@@ -1,13 +1,16 @@
 """Import-queue + preview-queue lifecycle."""
+import logging
+import os
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import msgspec
 import psycopg2
 import psycopg2.extras
 
+from lib import transitions
 from lib.import_execution import (
     ExecutionLeaseSnapshot,
     ExecutionLivenessDecision,
@@ -32,7 +35,86 @@ from lib.pipeline_db._shared import ADVISORY_LOCK_NAMESPACE_IMPORT
 from lib.pipeline_db.cleanup_journal import (
     CleanupJournalConflict,
     ProcessingCleanupJournalRow,
+    _CleanupJournalMixin,
 )
+from lib.pipeline_db.rows import AlbumRequestRow, album_request_row
+from lib.pipeline_db.terminal_outcomes import (
+    ImportJobTerminalConflict,
+    _TerminalOutcomesMixin,
+)
+from lib.terminal_outcomes import (
+    AutomationTerminalAuthority,
+    ImportJobTerminal,
+)
+
+if TYPE_CHECKING:
+    from lib.import_job_recovery_service import AutomationCompletionReceipt
+
+logger = logging.getLogger("cratedigger")
+
+# Every automation world failure surfaces under this exact label, so one
+# Recents read tells the operator the request self-healed rather than stopped.
+# Owned here because both the in-flight importer self-heal and the recovery
+# re-probe below must be indistinguishable to the operator reading the log.
+AUTOMATION_WORLD_FAILURE_AUDIT_PREFIX = (
+    "Automation world failure; request returned to the search pool"
+)
+
+# The attached-owner stages a proven-dead recovery can drive. ``queued`` and
+# ``running`` are the two live lanes; ``recovery_required`` is a close that
+# stopped mid-frame, never a resting state (CLAUDE.md invariant 11).
+_RECOVERABLE_OWNER_STAGES: frozenset[tuple[str, str | None]] = frozenset({
+    ("queued", "running"),
+    ("running", "evidence_ready"),
+})
+
+
+def _recovery_stage_is_recoverable(job: ImportJob) -> bool:
+    if job.job_type != IMPORT_JOB_AUTOMATION or job.completed_at is not None:
+        return False
+    if job.status == "recovery_required":
+        return True
+    return (job.status, job.preview_status) in _RECOVERABLE_OWNER_STAGES
+
+
+def _job_terminal_stage(
+    status: str,
+) -> Literal["queued", "running", "recovery_required"]:
+    if status not in ("queued", "running", "recovery_required"):
+        raise ValueError(f"job status {status!r} is not a terminal-write stage")
+    return status
+
+
+def automation_completion_receipt(
+    job: ImportJob,
+) -> "AutomationCompletionReceipt | None":
+    """Decode one job's persisted Beets completion receipt, if it captured one.
+
+    A launched job with no receipt is the genuine ambiguity: nothing observed
+    whether Beets finished. That distinction is the whole reason the owner
+    authority treats the two cases differently, so it is decoded from the
+    persisted result rather than inferred from any path or timestamp.
+    """
+    from lib.import_job_recovery_service import (
+        AUTOMATION_COMPLETION_RESULT_KEY,
+        AutomationCompletionReceipt,
+        automation_completion_result_patch,
+    )
+
+    raw = (
+        None
+        if job.result is None
+        else job.result.get(AUTOMATION_COMPLETION_RESULT_KEY)
+    )
+    if raw is None:
+        return None
+    receipt = msgspec.convert(
+        raw,
+        type=AutomationCompletionReceipt,
+        strict=True,
+    )
+    automation_completion_result_patch(receipt)
+    return receipt
 
 
 class AutomationRecoveryCAS(msgspec.Struct, frozen=True):
@@ -198,8 +280,20 @@ def _recovery_owner_matches(
     )
 
 
-class _ImportJobsMixin(_PipelineDBBase):
-    """Import-queue + preview-queue lifecycle."""
+class _ImportJobsMixin(
+    _CleanupJournalMixin,
+    _TerminalOutcomesMixin,
+    _PipelineDBBase,
+):
+    """Import-queue + preview-queue lifecycle.
+
+    The cleanup-journal and terminal-outcome clusters are real bases rather
+    than ``_core`` stubs: recovering an abandoned owner has to resume that
+    owner's journaled cleanup and then commit its terminal bundle, so the
+    dependency is type-checked here instead of asserted in a stub list. The
+    composed ``PipelineDB`` MRO is unchanged — it already lists both after
+    this mixin.
+    """
 
 
     # --- import_jobs queue ---
@@ -601,10 +695,16 @@ class _ImportJobsMixin(_PipelineDBBase):
     ) -> list[ImportJob]:
         """Return every exact owner whose persisted execution may need recovery.
 
-        Startup recovery must not infer authority from a recent-job timeline.
-        The request's explicit owner pointer selects the automation job before
-        any ordering, and the query is intentionally unbounded so unrelated
-        queue activity cannot hide a crashed owner.
+        Recovery must not infer authority from a recent-job timeline. The
+        request's explicit owner pointer selects the automation job before any
+        ordering, and the query is intentionally unbounded so unrelated queue
+        activity cannot hide a crashed owner.
+
+        ``recovery_required`` is included because it is no longer a resting
+        state (CLAUDE.md invariant 11): it is only ever the momentary authority
+        stage a close transits, so an owner still ATTACHED there is a world
+        that stopped mid-close and must be re-driven. Omitting it is how a
+        crash inside that one frame became a permanent, unalerted park.
         """
         cur = self._execute("""
             SELECT job.*
@@ -623,6 +723,7 @@ class _ImportJobsMixin(_PipelineDBBase):
                       job.status = 'running'
                       AND job.preview_status = 'evidence_ready'
                   )
+                  OR job.status = 'recovery_required'
               )
             ORDER BY job.created_at ASC, job.id ASC
         """)
@@ -1797,19 +1898,52 @@ class _ImportJobsMixin(_PipelineDBBase):
         self,
         job_id: int,
         *,
-        expected_execution_lease: ExecutionLeaseSnapshot,
+        expected_execution_lease: ExecutionLeaseSnapshot | None,
         decision: ExecutionLivenessDecision,
         requeue_message: str,
         recovery_message: str,
     ) -> ImportJob | None:
-        """Apply one startup-only recovery after exact persisted death proof."""
+        """Recover one abandoned owner after exact persisted death proof.
+
+        An owner whose execution is proven dead never rests anywhere an
+        operator has to reach it (CLAUDE.md invariant 11). There are exactly
+        two outcomes:
+
+        - **Proven replayable** — nothing was authorized at Beets and no
+          cleanup was journaled, so the same job is requeued into its own lane
+          with its dead lease cleared. The request keeps its owner because that
+          owner is runnable again.
+        - **Anything else** — the journaled cleanup is RESUMED to completion,
+          then the owner is closed terminally: a ``download_log`` row records
+          the world failure so it reads in Recents, the job ends ``failed``,
+          and the request returns to ``wanted`` with its owner and state
+          cleared so the next cycle re-derives everything. "Did Beets already
+          mutate the library?" answers itself on that re-derivation — album
+          present means upgrade/no-op, absent means re-import.
+
+        LIVENESS AMBIGUITY IS NOT WORLD AMBIGUITY — do not "fix" this by
+        recovering an unproven lease. Invariant 11 says an ambiguous WORLD
+        (half-finished cleanup, unacknowledged Beets child) must be recorded
+        and restarted, and that is what the close above does. An unproven
+        EXECUTION is a different thing: it is an unfinished observation of one
+        of our own processes, and treating it as dead would steal a live
+        worker's request mid-flight, which is the one failure no later cycle
+        can repair. Such a row is not parked either — nothing about it needs a
+        human, and the periodic re-probe converges it as soon as the lease is
+        provable. So the gate below stays exact: status ``dead`` AND evidence
+        about this exact lease, or nothing happens at all.
+
+        ``expected_execution_lease`` is ``None`` for an owner no execution ever
+        claimed — the leaseless replacement an operator retry mints when it
+        retargets an unresolved cleanup journal. ``never_claimed`` is a real
+        death proof, not a weakening of one, so such an owner converges on a
+        re-probe instead of resting where only an operator can reach it.
+        """
         if not _decision_proves_exact_lease_dead(
             decision,
             expected_execution_lease,
         ):
             return None
-        lease = _lease_values(expected_execution_lease)
-        child = _child_lease_values(expected_execution_lease)
         request_cur = self._execute(
             "SELECT request_id FROM import_jobs WHERE id = %s",
             (job_id,),
@@ -1825,167 +1959,314 @@ class _ImportJobsMixin(_PipelineDBBase):
         ) as acquired:
             if not acquired:
                 return None
-            with self._atomic():
-                request_lock = self._execute("""
-                    SELECT id
-                    FROM album_requests
-                    WHERE id = %s
-                      AND status = 'processing'
-                      AND active_automation_import_job_id = %s
-                    FOR UPDATE
-                """, (request_id, job_id))
-                if request_lock.fetchone() is None:
-                    self.conn.rollback()
-                    return None
-                job_lock = self._execute("""
-                    SELECT id
-                    FROM import_jobs
-                    WHERE id = %s
-                      AND request_id = %s
-                      AND job_type = 'automation_import'
-                    FOR UPDATE
-                """, (job_id, request_id))
-                if job_lock.fetchone() is None:
-                    self.conn.rollback()
-                    return None
+            # This branch read is deliberately outside a transaction: the close
+            # below must commit its cleanup checkpoints as it goes, so it
+            # cannot run inside one. Safety comes from the exact-owner CAS on
+            # both write paths, not from this snapshot — a journal or launch
+            # fence appearing after the read makes the requeue's own predicate
+            # miss and return None rather than write the wrong outcome.
+            job = self.get_import_job(job_id)
+            if job is None or not _recovery_stage_is_recoverable(job):
+                return None
+            journalled = self.get_processing_cleanup_journal(
+                request_id=request_id,
+                job_id=job_id,
+            ) is not None
+            if (
+                job.beets_launch_authorized_at is None
+                and job.status != "recovery_required"
+                and not journalled
+            ):
+                return self._requeue_proven_unstarted_automation_owner(
+                    job_id,
+                    request_id=request_id,
+                    expected_execution_lease=expected_execution_lease,
+                    requeue_message=requeue_message,
+                )
+            return self._close_abandoned_automation_owner(
+                job,
+                request_id=request_id,
+                expected_execution_lease=expected_execution_lease,
+                reason=recovery_message,
+            )
 
-                journal_cur = self._execute("""
-                    SELECT job_id
-                    FROM processing_cleanup_journal
-                    WHERE job_id = %s
-                      AND request_id = %s
-                    FOR UPDATE
-                """, (job_id, request_id))
-                cleanup_requires_recovery = journal_cur.fetchone() is not None
 
-                cur = self._execute("""
-                    UPDATE import_jobs
-                    SET status = CASE
-                            WHEN beets_launch_authorized_at IS NULL
-                                 AND NOT %(cleanup_requires_recovery)s
-                                THEN 'queued'
-                            ELSE 'recovery_required'
-                        END,
-                        preview_status = CASE
-                            WHEN status = 'queued'
-                                AND preview_status = 'running'
-                                AND NOT %(cleanup_requires_recovery)s
-                                THEN 'waiting'
-                            ELSE preview_status
-                        END,
-                        message = CASE
-                            WHEN beets_launch_authorized_at IS NULL
-                                 AND NOT %(cleanup_requires_recovery)s
-                                THEN %(requeue_message)s
-                            ELSE %(recovery_message)s
-                        END,
-                        error = CASE
-                            WHEN beets_launch_authorized_at IS NULL
-                                 AND NOT %(cleanup_requires_recovery)s
-                                THEN NULL
-                            WHEN %(cleanup_requires_recovery)s
-                                THEN 'Automatic replay refused because processor cleanup may have mutated the canonical source'
-                            ELSE 'Automatic replay refused because Beets may have mutated the library'
-                        END,
-                        worker_id = NULL,
-                        started_at = CASE
-                            WHEN beets_launch_authorized_at IS NULL
-                                 AND NOT %(cleanup_requires_recovery)s
-                                THEN NULL
-                            ELSE started_at
-                        END,
-                        heartbeat_at = NULL,
-                        preview_worker_id = NULL,
-                        preview_started_at = CASE
-                            WHEN beets_launch_authorized_at IS NULL
-                                 AND NOT %(cleanup_requires_recovery)s
-                                THEN NULL
-                            ELSE preview_started_at
-                        END,
-                        preview_heartbeat_at = NULL,
-                        execution_invocation_id = CASE
-                            WHEN beets_launch_authorized_at IS NULL
-                                 AND NOT %(cleanup_requires_recovery)s
-                                THEN NULL
-                            ELSE execution_invocation_id
-                        END,
-                        execution_host_boot_id = CASE
-                            WHEN beets_launch_authorized_at IS NULL
-                                 AND NOT %(cleanup_requires_recovery)s
-                                THEN NULL
-                            ELSE execution_host_boot_id
-                        END,
-                        execution_systemd_unit = CASE
-                            WHEN beets_launch_authorized_at IS NULL
-                                 AND NOT %(cleanup_requires_recovery)s
-                                THEN NULL
-                            ELSE execution_systemd_unit
-                        END,
-                        execution_worker_pid = CASE
-                            WHEN beets_launch_authorized_at IS NULL
-                                 AND NOT %(cleanup_requires_recovery)s
-                                THEN NULL
-                            ELSE execution_worker_pid
-                        END,
-                        execution_worker_start_ticks = CASE
-                            WHEN beets_launch_authorized_at IS NULL
-                                 AND NOT %(cleanup_requires_recovery)s
-                                THEN NULL
-                            ELSE execution_worker_start_ticks
-                        END,
-                        execution_beets_pid = CASE
-                            WHEN beets_launch_authorized_at IS NULL
-                                 AND NOT %(cleanup_requires_recovery)s
-                                THEN NULL
-                            ELSE execution_beets_pid
-                        END,
-                        execution_beets_start_ticks = CASE
-                            WHEN beets_launch_authorized_at IS NULL
-                                 AND NOT %(cleanup_requires_recovery)s
-                                THEN NULL
-                            ELSE execution_beets_start_ticks
-                        END,
-                        updated_at = NOW()
-                    WHERE id = %(job_id)s
-                      AND request_id = %(request_id)s
-                      AND job_type = 'automation_import'
-                      AND (
-                          (status = 'queued' AND preview_status = 'running')
-                          OR (
-                              status = 'running'
-                              AND preview_status = 'evidence_ready'
-                          )
+    def _requeue_proven_unstarted_automation_owner(
+        self,
+        job_id: int,
+        *,
+        request_id: int,
+        expected_execution_lease: ExecutionLeaseSnapshot | None,
+        requeue_message: str,
+    ) -> ImportJob | None:
+        """Return one provably unstarted owner to its own lane, owner intact.
+
+        Nothing was authorized at Beets and nothing was journaled, so there is
+        no world to surface: the exact same job becomes claimable again with
+        its dead lease cleared. The request stays ``processing`` because its
+        owner is runnable, not because anything is waiting for a human.
+        """
+        lease = _lease_values(expected_execution_lease)
+        child = _child_lease_values(expected_execution_lease)
+        with self._atomic():
+            request_lock = self._execute("""
+                SELECT id
+                FROM album_requests
+                WHERE id = %s
+                  AND status = 'processing'
+                  AND active_automation_import_job_id = %s
+                FOR UPDATE
+            """, (request_id, job_id))
+            if request_lock.fetchone() is None:
+                self.conn.rollback()
+                return None
+            cur = self._execute("""
+                UPDATE import_jobs
+                SET status = 'queued',
+                    preview_status = CASE
+                        WHEN status = 'queued' AND preview_status = 'running'
+                            THEN 'waiting'
+                        ELSE preview_status
+                    END,
+                    message = %(requeue_message)s,
+                    error = NULL,
+                    worker_id = NULL,
+                    started_at = NULL,
+                    heartbeat_at = NULL,
+                    preview_worker_id = NULL,
+                    preview_started_at = NULL,
+                    preview_heartbeat_at = NULL,
+                    execution_invocation_id = NULL,
+                    execution_host_boot_id = NULL,
+                    execution_systemd_unit = NULL,
+                    execution_worker_pid = NULL,
+                    execution_worker_start_ticks = NULL,
+                    execution_beets_pid = NULL,
+                    execution_beets_start_ticks = NULL,
+                    updated_at = NOW()
+                WHERE id = %(job_id)s
+                  AND request_id = %(request_id)s
+                  AND job_type = 'automation_import'
+                  AND beets_launch_authorized_at IS NULL
+                  AND (
+                      (status = 'queued' AND preview_status = 'running')
+                      OR (
+                          status = 'running'
+                          AND preview_status = 'evidence_ready'
                       )
-                      AND execution_invocation_id = %(invocation_id)s
-                      AND execution_host_boot_id = %(host_boot_id)s
-                      AND execution_systemd_unit = %(systemd_unit)s
-                      AND execution_worker_pid = %(worker_pid)s
-                      AND execution_worker_start_ticks = %(worker_start_ticks)s
-                      AND execution_beets_pid
-                          IS NOT DISTINCT FROM %(beets_pid)s
-                      AND execution_beets_start_ticks
-                          IS NOT DISTINCT FROM %(beets_start_ticks)s
-                    RETURNING *
-                """, {
-                    "cleanup_requires_recovery": cleanup_requires_recovery,
-                    "requeue_message": requeue_message,
-                    "recovery_message": recovery_message,
-                    "job_id": job_id,
-                    "request_id": request_id,
-                    "invocation_id": lease[0],
-                    "host_boot_id": lease[1],
-                    "systemd_unit": lease[2],
-                    "worker_pid": lease[3],
-                    "worker_start_ticks": lease[4],
-                    "beets_pid": child[0],
-                    "beets_start_ticks": child[1],
-                })
-                row = cur.fetchone()
-                if row is None:
-                    self.conn.rollback()
+                  )
+                  AND execution_invocation_id = %(invocation_id)s
+                  AND execution_host_boot_id = %(host_boot_id)s
+                  AND execution_systemd_unit = %(systemd_unit)s
+                  AND execution_worker_pid = %(worker_pid)s
+                  AND execution_worker_start_ticks = %(worker_start_ticks)s
+                  AND execution_beets_pid
+                      IS NOT DISTINCT FROM %(beets_pid)s
+                  AND execution_beets_start_ticks
+                      IS NOT DISTINCT FROM %(beets_start_ticks)s
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM processing_cleanup_journal AS journal
+                      WHERE journal.job_id = %(job_id)s
+                        AND journal.request_id = %(request_id)s
+                  )
+                RETURNING *
+            """, {
+                "requeue_message": requeue_message,
+                "job_id": job_id,
+                "request_id": request_id,
+                "invocation_id": lease[0],
+                "host_boot_id": lease[1],
+                "systemd_unit": lease[2],
+                "worker_pid": lease[3],
+                "worker_start_ticks": lease[4],
+                "beets_pid": child[0],
+                "beets_start_ticks": child[1],
+            })
+            row = cur.fetchone()
+            if row is None:
+                self.conn.rollback()
+                return None
+            self.conn.commit()
+            return ImportJob.from_row(dict(row))
+
+
+    def _close_abandoned_automation_owner(
+        self,
+        job: ImportJob,
+        *,
+        request_id: int,
+        expected_execution_lease: ExecutionLeaseSnapshot | None,
+        reason: str,
+    ) -> ImportJob | None:
+        """Resume the journaled cleanup, then close the owner into ``wanted``.
+
+        Cleanup runs FIRST and while the dead owner is still attached, because
+        the terminal bundle consumes the receipt it produces and the deferred
+        066 triggers refuse to release a request that still has a journal. The
+        journal is resumed, never re-planned: its pre-checkpoints are the only
+        record of which filesystem mutations already happened.
+
+        Returns ``None`` when the world is still too broken to close — an
+        uninspectable source, a journal that cannot finish, or an owner whose
+        evidence moved under us. The row then stays exactly as it was, for the
+        next re-probe. Never fabricate a receipt or a half-written outcome to
+        make a pass look successful.
+        """
+        from lib.download import _local_completion_terminal_outcome
+        from lib.download_reconstruction import reconstruct_grab_list_entry
+        from lib.processing_cleanup import (
+            ProcessingCleanupError,
+            complete_owner_processing_cleanup,
+        )
+        from lib.quality.download_state import ActiveDownloadState
+
+        detail = f"{AUTOMATION_WORLD_FAILURE_AUDIT_PREFIX}: {reason}"
+        try:
+            row = self._recovery_request_row(request_id)
+            raw_state = None if row is None else row.get("active_download_state")
+            if row is None or raw_state is None:
+                return None
+            state = ActiveDownloadState.from_raw(raw_state)
+            if state.current_path is None:
+                return None
+            canonical_path = os.path.abspath(state.current_path)
+            cas = self._automation_recovery_owner_cas(
+                job,
+                request_id=request_id,
+                canonical_path=canonical_path,
+            )
+
+            def checkpoint() -> None:
+                self.require_automation_recovery_owner(cas)
+
+            cleanup_receipt = complete_owner_processing_cleanup(
+                self,
+                request_id=request_id,
+                job_id=job.id,
+                source_path=canonical_path,
+                owner_checkpoint=checkpoint,
+            )
+            completion_receipt = automation_completion_receipt(job)
+            expected_job_status: Literal["queued", "running", "recovery_required"]
+            expected_job_status = _job_terminal_stage(job.status)
+            if (
+                job.beets_launch_authorized_at is not None
+                and completion_receipt is None
+                and expected_job_status != "recovery_required"
+            ):
+                # The owner authority refuses a ``running`` terminal write for
+                # a launched job that never captured its completion receipt --
+                # and that missing receipt IS the ambiguity being closed.
+                # ``recovery_required`` is the one stage the CAS accepts
+                # without it, so the ambiguity transits that stage and is
+                # closed in this same frame. It never RESTS there: a crash
+                # inside this window leaves the owner ATTACHED at
+                # ``recovery_required``, which the recovery query deliberately
+                # selects so the next pass finishes the close.
+                staged = self.mark_import_job_recovery_required(
+                    job.id,
+                    reason=reason,
+                    expected_execution_lease=expected_execution_lease,
+                )
+                if staged is None:
                     return None
-                self.conn.commit()
-                return ImportJob.from_row(dict(row))
+                expected_job_status = "recovery_required"
+            pending = _local_completion_terminal_outcome(
+                reconstruct_grab_list_entry(row, state),
+                state,
+                request_id=request_id,
+                import_job_id=job.id,
+                transition=transitions.RequestTransition.to_wanted(
+                    from_status="processing",
+                    attempt_type="validation",
+                ),
+                outcome="failed",
+                detail=detail,
+                error_message=detail,
+            )
+            terminal = self.persist_import_terminal_outcome(
+                replace(
+                    pending,
+                    automation=AutomationTerminalAuthority(
+                        expected_job_status=expected_job_status,
+                        expected_preview_status=job.preview_status,
+                        expected_execution_lease=expected_execution_lease,
+                        cleanup_receipt=cleanup_receipt,
+                        completion_receipt=completion_receipt,
+                    ),
+                ).with_job(ImportJobTerminal(
+                    status="failed",
+                    error=detail,
+                    result={"automation_recovery_self_heal": {"reason": reason}},
+                    message=detail,
+                ))
+            )
+        except (
+            AutomationRecoveryEvidenceChanged,
+            CleanupJournalConflict,
+            ImportJobTerminalConflict,
+            ProcessingCleanupError,
+        ):
+            logger.exception(
+                "Abandoned automation owner %s could not be closed yet (%s); "
+                "leaving it for the next liveness re-probe",
+                job.id,
+                reason,
+            )
+            return None
+        logger.warning(
+            "Recovery returned request %s to the search pool after abandoned "
+            "import job %s: %s",
+            request_id,
+            job.id,
+            reason,
+        )
+        return terminal.job
+
+
+    def _recovery_request_row(
+        self,
+        request_id: int,
+    ) -> AlbumRequestRow | None:
+        """Read one request row for a recovery bundle, own-cluster only."""
+        cur = self._execute(
+            "SELECT * FROM album_requests WHERE id = %s",
+            (request_id,),
+        )
+        row = cur.fetchone()
+        return album_request_row(row) if row is not None else None
+
+
+    def _automation_recovery_owner_cas(
+        self,
+        job: ImportJob,
+        *,
+        request_id: int,
+        canonical_path: str,
+    ) -> AutomationRecoveryCAS:
+        """Freeze the exact owner facts a cleanup resume must not outlive."""
+        return AutomationRecoveryCAS(
+            request_id=request_id,
+            job_id=job.id,
+            job_status=job.status,
+            preview_status=job.preview_status,
+            canonical_path=canonical_path,
+            beets_launch_authorized_at=job.beets_launch_authorized_at,
+            beets_launch_release_id=job.beets_launch_release_id,
+            beets_launch_source_path=job.beets_launch_source_path,
+            beets_launch_request_status=job.beets_launch_request_status,
+            beets_launch_snapshot_fingerprint=(
+                job.beets_launch_snapshot_fingerprint
+            ),
+            execution_invocation_id=job.execution_invocation_id,
+            execution_host_boot_id=job.execution_host_boot_id,
+            execution_systemd_unit=job.execution_systemd_unit,
+            execution_worker_pid=job.execution_worker_pid,
+            execution_worker_start_ticks=job.execution_worker_start_ticks,
+            execution_beets_pid=job.execution_beets_pid,
+            execution_beets_start_ticks=job.execution_beets_start_ticks,
+        )
 
 
     def requeue_import_job_for_preview(

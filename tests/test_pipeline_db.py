@@ -2600,7 +2600,7 @@ class TestAutomationImportHandoff(unittest.TestCase):
                 evidence=dead_evidence,
             ),
             requeue_message="requeue",
-            recovery_message="operator recovery",
+            recovery_message="importer restarted",
         ))
         recovered = self.db.recover_automation_import_job(
             job.id,
@@ -2611,11 +2611,20 @@ class TestAutomationImportHandoff(unittest.TestCase):
                 evidence=dead_evidence,
             ),
             requeue_message="requeue",
-            recovery_message="operator recovery",
+            recovery_message="importer restarted",
         )
+        # A launched owner whose execution is proven dead is CLOSED, not parked
+        # (CLAUDE.md invariant 11): the persisted child identity above stays as
+        # audit evidence on the terminal row, and the request goes back into the
+        # search pool instead of waiting for an operator command.
         assert recovered is not None
-        self.assertEqual(recovered.status, "recovery_required")
+        self.assertEqual(recovered.status, "failed")
         self.assertEqual(recovered.execution_beets_pid, 402)
+        released = self.db.get_request(self.request_id)
+        assert released is not None
+        self.assertEqual(released["status"], "wanted")
+        self.assertIsNone(released["active_automation_import_job_id"])
+        # The ambiguous operation still never replays automatically.
         self.assertIsNone(claim_next_import_job(self.db, worker_id="must-not-replay",
         execution_lease=importer_lease,))
 

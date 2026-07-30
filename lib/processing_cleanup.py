@@ -32,6 +32,7 @@ from lib.fs_authority import (
     unlink_if_same,
 )
 from lib.pipeline_db import (
+    CleanupJournalIntent,
     CleanupJournalReceipt,
     ProcessingCleanupJournalRow,
 )
@@ -138,6 +139,25 @@ class ProcessingCleanupJournalDB(Protocol):
         job_id: int,
         expected_revision: int,
         receipt: CleanupJournalReceipt,
+    ) -> ProcessingCleanupJournalRow: ...
+
+
+class OwnerProcessingCleanupDB(ProcessingCleanupJournalDB, Protocol):
+    """Journal surface needed to create-or-resume one exact owner's cleanup."""
+
+    def get_processing_cleanup_journal(
+        self,
+        *,
+        request_id: int,
+        job_id: int,
+    ) -> ProcessingCleanupJournalRow | None: ...
+
+    def create_processing_cleanup_journal(
+        self,
+        *,
+        request_id: int,
+        job_id: int,
+        intent: CleanupJournalIntent,
     ) -> ProcessingCleanupJournalRow: ...
 
 
@@ -1340,3 +1360,97 @@ def execute_processing_cleanup(
     )
     _boundary(after_boundary, "completed")
     return completed
+
+
+def canonical_source_cleanup_intent(source_path: str) -> CleanupJournalIntent:
+    """Derive the plan-free cleanup intent for one canonical owner path.
+
+    This is the intent when nothing else claims the canonical album: an
+    inspectable tree is removed, an already-absent tree is a typed no-op. A
+    source that cannot be inspected is refused rather than journaled, because
+    the intent is immutable once written and an unprovable manifest would
+    become a permanent plan.
+    """
+    inspection = inspect_processing_cleanup_source(source_path)
+    if inspection.status == "uninspectable":
+        raise ProcessingCleanupError(
+            "source_uninspectable",
+            "processor cleanup source cannot be inspected: "
+            f"{inspection.reason}",
+        )
+    if inspection.status == "missing":
+        empty_manifest: CleanupExactManifest = ()
+        return CleanupJournalIntent(
+            action=PROCESSING_CLEANUP_NO_OP,
+            source_path=source_path,
+            source_manifest=cleanup_manifest_builtins(empty_manifest),
+            source_manifest_hash=cleanup_manifest_hash(empty_manifest),
+        )
+    assert inspection.manifest_hash is not None
+    return CleanupJournalIntent(
+        action=PROCESSING_CLEANUP_REMOVE_SOURCE,
+        source_path=source_path,
+        source_manifest=cleanup_manifest_builtins(inspection.manifest),
+        source_manifest_hash=inspection.manifest_hash,
+    )
+
+
+def complete_owner_processing_cleanup(
+    db: OwnerProcessingCleanupDB,
+    *,
+    request_id: int,
+    job_id: int,
+    source_path: str,
+    owner_checkpoint: Callable[[], None],
+    intent_factory: Callable[[str], CleanupJournalIntent] | None = None,
+) -> CleanupJournalReceipt:
+    """Create-or-resume the exact owner's cleanup and return its receipt.
+
+    The one composition every proven owner uses to reach a consumable receipt:
+    journal the exact plan before the first filesystem effect, then execute or
+    RESUME it. An existing journal is never re-planned — it is resumed
+    byte-for-byte, because its pre-checkpoints are the only record of which
+    mutations already happened. ``source_path`` must be the owner's current
+    canonical path; a journal naming a different one is a hard refusal rather
+    than a second plan.
+
+    ``owner_checkpoint`` is the caller's proof that it still holds exact
+    ownership; it runs before every effect. ``intent_factory`` defaults to the
+    plan-free canonical intent, which is what a recovery caller wants — it has
+    no dispatch outcome to honour.
+    """
+    factory = (
+        canonical_source_cleanup_intent
+        if intent_factory is None
+        else intent_factory
+    )
+    owner_checkpoint()
+    journal = db.get_processing_cleanup_journal(
+        request_id=request_id,
+        job_id=job_id,
+    )
+    if journal is None:
+        intent = factory(source_path)
+        owner_checkpoint()
+        journal = db.create_processing_cleanup_journal(
+            request_id=request_id,
+            job_id=job_id,
+            intent=intent,
+        )
+    elif os.path.abspath(journal["source_path"]) != source_path:
+        raise ProcessingCleanupError(
+            "manifest_drift",
+            "cleanup journal names a different canonical source path",
+        )
+    completed = execute_processing_cleanup(
+        db,
+        journal,
+        owner_checkpoint=owner_checkpoint,
+    )
+    receipt = completed["completed_receipt"]
+    if receipt is None:
+        raise ProcessingCleanupError(
+            "invalid_journal",
+            "cleanup completed without a receipt",
+        )
+    return receipt

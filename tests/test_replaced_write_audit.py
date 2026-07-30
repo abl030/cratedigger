@@ -115,10 +115,10 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "JSON path key is selected from a closed server-owned vocabulary "
         "(issue #835 shifted this line only)"
     ),
-    ("lib/pipeline_db/import_jobs.py", 494, "ecf3d1844c67f653"): (
+    ("lib/pipeline_db/import_jobs.py", 588, "ecf3d1844c67f653"): (
         "optional job filter is a fixed literal WHERE clause"
     ),
-    ("lib/pipeline_db/import_jobs.py", 554, "d020bd0235c95c4a"): (
+    ("lib/pipeline_db/import_jobs.py", 648, "d020bd0235c95c4a"): (
         "claim exclusion predicate is assembled from fixed literal clauses"
     ),
     ("lib/pipeline_db/misc.py", 186, "12cfdd83a367c90e"): (
@@ -218,7 +218,7 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
 # beside the implementation they review; movement or SQL-shape drift fails the
 # ratchet just like the dynamic-SQL exceptions above.
 _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, int, str], str] = {
-    ("lib/pipeline_db/import_jobs.py", 419, "71e0271f65123747"): (
+    ("lib/pipeline_db/import_jobs.py", 513, "71e0271f65123747"): (
         "atomic download-to-processing handoff CASes the immutable download "
         "witness while installing the exact automation owner"
     ),

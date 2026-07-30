@@ -44,6 +44,7 @@ from lib.import_execution import (
     CancellationToken,
     ExecutionCancelled,
     ExecutionLeaseSnapshot,
+    ExecutionLivenessDecision,
     ExecutionLivenessProbe,
     OwnerSessionIdentity,
     ProcessIdentity,
@@ -55,6 +56,7 @@ from lib.import_manifest import audio_relative_paths
 from lib.import_queue import (
     IMPORT_JOB_AUTOMATION,
     IMPORT_JOB_FORCE,
+    IMPORT_JOB_RECOVERY_REQUIRED,
     IMPORT_JOB_YOUTUBE,
     ForceImportPayload,
     ImportJob,
@@ -67,19 +69,19 @@ from lib.pipeline_db import (
     CleanupJournalIntent,
     CleanupJournalReceipt,
     PipelineDB,
-    ProcessingCleanupJournalRow,
 )
 from lib.pipeline_db._core import OwnerSessionLost
+from lib.pipeline_db.import_jobs import (
+    AUTOMATION_WORLD_FAILURE_AUDIT_PREFIX,
+    automation_completion_receipt,
+)
 from lib.pipeline_db.rows import AlbumRequestRow
 from lib.processing_cleanup import (
     PROCESSING_CLEANUP_NO_OP,
     PROCESSING_CLEANUP_QUARANTINE_SOURCE,
-    PROCESSING_CLEANUP_REMOVE_SOURCE,
-    ProcessingCleanupJournalDB,
-    cleanup_manifest_builtins,
-    cleanup_manifest_hash,
-    execute_processing_cleanup,
-    inspect_processing_cleanup_source,
+    OwnerProcessingCleanupDB,
+    canonical_source_cleanup_intent,
+    complete_owner_processing_cleanup,
 )
 from lib.quality import ActiveDownloadFileState, ActiveDownloadState
 from lib.terminal_outcomes import (
@@ -94,15 +96,18 @@ from lib.youtube_ingest_service import (
 logger = logging.getLogger("cratedigger-importer")
 RESTART_REQUEUE_MESSAGE = "Importer restarted while job was running; retry queued"
 RESTART_RECOVERY_MESSAGE = (
-    "Recovery required: importer restarted after Beets launch authorization"
+    "Importer restarted after Beets launch authorization"
 )
-# Every automation world failure surfaces under this exact label, so one
-# Recents read tells the operator the request self-healed rather than stopped.
-_WORLD_FAILURE_AUDIT_PREFIX = (
-    "Automation world failure; request returned to the search pool"
-)
+# One label for every automation world failure, whichever path surfaces it, so
+# a single Recents read tells the operator the request self-healed rather than
+# stopped. Owned by the recovery cluster; aliased here for this module's users.
+_WORLD_FAILURE_AUDIT_PREFIX = AUTOMATION_WORLD_FAILURE_AUDIT_PREFIX
 IMPORT_CANDIDATE_SCAN_LIMIT = 32
 IMPORTER_SYSTEMD_UNIT = "cratedigger-importer.service"
+# A dead owner must not wait for the next process restart to be noticed. The
+# startup sweep cannot see a transient procfs failure coming, so the same exact
+# death proof is re-run on this cadence for as long as the worker lives.
+AUTOMATION_RECOVERY_REPROBE_INTERVAL_SECONDS = 300.0
 
 
 @dataclass
@@ -139,27 +144,30 @@ class _PostCommitCleanupDB(Protocol):
 
 class _AutomationCleanupDB(
     AutomationOwnerCheckpointDB,
-    ProcessingCleanupJournalDB,
+    OwnerProcessingCleanupDB,
     Protocol,
 ):
     """Exact persistence surface for owned processor cleanup."""
 
     def get_request(self, request_id: int) -> AlbumRequestRow | None: ...
 
-    def get_processing_cleanup_journal(
-        self,
-        *,
-        request_id: int,
-        job_id: int,
-    ) -> ProcessingCleanupJournalRow | None: ...
 
-    def create_processing_cleanup_journal(
+class _AutomationRecoveryDB(Protocol):
+    """Persistence surface the re-runnable automation recovery sweep needs."""
+
+    def list_automation_import_jobs_for_startup_recovery(
         self,
-        *,
-        request_id: int,
+    ) -> list[ImportJob]: ...
+
+    def recover_automation_import_job(
+        self,
         job_id: int,
-        intent: CleanupJournalIntent,
-    ) -> ProcessingCleanupJournalRow: ...
+        *,
+        expected_execution_lease: ExecutionLeaseSnapshot | None,
+        decision: ExecutionLivenessDecision,
+        requeue_message: str,
+        recovery_message: str,
+    ) -> ImportJob | None: ...
 
 
 def _run_post_commit_cleanup(
@@ -267,50 +275,19 @@ def _select_missing_destination(path: str, *, separator: str) -> str:
     return candidate
 
 
-def _automation_completion_from_job(job: ImportJob):
-    from lib.import_job_recovery_service import (
-        AUTOMATION_COMPLETION_RESULT_KEY,
-        AutomationCompletionReceipt,
-        automation_completion_result_patch,
-    )
-
-    raw = (
-        None
-        if job.result is None
-        else job.result.get(AUTOMATION_COMPLETION_RESULT_KEY)
-    )
-    if raw is None:
-        return None
-    receipt = msgspec.convert(
-        raw,
-        type=AutomationCompletionReceipt,
-        strict=True,
-    )
-    automation_completion_result_patch(receipt)
-    return receipt
-
-
 def _automation_cleanup_intent(
     *,
     source_path: str,
     plan: PostCommitCleanup | None,
 ) -> CleanupJournalIntent:
-    inspection = inspect_processing_cleanup_source(source_path)
-    if inspection.status == "uninspectable":
-        raise RuntimeError(
-            "processor cleanup source cannot be inspected: "
-            f"{inspection.reason}"
-        )
-    if inspection.status == "missing":
-        empty_manifest = ()
-        return CleanupJournalIntent(
-            action=PROCESSING_CLEANUP_NO_OP,
-            source_path=source_path,
-            source_manifest=cleanup_manifest_builtins(empty_manifest),
-            source_manifest_hash=cleanup_manifest_hash(empty_manifest),
-        )
-    assert inspection.manifest_hash is not None
-    manifest = cleanup_manifest_builtins(inspection.manifest)
+    # One inspection, shared with every proven owner: the plan-free canonical
+    # intent is the base, and a plan may only retarget WHERE the already
+    # measured manifest goes, never re-measure it.
+    canonical = canonical_source_cleanup_intent(source_path)
+    if canonical.action == PROCESSING_CLEANUP_NO_OP:
+        return canonical
+    manifest = canonical.source_manifest
+    manifest_hash = canonical.source_manifest_hash
 
     if (
         plan is not None
@@ -346,10 +323,10 @@ def _automation_cleanup_intent(
             action=PROCESSING_CLEANUP_QUARANTINE_SOURCE,
             source_path=source_path,
             source_manifest=manifest,
-            source_manifest_hash=inspection.manifest_hash,
+            source_manifest_hash=manifest_hash,
             destination_path=destination,
             destination_manifest=manifest,
-            destination_manifest_hash=inspection.manifest_hash,
+            destination_manifest_hash=manifest_hash,
             selected_destination_path=destination,
         )
 
@@ -373,10 +350,10 @@ def _automation_cleanup_intent(
             action=PROCESSING_CLEANUP_QUARANTINE_SOURCE,
             source_path=source_path,
             source_manifest=manifest,
-            source_manifest_hash=inspection.manifest_hash,
+            source_manifest_hash=manifest_hash,
             destination_path=destination,
             destination_manifest=manifest,
-            destination_manifest_hash=inspection.manifest_hash,
+            destination_manifest_hash=manifest_hash,
             selected_destination_path=destination,
         )
 
@@ -388,12 +365,7 @@ def _automation_cleanup_intent(
         raise RuntimeError(
             "staged cleanup plan does not name the canonical owner path"
         )
-    return CleanupJournalIntent(
-        action=PROCESSING_CLEANUP_REMOVE_SOURCE,
-        source_path=source_path,
-        source_manifest=manifest,
-        source_manifest_hash=inspection.manifest_hash,
-    )
+    return canonical
 
 
 def _complete_automation_processing_cleanup(
@@ -427,35 +399,22 @@ def _complete_automation_processing_cleanup(
             owner_session_identity=owner_session_identity,
         )
 
-    checkpoint()
-    journal = db.get_processing_cleanup_journal(
-        request_id=job.request_id,
-        job_id=job.id,
-    )
-    if journal is None:
-        intent = _automation_cleanup_intent(
-            source_path=source_path,
+    def intent_factory(path: str) -> CleanupJournalIntent:
+        return _automation_cleanup_intent(
+            source_path=path,
             plan=outcome.post_commit_cleanup,
         )
-        checkpoint()
-        journal = db.create_processing_cleanup_journal(
-            request_id=job.request_id,
-            job_id=job.id,
-            intent=intent,
-        )
-    elif os.path.abspath(journal["source_path"]) != source_path:
-        raise RuntimeError(
-            "automation cleanup journal changed canonical source path"
-        )
-    completed = execute_processing_cleanup(
+
+    return complete_owner_processing_cleanup(
         db,
-        journal,
+        request_id=job.request_id,
+        job_id=job.id,
+        source_path=source_path,
         owner_checkpoint=checkpoint,
+        intent_factory=intent_factory,
     )
-    receipt = completed["completed_receipt"]
-    if receipt is None:
-        raise RuntimeError("automation cleanup completed without a receipt")
-    return receipt
+
+
 
 
 def _force_job_wrong_match_payload(job: ImportJob) -> tuple[int, str | None] | None:
@@ -1268,7 +1227,7 @@ def _self_heal_automation_world_failure(
             cancellation_token=cancellation_token,
             owner_session_identity=owner_session_identity,
         )
-        completion_receipt = _automation_completion_from_job(job)
+        completion_receipt = automation_completion_receipt(job)
         expected_job_status: Literal["running", "recovery_required"] = "running"
         if (
             job.beets_launch_authorized_at is not None
@@ -1668,7 +1627,7 @@ def process_claimed_job(
                 cancellation_token=cancellation_token,
                 owner_session_identity=owner_session_identity,
             )
-            completion_receipt = _automation_completion_from_job(current)
+            completion_receipt = automation_completion_receipt(current)
             if (
                 current.beets_launch_authorized_at is not None
                 and completion_receipt is None
@@ -1963,12 +1922,69 @@ def run_once(
     return None
 
 
+def recover_abandoned_automation_owners(
+    db: _AutomationRecoveryDB,
+    *,
+    liveness_probe: ExecutionLivenessProbe | None = None,
+) -> list[ImportJob]:
+    """Re-probe every attached automation owner and recover the proven dead.
+
+    Safe to run repeatedly against a live fleet, which is the point: a
+    transient probe failure must not cost a request its acquisition until the
+    next process restart. Every recovery still needs an exact death proof, so a
+    live preview or import execution — including this worker's own in-flight
+    job — is observed alive and left completely alone. The sweep is deliberately
+    lane-agnostic: a dead owner is equally stuck whichever lane abandoned it,
+    and the recovery write is owner-atomic under ``IMPORT(request_id)``.
+    """
+    recovered: list[ImportJob] = []
+    for job in db.list_automation_import_jobs_for_startup_recovery():
+        lease = _execution_lease_from_job(job)
+        if lease is None and job.status != IMPORT_JOB_RECOVERY_REQUIRED:
+            # A leaseless owner in a live lane is simply waiting to be claimed
+            # — normal, not abandoned. Only a leaseless owner stopped at
+            # ``recovery_required`` (the replacement an operator retry mints
+            # for an unresolved cleanup journal) is a park needing closure, and
+            # ``never_claimed`` is its exact death proof.
+            continue
+        decision = probe_execution_liveness(
+            lease,
+            probe=liveness_probe,
+        )
+        try:
+            recovered_job = db.recover_automation_import_job(
+                job.id,
+                expected_execution_lease=lease,
+                decision=decision,
+                requeue_message=RESTART_REQUEUE_MESSAGE,
+                recovery_message=RESTART_RECOVERY_MESSAGE,
+            )
+        except Exception:
+            # One unrecoverable owner must not abort the sweep or the worker's
+            # startup — the other stuck requests still need their pass. The row
+            # is left exactly as it was and retried on the next re-probe.
+            logger.exception(
+                "Recovery pass failed for automation owner %s; continuing",
+                job.id,
+            )
+            continue
+        if recovered_job is not None:
+            recovered.append(recovered_job)
+    return recovered
+
+
 def recover_abandoned_running_jobs(
     db: PipelineDB,
     *,
     liveness_probe: ExecutionLivenessProbe | None = None,
 ) -> list[ImportJob]:
-    """Recover only executions whose exact persisted lease is proven dead."""
+    """Recover only executions whose exact persisted lease is proven dead.
+
+    Startup only: ``recover_running_import_jobs`` requeues every non-automation
+    ``running`` row without a liveness probe, which is sound exactly once,
+    before this singleton worker has claimed anything. The automation half is
+    the re-runnable sweep and is also called periodically from ``main``.
+    """
     recovered: list[ImportJob] = []
     batch_size = 50
     while True:
@@ -1980,27 +1996,10 @@ def recover_abandoned_running_jobs(
         recovered.extend(batch)
         if len(batch) < batch_size:
             break
-    for job in db.list_automation_import_jobs_for_startup_recovery():
-        if (
-            job.status != "running"
-        ):
-            continue
-        lease = _execution_lease_from_job(job)
-        if lease is None:
-            continue
-        decision = probe_execution_liveness(
-            lease,
-            probe=liveness_probe,
-        )
-        recovered_job = db.recover_automation_import_job(
-            job.id,
-            expected_execution_lease=lease,
-            decision=decision,
-            requeue_message=RESTART_REQUEUE_MESSAGE,
-            recovery_message=RESTART_RECOVERY_MESSAGE,
-        )
-        if recovered_job is not None:
-            recovered.append(recovered_job)
+    recovered.extend(recover_abandoned_automation_owners(
+        db,
+        liveness_probe=liveness_probe,
+    ))
     return recovered
 
 
@@ -2036,7 +2035,23 @@ def main() -> int:
                 )
 
             scan_cursor = _CandidateScanCursor()
+            next_reprobe_at = (
+                time.monotonic()
+                + AUTOMATION_RECOVERY_REPROBE_INTERVAL_SECONDS
+            )
             while True:
+                if time.monotonic() >= next_reprobe_at:
+                    next_reprobe_at = (
+                        time.monotonic()
+                        + AUTOMATION_RECOVERY_REPROBE_INTERVAL_SECONDS
+                    )
+                    reprobed = recover_abandoned_automation_owners(db)
+                    if reprobed:
+                        logger.warning(
+                            "Liveness re-probe recovered %s abandoned "
+                            "automation owner(s) a restart would have stranded",
+                            len(reprobed),
+                        )
                 job = run_once(
                     db,
                     worker_id=worker_id,

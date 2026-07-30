@@ -542,27 +542,29 @@ def _launched_owner_db(
     return db, job_id, import_lease
 
 
-def _recover_launched_owner(
+def _stage_launched_owner_for_close(
     db: FakePipelineDB,
     *,
     job_id: int,
+    execution_lease: ExecutionLeaseSnapshot,
 ) -> None:
-    from scripts import importer
+    """Put one launched owner into the momentary ``recovery_required`` stage.
 
-    recovered = importer.recover_abandoned_running_jobs(
-        db,  # pyright: ignore[reportArgumentType]
-        liveness_probe=_ChangedBootProbe(),
+    ``recovery_required`` is no longer a resting state (CLAUDE.md invariant
+    11): startup recovery now closes an abandoned launched owner itself rather
+    than parking it, and the operator-facing close/retry commands below are the
+    only remaining consumers of the stage. Rule C — this stages it through the
+    one production writer that still produces it, ``mark_import_job_recovery_
+    required``, instead of a policy the recovery sweep no longer applies.
+    """
+    staged = db.mark_import_job_recovery_required(
+        job_id,
+        reason="generated ambiguous launched operation",
+        expected_execution_lease=execution_lease,
     )
-    if [job.id for job in recovered] != [job_id]:
+    if staged is None or staged.status != IMPORT_JOB_RECOVERY_REQUIRED:
         raise AssertionError(
-            f"dead exact import execution was not recovered: {recovered!r}"
-        )
-    current = db.get_import_job(job_id)
-    assert current is not None
-    if current.status != IMPORT_JOB_RECOVERY_REQUIRED:
-        raise AssertionError(
-            f"dead launched owner became {current.status!r}, "
-            "want recovery_required"
+            f"launched owner could not be staged for close: {staged!r}"
         )
 
 
@@ -794,9 +796,10 @@ class ProcessingLifecycleMachine(RuleBasedStateMachine):
                 self.oracle.import_lease,
                 beets=child,
             )
-        _recover_launched_owner(
+        _stage_launched_owner_for_close(
             self.db,
             job_id=self.oracle.owner_job_id,
+            execution_lease=self.oracle.import_lease,
         )
         self.oracle.stage = "recovery_required"
 
@@ -1510,8 +1513,12 @@ class TestProcessingLifecycleGenerated(unittest.TestCase):
         self,
         with_journal: bool,
     ) -> None:
-        db, old_job_id, _lease = _launched_owner_db()
-        _recover_launched_owner(db, job_id=old_job_id)
+        db, old_job_id, lease = _launched_owner_db()
+        _stage_launched_owner_for_close(
+            db,
+            job_id=old_job_id,
+            execution_lease=lease,
+        )
         old_revision: int | None = None
         if with_journal:
             journal = db.create_processing_cleanup_journal(
@@ -1594,8 +1601,12 @@ class TestProcessingLifecycleGenerated(unittest.TestCase):
         self,
         result_status: Literal["wanted", "imported"],
     ) -> None:
-        db, job_id, _lease = _launched_owner_db()
-        _recover_launched_owner(db, job_id=job_id)
+        db, job_id, lease = _launched_owner_db()
+        _stage_launched_owner_for_close(
+            db,
+            job_id=job_id,
+            execution_lease=lease,
+        )
         probe = _ChangedBootProbe()
         observed = get_automation_recovery_detail(
             db,

@@ -10,6 +10,93 @@ execution: code
 
 # Processing Lifecycle and Exact Automation Ownership - Plan
 
+## Amendment 1 (2026-07-30) - nothing is ever parked
+
+**Read this before the Product Contract.** Review of the implemented PR found a
+request could wedge in `processing` with no working exit, and that the branch had
+grown the number of ways to park work from 4 to 8. The operator reversed the
+underlying policy rather than adding the missing unpark path.
+
+Authority: "we surfsce broken worlds to the user and tje jsut restsrt, the
+pipeline keeps moving. never parked." —
+https://github.com/abl030/cratedigger/issues/898#issuecomment-5124769384
+
+The reversal is now codified as **CLAUDE.md invariant 11**: a world failure
+records audit evidence so it renders in Recents, returns the request to a
+runnable state, and lets the next cycle re-derive the truth. Nothing is left in a
+state whose only exit is a human command. This is safe because of invariant 6 —
+the request is the source of truth and everything else is derived, so the next
+cycle re-reads the library and even "did Beets already mutate it?" answers
+itself. Retained attempt counters give growing backoff, so a permanently broken
+world backs off instead of hot-looping.
+
+The defect that forced it: an importer-created cleanup journal carries no
+`declared_result_status`, so the operator close returned `ineligible` for both
+legal values while retry refused to queue. Because `get_wanted()` is
+`WHERE status = 'wanted'`, such a request silently stopped being acquired
+forever, with nothing alerting on it.
+
+### What this supersedes
+
+| Item | Status under Amendment 1 |
+|---|---|
+| **R12** (last two sentences) | A crash after launch authorization no longer becomes `recovery_required` with the request held in `processing`. It self-heals: audit row, request to `wanted`, exact owner cleared, job terminal `failed`. The death proof and "never two live executions" clause are UNCHANGED and still binding. |
+| **R14** (automation recovery `retry`) | Obsolete. There is no parked job to retry. |
+| **R15** (operator close with declaration) | Obsolete. The cleanup journal's `declared_result_status` / `declared_reason` / `evidence_revision` triple exists only to serve a declared close and is superseded with it; both the action and the columns are removed in the follow-up, not here. |
+| **AE6** (launched job becomes `recovery_required`) | Superseded — the launched job self-heals. The "live or unprovable old execution blocks either action" half is UNCHANGED. |
+| **AE7**, **AE8** (operator retry / operator close) | Obsolete. |
+| **KTD8** ("evidence-backed close also supplies the wedged-owner escape") | Superseded. There is no wedged owner to escape. `close_eligible` / `close_block_reason` go with it. |
+| **Crash/recovery decision diagram** ("Keep same owner; recovery_required") | Superseded by the self-heal edge. |
+| **R21** badge mapping (`recovery_required` as "needs recovery") | Retained for historical rows only; no new row reaches that state. |
+
+### What is explicitly NOT superseded
+
+- The **liveness proof** (R12's boot-ID / unit / PID / start-ticks / cgroup
+  rules, and `unknown` leaving the owner untouched). Liveness ambiguity is not
+  world ambiguity: it is an unfinished observation of our own process, it
+  involves no operator command, and it converges automatically once the lease is
+  provable. Treating an unprovable lease as dead would steal a live worker's
+  request mid-flight — the one failure invariant 11 cannot repair.
+- The **exact-owner model**, the atomic handoff, owner-atomic terminalization,
+  the operator invalidation conflicts, and the migration's constraints and
+  triggers, including the partial unique index over `queued`/`running`/
+  `recovery_required` (the status remains in the schema for history).
+- The **deploy preflight** requirement that active automation jobs,
+  `recovery_required` jobs, and dirty `downloading` rows are all zero.
+- **`ExecutionCancelled` / `OwnerSessionLost` still fail-stop.** That session's
+  authority is gone, so a self-heal write on it would raise again; startup
+  recovery owns the row once the lease is proven dead.
+
+### Consequences for review
+
+The operator `retry`/`close` action surface is now **unreachable for new work** —
+nothing rests at `recovery_required` for a human to act on — but it is still
+present in this PR rather than deleted. Removing it (the close/retry service
+paths, their CLI and API actions, and the journal declaration triple, which
+exists only to serve a declared close) is deliberately left as a follow-up so
+the deletion is reviewable on its own instead of inside a policy commit. Read
+the recovery framework's remaining size with that in mind: it is larger than the
+policy now requires.
+
+`recovery_required` survives in three legitimate shapes, all verified:
+
+1. a **momentary transit** inside a single self-heal frame, because the
+   owner-authority CAS refuses an `expected_job_status="running"` terminal write
+   for a launch-authorized job with no captured completion receipt. Two callers,
+   both closed in the same frame.
+2. a **self-converging** row minted by the operator `retry` command when it
+   retargets an unresolved cleanup journal. The periodic re-probe closes it
+   within `AUTOMATION_RECOVERY_REPROBE_INTERVAL_SECONDS` (300s). No human is
+   required, so invariant 11 — which forbids a state whose only exit is a human
+   command — holds. Whether `retry` should simply queue the retargeted journal
+   for a worker to resume is a semantics question left with the surface removal.
+3. **historical rows** and the schema/index/preflight predicates that must keep
+   reading them.
+
+Follow-ups tracked outside this PR: the four pre-existing importer parking sites
+and their per-job-type policy split (#940), and the fuzz-burst infrastructure
+ceiling that prevents a full randomized burst on doc1 (#939).
+
 ## Goal Capsule
 
 Complete PR2 of
@@ -153,10 +240,15 @@ inferred-ownership design that issue #898 rejected.
   only that the stored process identity is absent; it is never treated as the
   old process. Any contradictory signal or read/probe error is `unknown` and
   leaves the owner untouched.
-  Automatic recovery is startup-only; a stale heartbeat inside the same live
-  invocation cannot requeue itself. A crash after launch authorization changes
-  that job to `recovery_required` while the request stays `processing` with
-  the same owner. Recovery never creates two live executions of one job.
+  A stale heartbeat inside the same live invocation cannot requeue itself.
+  Recovery never creates two live executions of one job.
+  **Amended (Amendment 1):** a crash after launch authorization no longer parks
+  the job as `recovery_required` holding the request in `processing`. It
+  self-heals — audit evidence, request returned to `wanted`, exact owner
+  cleared, journaled cleanup resumed to completion, job terminal `failed`.
+  Liveness re-probing is no longer startup-only: a periodic re-probe converges a
+  dead owner without waiting for a worker restart, because a transient probe
+  error at startup would otherwise hold the request until the next restart.
 - R13. A pre-launch defer, release-lock contention, or missing/stale preview
   evidence requeues the same owning job instead of terminalizing it and
   stranding the request; this in-process requeue remains under the same live
@@ -362,18 +454,18 @@ inferred-ownership design that issue #898 rejected.
   evidence, files, launch authority, lifecycle, audit, or job state. Covers
   R8-R11.
 - AE6. Importer startup sees two interrupted owners. The unlaunched job
-  requeues with the same owner only after the old service cgroup is dead; the
-  launched job becomes `recovery_required` with its owner unchanged. A live or
-  unprovable old execution blocks either action. Covers R12.
-- AE7. The operator retries a recovery-required automation job. The old job
-  worker execution, Beets subprocess, and service cgroup are all proven dead;
-  the old job becomes failed, a fresh job becomes the owner, and no observation
-  can see `processing` without exactly one owner. Covers R14.
-- AE8. The operator closes ambiguous automation work and declares `wanted` or
-  `imported` after reviewing exact job, launch, path, completion, and library
-  evidence. The chosen status, audit reason, failed old job, cleared owner, and
-  cleared active state commit together; omitting the declaration is rejected.
-  The same action can close a proven-dead wedged active owner. Covers R15.
+  requeues with the same owner only after the old service cgroup is dead. **The
+  launched job self-heals (Amendment 1)**: its journaled cleanup is resumed to
+  completion, an audit row records the world failure, the request returns to
+  `wanted`, the exact owner is cleared, and the job ends `failed` — it is never
+  parked as `recovery_required`. A live or unprovable old execution blocks
+  either action. Covers R12.
+- AE7. **Obsolete (Amendment 1)** — there is no parked job for an operator to
+  retry. The scenario it covered is now AE6's self-heal.
+- AE8. **Obsolete (Amendment 1)** — ambiguous automation work is not closed by
+  an operator declaration. The next cycle re-derives the outcome from the
+  library, which is why no declaration is needed; the journal's declaration
+  triple is removed with the action.
 - AE9. A terminal validation reject faults after its audit write. No audit,
   denylist, transition, owner clear, or job failure survives; retry still sees
   the same processing owner. A crash after any cleanup mutation likewise
@@ -584,6 +676,13 @@ inferred-ownership design that issue #898 rejected.
   recomputing any path or step.
   Force/YouTube action contracts remain as specified in R14-R15.
   `(session-settled: user-approved review amendment — evidence-backed close also supplies the wedged-owner escape.)`
+  **SUPERSEDED by Amendment 1.** The close/retry actions, `close_eligible`,
+  `close_block_reason`, and the journal declaration triple are removed: a world
+  failure self-heals instead of waiting for an operator, so there is no wedged
+  owner to escape and no declaration to reconcile. Force/YouTube jobs own no
+  processing request, so their terminal `failed`/`completed` status is itself the
+  operator surface. Authority:
+  https://github.com/abl030/cratedigger/issues/898#issuecomment-5124769384
 - KTD9. Treat every per-request operator invalidator as a lock-and-recheck
   boundary. Early preflight improves feedback but is never authority. Direct
   request deletion moves behind a canonical service so it cannot null an
@@ -677,14 +776,14 @@ No processor-owned filesystem effect appears before the commit line.
 flowchart TD
     C["Owned processing job interrupted"] --> L{"Beets launch authorized?"}
     L -->|"No"| D{"Prior worker and cgroup proven dead?"}
-    D -->|"No / unknown"| H["Keep owner unchanged; typed busy/recovery result"]
+    D -->|"No / unknown"| H["Keep owner unchanged; re-probe later"]
     D -->|"Yes"| Q["Requeue same owner"]
-    L -->|"Yes / uncertain"| R["Keep same owner; recovery_required"]
-    R --> O{"Operator action"}
-    Q -.->|"proven-dead owner still cannot progress"| O
-    O -->|"retry + old execution dead"| S["Fail old job; insert fresh job; swap owner atomically"]
-    O -->|"close + evidence + wanted"| W["Fail job; processing -> wanted; clear owner/state"]
-    O -->|"close + evidence + imported"| I["Fail job; processing -> imported; clear owner/state"]
+    L -->|"Yes"| P{"Prior execution proven dead?"}
+    P -->|"No / unknown"| H
+    P -->|"Yes"| R["Resume journaled cleanup to completion"]
+    R --> A["Write world-failure audit (renders in Recents)"]
+    A --> W["Fail job; processing -> wanted; clear owner/state; retain attempts"]
+    W --> N["Next cycle re-derives from the library"]
 ```
 
 The shared liveness decision table is exact and fail-closed:
@@ -1062,10 +1161,22 @@ independently.
 
 #### U4. Make recovery and terminal outcomes owner-atomic
 
-**Goal:** Retarget or clear processor ownership exactly once with every
-recovery or terminal outcome.
+> **Amendment 1 applies to this whole unit.** Every task below that builds the
+> operator `retry`/`close` action surface — the `close_eligible` /
+> `close_block_reason` projection, the revision-bound declared close, the
+> journal declaration triple, and the `retry` owner-retarget — is superseded.
+> A world failure self-heals instead: resume the journaled cleanup, write the
+> audit row, return the request to `wanted`, clear the exact owner, terminalize
+> the job. The owner-atomicity requirement itself, the death proof, and the
+> "exactly once" clearing are UNCHANGED and still the point of this unit; only
+> the operator-adjudicated exit is removed. Read the Amendment 1 table before
+> implementing or reviewing anything here.
 
-**Requirements:** R12-R17, R23-R25; F2-F3; AE6-AE9; KTD6-KTD8.
+**Goal:** Clear processor ownership exactly once with every recovery or terminal
+outcome, always leaving the request runnable or imported.
+
+**Requirements:** R12-R13, R16-R17, R23-R25; F2-F3; AE6, AE9; KTD6-KTD7.
+(R14-R15, AE7-AE8, and KTD8's close/retry grant are superseded by Amendment 1.)
 
 **Dependencies:** U1-U3.
 
