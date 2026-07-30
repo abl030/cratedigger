@@ -13,7 +13,13 @@ import time
 import unittest
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import (
+    FIRST_COMPLETED,
+    Future,
+    ThreadPoolExecutor,
+    as_completed,
+    wait,
+)
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -37,6 +43,9 @@ from scripts.run_python_tests import (
 TARGET_RUNNER = REPO_ROOT / "scripts" / "run_python_tests.py"
 DEFAULT_PROFILE = "fuzz"
 DEFAULT_DURATIONS = 5
+EPHEMERAL_POSTGRES_TARGET_LIMIT = 2
+_SCHEMA_READY_ENV = "CRATEDIGGER_TEST_SCHEMA_READY"
+_DISCOVERY_DSN = "postgresql:///cratedigger_fuzz_discovery_only"
 
 #: Ranked depth-report lines printed per section before truncation.
 DEPTH_REPORT_LIMIT = 20
@@ -61,6 +70,7 @@ class FuzzModuleManifest(msgspec.Struct, frozen=True):
     module_name: str
     test_ids: tuple[str, ...]
     hypothesis_tests: tuple[FuzzPropertyManifest, ...]
+    uses_ephemeral_postgres: bool = False
 
 
 @dataclass(frozen=True)
@@ -74,6 +84,7 @@ class FuzzTarget:
     shard_index: int = 0
     shard_count: int = 1
     profile_max_examples: int | None = None
+    uses_ephemeral_postgres: bool = False
 
 
 @dataclass(frozen=True)
@@ -123,6 +134,15 @@ class FuzzInfrastructureFailure:
     log_path: Path
 
 
+@dataclass(frozen=True)
+class FuzzTargetBatch:
+    """Completed target outcomes plus work withheld after infrastructure loss."""
+
+    results: tuple[FuzzRunResult, ...]
+    infrastructure_failures: tuple[FuzzInfrastructureFailure, ...]
+    not_started: tuple[FuzzTarget, ...]
+
+
 class PersistedFuzzTarget(msgspec.Struct, frozen=True):
     """Failure-artifact mapping from a log file to its exact target."""
 
@@ -133,6 +153,7 @@ class PersistedFuzzTarget(msgspec.Struct, frozen=True):
     shard_index: int
     shard_count: int
     profile_max_examples: int | None
+    uses_ephemeral_postgres: bool
 
 
 class PersistedFuzzManifest(msgspec.Struct, frozen=True):
@@ -178,6 +199,9 @@ def build_fuzz_targets(
                     module_name=manifest.module_name,
                     load_names=(manifest.module_name,),
                     expected_test_ids=manifest.test_ids,
+                    uses_ephemeral_postgres=(
+                        manifest.uses_ephemeral_postgres
+                    ),
                 )
             )
             continue
@@ -216,6 +240,9 @@ def build_fuzz_targets(
                         profile_max_examples=(
                             budget if shard_count > 1 else None
                         ),
+                        uses_ephemeral_postgres=(
+                            manifest.uses_ephemeral_postgres
+                        ),
                     )
                 )
         pin_ids = tuple(
@@ -230,6 +257,9 @@ def build_fuzz_targets(
                     module_name=manifest.module_name,
                     load_names=(manifest.module_name,),
                     expected_test_ids=pin_ids,
+                    uses_ephemeral_postgres=(
+                        manifest.uses_ephemeral_postgres
+                    ),
                 )
             )
 
@@ -501,6 +531,10 @@ def _discover_module_child(module_name: str, result_path: Path) -> int:
                 module_name=module_name,
                 test_ids=test_ids,
                 hypothesis_tests=tuple(hypothesis_tests),
+                uses_ephemeral_postgres=(
+                    "conftest" in sys.modules
+                    or "tests.conftest" in sys.modules
+                ),
             )
         )
     )
@@ -516,6 +550,13 @@ def _discover_one_manifest(
 ) -> FuzzModuleManifest:
     result_path = work_directory / f"discover-{index:04d}.json"
     log_path = work_directory / f"discover-{index:04d}.log"
+    discovery_environment = dict(environment)
+    discovery_environment.update(
+        {
+            "TEST_DB_DSN": _DISCOVERY_DSN,
+            _SCHEMA_READY_ENV: "1",
+        }
+    )
     with log_path.open("wb") as raw_output:
         completed = subprocess.run(
             [
@@ -526,7 +567,7 @@ def _discover_one_manifest(
                 str(result_path),
             ],
             cwd=REPO_ROOT,
-            env=environment,
+            env=discovery_environment,
             stdout=raw_output,
             stderr=subprocess.STDOUT,
             check=False,
@@ -618,6 +659,16 @@ def _execute_fuzz_target(
     )
     with log_path.open("a", encoding="utf-8") as output:
         output.write(child.output)
+    if child.infrastructure_errors:
+        detail = "\n".join(
+            f"{error.test_id}: {error.kind}: {error.detail}"
+            for error in child.infrastructure_errors
+        )
+        return FuzzInfrastructureFailure(
+            target=target,
+            detail=detail,
+            log_path=log_path,
+        )
     if child.test_ids != target.expected_test_ids:
         return FuzzInfrastructureFailure(
             target=target,
@@ -637,61 +688,187 @@ def _execute_fuzz_target(
     )
 
 
+def assert_fuzz_admission(
+    pending: Sequence[FuzzTarget],
+    active: Sequence[FuzzTarget],
+    admitted_indexes: Sequence[int],
+    *,
+    worker_count: int,
+    postgres_worker_count: int,
+) -> None:
+    """Prove one queue admission fills safe worker and PostgreSQL capacity."""
+    if worker_count < 1 or postgres_worker_count < 1:
+        raise ValueError("worker limits must be at least 1")
+    if len(active) > worker_count:
+        raise ValueError("active targets exceed worker capacity")
+    active_postgres = sum(
+        target.uses_ephemeral_postgres for target in active
+    )
+    if active_postgres > postgres_worker_count:
+        raise ValueError("active targets exceed PostgreSQL capacity")
+    if len(set(admitted_indexes)) != len(admitted_indexes):
+        raise AssertionError("duplicate fuzz admission")
+    if any(index < 0 or index >= len(pending) for index in admitted_indexes):
+        raise AssertionError("fuzz admission index is out of range")
+
+    admitted = tuple(pending[index] for index in admitted_indexes)
+    if len(active) + len(admitted) > worker_count:
+        raise AssertionError("fuzz admission exceeds worker capacity")
+    admitted_postgres = sum(
+        target.uses_ephemeral_postgres for target in admitted
+    )
+    if active_postgres + admitted_postgres > postgres_worker_count:
+        raise AssertionError("fuzz admission exceeds PostgreSQL capacity")
+
+    admitted_set = set(admitted_indexes)
+    remaining = tuple(
+        target
+        for index, target in enumerate(pending)
+        if index not in admitted_set
+    )
+    total_slots = worker_count - len(active) - len(admitted)
+    postgres_slots = (
+        postgres_worker_count - active_postgres - admitted_postgres
+    )
+    has_eligible_remaining = any(
+        not target.uses_ephemeral_postgres or postgres_slots > 0
+        for target in remaining
+    )
+    if total_slots > 0 and has_eligible_remaining:
+        raise AssertionError("fuzz admission left eligible worker capacity idle")
+
+
+def select_fuzz_admissions(
+    pending: Sequence[FuzzTarget],
+    active: Sequence[FuzzTarget],
+    *,
+    worker_count: int,
+    postgres_worker_count: int,
+) -> tuple[int, ...]:
+    """Select a work-conserving queue prefix under a separate PG ceiling."""
+    total_slots = worker_count - len(active)
+    postgres_slots = postgres_worker_count - sum(
+        target.uses_ephemeral_postgres for target in active
+    )
+    admitted: list[int] = []
+    for index, target in enumerate(pending):
+        if len(admitted) >= total_slots:
+            break
+        if target.uses_ephemeral_postgres:
+            if postgres_slots < 1:
+                continue
+            postgres_slots -= 1
+        admitted.append(index)
+    selected = tuple(admitted)
+    assert_fuzz_admission(
+        pending,
+        active,
+        selected,
+        worker_count=worker_count,
+        postgres_worker_count=postgres_worker_count,
+    )
+    return selected
+
+
 def run_fuzz_targets(
     targets: Sequence[FuzzTarget],
     *,
     worker_count: int,
+    postgres_worker_count: int,
     environment: Mapping[str, str],
     log_directory: Path,
-) -> tuple[
-    tuple[FuzzRunResult, ...],
-    tuple[FuzzInfrastructureFailure, ...],
-]:
-    """Drain every exact fuzz target and aggregate all failures."""
+) -> FuzzTargetBatch:
+    """Run a bounded queue and stop admission after infrastructure loss."""
     results: list[FuzzRunResult] = []
     infrastructure_failures: list[FuzzInfrastructureFailure] = []
+    pending = list(enumerate(targets))
+    infrastructure_aborted = False
     completed_count = 0
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
-        futures = {
-            executor.submit(
-                _execute_fuzz_target,
-                index,
-                target,
-                environment=environment,
-                log_directory=log_directory,
-            ): (index, target)
-            for index, target in enumerate(targets)
-        }
-        for future in as_completed(futures):
-            index, target = futures[future]
-            completed_count += 1
-            try:
-                outcome = future.result()
-            except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
-                outcome = FuzzInfrastructureFailure(
-                    target=target,
-                    detail=f"{type(exc).__name__}: {exc}",
-                    log_path=log_directory / f"{index:04d}.log",
+        futures: dict[
+            Future[FuzzRunResult | FuzzInfrastructureFailure],
+            tuple[int, FuzzTarget],
+        ] = {}
+        while futures or (pending and not infrastructure_aborted):
+            if not infrastructure_aborted:
+                active = tuple(target for _index, target in futures.values())
+                admitted_positions = select_fuzz_admissions(
+                    tuple(target for _index, target in pending),
+                    active,
+                    worker_count=worker_count,
+                    postgres_worker_count=postgres_worker_count,
                 )
-            if isinstance(outcome, FuzzInfrastructureFailure):
-                infrastructure_failures.append(outcome)
-                print(f"FAIL {outcome.target.label}", flush=True)
-                continue
-            results.append(outcome)
-            if (
-                outcome.successful
-                and (
-                    completed_count % 25 == 0
-                    or completed_count == len(targets)
+                admitted_position_set = set(admitted_positions)
+                admitted = tuple(
+                    item
+                    for position, item in enumerate(pending)
+                    if position in admitted_position_set
                 )
-            ):
-                print(
-                    f"PROGRESS {completed_count}/{len(targets)} targets",
-                    flush=True,
-                )
-            elif not outcome.successful:
-                print(f"FAIL {outcome.target.label}", flush=True)
-    return tuple(results), tuple(infrastructure_failures)
+                pending = [
+                    item
+                    for position, item in enumerate(pending)
+                    if position not in admitted_position_set
+                ]
+                for index, target in admitted:
+                    future = executor.submit(
+                        _execute_fuzz_target,
+                        index,
+                        target,
+                        environment=environment,
+                        log_directory=log_directory,
+                    )
+                    futures[future] = (index, target)
+            if not futures:
+                break
+
+            done, _not_done = wait(
+                tuple(futures),
+                return_when=FIRST_COMPLETED,
+            )
+            completed = sorted(
+                (
+                    (futures[future][0], future)
+                    for future in done
+                ),
+                key=lambda item: item[0],
+            )
+            for _completed_index, future in completed:
+                index, target = futures.pop(future)
+                completed_count += 1
+                try:
+                    outcome = future.result()
+                except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
+                    outcome = FuzzInfrastructureFailure(
+                        target=target,
+                        detail=f"{type(exc).__name__}: {exc}",
+                        log_path=log_directory / f"{index:04d}.log",
+                    )
+                if isinstance(outcome, FuzzInfrastructureFailure):
+                    infrastructure_failures.append(outcome)
+                    infrastructure_aborted = True
+                    print(
+                        f"INFRASTRUCTURE FAIL {outcome.target.label}",
+                        flush=True,
+                    )
+                    continue
+                results.append(outcome)
+                if (
+                    outcome.successful
+                    and (
+                        completed_count % 25 == 0
+                        or completed_count == len(targets)
+                    )
+                ):
+                    print(
+                        f"PROGRESS {completed_count}/{len(targets)} targets",
+                        flush=True,
+                    )
+
+    return FuzzTargetBatch(
+        results=tuple(results),
+        infrastructure_failures=tuple(infrastructure_failures),
+        not_started=tuple(target for _index, target in pending),
+    )
 
 
 def _failure_tail(log_path: Path) -> str:
@@ -721,6 +898,8 @@ def _test_subprocess_environment(
     active_database: Path,
 ) -> dict[str, str]:
     environment = dict(base)
+    environment.pop("TEST_DB_DSN", None)
+    environment.pop(_SCHEMA_READY_ENV, None)
     python_paths = [str(REPO_ROOT), str(REPO_ROOT / "tests")]
     inherited_python_path = environment.get("PYTHONPATH")
     if inherited_python_path:
@@ -761,6 +940,7 @@ def _persist_failure_logs(
                 shard_index=target.shard_index,
                 shard_count=target.shard_count,
                 profile_max_examples=target.profile_max_examples,
+                uses_ephemeral_postgres=target.uses_ephemeral_postgres,
             )
             for index, target in enumerate(targets)
         )
@@ -898,52 +1078,73 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"fuzz burst: {len(module_names)} generated modules, "
             f"{len(targets)} targets ({property_targets} property targets, "
             f"up to {property_shards} entropy shards), "
-            f"up to {worker_count} parallel "
+            f"up to {worker_count} parallel, "
+            f"up to {min(EPHEMERAL_POSTGRES_TARGET_LIMIT, worker_count)} "
+            "PostgreSQL-backed "
             f"({os.cpu_count() or 1} host cores), profile={args.profile}",
             flush=True,
         )
         started_at = time.monotonic()
-        results, infrastructure_failures = run_fuzz_targets(
+        batch = run_fuzz_targets(
             targets,
             worker_count=worker_count,
+            postgres_worker_count=min(
+                EPHEMERAL_POSTGRES_TARGET_LIMIT,
+                worker_count,
+            ),
             environment=child_environment,
             log_directory=log_directory,
         )
+        results = batch.results
+        infrastructure_failures = batch.infrastructure_failures
         wall_seconds = time.monotonic() - started_at
 
         failed_results = [result for result in results if not result.successful]
-        for result in sorted(
-            results,
-            key=lambda item: item.elapsed_seconds,
-            reverse=True,
-        )[:12]:
-            print(
-                f"SLOW {result.elapsed_seconds:.1f}s {result.target.label}"
-            )
-        for line in format_depth_report(
-            aggregate_property_depth(
-                tuple(
-                    record
-                    for result in results
-                    for record in result.hypothesis_stats
-                )
-            )
-        ):
-            print(line)
-        if failed_results or infrastructure_failures:
+        if not infrastructure_failures:
             for result in sorted(
-                failed_results,
-                key=lambda item: item.target.label,
+                results,
+                key=lambda item: item.elapsed_seconds,
+                reverse=True,
+            )[:12]:
+                print(
+                    f"SLOW {result.elapsed_seconds:.1f}s {result.target.label}"
+                )
+            for line in format_depth_report(
+                aggregate_property_depth(
+                    tuple(
+                        record
+                        for result in results
+                        for record in result.hypothesis_stats
+                    )
+                )
             ):
-                print(f"\n--- FAIL {result.target.label} ---")
-                print(_failure_tail(result.log_path))
+                print(line)
+        if failed_results or infrastructure_failures:
+            if infrastructure_failures:
+                if failed_results:
+                    print(
+                        f"\n{len(failed_results)} unittest-failed "
+                        "target withheld from property reporting because "
+                        "the burst's infrastructure failed."
+                    )
+            else:
+                for result in sorted(
+                    failed_results,
+                    key=lambda item: item.target.label,
+                ):
+                    print(f"\n--- FAIL {result.target.label} ---")
+                    print(_failure_tail(result.log_path))
             for failure in sorted(
                 infrastructure_failures,
                 key=lambda item: item.target.label,
             ):
                 print(f"\n--- INFRASTRUCTURE FAIL {failure.target.label} ---")
                 print(failure.detail)
-            _persist_failure_database(active_database, persistent_database)
+            if not infrastructure_failures:
+                _persist_failure_database(
+                    active_database,
+                    persistent_database,
+                )
             if persistent_output_value is not None:
                 retained = _persist_failure_logs(
                     log_directory,
@@ -951,10 +1152,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                     targets,
                 )
                 print(f"fuzz burst: complete module logs retained at {retained}")
-            print(
-                f"fuzz burst: FAILURES after {wall_seconds:.1f}s "
-                f"({len(failed_results) + len(infrastructure_failures)} targets)"
-            )
+            completed_targets = len(results) + len(infrastructure_failures)
+            if infrastructure_failures:
+                print(
+                    f"fuzz burst: INFRASTRUCTURE ABORT after "
+                    f"{wall_seconds:.1f}s ({completed_targets} completed of "
+                    f"{len(targets)}; {len(batch.not_started)} not started; "
+                    "property verdict invalid)"
+                )
+            else:
+                print(
+                    f"fuzz burst: FAILURES after {wall_seconds:.1f}s "
+                    f"({len(failed_results)} failed targets; "
+                    f"{len(results)} completed)"
+                )
             return 1
 
         if Counter(result.target for result in results) != Counter(targets):

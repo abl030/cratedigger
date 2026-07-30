@@ -381,12 +381,18 @@ repeating the module's other properties or pins. An exact-budget check rejects
 any schedule that omits a test, repeats a pin, changes a property's combined
 example count, or invents an ID.
 
-The queue uses every host core by default. Set `CRATEDIGGER_FUZZ_JOBS` to cap
-concurrent processes or `CRATEDIGGER_FUZZ_PROPERTY_SHARDS` to override the
-host-scaled entropy fan-out. On doc1's 30-core VM on 2026-07-23, the complete
-71-module, 769-test overnight burst at 20,000 examples completed in 607.8
-seconds. The worst subprocess-heavy generated module completed alone in 142.7
-seconds; its unsharded properties had still not completed after ten minutes.
+The queue uses every host core by default for ordinary targets. Targets whose
+module boots an ephemeral PostgreSQL cluster are capped at two concurrent
+processes, bounding their tmpfs footprint independently of the queue length;
+eligible ordinary work bypasses a PostgreSQL-backed target waiting for that
+resource. Any `ENOSPC`, PostgreSQL `DiskFull`, or unexpected loss of an
+ephemeral database aborts further admission and reports that the property
+verdict is invalid. Set `CRATEDIGGER_FUZZ_JOBS` to cap all concurrent
+processes or `CRATEDIGGER_FUZZ_PROPERTY_SHARDS` to override the host-scaled
+entropy fan-out. On doc1's 30-core VM on 2026-07-23, the complete 71-module,
+769-test overnight burst at 20,000 examples completed in 607.8 seconds. The
+worst subprocess-heavy generated module completed alone in 142.7 seconds; its
+unsharded properties had still not completed after ten minutes.
 
 ### Per-property depth report
 
@@ -464,12 +470,14 @@ strategy widened, so re-run the burst rather than trusting these numbers.
 All active logs, property tempdirs, and Hypothesis database writes stay in the
 private per-shell tmpfs. A database named by
 `HYPOTHESIS_STORAGE_DIRECTORY` seeds the run read-only. A green run discards
-its active database and logs without writing persistent storage. On failure,
-the active database is copied back so the shrunk example replays, and
+its active database and logs without writing persistent storage. On a property
+failure, the active database is copied back so the shrunk example replays.
+An infrastructure abort discards that contaminated database instead.
 `CRATEDIGGER_FUZZ_OUTPUT_DIR` optionally receives the complete logs plus an
-exact target manifest beneath a unique `run.*` directory. The ordinary burst
-uses 500 examples; the daily unattended gate preserves the 20,000-example
-depth. The serial equivalent, when you need one module's live output:
+exact target manifest beneath a unique `run.*` directory for either kind of
+failure. The ordinary burst uses 500 examples; the daily unattended gate
+preserves the 20,000-example depth. The serial equivalent, when you need one
+module's live output:
 
 ```bash
 nix-shell --run "CRATEDIGGER_HYPOTHESIS_PROFILE=fuzz \

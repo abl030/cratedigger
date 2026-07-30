@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import io
 import multiprocessing
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -17,10 +19,15 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
+from types import TracebackType
+from typing import Literal, TypeIs
 
 import msgspec
 from hypothesis import is_hypothesis_test, settings
 from hypothesis.statistics import collector
+from psycopg2 import Error as PsycopgError
+from psycopg2 import OperationalError
+from psycopg2.errors import DiskFull
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
@@ -32,6 +39,11 @@ from scripts.run_test_suite import (
     METRICS_MARKER_PREFIX,
     CheckFailureMarker,
     CheckMetricsMarker,
+)
+
+ExcInfo = (
+    tuple[type[BaseException], BaseException, TracebackType]
+    | tuple[None, None, None]
 )
 
 DEFAULT_MAX_WORKERS = 12
@@ -56,6 +68,10 @@ STRATEGY_SPACE_EXHAUSTED = "nothing left to do"
 #: ``tests/test_parallel_test_runner.py`` against the live ``Status`` enum: a
 #: new status would otherwise be silently uncounted in the depth report.
 HYPOTHESIS_CASE_STATUSES = ("valid", "invalid", "overrun", "interesting")
+
+# Once a disposable database fails below this floor, the surrounding test
+# cannot produce a trustworthy property verdict even if ENOSPC was swallowed.
+_MIN_VALID_TEMP_HEADROOM_BYTES = 64 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -118,6 +134,14 @@ class HypothesisPropertyStats(msgspec.Struct, frozen=True):
     stopped_because: str
 
 
+class ChildInfrastructureError(msgspec.Struct, frozen=True):
+    """One infrastructure failure detected inside a unittest result."""
+
+    test_id: str
+    kind: Literal["disk_full", "database_unavailable"]
+    detail: str
+
+
 class ChildTargetResult(msgspec.Struct, frozen=True):
     """Wire result written by one fresh target interpreter."""
 
@@ -127,6 +151,7 @@ class ChildTargetResult(msgspec.Struct, frozen=True):
     output: str
     failed_test_ids: tuple[str, ...]
     hypothesis_stats: tuple[HypothesisPropertyStats, ...] = ()
+    infrastructure_errors: tuple[ChildInfrastructureError, ...] = ()
 
 
 class ListedTestIds(msgspec.Struct, frozen=True):
@@ -139,12 +164,140 @@ class RecordingTextTestResult(unittest.TextTestResult):
     """Text result that proves which exact unittest IDs executed."""
 
     test_ids: list[str] | None = None
+    infrastructure_errors: list[ChildInfrastructureError] | None = None
 
     def startTest(self, test: unittest.TestCase) -> None:
         if self.test_ids is None:
             self.test_ids = []
         self.test_ids.append(test.id())
         super().startTest(test)
+
+    def _record_infrastructure_error(
+        self,
+        test: unittest.TestCase,
+        error: BaseException,
+    ) -> None:
+        infrastructure = _classify_test_infrastructure_error(error)
+        if infrastructure is None:
+            return
+        kind, detail = infrastructure
+        if self.infrastructure_errors is None:
+            self.infrastructure_errors = []
+        self.infrastructure_errors.append(
+            ChildInfrastructureError(
+                test_id=test.id(),
+                kind=kind,
+                detail=detail,
+            )
+        )
+
+    def addError(
+        self,
+        test: unittest.TestCase,
+        err: ExcInfo,
+    ) -> None:
+        if err[1] is not None:
+            self._record_infrastructure_error(test, err[1])
+        super().addError(test, err)
+
+    def addFailure(
+        self,
+        test: unittest.TestCase,
+        err: ExcInfo,
+    ) -> None:
+        if err[1] is not None:
+            self._record_infrastructure_error(test, err[1])
+        super().addFailure(test, err)
+
+    def addSubTest(
+        self,
+        test: unittest.TestCase,
+        subtest: unittest.TestCase,
+        err: ExcInfo | None,
+    ) -> None:
+        if err is not None and err[1] is not None:
+            self._record_infrastructure_error(subtest, err[1])
+        super().addSubTest(test, subtest, err)
+
+
+def _find_disk_full_exception(
+    error: BaseException,
+) -> BaseException | None:
+    """Find ENOSPC through database and exception-wrapper boundaries."""
+    for current in _walk_exception_chain(error):
+        if isinstance(current, OSError) and current.errno == errno.ENOSPC:
+            return current
+        if isinstance(current, DiskFull):
+            return current
+        if isinstance(current, PsycopgError) and current.pgcode == "53100":
+            return current
+    return None
+
+
+def _walk_exception_chain(error: BaseException) -> Iterator[BaseException]:
+    """Yield one exception graph once across groups, causes, and contexts."""
+    pending = [error]
+    visited: set[int] = set()
+    while pending:
+        current = pending.pop()
+        identity = id(current)
+        if identity in visited:
+            continue
+        visited.add(identity)
+        yield current
+        if _is_exception_group(current):
+            pending.extend(current.exceptions)
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+
+
+def _is_exception_group(
+    error: BaseException,
+) -> TypeIs[ExceptionGroup[Exception]]:
+    """Narrow stdlib's otherwise-unknown ExceptionGroup parameter."""
+    return isinstance(error, ExceptionGroup)
+
+
+def _classify_test_infrastructure_error(
+    error: BaseException,
+    *,
+    available_temp_bytes: int | None = None,
+) -> tuple[Literal["disk_full", "database_unavailable"], str] | None:
+    """Classify capacity and disposable-database loss before JSON encoding."""
+    disk_full = _find_disk_full_exception(error)
+    if disk_full is not None:
+        return "disk_full", f"{type(disk_full).__name__}: {disk_full}"
+    available = available_temp_bytes
+    if available is None:
+        try:
+            available = shutil.disk_usage(tempfile.gettempdir()).free
+        except OSError:
+            available = None
+    if (
+        available is not None
+        and available < _MIN_VALID_TEMP_HEADROOM_BYTES
+    ):
+        detail = (
+            f"temporary filesystem has {available} bytes free; "
+            f"{type(error).__name__}: {error}"
+        )
+        return "disk_full", detail
+    operational = next(
+        (
+            current
+            for current in _walk_exception_chain(error)
+            if isinstance(current, OperationalError)
+        ),
+        None,
+    )
+    if operational is None:
+        return None
+    return (
+        "database_unavailable",
+        f"{type(operational).__name__}: {operational}",
+    )
 
 
 class HypothesisStatsRecorder:
@@ -753,6 +906,9 @@ def _run_test_target_child(
                 )
                 + tuple(test.id() for test in result.unexpectedSuccesses),
                 hypothesis_stats=recorder.records,
+                infrastructure_errors=tuple(
+                    result.infrastructure_errors or ()
+                ),
             )
         )
     )
