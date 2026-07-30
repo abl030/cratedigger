@@ -1697,6 +1697,12 @@ def process_claimed_job(
                 reason=f"{type(exc).__name__}: {exc}",
                 result=result,
             )
+        _cleanup_committed_wrong_match_rejection(
+            db,
+            job,
+            terminal.download_log_id,
+            outcome,
+        )
         return terminal.job
     if outcome.success:
         if outcome.terminal_outcome is not None:

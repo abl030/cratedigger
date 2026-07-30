@@ -61,6 +61,7 @@ from tests.helpers import (
     RecordingQualityGate,
     claim_next_import_job,
     claim_next_import_preview_job,
+    finalize_claimed_dispatch,
     hermetic_beets_config_defaults,
     make_album_quality_evidence,
     make_ctx_with_fake_db,
@@ -1310,6 +1311,105 @@ class TestAudioCorruptPostCommitQuarantine(unittest.TestCase):
             )
             self.assertNotIn("wrong_match_triage", terminal_audit)
             self.assertEqual(db.request(835)["status"], "unsearchable")
+
+
+class TestAutomationWrongMatchPostCommitTriage(unittest.TestCase):
+    def test_high_distance_rejection_triages_after_owner_terminal_commit(
+        self,
+    ) -> None:
+        from lib.dispatch import (
+            DispatchOutcome,
+            _record_rejection_and_maybe_requeue,
+        )
+        from lib.terminal_outcomes import PendingImportTerminalOutcome
+
+        with tempfile.TemporaryDirectory() as root:
+            processing_albums = os.path.join(root, "processing", "albums")
+            canonical_path = os.path.join(
+                processing_albums,
+                "Stone Sour - Come What(ever) May",
+            )
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=42,
+                status="wanted",
+                mb_release_id="stone-sour-release",
+            ))
+            claimed, _candidate, _execution_lease = _claim_dispatch_job(
+                db,
+                path=canonical_path,
+                release_id="stone-sour-release",
+            )
+
+            wrong_matches = os.path.join(processing_albums, "wrong_matches")
+            os.makedirs(wrong_matches)
+            failed_path = os.path.join(
+                wrong_matches,
+                "Stone Sour - Come What(ever) May",
+            )
+            os.rename(canonical_path, failed_path)
+
+            validation = ValidationResult(
+                valid=False,
+                distance=0.1697,
+                scenario="high_distance",
+                detail="distance=0.1697",
+                failed_path=failed_path,
+                soulseek_username="Strudel",
+            )
+            pending = _record_rejection_and_maybe_requeue(
+                db,  # pyright: ignore[reportArgumentType]
+                42,
+                DownloadInfo(filetype="mp3", username="Strudel"),
+                detail=validation.detail,
+                error=None,
+                validation_result=validation.to_json(),
+                requeue=True,
+                import_job_id=claimed.id,
+            )
+            self.assertIsInstance(pending, PendingImportTerminalOutcome)
+            assert isinstance(pending, PendingImportTerminalOutcome)
+            outcome = DispatchOutcome(
+                success=False,
+                message="Rejected: high_distance - distance=0.1697",
+                terminal_outcome=pending,
+                post_commit_wrong_match_scenario="high_distance",
+            )
+            observed: list[tuple[int, int | None, str, str]] = []
+
+            def cleanup_after_commit(
+                db_arg,
+                download_log_id: int,
+                *,
+                ignore_import_job_id: int | None,
+            ) -> None:
+                request = db_arg.request(42)
+                terminal_job = db_arg.get_import_job(claimed.id)
+                assert terminal_job is not None
+                observed.append((
+                    download_log_id,
+                    ignore_import_job_id,
+                    str(request["status"]),
+                    terminal_job.status,
+                ))
+
+            with patch(
+                "lib.wrong_match_cleanup_service.cleanup_wrong_match",
+                side_effect=cleanup_after_commit,
+            ):
+                terminal_job = finalize_claimed_dispatch(db, claimed, outcome)
+
+            assert terminal_job is not None
+            terminal_log = db.download_logs[-1]
+            self.assertEqual(
+                observed,
+                [(terminal_log.id, claimed.id, "wanted", "failed")],
+            )
+            self.assertEqual(
+                terminal_log.candidate_evidence_id,
+                claimed.candidate_evidence_id,
+            )
+            self.assertTrue(os.path.isdir(failed_path))
 
 
 class TestRecordRejectionAndRequeueSeam(unittest.TestCase):
