@@ -31,8 +31,9 @@ Two modes, same two-tree runbook as Rule D:
 **Copying this harness into a base tree that predates the change.** The
 copy runs against the BASE tree's production code, so anything the base
 does not have has to come out of the copy: for a base ref older than the
-v3 ultrasonic leg that is the leg import, ``leg_for_evidence``, and the
-three ``PROOF_FIELDS`` entries it feeds. The two sides then emit different
+v3 ultrasonic leg or the v4 AAC-lattice leg that is the leg import, its
+``*_leg_for_evidence`` helper, and the ``PROOF_FIELDS`` entries it feeds.
+The two sides then emit different
 field sets, which the diff engine refuses by default and correctly so —
 re-run the ``diff`` with ``--allow-field-drift``, which compares the shared
 fields and prints the unshared ones under ``NOT COMPARED``. Say in the PR
@@ -95,8 +96,10 @@ import msgspec
 from lib.json_narrow import is_object_list, is_str_object_dict
 from lib.pipeline_db.evidence import _EvidenceMixin
 from lib.quality import (
+    AacLatticeProofLeg,
     AlbumQualityEvidence,
     UltrasonicProofLeg,
+    aac_lattice_proof_leg,
     full_pipeline_decision_from_evidence,
     is_preserved_source_spectral,
     mint_verified_lossless_proof,
@@ -131,6 +134,8 @@ PROOF_FIELDS: tuple[str, ...] = (
     "verified_lossless_classifier",
     "ultrasonic_leg_outcome",
     "ultrasonic_leg_reason",
+    "aac_lattice_leg_outcome",
+    "aac_lattice_leg_reason",
 )
 
 #: Recorded in place of a decision when the decider refuses the row.
@@ -227,6 +232,17 @@ def leg_for_evidence(evidence: AlbumQualityEvidence) -> UltrasonicProofLeg:
     )
 
 
+def lattice_leg_for_evidence(
+    evidence: AlbumQualityEvidence,
+) -> AacLatticeProofLeg:
+    """The AAC frame-lattice proof leg the decider will build for this row.
+
+    The decider reads the persisted capture straight off the evidence row
+    with no adapter in between, so this is the same one-liner it runs.
+    """
+    return aac_lattice_proof_leg(evidence.aac_lattice)
+
+
 #: The persisted verified-lossless proof columns, dropped by the
 #: counterfactual arm. Spelled here rather than derived because they are DB
 #: column names on the corpus row, not fields of any type this module holds.
@@ -311,12 +327,14 @@ def decide_row(
         value = decision.get(key)
         fields[key] = value if _is_json_scalar(value) else repr(value)
     leg = leg_for_evidence(evidence)
+    lattice_leg = lattice_leg_for_evidence(evidence)
     proof = mint_verified_lossless_proof(
         bool(decision.get("verified_lossless")),
         was_converted_from=evidence.measurement.was_converted_from,
         detected_source_format=evidence.storage_format,
         spectral_grade=evidence.measurement.spectral_grade,
         ultrasonic_leg=leg,
+        aac_lattice_leg=lattice_leg,
     )
     fields.update({
         "verified_lossless_classifier": (
@@ -324,6 +342,8 @@ def decide_row(
         ),
         "ultrasonic_leg_outcome": leg.outcome,
         "ultrasonic_leg_reason": leg.reason,
+        "aac_lattice_leg_outcome": lattice_leg.outcome,
+        "aac_lattice_leg_reason": lattice_leg.reason,
     })
     # The emitted field set is checked against the declared contract on
     # every row rather than trusted: a proof fact added above without
