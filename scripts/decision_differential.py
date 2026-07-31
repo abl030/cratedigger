@@ -42,10 +42,18 @@ body which fields had no base value.
 **Two arms, and the second is the one that measures a proof-gate change.**
 
 * ``decide`` alone re-decides each row AS PERSISTED. A row that already
-  holds a verified-lossless proof starts from that proof, so the promotion
-  the gate governs never runs: this arm answers "does the change disturb
-  the library as it stands", and its honest result for a promotion-gate
-  change is zero.
+  holds a verified-lossless proof starts from that proof, so the
+  PROMOTION the gate governs never runs: this arm answers "does the
+  change disturb the library as it stands", and for a change that only
+  moves whether a promotion is GRANTED its honest result is zero.
+
+  It is NOT zero for a change that moves what a proof is CALLED.
+  ``decide_row`` re-mints the proof through ``mint_verified_lossless_
+  proof`` on every row, so a classifier change — a new leg composing into
+  the name, say — lands in ``verified_lossless_classifier`` on this arm
+  too, on exactly the rows whose legs adjudicate. Read the per-field
+  table, not the headline count: "0 decision fields, N classifier rows"
+  and "0 rows" are different findings.
 * ``decide --counterfactual`` drops each candidate's persisted proof
   columns first, asking the question the gate actually decides — if this
   exact album arrived now, would it be promoted? This is the arm where a
