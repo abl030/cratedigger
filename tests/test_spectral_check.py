@@ -152,7 +152,14 @@ class TestEstimateOriginalBitrate(unittest.TestCase):
 
 
 class TestClassifyTrack(unittest.TestCase):
-    """Test per-track classification logic."""
+    """Per-track classification, on the MEASURED HF-deficit thresholds.
+
+    Issue #829 Phase 5 PR3 replaced the guessed 40/60 dB thresholds with
+    the measured 65/69. On four independent arms the old pair flagged
+    4-17% of genuine lossless controls; the measured pair flags 1-8%. The
+    values are calibration output, not tuning knobs — the Phase 5 plan §1
+    and docs/research/calibration-data/README.md own their provenance.
+    """
 
     def test_genuine(self):
         from lib.spectral_check import classify_track
@@ -169,23 +176,54 @@ class TestClassifyTrack(unittest.TestCase):
 
     def test_suspect_hf_deficit(self):
         from lib.spectral_check import classify_track
-        result = classify_track(hf_deficit_db=65.0, cliff_freq_hz=None)
+        result = classify_track(hf_deficit_db=70.0, cliff_freq_hz=None)
         self.assertEqual(result.grade, "suspect")
 
     def test_marginal(self):
         from lib.spectral_check import classify_track
-        result = classify_track(hf_deficit_db=50.0, cliff_freq_hz=None)
+        result = classify_track(hf_deficit_db=67.0, cliff_freq_hz=None)
         self.assertEqual(result.grade, "marginal")
 
-    def test_marginal_boundary_40(self):
+    def test_marginal_boundary_65(self):
         from lib.spectral_check import classify_track
-        result = classify_track(hf_deficit_db=40.0, cliff_freq_hz=None)
+        result = classify_track(hf_deficit_db=65.0, cliff_freq_hz=None)
         self.assertEqual(result.grade, "marginal")
 
-    def test_genuine_boundary_39(self):
+    def test_genuine_boundary_64(self):
         from lib.spectral_check import classify_track
-        result = classify_track(hf_deficit_db=39.9, cliff_freq_hz=None)
+        result = classify_track(hf_deficit_db=64.9, cliff_freq_hz=None)
         self.assertEqual(result.grade, "genuine")
+
+    def test_suspect_boundary_69(self):
+        from lib.spectral_check import classify_track
+        result = classify_track(hf_deficit_db=69.0, cliff_freq_hz=None)
+        self.assertEqual(result.grade, "suspect")
+
+    def test_the_old_guessed_band_is_now_genuine(self):
+        """The decision consequence of the re-threshold, pinned.
+
+        A 50 dB deficit is a control false-flag under the old thresholds
+        (``marginal``) and a clean ``genuine`` under the measured ones; a
+        65 dB deficit was ``suspect`` and is now only ``marginal``. Both
+        moves are toward not accusing genuine lossless.
+        """
+        from lib.spectral_check import classify_track
+        self.assertEqual(
+            classify_track(hf_deficit_db=50.0, cliff_freq_hz=None).grade,
+            "genuine",
+        )
+        self.assertEqual(
+            classify_track(hf_deficit_db=65.0, cliff_freq_hz=None).grade,
+            "marginal",
+        )
+
+    def test_the_measured_thresholds_are_the_shipped_constants(self):
+        from lib.spectral_check import (
+            HF_DEFICIT_MARGINAL,
+            HF_DEFICIT_SUSPECT,
+        )
+        self.assertEqual(HF_DEFICIT_MARGINAL, 65.0)
+        self.assertEqual(HF_DEFICIT_SUSPECT, 69.0)
 
 
 class TestClassifyAlbum(unittest.TestCase):

@@ -26,6 +26,11 @@ Three invariants, each shipped as pin + generated property per
    deterministic pin in
    ``tests/test_spectral_check.py::TestExtensionSlicesNeverFeedCliffDetection``
    (review round 2, should-fix 4).
+4. A carried spectral fact and its capture facts move atomically.
+5. The per-track HF-deficit grade ladder is exactly the two shipped
+   MEASURED constants (issue #829 Phase 5 PR3's 65/69, replacing the
+   guessed 40/60), both boundaries inclusive, with a detected cliff
+   dominating at any deficit.
 
 Every checker is a module-level pure function with a known-bad self-test
 proving it actually trips on a planted violation.
@@ -60,7 +65,14 @@ from lib.quality_evidence import (
     backfill_current_evidence_from_album_info,
     snapshot_audio_files,
 )
-from lib.spectral_check import EXTENSION_SLICE_FREQS, SLICE_FREQS, TrackResult
+from lib.spectral_check import (
+    EXTENSION_SLICE_FREQS,
+    HF_DEFICIT_MARGINAL,
+    HF_DEFICIT_SUSPECT,
+    SLICE_FREQS,
+    TrackResult,
+    classify_track,
+)
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_album_quality_evidence, make_request_row
 from tests.test_quality_generated import wild_ready_candidate_evidence
@@ -763,6 +775,182 @@ class TestBackfillCurrentEvidenceCaptureFactsAreAtomic(unittest.TestCase):
     @given(world=_atomic_backfill_worlds())
     def test_capture_facts_move_atomically_across_generated_worlds(self, world):
         self.assertTrue(self._run_backfill(world))
+
+
+# ---------------------------------------------------------------------------
+# Invariant 5: the HF-deficit grade ladder is exactly the two shipped
+# MEASURED constants, and a detected cliff always dominates it.
+#
+# Issue #829 Phase 5 PR3 replaced the guessed 40/60 dB thresholds with the
+# measured 65/69 pair. The risk a bare pin cannot cover is the ladder
+# drifting away from the constants it is supposed to embody — a branch
+# that hardcodes a literal, an inverted comparison, or a boundary that
+# stops being inclusive. This property reads the constants and requires
+# the real classifier to agree with them at every deficit, including the
+# ones no pin lists.
+# ---------------------------------------------------------------------------
+
+Classifier = Callable[..., TrackResult]
+
+
+def hf_deficit_ladder_follows_the_shipped_constants(
+    hf_deficit_db: float,
+    cliff_freq_hz: "int | None",
+    *,
+    classifier: Classifier = classify_track,
+) -> bool:
+    """Invariant checker: the grade is the shipped constants' own ladder.
+
+    Both boundaries are inclusive (``>=``) and the constants are READ,
+    never restated — a checker spelling 65/69 as literals would pass a
+    production module that had drifted to any other pair, which is the
+    whole failure mode. A detected cliff dominates: it forces ``suspect``
+    at any deficit, because the cliff leg is an independent detection.
+
+    ``classifier`` is injectable ONLY so the known-bad self-tests can
+    plant a drifted ladder; production always uses the default.
+    """
+    grade = classifier(
+        hf_deficit_db=hf_deficit_db, cliff_freq_hz=cliff_freq_hz,
+    ).grade
+    if cliff_freq_hz is not None:
+        return grade == "suspect"
+    if hf_deficit_db >= HF_DEFICIT_SUSPECT:
+        expected = "suspect"
+    elif hf_deficit_db >= HF_DEFICIT_MARGINAL:
+        expected = "marginal"
+    else:
+        expected = "genuine"
+    return grade == expected
+
+
+def _decoy_classifier_with_the_old_guessed_thresholds(
+    hf_deficit_db: float,
+    cliff_freq_hz: "int | None",
+    **_kwargs: object,
+) -> TrackResult:
+    """The pre-PR3 ladder: 40 dB marginal, 60 dB suspect. Used only to
+    prove the checker trips on a drifted pair."""
+    if cliff_freq_hz is not None or hf_deficit_db >= 60.0:
+        grade = "suspect"
+    elif hf_deficit_db >= 40.0:
+        grade = "marginal"
+    else:
+        grade = "genuine"
+    return TrackResult(grade=grade, hf_deficit_db=hf_deficit_db)
+
+
+def _decoy_classifier_with_an_exclusive_boundary(
+    hf_deficit_db: float,
+    cliff_freq_hz: "int | None",
+    **_kwargs: object,
+) -> TrackResult:
+    """The off-by-one ladder: strictly-greater instead of at-or-above, so
+    a deficit landing exactly on a constant grades one tier better."""
+    if cliff_freq_hz is not None or hf_deficit_db > HF_DEFICIT_SUSPECT:
+        grade = "suspect"
+    elif hf_deficit_db > HF_DEFICIT_MARGINAL:
+        grade = "marginal"
+    else:
+        grade = "genuine"
+    return TrackResult(grade=grade, hf_deficit_db=hf_deficit_db)
+
+
+def _decoy_classifier_that_lets_the_deficit_outrank_the_cliff(
+    hf_deficit_db: float,
+    cliff_freq_hz: "int | None",
+    **_kwargs: object,
+) -> TrackResult:
+    """A ladder where a low deficit rescues a cliffed track — the
+    fail-OPEN direction the cliff leg exists to prevent."""
+    del cliff_freq_hz
+    if hf_deficit_db >= HF_DEFICIT_SUSPECT:
+        grade = "suspect"
+    elif hf_deficit_db >= HF_DEFICIT_MARGINAL:
+        grade = "marginal"
+    else:
+        grade = "genuine"
+    return TrackResult(grade=grade, hf_deficit_db=hf_deficit_db)
+
+
+class TestHfDeficitLadderCheckerSelfTest(unittest.TestCase):
+    """Known-bad self-tests: the checker must trip on a drifted pair, an
+    exclusive boundary, and a cliff the deficit is allowed to outrank."""
+
+    def test_checker_passes_for_the_real_classifier(self):
+        for deficit in (0.0, 64.9, 65.0, 68.9, 69.0, 200.0):
+            with self.subTest(deficit=deficit):
+                self.assertTrue(
+                    hf_deficit_ladder_follows_the_shipped_constants(
+                        deficit, None,
+                    )
+                )
+        self.assertTrue(
+            hf_deficit_ladder_follows_the_shipped_constants(0.0, 16000)
+        )
+
+    def test_checker_trips_on_the_old_guessed_thresholds(self):
+        self.assertFalse(
+            hf_deficit_ladder_follows_the_shipped_constants(
+                50.0, None,
+                classifier=_decoy_classifier_with_the_old_guessed_thresholds,
+            )
+        )
+
+    def test_checker_trips_on_an_exclusive_boundary(self):
+        self.assertFalse(
+            hf_deficit_ladder_follows_the_shipped_constants(
+                HF_DEFICIT_SUSPECT, None,
+                classifier=_decoy_classifier_with_an_exclusive_boundary,
+            )
+        )
+
+    def test_checker_trips_when_a_low_deficit_rescues_a_cliffed_track(self):
+        self.assertFalse(
+            hf_deficit_ladder_follows_the_shipped_constants(
+                0.0, 16000,
+                classifier=(
+                    _decoy_classifier_that_lets_the_deficit_outrank_the_cliff
+                ),
+            )
+        )
+
+
+class TestHfDeficitLadderFollowsTheShippedConstants(unittest.TestCase):
+    """Pin + generated property for the measured 65/69 HF-deficit ladder.
+
+    The deterministic boundary pins live in
+    ``tests/test_spectral_check.py::TestClassifyTrack``; this patrols the
+    whole deficit line, cliffed and uncliffed."""
+
+    def test_pin_the_measured_boundaries(self):
+        for deficit, expected in (
+            (64.9, "genuine"), (65.0, "marginal"),
+            (68.9, "marginal"), (69.0, "suspect"),
+        ):
+            with self.subTest(deficit=deficit):
+                self.assertEqual(
+                    classify_track(
+                        hf_deficit_db=deficit, cliff_freq_hz=None,
+                    ).grade,
+                    expected,
+                )
+
+    @given(
+        hf_deficit_db=st.floats(
+            min_value=-200.0, max_value=200.0,
+            allow_nan=False, allow_infinity=False,
+        ),
+        cliff_freq_hz=st.one_of(
+            st.none(), st.integers(min_value=0, max_value=24000),
+        ),
+    )
+    def test_across_generated_worlds(self, hf_deficit_db, cliff_freq_hz):
+        self.assertTrue(
+            hf_deficit_ladder_follows_the_shipped_constants(
+                hf_deficit_db, cliff_freq_hz,
+            )
+        )
 
 
 if __name__ == "__main__":
