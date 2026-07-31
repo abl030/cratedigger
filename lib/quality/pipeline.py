@@ -492,8 +492,17 @@ def full_pipeline_decision(
                 converted_count=0, is_transcode=False,
                 v0_probe=candidate_probe_full,
                 ultrasonic_leg=candidate_ultrasonic_leg)
+            # A denied leg vetoes the V0 override's DOWNSTREAM effects
+            # too, not just the proof. This flag suppresses the
+            # provisional-lossless lane on the strength of "the V0 probe
+            # certified this as lossless" — which a denied leg says it did
+            # not. The harness reads the same veto through
+            # ``will_be_verified_lossless``; keying on the leg directly
+            # here changes nothing for any world without a denying leg,
+            # which is every world before this PR.
             v0_verified_override = (
-                spectral_grade in SPECTRAL_TRANSCODE_GRADES
+                not candidate_ultrasonic_leg.denies_promotion
+                and spectral_grade in SPECTRAL_TRANSCODE_GRADES
                 and v0_probe_overrides_spectral(candidate_probe_full)
             )
             # avg/median stay None — only the min crosses this interface. A
@@ -612,8 +621,14 @@ def full_pipeline_decision(
                 is_transcode=is_transcode,
                 v0_probe=candidate_probe_full,
                 ultrasonic_leg=candidate_ultrasonic_leg)
+            # Same veto as the flac-keep branch above; here it additionally
+            # keeps ``policy_is_transcode`` honest, so a denied album is
+            # not compared as though the probe had cleared its transcode
+            # suspicion.
             v0_verified_override = (
-                is_transcode and v0_probe_overrides_spectral(candidate_probe_full)
+                not candidate_ultrasonic_leg.denies_promotion
+                and is_transcode
+                and v0_probe_overrides_spectral(candidate_probe_full)
             )
             policy_is_transcode = is_transcode and not v0_verified_override
             stage2_new_format = comparison_format_hint(

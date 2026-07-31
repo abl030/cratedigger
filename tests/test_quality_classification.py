@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from datetime import UTC
 
 from lib.quality import (
+    DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
     STAGE2_COUNTERFACTUAL_UNAVAILABLE,
     CodecFamily,
     full_pipeline_decision,
@@ -1924,6 +1925,22 @@ class TestUltrasonicProofGateV3(unittest.TestCase):
         self.assertFalse(
             denied["verified_lossless"],
             "a denied ultrasonic leg is a hard veto ahead of the V0 override",
+        )
+        # The veto reaches the override's DOWNSTREAM effects too. The
+        # rescued world skips the provisional-lossless lane because the
+        # probe certified the source; the denied world must not, or a
+        # denied album would still be compared as though its transcode
+        # suspicion had been cleared.
+        self.assertEqual(
+            denied["stage2_import"],
+            DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
+            "a denied album falls back into the provisional lane",
+        )
+        self.assertNotEqual(
+            rescued["stage2_import"],
+            DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
+            "the rescued album is certified, so the provisional lane is "
+            "correctly skipped",
         )
 
     # -- the leg withholds: the decode-path scope --------------------------
