@@ -660,27 +660,10 @@ def build_parity_candidate_evidence(
     # Candidate evidence always describes the downloaded source bytes.
     # Conversion policy/output stay on the target contract and decision facts;
     # a temporary V0 probe must never make a FLAC source wear an MP3 label.
-    if is_flac and post_conversion_min_bitrate is not None:
-        container = lossless_container
-        codec = lossless_codec
-        storage_format = lossless_codec
-        measurement = AudioQualityMeasurement(
-            min_bitrate_kbps=min_bitrate or 900,
-            avg_bitrate_kbps=min_bitrate or 900,
-            median_bitrate_kbps=min_bitrate or 900,
-            format=lossless_codec.upper(),
-            is_cbr=False,
-            spectral_grade=spectral_grade,
-            spectral_bitrate_kbps=spectral_bitrate,
-            spectral_subject=(
-                EVIDENCE_SUBJECT_SOURCE if spectral_grade is not None else None
-            ),
-            spectral_provenance=(
-                EVIDENCE_PROVENANCE_MEASURED
-                if spectral_grade is not None else None
-            ),
-        )
-    elif is_flac:
+    # The two lossless branches (converting and kept-on-disk) built the
+    # identical row and were only ever spelled apart; PR3's
+    # container/codec split made that literally true, so they are one.
+    if is_flac:
         container = lossless_container
         codec = lossless_codec
         storage_format = lossless_codec

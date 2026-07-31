@@ -2291,8 +2291,18 @@ def main():
     # stated as the SOURCE with no conversion lineage because that is
     # literally what was measured: ``collect_attempt_spectral_audit`` ran
     # over the downloaded folder in this process, before any conversion.
-    # An unreadable source directory leaves no containers, which resolves
-    # to an unknown decode path and withholds the leg — fail closed.
+    #
+    # ``args.path`` is the right container list for the decode-path
+    # question on the path that matters. The evidence-authorized
+    # production import returns above (``NoReturn``) carrying the proof
+    # the PREVIEW minted, and preview runs ``--dry-run``, where
+    # ``work_path`` is an isolated copy and ``args.path`` stays pristine.
+    # A legacy non-preview caller converts in place, so its list can mix
+    # kept originals with V0 outputs — which resolves to an unknown decode
+    # path and withholds the leg. Fail closed, and the same direction the
+    # adjacent ``has_lossy_passthrough`` read already takes there.
+    # An unreadable source directory leaves no containers at all, which
+    # withholds it too.
     candidate_ultrasonic_leg = album_ultrasonic_proof_leg(
         ultrasonic_deficit_db=spectral_ultrasonic_deficit_db,
         spectral_measurement_version=spectral_measurement_version,
