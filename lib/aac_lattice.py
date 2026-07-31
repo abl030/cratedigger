@@ -484,6 +484,41 @@ def _parse_float_wav(path: str) -> _WavPcm:
         )
 
 
+def probe_sample_rate_khz(path: str) -> int | None:
+    """The source's own sample rate in kHz, without decoding it.
+
+    A pre-screen, not the authority. Decoding a whole track to learn it has
+    no scalefactor-band table is pure waste, and a hi-res album pays it once
+    per track for zero information — two of the nineteen research-corpus
+    albums are exactly that shape. ffprobe answers in milliseconds.
+
+    Fail-soft by design: ``None`` means "ffprobe could not tell us", and the
+    caller decodes anyway so an unprobeable-but-decodable file still gets its
+    chance and an undecodable one still reports the decode error it always
+    did. The post-decode check on the ACTUAL decoded rate stays authoritative.
+
+    Uses the repository's one ffprobe invocation shape
+    (``lib.measurement.ffprobe_first_audio_stream``), deferred like
+    ``lib.spectral_check.codec_family_from_extension`` does so this module's
+    import-time footprint is unchanged.
+    """
+    from lib.measurement import ffprobe_first_audio_stream
+
+    stream = ffprobe_first_audio_stream(_safe_path(path), "sample_rate")
+    if stream is None:
+        return None
+    raw = stream.get("sample_rate")
+    if not isinstance(raw, str):
+        return None
+    try:
+        rate = int(raw.strip())
+    except ValueError:
+        return None
+    if rate < 1:
+        return None
+    return round(rate / 1000)
+
+
 def _decode_to_float_wav(src: str, dst: str) -> _WavPcm:
     """Decode ``src`` to a native-rate float32 WAV at ``dst``.
 
@@ -601,7 +636,17 @@ def analyze_track(
     Raises ``AacLatticeUnsupportedRateError`` (no band table for the rate —
     96 kHz is the live case), ``AacLatticeDecodeError``, or
     ``AacLatticeTooShortError``. Callers record those as per-track evidence.
+
+    The rate is pre-screened before decoding so an unscoreable track costs an
+    ffprobe rather than a full decode; the post-decode check below stays the
+    authority, because the band tables are chosen from the rate the decoded
+    PCM actually carries.
     """
+    probed_khz = probe_sample_rate_khz(path)
+    if probed_khz is not None and probed_khz not in SUPPORTED_RATES_KHZ:
+        raise AacLatticeUnsupportedRateError(
+            f"unsupported sample rate {probed_khz} kHz"
+        )
     with tempfile.TemporaryDirectory(prefix="aac_lattice_") as tmpdir:
         wav = _decode_to_float_wav(path, os.path.join(tmpdir, "audio.wav"))
         fs_khz = round(wav.sample_rate / 1000)

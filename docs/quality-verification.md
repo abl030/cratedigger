@@ -472,9 +472,18 @@ stops at 6 successful tracks.
 
 **A detector failure is evidence, never a failure of the preview job.**
 96 kHz input has no scalefactor-band table at all and cannot be scored;
-that, an undecodable file, and any detector exception are recorded per
-track. A failure of the measurement itself is logged and costs the album
-its lattice and nothing else.
+the rate is pre-screened with ffprobe so such a track costs a probe rather
+than a full decode. That, an undecodable file, and any detector exception
+are recorded per track. A failure of the measurement itself is logged and
+costs the album its lattice and nothing else.
+
+**Absolute modal offsets are decode-path-relative.** The 960 / 0 values
+above were calibrated through FLAC decodes. A container whose decoder
+applies encoder-delay priming — ALAC/M4A in particular — shifts the sample
+origin, so its recovered offsets are not directly comparable to those
+constants. Offset *concentration* (k tracks sharing one offset) is
+unaffected, which is the statistic the deployable rule uses; a rule keyed
+on the literal value 960 would not be. This is a PR-B design input.
 
 Persistence (`album_quality_evidence`, migration 069): `aac_lattice_tracks`
 is the per-track JSONB array (filename plus `offset`/`z`/`proba`, or an

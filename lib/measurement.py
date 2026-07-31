@@ -442,13 +442,23 @@ class AudioCodecProbeError(RuntimeError):
     """Raised when an ambiguous container's codec cannot be measured."""
 
 
-def ffprobe_audio_codec_name(fpath: str) -> str | None:
-    """Return the first audio stream codec name reported by ffprobe."""
+def ffprobe_first_audio_stream(
+    fpath: str,
+    entries: str,
+) -> dict[str, object] | None:
+    """Return the first audio stream's requested ffprobe entries, or None.
+
+    The one ffprobe invocation shape in the repository: ``-select_streams
+    a:0``, JSON out, fail-soft to ``None`` on any error. ``entries`` is the
+    comma-separated ``-show_entries stream=...`` field list. Callers own
+    ``_safe_path`` for peer-controlled filenames and own the narrowing of
+    whichever field they asked for.
+    """
     try:
         result = subprocess.run(
             [
                 "ffprobe", "-v", "error", "-select_streams", "a:0",
-                "-show_entries", "stream=codec_name", "-of", "json", fpath,
+                "-show_entries", f"stream={entries}", "-of", "json", fpath,
             ],
             capture_output=True,
             text=True,
@@ -465,7 +475,14 @@ def ffprobe_audio_codec_name(fpath: str) -> str | None:
     streams = _json_list(_json_dict(payload).get("streams"))
     if not streams:
         return None
-    stream = _json_dict(streams[0])
+    return _json_dict(streams[0])
+
+
+def ffprobe_audio_codec_name(fpath: str) -> str | None:
+    """Return the first audio stream codec name reported by ffprobe."""
+    stream = ffprobe_first_audio_stream(fpath, "codec_name")
+    if stream is None:
+        return None
     codec = stream.get("codec_name")
     if not isinstance(codec, str):
         return None

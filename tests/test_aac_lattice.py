@@ -29,14 +29,17 @@ the three failures the live corpus actually produced.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import struct
+import subprocess
 import sys
 import tempfile
 import unittest
 import wave
 from collections.abc import Callable
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -49,6 +52,7 @@ from lib.aac_lattice import (
     MAX_SCORED_TRACKS,
     AacLatticeAnalysis,
     AacLatticeDecodeError,
+    AacLatticeError,
     AacLatticeTooShortError,
     AacLatticeUnsupportedRateError,
     BandPlan,
@@ -59,6 +63,7 @@ from lib.aac_lattice import (
     init_aac,
     mdct,
     measure_album_aac_lattice,
+    probe_sample_rate_khz,
     select_frames,
     tau_tables,
 )
@@ -504,6 +509,86 @@ class TestAnalyzeTrackEndToEnd(unittest.TestCase):
     ) -> None:
         with self.assertRaises(AacLatticeTooShortError):
             select_frames(np.zeros(2, dtype=np.float64), 8)
+
+
+class TestSampleRatePreScreen(unittest.TestCase):
+    """A track the detector cannot score must not cost a full decode.
+
+    The spy is a leaf-seam recorder over the external process boundary that
+    DELEGATES to the real ``subprocess.run``: ffprobe really runs, ffmpeg
+    really would, and the assertion is on which binaries were invoked."""
+
+    tmpdir: str
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.tmpdir = tempfile.mkdtemp(prefix="aac_lattice_probe_")
+        fixture = _LatticeFixture.get()
+        _write_wav(
+            os.path.join(cls.tmpdir, "hires.wav"), fixture.signal, 96000,
+        )
+        _write_wav(
+            os.path.join(cls.tmpdir, "ok.wav"), fixture.signal[:8192], 44100,
+        )
+        with open(os.path.join(cls.tmpdir, "garbage.flac"), "wb") as fh:
+            fh.write(b"this is not audio" * 64)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def _path(self, name: str) -> str:
+        return os.path.join(self.tmpdir, name)
+
+    def _binaries_invoked(self, name: str) -> list[str]:
+        real_run = subprocess.run
+        invoked: list[str] = []
+
+        def spy(cmd, *args, **kwargs):
+            if isinstance(cmd, list) and cmd:
+                invoked.append(str(cmd[0]))
+            return real_run(cmd, *args, **kwargs)
+
+        with (
+            patch("lib.aac_lattice.subprocess.run", side_effect=spy),
+            contextlib.suppress(AacLatticeError),
+        ):
+            analyze_track(self._path(name))
+        return invoked
+
+    def test_probe_reads_the_rate_without_decoding(self) -> None:
+        self.assertEqual(probe_sample_rate_khz(self._path("hires.wav")), 96)
+        self.assertEqual(probe_sample_rate_khz(self._path("ok.wav")), 44)
+
+    def test_an_unprobeable_file_reports_none_and_is_still_decoded(
+        self,
+    ) -> None:
+        """Fail-soft: ffprobe not answering must not become a new verdict.
+        The file still gets its decode, and still reports the same
+        decode-failure evidence it always did."""
+        self.assertIsNone(probe_sample_rate_khz(self._path("garbage.flac")))
+        self.assertIn("ffmpeg", self._binaries_invoked("garbage.flac"))
+        with self.assertRaises(AacLatticeDecodeError):
+            analyze_track(self._path("garbage.flac"))
+
+    def test_unsupported_rate_never_reaches_ffmpeg(self) -> None:
+        invoked = self._binaries_invoked("hires.wav")
+        self.assertEqual(invoked, ["ffprobe"])
+
+    def test_a_supported_rate_is_decoded_as_before(self) -> None:
+        """Must-still-work guard: the pre-screen must not fail closed on the
+        cohort the measurement exists to serve."""
+        invoked = self._binaries_invoked("ok.wav")
+        self.assertEqual(invoked[0], "ffprobe")
+        self.assertIn("ffmpeg", invoked)
+
+    def test_the_error_taxonomy_is_unchanged_by_the_pre_screen(self) -> None:
+        """The persisted per-track evidence string for a 96 kHz track is
+        operator-visible and already pinned elsewhere; the pre-screen must
+        produce the identical one."""
+        with self.assertRaises(AacLatticeUnsupportedRateError) as caught:
+            analyze_track(self._path("hires.wav"))
+        self.assertEqual(str(caught.exception), "unsupported sample rate 96 kHz")
 
 
 class TestAlbumMeasurementWithRealFailures(unittest.TestCase):
