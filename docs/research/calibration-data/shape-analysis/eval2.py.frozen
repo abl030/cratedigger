@@ -1,0 +1,118 @@
+"""Step 3b — LOO operating curves at real false-positive budgets, plus AUC.
+
+For each shape feature and each direction:
+  * AUC over album-level values, genuine controls vs launder albums (this is
+    the threshold-free ceiling of ANY single-threshold rule on that feature);
+  * leave-one-ALBUM-out operating points at genuine-quantile thresholds
+    q in {0.99, 0.95, 0.90}: the threshold is the q-quantile of the OTHER
+    genuine albums, the held-out album (genuine or its launder) is then scored.
+Track-level FP is reported for the best candidates separately.
+"""
+import sys
+from collections import defaultdict
+
+import numpy as np
+
+sys.path.insert(0, "/home/abl030/.claude/jobs/7dbdc6f4/tmp/shapes")
+from eval import ESCAPE_TARGETS, CAUGHT_TARGETS, HIRES_SLUGS, build, genuine_population  # noqa: E402
+from feat import FEATURE_NAMES  # noqa: E402
+
+
+def auc(pos, neg):
+    """P(pos > neg) with ties at 0.5. pos = launder values, neg = genuine values."""
+    pos, neg = np.asarray(pos), np.asarray(neg)
+    if len(pos) == 0 or len(neg) == 0:
+        return float("nan")
+    gt = (pos[:, None] > neg[None, :]).sum()
+    eq = (pos[:, None] == neg[None, :]).sum()
+    return float((gt + 0.5 * eq) / (len(pos) * len(neg)))
+
+
+def main():
+    recs, aid, table, grp = build()
+    gpop = genuine_population(aid, table)
+    gen_ids = sorted(gpop)
+
+    targets = {}
+    for corpus, variant, label in ESCAPE_TARGETS + CAUGHT_TARGETS:
+        d = {}
+        for (c, slug, v), (f, n) in table.items():
+            if c == corpus and v == variant:
+                if corpus.startswith("MTX") and slug.startswith(HIRES_SLUGS):
+                    continue
+                pid = aid[(c, slug)]
+                if pid in gpop:
+                    d[pid] = f
+        targets[label] = d
+    esc = [l for _, _, l in ESCAPE_TARGETS]
+    cau = [l for _, _, l in CAUGHT_TARGETS]
+
+    print(f"genuine control albums: {len(gen_ids)}   escape targets: "
+          + ", ".join(f"{l}={len(targets[l])}" for l in esc))
+    print()
+
+    # ---------- AUC table (orientation-free: report max(auc, 1-auc) direction) ----------
+    print("=" * 160)
+    print("A. ALBUM-LEVEL AUC — genuine controls (n=114) vs launder albums. 0.50 = no information.")
+    print("   Reported as AUC for the direction that favours detection (>0.5 always); "
+          "'dir' is hi if launders read HIGH.")
+    print("=" * 160)
+    print(f"{'feature':14s}" + "".join(f"{l[:12]:>13s}" for l in esc + cau))
+    aucs = {}
+    for name in FEATURE_NAMES:
+        gvals = np.array([gpop[p][1][name] for p in gen_ids])
+        cells = []
+        for label in esc + cau:
+            tv = np.array([f[name] for f in targets[label].values()])
+            a = auc(tv, gvals)
+            aucs[(name, label)] = a
+            best = max(a, 1 - a)
+            d = "hi" if a >= 0.5 else "lo"
+            cells.append(f"{best:.3f}{d}")
+        print(f"{name:14s}" + "".join(f"{c:>13s}" for c in cells))
+    print()
+
+    # ---------- LOO operating points ----------
+    print("=" * 160)
+    print("B. LEAVE-ONE-ALBUM-OUT OPERATING POINTS")
+    print("   threshold = q-quantile of the OTHER genuine albums (fold-fitted, one global rule,")
+    print("   computable on the album under test with no ground truth of its own)")
+    print("=" * 160)
+
+    def loo_points(name, hib, q):
+        gvals = {p: gpop[p][1][name] for p in gen_ids}
+        arr = np.array([gvals[p] for p in gen_ids])
+        fp = 0
+        for j, p in enumerate(gen_ids):
+            rest = np.delete(arr, j)
+            tau = np.quantile(rest, q if hib else 1 - q)
+            if (gvals[p] > tau) if hib else (gvals[p] < tau):
+                fp += 1
+        rec = {}
+        for label in esc + cau:
+            hits = 0
+            for pid, f in targets[label].items():
+                rest = np.array([gvals[k] for k in gen_ids if k != pid])
+                tau = np.quantile(rest, q if hib else 1 - q)
+                v = f[name]
+                if (v > tau) if hib else (v < tau):
+                    hits += 1
+            rec[label] = (hits, len(targets[label]))
+        return fp, len(gen_ids), rec
+
+    for q in (0.99, 0.95, 0.90):
+        print(f"--- threshold at the q={q} quantile of fold-genuine albums "
+              f"(nominal FP budget {100*(1-q):.0f}%) ---")
+        print(f"{'feature':14s}{'dir':>4s}{'genFP':>9s}" + "".join(f"{l[:12]:>13s}" for l in esc + cau))
+        for name in FEATURE_NAMES:
+            a_any = [aucs[(name, l)] for l in esc]
+            hib = np.mean(a_any) >= 0.5
+            d = "hi" if hib else "lo"
+            fp, n, rec = loo_points(name, hib, q)
+            cells = [f"{rec[l][0]}/{rec[l][1]}" for l in esc + cau]
+            print(f"{name:14s}{d:>4s}{fp:>4d}/{n:<4d}" + "".join(f"{c:>13s}" for c in cells))
+        print()
+
+
+if __name__ == "__main__":
+    main()

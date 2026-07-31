@@ -1,0 +1,110 @@
+"""Load every Derrien measurement into one normalized long table.
+
+Writes /home/abl030/.claude/jobs/7dbdc6f4/tmp/derrien/all.tsv
+Columns: src, arm, variant, rid, mode, path, sr, dur, proba, median, std, z, offset, pmode, nac_z
+Only successful rows (err empty) are emitted.
+"""
+import gzip, os, sys, collections
+
+ROOT = "/home/abl030/cratedigger/docs/research/calibration-data"
+D = os.path.join(ROOT, "derrien")
+M = os.path.join(ROOT, "launder-matrix")
+OUT = "/home/abl030/.claude/jobs/7dbdc6f4/tmp/derrien"
+
+
+def rd(p):
+    with gzip.open(p, "rt") as f:
+        hdr = f.readline().rstrip("\n").split("\t")
+        for line in f:
+            row = line.rstrip("\n").split("\t")
+            yield dict(zip(hdr, row))
+
+
+rows = []
+# --- derrien/ paired arm (res_gt_*): cls in {genuine, launder}; launder = Apple CVBR-256
+for fn, mode in (("res_gt_high.tsv.gz", "high"), ("res_gt_low.tsv.gz", "low")):
+    for r in rd(os.path.join(D, fn)):
+        if r["err"]:
+            continue
+        variant = "genuine" if r["cls"] == "genuine" else "gtarm-qaac-cvbr256"
+        rows.append(dict(src=fn, arm="gt", variant=variant, rid=r["rid"], mode=r["mode"],
+                         path=r["path"], sr=r["sr"], dur=r["dur"], proba=r["proba"],
+                         median=r["median"], std=r["std"], z=r["z"], offset=r["offset"],
+                         pmode=r["pmode"], nac_z=r.get("nac_z", "")))
+
+# --- derrien/ wild arm
+for r in rd(os.path.join(D, "res_wild_high.tsv.gz")):
+    if r["err"]:
+        continue
+    rows.append(dict(src="res_wild_high.tsv.gz", arm="wild", variant=r["cls"], rid="",
+                     mode=r["mode"], path=r["path"], sr=r["sr"], dur=r["dur"],
+                     proba=r["proba"], median=r["median"], std=r["std"], z=r["z"],
+                     offset=r["offset"], pmode=r["pmode"], nac_z=r.get("nac_z", "")))
+
+# --- launder-matrix derrien-*
+for tag in ("local", "apple", "localw", "pilot", "qaacchk"):
+    fn = f"derrien-{tag}.tsv.gz"
+    for r in rd(os.path.join(M, fn)):
+        if r["err"]:
+            continue
+        rows.append(dict(src=fn, arm=f"mx:{tag}", variant=r["variant"], rid=r["request_id"],
+                         mode=r["mode"], path=r["path"], sr=r["sr"], dur=r["dur"],
+                         proba=r["proba"], median=r["median"], std=r["std"], z=r["z"],
+                         offset=r["offset"], pmode=r["pmode"], nac_z=""))
+
+cols = ["src", "arm", "variant", "rid", "mode", "path", "sr", "dur", "proba", "median",
+        "std", "z", "offset", "pmode", "nac_z"]
+with open(os.path.join(OUT, "all.tsv"), "w") as f:
+    f.write("\t".join(cols) + "\n")
+    for r in rows:
+        f.write("\t".join(str(r[c]) for c in cols) + "\n")
+
+print("total successful rows:", len(rows))
+c = collections.Counter((r["arm"], r["variant"], r["mode"]) for r in rows)
+for k in sorted(c):
+    print(f"  {k[0]:12s} {k[1]:22s} {k[2]:5s} {c[k]:5d}")
+
+# --- determinism check: same path measured in several arms at mode=high -> same proba?
+byp = collections.defaultdict(list)
+for r in rows:
+    if r["mode"] == "high":
+        byp[r["path"]].append(r)
+dups = {p: v for p, v in byp.items() if len(v) > 1}
+print(f"\npaths measured >1x at mode=high: {len(dups)}")
+bad = 0
+for p, v in dups.items():
+    pr = set(x["proba"] for x in v)
+    if len(pr) > 1:
+        bad += 1
+        if bad <= 5:
+            print("  MISMATCH", p, sorted(pr), [x["src"] for x in v])
+print(f"  paths with differing proba across files: {bad}")
+
+# --- is null-flac == genuine bitwise for 44.1k? compare proba per (rid, track index)
+gen = {}
+nul = {}
+for r in rows:
+    if r["arm"].startswith("mx:") and r["mode"] == "high":
+        if r["variant"] == "genuine":
+            gen.setdefault((r["rid"], os.path.basename(r["path"])), r["proba"])
+        elif r["variant"] == "null-flac":
+            nul.setdefault((r["rid"], os.path.basename(r["path"])), r["proba"])
+print("\ngenuine rows (mx, dedup by rid+basename):", len(gen), " null-flac rows:", len(nul))
+# null-flac basenames are NNN.flac, genuine are library names -> compare by rid, sorted order
+g_by_rid = collections.defaultdict(list)
+n_by_rid = collections.defaultdict(list)
+for r in rows:
+    if r["arm"].startswith("mx:") and r["mode"] == "high" and r["variant"] in ("genuine", "null-flac"):
+        (g_by_rid if r["variant"] == "genuine" else n_by_rid)[r["rid"]].append(r)
+same = diff = 0
+for rid in sorted(set(g_by_rid) & set(n_by_rid)):
+    G = {r["path"]: r for r in g_by_rid[rid]}
+    N = sorted(set(r["path"] for r in n_by_rid[rid]))
+    gs = sorted(float(r["proba"]) for r in G.values())
+    ns = sorted(float(p) for p in set((r["path"], r["proba"]) for r in n_by_rid[rid]) for p in [p[1]])
+    if len(gs) == len(ns) and all(abs(a - b) < 1e-12 for a, b in zip(gs, ns)):
+        same += 1
+    else:
+        diff += 1
+        print(f"  rid {rid}: genuine n={len(gs)} null n={len(ns)} identical-sorted=False")
+print(f"null-flac identical to genuine (sorted proba multiset): {same} albums, differing: {diff}")

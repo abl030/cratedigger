@@ -1,0 +1,108 @@
+"""Q3a: leave-one-album-out stability of the pooled zero-FP threshold, proba vs z.
+Also: wild-arm firing rate, and the gate-union table recomputed with the z rule."""
+import sys, json, os, collections
+sys.path.insert(0, "/home/abl030/.claude/jobs/7dbdc6f4/tmp/derrien")
+from engine import *
+
+MX = "/home/abl030/cratedigger/docs/research/calibration-data/launder-matrix"
+C = build()
+GEN = "mx:local:genuine"
+
+print("=" * 92)
+print("A. THRESHOLD STABILITY -- pooled zero-track-FP lambda, dropping albums one at a time")
+print("=" * 92)
+for snm, sf in (("proba", sc_proba), ("z", sc_z)):
+    full = max(sf(t) for a in ALB17 for t in C[GEN][a])
+    print(f"\n{snm}: pooled zero-FP lambda over all 17 albums = {full:.4f}")
+    drops = []
+    for A in ALB17:
+        v = max(sf(t) for b in ALB17 if b != A for t in C[GEN][b])
+        drops.append((v, A))
+    drops.sort()
+    lo, hi = drops[0][0], drops[-1][0]
+    print(f"  LOO lambda range across the 17 held-out fits: {lo:.4f} .. {hi:.4f}  "
+          f"(spread {100.0*(hi-lo)/hi:.1f}% of the max)")
+    for v, A in drops[:4]:
+        print(f"    drop {A}: lambda -> {v:.4f}  ({100.0*(v-full)/full:+.1f}%)")
+    # how many albums must be dropped before lambda halves?
+    ordered = sorted(((sf(t), a) for a in ALB17 for t in C[GEN][a]), reverse=True)
+    seen, k = set(), 0
+    cur = full
+    while cur > full / 2 and k < 17:
+        top_alb = ordered[0][1]
+        seen.add(top_alb)
+        ordered = [(x, a) for x, a in ordered if a not in seen]
+        if not ordered:
+            break
+        cur = ordered[0][0]
+        k += 1
+    print(f"  albums that must be removed before lambda halves: {k}  (removed: {sorted(seen)})")
+    # top-5 album contributors
+    per = sorted(((max(sf(t) for t in C[GEN][a]), a) for a in ALB17), reverse=True)
+    print("  top-5 genuine albums by max: " + ", ".join(f"{a}={v:.4f}" for v, a in per[:5]))
+    print(f"  ratio max/2nd = {per[0][0]/per[1][0]:.3f}   max/median-album = {per[0][0]/per[len(per)//2][0]:.3f}")
+
+print("\n" + "=" * 92)
+print("B. WILD ARM -- firing rate of the two rules on 1136 unlabelled real peer FLACs")
+print("=" * 92)
+rows = load()
+wild = [r for r in rows if r["arm"] == "wild"]
+byp = collections.defaultdict(list)
+for r in wild:
+    byp[os.path.dirname(r["path"])].append(r)
+Lp = max(sc_proba(t) for a in ALB17 for t in C[GEN][a])
+Lz = max(sc_z(t) for a in ALB17 for t in C[GEN][a])
+for nm, col, L in (("proba", "proba", Lp), ("z", "z", Lz)):
+    over = sum(1 for r in wild if float(r[col]) > L)
+    folders = sum(1 for f, rs in byp.items() if any(float(r[col]) > L for r in rs))
+    print(f"  {nm:6s} L={L:.4f}   tracks over: {over:4d}/{len(wild)} ({100.0*over/len(wild):5.1f}%)   "
+          f"folders with >=1 over: {folders}/{len(byp)} ({100.0*folders/len(byp):5.1f}%)")
+# z*1.05 too
+for m in (1.05, 1.10, 1.50):
+    over = sum(1 for r in wild if float(r["z"]) > m * Lz)
+    print(f"  z      L={m*Lz:.4f} (m={m})  tracks over: {over:4d}/{len(wild)} ({100.0*over/len(wild):5.1f}%)")
+
+print("\n" + "=" * 92)
+print("C. GATE UNION -- of the albums a launder gets past the SPECTRAL GATE (T=62,")
+print("   genuine-provable 44.1k/16 cohort), how many ALSO survive Derrien?")
+print("=" * 92)
+gate = []
+for tag in ("local", "apple", "localw"):
+    gate += json.load(open(f"{MX}/gate-{tag}.json"))
+slug2rid = {}
+for g in gate:
+    slug2rid[g["slug"]] = g["slug"].split("--")[0]
+den = {}
+for g in gate:
+    den[(g["variant"], slug2rid[g["slug"]])] = g["denied@62"]
+# genuine-provable 44.1k/16 albums
+provable = [a for a in ALB17 if den.get(("genuine", a)) is False]
+print(f"genuine-provable albums at T=62 (44.1k/16): {len(provable)} -> {provable}")
+
+RULES = [
+    ("proba max > 0.1082 (pooled zero-FP)", sc_proba, agg_kth(1), Lp),
+    ("proba 2nd > 0.0500 (FINAL_REPORT E baseline)", sc_proba, agg_kth(2), 0.05),
+    ("proba 2nd > 0.0312 (pooled zero-albumFP)", sc_proba, agg_kth(2), 0.0312),
+    ("z max > 6.9140 (pooled zero-FP)", sc_z, agg_kth(1), Lz),
+    ("z max > 7.2597 (m=1.05 LOO-safe)", sc_z, agg_kth(1), 1.05 * Lz),
+    ("z max > 10.371 (m=1.50 LOO-safe)", sc_z, agg_kth(1), 1.50 * Lz),
+]
+VAR = [("aacffm-256", "mx:local:aacffm-256"), ("aacffm-320", "mx:local:aacffm-320"),
+       ("qaac-cvbr256", "mx:apple:qaac-cvbr256"), ("qaac-cvbr320", "mx:apple:qaac-cvbr320"),
+       ("qaac-tvbr91", "mx:apple:qaac-tvbr91"), ("qaac-abr192", "mx:apple:qaac-abr192"),
+       ("qaac-cbr128", "mx:apple:qaac-cbr128"), ("lame-v0", "mx:local:lame-v0"),
+       ("vorbis-q10", "mx:local:vorbis-q10"), ("null-flac", "mx:local:null-flac"),
+       ("genuine", "mx:local:genuine")]
+print(f"\n{'variant':14s} {'gate esc':>9s} " + " ".join(f"{r[0][:22]:>23s}" for r in RULES))
+print(" " * 24 + " ".join(f"{'survive both':>23s}" for _ in RULES))
+for vn, vk in VAR:
+    esc = [a for a in provable if den.get((vn, a)) is False]
+    cells = []
+    for rn, sf, ag, L in RULES:
+        ts = album_stats(C, vk, provable, sf, ag)
+        surv = [a for a in esc if not (ts.get(a, -1e9) > L)]
+        cells.append(f"{len(surv):2d}/{len(esc):<2d} ({100.0*len(surv)/max(len(esc),1):5.1f}%)")
+    print(f"{vn:14s} {len(esc):3d}/{len(provable):<5d} " + " ".join(f"{c:>23s}" for c in cells))
+print("\n  'survive both' = launder albums that reach PROOF under the frozen spectral gate AND")
+print("  are NOT flagged by the Derrien rule.  Lower is better.  genuine/null-flac rows are the")
+print("  false-positive check: they must stay at 11/11.")

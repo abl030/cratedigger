@@ -1,0 +1,127 @@
+"""Render the final provenance table + success metric."""
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from provlib import toc_from_dir  # noqa: E402
+
+OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out")
+
+
+def load(name, default):
+    p = os.path.join(OUT, name)
+    if not os.path.exists(p):
+        return default
+    with open(p, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def main():
+    recs = load("fullrun2.json", [])
+    offs = load("offsets.json", {})
+    alac = load("alac.json", [])
+    cte = load("ctdb_entry.json", {})
+
+    for r in recs:
+        if "error" in r:
+            files, meta, _l = toc_from_dir(r["path"])
+            r.update(tracks=len(files), sector_aligned=False, ar_blocks=0,
+                     ar_toc_hit=False, ar_v1_hits=0, ar_v2_hits=0,
+                     ar_v1_conf=0, ar_v2_conf=0, ctdb_entries=0,
+                     ctdb_track_hits=0, ctdb_track_conf=0,
+                     ctdb_disc_match=False, ctdb_disc_conf=0,
+                     note=f"{meta[0][1]} Hz / {meta[0][3]}-bit hi-res")
+
+    hdr = (f"{'#':>2s} {'album':44s} {'trk':>3s} {'al':>2s} {'ARblk':>5s} "
+           f"{'ARv1':>6s} {'ARv2':>6s} {'ARcnf':>6s} {'CTent':>5s} "
+           f"{'CT1rip':>7s} {'CTcnf':>6s}  best overall claim")
+    print(hdr)
+    print("-" * 152)
+    c = dict.fromkeys(
+        ["ar0_any", "ar0_all", "ct_any", "ct_disc", "any", "strong",
+         "off_only", "v2_only"], 0)
+    for k, r in enumerate(sorted(recs, key=lambda x: x["album"].lower()), 1):
+        n = r["tracks"]
+        v1, v2 = r["ar_v1_hits"], r["ar_v2_hits"]
+        arc = max(r["ar_v1_conf"], r["ar_v2_conf"])
+        dm, dmc = r["ctdb_disc_match"], r["ctdb_disc_conf"]
+        ce = cte.get(r["album"], {})
+        ct1 = ce.get("best_entry_agree", 0)
+        ct1c = ce.get("best_entry_conf", 0)
+        orecs = offs.get(r["album"], [])
+        bo = max(orecs, key=lambda o: (o["v1"] + o["v2"], o["max_conf"]),
+                 default=None) if orecs else None
+        oh = max(bo["v1"], bo["v2"]) if bo else 0
+
+        claim = []
+        if dm:
+            claim.append(f"CTDB whole-disc exact, conf {dmc}")
+        elif ct1:
+            claim.append(f"CTDB best single rip {ct1}/{n}, conf {ct1c}")
+        if v2 or v1:
+            claim.append(f"ARv1 {v1}/{n} + ARv2 {v2}/{n}, conf {arc}")
+        if oh:
+            claim.append(f"AR @offset {bo['offset']:+d}: v1 {bo['v1']}/{n} "
+                         f"v2 {bo['v2']}/{n}, conf {bo['max_conf']}")
+        if not claim:
+            if r.get("note"):
+                claim = [f"- ({r['note']}; no CD TOC)"]
+            elif not r["sector_aligned"]:
+                claim = ["- (not a sector-aligned track split)"]
+            elif not r["ar_toc_hit"] and r["ctdb_entries"] == 0:
+                claim = ["- (TOC in neither database)"]
+            else:
+                claim = ["- (TOC present, audio matched nothing)"]
+
+        print(f"{k:2d} {r['album'][:44]:44s} {n:3d} "
+              f"{'y' if r['sector_aligned'] else 'N':>2s} {r['ar_blocks']:5d} "
+              f"{f'{v1}/{n}':>6s} {f'{v2}/{n}':>6s} {arc:6d} "
+              f"{r['ctdb_entries']:5d} {f'{ct1}/{n}':>7s} {ct1c:6d}  "
+              f"{'; '.join(claim)}")
+
+        if v1 or v2:
+            c["ar0_any"] += 1
+        if n and (v1 == n or v2 == n):
+            c["ar0_all"] += 1
+        if v2 and not v1:
+            c["v2_only"] += 1
+        if ct1:
+            c["ct_any"] += 1
+        if dm:
+            c["ct_disc"] += 1
+        if v1 or v2 or ct1 or dm or oh:
+            c["any"] += 1
+        if n and (dm or v1 == n or v2 == n or ct1 == n or oh == n):
+            c["strong"] += 1
+        if not (v1 or v2 or ct1 or dm) and oh:
+            c["off_only"] += 1
+
+    print(f"\n=== SUCCESS METRIC ({len(recs)} FLAC album dirs) ===")
+    print("  BEFORE (frozen run): 9 albums with >=1 ARv1 track at offset 0;")
+    print("                       ARv2 0 tracks everywhere; CTDB never verified.")
+    print(f"  AR offset 0, >=1 track matched     : {c['ar0_any']}")
+    print(f"     of which ARv2-only (parser fix) : {c['v2_only']}")
+    print(f"  AR offset 0, ALL tracks matched    : {c['ar0_all']}")
+    print(f"  CTDB, single submitted rip >=1 trk : {c['ct_any']}")
+    print(f"  CTDB whole-disc CRC32 exact        : {c['ct_disc']}")
+    print(f"  rescued ONLY by AR read-offset     : {c['off_only']}")
+    print(f"  ANY positive bit-verified match    : {c['any']} "
+          f"({100*c['any']/len(recs):.0f}% of 38)")
+    print(f"     of which STRONG (whole-disc or ALL tracks): {c['strong']}")
+
+    if alac:
+        matched = sum(1 for r in alac if r["ar_v1_hits"] or r["ar_v2_hits"]
+                      or r["ctdb_track_hits"] or r["ctdb_disc_match"])
+        print("\n=== ALAC albums (remainder of the lossless population) ===")
+        for r in alac:
+            print(f"   {r['album'][:50]:50s} trk={r['tracks']:2d} "
+                  f"align={'y' if r['sector_aligned'] else 'N'} "
+                  f"ARblk={r['ar_blocks']} ARv1={r['ar_v1_hits']} "
+                  f"ARv2={r['ar_v2_hits']} CTent={r['ctdb_entries']} "
+                  f"CTtrk={r['ctdb_track_hits']} CTdisc={r['ctdb_disc_match']}")
+        print(f"   -> {matched}/{len(alac)} matched")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,80 @@
+"""Step 5 — the single decisive number.
+
+Shape displacement caused by the codec, versus the shape distance between two
+different genuine albums, in the same 20-dim anchored-shape space:
+
+  s[k] = (slice[k] - ref) - (slice[12000] - ref)          (album mean over tracks)
+  d_codec(album)  = || s_launder(album) - s_genuine(album) ||   (paired, RMS per band)
+  d_genuine(A,B)  = || s_genuine(A)     - s_genuine(B)     ||   (all genuine pairs)
+
+SNR = median d_codec / median d_genuine. An SNR far below 1 means the codec's
+shape footprint is buried inside ordinary album-to-album shape variation, and
+no threshold on any function of that vector can separate them.
+"""
+import sys
+
+import numpy as np
+
+sys.path.insert(0, "/home/abl030/.claude/jobs/7dbdc6f4/tmp/shapes")
+from eval import ESCAPE_TARGETS, CAUGHT_TARGETS, HIRES_SLUGS, build, genuine_population  # noqa: E402
+
+GEN_VARIANTS = {"control-flac1644", "genuine", "null-flac"}
+
+
+def main():
+    recs, aid, table, grp = build()
+    gpop = genuine_population(aid, table)
+    pref = ["MTX-local", "MTX-apple", "APL-apple", "APL-apple2", "TRAIN", "R1", "R2", "R3"]
+
+    def shape(rows):
+        m = np.mean([r["vec"] - r["ref"] for r in rows], axis=0)
+        return m - m[0]
+
+    rows_by = {}
+    for r in recs:
+        rows_by.setdefault((r["corpus"], r["slug"], r["variant"]), []).append(r)
+
+    gen_s = {}
+    for (c, slug, v), rows in rows_by.items():
+        pid = aid.get((c, slug))
+        if v not in GEN_VARIANTS or pid not in gpop:
+            continue
+        rank = pref.index(c) if c in pref else 99
+        if pid not in gen_s or rank < gen_s[pid][0]:
+            gen_s[pid] = (rank, shape(rows))
+    gen_s = {p: v[1] for p, v in gen_s.items()}
+
+    ids = sorted(gen_s)
+    S = np.array([gen_s[p] for p in ids])
+    dg = []
+    for i in range(len(S)):
+        for j in range(i + 1, len(S)):
+            dg.append(np.sqrt(np.mean((S[i] - S[j]) ** 2)))
+    dg = np.array(dg)
+    print(f"genuine albums: {len(ids)}   genuine-vs-genuine shape distance (RMS dB/band over 20 bands)")
+    print(f"  p10={np.percentile(dg,10):.3f}  median={np.median(dg):.3f}  p90={np.percentile(dg,90):.3f}")
+    print()
+    print(f"{'variant':18s}{'n':>4s}{'d_codec med':>13s}{'d_codec p90':>13s}{'SNR med':>10s}"
+          f"{'pct of genuine pairs closer':>30s}")
+    for corpus, variant, label in ESCAPE_TARGETS + CAUGHT_TARGETS:
+        dc = []
+        for (c, slug, v), rows in rows_by.items():
+            if c != corpus or v != variant:
+                continue
+            if corpus.startswith("MTX") and slug.startswith(HIRES_SLUGS):
+                continue
+            pid = aid[(c, slug)]
+            if pid not in gen_s:
+                continue
+            dc.append(np.sqrt(np.mean((shape(rows) - gen_s[pid]) ** 2)))
+        if not dc:
+            continue
+        dc = np.array(dc)
+        med = float(np.median(dc))
+        pct = float((dg < med).mean() * 100)
+        print(f"{label:18s}{len(dc):>4d}{med:>13.3f}{np.percentile(dc,90):>13.3f}"
+              f"{med/np.median(dg):>10.3f}{pct:>29.1f}%")
+
+
+if __name__ == "__main__":
+    main()

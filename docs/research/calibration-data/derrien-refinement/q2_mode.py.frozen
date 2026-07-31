@@ -1,0 +1,111 @@
+"""Q2: mode=low vs mode=high (paired arm only -- res_gt_low covers genuine +
+Apple CVBR-256 and nothing else).  Plus offset-structure probes."""
+import sys, collections, math
+sys.path.insert(0, "/home/abl030/.claude/jobs/7dbdc6f4/tmp/derrien")
+from engine import *
+
+C = build()
+GEN, LAU, A = "gt:genuine", "gt:gtarm-qaac-cvbr256", ALB15
+g = [t for a in A for t in C[GEN][a]]
+l = [t for a in A for t in C[LAU][a]]
+print(f"paired arm: genuine {len(g)}  Apple CVBR-256 {len(l)}  albums {len(A)}")
+
+
+def auc(pos, neg):
+    pos = [x for x in pos if x is not None]
+    neg = [x for x in neg if x is not None]
+    allv = sorted([(x, 1) for x in pos] + [(x, 0) for x in neg])
+    r = [0.0] * len(allv)
+    i = 0
+    while i < len(allv):
+        j = i
+        while j + 1 < len(allv) and allv[j + 1][0] == allv[i][0]:
+            j += 1
+        for k in range(i, j + 1):
+            r[k] = (i + j) / 2.0 + 1
+        i = j + 1
+    sp = sum(r[k] for k in range(len(allv)) if allv[k][1] == 1)
+    return (sp - len(pos) * (len(pos) + 1) / 2.0) / (len(pos) * len(neg))
+
+
+def q(v, p):
+    v = sorted(v)
+    return v[min(len(v) - 1, max(0, int(round(p * (len(v) - 1)))))]
+
+
+print("\n--- TRACK DISTRIBUTIONS: high vs low ---")
+for nm, f in (("proba HIGH", lambda t: t.proba), ("proba LOW", lambda t: t.lo_proba),
+              ("z HIGH", lambda t: t.z), ("z LOW", lambda t: t.lo_z)):
+    vg = [f(t) for t in g]
+    vl = [f(t) for t in l]
+    print(f"  {nm:11s} GEN min={min(vg):8.4f} med={q(vg,.5):8.4f} max={max(vg):8.4f}  |  "
+          f"LAU min={min(vl):8.4f} q05={q(vl,.05):8.4f} med={q(vl,.5):8.4f} max={max(vl):8.4f}  "
+          f"AUC={auc(vl, vg):.4f}")
+
+COMBOS = [
+    ("hi_proba", lambda t: t.proba),
+    ("lo_proba", lambda t: t.lo_proba),
+    ("max(proba)", lambda t: max(t.proba, t.lo_proba)),
+    ("mean(proba)", lambda t: 0.5 * (t.proba + t.lo_proba)),
+    ("min(proba)", lambda t: min(t.proba, t.lo_proba)),
+    ("hi_z", lambda t: t.z),
+    ("lo_z", lambda t: t.lo_z),
+    ("max(z)", lambda t: max(t.z, t.lo_z)),
+    ("mean(z)", lambda t: 0.5 * (t.z + t.lo_z)),
+    ("min(z)", lambda t: min(t.z, t.lo_z)),
+    ("hi_z*lo_z", lambda t: t.z * t.lo_z),
+    ("offset agree", lambda t: 1.0 if t.offset == t.lo_offset else 0.0),
+    ("offset agree*z", lambda t: t.z if t.offset == t.lo_offset else 0.0),
+]
+print("\n--- TRACK AUC, high/low combinations ---")
+for nm, f in COMBOS:
+    print(f"  {nm:16s} AUC={auc([f(t) for t in l], [f(t) for t in g]):.4f}")
+
+print("\n--- HIGH/LOW OFFSET AGREEMENT (chance = 1/1024 = 0.1%) ---")
+for nm, ts in (("genuine", g), ("Apple CVBR-256", l)):
+    ag = sum(1 for t in ts if t.offset == t.lo_offset)
+    near = sum(1 for t in ts if min(abs(t.offset - t.lo_offset),
+                                    1024 - abs(t.offset - t.lo_offset)) <= 2)
+    print(f"  {nm:16s} exact {ag:3d}/{len(ts)} ({100.0*ag/len(ts):5.1f}%)   within+-2 "
+          f"{near:3d}/{len(ts)} ({100.0*near/len(ts):5.1f}%)")
+
+print("\n--- LOO ALBUM EVAL (15 albums), zero-train-FP + margin ---")
+print(f"{'score':16s} {'aggr':9s} {'m':>5s}  {'LOO-FP':>7s}  {'recall Apple':>13s}")
+for snm, sf in COMBOS:
+    if snm.startswith("offset agree") and snm != "offset agree*z":
+        continue
+    for ag in (agg_kth(1), agg_kth(2)):
+        gs = album_stats(C, GEN, A, sf, ag)
+        ts = album_stats(C, LAU, A, sf, ag)
+        for m in (1.00, 1.05, 1.20, 1.50):
+            fp = tp = 0
+            for X in A:
+                L = m * max(gs[b] for b in A if b != X)
+                fp += int(gs[X] > L)
+                tp += int(ts[X] > L)
+            print(f"{snm:16s} {ag.__name__:9s} {m:5.2f}  {fp:2d}/{len(A):<4d}  "
+                  f"{tp:2d}/{len(A):<3d} {100.0*tp/len(A):5.1f}%")
+    print()
+
+print("=" * 80)
+print("OFFSET STRUCTURE WITHIN AN ALBUM (mode=high, 17-album matrix cohort)")
+print("  a launder album was encoded by one encoder -> do its tracks share one offset?")
+print("=" * 80)
+VAR = [("genuine", "mx:local:genuine"), ("null-flac", "mx:local:null-flac"),
+       ("aacffm-256", "mx:local:aacffm-256"), ("aacffm-320", "mx:local:aacffm-320"),
+       ("qaac-cvbr256", "mx:apple:qaac-cvbr256"), ("qaac-cvbr320", "mx:apple:qaac-cvbr320"),
+       ("lame-v0", "mx:local:lame-v0"), ("vorbis-q10", "mx:local:vorbis-q10")]
+Cm = C
+print(f"{'variant':14s} {'mode-share (mean over albums)':>30s} {'albums w/ modeshare>=0.5':>26s}")
+for vn, vk in VAR:
+    shares = []
+    for a in ALB17:
+        offs = [t.offset for t in Cm[vk].get(a, [])]
+        if not offs:
+            continue
+        c = collections.Counter(offs)
+        shares.append(c.most_common(1)[0][1] / len(offs))
+    if not shares:
+        continue
+    print(f"{vn:14s} {sum(shares)/len(shares):30.3f} "
+          f"{sum(1 for s in shares if s >= 0.5):20d}/{len(shares):<5d}")

@@ -1,0 +1,62 @@
+"""Library-ceiling census: which albums could EVER match a rip checksum DB?
+
+Only lossless, 44.1 kHz stereo, sector-aligned track splits are reachable.
+Read-only against the beets library SQLite.
+"""
+import collections
+import sqlite3
+
+DB = "file:/mnt/virtio/cratedigger/beets-db/beets-library.db?mode=ro&immutable=1"
+LOSSLESS = {"FLAC", "ALAC", "AIFF", "WAV", "APE", "WavPack", "Monkey's Audio",
+            "Musepack", "TTA", "Windows Media Lossless"}
+
+c = sqlite3.connect(DB, uri=True)
+q = """select i.album_id, i.format, i.length, i.samplerate, i.bitdepth, i.channels
+       from items i where i.album_id is not null"""
+per = collections.defaultdict(list)
+for aid, fmt, ln, sr, bd, ch in c.execute(q):
+    per[aid].append((fmt, ln, sr, bd, ch))
+
+fmt_albums = collections.Counter()
+lossless_albums = []
+for aid, tracks in per.items():
+    fmts = {t[0] for t in tracks}
+    fmt = tracks[0][0] if len(fmts) == 1 else "MIXED"
+    fmt_albums[fmt] += 1
+    if fmts <= LOSSLESS:
+        lossless_albums.append((aid, fmt, tracks))
+
+print(f"total albums with items: {len(per)}")
+print("\nformat census (album-level):")
+for f, n in fmt_albums.most_common(20):
+    print(f"  {str(f):22s} {n:6d}")
+
+print(f"\nlossless albums (all tracks lossless): {len(lossless_albums)}")
+byfmt = collections.Counter(f for _a, f, _t in lossless_albums)
+print("  by format:", dict(byfmt))
+
+# CD-shape filter on the lossless subset
+cd_shape = 0
+sr_bad = bd_bad = ch_bad = 0
+for aid, fmt, tracks in lossless_albums:
+    ok = True
+    for _f, _ln, sr, bd, ch in tracks:
+        if sr != 44100:
+            sr_bad += 1
+            ok = False
+        if bd not in (0, 16):
+            bd_bad += 1
+            ok = False
+        if ch not in (0, 2):
+            ch_bad += 1
+            ok = False
+    if ok:
+        cd_shape += 1
+print(f"  of which CD-shape (44.1k/16bit/stereo, all tracks): {cd_shape}")
+print(f"  offending track counts: samplerate {sr_bad}, bitdepth {bd_bad}, channels {ch_bad}")
+
+# item-level totals for context
+tot_items = sum(len(v) for v in per.values())
+lossless_items = sum(1 for v in per.values() for t in v if t[0] in LOSSLESS)
+print(f"\nitems: {tot_items} total, {lossless_items} lossless "
+      f"({100*lossless_items/tot_items:.2f}%)")

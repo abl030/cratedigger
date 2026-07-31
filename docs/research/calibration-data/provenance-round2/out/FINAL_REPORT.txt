@@ -1,0 +1,60 @@
+cratedigger dev shell — run: python3 -m unittest discover -s tests -t . -v
+ # album                                        trk al ARblk   ARv1   ARv2  ARcnf CTent  CT1rip  CTcnf  best overall claim
+--------------------------------------------------------------------------------------------------------------------------------------------------------
+ 1 1982 - The Goldberg Variations                32  y     6   0/32  32/32     42    16   31/32      1  CTDB best single rip 31/32, conf 1; ARv1 0/32 + ARv2 32/32, conf 42
+ 2 1984 - Tabula Rasa                             4  y    12    0/4    0/4      0    54     4/4     10  CTDB whole-disc exact, conf 10; AR @offset -78: v1 4/4 v2 0/4, conf 1
+ 3 1987 - Kind of Blue [CK 40579]                 5  y    21    5/5    5/5     62    60     4/5      1  CTDB best single rip 4/5, conf 1; ARv1 5/5 + ARv2 5/5, conf 62
+ 4 1987 - Rumours [3010-2]                       11  N     0   0/11   0/11      0     0    0/11      0  - (96000 Hz / 24-bit hi-res; no CD TOC)
+ 5 1989 - Slay Tracks_ 1933-1969                  5  y     0    0/5    0/5      0     0     0/5      0  - (TOC in neither database)
+ 6 1990 - Ambient 1_ Music for Airports [EEGCD    4  y     4    4/4    4/4     57    12     4/4     92  CTDB whole-disc exact, conf 92; ARv1 4/4 + ARv2 4/4, conf 57
+ 7 1990 - Demolition Plot J-7                     6  y     0    0/6    0/6      0     0     0/6      0  - (TOC in neither database)
+ 8 1991 - End on End                             17  y     5  17/17  17/17     15     5   17/17     95  CTDB whole-disc exact, conf 95; ARv1 17/17 + ARv2 17/17, conf 15
+ 9 1991 - Loveless [crecd 060]                   11  N     0   0/11   0/11      0     0    0/11      0  - (not a sector-aligned track split)
+10 1991 - Perfect Sound Forever                   7  y     0    0/7    0/7      0     0     0/7      0  - (TOC in neither database)
+11 1992 - Slanted and Enchanted                  14  y     3   0/14   0/14      0     3    0/14      0  AR @offset -30: v1 14/14 v2 14/14, conf 1
+12 1992 - Watery, Domestic                        4  y     0    0/4    0/4      0     0     0/4      0  - (TOC in neither database)
+13 1993 - A Long Time Coming                     15  y     0   0/15   0/15      0     1    0/15      0  - (TOC present, audio matched nothing)
+14 1993 - Bridge Over Troubled Water [462488 2]  11  y     0   0/11   0/11      0     0    0/11      0  - (TOC in neither database)
+15 1995 - Tri Repetae [WARPCD38]                 10  y    11   0/10   0/10      0    28    0/10      0  AR @offset -222: v1 10/10 v2 10/10, conf 44
+16 1996 - Feed Me Weird Things                   12  y     6   0/12   0/12      0    26    0/12      0  AR @offset +102: v1 12/12 v2 12/12, conf 65
+17 1996 - The Velvet Underground & Nico [31453   11  y    36  11/11  11/11    125   106   10/11      1  CTDB best single rip 10/11, conf 1; ARv1 11/11 + ARv2 11/11, conf 125
+18 1997 - Raising the Standard                   10  y     0   0/10   0/10      0     1   10/10      1  CTDB whole-disc exact, conf 1
+19 1997 - Shady Lane                              9  y     2    9/9    9/9      4     1     9/9     19  CTDB whole-disc exact, conf 19; ARv1 9/9 + ARv2 9/9, conf 4
+20 1998 - Stratosphere                           17  y     1   0/17  17/17      3     2   17/17     17  CTDB whole-disc exact, conf 17; ARv1 0/17 + ARv2 17/17, conf 3
+21 1998 - Voices of Gondwana                     12  y     1   0/12   0/12      0     1    0/12      0  - (TOC present, audio matched nothing)
+22 1999 - Californication                        15  y    70   0/15   0/15      0   114    0/15      0  AR @offset +697: v1 15/15 v2 15/15, conf 200
+23 1999 - Major Leagues                           7  y     0    0/7    0/7      0     2     7/7     42  CTDB whole-disc exact, conf 42
+24 1999 - Spit on a Stranger                      5  y     0    0/5    0/5      0     0     0/5      0  - (TOC in neither database)
+25 1999 - Terror Twilight                        11  y    14   0/11   0/11      0    26    0/11      0  AR @offset +6: v1 11/11 v2 11/11, conf 95
+26 2000 - The Pointless Gift                     12  y     2   0/12   0/12      0     1    0/12      0  AR @offset +664: v1 12/12 v2 12/12, conf 1
+27 2001 - Jane Doe                               12  y     8  12/12  12/12     54    13   11/12      1  CTDB best single rip 11/12, conf 1; ARv1 12/12 + ARv2 12/12, conf 54
+28 2004 - Fake Our Deaths                        13  y     1   0/13  13/13      1     1   13/13      6  CTDB whole-disc exact, conf 6; ARv1 0/13 + ARv2 13/13, conf 1
+29 2006 - Ten Lives                              12  y     1   0/12   0/12      0     1    0/12      0  AR @offset +667: v1 12/12 v2 0/12, conf 2
+30 2008 - Death Magnetic                         10  y    49  10/10  10/10    200   116   10/10   8026  CTDB whole-disc exact, conf 8026; ARv1 10/10 + ARv2 10/10, conf 200
+31 2011 - Hurry Up, We're Dreaming               22  N     0   0/22   0/22      0     0    0/22      0  - (not a sector-aligned track split)
+32 2013 - Random Access Memories [88883716862]   13  y    28  13/13  13/13    200   117   13/13  12412  CTDB whole-disc exact, conf 12412; ARv1 13/13 + ARv2 13/13, conf 200
+33 2014 - Ruins                                   8  y     2    0/8    0/8      0     1     0/8      0  AR @offset +108: v1 7/8 v2 8/8, conf 38
+34 2014 - Syro [WARPCD247]                       12  y     5   0/12   0/12      0    29    0/12      0  AR @offset +667: v1 12/12 v2 12/12, conf 200
+35 2016 - Man Made Object                        10  y     2   0/10  10/10    144    12   10/10    751  CTDB whole-disc exact, conf 751; ARv1 0/10 + ARv2 10/10, conf 144
+36 2017 - New Light New Hope                     21  y     1   0/21   0/21      0     1    0/21      0  - (TOC present, audio matched nothing)
+37 2025 - Hecklers Choice_ Big Gums and Heavy L  12  N     0   0/12   0/12      0     0    0/12      0  - (not a sector-aligned track split)
+38 The Rough Guide to Australian Aboriginal Mus  16  y     2  16/16  16/16     12     1   16/16     19  CTDB whole-disc exact, conf 19; ARv1 16/16 + ARv2 16/16, conf 12
+
+=== SUCCESS METRIC (38 FLAC album dirs) ===
+  BEFORE (frozen run): 9 albums with >=1 ARv1 track at offset 0;
+                       ARv2 0 tracks everywhere; CTDB never verified.
+  AR offset 0, >=1 track matched     : 13
+     of which ARv2-only (parser fix) : 4
+  AR offset 0, ALL tracks matched    : 13
+  CTDB, single submitted rip >=1 trk : 16
+  CTDB whole-disc CRC32 exact        : 12
+  rescued ONLY by AR read-offset     : 9
+  ANY positive bit-verified match    : 25 (66% of 38)
+     of which STRONG (whole-disc or ALL tracks): 25
+
+=== ALAC albums (remainder of the lossless population) ===
+   2004 - This Time It Is Forever                     trk= 5 align=y ARblk=0 ARv1=0 ARv2=0 CTent=2 CTtrk=0 CTdisc=False
+   2006 - Half-Truths & Indiscretions_ The Anthology  trk=14 align=y ARblk=1 ARv1=0 ARv2=0 CTent=1 CTtrk=0 CTdisc=False
+   1999 - Re-Rewind (The Crowd Say Bo Selecta)        trk= 3 align=y ARblk=6 ARv1=0 ARv2=0 CTent=7 CTtrk=0 CTdisc=False
+   2025 - Punjabi Disco                               trk=17 align=N ARblk=0 ARv1=0 ARv2=0 CTent=0 CTtrk=0 CTdisc=False
+   -> 0/4 matched

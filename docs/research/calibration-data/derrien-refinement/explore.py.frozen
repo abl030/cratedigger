@@ -1,0 +1,51 @@
+import sys
+sys.path.insert(0, "/home/abl030/.claude/jobs/7dbdc6f4/tmp/derrien")
+from engine import *
+
+C = build()
+
+
+def q(v, p):
+    v = sorted(v)
+    return v[min(len(v) - 1, max(0, int(round(p * (len(v) - 1)))))]
+
+
+TARGETS = [
+    ("mx:local:genuine", ALB17, "GENUINE control (17 alb)"),
+    ("mx:local:aacffm-256", ALB17, "aacffm-256"),
+    ("mx:local:aacffm-320", ALB17, "aacffm-320"),
+    ("mx:local:aacffm-192", ALB17, "aacffm-192"),
+    ("mx:local:aacffm-128", ALB17, "aacffm-128"),
+    ("mx:apple:qaac-cvbr256", ALB17, "qaac-cvbr256"),
+    ("mx:apple:qaac-cvbr320", ALB17, "qaac-cvbr320"),
+    ("mx:apple:qaac-tvbr91", ALB17, "qaac-tvbr91"),
+    ("mx:apple:qaac-abr192", ALB17, "qaac-abr192"),
+    ("mx:apple:qaac-cbr128", ALB17, "qaac-cbr128"),
+    ("gt:gtarm-qaac-cvbr256", ALB15, "gt-arm Apple CVBR256 (15 alb)"),
+    ("mx:local:lame-v0", ALB17, "lame-v0 (non-AAC)"),
+    ("mx:local:vorbis-q10", ALB17, "vorbis-q10 (non-AAC)"),
+    ("mx:local:opus-256", ALB17, "opus-256 (non-AAC)"),
+]
+
+for stat, f in (("proba", sc_proba), ("z", sc_z)):
+    print(f"\n=========== TRACK {stat} ===========")
+    print(f"{'variant':32s} {'n':>4s} {'min':>9s} {'q05':>9s} {'q25':>9s} {'med':>9s} {'q75':>9s} {'max':>9s}")
+    for name, alb, lab in TARGETS:
+        ts = [t for a in alb for t in C[name].get(a, [])]
+        v = [f(t) for t in ts]
+        if not v:
+            print(f"{lab:32s}  (none)")
+            continue
+        print(f"{lab:32s} {len(v):4d} {min(v):9.4f} {q(v,.05):9.4f} {q(v,.25):9.4f} "
+              f"{q(v,.5):9.4f} {q(v,.75):9.4f} {max(v):9.4f}")
+
+# per-album genuine max z / proba over 17 albums
+print("\n--- genuine per-album max, 17 albums ---")
+print(f"{'alb':6s} {'n':>3s} {'max proba':>10s} {'max z':>8s} {'max p*z':>9s}")
+for a in ALB17:
+    ts = C["mx:local:genuine"][a]
+    print(f"{a:6s} {len(ts):3d} {max(t.proba for t in ts):10.4f} "
+          f"{max(t.z for t in ts):8.3f} {max(t.proba*t.z for t in ts):9.4f}")
+g = [t for a in ALB17 for t in C["mx:local:genuine"][a]]
+print(f"POOLED genuine n={len(g)}  max proba={max(t.proba for t in g):.4f} "
+      f"max z={max(t.z for t in g):.3f}  max p*z={max(t.proba*t.z for t in g):.4f}")

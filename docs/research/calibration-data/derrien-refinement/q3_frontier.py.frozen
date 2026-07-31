@@ -1,0 +1,95 @@
+"""Q3: aggregation + threshold robustness.  The deployable operating frontier.
+
+All thresholds here are GLOBAL constants applied to an album statistic computed
+from that album's own tracks.  Two framings are reported:
+  (F) fixed-global-threshold frontier   -- sweep L, price FP on 197 genuine tracks
+  (L) leave-one-album-out calibration   -- L_A derived from the other 16 albums only
+"""
+import sys, json, os, math
+sys.path.insert(0, "/home/abl030/.claude/jobs/7dbdc6f4/tmp/derrien")
+from engine import *
+
+C = build()
+GEN = "mx:local:genuine"
+AAC = [("aacffm-256", "mx:local:aacffm-256"),
+       ("aacffm-320", "mx:local:aacffm-320"),
+       ("qaac-cvbr256", "mx:apple:qaac-cvbr256"),
+       ("qaac-cvbr320", "mx:apple:qaac-cvbr320"),
+       ("qaac-tvbr91", "mx:apple:qaac-tvbr91"),
+       ("qaac-abr192", "mx:apple:qaac-abr192"),
+       ("qaac-cbr128", "mx:apple:qaac-cbr128")]
+OTHER = [("lame-v0", "mx:local:lame-v0"), ("vorbis-q10", "mx:local:vorbis-q10"),
+         ("opus-256", "mx:local:opus-256"), ("lame-cbr320", "mx:local:lame-cbr320"),
+         ("wma-320", "mx:localw:wma-320"), ("null-flac", "mx:local:null-flac")]
+
+SCORES = [("proba", sc_proba), ("z", sc_z), ("proba*z", sc_pz), ("proba/median", sc_ratio)]
+AGGS = [agg_kth(1), agg_kth(2), agg_kth(3), agg_kth(4), agg_topk_mean(2),
+        agg_topk_mean(3), agg_topk_mean(5), agg_median, agg_mean]
+
+print("=" * 100)
+print("PART 1 -- FIXED-GLOBAL-THRESHOLD FRONTIER, album statistic, 17-album cohort")
+print("  For each (score, aggregator): the largest genuine album statistic sets the")
+print("  zero-album-FP threshold; we report recall at that L and at the 2nd/3rd largest.")
+print("=" * 100)
+hdr = f"{'score':13s} {'aggr':10s} {'FPalb':>5s} {'L':>10s} {'FPtrk':>9s} " + \
+      " ".join(f"{n:>12s}" for n, _ in AAC)
+print(hdr)
+best = []
+for snm, sf in SCORES:
+    for ag in AGGS:
+        gs = album_stats(C, GEN, ALB17, sf, ag)
+        gv = sorted(gs.values(), reverse=True)
+        tstats = {n: album_stats(C, v, ALB17, sf, ag) for n, v in AAC}
+        for nfp in (0, 1, 2):
+            L = gv[nfp]  # flag iff stat > L  =>  exactly nfp genuine albums flagged
+            # track-level genuine FP only meaningful for kth aggregators
+            ftrk = "-"
+            if ag.__name__.startswith("kth"):
+                allg = [sf(t) for a in ALB17 for t in C[GEN][a]]
+                ftrk = f"{sum(x > L for x in allg)}/{len(allg)}"
+            cells = []
+            for n, _ in AAC:
+                r = sum(1 for a, s in tstats[n].items() if s > L)
+                cells.append(f"{r:2d}/17 {100.0*r/17:5.1f}%")
+            print(f"{snm:13s} {ag.__name__:10s} {nfp:5d} {L:10.4f} {ftrk:>9s} " +
+                  " ".join(f"{c:>12s}" for c in cells))
+            best.append((snm, ag.__name__, nfp, L,
+                         {n: sum(1 for a, s in tstats[n].items() if s > L) for n, _ in AAC}))
+    print()
+
+print("=" * 100)
+print("PART 2 -- LEAVE-ONE-ALBUM-OUT CALIBRATION (threshold never sees the album under test)")
+print("  L_A = margin * max(genuine album statistic over the other 16 albums)")
+print("=" * 100)
+MARGINS = [1.00, 1.02, 1.05, 1.10, 1.20, 1.35, 1.50]
+for snm, sf in SCORES:
+    for ag in (agg_kth(1), agg_kth(2), agg_kth(3), agg_topk_mean(3)):
+        gs = album_stats(C, GEN, ALB17, sf, ag)
+        tstats = {n: album_stats(C, v, ALB17, sf, ag) for n, v in AAC}
+        for m in MARGINS:
+            fp = 0
+            rec = {n: 0 for n, _ in AAC}
+            for A in ALB17:
+                L = m * max(gs[b] for b in ALB17 if b != A)
+                fp += int(gs[A] > L)
+                for n, _ in AAC:
+                    if A in tstats[n] and tstats[n][A] > L:
+                        rec[n] += 1
+            cells = " ".join(f"{rec[n]:2d}/17" for n, _ in AAC)
+            print(f"{snm:13s} {ag.__name__:9s} m={m:4.2f}  LOO-FP {fp:2d}/17  " + cells)
+        print()
+
+print("=" * 100)
+print("PART 3 -- NON-AAC + CONTROL BEHAVIOUR at the headline z operating point")
+print("=" * 100)
+for ag in (agg_kth(1), agg_kth(2)):
+    gs = album_stats(C, GEN, ALB17, sc_z, ag)
+    L = max(gs.values())
+    print(f"\naggregator={ag.__name__}  zero-album-FP global L(z) = {L:.4f}")
+    for n, v in AAC + OTHER:
+        alb = ALB17
+        ts = album_stats(C, v, alb, sc_z, ag)
+        r = sum(1 for a, s in ts.items() if s > L)
+        trk = [sc_z(t) for a in alb for t in C[v].get(a, [])]
+        print(f"  {n:14s} albums {r:2d}/{len(ts):<2d}  tracks over L: "
+              f"{sum(x > L for x in trk):3d}/{len(trk):<3d} ({100.0*sum(x>L for x in trk)/max(len(trk),1):5.1f}%)")

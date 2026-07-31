@@ -1,0 +1,71 @@
+"""How do the two zero-FP legs behave at LIBRARY scale rather than 17 albums?
+  (a) empirical upper tail of the genuine z distribution + exceedance extrapolation
+  (b) analytic false-positive floor of the offset-concentration rule under
+      uniformity, checked against the observed genuine offsets."""
+import sys, math, collections
+sys.path.insert(0, "/home/abl030/.claude/jobs/7dbdc6f4/tmp/derrien")
+from engine import *
+
+C = build()
+GEN = "mx:local:genuine"
+gz = sorted(sc_z(t) for a in ALB17 for t in C[GEN][a])
+n = len(gz)
+print(f"genuine z, n={n} tracks / 17 albums")
+print(f"  min {gz[0]:.3f}  med {gz[n//2]:.3f}  mean {sum(gz)/n:.3f}  max {gz[-1]:.3f}")
+sd = (sum((x - sum(gz)/n)**2 for x in gz)/(n-1))**0.5
+print(f"  sd {sd:.3f}   (max - mean)/sd = {(gz[-1]-sum(gz)/n)/sd:.2f}")
+print("\n  upper-tail exceedance over the genuine control:")
+for L in (5.5, 6.0, 6.25, 6.5, 6.75, 6.9140, 7.2597, 8.2968, 10.371):
+    k = sum(1 for x in gz if x > L)
+    print(f"    z > {L:7.4f}: {k:3d}/{n} tracks ({100.0*k/n:5.2f}%)   "
+          f"albums with >=1: {sum(1 for a in ALB17 if max(sc_z(t) for t in C[GEN][a]) > L):2d}/17")
+
+# Gumbel fit to per-album maxima (17 maxima) -> extrapolate the album-max distribution
+import statistics as st
+maxes = sorted(max(sc_z(t) for t in C[GEN][a]) for a in ALB17)
+m, s = st.mean(maxes), st.stdev(maxes)
+beta = s * math.sqrt(6) / math.pi
+mu = m - 0.5772 * beta
+print(f"\n  Gumbel fit to the 17 genuine ALBUM-MAX z values: mu={mu:.3f} beta={beta:.3f}")
+print(f"  (album maxima observed: {' '.join(f'{x:.2f}' for x in maxes)})")
+for L in (6.9140, 7.2597, 8.2968, 10.371, 12.0):
+    p = 1 - math.exp(-math.exp(-(L - mu) / beta))
+    print(f"    P(album-max z > {L:7.4f}) = {p:.2e}   -> expected FP albums in a "
+          f"5000-album library: {p*5000:8.1f}")
+
+print("\n" + "=" * 80)
+print("OFFSET-CONCENTRATION FP FLOOR UNDER UNIFORMITY")
+print("=" * 80)
+offs = [t.offset for a in ALB17 for t in C[GEN][a]]
+print(f"genuine offsets, n={len(offs)}: distinct={len(set(offs))}  "
+      f"max repeat={collections.Counter(offs).most_common(1)[0][1]}")
+# chi-square over 32 bins of 32 offsets
+bins = [0] * 32
+for o in offs:
+    bins[o // 32] += 1
+e = len(offs) / 32
+chi = sum((b - e) ** 2 / e for b in bins)
+print(f"  chi^2 over 32 equal bins = {chi:.1f} on 31 df (E[chi^2]=31) -> consistent with uniform")
+print(f"  offsets 0 or 960 among genuine tracks: "
+      f"{sum(1 for o in offs if o in (0, 960))}/{len(offs)}")
+
+
+def pk(nt, k, M=1024):
+    """P(at least k of nt uniform offsets coincide) -- union bound, exact enough here."""
+    return math.comb(nt, k) / M ** (k - 1)
+
+
+print(f"\n  {'tracks':>7s} {'P(k>=2)':>10s} {'P(k>=3)':>10s} {'P(k>=4)':>10s}")
+for nt in (5, 10, 12, 17, 32, 50):
+    print(f"  {nt:7d} {pk(nt,2):10.2e} {pk(nt,3):10.2e} {pk(nt,4):10.2e}")
+sizes = [len(C[GEN][a]) for a in ALB17]
+exp2 = sum(pk(x, 2) for x in sizes)
+exp3 = sum(pk(x, 3) for x in sizes)
+print(f"\n  expected genuine albums (of 17, sizes {sizes}) with k>=2: {exp2:.3f}   "
+      f"k>=3: {exp3:.5f}   observed: 0 and 0")
+avg = sum(sizes) / len(sizes)
+print(f"  extrapolated to a 5000-album library at the corpus mean {avg:.1f} tracks/album:")
+print(f"    k>=2 rule: ~{5000*pk(round(avg),2):.1f} FP albums   "
+      f"k>=3 rule: ~{5000*pk(round(avg),3):.3f} FP albums   "
+      f"k>=4 rule: ~{5000*pk(round(avg),4):.5f} FP albums")
+print(f"    a 32-track album:  k>=3 -> {pk(32,3):.2e},  k>=4 -> {pk(32,4):.2e}")

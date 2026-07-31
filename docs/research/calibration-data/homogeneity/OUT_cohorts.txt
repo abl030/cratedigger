@@ -1,0 +1,20 @@
+cratedigger dev shell — run: python3 -m unittest discover -s tests -t . -v
+arm genuine albums: 100
+matrix genuine albums: 19
+apple-arm genuine albums: 37
+slug overlap arm vs apple-arm: 0
+slug overlap arm vs matrix: 0
+slug overlap matrix vs apple-arm: 17
+APPLEA slugs sample: ['8916--2013 - Random Access Memories [88883716862]', '8917--2014 - Syro [WARPCD247]', '8918--1995 - Tri Repetae [WARPCD38]']
+APPLEB slugs sample: ['c2-00--c2-00', 'c2-01--c2-01', 'c2-02--c2-02']
+null-flac vs genuine U_sd identical: 56, differing: 2
+genuine MAPPLE vs LOCAL identical U_sd: 19/19
+genuine LOCALW vs LOCAL identical U_sd: 17/17
+genuine PILOT vs LOCAL identical U_sd: 3/3
+U_sd               n=100 corr(n,stat)=-0.088 min=1.88 med=6.60 max=21.36
+U_iqr              n=100 corr(n,stat)=+0.007 min=2.13 med=6.98 max=37.90
+U_mad              n=100 corr(n,stat)=+0.144 min=0.87 med=3.64 max=12.03
+shape_mpd_ul       n=100 corr(n,stat)=-0.113 min=3.29 med=8.21 max=26.12
+shape_mpd_hi       n=100 corr(n,stat)=-0.109 min=2.82 med=8.43 max=26.09
+k4_U_sd            n= 99 corr(n,stat)=-0.038 min=1.84 med=6.21 max=20.86
+k4_shape_mpd_ul    n= 99 corr(n,stat)=-0.043 min=3.25 med=8.00 max=24.57

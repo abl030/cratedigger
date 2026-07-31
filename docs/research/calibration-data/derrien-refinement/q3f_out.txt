@@ -1,0 +1,46 @@
+cratedigger dev shell — run: python3 -m unittest discover -s tests -t . -v
+================================================================================================
+REPRODUCIBILITY -- the offset fingerprint across TWO independent Apple CVBR-256 builds
+================================================================================================
+  matrix qaac-cvbr256          n= 197  modal offset 960  in 192/197 tracks ( 97.5%)   distinct offsets: 5
+  derrien-arm qaac -s -v 256   n= 182  modal offset 960  in 177/182 tracks ( 97.3%)   distinct offsets: 5
+  qaacchk qaac-cvbr256         n=   8  modal offset 960  in 8/8 tracks (100.0%)   distinct offsets: 1
+  ffmpeg aacffm-256            n= 197  modal offset 0  in 57/197 tracks ( 28.9%)   distinct offsets: 127
+  ffmpeg aacffm-320            n= 197  modal offset 0  in 56/197 tracks ( 28.4%)   distinct offsets: 126
+  ffmpeg aacffm-128            n= 197  modal offset 0  in 14/197 tracks (  7.1%)   distinct offsets: 160
+  genuine                      n= 197  modal offset 803  in 3/197 tracks (  1.5%)   distinct offsets: 182
+  lame-v0                      n= 197  modal offset 982  in 3/197 tracks (  1.5%)   distinct offsets: 178
+
+  mechanism: qaac/CoreAudio primes 2112 samples -> 2112 mod 1024 = 64 -> lattice at
+  1024-64 = 960.  ffmpeg's native AAC primes 1024 -> lattice at 0.  A genuine album's
+  tracks share no such constant, so their offsets are uniform over 0..1023.
+
+================================================================================================
+FINAL RULE LADDER -- FP evidence: 197 genuine control tracks / 17 albums (album rule),
+  1136 unlabelled wild peer FLACs / 115 folders, and the analytic uniform-offset floor
+================================================================================================
+rule                            genFP  wild fold  analytic FP/5000   aacffm-256   aacffm-320 qaac-cvbr256 qaac-cvbr320   apple-arm2
+BASELINE proba 2nd-trk > 0.05     0/17        n/a               n/a         2/17         1/17        17/17        17/17        15/15
+z max > 6.914  (naive 0-FP)       0/17     11/115       z-tail only        12/17        12/17        17/17        17/17        15/15
+z max > 8.297                     0/17      1/115       z-tail only         8/17         9/17        17/17        17/17        15/15
+z max > 12.0                      0/17      0/115       z-tail only         4/17         5/17        17/17        17/17        15/15
+z max > 20.0                      0/17      0/115       z-tail only         2/17         1/17        17/17        17/17        15/15
+offset k>=3                       0/17      1/115             1.049         7/17         5/17        17/17        17/17        15/15
+offset k>=4                       0/17      1/115             0.002         4/17         4/17        17/17        17/17        15/15
+offset k>=4 OR z>20.0             0/17      1/115             0.002         5/17         4/17        17/17        17/17        15/15
+offset k>=4 OR z>15.0             0/17      1/115             0.002         6/17         6/17        17/17        17/17        15/15
+offset k>=4 OR z>12.0             0/17      1/115             0.002         6/17         7/17        17/17        17/17        15/15
+offset k>=4 OR z>10.371           0/17      1/115             0.002         6/17         8/17        17/17        17/17        15/15
+offset k>=3 OR z>8.297            0/17      1/115             1.049        10/17         9/17        17/17        17/17        15/15
+
+================================================================================================
+GATE UNION -- launder albums that reach PROOF under the frozen spectral gate (T=62)
+  AND are not flagged.  11 genuine-provable 44.1k/16 albums.  Lower is better.
+================================================================================================
+variant          esc   BASELINE proba 2nd>0.0              offset k>=4    offset k>=4 OR z>20.0    offset k>=4 OR z>12.0   offset k>=4 OR z>6.914
+aacffm-256      10/11            8/10 ( 80.0%)            7/10 ( 70.0%)            6/10 ( 60.0%)            5/10 ( 50.0%)            3/10 ( 30.0%)
+aacffm-320      10/11            9/10 ( 90.0%)            7/10 ( 70.0%)            7/10 ( 70.0%)            4/10 ( 40.0%)            2/10 ( 20.0%)
+qaac-cvbr256    10/11            0/10 (  0.0%)            0/10 (  0.0%)            0/10 (  0.0%)            0/10 (  0.0%)            0/10 (  0.0%)
+qaac-cvbr320    10/11            0/10 (  0.0%)            0/10 (  0.0%)            0/10 (  0.0%)            0/10 (  0.0%)            0/10 (  0.0%)
+genuine         11/11           11/11 (100.0%)           11/11 (100.0%)           11/11 (100.0%)           11/11 (100.0%)           11/11 (100.0%)
+null-flac       11/11           11/11 (100.0%)           11/11 (100.0%)           11/11 (100.0%)           11/11 (100.0%)           11/11 (100.0%)

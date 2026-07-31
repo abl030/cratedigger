@@ -1,0 +1,164 @@
+"""Library-scale pricing of every candidate rule + the final operating frontier."""
+import sys, math, collections
+sys.path.insert(0, "/home/abl030/.claude/jobs/7dbdc6f4/tmp/derrien")
+import numpy as np
+from scipy import stats
+from engine import *
+
+C = build()
+GEN = "mx:local:genuine"
+gz = np.array(sorted(sc_z(t) for a in ALB17 for t in C[GEN][a]))
+sizes = [len(C[GEN][a]) for a in ALB17]
+NALB = 5000
+MEAN_N = sum(sizes) / len(sizes)
+
+print("=" * 96)
+print("TRACK-LEVEL GPD TAIL FIT on the genuine z control (197 tracks / 17 albums)")
+print("=" * 96)
+for u in (5.0, 5.25, 5.5, 5.75):
+    exc = gz[gz > u] - u
+    if len(exc) < 8:
+        continue
+    c, loc, sc = stats.genpareto.fit(exc, floc=0)
+    rate = len(exc) / len(gz)
+    print(f"  u={u:4.2f}  n_exc={len(exc):3d}  xi={c:+.3f} sigma={sc:.3f}  "
+          f"P(z>u)={rate:.4f}")
+    for L in (6.914, 7.26, 8.30, 10.37, 12.0, 15.0):
+        p = rate * stats.genpareto.sf(L - u, c, 0, sc)
+        palb = 1 - (1 - p) ** MEAN_N
+        print(f"      L={L:6.3f}: P_track={p:.3e}  P_album({MEAN_N:.1f} trk)={palb:.3e}  "
+              f"-> {palb*NALB:8.2f} FP albums / {NALB}")
+    print()
+
+print("=" * 96)
+print("EMPIRICAL CORROBORATION -- wild arm (1136 unlabelled real peer FLACs)")
+print("=" * 96)
+rows = load()
+wz = sorted(float(r["z"]) for r in rows if r["arm"] == "wild")
+for L in (6.5, 6.914, 7.26, 8.30, 10.37, 12.0, 15.0, 20.0):
+    print(f"  z > {L:6.3f}: genuine control {sum(1 for x in gz if x>L):3d}/197 "
+          f"({100.0*sum(1 for x in gz if x>L)/197:5.2f}%)   "
+          f"wild {sum(1 for x in wz if x>L):3d}/1136 ({100.0*sum(1 for x in wz if x>L)/1136:5.2f}%)")
+
+print("\n" + "=" * 96)
+print("FINAL OPERATING FRONTIER -- one global rule, LOO-honest, priced at library scale")
+print("=" * 96)
+
+
+def modal_count(offs):
+    return collections.Counter(offs).most_common(1)[0][1] if offs else 0
+
+
+def pk(nt, k, M=1024):
+    return math.comb(nt, k) / M ** (k - 1)
+
+
+# tail model used for pricing the z leg: GPD at u=5.5
+exc = gz[gz > 5.5] - 5.5
+cpar, _, spar = stats.genpareto.fit(exc, floc=0)
+rate = len(exc) / len(gz)
+
+
+def z_fp_per_5000(L):
+    p = rate * stats.genpareto.sf(L - 5.5, cpar, 0, spar)
+    return (1 - (1 - p) ** MEAN_N) * NALB
+
+
+def off_fp_per_5000(k):
+    return pk(round(MEAN_N), k) * NALB
+
+
+TARG = [("aacffm-256", "mx:local:aacffm-256"), ("aacffm-320", "mx:local:aacffm-320"),
+        ("qaac-cvbr256", "mx:apple:qaac-cvbr256"), ("qaac-cvbr320", "mx:apple:qaac-cvbr320"),
+        ("qaac-tvbr91", "mx:apple:qaac-tvbr91"), ("qaac-abr192", "mx:apple:qaac-abr192"),
+        ("qaac-cbr128", "mx:apple:qaac-cbr128")]
+CTRL = [("genuine", "mx:local:genuine"), ("lame-v0", "mx:local:lame-v0"),
+        ("vorbis-q4", "mx:local:vorbis-q4"), ("opus-256", "mx:local:opus-256")]
+
+
+def mk(zL=None, offk=None):
+    def f(ts):
+        if zL is not None and max(t.z for t in ts) > zL:
+            return True
+        if offk is not None and modal_count([t.offset for t in ts]) >= offk:
+            return True
+        return False
+    return f
+
+
+ROWS = [
+    ("BASELINE  proba 2nd-track > 0.0500", mk(), None, None, "rule_p2nd"),
+    ("proba max > 0.1082", mk(), None, None, "rule_pmax"),
+    ("z max > 6.914", mk(zL=6.914), 6.914, None, None),
+    ("z max > 8.297", mk(zL=8.297), 8.297, None, None),
+    ("z max > 10.371", mk(zL=10.371), 10.371, None, None),
+    ("z max > 15.0", mk(zL=15.0), 15.0, None, None),
+    ("z max > 20.0", mk(zL=20.0), 20.0, None, None),
+    ("offset k>=3", mk(offk=3), None, 3, None),
+    ("offset k>=4", mk(offk=4), None, 4, None),
+    ("offset k>=5", mk(offk=5), None, 5, None),
+    ("z>10.371 OR offset k>=4", mk(zL=10.371, offk=4), 10.371, 4, None),
+    ("z>15.0   OR offset k>=4", mk(zL=15.0, offk=4), 15.0, 4, None),
+    ("z>20.0   OR offset k>=4", mk(zL=20.0, offk=4), 20.0, 4, None),
+    ("z>20.0   OR offset k>=3", mk(zL=20.0, offk=3), 20.0, 3, None),
+]
+
+
+def rule_p2nd(ts):
+    v = sorted((t.proba for t in ts), reverse=True)
+    return len(v) >= 2 and v[1] > 0.05
+
+
+def rule_pmax(ts):
+    return max(t.proba for t in ts) > 0.1082
+
+
+SPECIAL = {"rule_p2nd": rule_p2nd, "rule_pmax": rule_pmax}
+hdr = f"{'rule':28s} {'FP/5000 (modelled)':>19s} {'obs FP':>7s} " + \
+      " ".join(f"{n[:12]:>9s}" for n, _ in TARG)
+print(hdr)
+for label, fn, zL, offk, sp in ROWS:
+    f = SPECIAL[sp] if sp else fn
+    fp_model = 0.0
+    if zL is not None:
+        fp_model += z_fp_per_5000(zL)
+    if offk is not None:
+        fp_model += off_fp_per_5000(offk)
+    fpm = "n/a (see note)" if sp else f"{fp_model:8.2f}"
+    obs = sum(1 for a in ALB17 if f(C[GEN][a]))
+    cells = []
+    for n_, k_ in TARG:
+        r = sum(1 for a in ALB17 if C[k_].get(a) and f(C[k_][a]))
+        cells.append(f"{r:2d}/17")
+    print(f"{label:28s} {fpm:>19s} {obs:5d}/17 " + " ".join(f"{c:>9s}" for c in cells))
+
+print("\nnon-AAC / control behaviour of the same rules:")
+print(f"{'rule':28s} " + " ".join(f"{n[:12]:>11s}" for n, _ in CTRL))
+for label, fn, zL, offk, sp in ROWS:
+    f = SPECIAL[sp] if sp else fn
+    cells = []
+    for n_, k_ in CTRL:
+        r = sum(1 for a in ALB17 if C[k_].get(a) and f(C[k_][a]))
+        cells.append(f"{r:2d}/17")
+    print(f"{label:28s} " + " ".join(f"{c:>11s}" for c in cells))
+
+print("\n" + "=" * 96)
+print("SPECTRAL-GATE UNION with the two best rules (11 genuine-provable 44.1k/16 albums)")
+print("=" * 96)
+import json
+MX = "/home/abl030/cratedigger/docs/research/calibration-data/launder-matrix"
+gate = sum((json.load(open(f"{MX}/gate-{t}.json")) for t in ("local", "apple", "localw")), [])
+den = {(g["variant"], g["slug"].split("--")[0]): g["denied@62"] for g in gate}
+prov = [a for a in ALB17 if den.get(("genuine", a)) is False]
+BEST = [("BASELINE proba 2nd > 0.05", rule_p2nd),
+        ("offset k>=4", mk(offk=4)),
+        ("z>10.371 OR offset k>=4", mk(zL=10.371, offk=4)),
+        ("z>6.914  OR offset k>=4", mk(zL=6.914, offk=4))]
+print(f"{'variant':14s} {'gate esc':>9s} " + " ".join(f"{b[0][:24]:>26s}" for b in BEST))
+for vn, vk in TARG + [("genuine", "mx:local:genuine"), ("null-flac", "mx:local:null-flac")]:
+    esc = [a for a in prov if den.get((vn, a)) is False]
+    cells = []
+    for bn, bf in BEST:
+        surv = [a for a in esc if not (C[vk].get(a) and bf(C[vk][a]))]
+        cells.append(f"survive {len(surv):2d}/{len(esc):<2d} ({100.0*len(surv)/max(len(esc),1):5.1f}%)")
+    print(f"{vn:14s} {len(esc):3d}/{len(prov):<5d} " + " ".join(f"{c:>26s}" for c in cells))

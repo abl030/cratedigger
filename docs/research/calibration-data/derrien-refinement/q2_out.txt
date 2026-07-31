@@ -1,0 +1,151 @@
+cratedigger dev shell — run: python3 -m unittest discover -s tests -t . -v
+paired arm: genuine 182  Apple CVBR-256 182  albums 15
+
+--- TRACK DISTRIBUTIONS: high vs low ---
+  proba HIGH  GEN min=  0.0155 med=  0.0180 max=  0.1082  |  LAU min=  0.0194 q05=  0.0449 med=  0.1198 max=  0.2207  AUC=0.9952
+  proba LOW   GEN min=  0.0115 med=  0.0315 max=  1.0000  |  LAU min=  0.0107 q05=  0.0123 med=  0.0980 max=  1.0000  AUC=0.6437
+  z HIGH      GEN min=  2.4390 med=  4.4750 max=  6.7660  |  LAU min=  3.6260 q05= 12.9120 med= 28.5980 max= 31.1340  AUC=0.9933
+  z LOW       GEN min=  2.0880 med=  4.3230 max=  9.7380  |  LAU min=  2.1800 q05=  2.6790 med=  5.6020 max= 30.0250  AUC=0.6586
+
+--- TRACK AUC, high/low combinations ---
+  hi_proba         AUC=0.9952
+  lo_proba         AUC=0.6437
+  max(proba)       AUC=0.7298
+  mean(proba)      AUC=0.7730
+  min(proba)       AUC=0.9137
+  hi_z             AUC=0.9933
+  lo_z             AUC=0.6586
+  max(z)           AUC=0.9917
+  mean(z)          AUC=0.9908
+  min(z)           AUC=0.7149
+  hi_z*lo_z        AUC=0.9896
+  offset agree     AUC=0.6786
+  offset agree*z   AUC=0.6796
+
+--- HIGH/LOW OFFSET AGREEMENT (chance = 1/1024 = 0.1%) ---
+  genuine          exact   1/182 (  0.5%)   within+-2   1/182 (  0.5%)
+  Apple CVBR-256   exact  66/182 ( 36.3%)   within+-2  66/182 ( 36.3%)
+
+--- LOO ALBUM EVAL (15 albums), zero-train-FP + margin ---
+score            aggr          m   LOO-FP   recall Apple
+hi_proba         kth1       1.00   1/15    15/15  100.0%
+hi_proba         kth1       1.05   0/15    15/15  100.0%
+hi_proba         kth1       1.20   0/15    13/15   86.7%
+hi_proba         kth1       1.50   0/15     5/15   33.3%
+hi_proba         kth2       1.00   1/15    15/15  100.0%
+hi_proba         kth2       1.05   1/15    15/15  100.0%
+hi_proba         kth2       1.20   1/15    15/15  100.0%
+hi_proba         kth2       1.50   0/15    15/15  100.0%
+
+lo_proba         kth1       1.00   1/15     1/15    6.7%
+lo_proba         kth1       1.05   0/15     0/15    0.0%
+lo_proba         kth1       1.20   0/15     0/15    0.0%
+lo_proba         kth1       1.50   0/15     0/15    0.0%
+lo_proba         kth2       1.00   1/15     1/15    6.7%
+lo_proba         kth2       1.05   1/15     1/15    6.7%
+lo_proba         kth2       1.20   0/15     0/15    0.0%
+lo_proba         kth2       1.50   0/15     0/15    0.0%
+
+max(proba)       kth1       1.00   1/15     1/15    6.7%
+max(proba)       kth1       1.05   0/15     0/15    0.0%
+max(proba)       kth1       1.20   0/15     0/15    0.0%
+max(proba)       kth1       1.50   0/15     0/15    0.0%
+max(proba)       kth2       1.00   1/15     1/15    6.7%
+max(proba)       kth2       1.05   1/15     1/15    6.7%
+max(proba)       kth2       1.20   0/15     0/15    0.0%
+max(proba)       kth2       1.50   0/15     0/15    0.0%
+
+mean(proba)      kth1       1.00   1/15     3/15   20.0%
+mean(proba)      kth1       1.05   0/15     3/15   20.0%
+mean(proba)      kth1       1.20   0/15     0/15    0.0%
+mean(proba)      kth1       1.50   0/15     0/15    0.0%
+mean(proba)      kth2       1.00   1/15     1/15    6.7%
+mean(proba)      kth2       1.05   1/15     1/15    6.7%
+mean(proba)      kth2       1.20   0/15     1/15    6.7%
+mean(proba)      kth2       1.50   0/15     0/15    0.0%
+
+min(proba)       kth1       1.00   1/15    13/15   86.7%
+min(proba)       kth1       1.05   1/15    12/15   80.0%
+min(proba)       kth1       1.20   1/15    11/15   73.3%
+min(proba)       kth1       1.50   1/15     3/15   20.0%
+min(proba)       kth2       1.00   1/15    15/15  100.0%
+min(proba)       kth2       1.05   1/15    15/15  100.0%
+min(proba)       kth2       1.20   1/15    15/15  100.0%
+min(proba)       kth2       1.50   0/15    14/15   93.3%
+
+hi_z             kth1       1.00   1/15    15/15  100.0%
+hi_z             kth1       1.05   0/15    15/15  100.0%
+hi_z             kth1       1.20   0/15    15/15  100.0%
+hi_z             kth1       1.50   0/15    15/15  100.0%
+hi_z             kth2       1.00   1/15    15/15  100.0%
+hi_z             kth2       1.05   1/15    15/15  100.0%
+hi_z             kth2       1.20   0/15    15/15  100.0%
+hi_z             kth2       1.50   0/15    15/15  100.0%
+
+lo_z             kth1       1.00   1/15     8/15   53.3%
+lo_z             kth1       1.05   1/15     8/15   53.3%
+lo_z             kth1       1.20   0/15     7/15   46.7%
+lo_z             kth1       1.50   0/15     7/15   46.7%
+lo_z             kth2       1.00   1/15     8/15   53.3%
+lo_z             kth2       1.05   1/15     6/15   40.0%
+lo_z             kth2       1.20   0/15     6/15   40.0%
+lo_z             kth2       1.50   0/15     6/15   40.0%
+
+max(z)           kth1       1.00   1/15    15/15  100.0%
+max(z)           kth1       1.05   1/15    15/15  100.0%
+max(z)           kth1       1.20   0/15    15/15  100.0%
+max(z)           kth1       1.50   0/15    15/15  100.0%
+max(z)           kth2       1.00   1/15    15/15  100.0%
+max(z)           kth2       1.05   1/15    15/15  100.0%
+max(z)           kth2       1.20   0/15    15/15  100.0%
+max(z)           kth2       1.50   0/15    15/15  100.0%
+
+mean(z)          kth1       1.00   1/15    15/15  100.0%
+mean(z)          kth1       1.05   1/15    15/15  100.0%
+mean(z)          kth1       1.20   0/15    15/15  100.0%
+mean(z)          kth1       1.50   0/15    15/15  100.0%
+mean(z)          kth2       1.00   1/15    15/15  100.0%
+mean(z)          kth2       1.05   0/15    15/15  100.0%
+mean(z)          kth2       1.20   0/15    15/15  100.0%
+mean(z)          kth2       1.50   0/15    15/15  100.0%
+
+min(z)           kth1       1.00   1/15    15/15  100.0%
+min(z)           kth1       1.05   0/15    14/15   93.3%
+min(z)           kth1       1.20   0/15    13/15   86.7%
+min(z)           kth1       1.50   0/15    11/15   73.3%
+min(z)           kth2       1.00   1/15    14/15   93.3%
+min(z)           kth2       1.05   0/15    13/15   86.7%
+min(z)           kth2       1.20   0/15    12/15   80.0%
+min(z)           kth2       1.50   0/15     8/15   53.3%
+
+hi_z*lo_z        kth1       1.00   1/15    15/15  100.0%
+hi_z*lo_z        kth1       1.05   1/15    15/15  100.0%
+hi_z*lo_z        kth1       1.20   0/15    15/15  100.0%
+hi_z*lo_z        kth1       1.50   0/15    15/15  100.0%
+hi_z*lo_z        kth2       1.00   1/15    15/15  100.0%
+hi_z*lo_z        kth2       1.05   0/15    15/15  100.0%
+hi_z*lo_z        kth2       1.20   0/15    15/15  100.0%
+hi_z*lo_z        kth2       1.50   0/15    15/15  100.0%
+
+offset agree*z   kth1       1.00   1/15    10/15   66.7%
+offset agree*z   kth1       1.05   1/15    10/15   66.7%
+offset agree*z   kth1       1.20   1/15    10/15   66.7%
+offset agree*z   kth1       1.50   1/15    10/15   66.7%
+offset agree*z   kth2       1.00   0/15     7/15   46.7%
+offset agree*z   kth2       1.05   0/15     7/15   46.7%
+offset agree*z   kth2       1.20   0/15     7/15   46.7%
+offset agree*z   kth2       1.50   0/15     7/15   46.7%
+
+================================================================================
+OFFSET STRUCTURE WITHIN AN ALBUM (mode=high, 17-album matrix cohort)
+  a launder album was encoded by one encoder -> do its tracks share one offset?
+================================================================================
+variant         mode-share (mean over albums)   albums w/ modeshare>=0.5
+genuine                                 0.111                    0/17   
+null-flac                               0.111                    0/17   
+aacffm-256                              0.287                    4/17   
+aacffm-320                              0.279                    3/17   
+qaac-cvbr256                            0.974                   17/17   
+qaac-cvbr320                            0.972                   17/17   
+lame-v0                                 0.117                    0/17   
+vorbis-q10                              0.115                    0/17   

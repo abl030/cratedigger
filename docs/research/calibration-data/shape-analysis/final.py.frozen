@@ -1,0 +1,164 @@
+"""Step 4 — decode-path audit, apple-arm paired per-band deltas (cross-corpus
+replication of the qaac-cvbr256 mechanism result), and track-level operating
+tables for the best shape candidates.
+"""
+import json
+import os
+import sys
+from collections import Counter, defaultdict
+
+import numpy as np
+
+sys.path.insert(0, "/home/abl030/.claude/jobs/7dbdc6f4/tmp/shapes")
+from eval import ESCAPE_TARGETS, HIRES_SLUGS, build, genuine_population  # noqa: E402
+from feat import features  # noqa: E402
+from load import APL, FREQS, load_all, variant_map  # noqa: E402
+
+GEN_VARIANTS = {"control-flac1644", "genuine", "null-flac"}
+
+
+def decode_path_audit(recs):
+    print("=" * 130)
+    print("0. DECODE-PATH AUDIT — every row used below must be a FLAC measured sox-native.")
+    print("   (README: ultrasonic statistics skew +3.09 dB between _ffmpeg_to_wav @48k and sox-native @44.1k.)")
+    print("=" * 130)
+    sets = {
+        "arms control-flac1644 (FP set)": [r for r in recs if r["corpus"] in {"TRAIN", "R1", "R2", "R3"} and r["variant"] == "control-flac1644"],
+        "matrix genuine + null-flac (FP set)": [r for r in recs if r["corpus"].startswith("MTX-") and r["variant"] in {"genuine", "null-flac"}],
+        "apple-arm control-flac1644 (FP set)": [r for r in recs if r["corpus"].startswith("APL-") and r["variant"] == "control-flac1644"],
+        "matrix escape launders (recall set)": [r for r in recs if r["corpus"].startswith("MTX-") and r["variant"] in {"lame-v0", "aacffm-256", "aacffm-320", "vorbis-q10", "vorbis-q8", "vorbis-q7", "vorbis-q6", "qaac-cvbr256", "qaac-cvbr320"}],
+        "apple-arm t-apple256-flac (recall set)": [r for r in recs if r["corpus"].startswith("APL-") and r["variant"].startswith("t-apple256")],
+        "arms native lossy (EXCLUDED, different path)": [r for r in recs if r["corpus"] in {"TRAIN", "R1", "R2", "R3"} and r["variant"] not in {"control-flac1644"} and not r["variant"].startswith("t-")],
+    }
+    for name, rows in sets.items():
+        ext = Counter(os.path.splitext(r["path"])[1].lower() for r in rows)
+        print(f"  {name:44s} n={len(rows):6d}  extensions={dict(ext)}")
+    print()
+
+
+def apple_arm_pairs(recs):
+    """Pair apple-arm control-flac1644 with t-apple256-flac by manifest ordinal."""
+    by = {}
+    for r in recs:
+        if r["corpus"].startswith("APL-"):
+            by[(r["corpus"], r["variant"], r["path"])] = r
+    out = defaultdict(list)
+    for arm, mf, lvar in [
+        ("APL-apple", "manifest-armA.json", "t-apple256-flac"),
+        ("APL-apple2", "manifest-armB.json", "t-apple256-flac"),
+        ("APL-apple24", "manifest-armA.json", "t-apple256-flac24"),
+    ]:
+        man = json.load(open(os.path.join(APL, mf)))
+        for alb in man:
+            rid = alb.get("request_id") or alb.get("id") or alb.get("slug")
+            for i, t in enumerate(alb["tracks"]):
+                g = by.get((arm, "control-flac1644", t["path"]))
+                if g is None:
+                    continue
+                cands = [
+                    k for k in by
+                    if k[0] == arm and k[1] == lvar and k[2].endswith(f"/{rid}/{i:03d}.flac")
+                ]
+                if len(cands) != 1:
+                    continue
+                l = by[cands[0]]
+                out[arm].append((str(rid), g, l))
+    return out
+
+
+def main():
+    recs, aid, table, grp = build()
+    decode_path_audit(recs)
+
+    # ---------- apple-arm paired per-band deltas (independent corpus) ----------
+    print("=" * 150)
+    print("1b. APPLE-ARM PAIRED PER-BAND DELTAS — independent replication of the qaac-cvbr256 mechanism result.")
+    print("    n[k] = slice - ref ; s[k] = n[k] - n[12kHz] (pure shape). MEDIAN over paired tracks.")
+    print("=" * 150)
+    ap = apple_arm_pairs(recs)
+    hdr = "arm/metric".ljust(24) + "n    " + "".join(f"{f/1000:>7.1f}" for f in FREQS)
+    print(hdr)
+    for arm, prs in ap.items():
+        for metric in ("n", "s"):
+            D = []
+            for _, g, l in prs:
+                ng, nl = g["vec"] - g["ref"], l["vec"] - l["ref"]
+                D.append((nl - ng) if metric == "n" else ((nl - nl[0]) - (ng - ng[0])))
+            D = np.array(D)
+            print(f"{arm+' '+metric+'[k]':24s}{len(D):<5d}" + "".join(f"{x:7.2f}" for x in np.median(D, axis=0)))
+    print()
+
+    # ---------- track-level operating table for the best shape candidates ----------
+    print("=" * 150)
+    print("2b. TRACK-LEVEL leave-one-ALBUM-out operating table for the strongest shape candidates.")
+    print("    Album rule: flag if >= C of the album's tracks exceed the track threshold tau,")
+    print("    tau = q-quantile of ALL tracks of the OTHER genuine albums (fold-fitted, one global rule).")
+    print("=" * 150)
+
+    gpop = genuine_population(aid, table)
+    gen_ids = sorted(gpop)
+
+    # per-track features grouped by physical album, genuine and per target variant
+    pref = ["MTX-local", "MTX-apple", "APL-apple", "APL-apple2", "TRAIN", "R1", "R2", "R3"]
+    gen_tracks = {}
+    for (c, slug, v), fs in grp.items():
+        pid = aid.get((c, slug))
+        if v not in GEN_VARIANTS or pid not in gpop:
+            continue
+        rank = pref.index(c) if c in pref else 99
+        if pid not in gen_tracks or rank < gen_tracks[pid][0]:
+            gen_tracks[pid] = (rank, fs)
+    gen_tracks = {p: v[1] for p, v in gen_tracks.items()}
+
+    tgt_tracks = {}
+    for corpus, variant, label in ESCAPE_TARGETS:
+        d = {}
+        for (c, slug, v), fs in grp.items():
+            if c == corpus and v == variant:
+                if corpus.startswith("MTX") and slug.startswith(HIRES_SLUGS):
+                    continue
+                pid = aid[(c, slug)]
+                if pid in gpop:
+                    d[pid] = fs
+        tgt_tracks[label] = d
+    esc = [l for _, _, l in ESCAPE_TARGETS]
+
+    CANDS = [("rough_top", True), ("maxdrop", True), ("curv_top", True),
+             ("resid_lin", True), ("knee_top_mid", False), ("_U", True)]
+    for name, hib in CANDS:
+        print(f"--- feature {name} ({'high' if hib else 'low'} = launder) ---")
+        allg = {p: np.array([f[name] for f in gen_tracks[p]]) for p in gen_ids}
+        for q, C in [(0.95, 0.30), (0.90, 0.30), (0.90, 0.50)]:
+            fp_alb = fp_trk = n_trk = 0
+            for p in gen_ids:
+                pool = np.concatenate([allg[k] for k in gen_ids if k != p])
+                tau = np.quantile(pool, q if hib else 1 - q)
+                v = allg[p]
+                over = (v > tau) if hib else (v < tau)
+                fp_trk += int(over.sum())
+                n_trk += len(v)
+                if over.mean() >= C:
+                    fp_alb += 1
+            cells = []
+            for label in esc:
+                hits = nul = 0
+                for pid, fs in tgt_tracks[label].items():
+                    pool = np.concatenate([allg[k] for k in gen_ids if k != pid])
+                    tau = np.quantile(pool, q if hib else 1 - q)
+                    lv = np.array([f[name] for f in fs])
+                    gv = allg[pid]
+                    lo = (lv > tau) if hib else (lv < tau)
+                    go = (gv > tau) if hib else (gv < tau)
+                    hits += int(lo.mean() >= C)
+                    nul += int(go.mean() >= C)
+                n = len(tgt_tracks[label])
+                cells.append(f"{hits}-{nul}={hits-nul:+d}/{n}")
+            print(f"  q={q} C={C:.2f}  genFP alb {fp_alb:3d}/{len(gen_ids)}  trk {fp_trk:5d}/{n_trk}   "
+                  + "".join(f"{c:>15s}" for c in cells))
+        print()
+    print("legend: hits-null=NET/n  (null = the same rule on those albums' own genuine twins)")
+    print("target order: " + ", ".join(esc))
+
+
+if __name__ == "__main__":
+    main()

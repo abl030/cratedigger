@@ -1,0 +1,25 @@
+"""Does the Apple shape displacement occur on albums that are PROVABLE in the first place?"""
+import json, gzip, sys
+import numpy as np
+sys.path.insert(0, "/home/abl030/.claude/jobs/7dbdc6f4/tmp/shapes")
+from load import MTX
+g = json.load(open(f"{MTX}/gate-apple.json"))
+gen = {r["slug"]: r for r in g if r["variant"] == "genuine"}
+lau = {r["slug"]: r for r in g if r["variant"] == "qaac-cvbr256"}
+D = {"8924":4.101,"8926":2.641,"8925":2.477,"8935":2.249,"8928":1.600,"8932":1.504,"8919":0.966,
+     "8922":0.497,"8917":0.464,"8933":0.262,"8916":0.185,"8934":0.160,"8918":0.143,"8923":0.113,
+     "8930":0.085,"8929":0.067,"8921":0.040}
+print(f"{'album':44s}{'d_shape':>9s}{'genuine@62':>12s}{'launder@62':>12s}")
+prov_d, unprov_d = [], []
+for slug, r in sorted(gen.items()):
+    rid = slug.split("--")[0]
+    if rid not in D:
+        continue
+    gd, ld = r["denied@62"], lau[slug]["denied@62"]
+    print(f"{slug[:44]:44s}{D[rid]:9.3f}{('DENY' if gd else 'PROOF'):>12s}{('DENY' if ld else 'PROOF'):>12s}")
+    (unprov_d if gd else prov_d).append(D[rid])
+print()
+print(f"albums whose GENUINE twin reaches proof (the only population a discriminator can help): n={len(prov_d)}")
+print(f"   their shape displacement: median {np.median(prov_d):.3f}  max {max(prov_d):.3f}")
+print(f"albums whose genuine twin is already DENIED (not provable at all): n={len(unprov_d)}")
+print(f"   their shape displacement: median {np.median(unprov_d):.3f}  max {max(unprov_d):.3f}")

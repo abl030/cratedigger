@@ -1,0 +1,140 @@
+"""Consolidated final numbers: reproducibility of the offset fingerprint across the
+two independent Apple builds, the final rule ladder, and the gate-union table."""
+import sys, math, collections, json, os
+sys.path.insert(0, "/home/abl030/.claude/jobs/7dbdc6f4/tmp/derrien")
+from engine import *
+
+MX = "/home/abl030/cratedigger/docs/research/calibration-data/launder-matrix"
+C = build()
+GEN = "mx:local:genuine"
+
+
+def modal(offs):
+    c = collections.Counter(offs)
+    return c.most_common(1)[0] if offs else (None, 0)
+
+
+print("=" * 96)
+print("REPRODUCIBILITY -- the offset fingerprint across TWO independent Apple CVBR-256 builds")
+print("=" * 96)
+for nm, key, alb in (("matrix qaac-cvbr256", "mx:apple:qaac-cvbr256", ALB17),
+                     ("derrien-arm qaac -s -v 256", "gt:gtarm-qaac-cvbr256", ALB15),
+                     ("qaacchk qaac-cvbr256", "mx:qaacchk:qaac-cvbr256", ALB17)):
+    allo = [t.offset for a in alb for t in C[key].get(a, [])]
+    if not allo:
+        continue
+    o, n = modal(allo)
+    print(f"  {nm:28s} n={len(allo):4d}  modal offset {o}  in {n}/{len(allo)} tracks "
+          f"({100.0*n/len(allo):5.1f}%)   distinct offsets: {len(set(allo))}")
+for nm, key in (("ffmpeg aacffm-256", "mx:local:aacffm-256"),
+                ("ffmpeg aacffm-320", "mx:local:aacffm-320"),
+                ("ffmpeg aacffm-128", "mx:local:aacffm-128"),
+                ("genuine", "mx:local:genuine"),
+                ("lame-v0", "mx:local:lame-v0")):
+    allo = [t.offset for a in ALB17 for t in C[key].get(a, [])]
+    o, n = modal(allo)
+    print(f"  {nm:28s} n={len(allo):4d}  modal offset {o}  in {n}/{len(allo)} tracks "
+          f"({100.0*n/len(allo):5.1f}%)   distinct offsets: {len(set(allo))}")
+
+print("\n  mechanism: qaac/CoreAudio primes 2112 samples -> 2112 mod 1024 = 64 -> lattice at")
+print("  1024-64 = 960.  ffmpeg's native AAC primes 1024 -> lattice at 0.  A genuine album's")
+print("  tracks share no such constant, so their offsets are uniform over 0..1023.")
+
+print("\n" + "=" * 96)
+print("FINAL RULE LADDER -- FP evidence: 197 genuine control tracks / 17 albums (album rule),")
+print("  1136 unlabelled wild peer FLACs / 115 folders, and the analytic uniform-offset floor")
+print("=" * 96)
+rows = load()
+wildf = collections.defaultdict(list)
+for r in rows:
+    if r["arm"] == "wild":
+        wildf[os.path.dirname(r["path"])].append(r)
+wbig = {f: rs for f, rs in wildf.items() if len(rs) >= 4}
+MEAN_N = 197 / 17
+
+
+def pk(nt, k, M=1024):
+    return math.comb(nt, k) / M ** (k - 1)
+
+
+def mk(zL=None, offk=None):
+    def f(ts):
+        if zL is not None and max(t.z for t in ts) > zL:
+            return True
+        if offk is not None and modal([t.offset for t in ts])[1] >= offk:
+            return True
+        return False
+    return f
+
+
+def wild_fire(zL=None, offk=None):
+    n = 0
+    for f, rs in wildf.items():
+        hit = False
+        if zL is not None and max(float(r["z"]) for r in rs) > zL:
+            hit = True
+        if offk is not None and modal([int(r["offset"]) for r in rs])[1] >= offk:
+            hit = True
+        n += hit
+    return n
+
+
+def p2nd(ts):
+    v = sorted((t.proba for t in ts), reverse=True)
+    return len(v) >= 2 and v[1] > 0.05
+
+
+LADDER = [
+    ("BASELINE proba 2nd-trk > 0.05", p2nd, None, None),
+    ("z max > 6.914  (naive 0-FP)", None, 6.914, None),
+    ("z max > 8.297", None, 8.297, None),
+    ("z max > 12.0", None, 12.0, None),
+    ("z max > 20.0", None, 20.0, None),
+    ("offset k>=3", None, None, 3),
+    ("offset k>=4", None, None, 4),
+    ("offset k>=4 OR z>20.0", None, 20.0, 4),
+    ("offset k>=4 OR z>15.0", None, 15.0, 4),
+    ("offset k>=4 OR z>12.0", None, 12.0, 4),
+    ("offset k>=4 OR z>10.371", None, 10.371, 4),
+    ("offset k>=3 OR z>8.297", None, 8.297, 3),
+]
+TARG = [("aacffm-256", "mx:local:aacffm-256"), ("aacffm-320", "mx:local:aacffm-320"),
+        ("qaac-cvbr256", "mx:apple:qaac-cvbr256"), ("qaac-cvbr320", "mx:apple:qaac-cvbr320"),
+        ("apple-arm2", "gt:gtarm-qaac-cvbr256")]
+print(f"{'rule':30s} {'genFP':>6s} {'wild fold':>10s} {'analytic FP/5000':>17s} " +
+      " ".join(f"{n[:12]:>12s}" for n, _ in TARG))
+for lab, sp, zL, ok in LADDER:
+    f = sp if sp else mk(zL, ok)
+    gfp = sum(1 for a in ALB17 if f(C[GEN][a]))
+    wf = "n/a" if sp else f"{wild_fire(zL, ok):3d}/115"
+    an = "n/a" if sp else (f"{pk(round(MEAN_N), ok)*5000:8.3f}" if ok else "z-tail only")
+    cells = []
+    for n_, k_ in TARG:
+        alb = ALB15 if k_.startswith("gt:") else ALB17
+        r = sum(1 for a in alb if C[k_].get(a) and f(C[k_][a]))
+        cells.append(f"{r:2d}/{len(alb)}")
+    print(f"{lab:30s} {gfp:4d}/17 {wf:>10s} {an:>17s} " + " ".join(f"{c:>12s}" for c in cells))
+
+print("\n" + "=" * 96)
+print("GATE UNION -- launder albums that reach PROOF under the frozen spectral gate (T=62)")
+print("  AND are not flagged.  11 genuine-provable 44.1k/16 albums.  Lower is better.")
+print("=" * 96)
+gate = sum((json.load(open(f"{MX}/gate-{t}.json")) for t in ("local", "apple", "localw")), [])
+den = {(g["variant"], g["slug"].split("--")[0]): g["denied@62"] for g in gate}
+prov = [a for a in ALB17 if den.get(("genuine", a)) is False]
+SEL = [("BASELINE proba 2nd>0.05", p2nd, None, None),
+       ("offset k>=4", None, None, 4),
+       ("offset k>=4 OR z>20.0", None, 20.0, 4),
+       ("offset k>=4 OR z>12.0", None, 12.0, 4),
+       ("offset k>=4 OR z>6.914", None, 6.914, 4)]
+print(f"{'variant':14s} {'esc':>5s} " + " ".join(f"{s[0][:22]:>24s}" for s in SEL))
+for vn, vk in [("aacffm-256", "mx:local:aacffm-256"), ("aacffm-320", "mx:local:aacffm-320"),
+               ("qaac-cvbr256", "mx:apple:qaac-cvbr256"), ("qaac-cvbr320", "mx:apple:qaac-cvbr320"),
+               ("genuine", "mx:local:genuine"), ("null-flac", "mx:local:null-flac")]:
+    esc = [a for a in prov if den.get((vn, a)) is False]
+    cells = []
+    for lab, sp, zL, ok in SEL:
+        f = sp if sp else mk(zL, ok)
+        surv = [a for a in esc if not (C[vk].get(a) and f(C[vk][a]))]
+        cells.append(f"{len(surv):2d}/{len(esc):<2d} ({100.0*len(surv)/max(len(esc),1):5.1f}%)")
+    print(f"{vn:14s} {len(esc):3d}/{len(prov):<2d} " + " ".join(f"{c:>24s}" for c in cells))

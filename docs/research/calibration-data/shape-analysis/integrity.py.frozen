@@ -1,0 +1,78 @@
+"""Integrity checks before pricing false positives.
+
+1. Do the arms' 100 genuine control albums overlap the 19 matrix albums /
+   37 apple-arm albums?  (Same physical album in both the FP set and the
+   recall set would corrupt leave-one-ALBUM-out.)
+2. The four arms store slice dB rounded to 0.1; the matrix and apple-arm store
+   full precision.  Roughness / curvature features are differences of
+   differences, so 0.1 dB quantisation is a real perturbation.  Quantify it by
+   re-rounding the full-precision genuine rows.
+"""
+import sys
+from collections import defaultdict
+
+import numpy as np
+
+sys.path.insert(0, "/home/abl030/.claude/jobs/7dbdc6f4/tmp/shapes")
+from feat import FEATURE_NAMES, features  # noqa: E402
+from load import load_all  # noqa: E402
+
+
+def main():
+    recs = load_all()
+
+    # ---- 1. overlap detection by track-vector fingerprint (rounded to 0.1) ----
+    fp = defaultdict(set)
+    for r in recs:
+        if r["variant"] not in {"control-flac1644", "genuine"}:
+            continue
+        key = tuple(np.round(r["vec"], 1)) + (round(r["ref"], 1),)
+        fp[key].add((r["corpus"], r["slug"]))
+    linked = defaultdict(set)
+    for key, owners in fp.items():
+        if len(owners) > 1:
+            for a in owners:
+                for b in owners:
+                    if a != b:
+                        linked[a].add(b)
+    print("=== 1. genuine-album overlap across corpora (matched by track fingerprint) ===")
+    seen = set()
+    groups = []
+    for a in linked:
+        if a in seen:
+            continue
+        comp = {a}
+        stack = [a]
+        while stack:
+            x = stack.pop()
+            for y in linked[x]:
+                if y not in comp:
+                    comp.add(y)
+                    stack.append(y)
+        seen |= comp
+        groups.append(sorted(comp))
+    print(f"distinct overlapping album groups: {len(groups)}")
+    for g in sorted(groups)[:40]:
+        print("   ", " == ".join(f"{c}:{s[:44]}" for c, s in g))
+    print()
+
+    # ---- 2. rounding sensitivity ----
+    print("=== 2. effect of 0.1 dB storage rounding on each shape feature ===")
+    full, rnd = [], []
+    for r in recs:
+        if r["corpus"] in {"MTX-local", "APL-apple", "APL-apple2"} and r["variant"] in {
+            "genuine",
+            "control-flac1644",
+        }:
+            full.append(features(r["vec"], r["ref"]))
+            rnd.append(features(np.round(r["vec"], 1), round(r["ref"], 1)))
+    print(f"tracks: {len(full)}")
+    print(f"{'feature':14s}{'mean(full)':>12s}{'mean(rnd)':>12s}{'bias':>10s}{'rms(dev)':>10s}")
+    for n in FEATURE_NAMES:
+        a = np.array([x[n] for x in full])
+        b = np.array([x[n] for x in rnd])
+        print(f"{n:14s}{a.mean():12.4f}{b.mean():12.4f}{b.mean()-a.mean():10.4f}{np.sqrt(np.mean((b-a)**2)):10.4f}")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,112 @@
+"""Within-album dispersion table + paired mechanism check.
+
+Reads tracks.json.gz (built by build.py). Writes disp.json.gz + prints the
+paired mechanism table.
+"""
+import gzip
+import json
+import math
+from collections import defaultdict
+
+import numpy as np
+
+OUT = "/home/abl030/.claude/jobs/7dbdc6f4/tmp/homogeneity"
+
+HZ = [12000 + 500 * i for i in range(16)] + [20000, 20500, 21000, 21500]
+SCALARS = ["U", "d12_14", "d14_16", "d16_18", "d18_195", "d20_215",
+           "drop_hi", "slope_mid", "ref", "hfdef"] + ["r%d" % h for h in HZ]
+
+# ref-normalized slice vector used for shape dispersion
+SHAPE_ALL = ["r%d" % h for h in HZ]
+SHAPE_HI = ["r%d" % h for h in HZ if h >= 18000]
+SHAPE_UL = ["r%d" % h for h in HZ if h >= 20000]
+SHAPE_LO = ["r%d" % h for h in HZ if h <= 16000]
+
+
+def _disp(vals):
+    a = np.asarray(vals, dtype=float)
+    n = len(a)
+    if n < 2:
+        return None
+    med = float(np.median(a))
+    return {
+        "sd": float(np.std(a, ddof=1)),
+        "iqr": float(np.percentile(a, 75) - np.percentile(a, 25)),
+        "mad": float(np.median(np.abs(a - med))),
+        "rng": float(a.max() - a.min()),
+        "mean": float(a.mean()),
+        "med": med,
+    }
+
+
+def _mpd(mat):
+    """mean pairwise euclidean distance between rows, normalized by sqrt(dim)."""
+    n, d = mat.shape
+    if n < 2:
+        return None
+    tot, cnt = 0.0, 0
+    for i in range(n - 1):
+        diff = mat[i + 1:] - mat[i]
+        tot += float(np.sqrt((diff ** 2).sum(axis=1)).sum())
+        cnt += n - i - 1
+    return tot / cnt / math.sqrt(d)
+
+
+def build():
+    rows = json.load(gzip.open(OUT + "/tracks.json.gz", "rt"))
+    g = defaultdict(list)
+    for r in rows:
+        g[(r["ds"], r["slug"], r["variant"])].append(r)
+    out = []
+    for (ds, slug, variant), trs in g.items():
+        rec = {"ds": ds, "slug": slug, "variant": variant, "n": len(trs)}
+        if len(trs) < 2:
+            continue
+        for k in SCALARS:
+            d = _disp([t[k] for t in trs])
+            for kk, vv in d.items():
+                rec["%s_%s" % (k, kk)] = vv
+        for name, cols in (("all", SHAPE_ALL), ("hi", SHAPE_HI), ("ul", SHAPE_UL),
+                           ("lo", SHAPE_LO)):
+            mat = np.array([[t[c] for c in cols] for t in trs], dtype=float)
+            rec["shape_mpd_" + name] = _mpd(mat)
+            rec["shape_sdmean_" + name] = float(np.std(mat, axis=0, ddof=1).mean())
+            # shape after removing each track's own mean level in that band
+            cen = mat - mat.mean(axis=1, keepdims=True)
+            rec["shapec_mpd_" + name] = _mpd(cen)
+            rec["shapec_sdmean_" + name] = float(np.std(cen, axis=0, ddof=1).mean())
+        # ---- fixed-n resampled dispersion (track-count control) ----
+        # For K in (4, 8): mean over B random size-K track subsets of the same
+        # statistic, so every album is compared at identical n.
+        rng = np.random.default_rng(abs(hash((ds, slug, variant))) % (2 ** 32))
+        Uv = np.array([t["U"] for t in trs], float)
+        D18 = np.array([t["d18_195"] for t in trs], float)
+        DH = np.array([t["drop_hi"] for t in trs], float)
+        MUL = np.array([[t[c] for c in SHAPE_UL] for t in trs], float)
+        MHI = np.array([[t[c] for c in SHAPE_HI] for t in trs], float)
+        for K in (4, 8):
+            if len(trs) < K:
+                continue
+            B = 200
+            us, d1, dh, mu, mh = [], [], [], [], []
+            for _ in range(B):
+                sel = rng.choice(len(trs), size=K, replace=False)
+                us.append(np.std(Uv[sel], ddof=1))
+                d1.append(np.std(D18[sel], ddof=1))
+                dh.append(np.std(DH[sel], ddof=1))
+                mu.append(_mpd(MUL[sel]))
+                mh.append(_mpd(MHI[sel]))
+            rec["k%d_U_sd" % K] = float(np.mean(us))
+            rec["k%d_d18_195_sd" % K] = float(np.mean(d1))
+            rec["k%d_drop_hi_sd" % K] = float(np.mean(dh))
+            rec["k%d_shape_mpd_ul" % K] = float(np.mean(mu))
+            rec["k%d_shape_mpd_hi" % K] = float(np.mean(mh))
+        out.append(rec)
+    with gzip.open(OUT + "/disp.json.gz", "wt") as fh:
+        json.dump(out, fh)
+    print("groups", len(out))
+    return out
+
+
+if __name__ == "__main__":
+    build()

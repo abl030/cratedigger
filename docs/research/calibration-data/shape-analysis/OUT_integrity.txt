@@ -1,0 +1,59 @@
+cratedigger dev shell — run: python3 -m unittest discover -s tests -t . -v
+=== 1. genuine-album overlap across corpora (matched by track fingerprint) ===
+distinct overlapping album groups: 28
+    APL-apple:8916--2013 - Random Access Memories [8888371 == APL-apple2:c2-12--c2-12 == APL-apple24:8916--2013 - Random Access Memories [8888371 == MTX-apple:8916--2013 - Random Access Memories [8888371 == MTX-local:8916--2013 - Random Access Memories [8888371 == MTX-localw:8916--2013 - Random Access Memories [8888371 == TRAIN:01-daft-punk-ram
+    APL-apple:8917--2014 - Syro [WARPCD247] == APL-apple24:8917--2014 - Syro [WARPCD247] == MTX-apple:8917--2014 - Syro [WARPCD247] == MTX-local:8917--2014 - Syro [WARPCD247] == MTX-localw:8917--2014 - Syro [WARPCD247] == TRAIN:Aphex_Twin--2014_-_Syro
+    APL-apple:8918--1995 - Tri Repetae [WARPCD38] == APL-apple24:8918--1995 - Tri Repetae [WARPCD38] == MTX-apple:8918--1995 - Tri Repetae [WARPCD38] == MTX-local:8918--1995 - Tri Repetae [WARPCD38] == MTX-localw:8918--1995 - Tri Repetae [WARPCD38] == MTX-pilot:8918--1995 - Tri Repetae [WARPCD38] == TRAIN:Autechre--1995_-_Tri_Repetae
+    APL-apple:8919--1996 - Feed Me Weird Things == APL-apple24:8919--1996 - Feed Me Weird Things == MTX-apple:8919--1996 - Feed Me Weird Things == MTX-local:8919--1996 - Feed Me Weird Things == MTX-localw:8919--1996 - Feed Me Weird Things == TRAIN:Squarepusher--1996_-_Feed_Me_Weird_Things
+    APL-apple:8920--2011 - Hurry Up, We're Dreaming == APL-apple24:8920--2011 - Hurry Up, We're Dreaming == MTX-apple:8920--2011 - Hurry Up, We're Dreaming == MTX-local:8920--2011 - Hurry Up, We're Dreaming
+    APL-apple:8921--1999 - Californication == APL-apple24:8921--1999 - Californication == MTX-apple:8921--1999 - Californication == MTX-local:8921--1999 - Californication == MTX-localw:8921--1999 - Californication == TRAIN:Red_Hot_Chili_Peppers--1999_-_Californicatio
+    APL-apple:8922--2008 - Death Magnetic == APL-apple24:8922--2008 - Death Magnetic == MTX-apple:8922--2008 - Death Magnetic == MTX-local:8922--2008 - Death Magnetic == MTX-localw:8922--2008 - Death Magnetic
+    APL-apple:8923--2001 - Jane Doe == APL-apple24:8923--2001 - Jane Doe == MTX-apple:8923--2001 - Jane Doe == MTX-local:8923--2001 - Jane Doe == MTX-localw:8923--2001 - Jane Doe == MTX-pilot:8923--2001 - Jane Doe == TRAIN:Converge--2001_-_Jane_Doe
+    APL-apple:8924--1984 - Tabula Rasa == APL-apple24:8924--1984 - Tabula Rasa == MTX-apple:8924--1984 - Tabula Rasa == MTX-local:8924--1984 - Tabula Rasa == MTX-localw:8924--1984 - Tabula Rasa == TRAIN:Arvo_Part--1984_-_Tabula_Rasa
+    APL-apple:8925--1982 - The Goldberg Variations == APL-apple24:8925--1982 - The Goldberg Variations == MTX-apple:8925--1982 - The Goldberg Variations == MTX-local:8925--1982 - The Goldberg Variations == MTX-localw:8925--1982 - The Goldberg Variations == TRAIN:Johann_Sebastian_Bach_Glenn_Gould--1982_-_Th
+    APL-apple:8926--1987 - Kind of Blue [CK 40579] == APL-apple24:8926--1987 - Kind of Blue [CK 40579] == MTX-apple:8926--1987 - Kind of Blue [CK 40579] == MTX-local:8926--1987 - Kind of Blue [CK 40579] == MTX-localw:8926--1987 - Kind of Blue [CK 40579] == R1:Miles_Davis--1987_-_Kind_of_Blue == TRAIN:20-miles-davis-kind-of-blue
+    APL-apple:8928--2016 - Man Made Object == APL-apple24:8928--2016 - Man Made Object == MTX-apple:8928--2016 - Man Made Object == MTX-local:8928--2016 - Man Made Object == MTX-localw:8928--2016 - Man Made Object == TRAIN:GoGo_Penguin--2016_-_Man_Made_Object
+    APL-apple:8929--1996 - The Velvet Underground & Nico [ == APL-apple24:8929--1996 - The Velvet Underground & Nico [ == MTX-apple:8929--1996 - The Velvet Underground & Nico [ == MTX-local:8929--1996 - The Velvet Underground & Nico [ == MTX-localw:8929--1996 - The Velvet Underground & Nico [
+    APL-apple:8931--1987 - Rumours [3010-2] == APL-apple24:8931--1987 - Rumours [3010-2] == MTX-apple:8931--1987 - Rumours [3010-2] == MTX-local:8931--1987 - Rumours [3010-2]
+    APL-apple:8932--1991 - Loveless [crecd 060] == APL-apple24:8932--1991 - Loveless [crecd 060] == MTX-apple:8932--1991 - Loveless [crecd 060] == MTX-local:8932--1991 - Loveless [crecd 060] == MTX-localw:8932--1991 - Loveless [crecd 060]
+    APL-apple:8933--2014 - Ruins == APL-apple24:8933--2014 - Ruins == MTX-apple:8933--2014 - Ruins == MTX-local:8933--2014 - Ruins == MTX-localw:8933--2014 - Ruins == MTX-pilot:8933--2014 - Ruins == MTX-qaacchk:8933--2014 - Ruins == TRAIN:Grouper--2014_-_Ruins
+    APL-apple:8934--1998 - Stratosphere == APL-apple24:8934--1998 - Stratosphere == MTX-apple:8934--1998 - Stratosphere == MTX-local:8934--1998 - Stratosphere == MTX-localw:8934--1998 - Stratosphere == TRAIN:Duster--1998_-_Stratosphere
+    APL-apple2:c2-01--c2-01 == R2:Aphex_Twin--1994_-_Selected_Ambient_Works_Vo
+    APL-apple2:c2-05--c2-05 == R1:Sparklehorse--1995_-_Vivadixiesubmarinetrans
+    APL-apple2:c2-06--c2-06 == R1:Kendrick_Lamar--2015_-_To_Pimp_a_Butterfly == TRAIN:35-kendrick-lamar-tpab
+    APL-apple2:c2-08--c2-08 == R2:MF_DOOM--2004_-_MM..FOOD
+    APL-apple2:c2-10--c2-10 == R2:Ye--2010_-_My_Beautiful_Dark_Twisted_Fantasy
+    APL-apple2:c2-11--c2-11 == R1:Death_Grips--2012_-_The_Money_Store
+    APL-apple2:c2-14--c2-14 == R2:Gojira--2005_-_From_Mars_to_Sirius
+    APL-apple2:c2-15--c2-15 == R2:Talking_Heads--1987_-_Fear_of_Music
+    APL-apple2:c2-17--c2-17 == R2:Ride--1990_-_Nowhere
+    MTX-apple:8930--1993 - Bridge Over Troubled Water [462 == MTX-local:8930--1993 - Bridge Over Troubled Water [462 == MTX-localw:8930--1993 - Bridge Over Troubled Water [462
+    MTX-apple:8935--1990 - Ambient 1_ Music for Airports [ == MTX-local:8935--1990 - Ambient 1_ Music for Airports [ == MTX-localw:8935--1990 - Ambient 1_ Music for Airports [ == TRAIN:Brian_Eno--1990_-_Ambient_1__Music_for_Airpo
+
+=== 2. effect of 0.1 dB storage rounding on each shape feature ===
+tracks: 748
+feature         mean(full)   mean(rnd)      bias  rms(dev)
+slope_lo           -0.8633     -0.8634   -0.0001    0.0051
+slope_mid          -0.7399     -0.7400   -0.0001    0.0053
+slope_top          -2.4206     -2.4221   -0.0015    0.0103
+knee_mid_lo         0.1234      0.1234    0.0000    0.0089
+knee_top_mid       -1.6807     -1.6821   -0.0014    0.0135
+curv_all           -0.0492     -0.0495   -0.0003    0.0031
+curv_top           -0.2277     -0.2286   -0.0009    0.0084
+curv_min           -6.0665     -6.0730   -0.0065    0.0656
+curv_max            5.0859      5.0866    0.0007    0.0621
+rough_all           1.6036      1.6053    0.0017    0.0161
+rough_top           1.7383      1.7405    0.0022    0.0230
+rough_lo            1.4959      1.4972    0.0013    0.0217
+rough_ratio         0.2424      0.2433    0.0009    0.0311
+resid_lin           2.7426      2.7435    0.0009    0.0069
+resid_iso           0.6676      0.6677    0.0001    0.0057
+quad_c             -0.0347     -0.0347   -0.0000    0.0002
+resid_quad          1.9883      1.9889    0.0006    0.0068
+top_sd              3.4944      3.4963    0.0019    0.0153
+top_span            8.7559      8.7615    0.0056    0.0412
+maxdrop             6.7225      6.7263    0.0038    0.0402
+maxdrop_top         5.7566      5.7606    0.0040    0.0395
+_U                 56.9974     57.0047    0.0074    0.0385
+_d18_195           48.6468     48.6502    0.0033    0.0371
+_drop_hi            8.6740      8.6778    0.0038    0.0256

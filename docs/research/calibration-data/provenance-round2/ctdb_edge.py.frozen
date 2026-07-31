@@ -1,0 +1,60 @@
+"""Brute-force the CTDB first/last-track + whole-disc CRC convention."""
+import os
+import re
+import sys
+import zlib
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from provlib import (album_dirs, build_toc, ctdb_fetch_cached, decode,  # noqa: E402
+                     toc_from_dir)
+
+M32 = 0xFFFFFFFF
+SB = 2352
+
+
+def C(b, seed=0):
+    return zlib.crc32(b, seed) & M32
+
+
+def probe(raw, target, label, maxsec=30):
+    found = []
+    for k in range(0, maxsec + 1):
+        if C(raw[k * SB:]) == target:
+            found.append(f"drop_lead_{k}sec")
+        if k and C(raw[:len(raw) - k * SB]) == target:
+            found.append(f"drop_tail_{k}sec")
+        z = C(b"\x00" * (k * SB))
+        if C(raw, z) == target:
+            found.append(f"zeropad_lead_{k}sec")
+        if C(b"\x00" * (k * SB), C(raw)) == target:
+            found.append(f"zeropad_tail_{k}sec")
+    # sample-granularity around AR's 5-sector trim
+    for k in (150, 149, 151):
+        if C(raw, C(b"\x00" * (k * SB))) == target:
+            found.append(f"zeropad_lead_{k}sec")
+        if C(raw[k * SB:]) == target:
+            found.append(f"drop_lead_{k}sec")
+    print(f"  {label}: target={target:08x} -> {found or 'NO MATCH'}")
+    return found
+
+
+def main():
+    dirs = {os.path.basename(d): d for d in album_dirs()}
+    d = dirs["2008 - Death Magnetic"]
+    files, meta, lens = toc_from_dir(d)
+    toc = build_toc(lens)
+    _u, xml, _s = ctdb_fetch_cached(toc)
+    e = re.findall(
+        r'<entry confidence="(\d+)"\s+crc32="([0-9a-f]+)"[^>]*?trackcrcs="([^"]*)"', xml)
+    conf, dcrc, tcs = e[0]
+    tcs = [int(x, 16) for x in tcs.split()]
+    print(f"top entry conf={conf} disc_crc32={dcrc}")
+    raws = [decode(os.path.join(d, f)) for f in files]
+    probe(raws[0], tcs[0], "track01")
+    probe(raws[-1], tcs[-1], f"track{len(raws):02d}")
+    whole = b"".join(raws)
+    probe(whole, int(dcrc, 16), "whole-disc")
+
+
+if __name__ == "__main__":
+    main()

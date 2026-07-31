@@ -1,5 +1,24 @@
 # Provenance probes — can a file's origin be established without looking at its spectrum?
 
+> **SUPERSEDED (2026-07-31) — the ARv1/ARv2 and CTDB results below are wrong.**
+> `../provenance-round2/` diagnoses and fixes three implementation bugs in
+> these probes: (A) the AccurateRip response's per-track fields are `checksum`
+> (holding *either* the v1 or the v2 value — the database does not say which)
+> and `checksum_450` (a frame-450 CRC for read-offset detection only), and
+> round 1 compared ARv2 against `checksum_450`, so "ARv2 matched 0 tracks
+> everywhere" was structurally guaranteed rather than an anomaly; (B) a
+> track-1 off-by-one in the checksum window (skip `5*588 = 2940` samples, not
+> 2941), invisible whenever CD frame 2939 is silence — which is exactly why
+> the 25-of-25 `arver` cross-check below passed; and (C) float64 promotion in
+> the offset-scan prefix sums (53-bit mantissa against ~2^60 sums), which is
+> why "the offset search rescued nothing" — exact `uint64` arithmetic rescues
+> 9 albums at a constant read offset. Round 2 also reverse-engineers and
+> validates the CTDB CRC convention that was never determined here, and
+> reaches 25 of 38 FLAC albums bit-verified (27 of 42 including ALAC) against
+> the 9 partial below. Nothing else in this file is rewritten: the MusicBrainz
+> DiscID probe, the coverage survey and the alignment survey stand, and the
+> record of what was believed on 2026-07-30 is kept deliberately.
+
 Run 2026-07-30. **Descriptive record only.** This directory records a set of
 read-only probes against external rip databases and MusicBrainz, and what they
 returned on the current library. It draws no conclusion about whether any of

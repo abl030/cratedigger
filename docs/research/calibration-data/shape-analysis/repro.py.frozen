@@ -1,0 +1,32 @@
+"""Harness fidelity: reproduce published numbers from apple-arm/README.md and FINAL_REPORT.txt."""
+import sys
+import numpy as np
+sys.path.insert(0, "/home/abl030/.claude/jobs/7dbdc6f4/tmp/shapes")
+from load import load_all, FREQS
+from final import apple_arm_pairs
+
+recs = load_all()
+# --- apple-arm README: "Mean level relative to each album's own 1-4 kHz reference, 17 albums"
+# genuine 19.5k -46.7 / launder -47.9 ; genuine 21.5k -55.4 / launder -57.5
+ap = apple_arm_pairs(recs)["APL-apple"]
+byalb = {}
+for rid, g, l in ap:
+    byalb.setdefault(rid, []).append((g["vec"] - g["ref"], l["vec"] - l["ref"]))
+G = np.array([np.mean([p[0] for p in v], axis=0) for v in byalb.values()])
+L = np.array([np.mean([p[1] for p in v], axis=0) for v in byalb.values()])
+i195, i215 = list(FREQS).index(19500), list(FREQS).index(21500)
+print(f"albums={len(G)}")
+print(f"  19.5 kHz  genuine {G[:,i195].mean():7.2f}  launder {L[:,i195].mean():7.2f}   (README: -46.7 / -47.9)")
+print(f"  21.5 kHz  genuine {G[:,i215].mean():7.2f}  launder {L[:,i215].mean():7.2f}   (README: -55.4 / -57.5)")
+U_g = -G[:, i215-2:].mean(axis=1); U_l = -L[:, i215-2:].mean(axis=1)
+d = U_l - U_g
+print(f"  paired U delta (n={len(d)}): mean {d.mean():+.2f}  median {np.median(d):+.2f}  |d|<1 on {(abs(d)<1).sum()}/{len(d)}")
+print("     (README pooled A+B, n=37: mean +1.88, median +0.57, |d|<1 on 19/37)")
+ap2 = apple_arm_pairs(recs)["APL-apple2"]
+b2 = {}
+for rid, g, l in ap2:
+    b2.setdefault(rid, []).append((g["vec"] - g["ref"], l["vec"] - l["ref"]))
+G2 = np.array([np.mean([p[0] for p in v], axis=0) for v in b2.values()])
+L2 = np.array([np.mean([p[1] for p in v], axis=0) for v in b2.values()])
+dd = np.concatenate([d, (-L2[:, i215-2:].mean(axis=1)) - (-G2[:, i215-2:].mean(axis=1))])
+print(f"  pooled A+B (n={len(dd)}): mean {dd.mean():+.2f}  median {np.median(dd):+.2f}  |d|<1 on {(abs(dd)<1).sum()}/{len(dd)}")

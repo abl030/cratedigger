@@ -1,0 +1,107 @@
+"""Exact (integer, mod 2^32) AR read-offset scan for every album with an
+AccurateRip block but no match at offset 0, then all-track confirmation.
+
+The frozen fullrun.py (and a first draft here) built prefix sums with
+`np.concatenate(([0], np.cumsum(uint64)))`, which numpy promotes to float64
+(53-bit mantissa) -- silently lossy above 2^53. Everything here stays in
+uint64 and is reduced mod 2^32.
+"""
+import json
+import os
+import sys
+
+import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from provlib import (M32, ar_track_index, as_dwords, build_toc, decode,  # noqa: E402
+                     fetch_ar_cached, parse_ar, toc_from_dir)
+from offsetcheck import ar_at  # noqa: E402
+
+OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out")
+RADIUS = 5000
+
+
+def prefix_mod(w):
+    """(s0, s1) prefix sums mod 2^32; s1 weights sample j (0-based) by j+1."""
+    n = len(w)
+    j = np.arange(1, n + 1, dtype=np.uint64)
+    s0 = np.zeros(n + 1, dtype=np.uint64)
+    s1 = np.zeros(n + 1, dtype=np.uint64)
+    np.cumsum(w & np.uint64(M32), dtype=np.uint64, out=s0[1:])
+    np.cumsum((j * w) & np.uint64(M32), dtype=np.uint64, out=s1[1:])
+    return s0 & np.uint64(M32), s1 & np.uint64(M32)
+
+
+def scan(stream, a0, L, want, radius=RADIUS):
+    total = len(stream)
+    w0 = max(0, a0 - radius)
+    w1 = min(total, a0 + L + radius)
+    w = stream[w0:w1].astype(np.uint64)
+    s0, s1 = prefix_mod(w)
+    hits = []
+    for off in range(-radius, radius + 1):
+        a = a0 + off - w0
+        b = a + L
+        if a < 0 or b > len(w):
+            continue
+        val = ((int(s1[b]) - int(s1[a])) - a * (int(s0[b]) - int(s0[a]))) & M32
+        if val in want:
+            hits.append(off)
+    return hits
+
+
+def main():
+    with open(os.path.join(OUT, "fullrun2.json"), encoding="utf-8") as fh:
+        recs = json.load(fh)
+    out = {}
+    for r in recs:
+        if r.get("error") or not r.get("ar_toc_hit"):
+            continue
+        if r["ar_v1_hits"] or r["ar_v2_hits"]:
+            continue
+        d = r["path"]
+        files, meta, lens = toc_from_dir(d)
+        n = len(files)
+        toc = build_toc(lens)
+        _u, blob, _s = fetch_ar_cached(toc)
+        aridx = ar_track_index(parse_ar(blob))
+        parts = [as_dwords(decode(os.path.join(d, f))) for f in files]
+        tlens = [len(p) for p in parts]
+        starts = np.cumsum([0] + tlens[:-1])
+        stream = np.concatenate(parts)
+        del parts
+        cands = set()
+        for probe in {n // 2, max(1, n // 3), min(n - 2, 2 * n // 3)}:
+            if not 0 <= probe < n:
+                continue
+            want = set(aridx.get(probe, {}))
+            if want:
+                cands |= set(scan(stream, int(starts[probe]), tlens[probe], want))
+        confirmed = []
+        for off in sorted(cands):
+            h1 = h2 = 0
+            confs = []
+            for i in range(n):
+                v1, v2 = ar_at(stream, int(starts[i]) + off, tlens[i], i + 1, n)
+                slot = aridx.get(i, {})
+                if v1 in slot:
+                    h1 += 1
+                    confs.append(slot[v1])
+                if v2 in slot:
+                    h2 += 1
+                    confs.append(slot[v2])
+            confirmed.append({"offset": off, "v1": h1, "v2": h2, "n": n,
+                              "max_conf": max(confs, default=0)})
+        del stream
+        best = max(confirmed, key=lambda o: (o["v1"] + o["v2"], o["max_conf"]),
+                   default=None)
+        out[r["album"]] = confirmed
+        print(f"{r['album'][:46]:46s} n={n:2d} cands={len(cands):2d} "
+              f"best={'off%+d v1=%d/%d v2=%d/%d conf=%d' % (best['offset'], best['v1'], n, best['v2'], n, best['max_conf']) if best else 'NONE'}",
+              flush=True)
+    with open(os.path.join(OUT, "offsets.json"), "w", encoding="utf-8") as fh:
+        json.dump(out, fh, indent=1)
+
+
+if __name__ == "__main__":
+    main()

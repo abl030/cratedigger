@@ -1,0 +1,67 @@
+"""Cohort definition + sanity checks: overlaps, null-flac degeneracy, n-sensitivity."""
+import gzip
+import json
+from collections import defaultdict
+
+import numpy as np
+
+OUT = "/home/abl030/.claude/jobs/7dbdc6f4/tmp/homogeneity"
+rows = json.load(gzip.open(OUT + "/disp.json.gz", "rt"))
+idx = {(r["ds"], r["slug"], r["variant"]): r for r in rows}
+
+arm_gen = {(d, r["slug"]) for r in rows for d in [r["ds"]]
+           if d in ("TRAIN", "R1", "R2", "R3") and r["variant"] == "control-flac1644"}
+mtx_gen = {(r["ds"], r["slug"]) for r in rows if r["ds"] == "LOCAL" and r["variant"] == "genuine"}
+app_gen = {(r["ds"], r["slug"]) for r in rows
+           if r["ds"] in ("APPLEA", "APPLEB") and r["variant"] == "control-flac1644"}
+print("arm genuine albums:", len(arm_gen))
+print("matrix genuine albums:", len(mtx_gen))
+print("apple-arm genuine albums:", len(app_gen))
+print("slug overlap arm vs apple-arm:",
+      len({s for _, s in arm_gen} & {s for _, s in app_gen}))
+print("slug overlap arm vs matrix:",
+      len({s for _, s in arm_gen} & {s for _, s in mtx_gen}))
+print("slug overlap matrix vs apple-arm:",
+      len({s for _, s in mtx_gen} & {s for _, s in app_gen}))
+print("APPLEA slugs sample:", sorted({s for d, s in app_gen if d == 'APPLEA'})[:3])
+print("APPLEB slugs sample:", sorted({s for d, s in app_gen if d == 'APPLEB'})[:3])
+
+# null-flac degeneracy check
+same, diff = 0, 0
+for r in rows:
+    if r["variant"] != "null-flac":
+        continue
+    g = idx.get((r["ds"], r["slug"], "genuine"))
+    if g is None:
+        continue
+    if abs((r["U_sd"] or 0) - (g["U_sd"] or 0)) < 1e-9:
+        same += 1
+    else:
+        diff += 1
+print(f"null-flac vs genuine U_sd identical: {same}, differing: {diff}")
+
+# cross-tag genuine identity (LOCAL vs MAPPLE vs LOCALW)
+for other in ("MAPPLE", "LOCALW", "PILOT"):
+    n, ident = 0, 0
+    for (ds, slug, v), r in idx.items():
+        if ds != other or v != "genuine":
+            continue
+        b = idx.get(("LOCAL", slug, "genuine"))
+        if b is None:
+            continue
+        n += 1
+        if abs(r["U_sd"] - b["U_sd"]) < 1e-9:
+            ident += 1
+    print(f"genuine {other} vs LOCAL identical U_sd: {ident}/{n}")
+
+# n-sensitivity of the raw dispersion statistics on genuine albums
+gen = [idx[(d, s, "control-flac1644")] for d, s in arm_gen]
+for stat in ("U_sd", "U_iqr", "U_mad", "shape_mpd_ul", "shape_mpd_hi",
+             "k4_U_sd", "k4_shape_mpd_ul"):
+    xs = [(r["n"], r.get(stat)) for r in gen if r.get(stat) is not None]
+    a = np.array([x[0] for x in xs], float)
+    b = np.array([x[1] for x in xs], float)
+    print(f"{stat:18s} n={len(a):3d} spearman(n, stat)={np_spear(a, b):+.3f}"
+          if False else
+          f"{stat:18s} n={len(a):3d} corr(n,stat)={np.corrcoef(a, b)[0,1]:+.3f} "
+          f"min={b.min():.2f} med={np.median(b):.2f} max={b.max():.2f}")

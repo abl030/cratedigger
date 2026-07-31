@@ -1,0 +1,13 @@
+cratedigger dev shell — run: python3 -m unittest discover -s tests -t . -v
+2014 - Syro [WARPCD247]                        n=12 cands= 2 best=off+667 v1=12/12 v2=12/12 conf=200
+1984 - Tabula Rasa                             n= 4 cands= 3 best=off-78 v1=4/4 v2=0/4 conf=1
+1995 - Tri Repetae [WARPCD38]                  n=10 cands= 5 best=off-222 v1=10/10 v2=10/10 conf=44
+2000 - The Pointless Gift                      n=12 cands= 1 best=off+664 v1=12/12 v2=12/12 conf=1
+2006 - Ten Lives                               n=12 cands= 1 best=off+667 v1=12/12 v2=0/12 conf=2
+1998 - Voices of Gondwana                      n=12 cands= 0 best=NONE
+2017 - New Light New Hope                      n=21 cands= 0 best=NONE
+2014 - Ruins                                   n= 8 cands= 1 best=off+108 v1=7/8 v2=8/8 conf=38
+1992 - Slanted and Enchanted                   n=14 cands= 1 best=off-30 v1=14/14 v2=14/14 conf=1
+1999 - Terror Twilight                         n=11 cands= 7 best=off+6 v1=11/11 v2=11/11 conf=95
+1999 - Californication                         n=15 cands=23 best=off+697 v1=15/15 v2=15/15 conf=200
+1996 - Feed Me Weird Things                    n=12 cands= 3 best=off+102 v1=12/12 v2=12/12 conf=65

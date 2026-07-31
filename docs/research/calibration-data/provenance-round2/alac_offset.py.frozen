@@ -1,0 +1,59 @@
+"""Exact AR read-offset scan for the ALAC albums that have an AccurateRip block."""
+import json
+import os
+import subprocess
+import sys
+
+import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from provlib import ar_track_index, as_dwords, build_toc, fetch_ar_cached, parse_ar  # noqa: E402
+from offsetcheck import ar_at  # noqa: E402
+from offsetscan import scan  # noqa: E402
+from alacrun import decode_m4a  # noqa: E402
+
+OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out")
+
+with open(os.path.join(OUT, "alac.json"), encoding="utf-8") as fh:
+    recs = json.load(fh)
+res = {}
+for r in recs:
+    if not r["ar_toc_hit"]:
+        continue
+    d = r["path"]
+    files = sorted(f for f in os.listdir(d) if f.lower().endswith(".m4a"))
+    parts = [as_dwords(decode_m4a(os.path.join(d, f))) for f in files]
+    n = len(parts)
+    tlens = [len(p) for p in parts]
+    lens = tlens
+    toc = build_toc(lens)
+    _u, blob, _s = fetch_ar_cached(toc)
+    aridx = ar_track_index(parse_ar(blob))
+    starts = np.cumsum([0] + tlens[:-1])
+    stream = np.concatenate(parts)
+    del parts
+    cands = set()
+    for probe in {n // 2, max(0, n - 2)}:
+        want = set(aridx.get(probe, {}))
+        if want:
+            cands |= set(scan(stream, int(starts[probe]), tlens[probe], want))
+    conf = []
+    for off in sorted(cands):
+        h1 = h2 = 0
+        cf = []
+        for i in range(n):
+            v1, v2 = ar_at(stream, int(starts[i]) + off, tlens[i], i + 1, n)
+            slot = aridx.get(i, {})
+            if v1 in slot:
+                h1 += 1
+                cf.append(slot[v1])
+            if v2 in slot:
+                h2 += 1
+                cf.append(slot[v2])
+        conf.append({"offset": off, "v1": h1, "v2": h2, "n": n,
+                     "max_conf": max(cf, default=0)})
+    res[r["album"]] = conf
+    print(f"{r['album'][:50]:50s} n={n} cands={len(cands)} best="
+          f"{max(conf, key=lambda o: o['v1']+o['v2'], default=None)}", flush=True)
+with open(os.path.join(OUT, "alac_offsets.json"), "w", encoding="utf-8") as fh:
+    json.dump(res, fh, indent=1)

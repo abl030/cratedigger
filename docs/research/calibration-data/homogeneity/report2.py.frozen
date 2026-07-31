@@ -1,0 +1,144 @@
+"""Composition controls + the operationally-conditional table.
+
+(1) Cross-corpus genuine FP: reference quantiles from the 100 arm albums,
+    applied to 37 out-of-corpus genuine albums.  This is the real deployment
+    condition and the LOAO-within-corpus FP understates it.
+(2) Conditional table: a new deny-leg only matters on albums the gate would
+    otherwise PROMOTE.  Recall denominator = launders that escaped the gate;
+    FP denominator = genuine albums the gate currently proves.
+(3) Multivariate grouped-LOAO per-variant recall.
+"""
+import gzip
+import json
+import numpy as np
+
+import eval as E
+
+CAL = "/home/abl030/cratedigger/docs/research/calibration-data"
+E.add_derived()
+rows, idx = E.rows, E.idx
+
+# ---------------------------------------------------------- gate verdicts
+DENIED = {}
+feats = json.load(gzip.open(CAL + "/floor-analysis/feats.json.gz", "rt"))
+DSMAP = {"APPLE": "MAPPLE"}
+for f in feats:
+    ds = DSMAP.get(f["ds"], f["ds"])
+    DENIED[(ds, f["slug"], f["variant"])] = bool(f["w0denied@62"])
+for tag, ds in (("local", "LOCAL"), ("localw", "LOCALW"), ("apple", "MAPPLE"),
+                ("pilot", "PILOT")):
+    for g in json.load(open(CAL + "/launder-matrix/gate-%s.json" % tag)):
+        DENIED[(ds, g["slug"], g["variant"])] = bool(g["denied@62"])
+for tag, ds in (("apple", "APPLEA"), ("apple2", "APPLEB"), ("apple24", "APPLE24")):
+    for g in json.load(open(CAL + "/apple-arm/gate-%s.json" % tag)):
+        DENIED[(ds, g["slug"], g["variant"])] = bool(g["denied@62"])
+print("gate verdicts loaded:", len(DENIED))
+
+
+def proved(r):
+    d = DENIED.get((r["ds"], r["slug"], r["variant"]))
+    return (d is False)
+
+
+# --------------------------------------------- (1) cross-corpus genuine FP
+def cross_corpus(stat, alphas=(0.01, 0.05, 0.10, 0.20)):
+    ref = [r for t, r in E.GENUINE if t == "ARM" and r.get(stat) is not None]
+    test = [r for t, r in E.GENUINE
+            if t in ("MTX", "APPB") and r.get(stat) is not None
+            and not E.is_hires(r["slug"])]
+    pool = np.array([r[stat] for r in ref], float)
+    out = []
+    for a in alphas:
+        tau = np.quantile(pool, 1 - a)
+        hits = sum(1 for r in test if r[stat] > tau)
+        out.append((a, hits, len(test), 100.0 * hits / len(test)))
+    return out
+
+
+print("\n=== (1) CROSS-CORPUS GENUINE FALSE-POSITIVE RATE")
+print("reference quantiles fitted on the 100 arm genuine albums; applied to the")
+print("37 genuine albums from the other two corpora (17 matrix + 20 apple-arm B).")
+print("%-24s %s" % ("statistic", "  ".join("a=%.2f" % a for a in (0.01, 0.05, 0.10, 0.20))))
+for stat in ("U_sd", "shape_mpd_hi", "shape_mpd_ul", "k4_shape_mpd_ul",
+             "d18_195_sd", "rat_mpdhi_over_mpdlo", "ref_sd"):
+    r = cross_corpus(stat)
+    print("%-24s %s" % (stat, "  ".join("%5.1f%%" % x[3] for x in r)),
+          "   (nominal FP would be 1/5/10/20%)")
+
+# ------------------------------------------- (2) conditional operating table
+ESC_SPEC = dict((l, s) for l, s, _c in E.FLAC_LAUNDER)
+ESC_SPEC.update(dict((l, s) for l, s, _c in E.NATIVE_LAUNDER))
+
+
+def conditional(stat, alphas=(0.01, 0.05, 0.10, 0.20)):
+    gen_all = [r for _t, r in E.GENUINE
+               if r.get(stat) is not None and not E.is_hires(r["slug"])]
+    gen_proved = [r for r in gen_all if proved(r)]
+    print("\n=== (2) CONDITIONAL TABLE: %s  (HIGH dispersion => launder)" % stat)
+    print("genuine albums the gate currently PROVES: %d of %d"
+          % (len(gen_proved), len(gen_all)))
+    hdr = "%-6s %-16s" % ("alpha", "newFP/proved")
+    labels = [l for l, _s, _c in E.FLAC_LAUNDER + E.NATIVE_LAUNDER]
+    for l in labels:
+        hdr += " %-13s" % l[:13]
+    print(hdr)
+    for a in alphas:
+        # threshold fitted LOAO on ALL genuine albums (the deployable reference)
+        f = 0
+        for r in gen_proved:
+            tau = np.quantile(E.gen_pool(stat, exclude_slug=r["slug"]), 1 - a)
+            f += int(r[stat] > tau)
+        line = "%-6.2f %4d/%-4d %5.1f%%" % (a, f, len(gen_proved),
+                                            100.0 * f / max(1, len(gen_proved)))
+        for l in labels:
+            lr = [r for r in E.launder_rows(ESC_SPEC[l], stat) if proved(r)]
+            h = 0
+            for r in lr:
+                tau = np.quantile(E.gen_pool(stat, exclude_slug=r["slug"]), 1 - a)
+                h += int(r[stat] > tau)
+            line += " %5.1f%% %-6s" % ((100.0 * h / len(lr) if lr else 0.0),
+                                       "%d/%d" % (h, len(lr)))
+        print(line)
+
+
+for stat in ("rat_mpdhi_over_mpdlo", "shape_mpd_hi", "k4_shape_mpd_ul", "U_sd",
+             "d18_195_sd"):
+    conditional(stat)
+
+# ---------------------------------- (3) multivariate grouped-LOAO per variant
+print("\n=== (3) MULTIVARIATE grouped-LOAO, per-variant recall")
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
+
+FEATS = [f for f in E.CANDIDATES + list(E.RATIOS) + list(E.DIFFS)
+         if not f.startswith("k8_")]
+recs = []
+for _t, r in E.GENUINE:
+    if E.is_hires(r["slug"]):
+        continue
+    recs.append((r, 0, "genuine"))
+for label in E.ESCAPE:
+    for r in E.launder_rows(ESC_SPEC[label], "U_sd"):
+        recs.append((r, 1, label))
+X, y, grp, lab = [], [], [], []
+for r, yy, ll in recs:
+    v = [r.get(f) for f in FEATS]
+    if any(x is None or not np.isfinite(x) for x in v):
+        continue
+    X.append(v); y.append(yy); grp.append(r["slug"]); lab.append(ll)
+X = np.array(X, float); y = np.array(y); grp = np.array(grp); lab = np.array(lab)
+scores = np.zeros(len(y))
+for g in sorted(set(grp)):
+    te = grp == g
+    tr = ~te
+    sc = StandardScaler().fit(X[tr])
+    m = LogisticRegression(max_iter=5000, C=0.3).fit(sc.transform(X[tr]), y[tr])
+    scores[te] = m.decision_function(sc.transform(X[te]))
+neg = scores[y == 0]
+for alpha in (0.05, 0.10, 0.20):
+    tau = np.quantile(neg, 1 - alpha)
+    print("  genuine FP %5.1f%%:" % (100.0 * (neg > tau).mean()), end=" ")
+    for label in E.ESCAPE:
+        m = lab == label
+        print("%s %.0f%%" % (label, 100.0 * (scores[m] > tau).mean()), end="  ")
+    print()

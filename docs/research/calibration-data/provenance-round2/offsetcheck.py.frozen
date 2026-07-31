@@ -1,0 +1,89 @@
+"""Validate candidate ARv1 read-offsets across ALL tracks of an album.
+
+A single probe-track hit at some offset is weak. A real drive-offset rip
+matches every track at the SAME offset. Recompute ARv1+ARv2 for every track
+at each candidate offset and count hits.
+"""
+import json
+import os
+import sys
+
+import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from provlib import (M32, ar_track_index, as_dwords, build_toc, decode,  # noqa: E402
+                     fetch_ar_cached, parse_ar, toc_from_dir)
+
+SD = 588
+CHUNK = 4_000_000
+OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out")
+
+
+def ar_at(stream, start, length, track_number, total_tracks):
+    """ARv1/v2 of the L samples at stream[start:start+L], zero-padded."""
+    lo = 5 * SD if track_number == 1 else 1   # arver _audio.c sum_from
+    hi = length - 5 * SD if track_number == total_tracks else length
+    v1 = v2lo = v2hi = 0
+    for base in range(0, length, CHUNK):
+        end = min(base + CHUNK, length)
+        a = max(lo, base + 1)
+        b = min(hi, end)
+        if b < a:
+            continue
+        gs, ge = start + a - 1, start + b
+        seg = np.zeros(b - a + 1, dtype=np.uint64)
+        cs, ce = max(gs, 0), min(ge, len(stream))
+        if ce > cs:
+            seg[cs - gs:ce - gs] = stream[cs:ce].astype(np.uint64)
+        mul = np.arange(a, b + 1, dtype=np.uint64)
+        prod = seg * mul
+        v1 += int(np.sum(prod, dtype=object))
+        v2lo += int(np.sum(prod & np.uint64(M32), dtype=object))
+        v2hi += int(np.sum(prod >> np.uint64(32), dtype=object))
+    return v1 & M32, (v2lo + v2hi) & M32
+
+
+def main():
+    with open(os.path.join(OUT, "fullrun2.json"), encoding="utf-8") as fh:
+        recs = json.load(fh)
+    results = {}
+    for r in recs:
+        cands = r.get("ar_offset_hits")
+        if not cands or cands == "memerr":
+            continue
+        d = r["path"]
+        files, meta, lens = toc_from_dir(d)
+        n = len(files)
+        toc = build_toc(lens)
+        _u, blob, _s = fetch_ar_cached(toc)
+        aridx = ar_track_index(parse_ar(blob))
+        parts = [as_dwords(decode(os.path.join(d, f))) for f in files]
+        tlens = [len(p) for p in parts]
+        starts = np.cumsum([0] + tlens[:-1])
+        stream = np.concatenate(parts)
+        del parts
+        out = []
+        for off in sorted(set(cands))[:6]:
+            h1 = h2 = 0
+            confs = []
+            for i in range(n):
+                v1, v2 = ar_at(stream, int(starts[i]) + off, tlens[i], i + 1, n)
+                slot = aridx.get(i, {})
+                if v1 in slot:
+                    h1 += 1
+                    confs.append(slot[v1])
+                if v2 in slot:
+                    h2 += 1
+                    confs.append(slot[v2])
+            out.append({"offset": off, "v1": h1, "v2": h2, "n": n,
+                        "max_conf": max(confs, default=0)})
+            print(f"{r['album'][:46]:46s} off={off:+6d} v1={h1}/{n} v2={h2}/{n} "
+                  f"maxconf={max(confs, default=0)}", flush=True)
+        del stream
+        results[r["album"]] = out
+    with open(os.path.join(OUT, "offsets.json"), "w", encoding="utf-8") as fh:
+        json.dump(results, fh, indent=1)
+
+
+if __name__ == "__main__":
+    main()

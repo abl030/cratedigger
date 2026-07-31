@@ -1,0 +1,221 @@
+"""Corrected whole-library AccurateRip (v1+v2) + CTDB verification, 38 FLAC albums.
+
+AccurateRip: `checksum` field holds EITHER the v1 or v2 value (arver 1.5.0
+disc/database.py). Both computed checksums are looked up in that one field;
+`checksum_450` is the frame-450 offset CRC and is never compared.
+
+CTDB: plain zlib CRC-32 over the disc PCM trimmed to
+[stride, total - stride - (total % stride)) samples, stride = 5880 samples.
+Derived + validated against Death Magnetic (AR conf 200) and Ambient 1.
+"""
+import json
+import os
+import sys
+import xml.etree.ElementTree as ET
+import zlib
+
+import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from provlib import (M32, album_dirs, ar_track_index, as_dwords, build_toc,  # noqa: E402
+                     ctdb_fetch_cached, decode, fetch_ar_cached, mb_discid,
+                     parse_ar, toc_from_dir)
+
+BPS = 4
+STRIDE = 5880
+SD = 588          # sector in samples
+CHUNK = 4_000_000
+OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out")
+
+
+def ar_checksums_streamed(arr, track_number, total_tracks):
+    n = len(arr)
+    lo = 5 * SD if track_number == 1 else 1   # arver _audio.c sum_from
+    hi = n - 5 * SD if track_number == total_tracks else n
+    v1 = 0
+    v2lo = v2hi = 0
+    for base in range(0, n, CHUNK):
+        end = min(base + CHUNK, n)
+        a = max(lo, base + 1)
+        b = min(hi, end)
+        if b < a:
+            continue
+        vals = arr[a - 1:b].astype(np.uint64)
+        mul = np.arange(a, b + 1, dtype=np.uint64)
+        prod = vals * mul
+        v1 += int(np.sum(prod, dtype=object))
+        v2lo += int(np.sum(prod & np.uint64(M32), dtype=object))
+        v2hi += int(np.sum(prod >> np.uint64(32), dtype=object))
+    return v1 & M32, (v2lo + v2hi) & M32
+
+
+def ctdb_entries(xml):
+    try:
+        root = ET.fromstring(xml)
+    except ET.ParseError:
+        return None
+    out = []
+    for e in root.iter():
+        if not e.tag.endswith("entry"):
+            continue
+        a = e.attrib
+        if "trackcrcs" not in a:
+            continue
+        out.append({
+            "confidence": int(a.get("confidence", "0")),
+            "crc32": int(a["crc32"], 16) if a.get("crc32") else None,
+            "id": a.get("id"),
+            "npar": a.get("npar"),
+            "stride": int(a.get("stride", STRIDE)),
+            "trackcrcs": [int(x, 16) for x in a["trackcrcs"].split()],
+        })
+    return out
+
+
+def offset_search(files, d, probe, want, radius=3000):
+    """ARv1 read-offset search around one probe track, prefix sums."""
+    parts = []
+    base = 0
+    for i, f in enumerate(files):
+        raw = decode(os.path.join(d, f))
+        parts.append(as_dwords(raw))
+    tlens = [len(p) for p in parts]
+    starts = np.cumsum([0] + tlens[:-1])
+    stream = np.concatenate(parts)
+    del parts
+    total = len(stream)
+    a0 = int(starts[probe])
+    L = tlens[probe]
+    w0 = max(0, a0 - radius)
+    w1 = min(total, a0 + L + radius)
+    w = stream[w0:w1].astype(np.uint64)
+    del stream
+    j = np.arange(1, len(w) + 1, dtype=np.uint64)
+    s0 = np.concatenate(([0], np.cumsum(w)))
+    s1 = np.concatenate(([0], np.cumsum((j * w) & np.uint64(M32))))
+    hits = []
+    for off in range(-radius, radius + 1):
+        a = a0 + off - w0
+        b = a + L
+        if a < 0 or b > len(w):
+            continue
+        val = ((int(s1[b]) - int(s1[a])) - a * (int(s0[b]) - int(s0[a]))) & M32
+        if val in want:
+            hits.append(off)
+    return hits
+
+
+def run_album(d):
+    name = os.path.basename(d)
+    files, meta, lens = toc_from_dir(d)
+    n = len(files)
+    aligned = all(t % SD == 0 and sr == 44100 for (_f, sr, _c, _b, t) in meta)
+    toc = build_toc(lens)
+    rec = {"album": name, "path": d, "tracks": n, "sector_aligned": aligned,
+           "mb_discid": mb_discid(toc), "toc": toc}
+
+    _u, blob, arsrc = fetch_ar_cached(toc)
+    blocks = parse_ar(blob) if blob else []
+    aridx = ar_track_index(blocks)
+    rec["ar_blocks"] = len(blocks)
+    rec["ar_toc_hit"] = bool(blob)
+
+    _u2, xml, ctsrc = ctdb_fetch_cached(toc)
+    ents = ctdb_entries(xml) if not xml.startswith("<<ERROR") else None
+    rec["ctdb_error"] = xml[:120] if xml.startswith("<<ERROR") else (
+        None if ents is not None else "unparseable")
+    ents = ents or []
+    rec["ctdb_entries"] = len(ents)
+    rec["ctdb_top_conf"] = max((e["confidence"] for e in ents), default=0)
+    ct_want = {}
+    for e in ents:
+        for i, c in enumerate(e["trackcrcs"]):
+            ct_want.setdefault(i, {})
+            ct_want[i][c] = max(ct_want[i].get(c, 0), e["confidence"])
+
+    total_samples = sum(lens)
+    lead = STRIDE
+    tail = STRIDE + (total_samples % STRIDE)
+    lo_b, hi_b = lead * BPS, (total_samples - tail) * BPS
+
+    ar_v1 = ar_v2 = 0
+    ar_v1_conf = ar_v2_conf = 0
+    ct_hits = 0
+    ct_conf = 0
+    disc_crc = 0
+    pos = 0
+    per_track = []
+    for i, f in enumerate(files):
+        raw = decode(os.path.join(d, f))
+        arr = as_dwords(raw)
+        v1, v2 = ar_checksums_streamed(arr, i + 1, n)
+        del arr
+        a = max(lo_b, pos)
+        b = min(hi_b, pos + len(raw))
+        chunk = raw[a - pos:b - pos] if b > a else b""
+        tc = zlib.crc32(chunk) & M32
+        disc_crc = zlib.crc32(chunk, disc_crc) & M32
+        pos += len(raw)
+        del raw, chunk
+        slot = aridx.get(i, {})
+        h1 = v1 in slot
+        h2 = v2 in slot
+        if h1:
+            ar_v1 += 1
+            ar_v1_conf = max(ar_v1_conf, slot[v1])
+        if h2:
+            ar_v2 += 1
+            ar_v2_conf = max(ar_v2_conf, slot[v2])
+        cslot = ct_want.get(i, {})
+        hc = tc in cslot
+        if hc:
+            ct_hits += 1
+            ct_conf = max(ct_conf, cslot[tc])
+        per_track.append({"n": i + 1, "v1": v1, "v2": v2, "ctdb_crc": tc,
+                          "ar_v1_hit": h1, "ar_v2_hit": h2,
+                          "ar_conf": max(slot.get(v1, 0), slot.get(v2, 0)),
+                          "ctdb_hit": hc, "ctdb_conf": cslot.get(tc, 0)})
+
+    rec["ar_v1_hits"] = ar_v1
+    rec["ar_v2_hits"] = ar_v2
+    rec["ar_v1_conf"] = ar_v1_conf
+    rec["ar_v2_conf"] = ar_v2_conf
+    rec["ctdb_track_hits"] = ct_hits
+    rec["ctdb_track_conf"] = ct_conf
+    rec["ctdb_disc_crc"] = disc_crc
+    disc_match = [e for e in ents if e["crc32"] == disc_crc]
+    rec["ctdb_disc_match"] = bool(disc_match)
+    rec["ctdb_disc_conf"] = max((e["confidence"] for e in disc_match), default=0)
+    rec["per_track"] = per_track
+
+    rec["ar_offset_hits"] = None
+    if blocks and ar_v1 == 0 and ar_v2 == 0 and n >= 2:
+        probe = n // 2
+        want = set(aridx.get(probe, {}))
+        if want:
+            try:
+                rec["ar_offset_hits"] = offset_search(files, d, probe, want)
+            except MemoryError:
+                rec["ar_offset_hits"] = "memerr"
+    return rec
+
+
+def main():
+    dirs = album_dirs()
+    os.makedirs(OUT, exist_ok=True)
+    recs = []
+    for d in dirs:
+        try:
+            r = run_album(d)
+        except Exception as exc:                          # noqa: BLE001
+            r = {"album": os.path.basename(d), "path": d, "error": repr(exc)}
+        recs.append(r)
+        print(json.dumps({k: v for k, v in r.items()
+                          if k not in ("per_track", "toc")}), flush=True)
+    with open(os.path.join(OUT, "fullrun2.json"), "w", encoding="utf-8") as fh:
+        json.dump(recs, fh, indent=1)
+    print(f"\nwrote {len(recs)} records")
+
+
+if __name__ == "__main__":
+    main()

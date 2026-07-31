@@ -1,0 +1,57 @@
+cratedigger dev shell — run: python3 -m unittest discover -s tests -t . -v
+============================================================================================
+A. THRESHOLD STABILITY -- pooled zero-track-FP lambda, dropping albums one at a time
+============================================================================================
+
+proba: pooled zero-FP lambda over all 17 albums = 0.1082
+  LOO lambda range across the 17 held-out fits: 0.1046 .. 0.1082  (spread 3.3% of the max)
+    drop 8918: lambda -> 0.1046  (-3.3%)
+    drop 8916: lambda -> 0.1082  (+0.0%)
+    drop 8917: lambda -> 0.1082  (+0.0%)
+    drop 8919: lambda -> 0.1082  (+0.0%)
+  albums that must be removed before lambda halves: 2  (removed: ['8918', '8919'])
+  top-5 genuine albums by max: 8918=0.1082, 8919=0.1046, 8917=0.0252, 8930=0.0228, 8929=0.0225
+  ratio max/2nd = 1.034   max/median-album = 5.012
+
+z: pooled zero-FP lambda over all 17 albums = 6.9140
+  LOO lambda range across the 17 held-out fits: 6.7660 .. 6.9140  (spread 2.1% of the max)
+    drop 8930: lambda -> 6.7660  (-2.1%)
+    drop 8916: lambda -> 6.9140  (+0.0%)
+    drop 8917: lambda -> 6.9140  (+0.0%)
+    drop 8918: lambda -> 6.9140  (+0.0%)
+  albums that must be removed before lambda halves: 16  (removed: ['8916', '8917', '8918', '8919', '8921', '8922', '8923', '8924', '8925', '8926', '8928', '8929', '8930', '8932', '8933', '8934', '8935'])
+  top-5 genuine albums by max: 8930=6.9140, 8923=6.7660, 8929=6.6560, 8925=6.6420, 8934=6.5120
+  ratio max/2nd = 1.022   max/median-album = 1.114
+
+============================================================================================
+B. WILD ARM -- firing rate of the two rules on 1136 unlabelled real peer FLACs
+============================================================================================
+  proba  L=0.1082   tracks over:    0/1136 (  0.0%)   folders with >=1 over: 0/115 (  0.0%)
+  z      L=6.9140   tracks over:   14/1136 (  1.2%)   folders with >=1 over: 11/115 (  9.6%)
+  z      L=7.2597 (m=1.05)  tracks over:   11/1136 (  1.0%)
+  z      L=7.6054 (m=1.1)  tracks over:    7/1136 (  0.6%)
+  z      L=10.3710 (m=1.5)  tracks over:    1/1136 (  0.1%)
+
+============================================================================================
+C. GATE UNION -- of the albums a launder gets past the SPECTRAL GATE (T=62,
+   genuine-provable 44.1k/16 cohort), how many ALSO survive Derrien?
+============================================================================================
+genuine-provable albums at T=62 (44.1k/16): 11 -> ['8916', '8917', '8918', '8921', '8922', '8923', '8928', '8929', '8930', '8933', '8934']
+
+variant         gate esc  proba max > 0.1082 (po  proba 2nd > 0.0500 (FI  proba 2nd > 0.0312 (po  z max > 6.9140 (pooled  z max > 7.2597 (m=1.05  z max > 10.371 (m=1.50
+                                   survive both            survive both            survive both            survive both            survive both            survive both
+aacffm-256      10/11              9/10 ( 90.0%)           8/10 ( 80.0%)           8/10 ( 80.0%)           3/10 ( 30.0%)           3/10 ( 30.0%)           6/10 ( 60.0%)
+aacffm-320      10/11              9/10 ( 90.0%)           9/10 ( 90.0%)           7/10 ( 70.0%)           2/10 ( 20.0%)           2/10 ( 20.0%)           4/10 ( 40.0%)
+qaac-cvbr256    10/11              0/10 (  0.0%)           0/10 (  0.0%)           0/10 (  0.0%)           0/10 (  0.0%)           0/10 (  0.0%)           0/10 (  0.0%)
+qaac-cvbr320    10/11              7/10 ( 70.0%)           0/10 (  0.0%)           0/10 (  0.0%)           0/10 (  0.0%)           0/10 (  0.0%)           0/10 (  0.0%)
+qaac-tvbr91      0/11              0/0  (  0.0%)           0/0  (  0.0%)           0/0  (  0.0%)           0/0  (  0.0%)           0/0  (  0.0%)           0/0  (  0.0%)
+qaac-abr192      0/11              0/0  (  0.0%)           0/0  (  0.0%)           0/0  (  0.0%)           0/0  (  0.0%)           0/0  (  0.0%)           0/0  (  0.0%)
+qaac-cbr128      0/11              0/0  (  0.0%)           0/0  (  0.0%)           0/0  (  0.0%)           0/0  (  0.0%)           0/0  (  0.0%)           0/0  (  0.0%)
+lame-v0         10/11             10/10 (100.0%)          10/10 (100.0%)           9/10 ( 90.0%)           8/10 ( 80.0%)           9/10 ( 90.0%)          10/10 (100.0%)
+vorbis-q10      10/11             10/10 (100.0%)          10/10 (100.0%)          10/10 (100.0%)          10/10 (100.0%)          10/10 (100.0%)          10/10 (100.0%)
+null-flac       11/11             11/11 (100.0%)          11/11 (100.0%)          11/11 (100.0%)          11/11 (100.0%)          11/11 (100.0%)          11/11 (100.0%)
+genuine         11/11             11/11 (100.0%)          11/11 (100.0%)          11/11 (100.0%)          11/11 (100.0%)          11/11 (100.0%)          11/11 (100.0%)
+
+  'survive both' = launder albums that reach PROOF under the frozen spectral gate AND
+  are NOT flagged by the Derrien rule.  Lower is better.  genuine/null-flac rows are the
+  false-positive check: they must stay at 11/11.

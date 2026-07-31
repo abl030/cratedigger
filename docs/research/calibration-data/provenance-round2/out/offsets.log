@@ -1,0 +1,10 @@
+cratedigger dev shell — run: python3 -m unittest discover -s tests -t . -v
+2014 - Syro [WARPCD247]                        off=  +667 v1=12/12 v2=12/12 maxconf=200
+2014 - Syro [WARPCD247]                        off=  +673 v1=12/12 v2=12/12 maxconf=163
+1995 - Tri Repetae [WARPCD38]                  off= -2037 v1=10/10 v2=10/10 maxconf=32
+1999 - Californication                         off= +2005 v1=15/15 v2=0/15 maxconf=3
+1999 - Californication                         off= +2007 v1=13/15 v2=0/15 maxconf=2
+1999 - Californication                         off= +2008 v1=15/15 v2=15/15 maxconf=23
+1999 - Californication                         off= +2028 v1=14/15 v2=6/15 maxconf=3
+1999 - Californication                         off= +2079 v1=6/15 v2=0/15 maxconf=2
+1999 - Californication                         off= +2089 v1=15/15 v2=0/15 maxconf=2

@@ -1,0 +1,97 @@
+cratedigger dev shell — run: python3 -m unittest discover -s tests -t . -v
+================================================================================================
+TRACK-LEVEL GPD TAIL FIT on the genuine z control (197 tracks / 17 albums)
+================================================================================================
+  u=5.00  n_exc= 45  xi=-0.304 sigma=0.836  P(z>u)=0.2284
+      L= 6.914: P_track=4.527e-03  P_album(11.6 trk)=5.122e-02  ->   256.08 FP albums / 5000
+      L= 7.260: P_track=7.752e-04  P_album(11.6 trk)=8.946e-03  ->    44.73 FP albums / 5000
+      L= 8.300: P_track=0.000e+00  P_album(11.6 trk)=0.000e+00  ->     0.00 FP albums / 5000
+      L=10.370: P_track=0.000e+00  P_album(11.6 trk)=0.000e+00  ->     0.00 FP albums / 5000
+      L=12.000: P_track=0.000e+00  P_album(11.6 trk)=0.000e+00  ->     0.00 FP albums / 5000
+      L=15.000: P_track=0.000e+00  P_album(11.6 trk)=0.000e+00  ->     0.00 FP albums / 5000
+
+  u=5.25  n_exc= 28  xi=-0.768 sigma=1.302  P(z>u)=0.1421
+      L= 6.914: P_track=7.554e-04  P_album(11.6 trk)=8.719e-03  ->    43.59 FP albums / 5000
+      L= 7.260: P_track=0.000e+00  P_album(11.6 trk)=0.000e+00  ->     0.00 FP albums / 5000
+      L= 8.300: P_track=0.000e+00  P_album(11.6 trk)=0.000e+00  ->     0.00 FP albums / 5000
+      L=10.370: P_track=0.000e+00  P_album(11.6 trk)=0.000e+00  ->     0.00 FP albums / 5000
+      L=12.000: P_track=0.000e+00  P_album(11.6 trk)=0.000e+00  ->     0.00 FP albums / 5000
+      L=15.000: P_track=0.000e+00  P_album(11.6 trk)=0.000e+00  ->     0.00 FP albums / 5000
+
+  u=5.50  n_exc= 20  xi=-1.101 sigma=1.557  P(z>u)=0.1015
+      L= 6.914: P_track=3.294e-16  P_album(11.6 trk)=3.886e-15  ->     0.00 FP albums / 5000
+      L= 7.260: P_track=0.000e+00  P_album(11.6 trk)=0.000e+00  ->     0.00 FP albums / 5000
+      L= 8.300: P_track=0.000e+00  P_album(11.6 trk)=0.000e+00  ->     0.00 FP albums / 5000
+      L=10.370: P_track=0.000e+00  P_album(11.6 trk)=0.000e+00  ->     0.00 FP albums / 5000
+      L=12.000: P_track=0.000e+00  P_album(11.6 trk)=0.000e+00  ->     0.00 FP albums / 5000
+      L=15.000: P_track=0.000e+00  P_album(11.6 trk)=0.000e+00  ->     0.00 FP albums / 5000
+
+  u=5.75  n_exc= 18  xi=-0.848 sigma=1.000  P(z>u)=0.0914
+      L= 6.914: P_track=5.257e-04  P_album(11.6 trk)=6.075e-03  ->    30.37 FP albums / 5000
+      L= 7.260: P_track=0.000e+00  P_album(11.6 trk)=0.000e+00  ->     0.00 FP albums / 5000
+      L= 8.300: P_track=0.000e+00  P_album(11.6 trk)=0.000e+00  ->     0.00 FP albums / 5000
+      L=10.370: P_track=0.000e+00  P_album(11.6 trk)=0.000e+00  ->     0.00 FP albums / 5000
+      L=12.000: P_track=0.000e+00  P_album(11.6 trk)=0.000e+00  ->     0.00 FP albums / 5000
+      L=15.000: P_track=0.000e+00  P_album(11.6 trk)=0.000e+00  ->     0.00 FP albums / 5000
+
+================================================================================================
+EMPIRICAL CORROBORATION -- wild arm (1136 unlabelled real peer FLACs)
+================================================================================================
+  z >  6.500: genuine control   6/197 ( 3.05%)   wild  28/1136 ( 2.46%)
+  z >  6.914: genuine control   0/197 ( 0.00%)   wild  14/1136 ( 1.23%)
+  z >  7.260: genuine control   0/197 ( 0.00%)   wild  11/1136 ( 0.97%)
+  z >  8.300: genuine control   0/197 ( 0.00%)   wild   1/1136 ( 0.09%)
+  z > 10.370: genuine control   0/197 ( 0.00%)   wild   1/1136 ( 0.09%)
+  z > 12.000: genuine control   0/197 ( 0.00%)   wild   0/1136 ( 0.00%)
+  z > 15.000: genuine control   0/197 ( 0.00%)   wild   0/1136 ( 0.00%)
+  z > 20.000: genuine control   0/197 ( 0.00%)   wild   0/1136 ( 0.00%)
+
+================================================================================================
+FINAL OPERATING FRONTIER -- one global rule, LOO-honest, priced at library scale
+================================================================================================
+rule                          FP/5000 (modelled)  obs FP aacffm-256 aacffm-320 qaac-cvbr256 qaac-cvbr320 qaac-tvbr91 qaac-abr192 qaac-cbr128
+BASELINE  proba 2nd-track > 0.0500      n/a (see note)     0/17      2/17      1/17     17/17     17/17     17/17     17/17     17/17
+proba max > 0.1082                n/a (see note)     0/17      1/17      1/17     17/17      6/17     17/17     17/17     16/17
+z max > 6.914                               0.00     0/17     12/17     12/17     17/17     17/17     17/17     17/17     17/17
+z max > 8.297                               0.00     0/17      8/17      9/17     17/17     17/17     17/17     17/17     17/17
+z max > 10.371                              0.00     0/17      5/17      7/17     17/17     17/17     17/17     17/17     17/17
+z max > 15.0                                0.00     0/17      3/17      4/17     17/17     17/17     17/17     17/17     17/17
+z max > 20.0                                0.00     0/17      2/17      1/17     17/17     17/17     17/17     17/17     16/17
+offset k>=3                                 1.05     0/17      7/17      5/17     17/17     17/17     17/17     17/17     17/17
+offset k>=4                                 0.00     0/17      4/17      4/17     17/17     17/17     17/17     17/17     16/17
+offset k>=5                                 0.00     0/17      3/17      2/17     15/17     15/17     15/17     15/17     14/17
+z>10.371 OR offset k>=4                     0.00     0/17      6/17      8/17     17/17     17/17     17/17     17/17     17/17
+z>15.0   OR offset k>=4                     0.00     0/17      6/17      6/17     17/17     17/17     17/17     17/17     17/17
+z>20.0   OR offset k>=4                     0.00     0/17      5/17      4/17     17/17     17/17     17/17     17/17     16/17
+z>20.0   OR offset k>=3                     1.05     0/17      8/17      5/17     17/17     17/17     17/17     17/17     17/17
+
+non-AAC / control behaviour of the same rules:
+rule                             genuine     lame-v0   vorbis-q4    opus-256
+BASELINE  proba 2nd-track > 0.0500        0/17        0/17        8/17        0/17
+proba max > 0.1082                  0/17        0/17        2/17        1/17
+z max > 6.914                       0/17        2/17        3/17        3/17
+z max > 8.297                       0/17        0/17        1/17        0/17
+z max > 10.371                      0/17        0/17        1/17        0/17
+z max > 15.0                        0/17        0/17        0/17        0/17
+z max > 20.0                        0/17        0/17        0/17        0/17
+offset k>=3                         0/17        0/17        1/17        0/17
+offset k>=4                         0/17        0/17        1/17        0/17
+offset k>=5                         0/17        0/17        1/17        0/17
+z>10.371 OR offset k>=4             0/17        0/17        1/17        0/17
+z>15.0   OR offset k>=4             0/17        0/17        1/17        0/17
+z>20.0   OR offset k>=4             0/17        0/17        1/17        0/17
+z>20.0   OR offset k>=3             0/17        0/17        1/17        0/17
+
+================================================================================================
+SPECTRAL-GATE UNION with the two best rules (11 genuine-provable 44.1k/16 albums)
+================================================================================================
+variant         gate esc   BASELINE proba 2nd > 0.0                offset k>=4    z>10.371 OR offset k>=4    z>6.914  OR offset k>=4
+aacffm-256      10/11        survive  8/10 ( 80.0%)     survive  7/10 ( 70.0%)     survive  5/10 ( 50.0%)     survive  3/10 ( 30.0%)
+aacffm-320      10/11        survive  9/10 ( 90.0%)     survive  7/10 ( 70.0%)     survive  3/10 ( 30.0%)     survive  2/10 ( 20.0%)
+qaac-cvbr256    10/11        survive  0/10 (  0.0%)     survive  0/10 (  0.0%)     survive  0/10 (  0.0%)     survive  0/10 (  0.0%)
+qaac-cvbr320    10/11        survive  0/10 (  0.0%)     survive  0/10 (  0.0%)     survive  0/10 (  0.0%)     survive  0/10 (  0.0%)
+qaac-tvbr91      0/11        survive  0/0  (  0.0%)     survive  0/0  (  0.0%)     survive  0/0  (  0.0%)     survive  0/0  (  0.0%)
+qaac-abr192      0/11        survive  0/0  (  0.0%)     survive  0/0  (  0.0%)     survive  0/0  (  0.0%)     survive  0/0  (  0.0%)
+qaac-cbr128      0/11        survive  0/0  (  0.0%)     survive  0/0  (  0.0%)     survive  0/0  (  0.0%)     survive  0/0  (  0.0%)
+genuine         11/11        survive 11/11 (100.0%)     survive 11/11 (100.0%)     survive 11/11 (100.0%)     survive 11/11 (100.0%)
+null-flac       11/11        survive 11/11 (100.0%)     survive 11/11 (100.0%)     survive 11/11 (100.0%)     survive 11/11 (100.0%)

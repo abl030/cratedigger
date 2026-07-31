@@ -1,0 +1,218 @@
+"""Leave-one-album-out deployability evaluation of within-album dispersion.
+
+Rule shape evaluated: ONE global threshold on a statistic computable from the
+album under test alone.  The threshold is fitted on a genuine reference corpus
+that always EXCLUDES the album under test (and, for launder rows, excludes that
+album's own genuine twin).  No per-album calibration anywhere.
+"""
+import gzip
+import json
+from collections import defaultdict
+
+import numpy as np
+
+OUT = "/home/abl030/.claude/jobs/7dbdc6f4/tmp/homogeneity"
+rows = json.load(gzip.open(OUT + "/disp.json.gz", "rt"))
+idx = {(r["ds"], r["slug"], r["variant"]): r for r in rows}
+
+HIRES_PREFIX = ("8920", "8931")
+
+
+def is_hires(slug):
+    return slug.split("--")[0] in HIRES_PREFIX
+
+
+# ---------------------------------------------------------------- cohorts
+# genuine reference corpus: 139 distinct albums, deduped
+GENUINE = []
+for r in rows:
+    if r["ds"] in ("TRAIN", "R1", "R2", "R3") and r["variant"] == "control-flac1644":
+        GENUINE.append(("ARM", r))
+    elif r["ds"] == "LOCAL" and r["variant"] == "genuine":
+        GENUINE.append(("MTX", r))
+    elif r["ds"] == "APPLEB" and r["variant"] == "control-flac1644":
+        GENUINE.append(("APPB", r))
+
+# recall sets.  (label, [(ds, variant)], container)
+FLAC_LAUNDER = [
+    ("lame-v0", [("LOCAL", "lame-v0")], "flac"),
+    ("aacffm-256", [("LOCAL", "aacffm-256")], "flac"),
+    ("aacffm-320", [("LOCAL", "aacffm-320")], "flac"),
+    ("vorbis-q10", [("LOCAL", "vorbis-q10")], "flac"),
+    ("vorbis-q8", [("LOCAL", "vorbis-q8")], "flac"),
+    ("vorbis-q7", [("LOCAL", "vorbis-q7")], "flac"),
+    ("vorbis-q6", [("LOCAL", "vorbis-q6")], "flac"),
+    ("qaac-cvbr256", [("MAPPLE", "qaac-cvbr256")], "flac"),
+    ("qaac-cvbr320", [("MAPPLE", "qaac-cvbr320")], "flac"),
+    ("t-apple256-flac", [("APPLEA", "t-apple256-flac"),
+                         ("APPLEB", "t-apple256-flac")], "flac"),
+    # already caught by the gate - context only
+    ("lame-cbr128*", [("LOCAL", "lame-cbr128")], "flac"),
+    ("t-mp3128-flac*", [("TRAIN", "t-mp3128-flac"), ("R1", "t-mp3128-flac"),
+                        ("R2", "t-mp3128-flac"), ("R3", "t-mp3128-flac")], "flac"),
+    ("t-vorbisq5-flac*", [("TRAIN", "t-vorbisq5-flac"), ("R1", "t-vorbisq5-flac"),
+                          ("R2", "t-vorbisq5-flac"), ("R3", "t-vorbisq5-flac")], "flac"),
+]
+NATIVE_LAUNDER = [
+    ("lame-v0 (native mp3)", [("TRAIN", "lame-v0"), ("R1", "lame-v0"),
+                              ("R2", "lame-v0"), ("R3", "lame-v0")], "native"),
+    ("vorbis-q6 (native ogg)", [("TRAIN", "vorbis-q6"), ("R1", "vorbis-q6"),
+                                ("R2", "vorbis-q6"), ("R3", "vorbis-q6")], "native"),
+    ("vorbis-q9 (native ogg)", [("TRAIN", "vorbis-q9"), ("R1", "vorbis-q9"),
+                                ("R2", "vorbis-q9"), ("R3", "vorbis-q9")], "native"),
+    ("apple-cvbr256 (native m4a)", [("TRAIN", "apple-cvbr256")], "native"),
+]
+
+ESCAPE = ["lame-v0", "aacffm-256", "aacffm-320", "vorbis-q10", "vorbis-q8",
+          "vorbis-q7", "vorbis-q6", "qaac-cvbr256", "qaac-cvbr320",
+          "t-apple256-flac"]
+
+# genuine twin lookup: (ds, slug) of a launder row -> its genuine reference row
+TWIN_DS = {"LOCAL": ("LOCAL", "genuine"), "MAPPLE": ("LOCAL", "genuine"),
+           "LOCALW": ("LOCAL", "genuine"), "PILOT": ("LOCAL", "genuine"),
+           "APPLEA": ("APPLEA", "control-flac1644"),
+           "APPLEB": ("APPLEB", "control-flac1644"),
+           "TRAIN": ("TRAIN", "control-flac1644"), "R1": ("R1", "control-flac1644"),
+           "R2": ("R2", "control-flac1644"), "R3": ("R3", "control-flac1644")}
+
+
+def gen_pool(stat, exclude_slug=None, no_hires=True):
+    out = []
+    for _tag, r in GENUINE:
+        v = r.get(stat)
+        if v is None:
+            continue
+        if no_hires and is_hires(r["slug"]):
+            continue
+        if exclude_slug is not None and r["slug"] == exclude_slug:
+            continue
+        out.append(v)
+    return np.array(out, float)
+
+
+def launder_rows(spec, stat, no_hires=True):
+    out = []
+    for ds, variant in spec:
+        for r in rows:
+            if r["ds"] != ds or r["variant"] != variant:
+                continue
+            if no_hires and is_hires(r["slug"]):
+                continue
+            if r.get(stat) is None:
+                continue
+            out.append(r)
+    return out
+
+
+def loao_table(stat, alphas=(0.01, 0.05, 0.10, 0.20), hi_is_launder=True):
+    """Returns dict alpha -> {'fp': x, 'recall': {label: r}}."""
+    res = {}
+    for a in alphas:
+        # genuine FP, LOAO
+        flags = 0
+        tot = 0
+        for _tag, r in GENUINE:
+            if r.get(stat) is None or is_hires(r["slug"]):
+                continue
+            pool = gen_pool(stat, exclude_slug=r["slug"])
+            tau = np.quantile(pool, 1 - a) if hi_is_launder else np.quantile(pool, a)
+            hit = (r[stat] > tau) if hi_is_launder else (r[stat] < tau)
+            flags += int(hit)
+            tot += 1
+        rec = {}
+        for label, spec, _c in FLAC_LAUNDER + NATIVE_LAUNDER:
+            lr = launder_rows(spec, stat)
+            if not lr:
+                continue
+            h, n = 0, 0
+            for r in lr:
+                pool = gen_pool(stat, exclude_slug=r["slug"])
+                tau = np.quantile(pool, 1 - a) if hi_is_launder else np.quantile(pool, a)
+                hit = (r[stat] > tau) if hi_is_launder else (r[stat] < tau)
+                h += int(hit)
+                n += 1
+            rec[label] = (h, n)
+        res[a] = {"fp": (flags, tot), "recall": rec}
+    return res
+
+
+def auc(stat, spec):
+    """AUC of launder vs genuine (genuine pool excludes each launder's own twin)."""
+    lr = launder_rows(spec, stat)
+    if not lr:
+        return None, 0
+    tot, cnt = 0.0, 0
+    for r in lr:
+        pool = gen_pool(stat, exclude_slug=r["slug"])
+        x = r[stat]
+        tot += float((x > pool).sum() + 0.5 * (x == pool).sum())
+        cnt += len(pool)
+    return tot / cnt, len(lr)
+
+
+CANDIDATES = [
+    "U_sd", "U_iqr", "U_mad", "U_rng",
+    "d18_195_sd", "d16_18_sd", "d12_14_sd", "drop_hi_sd", "hfdef_sd", "ref_sd",
+    "shape_mpd_ul", "shape_mpd_hi", "shape_mpd_all", "shape_mpd_lo",
+    "shapec_mpd_ul", "shapec_mpd_hi", "shapec_mpd_all",
+    "shape_sdmean_ul", "shape_sdmean_hi",
+    "k4_U_sd", "k4_shape_mpd_ul", "k4_shape_mpd_hi", "k4_d18_195_sd",
+    "k4_drop_hi_sd",
+    "k8_U_sd", "k8_shape_mpd_ul",
+]
+RATIOS = {
+    "rat_U_over_d12_14": ("U_sd", "d12_14_sd"),
+    "rat_U_over_d16_18": ("U_sd", "d16_18_sd"),
+    "rat_U_over_d18_195": ("U_sd", "d18_195_sd"),
+    "rat_mpdul_over_mpdlo": ("shape_mpd_ul", "shape_mpd_lo"),
+    "rat_mpdhi_over_mpdlo": ("shape_mpd_hi", "shape_mpd_lo"),
+    "rat_drophi_over_d12_14": ("drop_hi_sd", "d12_14_sd"),
+}
+DIFFS = {
+    "dif_U_minus_d12_14": ("U_sd", "d12_14_sd"),
+    "dif_U_minus_d18_195": ("U_sd", "d18_195_sd"),
+    "dif_mpdul_minus_mpdlo": ("shape_mpd_ul", "shape_mpd_lo"),
+}
+
+
+def add_derived():
+    for r in rows:
+        for name, (a, b) in RATIOS.items():
+            va, vb = r.get(a), r.get(b)
+            r[name] = (va / vb) if (va is not None and vb not in (None, 0)) else None
+        for name, (a, b) in DIFFS.items():
+            va, vb = r.get(a), r.get(b)
+            r[name] = (va - vb) if (va is not None and vb is not None) else None
+
+
+if __name__ == "__main__":
+    add_derived()
+    ALL = CANDIDATES + list(RATIOS) + list(DIFFS)
+
+    print("genuine reference corpus (deduped, 96k/24 excluded):",
+          sum(1 for _t, r in GENUINE if not is_hires(r["slug"])))
+    from collections import Counter
+    print(Counter(t for t, r in GENUINE if not is_hires(r["slug"])))
+
+    print("\n=== AUC (launder vs genuine, twin-excluded). 0.5 = no signal. "
+          ">0.5 = launder MORE dispersed.")
+    labels = [l for l, _s, _c in FLAC_LAUNDER + NATIVE_LAUNDER]
+    hdr = "%-24s" % "statistic"
+    for l in labels:
+        hdr += " %-8s" % l[:8]
+    print(hdr)
+    best = []
+    for stat in ALL:
+        line = "%-24s" % stat
+        aucs = {}
+        for label, spec, _c in FLAC_LAUNDER + NATIVE_LAUNDER:
+            a, n = auc(stat, spec)
+            aucs[label] = a
+            line += " %-8s" % ("%.3f" % a if a is not None else "-")
+        print(line)
+        esc = [aucs[l] for l in ESCAPE if aucs.get(l) is not None]
+        best.append((float(np.mean(esc)), stat, aucs))
+    best.sort(reverse=True)
+    print("\n=== ranked by mean AUC over the escape class")
+    for m, stat, _a in best:
+        print("%-24s meanAUC_escape=%.3f" % (stat, m))

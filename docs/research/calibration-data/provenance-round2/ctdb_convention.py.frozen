@@ -1,0 +1,99 @@
+"""Empirically identify CTDB's trackcrcs / crc32 convention.
+
+Death Magnetic is bit-verified against AccurateRip at confidence 200 on all
+10 tracks (both ARv1 and ARv2), and its top CTDB entry has confidence 8026.
+Whatever CRC convention CTDB uses, our PCM must reproduce those values.
+"""
+import os
+import re
+import sys
+import zlib
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from provlib import (album_dirs, build_toc, ctdb_fetch_cached, decode,  # noqa: E402
+                     toc_from_dir)
+
+M32 = 0xFFFFFFFF
+SECTOR_BYTES = 2352
+
+
+def crc_std(b, seed=0):
+    return zlib.crc32(b, seed) & M32
+
+
+def crc_init0(b):
+    return (zlib.crc32(b, 0xFFFFFFFF) ^ 0xFFFFFFFF) & M32
+
+
+def variants(raw, disc_offset_bytes, is_first, is_last, total_len):
+    """Return {name: crc} candidate conventions for one track's PCM."""
+    out = {}
+    out["std"] = crc_std(raw)
+    out["init0"] = crc_init0(raw)
+    out["std_inv"] = (~crc_std(raw)) & M32
+    # byte-swapped 16-bit samples (big-endian PCM)
+    ba = bytearray(raw)
+    ba[0::2], ba[1::2] = raw[1::2], raw[0::2]
+    out["std_be"] = crc_std(bytes(ba))
+    # CRC of (zero prefix of disc_offset bytes || track)  == Crc32.Combine
+    out["std_zeroprefix"] = crc_std(raw, crc_std(b"\x00" * disc_offset_bytes))
+    # AccurateRip-style 5-sector trims
+    lo = 5 * SECTOR_BYTES if is_first else 0
+    hi = len(raw) - 5 * SECTOR_BYTES if is_last else len(raw)
+    out["std_artrim"] = crc_std(raw[lo:hi])
+    # "skip zeroes" variants
+    s = 0
+    while s < len(raw) and raw[s] == 0:
+        s += 1
+    e = len(raw)
+    while e > s and raw[e - 1] == 0:
+        e -= 1
+    out["std_skipzero"] = crc_std(raw[s:e])
+    return out
+
+
+def sample_offset_weighted(raw, start_sample):
+    """CUETools CDRepair-style: CRC32 seeded per 32-bit sample position."""
+    return None
+
+
+def main():
+    dirs = {os.path.basename(d): d for d in album_dirs()}
+    d = dirs["2008 - Death Magnetic"]
+    files, meta, lens = toc_from_dir(d)
+    toc = build_toc(lens)
+    _u, xml, _s = ctdb_fetch_cached(toc)
+    entries = re.findall(
+        r'<entry confidence="(\d+)"\s+crc32="([0-9a-f]+)"[^>]*?trackcrcs="([^"]*)"', xml)
+    print(f"{len(entries)} CTDB entries; top conf {entries[0][0]}")
+    wanted = {}
+    for conf, dcrc, tcs in entries:
+        for i, c in enumerate(tcs.split()):
+            wanted.setdefault(i, {})[int(c, 16)] = max(
+                wanted.setdefault(i, {}).get(int(c, 16), 0), int(conf))
+    disc_crcs = {int(dcrc, 16): int(conf) for conf, dcrc, _ in entries}
+
+    raws = [decode(os.path.join(d, f)) for f in files]
+    total = sum(len(r) for r in raws)
+    off = 0
+    for i, raw in enumerate(raws):
+        v = variants(raw, off, i == 0, i == len(raws) - 1, total)
+        hits = [f"{k}=>conf{wanted[i][val]}" for k, val in v.items()
+                if val in wanted.get(i, {})]
+        print(f"trk{i+1:02d} " + " ".join(f"{k}={val:08x}" for k, val in v.items())
+              + ("   HIT " + ",".join(hits) if hits else "   -"))
+        off += len(raw)
+
+    whole = b"".join(raws)
+    wv = {"std": crc_std(whole), "init0": crc_init0(whole),
+          "inv": (~crc_std(whole)) & M32}
+    print("\nwhole-disc:", {k: f"{x:08x}" for k, x in wv.items()})
+    print("disc crc32 in CTDB (top 6):",
+          [f"{c:08x}/conf{n}" for c, n in list(disc_crcs.items())[:6]])
+    for k, x in wv.items():
+        if x in disc_crcs:
+            print(f"  DISC HIT via {k}: conf {disc_crcs[x]}")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,100 @@
+"""Shape-feature battery over the level-normalized 20-point slice vector.
+
+Every feature is invariant to the album's absolute level: they are built from
+n[k] = slice[k] - ref, and each one is either a difference of bands, a second
+difference, or a residual from a fit -- i.e. pure shape.
+"""
+import numpy as np
+
+FREQS = np.array([12000 + 500 * i for i in range(20)], dtype=float)
+IDX = {int(f): i for i, f in enumerate(FREQS)}
+
+
+def _iso_decreasing(y):
+    """Pool-adjacent-violators fit of a non-increasing sequence."""
+    y = np.asarray(y, dtype=float)
+    v = list(y)
+    w = [1.0] * len(y)
+    i = 0
+    while i < len(v) - 1:
+        if v[i] < v[i + 1] - 1e-12:
+            tot = v[i] * w[i] + v[i + 1] * w[i + 1]
+            ww = w[i] + w[i + 1]
+            v[i] = tot / ww
+            w[i] = ww
+            del v[i + 1]
+            del w[i + 1]
+            if i > 0:
+                i -= 1
+        else:
+            i += 1
+    out = []
+    for val, ww in zip(v, w):
+        out += [val] * int(round(ww))
+    return np.array(out)
+
+
+def features(vec, ref):
+    """vec: 20 absolute slice dB; ref: 1-4 kHz reference dB. Returns dict of shape features."""
+    n = np.asarray(vec, dtype=float) - float(ref)
+    d1 = np.diff(n)                      # 19 adjacent-band differences, dB/500Hz
+    d2 = np.diff(d1)                     # 18 second differences (curvature)
+    f = {}
+
+    def band(a, b):
+        return n[IDX[a] : IDX[b] + 1]
+
+    # --- slopes (differences of bands: level-free) ---
+    f["slope_lo"] = (n[IDX[16000]] - n[IDX[12000]]) / 8.0
+    f["slope_mid"] = (n[IDX[19500]] - n[IDX[16000]]) / 7.0
+    f["slope_top"] = (n[IDX[21500]] - n[IDX[19500]]) / 4.0
+    f["knee_mid_lo"] = f["slope_mid"] - f["slope_lo"]
+    f["knee_top_mid"] = f["slope_top"] - f["slope_mid"]
+
+    # --- curvature ---
+    f["curv_all"] = float(np.mean(d2))
+    f["curv_top"] = float(np.mean(d2[IDX[18000] :]))
+    f["curv_min"] = float(np.min(d2))
+    f["curv_max"] = float(np.max(d2))
+
+    # --- roughness / smoothness ---
+    f["rough_all"] = float(np.mean(np.abs(d2)))
+    f["rough_top"] = float(np.mean(np.abs(d2[IDX[17000] :])))
+    f["rough_lo"] = float(np.mean(np.abs(d2[: IDX[17000]])))
+    f["rough_ratio"] = f["rough_top"] - f["rough_lo"]
+
+    # --- residual from fits ---
+    x = np.arange(20, dtype=float)
+    A = np.vstack([x, np.ones_like(x)]).T
+    coef, *_ = np.linalg.lstsq(A, n, rcond=None)
+    f["resid_lin"] = float(np.sqrt(np.mean((n - A @ coef) ** 2)))
+    f["resid_iso"] = float(np.sqrt(np.mean((n - _iso_decreasing(n)) ** 2)))
+
+    # quadratic residual + quadratic curvature coefficient
+    A2 = np.vstack([x**2, x, np.ones_like(x)]).T
+    c2, *_ = np.linalg.lstsq(A2, n, rcond=None)
+    f["quad_c"] = float(c2[0])
+    f["resid_quad"] = float(np.sqrt(np.mean((n - A2 @ c2) ** 2)))
+
+    # --- shelf vs slope character in the top octave ---
+    top = band(20000, 21500)
+    f["top_sd"] = float(np.std(top))
+    f["top_span"] = float(top.max() - top.min())
+    f["maxdrop"] = float(-np.min(d1))
+    f["maxdrop_top"] = float(-np.min(d1[IDX[17000] :]))
+
+    # --- deficits (LEVEL features, kept only as reference/ceiling context) ---
+    f["_U"] = float(-np.mean(n[IDX[20500] :]))
+    f["_d18_195"] = float(-np.mean(band(18500, 19500)))
+    f["_drop_hi"] = float(np.mean(band(18000, 19500)) - np.mean(band(20500, 21500)))
+    return f
+
+
+FEATURE_NAMES = [
+    "slope_lo", "slope_mid", "slope_top", "knee_mid_lo", "knee_top_mid",
+    "curv_all", "curv_top", "curv_min", "curv_max",
+    "rough_all", "rough_top", "rough_lo", "rough_ratio",
+    "resid_lin", "resid_iso", "quad_c", "resid_quad",
+    "top_sd", "top_span", "maxdrop", "maxdrop_top",
+    "_U", "_d18_195", "_drop_hi",
+]

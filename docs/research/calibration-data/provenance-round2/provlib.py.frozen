@@ -1,0 +1,277 @@
+"""Corrected AccurateRip parsing + CTDB verification. Scratch research only."""
+import hashlib
+import base64
+import json
+import os
+import struct
+import subprocess
+import sys
+import time
+import urllib.request
+import urllib.error
+
+import numpy as np
+
+SECTOR = 588
+SECTOR_DWORDS = 588
+ROOT = "/mnt/virtio/Music/Beets"
+SCRATCH = os.path.dirname(os.path.abspath(__file__))
+CACHE_AR = os.path.join(SCRATCH, "cache", "ar")
+CACHE_CTDB = os.path.join(SCRATCH, "cache", "ctdb")
+M32 = 0xFFFFFFFF
+
+# ---------------------------------------------------------------- TOC / IDs
+
+
+def streaminfo(path):
+    with open(path, "rb") as fh:
+        if fh.read(4) != b"fLaC":
+            raise ValueError(f"not flac: {path}")
+        hdr = fh.read(4)
+        block_type = hdr[0] & 0x7F
+        length = struct.unpack(">I", b"\x00" + hdr[1:4])[0]
+        if block_type != 0:
+            raise ValueError("first block not STREAMINFO")
+        data = fh.read(length)
+    bits = int.from_bytes(data[10:18], "big")
+    return ((bits >> 44) & 0xFFFFF, ((bits >> 41) & 0x7) + 1,
+            ((bits >> 36) & 0x1F) + 1, bits & 0xFFFFFFFFF)
+
+
+def toc_from_dir(d):
+    files = sorted(f for f in os.listdir(d) if f.lower().endswith(".flac"))
+    meta, lens = [], []
+    for f in files:
+        sr, ch, bps, total = streaminfo(os.path.join(d, f))
+        meta.append((f, sr, ch, bps, total))
+        lens.append(total)
+    return files, meta, lens
+
+
+def build_toc(lens):
+    offs, acc = [0], 0
+    for L in lens:
+        acc += L
+        offs.append(acc // SECTOR)
+    return offs
+
+
+def cddbid(toc):
+    n = len(toc) - 1
+    s = "".join(str(abs(toc[t]) // 75 + 2) for t in range(n))
+    id0 = sum(ord(c) - ord("0") for c in s)
+    return "%02X%04X%02X" % (id0 % 255, abs(toc[n]) // 75 - abs(toc[0]) // 75, n)
+
+
+def arid(toc):
+    n = len(toc) - 1
+    d1 = d2 = 0
+    k = 0
+    for t in range(n):
+        o = toc[t]
+        d1 += o
+        k += 1
+        d2 += max(1, o) * k
+    lead = abs(toc[n])
+    d1 += lead
+    k += 1
+    d2 += max(1, lead) * k
+    return "%08x-%08x-%s" % (d1 & M32, d2 & M32, cddbid(toc).lower())
+
+
+def mb_discid(toc):
+    n = len(toc) - 1
+    s = "01" + "%02X" % n + "%08X" % (toc[n] + 150)
+    for t in range(n):
+        s += "%08X" % (toc[t] + 150)
+    s = s.ljust(804, "0")
+    h = hashlib.sha1(s.encode("ascii")).digest()
+    return (base64.b64encode(h).decode()
+            .replace("+", ".").replace("/", "_").replace("=", "-"))
+
+
+def album_dirs():
+    return sorted({dp for dp, _dn, fn in os.walk(ROOT)
+                   if any(f.lower().endswith(".flac") for f in fn)})
+
+
+# ---------------------------------------------------------------- audio
+
+
+def decode(path):
+    out = subprocess.run(
+        ["flac", "-d", "-c", "--totally-silent", "--force-raw-format",
+         "--endian=little", "--sign=signed", path],
+        capture_output=True, check=True).stdout
+    return out
+
+
+def as_dwords(raw):
+    return np.frombuffer(raw, dtype="<u4")
+
+
+def ar_checksums(data, track_number, total_tracks):
+    """ARv1 + ARv2 for one track (offset 0). data = uint32 view of PCM."""
+    n = len(data)
+    lo, hi = 1, n
+    if track_number == 1:
+        lo = 5 * SECTOR_DWORDS          # arver _audio.c: sum_from = 5*588
+    if track_number == total_tracks:
+        hi = n - 5 * SECTOR_DWORDS
+    idx = np.arange(1, n + 1, dtype=np.uint64)
+    sel = (idx >= lo) & (idx <= hi)
+    vals = data[sel].astype(np.uint64)
+    mul = idx[sel]
+    v1 = int(np.sum(vals * mul, dtype=object)) & M32
+    prod = vals * mul
+    v2 = int(np.sum(prod & np.uint64(M32), dtype=object)
+             + np.sum(prod >> np.uint64(32), dtype=object)) & M32
+    return v1, v2
+
+
+def ar_frame450(data, track_number, total_tracks):
+    """AccurateRip frame-450 CRC: ARv1-style sum over sector 450 only.
+
+    AccurateRip stores, per track, a checksum computed over the single
+    CD frame (sector) at index 450, used for read-offset detection.
+    """
+    n = len(data)
+    start = 450 * SECTOR_DWORDS          # 0-based sample index of frame 450
+    stop = start + SECTOR_DWORDS
+    if stop > n:
+        return None
+    lo, hi = 1, n
+    if track_number == 1:
+        lo = 1 + 5 * SECTOR_DWORDS
+    if track_number == total_tracks:
+        hi = n - 5 * SECTOR_DWORDS
+    idx = np.arange(start + 1, stop + 1, dtype=np.uint64)
+    vals = data[start:stop].astype(np.uint64)
+    sel = (idx >= lo) & (idx <= hi)
+    return int(np.sum(vals[sel] * idx[sel], dtype=object)) & M32
+
+
+# ---------------------------------------------------------------- AccurateRip
+
+
+def ar_url(toc):
+    a = arid(toc)
+    d1 = a.split("-")[0]
+    return (f"http://www.accuraterip.com/accuraterip/{d1[-1]}/{d1[-2]}/{d1[-3]}/"
+            f"dBAR-{len(toc)-1:03d}-{a}.bin")
+
+
+def fetch_ar_cached(toc, delay=0.7):
+    os.makedirs(CACHE_AR, exist_ok=True)
+    a = arid(toc)
+    key = f"{len(toc)-1:03d}-{a}"
+    hit = os.path.join(CACHE_AR, key + ".bin")
+    miss = os.path.join(CACHE_AR, key + ".404")
+    url = ar_url(toc)
+    if os.path.exists(hit):
+        with open(hit, "rb") as fh:
+            return url, fh.read(), "cache"
+    if os.path.exists(miss):
+        return url, None, "cache"
+    time.sleep(delay)
+    try:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "cratedigger-provenance-research/1.0"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            blob = r.read()
+        with open(hit, "wb") as fh:
+            fh.write(blob)
+        return url, blob, "net"
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            open(miss, "wb").close()
+            return url, None, "net"
+        raise
+    except Exception:                                     # noqa: BLE001
+        return url, None, "err"
+
+
+def parse_ar(blob):
+    """CORRECT AccurateRip dBAR parse.
+
+    Layout (little endian), repeated once per response/pressing block:
+        header : uint8 num_tracks, uint32 ar_id1, uint32 ar_id2, uint32 freedb_id
+        track  : uint8 confidence, uint32 checksum, uint32 checksum_450   x num_tracks
+
+    `checksum` is EITHER the ARv1 or the ARv2 value -- the database does not
+    record which. `checksum_450` is the frame-450 offset-detection CRC and is
+    never a track checksum. Reference: arver 1.5.0 arver/disc/database.py
+    (Track docstring + make_dict, which keys only on `checksum`).
+
+    Returns list of blocks; each block = (header_tuple, [(conf, checksum, c450)]).
+    """
+    pos = 0
+    blocks = []
+    while pos < len(blob):
+        if pos + 13 > len(blob):
+            raise ValueError(f"truncated header at {pos}")
+        ntr, id1, id2, fdb = struct.unpack("<BLLL", blob[pos:pos + 13])
+        pos += 13
+        entries = []
+        for _ in range(ntr):
+            if pos + 9 > len(blob):
+                raise ValueError(f"truncated track at {pos}")
+            conf, csum, c450 = struct.unpack("<BLL", blob[pos:pos + 9])
+            entries.append((conf, csum, c450))
+            pos += 9
+        blocks.append(((ntr, id1, id2, fdb), entries))
+    return blocks
+
+
+def ar_track_index(blocks):
+    """{track_index0: {checksum: max_confidence}} over all blocks, conf>0."""
+    out = {}
+    for _hdr, entries in blocks:
+        for i, (conf, csum, _c450) in enumerate(entries):
+            if conf == 0:
+                continue
+            slot = out.setdefault(i, {})
+            slot[csum] = max(slot.get(csum, 0), conf)
+    return out
+
+
+def ar_c450_index(blocks):
+    out = {}
+    for _hdr, entries in blocks:
+        for i, (conf, _c, c450) in enumerate(entries):
+            if conf == 0 or c450 == 0:
+                continue
+            slot = out.setdefault(i, {})
+            slot[c450] = max(slot.get(c450, 0), conf)
+    return out
+
+
+# ---------------------------------------------------------------- CTDB
+
+
+def ctdb_fetch_cached(toc, host="db.cue.tools", delay=0.7):
+    os.makedirs(CACHE_CTDB, exist_ok=True)
+    tocstr = ":".join(str(x) for x in toc)
+    key = hashlib.sha1((host + "|" + tocstr).encode()).hexdigest()[:24]
+    path = os.path.join(CACHE_CTDB, key + ".xml")
+    url = (f"https://{host}/lookup2.php?version=3&ctdb=1&fuzzy=1"
+           f"&metadata=default&toc=" + tocstr)
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as fh:
+            return url, fh.read(), "cache"
+    time.sleep(delay)
+    try:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "cratedigger-provenance-research/1.0"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            xml = r.read().decode("utf-8", "replace")
+    except Exception as exc:                              # noqa: BLE001
+        return url, f"<<ERROR {exc!r}>>", "err"
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(xml)
+    return url, xml, "net"
+
+
+def jdump(obj, path):
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(obj, fh, indent=1)

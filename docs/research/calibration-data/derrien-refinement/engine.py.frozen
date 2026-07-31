@@ -1,0 +1,212 @@
+"""Shared cohort + LOO evaluation engine for the Derrien refinement study.
+
+Deployability rule enforced here:
+  * one GLOBAL threshold applied to an album statistic computed from that
+    album's own tracks only (no per-album ground truth);
+  * the threshold is calibrated leave-one-album-out on genuine controls;
+  * false positives are priced on the full genuine control set.
+"""
+import os, collections, math
+
+TMP = "/home/abl030/.claude/jobs/7dbdc6f4/tmp/derrien"
+ALL = os.path.join(TMP, "all.tsv")
+
+# 17 albums with a genuine Derrien baseline (44.1 kHz / 16 bit)
+ALB17 = ["8916", "8917", "8918", "8919", "8921", "8922", "8923", "8924", "8925",
+         "8926", "8928", "8929", "8930", "8932", "8933", "8934", "8935"]
+# the paired (derrien/) arm covers 15 of them
+ALB15 = [a for a in ALB17 if a not in ("8930", "8935")]
+
+
+class Track:
+    __slots__ = ("variant", "rid", "path", "proba", "median", "std", "z", "offset",
+                 "pmode", "nac_z", "lo_proba", "lo_median", "lo_std", "lo_z", "lo_offset")
+
+    def __init__(self, **kw):
+        for k in self.__slots__:
+            setattr(self, k, kw.get(k))
+
+
+def load():
+    rows = []
+    with open(ALL) as f:
+        hdr = f.readline().rstrip("\n").split("\t")
+        for line in f:
+            rows.append(dict(zip(hdr, line.rstrip("\n").split("\t"))))
+    return rows
+
+
+def _f(x):
+    return float(x) if x not in ("", None) else None
+
+
+def build():
+    """Return dict variant -> {rid -> [Track,...]} for the ground-truth arms."""
+    rows = load()
+    # matrix rows (mode=high only)
+    hi = {}
+    lo = {}
+    for r in rows:
+        if r["arm"] == "wild":
+            continue
+        if r["mode"] == "high":
+            hi[(r["src"], r["variant"], r["path"])] = r
+        else:
+            lo[r["path"]] = r  # mode=low exists only in the paired arm; path is unique
+
+    out = collections.defaultdict(lambda: collections.defaultdict(list))
+    for key, r in hi.items():
+        src, variant, path = key
+        lr = lo.get(path)
+        t = Track(variant=variant, rid=r["rid"], path=path,
+                  proba=_f(r["proba"]), median=_f(r["median"]), std=_f(r["std"]),
+                  z=_f(r["z"]), offset=int(r["offset"]), pmode=r["pmode"],
+                  nac_z=_f(r["nac_z"]),
+                  lo_proba=_f(lr["proba"]) if lr else None,
+                  lo_median=_f(lr["median"]) if lr else None,
+                  lo_std=_f(lr["std"]) if lr else None,
+                  lo_z=_f(lr["z"]) if lr else None,
+                  lo_offset=int(lr["offset"]) if lr else None)
+        # namespace matrix vs paired arm
+        if src.startswith("derrien-"):
+            tag = src[len("derrien-"):-len(".tsv.gz")]
+            name = f"mx:{tag}:{variant}"
+        else:
+            name = f"gt:{variant}"
+        out[name][r["rid"]].append(t)
+    return out
+
+
+# ---------------------------------------------------------------- scores
+def sc_proba(t):
+    return t.proba
+
+
+def sc_z(t):
+    return t.z
+
+
+def sc_nac(t):
+    return t.nac_z
+
+
+def sc_ratio(t):
+    return t.proba / t.median
+
+
+def sc_pz(t):
+    return t.proba * t.z
+
+
+def sc_lo_proba(t):
+    return t.lo_proba
+
+
+def sc_lo_z(t):
+    return t.lo_z
+
+
+# ---------------------------------------------------------------- aggregators
+def agg_kth(k):
+    """k-th largest track score (k=1 -> max, k=2 -> the '>=2 tracks over L' rule)."""
+    def f(vals):
+        v = sorted((x for x in vals if x is not None), reverse=True)
+        return v[k - 1] if len(v) >= k else -math.inf
+    f.__name__ = f"kth{k}"
+    return f
+
+
+def agg_topk_mean(k):
+    def f(vals):
+        v = sorted((x for x in vals if x is not None), reverse=True)
+        if not v:
+            return -math.inf
+        v = v[:k]
+        return sum(v) / len(v)
+    f.__name__ = f"top{k}mean"
+    return f
+
+
+def agg_frac_over(q):
+    """album statistic = q-quantile of track scores (rank-based)."""
+    def f(vals):
+        v = sorted((x for x in vals if x is not None))
+        if not v:
+            return -math.inf
+        i = min(len(v) - 1, max(0, int(round(q * (len(v) - 1)))))
+        return v[i]
+    f.__name__ = f"q{q:g}"
+    return f
+
+
+def agg_mean(vals):
+    v = [x for x in vals if x is not None]
+    return sum(v) / len(v) if v else -math.inf
+
+
+def agg_median(vals):
+    v = sorted(x for x in vals if x is not None)
+    if not v:
+        return -math.inf
+    n = len(v)
+    return v[n // 2] if n % 2 else 0.5 * (v[n // 2 - 1] + v[n // 2])
+
+
+# ---------------------------------------------------------------- LOO evaluation
+def album_stats(cohort, variant, albums, score, agg):
+    """variant -> {album: album statistic}"""
+    d = cohort.get(variant, {})
+    out = {}
+    for a in albums:
+        ts = d.get(a)
+        if not ts:
+            continue
+        out[a] = agg([score(t) for t in ts])
+    return out
+
+
+def loo_eval(gen_stats, target_stats, allowed_train_fp=0):
+    """Leave-one-album-out.
+
+    For each held-out album A: threshold L_A = the (allowed_train_fp+1)-th
+    largest genuine album statistic among the OTHER albums.  An album is
+    flagged iff stat > L_A.  Returns (fp_albums, n_gen, tp_albums, n_target,
+    per-album detail).
+    """
+    albums = sorted(gen_stats)
+    fp = 0
+    tp = 0
+    n_t = 0
+    detail = []
+    for A in albums:
+        train = sorted((gen_stats[b] for b in albums if b != A), reverse=True)
+        idx = min(allowed_train_fp, len(train) - 1)
+        L = train[idx]
+        g = gen_stats[A]
+        gflag = g > L
+        fp += int(gflag)
+        tflag = None
+        if A in target_stats:
+            n_t += 1
+            tflag = target_stats[A] > L
+            tp += int(tflag)
+        detail.append((A, L, g, gflag, target_stats.get(A), tflag))
+    return fp, len(albums), tp, n_t, detail
+
+
+def loo_track_fp(cohort, gen_variant, albums, score, allowed_train_fp_albums, agg):
+    """Track-level genuine FP under the same LOO thresholds (for reporting)."""
+    gs = album_stats(cohort, gen_variant, albums, score, agg)
+    d = cohort[gen_variant]
+    n_over = 0
+    n_tot = 0
+    for A in sorted(gs):
+        train = sorted((gs[b] for b in gs if b != A), reverse=True)
+        L = train[min(allowed_train_fp_albums, len(train) - 1)]
+        for t in d[A]:
+            s = score(t)
+            if s is None:
+                continue
+            n_tot += 1
+            n_over += int(s > L)
+    return n_over, n_tot

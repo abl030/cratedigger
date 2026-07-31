@@ -55,13 +55,29 @@ questions and the data that would answer them.
 
 **PR3 has not started.**
 
+**Update 2026-07-31 — the research phase is closed.** A four-thread round ran
+against the committed data and **drew** the conclusions the 2026-07-30 round
+deferred. Four more datasets are committed under
+`docs/research/calibration-data/`, each stating its verdict up front:
+`homogeneity/` (within-album dispersion — **no**, falsified with the sign
+inverted), `shape-analysis/` (the slice vector as a shape — **no**; SNR > 1 ⇔
+the frozen gate already catches the class), `derrien-refinement/` (**yes,
+partial** — a parameter-free offset-concentration rule closes the whole
+Apple/CoreAudio family at proof grade), and `provenance-round2/` (**partial** —
+three round-1 bugs corrected, 27 of 42 lossless albums bit-verified, badge tier
+only). `docs/research/spectral-calibration-findings.md` § "2026-07-31 —
+four-thread verification round: conclusions" carries all four. One correction
+lands on this plan: see §1.5 item **f**. **Research is closed; PR3 is
+unblocked.**
+
 ---
 
 ## 1.5 Corrections since this plan was written — READ FIRST
 
 Five claims in the original plan are wrong or overstated. They were found by
 checking the plan against the committed data and the live DB, and each one
-changes PR3.
+changes PR3. Item **f** was added on 2026-07-31 and is a correction to item
+**c** itself, not to the original plan.
 
 **a. The un-backfillable cohort is ~40%, not 93%.** §3's "93% of existing
 verified-lossless proofs sit on rows whose source no longer exists" counts
@@ -158,6 +174,43 @@ genuinely dangerous case, HE-AAC laundered into a FLAC container, has no AAC
 object type left to read; that case is what the ultrasonic leg is for.
 `sbr_present` in `lib/quality/spectral_interpretation.py` is currently dead
 plumbing — PR3 should wire it or delete it (`scope.md`); leaning delete.
+
+**f. CORRECTION 2026-07-31 — §1.5c's scope is the spectral gate alone, and the
+Apple class had never been scored against the detector we already have.**
+"The gate does not catch the class" stands exactly as written *for the spectral
+gate*, and two independent 2026-07-31 threads now prove no spectral instrument
+can (`docs/research/calibration-data/homogeneity/`,
+`.../shape-analysis/` — the AAC/Apple paired shape delta is ≤ 0.24 dB in all 20
+bands and its SNR against genuine album-to-album variation is 0.031–0.086).
+But the Apple family was **never scored against the Derrien MDCT-lattice
+detector**: `launder-matrix/FINAL_REPORT.txt` § D's gate ∪ Derrien union table
+excludes the five `qaac-*` variants through its producing script's hardcoded
+`ORDER` list, so no `qaac-*` row exists there. Scored on 2026-07-31
+(`docs/research/calibration-data/derrien-refinement/`):
+
+- The **existing pooled Derrien rule already closes the class completely** —
+  **0 of 10** Apple launder albums survive the spectral ∪ Derrien union, and
+  17/17 are flagged. Nothing new had to be measured, only scored.
+- A **parameter-free offset-concentration rule** — ≥ 4 tracks of an album
+  recovering the same MDCT frame offset — gives proof-grade coverage of the
+  whole Apple/CoreAudio family (100 % of `qaac-cvbr256`, `qaac-cvbr320`,
+  `qaac-tvbr91`, `qaac-abr192`; 16/17 of `qaac-cbr128`) at an **analytic**
+  false-positive floor of ~0.0023 albums per 5000. Genuine frame offsets are
+  uniform over 0–1023 (182 distinct in 197 tracks, zero within-album k ≥ 2
+  coincidences); the mechanism is exact (CoreAudio primes 2112 samples →
+  2112 mod 1024 = 64 → lattice offset 960; ffmpeg primes 1024 → offset 0), and
+  it reproduces on an independent second Apple build.
+- **The permanently open spectral residual is therefore `lame-v0`,
+  `vorbis-q10`, and roughly half of `ffmpeg`-native AAC 256/320** (best union:
+  5/10 and 4/10 survive under `offset k ≥ 4 OR z > 12`). The first two carry no
+  AAC lattice at all, so no Derrien-family rule can reach them.
+
+**§1.7's reframe is intact and still governs.** `verified_lossless` continues to
+mean "no evidence of lossy origin was found by the tests we have"; that wording
+simply gains a possible future fourth leg. Nothing in this item authorises PR3
+to widen the claim, to ship a Derrien leg, or to change any threshold — PR3's
+scope is unchanged, and a detector leg is a separate, later decision with its
+own operator authority.
 
 ---
 

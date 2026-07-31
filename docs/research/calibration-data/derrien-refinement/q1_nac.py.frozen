@@ -1,0 +1,97 @@
+"""Q1: does the never-scored NAC probe (res_gt_high col 13) separate genuine
+from Apple CVBR-256 launders on real audio, alone or combined?"""
+import sys, statistics as st, math
+sys.path.insert(0, "/home/abl030/.claude/jobs/7dbdc6f4/tmp/derrien")
+from engine import *
+
+C = build()
+GEN = "gt:genuine"
+LAU = "gt:gtarm-qaac-cvbr256"
+A = ALB15
+
+g = [t for a in A for t in C[GEN].get(a, [])]
+l = [t for a in A for t in C[LAU].get(a, [])]
+print(f"paired arm, 15 albums: genuine n={len(g)}  Apple CVBR-256 launder n={len(l)}")
+print(f"NAC populated: genuine {sum(t.nac_z is not None for t in g)}  launder {sum(t.nac_z is not None for t in l)}")
+
+
+def desc(name, vals):
+    v = sorted(x for x in vals if x is not None)
+    if not v:
+        return f"{name:12s} (empty)"
+    q = lambda p: v[min(len(v) - 1, int(round(p * (len(v) - 1))))]
+    return (f"{name:12s} n={len(v):4d} min={v[0]:9.4f} q25={q(.25):9.4f} med={q(.5):9.4f} "
+            f"q75={q(.75):9.4f} q95={q(.95):9.4f} max={v[-1]:9.4f}")
+
+
+print("\n--- TRACK-LEVEL DISTRIBUTIONS (paired arm) ---")
+for nm, f in (("proba", sc_proba), ("z", sc_z), ("nac_z", sc_nac)):
+    print(" GEN ", desc(nm, [f(t) for t in g]))
+    print(" LAU ", desc(nm, [f(t) for t in l]))
+
+
+def auc(pos, neg):
+    """Mann-Whitney AUC: P(pos > neg) + 0.5 P(tie)."""
+    pos = [x for x in pos if x is not None]
+    neg = [x for x in neg if x is not None]
+    if not pos or not neg:
+        return float("nan")
+    allv = sorted([(x, 1) for x in pos] + [(x, 0) for x in neg])
+    # rank with ties
+    ranks = {}
+    i = 0
+    r = [0.0] * len(allv)
+    while i < len(allv):
+        j = i
+        while j + 1 < len(allv) and allv[j + 1][0] == allv[i][0]:
+            j += 1
+        avg = (i + j) / 2.0 + 1
+        for k in range(i, j + 1):
+            r[k] = avg
+        i = j + 1
+    sp = sum(r[k] for k in range(len(allv)) if allv[k][1] == 1)
+    n1, n0 = len(pos), len(neg)
+    return (sp - n1 * (n1 + 1) / 2.0) / (n1 * n0)
+
+
+print("\n--- TRACK-LEVEL AUC (launder = positive) ---")
+for nm, f in (("proba", sc_proba), ("z", sc_z), ("nac_z", sc_nac),
+              ("proba*z", sc_pz), ("proba/median", sc_ratio)):
+    print(f"  {nm:14s} AUC={auc([f(t) for t in l], [f(t) for t in g]):.4f}")
+
+# combinations of nac_z with the main statistics
+print("\n--- COMBINED SCORES (track AUC) ---")
+
+
+def mk(fn, name):
+    fn.__name__ = name
+    return fn
+
+
+combos = [
+    ("nac_z*z", lambda t: t.nac_z * t.z if t.nac_z is not None else None),
+    ("nac_z*proba", lambda t: t.nac_z * t.proba if t.nac_z is not None else None),
+    ("nac_z+z", lambda t: t.nac_z + t.z if t.nac_z is not None else None),
+    ("min(nac_z,z)", lambda t: min(t.nac_z, t.z) if t.nac_z is not None else None),
+    ("z/nac_z", lambda t: t.z / t.nac_z if t.nac_z else None),
+]
+for nm, f in combos:
+    print(f"  {nm:14s} AUC={auc([f(t) for t in l], [f(t) for t in g]):.4f}")
+
+# does the NAC probe agree with the Derrien offset? (independent-evidence check)
+print("\n--- NAC vs Derrien offset agreement is unavailable (nac offset not stored) ---")
+
+# ---------------------------------------------------------------- LOO album eval
+print("\n--- LOO ALBUM-LEVEL, paired arm (15 albums), aggregator = 2nd-largest track score ---")
+print(f"{'score':16s} {'aggr':10s} {'trainFP':>7s}  {'FPalb':>6s} {'recall Apple':>14s}")
+scores = [("proba", sc_proba), ("z", sc_z), ("nac_z", sc_nac), ("proba*z", sc_pz),
+          ("nac_z*z", combos[0][1]), ("nac_z*proba", combos[1][1])]
+aggs = [agg_kth(1), agg_kth(2), agg_kth(3), agg_topk_mean(3), agg_median]
+for snm, sf in scores:
+    for ag in aggs:
+        gs = album_stats(C, GEN, A, sf, ag)
+        ts = album_stats(C, LAU, A, sf, ag)
+        for t_fp in (0, 1, 2):
+            fp, ng, tp, nt, _ = loo_eval(gs, ts, t_fp)
+            print(f"{snm:16s} {ag.__name__:10s} {t_fp:7d}  {fp:2d}/{ng:<3d} {tp:3d}/{nt:<3d} {100.0*tp/max(nt,1):5.1f}%")
+    print()
