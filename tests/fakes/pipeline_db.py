@@ -4784,6 +4784,19 @@ class FakePipelineDB:
                 evidence,
                 v0_metric=existing.v0_metric,
             )
+        # The AAC lattice capture (issue #829 PR-A) follows the V0 tuple's
+        # guard, not the spectral one: an incoming row without a lattice
+        # preserves the stored one wholesale. Mirrors the real SQL's
+        # ``EXCLUDED.aac_lattice_tracks IS NOT NULL`` CASE exactly.
+        if (
+            existing is not None
+            and existing.aac_lattice is not None
+            and evidence.aac_lattice is None
+        ):
+            evidence = msgspec.structs.replace(
+                evidence,
+                aac_lattice=existing.aac_lattice,
+            )
         if (
             existing is not None
             and existing.on_disk_v0_research_attempted

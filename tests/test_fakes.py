@@ -207,6 +207,66 @@ class TestFakePipelineDB(unittest.TestCase):
         self.assertEqual(loaded.measurement.ultrasonic_deficit_db, 44.0)
         self.assertEqual(loaded.measurement.spectral_measurement_version, 2)
 
+    def test_album_quality_evidence_lattice_preserve_mirrors_the_real_sql(self):
+        """The fake's AAC-lattice guard must mirror
+        ``upsert_album_quality_evidence``'s CASE exactly (issue #829 PR-A):
+        a writer with no lattice preserves the stored one, a writer with one
+        replaces it wholesale. The real-PG twins live in
+        ``tests/test_pipeline_db.py::TestAlbumQualityEvidenceStorage``."""
+        from lib.quality import AacLatticeCapture, AacLatticeTrackScore
+
+        db = FakePipelineDB()
+        capture = AacLatticeCapture.from_tracks([
+            AacLatticeTrackScore(
+                filename="01.flac", offset=960, z=28.0, proba=0.13,
+            ),
+        ])
+        evidence = make_album_quality_evidence(
+            mb_release_id="mb-lattice-preserve",
+            aac_lattice=capture,
+        )
+        db.upsert_album_quality_evidence(evidence)
+        db.upsert_album_quality_evidence(
+            msgspec.structs.replace(evidence, aac_lattice=None)
+        )
+
+        loaded = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert loaded is not None
+        self.assertEqual(loaded.aac_lattice, capture)
+
+        replacement = AacLatticeCapture.from_tracks([
+            AacLatticeTrackScore(filename="01.flac", error="boom"),
+        ])
+        db.upsert_album_quality_evidence(
+            msgspec.structs.replace(evidence, aac_lattice=replacement)
+        )
+        reloaded = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert reloaded is not None
+        self.assertEqual(reloaded.aac_lattice, replacement)
+
+    def test_album_quality_evidence_rejects_an_inconsistent_lattice(self):
+        """The fake enforces the same shape the migration's CHECK does,
+        because both delegate to ``AacLatticeCapture.validation_errors``."""
+        from lib.quality import AacLatticeCapture, AacLatticeTrackScore
+
+        db = FakePipelineDB()
+        with self.assertRaisesRegex(ValueError, "scored_tracks must count"):
+            db.upsert_album_quality_evidence(make_album_quality_evidence(
+                mb_release_id="mb-lattice-bad-shape",
+                aac_lattice=AacLatticeCapture(
+                    tracks=[AacLatticeTrackScore(
+                        filename="01.flac", offset=1, z=1.0, proba=0.1,
+                    )],
+                    modal_offset=1, modal_count=1, scored_tracks=7, max_z=1.0,
+                ),
+            ))
+
     def test_album_quality_evidence_validates_snapshot(self):
         from lib.quality import AlbumQualityEvidenceFile
 

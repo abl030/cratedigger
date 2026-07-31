@@ -42,6 +42,7 @@ from lib.quality import (
     EVIDENCE_PROVENANCE_MEASURED,
     EVIDENCE_SUBJECT_INSTALLED,
     EVIDENCE_SUBJECT_SOURCE,
+    AacLatticeCapture,
     ActiveDownloadFileState,
     ActiveDownloadState,
     AlbumQualityEvidence,
@@ -272,6 +273,7 @@ def make_album_quality_evidence(
     audio_corrupt: bool = False,
     audio_error: str | None = None,
     audio_validation: AudioValidationReport | None = None,
+    aac_lattice: AacLatticeCapture | None = None,
 ) -> AlbumQualityEvidence:
     """Build production-shaped active album-quality evidence.
 
@@ -355,6 +357,7 @@ def make_album_quality_evidence(
         ),
         audio_corrupt=audio_corrupt,
         audio_error=audio_error,
+        aac_lattice=aac_lattice,
     )
 
 

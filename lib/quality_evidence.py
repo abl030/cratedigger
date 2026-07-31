@@ -508,6 +508,7 @@ def evidence_from_import_result(
         )
         matched_bad_hash_id = measurement.matched_bad_hash_id
         matched_bad_hash_path = measurement.matched_bad_track_path
+        aac_lattice = measurement.aac_lattice
     else:
         audio_error = None
         folder_layout = derive_folder_layout(files)
@@ -515,6 +516,7 @@ def evidence_from_import_result(
         filetype_band = derive_filetype_band(files)
         matched_bad_hash_id = None
         matched_bad_hash_path = None
+        aac_lattice = None
     evidence = AlbumQualityEvidence(
         mb_release_id=mb_release_id,
         snapshot_fingerprint=snapshot_fingerprint(files),
@@ -544,6 +546,7 @@ def evidence_from_import_result(
         filetype_band=filetype_band,
         matched_bad_audio_hash_id=matched_bad_hash_id,
         matched_bad_audio_hash_path=matched_bad_hash_path,
+        aac_lattice=aac_lattice,
     )
     errors = evidence.storage_validation_errors()
     if errors:
@@ -667,6 +670,7 @@ def evidence_from_measurement(
         filetype_band=filetype_band,
         matched_bad_audio_hash_id=measurement.matched_bad_hash_id,
         matched_bad_audio_hash_path=measurement.matched_bad_track_path,
+        aac_lattice=measurement.aac_lattice,
     )
     errors = evidence.storage_validation_errors()
     if errors:
@@ -852,6 +856,11 @@ def propagate_candidate_evidence_to_current(
     * Installed-subject facts are dropped and measured again on the installed
       snapshot by the ordinary enrichment path.
     * Verified-lossless proof carries with provenance ``carried``.
+    * The AAC frame lattice does NOT carry (issue #829 PR-A). It is a fact
+      about the exact candidate bytes, and the library row is a different
+      snapshot — usually the transcoded output, which carries the target
+      codec's lattice or none at all. Carrying it would be the R19 mistake
+      in a new column.
     """
 
     from lib.beets_db import exact_release_identity_matches

@@ -7,6 +7,8 @@ import msgspec
 from lib.import_execution import ExecutionLeaseSnapshot
 from lib.pipeline_db._core import _PipelineDBBase
 from lib.quality import (
+    AacLatticeCapture,
+    AacLatticeTrackScore,
     AlbumQualityEvidence,
     AlbumQualityEvidenceFile,
     AlbumQualityV0Metric,
@@ -41,10 +43,15 @@ class _EvidenceMixin(_PipelineDBBase):
 
         v0 = evidence.v0_metric
         proof = evidence.verified_lossless_proof
+        lattice = evidence.aac_lattice
         m = evidence.measurement
         audio_validation_json = msgspec.json.encode(
             evidence.audio_validation,
         ).decode()
+        aac_lattice_tracks_json = (
+            msgspec.json.encode(lattice.tracks).decode()
+            if lattice is not None else None
+        )
         preserve_existing_audio_validation = (
             evidence.audio_validation.outcome
             in {"legacy_unrecorded", "skipped"}
@@ -89,6 +96,9 @@ class _EvidenceMixin(_PipelineDBBase):
                     folder_layout, audio_file_count,
                     filetype_band, matched_bad_audio_hash_id,
                     matched_bad_audio_hash_path,
+                    aac_lattice_tracks, aac_lattice_modal_offset,
+                    aac_lattice_modal_count, aac_lattice_scored_tracks,
+                    aac_lattice_max_z,
                     updated_at
                 )
                 VALUES (
@@ -103,6 +113,7 @@ class _EvidenceMixin(_PipelineDBBase):
                     %s, -- changed-current enrichment required
                     %s, %s, %s, %s, -- verified-lossless proof
                     %s, %s, %s, %s, %s, %s, %s, %s, -- preview facts
+                    %s, %s, %s, %s, %s, -- AAC lattice capture (issue #829 PR-A)
                     NOW()
                 )
                 ON CONFLICT (mb_release_id, snapshot_fingerprint)
@@ -366,6 +377,37 @@ class _EvidenceMixin(_PipelineDBBase):
                     matched_bad_audio_hash_id = EXCLUDED.matched_bad_audio_hash_id,
                     matched_bad_audio_hash_path =
                         EXCLUDED.matched_bad_audio_hash_path,
+                    -- issue #829 AAC-lattice leg PR-A: the lattice is one
+                    -- atomic fact across five columns, and an expensive
+                    -- once-per-content measurement (tens of seconds of CPU
+                    -- per track), so it follows the V0 tuple's guard rather
+                    -- than the spectral one: a writer that carries no lattice
+                    -- preserves the stored one wholesale, and a writer that
+                    -- carries one replaces it wholesale. The measurement is
+                    -- gated on the spectral grade, so a same-snapshot
+                    -- re-persist from a path that did not run the gate must
+                    -- not erase what an earlier pass measured on the exact
+                    -- same bytes.
+                    aac_lattice_tracks = CASE
+                        WHEN EXCLUDED.aac_lattice_tracks IS NOT NULL
+                        THEN EXCLUDED.aac_lattice_tracks
+                        ELSE album_quality_evidence.aac_lattice_tracks END,
+                    aac_lattice_modal_offset = CASE
+                        WHEN EXCLUDED.aac_lattice_tracks IS NOT NULL
+                        THEN EXCLUDED.aac_lattice_modal_offset
+                        ELSE album_quality_evidence.aac_lattice_modal_offset END,
+                    aac_lattice_modal_count = CASE
+                        WHEN EXCLUDED.aac_lattice_tracks IS NOT NULL
+                        THEN EXCLUDED.aac_lattice_modal_count
+                        ELSE album_quality_evidence.aac_lattice_modal_count END,
+                    aac_lattice_scored_tracks = CASE
+                        WHEN EXCLUDED.aac_lattice_tracks IS NOT NULL
+                        THEN EXCLUDED.aac_lattice_scored_tracks
+                        ELSE album_quality_evidence.aac_lattice_scored_tracks END,
+                    aac_lattice_max_z = CASE
+                        WHEN EXCLUDED.aac_lattice_tracks IS NOT NULL
+                        THEN EXCLUDED.aac_lattice_max_z
+                        ELSE album_quality_evidence.aac_lattice_max_z END,
                     updated_at = NOW()
                 RETURNING id, %s::boolean AS preserve_existing_audio_validation
             ),
@@ -465,6 +507,11 @@ class _EvidenceMixin(_PipelineDBBase):
                 evidence.filetype_band,
                 evidence.matched_bad_audio_hash_id,
                 evidence.matched_bad_audio_hash_path,
+                aac_lattice_tracks_json,
+                lattice.modal_offset if lattice is not None else None,
+                lattice.modal_count if lattice is not None else None,
+                lattice.scored_tracks if lattice is not None else None,
+                lattice.max_z if lattice is not None else None,
                 preserve_existing_audio_validation,
                 json.dumps(file_rows),
             ),
@@ -909,6 +956,21 @@ class _EvidenceMixin(_PipelineDBBase):
                 avg_bitrate_kbps=row.get("v0_avg_bitrate_kbps"),
                 median_bitrate_kbps=row.get("v0_median_bitrate_kbps"),
             )
+        aac_lattice = None
+        if row.get("aac_lattice_tracks") is not None:
+            # The one wire-decode site for the lattice capture: the JSONB
+            # array validates into its Struct here, and every consumer
+            # downstream works with the typed rows.
+            aac_lattice = AacLatticeCapture(
+                tracks=msgspec.convert(
+                    row["aac_lattice_tracks"],
+                    type=list[AacLatticeTrackScore],
+                ),
+                modal_offset=row.get("aac_lattice_modal_offset"),
+                modal_count=row.get("aac_lattice_modal_count"),
+                scored_tracks=int(row.get("aac_lattice_scored_tracks") or 0),
+                max_z=row.get("aac_lattice_max_z"),
+            )
         proof = None
         if row.get("verified_lossless"):
             proof = VerifiedLosslessProof(
@@ -982,4 +1044,5 @@ class _EvidenceMixin(_PipelineDBBase):
                 else None
             ),
             matched_bad_audio_hash_path=row.get("matched_bad_audio_hash_path"),
+            aac_lattice=aac_lattice,
         )
