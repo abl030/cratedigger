@@ -397,6 +397,18 @@ changed rows by field — the decision-level sibling of
 two-tree runbook (recipe in the module docstring). A quality-policy
 change is measured on the live corpus, not reasoned about from the diff.
 
+Two flags decide whether the run can SEE a promotion-gate change, and a
+zero from a run without them is not evidence:
+
+- `--counterfactual` drops each candidate's persisted proof first. A row
+  that already holds a proof never runs the promotion the gate governs,
+  so the as-persisted arm's honest answer for a proof-gate change is zero.
+- `--pair-with` supplies the installed album's evidence per candidate
+  (`{"id": <candidate id>, "current": {<evidence row>}}`), the way
+  production decides. Unpaired, every row is a fresh request with nothing
+  installed, and no branch that compares against a HAVE — including the
+  provisional lane's confident rejects — is reachable at all.
+
 ### Tuning results (Mountain Goats library, 65 albums) — HISTORICAL
 
 Tested across the entire Mountain Goats catalogue — a worst-case scenario as the band's early work (1991-2000) was recorded on boomboxes and cassette recorders with genuinely minimal high-frequency content.

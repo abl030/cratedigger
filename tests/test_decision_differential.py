@@ -48,7 +48,10 @@ from scripts.decision_differential import (
     decide_row,
     leg_for_evidence,
     main,
+    read_current_pairs,
+    without_persisted_proof,
 )
+from tests.helpers import PROVISIONAL_LANE_DECISIONS
 
 
 def _corpus_row(**overrides: object) -> dict[str, object]:
@@ -274,6 +277,164 @@ class TestDecideCorpusSeesTheProofGateChange(unittest.TestCase):
         self.assertTrue(decided[4]["verified_lossless"])
         self.assertEqual(decided[4]["ultrasonic_leg_reason"],
                          "uncalibrated_decode_path")
+
+
+class TestCounterfactualArm(unittest.TestCase):
+    """The arm that measures a PROMOTION gate.
+
+    A persisted row already holds its proof, so re-deciding it never runs
+    the promotion the gate governs and the as-persisted arm reports zero —
+    correctly, and uselessly, for a proof-gate change. The counterfactual
+    arm drops the proof and asks what the same album would be granted
+    today.
+    """
+
+    def _proved_row(self, **overrides: object) -> dict[str, object]:
+        return _corpus_row(
+            verified_lossless=True,
+            verified_lossless_provenance="measured",
+            verified_lossless_source="flac",
+            verified_lossless_classifier=VERIFIED_LOSSLESS_CLASSIFIER,
+            verified_lossless_detail="genuine",
+            **overrides,
+        )
+
+    def test_only_the_proof_columns_move(self):
+        """Nothing measured is touched: the counterfactual asks what the
+        row was GRANTED, never what it IS."""
+        row = self._proved_row(ultrasonic_deficit_db=65.16)
+        counterfactual = without_persisted_proof(row)
+        self.assertFalse(counterfactual["verified_lossless"])
+        self.assertIsNone(counterfactual["verified_lossless_classifier"])
+        moved = {
+            key for key in row
+            if row[key] != counterfactual[key]
+        }
+        self.assertEqual(moved, {
+            "verified_lossless",
+            "verified_lossless_provenance",
+            "verified_lossless_source",
+            "verified_lossless_classifier",
+            "verified_lossless_detail",
+        })
+
+    def test_the_gate_is_invisible_as_persisted_and_visible_fresh(self):
+        """The same launder row, both arms. This is the zero that has to
+        be earned before it can be read."""
+        row = self._proved_row(ultrasonic_deficit_db=65.16)
+        as_persisted = decide_row(row)
+        fresh = decide_row(row, counterfactual=True)
+        self.assertTrue(as_persisted.fields["verified_lossless"])
+        self.assertFalse(fresh.fields["verified_lossless"])
+        self.assertEqual(fresh.fields["ultrasonic_leg_outcome"], "denied")
+        # And the album is still imported — a withheld proof is not a
+        # rejection.
+        self.assertTrue(fresh.fields["imported"])
+
+
+class TestCurrentSidePairing(unittest.TestCase):
+    """Without a HAVE, no branch that compares against one can be reached.
+
+    The provisional-lossless lane's confident rejects need an installed
+    album carrying a comparable ``lossless_source_v0`` probe; a corpus
+    decided with no current side reports zero for every one of them, which
+    is how a differential can miss the branch that matters most.
+    """
+
+    def _installed_row(self, **overrides: object) -> dict[str, object]:
+        return _corpus_row(
+            id=99,
+            source_path="/Beets/installed",
+            min_bitrate_kbps=128, avg_bitrate_kbps=128,
+            median_bitrate_kbps=128,
+            format="MP3", is_cbr=True,
+            spectral_grade=None, spectral_subject=None,
+            spectral_provenance=None, codec_family=None,
+            spectral_measurement_version=None,
+            codec="mp3", container="mp3", storage_format="mp3",
+            filetype_band="mp3", target_format=None, target_is_cbr=None,
+            v0_min_bitrate_kbps=219, v0_avg_bitrate_kbps=240,
+            v0_median_bitrate_kbps=240, v0_subject="source",
+            files=[{
+                "relative_path": "01.mp3", "size_bytes": 1, "mtime_ns": 1,
+                "extension": "mp3", "container": "mp3", "codec": "mp3",
+                "decode_ok": True,
+            }],
+            **overrides,
+        )
+
+    def _candidate_row(self) -> dict[str, object]:
+        """The Bill Hicks rescue shape: suspect grade, strong probe."""
+        return _corpus_row(
+            id=7, spectral_grade="suspect", ultrasonic_deficit_db=65.16,
+            v0_min_bitrate_kbps=219, v0_avg_bitrate_kbps=241,
+            v0_median_bitrate_kbps=241,
+        )
+
+    def test_the_current_side_reaches_the_comparison(self):
+        alone = decide_row(self._candidate_row(), counterfactual=True)
+        paired = decide_row(
+            self._candidate_row(), current=self._installed_row(),
+            counterfactual=True,
+        )
+        # Decided as a fresh request, the candidate has nothing to lose to
+        # and nothing to be locked by: the whole HAVE-comparing half of the
+        # decider is unreachable, which is what makes an unpaired
+        # differential under-report.
+        self.assertEqual(alone.fields["stage1_spectral"], "import_no_exist")
+        self.assertTrue(alone.fields["imported"])
+        self.assertTrue(paired.fields["imported"])
+        # A denial must not re-route the paired album into the
+        # provisional-lossless lane, whose confident rejects need exactly
+        # this installed probe to fire.
+        self.assertNotIn(
+            paired.fields["stage2_import"], PROVISIONAL_LANE_DECISIONS,
+        )
+
+    def test_pairs_are_joined_by_candidate_id(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            corpus = root / "corpus.jsonl"
+            pairs = root / "pairs.jsonl"
+            corpus.write_text(
+                json.dumps(self._candidate_row()) + "\n", encoding="utf-8")
+            pairs.write_text(
+                json.dumps({"id": 7, "current": self._installed_row()}) + "\n",
+                encoding="utf-8")
+            out = root / "decided.jsonl"
+            self.assertEqual(
+                main(["decide", "--corpus", str(corpus),
+                      "--pair-with", str(pairs), "--counterfactual",
+                      "--out", str(out)]), 0)
+            decided = msgspec.json.decode(
+                out.read_text(encoding="utf-8").strip(), type=dict)
+            self.assertEqual(decided["id"], 7)
+            self.assertFalse(decided["fields"]["verified_lossless"])
+            self.assertTrue(decided["fields"]["imported"])
+
+    def test_a_pairing_row_without_a_current_object_fails_closed(self):
+        with TemporaryDirectory() as tmp:
+            pairs = Path(tmp) / "pairs.jsonl"
+            pairs.write_text(
+                json.dumps({"id": 7}) + "\n", encoding="utf-8")
+            with self.assertRaises(RenderDifferentialError):
+                read_current_pairs(str(pairs))
+
+    def test_an_unpaired_candidate_is_still_decided(self):
+        """A corpus row with no installed album is the ordinary fresh
+        request, not an error."""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            corpus = root / "corpus.jsonl"
+            pairs = root / "pairs.jsonl"
+            corpus.write_text(
+                json.dumps(self._candidate_row()) + "\n", encoding="utf-8")
+            pairs.write_text(
+                json.dumps({"id": 4242, "current": self._installed_row()})
+                + "\n", encoding="utf-8")
+            out = root / "decided.jsonl"
+            self.assertEqual(
+                decide_corpus(str(corpus), str(out), pairs_path=str(pairs)), 1)
 
 
 class TestCli(unittest.TestCase):

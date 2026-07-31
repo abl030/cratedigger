@@ -28,6 +28,39 @@ Two modes, same two-tree runbook as Rule D:
     nix-shell --run "python3 scripts/decision_differential.py diff \\
       --base /tmp/base.jsonl --current /tmp/current.jsonl"
 
+**Copying this harness into a base tree that predates the change.** The
+copy runs against the BASE tree's production code, so anything the base
+does not have has to come out of the copy: for a base ref older than the
+v3 ultrasonic leg that is the leg import, ``leg_for_evidence``, and the
+three ``PROOF_FIELDS`` entries it feeds. The two sides then emit different
+field sets, which the diff engine refuses by default and correctly so —
+re-run the ``diff`` with ``--allow-field-drift``, which compares the shared
+fields and prints the unshared ones under ``NOT COMPARED``. Say in the PR
+body which fields had no base value.
+
+**Two arms, and the second is the one that measures a proof-gate change.**
+
+* ``decide`` alone re-decides each row AS PERSISTED. A row that already
+  holds a verified-lossless proof starts from that proof, so the promotion
+  the gate governs never runs: this arm answers "does the change disturb
+  the library as it stands", and its honest result for a promotion-gate
+  change is zero.
+* ``decide --counterfactual`` drops each candidate's persisted proof
+  columns first, asking the question the gate actually decides — if this
+  exact album arrived now, would it be promoted? This is the arm where a
+  proof-gate change shows its real blast radius.
+
+**Pairing a current side.** ``decide --pair-with`` takes a JSONL of
+``{"id": <candidate evidence id>, "current": {<evidence row>}}`` and
+decides each candidate against the installed album's own evidence, the way
+production does (``lib/dispatch/core.py`` passes the request's current
+evidence row beside the candidate). Without it every row is decided as a
+fresh request with nothing installed — which cannot reach any branch that
+compares against a HAVE, including the provisional-lossless lane's
+confident rejects. A proof-gate differential run without a current side
+will under-report; the current side's OWN proof is never stripped, because
+an installed proof is real evidence and is the acquisition ceiling.
+
 Three properties keep the measurement honest, and each is the mirror of a
 way a differential can lie:
 
@@ -194,22 +227,66 @@ def leg_for_evidence(evidence: AlbumQualityEvidence) -> UltrasonicProofLeg:
     )
 
 
-def decide_row(row: Mapping[str, object]) -> RenderedRow:
+#: The persisted verified-lossless proof columns, dropped by the
+#: counterfactual arm. Spelled here rather than derived because they are DB
+#: column names on the corpus row, not fields of any type this module holds.
+_PERSISTED_PROOF_COLUMNS: tuple[str, ...] = (
+    "verified_lossless_provenance",
+    "verified_lossless_source",
+    "verified_lossless_classifier",
+    "verified_lossless_detail",
+)
+
+
+def without_persisted_proof(row: Mapping[str, object]) -> dict[str, object]:
+    """The same corpus row as it would have arrived before it was proved.
+
+    Re-deciding a persisted row starts from the proof it already holds, so
+    the promotion path a proof gate governs is never exercised. Dropping
+    the proof asks the question the gate actually answers: if this exact
+    album were acquired now, would it be promoted?
+
+    Only the four proof columns and the boolean move. Nothing measured is
+    touched — the counterfactual is about what the row was GRANTED, never
+    about what it IS.
+    """
+    counterfactual = dict(row)
+    counterfactual["verified_lossless"] = False
+    for column in _PERSISTED_PROOF_COLUMNS:
+        counterfactual[column] = None
+    return counterfactual
+
+
+def decide_row(
+    row: Mapping[str, object],
+    *,
+    current: Mapping[str, object] | None = None,
+    counterfactual: bool = False,
+) -> RenderedRow:
     """Re-decide one corpus row through the real decider.
 
-    The candidate is the row itself and there is no ``current``: the
-    question this differential answers is "what does the policy change do
-    to THIS album's own evidence", and pairing every row against a HAVE
-    would measure the comparison rather than the change.
+    ``current`` is the installed album's evidence row, paired the way
+    production pairs it. Without one the row is decided as a fresh request
+    with nothing installed, which no branch that compares against a HAVE
+    can reach. ``counterfactual`` drops the candidate's persisted proof
+    first (see ``without_persisted_proof``); the current side keeps its
+    own, because an installed proof is real evidence.
     """
     row_id = row.get("id")
     if not isinstance(row_id, int) or isinstance(row_id, bool):
         raise RenderDifferentialError(
             f"corpus row has no integer id: {row_id!r}")
-    evidence = _evidence_from_corpus_row(row)
+    evidence = _evidence_from_corpus_row(
+        without_persisted_proof(row) if counterfactual else row,
+    )
+    current_evidence = (
+        _evidence_from_corpus_row(current) if current is not None else None
+    )
     fields: dict[str, object] = {}
     try:
-        decision = full_pipeline_decision_from_evidence(evidence)
+        decision = full_pipeline_decision_from_evidence(
+            evidence, current_evidence,
+        )
     except ValueError as exc:
         # A row the decider refuses is a real outcome and is compared as
         # one; dropping it would shrink the denominator. It still carries
@@ -279,9 +356,37 @@ def _corpus_rows(path: str) -> Iterator[dict[str, object]]:
                     f"{exc}") from exc
 
 
-def decide_corpus(corpus_path: str, out_path: str | None) -> int:
+def read_current_pairs(path: str) -> dict[int, dict[str, object]]:
+    """Load ``{"id": <candidate id>, "current": {<evidence row>}}`` lines.
+
+    Held in memory on purpose: the pairing side is one row per INSTALLED
+    album for the candidates being measured, and the join has to be random
+    access. The candidate corpus itself still streams.
+    """
+    pairs: dict[int, dict[str, object]] = {}
+    for row in _corpus_rows(path):
+        pair_id = row.get("id")
+        if not isinstance(pair_id, int) or isinstance(pair_id, bool):
+            raise RenderDifferentialError(
+                f"pairing row has no integer id: {pair_id!r}")
+        current = row.get("current")
+        if not is_str_object_dict(current):
+            raise RenderDifferentialError(
+                f"pairing row {pair_id} has no 'current' evidence object")
+        pairs[pair_id] = dict(current)
+    return pairs
+
+
+def decide_corpus(
+    corpus_path: str,
+    out_path: str | None,
+    *,
+    pairs_path: str | None = None,
+    counterfactual: bool = False,
+) -> int:
     """Decide every corpus row, streaming so a large corpus stays bounded."""
     count = 0
+    pairs = read_current_pairs(pairs_path) if pairs_path is not None else {}
     output = (
         contextlib.nullcontext(sys.stdout)
         if out_path is None
@@ -289,7 +394,14 @@ def decide_corpus(corpus_path: str, out_path: str | None) -> int:
     )
     with output as handle:
         for row in _corpus_rows(corpus_path):
-            handle.write(msgspec.json.encode(decide_row(row)).decode())
+            row_id = row.get("id")
+            current = (
+                pairs.get(row_id) if isinstance(row_id, int) else None
+            )
+            decided = decide_row(
+                row, current=current, counterfactual=counterfactual,
+            )
+            handle.write(msgspec.json.encode(decided).decode())
             handle.write("\n")
             count += 1
     return count
@@ -320,6 +432,16 @@ def _build_parser() -> argparse.ArgumentParser:
     decide.add_argument(
         "--out", default=None,
         help="Decided JSONL output path (default: stdout)")
+    decide.add_argument(
+        "--pair-with", default=None, dest="pair_with",
+        help=("JSONL of {\"id\": <candidate evidence id>, \"current\": "
+              "{<evidence row>}} pairing each candidate against the "
+              "installed album, the way production decides"))
+    decide.add_argument(
+        "--counterfactual", action="store_true",
+        help=("Drop each candidate's persisted verified-lossless proof "
+              "first — the fresh-mint arm, where a promotion-gate change "
+              "shows its real blast radius"))
 
     diff = sub.add_parser(
         "diff", help="Compare two decided JSONL files field by field")
@@ -341,7 +463,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
         if args.mode == "decide":
-            count = decide_corpus(args.corpus, args.out)
+            count = decide_corpus(
+                args.corpus, args.out,
+                pairs_path=args.pair_with,
+                counterfactual=args.counterfactual,
+            )
             print(f"decided {count} rows", file=sys.stderr)
             return 0
         report = summarize_render_diff(
