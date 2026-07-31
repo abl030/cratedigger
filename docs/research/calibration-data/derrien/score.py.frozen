@@ -1,0 +1,86 @@
+"""Score a Derrien measurement TSV: separation, recall, false positives, lambda."""
+import csv
+import sys
+import numpy as np
+
+
+def load(paths):
+    rows = []
+    for p in paths:
+        with open(p) as fh:
+            for r in csv.DictReader(fh, delimiter="\t"):
+                rows.append(r)
+    return rows
+
+
+def col(rows, name, f=float):
+    return np.array([f(r[name]) if r[name] != "" else np.nan for r in rows])
+
+
+def describe(tag, v):
+    if len(v) == 0:
+        return f"{tag:22s} n=0"
+    q = np.percentile(v, [0, 1, 5, 25, 50, 75, 95, 99, 100])
+    return (f"{tag:22s} n={len(v):5d}  min={q[0]:.4f} p5={q[2]:.4f} med={q[4]:.4f} "
+            f"p95={q[6]:.4f} p99={q[7]:.4f} max={q[8]:.4f}")
+
+
+def main():
+    rows = load(sys.argv[1:])
+    rows = [r for r in rows if r["err"] == ""]
+    errs = [r for r in load(sys.argv[1:]) if r["err"] != ""]
+    modes = sorted({r["mode"] for r in rows})
+    for mode in modes:
+        sub = [r for r in rows if r["mode"] == mode]
+        print(f"\n===== frame selection: {mode} =====")
+        classes = sorted({r["cls"] for r in sub})
+        stats = {}
+        for c in classes:
+            s = [r for r in sub if r["cls"] == c]
+            v = col(s, "proba")
+            stats[c] = (v, s)
+            print(describe("proba " + c, v))
+        if "launder" in stats and "genuine" in stats:
+            lau, gen = stats["launder"][0], stats["genuine"][0]
+            neg = gen
+            for c in classes:
+                if c.startswith("wild"):
+                    neg = np.concatenate([neg, stats[c][0]])
+            print(f"\n  separation: max(genuine)={gen.max():.4f}  "
+                  f"min(launder)={lau.min():.4f}  "
+                  f"ratio med(launder)/max(genuine)="
+                  f"{np.median(lau) / gen.max():.2f}x")
+            print(f"  all negatives (genuine+wild): n={len(neg)} max={neg.max():.4f} "
+                  f"p99={np.percentile(neg, 99):.4f}")
+            # lambda calibrated on OUR corpus
+            for name, lam in (("paper lambda", 0.031),
+                              ("max(neg)", float(neg.max())),
+                              ("max(neg)*1.15", float(neg.max()) * 1.15),
+                              ("p99(neg)", float(np.percentile(neg, 99)))):
+                rec = (lau > lam).mean()
+                fp = (neg > lam).mean()
+                print(f"  lambda={lam:.4f} ({name:14s}) recall={rec * 100:5.1f}%  "
+                      f"FP={fp * 100:5.2f}% ({int((neg > lam).sum())}/{len(neg)})")
+            # album-level recall at the zero-FP threshold
+            lam0 = float(neg.max())
+            alb = {}
+            for r, v in zip(stats["launder"][1], lau):
+                alb.setdefault(r["rid"], []).append(v)
+            hit = sum(1 for k, v in alb.items() if max(v) > lam0)
+            print(f"  album-level (any track > {lam0:.4f}): {hit}/{len(alb)} albums")
+            # offsets
+            offs = col(stats["launder"][1], "offset", int)
+            u, c2 = np.unique(offs[~np.isnan(offs)], return_counts=True)
+            top = sorted(zip(c2, u), reverse=True)[:4]
+            print("  launder offsets: " + ", ".join(f"{int(o)}x{int(n)}" for n, o in top))
+    if errs:
+        from collections import Counter
+        print("\nerrors:", Counter(r["err"].split(":")[0] + " " + r["err"][-30:]
+                                   for r in errs).most_common(5))
+    t = col([r for r in rows], "secs")
+    print(f"\ncompute: median {np.median(t):.1f}s/track, total CPU "
+          f"{t.sum() / 3600:.2f} core-hours over {len(t)} analyses")
+
+
+if __name__ == "__main__":
+    main()

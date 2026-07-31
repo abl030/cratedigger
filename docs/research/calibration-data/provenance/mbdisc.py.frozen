@@ -1,0 +1,37 @@
+import json, os, subprocess, sys, urllib.request
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from toc_probe import toc_from_dir, build_toc, mbid as calc_mbid
+BASE = "http://192.168.1.43:5200"
+ROOT = "/mnt/virtio/Music/Beets"
+
+def tag(path, key):
+    out = subprocess.run(["metaflac", f"--show-tag={key}", path],
+                         capture_output=True, text=True).stdout.strip()
+    return out.split("=", 1)[1] if "=" in out else None
+
+dirs = sorted({dp for dp, dn, fn in os.walk(ROOT) if any(f.lower().endswith(".flac") for f in fn)})
+hit = tot = have_discids = 0
+for d in dirs:
+    files, meta, lens = toc_from_dir(d)
+    if not files: continue
+    if any(t % 588 or sr != 44100 for (_f, sr, _c, _b, t) in meta):
+        print(f"{os.path.basename(d)[:44]:44s} not sector aligned"); continue
+    rel = tag(os.path.join(d, files[0]), "MUSICBRAINZ_ALBUMID")
+    if not rel:
+        print(f"{os.path.basename(d)[:44]:44s} no MB album id"); continue
+    tot += 1
+    mine = calc_mbid(build_toc(lens))
+    try:
+        req = urllib.request.Request(f"{BASE}/ws/2/release/{rel}?inc=discids&fmt=json",
+                                     headers={"User-Agent": "provenance-probe/1.0"})
+        data = json.load(urllib.request.urlopen(req, timeout=25))
+    except Exception as e:
+        print(f"{os.path.basename(d)[:44]:44s} MB err {e}"); continue
+    ids = [d2["id"] for m in data.get("media", []) for d2 in (m.get("discs") or [])]
+    if ids: have_discids += 1
+    ok = mine in ids
+    hit += ok
+    print(f"{os.path.basename(d)[:44]:44s} mine={mine[:12]}.. MBdiscs={len(ids):2d} "
+          f"{'MATCH' if ok else ('no-match' if ids else 'release has no discid')}")
+print(f"\n{hit}/{tot} albums: computed DiscID present on the matched MB release "
+      f"({have_discids} releases have any discid)")

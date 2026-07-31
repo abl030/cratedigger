@@ -1,0 +1,331 @@
+"""AAC transcode detection: a numpy port of Derrien (JAES 2019, 67(3) 116-123)
+plus a Yang-style NAC (non-zero-MDCT-coefficient) frame-grid probe.
+
+The Derrien port follows the author's reference Matlab (main.m / detect_aac.m /
+init_aac.m / MDCT.m), with the offset, frame and scalefactor loops vectorised.
+"""
+from __future__ import annotations
+
+import numpy as np
+from scipy.special import erf, erfinv
+
+IBLEN_LONG = 1024
+IBLEN_SHORT = 128
+NB_SHORT_WIN = IBLEN_LONG // IBLEN_SHORT          # 8
+OFFSET_SHORT = (IBLEN_LONG - IBLEN_SHORT) // 2    # 448
+
+# init_aac.m scalefactor-band start indices (1-based in Matlab).
+_SWB_LONG_44_48 = [
+    1, 5, 9, 13, 17, 21, 25, 29, 33, 37, 41, 49, 57, 65, 73, 81, 89, 97, 109,
+    121, 133, 145, 161, 177, 197, 217, 241, 265, 293, 321, 353, 385, 417, 449,
+    481, 513, 545, 577, 609, 641, 673, 705, 737, 769, 801, 833, 865, 897, 929]
+_SWB_LONG_32 = _SWB_LONG_44_48 + [961, 993]
+_SWB_SHORT = [1, 5, 9, 13, 17, 21, 29, 37, 45, 57, 69, 81, 97, 113]
+
+
+def _bands(low_1based, top):
+    low = np.asarray(low_1based, dtype=int) - 1
+    high = np.empty_like(low)
+    high[:-1] = low[1:] - 1
+    high[-1] = top - 1
+    return low, high
+
+
+def init_aac(fs_khz: int):
+    """Band tables and the four sine window shapes for a sample rate (kHz)."""
+    if fs_khz == 32:
+        lo_l = _SWB_LONG_32
+    elif fs_khz in (44, 48):
+        lo_l = _SWB_LONG_44_48
+    else:
+        raise ValueError(f"unsupported sample rate {fs_khz} kHz")
+    low_l, high_l = _bands(lo_l, IBLEN_LONG)
+    low_s, high_s = _bands(_SWB_SHORT, IBLEN_SHORT)
+
+    n = 2 * IBLEN_LONG
+    wl_2048 = np.sin(np.pi * (2 * np.arange(0, n // 2) + 1) / n / 2)
+    wr_2048 = np.sin(np.pi * (2 * np.arange(n // 2, n) + 1) / n / 2)
+    n = 2 * IBLEN_SHORT
+    wl_256 = np.sin(np.pi * (2 * np.arange(0, n // 2) + 1) / n / 2)
+    wr_256 = np.sin(np.pi * (2 * np.arange(n // 2, n) + 1) / n / 2)
+
+    win = {
+        "long": np.concatenate([wl_2048, wr_2048]),
+        "start": np.concatenate([wl_2048, np.ones(OFFSET_SHORT), wr_256,
+                                 np.zeros(OFFSET_SHORT)]),
+        "stop": np.concatenate([np.zeros(OFFSET_SHORT), wl_256,
+                               np.ones(OFFSET_SHORT), wr_2048]),
+        "short": np.concatenate([wl_256, wr_256]),
+    }
+    return low_l, high_l, low_s, high_s, win
+
+
+def tau_tables(low_l, high_l, low_s, high_s, ref_proba=1e-2):
+    """main.m per-band significance thresholds under the uniform-error null."""
+    w_l = (high_l - low_l + 1).astype(float)
+    w_s = (high_s - low_s + 1).astype(float) * NB_SHORT_WIN
+    mu = 1.0 / 12.0
+    sig_l = np.sqrt(1.0 / w_l / 180.0)
+    sig_s = np.sqrt(1.0 / w_s / 180.0)
+    tau_l = mu - np.sqrt(2) * sig_l * erfinv(erf(mu / sig_l / np.sqrt(2)) - 2 * ref_proba)
+    tau_s = mu - np.sqrt(2) * sig_s * erfinv(erf(mu / sig_s / np.sqrt(2)) - 2 * ref_proba)
+    return tau_l, tau_s
+
+
+def mdct(x: np.ndarray) -> np.ndarray:
+    """MDCT.m, batched over leading axes. Last axis 2N samples -> N bins."""
+    n2 = x.shape[-1]
+    n = n2 // 2
+    t = np.arange(n2)
+    f = np.arange(n)
+    y = x * np.exp(-1j * np.pi * t / (2 * n))
+    y = np.fft.fft(y, axis=-1)[..., :n]
+    return np.real(y * np.exp(-1j * np.pi * (f + 0.5) * (n + 1) / (2 * n)))
+
+
+def _frame_matrix(seg, offsets):
+    """(n_off, n_frames, 2048) block from per-frame segments of 3071+ samples.
+
+    `seg` is (n_frames, >=2048+max_offset); segment f starts at sample
+    (frame_f - 1) * IBLEN_LONG of the channel, matching detect_aac.m slicing.
+    """
+    idx = offsets[:, None, None] + np.arange(2 * IBLEN_LONG)[None, None, :]
+    return seg[None, :, :][np.zeros(len(offsets), dtype=int)[:, None, None],
+                           np.arange(seg.shape[0])[None, :, None], idx]
+
+
+class BandPlan:
+    """Precomputed bin->band mapping for one window family.
+
+    `group` is the number of MDCT blocks pooled into one band (1 for long
+    windows, 8 for short windows, matching detect_aac.m's reshape).
+    """
+
+    def __init__(self, low, high, nbins, group):
+        nb = len(low) - 1                      # detect_aac.m skips the last band
+        self.nb = nb
+        lab = np.full(group * nbins, -1, dtype=np.int64)
+        for b in range(nb):
+            for g in range(group):
+                lab[g * nbins + low[b]: g * nbins + high[b] + 1] = b
+        keep = np.nonzero(lab >= 0)[0]
+        order = np.argsort(lab[keep], kind="stable")
+        self.perm = keep[order]
+        sortlab = lab[self.perm]
+        self.starts = np.searchsorted(sortlab, np.arange(nb))
+        self.width = np.bincount(sortlab, minlength=nb).astype(np.float64)
+        self.bin_band = sortlab
+        self.group = group
+        self.nbins = nbins
+
+
+def band_counts(coef, plan: BandPlan, sf, tau):
+    """Hits/trials per leading index, for one window family.
+
+    coef: (..., group, nbins). Returns (hits, trials) where hits has the shape
+    of the leading axes and trials is a scalar.
+    """
+    lead = coef.shape[:-2]
+    a = np.abs(coef).reshape(lead + (plan.group * plan.nbins,))[..., plan.perm]
+    seg_max = np.maximum.reduceat(a, plan.starts, axis=-1)
+    with np.errstate(divide="ignore"):
+        sf_max = 4 * np.log2(seg_max) + 16.0 / 3.0 + 60.0        # (..., nb)
+    a34 = a ** 0.75
+    scale = np.exp2(-3.0 / 16.0 * (sf_max[..., None] * sf - 60.0))  # (..., nb, nsf)
+    v = a34[..., None] * scale[..., plan.bin_band, :]               # (..., K, nsf)
+    e = np.rint(v)
+    e -= v
+    e *= e
+    err = np.add.reduceat(e, plan.starts, axis=-2) / plan.width[:, None]
+    hits = np.count_nonzero(err < tau[:plan.nb, None], axis=(-2, -1))
+    trials = plan.nb * len(sf)
+    return hits, trials
+
+
+def detect_aac(seg, offsets, sf, plans, win, tau_l, tau_s, chunk=32):
+    """detect_aac.m over every candidate offset. Returns (len(offsets),)."""
+    plan_l, plan_s = plans
+    out = np.empty(len(offsets), dtype=np.float64)
+    nf = seg.shape[0]
+    for c0 in range(0, len(offsets), chunk):
+        off = offsets[c0:c0 + chunk]
+        blk = _frame_matrix(seg, off)                         # (no, nf, 2048)
+        hits = np.empty((4, len(off), nf), dtype=np.int64)
+        trials = np.empty(4, dtype=np.int64)
+        for w, name in enumerate(("long", "start", "stop")):
+            co = mdct(blk * win[name])[:, :, None, :]          # (no, nf, 1, 1024)
+            hits[w], trials[w] = band_counts(co, plan_l, sf, tau_l)
+        sh = np.stack([blk[..., OFFSET_SHORT + k * IBLEN_SHORT:
+                           OFFSET_SHORT + (k + 2) * IBLEN_SHORT] * win["short"]
+                       for k in range(NB_SHORT_WIN)], axis=2)  # (no, nf, 8, 256)
+        hits[3], trials[3] = band_counts(mdct(sh), plan_s, sf, tau_s)
+        proba = hits / trials[:, None, None]
+        best = np.argmax(proba, axis=0)                        # (no, nf)
+        take_h = np.take_along_axis(hits, best[None], axis=0)[0]
+        take_t = trials[best]
+        out[c0:c0 + chunk] = take_h.sum(axis=1) / take_t.sum(axis=1)
+    return out
+
+
+# ---------------------------------------------------------------- NAC probe
+
+def nac_profile(seg, offsets, win_long, rel=1e-3, hi_bin=None):
+    """Near-zero MDCT coefficient count as a function of candidate frame offset.
+
+    Self-normalising: each file is its own control. A signal carrying an AAC
+    quantisation lattice should show a pronounced peak in the near-zero count
+    at the true frame offset. `rel` is relative to each frame's peak magnitude.
+    """
+    prof = np.empty(len(offsets), dtype=np.float64)
+    for c0 in range(0, len(offsets), 128):
+        off = offsets[c0:c0 + 128]
+        co = np.abs(mdct(_frame_matrix(seg, off) * win_long))
+        if hi_bin is not None:
+            co = co[..., :hi_bin]
+        thr = co.max(axis=-1, keepdims=True) * rel
+        prof[c0:c0 + 128] = (co < thr).sum(axis=(1, 2)) / co.shape[1]
+    return prof
+
+
+def profile_zscore(prof, period=None):
+    """Contrast of the profile's best offset against the rest of the profile."""
+    i = int(np.argmax(prof))
+    mask = np.ones(len(prof), dtype=bool)
+    lo, hi = max(0, i - 2), min(len(prof), i + 3)
+    mask[lo:hi] = False
+    rest = prof[mask]
+    sd = rest.std()
+    return {"best_offset": i, "peak": float(prof[i]),
+            "median": float(np.median(rest)), "std": float(sd),
+            "z": float((prof[i] - np.median(rest)) / sd) if sd > 0 else 0.0}
+
+
+def _block_energies(path, chunk_blocks=4096):
+    """Streaming per-1024-block energy for L, R, M=L+R, S=L-R (or mono)."""
+    import soundfile as sf_mod
+    acc = {}
+    with sf_mod.SoundFile(path) as f:
+        rate, nch, total = f.samplerate, f.channels, f.frames
+        nblk = total // IBLEN_LONG
+        keys = ("mono",) if nch == 1 else ("L", "R", "M", "S")
+        acc = {k: np.empty(nblk, dtype=np.float64) for k in keys}
+        done = 0
+        while done < nblk:
+            want = min(chunk_blocks, nblk - done)
+            d = f.read(want * IBLEN_LONG, dtype="float64", always_2d=True)
+            got = d.shape[0] // IBLEN_LONG
+            if got == 0:
+                break
+            d = d[:got * IBLEN_LONG]
+            if nch == 1:
+                ch = {"mono": d[:, 0]}
+            else:
+                ch = {"L": d[:, 0], "R": d[:, 1],
+                      "M": d[:, 0] + d[:, 1], "S": d[:, 0] - d[:, 1]}
+            for k, v in ch.items():
+                acc[k][done:done + got] = (v.reshape(got, IBLEN_LONG) ** 2).sum(axis=1)
+            done += got
+        for k in acc:
+            acc[k] = acc[k][:done]
+    return acc, rate, nch, total
+
+
+def select_frames_from_blocks(eblk, nb_win, mode="high"):
+    """main.m frame selection (highest energy) plus a low-energy variant."""
+    nmax = len(eblk) - 2
+    if nmax < 1:
+        raise ValueError("file too short")
+    energy = eblk[:nmax] + eblk[1:nmax + 1]
+    with np.errstate(divide="ignore"):
+        db = 10 * np.log10(energy)
+    if mode == "high":
+        order = np.argsort(db)[::-1]
+    else:
+        order = np.argsort(np.where(np.isfinite(db), db, np.inf))
+    return order[:nb_win] + 1, db
+
+
+def read_segments(path, frames, span):
+    """Per-frame contiguous segments starting at (frame-1)*1024, `span` long."""
+    import soundfile as sf_mod
+    with sf_mod.SoundFile(path) as f:
+        nch = f.channels
+        segs = []
+        for fr in frames:
+            f.seek(int((fr - 1) * IBLEN_LONG))
+            d = f.read(span, dtype="float64", always_2d=True)
+            if d.shape[0] < span:
+                d = np.vstack([d, np.zeros((span - d.shape[0], nch))])
+            segs.append(d)
+    a = np.stack(segs, axis=0)                     # (nf, span, nch)
+    if nch == 1:
+        return {"mono": a[:, :, 0]}
+    return {"L": a[:, :, 0], "R": a[:, :, 1],
+            "M": a[:, :, 0] + a[:, :, 1], "S": a[:, :, 0] - a[:, :, 1]}
+
+
+def analyse(path, nb_win=8, nb_sf=8, sf_min=0.3, sf_max=0.7, mode="high",
+            stride=1, probe_only=False, want_profile=False):
+    """Full-file analysis; returns a statistics dict.
+
+    Memory-light: one streaming pass for frame selection, then only the
+    selected 2048+offset-sample segments are read.
+    """
+    eblk, rate, nch, total = _block_energies(path)
+    fs_khz = int(round(rate / 1000))
+    low_l, high_l, low_s, high_s, win = init_aac(fs_khz)
+    tau_l, tau_s = tau_tables(low_l, high_l, low_s, high_s)
+    plans = (BandPlan(low_l, high_l, IBLEN_LONG, 1),
+             BandPlan(low_s, high_s, IBLEN_SHORT, NB_SHORT_WIN))
+    sf = np.linspace(sf_min, sf_max, nb_sf)
+    offsets = np.arange(0, IBLEN_LONG, stride)
+
+    sel_key = "mono" if nch == 1 else "M"
+    frames, _ = select_frames_from_blocks(eblk[sel_key], nb_win, mode)
+    span = 2 * IBLEN_LONG + int(offsets.max())
+    segs = read_segments(path, frames, span)
+
+    if nch == 1:
+        pick = [("mono", "mono")]
+    else:
+        idx = frames - 1
+        em = {k: float(np.log10(np.maximum(
+            eblk[k][idx] + eblk[k][idx + 1], 1e-300)).mean())
+            for k in ("L", "R", "M", "S")}
+        pick = [("LR", "L" if em["L"] >= em["R"] else "R"),
+                ("MS", "M" if em["M"] >= em["S"] else "S")]
+
+    res = {"path": path, "rate": rate, "channels": nch, "duration": total / rate,
+           "frames": frames.tolist(), "mode": mode, "picked": [p[1] for p in pick]}
+
+    prof = {}
+    for tag, ch in pick:
+        prof[tag] = detect_aac(segs[ch], offsets, sf, plans, win, tau_l, tau_s)
+    bt = max(prof, key=lambda k: prof[k].max())
+    p = prof[bt]
+    res["proba"] = float(p.max())
+    res["proba_mode"] = bt
+    res["offset"] = int(offsets[int(np.argmax(p))])
+    res["proba_median"] = float(np.median(p))
+    res["proba_std"] = float(p.std())
+    res["proba_z"] = float((p.max() - np.median(p)) / p.std()) if p.std() > 0 else 0.0
+    res["proba_by_mode"] = {k: float(v.max()) for k, v in prof.items()}
+    if want_profile:
+        res["profile"] = {k: v.tolist() for k, v in prof.items()}
+    return res
+
+
+def nac_analyse(path, nb_win=8, mode="high", rel=1e-3):
+    """Cheap NAC frame-grid probe only."""
+    eblk, rate, nch, total = _block_energies(path)
+    fs_khz = int(round(rate / 1000))
+    _, _, _, _, win = init_aac(fs_khz)
+    offsets = np.arange(IBLEN_LONG)
+    sel_key = "mono" if nch == 1 else "M"
+    frames, _ = select_frames_from_blocks(eblk[sel_key], nb_win, mode)
+    segs = read_segments(path, frames, 2 * IBLEN_LONG + IBLEN_LONG - 1)
+    out = {}
+    for k, v in segs.items():
+        out[k] = profile_zscore(nac_profile(v, offsets, win["long"], rel=rel))
+    return {"path": path, "rate": rate, "nac": out,
+            "nac_z": max(x["z"] for x in out.values())}

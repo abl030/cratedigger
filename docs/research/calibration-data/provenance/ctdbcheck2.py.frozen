@@ -1,0 +1,27 @@
+import os, re, sys, subprocess, zlib
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from toc_probe import toc_from_dir, build_toc, ctdb_lookup
+
+def raw_crc(data):          # CUETools convention: init 0, no final xor
+    return zlib.crc32(data, 0xFFFFFFFF) ^ 0xFFFFFFFF
+
+d = sys.argv[1]
+files, meta, lens = toc_from_dir(d)
+toc = build_toc(lens)
+xml = ctdb_lookup(toc)
+ent = re.findall(r'confidence="(\d+)"[^>]*crc32="([0-9a-f]+)"[^>]*trackcrcs="([^"]*)"', xml)
+want = {}
+for conf, dcrc, tc in ent:
+    for i, c in enumerate(tc.split()):
+        want.setdefault(i, {})
+        want[i][int(c,16)] = max(want[i].get(int(c,16),0), int(conf))
+hits = 0
+for i, f in enumerate(files):
+    raw = subprocess.run(["flac","-d","-c","--totally-silent","--force-raw-format",
+        "--endian=little","--sign=signed", os.path.join(d,f)], capture_output=True, check=True).stdout
+    z = zlib.crc32(raw)&0xFFFFFFFF; r = raw_crc(raw)
+    m = [k for k,v in ((z,'zlib'),(r,'raw')) if k in want.get(i,{})]
+    if m: hits += 1
+    lbl = ",".join(f"{v}:conf{want[i][k]}" for k,v in ((z,'zlib'),(r,'raw')) if k in want.get(i,{}))
+    print(f"  trk{i+1:02d} zlib={z:08x} raw={r:08x} {'MATCH '+lbl if m else '-'}")
+print(f">>> {hits}/{len(files)} matched")

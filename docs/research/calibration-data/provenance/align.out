@@ -1,0 +1,11 @@
+cratedigger dev shell — run: python3 -m unittest discover -s tests -t . -v
+format          albums  all-tracks sector-aligned    pct
+Opus              7257                       2800  38.6%
+MP3               1127                        401  35.6%
+AAC                 48                         18  37.5%
+FLAC                38                         19  50.0%
+OGG                 10                          8  80.0%
+MIXED                5                          3  60.0%
+ALAC                 4                          3  75.0%
+Windows Media        1                          0   0.0%
+TOTAL             8490                       3252  38.3%

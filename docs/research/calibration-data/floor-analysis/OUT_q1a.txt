@@ -1,0 +1,59 @@
+cratedigger dev shell — run: python3 -m unittest discover -s tests -t . -v
+-- GENUINE proof@62 (n=64)
+   U          min   25.54 p10   41.31 med   50.45 p90   58.10 max   61.97
+   D_b12_14   min   23.35 p10   27.66 med   35.56 p90   46.15 max   57.40
+   D_b14_16   min   22.79 p10   30.76 med   39.12 p90   49.00 max   57.23
+   D_b16_18   min   26.30 p10   33.88 med   42.97 p90   50.75 max   55.05
+   D_b18_195  min   27.27 p10   37.64 med   45.03 p90   52.15 max   56.83
+   abs_bU     min -102.54 p10  -96.23 med  -83.57 p90  -69.75 max  -60.91
+   abs_b12_14 min -109.21 p10  -88.64 med  -67.33 p90  -54.80 max  -45.49
+   ref        min  -64.04 p10  -45.84 med  -31.94 p90  -21.34 max  -16.34
+   drop_hi    min   -2.78 p10   -0.19 med    5.53 p90    9.18 max   12.94
+   slope_mid  min   -1.16 p10    0.02 med    0.82 p90    1.24 max    1.47
+   step       min   -1.23 p10    0.37 med    4.86 p90    8.18 max   11.34
+   cons       min    0.00 p10    0.00 med    0.00 p90    0.38 max    0.94
+   U_sd       min    1.68 p10    3.45 med    6.62 p90   10.90 max   18.90
+-- GENUINE ultrasonic-denied@62 (n=34)
+   U          min   55.40 p10   58.61 med   65.15 p90   72.69 max   81.53
+   D_b12_14   min   26.90 p10   27.51 med   38.54 p90   52.46 max   66.17
+   D_b14_16   min   29.80 p10   32.42 med   43.79 p90   56.34 max   68.02
+   D_b16_18   min   29.95 p10   36.74 med   47.90 p90   57.91 max   69.17
+   D_b18_195  min   31.28 p10   39.06 med   50.01 p90   64.18 max   70.32
+   abs_bU     min -113.11 p10 -110.67 med  -99.94 p90  -89.41 max  -80.53
+   abs_b12_14 min -106.59 p10  -88.75 med  -74.69 p90  -58.20 max  -52.20
+   ref        min  -50.02 p10  -44.48 med  -33.46 p90  -25.30 max  -21.58
+   drop_hi    min   -0.04 p10    4.11 med   15.37 p90   23.14 max   33.58
+   slope_mid  min    0.02 p10    0.32 med    1.07 p90    1.64 max    2.31
+   step       min    0.33 p10    3.84 med   13.00 p90   20.50 max   30.25
+   cons       min    0.00 p10    0.00 med    0.70 p90    0.92 max    1.00
+   U_sd       min    3.11 p10    3.32 med    6.06 p90    9.74 max   11.19
+-- GENUINE ceiling-only-denied@62 (n=2)
+   U          min   59.94 p10   59.94 med   60.42 p90   60.90 max   60.90
+   D_b12_14   min   33.87 p10   33.87 med   34.74 p90   35.62 max   35.62
+   D_b14_16   min   36.76 p10   36.76 med   38.52 p90   40.28 max   40.28
+   D_b16_18   min   39.93 p10   39.93 med   41.74 p90   43.55 max   43.55
+   D_b18_195  min   43.00 p10   43.00 med   44.51 p90   46.02 max   46.02
+   abs_bU     min  -95.03 p10  -95.03 med  -86.84 p90  -78.64 max  -78.64
+   abs_b12_14 min  -68.00 p10  -68.00 med  -61.16 p90  -54.32 max  -54.32
+   ref        min  -34.12 p10  -34.12 med  -26.42 p90  -18.71 max  -18.71
+   drop_hi    min   13.92 p10   13.92 med   15.91 p90   17.91 max   17.91
+   slope_mid  min    0.83 p10    0.83 med    0.89 p90    0.95 max    0.95
+   step       min   12.59 p10   12.59 med   13.75 p90   14.91 max   14.91
+   cons       min    0.50 p10    0.50 med    0.53 p90    0.56 max    0.56
+   U_sd       min    4.68 p10    4.68 med    6.20 p90    7.72 max    7.72
+-- FLAC-fraud launders (all) (n=300)
+   U          min   57.03 p10   66.61 med   76.04 p90   81.73 max   90.30
+   D_b12_14   min   23.25 p10   27.57 med   35.93 p90   49.11 max   71.05
+   D_b14_16   min   22.67 p10   31.84 med   40.57 p90   51.92 max   75.30
+   D_b16_18   min   26.20 p10   35.61 med   49.56 p90   75.04 max   86.69
+   D_b18_195  min   26.58 p10   39.44 med   53.96 p90   80.05 max   87.63
+   abs_bU     min -140.00 p10 -120.41 med -110.19 p90  -95.63 max  -80.14
+   abs_b12_14 min -112.92 p10  -88.83 med  -69.02 p90  -54.90 max  -45.45
+   ref        min  -64.50 p10  -45.35 med  -32.63 p90  -22.89 max  -16.37
+   drop_hi    min   -1.67 p10   -0.11 med   19.76 p90   35.09 max   49.50
+   slope_mid  min   -1.12 p10    0.48 med    1.41 p90    4.06 max    5.26
+   step       min   -1.00 p10   -0.02 med   17.29 p90   29.61 max   43.65
+   cons       min    0.00 p10    0.00 med    0.50 p90    0.87 max    1.00
+   U_sd       min    2.61 p10    4.90 med    8.44 p90   13.96 max   21.95
+
+genuine ultra-denied w/ ceiling: 18 without: 16

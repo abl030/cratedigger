@@ -1,0 +1,26 @@
+"""Single genuine/launder pair probe: Derrien statistic + offset-profile contrast."""
+import sys
+import time
+import json
+
+sys.path.insert(0, "/home/abl030/.claude/jobs/fb229c18/tmp/derrien")
+import aacdet as A  # noqa: E402
+
+rid = sys.argv[1] if len(sys.argv) > 1 else "8916"
+n = int(sys.argv[2]) if len(sys.argv) > 2 else 1
+mode = sys.argv[3] if len(sys.argv) > 3 else "high"
+
+idx = json.load(open("/mnt/virtio/Music/derrien-arm/index.json"))
+for m in idx[rid]["map"][:n]:
+    for tag, p in (("GENUINE", m["genuine"]), ("LAUNDER", m["launder"])):
+        t = time.time()
+        try:
+            r = A.analyse(p, nb_win=8, nb_sf=8, mode=mode)
+        except ValueError as e:
+            print(f"{tag:8s} SKIP {e}")
+            continue
+        nz = A.nac_analyse(p, nb_win=8, mode=mode)
+        print(f"{tag:8s} proba={r['proba']:.4f} med={r['proba_median']:.4f} "
+              f"z={r['proba_z']:.1f} off={r['offset']:4d} {r['proba_mode']} "
+              f"nac_z={nz['nac_z']:.2f} sr={r['rate']} t={time.time() - t:.1f}s",
+              flush=True)

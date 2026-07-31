@@ -1,0 +1,22 @@
+import json, math
+from statistics import mean, pstdev
+R = json.load(open('/home/abl030/.claude/jobs/fb229c18/tmp/floor/feats.json'))
+ARM=[r for r in R if r['ds'] in ('TRAIN','R1','R2','R3')]
+GEN=[r for r in ARM if r['variant']=='control-flac1644']
+def corr(a,b):
+    ma,mb=mean(a),mean(b); sa,sb=pstdev(a),pstdev(b)
+    if sa==0 or sb==0: return 0
+    return sum((x-ma)*(y-mb) for x,y in zip(a,b))/(len(a)*sa*sb)
+U=[r['U'] for r in GEN]
+print("GENUINE albums (n=%d): correlation of U with preserved-band features"%len(GEN))
+for k in ('D_b12_14','D_b14_16','D_b16_18','D_b18_195','abs_b12_14','abs_b14_16','ref','slope_mid'):
+    print(f"   {k:<12} r={corr([r[k] for r in GEN],U):+.3f}")
+# how well do preserved-band features of a LAUNDER match its genuine twin?
+gen={(r['ds'],r['slug']):r for r in GEN}
+print("\nPreserved-band fidelity: |launder - genuine| for D_b12_14 / D_b14_16 (median abs diff, dB)")
+for v in ('t-mp3128-flac','t-opus96-flac','t-vorbisq5-flac','apple-cvbr256','lame-cbr320','opus-256','vorbis-q9'):
+    rows=[r for r in ARM if r['variant']==v and (r['ds'],r['slug']) in gen]
+    if not rows: continue
+    d1=sorted(abs(r['D_b12_14']-gen[(r['ds'],r['slug'])]['D_b12_14']) for r in rows)
+    d2=sorted(abs(r['D_b14_16']-gen[(r['ds'],r['slug'])]['D_b14_16']) for r in rows)
+    print(f"   {v:<18} n={len(rows):<4} d12_14 med {d1[len(d1)//2]:5.2f} p90 {d1[int(.9*len(d1))]:5.2f}   d14_16 med {d2[len(d2)//2]:5.2f} p90 {d2[int(.9*len(d2))]:5.2f}")

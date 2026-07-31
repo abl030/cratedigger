@@ -1,0 +1,64 @@
+import json, sys
+from collections import defaultdict
+R = json.load(open('/home/abl030/.claude/jobs/fb229c18/tmp/floor/feats.json'))
+
+def extra(r):
+    r['r1'] = r['abs_b12_14'] - r['abs_b16_18']
+    r['r2'] = r['abs_b16_18'] - r['abs_b20_215']
+    r['excess'] = r['r2'] - r['r1']
+    return r
+for r in R: extra(r)
+
+ARM = [r for r in R if r['ds'] in ('TRAIN','R1','R2','R3')]
+GEN_V = 'control-flac1644'
+FRAUD = ('t-mp3128-flac','t-opus96-flac','t-vorbisq5-flac')
+
+PRECONDS = {
+    'abs_bU<=T':      lambda r,t: r['abs_bU'] <= t,
+    'abs_b18_195<=T': lambda r,t: r['abs_b18_195'] <= t,
+    'D_b18_195>=T':   lambda r,t: r['D_b18_195'] >= t,
+    'excess<=T':      lambda r,t: r['excess'] <= t,
+    'drop_hi<=T':     lambda r,t: r['drop_hi'] <= t,
+    'step<T':         lambda r,t: r['step'] < t,
+}
+
+def state(r, T, pre=None, th=None):
+    legs=set()
+    if r['cliff_frac']>=0.6: legs.add('cliff')
+    if r['step']>=15.0 and r['cons']>=0.5: legs.add('ceiling')
+    if r['U']>=T: legs.add('ultra')
+    if 'cliff' in legs or 'ceiling' in legs: return 'DENIED'
+    if 'ultra' in legs:
+        if pre and pre(r, th): return 'UNTESTABLE'
+        return 'DENIED'
+    return 'PROVED'
+
+def run(rows, T, pre=None, th=None):
+    gen = [r for r in rows if r['variant']==GEN_V]
+    out = defaultdict(lambda: defaultdict(int))
+    for r in rows:
+        out[r['variant']][state(r,T,pre,th)] += 1
+    return out
+
+T = 62.0
+base = run(ARM, T)
+print(f"BASELINE window-0 gate, arms (T={T}):")
+for v in [GEN_V]+list(FRAUD)+['apple-cvbr256','lame-v0','vorbis-q9','opus-256','lame-cbr320']:
+    d=base[v]; n=sum(d.values())
+    print(f"  {v:<18} n={n:<4} PROVED {d['PROVED']:<4} DENIED {d['DENIED']:<4}")
+print()
+print("TRADE CURVE — precondition sweeps (arms, T=62). "
+      "gU = genuine albums moved DENIED->UNTESTABLE (of 100); lU = launder albums moved (pooled over 3 FLAC frauds, of 300)")
+for name, fn in PRECONDS.items():
+    print(f"\n{name}")
+    if 'abs' in name: ths=[-120,-115,-112,-110,-108,-105,-100,-95,-90,-85]
+    elif name.startswith('D_'): ths=[70,65,60,55,50,45,40,35]
+    elif name=='excess<=T': ths=[-5,0,5,10,15,20,25,30]
+    elif name=='drop_hi<=T': ths=[0,3,5,8,10,15,20,25]
+    else: ths=[2,4,6,8,10,12,15]
+    for th in ths:
+        o = run(ARM, T, fn, th)
+        g=o[GEN_V]; lu=sum(o[v]['UNTESTABLE'] for v in FRAUD); ld=sum(o[v]['DENIED'] for v in FRAUD)
+        lp=sum(o[v]['PROVED'] for v in FRAUD)
+        print(f"   th={th:<7} genuine P/D/U {g['PROVED']:>3}/{g['DENIED']:>3}/{g['UNTESTABLE']:>3}   "
+              f"launder(3 frauds) P/D/U {lp:>3}/{ld:>3}/{lu:>3}")

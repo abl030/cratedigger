@@ -1,0 +1,53 @@
+"""Q1 definitive: multiwin (shipped) gate on arms; precondition = codec-invariant midband deficit."""
+import sys, json
+sys.path.insert(0,'/home/abl030/.claude/jobs/fb229c18/tmp/floor')
+from load import *
+from collections import defaultdict
+from statistics import mean
+
+ARMS={'TRAIN':('results.tsv.gz','extended.tsv.gz','multiwin.tsv.gz'),
+ 'R1':('results-holdout.tsv.gz','extended-holdout.tsv.gz','multiwin-holdout.tsv.gz'),
+ 'R2':('results-holdout2.tsv.gz','extended-holdout2.tsv.gz','multiwin-holdout2.tsv.gz'),
+ 'R3':('results-holdout3.tsv.gz','extended-holdout3.tsv.gz','multiwin-holdout3.tsv.gz')}
+GENV='control-flac1644'; FRAUD=('t-mp3128-flac','t-opus96-flac','t-vorbisq5-flac')
+FEAT={ (r['ds'],r['slug'],r['variant']):r for r in json.load(open('/home/abl030/.claude/jobs/fb229c18/tmp/floor/feats.json'))}
+
+REC={}
+for arm,(r,e,m) in ARMS.items():
+    A=load_arm(CAL+'/'+r, CAL+'/'+e, CAL+'/'+m)
+    for v in (GENV,)+FRAUD:
+        for slug,(tr,cl,w) in A[v].items():
+            for T in (62.0,59.5):
+                d,legs,Us=gate(tr,cl,w,T)
+                REC[(arm,slug,v,T)]=set(legs)
+
+def run(T, th):
+    c=defaultdict(lambda: defaultdict(int))
+    for (arm,slug,v,t),L in REC.items():
+        if t!=T: continue
+        f=FEAT.get((arm,slug,v))
+        if f is None: continue
+        if L & {'cliff','ceiling'}: s='D'
+        elif 'no-ultrasonic' in L: s='U' if f['D_b12_14']>=th else 'D'
+        else: s='P'
+        c[v][s]+=1
+    return c
+
+for T in (62.0, 59.5):
+    print(f"\n########## T = {T} (multiwin gate, 100 arm albums) ##########")
+    base=run(T, 9e9)
+    print("baseline leg structure:")
+    for v in (GENV,)+FRAUD:
+        cc=defaultdict(int)
+        for (arm,slug,vv,t),L in REC.items():
+            if vv==v and t==T: cc[tuple(sorted(L)) or ('PROVED',)]+=1
+        print(f"  {v:<18} " + "  ".join(f"{'+'.join(k)}:{n}" for k,n in sorted(cc.items(), key=lambda x:-x[1])))
+    print(f"\n{'theta':>6} | {'gen P':>6}{'gen D':>6}{'gen U':>6} | " +
+          "".join(f"{v.replace('t-','').replace('-flac',''):>16}" for v in FRAUD) + f"{'launder U tot':>15}")
+    for th in (9e9,60,55,50,48,46,44,42,40,38,36,34,30,20,0):
+        c=run(T,th); g=c[GENV]
+        cells=""
+        tot=0
+        for v in FRAUD:
+            d=c[v]; cells+=f"  P{d['P']:>2} D{d['D']:>3} U{d['U']:>3}"; tot+=d['U']
+        print(f"{th if th<1e8 else 'off':>6} | {g['P']:>6}{g['D']:>6}{g['U']:>6} |{cells}{tot:>15}")

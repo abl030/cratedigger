@@ -1,0 +1,292 @@
+"""Report the local-encoder launder matrix.
+
+Reads the harness outputs (gate-<tag>.json, derrien-<tag>.tsv) and answers the
+one question: for each variant, does a FLAC-wrapped launder of it reach PROOF?
+
+Two framing decisions, both load-bearing:
+
+1. The GENUINE control is itself denied on 7/19 albums at T=62 (albums with
+   little natural ultrasonic content). A launder can only "get away with it"
+   on an album whose genuine twin reaches proof, so the escape rate is scored
+   over the genuine-provable subset. The raw count is printed too.
+
+2. Derrien is scored PER ALBUM against that album's own genuine control (the
+   paired design that measures the instrument's separability) AND pooled
+   against one global threshold (the deployable design). Both are printed
+   because the difference is the result.
+
+  python3 analyze_local.py --tag local [--variants a,b,c]
+
+Scratch. Not tracked.
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import os
+import statistics
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+HIRES = {"8920", "8931"}
+CONTROL = "genuine"
+PAPER_LAMBDA = 0.031
+ORDER = ["genuine", "null-flac",
+         "lame-v0", "lame-v2", "vorbis-q6", "vorbis-q8", "aacffm-256",
+         "aacffm-320",
+         "lame-cbr192", "lame-cbr256", "lame-cbr320", "vorbis-q4", "vorbis-q5",
+         "vorbis-q7", "vorbis-q10", "aacffm-128", "aacffm-192",
+         "opus-96", "opus-192", "opus-256", "wma-128", "wma-192", "wma-320",
+         "lame-cbr128"]
+
+
+def rid_of(slug):
+    return slug.split("--", 1)[0]
+
+
+def pct(hit, n):
+    return f"{hit}/{n}" + (f" {hit / n * 100:5.1f}%" if n else "")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--tag", default="local")
+    ap.add_argument("--extra-tags", default="localw",
+                    help="tags merged in for variants that could not run on "
+                         "the whole corpus (wmav2 cannot encode 96 kHz)")
+    a = ap.parse_args()
+    tags = [a.tag] + [t for t in a.extra_tags.split(",") if t.strip()]
+    gate, der, seen = [], [], set()
+    for t in tags:
+        gp = f"{HERE}/gate-{t}.json"
+        if os.path.exists(gp):
+            for r in json.load(open(gp)):
+                k = (r["variant"], r["slug"])
+                if k not in seen:
+                    seen.add(k)
+                    gate.append(r)
+        dp = f"{HERE}/derrien-{t}.tsv"
+        if os.path.exists(dp):
+            # the two tags overlap on the controls; keep one row per file
+            for r in csv.DictReader(open(dp), delimiter="\t"):
+                k = (r["variant"], r["path"], r["mode"])
+                if r["err"] or r["mode"] != "high" or k in seen:
+                    continue
+                seen.add(k)
+                der.append(r)
+
+    g = {}
+    for r in gate:
+        g.setdefault(r["variant"], {})[r["slug"]] = r
+    variants = sorted(g, key=lambda v: ORDER.index(v) if v in ORDER else 99)
+    slugs = sorted({r["slug"] for r in gate})
+    norm = [s for s in slugs if rid_of(s) not in HIRES]
+    hires = [s for s in slugs if rid_of(s) in HIRES]
+    gen = g.get(CONTROL, {})
+
+    prov = {T: [s for s in norm if s in gen and not gen[s][f"denied@{T}"]]
+            for T in ("62", "59.5")}
+    provh = {T: [s for s in hires if s in gen and not gen[s][f"denied@{T}"]]
+             for T in ("62", "59.5")}
+
+    print("\n" + "=" * 112)
+    print("A. SPECTRAL GATE - does the launder REACH PROOF?  (frozen score_v3, "
+          "single production window)")
+    print(f"   denominator = albums whose GENUINE twin reaches proof: "
+          f"44.1k/16 {len(prov['62'])}/{len(norm)} at T=62, "
+          f"{len(prov['59.5'])}/{len(norm)} at T=59.5;  "
+          f"96k/24 {len(provh['62'])}/{len(hires)} at T=62")
+    print("=" * 112)
+    print(f"{'variant':<14}{'ESCAPE T=62':>16}{'ESCAPE T=59.5':>16}"
+          f"{'all-19 proof@62':>17}{'meanU 44k':>11}{'dU vs genuine':>15}"
+          f"{'96k/24 esc@62':>15}")
+    print("-" * 112)
+    for v in variants:
+        rows = g[v]
+        c = []
+        for T in ("62", "59.5"):
+            sub = [s for s in prov[T] if s in rows]
+            c.append(pct(sum(1 for s in sub if not rows[s][f"denied@{T}"]), len(sub)))
+        allp = sum(1 for s in slugs if s in rows and not rows[s]["denied@62"])
+        us = [rows[s]["U_win0"] for s in norm if s in rows]
+        du = [rows[s]["U_win0"] - gen[s]["U_win0"] for s in norm
+              if s in rows and s in gen]
+        hs = [s for s in provh["62"] if s in rows]
+        hc = pct(sum(1 for s in hs if not rows[s]["denied@62"]), len(hs))
+        print(f"{v:<14}{c[0]:>16}{c[1]:>16}{f'{allp}/{len(slugs)}':>17}"
+              f"{statistics.mean(us) if us else 0:>11.2f}"
+              f"{statistics.mean(du) if du else 0:>+15.2f}{hc:>15}")
+
+    print("\n--- per-album gate detail, T=62, 44.1k/16 (P=proof D=deny; "
+          "* = genuine itself denied, album is not provable at all) ---")
+    hdr = "".join(f"{rid_of(s):>6}" for s in norm)
+    print(f"{'variant':<14}{hdr}")
+    for v in variants:
+        rows = g[v]
+        cells = []
+        for s in norm:
+            mark = "" if (s in gen and not gen[s]["denied@62"]) else "*"
+            cells.append(f"{('D' if rows[s]['denied@62'] else 'P') + mark:>6}"
+                         if s in rows else f"{'?':>6}")
+        print(f"{v:<14}" + "".join(cells))
+
+    if not der:
+        print("\n(no Derrien rows yet)")
+        return
+
+    by = {}
+    for r in der:
+        by.setdefault((r["variant"], r["slug"]), []).append(r)
+    dslugs = sorted({s for (v, s) in by if v == CONTROL})
+    lam_p = {s: max(float(x["proba"]) for x in by[(CONTROL, s)]) for s in dslugs}
+    lam_z = {s: max(float(x["z"]) for x in by[(CONTROL, s)]) for s in dslugs}
+    genp = [float(x["proba"]) for s in dslugs for x in by[(CONTROL, s)]]
+    genz = [float(x["z"]) for s in dslugs for x in by[(CONTROL, s)]]
+    pool_p, pool_z = max(genp), max(genz)
+
+    print("\n" + "=" * 112)
+    print("B. DERRIEN CONTROL (genuine) - per-album zero-FP thresholds")
+    print("=" * 112)
+    print(f"{'album':<8}{'n':>4}{'max proba':>11}{'med proba':>11}{'max z':>9}")
+    for s in dslugs:
+        pv = [float(x["proba"]) for x in by[(CONTROL, s)]]
+        zv = [float(x["z"]) for x in by[(CONTROL, s)]]
+        print(f"{rid_of(s):<8}{len(pv):>4}{max(pv):>11.4f}"
+              f"{statistics.median(pv):>11.4f}{max(zv):>9.2f}")
+    fp = sum(1 for x in genp if x > PAPER_LAMBDA)
+    print(f"\npooled genuine n={len(genp)}  zero-FP lambda(proba)={pool_p:.4f} "
+          f"(set by {', '.join(rid_of(s) for s in dslugs if lam_p[s] > 0.03)})  "
+          f"zero-FP lambda(z)={pool_z:.2f}")
+    print(f"FALSE POSITIVES at the paper's lambda {PAPER_LAMBDA}: "
+          f"{fp}/{len(genp)} tracks ({fp / len(genp) * 100:.1f}%), "
+          f"{sum(1 for s in dslugs if lam_p[s] > PAPER_LAMBDA)}/{len(dslugs)} "
+          f"albums carry >=1 false positive")
+    print("NOTE: Derrien cannot analyse 96 kHz input (ValueError), so the two "
+          "hi-res albums have NO genuine Derrien baseline.")
+
+    def rate(v, ss, stat, thr, album_level):
+        n = hit = 0
+        for s in ss:
+            rows = by.get((v, s))
+            if not rows:
+                continue
+            if album_level:
+                n += 1
+                hit += any(float(x[stat]) > thr(s) for x in rows)
+            else:
+                for x in rows:
+                    n += 1
+                    hit += float(x[stat]) > thr(s)
+        return hit, n
+
+    nslug = [s for s in dslugs if rid_of(s) not in HIRES]
+    print("\n" + "=" * 112)
+    print("C. DERRIEN RECALL - 44.1k/16 cohort (17 albums, 197 genuine tracks)")
+    print("   album-calibrated = each album's own genuine max; pooled = one "
+          "global threshold; paper = 0.031")
+    print("=" * 112)
+    print(f"{'variant':<14}{'TRK album-cal':>16}{'ALB album-cal':>16}"
+          f"{'TRK pooled':>16}{'ALB pooled':>16}{'TRK paper':>16}"
+          f"{'ALB z album-cal':>17}{'med proba':>11}")
+    for v in variants:
+        if not any(k[0] == v for k in by):
+            continue
+        cells = []
+        for stat, thr, lvl in (("proba", lambda s: lam_p[s], False),
+                               ("proba", lambda s: lam_p[s], True),
+                               ("proba", lambda s: pool_p, False),
+                               ("proba", lambda s: pool_p, True),
+                               ("proba", lambda s: PAPER_LAMBDA, False),
+                               ("z", lambda s: lam_z[s], True)):
+            h, n = rate(v, nslug, stat, thr, lvl)
+            cells.append(pct(h, n))
+        pv = [float(x["proba"]) for s in nslug if (v, s) in by for x in by[(v, s)]]
+        print(f"{v:<14}" + "".join(f"{c:>16}" for c in cells[:5])
+              + f"{cells[5]:>17}{statistics.median(pv):>11.4f}")
+
+    # ---- honest baseline for the per-album rule: leave-one-out on genuine ---
+    loo_hit = loo_n = 0
+    loo_alb = 0
+    for s in nslug:
+        pv = [float(x["proba"]) for x in by[(CONTROL, s)]]
+        flagged = 0
+        for i, v in enumerate(pv):
+            thr = max(pv[:i] + pv[i + 1:])
+            loo_n += 1
+            loo_hit += v > thr
+            flagged += v > thr
+        loo_alb += flagged > 0
+    print(f"\nLEAVE-ONE-OUT baseline for the per-album rule (each genuine track "
+          f"scored against the max of its OWN album's other genuine tracks):")
+    print(f"  genuine tracks over threshold: {loo_hit}/{loo_n} "
+          f"({loo_hit / loo_n * 100:.1f}%)   albums with >=1: {loo_alb}/{len(nslug)} "
+          f"({loo_alb / len(nslug) * 100:.0f}%)")
+    print("  -> the in-sample 'album-calibrated' columns above have FP=0 BY "
+          "CONSTRUCTION; this is the real false-positive floor of that rule, "
+          "and it is why the album-level album-calibrated column is not a "
+          "deployable statistic.")
+
+    # ---- E. pooled operating points ------------------------------------
+    lambdas = [0.0208, 0.025, PAPER_LAMBDA, 0.05, 0.08, pool_p]
+    print("\n" + "=" * 112)
+    print("E. DEPLOYABLE POOLED OPERATING POINTS (one global threshold, "
+          "44.1k/16 cohort)")
+    print("   album rule = >=2 tracks over lambda (robust to a single "
+          "outlier track)")
+    print("=" * 112)
+    head = "".join(f"{f'L={lam:.4f}':>16}" for lam in lambdas)
+    print(f"{'variant':<14}{head}")
+    for v in variants:
+        if not any(k[0] == v for k in by):
+            continue
+        cells = []
+        for lam in lambdas:
+            th = ta = na = 0
+            tn = 0
+            for s in nslug:
+                rows = by.get((v, s))
+                if not rows:
+                    continue
+                over = sum(1 for x in rows if float(x["proba"]) > lam)
+                th += over
+                tn += len(rows)
+                na += 1
+                ta += over >= 2
+            cells.append(f"{th / tn * 100:4.1f}%/{ta}of{na}" if tn else "-")
+        print(f"{v:<14}" + "".join(f"{c:>16}" for c in cells))
+    print("  cells are: % of tracks over lambda  /  albums flagged by the "
+          ">=2-track rule.  The 'genuine' row IS the false-positive rate.")
+
+    print("\n" + "=" * 112)
+    print("D. UNION - of the albums a launder gets past the SPECTRAL GATE "
+          "(T=62, genuine-provable 44.1k/16),")
+    print("   how many ALSO survive Derrien?  Lower is better for us.")
+    print("=" * 112)
+    print(f"{'variant':<14}{'gate escapes':>15}{'+ derrien album-cal':>21}"
+          f"{'+ derrien pooled':>18}{'closed by derrien':>19}"
+          f"{'+ pooled L=.05 >=2trk':>23}")
+    for v in variants:
+        if v == CONTROL or v not in g:
+            continue
+        rows = g[v]
+        sub = [s for s in prov["62"] if s in rows and any(k == (v, s) for k in by)]
+        if not sub:
+            continue
+        esc = [s for s in sub if not rows[s]["denied@62"]]
+
+        def surv(s, thr):
+            r = by.get((v, s), [])
+            return not any(float(x["proba"]) > thr(s) for x in r)
+        u1 = [s for s in esc if surv(s, lambda z: lam_p[z])]
+        u2 = [s for s in esc if surv(s, lambda z: pool_p)]
+        # the only pooled operating point with ZERO album-level FP on genuine
+        u3 = [s for s in esc
+              if sum(1 for x in by.get((v, s), []) if float(x["proba"]) > 0.05) < 2]
+        print(f"{v:<14}{pct(len(esc), len(sub)):>15}"
+              f"{pct(len(u1), len(sub)):>21}{pct(len(u2), len(sub)):>18}"
+              f"{f'{len(esc) - len(u1)} of {len(esc)}':>19}"
+              f"{pct(len(u3), len(sub)):>23}")
+
+
+if __name__ == "__main__":
+    main()

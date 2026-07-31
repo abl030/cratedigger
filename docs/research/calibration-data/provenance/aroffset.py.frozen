@@ -1,0 +1,95 @@
+"""Search for the CD read offset that makes a FLAC rip match AccurateRip.
+
+Uses prefix sums so each candidate offset costs O(1). Read-only probe.
+"""
+import os
+import subprocess
+import sys
+
+import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from toc_probe import build_toc, toc_from_dir  # noqa: E402
+from arverify import ar_checksums, fetch_ar, parse_ar  # noqa: E402
+
+M32 = 0xFFFFFFFF
+SEC = 588
+
+
+def decode_all(d, files):
+    parts = []
+    for f in files:
+        out = subprocess.run(
+            ["flac", "-d", "-c", "--totally-silent", "--force-raw-format",
+             "--endian=little", "--sign=signed", os.path.join(d, f)],
+            capture_output=True, check=True).stdout
+        parts.append(np.frombuffer(out, dtype="<u4"))
+    return np.concatenate(parts), [len(p) for p in parts]
+
+
+def main(d, radius=5000):
+    files, meta, lens = toc_from_dir(d)
+    toc = build_toc(lens)
+    n = len(files)
+    url, blob = fetch_ar(toc)
+    if blob is None:
+        print(f"{os.path.basename(d)}: no AccurateRip entry")
+        return
+    blocks = parse_ar(blob, n)
+    stream, tlens = decode_all(d, files)
+    starts = np.cumsum([0] + tlens[:-1])
+    total = len(stream)
+    print(f"== {os.path.basename(d)}: {n} tracks, {total} samples, "
+          f"{len(blocks)} AR blocks")
+
+    # Prefix sums over the whole stream (uint64; values < 2^32).
+    v = stream.astype(np.uint64)
+    j = np.arange(1, total + 1, dtype=np.uint64)
+    s0 = np.concatenate(([0], np.cumsum(v & np.uint64(M32)) & np.uint64(0xFFFFFFFFFFFFFFFF)))
+    s1 = np.concatenate(([0], np.cumsum((j * v) & np.uint64(M32))))
+
+    def v1_window(a, b):
+        # sum_{k=a..b-1} (k-a+1)*v[k], 0-based a,b -> multiplier (k-a+1)
+        d1 = (int(s1[b]) - int(s1[a]))
+        d0 = (int(s0[b]) - int(s0[a]))
+        return (d1 - a * d0) & M32
+
+    # Candidate offsets from one mid-disc track.
+    probe = n // 2
+    want = {blk[probe][1] for blk in blocks if probe < len(blk) and blk[probe][0] > 0}
+    cands = []
+    for off in range(-radius, radius + 1):
+        a = int(starts[probe]) + off
+        b = a + tlens[probe]
+        if a < 0 or b > total:
+            continue
+        if v1_window(a, b) in want:
+            cands.append(off)
+    print(f"   probe track {probe+1}: candidate offsets {cands[:10]} "
+          f"(searched +/-{radius} samples)")
+
+    for off in cands[:4] or [0]:
+        ok1 = ok2 = 0
+        for i in range(n):
+            a = int(starts[i]) + off
+            b = a + tlens[i]
+            if a < 0 or b > total:
+                continue
+            seg = stream[a:b]
+            c1, c2 = ar_checksums(seg, i + 1, n)
+            for blk in blocks:
+                if i < len(blk) and blk[i][0] > 0:
+                    if c1 == blk[i][1]:
+                        ok1 += 1
+                        break
+            for blk in blocks:
+                if i < len(blk) and blk[i][0] > 0:
+                    if c2 == blk[i][2]:
+                        ok2 += 1
+                        break
+        print(f"   offset {off:+6d} samples ({off/1.0:+.0f}): "
+              f"ARv1 {ok1}/{n}, ARv2 {ok2}/{n}")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1], int(sys.argv[2]) if len(sys.argv) > 2 else 5000)

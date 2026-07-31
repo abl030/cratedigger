@@ -1,0 +1,111 @@
+"""Compute AccurateRip v1/v2 checksums for track-split FLACs and compare to the
+live AccurateRip database. Read-only research probe."""
+import os
+import subprocess
+import sys
+import urllib.request
+
+import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from toc_probe import arid, build_toc, cddbid, toc_from_dir  # noqa: E402
+
+SECTOR_DWORDS = 2352 // 4  # 588
+
+
+def decode(path):
+    out = subprocess.run(
+        ["flac", "-d", "-c", "--totally-silent", "--force-raw-format",
+         "--endian=little", "--sign=signed", path],
+        capture_output=True, check=True).stdout
+    return np.frombuffer(out, dtype="<u4")
+
+
+def ar_checksums(data, track_number, total_tracks):
+    n = len(data)
+    lo, hi = 1, n  # MulBy range, inclusive
+    if track_number == 1:
+        lo = 1 + 5 * SECTOR_DWORDS
+    if track_number == total_tracks:
+        hi = n - 5 * SECTOR_DWORDS
+    idx = np.arange(1, n + 1, dtype=np.uint64)
+    sel = (idx >= lo) & (idx <= hi)
+    vals = data[sel].astype(np.uint64)
+    mul = idx[sel]
+    v1 = int(np.sum(vals * mul, dtype=object)) & 0xFFFFFFFF
+    prod = vals * mul  # uint64, exact (values < 2^32, mul < 2^25)
+    v2 = int((np.sum(prod & 0xFFFFFFFF, dtype=object)
+              + np.sum(prod >> np.uint64(32), dtype=object))) & 0xFFFFFFFF
+    return v1, v2
+
+
+def fetch_ar(toc):
+    a = arid(toc)
+    d1 = a.split("-")[0]
+    url = (f"http://www.accuraterip.com/accuraterip/{d1[-1]}/{d1[-2]}/{d1[-3]}/"
+           f"dBAR-{len(toc)-1:03d}-{a}.bin")
+    try:
+        with urllib.request.urlopen(url, timeout=30) as r:
+            return url, r.read()
+    except Exception as exc:  # noqa: BLE001
+        return url, None
+
+
+def parse_ar(blob, ntracks):
+    """Yield (confidence, crc_v1_field, crc_field2) lists, one per pressing block."""
+    pos = 0
+    blocks = []
+    while pos + 13 <= len(blob):
+        tc = blob[pos]
+        pos += 13
+        entries = []
+        for _ in range(tc):
+            conf = blob[pos]
+            c1 = int.from_bytes(blob[pos + 1:pos + 5], "little")
+            c2 = int.from_bytes(blob[pos + 5:pos + 9], "little")
+            entries.append((conf, c1, c2))
+            pos += 9
+        blocks.append(entries)
+    return blocks
+
+
+def main(d):
+    files, meta, lens = toc_from_dir(d)
+    toc = build_toc(lens)
+    n = len(files)
+    print(f"== {os.path.basename(d)}  ({n} tracks)")
+    url, blob = fetch_ar(toc)
+    print(f"   AR url: {url}")
+    if blob is None:
+        print("   AR: NO ENTRY (disc not in AccurateRip)")
+        return
+    blocks = parse_ar(blob, n)
+    print(f"   AR: {len(blocks)} pressing block(s), {len(blob)} bytes")
+    mine = []
+    for i, f in enumerate(files, start=1):
+        data = decode(os.path.join(d, f))
+        mine.append(ar_checksums(data, i, n))
+    matched_v1 = matched_v2 = 0
+    for i, (v1, v2) in enumerate(mine):
+        hits = []
+        for bi, blk in enumerate(blocks):
+            if i >= len(blk):
+                continue
+            conf, c1, c2 = blk[i]
+            if conf == 0:
+                continue
+            if v1 == c1:
+                hits.append(f"v1/blk{bi}/conf{conf}")
+            if v2 == c2:
+                hits.append(f"v2/blk{bi}/conf{conf}")
+        if any(h.startswith("v1") for h in hits):
+            matched_v1 += 1
+        if any(h.startswith("v2") for h in hits):
+            matched_v2 += 1
+        print(f"   trk{i:02d} mine v1={v1:08X} v2={v2:08X}  "
+              f"{'MATCH ' + ','.join(hits[:3]) if hits else 'no match'}")
+    print(f"   >>> {matched_v1}/{n} tracks matched ARv1, {matched_v2}/{n} matched ARv2")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1])

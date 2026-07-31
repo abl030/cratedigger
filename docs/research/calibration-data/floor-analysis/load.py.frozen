@@ -1,0 +1,78 @@
+"""Common loader for arms + matrix. Emits per (dataset, album, variant) feature rows."""
+import gzip, json, os, sys
+from collections import Counter, defaultdict
+
+CAL = "/home/abl030/cratedigger/.claude/worktrees/829-phase5-pr2/docs/research/calibration-data"
+MTX = "/home/abl030/.claude/jobs/fb229c18/tmp/matrix"
+
+S_STEP, C_CONS = 15.0, 0.5
+INWINDOW_CLIFF_HZ, INWINDOW_FRAC = 19000, 0.6
+
+
+def _open(p):
+    return gzip.open(p, "rt") if p.endswith(".gz") else open(p)
+
+
+def load_arm(results, extended, multiwin=None):
+    ext = {}
+    for ln in _open(extended):
+        p = ln.rstrip("\n").split("\t")
+        if len(p) >= 6 and p[2]:
+            ext[p[1]] = [float(x) for x in p[2:6]]
+    albums = defaultdict(lambda: defaultdict(lambda: ([], [], defaultdict(dict))))
+    outkey = {}
+    for ln in _open(results):
+        p = ln.rstrip("\n").split("\t")
+        if len(p) < 27 or not p[11]:
+            continue
+        s16 = [float(x) for x in p[11:27]]
+        s20 = s16 + ext.get(p[5], [None] * 4)
+        tr, cl, wins = albums[p[1]][p[0]]
+        tr.append(s20)
+        cl.append((int(p[7]) if p[7] else None, float(p[9]) if p[9] else 0.0))
+        if s20[16] is not None and p[10]:
+            wins[0][p[5]] = [float(p[10])] + s20
+        outkey[p[5]] = (p[1], p[0])
+    if multiwin and os.path.exists(multiwin):
+        for ln in _open(multiwin):
+            p = ln.rstrip("\n").split("\t")
+            if len(p) >= 24 and p[3] != "SILENT" and p[1] in outkey:
+                v, slug = outkey[p[1]]
+                albums[v][slug][2][int(p[2])][p[1]] = [float(x) for x in p[3:24]]
+    return albums
+
+
+def window_legs(vecs, T):
+    m = len(vecs)
+    mean = [sum(v[1 + i] for v in vecs) / m for i in range(20)]
+    step = max(((mean[k - 2] + mean[k - 1]) / 2 - sum(mean[k:]) / (20 - k)) for k in (15, 16, 17, 18))
+    poss = []
+    for v in vecs:
+        t = v[1:]
+        b, bk = -999.0, None
+        for k in (14, 15, 16, 17, 18):
+            s = (t[k - 2] + t[k - 1]) / 2 - sum(t[k:]) / (20 - k)
+            if s > b:
+                b, bk = s, k
+        if b >= 8:
+            poss.append(bk)
+    cons = (Counter(poss).most_common(1)[0][1] / m) if len(poss) >= max(2, m // 2) else 0.0
+    U = sum(v[0] - sum(v[18:21]) / 3.0 for v in vecs) / m
+    return (step >= S_STEP and cons >= C_CONS), (U >= T), U, step, cons
+
+
+def gate(tracks, tcliffs, wins, T):
+    n = len(tracks)
+    legs = set()
+    if sum(1 for c, _d in tcliffs if c and c <= INWINDOW_CLIFF_HZ) / n >= INWINDOW_FRAC:
+        legs.add("cliff")
+    Us = {}
+    for off, vv in wins.items():
+        if len(vv) >= 2:
+            ceiling, no_ultra, U, step, cons = window_legs(list(vv.values()), T)
+            Us[off] = U
+            if ceiling:
+                legs.add("ceiling")
+            if no_ultra:
+                legs.add("no-ultrasonic")
+    return bool(legs), sorted(legs), Us

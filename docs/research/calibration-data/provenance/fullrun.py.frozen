@@ -1,0 +1,99 @@
+"""Full AccurateRip verification survey over every FLAC album in the beets library.
+
+For each album: reconstruct the TOC from track lengths, fetch AccurateRip,
+compute ARv1/ARv2 at offset 0, and if that fails search read offsets via
+prefix sums. Read-only.
+"""
+import os
+import re
+import subprocess
+import sys
+
+import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from toc_probe import build_toc, toc_from_dir, ctdb_lookup  # noqa: E402
+from arverify import ar_checksums, fetch_ar, parse_ar  # noqa: E402
+
+M32 = 0xFFFFFFFF
+ROOT = "/mnt/virtio/Music/Beets"
+
+
+def decode(p):
+    return np.frombuffer(subprocess.run(
+        ["flac", "-d", "-c", "--totally-silent", "--force-raw-format",
+         "--endian=little", "--sign=signed", p],
+        capture_output=True, check=True).stdout, dtype="<u4")
+
+
+def offset_search(stream, starts, tlens, blocks, probe, radius):
+    total = len(stream)
+    v = stream.astype(np.uint64)
+    j = np.arange(1, total + 1, dtype=np.uint64)
+    s0 = np.concatenate(([0], np.cumsum(v)))
+    s1 = np.concatenate(([0], np.cumsum((j * v) & np.uint64(M32))))
+    want = {b[probe][1] for b in blocks if probe < len(b) and b[probe][0] > 0}
+    out = []
+    for off in range(-radius, radius + 1):
+        a = int(starts[probe]) + off
+        b = a + tlens[probe]
+        if a < 0 or b > total:
+            continue
+        val = ((int(s1[b]) - int(s1[a])) - a * (int(s0[b]) - int(s0[a]))) & M32
+        if val in want:
+            out.append(off)
+    return out
+
+
+def main(radius=3000):
+    dirs = sorted({dp for dp, _dn, fn in os.walk(ROOT)
+                   if any(f.lower().endswith(".flac") for f in fn)})
+    tot = ar_hit = proved = proved_off = 0
+    for d in dirs:
+        try:
+            files, meta, lens = toc_from_dir(d)
+        except Exception as exc:  # noqa: BLE001
+            print(f"{os.path.basename(d)[:46]:46s}  ERR {exc}")
+            continue
+        if not files:
+            continue
+        tot += 1
+        name = os.path.basename(d)[:46]
+        if any(t % 588 or sr != 44100 for (_f, sr, _c, _b, t) in meta):
+            print(f"{name:46s}  not sector-aligned -> not a CD track split")
+            continue
+        toc = build_toc(lens)
+        n = len(files)
+        _u, blob = fetch_ar(toc)
+        if not blob:
+            print(f"{name:46s}  TOC not in AccurateRip")
+            continue
+        ar_hit += 1
+        blocks = parse_ar(blob, n)
+        parts = [decode(os.path.join(d, f)) for f in files]
+        ok1 = ok2 = 0
+        for i, arr in enumerate(parts):
+            c1, c2 = ar_checksums(arr, i + 1, n)
+            if any(i < len(b) and b[i][0] > 0 and b[i][1] == c1 for b in blocks):
+                ok1 += 1
+            if any(i < len(b) and b[i][0] > 0 and b[i][2] == c2 for b in blocks):
+                ok2 += 1
+        best = max(ok1, ok2)
+        note = ""
+        if best == 0:
+            stream = np.concatenate(parts)
+            tlens = [len(p) for p in parts]
+            starts = np.cumsum([0] + tlens[:-1])
+            cands = offset_search(stream, starts, tlens, blocks, n // 2, radius)
+            if cands:
+                note = f" offset-match at {cands[:3]} samples"
+                proved_off += 1
+        if best:
+            proved += 1
+        print(f"{name:46s}  AR blocks={len(blocks):3d}  v1={ok1}/{n} v2={ok2}/{n}{note}")
+    print(f"\n== {tot} albums | AR TOC hit {ar_hit} | audio-proved at offset 0 {proved} "
+          f"| proved only after offset shift {proved_off}")
+
+
+if __name__ == "__main__":
+    main(int(sys.argv[1]) if len(sys.argv) > 1 else 3000)

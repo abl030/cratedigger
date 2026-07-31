@@ -1,0 +1,28 @@
+import json, sys
+from statistics import mean, median
+R = json.load(open('/home/abl030/.claude/jobs/fb229c18/tmp/floor/feats.json'))
+ARM = [r for r in R if r['ds'] in ('TRAIN','R1','R2','R3')]
+GEN = [r for r in ARM if r['variant']=='control-flac1644']
+FR  = [r for r in ARM if r['variant'] in ('t-mp3128-flac','t-opus96-flac','t-vorbisq5-flac')]
+
+def q(xs, p):
+    xs = sorted(xs); return xs[min(len(xs)-1, int(p*len(xs)))]
+
+def desc(tag, rows, keys):
+    print(f"-- {tag} (n={len(rows)})")
+    for k in keys:
+        v = [r[k] for r in rows if r.get(k) is not None]
+        if not v: continue
+        print(f"   {k:10s} min {min(v):7.2f} p10 {q(v,.1):7.2f} med {median(v):7.2f} p90 {q(v,.9):7.2f} max {max(v):7.2f}")
+
+KEYS = ['U','D_b12_14','D_b14_16','D_b16_18','D_b18_195','abs_bU','abs_b12_14','ref','drop_hi','slope_mid','step','cons','U_sd']
+gd = [r for r in GEN if 'no-ultrasonic' in r['legs@62']]
+gp = [r for r in GEN if not r['denied@62']]
+gc = [r for r in GEN if r['denied@62'] and 'no-ultrasonic' not in r['legs@62']]
+desc('GENUINE proof@62', gp, KEYS)
+desc('GENUINE ultrasonic-denied@62', gd, KEYS)
+desc('GENUINE ceiling-only-denied@62', gc, KEYS)
+desc('FLAC-fraud launders (all)', FR, KEYS)
+print()
+# genuine ultrasonic-denied: split by whether ceiling also fires
+print('genuine ultra-denied w/ ceiling:', sum(1 for r in gd if 'ceiling' in r['legs@62']), 'without:', sum(1 for r in gd if 'ceiling' not in r['legs@62']))

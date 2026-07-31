@@ -1,0 +1,122 @@
+"""Build the Apple CoreAudio CVBR-256 launder arm for the Derrien experiment.
+
+Per track: library FLAC -> WAV (native rate/depth, no resample) -> scp ->
+qaac64 -s -v 256 -> scp back -> ffmpeg -sample_fmt s16 -c:a flac.
+
+WAVs are staged on doc1 local disk (virtiofs writes avoided); the launder FLACs
+land in the sanctioned doc2 scratch tree.
+"""
+import json
+import os
+import subprocess
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
+
+OUT = "/mnt/virtio/Music/derrien-arm/launder"
+STAGE = "/home/abl030/.claude/jobs/fb229c18/tmp/derrien/stage"
+WIN = "192.168.1.115"
+WINDIR = "C:\\derrien"
+MANIFEST = "/home/abl030/.claude/jobs/fb229c18/tmp/manifest.json"
+INDEX = "/mnt/virtio/Music/derrien-arm/index.json"
+QAAC = "C:\\Tools\\qaac\\qaac64.exe"
+
+
+def run(cmd, **kw):
+    r = subprocess.run(cmd, capture_output=True, text=True, errors="replace", **kw)
+    if r.returncode != 0:
+        raise RuntimeError(f"FAILED rc={r.returncode}: {cmd[:5]}\n{r.stderr[-600:]}")
+    return r
+
+
+def ssh(args):
+    return run(["env", "-u", "SSH_AUTH_SOCK", "ssh", "-o", "ConnectTimeout=20", WIN] + args)
+
+
+def decode(args):
+    src, dst, bits = args
+    codec = "pcm_s24le" if str(bits) == "24" else "pcm_s16le"
+    run(["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", src,
+         "-map", "0:a", "-map_metadata", "-1", "-vn", "-c:a", codec, "-f", "wav", dst])
+
+
+def reflac(args):
+    src, dst = args
+    run(["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", src,
+         "-map", "0:a", "-map_metadata", "-1", "-vn",
+         "-sample_fmt", "s16", "-c:a", "flac", dst])
+
+
+def main():
+    albums = json.load(open(MANIFEST))
+    only = set(sys.argv[1:])
+    os.makedirs(OUT, exist_ok=True)
+    os.makedirs(STAGE, exist_ok=True)
+    index = json.load(open(INDEX)) if os.path.exists(INDEX) else {}
+    ssh([f'New-Item -ItemType Directory -Force -Path {WINDIR} | Out-Null'])
+
+    for a in albums:
+        rid = str(a["request_id"])
+        if only and rid not in only:
+            continue
+        if index.get(rid, {}).get("done"):
+            print(f"[{rid}] already done", flush=True)
+            continue
+        t0 = time.time()
+        adir = os.path.join(OUT, rid)
+        os.makedirs(adir, exist_ok=True)
+        sdir = os.path.join(STAGE, rid)
+        os.makedirs(sdir, exist_ok=True)
+        tracks = a["tracks"]
+        jobs = []
+        for i, t in enumerate(tracks):
+            base = f"{i:03d}"
+            jobs.append({
+                "src": t["path"], "base": base, "sr": t["sr"], "bits": t["bits"],
+                "wav": os.path.join(sdir, base + ".wav"),
+                "m4a": os.path.join(sdir, base + ".m4a"),
+                "flac": os.path.join(adir, base + ".flac"),
+            })
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            list(ex.map(decode, [(j["src"], j["wav"], j["bits"]) for j in jobs]))
+        t1 = time.time()
+        # ship the whole album's WAVs in one scp
+        ssh([f'Remove-Item -Recurse -Force {WINDIR}\\{rid} -EA SilentlyContinue; '
+             f'New-Item -ItemType Directory -Force {WINDIR}\\{rid} | Out-Null'])
+        run(["env", "-u", "SSH_AUTH_SOCK", "scp", "-q", "-r", sdir + "/.",
+             f"{WIN}:C:/derrien/{rid}/"])
+        t2 = time.time()
+        # encode all on the VM in one shell invocation
+        enc = ssh(['Get-ChildItem ' + WINDIR + '\\' + rid + '\\*.wav | ForEach-Object { & "'
+                   + QAAC + '" -s -v 256 -o ($_.FullName -replace ".wav$",".m4a") '
+                   + '$_.FullName ; "DONE " + $_.Name + " rc=" + $LASTEXITCODE }'])
+        ok = [l for l in enc.stdout.splitlines() if l.startswith("DONE ") and l.endswith("rc=0")]
+        if len(ok) != len(jobs):
+            raise RuntimeError(f"[{rid}] encode produced {len(ok)}/{len(jobs)}:\n{enc.stdout[-800:]}")
+        t3 = time.time()
+        run(["env", "-u", "SSH_AUTH_SOCK", "scp", "-q",
+             f"{WIN}:C:/derrien/{rid}/*.m4a", sdir + "/"])
+        got = sorted(f for f in os.listdir(sdir) if f.endswith(".m4a"))
+        if len(got) != len(jobs):
+            raise RuntimeError(f"[{rid}] expected {len(jobs)} m4a, got {len(got)}")
+        t4 = time.time()
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            list(ex.map(reflac, [(j["m4a"], j["flac"]) for j in jobs]))
+        ssh([f'Remove-Item -Recurse -Force {WINDIR}\\{rid} -EA SilentlyContinue'])
+        for j in jobs:
+            for p in (j["wav"], j["m4a"]):
+                if os.path.exists(p):
+                    os.remove(p)
+        os.rmdir(sdir)
+        index[rid] = {
+            "done": True, "album_dir": a["album_dir"], "n": len(jobs),
+            "map": [{"genuine": j["src"], "launder": j["flac"],
+                     "sr": j["sr"], "bits": j["bits"]} for j in jobs],
+        }
+        json.dump(index, open(INDEX, "w"), indent=1)
+        print(f"[{rid}] {len(jobs)} tracks  dec={t1-t0:.0f}s up={t2-t1:.0f}s "
+              f"enc={t3-t2:.0f}s dn={t4-t3:.0f}s tot={time.time()-t0:.0f}s", flush=True)
+
+
+if __name__ == "__main__":
+    main()

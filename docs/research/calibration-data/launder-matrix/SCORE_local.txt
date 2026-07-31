@@ -1,0 +1,511 @@
+cratedigger dev shell — run: python3 -m unittest discover -s tests -t . -v
+WARNING: no multiwin file — gate degrades to single-window
+
+album                                U(win0)                    T=62                  T=59.5   derr pmax
+
+--- aacffm-128 ---
+8916--2013 - Random Access Memories    72.35      DENY no-ultrasonic      DENY no-ultrasonic  None
+8917--2014 - Syro [WARPCD247]          68.01      DENY no-ultrasonic      DENY no-ultrasonic  None
+8918--1995 - Tri Repetae [WARPCD38]    71.38  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+8919--1996 - Feed Me Weird Things      70.57      DENY no-ultrasonic      DENY no-ultrasonic  None
+8920--2011 - Hurry Up, We're Dreami    79.73  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+8921--1999 - Californication           67.86      DENY no-ultrasonic      DENY no-ultrasonic  None
+8922--2008 - Death Magnetic            62.33      DENY no-ultrasonic      DENY no-ultrasonic  None
+8923--2001 - Jane Doe                  65.74      DENY no-ultrasonic      DENY no-ultrasonic  None
+8924--1984 - Tabula Rasa               69.89      DENY no-ultrasonic      DENY no-ultrasonic  None
+8925--1982 - The Goldberg Variation    77.68      DENY no-ultrasonic      DENY no-ultrasonic  None
+8926--1987 - Kind of Blue [CK 40579    68.37      DENY no-ultrasonic      DENY no-ultrasonic  None
+8928--2016 - Man Made Object           75.16      DENY no-ultrasonic      DENY no-ultrasonic  None
+8929--1996 - The Velvet Underground    79.67      DENY no-ultrasonic      DENY no-ultrasonic  None
+8930--1993 - Bridge Over Troubled W    79.40      DENY no-ultrasonic      DENY no-ultrasonic  None
+8931--1987 - Rumours [3010-2]          80.68  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+8932--1991 - Loveless [crecd 060]      85.29      DENY no-ultrasonic      DENY no-ultrasonic  None
+8933--2014 - Ruins                     66.02      DENY no-ultrasonic      DENY no-ultrasonic  None
+8934--1998 - Stratosphere              79.93      DENY no-ultrasonic      DENY no-ultrasonic  None
+8935--1990 - Ambient 1_ Music for A    72.32      DENY no-ultrasonic      DENY no-ultrasonic  None
+    T=62: DENIED 19/19  reached PROOF 0/19
+    T=59.5: DENIED 19/19  reached PROOF 0/19
+
+--- aacffm-192 ---
+8916--2013 - Random Access Memories    72.84  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8917--2014 - Syro [WARPCD247]          69.52  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8918--1995 - Tri Repetae [WARPCD38]    68.88  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8919--1996 - Feed Me Weird Things      70.28  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8920--2011 - Hurry Up, We're Dreami    69.30      DENY no-ultrasonic      DENY no-ultrasonic  None
+8921--1999 - Californication           71.37  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8922--2008 - Death Magnetic            67.13  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8923--2001 - Jane Doe                  74.85  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8924--1984 - Tabula Rasa               69.95  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8925--1982 - The Goldberg Variation    77.64  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8926--1987 - Kind of Blue [CK 40579    68.85  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8928--2016 - Man Made Object           74.63  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8929--1996 - The Velvet Underground    80.00  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8930--1993 - Bridge Over Troubled W    79.91  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8931--1987 - Rumours [3010-2]          57.84                   PROOF                   PROOF  None
+8932--1991 - Loveless [crecd 060]      85.48  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8933--2014 - Ruins                     66.02  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8934--1998 - Stratosphere              80.49  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8935--1990 - Ambient 1_ Music for A    71.56  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+    T=62: DENIED 18/19  reached PROOF 1/19
+    T=59.5: DENIED 18/19  reached PROOF 1/19
+
+--- aacffm-256 ---
+8916--2013 - Random Access Memories    41.44                   PROOF                   PROOF      0.0282
+8917--2014 - Syro [WARPCD247]          42.83                   PROOF                   PROOF      0.0666
+8918--1995 - Tri Repetae [WARPCD38]    25.52                   PROOF                   PROOF      0.2608
+8919--1996 - Feed Me Weird Things      64.38      DENY no-ultrasonic      DENY no-ultrasonic      0.0829
+8920--2011 - Hurry Up, We're Dreami    63.26      DENY no-ultrasonic      DENY no-ultrasonic  None
+8921--1999 - Californication           46.90                   PROOF                   PROOF      0.0220
+8922--2008 - Death Magnetic            51.31                   PROOF                   PROOF      0.0282
+8923--2001 - Jane Doe                  46.86                   PROOF                   PROOF      0.0216
+8924--1984 - Tabula Rasa               61.19                   PROOF      DENY no-ultrasonic      0.0201
+8925--1982 - The Goldberg Variation    71.94  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic      0.0297
+8926--1987 - Kind of Blue [CK 40579    63.40      DENY no-ultrasonic      DENY no-ultrasonic      0.0371
+8928--2016 - Man Made Object           50.37                   PROOF                   PROOF      0.0216
+8929--1996 - The Velvet Underground    55.03                   PROOF                   PROOF      0.0259
+8930--1993 - Bridge Over Troubled W    52.38                   PROOF                   PROOF      0.0579
+8931--1987 - Rumours [3010-2]          49.30                   PROOF                   PROOF  None
+8932--1991 - Loveless [crecd 060]      69.88      DENY no-ultrasonic      DENY no-ultrasonic      0.0239
+8933--2014 - Ruins                     41.05                   PROOF                   PROOF      0.0295
+8934--1998 - Stratosphere              63.71      DENY no-ultrasonic      DENY no-ultrasonic      0.0216
+8935--1990 - Ambient 1_ Music for A    67.80      DENY no-ultrasonic      DENY no-ultrasonic      0.0225
+    T=62: DENIED 7/19  reached PROOF 12/19
+    T=59.5: DENIED 8/19  reached PROOF 11/19
+
+--- aacffm-320 ---
+8916--2013 - Random Access Memories    41.65                   PROOF                   PROOF      0.0287
+8917--2014 - Syro [WARPCD247]          42.90                   PROOF                   PROOF      0.0515
+8918--1995 - Tri Repetae [WARPCD38]    25.58                   PROOF                   PROOF      0.2019
+8919--1996 - Feed Me Weird Things      64.41      DENY no-ultrasonic      DENY no-ultrasonic      0.0745
+8920--2011 - Hurry Up, We're Dreami    63.11      DENY no-ultrasonic      DENY no-ultrasonic  None
+8921--1999 - Californication           47.08                   PROOF                   PROOF      0.0246
+8922--2008 - Death Magnetic            51.51                   PROOF                   PROOF      0.0549
+8923--2001 - Jane Doe                  47.10                   PROOF                   PROOF      0.0207
+8924--1984 - Tabula Rasa               61.19                   PROOF      DENY no-ultrasonic      0.0175
+8925--1982 - The Goldberg Variation    71.28  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic      0.0276
+8926--1987 - Kind of Blue [CK 40579    63.09      DENY no-ultrasonic      DENY no-ultrasonic      0.0260
+8928--2016 - Man Made Object           50.22                   PROOF                   PROOF      0.0405
+8929--1996 - The Velvet Underground    55.29                   PROOF                   PROOF      0.0221
+8930--1993 - Bridge Over Troubled W    52.44                   PROOF                   PROOF      0.0628
+8931--1987 - Rumours [3010-2]          49.19                   PROOF                   PROOF  None
+8932--1991 - Loveless [crecd 060]      69.63      DENY no-ultrasonic      DENY no-ultrasonic      0.0225
+8933--2014 - Ruins                     41.12                   PROOF                   PROOF      0.0269
+8934--1998 - Stratosphere              62.69      DENY no-ultrasonic      DENY no-ultrasonic      0.0216
+8935--1990 - Ambient 1_ Music for A    67.01      DENY no-ultrasonic      DENY no-ultrasonic      0.0233
+    T=62: DENIED 7/19  reached PROOF 12/19
+    T=59.5: DENIED 8/19  reached PROOF 11/19
+
+--- genuine ---
+8916--2013 - Random Access Memories    41.61                   PROOF                   PROOF  None
+8917--2014 - Syro [WARPCD247]          42.97                   PROOF                   PROOF  None
+8918--1995 - Tri Repetae [WARPCD38]    25.53                   PROOF                   PROOF  None
+8919--1996 - Feed Me Weird Things      64.85  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8920--2011 - Hurry Up, We're Dreami    63.50      DENY no-ultrasonic      DENY no-ultrasonic  None
+8921--1999 - Californication           47.02                   PROOF                   PROOF  None
+8922--2008 - Death Magnetic            51.64                   PROOF                   PROOF  None
+8923--2001 - Jane Doe                  47.17                   PROOF                   PROOF  None
+8924--1984 - Tabula Rasa               62.02      DENY no-ultrasonic      DENY no-ultrasonic  None
+8925--1982 - The Goldberg Variation    71.74  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8926--1987 - Kind of Blue [CK 40579    63.75      DENY no-ultrasonic      DENY no-ultrasonic  None
+8928--2016 - Man Made Object           50.65                   PROOF                   PROOF  None
+8929--1996 - The Velvet Underground    55.68                   PROOF                   PROOF  None
+8930--1993 - Bridge Over Troubled W    52.61                   PROOF                   PROOF  None
+8931--1987 - Rumours [3010-2]          49.41                   PROOF                   PROOF  None
+8932--1991 - Loveless [crecd 060]      69.53      DENY no-ultrasonic      DENY no-ultrasonic  None
+8933--2014 - Ruins                     41.33                   PROOF                   PROOF  None
+8934--1998 - Stratosphere              61.97                   PROOF      DENY no-ultrasonic  None
+8935--1990 - Ambient 1_ Music for A    67.83      DENY no-ultrasonic      DENY no-ultrasonic  None
+    T=62: DENIED 7/19  reached PROOF 12/19
+    T=59.5: DENIED 8/19  reached PROOF 11/19
+
+--- lame-cbr128 ---
+8916--2013 - Random Access Memories    75.34  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+8917--2014 - Syro [WARPCD247]          70.84  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+8918--1995 - Tri Repetae [WARPCD38]    75.45  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+8919--1996 - Feed Me Weird Things      70.21  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+8920--2011 - Hurry Up, We're Dreami    77.25  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+8921--1999 - Californication           70.42  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+8922--2008 - Death Magnetic            64.84  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+8923--2001 - Jane Doe                  70.99  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+8924--1984 - Tabula Rasa               69.57  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+8925--1982 - The Goldberg Variation    77.54  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+8926--1987 - Kind of Blue [CK 40579    68.45  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+8928--2016 - Man Made Object           74.87  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+8929--1996 - The Velvet Underground    79.45  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+8930--1993 - Bridge Over Troubled W    80.05  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+8931--1987 - Rumours [3010-2]          78.25  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+8932--1991 - Loveless [crecd 060]      85.37  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+8933--2014 - Ruins                     66.13      DENY no-ultrasonic      DENY no-ultrasonic  None
+8934--1998 - Stratosphere              80.36  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+8935--1990 - Ambient 1_ Music for A    71.45  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+    T=62: DENIED 19/19  reached PROOF 0/19
+    T=59.5: DENIED 19/19  reached PROOF 0/19
+
+--- lame-cbr192 ---
+8916--2013 - Random Access Memories    75.71  DENY ceiling,cliff,no-ultrasonic  DENY ceiling,cliff,no-ultrasonic      0.0373
+8917--2014 - Syro [WARPCD247]          72.85  DENY ceiling,cliff,no-ultrasonic  DENY ceiling,cliff,no-ultrasonic      0.0409
+8918--1995 - Tri Repetae [WARPCD38]    77.09  DENY ceiling,cliff,no-ultrasonic  DENY ceiling,cliff,no-ultrasonic      0.0793
+8919--1996 - Feed Me Weird Things      70.52      DENY no-ultrasonic      DENY no-ultrasonic      0.1154
+8920--2011 - Hurry Up, We're Dreami    77.14  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic      0.0661
+8921--1999 - Californication           73.25  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic      0.0433
+8922--2008 - Death Magnetic            69.64  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic      0.0397
+8923--2001 - Jane Doe                  77.71  DENY ceiling,cliff,no-ultrasonic  DENY ceiling,cliff,no-ultrasonic      0.0445
+8924--1984 - Tabula Rasa               69.74      DENY no-ultrasonic      DENY no-ultrasonic      0.0266
+8925--1982 - The Goldberg Variation    77.57      DENY no-ultrasonic      DENY no-ultrasonic      0.0517
+8926--1987 - Kind of Blue [CK 40579    68.74  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic      0.0481
+8928--2016 - Man Made Object           75.23  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic      0.0457
+8929--1996 - The Velvet Underground    80.14  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic      0.0387
+8930--1993 - Bridge Over Troubled W    79.72  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic      0.0529
+8931--1987 - Rumours [3010-2]          78.39  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic      0.0637
+8932--1991 - Loveless [crecd 060]      85.26  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic      0.0493
+8933--2014 - Ruins                     66.21  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic      0.0373
+8934--1998 - Stratosphere              80.58  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic      0.0457
+8935--1990 - Ambient 1_ Music for A    72.13  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic      0.0233
+    T=62: DENIED 19/19  reached PROOF 0/19
+    T=59.5: DENIED 19/19  reached PROOF 0/19
+
+--- lame-cbr256 ---
+8916--2013 - Random Access Memories    74.22  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic      0.0325
+8917--2014 - Syro [WARPCD247]          72.05  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic      0.0288
+8918--1995 - Tri Repetae [WARPCD38]    77.02  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic      0.0457
+8919--1996 - Feed Me Weird Things      70.29  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic      0.0877
+8920--2011 - Hurry Up, We're Dreami    77.29      DENY no-ultrasonic      DENY no-ultrasonic      0.0601
+8921--1999 - Californication           69.98  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic      0.0264
+8922--2008 - Death Magnetic            69.92  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic      0.0263
+8923--2001 - Jane Doe                  79.06  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic      0.0457
+8924--1984 - Tabula Rasa               70.01  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic      0.0345
+8925--1982 - The Goldberg Variation    77.69  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic      0.0577
+8926--1987 - Kind of Blue [CK 40579    68.42  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic      0.0457
+8928--2016 - Man Made Object           75.18  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic      0.0338
+8929--1996 - The Velvet Underground    79.84  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic      0.0405
+8930--1993 - Bridge Over Troubled W    80.49  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic      0.0445
+8931--1987 - Rumours [3010-2]          78.64  DENY ceiling,cliff,no-ultrasonic  DENY ceiling,cliff,no-ultrasonic      0.0709
+8932--1991 - Loveless [crecd 060]      85.16  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic      0.0517
+8933--2014 - Ruins                     66.07  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic      0.0210
+8934--1998 - Stratosphere              80.45  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic      0.0469
+8935--1990 - Ambient 1_ Music for A    71.89  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic      0.0337
+    T=62: DENIED 19/19  reached PROOF 0/19
+    T=59.5: DENIED 19/19  reached PROOF 0/19
+
+--- lame-cbr320 ---
+8916--2013 - Random Access Memories    75.30  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic      0.0216
+8917--2014 - Syro [WARPCD247]          73.64  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic      0.0252
+8918--1995 - Tri Repetae [WARPCD38]    74.23  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic      0.0601
+8919--1996 - Feed Me Weird Things      70.28  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic      0.0925
+8920--2011 - Hurry Up, We're Dreami    77.11      DENY no-ultrasonic      DENY no-ultrasonic      0.0565
+8921--1999 - Californication           72.50  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic      0.0210
+8922--2008 - Death Magnetic            72.19  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic      0.0252
+8923--2001 - Jane Doe                  82.09  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic      0.0225
+8924--1984 - Tabula Rasa               70.01  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic      0.0316
+8925--1982 - The Goldberg Variation    77.71  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic      0.0441
+8926--1987 - Kind of Blue [CK 40579    68.36  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic      0.0421
+8928--2016 - Man Made Object           74.90  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic      0.0208
+8929--1996 - The Velvet Underground    79.41  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic      0.0405
+8930--1993 - Bridge Over Troubled W    80.49  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic      0.0445
+8931--1987 - Rumours [3010-2]          77.47  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic      0.0613
+8932--1991 - Loveless [crecd 060]      85.23  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic      0.0369
+8933--2014 - Ruins                     66.07  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic      0.0198
+8934--1998 - Stratosphere              80.54  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic      0.0352
+8935--1990 - Ambient 1_ Music for A    71.80  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic      0.0347
+    T=62: DENIED 19/19  reached PROOF 0/19
+    T=59.5: DENIED 19/19  reached PROOF 0/19
+
+--- lame-v0 ---
+8916--2013 - Random Access Memories    44.32                   PROOF                   PROOF  None
+8917--2014 - Syro [WARPCD247]          44.19                   PROOF                   PROOF  None
+8918--1995 - Tri Repetae [WARPCD38]    25.54                   PROOF                   PROOF  None
+8919--1996 - Feed Me Weird Things      68.28  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8920--2011 - Hurry Up, We're Dreami    71.08      DENY no-ultrasonic      DENY no-ultrasonic  None
+8921--1999 - Californication           47.90                   PROOF                   PROOF  None
+8922--2008 - Death Magnetic            53.83                   PROOF                   PROOF  None
+8923--2001 - Jane Doe                  53.87                   PROOF                   PROOF  None
+8924--1984 - Tabula Rasa               69.51      DENY no-ultrasonic      DENY no-ultrasonic  None
+8925--1982 - The Goldberg Variation    77.71      DENY no-ultrasonic      DENY no-ultrasonic  None
+8926--1987 - Kind of Blue [CK 40579    68.42      DENY no-ultrasonic      DENY no-ultrasonic  None
+8928--2016 - Man Made Object           55.49                   PROOF                   PROOF  None
+8929--1996 - The Velvet Underground    59.37                   PROOF                   PROOF  None
+8930--1993 - Bridge Over Troubled W    57.80                   PROOF                   PROOF  None
+8931--1987 - Rumours [3010-2]          56.90              DENY cliff              DENY cliff  None
+8932--1991 - Loveless [crecd 060]      82.40  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8933--2014 - Ruins                     47.50                   PROOF                   PROOF  None
+8934--1998 - Stratosphere              70.07  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8935--1990 - Ambient 1_ Music for A    71.30      DENY no-ultrasonic      DENY no-ultrasonic  None
+    T=62: DENIED 9/19  reached PROOF 10/19
+    T=59.5: DENIED 9/19  reached PROOF 10/19
+
+--- lame-v2 ---
+8916--2013 - Random Access Memories    73.44  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+8917--2014 - Syro [WARPCD247]          71.23  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+8918--1995 - Tri Repetae [WARPCD38]    77.42  DENY ceiling,cliff,no-ultrasonic  DENY ceiling,cliff,no-ultrasonic  None
+8919--1996 - Feed Me Weird Things      70.43      DENY no-ultrasonic      DENY no-ultrasonic  None
+8920--2011 - Hurry Up, We're Dreami    77.34  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+8921--1999 - Californication           66.85  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+8922--2008 - Death Magnetic            67.34  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+8923--2001 - Jane Doe                  72.38  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+8924--1984 - Tabula Rasa               70.01  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+8925--1982 - The Goldberg Variation    77.69  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+8926--1987 - Kind of Blue [CK 40579    68.41  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+8928--2016 - Man Made Object           75.10  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+8929--1996 - The Velvet Underground    79.83      DENY no-ultrasonic      DENY no-ultrasonic  None
+8930--1993 - Bridge Over Troubled W    80.39  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+8931--1987 - Rumours [3010-2]          78.64  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+8932--1991 - Loveless [crecd 060]      84.80  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+8933--2014 - Ruins                     66.07  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+8934--1998 - Stratosphere              80.56  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+8935--1990 - Ambient 1_ Music for A    71.89      DENY no-ultrasonic      DENY no-ultrasonic  None
+    T=62: DENIED 19/19  reached PROOF 0/19
+    T=59.5: DENIED 19/19  reached PROOF 0/19
+
+--- null-flac ---
+8916--2013 - Random Access Memories    41.61                   PROOF                   PROOF  None
+8917--2014 - Syro [WARPCD247]          42.97                   PROOF                   PROOF  None
+8918--1995 - Tri Repetae [WARPCD38]    25.53                   PROOF                   PROOF  None
+8919--1996 - Feed Me Weird Things      64.85  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8920--2011 - Hurry Up, We're Dreami    63.39      DENY no-ultrasonic      DENY no-ultrasonic  None
+8921--1999 - Californication           47.02                   PROOF                   PROOF  None
+8922--2008 - Death Magnetic            51.64                   PROOF                   PROOF  None
+8923--2001 - Jane Doe                  47.17                   PROOF                   PROOF  None
+8924--1984 - Tabula Rasa               62.02      DENY no-ultrasonic      DENY no-ultrasonic  None
+8925--1982 - The Goldberg Variation    71.74  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8926--1987 - Kind of Blue [CK 40579    63.75      DENY no-ultrasonic      DENY no-ultrasonic  None
+8928--2016 - Man Made Object           50.65                   PROOF                   PROOF  None
+8929--1996 - The Velvet Underground    55.68                   PROOF                   PROOF  None
+8930--1993 - Bridge Over Troubled W    52.61                   PROOF                   PROOF  None
+8931--1987 - Rumours [3010-2]          49.41                   PROOF                   PROOF  None
+8932--1991 - Loveless [crecd 060]      69.53      DENY no-ultrasonic      DENY no-ultrasonic  None
+8933--2014 - Ruins                     41.33                   PROOF                   PROOF  None
+8934--1998 - Stratosphere              61.97                   PROOF      DENY no-ultrasonic  None
+8935--1990 - Ambient 1_ Music for A    67.83      DENY no-ultrasonic      DENY no-ultrasonic  None
+    T=62: DENIED 7/19  reached PROOF 12/19
+    T=59.5: DENIED 8/19  reached PROOF 11/19
+
+--- opus-192 ---
+8916--2013 - Random Access Memories    72.28  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8917--2014 - Syro [WARPCD247]          69.33  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8918--1995 - Tri Repetae [WARPCD38]    70.90  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8919--1996 - Feed Me Weird Things      71.30  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8920--2011 - Hurry Up, We're Dreami    77.35  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8921--1999 - Californication           67.13  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8922--2008 - Death Magnetic            68.41  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8923--2001 - Jane Doe                  71.36  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8924--1984 - Tabula Rasa               70.00  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8925--1982 - The Goldberg Variation    78.09  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8926--1987 - Kind of Blue [CK 40579    70.49  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8928--2016 - Man Made Object           74.06  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8929--1996 - The Velvet Underground    81.13  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8930--1993 - Bridge Over Troubled W    80.19  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8931--1987 - Rumours [3010-2]          78.65  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8932--1991 - Loveless [crecd 060]      85.21  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8933--2014 - Ruins                     66.70  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8934--1998 - Stratosphere              81.15  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8935--1990 - Ambient 1_ Music for A    72.66  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+    T=62: DENIED 19/19  reached PROOF 0/19
+    T=59.5: DENIED 19/19  reached PROOF 0/19
+
+--- opus-256 ---
+8916--2013 - Random Access Memories    73.28  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8917--2014 - Syro [WARPCD247]          70.45  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8918--1995 - Tri Repetae [WARPCD38]    70.89  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8919--1996 - Feed Me Weird Things      71.80  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8920--2011 - Hurry Up, We're Dreami    77.07  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8921--1999 - Californication           68.73  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8922--2008 - Death Magnetic            70.86  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8923--2001 - Jane Doe                  76.63  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8924--1984 - Tabula Rasa               70.00  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8925--1982 - The Goldberg Variation    78.20  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8926--1987 - Kind of Blue [CK 40579    70.49  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8928--2016 - Man Made Object           74.49  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8929--1996 - The Velvet Underground    81.19  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8930--1993 - Bridge Over Troubled W    80.68  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8931--1987 - Rumours [3010-2]          78.65  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8932--1991 - Loveless [crecd 060]      85.70  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8933--2014 - Ruins                     66.70  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8934--1998 - Stratosphere              80.95  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8935--1990 - Ambient 1_ Music for A    72.66  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+    T=62: DENIED 19/19  reached PROOF 0/19
+    T=59.5: DENIED 19/19  reached PROOF 0/19
+
+--- opus-96 ---
+8916--2013 - Random Access Memories    69.57  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8917--2014 - Syro [WARPCD247]          67.37  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8918--1995 - Tri Repetae [WARPCD38]    69.23  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8919--1996 - Feed Me Weird Things      71.77  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8920--2011 - Hurry Up, We're Dreami    77.72  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8921--1999 - Californication           63.63  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8922--2008 - Death Magnetic            63.01  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8923--2001 - Jane Doe                  63.79  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8924--1984 - Tabula Rasa               69.99  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8925--1982 - The Goldberg Variation    78.21  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8926--1987 - Kind of Blue [CK 40579    70.49  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8928--2016 - Man Made Object           74.55  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8929--1996 - The Velvet Underground    80.52  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8930--1993 - Bridge Over Troubled W    80.16  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8931--1987 - Rumours [3010-2]          78.55  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8932--1991 - Loveless [crecd 060]      84.15  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8933--2014 - Ruins                     66.88  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8934--1998 - Stratosphere              79.98  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8935--1990 - Ambient 1_ Music for A    72.66  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+    T=62: DENIED 19/19  reached PROOF 0/19
+    T=59.5: DENIED 19/19  reached PROOF 0/19
+
+--- vorbis-q10 ---
+8916--2013 - Random Access Memories    42.98                   PROOF                   PROOF  None
+8917--2014 - Syro [WARPCD247]          44.15                   PROOF                   PROOF  None
+8918--1995 - Tri Repetae [WARPCD38]    25.79                   PROOF                   PROOF  None
+8919--1996 - Feed Me Weird Things      67.67  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8920--2011 - Hurry Up, We're Dreami    67.38      DENY no-ultrasonic      DENY no-ultrasonic  None
+8921--1999 - Californication           47.12                   PROOF                   PROOF  None
+8922--2008 - Death Magnetic            52.70                   PROOF                   PROOF  None
+8923--2001 - Jane Doe                  47.17                   PROOF                   PROOF  None
+8924--1984 - Tabula Rasa               69.56      DENY no-ultrasonic      DENY no-ultrasonic  None
+8925--1982 - The Goldberg Variation    77.46  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8926--1987 - Kind of Blue [CK 40579    68.37      DENY no-ultrasonic      DENY no-ultrasonic  None
+8928--2016 - Man Made Object           53.63                   PROOF                   PROOF  None
+8929--1996 - The Velvet Underground    57.49                   PROOF                   PROOF  None
+8930--1993 - Bridge Over Troubled W    53.74                   PROOF                   PROOF  None
+8931--1987 - Rumours [3010-2]          49.26                   PROOF                   PROOF  None
+8932--1991 - Loveless [crecd 060]      75.28      DENY no-ultrasonic      DENY no-ultrasonic  None
+8933--2014 - Ruins                     44.73                   PROOF                   PROOF  None
+8934--1998 - Stratosphere              67.98  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8935--1990 - Ambient 1_ Music for A    71.45  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+    T=62: DENIED 8/19  reached PROOF 11/19
+    T=59.5: DENIED 8/19  reached PROOF 11/19
+
+--- vorbis-q4 ---
+8916--2013 - Random Access Memories    71.66  DENY ceiling,cliff,no-ultrasonic  DENY ceiling,cliff,no-ultrasonic  None
+8917--2014 - Syro [WARPCD247]          68.17  DENY ceiling,cliff,no-ultrasonic  DENY ceiling,cliff,no-ultrasonic  None
+8918--1995 - Tri Repetae [WARPCD38]    75.84  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8919--1996 - Feed Me Weird Things      71.36      DENY no-ultrasonic      DENY no-ultrasonic  None
+8920--2011 - Hurry Up, We're Dreami    78.51      DENY no-ultrasonic      DENY no-ultrasonic  None
+8921--1999 - Californication           64.09  DENY ceiling,cliff,no-ultrasonic  DENY ceiling,cliff,no-ultrasonic  None
+8922--2008 - Death Magnetic            63.57      DENY no-ultrasonic      DENY no-ultrasonic  None
+8923--2001 - Jane Doe                  65.81  DENY ceiling,cliff,no-ultrasonic  DENY ceiling,cliff,no-ultrasonic  None
+8924--1984 - Tabula Rasa               69.95  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+8925--1982 - The Goldberg Variation    77.59      DENY no-ultrasonic      DENY no-ultrasonic  None
+8926--1987 - Kind of Blue [CK 40579    68.80  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+8928--2016 - Man Made Object           74.61  DENY ceiling,cliff,no-ultrasonic  DENY ceiling,cliff,no-ultrasonic  None
+8929--1996 - The Velvet Underground    80.14      DENY no-ultrasonic      DENY no-ultrasonic  None
+8930--1993 - Bridge Over Troubled W    79.74  DENY ceiling,cliff,no-ultrasonic  DENY ceiling,cliff,no-ultrasonic  None
+8931--1987 - Rumours [3010-2]          78.85      DENY no-ultrasonic      DENY no-ultrasonic  None
+8932--1991 - Loveless [crecd 060]      84.27  DENY ceiling,cliff,no-ultrasonic  DENY ceiling,cliff,no-ultrasonic  None
+8933--2014 - Ruins                     65.80      DENY no-ultrasonic      DENY no-ultrasonic  None
+8934--1998 - Stratosphere              79.15  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+8935--1990 - Ambient 1_ Music for A    71.78      DENY no-ultrasonic      DENY no-ultrasonic  None
+    T=62: DENIED 19/19  reached PROOF 0/19
+    T=59.5: DENIED 19/19  reached PROOF 0/19
+
+--- vorbis-q5 ---
+8916--2013 - Random Access Memories    66.35      DENY no-ultrasonic      DENY no-ultrasonic  None
+8917--2014 - Syro [WARPCD247]          62.97  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8918--1995 - Tri Repetae [WARPCD38]    56.15            DENY ceiling            DENY ceiling  None
+8919--1996 - Feed Me Weird Things      70.05      DENY no-ultrasonic      DENY no-ultrasonic  None
+8920--2011 - Hurry Up, We're Dreami    77.10      DENY no-ultrasonic      DENY no-ultrasonic  None
+8921--1999 - Californication           62.91  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8922--2008 - Death Magnetic            64.23      DENY no-ultrasonic      DENY no-ultrasonic  None
+8923--2001 - Jane Doe                  66.45  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8924--1984 - Tabula Rasa               69.96      DENY no-ultrasonic      DENY no-ultrasonic  None
+8925--1982 - The Goldberg Variation    77.54  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8926--1987 - Kind of Blue [CK 40579    68.40  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+8928--2016 - Man Made Object           68.91      DENY no-ultrasonic      DENY no-ultrasonic  None
+8929--1996 - The Velvet Underground    79.27      DENY no-ultrasonic      DENY no-ultrasonic  None
+8930--1993 - Bridge Over Troubled W    75.16      DENY no-ultrasonic      DENY no-ultrasonic  None
+8931--1987 - Rumours [3010-2]          74.48      DENY no-ultrasonic      DENY no-ultrasonic  None
+8932--1991 - Loveless [crecd 060]      84.47  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8933--2014 - Ruins                     65.88      DENY no-ultrasonic      DENY no-ultrasonic  None
+8934--1998 - Stratosphere              78.47      DENY no-ultrasonic      DENY no-ultrasonic  None
+8935--1990 - Ambient 1_ Music for A    71.88      DENY no-ultrasonic      DENY no-ultrasonic  None
+    T=62: DENIED 19/19  reached PROOF 0/19
+    T=59.5: DENIED 19/19  reached PROOF 0/19
+
+--- vorbis-q6 ---
+8916--2013 - Random Access Memories    49.26                   PROOF                   PROOF  None
+8917--2014 - Syro [WARPCD247]          48.94                   PROOF                   PROOF  None
+8918--1995 - Tri Repetae [WARPCD38]    26.53                   PROOF                   PROOF  None
+8919--1996 - Feed Me Weird Things      69.61      DENY no-ultrasonic      DENY no-ultrasonic  None
+8920--2011 - Hurry Up, We're Dreami    71.82      DENY no-ultrasonic      DENY no-ultrasonic  None
+8921--1999 - Californication           50.40                   PROOF                   PROOF  None
+8922--2008 - Death Magnetic            55.53                   PROOF                   PROOF  None
+8923--2001 - Jane Doe                  52.74                   PROOF                   PROOF  None
+8924--1984 - Tabula Rasa               69.98      DENY no-ultrasonic      DENY no-ultrasonic  None
+8925--1982 - The Goldberg Variation    77.51  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8926--1987 - Kind of Blue [CK 40579    68.35  DENY cliff,no-ultrasonic  DENY cliff,no-ultrasonic  None
+8928--2016 - Man Made Object           57.90                   PROOF                   PROOF  None
+8929--1996 - The Velvet Underground    72.95      DENY no-ultrasonic      DENY no-ultrasonic  None
+8930--1993 - Bridge Over Troubled W    65.22      DENY no-ultrasonic      DENY no-ultrasonic  None
+8931--1987 - Rumours [3010-2]          63.79      DENY no-ultrasonic      DENY no-ultrasonic  None
+8932--1991 - Loveless [crecd 060]      82.59      DENY no-ultrasonic      DENY no-ultrasonic  None
+8933--2014 - Ruins                     65.35      DENY no-ultrasonic      DENY no-ultrasonic  None
+8934--1998 - Stratosphere              76.66      DENY no-ultrasonic      DENY no-ultrasonic  None
+8935--1990 - Ambient 1_ Music for A    71.89      DENY no-ultrasonic      DENY no-ultrasonic  None
+    T=62: DENIED 12/19  reached PROOF 7/19
+    T=59.5: DENIED 12/19  reached PROOF 7/19
+
+--- vorbis-q7 ---
+8916--2013 - Random Access Memories    48.57                   PROOF                   PROOF  None
+8917--2014 - Syro [WARPCD247]          48.29                   PROOF                   PROOF  None
+8918--1995 - Tri Repetae [WARPCD38]    26.23                   PROOF                   PROOF  None
+8919--1996 - Feed Me Weird Things      68.99      DENY no-ultrasonic      DENY no-ultrasonic  None
+8920--2011 - Hurry Up, We're Dreami    70.95      DENY no-ultrasonic      DENY no-ultrasonic  None
+8921--1999 - Californication           49.56                   PROOF                   PROOF  None
+8922--2008 - Death Magnetic            54.62                   PROOF                   PROOF  None
+8923--2001 - Jane Doe                  51.18                   PROOF                   PROOF  None
+8924--1984 - Tabula Rasa               69.99      DENY no-ultrasonic      DENY no-ultrasonic  None
+8925--1982 - The Goldberg Variation    77.59  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic  None
+8926--1987 - Kind of Blue [CK 40579    68.36      DENY no-ultrasonic      DENY no-ultrasonic  None
+8928--2016 - Man Made Object           57.04                   PROOF                   PROOF  None
+8929--1996 - The Velvet Underground    70.54      DENY no-ultrasonic      DENY no-ultrasonic  None
+8930--1993 - Bridge Over Troubled W    62.78      DENY no-ultrasonic      DENY no-ultrasonic  None
+8931--1987 - Rumours [3010-2]          61.03                   PROOF      DENY no-ultrasonic  None
+8932--1991 - Loveless [crecd 060]      81.58      DENY no-ultrasonic      DENY no-ultrasonic  None
+8933--2014 - Ruins                     64.10      DENY no-ultrasonic      DENY no-ultrasonic  None
+8934--1998 - Stratosphere              75.86      DENY no-ultrasonic      DENY no-ultrasonic  None
+8935--1990 - Ambient 1_ Music for A    71.90      DENY no-ultrasonic      DENY no-ultrasonic  None
+    T=62: DENIED 11/19  reached PROOF 8/19
+    T=59.5: DENIED 12/19  reached PROOF 7/19
+
+--- vorbis-q8 ---
+8916--2013 - Random Access Memories    48.08                   PROOF                   PROOF      0.0300
+8917--2014 - Syro [WARPCD247]          47.74                   PROOF                   PROOF      0.0337
+8918--1995 - Tri Repetae [WARPCD38]    26.25                   PROOF                   PROOF      0.1274
+8919--1996 - Feed Me Weird Things      69.07      DENY no-ultrasonic      DENY no-ultrasonic      0.1166
+8920--2011 - Hurry Up, We're Dreami    70.45      DENY no-ultrasonic      DENY no-ultrasonic  None
+8921--1999 - Californication           49.20                   PROOF                   PROOF      0.0433
+8922--2008 - Death Magnetic            54.96                   PROOF                   PROOF      0.0228
+8923--2001 - Jane Doe                  50.17                   PROOF                   PROOF      0.0252
+8924--1984 - Tabula Rasa               70.00      DENY no-ultrasonic      DENY no-ultrasonic      0.0493
+8925--1982 - The Goldberg Variation    77.58  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic      0.0613
+8926--1987 - Kind of Blue [CK 40579    68.38      DENY no-ultrasonic      DENY no-ultrasonic      0.0397
+8928--2016 - Man Made Object           56.78                   PROOF                   PROOF      0.0349
+8929--1996 - The Velvet Underground    69.64      DENY no-ultrasonic      DENY no-ultrasonic      0.0387
+8930--1993 - Bridge Over Troubled W    62.00      DENY no-ultrasonic      DENY no-ultrasonic      0.0493
+8931--1987 - Rumours [3010-2]          59.30                   PROOF                   PROOF  None
+8932--1991 - Loveless [crecd 060]      80.97  DENY ceiling,no-ultrasonic  DENY ceiling,no-ultrasonic      0.0493
+8933--2014 - Ruins                     63.02      DENY no-ultrasonic      DENY no-ultrasonic      0.0421
+8934--1998 - Stratosphere              75.50      DENY no-ultrasonic      DENY no-ultrasonic      0.0397
+8935--1990 - Ambient 1_ Music for A    72.41      DENY no-ultrasonic      DENY no-ultrasonic      0.0637
+    T=62: DENIED 11/19  reached PROOF 8/19
+    T=59.5: DENIED 11/19  reached PROOF 8/19
+
+=== paired U delta vs control 'genuine' ===
+  aacffm-128       n=19  mean  +19.03  median  +18.57  min   +4.50  max  +45.85
+  aacffm-192       n=19  mean  +18.20  median  +18.52  min   +3.73  max  +43.35
+  aacffm-256       n=19  mean   -0.12  median   -0.23  min   -0.83  max   +1.73
+  aacffm-320       n=19  mean   -0.23  median   -0.21  min   -0.83  max   +0.71
+  lame-cbr128      n=19  mean  +19.79  median  +23.41  min   +3.62  max  +49.92
+  lame-cbr192      n=19  mean  +20.89  median  +24.46  min   +4.30  max  +51.55
+  lame-cbr256      n=19  mean  +20.68  median  +22.96  min   +4.06  max  +51.49
+  lame-cbr320      n=19  mean  +20.98  median  +23.74  min   +3.98  max  +48.69
+  lame-v0          n=19  mean   +4.98  median   +4.84  min   +0.00  max  +12.88
+  lame-v2          n=19  mean  +19.95  median  +19.83  min   +4.07  max  +51.89
+  null-flac        n=19  mean   -0.01  median   +0.00  min   -0.11  max   +0.00
+  opus-192         n=19  mean  +19.77  median  +20.11  min   +4.84  max  +45.37
+  opus-256         n=19  mean  +20.45  median  +21.71  min   +4.84  max  +45.36
+  opus-96          n=19  mean  +18.50  median  +16.62  min   +4.84  max  +43.69
+  vorbis-q10       n=19  mean   +2.80  median   +2.82  min   -0.14  max   +7.54
+  vorbis-q4        n=19  mean  +18.89  median  +17.17  min   +3.96  max  +50.31
+  vorbis-q5        n=19  mean  +16.31  median  +16.50  min   +4.06  max  +30.62
+  vorbis-q6        n=19  mean   +8.75  median   +7.26  min   +1.00  max  +24.02
+  vorbis-q7        n=19  mean   +7.81  median   +6.40  min   +0.70  max  +22.78
+  vorbis-q8        n=19  mean   +7.41  median   +6.14  min   +0.71  max  +21.69
+
+wrote gate-local.json, tracks-local.tsv

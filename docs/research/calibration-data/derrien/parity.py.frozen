@@ -1,0 +1,48 @@
+"""Parity: vectorised port vs the literal Matlab transcription, on real audio."""
+import sys
+import json
+import numpy as np
+
+sys.path.insert(0, "/home/abl030/.claude/jobs/fb229c18/tmp/derrien")
+import aacdet as A            # noqa: E402
+import naive as NV            # noqa: E402
+import soundfile as sf_mod    # noqa: E402
+
+idx = json.load(open("/mnt/virtio/Music/derrien-arm/index.json"))
+m = idx["8916"]["map"][0]
+
+low_l, high_l, low_s, high_s, win = A.init_aac(44)
+tau_l, tau_s = A.tau_tables(low_l, high_l, low_s, high_s)
+plans = (A.BandPlan(low_l, high_l, A.IBLEN_LONG, 1),
+         A.BandPlan(low_s, high_s, A.IBLEN_SHORT, A.NB_SHORT_WIN))
+sf = np.linspace(0.3, 0.7, 8)
+# Matlab-style 1-based band tables for the naive transcription
+w_low_l = (low_l + 1).tolist()
+w_high_l = (high_l + 1).tolist()
+w_low_s = (low_s + 1).tolist()
+w_high_s = (high_s + 1).tolist()
+
+rng = np.random.default_rng(11)
+worst = 0.0
+for tag, path in (("genuine", m["genuine"]), ("launder", m["launder"])):
+    data, rate = sf_mod.read(path, dtype="float64", always_2d=True)
+    eblk, rate2, nch, total = A._block_energies(path)
+    frames, _ = A.select_frames_from_blocks(eblk["M"], 8, "high")
+    chan = data[:, 0] + data[:, 1]                       # M channel
+    offsets = np.sort(rng.choice(1024, 6, replace=False))
+    offsets = np.unique(np.concatenate([offsets, [960]]))
+    span = 2 * A.IBLEN_LONG + 1023
+    segs = A.read_segments(path, frames, span)
+    fast = A.detect_aac(segs["M"], offsets, sf, plans, win, tau_l, tau_s)
+    for i, off in enumerate(offsets):
+        slow = NV.detect_aac_naive(
+            chan, int(off), sf, frames.tolist(), A.IBLEN_LONG, A.IBLEN_SHORT,
+            A.OFFSET_SHORT, len(low_l), len(low_s), A.NB_SHORT_WIN,
+            w_low_l, w_high_l, w_low_s, w_high_s, win["long"], win["start"],
+            win["stop"], win["short"], tau_l, tau_s)
+        d = abs(slow - fast[i])
+        worst = max(worst, d)
+        print(f"{tag:8s} offset={int(off):4d}  vectorised={fast[i]:.8f}  "
+              f"matlab-transcription={slow:.8f}  |diff|={d:.2e}")
+print(f"\nworst |diff| over all probes: {worst:.3e}")
+print("PARITY", "PASS" if worst < 1e-12 else "FAIL")

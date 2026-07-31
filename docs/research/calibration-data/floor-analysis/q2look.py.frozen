@@ -1,0 +1,15 @@
+import json
+from collections import defaultdict
+from statistics import median
+R=json.load(open('/home/abl030/.claude/jobs/fb229c18/tmp/floor/q2feats.json'))
+ARM=[r for r in R if r['ds'] in ('TRAIN','R1','R2','R3')]
+by=defaultdict(list)
+for r in ARM: by[r['variant']].append(r)
+print(f"{'variant':<20}{'kbps':>6}{'n':>5}{'d18_195':>9}{'d16_18':>9}{'hfdef':>8}{'rel18':>8}{'edge_med':>10}{'cliff_med':>10}{'cliff_frac':>11}")
+for v in sorted(by, key=lambda v: median(r['d18_195'] for r in by[v])):
+    rs=by[v]
+    print(f"{v:<20}{rs[0]['kbps']:>6}{len(rs):>5}"
+          f"{median(r['d18_195'] for r in rs):>9.1f}{median(r['d16_18'] for r in rs):>9.1f}"
+          f"{median(r['hfdef'] for r in rs):>8.1f}{median(r['rel18'] for r in rs):>8.1f}"
+          f"{median(r['edge_med'] for r in rs):>10.0f}{median(r['cliff_med'] for r in rs):>10.0f}"
+          f"{median(r['cliff_frac'] for r in rs):>11.2f}")

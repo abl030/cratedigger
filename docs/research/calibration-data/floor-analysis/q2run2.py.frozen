@@ -1,0 +1,49 @@
+"""Q2 v2: LOO floor using ref-normalised (absolute-deficit) statistics only, over 3 codec universes."""
+import json, bisect
+from collections import defaultdict
+from statistics import median
+R=json.load(open('/home/abl030/.claude/jobs/fb229c18/tmp/floor/q2feats.json'))
+for r in R: r['album']=(r['ds'],r['slug'])
+LOSSLESS=10000
+SIGN={'d18_195':-1,'d16_18':-1,'hfdef':-1,'cliff_min':1,'cliff_med':1}
+def floor_fn(train,key):
+    s=SIGN[key]; pts=sorted((s*r[key],r['kbps']) for r in train)
+    xs=[];mins=[];m=10**9
+    for x,k in reversed(pts): m=min(m,k); xs.append(x); mins.append(m)
+    xs.reverse();mins.reverse()
+    def F(v):
+        i=bisect.bisect_left(xs,s*v)
+        return mins[i] if i<len(mins) else LOSSLESS
+    return F
+def loo(pool,keys):
+    out=[]
+    for a in sorted({r['album'] for r in pool}):
+        tr=[r for r in pool if r['album']!=a]
+        Fs=[floor_fn(tr,k) for k in keys]
+        for r in (x for x in pool if x['album']==a):
+            out.append((r, max(F(r[k]) for k,F in zip(keys,Fs))))
+    return out
+OPUS=lambda v: v.startswith('opus-') or v=='t-opus96-flac'
+HE=lambda v: v.startswith('fdk-he')
+UNIV={'(a) ALL codecs':lambda v:True,
+      '(b) no Opus (candidate is 44.1kHz)':lambda v: not OPUS(v),
+      '(c) no Opus, no HE-AAC':lambda v: not OPUS(v) and not HE(v)}
+ARM=[r for r in R if r['ds'] in ('TRAIN','R1','R2','R3')]
+KEYS=['d18_195','d16_18','cliff_min']
+SHOW=['control-flac1644','lame-v0','lame-cbr320','lame-cbr192','lame-cbr128','vorbis-q9','vorbis-q6','vorbis-q5','vorbis-q4',
+      'aacffm-320','aacffm-256','aacffm-128','apple-cvbr256','apple-abr192','apple-cbr128','fdk-he1-64','opus-256','opus-96',
+      't-mp3128-flac','t-vorbisq5-flac','t-opus96-flac']
+for uname,keep in UNIV.items():
+    pool=[r for r in ARM if keep(r['variant'])]
+    res=loo(pool,KEYS)
+    ok=sum(1 for r,f in res if r['kbps']>=f)
+    print(f"\n===== {uname}  (arms, LOO by album; n={len(res)}) =====")
+    print(f"  correctness (true kbps >= predicted floor): {ok}/{len(res)} = {100*ok/len(res):.2f}%")
+    byv=defaultdict(list)
+    for r,f in res: byv[r['variant']].append((f,r['kbps']))
+    print(f"  {'variant':<20}{'true':>7}{'floor p10':>11}{'floor med':>11}{'floor p90':>11}{'viol':>6}")
+    for v in SHOW:
+        if v not in byv: continue
+        fs=sorted(f for f,_ in byv[v]); k=byv[v][0][1]
+        viol=sum(1 for f,kk in byv[v] if kk<f)
+        print(f"  {v:<20}{('LL' if k==LOSSLESS else k):>7}{fs[len(fs)//10]:>11}{median(fs):>11.0f}{fs[int(.9*len(fs))]:>11}{viol:>6}")

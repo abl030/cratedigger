@@ -27,6 +27,15 @@ Per-phase chronology lives on issue #829. Raw data and one-shot analysis
 scripts (uncommitted, per `.claude/rules/scope.md`) live under
 `/mnt/virtio/Music/calibration-tmp/` on shared storage.
 
+**Research did not stop there.** A further round of measurement ran on
+2026-07-30 — a 31-variant launder matrix, a validated port of an MDCT-lattice
+AAC-transcode detector, a floor/precondition re-reading of the arms, and
+non-spectral CD-provenance probes. It is recorded, deliberately without
+conclusions, in § "2026-07-30 — further measurement, ongoing" near the end of
+this document, and the data is committed under
+`docs/research/calibration-data/`. Nothing above that section has been revised
+by it.
+
 ---
 
 ## The evidence base
@@ -938,6 +947,129 @@ was the right call.
   verdicts. Never run; dropped with the gates above.
 - **No-cliff asserts nothing.** The high end of every ladder is invisible. This
   is a permanent property, not a defect.
+
+---
+
+## 2026-07-30 — further measurement, ongoing
+
+**Nothing in this document above this line has been revised.** This section
+records only that a further round of measurement happened, what it consists of,
+where the data lives, and which existing claims it touches. It states no
+conclusion and revises none: the investigation was explicitly left open, and a
+future reader should form their own view from the data rather than inherit a
+half-formed one from here.
+
+Four new datasets were assembled and committed under
+`docs/research/calibration-data/`. Each has its own README with the exact
+commands, tool versions and TSV column layouts.
+
+### `launder-matrix/` — one corpus, many encoders, measured as real launders
+
+19 ground-truth library FLAC albums (230 tracks, 1044 min), pushed through
+**31 encoder variant IDs** — two controls plus 29 that apply a lossy step —
+and decoded back to 16-bit FLAC, so every row is an *actual launder* rather
+than a native lossy file read as if it were one. **7,681 track rows.** Every
+variant carries its exact `argv` template, the encoder's own version string and
+a rendered example command (`variant-index.json.gz`).
+
+- Measurement calls `lib.spectral_check.analyze_album` **unmodified**;
+  `_get_band_rms` is wrapped by a pass-through recorder, so slice vectors come
+  from the same sox calls production makes.
+- Scoring imports `score_v3.py.frozen`'s own `load` / `gate` / `_window_legs`
+  from a byte-identical copy (md5 re-verified at capture), driven
+  **single-window** — the production window.
+- Families covered: LAME MP3 (V0, V2, CBR 128/192/256/320), ffmpeg-native AAC
+  (128/192/256/320), Apple CoreAudio via qaac (CBR 128, ABR 192, TVBR 91,
+  CVBR 256, CVBR 320), Vorbis (q4–q10), Opus (96/192/256), `wmav2`
+  (128/192/320).
+- `FINAL_REPORT.txt` tabulates 24 of the 31 IDs; the five `qaac-*` and two
+  pilot-only IDs are excluded by that script's hardcoded list, not by absence
+  of data.
+
+Bearing on claims above, stated as pointers rather than revisions:
+
+- § "HE-AAC (SBR)" — **untestable on this host.** `libfdk_aac` is not in this
+  ffmpeg (licensing), so no SBR launder could be built at all. The four arms'
+  `fdk-he1-64` rows remain the only HE-AAC evidence.
+- § "Documented residual classes", residual #1 — the whole Apple CoreAudio
+  family, not just CVBR-256, now has 19-album gate verdicts in
+  `launder-matrix/gate-apple.json`.
+- § "WMA" — `wmav2` is ffmpeg's clean-room reimplementation and **overshoots
+  requested rates badly** (measured: `-b:a 128k` → ~138 kbps, `192k` → ~276,
+  `320k` → ~551). The variant label is the request, not the result. It also
+  cannot encode 96 kHz, so those rows cover 17 albums.
+- § "Opus" — libopus encodes at 48 kHz unconditionally, so every Opus launder
+  decodes to a 48 kHz FLAC and the 20.5–21.5 kHz band sits far below Nyquist.
+  Sample rate is entangled in every Opus row.
+- **Harness controls hold.** The null launder (FLAC → WAV → FLAC, no lossy
+  step) is PCM bit-identical to its source on **197 of 197 tracks from the
+  seventeen 16-bit albums**, re-verified at capture. The two 96 kHz/24-bit
+  albums are not (the chain's `-sample_fmt s16` requantizes them) and must be
+  scored against their own null control.
+- `lame -V0` and `ffmpeg -q:a 0 -c:a libmp3lame` are **nearly** the same
+  bitstream: 27 of 30 pilot tracks decode to bit-identical PCM; 3 differ only
+  in trailing length by ≈0.0008 s. The runbook's flat "bit-identical" is
+  slightly stronger than the measurement.
+
+### `derrien/` — a validated port of an MDCT-lattice AAC-transcode detector
+
+A numpy port of Derrien (JAES 2019, 67(3) 116–123), which recovers the AAC
+frame lattice from decoded PCM. Validated three ways; two of the three were
+**re-run at capture time** and pass: mathematical self-validation (MDCT identity,
+TDAC reconstruction, tau null, synthetic lattice, noise control) and parity
+against a literal statement-by-statement transcription of the author's
+`detect_aac.m` (worst difference 0.000e+00 over fourteen probes on real audio).
+The third — comparison against Octave running the author's unmodified Matlab —
+was recorded at 3.3e-16 worst difference, and its WAV inputs no longer exist.
+
+Two measurement arms: a **paired** arm (215 genuine + 215 Apple CVBR-256
+launders of the same corpus; 33 of each error out because the detector cannot
+score 96 kHz input at all) and a **wild** arm (1500 files from the doc2
+`wrong_matches/` and `failed_imports/` quarantine trees, 364 errors, no
+labels). The detector was also run across the whole launder matrix, AAC or not
+— see `launder-matrix/FINAL_REPORT.txt` sections B–E.
+
+### `floor-analysis/` — re-reading the arms and the matrix
+
+No new audio. Two feature files derived from the four committed arms and the
+new matrix (2,251 and 5,917 rows per album × variant), and nineteen saved
+script outputs asking three questions: whether a codec-independent
+*precondition* exists under which the ultrasonic leg should be treated as
+uninformative; what bitrate *floor* a measurement can assert
+(leave-one-album-out); and what a PROVED / BOUNDED / DENIED three-state framing
+tabulates to. Nothing was concluded from any of it.
+
+One measurement from that directory bears on everything else here: **album
+identity dominates codec effect on these statistics.** Genuine-lossless
+`d18_195` spans min 27.3 / median 46.8 / max 70.3 across the 100 genuine
+control albums — a **43.0 dB spread** (`floor-analysis/OUT_q2run3.txt`); the
+proof leg's own window-0 `U` spans 25.54 to 81.53 dB over the same albums, a
+**55.99 dB range**. Paired per-album codec effects on `abs_bU` are a few dB by
+comparison.
+
+### `provenance/` — a non-spectral axis
+
+Read-only probes asking a different question from anything above: not "what
+does this audio look like?" but "is this exact audio a known CD rip?".
+AccurateRip, CUETools DB and MusicBrainz DiscID, over the library's 38 FLAC
+album directories.
+
+- 34 of 38 are sector-aligned (the other 4 are not CD track splits).
+- 25 TOCs are in AccurateRip; **9 albums have at least one track matching ARv1
+  at offset 0**. A ±3000-sample read-offset search rescued none.
+- **ARv2 matched 0 tracks anywhere**, including on the 9 that matched ARv1.
+- CTDB has entries for 28 of 38.
+- MusicBrainz DiscID: 20 of the 27 releases that carry any DiscID matched.
+- The checksum implementation was cross-validated against the `arver` 1.5.0 C
+  extension: **25 of 25 tracks match on both ARv1 and ARv2**, including on an
+  album that matched nothing in the database.
+
+### Disposable inputs
+
+The launder audio (**163 GB**, `/mnt/virtio/Music/matrix/`) and the Derrien
+paired arm's launders (`/mnt/virtio/Music/derrien-arm/`) are disposable. Every
+measurement derived from them is committed; the manifests and `argv` records
+are the rebuild recipe (~5 min and ~6 GB per variant per the recorded timings).
 
 ---
 

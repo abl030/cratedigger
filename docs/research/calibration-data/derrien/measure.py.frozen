@@ -1,0 +1,108 @@
+"""Batch Derrien measurement over the genuine / launder corpus.
+
+Writes one TSV row per (file, frame-selection mode).
+"""
+import json
+import os
+import sys
+import time
+import traceback
+from concurrent.futures import ProcessPoolExecutor
+
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+
+sys.path.insert(0, "/home/abl030/.claude/jobs/fb229c18/tmp/derrien")
+
+ROOT = "/home/abl030/.claude/jobs/fb229c18/tmp/derrien"
+INDEX = "/mnt/virtio/Music/derrien-arm/index.json"
+WILD = ["/mnt/virtio/music/slskd/wrong_matches",
+        "/mnt/virtio/music/slskd/failed_imports"]
+COLS = ["cls", "rid", "mode", "path", "sr", "ch", "dur", "proba", "median",
+        "std", "z", "offset", "pmode", "nac_z", "secs", "err"]
+
+
+def work(item):
+    import aacdet as A
+    cls, rid, mode, path, nb_win, nb_sf, do_nac = item
+    t0 = time.time()
+    row = {c: "" for c in COLS}
+    row.update(cls=cls, rid=rid, mode=mode, path=path)
+    try:
+        r = A.analyse(path, nb_win=nb_win, nb_sf=nb_sf, mode=mode)
+        row.update(sr=r["rate"], ch=r["channels"], dur=f"{r['duration']:.1f}",
+                   proba=f"{r['proba']:.6f}", median=f"{r['proba_median']:.6f}",
+                   std=f"{r['proba_std']:.6f}", z=f"{r['proba_z']:.3f}",
+                   offset=r["offset"], pmode=r["proba_mode"])
+        if do_nac:
+            row["nac_z"] = f"{A.nac_analyse(path, nb_win=nb_win, mode=mode)['nac_z']:.3f}"
+    except Exception as e:  # noqa: BLE001 - recorded per row, corpus keeps going
+        row["err"] = f"{type(e).__name__}: {e}".replace("\t", " ")[:200]
+        if os.environ.get("AACDET_TRACE"):
+            traceback.print_exc()
+    row["secs"] = f"{time.time() - t0:.1f}"
+    return row
+
+
+def build_items(which, modes, nb_win, nb_sf, wild_limit, do_nac):
+    idx = json.load(open(INDEX))
+    items = []
+    for rid, v in sorted(idx.items()):
+        for m in v["map"]:
+            for mode in modes:
+                if "launder" in which:
+                    items.append(("launder", rid, mode, m["launder"], nb_win, nb_sf, do_nac))
+                if "genuine" in which:
+                    items.append(("genuine", rid, mode, m["genuine"], nb_win, nb_sf, do_nac))
+    if "wild" in which:
+        found = []
+        for root in WILD:
+            tag = os.path.basename(root)
+            for dirpath, _dirs, files in os.walk(root):
+                for f in sorted(files):
+                    if f.lower().endswith(".flac"):
+                        found.append((tag, os.path.join(dirpath, f)))
+        found.sort()
+        if wild_limit:
+            found = found[:wild_limit]
+        for tag, p in found:
+            for mode in modes:
+                items.append(("wild:" + tag, "", mode, p, nb_win, nb_sf, do_nac))
+    return items
+
+
+def main():
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--which", default="launder,genuine")
+    ap.add_argument("--modes", default="high")
+    ap.add_argument("--nb-win", type=int, default=8)
+    ap.add_argument("--nb-sf", type=int, default=8)
+    ap.add_argument("--wild-limit", type=int, default=0)
+    ap.add_argument("--workers", type=int, default=24)
+    ap.add_argument("--nac", action="store_true")
+    ap.add_argument("--out", required=True)
+    a = ap.parse_args()
+
+    items = build_items(a.which.split(","), a.modes.split(","),
+                        a.nb_win, a.nb_sf, a.wild_limit, a.nac)
+    print(f"{len(items)} jobs, {a.workers} workers", flush=True)
+    t0 = time.time()
+    done = 0
+    with open(a.out, "w") as fh:
+        fh.write("\t".join(COLS) + "\n")
+        with ProcessPoolExecutor(max_workers=a.workers) as ex:
+            for row in ex.map(work, items, chunksize=1):
+                fh.write("\t".join(str(row[c]) for c in COLS) + "\n")
+                done += 1
+                if done % 100 == 0:
+                    fh.flush()
+                    el = time.time() - t0
+                    print(f"  {done}/{len(items)}  {el:.0f}s  "
+                          f"eta {el / done * (len(items) - done):.0f}s", flush=True)
+    print(f"done {done} in {time.time() - t0:.0f}s -> {a.out}", flush=True)
+
+
+if __name__ == "__main__":
+    main()

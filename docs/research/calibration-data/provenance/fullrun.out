@@ -1,0 +1,41 @@
+cratedigger dev shell — run: python3 -m unittest discover -s tests -t . -v
+2014 - Syro [WARPCD247]                         AR blocks=  5  v1=0/12 v2=0/12
+1984 - Tabula Rasa                              AR blocks= 12  v1=0/4 v2=0/4
+1995 - Tri Repetae [WARPCD38]                   AR blocks= 11  v1=0/10 v2=0/10
+1990 - Ambient 1_ Music for Airports [EEGCD 17  AR blocks=  4  v1=4/4 v2=0/4
+The Rough Guide to Australian Aboriginal Music  AR blocks=  2  v1=15/16 v2=0/16
+2001 - Jane Doe                                 AR blocks=  8  v1=11/12 v2=0/12
+2013 - Random Access Memories [88883716862]     AR blocks= 28  v1=12/13 v2=0/13
+2000 - The Pointless Gift                       AR blocks=  2  v1=0/12 v2=0/12
+2004 - Fake Our Deaths                          AR blocks=  1  v1=0/13 v2=0/13
+2006 - Ten Lives                                AR blocks=  1  v1=0/12 v2=0/12
+1998 - Stratosphere                             AR blocks=  1  v1=0/17 v2=0/17
+1987 - Rumours [3010-2]                         not sector-aligned -> not a CD track split
+2016 - Man Made Object                          AR blocks=  2  v1=0/10 v2=0/10
+1998 - Voices of Gondwana                       AR blocks=  1  v1=0/12 v2=0/12
+2017 - New Light New Hope                       AR blocks=  1  v1=0/21 v2=0/21
+2014 - Ruins                                    AR blocks=  2  v1=0/8 v2=0/8
+1993 - A Long Time Coming                       TOC not in AccurateRip
+1997 - Raising the Standard                     TOC not in AccurateRip
+1982 - The Goldberg Variations                  AR blocks=  6  v1=0/32 v2=0/32
+2011 - Hurry Up, We're Dreaming                 not sector-aligned -> not a CD track split
+2008 - Death Magnetic                           AR blocks= 49  v1=10/10 v2=0/10
+1987 - Kind of Blue [CK 40579]                  AR blocks= 21  v1=5/5 v2=0/5
+1991 - Loveless [crecd 060]                     not sector-aligned -> not a CD track split
+1989 - Slay Tracks_ 1933-1969                   TOC not in AccurateRip
+1990 - Demolition Plot J-7                      TOC not in AccurateRip
+1991 - Perfect Sound Forever                    TOC not in AccurateRip
+1992 - Slanted and Enchanted                    AR blocks=  3  v1=0/14 v2=0/14
+1992 - Watery, Domestic                         TOC not in AccurateRip
+1997 - Shady Lane                               AR blocks=  2  v1=9/9 v2=0/9
+1999 - Major Leagues                            TOC not in AccurateRip
+1999 - Spit on a Stranger                       TOC not in AccurateRip
+1999 - Terror Twilight                          AR blocks= 14  v1=0/11 v2=0/11
+2025 - Hecklers Choice_ Big Gums and Heavy Lif  not sector-aligned -> not a CD track split
+1999 - Californication                          AR blocks= 70  v1=0/15 v2=0/15
+1991 - End on End                               AR blocks=  5  v1=16/17 v2=0/17
+1993 - Bridge Over Troubled Water [462488 2]    TOC not in AccurateRip
+1996 - Feed Me Weird Things                     AR blocks=  6  v1=0/12 v2=0/12
+1996 - The Velvet Underground & Nico [31453 12  AR blocks= 36  v1=11/11 v2=0/11
+
+== 38 albums | AR TOC hit 25 | audio-proved at offset 0 9 | proved only after offset shift 0

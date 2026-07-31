@@ -1,0 +1,12 @@
+import glob, json, os, sys
+sys.path.insert(0, '/home/abl030/.claude/jobs/fb229c18/tmp/provenance/venv/lib/python3.12/site-packages')
+from arver.audio.checksums import get_checksums
+D = sys.argv[1]
+files = sorted(glob.glob(os.path.join(D, "*.flac")))
+n = len(files)
+out = {}
+for i, f in enumerate(files, start=1):
+    c = get_checksums(f, i, n)
+    out[os.path.basename(f)] = [c.arv1, c.arv2]
+json.dump(out, open(sys.argv[2], "w"))
+print("arver wrote", len(out), "tracks")

@@ -1,0 +1,45 @@
+import csv
+import sys
+import numpy as np
+
+rows = []
+for p in sys.argv[1:]:
+    for r in csv.DictReader(open(p), delimiter="\t"):
+        if r["err"] == "" and r["mode"] == "high":
+            rows.append(r)
+neg = [r for r in rows if r["cls"] != "launder"]
+lau = [r for r in rows if r["cls"] == "launder"]
+
+
+def lz(r):
+    p, m, z = float(r["proba"]), float(r["median"]), float(r["z"])
+    return np.log(p / m) * np.sqrt(max(z, 0.0))
+
+
+for key, name in ((lambda r: float(r["z"]), "z"), (lz, "logratio_z")):
+    print(f"\n--- top negatives by {name} ---")
+    for r in sorted(neg, key=key, reverse=True)[:10]:
+        parts = r["path"].split("/")
+        print(f"{name}={key(r):7.2f} proba={float(r['proba']):.4f} "
+              f"off={r['offset']:>4} {r['cls']:>18} | {parts[-2][:32]} | {parts[-1][:34]}")
+    v = np.array([key(r) for r in lau])
+    lam = max(key(r) for r in neg)
+    print(f"    launder: min={v.min():.2f} med={np.median(v):.2f}; "
+          f"zero-FP lambda={lam:.2f} -> recall {(v > lam).mean() * 100:.1f}%")
+
+# per-album consistency of the recovered offset among the wild negatives
+from collections import Counter, defaultdict  # noqa: E402
+alb = defaultdict(list)
+for r in neg:
+    if r["cls"].startswith("wild"):
+        alb[r["path"].split("/")[-2]].append((float(r["proba"]), int(r["offset"])))
+print("\n--- wild albums with >=4 tracks sharing one recovered offset ---")
+out = []
+for k, v in alb.items():
+    if len(v) < 4:
+        continue
+    c = Counter(o for _p, o in v).most_common(1)[0]
+    if c[1] >= 4 and c[1] / len(v) >= 0.5:
+        out.append((c[1] / len(v), k, c, len(v), np.median([p for p, _ in v])))
+for frac, k, c, n, med in sorted(out, reverse=True)[:10]:
+    print(f"  {c[1]:2d}/{n:2d} tracks at offset {c[0]:4d}  medproba={med:.4f}  {k[:52]}")

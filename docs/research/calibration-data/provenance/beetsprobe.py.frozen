@@ -1,0 +1,12 @@
+import sqlite3, collections
+DB="file:/mnt/virtio/cratedigger/beets-db/beets-library.db?mode=ro&immutable=1"
+c=sqlite3.connect(DB, uri=True)
+cols=[r[1] for r in c.execute("PRAGMA table_info(items)")]
+print("length-ish cols:", [x for x in cols if any(k in x for k in ("length","format","bitrate","samplerate","channels","bitdepth"))])
+print("albums:", c.execute("select count(*) from albums").fetchone()[0],
+      "items:", c.execute("select count(*) from items").fetchone()[0])
+for fmt, n in c.execute("select format, count(*) from items group by 1 order by 2 desc limit 8"):
+    print(f"  fmt {fmt}: {n}")
+# precision check: how many decimal digits does length carry?
+rows=c.execute("select format, length, samplerate from items where format in ('FLAC','Opus') limit 6").fetchall()
+for r in rows: print("  sample row:", r)

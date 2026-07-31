@@ -1,0 +1,32 @@
+"""Compare the numpy port against Octave running Derrien's unmodified Matlab."""
+import sys
+import numpy as np
+
+sys.path.insert(0, "/home/abl030/.claude/jobs/fb229c18/tmp/derrien")
+import aacdet as A  # noqa: E402
+
+D = "/home/abl030/.claude/jobs/fb229c18/tmp/derrien"
+frames = np.array([243, 69, 330, 416, 1426, 1469, 590, 329])
+offsets = np.array([0, 137, 512, 960, 1001])
+
+low_l, high_l, low_s, high_s, win = A.init_aac(44)
+tau_l, tau_s = A.tau_tables(low_l, high_l, low_s, high_s)
+plans = (A.BandPlan(low_l, high_l, A.IBLEN_LONG, 1),
+         A.BandPlan(low_s, high_s, A.IBLEN_SHORT, A.NB_SHORT_WIN))
+sfv = np.linspace(0.3, 0.7, 8)
+
+worst = 0.0
+for tag in ("genuine", "launder"):
+    ref = dict(tuple(map(float, ln.split("\t")))
+               for ln in open(f"{D}/oct_{tag}.txt") if ln.strip())
+    segs = A.read_segments(f"{D}/oracle_{tag}.wav", frames,
+                           2 * A.IBLEN_LONG + int(offsets.max()))
+    mine = A.detect_aac(segs["M"], offsets, sfv, plans, win, tau_l, tau_s)
+    for o, v in zip(offsets, mine):
+        r = ref[float(o)]
+        d = abs(r - v)
+        worst = max(worst, d)
+        print(f"{tag:8s} offset={o:4d}  octave(reference)={r:.15f}  "
+              f"numpy(port)={v:.15f}  |diff|={d:.2e}")
+print(f"\nworst |diff| vs Derrien's own Matlab: {worst:.3e}")
+print("ORACLE PARITY", "PASS" if worst < 1e-12 else "FAIL")

@@ -1,0 +1,25 @@
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from arverify import fetch_ar, parse_ar
+from toc_probe import toc_from_dir, build_toc
+d='/mnt/virtio/Music/Beets/Red Hot Chili Peppers/1999 - Californication'
+files, meta, lens = toc_from_dir(d)
+toc = build_toc(lens)
+url, blob = fetch_ar(toc)
+blocks = parse_ar(blob, 15)
+print("blocks:", len(blocks))
+for bi in (0,1,2):
+    print(f"blk{bi}:", [(c, f"{a:08X}", f"{b:08X}") for c,a,b in blocks[bi][:4]])
+confs = [e[0] for blk in blocks for e in blk]
+print("confidence range:", min(confs), max(confs), "nonzero:", sum(1 for c in confs if c))
+# does any of my checksums appear anywhere?
+mine = {0x190FBEF3,0xDC16BDB9,0x5805DE10,0x3C44FFD5,0xEE03E9C2,0x905E35DB,0x2F8F5C84,
+        0x0C2A6301,0xF94D5C9A,0x4454691D,0x6FBBC8C6,0x4829874A,0x0CBFC66D,0xCA376BFE,0x0C812958,
+        0xB1376308,0x5FDB42F1,0x5E2D2483,0x29FB832B,0xC2C30FD9,0xF2BBAB37,0xD7E3B61A,
+        0xB078552C,0xC358000A,0xE1612934,0xC370BEDE,0xC395D2E4,0xEAEFA5D3,0x31BD24AC,0x2E261D97}
+allv = set()
+for blk in blocks:
+    for c,a,b in blk:
+        allv.add(a); allv.add(b)
+print("intersection with AR values:", [f"{x:08X}" for x in (mine & allv)])
+print("distinct AR values:", len(allv))

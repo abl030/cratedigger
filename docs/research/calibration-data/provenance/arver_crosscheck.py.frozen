@@ -1,0 +1,20 @@
+import glob, json, os, subprocess, sys
+sys.path.insert(0, '/home/abl030/.claude/jobs/fb229c18/tmp/provenance')
+import numpy as np
+from arverify import ar_checksums
+D, refp = sys.argv[1], sys.argv[2]
+ref = json.load(open(refp))
+files = sorted(glob.glob(os.path.join(D, "*.flac")))
+n = len(files); ok = bad = 0
+for i, f in enumerate(files, start=1):
+    raw = subprocess.run(["flac","-d","-c","--totally-silent","--force-raw-format",
+                          "--endian=little","--sign=signed", f],
+                         capture_output=True, check=True).stdout
+    a = np.frombuffer(raw, dtype="<u4")
+    v1, v2 = ar_checksums(a, i, n)
+    r1, r2 = ref[os.path.basename(f)]
+    same = (int(v1) == r1 and int(v2) == r2)
+    ok += same; bad += (not same)
+    print("  %-40s ours %08X/%08X  arver %08X/%08X  %s"
+          % (os.path.basename(f)[:40], v1, v2, r1, r2, "MATCH" if same else "MISMATCH"))
+print("TOTAL match=%d mismatch=%d" % (ok, bad))

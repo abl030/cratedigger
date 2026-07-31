@@ -1,0 +1,74 @@
+"""Consolidated result table for the Derrien-on-Cratedigger experiment."""
+import csv
+import numpy as np
+
+D = "/home/abl030/.claude/jobs/fb229c18/tmp/derrien"
+
+
+def load(f, mode="high"):
+    return [r for r in csv.DictReader(open(f), delimiter="\t")
+            if r["err"] == "" and r["mode"] == mode]
+
+
+gt = load(D + "/res_gt_high.tsv")
+wild = load(D + "/res_wild_high.tsv")
+lau = [r for r in gt if r["cls"] == "launder"]
+gen = [r for r in gt if r["cls"] == "genuine"]
+
+
+def stat(rows, kind):
+    p = np.array([float(r["proba"]) for r in rows])
+    m = np.array([float(r["median"]) for r in rows])
+    z = np.array([float(r["z"]) for r in rows])
+    return {"proba": p, "z": z, "ratio": p / m,
+            "logratio_z": np.log(p / m) * np.sqrt(np.maximum(z, 0))}[kind]
+
+
+def alb_recall(rows, vals, lam):
+    a = {}
+    for r, v in zip(rows, vals):
+        a.setdefault(r["rid"], []).append(v)
+    return sum(1 for v in a.values() if max(v) > lam), len(a)
+
+
+print(f"corpus: {len(lau)} launders, {len(gen)} curated genuine, "
+      f"{len(wild)} protected-tree FLACs\n")
+for kind in ("proba", "z", "logratio_z"):
+    L = stat(lau, kind)
+    G = stat(gen, kind)
+    W = stat(wild, kind)
+    ALL = np.concatenate([G, W])
+    print(f"--- statistic: {kind} ---")
+    print(f"  launder      : min {L.min():8.4f}  med {np.median(L):8.4f}  max {L.max():8.4f}")
+    print(f"  genuine (GT) : min {G.min():8.4f}  med {np.median(G):8.4f}  max {G.max():8.4f}")
+    print(f"  protected    : min {W.min():8.4f}  med {np.median(W):8.4f}  max {W.max():8.4f}")
+    for tag, neg in (("curated genuine only", G), ("all negatives", ALL)):
+        lam = neg.max()
+        rec = (L > lam).mean() * 100
+        h, n = alb_recall(lau, L, lam)
+        print(f"  zero-FP lambda vs {tag:21s} = {lam:8.4f}  "
+              f"track recall {rec:5.1f}%  album recall {h}/{n}")
+    if kind == "proba":
+        for lam in (0.031,):
+            print(f"  paper lambda={lam}: track recall {(L > lam).mean() * 100:.1f}%  "
+                  f"FP on curated genuine {(G > lam).mean() * 100:.2f}% "
+                  f"({int((G > lam).sum())}/{len(G)})  "
+                  f"FP on all negatives {(ALL > lam).mean() * 100:.2f}% "
+                  f"({int((ALL > lam).sum())}/{len(ALL)})")
+    print()
+
+low = load(D + "/res_gt_low.tsv", "low")
+lL = stat([r for r in low if r["cls"] == "launder"], "proba")
+lG = stat([r for r in low if r["cls"] == "genuine"], "proba")
+print("--- frame selection: low-energy variant (proba) ---")
+print(f"  launder med {np.median(lL):.4f}   genuine med {np.median(lG):.4f} "
+      f"max {lG.max():.4f}  -> zero-FP recall {(lL > lG.max()).mean() * 100:.1f}%")
+
+print("\n--- launder offset consistency (the CoreAudio frame grid) ---")
+from collections import Counter  # noqa: E402
+c = Counter(r["offset"] for r in lau)
+print("  " + ", ".join(f"offset {o}: {n} tracks" for o, n in c.most_common(4)))
+sr48 = [r for r in lau if r["sr"] == "48000"]
+print(f"  hi-res sources (96k -> CoreAudio resample -> 48k AAC): n={len(sr48)}, "
+      f"median proba {np.median([float(r['proba']) for r in sr48]):.4f}, "
+      f"min z {min(float(r['z']) for r in sr48):.1f}")

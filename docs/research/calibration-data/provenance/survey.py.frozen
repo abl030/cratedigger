@@ -1,0 +1,39 @@
+import os, re, sys, urllib.request
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from toc_probe import toc_from_dir, build_toc, arid, ctdb_lookup
+from arverify import fetch_ar
+
+root = "/mnt/virtio/Music/Beets"
+dirs = sorted({os.path.dirname(os.path.join(dp, f))
+               for dp, dn, fn in os.walk(root) for f in fn if f.lower().endswith(".flac")})
+print(f"{len(dirs)} FLAC album dirs\n")
+hdr = f"{'album':52s} {'trk':>3s} {'align':>6s} {'AR':>6s} {'CTDBconf':>8s}"
+print(hdr); print("-"*len(hdr))
+stats = {"align": 0, "ar": 0, "ctdb": 0, "n": 0}
+for d in dirs:
+    try:
+        files, meta, lens = toc_from_dir(d)
+    except Exception as e:
+        print(f"{os.path.basename(d)[:52]:52s} ERR {e}"); continue
+    if not files: continue
+    stats["n"] += 1
+    bad = sum(1 for (_f, sr, ch, bps, t) in meta if t % 588 or sr != 44100)
+    aligned = bad == 0
+    stats["align"] += aligned
+    toc = build_toc(lens)
+    ar = "-"
+    if aligned:
+        _u, blob = fetch_ar(toc)
+        if blob: ar = f"{len(blob)//(13+9*len(files))}blk"; stats["ar"] += 1
+        else: ar = "miss"
+    conf = "-"
+    if aligned:
+        try:
+            xml = ctdb_lookup(toc)
+            m = re.findall(r'confidence="(\d+)"', xml)
+            if m: conf = max(int(x) for x in m); stats["ctdb"] += 1
+            else: conf = "miss"
+        except Exception as e:
+            conf = "err"
+    print(f"{os.path.basename(d)[:52]:52s} {len(files):3d} {'yes' if aligned else str(bad)+'bad':>6s} {str(ar):>6s} {str(conf):>8s}")
+print(f"\nsector-aligned {stats['align']}/{stats['n']}; AR TOC hit {stats['ar']}; CTDB TOC hit {stats['ctdb']}")

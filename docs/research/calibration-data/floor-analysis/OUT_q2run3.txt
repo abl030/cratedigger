@@ -1,0 +1,51 @@
+cratedigger dev shell — run: python3 -m unittest discover -s tests -t . -v
+=== DIAGNOSIS: is the floor dragged down by album heterogeneity? ===
+  genuine-lossless d18_195 across 100 albums: min 27.3  med 46.8  max 70.3  (spread 43.0 dB)
+  opus-32      d18_195 min 24.5 med 43.4; albums whose opus-32 looks better than the MEDIAN genuine album: 68/100
+  opus-12      d18_195 min 29.9 med 61.2; albums whose opus-12 looks better than the MEDIAN genuine album: 4/100
+  fdk-he1-64   d18_195 min 28.8 med 48.1; albums whose fdk-he1-64 looks better than the MEDIAN genuine album: 40/100
+  lame-cbr128  d18_195 min 55.7 med 77.4; albums whose lame-cbr128 looks better than the MEDIAN genuine album: 0/100
+
+=== ARMS: floor CONDITIONED on an affirmative cliff (cliff_frac>=0.6). n=1810 candidates ===
+    correctness: 1810/1810 = 100.0%
+    variant                true    n  floor med  floor p90  viol
+    fdk-he2-32               32   15         32         32     0
+    vorbis-q-1               45   67         45         45     0
+    vorbis-q0                64   55         32         32     0
+    aacffm-96                96   75         32         32     0
+    fdk-cbr96                96   44         32         32     0
+    vorbis-q2                96   96         32         32     0
+    lame-cbr96               96   76         32         32     0
+    vorbis-q3               112   67         45         45     0
+    lame-v6                 115   75         32         32     0
+    lame-cbr128             128   92         32         32     0
+    fdk-cbr128              128   89         32         32     0
+    fdk-vbr3                128   45         32         32     0
+    vorbis-q4               128   57        128        128     0
+    t-mp3128-flac           128   91         32         32     0
+    t-mp3128-aac256         128   90         32         32     0
+    apple-cbr128            128   83         45         45     0
+    aacffm-128              128   10         45         45     0
+    t-aac128-mp3320         128   10         45         45     0
+    lame-cbr160             160   45         45         45     0
+    t-vorbisq5-flac         160    8        128        128     0
+    lame-v4                 165   50         38         45     0
+    lame-v2                 190   84        128        128     0
+    lame-cbr192             192   91        128        128     0
+    fdk-cbr192              192   91         45         45     0
+    t-mp3192-mp3320         192   92        128        128     0
+    apple-abr192            192   12        128        128     0
+    fdk-cbr256              256   91         45         45     0
+    apple-tvbr91            256   11        128        128     0
+    fdk-cbr320              320   91         45         45     0
+    coverage: 1810/5300 = 34% of all candidates have affirmative cliff evidence
+
+=== MATRIX19: floor CONDITIONED on an affirmative cliff (cliff_frac>=0.6). n=88 candidates ===
+    correctness: 88/88 = 100.0%
+    variant                true    n  floor med  floor p90  viol
+    qaac-cbr128             128   14        128        128     0
+    vorbis-q4               128   10        128        128     0
+    lame-cbr128             128   18        128        128     0
+    lame-v2                 190   16        128        128     0
+    lame-cbr192             192   16        128        128     0
+    coverage: 88/617 = 14% of all candidates have affirmative cliff evidence

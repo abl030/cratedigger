@@ -1,0 +1,29 @@
+import os, re, sys, subprocess, zlib
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from toc_probe import toc_from_dir, build_toc, ctdb_lookup
+
+d = sys.argv[1]
+files, meta, lens = toc_from_dir(d)
+toc = build_toc(lens)
+xml = ctdb_lookup(toc)
+entries = re.findall(r'confidence="(\d+)"[^>]*crc32="([0-9a-f]+)"[^>]*trackcrcs="([^"]*)"', xml)
+print(f"== {os.path.basename(d)}: {len(entries)} CTDB entries, top confidence {entries[0][0] if entries else '-'}")
+want = {}
+for conf, disccrc, tcrcs in entries:
+    for i, c in enumerate(tcrcs.split()):
+        want.setdefault(i, set()).add((int(c, 16), int(conf)))
+raws = []
+for f in files:
+    raw = subprocess.run(["flac","-d","-c","--totally-silent","--force-raw-format",
+                          "--endian=little","--sign=signed", os.path.join(d,f)],
+                         capture_output=True, check=True).stdout
+    raws.append(raw)
+hits = 0
+for i, raw in enumerate(raws):
+    c = zlib.crc32(raw) & 0xFFFFFFFF
+    m = [conf for (v, conf) in want.get(i, ()) if v == c]
+    if m: hits += 1
+    print(f"  trk{i+1:02d} crc32={c:08x} {'MATCH conf=' + str(max(m)) if m else 'no match'}")
+whole = zlib.crc32(b"".join(raws)) & 0xFFFFFFFF
+print(f"  whole-image crc32={whole:08x}; CTDB disc crc32 values: {[e[1] for e in entries[:5]]}")
+print(f"  >>> {hits}/{len(files)} track CRC32 matched CTDB")

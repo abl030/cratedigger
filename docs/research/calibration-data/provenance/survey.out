@@ -1,0 +1,45 @@
+cratedigger dev shell — run: python3 -m unittest discover -s tests -t . -v
+38 FLAC album dirs
+
+album                                                trk  align     AR CTDBconf
+-------------------------------------------------------------------------------
+2014 - Syro [WARPCD247]                               12    yes   5blk     1195
+1984 - Tabula Rasa                                     4    yes  12blk      546
+1995 - Tri Repetae [WARPCD38]                         10    yes  11blk      250
+1990 - Ambient 1_ Music for Airports [EEGCD 17]        4    yes   4blk       92
+The Rough Guide to Australian Aboriginal Music        16    yes   2blk       19
+2001 - Jane Doe                                       12    yes   8blk      337
+2013 - Random Access Memories [88883716862]           13    yes  28blk    12411
+2000 - The Pointless Gift                             12    yes   2blk        4
+2004 - Fake Our Deaths                                13    yes   1blk        6
+2006 - Ten Lives                                      12    yes   1blk        4
+1998 - Stratosphere                                   17    yes   1blk       20
+1987 - Rumours [3010-2]                               11  11bad      -        -
+2016 - Man Made Object                                10    yes   2blk      751
+1998 - Voices of Gondwana                             12    yes   1blk        2
+2017 - New Light New Hope                             21    yes   1blk        6
+2014 - Ruins                                           8    yes   2blk      108
+1993 - A Long Time Coming                             15    yes   miss        2
+1997 - Raising the Standard                           10    yes   miss        1
+1982 - The Goldberg Variations                        32    yes   6blk      594
+2011 - Hurry Up, We're Dreaming                       22  22bad      -        -
+2008 - Death Magnetic                                 10    yes  49blk     8026
+1987 - Kind of Blue [CK 40579]                         5    yes  21blk      872
+1991 - Loveless [crecd 060]                           11  11bad      -        -
+1989 - Slay Tracks_ 1933-1969                          5    yes   miss     miss
+1990 - Demolition Plot J-7                             6    yes   miss     miss
+1991 - Perfect Sound Forever                           7    yes   miss     miss
+1992 - Slanted and Enchanted                          14    yes   3blk        6
+1992 - Watery, Domestic                                4    yes   miss      err
+1997 - Shady Lane                                      9    yes   2blk       19
+1999 - Major Leagues                                   7    yes   miss       42
+1999 - Spit on a Stranger                              5    yes   miss     miss
+1999 - Terror Twilight                                11    yes  14blk      566
+2025 - Hecklers Choice_ Big Gums and Heavy Lifters -  12  12bad      -        -
+1999 - Californication                                15    yes  70blk     8411
+1991 - End on End                                     17    yes   5blk       95
+1993 - Bridge Over Troubled Water [462488 2]          11    yes   miss      err
+1996 - Feed Me Weird Things                           12    yes   6blk      207
+1996 - The Velvet Underground & Nico [31453 1250 2]   11    yes  36blk     3299
+
+sector-aligned 34/38; AR TOC hit 25; CTDB TOC hit 28

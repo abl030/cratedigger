@@ -1,0 +1,76 @@
+cratedigger dev shell — run: python3 -m unittest discover -s tests -t . -v
+BASELINE window-0 gate, arms (T=62.0):
+  control-flac1644   n=100  PROVED 74   DENIED 26  
+  t-mp3128-flac      n=100  PROVED 0    DENIED 100 
+  t-opus96-flac      n=100  PROVED 0    DENIED 100 
+  t-vorbisq5-flac    n=100  PROVED 1    DENIED 99  
+  apple-cvbr256      n=34   PROVED 19   DENIED 15  
+  lame-v0            n=100  PROVED 53   DENIED 47  
+  vorbis-q9          n=100  PROVED 48   DENIED 52  
+  opus-256           n=100  PROVED 40   DENIED 60  
+  lame-cbr320        n=100  PROVED 0    DENIED 100 
+
+TRADE CURVE — precondition sweeps (arms, T=62). gU = genuine albums moved DENIED->UNTESTABLE (of 100); lU = launder albums moved (pooled over 3 FLAC frauds, of 300)
+
+abs_bU<=T
+   th=-120    genuine P/D/U  74/ 26/  0   launder(3 frauds) P/D/U   1/296/  3
+   th=-115    genuine P/D/U  74/ 26/  0   launder(3 frauds) P/D/U   1/289/ 10
+   th=-112    genuine P/D/U  74/ 25/  1   launder(3 frauds) P/D/U   1/275/ 24
+   th=-110    genuine P/D/U  74/ 22/  4   launder(3 frauds) P/D/U   1/269/ 30
+   th=-108    genuine P/D/U  74/ 21/  5   launder(3 frauds) P/D/U   1/264/ 35
+   th=-105    genuine P/D/U  74/ 21/  5   launder(3 frauds) P/D/U   1/254/ 45
+   th=-100    genuine P/D/U  74/ 18/  8   launder(3 frauds) P/D/U   1/243/ 56
+   th=-95     genuine P/D/U  74/ 16/ 10   launder(3 frauds) P/D/U   1/233/ 66
+   th=-90     genuine P/D/U  74/ 14/ 12   launder(3 frauds) P/D/U   1/232/ 67
+   th=-85     genuine P/D/U  74/ 14/ 12   launder(3 frauds) P/D/U   1/231/ 68
+
+abs_b18_195<=T
+   th=-120    genuine P/D/U  74/ 26/  0   launder(3 frauds) P/D/U   1/298/  1
+   th=-115    genuine P/D/U  74/ 26/  0   launder(3 frauds) P/D/U   1/295/  4
+   th=-112    genuine P/D/U  74/ 26/  0   launder(3 frauds) P/D/U   1/293/  6
+   th=-110    genuine P/D/U  74/ 25/  1   launder(3 frauds) P/D/U   1/290/  9
+   th=-108    genuine P/D/U  74/ 25/  1   launder(3 frauds) P/D/U   1/288/ 11
+   th=-105    genuine P/D/U  74/ 25/  1   launder(3 frauds) P/D/U   1/279/ 20
+   th=-100    genuine P/D/U  74/ 24/  2   launder(3 frauds) P/D/U   1/273/ 26
+   th=-95     genuine P/D/U  74/ 21/  5   launder(3 frauds) P/D/U   1/266/ 33
+   th=-90     genuine P/D/U  74/ 18/  8   launder(3 frauds) P/D/U   1/259/ 40
+   th=-85     genuine P/D/U  74/ 17/  9   launder(3 frauds) P/D/U   1/253/ 46
+
+D_b18_195>=T
+   th=70      genuine P/D/U  74/ 25/  1   launder(3 frauds) P/D/U   1/289/ 10
+   th=65      genuine P/D/U  74/ 23/  3   launder(3 frauds) P/D/U   1/278/ 21
+   th=60      genuine P/D/U  74/ 22/  4   launder(3 frauds) P/D/U   1/269/ 30
+   th=55      genuine P/D/U  74/ 22/  4   launder(3 frauds) P/D/U   1/259/ 40
+   th=50      genuine P/D/U  74/ 17/  9   launder(3 frauds) P/D/U   1/246/ 53
+   th=45      genuine P/D/U  74/ 14/ 12   launder(3 frauds) P/D/U   1/238/ 61
+   th=40      genuine P/D/U  74/ 14/ 12   launder(3 frauds) P/D/U   1/231/ 68
+   th=35      genuine P/D/U  74/ 14/ 12   launder(3 frauds) P/D/U   1/230/ 69
+
+excess<=T
+   th=-5      genuine P/D/U  74/ 24/  2   launder(3 frauds) P/D/U   1/287/ 12
+   th=0       genuine P/D/U  74/ 23/  3   launder(3 frauds) P/D/U   1/286/ 13
+   th=5       genuine P/D/U  74/ 21/  5   launder(3 frauds) P/D/U   1/282/ 17
+   th=10      genuine P/D/U  74/ 16/ 10   launder(3 frauds) P/D/U   1/270/ 29
+   th=15      genuine P/D/U  74/ 14/ 12   launder(3 frauds) P/D/U   1/254/ 45
+   th=20      genuine P/D/U  74/ 14/ 12   launder(3 frauds) P/D/U   1/240/ 59
+   th=25      genuine P/D/U  74/ 14/ 12   launder(3 frauds) P/D/U   1/231/ 68
+   th=30      genuine P/D/U  74/ 14/ 12   launder(3 frauds) P/D/U   1/231/ 68
+
+drop_hi<=T
+   th=0       genuine P/D/U  74/ 26/  0   launder(3 frauds) P/D/U   1/291/  8
+   th=3       genuine P/D/U  74/ 24/  2   launder(3 frauds) P/D/U   1/286/ 13
+   th=5       genuine P/D/U  74/ 23/  3   launder(3 frauds) P/D/U   1/286/ 13
+   th=8       genuine P/D/U  74/ 23/  3   launder(3 frauds) P/D/U   1/282/ 17
+   th=10      genuine P/D/U  74/ 21/  5   launder(3 frauds) P/D/U   1/279/ 20
+   th=15      genuine P/D/U  74/ 20/  6   launder(3 frauds) P/D/U   1/265/ 34
+   th=20      genuine P/D/U  74/ 14/ 12   launder(3 frauds) P/D/U   1/252/ 47
+   th=25      genuine P/D/U  74/ 14/ 12   launder(3 frauds) P/D/U   1/237/ 62
+
+step<T
+   th=2       genuine P/D/U  74/ 24/  2   launder(3 frauds) P/D/U   1/287/ 12
+   th=4       genuine P/D/U  74/ 24/  2   launder(3 frauds) P/D/U   1/287/ 12
+   th=6       genuine P/D/U  74/ 23/  3   launder(3 frauds) P/D/U   1/285/ 14
+   th=8       genuine P/D/U  74/ 23/  3   launder(3 frauds) P/D/U   1/284/ 15
+   th=10      genuine P/D/U  74/ 22/  4   launder(3 frauds) P/D/U   1/277/ 22
+   th=12      genuine P/D/U  74/ 21/  5   launder(3 frauds) P/D/U   1/270/ 29
+   th=15      genuine P/D/U  74/ 14/ 12   launder(3 frauds) P/D/U   1/257/ 42

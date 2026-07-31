@@ -1,0 +1,68 @@
+"""Compare candidate decision statistics on the measured corpus."""
+import csv
+import sys
+import numpy as np
+
+
+def load(paths, mode="high"):
+    rows = []
+    for p in paths:
+        for r in csv.DictReader(open(p), delimiter="\t"):
+            if r["err"] == "" and r["mode"] == mode:
+                rows.append(r)
+    return rows
+
+
+def stat_values(rows, name):
+    p = np.array([float(r["proba"]) for r in rows])
+    m = np.array([float(r["median"]) for r in rows])
+    z = np.array([float(r["z"]) for r in rows])
+    s = np.array([float(r["std"]) for r in rows])
+    if name == "proba":
+        return p
+    if name == "ratio":
+        return p / m
+    if name == "z":
+        return z
+    if name == "excess":
+        return p - m
+    if name == "excess_rel":
+        return (p - m) / m
+    if name == "logratio_z":
+        return np.log(p / m) * np.sqrt(np.maximum(z, 0.0))
+    if name == "min_ratio_z":
+        return np.minimum(p / m / 1.5, z / 8.0)
+    raise ValueError(name)
+
+
+def main():
+    mode = "high"
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    for a in sys.argv[1:]:
+        if a.startswith("--mode="):
+            mode = a.split("=", 1)[1]
+    rows = load(args, mode)
+    lau = [r for r in rows if r["cls"] == "launder"]
+    neg = [r for r in rows if r["cls"] != "launder"]
+    print(f"mode={mode}  launder n={len(lau)}  negatives n={len(neg)} "
+          f"({sorted({r['cls'] for r in neg})})")
+    print(f"{'statistic':12s} {'max(neg)':>9s} {'p99(neg)':>9s} {'med(lau)':>9s} "
+          f"{'min(lau)':>9s} {'recall@0FP':>10s} {'AUC':>6s} {'albums@0FP':>11s}")
+    for name in ("proba", "ratio", "excess", "excess_rel", "z",
+                 "logratio_z", "min_ratio_z"):
+        L = stat_values(lau, name)
+        N = stat_values(neg, name)
+        lam = N.max()
+        rec = (L > lam).mean()
+        auc = (np.subtract.outer(L, N) > 0).mean() + 0.5 * (np.subtract.outer(L, N) == 0).mean()
+        alb = {}
+        for r, v in zip(lau, L):
+            alb.setdefault(r["rid"], []).append(v)
+        ahit = sum(1 for v in alb.values() if max(v) > lam)
+        print(f"{name:12s} {lam:9.4f} {np.percentile(N, 99):9.4f} "
+              f"{np.median(L):9.4f} {L.min():9.4f} {rec * 100:9.1f}% {auc:6.4f} "
+              f"{ahit:6d}/{len(alb):<4d}")
+
+
+if __name__ == "__main__":
+    main()

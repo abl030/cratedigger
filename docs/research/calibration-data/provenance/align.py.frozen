@@ -1,0 +1,28 @@
+import sqlite3, collections
+DB="file:/mnt/virtio/cratedigger/beets-db/beets-library.db?mode=ro&immutable=1"
+c=sqlite3.connect(DB, uri=True)
+q="""select i.album_id, i.format, i.length, i.samplerate from items i
+     where i.length is not null and i.album_id is not null"""
+per=collections.defaultdict(list)
+for aid, fmt, ln, sr in c.execute(q):
+    per[aid].append((fmt, ln))
+stats=collections.Counter(); aligned_alb=collections.Counter()
+for aid, tracks in per.items():
+    fmts={f for f,_ in tracks}
+    fmt = tracks[0][0] if len(fmts)==1 else "MIXED"
+    stats[fmt]+=1
+    ok=0
+    for _f, ln in tracks:
+        s = ln*44100
+        # nearest integer sample count, then sector divisibility
+        n = round(s)
+        if abs(s-n) < 0.5 and n % 588 == 0:
+            ok += 1
+    if ok == len(tracks):
+        aligned_alb[fmt]+=1
+print(f"{'format':14s} {'albums':>7s} {'all-tracks sector-aligned':>26s} {'pct':>6s}")
+for f, n in stats.most_common(10):
+    a=aligned_alb[f]
+    print(f"{str(f):14s} {n:7d} {a:26d} {100*a/n:5.1f}%")
+tot=sum(stats.values()); al=sum(aligned_alb.values())
+print(f"{'TOTAL':14s} {tot:7d} {al:26d} {100*al/tot:5.1f}%")
