@@ -38,19 +38,28 @@ opus (>=32k)       nothing at all. Statistically indistinguishable from
                    genuine lossless on every arm. Audit-only,
                    unconditional.
 HE-AAC (SBR)       nothing at all. ``fdk-he1-64`` is 96-100% no-cliff,
-                   i.e. it READS AS LOSSLESS. Audit-only whenever
-                   ``sbr_present`` is True — for every family EXCEPT
-                   lossless, where audit-only would fail OPEN.
+                   i.e. it READS AS LOSSLESS. There is no object-type
+                   pre-gate: see "The SBR pre-gate is not implemented"
+                   below.
 lossless           unchanged from today: the cliff is the fake-FLAC
                    detector and ``genuine`` is the affirmative input
                    verified-lossless proof requires. This module never
-                   derives a kbps class for a lossless container, and
-                   ``sbr_present`` never demotes one: for a lossless
-                   container the unrecoverable error is failing to detect
-                   a FAKE, so the detector stays armed whatever an
-                   object-type probe reports.
+                   derives a kbps class for a lossless container.
 other / unknown    nothing. Fail closed.
 =================  ====================================================
+
+The SBR pre-gate is not implemented
+-----------------------------------
+PR2a's plan reserved an ``sbr_present`` fact (AAC object type 5/29) to
+demote HE-AAC to audit-only. PR3 deleted that parameter unwired
+(``scope.md``: inert plumbing is dead code). It was measured not to be
+needed: doc2 carries **zero HE-AAC** (409 AAC-LC and 39 ALAC in the
+library, 22 ALAC in slskd), and HE-AAC cannot structurally reach the
+verified-lossless proof gate anyway — ``converted_count`` only counts
+files ``_is_lossless_file`` accepts and HE-AAC probes as plain ``aac``.
+The genuinely dangerous shape, HE-AAC laundered INTO a FLAC container,
+has no AAC object type left to read; that case is the ultrasonic proof
+leg's, not a pre-gate's. Evidence: the Phase 5 plan §1.5e.
 
 **No cliff asserts NOTHING for any codec.** The high end of every ladder
 is invisible in the 12-20 kHz production window. That is a permanent
@@ -227,7 +236,6 @@ SpectralInterpretationReason = Literal[
     "aac_cliff_below_measurable_floor",
     "aac_no_cliff",
     "opus_no_spectral_signal",
-    "sbr_audit_only",
     "lossless_transcode_grade",
     "lossless_grade_not_transcode",
     "uncalibrated_codec_family",
@@ -269,7 +277,6 @@ REASON_AAC_NO_CLIFF: SpectralInterpretationReason = "aac_no_cliff"
 REASON_OPUS_NO_SPECTRAL_SIGNAL: SpectralInterpretationReason = (
     "opus_no_spectral_signal"
 )
-REASON_SBR_AUDIT_ONLY: SpectralInterpretationReason = "sbr_audit_only"
 REASON_LOSSLESS_TRANSCODE_GRADE: SpectralInterpretationReason = (
     "lossless_transcode_grade"
 )
@@ -313,10 +320,6 @@ class SpectralEvidenceFacts:
 
     ``spectral_grade`` is production's spectral VERDICT and is required
     input, not decoration — see ``interpret_spectral_cliff``.
-
-    ``sbr_present`` has no producer yet: PR3 captures the AAC object type
-    (5/29). ``None`` means "not captured", which is not the same as False
-    and is why the parameter is tri-state.
     """
 
     spectral_grade: str | None = None
@@ -328,7 +331,6 @@ class SpectralEvidenceFacts:
     filetype_band: str = ""
     cliff_hz: int | None = None
     spectral_bitrate_kbps: int | None = None
-    sbr_present: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -343,10 +345,8 @@ class SpectralCodecContext:
     the flat scalars so there is never a second source of truth for the
     grade, the stored bucket or the format label.
 
-    Every field is consumed by ``resolve_measured_codec_family`` or
-    ``interpret_spectral_cliff``. ``sbr_present`` is deliberately absent:
-    it has no producer until PR3 captures the AAC object type, and inert
-    plumbing is dead code.
+    Every field is consumed by ``resolve_measured_codec_family``,
+    ``interpret_spectral_cliff`` or the ultrasonic proof leg.
     """
 
     codec_family: CodecFamily | None = None
@@ -709,7 +709,6 @@ def interpret_spectral_cliff(
     spectral_grade: str | None,
     cliff_hz: int | None = None,
     stored_bitrate_kbps: int | None = None,
-    sbr_present: bool | None = None,
 ) -> SpectralInterpretation:
     """Interpret one album's spectral evidence in its own codec's terms.
 
@@ -736,9 +735,6 @@ def interpret_spectral_cliff(
     minority carry it. **The stored value never becomes a class for AAC,
     Opus, HE-AAC, ``other`` or an unknown family** — that is exactly the
     download-37946 defect.
-
-    ``sbr_present`` demotes every family EXCEPT lossless to audit-only;
-    the lossless branch below owns the reasoning for that exception.
     """
     if codec_family is None:
         return _audit_only(None, REASON_UNKNOWN_CODEC_FAMILY)
@@ -748,17 +744,6 @@ def interpret_spectral_cliff(
         # detector and this module never derives a kbps class for it. A
         # legacy lossless row records its cliff only as a stored bucket, so
         # either field counts as cliff presence.
-        #
-        # ``sbr_present`` is deliberately NOT consulted on this branch, and
-        # that asymmetry is load-bearing. Ask which of the two possible
-        # errors is unrecoverable. For AAC/HE-AAC it is wrongly ASSERTING
-        # quality, so audit-only is right. For a lossless container it is
-        # failing to detect a FAKE, so audit-only is wrong: demoting here
-        # would clear ``supports_transcode_accusation`` and silently
-        # disable the fake-FLAC detector that the whole verified-lossless
-        # proof rests on. An SBR flag on a FLAC row is unproducible today,
-        # but PR2b/PR3 wire a real object-type producer and a mis-probe
-        # must not be able to fail OPEN with respect to fraud.
         #
         # The detector is armed by the GRADE, never by cliff presence:
         # evidence 33735 is a FLAC graded ``likely_transcode`` with
@@ -781,13 +766,6 @@ def interpret_spectral_cliff(
                 else REASON_LOSSLESS_GRADE_NOT_TRANSCODE
             ),
         )
-
-    if sbr_present:
-        # HE-AAC reads as lossless (fdk-he1-64 is 96-100% no-cliff), so a
-        # cliff-based grade asserts nothing about an SBR stream in either
-        # direction. Positioned AFTER the lossless branch on purpose — see
-        # the comment there.
-        return _audit_only(codec_family, REASON_SBR_AUDIT_ONLY)
 
     if codec_family in LADDER_CODEC_FAMILIES:
         # ``decision_grade`` is DERIVED from "a class was actually
@@ -916,7 +894,6 @@ def interpret_spectral_evidence(
         spectral_grade=facts.spectral_grade,
         cliff_hz=facts.cliff_hz,
         stored_bitrate_kbps=facts.spectral_bitrate_kbps,
-        sbr_present=facts.sbr_present,
     )
 
 
@@ -998,7 +975,6 @@ def interpret_measurement(
     *,
     storage_format: str | None = None,
     filetype_band: str = "",
-    sbr_present: bool | None = None,
 ) -> SpectralInterpretation:
     """Interpret an ``AudioQualityMeasurement``'s own spectral fields.
 
@@ -1024,7 +1000,6 @@ def interpret_measurement(
         filetype_band=filetype_band,
         cliff_hz=measurement.cliff_hz,
         spectral_bitrate_kbps=measurement.spectral_bitrate_kbps,
-        sbr_present=sbr_present,
     ))
 
 

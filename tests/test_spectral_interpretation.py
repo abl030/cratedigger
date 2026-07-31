@@ -23,6 +23,7 @@ from lib.quality import (
     VORBIS_TOP_CLASS_KBPS,
     CodecFamily,
     SpectralEvidenceFacts,
+    decision_class_kbps,
     interpret_spectral_cliff,
     interpret_spectral_evidence,
     is_mixed_codec_album,
@@ -53,7 +54,6 @@ WAVVES_EVIDENCE_33591 = SpectralEvidenceFacts(
     filetype_band="m4a",
     cliff_hz=None,
     spectral_bitrate_kbps=128,
-    sbr_present=None,
 )
 
 #: evidence 33592 — the same Wavves album's INSTALLED subject, and the
@@ -71,7 +71,6 @@ WAVVES_EVIDENCE_33592 = SpectralEvidenceFacts(
     filetype_band="m4a",
     cliff_hz=15500,
     spectral_bitrate_kbps=128,
-    sbr_present=None,
 )
 
 #: evidence id 34219, request 8902, Iron & Wine — "Fall 2007". A live
@@ -87,7 +86,6 @@ FALL_2007_34219 = SpectralEvidenceFacts(
     filetype_band="mp3",
     cliff_hz=16500,
     spectral_bitrate_kbps=128,
-    sbr_present=None,
 )
 
 #: evidence 33735 — a FLAC graded ``likely_transcode`` by the HF-DEFICIT
@@ -104,7 +102,6 @@ DEFICIT_ONLY_FAKE_FLAC_33735 = SpectralEvidenceFacts(
     filetype_band="flac",
     cliff_hz=None,
     spectral_bitrate_kbps=None,
-    sbr_present=None,
 )
 
 #: evidence 3689 — an Opus copy wearing its source FLAC's spectral
@@ -120,7 +117,6 @@ R19_GENUINE_LOSSLESS_3689 = SpectralEvidenceFacts(
     filetype_band="opus",
     cliff_hz=None,
     spectral_bitrate_kbps=198,
-    sbr_present=None,
 )
 
 #: evidence 5144 — an MP3 graded ``genuine`` whose stored
@@ -138,7 +134,6 @@ CONTAINER_BITRATE_IN_SPECTRAL_5144 = SpectralEvidenceFacts(
     filetype_band="mp3",
     cliff_hz=None,
     spectral_bitrate_kbps=202,
-    sbr_present=None,
 )
 
 
@@ -546,60 +541,33 @@ class TestOpusAndSbrAreAuditOnly(unittest.TestCase):
                     self.assertFalse(result.decision_grade)
                     self.assertFalse(result.supports_transcode_accusation)
 
-    def test_sbr_forces_audit_only_over_every_lossy_family(self):
-        """fdk-he1-64 is 96-100% no-cliff — HE-AAC reads as lossless, so an
-        SBR stream's spectral evidence is meaningless in both directions.
+    def test_he_aac_reads_as_an_ordinary_aac_content_floor(self):
+        """The SBR pre-gate was deleted unwired (Phase 5 plan §1.5e).
 
-        ``lossless`` is excluded on purpose and pinned separately below."""
-        for family in ("mp3", "aac", "opus", "vorbis", "other"):
-            with self.subTest(family=family):
-                result = interpret_spectral_cliff(
-                    family, spectral_grade="likely_transcode",
-                    cliff_hz=16500, stored_bitrate_kbps=128,
-                    sbr_present=True,
-                )
-                self.assertEqual(result.semantics, "audit_only")
-                self.assertEqual(result.reason, "sbr_audit_only")
-                self.assertIsNone(result.inferred_class_kbps)
-                self.assertFalse(result.decision_grade)
-                self.assertFalse(result.supports_transcode_accusation)
+        doc2 carries zero HE-AAC, and an HE-AAC stream probes as plain
+        ``aac``, so it lands on the AAC content-floor branch — which
+        already asserts no class and no accusation, the two things the
+        pre-gate existed to prevent. This pins that the deletion left no
+        hole: the dangerous direction stays closed without it.
+        """
+        result = interpret_spectral_cliff(
+            "aac", spectral_grade="likely_transcode",
+            cliff_hz=16500, stored_bitrate_kbps=128,
+        )
+        self.assertEqual(result.semantics, "content_floor")
+        self.assertIsNone(decision_class_kbps(result))
+        self.assertFalse(result.decision_grade)
+        self.assertFalse(result.supports_transcode_accusation)
 
-    def test_sbr_never_disarms_the_lossless_fake_detector(self):
-        """Which of the two errors is unrecoverable decides the direction.
-        For AAC it is wrongly ASSERTING quality, so audit-only is right;
-        for a lossless container it is failing to detect a FAKE, so
-        audit-only would fail OPEN. SBR is inert on this branch."""
-        armed = interpret_spectral_cliff(
+    def test_the_lossless_fake_detector_stays_armed(self):
+        """A lossless container keeps its fake-FLAC detector armed by the
+        GRADE. This was the branch the deleted SBR gate was deliberately
+        positioned after; it must still behave identically."""
+        result = interpret_spectral_cliff(
             "lossless", spectral_grade="likely_transcode", cliff_hz=16500,
         )
-        for sbr in (None, False, True):
-            with self.subTest(sbr_present=sbr):
-                result = interpret_spectral_cliff(
-                    "lossless", spectral_grade="likely_transcode",
-                    cliff_hz=16500, sbr_present=sbr,
-                )
-                self.assertEqual(result, armed)
-                self.assertEqual(result.semantics, "lossless_authenticity")
-                self.assertTrue(result.supports_transcode_accusation)
-
-    def test_sbr_not_captured_is_not_sbr_absent(self):
-        """``None`` means the AAC object type was never probed (no producer
-        until PR3); it must not behave like ``False`` being asserted."""
-        unprobed = interpret_spectral_cliff(
-            "aac", spectral_grade="likely_transcode", cliff_hz=16500,
-        )
-        explicit_false = interpret_spectral_cliff(
-            "aac", spectral_grade="likely_transcode",
-            cliff_hz=16500, sbr_present=False,
-        )
-        self.assertEqual(unprobed, explicit_false)
-        self.assertNotEqual(
-            unprobed,
-            interpret_spectral_cliff(
-                "aac", spectral_grade="likely_transcode",
-                cliff_hz=16500, sbr_present=True,
-            ),
-        )
+        self.assertEqual(result.semantics, "lossless_authenticity")
+        self.assertTrue(result.supports_transcode_accusation)
 
 
 class TestLosslessSemanticsUnchanged(unittest.TestCase):
