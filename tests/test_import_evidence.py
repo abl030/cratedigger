@@ -181,7 +181,7 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
             "/pre-quarantine/Artist - Album",
         )
 
-    def test_stale_candidate_snapshot_fails_closed(self):
+    def test_stale_candidate_snapshot_fails_closed_at_action_boundary(self):
         self._persist_candidate()
         with open(os.path.join(self.root, "01 - Track.mp3"), "ab") as handle:
             handle.write(b" changed")
@@ -469,8 +469,8 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
         assert completed.evidence is not None
         self.assertEqual(completed.evidence.id, linked.id)
 
-    def test_stale_rebuild_stays_fail_closed_across_unenriched_retry(self):
-        """The live #743 drift shape cannot become safe merely by retrying."""
+    def test_stale_have_snapshot_fails_closed_at_action_boundary(self):
+        """The live #743 drift shape cannot authorize import merely by retrying."""
 
         self._persist_current()
         with open(os.path.join(self.root, "01 - Track.mp3"), "ab") as handle:
@@ -657,7 +657,7 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
         assert linked is not None
         self.assertEqual(linked.source_path, self.root)
 
-    def test_stale_current_evidence_is_not_reused_as_preloaded_backfill(self):
+    def test_stale_have_is_not_reused_as_preloaded_action_authority(self):
         self._persist_current()
         with open(os.path.join(self.root, "01 - Track.mp3"), "ab") as handle:
             handle.write(b" changed")

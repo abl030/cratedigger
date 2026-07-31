@@ -652,6 +652,37 @@ property (`tests/test_quality_generated.py`) and the request-8781 pins in
 
 > Relocated from CLAUDE.md (2026-07-04 doc simplification) — this is canonical policy, not narrative.
 
+### Consistency boundary: observation plus action-time fail-closed
+
+Quality evidence is an observation of files, not a lock or transaction token.
+Cratedigger has no shared transaction across pipeline PostgreSQL, Beets SQLite,
+the candidate filesystem, and the library filesystem. A snapshot fingerprint
+therefore says which files one observation described; it cannot prove that
+those independently mutable authorities remain unchanged through a later Beets
+subprocess and filesystem mutation.
+
+The supported contract is deliberately narrower:
+
+1. Preview measures or reuses facts and persists them for later consumption. It
+   never authorizes a library mutation.
+2. At the import boundary, the importer reauthorizes the queue-owned candidate
+   action path against its linked evidence.
+3. Independently, it resolves the exact installed release from current Beets
+   authority and reauthorizes HAVE evidence against that library snapshot.
+4. Missing, stale, incomplete, invalid, or ambiguous authority fails closed
+   before Beets launch. Automation records the failure and returns to a
+   runnable state so a later cycle can re-derive the world.
+5. Only then does the unified evidence decision permit or reject the import.
+
+This is a bounded action-time consistency check, not a preview-to-import TOCTOU
+proof. Per-file hashes, repeated scans, and moving the check later can strengthen
+or move the observation point, but they cannot eliminate the final race while
+the two databases and filesystem subjects remain independent. A privileged
+process racing files after the action gate is outside this threat model. If the
+world changes or fails after the gate, the ownership, audit, terminalization,
+and self-heal lifecycle handles that failure; the request is never parked to
+simulate atomicity.
+
 **Evidence is content-addressed.** `album_quality_evidence` rows are keyed
 by `(mb_release_id, snapshot_fingerprint)`; addressing entities reference
 them via `import_jobs.candidate_evidence_id`,

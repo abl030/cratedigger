@@ -447,7 +447,7 @@ class TestAutomationEvidenceReuse(unittest.TestCase):
             claimed.id,
         )
 
-    def test_stale_previewed_automation_evidence_fails_before_preimport(self):
+    def test_action_time_candidate_drift_requeues_before_import(self):
         from lib.download_validation import _process_beets_validation
         from lib.quality import ValidationResult
 

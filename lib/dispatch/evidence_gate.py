@@ -1,10 +1,17 @@
-"""Action-time quality-evidence load/gate + post-import evidence refresh.
+"""Action-time quality-evidence fail-closed gate + post-import refresh.
 
 The preview->importer contract's importer-side seam: load persisted
 candidate/current ``AlbumQualityEvidence`` for a mutating import, write the
 action-file consumed by ``import_one.py``, requeue back to preview when
 evidence is unavailable, and refresh current evidence (+ sidecar) after a
 successful import. ``load_current_evidence_for_action`` is looked up here.
+
+This gate is deliberately not described as atomic or as a TOCTOU proof.
+Pipeline PostgreSQL, Beets SQLite, and the candidate/library filesystem
+subjects cannot share one transaction. The gate independently reauthorizes
+both evidence sides against the world observed immediately before dispatch
+and fails closed before Beets launch. A later world failure belongs to the
+owner-audit-retry lifecycle, not to a synthetic cross-system transaction.
 """
 # ruff: noqa: UP037 - quoted Any annotation is part of the typing ratchet
 
@@ -241,7 +248,11 @@ def _load_evidence_import_gate(
         ..., CurrentEvidenceActionResult | None
     ] = load_current_evidence_for_action,
 ) -> EvidenceImportGate:
-    """Load persisted evidence for import-time quality authority."""
+    """Reauthorize both evidence sides at the bounded import-time check.
+
+    A successful return authorizes the decision from the world observed here;
+    it does not lock either database or filesystem against subsequent change.
+    """
 
     if candidate_import_job_id is None and candidate_download_log_id is None:
         return EvidenceImportGate()

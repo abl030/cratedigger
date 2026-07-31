@@ -1207,7 +1207,7 @@ class TestAttemptAuditGenerated(unittest.TestCase):
         candidate_grade="suspect",
         track_count=1,
     )
-    def test_candidate_measurement_is_once_per_snapshot_across_job_modes(
+    def test_preview_candidate_measurement_is_once_per_snapshot_across_job_modes(
         self,
         job_mode: PreviewJobMode,
         snapshot_changed: bool,
@@ -1314,7 +1314,7 @@ class TestAttemptAuditGenerated(unittest.TestCase):
         scanned_grade="genuine",
         scanned_bitrate=192,
     )
-    def test_have_reuse_requires_complete_matching_snapshot(
+    def test_preview_have_reuse_requires_complete_matching_snapshot(
         self,
         have_complete: bool,
         snapshot_changed: bool,

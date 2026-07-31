@@ -156,6 +156,10 @@ def ensure_candidate_evidence_for_action(
 ) -> CandidateEvidenceActionResult:
     """Load valid candidate evidence for a mutating action or fail closed.
 
+    This is an action-time observation, not a filesystem lock: success says
+    that the active candidate matched its evidence while this function checked
+    it. The dispatch boundary performs its final recheck before Beets launch.
+
     Candidate evidence is addressed by release identity plus the audio
     snapshot, not by its observed filesystem location. Rejected downloads
     may move into ``failed_imports`` after preview, but ``evidence.source_path``
@@ -204,7 +208,12 @@ def ensure_current_evidence_for_action(
     backfill_builder: CurrentEvidenceBackfillBuilder | None = None,
     beets_library_root: str | None = None,
 ) -> CurrentEvidenceActionResult:
-    """Load or backfill current Beets evidence with action provenance."""
+    """Reauthorize exact-release HAVE evidence or fail closed.
+
+    Beets identity and the library snapshot are current observations, not a
+    transaction spanning Beets SQLite and the filesystem. Missing, ambiguous,
+    incomplete, or stale authority cannot permit a mutating action.
+    """
 
     current_album_path = current_release.album_path
     try:

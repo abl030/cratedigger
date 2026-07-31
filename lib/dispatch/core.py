@@ -781,6 +781,12 @@ def dispatch_import_core(
 
         quality_evidence_action_file: str | None = None
         try:
+            # Bounded consistency boundary, not cross-system atomicity:
+            # PostgreSQL evidence, Beets SQLite authority, and the candidate /
+            # library filesystems cannot share one transaction. Reauthorize
+            # both sides against the world observed immediately before the
+            # unified decision and fail closed before Beets launch. Any later
+            # world failure is audited and returned to the runnable lifecycle.
             evidence_gate_kwargs: dict[str, object] = {}
             if current_evidence_loader is not None:
                 evidence_gate_kwargs["current_evidence_loader"] = (
