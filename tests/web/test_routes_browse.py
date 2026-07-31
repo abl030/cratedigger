@@ -1488,6 +1488,31 @@ class TestSearchByIdResolveContract(_FakeDbWebServerCase):
         # artists[0].id == 194 → VA
         self.assertTrue(data["is_va"])
 
+    def test_invalid_discogs_id_is_rejected_before_mirror_lookup(self):
+        for raw_id in (
+            "0",
+            "000123",
+            "1234567890123",
+            "-1",
+            "12.3",
+            "%D9%A1%D9%A2%D9%A3",
+        ):
+            with self.subTest(raw_id=raw_id), patch(
+                "web.routes.browse.discogs_api"
+            ) as mock_dg:
+                status, data = self._get(
+                    f"/api/browse/resolve?source=discogs&id={raw_id}&kind=release"
+                )
+
+            self.assertEqual(status, 400)
+            self.assertEqual(
+                data,
+                {"error": "Invalid Discogs ID (must be 1-12 canonical digits)"},
+            )
+            self.assertEqual(mock_dg.require_mirror_configured.call_count, 0)
+            self.assertEqual(mock_dg.get_release.call_count, 0)
+            self.assertEqual(mock_dg.get_master_releases.call_count, 0)
+
     def test_discogs_master_resolved(self):
         """Discogs master ID → group shape, no leaf."""
         with patch("web.routes.browse.discogs_api") as mock_dg:
@@ -1650,9 +1675,52 @@ class TestSearchByIdResolveContract(_FakeDbWebServerCase):
         self.assertEqual(status, 400)
 
     def test_invalid_kind(self):
-        status, _data = self._get(
-            f"/api/browse/resolve?source=mb&id={self.MB_RELEASE_ID}&kind=garbage")
+        raw_kind = "%3Cscript%3Eprivate-input%3C%2Fscript%3E"
+        status, data = self._get(
+            f"/api/browse/resolve?source=mb&id={self.MB_RELEASE_ID}&kind={raw_kind}")
         self.assertEqual(status, 400)
+        self.assertEqual(data, {"error": "Invalid kind for source"})
+        self.assertNotIn("private-input", str(data))
+
+    def test_source_incompatible_kind_is_rejected_before_lookup(self):
+        cases = (
+            ("mb", self.MB_RELEASE_ID, "master"),
+            ("discogs", "32457180", "release-group"),
+        )
+        for source, raw_id, kind in cases:
+            with self.subTest(source=source, kind=kind), \
+                    patch("web.server.mb_api") as mock_mb, \
+                    patch("web.routes.browse.discogs_api") as mock_dg:
+                status, data = self._get(
+                    f"/api/browse/resolve?source={source}&id={raw_id}&kind={kind}"
+                )
+
+            self.assertEqual(status, 400)
+            self.assertEqual(
+                data,
+                {"error": "Invalid kind for source"},
+            )
+            self.assertEqual(mock_mb.get_release.call_count, 0)
+            self.assertEqual(mock_mb.get_release_group.call_count, 0)
+            self.assertEqual(mock_dg.require_mirror_configured.call_count, 0)
+            self.assertEqual(mock_dg.get_release.call_count, 0)
+            self.assertEqual(mock_dg.get_master_releases.call_count, 0)
+
+    def test_resolver_transport_failure_does_not_leak_adapter_detail(self):
+        raw_reason = "private mirror address and TLS failure"
+        uncached_id = "22222222-2222-2222-2222-222222222222"
+        with patch("web.server.mb_api") as mock_mb:
+            mock_mb.get_release.side_effect = URLError(raw_reason)
+            status, data = self._get(
+                f"/api/browse/resolve?source=mb&id={uncached_id}&kind=release"
+            )
+
+        self.assertEqual(status, 502)
+        self.assertEqual(data, {
+            "error": "Resolver upstream unavailable, retry",
+            "retryable": True,
+        })
+        self.assertNotIn(raw_reason, str(data))
 
 
 class TestLibraryArtistContract(unittest.TestCase):

@@ -121,7 +121,7 @@ ArtistPipelineKey = tuple[str, str, str]
 def _is_canonical_mbid(value: str) -> bool:
     """Whether a resolver-supplied MusicBrainz ID has canonical UUID form."""
     try:
-        return str(uuid.UUID(value)) == value
+        return len(value) == 36 and str(uuid.UUID(value)) == value
     except ValueError:
         return False
 
@@ -844,7 +844,20 @@ def get_artist_compare(h: RouteHandler, params: dict[str, list[str]]) -> None:
 
 # ── Search-by-ID resolver ────────────────────────────────────────────
 
-_RESOLVE_VALID_KINDS = {"release", "release-group", "master", "unknown"}
+_RESOLVE_VALID_KINDS_BY_SOURCE = {
+    "mb": frozenset(("release", "release-group", "unknown")),
+    "discogs": frozenset(("release", "master", "unknown")),
+}
+
+
+def _is_canonical_discogs_id(value: str) -> bool:
+    """Whether a resolver-supplied Discogs ID has one canonical spelling."""
+    return (
+        value.isascii()
+        and value.isdigit()
+        and 1 <= len(value) <= 12
+        and value[0] != "0"
+    )
 
 
 def _resolve_mb(raw_id: str, kind: str) -> dict[str, object]:
@@ -954,19 +967,21 @@ def get_browse_resolve(h: RouteHandler, params: dict[str, list[str]]) -> None:
     if not raw_id:
         h._error("Missing 'id' parameter")
         return
-    if source not in ("mb", "discogs"):
+    valid_kinds = _RESOLVE_VALID_KINDS_BY_SOURCE.get(source)
+    if valid_kinds is None:
         h._error("Missing or invalid 'source' (must be 'mb' or 'discogs')")
         return
-    if kind not in _RESOLVE_VALID_KINDS:
-        h._error(f"Invalid 'kind' (must be one of {sorted(_RESOLVE_VALID_KINDS)})")
+    if kind not in valid_kinds:
+        h._error("Invalid kind for source")
         return
     if source == "mb" and not _is_canonical_mbid(raw_id):
         h._error("Invalid MusicBrainz ID (must be a canonical UUID)")
         return
-    # Discogs IDs must be all-digit. Frontend parsePastedId already enforces
-    # this, but defense-in-depth so the resolver never hits int() on garbage.
-    if source == "discogs" and not raw_id.isdigit():
-        h._error("Invalid Discogs ID (must be numeric)")
+    # The browser parser is convenience, never authority. Require a positive,
+    # bounded canonical ASCII spelling before the cache or mirror boundary so
+    # zero/leading-zero aliases and arbitrary-size integers cannot fan out.
+    if source == "discogs" and not _is_canonical_discogs_id(raw_id):
+        h._error("Invalid Discogs ID (must be 1-12 canonical digits)")
         return
     if source == "discogs":
         discogs_api.require_mirror_configured()
@@ -988,8 +1003,11 @@ def get_browse_resolve(h: RouteHandler, params: dict[str, list[str]]) -> None:
         else:
             h._error(f"upstream_error: HTTP {e.code}", 502)
         return
-    except urllib.error.URLError as e:
-        h._error(f"upstream_unreachable: {e}", 502)
+    except urllib.error.URLError:
+        h._json({
+            "error": "Resolver upstream unavailable, retry",
+            "retryable": True,
+        }, 502)
         return
 
     h._json(result)

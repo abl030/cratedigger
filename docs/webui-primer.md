@@ -116,7 +116,9 @@ operation.
   row, the selected source authors the exact expansion/action identity; the UI
   never substitutes the counterpart pressing or copies its ownership/request
   state onto the selected identity. The hint line states this action contract.
-- **Search** — debounced text search, returns artists (or releases in album mode)
+- **Search** — debounced text search returns artists (or releases in album
+  mode); the explicit **ID/URL** mode accepts canonical MusicBrainz and Discogs
+  release, release-group, and master URLs as well as bare release identifiers.
 - **Unified artist page (#575 PR4)** — one scrolling page (the old
   Discography / Analysis / Library / Compare sub-tabs are gone) with the simple
   top-level model: **In library / In flight / Missing / Other releases**.

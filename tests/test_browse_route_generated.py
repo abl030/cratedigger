@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import email.message
 import json
+import string
 import unittest
 import uuid
 from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError, URLError
 
-from hypothesis import given
+from hypothesis import example, given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401 - registers active profile
@@ -195,6 +196,7 @@ class TestBrowseResolverMusicBrainzIdGenerated(unittest.TestCase):
             assert_mb_resolver_adapter_boundary(handler, adapter, accepted=False)
 
     @given(raw_id=st.text(alphabet="/?&#%=", min_size=1, max_size=80))
+    @example(raw_id="x" * 2049)
     def test_invalid_mb_identifier_never_reaches_the_adapter(self, raw_id: str) -> None:
         handler = _RecordingHandler()
         with patch("web.server.mb_api") as mock_mb:
@@ -236,6 +238,73 @@ class TestBrowseResolverMusicBrainzIdGenerated(unittest.TestCase):
                     "id": [noncanonical], "source": ["mb"], "kind": ["release"],
                 })
             assert_mb_resolver_adapter_boundary(handler, mock_mb, accepted=False)
+
+
+_INVALID_DISCOGS_IDS = st.one_of(
+    st.just("0"),
+    st.integers(min_value=1, max_value=99_999_999_999).map(
+        lambda value: f"0{value}"
+    ),
+    st.integers(min_value=1_000_000_000_000, max_value=10**20).map(str),
+    st.tuples(
+        st.text(alphabet=string.digits, min_size=0, max_size=11),
+        st.sampled_from(tuple(string.ascii_letters + ".+-_/")),
+    ).map(lambda parts: "".join(parts)),
+    st.text(alphabet="١٢٣٤٥٦７８９", min_size=1, max_size=12),
+)
+
+
+class TestBrowseResolverInputBoundaryGenerated(unittest.TestCase):
+    @given(raw_id=_INVALID_DISCOGS_IDS)
+    def test_noncanonical_discogs_id_never_reaches_the_adapter(
+        self, raw_id: str,
+    ) -> None:
+        handler = _RecordingHandler()
+        with patch("web.routes.browse.discogs_api") as mock_dg:
+            get_browse_resolve(handler, {
+                "id": [raw_id], "source": ["discogs"], "kind": ["release"],
+            })
+
+        self.assertEqual(handler.status, 400)
+        self.assertEqual(
+            handler.data,
+            {"error": "Invalid Discogs ID (must be 1-12 canonical digits)"},
+        )
+        self.assertEqual(mock_dg.require_mirror_configured.call_count, 0)
+        self.assertEqual(mock_dg.get_release.call_count, 0)
+        self.assertEqual(mock_dg.get_master_releases.call_count, 0)
+
+    @given(value=st.uuids())
+    def test_musicbrainz_master_kind_never_reaches_the_adapter(
+        self, value: uuid.UUID,
+    ) -> None:
+        handler = _RecordingHandler()
+        with patch("web.server.mb_api") as mock_mb:
+            get_browse_resolve(handler, {
+                "id": [str(value)], "source": ["mb"], "kind": ["master"],
+            })
+
+        self.assertEqual(handler.status, 400)
+        self.assertEqual(mock_mb.get_release.call_count, 0)
+        self.assertEqual(mock_mb.get_release_group.call_count, 0)
+
+    @given(
+        raw_id=st.integers(min_value=1, max_value=999_999_999_999).map(str),
+    )
+    def test_discogs_release_group_kind_never_reaches_the_adapter(
+        self, raw_id: str,
+    ) -> None:
+        handler = _RecordingHandler()
+        with patch("web.routes.browse.discogs_api") as mock_dg:
+            get_browse_resolve(handler, {
+                "id": [raw_id], "source": ["discogs"],
+                "kind": ["release-group"],
+            })
+
+        self.assertEqual(handler.status, 400)
+        self.assertEqual(mock_dg.require_mirror_configured.call_count, 0)
+        self.assertEqual(mock_dg.get_release.call_count, 0)
+        self.assertEqual(mock_dg.get_master_releases.call_count, 0)
 
 
 def assert_discogs_target_identity(
