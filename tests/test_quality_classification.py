@@ -17,12 +17,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from datetime import UTC
 
 from lib.quality import (
-    DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
     STAGE2_COUNTERFACTUAL_UNAVAILABLE,
     CodecFamily,
     full_pipeline_decision,
 )
 from tests.helpers import (
+    PROVISIONAL_LANE_DECISIONS,
     build_parity_candidate_evidence,
     build_parity_current_evidence,
 )
@@ -1926,22 +1926,185 @@ class TestUltrasonicProofGateV3(unittest.TestCase):
             denied["verified_lossless"],
             "a denied ultrasonic leg is a hard veto ahead of the V0 override",
         )
-        # The veto reaches the override's DOWNSTREAM effects too. The
-        # rescued world skips the provisional-lossless lane because the
-        # probe certified the source; the denied world must not, or a
-        # denied album would still be compared as though its transcode
-        # suspicion had been cleared.
-        self.assertEqual(
-            denied["stage2_import"],
-            DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
-            "a denied album falls back into the provisional lane",
+
+    # -- a denial withholds the proof and NOTHING else ---------------------
+
+    #: The installed side of the worlds below: a provisional-cohort album.
+    #: It was imported from a lossless source we ground down, so the linked
+    #: ``lossless_source_v0`` probe (avg 240) is its only comparable
+    #: anchor, and it carries no verified-lossless proof. A candidate probe
+    #: at avg 241 does NOT clear that anchor by the rank tolerance, so the
+    #: provisional lane answers ``suspect_lossless_downgrade`` — a
+    #: confident reject that also denylists the offering peer.
+    _HAVE_PROVISIONAL_V0_AVG = 240
+
+    def _denial_pair_evidence(self, deficit, *, have_min, have_format,
+                              have_is_cbr):
+        from lib.quality import (
+            EVIDENCE_SUBJECT_SOURCE,
+            AlbumQualityEvidenceDecisionFacts,
+            AlbumQualityV0Metric,
+            full_pipeline_decision_from_evidence,
         )
-        self.assertNotEqual(
-            rescued["stage2_import"],
-            DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
-            "the rescued album is certified, so the provisional lane is "
-            "correctly skipped",
+        candidate = build_parity_candidate_evidence(
+            is_flac=True, min_bitrate=0, is_cbr=False,
+            spectral_grade="suspect",
+            post_conversion_min_bitrate=219,
+            candidate_v0_probe_avg=241,
+            candidate_v0_probe_min=219,
+            codec_family="lossless",
+            ultrasonic_deficit_db=deficit,
         )
+        current = build_parity_current_evidence(
+            min_bitrate=have_min, avg_bitrate=have_min, format=have_format,
+            is_cbr=have_is_cbr,
+            v0_metric=AlbumQualityV0Metric(
+                subject=EVIDENCE_SUBJECT_SOURCE,
+                min_bitrate_kbps=219,
+                avg_bitrate_kbps=self._HAVE_PROVISIONAL_V0_AVG,
+            ),
+        )
+        return full_pipeline_decision_from_evidence(
+            candidate, current,
+            facts=AlbumQualityEvidenceDecisionFacts(
+                verified_lossless_target=self._FACTS_TARGET,
+            ),
+        )
+
+    def _denial_pair_simulator(self, deficit, *, have_min, have_format,
+                               have_is_cbr):
+        """The convert branch: the lossless source is ground to V0."""
+        from lib.quality import SpectralCodecContext
+        return full_pipeline_decision(
+            is_flac=True, min_bitrate=0, is_cbr=False,
+            spectral_grade="suspect",
+            converted_count=1,
+            post_conversion_min_bitrate=219,
+            post_conversion_is_cbr=False,
+            candidate_v0_probe_avg=241,
+            candidate_v0_probe_min=219,
+            candidate_v0_probe_kind="lossless_source_v0",
+            existing_min_bitrate=have_min,
+            existing_avg_bitrate=have_min,
+            existing_format=have_format.lower(),
+            existing_is_cbr=have_is_cbr,
+            existing_v0_probe_avg=self._HAVE_PROVISIONAL_V0_AVG,
+            existing_v0_probe_kind="lossless_source_v0",
+            verified_lossless_target=self._FACTS_TARGET,
+            candidate_spectral_context=SpectralCodecContext(
+                codec_family="lossless",
+                spectral_measurement_version=2,
+                spectral_decode_path="sox_native",
+                ultrasonic_deficit_db=deficit,
+            ),
+        )
+
+    def _denial_pair_flac_keep(self, deficit, *, have_min, have_format,
+                               have_is_cbr):
+        """The kept-on-disk branch of the same world (``target_format`` is
+        flac, so nothing is converted)."""
+        from lib.quality import SpectralCodecContext
+        return full_pipeline_decision(
+            is_flac=True, min_bitrate=900, is_cbr=False,
+            spectral_grade="suspect",
+            converted_count=0,
+            target_format="flac",
+            candidate_v0_probe_avg=241,
+            candidate_v0_probe_min=219,
+            candidate_v0_probe_kind="lossless_source_v0",
+            existing_min_bitrate=have_min,
+            existing_avg_bitrate=have_min,
+            existing_format=have_format.lower(),
+            existing_is_cbr=have_is_cbr,
+            existing_v0_probe_avg=self._HAVE_PROVISIONAL_V0_AVG,
+            existing_v0_probe_kind="lossless_source_v0",
+            candidate_spectral_context=SpectralCodecContext(
+                codec_family="lossless",
+                spectral_measurement_version=2,
+                spectral_decode_path="sox_native",
+                ultrasonic_deficit_db=deficit,
+            ),
+        )
+
+    _DENIAL_TWINS = (
+        ("evidence twin", "_denial_pair_evidence"),
+        ("simulator twin, convert branch", "_denial_pair_simulator"),
+        ("simulator twin, flac-keep branch", "_denial_pair_flac_keep"),
+    )
+
+    def test_a_denial_never_costs_the_album_its_import(self):
+        """A denial withholds the PROOF. It must not take the ALBUM.
+
+        The world is the one the V0-avg trust override exists to rescue —
+        HF-poor lossless graded ``suspect`` with a ``lossless_source_v0``
+        probe at avg 241 / min 219 — against an INSTALLED side the earlier
+        pins did not have: a provisional-cohort MP3 128 whose own
+        comparable probe sits at avg 240. That probe is what arms the
+        provisional lane: 241 does not clear 240 by the rank tolerance, so
+        the lane answers ``suspect_lossless_downgrade``, a confident reject
+        that denylists the peer as well.
+
+        A denied album that reached that lane therefore lost its import
+        outright — on exactly the HF-poor genuine-lossless cohort the leg
+        promised never to touch (Phase 5 plan §2, §1.7: withholding a proof
+        never rejects, denylists or accuses). Deciding the lane is the V0
+        PROBE's job and the probe's answer does not change; the leg's whole
+        effect is the proof and the search surface."""
+        for label, method in self._DENIAL_TWINS:
+            with self.subTest(twin=label):
+                def decide(deficit, method=method):
+                    return getattr(self, method)(
+                        deficit, have_min=128, have_format="MP3",
+                        have_is_cbr=True,
+                    )
+                rescued = decide(self.GENUINE_DEFICIT_DB)
+                denied = decide(self.LAUNDER_DEFICIT_DB)
+                self.assertTrue(
+                    rescued["imported"],
+                    f"{label}: the V0-rescued world imports",
+                )
+                self.assertTrue(
+                    rescued["verified_lossless"],
+                    f"{label}: the V0-avg trust override still rescues an "
+                    "HF-poor lossless the leg has no objection to",
+                )
+                self.assertFalse(rescued["keep_searching"], label)
+                self.assertTrue(
+                    denied["imported"],
+                    f"{label}: withholding a proof is NOT taking the album",
+                )
+                self.assertFalse(
+                    denied["verified_lossless"],
+                    f"{label}: the denial's first effect — no proof",
+                )
+                self.assertTrue(
+                    denied["keep_searching"],
+                    f"{label}: and its second — the album stays on the "
+                    "search surface",
+                )
+
+    def test_a_denial_never_reroutes_the_album_into_the_provisional_lane(self):
+        """The same world against a HAVE the unproved candidate cannot
+        beat: an Opus 245 with the same provisional probe.
+
+        Here the denial legitimately costs the import — an album with no
+        proof is compared on what it measures, and a V0 grind does not beat
+        an installed 245 — but it must lose that comparison in the MEASURED
+        lane, with a comparison basis the operator can read, and never by
+        being re-routed into the provisional lane's confident reject. The
+        lane is the V0 probe's answer; the leg does not get a vote in it."""
+        for label, method in self._DENIAL_TWINS:
+            with self.subTest(twin=label):
+                denied = getattr(self, method)(
+                    self.LAUNDER_DEFICIT_DB, have_min=245,
+                    have_format="Opus", have_is_cbr=False,
+                )
+                self.assertNotIn(
+                    denied["stage2_import"],
+                    PROVISIONAL_LANE_DECISIONS,
+                    f"{label}: a denial re-routed the album into the "
+                    "provisional lossless lane",
+                )
 
     # -- the leg withholds: the decode-path scope --------------------------
 

@@ -318,8 +318,32 @@ conflated "no gap" with "this album never had the dynamic range to show
 one" and promoted 12 FLAC-container launders on exactly such albums.
 
 **A denial is not a rejection.** The album imports normally, carries no
-spectral verified-lossless proof, and stays on the search surface. The
-gate never rejects, denylists or accuses.
+spectral verified-lossless proof, and stays on the search surface.
+
+The boundary is exactly that, and it is worth stating precisely because
+one review round got it wrong. The leg's authority is the PROOF: it is
+read at `determine_verified_lossless` and `mint_verified_lossless_proof`
+and nowhere else. It must NOT reach the V0 trust override
+(`v0_verified_override` in `lib/quality/pipeline.py`,
+`v0_verified_lossless_override` in `harness/import_one.py`), because that
+flag routes the import — it decides whether the album is compared on its
+measured quality or handed to the provisional-lossless lane, three of
+whose four outcomes are confident rejects that also denylist the offering
+peer. A denial that re-routed that choice would discard albums on exactly
+the HF-poor genuine-lossless cohort the V0 probe exists to rescue. The
+override is therefore keyed on the probe alone, and the harness derives it
+from a second, leg-free `determine_verified_lossless` call.
+
+What a denial DOES cost, beyond the proof, is everything the proof
+licensed: no `verified_lossless_target` conversion (the album keeps its
+V0 grind — a higher-bitrate artifact, and the decider gates the
+post-import quality gate's format on the same fact), no verified-lossless
+bypass in the measured comparison, and a post-import gate that requeues
+instead of accepting. So an unproved candidate compared against a BETTER
+installed copy can still lose that comparison as an ordinary `downgrade`,
+with a comparison basis behind it. That is the proof doing its job, not
+the leg passing a verdict: the existing copy is untouched and the request
+stays searchable.
 
 ### Threshold provenance
 

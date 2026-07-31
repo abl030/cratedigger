@@ -35,6 +35,10 @@ from lib.import_queue import (
 )
 from lib.pipeline_db._shared import ADVISORY_LOCK_NAMESPACE_IMPORT
 from lib.quality import (
+    DECISION_LOSSLESS_SOURCE_LOCKED,
+    DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
+    DECISION_SUSPECT_LOSSLESS_DOWNGRADE,
+    DECISION_SUSPECT_LOSSLESS_PROBE_MISSING,
     EVIDENCE_PROVENANCE_MEASURED,
     EVIDENCE_SUBJECT_INSTALLED,
     EVIDENCE_SUBJECT_SOURCE,
@@ -617,6 +621,24 @@ def claim_next_import_preview_job(
         candidate.id,
         worker_id=worker_id,
     )
+
+
+#: Every ``stage2_import`` decision produced by the provisional-lossless
+#: lane (``lib/quality/decisions.py::provisional_lossless_decision``) — the
+#: lane the V0 trust override routes an album AROUND. Membership is the
+#: observable answer to "which lane decided this album", which the v3
+#: ultrasonic leg must never change (issue #829 Phase 5 PR3): three of the
+#: four are confident rejects that also denylist the offering peer, so a
+#: leg that could re-route into this lane would turn a withheld proof into
+#: a discarded album. Spelled from the production constants, once, for the
+#: pins in ``tests/test_quality_classification.py`` and the property in
+#: ``tests/test_quality_generated.py``.
+PROVISIONAL_LANE_DECISIONS = frozenset({
+    DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
+    DECISION_SUSPECT_LOSSLESS_DOWNGRADE,
+    DECISION_SUSPECT_LOSSLESS_PROBE_MISSING,
+    DECISION_LOSSLESS_SOURCE_LOCKED,
+})
 
 
 def build_parity_candidate_evidence(
