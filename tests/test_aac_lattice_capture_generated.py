@@ -906,6 +906,21 @@ class TestCohortGateCheckerSelfTest(unittest.TestCase):
 class TestCohortGateFiresExactlyOnTheCohort(unittest.TestCase):
     """Pin + generated property for the cohort gate."""
 
+    def test_pin_the_cohort_is_exactly_genuine_and_marginal(self) -> None:
+        """The property above derives its expectation from this same
+        constant, so it cannot see the set itself drifting — widening it to
+        include ``suspect`` stays green everywhere else. The literal here is
+        legitimate because the authority is an operator design decision, not
+        a producer: "measure only the promotion-plausible cohort — candidate
+        fileset contains lossless containers AND album spectral grade in
+        {genuine, marginal}" —
+        https://github.com/abl030/cratedigger/issues/829#issuecomment-5144283616
+        """
+        self.assertEqual(
+            AAC_LATTICE_GATED_SPECTRAL_GRADES,
+            frozenset({"genuine", "marginal"}),
+        )
+
     def test_pin_lossless_and_genuine_is_measured(self) -> None:
         with _LosslessFolder() as folder:
             self.assertTrue(gate_fires_exactly_on_the_cohort(

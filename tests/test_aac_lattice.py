@@ -36,6 +36,7 @@ import sys
 import tempfile
 import unittest
 import wave
+from collections.abc import Callable
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -43,6 +44,7 @@ import numpy as np
 import numpy.typing as npt
 
 from lib.aac_lattice import (
+    DEFAULT_NB_WIN,
     IBLEN_LONG,
     MAX_SCORED_TRACKS,
     AacLatticeAnalysis,
@@ -246,6 +248,26 @@ class TestPortMathematics(unittest.TestCase):
                     f"tau is anti-conservative at width {width}",
                 )
 
+    def test_tau_tables_are_pinned_to_their_computed_values(self) -> None:
+        """``tau`` is the per-band significance threshold every hit in the
+        sweep is compared against, so it sets the scale of the whole
+        statistic. The conservativeness check above only asserts an
+        inequality against a sampled null — it stays green for a tau an
+        order of magnitude off in the safe direction, which would still
+        move ``proba``/``z`` far enough to invalidate PR-B's operating
+        points. These are the exact values the shipped formula computes."""
+        low_l, high_l, low_s, high_s, _windows = init_aac(44)
+        tau_l, tau_s = tau_tables(low_l, high_l, low_s, high_s)
+        self.assertAlmostEqual(
+            float(tau_l[0]), 0.008744873181812551, places=12,
+        )
+        self.assertAlmostEqual(
+            float(tau_l[-1]), 0.0656362054553284, places=12,
+        )
+        self.assertAlmostEqual(
+            float(tau_s[0]), 0.05268100876336167, places=12,
+        )
+
     def test_erfinv_round_trips_through_erf(self) -> None:
         """The scipy replacement. Bisection over ``math.erf`` must invert it
         to double precision across the whole range tau_tables ever asks for."""
@@ -266,27 +288,31 @@ class TestPortMathematics(unittest.TestCase):
                 erfinv(y)
 
 
+def _sweep(signal: F64, frames: npt.NDArray[np.int64]) -> F64:
+    """Run the production offset sweep over ``frames`` of ``signal``."""
+    fixture = _LatticeFixture.get()
+    plans = (
+        BandPlan(fixture.low_l, fixture.high_l, IBLEN_LONG, 1),
+        BandPlan(fixture.low_s, fixture.high_s, 128, 8),
+    )
+    offsets = np.arange(IBLEN_LONG, dtype=np.int64)
+    span = 2 * IBLEN_LONG + IBLEN_LONG - 1
+    segments = np.stack([
+        signal[(int(f) - 1) * IBLEN_LONG:(int(f) - 1) * IBLEN_LONG + span]
+        for f in frames
+    ])
+    return detect_aac(
+        segments, offsets, np.linspace(0.3, 0.7, 8), plans,
+        fixture.windows, fixture.tau_l, fixture.tau_s,
+    )
+
+
 class TestSyntheticLatticeThroughDetectAac(unittest.TestCase):
     """validate.py.frozen checks 4-5, at the ``detect_aac`` layer the frozen
     validation used — the direct comparison point with the recorded run."""
 
     def _profile(self, signal: F64) -> F64:
-        fixture = _LatticeFixture.get()
-        plans = (
-            BandPlan(fixture.low_l, fixture.high_l, IBLEN_LONG, 1),
-            BandPlan(fixture.low_s, fixture.high_s, 128, 8),
-        )
-        frames = np.arange(4, 12, dtype=np.int64)
-        offsets = np.arange(IBLEN_LONG, dtype=np.int64)
-        span = 2 * IBLEN_LONG + IBLEN_LONG - 1
-        segments = np.stack([
-            signal[(int(f) - 1) * IBLEN_LONG:(int(f) - 1) * IBLEN_LONG + span]
-            for f in frames
-        ])
-        return detect_aac(
-            segments, offsets, np.linspace(0.3, 0.7, 8), plans,
-            fixture.windows, fixture.tau_l, fixture.tau_s,
-        )
+        return _sweep(signal, np.arange(4, 12, dtype=np.int64))
 
     def test_detector_peaks_at_the_true_offset(self) -> None:
         profile = self._profile(_LatticeFixture.get().signal)
@@ -294,6 +320,114 @@ class TestSyntheticLatticeThroughDetectAac(unittest.TestCase):
 
     def test_white_noise_control_stays_below_the_paper_lambda(self) -> None:
         profile = self._profile(_LatticeFixture.get().noise)
+        self.assertLess(float(profile.max()), _PAPER_LAMBDA)
+
+    def test_the_statistic_itself_is_pinned_not_just_its_argmax(self) -> None:
+        """Recovering the right offset is necessary and nowhere near
+        sufficient. PR-B's operating points are calibrated numbers —
+        ``max_z > 12`` and the k>=4 concentration rule — so the MAGNITUDES
+        this detector produces are part of the contract, not incidental
+        output. Every constant the sweep depends on moves them: widening
+        the scalefactor grid, thinning it, changing the power-law exponent,
+        or loosening the null all keep ``argmax`` at 313 while collapsing
+        ``proba`` by more than half."""
+        profile = self._profile(_LatticeFixture.get().signal)
+        peak = float(profile.max())
+        median = float(np.median(profile))
+        self.assertAlmostEqual(peak, 0.13346354166666666, delta=5e-4)
+        self.assertAlmostEqual(median, 0.011270491803278689, delta=5e-5)
+        self.assertAlmostEqual(
+            (peak - median) / float(profile.std()),
+            29.57719476721612,
+            delta=0.05,
+        )
+
+    def test_the_noise_control_statistic_is_pinned_too(self) -> None:
+        profile = self._profile(_LatticeFixture.get().noise)
+        self.assertAlmostEqual(
+            float(profile.max()), 0.01854066985645933, delta=5e-4,
+        )
+
+
+class TestFrameSelectionDirectionAndPooling(unittest.TestCase):
+    """``mode=high`` is the shipped frame-selection rule and ``mode=low`` is
+    measured dead (track AUC 0.644 against 0.995, with ``proba`` saturating
+    at exactly 1.0000 on BOTH classes — derrien-refinement/README.md §
+    "The NAC probe and ``mode=low``"). Selecting in the wrong direction is
+    therefore not a degradation, it is the retired statistic; and it is
+    invisible to any fixture whose lattice is spread evenly across frames.
+
+    The pooling is load-bearing for the same reason: a frame's energy is
+    its own block PLUS the next one, because an MDCT frame spans two."""
+
+    def test_selects_the_highest_energy_frames_in_descending_order(
+        self,
+    ) -> None:
+        energies = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+        # Pooled: [1+2, 2+3, 3+4, 4+5] = [3, 5, 7, 9] -> frames 4, 3, 2, 1.
+        self.assertEqual(select_frames(energies, 4).tolist(), [4, 3, 2, 1])
+
+    def test_pools_two_consecutive_blocks_per_frame(self) -> None:
+        """The one block that wins alone is not the one that wins pooled."""
+        energies = np.array([0.0, 6.0, 0.0, 5.0, 5.0, 0.0, 0.0])
+        # Pooled:   [6, 6, 5, 10, 5] -> frame 4 wins.
+        # Unpooled: [0, 6, 0,  5, 5] -> frame 2 would win.
+        self.assertEqual(select_frames(energies, 1).tolist(), [4])
+
+
+class TestEnergyConcentratedLattice(unittest.TestCase):
+    """The consequence pin for frame-selection direction: a signal whose
+    lattice lives ONLY in its loud half. ``mode=high`` finds it; the retired
+    ``mode=low`` rule lands in the quiet half and finds nothing."""
+
+    signal: F64
+    tmpdir: str
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        fixture = _LatticeFixture.get()
+        rng = np.random.default_rng(11)
+        loud = _synthesize_lattice_signal(
+            rng, fixture.windows.long, fixture.low_l, fixture.high_l,
+            fixture.scale, frames=16, offset=_TRUE_OFFSET,
+        )
+        cls.signal = np.concatenate([loud, rng.standard_normal(len(loud)) * 0.02])
+        cls.tmpdir = tempfile.mkdtemp(prefix="aac_lattice_conc_")
+        _write_wav(
+            os.path.join(cls.tmpdir, "concentrated.wav"), cls.signal, 44100,
+        )
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    @classmethod
+    def _pooled_db(cls) -> F64:
+        nblk = len(cls.signal) // IBLEN_LONG
+        blocks = (
+            cls.signal[:nblk * IBLEN_LONG].reshape(nblk, IBLEN_LONG) ** 2
+        ).sum(axis=1)
+        nmax = nblk - 2
+        with np.errstate(divide="ignore"):
+            return 10 * np.log10(blocks[:nmax] + blocks[1:nmax + 1])
+
+    def test_production_selection_recovers_the_concentrated_lattice(
+        self,
+    ) -> None:
+        analysis = analyze_track(
+            os.path.join(self.tmpdir, "concentrated.wav")
+        )
+        self.assertEqual(analysis.offset, _TRUE_OFFSET)
+        self.assertAlmostEqual(analysis.proba, 0.13671875, delta=5e-4)
+        self.assertGreater(analysis.z, 12.0)
+
+    def test_the_retired_low_energy_rule_finds_nothing_on_it(self) -> None:
+        """Same signal, same sweep, only the frame-selection direction
+        differs — and the statistic collapses below the paper's null-rate
+        ceiling, i.e. to "no lattice here at all"."""
+        low_frames = np.argsort(self._pooled_db())[:DEFAULT_NB_WIN] + 1
+        profile = _sweep(self.signal, low_frames.astype(np.int64))
+        self.assertNotEqual(int(np.argmax(profile)), _TRUE_OFFSET)
         self.assertLess(float(profile.max()), _PAPER_LAMBDA)
 
 
@@ -337,10 +471,18 @@ class TestAnalyzeTrackEndToEnd(unittest.TestCase):
         # The lattice sweep is a spike, not a plateau: the frozen run
         # recorded z=29.6 here.
         self.assertGreater(analysis.z, 12.0)
+        # And the magnitudes themselves are the contract, not just the
+        # argmax — PR-B calibrates ``max_z > 12`` against exactly this
+        # scale. See TestSyntheticLatticeThroughDetectAac's sibling pin.
+        self.assertAlmostEqual(analysis.proba, 0.12890625, delta=5e-4)
+        self.assertAlmostEqual(analysis.z, 29.38866851865431, delta=0.05)
 
     def test_white_noise_control_stays_below_the_paper_lambda(self) -> None:
         analysis = analyze_track(self._path("noise.wav"))
         self.assertLess(analysis.proba, _PAPER_LAMBDA)
+        self.assertAlmostEqual(
+            analysis.proba, 0.017344497607655503, delta=5e-4,
+        )
 
     def test_96khz_input_raises_the_unsupported_rate_error(self) -> None:
         """The detector has no scalefactor-band table above 48 kHz, so hi-res
@@ -436,29 +578,69 @@ class TestAlbumAudioFileOrdering(unittest.TestCase):
                 ],
             )
 
-    def test_scoring_stops_at_the_cap(self) -> None:
-        """The cap counts SCORED tracks, so a failure does not consume it."""
-        with tempfile.TemporaryDirectory(prefix="aac_lattice_cap_") as root:
-            for index in range(MAX_SCORED_TRACKS + 4):
-                with open(os.path.join(root, f"{index:02d}.flac"), "wb") as fh:
-                    fh.write(b"x")
+    @staticmethod
+    def _seed_flacs(root: str, count: int) -> list[str]:
+        names = [f"{index:02d}.flac" for index in range(count)]
+        for name in names:
+            with open(os.path.join(root, name), "wb") as fh:
+                fh.write(b"x")
+        return names
 
-            def always_scores(path: str) -> AacLatticeAnalysis:
-                del path
-                return AacLatticeAnalysis(
-                    offset=960, z=20.0, proba=0.12,
-                    sample_rate=44100, channels=2,
+    @staticmethod
+    def _analyzer(failures: frozenset[str]) -> Callable[[str], AacLatticeAnalysis]:
+        def analyze(path: str) -> AacLatticeAnalysis:
+            if os.path.basename(path) in failures:
+                raise AacLatticeUnsupportedRateError(
+                    "unsupported sample rate 96 kHz"
                 )
+            return AacLatticeAnalysis(
+                offset=960, z=20.0, proba=0.12,
+                sample_rate=44100, channels=2,
+            )
+        return analyze
 
+    def test_scoring_stops_at_the_cap(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="aac_lattice_cap_") as root:
+            names = self._seed_flacs(root, MAX_SCORED_TRACKS + 4)
             capture = measure_album_aac_lattice(
-                root, analyze_fn=always_scores,
+                root, analyze_fn=self._analyzer(frozenset()),
             )
             self.assertEqual(capture.scored_tracks, MAX_SCORED_TRACKS)
             self.assertEqual(len(capture.tracks), MAX_SCORED_TRACKS)
             self.assertEqual(
                 [track.filename for track in capture.tracks],
-                [f"{index:02d}.flac" for index in range(MAX_SCORED_TRACKS)],
+                names[:MAX_SCORED_TRACKS],
             )
+
+    def test_a_failure_does_not_consume_the_cap(self) -> None:
+        """The cap counts SCORED tracks, and that is the whole point.
+
+        A hi-res album's first files all raise ``AacLatticeUnsupportedRateError``
+        (96 kHz has no scalefactor-band table). If a failure consumed a cap
+        slot, an album whose first six files were hi-res would record ZERO
+        scored tracks and the k>=4 concentration rule could never fire on it
+        — two of the nineteen research-corpus albums are exactly that shape."""
+        with tempfile.TemporaryDirectory(prefix="aac_lattice_cap_fail_") as root:
+            names = self._seed_flacs(root, MAX_SCORED_TRACKS + 5)
+            failures = frozenset(names[:3])
+            capture = measure_album_aac_lattice(
+                root, analyze_fn=self._analyzer(failures),
+            )
+            self.assertEqual(capture.scored_tracks, MAX_SCORED_TRACKS)
+            self.assertEqual(
+                len(capture.tracks), MAX_SCORED_TRACKS + len(failures),
+            )
+            self.assertEqual(
+                [track.filename for track in capture.tracks],
+                names[:MAX_SCORED_TRACKS + len(failures)],
+            )
+            self.assertEqual(
+                [t.filename for t in capture.tracks if t.error],
+                sorted(failures),
+            )
+            self.assertEqual(capture.modal_offset, 960)
+            self.assertEqual(capture.modal_count, MAX_SCORED_TRACKS)
+            self.assertEqual(capture.validation_errors(), [])
 
 
 class TestAacLatticeCaptureDerivation(unittest.TestCase):
