@@ -178,19 +178,27 @@ def collect_release_attempt_spectral_audit(
     analyzer: SpectralDetailAnalyzer,
     existing_resolver: ExistingSpectralResolver,
     candidate_detail: SpectralAnalysisDetail | None = None,
+    existing_detail: SpectralAnalysisDetail | None = None,
 ) -> tuple[SpectralDetail, ExistingSpectralAuditLookup]:
     """Own conditional HAVE collection for every attempted-import adapter.
 
     A lossless source converted to Opus/V0 keeps the source-side spectral
     measurement as its authoritative HAVE provenance; analyzing that installed
-    derivative can rewrite a transcode-like FLAC as apparently genuine. Every
-    other exact-release copy is analyzed from the files currently on disk.
+    derivative can rewrite a transcode-like FLAC as apparently genuine.
+    Content-addressed candidate and HAVE facts may be projected through
+    ``candidate_detail`` / ``existing_detail`` after their callers prove the
+    respective snapshots still match; otherwise the exact paths are analyzed.
     """
     candidate = (
         candidate_detail
         if candidate_detail is not None
         else _fail_soft_spectral_analysis(candidate_path, analyzer)
     )
+    if existing_detail is not None:
+        return (
+            SpectralDetail(candidate=candidate, existing=existing_detail),
+            ExistingSpectralAuditLookup(),
+        )
     try:
         lookup = (
             existing_resolver(mb_release_id)
@@ -644,6 +652,7 @@ def measure_preimport_state(
     db: PipelineDB | None = None,
     request_id: int | None = None,
     existing_spectral_evidence: SpectralAnalysisDetail | None = None,
+    reuse_existing_spectral_evidence: bool = False,
     preserve_existing_source_spectral: bool = False,
     precomputed_inspection: LocalFileInspection | None = None,
     spectral_detail_analyzer: SpectralDetailAnalyzer | None = None,
@@ -677,6 +686,12 @@ def measure_preimport_state(
         db: Pipeline DB — pass to enable spectral audit persistence and
             bad-hash lookup.
         request_id: Required when ``db`` is supplied.
+        existing_spectral_evidence: Persisted HAVE detail from a separately
+            authorized current-evidence row.
+        reuse_existing_spectral_evidence: The preview caller has matched that
+            row to the exact current release and established snapshot and
+            proved its spectral grade decision-usable. Re-project it without
+            another HAVE lookup or analyzer call.
 
     Returns:
         PreimportMeasurement with all gate facts populated. Audio-corrupt and
@@ -712,6 +727,9 @@ def measure_preimport_state(
         existing_spectral_evidence
         or SpectralAnalysisDetail(attempted=False)
     )
+    reusable_existing = (
+        persisted_existing if reuse_existing_spectral_evidence else None
+    )
     audit_analyzer = spectral_detail_analyzer or analyze_spectral_audit_path
     audit_resolver = (
         existing_spectral_resolver
@@ -744,6 +762,7 @@ def measure_preimport_state(
             ),
             analyzer=audit_analyzer,
             existing_resolver=audit_resolver,
+            existing_detail=reusable_existing,
         )
         existing_spectral_path = existing_lookup.path
         return PreimportMeasurement(
@@ -798,6 +817,7 @@ def measure_preimport_state(
                     ),
                     analyzer=audit_analyzer,
                     existing_resolver=audit_resolver,
+                    existing_detail=reusable_existing,
                 )
                 existing_spectral_path = existing_lookup.path
                 return PreimportMeasurement(
@@ -875,6 +895,7 @@ def measure_preimport_state(
             ),
             analyzer=audit_analyzer,
             existing_resolver=audit_resolver,
+            existing_detail=reusable_existing,
         )
         existing_spectral_path = existing_lookup.path
         candidate_audit = spectral_audit.candidate
@@ -938,6 +959,7 @@ def measure_preimport_state(
             analyzer=audit_analyzer,
             existing_resolver=audit_resolver,
             candidate_detail=spectral_audit.candidate,
+            existing_detail=reusable_existing,
         )
         existing_spectral_path = existing_lookup.path
 

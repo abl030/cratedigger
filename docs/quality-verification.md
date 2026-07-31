@@ -606,10 +606,12 @@ rows carry `lineage_version=4`: spectral and V0 facts add `subject`
 (`installed` | `source`) and `provenance` (`measured` | `carried`), while
 verified-lossless lives only in its proof object. Migration 055 maps old field
 names best-effort; current-evidence loaders treat v1/v3 rows as rebuild-required
-rather than guessing v4 meaning. Actual import/action attempts remeasure the
-exact installed Beets album before deciding. A same-snapshot repair preserves
-its original `measured_at` and atomic neutral facts so historical Recents cards
-remain pre-attempt evidence.
+rather than guessing v4 meaning. Preview reuses a decision-usable spectral fact
+only after exact-release and snapshot authorization; missing, unusable, or
+changed HAVE evidence is remeasured. The import action independently
+reauthorizes the exact installed Beets album before deciding. A same-snapshot
+repair preserves its original `measured_at` and atomic neutral facts so
+historical Recents cards remain pre-attempt evidence.
 
 Beets's native `items.format` is normalized only at the library projection
 boundary: its observed `OGG` label becomes bare `vorbis`, and `Windows Media`
@@ -764,8 +766,10 @@ therefore left evidence without an auditable capture location. Before issue
 #711, that
 incomplete HAVE side silently disabled all three spectral protections in the
 import comparison (download_log 37206: a ~96k transcode replaced a better copy
-as a "better" avg-bitrate tiebreak). Fresh HAVE analysis is now a prerequisite;
-failure aborts the attempt as `have_analysis_error`. `policy_incomplete_reasons`
+as a "better" avg-bitrate tiebreak). A decision-usable, matching HAVE fact is a
+prerequisite: preview reuses it when authorized, otherwise fresh analysis must
+succeed or the attempt aborts as `have_analysis_error`.
+`policy_incomplete_reasons`
 therefore rejects blank paths; the action loader
 (`ensure_current_evidence_for_action`) and the preview loader
 (`load_current_evidence_for_preview`) rebuild such rows from beets.
@@ -779,12 +783,14 @@ a fresh row, repoints the FK, and persists the changed-snapshot enrichment
 gate described above. Either way enrichment can then complete the surviving
 row. The candidate-reuse preview fast path first verifies the content
 snapshot, then projects the candidate spectral fact from that content-addressed
-evidence without scanning those bytes again. It separately persists the
-attempt-time HAVE scan through
-`persist_exact_current_spectral_from_attempt` before marking the job
-importable, so reused-evidence force and automation imports decide against the
-same completed HAVE the full measurement path would see. A changed candidate
-snapshot misses the front gate and runs full preview measurement again.
+evidence without scanning those bytes again. HAVE remains independent: preview
+freshly resolves the exact Beets release and matches its linked current
+evidence snapshot. A complete matching HAVE with a decision-usable grade
+projects its persisted spectral fact without another scan; changed,
+incomplete, or unusable HAVE evidence follows the existing analysis and
+`persist_exact_current_spectral_from_attempt` path. A
+changed candidate snapshot misses the front gate and runs full preview
+measurement again.
 
 **HAVE spectral persistence is fail-closed on absence and fresh-audit-wins on
 disagreement (issue #815).** Two rules govern how the request's on-disk (HAVE)
@@ -807,8 +813,9 @@ spectral fact is written:
   `spectral_provenance='measured'` (`persist_current_spectral_measurement` and
   `persist_exact_current_spectral_from_attempt`). This replaced the old
   fill-only-if-NULL policy, which silently discarded a fresh genuine/160 audit
-  and let the frozen 128 landmine keep deciding. The class self-heals at the
-  next preview, which always re-scans the installed bytes. Guards preserved: a
+  and let the frozen 128 landmine keep deciding. Missing, incomplete, or
+  changed evidence is measured on the next preview; complete matching evidence
+  with a decision-usable grade is reused. Guards preserved: a
   FAILED fresh audit never clears a persisted grade (fail-soft `incomplete`),
   and an R19 lossless-sourced row keeps its source spectral — an installed-
   derivative scan is never persisted as its grade (`preserve_existing_source_spectral`
@@ -858,6 +865,6 @@ Older library rows may still have NULL spectral / V0 / bad-hash facts. The
 deploy transition materializes each member of the canonical acquisition-fact
 set defined above that already exists in request history, but it never invents
 missing facts. Wrong-match and narrowing policy wait for a complete linked
-evidence row; fresh attempts remeasure the installed bytes.
+evidence row; fresh attempts remeasure incomplete or changed installed bytes.
 `lossless_source_locked` remains a separate defense-in-depth narrowing path. See
 `docs/brainstorms/2026-05-17-propagate-source-evidence-on-transcode-requirements.md`.

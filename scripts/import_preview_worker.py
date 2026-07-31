@@ -47,6 +47,7 @@ from lib.import_preview import (
     PREVIEW_VERDICT_MEASUREMENT_FAILED,
     ImportPreviewResult,
     cleanup_force_action_copy_for_job,
+    current_spectral_evidence_reusable,
     enrich_incomplete_current_evidence_for_request,
     force_action_copy_path,
     load_current_evidence_for_preview,
@@ -1083,6 +1084,7 @@ def process_claimed_preview_job(
     ):
         persisted_existing = SpectralAnalysisDetail(attempted=False)
         preserve_have_source = False
+        reuse_have_evidence = False
         mb_release_id = ""
         current_evidence = None
         if job.request_id is not None:
@@ -1137,6 +1139,11 @@ def process_claimed_preview_job(
                         current_evidence.measurement.spectral_grade,
                         current_evidence.measurement.spectral_bitrate_kbps,
                     )
+                    reuse_have_evidence = (
+                        current_spectral_evidence_reusable(
+                            current_evidence,
+                        )
+                    )
                 preserve_have_source = preserve_existing_source_spectral(
                     current_evidence,
                 )
@@ -1183,20 +1190,23 @@ def process_claimed_preview_job(
             # The front-gate already proved this exact content snapshot owns
             # complete candidate evidence. Re-project its persisted spectral
             # fact into the attempt audit instead of analyzing the same bytes
-            # again. HAVE remains separate below: ordinary installed bytes
-            # are still freshly analyzed for this replacement attempt.
+            # again. HAVE remains separate: a complete matching usable fact is
+            # re-projected; otherwise the exact installed bytes are analyzed.
             candidate_detail=spectral_detail_from_persisted_source(
                 front_gate_result.evidence.measurement.spectral_grade,
                 front_gate_result.evidence.measurement.spectral_bitrate_kbps,
             ),
+            existing_detail=(
+                persisted_existing if reuse_have_evidence else None
+            ),
         )
         if cancellation_token is not None:
             cancellation_token.raise_if_cancelled()
-        # The reuse fast path skips measurement but must still make its
-        # HAVE scan durable BEFORE the importer decides — an audit-only
-        # scan left the decision spectrally blind (download_log 37206).
-        # The persist helper's own guards keep this once-only, exact-path,
-        # exact-snapshot; failures are fail-soft like the audit itself.
+        # A newly measured HAVE fact must become durable BEFORE the importer
+        # decides — an audit-only scan left the decision spectrally blind
+        # (download_log 37206). Reused evidence has no lookup path and needs
+        # no write. The persist helper's own exact-path/exact-snapshot guards
+        # keep fresh failures fail-soft like the audit itself.
         if (
             job.request_id is not None
             and current_evidence is not None

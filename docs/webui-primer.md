@@ -266,16 +266,19 @@ operation.
   132k (min 102k) ... V0 224k avg`. Historical rows without materialized
   evidence show no inferred output measurement rather than recycling a
   decision-time bitrate.
-  Spectral evidence is attempt-local and two-sided: `IN` is measured from the
-  candidate before conversion, while `HAVE` normally measures the exact
-  requested release's current Beets files. The sole exception is a current
-  copy proven to be a derivative converted from a lossless source: `HAVE` then
-  uses persisted pre-conversion evidence because the derivative's altered
-  spectrum could mislabel the source. Both sides show grade plus floor when
-  measured. Historical rows remain explicitly unmeasured, or `ungraded` when
-  an old row has only an existing floor. A side that was attempted but could
-  not be decoded renders `analysis failed`; this is distinct from a legacy
-  row whose analysis was never attempted.
+  Spectral evidence is attempt-local and two-sided. `IN` and `HAVE` are
+  authorized independently against their own exact snapshots: complete
+  matching evidence with a decision-usable grade is projected without another
+  scan, while changed, incomplete, or unusable evidence is measured. `HAVE`
+  additionally resolves the exact
+  requested release's current Beets files. A current copy proven to be a
+  derivative converted from a lossless source uses persisted pre-conversion
+  evidence because the derivative's altered spectrum could mislabel the
+  source. Both sides show grade plus floor when measured. Historical rows
+  remain explicitly unmeasured, or `ungraded` when an old row has only an
+  existing floor. A side that was attempted but could not be decoded renders
+  `analysis failed`; this is distinct from a legacy row whose analysis was
+  never attempted.
   V0 probes render for every candidate — research probes of lossy sources
   qualified "(from lossy)" — matching the Wrong Matches convention. Probe
   averages and minima stay under that V0 label (`V0 171k avg (min 165k)`);

@@ -158,6 +158,43 @@ class TestAttemptSpectralAudit(unittest.TestCase):
         self.assertEqual(measured.existing_spectral.ultrasonic_deficit_db, 50.0)
         self.assertEqual(measured.existing_spectral.spectral_measurement_version, 2)
 
+    def test_authorized_existing_detail_skips_have_lookup_and_analysis(self):
+        """A caller-authorized HAVE fact crosses the shared audit seam once."""
+        from lib.measurement import collect_release_attempt_spectral_audit
+        from lib.quality import SpectralAnalysisDetail
+
+        persisted = SpectralAnalysisDetail(
+            attempted=True,
+            grade="suspect",
+            bitrate_kbps=128,
+        )
+        calls: list[str] = []
+
+        def analyze(path: str) -> SpectralAnalysisDetail:
+            calls.append(path)
+            return SpectralAnalysisDetail(
+                attempted=True,
+                grade="genuine",
+            )
+
+        audit, lookup = collect_release_attempt_spectral_audit(
+            "candidate",
+            "mbid",
+            existing_spectral_evidence=SpectralAnalysisDetail(
+                attempted=False,
+            ),
+            preserve_existing_source_spectral=False,
+            analyzer=analyze,
+            existing_resolver=lambda _mbid: self.fail(
+                "authorized HAVE reuse must not resolve Beets again"
+            ),
+            existing_detail=persisted,
+        )
+
+        self.assertEqual(calls, ["candidate"])
+        self.assertIs(audit.existing, persisted)
+        self.assertIsNone(lookup.path)
+
     def test_lossless_converted_have_preserves_source_without_derivative_scan(self):
         """FLAC-derived HAVE keeps source evidence and skips installed Opus."""
         from lib.beets_db import AlbumInfo

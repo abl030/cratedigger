@@ -1167,6 +1167,28 @@ def plan_current_evidence_enrichment(
     )
 
 
+def current_spectral_evidence_reusable(
+    evidence: AlbumQualityEvidence,
+) -> bool:
+    """Whether an authorized HAVE row has a decision-usable spectral fact.
+
+    The enrichment planner records whether analysis already ran, so an
+    attempted-but-failed ``"error"`` grade is intentionally complete for that
+    once-only bookkeeping. Preview reuse has a stricter contract: only one of
+    the grades the decision model understands may replace a fresh HAVE scan.
+    """
+    grade = evidence.measurement.spectral_grade
+    return (
+        not plan_current_evidence_enrichment(evidence).spectral
+        and grade in {
+            "genuine",
+            "marginal",
+            "suspect",
+            "likely_transcode",
+        }
+    )
+
+
 def prepare_current_evidence_for_failure(
     db: ImportPreviewDB,
     *,
@@ -2016,6 +2038,7 @@ def measure_and_persist_candidate_evidence(
         existing_spectral_evidence,
         _current_evidence_authoritative,
     ) = load_persisted_existing_spectral(db, request_id)
+    reuse_have_evidence = False
     load_current = current_evidence_loader or load_current_evidence_for_preview
     current_result = load_current(
         db,
@@ -2047,6 +2070,9 @@ def measure_and_persist_candidate_evidence(
         existing_spectral_evidence = spectral_detail_from_persisted_source(
             current_m.spectral_grade,
             current_m.spectral_bitrate_kbps,
+        )
+        reuse_have_evidence = current_spectral_evidence_reusable(
+            current_evidence,
         )
     preserve_have_source = preserve_existing_source_spectral(current_evidence)
 
@@ -2125,21 +2151,23 @@ def measure_and_persist_candidate_evidence(
                 db=None,
                 request_id=None,
                 existing_spectral_evidence=existing_spectral_evidence,
+                reuse_existing_spectral_evidence=reuse_have_evidence,
                 preserve_existing_source_spectral=preserve_have_source,
                 precomputed_inspection=inspection,
                 spectral_detail_analyzer=spectral_detail_analyzer,
                 existing_spectral_resolver=existing_spectral_resolver,
             )
             _checkpoint(cancellation_token)
-            spectral_result = persist_exact_current_spectral_from_attempt(
-                db,
-                request_id=request_id,
-                current_evidence=current_evidence,
-                measured_existing=measurement.spectral_audit.existing,
-                measured_existing_path=measurement.existing_spectral_path,
-            )
-            if spectral_result.evidence is not None:
-                current_evidence = spectral_result.evidence
+            if not reuse_have_evidence:
+                spectral_result = persist_exact_current_spectral_from_attempt(
+                    db,
+                    request_id=request_id,
+                    current_evidence=current_evidence,
+                    measured_existing=measurement.spectral_audit.existing,
+                    measured_existing_path=measurement.existing_spectral_path,
+                )
+                if spectral_result.evidence is not None:
+                    current_evidence = spectral_result.evidence
         except ExecutionCancelled:
             raise
         except AudioValidationMeasurementError as exc:
@@ -2652,6 +2680,7 @@ def preview_import_from_path(
         _,
         _,
     ) = load_persisted_existing_spectral(db, request_id)
+    reuse_have_evidence = False
     current_authority = _authorize_current_evidence_for_preview(
         db,
         request_id=request_id,
@@ -2687,6 +2716,9 @@ def preview_import_from_path(
         existing_spectral_evidence = spectral_detail_from_persisted_source(
             current_measurement.spectral_grade,
             current_measurement.spectral_bitrate_kbps,
+        )
+        reuse_have_evidence = current_spectral_evidence_reusable(
+            current_evidence,
         )
     preserve_have_source = preserve_existing_source_spectral(current_evidence)
 
@@ -2804,19 +2836,21 @@ def preview_import_from_path(
                 existing_spectral_evidence=(
                     existing_spectral_evidence
                 ),
+                reuse_existing_spectral_evidence=reuse_have_evidence,
                 preserve_existing_source_spectral=preserve_have_source,
                 precomputed_inspection=inspection,
             )
             _checkpoint(cancellation_token)
-            spectral_result = persist_exact_current_spectral_from_attempt(
-                db,
-                request_id=request_id,
-                current_evidence=current_evidence,
-                measured_existing=measurement.spectral_audit.existing,
-                measured_existing_path=measurement.existing_spectral_path,
-            )
-            if spectral_result.evidence is not None:
-                current_evidence = spectral_result.evidence
+            if not reuse_have_evidence:
+                spectral_result = persist_exact_current_spectral_from_attempt(
+                    db,
+                    request_id=request_id,
+                    current_evidence=current_evidence,
+                    measured_existing=measurement.spectral_audit.existing,
+                    measured_existing_path=measurement.existing_spectral_path,
+                )
+                if spectral_result.evidence is not None:
+                    current_evidence = spectral_result.evidence
         except ExecutionCancelled:
             raise
         except AudioValidationMeasurementError as exc:
