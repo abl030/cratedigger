@@ -1026,6 +1026,10 @@ EXPECTED_PARAMS = {
     # issue #829 Phase 5 PR2b: the codec-resolution context per side. One
     # keyword each, not six scalars — see ``SpectralCodecContext``.
     "candidate_spectral_context", "existing_spectral_context",
+    # issue #829 AAC-lattice leg PR-B: the candidate's persisted AAC
+    # frame-lattice capture. Candidate-only — this leg gates a PROMOTION
+    # and the installed side is never promoted by this decision.
+    "candidate_aac_lattice",
 }
 
 

@@ -66,6 +66,7 @@ from lib.quality import (
     SPECTRAL_TRANSCODE_GRADES,
     V0_PROBE_LOSSLESS_SOURCE,
     V0_PROBE_NATIVE_LOSSY_RESEARCH,
+    AlbumQualityEvidence,
     AudioQualityMeasurement,
     AudioToolDiagnostic,
     AudioToolDiagnosticCategory,
@@ -87,6 +88,7 @@ from lib.quality import (
     SpectralDetail,
     TargetQualityContract,
     V0ProbeEvidence,
+    aac_lattice_proof_leg,
     album_ultrasonic_proof_leg,
     bounded_audio_tool_diagnostic,
     build_existing_quality_measurement,
@@ -1519,14 +1521,34 @@ def _load_quality_evidence_action_file(
         return msgspec.json.decode(f.read(), type=QualityEvidenceActionPayload)
 
 
-def _preview_spectral_audit_from_action_file(
+def _preview_candidate_evidence(
     action_file: str | None,
-) -> SpectralDetail | None:
-    """Reuse the candidate grade already measured by preview."""
+) -> AlbumQualityEvidence | None:
+    """The candidate evidence row preview measured, decoded ONCE.
+
+    Preview writes this sidecar before the dry-run harness starts
+    (``lib/import_preview.py::_write_preview_spectral_evidence_file``), so
+    everything preview measured and the harness cannot afford to measure
+    again arrives here: the spectral audit below, and the AAC frame-lattice
+    capture, which costs tens of seconds of CPU per track and is measured
+    once by the preview worker.
+
+    Returned whole rather than projected per fact, because two separate
+    readers would decode the same file twice and could disagree about which
+    payload they were looking at.
+    """
     if not action_file:
         return None
-    payload = _load_quality_evidence_action_file(action_file)
-    measurement = payload.candidate.measurement
+    return _load_quality_evidence_action_file(action_file).candidate
+
+
+def _preview_spectral_audit(
+    candidate: AlbumQualityEvidence | None,
+) -> SpectralDetail | None:
+    """Reuse the candidate grade already measured by preview."""
+    if candidate is None:
+        return None
+    measurement = candidate.measurement
     if measurement.spectral_grade is None:
         return None
     return SpectralDetail(
@@ -2084,12 +2106,14 @@ def main():
     # legacy callers still measure here. HAVE provenance is attached by the
     # preview worker from the installed release's persisted source evidence;
     # the on-disk derivative must never be spectrally re-analyzed.
-    r.spectral = (
-        _preview_spectral_audit_from_action_file(
-            args.quality_evidence_action_file
-        )
+    preview_candidate = (
+        _preview_candidate_evidence(args.quality_evidence_action_file)
         if args.dry_run else None
-    ) or collect_attempt_spectral_audit(work_path, None)
+    )
+    r.spectral = (
+        _preview_spectral_audit(preview_candidate)
+        or collect_attempt_spectral_audit(work_path, None)
+    )
     candidate_audit = r.spectral.candidate
     existing_audit = r.spectral.existing
     if candidate_audit is not None:
@@ -2313,6 +2337,24 @@ def main():
         ],
     )
 
+    # The v4 AAC frame-lattice leg (issue #829 AAC-lattice leg PR-B).
+    # This harness NEVER measures the lattice itself — it costs tens of
+    # seconds of CPU per track and the preview worker already paid for it
+    # on the promotion-plausible cohort. The capture rides the same
+    # preview sidecar this run already decoded for its spectral grade, so
+    # the leg reads persisted evidence rather than re-deriving it.
+    #
+    # No sidecar means no capture means WITHHELD, and that is the honest
+    # answer rather than a gap: a legacy non-preview caller, a
+    # non-lossless candidate (preview writes no sidecar at all for one),
+    # and a candidate outside the cohort gate all genuinely have no
+    # lattice evidence. None of them may be treated as clean, and none may
+    # be treated as denied.
+    candidate_aac_lattice_leg = aac_lattice_proof_leg(
+        preview_candidate.aac_lattice
+        if preview_candidate is not None else None
+    )
+
     # Verified lossless: single source of truth in quality.py. r.v0_probe is
     # populated above (lossless source path) and lets the V0-avg trust
     # override flip a spectral suspect/likely_transcode sparse-HF lossless
@@ -2321,10 +2363,11 @@ def main():
         args.target_format, spectral_grade, converted, is_transcode,
         v0_probe=r.v0_probe,
         has_lossy_passthrough=has_lossy_passthrough,
-        ultrasonic_leg=candidate_ultrasonic_leg)
-    # The SAME certification with the v3 ultrasonic leg left out. The leg's
-    # authority is the PROOF — ``will_be_verified_lossless`` above, which
-    # feeds ``mint_verified_lossless_proof`` and the proof-licensed target
+        ultrasonic_leg=candidate_ultrasonic_leg,
+        aac_lattice_leg=candidate_aac_lattice_leg)
+    # The SAME certification with BOTH proof legs left out. Their authority
+    # is the PROOF — ``will_be_verified_lossless`` above, which feeds
+    # ``mint_verified_lossless_proof`` and the proof-licensed target
     # conversion. It must never reach the IMPORT ROUTING below: the
     # override suppresses the provisional-lossless lane, whose
     # ``suspect_lossless_downgrade`` is a confident reject that denylists
@@ -2333,12 +2376,12 @@ def main():
     # probe-rescued album imports WITHOUT a proof and stays on the search
     # surface (Phase 5 plan §2, §1.7). Mirrors ``v0_verified_override`` in
     # ``lib/quality/pipeline.py``, which the decision twins share.
-    certified_without_ultrasonic_leg = determine_verified_lossless(
+    certified_without_proof_legs = determine_verified_lossless(
         args.target_format, spectral_grade, converted, is_transcode,
         v0_probe=r.v0_probe,
         has_lossy_passthrough=has_lossy_passthrough)
     v0_verified_lossless_override = (
-        certified_without_ultrasonic_leg
+        certified_without_proof_legs
         and spectral_grade in SPECTRAL_TRANSCODE_GRADES
         and v0_probe_overrides_spectral(r.v0_probe)
     )
@@ -2417,6 +2460,7 @@ def main():
         detected_source_format=source_format,
         spectral_grade=spectral_grade,
         ultrasonic_leg=candidate_ultrasonic_leg,
+        aac_lattice_leg=candidate_aac_lattice_leg,
     )
     r.current_measurement = existing_m
     r.target_quality_contract = target_contract
@@ -2527,7 +2571,7 @@ def main():
         _log("  [QUALITY] no existing album in beets — importing transcode")
 
     if (not keep_lossless
-            and (certified_without_ultrasonic_leg
+            and (certified_without_proof_legs
                  or decision == "provisional_lossless_upgrade")
             and converted > 0
             and not should_run_target_conversion(new_conv_target)):

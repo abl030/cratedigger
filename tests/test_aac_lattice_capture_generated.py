@@ -312,10 +312,32 @@ class TestCaptureSurvivesALatticelessRePersist(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# A-I1: the lattice capture never changes a decision.
+# A-I1: the INSTALLED side's lattice capture never changes a decision.
+#
+# PR-A's version of this invariant covered BOTH sides, because PR-A decided
+# nothing. PR-B (the proof leg) deliberately makes the CANDIDATE's capture a
+# decision input, so the two-sided claim is now false by design — the fuzz
+# burst falsified it on a ``max_z=13`` world within minutes of the leg
+# landing, which is the property doing exactly its job.
+#
+# What survives, and is permanent: the INSTALLED album's own lattice is never
+# a decision input. The leg gates a PROMOTION and the installed side is never
+# promoted by this decision; its own proof, if it has one, was minted when it
+# was the candidate and is already the acquisition ceiling (decision 21).
+#
+# Equivalence for the retired half: the candidate side's inertness is now
+# conditional on the leg, and is covered by
+# ``tests/test_quality_generated.py`` — ``the_lattice_leg_only_ever_subtracts``
+# (L2, the pure decision) and ``a_non_denying_lattice_leg_leaves_the_decision_
+# untouched`` (L2b, the whole evidence decider, over the same
+# ``wild_ready_candidate_evidence`` world space). Both cover PASSED as well as
+# withheld — a clean lattice is as inert as an unmeasured one — so between
+# them the retired claim survives everywhere except a genuine denial, which is
+# the only place PR-B intends it not to. Restating either here would be a
+# parallel copy of a live invariant.
 # ---------------------------------------------------------------------------
 
-def decision_ignores_aac_lattice(
+def decision_ignores_the_installed_lattice(
     candidate: AlbumQualityEvidence,
     current: AlbumQualityEvidence | None,
     capture: AacLatticeCapture | None,
@@ -323,37 +345,23 @@ def decision_ignores_aac_lattice(
     decider: Decider = full_pipeline_decision_from_evidence,
 ) -> bool:
     """Invariant checker: does ``decider`` produce the same decision dict for
-    ``(candidate, current)`` whether or not EITHER side's evidence carries
-    ``capture``?
+    ``(candidate, current)`` whether or not the INSTALLED side's evidence
+    carries ``capture``?
 
-    Both sides are in scope, unlike the narrowed spectral-capture invariant:
-    PR-A promotes nothing, so a read of the lattice anywhere in the decider is
-    a bug in this PR by definition.
+    Deliberately one-sided since PR-B. A decider that let the installed
+    album's own frame lattice bound what a candidate is allowed to become
+    would be reading evidence about the wrong bytes entirely.
 
-    ``decider`` is injectable ONLY so the known-bad self-tests below can prove
+    ``decider`` is injectable ONLY so the known-bad self-test below can prove
     this checker actually trips; production always uses the real default.
     """
     baseline = decider(candidate, current)
     mutated = decider(
-        msgspec.structs.replace(candidate, aac_lattice=capture),
+        candidate,
         msgspec.structs.replace(current, aac_lattice=capture)
         if current is not None else None,
     )
     return baseline == mutated
-
-
-def _decoy_decider_reads_the_candidate_lattice(
-    candidate: AlbumQualityEvidence,
-    current: AlbumQualityEvidence | None = None,
-) -> dict[str, object]:
-    """The realistic rot: PR-B makes the candidate's modal offset a decision
-    input, and the reader is one keystroke from landing early."""
-    result: dict[str, object] = dict(
-        full_pipeline_decision_from_evidence(candidate, current)
-    )
-    if candidate.aac_lattice is not None:
-        result["final_status"] = "CORRUPTED_BY_CANDIDATE_AAC_LATTICE"
-    return result
 
 
 def _decoy_decider_reads_the_current_lattice(
@@ -380,7 +388,7 @@ _APPLE_SHAPED_CAPTURE = AacLatticeCapture.from_tracks([
 
 class TestDecisionIgnoresLatticeCheckerSelfTest(unittest.TestCase):
     """Known-bad self-test: the checker must trip on a decider that reads
-    the lattice on either side, and pass for the real decider."""
+    the installed album's lattice, and pass for the real decider."""
 
     def _pair(self, tag: str):
         return (
@@ -388,19 +396,10 @@ class TestDecisionIgnoresLatticeCheckerSelfTest(unittest.TestCase):
             make_album_quality_evidence(mb_release_id=f"{tag}-current"),
         )
 
-    def test_checker_trips_on_a_decider_that_reads_the_candidate(self) -> None:
-        candidate, current = self._pair("lattice-selftest-candidate")
-        self.assertFalse(
-            decision_ignores_aac_lattice(
-                candidate, current, _APPLE_SHAPED_CAPTURE,
-                decider=_decoy_decider_reads_the_candidate_lattice,
-            )
-        )
-
     def test_checker_trips_on_a_decider_that_reads_the_current(self) -> None:
         candidate, current = self._pair("lattice-selftest-current")
         self.assertFalse(
-            decision_ignores_aac_lattice(
+            decision_ignores_the_installed_lattice(
                 candidate, current, _APPLE_SHAPED_CAPTURE,
                 decider=_decoy_decider_reads_the_current_lattice,
             )
@@ -409,20 +408,34 @@ class TestDecisionIgnoresLatticeCheckerSelfTest(unittest.TestCase):
     def test_checker_passes_for_the_real_decider(self) -> None:
         candidate, current = self._pair("lattice-selftest-real")
         self.assertTrue(
-            decision_ignores_aac_lattice(
+            decision_ignores_the_installed_lattice(
                 candidate, current, _APPLE_SHAPED_CAPTURE,
             )
         )
 
+    def test_the_apple_shaped_capture_really_denies(self) -> None:
+        """The fixture is only evidence if the production leg reads it the
+        way its name asserts — otherwise this whole class proves that a
+        decider ignores a capture nothing would have acted on anyway."""
+        from lib.quality import aac_lattice_proof_leg
+        leg = aac_lattice_proof_leg(_APPLE_SHAPED_CAPTURE)
+        self.assertEqual(leg.outcome, "denied")
+        self.assertEqual(leg.reason, "offset_concentration")
 
-class TestLatticeCaptureNeverChangesDecision(unittest.TestCase):
-    """Pin + generated property for A-I1."""
 
-    def test_pin_a_denying_shaped_capture_on_an_importable_candidate(
+class TestInstalledLatticeNeverChangesDecision(unittest.TestCase):
+    """Pin + generated property for A-I1, as PR-B narrowed it."""
+
+    def test_pin_a_denying_shaped_capture_on_the_installed_album(
         self,
     ) -> None:
-        """The single most load-bearing world: an album whose lattice screams
-        Apple launder still imports in PR-A, because PR-A decides nothing."""
+        """The load-bearing world: the INSTALLED album's lattice screams
+        Apple launder and the candidate's decision does not move a hair.
+
+        An installed album is not up for promotion, so its lattice is
+        evidence about bytes this decision is not deciding on. Before PR-B
+        this pin also covered the candidate side; that half now lives with
+        the leg (see this section's header)."""
         candidate = make_album_quality_evidence(
             mb_release_id="lattice-pin-import-candidate",
         )
@@ -431,7 +444,7 @@ class TestLatticeCaptureNeverChangesDecision(unittest.TestCase):
         )
         baseline = full_pipeline_decision_from_evidence(candidate, current)
         self.assertTrue(
-            decision_ignores_aac_lattice(
+            decision_ignores_the_installed_lattice(
                 candidate, current, _APPLE_SHAPED_CAPTURE,
             )
         )
@@ -450,7 +463,7 @@ class TestLatticeCaptureNeverChangesDecision(unittest.TestCase):
             AacLatticeTrackScore(filename="01.flac", error="boom"),
         ])
         self.assertTrue(
-            decision_ignores_aac_lattice(candidate, current, capture)
+            decision_ignores_the_installed_lattice(candidate, current, capture)
         )
 
     @given(
@@ -465,7 +478,7 @@ class TestLatticeCaptureNeverChangesDecision(unittest.TestCase):
         capture: AacLatticeCapture | None,
     ) -> None:
         self.assertTrue(
-            decision_ignores_aac_lattice(candidate, current, capture)
+            decision_ignores_the_installed_lattice(candidate, current, capture)
         )
 
 

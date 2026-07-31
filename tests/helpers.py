@@ -11,7 +11,7 @@ import json
 import os
 import tempfile
 import types
-from collections.abc import Callable, Generator, Mapping
+from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from copy import deepcopy
 from datetime import UTC, datetime
@@ -644,6 +644,39 @@ PROVISIONAL_LANE_DECISIONS = frozenset({
 })
 
 
+def make_aac_lattice_capture(
+    tracks: Sequence[tuple[int | None, float | None]],
+    *,
+    proba: float = 0.12,
+    error: str = "AacLatticeUnsupportedRateError: unsupported sample rate 96 kHz",
+) -> AacLatticeCapture:
+    """Build an AAC-lattice capture through the PRODUCTION derivation.
+
+    ``tracks`` is one ``(offset, z)`` pair per track, in the deterministic
+    filename order ``lib/aac_lattice.py`` scores them in; a pair whose
+    offset is ``None`` records a per-track detector failure instead of a
+    score, exactly as ``measure_album_aac_lattice`` does.
+
+    The album statistics (``modal_offset``/``modal_count``/
+    ``scored_tracks``/``max_z``) are ALWAYS derived by
+    ``AacLatticeCapture.from_tracks`` — the one function production uses —
+    never written by hand. A test that hand-set them could assert on an
+    album statistic no measurement can produce (test-fidelity.md Rule C).
+    """
+    from lib.quality import AacLatticeTrackScore
+
+    rows: list[AacLatticeTrackScore] = []
+    for index, (offset, z) in enumerate(tracks):
+        filename = f"{index + 1:02d}.flac"
+        if offset is None:
+            rows.append(AacLatticeTrackScore(filename=filename, error=error))
+            continue
+        rows.append(AacLatticeTrackScore(
+            filename=filename, offset=offset, z=z, proba=proba,
+        ))
+    return AacLatticeCapture.from_tracks(rows)
+
+
 def build_parity_candidate_evidence(
     *,
     is_flac: bool,
@@ -672,6 +705,7 @@ def build_parity_candidate_evidence(
     was_converted_from: str | None = None,
     lossless_container: str = "flac",
     lossless_codec: str = "flac",
+    aac_lattice: AacLatticeCapture | None = None,
 ) -> AlbumQualityEvidence:
     """Build an ``AlbumQualityEvidence`` candidate row matching the
     simulator's flat-kwargs shape (post-U2/U3 schema).
@@ -796,6 +830,7 @@ def build_parity_candidate_evidence(
         ),
         matched_bad_audio_hash_id=matched_bad_audio_hash_id,
         matched_bad_audio_hash_path=matched_bad_audio_hash_path,
+        aac_lattice=aac_lattice,
     )
 
 

@@ -17,6 +17,7 @@ from lib.quality.evidence_types import (
     EVIDENCE_SUBJECT_INSTALLED,
     EVIDENCE_SUBJECT_SOURCE,
     SPECTRAL_TRANSCODE_GRADES,
+    AacLatticeCapture,
     AudioQualityMeasurement,
     CodecFamily,
     EvidenceSubject,
@@ -837,6 +838,194 @@ def album_ultrasonic_proof_leg(
     )
 
 
+# ---------------------------------------------------------------------------
+# Proof gate v4 — the AAC frame-lattice leg (issue #829 AAC-lattice leg PR-B)
+# ---------------------------------------------------------------------------
+
+#: Deny verified-lossless promotion when this many of an album's scored
+#: tracks recover the SAME MDCT frame offset.
+#:
+#: The one statistic in the whole #829 research whose false-positive rate
+#: is a CALCULATION rather than a fitted threshold, and the reason this
+#: leg is proof grade rather than triage grade
+#: (``docs/research/calibration-data/derrien-refinement/README.md``
+#: § "The offset-concentration rule and its false-positive floor"). 1024
+#: is the MDCT lattice size and 4 is an integer count; there is nothing
+#: here to tune.
+#:
+#: Measured, over the 17-album genuine control arm and the 1,136-track
+#: wild arm (``q3c_out.txt`` § D, ``q3d_out.txt``, ``q3f_out.txt``):
+#:
+#:     rule        genuine albums   wild folders   analytic FP/5000 albums
+#:     k >= 2           0/17              -                  ~322.3
+#:     k >= 3           0/17            1/115                  ~1.049
+#:     k >= 4           0/17            1/115                  ~0.00231
+#:
+#: and its recall over the Apple/CoreAudio family at ``k >= 4``:
+#: ``qaac-cvbr256`` 17/17, ``qaac-cvbr320`` 17/17, ``qaac-tvbr91`` 17/17,
+#: ``qaac-abr192`` 17/17, ``qaac-cbr128`` 16/17 — reproduced across two
+#: independent Apple builds. The mechanism is exact: qaac/CoreAudio primes
+#: 2112 samples, ``2112 mod 1024 = 64``, so its lattice lands at 960 in
+#: ~97% of tracks, while a genuine album's offsets are uniform over
+#: 0-1023 (chi^2 19.5 on 31 df, max repeat 3 across ALL 197 pooled tracks
+#: and 0/17 albums at k >= 2).
+AAC_LATTICE_PROOF_DENY_MODAL_COUNT: int = 4
+
+#: Deny promotion when the album's best per-track lattice contrast
+#: exceeds this.
+#:
+#: ``z = (peak - median) / std`` over the 1024-offset sweep. The naive
+#: zero-false-positive threshold is 6.914 — but that is the MAXIMUM
+#: OBSERVED genuine track z over 197 tracks, an in-sample maximum and not
+#: a false-positive rate. A Gumbel fit to the 17 genuine album-max values
+#: (mu=5.598, beta=0.580) prices ``z > 6.914`` at ~492 false-positive
+#: albums per 5000 (``q3d_out.txt``). 12 is the conservative operating
+#: point: ~0.1 per 5000 analytically, and measured 0/197 genuine control
+#: tracks and 0/1136 wild peer tracks (``q3e_out.txt``).
+#:
+#: Strictly greater, matching the research's own ``z > 12`` framing.
+AAC_LATTICE_PROOF_DENY_MAX_Z: float = 12.0
+
+#: Below this many successfully scored tracks the leg cannot say
+#: "adjudicated clean" — the offset-concentration rule needs 4 coincident
+#: tracks to fire at all, so an album with fewer has not been tested by
+#: the rule and a clean result from it means nothing. It withholds.
+#:
+#: Deliberately the SAME integer as the denial count: "enough evidence to
+#: clear an album" is exactly "enough evidence for the rule to have been
+#: able to condemn it". ``lib/aac_lattice.py::MAX_SCORED_TRACKS`` scores 6
+#: for headroom over per-track errors.
+AAC_LATTICE_PROOF_MIN_SCORED_TRACKS: int = AAC_LATTICE_PROOF_DENY_MODAL_COUNT
+
+AacLatticeProofOutcome = Literal["denied", "passed", "withheld"]
+
+AacLatticeProofReason = Literal[
+    # The leg adjudicated.
+    "offset_concentration",
+    "z_exceeded",
+    "adjudicated_clean",
+    # The leg could not adjudicate.
+    "not_measured",
+    "insufficient_scored_tracks",
+]
+
+
+@dataclass(frozen=True)
+class AacLatticeProofLeg:
+    """What the AAC frame-lattice leg asserts about one album (pure).
+
+    Three outcomes, with the same discipline as ``UltrasonicProofLeg``:
+
+    * ``denied``   — the album's tracks share an MDCT frame lattice.
+                     Withhold proof.
+    * ``passed``   — the detector scored enough tracks to run the
+                     offset-concentration rule, and found no lattice.
+    * ``withheld`` — the leg could not run. It asserts NOTHING; promotion
+                     falls through to every pre-existing rule unchanged.
+
+    ``withheld`` is where essentially the whole library sits and always
+    will: the capture is gated to the promotion-plausible cohort because
+    it costs tens of seconds of CPU per track, and every row measured
+    before the capture shipped has no lattice evidence at any price.
+
+    **``modal_offset`` is deliberately not a field here.** Absolute
+    offsets are decode-path relative — a container whose decoder applies
+    encoder-delay priming shifts the sample origin — so the literal 960
+    (Apple) and 0 (ffmpeg-native) constants are not portable facts about
+    an album. CONCENTRATION is, which is why the deployable rule counts
+    coincidences instead of matching values, and why this leg cannot be
+    "improved" by comparing an offset to a constant.
+    """
+
+    outcome: AacLatticeProofOutcome
+    reason: AacLatticeProofReason
+    scored_tracks: int = 0
+    modal_count: int | None = None
+    max_z: float | None = None
+
+    @property
+    def denies_promotion(self) -> bool:
+        return self.outcome == "denied"
+
+    @property
+    def proves_no_aac_lattice(self) -> bool:
+        return self.outcome == "passed"
+
+
+def aac_lattice_proof_leg(
+    capture: AacLatticeCapture | None,
+) -> AacLatticeProofLeg:
+    """Evaluate the AAC frame-lattice proof leg for one album (pure).
+
+    The capture is measured by ``lib/aac_lattice.py`` and persisted on the
+    candidate evidence row; this function is the only thing that reads it
+    as policy. Two independent denial conditions, either sufficient:
+
+    1. **Offset concentration** — ``modal_count >=
+       AAC_LATTICE_PROOF_DENY_MODAL_COUNT``. Parameter-free, with an
+       analytic false-positive floor of ~0.0023 albums per 5000, and it
+       closes the entire Apple/CoreAudio family, which every spectral leg
+       is blind to by construction.
+    2. **Sweep contrast** — ``max_z > AAC_LATTICE_PROOF_DENY_MAX_Z``.
+       Catches a laundered album whose per-track offsets scattered (the
+       ``ffmpeg``-native AAC shape) but whose sweep still spikes.
+
+    A denial fires on ANY amount of scored evidence: ``modal_count`` is
+    bounded above by ``scored_tracks``, so condition 1 implies four scored
+    tracks by construction, but condition 2 does not and must not — one
+    track at z=28 is evidence, and refusing to read it because five others
+    failed to decode would fail OPEN, which is the wrong direction for a
+    proof gate.
+
+    A clean result, by contrast, needs enough evidence to be worth
+    anything: below ``AAC_LATTICE_PROOF_MIN_SCORED_TRACKS`` successfully
+    scored tracks the concentration rule could not have fired whatever the
+    audio was, so "it did not fire" is not a finding. That world withholds.
+
+    Withheld asserts nothing in either direction — never evidence, never
+    denial — exactly like the ultrasonic leg's NULL states.
+    """
+    if capture is None:
+        return AacLatticeProofLeg(outcome="withheld", reason="not_measured")
+    scored = capture.scored_tracks
+    modal_count = capture.modal_count
+    max_z = capture.max_z
+    if (
+        modal_count is not None
+        and modal_count >= AAC_LATTICE_PROOF_DENY_MODAL_COUNT
+    ):
+        return AacLatticeProofLeg(
+            outcome="denied",
+            reason="offset_concentration",
+            scored_tracks=scored,
+            modal_count=modal_count,
+            max_z=max_z,
+        )
+    if max_z is not None and max_z > AAC_LATTICE_PROOF_DENY_MAX_Z:
+        return AacLatticeProofLeg(
+            outcome="denied",
+            reason="z_exceeded",
+            scored_tracks=scored,
+            modal_count=modal_count,
+            max_z=max_z,
+        )
+    if scored < AAC_LATTICE_PROOF_MIN_SCORED_TRACKS:
+        return AacLatticeProofLeg(
+            outcome="withheld",
+            reason="insufficient_scored_tracks",
+            scored_tracks=scored,
+            modal_count=modal_count,
+            max_z=max_z,
+        )
+    return AacLatticeProofLeg(
+        outcome="passed",
+        reason="adjudicated_clean",
+        scored_tracks=scored,
+        modal_count=modal_count,
+        max_z=max_z,
+    )
+
+
 def v0_probe_overrides_spectral(probe: V0ProbeEvidence | None) -> bool:
     """Decide whether a V0 probe is strong enough to override a suspect
     spectral grade and certify the source as genuine lossless.
@@ -864,6 +1053,7 @@ def determine_verified_lossless(
     *,
     has_lossy_passthrough: bool = False,
     ultrasonic_leg: UltrasonicProofLeg | None = None,
+    aac_lattice_leg: AacLatticeProofLeg | None = None,
 ) -> bool:
     """Single source of truth for verified lossless status (pure).
 
@@ -904,10 +1094,21 @@ def determine_verified_lossless(
     applies unchanged. Omitting the argument entirely is the pre-v3
     behaviour by construction, which is what keeps a caller that has no
     ultrasonic evidence — most of the library — exactly where it was.
+
+    Proof gate v4 (``aac_lattice_leg``, issue #829 AAC-lattice leg PR-B):
+    a ``denied`` lattice leg is a hard veto in the same precedence
+    position, and for the same reason. It measures the one thing every
+    spectral instrument here is blind to — the MDCT frame lattice an AAC
+    encoder leaves in the samples — so no spectral-derived rescue below,
+    the V0-avg trust override included, can speak to the evidence it
+    carries. The two legs are independent conditions on one proof: either
+    denies alone, and neither can overrule the other's denial.
     """
     if has_lossy_passthrough:
         return False
     if ultrasonic_leg is not None and ultrasonic_leg.denies_promotion:
+        return False
+    if aac_lattice_leg is not None and aac_lattice_leg.denies_promotion:
         return False
     if spectral_grade in (None, "error"):
         return False
@@ -934,6 +1135,13 @@ VERIFIED_LOSSLESS_CLASSIFIER = "spectral_verified_lossless"
 #: actually RAN on a comparable measurement and found nothing.
 VERIFIED_LOSSLESS_CLASSIFIER_V3 = "spectral_verified_lossless_v3"
 
+#: The classifier a proof carries when BOTH the v3 ultrasonic leg AND the
+#: AAC frame-lattice leg actually RAN and found nothing. The lattice leg
+#: is the only instrument here that can see the Apple/CoreAudio family —
+#: v3's named blind spot — so a row that cleared both was tested for a
+#: strictly larger class of laundering than one that cleared v3 alone.
+VERIFIED_LOSSLESS_CLASSIFIER_V4 = "spectral_verified_lossless_v4"
+
 
 def mint_verified_lossless_proof(
     will_be_verified_lossless: bool,
@@ -942,6 +1150,7 @@ def mint_verified_lossless_proof(
     detected_source_format: str | None,
     spectral_grade: str | None,
     ultrasonic_leg: UltrasonicProofLeg | None = None,
+    aac_lattice_leg: AacLatticeProofLeg | None = None,
 ) -> VerifiedLosslessProof | None:
     """Mint the measured verified-lossless proof for a harness attempt (pure).
 
@@ -966,6 +1175,21 @@ def mint_verified_lossless_proof(
     Apple/CoreAudio family, which applies essentially no lowpass in the
     measured band and which no spectral instrument separates.
 
+    The v4 name (issue #829 AAC-lattice leg PR-B) is exactly that blind
+    spot closing, and it composes on the same rule rather than replacing
+    it — the classifier names which MODELS ran, so:
+
+        ultrasonic   lattice     classifier
+        passed       passed      v4
+        passed       withheld    v3
+        anything else            the base name
+
+    A lattice pass with no ultrasonic adjudication is deliberately the
+    BASE name, not v4 and not some v4-minus: the names are a ladder of
+    what was tested, and claiming the top rung for a row that skipped a
+    rung would make the column mean two things again. A DENIED leg never
+    reaches here at all — the proof was already vetoed.
+
     ``spectral_measurement_version`` is deliberately NOT used as this
     axis: it is a measurement-shape version, and 47 live proofs carry
     version 2 while having been proved under the OLD gate — 7 of them
@@ -981,11 +1205,20 @@ def mint_verified_lossless_proof(
         or detected
         or "lossless_source"
     )
-    classifier = (
-        VERIFIED_LOSSLESS_CLASSIFIER_V3
-        if ultrasonic_leg is not None and ultrasonic_leg.proves_ultrasonic_content
-        else VERIFIED_LOSSLESS_CLASSIFIER
+    ultrasonic_adjudicated = (
+        ultrasonic_leg is not None
+        and ultrasonic_leg.proves_ultrasonic_content
     )
+    lattice_adjudicated = (
+        aac_lattice_leg is not None
+        and aac_lattice_leg.proves_no_aac_lattice
+    )
+    if ultrasonic_adjudicated and lattice_adjudicated:
+        classifier = VERIFIED_LOSSLESS_CLASSIFIER_V4
+    elif ultrasonic_adjudicated:
+        classifier = VERIFIED_LOSSLESS_CLASSIFIER_V3
+    else:
+        classifier = VERIFIED_LOSSLESS_CLASSIFIER
     return VerifiedLosslessProof(
         provenance=EVIDENCE_PROVENANCE_MEASURED,
         source=source,

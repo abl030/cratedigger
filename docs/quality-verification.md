@@ -401,6 +401,10 @@ of the library is permanently in that state.
 
 ### `verified_lossless_classifier` names the model
 
+The classifier names WHICH MODELS proved a row. The full ladder, including
+the AAC frame-lattice leg, is in § "`verified_lossless_classifier` with two
+legs" below; the ultrasonic leg's own rung is:
+
 - `spectral_verified_lossless` — the cliff/grade gate alone.
 - `spectral_verified_lossless_v3` — the ultrasonic leg ADJUDICATED and
   passed.
@@ -435,10 +439,10 @@ zero from a run without them is not evidence:
   installed, and no branch that compares against a HAVE — including the
   provisional lane's confident rejects — is reachable at all.
 
-## AAC frame-lattice capture (issue #829 AAC-lattice leg, PR-A)
+## AAC frame-lattice leg (issue #829 AAC-lattice leg)
 
-**Capture only. No decision reads it.** PR-B owns the proof leg and the
-semantics; this section documents what is measured and where it is stored.
+The fourth proof leg. PR-A measured and persisted the capture; PR-B reads
+it as policy.
 
 Every spectral leg above measures the *shape of the spectrum*, and the
 Apple/CoreAudio family defeats all of them by applying essentially no
@@ -483,7 +487,8 @@ applies encoder-delay priming — ALAC/M4A in particular — shifts the sample
 origin, so its recovered offsets are not directly comparable to those
 constants. Offset *concentration* (k tracks sharing one offset) is
 unaffected, which is the statistic the deployable rule uses; a rule keyed
-on the literal value 960 would not be. This is a PR-B design input.
+on the literal value 960 would not be. **The leg therefore never reads an
+absolute offset**, and `AacLatticeProofLeg` does not even carry one.
 
 Persistence (`album_quality_evidence`, migration 069): `aac_lattice_tracks`
 is the per-track JSONB array (filename plus `offset`/`z`/`proba`, or an
@@ -493,6 +498,72 @@ statistics broken out for SQL. NULL across all five means **never
 measured**; `aac_lattice_scored_tracks = 0` means **measured and nothing
 scored**. The capture follows the V0 tuple's preserve guard — a
 same-address writer that never ran the cohort gate does not erase it.
+
+### The proof leg (PR-B)
+
+`lib/quality/decisions.py::aac_lattice_proof_leg` is the only thing that
+reads the capture as policy. Two independent denial conditions, either
+sufficient:
+
+| condition | constant | measured basis |
+|---|---|---|
+| `modal_count >= 4` | `AAC_LATTICE_PROOF_DENY_MODAL_COUNT` | parameter-free; analytic FP floor ~0.0023 albums per 5000, 0/17 genuine control albums, 17/17 recall on four `qaac` variants and 16/17 on the fifth |
+| `max_z > 12` | `AAC_LATTICE_PROOF_DENY_MAX_Z` | 0/197 genuine control tracks, 0/1136 wild peer tracks, ~0.1 FP albums per 5000 under the Gumbel tail fit |
+
+A denial fires on **any** amount of scored evidence: `modal_count` is
+bounded by `scored_tracks` so the concentration rule implies four scored
+tracks by construction, but the contrast rule does not and must not — one
+track at z = 28 is evidence.
+
+A **pass** needs `scored_tracks >= 4` (`AAC_LATTICE_PROOF_MIN_SCORED_TRACKS`,
+deliberately the same integer): below that the concentration rule could
+not have fired whatever the audio was, so "it did not fire" is not a
+finding. That world **withholds**, as does an unmeasured row.
+
+Withheld asserts nothing in either direction. That is where essentially
+the whole library sits — the capture is gated to the promotion-plausible
+cohort and no row measured before it shipped has one — and a withheld leg
+leaves the entire decision bit-identical.
+
+**The leg's authority is the proof, never the lane.** A denial withholds
+the verified-lossless proof and nothing else. It never re-routes the
+provisional-lossless lane — whose decisions are confident rejects that
+denylist the offering peer — and it introduces no denylist class of its
+own: every denylist a denied album attracts is the pre-existing
+post-import policy any unproved album attracts.
+
+What a denial *does* cost is the proof's comparison privilege, and that
+is not a leg verdict. An album with no proof is compared on what it
+measures, so against a better installed copy it can lose that comparison
+and not be imported — in the MEASURED lane, with a comparison basis the
+operator can read, exactly as any unproved album can. That residual is
+byte-identical to the ultrasonic leg's and is pinned as such
+(`tests/test_quality_classification.py::TestAacLatticeProofGate`,
+`tests/test_quality_generated.py::TestAacLatticeProofLegProperties`);
+the lane boundary is the one PR3 shipped a blocking defect on, and this
+leg is pinned against it from birth.
+
+**Where the leg is evaluated.** Both decision twins build it once per call
+from the candidate's persisted capture. The dry-run harness — which is
+what mints the proof that becomes the candidate evidence row's — reads the
+capture off the preview sidecar it already decodes for its spectral grade
+(`lib/import_preview.py::_write_preview_spectral_evidence_file` →
+`harness/import_one.py::_preview_candidate_evidence`). It never measures
+the lattice itself. A legacy non-preview harness call, a non-lossless
+candidate, and a candidate outside the cohort gate all have no capture on
+that wire, and all withhold.
+
+### `verified_lossless_classifier` with two legs
+
+- `spectral_verified_lossless` — the cliff/grade gate alone.
+- `spectral_verified_lossless_v3` — the ultrasonic leg adjudicated and
+  passed; the lattice leg did not adjudicate.
+- `spectral_verified_lossless_v4` — **both** legs adjudicated and passed.
+
+A lattice pass with no ultrasonic adjudication is the base name, not v4:
+the names are a ladder of what was tested and skipping a rung must not buy
+the top one. As with v3, a name is never stamped merely because the code
+ran.
 
 ### Tuning results (Mountain Goats library, 65 albums) — HISTORICAL
 

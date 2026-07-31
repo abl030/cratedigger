@@ -21,6 +21,7 @@ from lib.quality.decisions import (
     MeasuredImportDecisionInput,
     ProvisionalLosslessDecisionInput,
     ProvisionalLosslessDecisionResult,
+    aac_lattice_proof_leg,
     build_existing_quality_measurement,
     determine_verified_lossless,
     is_preserved_source_spectral,
@@ -43,6 +44,7 @@ from lib.quality.evidence_types import (
     EVIDENCE_SUBJECT_SOURCE,
     SPECTRAL_TRANSCODE_GRADES,
     V0_PROBE_LOSSLESS_SOURCE,
+    AacLatticeCapture,
     AlbumQualityEvidence,
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
@@ -136,6 +138,15 @@ def full_pipeline_decision(
     # opinion (never rejects) — the fail-closed direction.
     candidate_spectral_context: SpectralCodecContext | None = None,
     existing_spectral_context: SpectralCodecContext | None = None,
+    # issue #829 AAC-lattice leg PR-B — the candidate's persisted AAC
+    # frame-lattice capture. Passed whole rather than as flat scalars
+    # because the capture is one album-level Struct on the evidence row
+    # (``AlbumQualityEvidence.aac_lattice``) and the leg reads three of its
+    # statistics together; splitting it into keywords would mint a second
+    # place where "what the detector found" is spelled. Only the CANDIDATE
+    # side has one, for the same reason as the ultrasonic leg: this leg
+    # gates a PROMOTION and the installed side is never promoted here.
+    candidate_aac_lattice: AacLatticeCapture | None = None,
     # Return type quoted (this module has no ``from __future__ import
     # annotations``) so the lexical typing-escape-hatch scanner's NAME-
     # token count doesn't grow — the module already carries this ``Any``
@@ -320,6 +331,13 @@ def full_pipeline_decision(
             candidate_context.was_converted_from,
         ),
     )
+    # The v4 AAC frame-lattice leg, computed ONCE per call from the
+    # candidate's own capture (issue #829 AAC-lattice leg PR-B). Same
+    # candidate-only scoping and same authority boundary as the ultrasonic
+    # leg above: it governs the PROOF and nothing else. Absent capture —
+    # every row measured before PR-A, and every row outside the
+    # promotion-plausible cohort the capture is gated to — withholds.
+    candidate_aac_lattice_leg = aac_lattice_proof_leg(candidate_aac_lattice)
 
     # ONE predicate, computed once, for every seam that asks "does the
     # spectral leg govern this pair?" — Stage 1's comparison AND the
@@ -491,20 +509,23 @@ def full_pipeline_decision(
                 target_format, spectral_grade,
                 converted_count=0, is_transcode=False,
                 v0_probe=candidate_probe_full,
-                ultrasonic_leg=candidate_ultrasonic_leg)
-            # The ultrasonic leg's authority is the PROOF, and its veto
+                ultrasonic_leg=candidate_ultrasonic_leg,
+                aac_lattice_leg=candidate_aac_lattice_leg)
+            # Both proof legs' authority is the PROOF, and their veto
             # lives at the one site that mints one
             # (``determine_verified_lossless`` above, and
             # ``mint_verified_lossless_proof`` in the harness). This flag
             # ROUTES THE IMPORT — it suppresses the provisional-lossless
-            # lane — so a denial must never reach it: the provisional
-            # lane's ``suspect_lossless_downgrade`` is a confident reject
-            # that also denylists the offering peer, and a denied album is
-            # exactly the HF-poor genuine-lossless cohort this override
-            # exists to rescue. A denied, probe-rescued album imports as
-            # provisional lossless WITHOUT a proof and stays on the search
-            # surface (Phase 5 plan §2, §1.7: withholding a proof never
-            # rejects, denylists or accuses).
+            # lane — so a denial from EITHER leg must never reach it: the
+            # provisional lane's ``suspect_lossless_downgrade`` is a
+            # confident reject that also denylists the offering peer, and a
+            # denied album is exactly the HF-poor genuine-lossless cohort
+            # this override exists to rescue. A denied, probe-rescued album
+            # imports as provisional lossless WITHOUT a proof and stays on
+            # the search surface (Phase 5 plan §2, §1.7: withholding a
+            # proof never rejects, denylists or accuses). PR3 shipped a
+            # blocking defect by keying this flag on a leg; PR-B's lattice
+            # leg inherits the boundary from birth.
             v0_verified_override = (
                 spectral_grade in SPECTRAL_TRANSCODE_GRADES
                 and v0_probe_overrides_spectral(candidate_probe_full)
@@ -624,13 +645,14 @@ def full_pipeline_decision(
                 converted_count=converted_count,
                 is_transcode=is_transcode,
                 v0_probe=candidate_probe_full,
-                ultrasonic_leg=candidate_ultrasonic_leg)
-            # Same boundary as the flac-keep branch above: the leg's
+                ultrasonic_leg=candidate_ultrasonic_leg,
+                aac_lattice_leg=candidate_aac_lattice_leg)
+            # Same boundary as the flac-keep branch above: each leg's
             # authority is the proof, which ``will_be_verified`` already
             # carries. This flag routes the import (and, through
-            # ``policy_is_transcode``, the comparison), so keying it on the
-            # leg would turn a withheld proof into a rejection plus a peer
-            # denylist for the provisional cohort.
+            # ``policy_is_transcode``, the comparison), so keying it on
+            # either leg would turn a withheld proof into a rejection plus
+            # a peer denylist for the provisional cohort.
             v0_verified_override = (
                 is_transcode and v0_probe_overrides_spectral(candidate_probe_full)
             )
@@ -1671,4 +1693,9 @@ def full_pipeline_decision_from_evidence(
         ),
         candidate_spectral_context=evidence_spectral_context(candidate),
         existing_spectral_context=evidence_spectral_context(current),
+        # The persisted capture, handed straight across (issue #829
+        # AAC-lattice leg PR-B). No adapter: the evidence row's column IS
+        # the leg's input, so there is nothing to derive and nothing that
+        # could derive it differently from the simulator twin.
+        candidate_aac_lattice=candidate.aac_lattice,
     )
