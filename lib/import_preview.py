@@ -49,11 +49,13 @@ from lib.fs_authority import (
 )
 from lib.import_execution import CancellationToken, ExecutionCancelled
 from lib.measurement import (
+    AacLatticeMeasureFn,
     ExistingSpectralResolver,
     PreimportMeasurement,
     SpectralDetailAnalyzer,
     analyze_spectral_audit_path,
     inspect_local_files,
+    measure_aac_lattice,
     measure_preimport_state,
     spectral_detail_from_persisted_source,
 )
@@ -1954,6 +1956,7 @@ def measure_and_persist_candidate_evidence(
     runtime_config: CratediggerConfig | None = None,
     repair_fn: HeaderRepairFn | None = None,
     cancellation_token: CancellationToken | None = None,
+    aac_lattice_measure_fn: AacLatticeMeasureFn | None = measure_aac_lattice,
 ) -> ImportPreviewResult:
     """Measure a source folder and persist candidate evidence; never decide.
 
@@ -1973,6 +1976,13 @@ def measure_and_persist_candidate_evidence(
     candidate_evidence_id`` / ``import_jobs.candidate_evidence_id``).
     Omitting both still persists the content-addressed evidence row, but
     triage's FK walk won't find it — pass whichever IDs the call site has.
+
+    This is the one surface that enables the AAC frame-lattice capture
+    (issue #829 PR-A): the default supplies the real measurement, so every
+    producer of persisted candidate evidence captures it. The read-only
+    classify contract does NOT — ``preview_import_from_path`` calls
+    ``measure_preimport_state`` without a measure fn, because a synchronous
+    operator surface must not block on tens of seconds of CPU per track.
 
     Flow:
       1. Validate request / mbid / path inputs (return measurement_failed on
@@ -2156,6 +2166,7 @@ def measure_and_persist_candidate_evidence(
                 precomputed_inspection=inspection,
                 spectral_detail_analyzer=spectral_detail_analyzer,
                 existing_spectral_resolver=existing_spectral_resolver,
+                aac_lattice_measure_fn=aac_lattice_measure_fn,
             )
             _checkpoint(cancellation_token)
             if not reuse_have_evidence:

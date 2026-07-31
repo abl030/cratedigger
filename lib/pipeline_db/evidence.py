@@ -379,9 +379,9 @@ class _EvidenceMixin(_PipelineDBBase):
                         EXCLUDED.matched_bad_audio_hash_path,
                     -- issue #829 AAC-lattice leg PR-A: the lattice is one
                     -- atomic fact across five columns, and an expensive
-                    -- once-per-content measurement (~49 s of CPU per track),
-                    -- so it follows the V0 tuple's guard rather than the
-                    -- spectral one: a writer that carries no lattice
+                    -- once-per-content measurement (tens of seconds of CPU
+                    -- per track), so it follows the V0 tuple's guard rather
+                    -- than the spectral one: a writer that carries no lattice
                     -- preserves the stored one wholesale, and a writer that
                     -- carries one replaces it wholesale. The measurement is
                     -- gated on the spectral grade, so a same-snapshot
@@ -508,10 +508,10 @@ class _EvidenceMixin(_PipelineDBBase):
                 evidence.matched_bad_audio_hash_id,
                 evidence.matched_bad_audio_hash_path,
                 aac_lattice_tracks_json,
-                lattice.modal_offset if lattice else None,
-                lattice.modal_count if lattice else None,
-                lattice.scored_tracks if lattice else None,
-                lattice.max_z if lattice else None,
+                lattice.modal_offset if lattice is not None else None,
+                lattice.modal_count if lattice is not None else None,
+                lattice.scored_tracks if lattice is not None else None,
+                lattice.max_z if lattice is not None else None,
                 preserve_existing_audio_validation,
                 json.dumps(file_rows),
             ),

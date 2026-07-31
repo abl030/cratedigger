@@ -6619,7 +6619,7 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
     def test_upsert_without_a_lattice_preserves_the_stored_capture(self):
         """The lattice follows the V0 tuple's guard, not the spectral one: a
         same-address writer that never ran the cohort gate must not erase a
-        ~49 s/track measurement taken on the exact same bytes."""
+        tens-of-seconds-per-track measurement of the exact same bytes."""
         from lib.quality import AacLatticeCapture, AacLatticeTrackScore
 
         capture = AacLatticeCapture.from_tracks([

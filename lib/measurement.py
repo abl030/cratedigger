@@ -39,6 +39,7 @@ from lib.json_narrow import json_list as _json_list
 _BAD_HASH_SUPPORTED_EXTS: frozenset[str] = frozenset({"flac", "mp3", "m4a", "aac", "ogg", "opus"})
 from lib.pipeline_db import RequestSpectralStateUpdate
 from lib.quality import (
+    AacLatticeCapture,
     AudioValidationMeasurementError,
     AudioValidationReport,
     CodecFamily,
@@ -66,6 +67,33 @@ def spectral_analyze(folder: str, trim_seconds: int = 30) -> Any:
     """
     from lib.spectral_check import analyze_album
     return analyze_album(folder, trim_seconds=trim_seconds)
+
+
+def measure_aac_lattice(folder: str) -> AacLatticeCapture:
+    """Proxy to aac_lattice.measure_album_aac_lattice (lazy import).
+
+    Lazy for the same reason ``spectral_analyze`` is: it keeps numpy and the
+    detector's per-rate table construction out of the import-time footprint
+    of every web request, CLI invocation, and pipeline cycle that never
+    measures a lattice.
+    """
+    from lib.aac_lattice import measure_album_aac_lattice
+    return measure_album_aac_lattice(folder)
+
+
+AacLatticeMeasureFn = Callable[[str], AacLatticeCapture]
+
+# The promotion-plausible cohort, and the ONLY reason this expensive
+# measurement is gated at all (issue #829 AAC-lattice leg, design comment
+# https://github.com/abl030/cratedigger/issues/829#issuecomment-5144283616):
+# an AAC launder that survives the spectral gate is exactly the album the
+# lattice can still see. Album grades are today genuine/suspect/
+# likely_transcode/error, so this reads as "spectrally clean"; ``marginal``
+# is listed because the per-track vocabulary carries it and an album grade
+# must never silently fall out of the gated cohort if it ever surfaces.
+AAC_LATTICE_GATED_SPECTRAL_GRADES: frozenset[str] = frozenset(
+    {"genuine", "marginal"}
+)
 
 
 def analyze_spectral_audit_path(path: str) -> SpectralAnalysisDetail:
@@ -311,6 +339,10 @@ class PreimportMeasurement(msgspec.Struct, frozen=True):
     min_bitrate_kbps: int | None = None
     is_vbr: bool | None = None
     spectral_audit: SpectralDetail = msgspec.field(default_factory=SpectralDetail)
+    # issue #829 AAC-lattice leg PR-A. None means the cohort gate did not
+    # fire (or the measurement itself failed outright); a capture with
+    # ``scored_tracks == 0`` means it ran and nothing scored.
+    aac_lattice: AacLatticeCapture | None = None
 
 
 AUDIO_EXTS = ("mp3", "flac", "alac", "m4a", "ogg", "opus", "wav", "aac")
@@ -657,6 +689,7 @@ def measure_preimport_state(
     precomputed_inspection: LocalFileInspection | None = None,
     spectral_detail_analyzer: SpectralDetailAnalyzer | None = None,
     existing_spectral_resolver: ExistingSpectralResolver | None = None,
+    aac_lattice_measure_fn: AacLatticeMeasureFn | None = None,
 ) -> PreimportMeasurement:
     """Collect pre-import measurement facts. Returns ``PreimportMeasurement``.
 
@@ -692,6 +725,13 @@ def measure_preimport_state(
             row to the exact current release and established snapshot and
             proved its spectral grade decision-usable. Re-project it without
             another HAVE lookup or analyzer call.
+        aac_lattice_measure_fn: Supplying this ENABLES the AAC frame-lattice
+            capture (issue #829 PR-A); the default ``None`` measures nothing.
+            Opt-in because the measurement costs tens of seconds of CPU per
+            track: the measure-and-persist evidence producer supplies it, and
+            the read-only classify contract (wrong-match triage UI, CLI
+            inspection) deliberately does not — those are synchronous
+            operator surfaces that must not block on it.
 
     Returns:
         PreimportMeasurement with all gate facts populated. Audio-corrupt and
@@ -945,6 +985,32 @@ def measure_preimport_state(
         if download_spectral is not None:
             existing_min_bitrate = measured_existing_min
             existing_spectral = measured_existing
+
+    # --- AAC MDCT frame-lattice capture (issue #829 AAC-lattice leg PR-A) ---
+    # THE cohort gate: lossless containers whose album spectral grade came
+    # back clean. That is the only cohort where the lattice can still change
+    # anything — an Apple CVBR-256 launder is spectrally invisible by
+    # construction, which is precisely why this detector exists — and the
+    # only cohort worth tens of seconds of CPU per track on the serial
+    # preview worker. A caller that supplies no measure fn measures nothing.
+    # Capture-only in PR-A: nothing reads ``aac_lattice`` to decide anything.
+    aac_lattice: AacLatticeCapture | None = None
+    if (
+        aac_lattice_measure_fn is not None
+        and lossless_candidate
+        and download_spectral is not None
+        and download_spectral.grade in AAC_LATTICE_GATED_SPECTRAL_GRADES
+    ):
+        try:
+            aac_lattice = aac_lattice_measure_fn(path)
+        except Exception:
+            # Invariant A-I4. Per-track failures are already recorded as
+            # evidence inside the measurement; this is the composition guard
+            # for a failure of the measurement itself, which must cost the
+            # album its lattice and nothing else.
+            logger.exception("AAC LATTICE: measurement failed for %s", path)
+            aac_lattice = None
+
     if not (spectral_audit.candidate and spectral_audit.candidate.attempted):
         # Normal harness-bound codecs collect the candidate inside
         # import_one.py before conversion. Fill only HAVE here so the attempt
@@ -999,4 +1065,5 @@ def measure_preimport_state(
         min_bitrate_kbps=min_bitrate_kbps,
         is_vbr=download_is_vbr,
         spectral_audit=spectral_audit,
+        aac_lattice=aac_lattice,
     )

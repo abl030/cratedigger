@@ -435,6 +435,56 @@ zero from a run without them is not evidence:
   installed, and no branch that compares against a HAVE — including the
   provisional lane's confident rejects — is reachable at all.
 
+## AAC frame-lattice capture (issue #829 AAC-lattice leg, PR-A)
+
+**Capture only. No decision reads it.** PR-B owns the proof leg and the
+semantics; this section documents what is measured and where it is stored.
+
+Every spectral leg above measures the *shape of the spectrum*, and the
+Apple/CoreAudio family defeats all of them by applying essentially no
+lowpass in the measured band. The Derrien detector measures something
+else entirely: AAC quantises MDCT coefficients on a fixed 1024-sample
+frame grid, and re-analysing the decoded PCM at the *right* offset
+recovers scalefactor-band structure that audio which was never
+AAC-encoded does not have. A genuine file's sweep over all 1024 candidate
+offsets is flat; an AAC-derived file's sweep spikes at the true offset.
+qaac/CoreAudio primes 2112 samples, so its lattice lands at
+`1024 - (2112 mod 1024) = 960`; ffmpeg's native AAC primes 1024 samples
+and lands at 0; a genuine album's tracks share no such constant.
+
+`lib/aac_lattice.py` is the typed production port of
+`docs/research/calibration-data/derrien/aacdet.py.frozen`, held to that
+frozen port's own mathematical self-validation by
+`tests/test_aac_lattice.py`. It computes `mode=high` frame selection only
+and drops the NAC probe — both measured dead in
+`docs/research/calibration-data/derrien-refinement/`. numpy is a
+production dependency for it; scipy deliberately is not (`erfinv` is
+bisection over `math.erf`).
+
+**The cohort gate is a cost decision, not a policy one.** The measurement
+costs on the order of tens of seconds of CPU per track, so
+`lib/measurement.py::measure_preimport_state` runs it only when the
+candidate fileset contains lossless containers AND the album spectral
+grade is `genuine`/`marginal` — the promotion-plausible cohort, which is
+exactly where an AAC launder that already survived every spectral leg
+would be. Tracks are selected in sorted relative-path order and scoring
+stops at 6 successful tracks.
+
+**A detector failure is evidence, never a failure of the preview job.**
+96 kHz input has no scalefactor-band table at all and cannot be scored;
+that, an undecodable file, and any detector exception are recorded per
+track. A failure of the measurement itself is logged and costs the album
+its lattice and nothing else.
+
+Persistence (`album_quality_evidence`, migration 069): `aac_lattice_tracks`
+is the per-track JSONB array (filename plus `offset`/`z`/`proba`, or an
+`error` string); `aac_lattice_modal_offset`, `aac_lattice_modal_count`,
+`aac_lattice_scored_tracks` and `aac_lattice_max_z` are the album
+statistics broken out for SQL. NULL across all five means **never
+measured**; `aac_lattice_scored_tracks = 0` means **measured and nothing
+scored**. The capture follows the V0 tuple's preserve guard — a
+same-address writer that never ran the cohort gate does not erase it.
+
 ### Tuning results (Mountain Goats library, 65 albums) — HISTORICAL
 
 Tested across the entire Mountain Goats catalogue — a worst-case scenario as the band's early work (1991-2000) was recorded on boomboxes and cassette recorders with genuinely minimal high-frequency content.

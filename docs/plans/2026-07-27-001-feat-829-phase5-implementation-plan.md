@@ -549,6 +549,66 @@ Consequences PR3 must implement, not discover:
 4. Fresh imports are unaffected — they capture the source-side statistic at
    import time, which is exactly what PR1 wired up.
 
+### PR-A / PR-B — the AAC-lattice leg (inserted between PR3 and PR4)
+
+Authority: operator sequencing decision 2026-07-31 —
+https://github.com/abl030/cratedigger/issues/829#issuecomment-5144197510
+("Next in the agreed sequence: the Derrien offset-concentration leg PR pair")
+and the design + invariants comment
+https://github.com/abl030/cratedigger/issues/829#issuecomment-5144283616.
+
+Evidence base: `docs/research/calibration-data/derrien-refinement/` — the
+offset-concentration rule is the only statistic in that research whose
+false-positive rate is a *calculation* (~0.0023 albums per 5000) rather than a
+fitted threshold, and it closes the entire Apple/CoreAudio family the spectral
+gate genuinely cannot see. `docs/research/calibration-data/derrien/` holds the
+validated detector port and its reference validation.
+
+#### PR-A — detector port + measurement capture (no decision change)
+
+- Port `derrien/aacdet.py.frozen` to a typed production module
+  (`lib/aac_lattice.py`). `mode=high` only and no NAC probe — both measured
+  dead by the refinement thread's conclusion 4. numpy joins the production
+  closure; scipy does not (`erfinv` is bisection over `math.erf`).
+- **Measurement gating is a COST decision, never a policy one:** measure only
+  the promotion-plausible cohort — the candidate fileset contains lossless
+  containers AND the album spectral grade is genuine/marginal. Deterministic
+  track selection (sorted relative paths), at most **6 scored tracks** (the
+  k>=4 rule needs 4 coincident; the rest is headroom for per-track errors).
+  The gate lives at exactly one site,
+  `lib/measurement.py::measure_preimport_state`.
+- 96 kHz tracks, undecodable files, and detector exceptions record a per-track
+  error and are skipped. A detector failure NEVER fails the preview job.
+- Persistence: migration 069 adds `aac_lattice_tracks` (JSONB) plus
+  `aac_lattice_modal_offset` / `_modal_count` / `_scored_tracks` / `_max_z`.
+  NULL everywhere means never measured; `scored_tracks = 0` means measured and
+  nothing scored. The capture follows the V0 tuple's preserve guard, not the
+  spectral one.
+- **No decision change anywhere**, no operator-facing display, no CLI/API
+  surface — nothing operator-actionable exists until PR-B.
+- Invariants (each pin + generated property + known-bad self-test):
+  **A-I1** capture inertness; **A-I2** detector fidelity against the frozen
+  port's own self-validation; **A-I3** real-PG round trip (Rule A);
+  **A-I4** failure isolation.
+
+#### PR-B — the decider seam (operator-held merge)
+
+- Pure `aac_lattice_proof_leg`: **denied** when >= 4 scored tracks share one
+  offset (or `max_z > 12`), **passed** when adjudicated clean, **withheld** on
+  insufficient evidence. Authority is the PROOF only, never the lane — PR3's
+  V5 invariant applies from birth.
+- Classifier composition: v4 when both the lattice and ultrasonic legs
+  adjudicated and passed; v3 when only ultrasonic; the base name otherwise.
+  Existing proofs untouched (never retroactively demote, per §2).
+- Invariants: **B-I1** proof-not-lane; **B-I2** subtract-only (a withheld leg
+  leaves the whole decision bit-identical); **B-I3** classifier honesty.
+- **Live validation before PR-B merges:** drive production measurement over
+  corpus albums 8916-8935 (held on disk for exactly this — see §1.6) and
+  compare recovered offsets against the committed research values for the same
+  albums, plus a locally-built ffmpeg-AAC launder as the positive control.
+  Identify the 1/115 wild-arm quarantine folder that hit k>=4 while there.
+- **Quality core: fable/opus review, merge held for operator approval.**
+
 ### PR4 — Tiered verdict persistence + display semantics
 
 - Persist the **fired-leg set** and derived tier, not just the boolean.

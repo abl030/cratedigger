@@ -39,9 +39,12 @@ Two further deliberate differences from the frozen port:
   The [-1, 1) normalisation libsndfile applied is reproduced exactly, which
   matters: the power-law quantisation lattice is NOT scale-invariant.
 
-Cost: roughly 49 s of CPU per track at the shipped ``nb_win=8`` /
-``nb_sf=8``, single-threaded (measured, ``derrien/README.md`` § Cost). Callers
-own the cohort gate and the per-album track cap.
+Cost: tens of seconds of CPU per track at the shipped ``nb_win=8`` /
+``nb_sf=8``. The research run recorded roughly 49 s/track single-threaded
+under 24-way contention (``derrien/README.md`` § Cost); an uncontended run
+with numpy free to thread is faster, but nothing here should be tuned on that
+— the cohort gate and the per-album track cap belong to the caller and are
+what actually bound the cost.
 
 Requires: ffmpeg in PATH.
 """
@@ -108,8 +111,8 @@ _REF_PROBA = 1e-2
 
 # Per-album cap. The offset-concentration rule needs 4 tracks recovering one
 # offset (derrien-refinement/README.md § "The offset-concentration rule"); 6
-# leaves headroom for per-track errors without paying for a whole album at
-# ~49 s/track.
+# leaves headroom for per-track errors without paying for a whole album's
+# worth of a tens-of-seconds-per-track measurement.
 MAX_SCORED_TRACKS = 6
 
 _DECODE_TIMEOUT_SECONDS = 300
