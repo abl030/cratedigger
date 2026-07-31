@@ -87,6 +87,7 @@ from lib.quality import (
     SpectralDetail,
     TargetQualityContract,
     V0ProbeEvidence,
+    album_ultrasonic_proof_leg,
     bounded_audio_tool_diagnostic,
     build_existing_quality_measurement,
     comparison_basis_from_decision,
@@ -2269,6 +2270,7 @@ def main():
     # verified-lossless. Look at the original source directory (``args.path``)
     # — ``work_path`` has already been mutated by conversion so it contains
     # the V0 outputs alongside the kept FLAC originals.
+    _source_audio_files: list[str] = []
     try:
         source_dir: str = args.path
         _source_audio_files = [
@@ -2285,6 +2287,22 @@ def main():
     except OSError:
         has_lossy_passthrough = False
 
+    # The v3 ultrasonic proof leg (issue #829 Phase 5 PR3). The subject is
+    # stated as the SOURCE with no conversion lineage because that is
+    # literally what was measured: ``collect_attempt_spectral_audit`` ran
+    # over the downloaded folder in this process, before any conversion.
+    # An unreadable source directory leaves no containers, which resolves
+    # to an unknown decode path and withholds the leg — fail closed.
+    candidate_ultrasonic_leg = album_ultrasonic_proof_leg(
+        ultrasonic_deficit_db=spectral_ultrasonic_deficit_db,
+        spectral_measurement_version=spectral_measurement_version,
+        spectral_subject=EVIDENCE_SUBJECT_SOURCE,
+        was_converted_from=None,
+        container_labels=[
+            os.path.splitext(f)[1] for f in _source_audio_files
+        ],
+    )
+
     # Verified lossless: single source of truth in quality.py. r.v0_probe is
     # populated above (lossless source path) and lets the V0-avg trust
     # override flip a spectral suspect/likely_transcode sparse-HF lossless
@@ -2292,7 +2310,8 @@ def main():
     will_be_verified_lossless = determine_verified_lossless(
         args.target_format, spectral_grade, converted, is_transcode,
         v0_probe=r.v0_probe,
-        has_lossy_passthrough=has_lossy_passthrough)
+        has_lossy_passthrough=has_lossy_passthrough,
+        ultrasonic_leg=candidate_ultrasonic_leg)
     v0_verified_lossless_override = (
         will_be_verified_lossless
         and spectral_grade in SPECTRAL_TRANSCODE_GRADES
@@ -2363,6 +2382,7 @@ def main():
         was_converted_from=r.conversion.original_filetype,
         detected_source_format=source_format,
         spectral_grade=spectral_grade,
+        ultrasonic_leg=candidate_ultrasonic_leg,
     )
     r.current_measurement = existing_m
     r.target_quality_contract = target_contract

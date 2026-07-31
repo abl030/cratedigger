@@ -36,6 +36,10 @@ actually trips on a planted violation:
 10. A class derived from the legacy stored column is always a
     ``LAME_LOWPASS`` member — a container bitrate parked in that column
     never becomes a ladder class.
+11. The decode-path resolution IS ``lib/spectral_check.py``'s own
+    sox-versus-ffmpeg routing, and an unrecognised label never gets a
+    path invented for it. This is what makes the ultrasonic proof
+    threshold's decode-path scope honest (issue #829 Phase 5 PR3).
 
 Checkers that would otherwise need a mutated production module take their
 dependency as a keyword-only argument defaulting to the real function
@@ -71,6 +75,7 @@ from lib.quality import (
     ladder_class_kbps,
     resolve_measured_codec_family,
     spectral_classes_comparable,
+    spectral_decode_path_for_container,
 )
 
 Comparator = Callable[
@@ -1538,6 +1543,130 @@ class TestStoredBucketIsAlwaysALameBucket(unittest.TestCase):
                 interpret_spectral_evidence(facts)
             )
         )
+
+
+# ---------------------------------------------------------------------------
+# Invariant 11: the decode-path resolution IS the analyzer's own routing.
+#
+# Issue #829 Phase 5 PR3 scopes the ultrasonic proof threshold to the
+# sox-native decode path, because the same bits read +3.09 dB through
+# ``_ffmpeg_to_wav`` at 48kHz — more than the gate's whole 2.05 dB margin.
+# That scope is only honest if this module's idea of "sox-native" is the
+# analyzer's idea of "sox-native", which is why the two share ONE routing
+# table. The property drives that identity over every label the live
+# corpus and the junk tail can produce.
+# ---------------------------------------------------------------------------
+
+PathResolver = Callable[["str | None"], "str | None"]
+
+
+def decode_path_matches_the_analyzers_router(
+    label: "str | None",
+    *,
+    resolver: PathResolver = spectral_decode_path_for_container,
+) -> bool:
+    """Invariant checker: a container resolves to ``sox_native`` exactly
+    when ``lib/spectral_check.py`` would decode it with sox directly, and
+    a resolution is never invented for a label that names no container.
+
+    The oracle reads the ANALYZER's own routing set, not this module's
+    derived token set, so a mutant that widened either one apart from the
+    other is caught rather than confirmed.
+
+    ``resolver`` is injectable ONLY so the known-bad self-tests can plant
+    a drifted router; production always uses the default.
+    """
+    from lib.spectral_check import _SOX_NATIVE_EXTS
+
+    resolved = resolver(label)
+    if resolved not in (None, "sox_native", "ffmpeg_resampled"):
+        return False
+    if label is None:
+        return resolved is None
+    token = label.strip().lower().split()[0].lstrip(".") if label.strip() else ""
+    if not token:
+        return resolved is None
+    if f".{token}" in _SOX_NATIVE_EXTS:
+        return resolved == "sox_native"
+    # Not sox-native: either a container the analyzer sends through
+    # ffmpeg, or a label naming no container at all. Never sox_native.
+    return resolved != "sox_native"
+
+
+def _decoy_resolver_treats_m4a_as_sox_native(
+    label: "str | None",
+) -> "str | None":
+    """The drift that matters: ALAC in ``.m4a`` is lossless, so it is
+    tempting to group it with FLAC. sox cannot open it — the analyzer
+    resamples it to 48kHz, which is the +3.09 dB skew. Used only to prove
+    the checker trips."""
+    if label is not None and label.strip().lower().lstrip(".") in (
+        "m4a", "alac", "mp4",
+    ):
+        return "sox_native"
+    return spectral_decode_path_for_container(label)
+
+
+def _decoy_resolver_guesses_a_path_for_an_unknown_label(
+    label: "str | None",
+) -> "str | None":
+    """Fail-open: assume anything unrecognised went through ffmpeg. That
+    turns "we do not know which instrument measured this" into a claim,
+    and the whole point of the scope is that an unknown instrument gates
+    nothing. Used only to prove the checker trips."""
+    resolved = spectral_decode_path_for_container(label)
+    return "ffmpeg_resampled" if resolved is None else resolved
+
+
+class TestDecodePathCheckerSelfTest(unittest.TestCase):
+    """Known-bad self-tests for the decode-path invariant."""
+
+    def test_checker_passes_for_the_real_resolver(self):
+        for label in ("flac", "m4a", "opus", None, "", "shorten"):
+            with self.subTest(label=label):
+                self.assertTrue(
+                    decode_path_matches_the_analyzers_router(label)
+                )
+
+    def test_checker_trips_when_m4a_is_called_sox_native(self):
+        self.assertFalse(
+            decode_path_matches_the_analyzers_router(
+                "m4a", resolver=_decoy_resolver_treats_m4a_as_sox_native,
+            )
+        )
+
+    def test_checker_trips_when_an_unknown_label_gets_a_path(self):
+        self.assertFalse(
+            decode_path_matches_the_analyzers_router(
+                None,
+                resolver=_decoy_resolver_guesses_a_path_for_an_unknown_label,
+            )
+        )
+
+
+class TestDecodePathMatchesTheAnalyzersRouter(unittest.TestCase):
+    """Pin + generated property. The deterministic container table lives in
+    ``tests/test_spectral_interpretation.py::TestSpectralDecodePathResolution``.
+    """
+
+    def test_pin_the_two_containers_the_skew_was_measured_on(self):
+        """Request 8923's ALAC control against an ordinary FLAC: the two
+        instruments the +3.09 dB skew was isolated between."""
+        self.assertEqual(
+            spectral_decode_path_for_container("flac"), "sox_native",
+        )
+        self.assertEqual(
+            spectral_decode_path_for_container("alac"), "ffmpeg_resampled",
+        )
+
+    @given(label=st.one_of(st.none(), st.sampled_from(_FORMAT_LABELS)))
+    @example(label="flac")
+    @example(label="m4a")
+    @example(label="alac")
+    @example(label="ogg")
+    @example(label=None)
+    def test_across_generated_worlds(self, label):
+        self.assertTrue(decode_path_matches_the_analyzers_router(label))
 
 
 if __name__ == "__main__":

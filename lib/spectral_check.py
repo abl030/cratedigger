@@ -25,6 +25,7 @@ from lib.quality import (
     CODEC_FAMILY_OPUS,
     CODEC_FAMILY_OTHER,
     CODEC_FAMILY_VORBIS,
+    SOX_NATIVE_AUDIO_EXTENSIONS,
     CodecFamily,
 )
 
@@ -432,9 +433,13 @@ def aggregate_album_spectral_capture(
 # Extensions sox can decode natively in our nix shell (see `sox --help`).
 # Anything outside this set must be transcoded via ffmpeg first or sox will
 # emit "FAIL formats: no handler for file extension X" and produce no RMS.
-_SOX_NATIVE_EXTS: frozenset[str] = frozenset({
-    ".mp3", ".flac", ".ogg", ".opus", ".wav", ".aif", ".aiff", ".au",
-})
+#
+# The set itself lives in ``lib/quality/filetypes.py``: it became a
+# DECISION input in issue #829 Phase 5 PR3 (the ultrasonic proof leg's
+# threshold is scoped to the sox-native decode path, because the same bits
+# read +3.09 dB through ``_ffmpeg_to_wav``). One definition, so the router
+# below and the threshold's scope cannot drift apart.
+_SOX_NATIVE_EXTS: frozenset[str] = SOX_NATIVE_AUDIO_EXTENSIONS
 
 
 class _DecodeFailedError(Exception):

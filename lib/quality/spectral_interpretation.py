@@ -132,6 +132,7 @@ branch that shape lands in is never reached by an interpretation. Recorded
 here so it does not get re-litigated.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import cache
 from typing import Literal
@@ -149,6 +150,7 @@ from lib.quality.evidence_types import (
     CodecFamily,
     EvidenceSubject,
 )
+from lib.quality.filetypes import SOX_NATIVE_AUDIO_EXTENSIONS
 
 # ---------------------------------------------------------------------------
 # Measured constants. Four arms, 60,102 measurements. Do not adjust.
@@ -251,6 +253,15 @@ SpectralComparabilityReason = Literal[
     "cross_codec_legacy_bucket",
 ]
 
+#: Which decoder produced a spectral measurement. NOT a cosmetic detail:
+#: ``ultrasonic_deficit_db`` is not comparable across the two, so the
+#: proof leg's threshold is scoped by it (issue #829 Phase 5 plan §1.5c).
+SpectralDecodePath = Literal["sox_native", "ffmpeg_resampled"]
+SPECTRAL_DECODE_PATH_SOX_NATIVE: SpectralDecodePath = "sox_native"
+SPECTRAL_DECODE_PATH_FFMPEG_RESAMPLED: SpectralDecodePath = (
+    "ffmpeg_resampled"
+)
+
 REASON_LADDER_CLASS_FROM_CLIFF: SpectralInterpretationReason = (
     "ladder_class_from_cliff"
 )
@@ -347,6 +358,14 @@ class SpectralCodecContext:
 
     Every field is consumed by ``resolve_measured_codec_family``,
     ``interpret_spectral_cliff`` or the ultrasonic proof leg.
+
+    The last three are the proof-leg facts (issue #829 Phase 5 PR3). They
+    are NOT passed to ``facts()``: codec interpretation does not read
+    them, and a field that reaches an interpreter that ignores it is the
+    inert plumbing PR3 deleted elsewhere in this module.
+    ``spectral_decode_path`` is resolved by the adapter that holds the
+    real containers (``resolve_spectral_decode_path``), never re-derived
+    from the format label a decision path may have defaulted.
     """
 
     codec_family: CodecFamily | None = None
@@ -355,6 +374,9 @@ class SpectralCodecContext:
     storage_format: str | None = None
     spectral_subject: EvidenceSubject | None = None
     was_converted_from: str | None = None
+    ultrasonic_deficit_db: float | None = None
+    spectral_measurement_version: int | None = None
+    spectral_decode_path: SpectralDecodePath | None = None
 
     def interpret(
         self,
@@ -520,6 +542,81 @@ def is_mixed_codec_album(filetype_band: str) -> bool:
     if not band:
         return False
     return "," in band or band in _MIXED_FILETYPE_BANDS
+
+
+#: Bare container tokens sox decodes natively, derived from the ONE
+#: routing table in ``lib/quality/filetypes.py`` (which
+#: ``lib/spectral_check.py`` also consumes). Deriving rather than
+#: restating is load-bearing: the router and the ultrasonic threshold's
+#: scope must never be able to drift apart.
+_SOX_NATIVE_CONTAINER_TOKENS: frozenset[str] = frozenset(
+    ext.lstrip(".") for ext in SOX_NATIVE_AUDIO_EXTENSIONS
+)
+
+
+def spectral_decode_path_for_container(
+    label: str | None,
+) -> SpectralDecodePath | None:
+    """Which decoder ``lib/spectral_check.py`` routes this container to.
+
+    ``None`` is an explicit unknown — an empty, ambiguous or unrecognised
+    label. ``m4a``/``mp4``/``ogg``/``oga`` are NOT ambiguous for this
+    question the way they are for codec family: ``analyze_track`` routes
+    purely on the file extension, so ``.ogg`` is sox-native whether it
+    holds Vorbis or Opus and ``.m4a`` is ffmpeg-routed whether it holds
+    AAC or ALAC. Only a label naming no container at all is unknown.
+    """
+    token = _normalise_format_token(label)
+    if token is None:
+        return None
+    if token in _SOX_NATIVE_CONTAINER_TOKENS:
+        return SPECTRAL_DECODE_PATH_SOX_NATIVE
+    if token in _FORMAT_TOKEN_TO_FAMILY or token in _AMBIGUOUS_FORMAT_TOKENS:
+        # A container we recognise and sox cannot open natively: the
+        # analyzer decodes it through ``_ffmpeg_to_wav`` at 48kHz.
+        return SPECTRAL_DECODE_PATH_FFMPEG_RESAMPLED
+    return None
+
+
+def resolve_spectral_decode_path(
+    *,
+    spectral_subject: EvidenceSubject | None,
+    was_converted_from: str | None,
+    container_labels: Sequence[str],
+) -> SpectralDecodePath | None:
+    """Which decode path produced this row's spectral measurement.
+
+    The container axis of the same measured-subject ladder
+    ``resolve_measured_codec_family`` walks, and it needs its own walk:
+    ``codec_family`` short-circuits that ladder, and one family spans
+    several containers with different decoders (``lossless`` covers
+    sox-native ``.flac``/``.wav`` AND ffmpeg-routed ``.m4a`` ALAC). The
+    PR1-captured rows that carry an ``ultrasonic_deficit_db`` at all are
+    exactly the rows that short-circuit, so reusing the family resolution
+    would answer "unknown" for every row this matters for.
+
+    Two cases, mirroring the family ladder:
+
+    * A converted row wearing its SOURCE's spectral under R19
+      (``spectral_subject='source'`` and ``was_converted_from`` set) was
+      measured on the SOURCE container, not on the files now on disk.
+      This is the common case: 15,399 of 15,547 live proofs carry
+      ``spectral_provenance='carried'``.
+    * Otherwise the measured subject IS the snapshot, so its own file
+      containers answer. They must all agree; a mixed fileset is an
+      explicit unknown rather than a first-file guess.
+
+    ``None`` means "cannot be established" and is the fail-closed answer.
+    """
+    if spectral_subject == EVIDENCE_SUBJECT_SOURCE and was_converted_from:
+        return spectral_decode_path_for_container(was_converted_from)
+    paths: set[SpectralDecodePath | None] = {
+        spectral_decode_path_for_container(label)
+        for label in container_labels
+    }
+    if len(paths) != 1:
+        return None
+    return next(iter(paths))
 
 
 def resolve_measured_codec_family(
@@ -948,12 +1045,20 @@ def codec_context_from_measurement(
     *,
     storage_format: str | None = None,
     filetype_band: str = "",
+    container_labels: Sequence[str] = (),
 ) -> SpectralCodecContext:
     """Lift a measurement's codec-resolution fields into a context.
 
-    The adapter from a persisted ``AudioQualityMeasurement`` (plus the two
+    The adapter from a persisted ``AudioQualityMeasurement`` (plus the
     album-level fields that live on ``AlbumQualityEvidence``) to the one
     keyword ``full_pipeline_decision`` takes per side.
+
+    ``container_labels`` are the snapshot's own file containers. They
+    answer the ultrasonic proof leg's decode-path question for a row whose
+    spectral describes the files on disk; a converted row wearing its
+    source's spectral is answered by ``was_converted_from`` instead. A
+    caller that has no snapshot passes none, and the decode path stays an
+    explicit unknown — fail closed.
     """
     if measurement is None:
         return SpectralCodecContext(
@@ -967,6 +1072,15 @@ def codec_context_from_measurement(
         storage_format=storage_format,
         spectral_subject=measurement.spectral_subject,
         was_converted_from=measurement.was_converted_from,
+        ultrasonic_deficit_db=measurement.ultrasonic_deficit_db,
+        spectral_measurement_version=(
+            measurement.spectral_measurement_version
+        ),
+        spectral_decode_path=resolve_spectral_decode_path(
+            spectral_subject=measurement.spectral_subject,
+            was_converted_from=measurement.was_converted_from,
+            container_labels=container_labels,
+        ),
     )
 
 

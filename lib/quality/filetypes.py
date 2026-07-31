@@ -201,6 +201,23 @@ AUDIO_EXTENSIONS: frozenset[str] = frozenset(_EXT_TO_CODEC.keys())
 # Same but dotted (".mp3", ".flac", ".m4a", ...) for os.path.splitext consumers
 AUDIO_EXTENSIONS_DOTTED: frozenset[str] = frozenset(f".{e}" for e in AUDIO_EXTENSIONS)
 
+# Extensions sox decodes natively in our nix shell (see ``sox --help``).
+# Anything outside this set reaches the spectral analyzer through
+# ``lib/spectral_check.py::_ffmpeg_to_wav``, which resamples to 48kHz.
+#
+# This set lives HERE, not in ``lib/spectral_check.py``, because it is now
+# a DECISION input as well as a measurement detail: the ultrasonic proof
+# leg's threshold was calibrated against sox-native decodes only, and the
+# same bits measure +3.09 dB through the ffmpeg path (issue #829 Phase 5
+# plan §1.5c, isolated on request 8923's ALAC control) — more than the
+# gate's entire margin. ``lib.spectral_check`` imports it as its own
+# routing table and ``lib.quality.spectral_interpretation`` derives the
+# bare container tokens from it, so the router and the threshold's scope
+# can never drift apart.
+SOX_NATIVE_AUDIO_EXTENSIONS: frozenset[str] = frozenset({
+    ".mp3", ".flac", ".ogg", ".opus", ".wav", ".aif", ".aiff", ".au",
+})
+
 # Codecs that are lossless by definition
 LOSSLESS_CODECS: frozenset[str] = frozenset({"flac", "alac", "wav"})
 

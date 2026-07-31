@@ -642,6 +642,11 @@ def build_parity_candidate_evidence(
     cliff_hz: int | None = None,
     codec_family: CodecFamily | None = None,
     filetype_band: str | None = None,
+    ultrasonic_deficit_db: float | None = None,
+    spectral_measurement_version: int | None = 2,
+    was_converted_from: str | None = None,
+    lossless_container: str = "flac",
+    lossless_codec: str = "flac",
 ) -> AlbumQualityEvidence:
     """Build an ``AlbumQualityEvidence`` candidate row matching the
     simulator's flat-kwargs shape (post-U2/U3 schema).
@@ -656,14 +661,14 @@ def build_parity_candidate_evidence(
     # Conversion policy/output stay on the target contract and decision facts;
     # a temporary V0 probe must never make a FLAC source wear an MP3 label.
     if is_flac and post_conversion_min_bitrate is not None:
-        container = "flac"
-        codec = "flac"
-        storage_format = "flac"
+        container = lossless_container
+        codec = lossless_codec
+        storage_format = lossless_codec
         measurement = AudioQualityMeasurement(
             min_bitrate_kbps=min_bitrate or 900,
             avg_bitrate_kbps=min_bitrate or 900,
             median_bitrate_kbps=min_bitrate or 900,
-            format="FLAC",
+            format=lossless_codec.upper(),
             is_cbr=False,
             spectral_grade=spectral_grade,
             spectral_bitrate_kbps=spectral_bitrate,
@@ -676,13 +681,14 @@ def build_parity_candidate_evidence(
             ),
         )
     elif is_flac:
-        container = codec = "flac"
-        storage_format = "flac"
+        container = lossless_container
+        codec = lossless_codec
+        storage_format = lossless_codec
         measurement = AudioQualityMeasurement(
             min_bitrate_kbps=min_bitrate or 900,
             avg_bitrate_kbps=min_bitrate or 900,
             median_bitrate_kbps=min_bitrate or 900,
-            format="FLAC",
+            format=lossless_codec.upper(),
             is_cbr=False,
             spectral_grade=spectral_grade,
             spectral_bitrate_kbps=spectral_bitrate,
@@ -719,13 +725,21 @@ def build_parity_candidate_evidence(
     # three candidate shapes carry it identically; a row with no spectral
     # grade may not carry these facts at all (evidence-row validation).
     if spectral_grade is not None and (
-        cliff_hz is not None or codec_family is not None
+        cliff_hz is not None
+        or codec_family is not None
+        or ultrasonic_deficit_db is not None
+        or was_converted_from is not None
     ):
+        # ``spectral_measurement_version`` defaults to 2 (the PR1+ capture
+        # code) because that is what any producer of these facts stamps.
+        # A caller pins it to None to build the legacy world explicitly.
         measurement = msgspec.structs.replace(
             measurement,
             cliff_hz=cliff_hz,
             codec_family=codec_family,
-            spectral_measurement_version=2,
+            ultrasonic_deficit_db=ultrasonic_deficit_db,
+            was_converted_from=was_converted_from,
+            spectral_measurement_version=spectral_measurement_version,
         )
 
     v0_metric = None

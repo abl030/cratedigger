@@ -4,6 +4,7 @@ Extracted verbatim from the monolithic ``lib/quality.py`` (issue #477).
 Pure move: every definition is AST-identical to the original.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -14,9 +15,11 @@ from lib.quality.compare import compare_quality
 from lib.quality.evidence_types import (
     EVIDENCE_PROVENANCE_MEASURED,
     EVIDENCE_SUBJECT_INSTALLED,
+    EVIDENCE_SUBJECT_SOURCE,
     SPECTRAL_TRANSCODE_GRADES,
     AudioQualityMeasurement,
     CodecFamily,
+    EvidenceSubject,
     QualityComparisonBasis,
     TargetQualityContract,
     V0ProbeEvidence,
@@ -24,7 +27,12 @@ from lib.quality.evidence_types import (
     is_comparable_lossless_source_probe,
 )
 from lib.quality.ranks import QualityRank, QualityRankConfig, gate_rank
-from lib.quality.spectral_interpretation import SpectralInterpretation
+from lib.quality.spectral_interpretation import (
+    SPECTRAL_DECODE_PATH_SOX_NATIVE,
+    SpectralDecodePath,
+    SpectralInterpretation,
+    resolve_spectral_decode_path,
+)
 
 DECISION_PROVISIONAL_LOSSLESS_UPGRADE = "provisional_lossless_upgrade"
 DECISION_SUSPECT_LOSSLESS_DOWNGRADE = "suspect_lossless_downgrade"
@@ -592,6 +600,232 @@ V0_OVERRIDE_AVG_KBPS: int = 230
 V0_OVERRIDE_MIN_KBPS: int = 200
 
 
+# ---------------------------------------------------------------------------
+# Proof gate v3 — the ultrasonic deficit leg (issue #829 Phase 5 PR3)
+# ---------------------------------------------------------------------------
+
+#: Deny verified-lossless promotion when the album's level-invariant
+#: ultrasonic deficit reaches this many dB.
+#:
+#: FROZEN 2026-07-31 by re-running the frozen scorer's own leg logic
+#: (``docs/research/calibration-data/score_v3.py.frozen``, ``_window_legs``
+#: / ``gate``) over all four committed arms at production's SINGLE window
+#: 0 — the only window production measures. Ablation, cliff + ceiling +
+#: ultrasonic, 100 genuine controls and 300 FLAC-container launders:
+#:
+#:     T      leaked launders   genuine denied
+#:     57.0        0               43/100
+#:     59.5        0               34/100
+#:     61.5        0               28/100
+#:     62.0        1               26/100
+#:
+#: The binding minimum — the lowest ``U`` over launder albums where this
+#: leg is the LAST line — is 61.55 dB, so 59.5 carries 2.05 dB of
+#: headroom, and the whole table reproduces the Phase 5 plan §1.5b figure
+#: exactly. Raising it to 62 leaks a ROUND-3 vorbis-q5 launder; lowering
+#: it buys nothing and costs genuine albums.
+#:
+#: A denial is NOT a rejection. The album imports normally and simply
+#: carries no spectral verified-lossless proof, so it stays on the search
+#: surface (Phase 5 plan §2's authority; §1.7's claim).
+#:
+#: KNOWN RESIDUAL, measured in the same run: production evaluates only
+#: TWO of the frozen scorer's three legs — its cliff leg is the album
+#: spectral GRADE, and it has no ceiling leg, which needs per-track slice
+#: vectors production does not persist. Against that reduced leg set one
+#: launder of 300 survives at any threshold above 57.03 dB
+#: (TRAINING / ``t-vorbisq5-flac`` / Autechre, ``U=57.03``, caught by the
+#: ceiling leg alone). Dropping to 57.0 to catch it would leave 0.03 dB of
+#: headroom — a coincidence, not a margin — and deny 43 of 100 genuine
+#: controls instead of 34. It is recorded rather than chased: §1.7 already
+#: bounds the claim to "no evidence of lossy origin by the tests we have",
+#: and a ceiling leg is new capture, not PR3's scope.
+ULTRASONIC_PROOF_DENY_DEFICIT_DB: float = 59.5
+
+#: The ``spectral_measurement_version`` at which ``ultrasonic_deficit_db``
+#: began being measured at all (``lib/spectral_check.py``'s PR1 capture).
+#: A row below it did not fail to measure the statistic — the code that
+#: measures it had not shipped.
+ULTRASONIC_PROOF_MIN_MEASUREMENT_VERSION = 2
+
+UltrasonicProofOutcome = Literal["denied", "passed", "withheld"]
+
+UltrasonicProofReason = Literal[
+    # The leg adjudicated.
+    "deficit_below_threshold",
+    "deficit_at_or_above_threshold",
+    # The three distinct NULL states, deliberately never conflated.
+    "preserved_source_spectral",
+    "legacy_measurement",
+    "not_measured",
+    # Measured, but not on the scale the threshold was calibrated for.
+    "uncalibrated_decode_path",
+]
+
+
+@dataclass(frozen=True)
+class UltrasonicProofLeg:
+    """What the ultrasonic deficit leg asserts about one album (pure).
+
+    Three outcomes, and the difference between two of them is the whole
+    point:
+
+    * ``denied``   — the measured deficit reaches the frozen threshold.
+                     Withhold proof.
+    * ``passed``   — the leg ran on a comparable measurement and found no
+                     evidence of a laundered ultrasonic band.
+    * ``withheld`` — the leg could not run. It asserts NOTHING; promotion
+                     falls through to the pre-v3 rules exactly as before.
+
+    ``withheld`` must never be read as either evidence or denial. Most of
+    the library is in that state and always will be: the source of 6,273
+    proof rows was converted away and cannot be re-measured at any price
+    (Phase 5 plan §1.5a / the PR3 hard-constraint section).
+    """
+
+    outcome: UltrasonicProofOutcome
+    reason: UltrasonicProofReason
+    deficit_db: float | None = None
+
+    @property
+    def denies_promotion(self) -> bool:
+        return self.outcome == "denied"
+
+    @property
+    def proves_ultrasonic_content(self) -> bool:
+        return self.outcome == "passed"
+
+
+def ultrasonic_proof_leg(
+    *,
+    deficit_db: float | None,
+    spectral_measurement_version: int | None,
+    decode_path: "SpectralDecodePath | None",
+    preserved_source_spectral: bool,
+) -> UltrasonicProofLeg:
+    """Evaluate the v3 ultrasonic deficit leg for one album (pure).
+
+    ``U = mean_over_tracks[ref_db(1-4kHz) - mean(20.5-22kHz)]``, measured
+    by ``lib/spectral_check.py`` and persisted album-level. Normalising
+    against the album's own midband is what makes it comparable across
+    masters: in absolute dB a quiet record's genuine ultrasonic content is
+    indistinguishable from a loud record's launder leakage.
+
+    ``ultrasonic_deficit_db IS NULL`` is THREE different states and this
+    function is where they stop being one (Phase 5 plan, PR3 hard
+    constraint 1):
+
+    a. ``preserved_source_spectral`` — an R19 converted copy wearing its
+       source's spectral, measured before the statistic existed. The
+       source was converted away, so this row can never be re-measured on
+       any timescale. 6,273 proof rows, 6,251 albums.
+    b. ``legacy_measurement`` — measured before PR1's capture shipped.
+       Re-measurable in principle: the lossless files are still on disk
+       for 8,273 proof rows.
+    c. ``not_measured`` — the current measurement code ran and honestly
+       reported no value, because the 20.5-22kHz bands were outside the
+       file's Nyquist (any sox-native source below ~44.1kHz). Permanent
+       for those bytes, and NOT a measurement failure.
+
+    All three withhold, so the acquisition behaviour is identical; they
+    are separated because they are different facts about the world, they
+    are what a triage surface has to tell apart, and conflating them was
+    called out as mis-handling most of the library.
+
+    ``decode_path`` scoping (Phase 5 plan §1.5c) is the fourth
+    non-adjudicating case and the one that is easiest to get wrong: the
+    SAME BITS measure 50.26 dB through ``_ffmpeg_to_wav`` at 48kHz versus
+    47.17 dB sox-native at 44.1kHz — a +3.09 dB skew, larger than the
+    gate's entire 2.05 dB margin (isolated on request 8923, the only
+    ``was_converted_from='alac'`` control; the other 16 reproduce their
+    stored value to 1e-7). The threshold was frozen against sox-native
+    FLAC decodes, so a value from any other path is on a different scale
+    and this leg refuses to gate it. That refusal is the conservative
+    direction in both senses: it neither denies a genuine album on a
+    mis-scaled number nor lets one buy a v3 proof it did not earn.
+    """
+    if (
+        spectral_measurement_version is None
+        or spectral_measurement_version < ULTRASONIC_PROOF_MIN_MEASUREMENT_VERSION
+    ):
+        return UltrasonicProofLeg(
+            outcome="withheld",
+            reason=(
+                "preserved_source_spectral"
+                if preserved_source_spectral
+                else "legacy_measurement"
+            ),
+        )
+    if deficit_db is None:
+        return UltrasonicProofLeg(outcome="withheld", reason="not_measured")
+    if decode_path != SPECTRAL_DECODE_PATH_SOX_NATIVE:
+        return UltrasonicProofLeg(
+            outcome="withheld",
+            reason="uncalibrated_decode_path",
+            deficit_db=deficit_db,
+        )
+    if deficit_db >= ULTRASONIC_PROOF_DENY_DEFICIT_DB:
+        return UltrasonicProofLeg(
+            outcome="denied",
+            reason="deficit_at_or_above_threshold",
+            deficit_db=deficit_db,
+        )
+    return UltrasonicProofLeg(
+        outcome="passed",
+        reason="deficit_below_threshold",
+        deficit_db=deficit_db,
+    )
+
+
+def is_preserved_source_spectral(
+    spectral_subject: EvidenceSubject | None,
+    was_converted_from: str | None,
+) -> bool:
+    """Whether a spectral fact describes a copy's pre-conversion SOURCE.
+
+    The R19 shape and nothing else — the same predicate
+    ``resolve_measured_codec_family`` uses to know it is looking at a
+    converted row. Spelled once so the leg's NULL tristate cannot drift
+    from the codec resolver's idea of the same world.
+    """
+    return (
+        spectral_subject == EVIDENCE_SUBJECT_SOURCE
+        and was_converted_from is not None
+    )
+
+
+def album_ultrasonic_proof_leg(
+    *,
+    ultrasonic_deficit_db: float | None,
+    spectral_measurement_version: int | None,
+    spectral_subject: EvidenceSubject | None,
+    was_converted_from: str | None,
+    container_labels: "Sequence[str]",
+) -> UltrasonicProofLeg:
+    """Build the proof leg for a caller that holds the raw containers.
+
+    The harness's entry point: it has the source folder's real file
+    extensions but no ``SpectralCodecContext``. Resolves the decode path
+    from those containers and delegates. A caller that already carries a
+    resolved ``SpectralCodecContext`` (the decision twins) calls
+    ``ultrasonic_proof_leg`` with the context's own
+    ``spectral_decode_path`` instead — one resolver either way, so the two
+    entry points cannot answer the decode-path question differently.
+    """
+    return ultrasonic_proof_leg(
+        deficit_db=ultrasonic_deficit_db,
+        spectral_measurement_version=spectral_measurement_version,
+        decode_path=resolve_spectral_decode_path(
+            spectral_subject=spectral_subject,
+            was_converted_from=was_converted_from,
+            container_labels=container_labels,
+        ),
+        preserved_source_spectral=is_preserved_source_spectral(
+            spectral_subject, was_converted_from,
+        ),
+    )
+
+
 def v0_probe_overrides_spectral(probe: V0ProbeEvidence | None) -> bool:
     """Decide whether a V0 probe is strong enough to override a suspect
     spectral grade and certify the source as genuine lossless.
@@ -618,6 +852,7 @@ def determine_verified_lossless(
     v0_probe: V0ProbeEvidence | None = None,
     *,
     has_lossy_passthrough: bool = False,
+    ultrasonic_leg: UltrasonicProofLeg | None = None,
 ) -> bool:
     """Single source of truth for verified lossless status (pure).
 
@@ -641,8 +876,27 @@ def determine_verified_lossless(
     ``preimport_mixed_source`` in ``full_pipeline_decision_from_evidence``;
     this argument is the harness-side defense in depth so the persisted
     candidate measurement field is honest even on the never-imported row.
+
+    Proof gate v3 (``ultrasonic_leg``, issue #829 Phase 5 PR3): a
+    ``denied`` leg is a hard veto, ahead of every other rule INCLUDING
+    the V0-avg trust override. The ordering is deliberate. The V0 probe
+    was tuned to rescue spoken-word and other HF-poor lossless from a
+    false ``suspect`` grade; it is measured NOT to separate the
+    FLAC-container launder classes this leg exists to catch
+    (``docs/research/calibration-data/probe_pair.tsv.gz``, 5,670 files:
+    only mp3-128 separates, and the cliff leg already catches that one).
+    Letting the override outrank the leg would therefore reopen the exact
+    hole, in exchange for rescuing albums whose only cost is staying on
+    the search surface.
+
+    A ``withheld`` or absent leg changes nothing: every pre-v3 rule below
+    applies unchanged. Omitting the argument entirely is the pre-v3
+    behaviour by construction, which is what keeps a caller that has no
+    ultrasonic evidence — most of the library — exactly where it was.
     """
     if has_lossy_passthrough:
+        return False
+    if ultrasonic_leg is not None and ultrasonic_leg.denies_promotion:
         return False
     if spectral_grade in (None, "error"):
         return False
@@ -660,12 +914,23 @@ def determine_verified_lossless(
     return bool(converted_count > 0 and spectral_disagrees and v0_probe_overrides_spectral(v0_probe))
 
 
+#: The classifier a proof minted without the v3 ultrasonic leg carries —
+#: the cliff/grade gate alone, which is what every proof in the library
+#: before issue #829 Phase 5 PR3 was minted under.
+VERIFIED_LOSSLESS_CLASSIFIER = "spectral_verified_lossless"
+
+#: The classifier a proof carries when the v3 ultrasonic deficit leg
+#: actually RAN on a comparable measurement and found nothing.
+VERIFIED_LOSSLESS_CLASSIFIER_V3 = "spectral_verified_lossless_v3"
+
+
 def mint_verified_lossless_proof(
     will_be_verified_lossless: bool,
     *,
     was_converted_from: str | None,
     detected_source_format: str | None,
     spectral_grade: str | None,
+    ultrasonic_leg: UltrasonicProofLeg | None = None,
 ) -> VerifiedLosslessProof | None:
     """Mint the measured verified-lossless proof for a harness attempt (pure).
 
@@ -675,6 +940,25 @@ def mint_verified_lossless_proof(
     on-disk source format; both normalise to lowercase, and an undetectable
     format (``UNKNOWN``) falls through to the ``lossless_source`` sentinel
     rather than minting a proof sourced to "unknown".
+
+    ``classifier`` names WHICH MODEL proved the row, and issue #829 Phase
+    5 PR3 makes that distinction load-bearing rather than decorative. The
+    v3 name is minted only when the ultrasonic leg ADJUDICATED and passed
+    — not merely because v3 code ran. A leg that withheld (no measurement,
+    a legacy row, an R19 preserved source, an uncalibrated decode path)
+    proves nothing new, and stamping v3 on it would make the column mean
+    two things again, which is exactly the ambiguity it exists to remove.
+
+    The claim the v3 name carries is bounded (Phase 5 plan §1.7): "no
+    evidence of lossy origin was found by the tests we have", never "this
+    is bit-faithful to a lossless source". The named blind spot is the
+    Apple/CoreAudio family, which applies essentially no lowpass in the
+    measured band and which no spectral instrument separates.
+
+    ``spectral_measurement_version`` is deliberately NOT used as this
+    axis: it is a measurement-shape version, and 47 live proofs carry
+    version 2 while having been proved under the OLD gate — 7 of them
+    rows v3 denies.
     """
     if not will_be_verified_lossless:
         return None
@@ -686,10 +970,15 @@ def mint_verified_lossless_proof(
         or detected
         or "lossless_source"
     )
+    classifier = (
+        VERIFIED_LOSSLESS_CLASSIFIER_V3
+        if ultrasonic_leg is not None and ultrasonic_leg.proves_ultrasonic_content
+        else VERIFIED_LOSSLESS_CLASSIFIER
+    )
     return VerifiedLosslessProof(
         provenance=EVIDENCE_PROVENANCE_MEASURED,
         source=source,
-        classifier="spectral_verified_lossless",
+        classifier=classifier,
         detail=spectral_grade,
     )
 

@@ -29,7 +29,9 @@ from lib.quality import (
     is_mixed_codec_album,
     ladder_class_kbps,
     resolve_measured_codec_family,
+    resolve_spectral_decode_path,
     spectral_classes_comparable,
+    spectral_decode_path_for_container,
 )
 
 # ---------------------------------------------------------------------------
@@ -1073,6 +1075,106 @@ class TestEveryCodecFamilyIsRouted(unittest.TestCase):
                 )
                 self.assertEqual(result.semantics, expected[family])
                 self.assertEqual(result.codec_family, family)
+
+
+class TestSpectralDecodePathResolution(unittest.TestCase):
+    """Which decoder produced a spectral measurement (issue #829 Phase 5
+    PR3). Not a cosmetic detail: ``ultrasonic_deficit_db`` is not
+    comparable across the two paths — the SAME BITS measure 50.26 dB
+    through ``_ffmpeg_to_wav`` at 48kHz versus 47.17 dB sox-native at
+    44.1kHz, a +3.09 dB skew larger than the proof gate's whole 2.05 dB
+    margin (Phase 5 plan §1.5c, isolated on request 8923's ALAC control).
+    """
+
+    CONTAINER_CASES: ClassVar = [
+        # label, expected path
+        ("flac", "sox_native"),
+        ("FLAC", "sox_native"),
+        (".flac", "sox_native"),
+        ("wav", "sox_native"),
+        ("mp3", "sox_native"),
+        ("mp3 v0", "sox_native"),
+        ("opus", "sox_native"),
+        # Ambiguous for CODEC family, unambiguous for decode path:
+        # ``analyze_track`` routes purely on the extension.
+        ("ogg", "sox_native"),
+        ("m4a", "ffmpeg_resampled"),
+        ("mp4", "ffmpeg_resampled"),
+        ("alac", "ffmpeg_resampled"),
+        ("aac", "ffmpeg_resampled"),
+        ("wma", "ffmpeg_resampled"),
+        # No container named at all.
+        (None, None),
+        ("", None),
+        ("   ", None),
+        ("shorten", None),
+    ]
+
+    def test_container_table(self):
+        for label, expected in self.CONTAINER_CASES:
+            with self.subTest(label=label):
+                self.assertEqual(
+                    spectral_decode_path_for_container(label), expected,
+                )
+
+    def test_a_converted_row_answers_from_its_source_container(self):
+        """R19: an Opus copy wearing its source FLAC's spectral was
+        measured on the FLAC, not on the Opus now on disk. 15,399 of
+        15,547 live proofs are carried like this."""
+        self.assertEqual(
+            resolve_spectral_decode_path(
+                spectral_subject="source", was_converted_from="flac",
+                container_labels=["opus"],
+            ),
+            "sox_native",
+        )
+        self.assertEqual(
+            resolve_spectral_decode_path(
+                spectral_subject="source", was_converted_from="alac",
+                container_labels=["opus"],
+            ),
+            "ffmpeg_resampled",
+        )
+
+    def test_an_unconverted_row_answers_from_its_own_files(self):
+        self.assertEqual(
+            resolve_spectral_decode_path(
+                spectral_subject="source", was_converted_from=None,
+                container_labels=["flac", "flac"],
+            ),
+            "sox_native",
+        )
+        self.assertEqual(
+            resolve_spectral_decode_path(
+                spectral_subject="installed", was_converted_from=None,
+                container_labels=["m4a"],
+            ),
+            "ffmpeg_resampled",
+        )
+
+    def test_a_disagreeing_or_empty_fileset_fails_closed(self):
+        for labels in ([], ["flac", "m4a"], ["flac", "shorten"]):
+            with self.subTest(labels=labels):
+                self.assertIsNone(
+                    resolve_spectral_decode_path(
+                        spectral_subject="source", was_converted_from=None,
+                        container_labels=labels,
+                    )
+                )
+
+    def test_the_resolver_matches_the_analyzers_own_routing(self):
+        """The decision's scope and the analyzer's router are ONE table.
+        Reading ``lib/spectral_check.py``'s own routing set rather than
+        restating it is what makes that structural rather than a promise.
+        """
+        from lib.spectral_check import _SOX_NATIVE_EXTS
+
+        for ext in _SOX_NATIVE_EXTS:
+            with self.subTest(ext=ext):
+                self.assertEqual(
+                    spectral_decode_path_for_container(ext.lstrip(".")),
+                    "sox_native",
+                )
 
 
 if __name__ == "__main__":
