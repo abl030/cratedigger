@@ -809,8 +809,19 @@ def album_ultrasonic_proof_leg(
     from those containers and delegates. A caller that already carries a
     resolved ``SpectralCodecContext`` (the decision twins) calls
     ``ultrasonic_proof_leg`` with the context's own
-    ``spectral_decode_path`` instead — one resolver either way, so the two
-    entry points cannot answer the decode-path question differently.
+    ``spectral_decode_path`` instead.
+
+    Both paths run the SAME resolver (``resolve_spectral_decode_path``), so
+    the RULE cannot drift; the inputs differ, and that is worth stating
+    exactly rather than claiming the two can never disagree. The harness
+    lists the source directory non-recursively (``os.listdir`` filtered by
+    ``AUDIO_EXTENSIONS``); the decider reads the evidence snapshot, which
+    ``snapshot_audio_files`` walks recursively. The two file sets differ
+    only when audio sits in a subdirectory — a multi-disc layout — and
+    that world does not reach either caller through automation: downloads
+    are flattened upstream in ``process_completed_album``, and a snapshot
+    that is still nested is rejected as ``nested_layout`` before any proof
+    is considered.
     """
     return ultrasonic_proof_leg(
         deficit_db=ultrasonic_deficit_db,
