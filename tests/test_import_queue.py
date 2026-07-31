@@ -5451,8 +5451,9 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
             str(updated.preview_result["detail"]),
         )
 
-    def test_reused_evidence_scans_ordinary_have_path(self):
-        """Front-gate reuse still analyzes non-lossless-converted HAVE."""
+    def test_reused_evidence_reuses_complete_matching_have(self):
+        """Candidate and HAVE reuse are independently snapshot-authorized."""
+        from lib.beets_db import AlbumInfo
         from lib.measurement import ExistingSpectralAuditLookup
         from lib.quality import SpectralAnalysisDetail
         from scripts import import_preview_worker
@@ -5468,11 +5469,17 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                 db,
                 42,
                 mb_release_id="mbid-42",
+                source_path=existing,
+                files=snapshot_audio_files(existing),
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=320,
                     avg_bitrate_kbps=320,
                     median_bitrate_kbps=320,
                     format="MP3",
+                    spectral_grade="genuine",
+                    spectral_bitrate_kbps=192,
+                    spectral_subject="installed",
+                    spectral_provenance="measured",
                     was_converted_from=None,
                 ),
                 codec="mp3",
@@ -5494,6 +5501,17 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
             assert claimed is not None
             self._seed_evidence_for_download_log(db, download_log_id, source)
             calls: list[str] = []
+            fake_beets = FakeBeetsDB()
+            fake_beets.set_album_info("mbid-42", AlbumInfo(
+                album_id=1,
+                track_count=1,
+                min_bitrate_kbps=320,
+                avg_bitrate_kbps=320,
+                median_bitrate_kbps=320,
+                is_cbr=True,
+                album_path=existing,
+                format="MP3",
+            ))
 
             def analyze(path: str) -> SpectralAnalysisDetail:
                 calls.append(path)
@@ -5503,20 +5521,24 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                     bitrate_kbps=128 if path == existing else None,
                 )
 
-            updated = import_preview_worker.process_claimed_preview_job(
-                db,
-                claimed,
-                spectral_detail_analyzer=analyze,
-                existing_spectral_resolver=lambda _mbid: (
-                    ExistingSpectralAuditLookup(path=existing)
-                ),
-                runtime_config=cfg,
-            )
+            with patch(
+                "lib.beets_db.BeetsDB",
+                lambda *_args, **_kwargs: fake_beets,
+            ):
+                updated = import_preview_worker.process_claimed_preview_job(
+                    db,
+                    claimed,
+                    spectral_detail_analyzer=analyze,
+                    existing_spectral_resolver=lambda _mbid: (
+                        ExistingSpectralAuditLookup(path=existing)
+                    ),
+                    runtime_config=cfg,
+                )
 
         self.assertEqual(
             calls,
-            [existing],
-            "candidate reuse must not suppress the separate HAVE scan",
+            [],
+            "matching complete HAVE evidence must skip spectral analysis",
         )
         assert updated is not None and updated.preview_result is not None
         import_result = ImportResult.from_dict(cast(
@@ -5524,8 +5546,8 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
             updated.preview_result["import_result"],
         ))
         assert import_result.spectral.existing is not None
-        self.assertEqual(import_result.spectral.existing.grade, "suspect")
-        self.assertEqual(import_result.spectral.existing.bitrate_kbps, 128)
+        self.assertEqual(import_result.spectral.existing.grade, "genuine")
+        self.assertEqual(import_result.spectral.existing.bitrate_kbps, 192)
 
     def test_reused_evidence_persists_missing_have_spectral(self):
         """Front-gate reuse must make its HAVE scan durable pre-decision.

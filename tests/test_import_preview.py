@@ -17,6 +17,7 @@ from lib.import_preview import (
     _lossless_candidate_spectral_failure,
     _prefer_successful_spectral_detail,
     compose_attempt_spectral_audit,
+    current_spectral_evidence_reusable,
     enrich_current_v0_research_for_preview,
     enrich_incomplete_current_evidence_for_request,
     load_persisted_existing_spectral,
@@ -110,6 +111,34 @@ def _preview_runtime_config(
 
 
 class TestSpectralAuditMerge(unittest.TestCase):
+    def test_have_reuse_requires_a_decision_usable_grade(self):
+        cases = (
+            ("genuine", True),
+            ("marginal", True),
+            ("suspect", True),
+            ("likely_transcode", True),
+            ("error", False),
+            ("", False),
+            (None, False),
+        )
+        for grade, expected in cases:
+            with self.subTest(grade=grade):
+                evidence = make_album_quality_evidence(
+                    measurement=AudioQualityMeasurement(
+                        spectral_grade=grade,
+                        spectral_subject=(
+                            "installed" if grade is not None else None
+                        ),
+                        spectral_provenance=(
+                            "measured" if grade is not None else None
+                        ),
+                    ),
+                )
+                self.assertEqual(
+                    current_spectral_evidence_reusable(evidence),
+                    expected,
+                )
+
     def test_lossless_candidate_requires_a_successful_usable_grade(self):
         cases = (
             ("absent", None),

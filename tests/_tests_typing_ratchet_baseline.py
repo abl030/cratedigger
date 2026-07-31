@@ -97,7 +97,7 @@ TESTS_TYPING_RATCHET_BASELINE: dict[str, dict[str, int]] = {
     "tests/test_search_plan_service.py": {"cast": 3},
     "tests/test_slskd_client.py": {"cast": 2, "type_ignore": 5},
     "tests/test_slskd_searches.py": {"any": 5},
-    "tests/test_spectral_attempt_audit_generated.py": {"any": 11, "type_ignore": 2},
+    "tests/test_spectral_attempt_audit_generated.py": {"any": 9, "type_ignore": 2},
     "tests/test_terminal_outcome_callers.py": {"any": 3, "cast": 3},
     "tests/test_terminal_outcomes.py": {"any": 4, "cast": 2},
     "tests/test_transfer_ledger_generated.py": {"type_ignore": 1},
