@@ -339,9 +339,11 @@ licensed: no `verified_lossless_target` conversion (the album keeps its
 V0 grind — a higher-bitrate artifact, and the decider gates the
 post-import quality gate's format on the same fact), no verified-lossless
 bypass in the measured comparison, and a post-import gate that requeues
-instead of accepting. So an unproved candidate compared against a BETTER
-installed copy can still lose that comparison as an ordinary `downgrade`,
-with a comparison basis behind it. That is the proof doing its job, not
+instead of accepting. So an unproved candidate compared against an
+EQUIVALENT-OR-BETTER installed copy can still lose that comparison as an
+ordinary `downgrade` — the proof is the tie-breaker on an `equivalent`
+verdict, and in every measured world that is the mechanism (identical
+ranks on both sides), not a rank loss. That is the proof doing its job, not
 the leg passing a verdict: the existing copy is untouched and the request
 stays searchable.
 
