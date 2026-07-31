@@ -303,6 +303,14 @@ class TestServerEndpoints(_FakeDbWebServerCase):
             self.assertEqual(resp.status, 200)
             self.assertIn("text/html", resp.headers.get("Content-Type", ""))
 
+    def test_index_names_the_existing_id_and_url_search_mode(self):
+        body = self._current_index_bytes()
+
+        self.assertIn(
+            b'id="search-type-id" onclick="setSearchType(\'id\')">ID/URL</button>',
+            body,
+        )
+
     def _current_index_bytes(self) -> bytes:
         request = Request(
             f"{self.base}/",

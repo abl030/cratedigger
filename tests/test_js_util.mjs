@@ -711,6 +711,11 @@ assertParse(
   { family: 'discogs', kind: 'release', id: '32457180' },
   'Discogs URL with querystring',
 );
+assertParse(
+  'https://www.discogs.com/release/32457180-Various-Rock-Christmas?utm_source=mobile#images',
+  { family: 'discogs', kind: 'release', id: '32457180' },
+  'phone-copied Discogs URL with slug, tracking query, and fragment',
+);
 
 // Whitespace handling
 assertParse(
@@ -742,6 +747,76 @@ assertParse(
   '32-char UUID without dashes rejected',
 );
 assertParse('1234567890123', null, '13-digit numeric rejected (out of range)');
+assertParse('0', null, 'zero is not a Discogs release identity');
+assertParse('000123', null, 'leading-zero Discogs identity rejected');
+assertParse(
+  'https://www.discogs.com/release/000123-Slug',
+  null,
+  'leading-zero Discogs URL identity rejected',
+);
+
+// Hostile URL boundaries: a trusted hostname must be the exact parsed origin,
+// never a path fragment, credential, suffix, or non-HTTP scheme.
+assertParse(
+  'https://evil.example/musicbrainz.org/release/c1f6a2c9-bcba-4e69-96f5-233c85b2830a',
+  null,
+  'MusicBrainz hostname embedded in an attacker path rejected',
+);
+assertParse(
+  'https://evil.example/discogs.com/release/32457180',
+  null,
+  'Discogs hostname embedded in an attacker path rejected',
+);
+assertParse(
+  'javascript://musicbrainz.org/release/c1f6a2c9-bcba-4e69-96f5-233c85b2830a',
+  null,
+  'javascript scheme rejected',
+);
+assertParse(
+  'ftp://www.discogs.com/release/32457180',
+  null,
+  'non-HTTP URL scheme rejected',
+);
+assertParse(
+  'https://musicbrainz.org.evil.example/release/c1f6a2c9-bcba-4e69-96f5-233c85b2830a',
+  null,
+  'trusted-host suffix rejected',
+);
+assertParse(
+  'https://musicbrainz.org@evil.example/release/c1f6a2c9-bcba-4e69-96f5-233c85b2830a',
+  null,
+  'trusted hostname in URL credentials rejected',
+);
+assertParse(
+  'https://:x@musicbrainz.org/release/c1f6a2c9-bcba-4e69-96f5-233c85b2830a',
+  null,
+  'userinfo rejected even when the parsed host is trusted',
+);
+assertParse(
+  'https://musicbrainz.org:444/release/c1f6a2c9-bcba-4e69-96f5-233c85b2830a',
+  null,
+  'non-canonical port rejected',
+);
+assertParse(
+  'https://musicbrainz.org/release/c1f6a2c9-bcba-4e69-96f5-233c85b2830a/extra',
+  null,
+  'extra MusicBrainz path components rejected',
+);
+assertParse(
+  'https://www.discogs.com/release/32457180/extra',
+  null,
+  'extra Discogs path components rejected',
+);
+assertParse(
+  'https://musicbrainz.org/release/------------------------------------',
+  null,
+  'malformed 36-character UUID rejected before the resolver',
+);
+assertParse(
+  `https://musicbrainz.org/release/c1f6a2c9-bcba-4e69-96f5-233c85b2830a?${'x'.repeat(2048)}`,
+  null,
+  'oversized pasted input rejected before URL parsing',
+);
 
 // Non-canonical hosts (deferred per Scope Boundaries)
 assertParse(

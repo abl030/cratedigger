@@ -378,38 +378,66 @@ export function consoleEmphasis(row) {
 export function parsePastedId(text) {
   if (typeof text !== 'string') return null;
   const trimmed = text.trim();
-  if (!trimmed) return null;
-
-  // Canonical URL forms — the URL path tells us the type, so the resolver
-  // doesn't need to probe both endpoints. release-group must be checked
-  // before release because the prefix matters.
-  const mbRgRe = /(?:^|\/)musicbrainz\.org\/release-group\/([0-9a-f-]{36})(?:[/?#]|$)/i;
-  const mbReleaseRe = /(?:^|\/)musicbrainz\.org\/release\/([0-9a-f-]{36})(?:[/?#]|$)/i;
-  const discogsMasterRe = /(?:^|\/)(?:www\.)?discogs\.com\/master\/(\d{1,12})(?:[-/?#]|$)/i;
-  const discogsReleaseRe = /(?:^|\/)(?:www\.)?discogs\.com\/release\/(\d{1,12})(?:[-/?#]|$)/i;
-
-  let m;
-  if ((m = trimmed.match(mbRgRe))) {
-    return { family: 'mb', kind: 'release-group', id: m[1].toLowerCase() };
-  }
-  if ((m = trimmed.match(mbReleaseRe))) {
-    return { family: 'mb', kind: 'release', id: m[1].toLowerCase() };
-  }
-  if ((m = trimmed.match(discogsMasterRe))) {
-    return { family: 'discogs', kind: 'master', id: m[1] };
-  }
-  if ((m = trimmed.match(discogsReleaseRe))) {
-    return { family: 'discogs', kind: 'release', id: m[1] };
+  // Keep parsing work bounded and reject controls that WHATWG URL parsing
+  // would otherwise silently strip. The pasted string is hostile input: its
+  // hostname is evidence only after URL has parsed the complete authority.
+  if (!trimmed || trimmed.length > 2048 || /[\u0000-\u001f\u007f]/.test(trimmed)) {
+    return null;
   }
 
   // Bare IDs — kind unknown, resolver disambiguates server-side.
   const bareUuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  const bareDigitsRe = /^\d{1,12}$/;
+  const bareDigitsRe = /^[1-9][0-9]{0,11}$/;
   if (bareUuidRe.test(trimmed)) {
     return { family: 'mb', kind: 'unknown', id: trimmed.toLowerCase() };
   }
   if (bareDigitsRe.test(trimmed)) {
     return { family: 'discogs', kind: 'unknown', id: trimmed };
+  }
+
+  // Preserve the documented scheme-less canonical forms without allowing an
+  // arbitrary prefix to hide the actual authority.
+  const schemeLessCanonical = /^(?:musicbrainz\.org|(?:www\.)?discogs\.com)\//i;
+  const candidate = schemeLessCanonical.test(trimmed)
+    ? `https://${trimmed}`
+    : trimmed;
+  let url;
+  try {
+    url = new URL(candidate);
+  } catch (_e) {
+    return null;
+  }
+  // For credential-bearing URLs, href has userinfo between "//" and the host
+  // while origin does not. Requiring the normalized href to begin at its own
+  // origin rejects that authority confusion without inspecting secret values.
+  const hasCredentialFreeAuthority = url.href.startsWith(`${url.origin}/`);
+  if ((url.protocol !== 'https:' && url.protocol !== 'http:')
+      || !hasCredentialFreeAuthority || url.port) {
+    return null;
+  }
+
+  const host = url.hostname.toLowerCase();
+  if (host === 'musicbrainz.org') {
+    const match = url.pathname.match(
+      /^\/(release|release-group)\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/?$/i,
+    );
+    if (!match) return null;
+    return {
+      family: 'mb',
+      kind: /** @type {'release'|'release-group'} */ (match[1].toLowerCase()),
+      id: match[2].toLowerCase(),
+    };
+  }
+  if (host === 'discogs.com' || host === 'www.discogs.com') {
+    const match = url.pathname.match(
+      /^\/(release|master)\/([1-9][0-9]{0,11})(?:-[^/]+)?\/?$/i,
+    );
+    if (!match) return null;
+    return {
+      family: 'discogs',
+      kind: /** @type {'release'|'master'} */ (match[1].toLowerCase()),
+      id: match[2],
+    };
   }
   return null;
 }
