@@ -319,6 +319,141 @@ class AlbumQualityV0Metric(msgspec.Struct, frozen=True):
         return errors
 
 
+class AacLatticeTrackScore(msgspec.Struct, frozen=True):
+    """One track's AAC MDCT-frame-lattice measurement, or why it has none.
+
+    Wire-boundary type: the rows of the
+    ``album_quality_evidence.aac_lattice_tracks`` JSONB array (issue #829
+    AAC-lattice leg PR-A). Exactly one of the two shapes is legal — a scored
+    triple, or an ``error`` string. A failure is EVIDENCE, not an absence:
+    96 kHz input has no scalefactor-band table at all, and recording that is
+    how the operator can tell "no lattice found" from "never looked".
+
+    ``offset`` is the argmax MDCT frame offset in samples (0-1023), ``z`` the
+    contrast of the sweep's peak against its own median, ``proba`` the
+    detector statistic at that peak. The detector, and the measured meaning
+    of all three, live in ``lib/aac_lattice.py``.
+    """
+
+    filename: str
+    offset: int | None = None
+    z: float | None = None
+    proba: float | None = None
+    error: str | None = None
+
+    def validation_errors(self) -> list[str]:
+        errors: list[str] = []
+        if not self.filename:
+            errors.append("aac lattice track filename is required")
+        scored = (self.offset, self.z, self.proba)
+        if self.error is None:
+            if any(value is None for value in scored):
+                errors.append(
+                    f"{self.filename}: a scored lattice track needs "
+                    "offset, z and proba"
+                )
+            elif not 0 <= (self.offset or 0) < 1024:
+                errors.append(
+                    f"{self.filename}: lattice offset must be within 0-1023"
+                )
+        elif any(value is not None for value in scored):
+            errors.append(
+                f"{self.filename}: a failed lattice track carries no statistics"
+            )
+        return errors
+
+
+class AacLatticeCapture(msgspec.Struct, frozen=True):
+    """One album's AAC-lattice measurement: per-track rows plus the album
+    statistics the offset-concentration rule reads.
+
+    Persisted across five ``album_quality_evidence`` columns (``tracks`` as
+    JSONB, the rest as scalars so SQL can aggregate them). The whole capture
+    is NULL for a row that was never measured, which is distinct from a row
+    measured with ``scored_tracks = 0``.
+
+    ``modal_offset``/``modal_count`` are the album's most-repeated recovered
+    offset and how many tracks recovered it — the parameter-free statistic
+    behind "k >= 4 tracks share one MDCT frame offset"
+    (``docs/research/calibration-data/derrien-refinement/README.md``). PR-A
+    only captures them; no decision reads this type.
+    """
+
+    tracks: list[AacLatticeTrackScore] = msgspec.field(
+        default_factory=list[AacLatticeTrackScore]
+    )
+    modal_offset: int | None = None
+    modal_count: int | None = None
+    scored_tracks: int = 0
+    max_z: float | None = None
+
+    @classmethod
+    def from_tracks(
+        cls,
+        tracks: "list[AacLatticeTrackScore]",
+    ) -> "AacLatticeCapture":
+        """Derive the album statistics from per-track rows.
+
+        Ties on the modal offset break to the LOWEST offset so the same
+        track population always yields the same album statistic — the
+        measurement must be a function of the audio, not of dict ordering.
+        """
+        scored = [
+            track for track in tracks
+            if track.error is None and track.offset is not None
+        ]
+        counts: dict[int, int] = {}
+        for track in scored:
+            offset = track.offset
+            if offset is not None:
+                counts[offset] = counts.get(offset, 0) + 1
+        modal_offset: int | None = None
+        modal_count: int | None = None
+        if counts:
+            modal_count = max(counts.values())
+            modal_offset = min(
+                offset for offset, count in counts.items()
+                if count == modal_count
+            )
+        z_values = [track.z for track in scored if track.z is not None]
+        return cls(
+            tracks=list(tracks),
+            modal_offset=modal_offset,
+            modal_count=modal_count,
+            scored_tracks=len(scored),
+            max_z=max(z_values) if z_values else None,
+        )
+
+    def validation_errors(self) -> list[str]:
+        errors: list[str] = []
+        for track in self.tracks:
+            errors.extend(track.validation_errors())
+        scored = sum(
+            1 for track in self.tracks
+            if track.error is None and track.offset is not None
+        )
+        if self.scored_tracks != scored:
+            errors.append(
+                "aac_lattice scored_tracks must count the scored track rows: "
+                f"{self.scored_tracks} != {scored}"
+            )
+        album_stats = (self.modal_offset, self.modal_count, self.max_z)
+        if scored == 0:
+            if any(value is not None for value in album_stats):
+                errors.append(
+                    "aac_lattice album statistics require a scored track"
+                )
+        elif any(value is None for value in album_stats):
+            errors.append(
+                "aac_lattice album statistics are missing for a scored album"
+            )
+        elif not 1 <= (self.modal_count or 0) <= scored:
+            errors.append(
+                "aac_lattice modal_count must be between 1 and scored_tracks"
+            )
+        return errors
+
+
 class VerifiedLosslessProof(msgspec.Struct, frozen=True):
     """Provenance for a true verified-lossless classification."""
 

@@ -15,6 +15,7 @@ let
     ps.pydantic  # HTTP request-body validation in web/routes/* (issue #343); msgspec stays for internal wire boundaries
     ps.redis     # web UI cache (graceful no-op if redis server is down, but the module must be importable)
     ps.zstandard # peer cache compresses msgpack directory payloads before writing Redis bytes
+    ps.numpy     # lib/aac_lattice.py — the MDCT frame-lattice detector (issue #829); scipy is deliberately NOT here, erfinv is computed from math.erf
     beetsPackage # the one beets: autotag.distance library + bin/beet (nix/beets.nix)
     ps.ytmusicapi # YouTube Music album resolver — anonymous `YTMusic()` for search + get_album
   ];
