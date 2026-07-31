@@ -1,0 +1,27 @@
+{
+ "2006 - Half-Truths & Indiscretions_ The Anthology": [
+  {
+   "offset": 680,
+   "v1": 14,
+   "v2": 0,
+   "n": 14,
+   "max_conf": 1
+  }
+ ],
+ "1999 - Re-Rewind (The Crowd Say Bo Selecta)": [
+  {
+   "offset": 6,
+   "v1": 3,
+   "v2": 3,
+   "n": 3,
+   "max_conf": 29
+  },
+  {
+   "offset": 18,
+   "v1": 3,
+   "v2": 3,
+   "n": 3,
+   "max_conf": 13
+  }
+ ]
+}

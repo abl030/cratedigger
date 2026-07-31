@@ -1,0 +1,57 @@
+"""Per-entry CTDB agreement: does ONE submitted rip agree with us on all tracks?"""
+import json
+import os
+import sys
+import zlib
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from provlib import M32, build_toc, ctdb_fetch_cached, decode, toc_from_dir  # noqa: E402
+from fullrun2 import BPS, STRIDE, ctdb_entries  # noqa: E402
+
+OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out")
+
+
+def main():
+    with open(os.path.join(OUT, "fullrun2.json"), encoding="utf-8") as fh:
+        recs = json.load(fh)
+    res = {}
+    for r in recs:
+        if r.get("error") or not r.get("ctdb_track_hits"):
+            continue
+        d = r["path"]
+        files, meta, lens = toc_from_dir(d)
+        toc = build_toc(lens)
+        _u, xml, _s = ctdb_fetch_cached(toc)
+        ents = ctdb_entries(xml) or []
+        total = sum(lens)
+        lo_b = STRIDE * BPS
+        hi_b = (total - STRIDE - (total % STRIDE)) * BPS
+        mine, pos, disc = [], 0, 0
+        for f in files:
+            raw = decode(os.path.join(d, f))
+            a, b = max(lo_b, pos), min(hi_b, pos + len(raw))
+            ch = raw[a - pos:b - pos] if b > a else b""
+            mine.append(zlib.crc32(ch) & M32)
+            disc = zlib.crc32(ch, disc) & M32
+            pos += len(raw)
+            del raw
+        n = len(mine)
+        best = (0, 0, None)
+        for e in ents:
+            agree = sum(1 for x, y in zip(mine, e["trackcrcs"]) if x == y)
+            if (agree, e["confidence"]) > (best[0], best[1]):
+                best = (agree, e["confidence"], e["id"])
+        dm = [e for e in ents if e["crc32"] == disc]
+        res[r["album"]] = {"n": n, "best_entry_agree": best[0],
+                           "best_entry_conf": best[1], "best_entry_id": best[2],
+                           "disc_match": bool(dm),
+                           "disc_conf": max((e["confidence"] for e in dm), default=0)}
+        print(f"{r['album'][:46]:46s} n={n:2d} best_single_entry={best[0]}/{n} "
+              f"conf={best[1]} id={best[2]} disc_exact={bool(dm)}"
+              f"{' conf'+str(res[r['album']]['disc_conf']) if dm else ''}", flush=True)
+    with open(os.path.join(OUT, "ctdb_entry.json"), "w", encoding="utf-8") as fh:
+        json.dump(res, fh, indent=1)
+
+
+if __name__ == "__main__":
+    main()

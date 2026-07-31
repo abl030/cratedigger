@@ -1,0 +1,95 @@
+"""PAIRED mechanism check: same album, genuine vs each launder variant.
+
+For every dispersion statistic, per variant:
+  median paired delta, median paired log2 ratio, sign-test count (n_down/n),
+  and a paired rank statistic (Wilcoxon signed-rank p).
+"""
+import gzip
+import json
+import sys
+from collections import defaultdict
+
+import numpy as np
+from scipy import stats
+
+OUT = "/home/abl030/.claude/jobs/7dbdc6f4/tmp/homogeneity"
+
+# dataset -> (genuine/control variant used as that dataset's own baseline)
+BASE = {
+    "TRAIN": "control-flac1644", "R1": "control-flac1644",
+    "R2": "control-flac1644", "R3": "control-flac1644",
+    "LOCAL": "genuine", "LOCALW": "genuine", "MAPPLE": "genuine",
+    "PILOT": "genuine",
+    "APPLEA": "control-flac1644", "APPLEB": "control-flac1644",
+    "APPLE24": "control-flac1644",
+}
+HIRES = {"8920--M83 - Hurry Up, We're Dreaming", "8931--Fleetwood Mac - Rumours"}
+
+
+def load():
+    return json.load(gzip.open(OUT + "/disp.json.gz", "rt"))
+
+
+def main(stats_wanted, datasets, exclude_hires=True):
+    rows = load()
+    idx = {(r["ds"], r["slug"], r["variant"]): r for r in rows}
+    hires = {s for s in {r["slug"] for r in rows} if s.split("--")[0] in ("8920", "8931")}
+    per = defaultdict(lambda: defaultdict(list))  # variant -> stat -> [(base, var)]
+    for r in rows:
+        ds = r["ds"]
+        if ds not in datasets:
+            continue
+        b = BASE[ds]
+        if r["variant"] == b:
+            continue
+        if exclude_hires and r["slug"] in hires:
+            continue
+        br = idx.get((ds, r["slug"], b))
+        if br is None:
+            continue
+        for s in stats_wanted:
+            if r.get(s) is None or br.get(s) is None:
+                continue
+            per[r["variant"]][s].append((br[s], r[s]))
+    return per
+
+
+def report(per, stats_wanted, title):
+    print("\n=== " + title)
+    hdr = "%-16s %5s" % ("variant", "n")
+    for s in stats_wanted:
+        hdr += " | %-26s" % s
+    print(hdr)
+    print("%-16s %5s" % ("", "") + "".join(" | %-8s %-8s %-6s" % ("medDelta", "medLog2", "down/n")
+                                            for _ in stats_wanted))
+    for v in sorted(per):
+        line = "%-16s %5d" % (v, len(per[v][stats_wanted[0]]) if per[v][stats_wanted[0]] else 0)
+        for s in stats_wanted:
+            pairs = per[v][s]
+            if not pairs:
+                line += " | %-8s %-8s %-6s" % ("-", "-", "-")
+                continue
+            a = np.array([p[0] for p in pairs], float)   # genuine
+            b = np.array([p[1] for p in pairs], float)   # launder
+            d = b - a
+            with np.errstate(divide="ignore", invalid="ignore"):
+                lr = np.log2(np.where(b > 0, b, np.nan) / np.where(a > 0, a, np.nan))
+            down = int((d < 0).sum())
+            line += " | %+8.3f %+8.3f %3d/%-3d" % (
+                float(np.median(d)), float(np.nanmedian(lr)), down, len(d))
+        print(line)
+
+
+if __name__ == "__main__":
+    STATS = ["U_sd", "U_iqr", "U_mad", "d18_195_sd", "drop_hi_sd",
+             "shape_mpd_ul", "shapec_mpd_ul", "shape_mpd_hi", "shapec_mpd_hi",
+             "shape_mpd_all", "shapec_mpd_all"]
+    for grp, dss in (("matrix (19 albums, real FLAC launders)",
+                      {"LOCAL", "LOCALW", "MAPPLE"}),
+                     ("arms (100 albums, native lossy containers + t-*-flac)",
+                      {"TRAIN", "R1", "R2", "R3"}),
+                     ("apple-arm (37 albums, real FLAC launders)",
+                      {"APPLEA", "APPLEB", "APPLE24"})):
+        per = main(STATS, dss)
+        for chunk in (STATS[:5], STATS[5:9], STATS[9:]):
+            report(per, chunk, grp)

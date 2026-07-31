@@ -1,0 +1,98 @@
+"""Extend the probe to the library's 4 ALAC albums (the rest of the lossless population)."""
+import json
+import os
+import sqlite3
+import subprocess
+import sys
+import xml.etree.ElementTree as ET
+import zlib
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from provlib import (M32, ar_track_index, as_dwords, build_toc,  # noqa: E402
+                     ctdb_fetch_cached, fetch_ar_cached, parse_ar)
+from fullrun2 import (BPS, STRIDE, SD, ar_checksums_streamed, ctdb_entries)  # noqa: E402
+
+DB = "file:/mnt/virtio/cratedigger/beets-db/beets-library.db?mode=ro&immutable=1"
+ROOT = "/mnt/virtio/Music/Beets"
+OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out")
+
+
+def decode_m4a(path):
+    return subprocess.run(
+        ["ffmpeg", "-v", "quiet", "-i", path, "-f", "s16le", "-acodec",
+         "pcm_s16le", "-ac", "2", "-ar", "44100", "-"],
+        capture_output=True, check=True).stdout
+
+
+def main():
+    c = sqlite3.connect(DB, uri=True)
+    q = """select i.album_id, i.path from items i where i.format='ALAC'
+           order by i.album_id, i.track"""
+    per = {}
+    for aid, p in c.execute(q):
+        per.setdefault(aid, []).append(p.decode("utf-8", "replace"))
+    recs = []
+    for aid, paths in per.items():
+        full = [os.path.join(ROOT, p) if not p.startswith("/") else p for p in paths]
+        d = os.path.dirname(full[0])
+        name = os.path.basename(d)
+        raws = [decode_m4a(p) for p in sorted(full)]
+        lens = [len(r) // BPS for r in raws]
+        aligned = all(L % SD == 0 for L in lens)
+        toc = build_toc(lens)
+        n = len(raws)
+        _u, blob, _s = fetch_ar_cached(toc)
+        blocks = parse_ar(blob) if blob else []
+        aridx = ar_track_index(blocks)
+        _u2, xml, _s2 = ctdb_fetch_cached(toc)
+        ents = ctdb_entries(xml) if not xml.startswith("<<ERROR") else []
+        ents = ents or []
+        ctw = {}
+        for e in ents:
+            for i, cc in enumerate(e["trackcrcs"]):
+                ctw.setdefault(i, {})
+                ctw[i][cc] = max(ctw[i].get(cc, 0), e["confidence"])
+        total = sum(lens)
+        lo_b = STRIDE * BPS
+        hi_b = (total - STRIDE - (total % STRIDE)) * BPS
+        v1h = v2h = cth = 0
+        v1c = v2c = ctc = 0
+        disc = 0
+        pos = 0
+        for i, raw in enumerate(raws):
+            arr = as_dwords(raw)
+            v1, v2 = ar_checksums_streamed(arr, i + 1, n)
+            slot = aridx.get(i, {})
+            if v1 in slot:
+                v1h += 1
+                v1c = max(v1c, slot[v1])
+            if v2 in slot:
+                v2h += 1
+                v2c = max(v2c, slot[v2])
+            a, b = max(lo_b, pos), min(hi_b, pos + len(raw))
+            chunk = raw[a - pos:b - pos] if b > a else b""
+            tc = zlib.crc32(chunk) & M32
+            disc = zlib.crc32(chunk, disc) & M32
+            pos += len(raw)
+            cs = ctw.get(i, {})
+            if tc in cs:
+                cth += 1
+                ctc = max(ctc, cs[tc])
+        dm = [e for e in ents if e["crc32"] == disc]
+        rec = {"album": name, "path": d, "tracks": n, "format": "ALAC",
+               "sector_aligned": aligned, "ar_blocks": len(blocks),
+               "ar_toc_hit": bool(blob), "ar_v1_hits": v1h, "ar_v2_hits": v2h,
+               "ar_v1_conf": v1c, "ar_v2_conf": v2c,
+               "ctdb_entries": len(ents),
+               "ctdb_top_conf": max((e["confidence"] for e in ents), default=0),
+               "ctdb_track_hits": cth, "ctdb_track_conf": ctc,
+               "ctdb_disc_match": bool(dm),
+               "ctdb_disc_conf": max((e["confidence"] for e in dm), default=0)}
+        recs.append(rec)
+        print(json.dumps(rec), flush=True)
+    with open(os.path.join(OUT, "alac.json"), "w", encoding="utf-8") as fh:
+        json.dump(recs, fh, indent=1)
+
+
+if __name__ == "__main__":
+    main()

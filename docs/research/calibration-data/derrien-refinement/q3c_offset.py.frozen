@@ -1,0 +1,178 @@
+"""Album-level offset-concentration rule + the final combined operating frontier."""
+import sys, collections, json, os
+sys.path.insert(0, "/home/abl030/.claude/jobs/7dbdc6f4/tmp/derrien")
+from engine import *
+
+MX = "/home/abl030/cratedigger/docs/research/calibration-data/launder-matrix"
+C = build()
+GEN = "mx:local:genuine"
+VAR = [("genuine", "mx:local:genuine"), ("null-flac", "mx:local:null-flac"),
+       ("aacffm-256", "mx:local:aacffm-256"), ("aacffm-320", "mx:local:aacffm-320"),
+       ("aacffm-192", "mx:local:aacffm-192"), ("aacffm-128", "mx:local:aacffm-128"),
+       ("qaac-cvbr256", "mx:apple:qaac-cvbr256"), ("qaac-cvbr320", "mx:apple:qaac-cvbr320"),
+       ("qaac-tvbr91", "mx:apple:qaac-tvbr91"), ("qaac-abr192", "mx:apple:qaac-abr192"),
+       ("qaac-cbr128", "mx:apple:qaac-cbr128"),
+       ("lame-v0", "mx:local:lame-v0"), ("lame-cbr320", "mx:local:lame-cbr320"),
+       ("vorbis-q10", "mx:local:vorbis-q10"), ("vorbis-q4", "mx:local:vorbis-q4"),
+       ("opus-256", "mx:local:opus-256"), ("wma-320", "mx:localw:wma-320")]
+
+
+def modal_count(offs, tol=0):
+    """largest number of tracks sharing an offset (within +-tol, circular mod 1024)."""
+    if tol == 0:
+        return collections.Counter(offs).most_common(1)[0][1] if offs else 0
+    best = 0
+    for o in offs:
+        n = sum(1 for x in offs
+                if min(abs(x - o), 1024 - abs(x - o)) <= tol)
+        best = max(best, n)
+    return best
+
+
+print("=" * 104)
+print("D. ALBUM OFFSET CONCENTRATION -- 'k tracks of the album recover the same MDCT frame offset'")
+print("   chance for a genuine album: offsets are ~uniform over 1024, so k>=2 is already rare")
+print("=" * 104)
+print(f"{'variant':14s} {'n alb':>5s} {'maxcount dist (k=1,2,3,4,5+)':>32s}  "
+      f"{'alb k>=2':>9s} {'alb k>=3':>9s} {'alb k>=4':>9s}  {'mean share':>10s}")
+kc = {}
+for vn, vk in VAR:
+    counts = []
+    for a in ALB17:
+        offs = [t.offset for t in C[vk].get(a, [])]
+        if offs:
+            counts.append((modal_count(offs), len(offs)))
+    kc[vn] = counts
+    dist = collections.Counter(min(c, 5) for c, _ in counts)
+    ds = " ".join(f"{dist.get(i,0):2d}" for i in range(1, 6))
+    print(f"{vn:14s} {len(counts):5d} {ds:>32s}  "
+          f"{sum(1 for c,_ in counts if c>=2):5d}/{len(counts):<3d} "
+          f"{sum(1 for c,_ in counts if c>=3):5d}/{len(counts):<3d} "
+          f"{sum(1 for c,_ in counts if c>=4):5d}/{len(counts):<3d}  "
+          f"{sum(c/n for c,n in counts)/len(counts):10.3f}")
+
+print("\n--- per-album modal offset, genuine vs the AAC class (is the offset a fixed constant?) ---")
+for vn in ("genuine", "aacffm-256", "qaac-cvbr256", "qaac-cvbr320"):
+    vk = dict(VAR)[vn]
+    row = []
+    for a in ALB17:
+        offs = [t.offset for t in C[vk].get(a, [])]
+        if offs:
+            o, n = collections.Counter(offs).most_common(1)[0]
+            row.append(f"{a}:{o}x{n}/{len(offs)}")
+    print(f"  {vn:13s} " + " ".join(row))
+
+print("\n" + "=" * 104)
+print("E. FINAL COMBINED FRONTIER -- one global rule, no per-album ground truth")
+print("=" * 104)
+Lz = max(sc_z(t) for a in ALB17 for t in C[GEN][a])          # 6.9140
+Lp = max(sc_proba(t) for a in ALB17 for t in C[GEN][a])      # 0.1082
+
+
+def rule_zmax(L):
+    return lambda ts: max(t.z for t in ts) > L
+
+
+def rule_pmax(L):
+    return lambda ts: max(t.proba for t in ts) > L
+
+
+def rule_p2nd(L):
+    def f(ts):
+        v = sorted((t.proba for t in ts), reverse=True)
+        return len(v) >= 2 and v[1] > L
+    return f
+
+
+def rule_offk(k):
+    return lambda ts: modal_count([t.offset for t in ts]) >= k
+
+
+def OR(*rs):
+    return lambda ts: any(r(ts) for r in rs)
+
+
+RULES = [
+    ("BASELINE proba 2nd-track > 0.0500", rule_p2nd(0.05)),
+    ("BASELINE proba 2nd-track > 0.0312 (0-albFP)", rule_p2nd(0.0312)),
+    ("proba max > 0.1082 (pooled 0-FP)", rule_pmax(Lp)),
+    ("z max > 6.9140 (pooled 0-FP)", rule_zmax(Lz)),
+    ("z max > 7.2597 (0-FP, m=1.05)", rule_zmax(1.05 * Lz)),
+    ("z max > 8.2968 (0-FP, m=1.20)", rule_zmax(1.20 * Lz)),
+    ("offset concentration k>=3", rule_offk(3)),
+    ("offset concentration k>=4", rule_offk(4)),
+    ("z max > 6.9140  OR  offset k>=3", OR(rule_zmax(Lz), rule_offk(3))),
+    ("z max > 8.2968  OR  offset k>=3", OR(rule_zmax(1.20 * Lz), rule_offk(3))),
+    ("z max > 8.2968  OR  offset k>=4", OR(rule_zmax(1.20 * Lz), rule_offk(4))),
+]
+print(f"{'rule':46s} " + " ".join(f"{v[:12]:>13s}" for v, _ in VAR[:11]))
+for rn, rf in RULES:
+    cells = []
+    for vn, vk in VAR[:11]:
+        n = f = 0
+        for a in ALB17:
+            ts = C[vk].get(a)
+            if not ts:
+                continue
+            n += 1
+            f += int(rf(ts))
+        cells.append(f"{f:2d}/{n:<2d} {100.0*f/n:5.1f}%")
+    print(f"{rn:46s} " + " ".join(f"{c:>13s}" for c in cells))
+print("\n  first column ('genuine') IS the false-positive rate; 'null-flac' is its bitwise twin.")
+
+print("\n--- non-AAC launder behaviour of the same rules (Derrien cannot see these lattices) ---")
+print(f"{'rule':46s} " + " ".join(f"{v[:12]:>13s}" for v, _ in VAR[11:]))
+for rn, rf in RULES:
+    cells = []
+    for vn, vk in VAR[11:]:
+        n = f = 0
+        for a in ALB17:
+            ts = C[vk].get(a)
+            if not ts:
+                continue
+            n += 1
+            f += int(rf(ts))
+        cells.append(f"{f:2d}/{n:<2d} {100.0*f/n:5.1f}%")
+    print(f"{rn:46s} " + " ".join(f"{c:>13s}" for c in cells))
+
+print("\n" + "=" * 104)
+print("F. LEAVE-ONE-ALBUM-OUT for the combined rule (z threshold refit on the other 16 albums;")
+print("   the offset leg has NO tunable threshold at all)")
+print("=" * 104)
+for m in (1.00, 1.05, 1.20, 1.50):
+    for k in (0, 3, 4):
+        fp = 0
+        rec = collections.Counter()
+        for A in ALB17:
+            L = m * max(sc_z(t) for b in ALB17 if b != A for t in C[GEN][b])
+            def fire(ts):
+                if max(t.z for t in ts) > L:
+                    return True
+                return k and modal_count([t.offset for t in ts]) >= k
+            fp += int(fire(C[GEN][A]))
+            for vn, vk in VAR[2:11]:
+                if C[vk].get(A):
+                    rec[vn] += int(fire(C[vk][A]))
+        lab = f"z m={m:.2f}" + (f" OR off k>={k}" if k else "")
+        print(f"  {lab:22s} LOO-FP {fp}/17   " +
+              "  ".join(f"{vn}={rec[vn]}/17" for vn, _ in VAR[2:11]))
+
+print("\n" + "=" * 104)
+print("G. WILD ARM under the offset rule (folder = album proxy, 115 folders / 1136 files)")
+print("=" * 104)
+rows = load()
+wild = collections.defaultdict(list)
+for r in rows:
+    if r["arm"] == "wild":
+        wild[os.path.dirname(r["path"])].append(r)
+for k in (2, 3, 4):
+    n = sum(1 for f, rs in wild.items() if modal_count([int(r["offset"]) for r in rs]) >= k)
+    big = [(f, rs) for f, rs in wild.items() if len(rs) >= 4]
+    nb = sum(1 for f, rs in big if modal_count([int(r["offset"]) for r in rs]) >= k)
+    print(f"  offset k>={k}: {n:3d}/{len(wild)} folders  "
+          f"({nb}/{len(big)} of folders with >=4 measured files)")
+n = sum(1 for f, rs in wild.items() if max(float(r["z"]) for r in rs) > Lz)
+print(f"  z max > {Lz:.4f}: {n:3d}/{len(wild)} folders")
+n = sum(1 for f, rs in wild.items()
+        if max(float(r["z"]) for r in rs) > Lz or modal_count([int(r["offset"]) for r in rs]) >= 3)
+print(f"  combined (z OR offset k>=3): {n:3d}/{len(wild)} folders")

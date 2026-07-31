@@ -1,0 +1,24 @@
+cratedigger dev shell — run: python3 -m unittest discover -s tests -t . -v
+album                                         d_shape  genuine@62  launder@62
+8916--2013 - Random Access Memories [8888371    0.185       PROOF       PROOF
+8917--2014 - Syro [WARPCD247]                   0.464       PROOF       PROOF
+8918--1995 - Tri Repetae [WARPCD38]             0.143       PROOF       PROOF
+8919--1996 - Feed Me Weird Things               0.966        DENY        DENY
+8921--1999 - Californication                    0.040       PROOF       PROOF
+8922--2008 - Death Magnetic                     0.497       PROOF       PROOF
+8923--2001 - Jane Doe                           0.113       PROOF       PROOF
+8924--1984 - Tabula Rasa                        4.101        DENY        DENY
+8925--1982 - The Goldberg Variations            2.477        DENY        DENY
+8926--1987 - Kind of Blue [CK 40579]            2.641        DENY        DENY
+8928--2016 - Man Made Object                    1.600       PROOF       PROOF
+8929--1996 - The Velvet Underground & Nico [    0.067       PROOF       PROOF
+8930--1993 - Bridge Over Troubled Water [462    0.085       PROOF       PROOF
+8932--1991 - Loveless [crecd 060]               1.504        DENY        DENY
+8933--2014 - Ruins                              0.262       PROOF       PROOF
+8934--1998 - Stratosphere                       0.160       PROOF        DENY
+8935--1990 - Ambient 1_ Music for Airports [    2.249        DENY        DENY
+
+albums whose GENUINE twin reaches proof (the only population a discriminator can help): n=11
+   their shape displacement: median 0.160  max 1.600
+albums whose genuine twin is already DENIED (not provable at all): n=6
+   their shape displacement: median 2.363  max 4.101

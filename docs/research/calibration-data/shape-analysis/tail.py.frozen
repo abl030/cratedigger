@@ -1,0 +1,35 @@
+"""Characterise the heavy tail: which albums DO show an Apple-CVBR shape displacement?"""
+import sys
+import numpy as np
+sys.path.insert(0, "/home/abl030/.claude/jobs/7dbdc6f4/tmp/shapes")
+from eval import build, genuine_population, HIRES_SLUGS
+
+recs, aid, table, grp = build()
+gpop = genuine_population(aid, table)
+rows_by = {}
+for r in recs:
+    rows_by.setdefault((r["corpus"], r["slug"], r["variant"]), []).append(r)
+
+def shape(rows):
+    m = np.mean([r["vec"] - r["ref"] for r in rows], axis=0)
+    return m - m[0], m
+
+for corpus, variant in [("MTX-apple", "qaac-cvbr256"), ("APL-apple", "t-apple256-flac")]:
+    print(f"=== {corpus} / {variant} ===")
+    print(f"{'album':44s}{'d_shape':>9s}{'genU':>8s}{'gen n[21.5]':>12s}")
+    out = []
+    for (c, slug, v), rows in rows_by.items():
+        if c != corpus or v != variant or slug.startswith(HIRES_SLUGS):
+            continue
+        pid = aid[(c, slug)]
+        gk = [k for k in rows_by if aid.get((k[0], k[1])) == pid and k[2] in {"genuine", "control-flac1644"}]
+        if not gk:
+            continue
+        gs, gm = shape(rows_by[gk[0]])
+        ls, lm = shape(rows)
+        out.append((float(np.sqrt(np.mean((ls - gs) ** 2))), slug, -gm[-3:].mean(), gm[-1]))
+    for d, slug, U, top in sorted(out, reverse=True):
+        print(f"{slug[:44]:44s}{d:9.3f}{U:8.1f}{top:12.1f}")
+    a = np.array([[o[0], o[2]] for o in out])
+    print(f"  corr(d_shape, genuine U) = {np.corrcoef(a[:,0], a[:,1])[0,1]:+.3f}   n={len(a)}")
+    print()

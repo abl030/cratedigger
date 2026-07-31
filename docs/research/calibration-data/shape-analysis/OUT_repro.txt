@@ -1,0 +1,7 @@
+cratedigger dev shell — run: python3 -m unittest discover -s tests -t . -v
+albums=17
+  19.5 kHz  genuine  -46.73  launder  -47.87   (README: -46.7 / -47.9)
+  21.5 kHz  genuine  -55.41  launder  -57.51   (README: -55.4 / -57.5)
+  paired U delta (n=17): mean +1.77  median +0.45  |d|<1 on 10/17
+     (README pooled A+B, n=37: mean +1.88, median +0.57, |d|<1 on 19/37)
+  pooled A+B (n=37): mean +1.88  median +0.57  |d|<1 on 19/37

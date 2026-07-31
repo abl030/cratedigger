@@ -1,0 +1,68 @@
+"""Prove the ARv2 root cause: which AR field do v1 / v2 / frame450 live in?"""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from provlib import (album_dirs, ar_c450_index, ar_checksums, ar_frame450,  # noqa: E402
+                     ar_track_index, as_dwords, build_toc, decode,
+                     fetch_ar_cached, parse_ar, toc_from_dir)
+
+TARGETS = [
+    "1990 - Ambient 1_ Music for Airports [EEGCD 17]",
+    "2008 - Death Magnetic",
+    "1999 - Californication",
+    "1996 - The Velvet Underground & Nico [31453 1250 2]",
+]
+
+
+def run(d):
+    files, meta, lens = toc_from_dir(d)
+    toc = build_toc(lens)
+    n = len(files)
+    url, blob, src = fetch_ar_cached(toc)
+    print(f"\n=== {os.path.basename(d)}  ({n} trk)  [{src}]")
+    if not blob:
+        print("   no AR entry")
+        return
+    blocks = parse_ar(blob)
+    hdrs = {b[0] for b in blocks}
+    print(f"   {len(blob)} bytes -> {len(blocks)} response block(s); "
+          f"distinct headers={len(hdrs)} -> {list(hdrs)[:2]}")
+    idx_csum = ar_track_index(blocks)
+    idx_450 = ar_c450_index(blocks)
+    n_v1_csum = n_v2_csum = n_v1_450 = n_v2_450 = 0
+    for i, f in enumerate(files):
+        arr = as_dwords(decode(os.path.join(d, f)))
+        v1, v2 = ar_checksums(arr, i + 1, n)
+        f450 = ar_frame450(arr, i + 1, n)
+        in_c = idx_csum.get(i, {})
+        in_4 = idx_450.get(i, {})
+        m = []
+        if v1 in in_c:
+            m.append(f"v1@checksum(conf{in_c[v1]})")
+            n_v1_csum += 1
+        if v2 in in_c:
+            m.append(f"v2@checksum(conf{in_c[v2]})")
+            n_v2_csum += 1
+        if v1 in in_4:
+            m.append("v1@c450")
+            n_v1_450 += 1
+        if v2 in in_4:
+            m.append("v2@c450")
+            n_v2_450 += 1
+        f450s = f"{f450:08X}" if f450 is not None else "n/a"
+        hit450 = " f450@c450" if (f450 is not None and f450 in in_4) else ""
+        print(f"   trk{i+1:02d} v1={v1:08X} v2={v2:08X} f450={f450s}"
+              f"  {' '.join(m) if m else '-'}{hit450}")
+    print(f"   >>> in `checksum` field: v1 {n_v1_csum}/{n}, v2 {n_v2_csum}/{n}")
+    print(f"   >>> in `checksum_450` field (OLD BUGGY v2 column): "
+          f"v1 {n_v1_450}/{n}, v2 {n_v2_450}/{n}")
+
+
+if __name__ == "__main__":
+    dirs = {os.path.basename(d): d for d in album_dirs()}
+    for t in TARGETS:
+        if t in dirs:
+            run(dirs[t])
+        else:
+            print(f"!! not found: {t}")

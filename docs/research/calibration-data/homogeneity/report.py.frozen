@@ -1,0 +1,117 @@
+"""LOAO operating tables + null-feature control + multivariate ceiling."""
+import gzip
+import json
+import numpy as np
+
+import eval as E  # noqa: E402  (reuses cohorts / loao machinery)
+
+OUT = "/home/abl030/.claude/jobs/7dbdc6f4/tmp/homogeneity"
+E.add_derived()
+rows = E.rows
+idx = E.idx
+
+
+def paired_null_check():
+    """ref_sd cannot be changed by a transparent encoder: it is a NULL feature.
+    Confirm paired delta ~ 0, then read its AUC as the corpus-composition floor."""
+    print("=== NULL-FEATURE CONTROL: ref_sd (1-4 kHz level dispersion)")
+    print("A transparent encoder cannot move the 1-4 kHz reference level, so any")
+    print("apparent AUC on ref_sd is corpus composition, not laundering.")
+    for label, spec, _c in E.FLAC_LAUNDER + E.NATIVE_LAUNDER:
+        lr = E.launder_rows(spec, "ref_sd")
+        ds_twin = {}
+        deltas = []
+        for r in lr:
+            tds, tv = E.TWIN_DS[r["ds"]]
+            g = idx.get((tds, r["slug"], tv))
+            if g and g.get("ref_sd") is not None:
+                deltas.append(r["ref_sd"] - g["ref_sd"])
+        a, n = E.auc("ref_sd", spec)
+        print("  %-28s n=%3d medianPairedDelta=%+7.4f dB   AUC_vs_pool=%.3f"
+              % (label, len(deltas), float(np.median(deltas)) if deltas else float("nan"),
+                 a if a is not None else float("nan")))
+    print()
+
+
+def operating(stat, alphas=(0.01, 0.05, 0.10, 0.20), hi=True):
+    t = E.loao_table(stat, alphas=alphas, hi_is_launder=hi)
+    dirn = "HIGH dispersion => launder" if hi else "LOW dispersion => launder (original hypothesis)"
+    print("=== LOAO operating table: %s   [%s]" % (stat, dirn))
+    labels = [l for l, _s, _c in E.FLAC_LAUNDER + E.NATIVE_LAUNDER]
+    hdr = "%-6s %-16s" % ("alpha", "genuineFP(alb)")
+    for l in labels:
+        hdr += " %-12s" % l[:12]
+    print(hdr)
+    for a in alphas:
+        f, tot = t[a]["fp"]
+        line = "%-6.2f %5d/%-3d %5.1f%% " % (a, f, tot, 100.0 * f / tot)
+        for l in labels:
+            h, n = t[a]["recall"].get(l, (0, 0))
+            line += " %5.1f%% %-5s" % ((100.0 * h / n if n else 0.0), "%d/%d" % (h, n))
+        print(line)
+    print()
+
+
+def multivariate_ceiling():
+    """Grouped-LOAO logistic regression over the whole dispersion feature vector.
+    This is the CEILING for 'any combination of these homogeneity features',
+    fitted only on other albums -> still deployable in shape."""
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.preprocessing import StandardScaler
+    feats = [f for f in E.CANDIDATES + list(E.RATIOS) + list(E.DIFFS)
+             if not f.startswith("k8_")]
+    X, y, grp = [], [], []
+    for _tag, r in E.GENUINE:
+        if E.is_hires(r["slug"]):
+            continue
+        v = [r.get(f) for f in feats]
+        if any(x is None or not np.isfinite(x) for x in v):
+            continue
+        X.append(v); y.append(0); grp.append(r["slug"])
+    for label in E.ESCAPE:
+        spec = dict((l, s) for l, s, _c in E.FLAC_LAUNDER)[label]
+        for r in E.launder_rows(spec, "U_sd"):
+            v = [r.get(f) for f in feats]
+            if any(x is None or not np.isfinite(x) for x in v):
+                continue
+            X.append(v); y.append(1); grp.append(r["slug"])
+    X = np.array(X, float); y = np.array(y); grp = np.array(grp)
+    print("=== MULTIVARIATE CEILING (grouped leave-one-album-out logistic regression)")
+    print("features=%d  genuine=%d  escape-launder=%d  albums=%d"
+          % (X.shape[1], int((y == 0).sum()), int((y == 1).sum()), len(set(grp))))
+    scores = np.zeros(len(y))
+    for g in sorted(set(grp)):
+        te = grp == g
+        tr = ~te
+        sc = StandardScaler().fit(X[tr])
+        m = LogisticRegression(max_iter=5000, C=0.3).fit(sc.transform(X[tr]), y[tr])
+        scores[te] = m.decision_function(sc.transform(X[te]))
+    pos, neg = scores[y == 1], scores[y == 0]
+    a = float(sum((p > neg).sum() + 0.5 * (p == neg).sum() for p in pos)) / (len(pos) * len(neg))
+    print("pooled AUC (escape class vs genuine, grouped-LOAO) = %.3f" % a)
+    for alpha in (0.01, 0.05, 0.10, 0.20):
+        tau = np.quantile(neg, 1 - alpha)
+        print("  genuine FP %5.1f%% (tau=%.3f)  ->  escape recall %5.1f%%"
+              % (100.0 * (neg > tau).mean(), tau, 100.0 * (pos > tau).mean()))
+    # per-variant recall at 5% FP
+    tau = np.quantile(neg, 0.95)
+    print("  per-variant recall at LOAO genuine FP=5%:")
+    for label in E.ESCAPE:
+        spec = dict((l, s) for l, s, _c in E.FLAC_LAUNDER)[label]
+        slugs = {r["slug"] for r in E.launder_rows(spec, "U_sd")}
+        m = np.array([(y[i] == 1 and grp[i] in slugs) for i in range(len(y))])
+        # need variant identity; recompute cleanly below
+    print()
+
+
+if __name__ == "__main__":
+    paired_null_check()
+    for stat in ("k8_shape_mpd_ul", "k8_U_sd", "shape_mpd_hi", "k4_shape_mpd_ul",
+                 "U_sd", "d18_195_sd", "rat_mpdhi_over_mpdlo"):
+        operating(stat)
+    operating("U_sd", hi=False)
+    operating("shape_mpd_ul", hi=False)
+    try:
+        multivariate_ceiling()
+    except ImportError as e:
+        print("sklearn unavailable:", e)

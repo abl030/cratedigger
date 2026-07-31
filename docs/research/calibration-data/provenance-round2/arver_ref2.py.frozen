@@ -1,0 +1,15 @@
+"""Emit arver 1.5.0 C-extension ARv1/ARv2 for one album, as JSON."""
+import json
+import os
+import sys
+
+from arver.audio.checksums import get_checksums
+
+d = sys.argv[1]
+files = sorted(f for f in os.listdir(d) if f.lower().endswith(".flac"))
+n = len(files)
+out = []
+for i, f in enumerate(files, start=1):
+    cs = get_checksums(os.path.join(d, f), i, n)
+    out.append({"n": i, "v1": cs.arv1, "v2": cs.arv2})
+print(json.dumps(out))

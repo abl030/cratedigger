@@ -1,0 +1,88 @@
+"""Step 1 — PAIRED MECHANISM CHECK.
+
+Same album, same track: genuine FLAC vs its launder. Does the per-track
+level-normalized rolloff SHAPE move for the transparent-escape variants?
+
+Normalizations (per track, before anything else):
+  n[k]  = slice[k] - ref              (deficit below the 1-4 kHz reference)
+  s[k]  = n[k] - n[0]                 (shape anchored at 12 kHz: pure shape,
+                                       no absolute or HF level at all)
+  d[k]  = n[k+1] - n[k]               (adjacent-band difference, dB/500Hz)
+"""
+import sys
+from collections import defaultdict
+
+import numpy as np
+
+sys.path.insert(0, "/home/abl030/.claude/jobs/7dbdc6f4/tmp/shapes")
+from load import FREQS, load_all, variant_map  # noqa: E402
+
+HIRES = {"8920", "8931"}  # 96 kHz / 24 bit sources — resample+requant confound
+
+TRANSPARENT = [
+    "lame-v0",
+    "aacffm-256",
+    "aacffm-320",
+    "vorbis-q10",
+    "vorbis-q8",
+    "vorbis-q7",
+    "vorbis-q6",
+    "qaac-cvbr256",
+    "qaac-cvbr320",
+    "qaac-tvbr91",
+    "null-flac",
+]
+CAUGHT = ["lame-cbr320", "vorbis-q5", "aacffm-192", "opus-256"]
+
+
+def main():
+    recs = load_all()
+    by_path = {}
+    for r in recs:
+        if r["corpus"].startswith("MTX-"):
+            by_path[(r["variant"], r["path"])] = r
+    vmap = variant_map()
+
+    pairs = defaultdict(list)  # variant -> list of (req, n_gen, n_lau)
+    for variant, per_req in vmap.items():
+        for req, info in per_req.items():
+            if req in HIRES:
+                continue
+            for m in info.get("map", []):
+                g = by_path.get(("genuine", m["genuine"]))
+                l = by_path.get((variant, m["launder"]))
+                if g is None or l is None:
+                    continue
+                pairs[variant].append((req, g["vec"] - g["ref"], l["vec"] - l["ref"]))
+
+    print("paired tracks per variant (44.1k/16 albums only):")
+    for v in sorted(pairs):
+        print(f"  {v:16s} {len(pairs[v]):4d} tracks, {len({p[0] for p in pairs[v]}):2d} albums")
+    print()
+
+    hdr = "variant".ljust(15) + "n   " + "".join(f"{f/1000:>7.1f}" for f in FREQS)
+    for label, vs in [("TRANSPARENT / escape class", TRANSPARENT), ("caught-by-gate reference", CAUGHT)]:
+        for metric in ["n", "s"]:
+            name = {
+                "n": "A. paired delta of n[k] = slice-ref   (dB, launder - genuine, MEDIAN over tracks)",
+                "s": "B. paired delta of s[k] = n[k]-n[12k] (dB, PURE SHAPE, launder - genuine, MEDIAN)",
+            }[metric]
+            print(f"### {label} :: {name}")
+            print(hdr)
+            for v in vs:
+                if v not in pairs:
+                    continue
+                D = []
+                for _, ng, nl in pairs[v]:
+                    if metric == "n":
+                        D.append(nl - ng)
+                    else:
+                        D.append((nl - nl[0]) - (ng - ng[0]))
+                D = np.array(D)
+                med = np.median(D, axis=0)
+                print(f"{v:15s}{len(D):4d}" + "".join(f"{x:7.2f}" for x in med))
+            print()
+
+
+if __name__ == "__main__":
+    main()

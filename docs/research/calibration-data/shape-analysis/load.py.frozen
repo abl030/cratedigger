@@ -1,0 +1,120 @@
+"""Loader for the #829 calibration corpora -> per-track 20-point normalized slice vectors.
+
+Read-only over docs/research/calibration-data. Nothing here writes into the repo.
+"""
+import gzip
+import json
+import os
+
+import numpy as np
+
+CAL = "/home/abl030/cratedigger/docs/research/calibration-data"
+MTX = os.path.join(CAL, "launder-matrix")
+APL = os.path.join(CAL, "apple-arm")
+
+# 20 contiguous 500 Hz slice centres, 12000 .. 21500
+FREQS = np.array([12000 + 500 * i for i in range(20)], dtype=float)
+
+
+def _rows(path):
+    with gzip.open(path, "rt") as fh:
+        for line in fh:
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            yield line.split("\t")
+
+
+def _load_extended(path):
+    out = {}
+    for f in _rows(path):
+        if len(f) < 6:
+            continue
+        variant, p = f[0], f[1]
+        vals = []
+        ok = True
+        for x in f[2:6]:
+            if x == "":
+                ok = False
+                break
+            vals.append(float(x))
+        if ok:
+            out[(variant, p)] = vals
+    return out
+
+
+def _load_results(res_path, ext_path, corpus):
+    ext = _load_extended(ext_path) if ext_path and os.path.exists(ext_path) else {}
+    recs = []
+    for f in _rows(res_path):
+        if len(f) < 27:
+            continue
+        slug, variant, fam, enc, setting, path, grade = f[0], f[1], f[2], f[3], f[4], f[5], f[6]
+        try:
+            ref = float(f[10])
+        except ValueError:
+            continue
+        try:
+            prod = [float(x) for x in f[11:27]]
+        except ValueError:
+            continue
+        e = ext.get((variant, path))
+        if e is None:
+            continue
+        vec = np.array(prod + e, dtype=float)
+        recs.append(
+            dict(
+                corpus=corpus,
+                slug=slug,
+                variant=variant,
+                family=fam,
+                encoder=enc,
+                setting=setting,
+                path=path,
+                grade=grade,
+                ref=ref,
+                vec=vec,
+            )
+        )
+    return recs
+
+
+def load_all():
+    recs = []
+    for tag, suffix in [("TRAIN", ""), ("R1", "-holdout"), ("R2", "-holdout2"), ("R3", "-holdout3")]:
+        recs += _load_results(
+            os.path.join(CAL, f"results{suffix}.tsv.gz"),
+            os.path.join(CAL, f"extended{suffix}.tsv.gz"),
+            tag,
+        )
+    for tag in ["local", "localw", "apple", "pilot", "qaacchk"]:
+        recs += _load_results(
+            os.path.join(MTX, f"results-{tag}.tsv.gz"),
+            os.path.join(MTX, f"extended-{tag}.tsv.gz"),
+            "MTX-" + tag,
+        )
+    for tag in ["apple", "apple2", "apple24"]:
+        recs += _load_results(
+            os.path.join(APL, f"results-{tag}.tsv.gz"),
+            os.path.join(APL, f"extended-{tag}.tsv.gz"),
+            "APL-" + tag,
+        )
+    return recs
+
+
+def variant_map():
+    """variant -> request_id -> list of {genuine, launder} paths (launder-matrix only)."""
+    with gzip.open(os.path.join(MTX, "variant-index.json.gz"), "rt") as fh:
+        return json.load(fh)
+
+
+if __name__ == "__main__":
+    recs = load_all()
+    from collections import Counter
+
+    print("total joined rows:", len(recs))
+    c = Counter(r["corpus"] for r in recs)
+    for k in sorted(c):
+        alb = len({r["slug"] for r in recs if r["corpus"] == k})
+        var = len({r["variant"] for r in recs if r["corpus"] == k})
+        print(f"  {k:12s} rows={c[k]:6d} albums={alb:4d} variants={var:3d}")

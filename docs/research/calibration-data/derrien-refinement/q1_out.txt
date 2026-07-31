@@ -1,0 +1,126 @@
+cratedigger dev shell — run: python3 -m unittest discover -s tests -t . -v
+paired arm, 15 albums: genuine n=182  Apple CVBR-256 launder n=182
+NAC populated: genuine 182  launder 182
+
+--- TRACK-LEVEL DISTRIBUTIONS (paired arm) ---
+ GEN  proba        n= 182 min=   0.0155 q25=   0.0173 med=   0.0180 q75=   0.0189 q95=   0.0216 max=   0.1082
+ LAU  proba        n= 182 min=   0.0194 q25=   0.0970 med=   0.1198 q75=   0.1393 q95=   0.1634 max=   0.2207
+ GEN  z            n= 182 min=   2.4390 q25=   4.1690 med=   4.4750 q75=   4.9300 q95=   6.1990 max=   6.7660
+ LAU  z            n= 182 min=   3.6260 q25=  24.8380 med=  28.5980 q75=  29.5610 q95=  30.1850 max=  31.1340
+ GEN  nac_z        n= 182 min=   1.0150 q25=   2.4150 med=   2.7250 q75=   2.9870 q95=   3.4250 max=   3.8210
+ LAU  nac_z        n= 182 min=   1.3850 q25=   2.7750 med=   3.4340 q75=   7.1450 q95=  19.1160 max=  35.4260
+
+--- TRACK-LEVEL AUC (launder = positive) ---
+  proba          AUC=0.9952
+  z              AUC=0.9933
+  nac_z          AUC=0.7597
+  proba*z        AUC=0.9987
+  proba/median   AUC=0.9975
+
+--- COMBINED SCORES (track AUC) ---
+  nac_z*z        AUC=0.9928
+  nac_z*proba    AUC=0.9967
+  nac_z+z        AUC=0.9954
+  min(nac_z,z)   AUC=0.7605
+  z/nac_z        AUC=0.8776
+
+--- NAC vs Derrien offset agreement is unavailable (nac offset not stored) ---
+
+--- LOO ALBUM-LEVEL, paired arm (15 albums), aggregator = 2nd-largest track score ---
+score            aggr       trainFP   FPalb   recall Apple
+proba            kth1             0   1/15   15/15  100.0%
+proba            kth1             1   2/15   15/15  100.0%
+proba            kth1             2   3/15   15/15  100.0%
+proba            kth2             0   1/15   15/15  100.0%
+proba            kth2             1   2/15   15/15  100.0%
+proba            kth2             2   3/15   15/15  100.0%
+proba            kth3             0   1/15   15/15  100.0%
+proba            kth3             1   2/15   15/15  100.0%
+proba            kth3             2   3/15   15/15  100.0%
+proba            top3mean         0   1/15   15/15  100.0%
+proba            top3mean         1   2/15   15/15  100.0%
+proba            top3mean         2   3/15   15/15  100.0%
+proba            agg_median       0   1/15   15/15  100.0%
+proba            agg_median       1   2/15   15/15  100.0%
+proba            agg_median       2   3/15   15/15  100.0%
+
+z                kth1             0   1/15   15/15  100.0%
+z                kth1             1   2/15   15/15  100.0%
+z                kth1             2   3/15   15/15  100.0%
+z                kth2             0   1/15   15/15  100.0%
+z                kth2             1   2/15   15/15  100.0%
+z                kth2             2   3/15   15/15  100.0%
+z                kth3             0   1/15   15/15  100.0%
+z                kth3             1   2/15   15/15  100.0%
+z                kth3             2   3/15   15/15  100.0%
+z                top3mean         0   1/15   15/15  100.0%
+z                top3mean         1   2/15   15/15  100.0%
+z                top3mean         2   3/15   15/15  100.0%
+z                agg_median       0   1/15   15/15  100.0%
+z                agg_median       1   2/15   15/15  100.0%
+z                agg_median       2   3/15   15/15  100.0%
+
+nac_z            kth1             0   1/15   13/15   86.7%
+nac_z            kth1             1   2/15   13/15   86.7%
+nac_z            kth1             2   3/15   13/15   86.7%
+nac_z            kth2             0   1/15   14/15   93.3%
+nac_z            kth2             1   2/15   14/15   93.3%
+nac_z            kth2             2   3/15   14/15   93.3%
+nac_z            kth3             0   1/15   10/15   66.7%
+nac_z            kth3             1   2/15   10/15   66.7%
+nac_z            kth3             2   3/15   12/15   80.0%
+nac_z            top3mean         0   1/15   13/15   86.7%
+nac_z            top3mean         1   2/15   13/15   86.7%
+nac_z            top3mean         2   3/15   14/15   93.3%
+nac_z            agg_median       0   1/15   11/15   73.3%
+nac_z            agg_median       1   2/15   13/15   86.7%
+nac_z            agg_median       2   3/15   13/15   86.7%
+
+proba*z          kth1             0   1/15   15/15  100.0%
+proba*z          kth1             1   2/15   15/15  100.0%
+proba*z          kth1             2   3/15   15/15  100.0%
+proba*z          kth2             0   1/15   15/15  100.0%
+proba*z          kth2             1   2/15   15/15  100.0%
+proba*z          kth2             2   3/15   15/15  100.0%
+proba*z          kth3             0   1/15   15/15  100.0%
+proba*z          kth3             1   2/15   15/15  100.0%
+proba*z          kth3             2   3/15   15/15  100.0%
+proba*z          top3mean         0   1/15   15/15  100.0%
+proba*z          top3mean         1   2/15   15/15  100.0%
+proba*z          top3mean         2   3/15   15/15  100.0%
+proba*z          agg_median       0   1/15   15/15  100.0%
+proba*z          agg_median       1   2/15   15/15  100.0%
+proba*z          agg_median       2   3/15   15/15  100.0%
+
+nac_z*z          kth1             0   1/15   15/15  100.0%
+nac_z*z          kth1             1   2/15   15/15  100.0%
+nac_z*z          kth1             2   3/15   15/15  100.0%
+nac_z*z          kth2             0   1/15   15/15  100.0%
+nac_z*z          kth2             1   2/15   15/15  100.0%
+nac_z*z          kth2             2   3/15   15/15  100.0%
+nac_z*z          kth3             0   1/15   15/15  100.0%
+nac_z*z          kth3             1   2/15   15/15  100.0%
+nac_z*z          kth3             2   3/15   15/15  100.0%
+nac_z*z          top3mean         0   1/15   15/15  100.0%
+nac_z*z          top3mean         1   2/15   15/15  100.0%
+nac_z*z          top3mean         2   3/15   15/15  100.0%
+nac_z*z          agg_median       0   1/15   15/15  100.0%
+nac_z*z          agg_median       1   2/15   15/15  100.0%
+nac_z*z          agg_median       2   3/15   15/15  100.0%
+
+nac_z*proba      kth1             0   1/15   15/15  100.0%
+nac_z*proba      kth1             1   2/15   15/15  100.0%
+nac_z*proba      kth1             2   3/15   15/15  100.0%
+nac_z*proba      kth2             0   1/15   15/15  100.0%
+nac_z*proba      kth2             1   2/15   15/15  100.0%
+nac_z*proba      kth2             2   3/15   15/15  100.0%
+nac_z*proba      kth3             0   1/15   15/15  100.0%
+nac_z*proba      kth3             1   2/15   15/15  100.0%
+nac_z*proba      kth3             2   3/15   15/15  100.0%
+nac_z*proba      top3mean         0   1/15   15/15  100.0%
+nac_z*proba      top3mean         1   2/15   15/15  100.0%
+nac_z*proba      top3mean         2   3/15   15/15  100.0%
+nac_z*proba      agg_median       0   1/15   15/15  100.0%
+nac_z*proba      agg_median       1   2/15   15/15  100.0%
+nac_z*proba      agg_median       2   3/15   15/15  100.0%
+

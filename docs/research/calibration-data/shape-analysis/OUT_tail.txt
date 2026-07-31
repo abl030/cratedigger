@@ -1,0 +1,41 @@
+cratedigger dev shell — run: python3 -m unittest discover -s tests -t . -v
+=== MTX-apple / qaac-cvbr256 ===
+album                                         d_shape    genU gen n[21.5]
+8924--1984 - Tabula Rasa                        4.101    61.8       -62.2
+8926--1987 - Kind of Blue [CK 40579]            2.641    66.1       -66.7
+8925--1982 - The Goldberg Variations            2.477    71.5       -70.8
+8935--1990 - Ambient 1_ Music for Airports [    2.249    67.9       -68.6
+8928--2016 - Man Made Object                    1.600    50.4       -56.1
+8932--1991 - Loveless [crecd 060]               1.504    69.5       -73.2
+8919--1996 - Feed Me Weird Things               0.966    64.5       -67.6
+8922--2008 - Death Magnetic                     0.497    51.6       -53.0
+8917--2014 - Syro [WARPCD247]                   0.464    42.6       -47.5
+8933--2014 - Ruins                              0.262    41.3       -40.8
+8916--2013 - Random Access Memories [8888371    0.185    41.6       -43.6
+8934--1998 - Stratosphere                       0.160    62.0       -66.1
+8918--1995 - Tri Repetae [WARPCD38]             0.143    25.5       -24.7
+8923--2001 - Jane Doe                           0.113    47.2       -50.9
+8930--1993 - Bridge Over Troubled Water [462    0.085    52.6       -58.5
+8929--1996 - The Velvet Underground & Nico [    0.067    55.7       -56.6
+8921--1999 - Californication                    0.040    47.0       -49.5
+  corr(d_shape, genuine U) = +0.620   n=17
+
+=== APL-apple / t-apple256-flac ===
+album                                         d_shape    genU gen n[21.5]
+8924--1984 - Tabula Rasa                        4.101    61.8       -62.2
+8926--1987 - Kind of Blue [CK 40579]            2.641    66.1       -66.7
+8925--1982 - The Goldberg Variations            2.477    71.5       -70.8
+8928--2016 - Man Made Object                    1.600    50.4       -56.1
+8932--1991 - Loveless [crecd 060]               1.504    69.5       -73.2
+8919--1996 - Feed Me Weird Things               0.966    64.5       -67.6
+8922--2008 - Death Magnetic                     0.497    51.6       -53.0
+8917--2014 - Syro [WARPCD247]                   0.464    42.6       -47.5
+8933--2014 - Ruins                              0.262    41.3       -40.8
+8916--2013 - Random Access Memories [8888371    0.185    41.6       -43.6
+8934--1998 - Stratosphere                       0.160    62.0       -66.1
+8918--1995 - Tri Repetae [WARPCD38]             0.143    25.5       -24.7
+8923--2001 - Jane Doe                           0.113    47.2       -50.9
+8929--1996 - The Velvet Underground & Nico [    0.067    55.7       -56.6
+8921--1999 - Californication                    0.040    47.0       -49.5
+  corr(d_shape, genuine U) = +0.599   n=15
+

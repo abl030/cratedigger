@@ -1,0 +1,199 @@
+"""Step 3 — DEPLOYABILITY. Leave-one-ALBUM-out operating tables.
+
+Rules of the exercise:
+  * one GLOBAL threshold, computable on the album under test with no ground
+    truth of its own;
+  * the threshold is fitted on the other albums only (leave-one-album-out);
+  * false positives priced on EVERY distinct genuine control album
+    (arms' control-flac1644 + matrix genuine + matrix null-flac + apple-arm
+    control-flac1644), deduplicated by track fingerprint so no physical album
+    is both a control and a recall target for the same fold;
+  * recall measured on the gate-escape variants only.
+"""
+import json
+import sys
+from collections import defaultdict
+
+import numpy as np
+
+sys.path.insert(0, "/home/abl030/.claude/jobs/7dbdc6f4/tmp/shapes")
+from feat import FEATURE_NAMES, features  # noqa: E402
+from load import load_all  # noqa: E402
+
+HIRES_SLUGS = ("8920--", "8931--")
+GEN_VARIANTS = {"control-flac1644", "genuine", "null-flac"}
+
+# gate-escape targets, as (corpus, variant, label)
+ESCAPE_TARGETS = [
+    ("MTX-local", "lame-v0", "lame-v0"),
+    ("MTX-local", "aacffm-256", "aacffm-256"),
+    ("MTX-local", "aacffm-320", "aacffm-320"),
+    ("MTX-local", "vorbis-q10", "vorbis-q10"),
+    ("MTX-local", "vorbis-q8", "vorbis-q8"),
+    ("MTX-local", "vorbis-q7", "vorbis-q7"),
+    ("MTX-local", "vorbis-q6", "vorbis-q6"),
+    ("MTX-apple", "qaac-cvbr256", "qaac-cvbr256"),
+    ("MTX-apple", "qaac-cvbr320", "qaac-cvbr320"),
+    ("APL-apple", "t-apple256-flac", "apple256-flac(A)"),
+    ("APL-apple2", "t-apple256-flac", "apple256-flac(B)"),
+]
+# reference targets the frozen gate already catches (sanity only)
+CAUGHT_TARGETS = [
+    ("MTX-local", "lame-cbr320", "lame-cbr320"),
+    ("MTX-local", "aacffm-192", "aacffm-192"),
+    ("MTX-local", "vorbis-q5", "vorbis-q5"),
+]
+
+
+def album_id_map(recs):
+    """Union-find physical albums across corpora via genuine track fingerprints."""
+    fp = defaultdict(set)
+    for r in recs:
+        if r["variant"] in GEN_VARIANTS:
+            key = tuple(np.round(r["vec"], 1)) + (round(r["ref"], 1),)
+            fp[key].add((r["corpus"], r["slug"]))
+    parent = {}
+
+    def find(x):
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for r in recs:
+        find((r["corpus"], r["slug"]))
+    for owners in fp.values():
+        o = sorted(owners)
+        for x in o[1:]:
+            union(o[0], x)
+    return {k: find(k) for k in parent}
+
+
+def build():
+    recs = load_all()
+    for r in recs:
+        r["f"] = features(r["vec"], r["ref"])
+    aid = album_id_map(recs)
+
+    # album-level (mean over tracks) feature table, per (corpus, slug, variant)
+    grp = defaultdict(list)
+    for r in recs:
+        grp[(r["corpus"], r["slug"], r["variant"])].append(r["f"])
+    table = {}
+    for k, fs in grp.items():
+        table[k] = ({n: float(np.mean([x[n] for x in fs])) for n in FEATURE_NAMES}, len(fs))
+    return recs, aid, table, grp
+
+
+def genuine_population(aid, table):
+    """physical album id -> album-mean feature dict (full precision preferred)."""
+    pref = ["MTX-local", "MTX-apple", "APL-apple", "APL-apple2", "TRAIN", "R1", "R2", "R3"]
+    best = {}
+    for (corpus, slug, variant), (f, n) in table.items():
+        if variant not in GEN_VARIANTS:
+            continue
+        pid = aid[(corpus, slug)]
+        rank = pref.index(corpus) if corpus in pref else 99
+        if pid not in best or rank < best[pid][0]:
+            best[pid] = (rank, f, n, corpus, slug, variant)
+    return {k: v for k, v in best.items()}
+
+
+def loo_table(gen, tgt, higher_is_launder):
+    """Leave-one-ALBUM-out, zero-FP-on-fold threshold.
+
+    gen: {album_id: value} genuine controls
+    tgt: {album_id: value} launders of the SAME physical albums where possible
+    Returns (fp_albums, n_gen, recall_hits, n_tgt, median_threshold)
+    """
+    ids = sorted(gen)
+    vals = np.array([gen[i] for i in ids])
+    fp = 0
+    taus = []
+    for j, i in enumerate(ids):
+        rest = np.delete(vals, j)
+        tau = rest.max() if higher_is_launder else rest.min()
+        taus.append(tau)
+        if (gen[i] > tau) if higher_is_launder else (gen[i] < tau):
+            fp += 1
+    hits = 0
+    for i, v in tgt.items():
+        # threshold for a launder album: fitted on all genuine albums EXCEPT
+        # this album's own genuine twin (that twin is the leave-one-out fold)
+        rest = np.array([gen[k] for k in ids if k != i])
+        tau = rest.max() if higher_is_launder else rest.min()
+        if (v > tau) if higher_is_launder else (v < tau):
+            hits += 1
+    return fp, len(ids), hits, len(tgt), float(np.median(taus))
+
+
+def main():
+    recs, aid, table, grp = build()
+    gpop = genuine_population(aid, table)
+    print(f"distinct genuine control albums (deduped): {len(gpop)}")
+    src = defaultdict(int)
+    for _, (_, f, n, corpus, slug, variant) in gpop.items():
+        src[corpus] += 1
+    print("  provenance of the chosen measurement:", dict(src))
+    n_hires = sum(1 for pid, v in gpop.items() if v[4].startswith(HIRES_SLUGS))
+    print(f"  of which 96k/24: {n_hires}")
+    print()
+
+    gen_ids = list(gpop)
+    targets = {}
+    for corpus, variant, label in ESCAPE_TARGETS + CAUGHT_TARGETS:
+        d = {}
+        for (c, slug, v), (f, n) in table.items():
+            if c == corpus and v == variant:
+                if corpus.startswith("MTX") and slug.startswith(HIRES_SLUGS):
+                    continue
+                pid = aid[(c, slug)]
+                if pid in gpop:
+                    d[pid] = f
+        targets[label] = d
+    print("launder target coverage (albums with a genuine twin in the control pool):")
+    for label, d in targets.items():
+        print(f"  {label:18s} {len(d):3d}")
+    print()
+
+    esc_labels = [l for _, _, l in ESCAPE_TARGETS]
+    cau_labels = [l for _, _, l in CAUGHT_TARGETS]
+
+    out = {}
+    print("=" * 150)
+    print("LEAVE-ONE-ALBUM-OUT, ZERO-FP-ON-FOLD GLOBAL THRESHOLD")
+    print("  genuine FP = held-out genuine albums exceeding the threshold fitted on the other genuine albums")
+    print("  recall     = launder albums exceeding the threshold fitted on all genuine albums except their own twin")
+    print("=" * 150)
+    hdr = f"{'feature':14s}{'dir':>4s}{'FP alb':>10s}" + "".join(f"{l[:12]:>13s}" for l in esc_labels + cau_labels)
+    for name in FEATURE_NAMES:
+        gen = {pid: gpop[pid][1][name] for pid in gen_ids}
+        for direction, hib in [("hi", True), ("lo", False)]:
+            cells = []
+            fp = n_gen = 0
+            for label in esc_labels + cau_labels:
+                tgt = {pid: f[name] for pid, f in targets[label].items()}
+                fp, n_gen, hits, n_t, tau = loo_table(gen, tgt, hib)
+                cells.append(f"{hits}/{n_t}")
+            if name.startswith("_") or True:
+                key = (name, direction)
+                out[str(key)] = cells
+            if direction == "hi":
+                print(hdr) if name == FEATURE_NAMES[0] else None
+            print(f"{name:14s}{direction:>4s}{fp:>4d}/{n_gen:<5d}" + "".join(f"{c:>13s}" for c in cells))
+    print()
+    print("(FP column is identical for both directions of a feature only by coincidence of layout;"
+          " it is the fold FP count for THAT direction.)")
+
+    with open("/home/abl030/.claude/jobs/7dbdc6f4/tmp/shapes/loo_zero_fp.json", "w") as fh:
+        json.dump(out, fh, indent=1)
+
+
+if __name__ == "__main__":
+    main()

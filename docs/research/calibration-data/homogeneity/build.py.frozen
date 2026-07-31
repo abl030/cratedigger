@@ -1,0 +1,112 @@
+"""Build a per-track feature table + per-(dataset,album,variant) dispersion table.
+
+Read-only over docs/research/calibration-data. Writes only into this scratch dir.
+Column layouts taken from the directory READMEs / frozen loaders, not inferred.
+"""
+import gzip
+import json
+import os
+from collections import defaultdict
+
+CAL = "/home/abl030/cratedigger/docs/research/calibration-data"
+OUT = "/home/abl030/.claude/jobs/7dbdc6f4/tmp/homogeneity"
+
+# dataset key -> (results path, extended path)
+SOURCES = {
+    "TRAIN": ("results.tsv.gz", "extended.tsv.gz"),
+    "R1": ("results-holdout.tsv.gz", "extended-holdout.tsv.gz"),
+    "R2": ("results-holdout2.tsv.gz", "extended-holdout2.tsv.gz"),
+    "R3": ("results-holdout3.tsv.gz", "extended-holdout3.tsv.gz"),
+    "LOCAL": ("launder-matrix/results-local.tsv.gz", "launder-matrix/extended-local.tsv.gz"),
+    "LOCALW": ("launder-matrix/results-localw.tsv.gz", "launder-matrix/extended-localw.tsv.gz"),
+    "MAPPLE": ("launder-matrix/results-apple.tsv.gz", "launder-matrix/extended-apple.tsv.gz"),
+    "PILOT": ("launder-matrix/results-pilot.tsv.gz", "launder-matrix/extended-pilot.tsv.gz"),
+    "APPLEA": ("apple-arm/results-apple.tsv.gz", "apple-arm/extended-apple.tsv.gz"),
+    "APPLEB": ("apple-arm/results-apple2.tsv.gz", "apple-arm/extended-apple2.tsv.gz"),
+    "APPLE24": ("apple-arm/results-apple24.tsv.gz", "apple-arm/extended-apple24.tsv.gz"),
+}
+
+# slice index -> Hz.  results cols 11..26 = 12000..19500 step 500 (16)
+# extended cols 2..5 = 20000, 20500, 21000, 21500 (4).  20 slices total.
+HZ = [12000 + 500 * i for i in range(16)] + [20000, 20500, 21000, 21500]
+IDX = {h: i for i, h in enumerate(HZ)}
+
+
+def _mean(xs):
+    xs = list(xs)
+    return sum(xs) / len(xs)
+
+
+def _band(s, lo, hi):
+    return _mean(s[IDX[h]] for h in HZ if lo <= h <= hi)
+
+
+def track_feats(ref, s):
+    """s = 20 slice levels (dB), ref = 1-4 kHz level (dB)."""
+    f = {"ref": ref}
+    f["U"] = ref - _band(s, 20500, 21500)
+    f["d12_14"] = ref - _band(s, 12000, 14000)
+    f["d14_16"] = ref - _band(s, 14500, 16000)
+    f["d16_18"] = ref - _band(s, 16500, 18000)
+    f["d18_195"] = ref - _band(s, 18500, 19500)
+    f["d20_215"] = ref - _band(s, 20000, 21500)
+    f["drop_hi"] = _band(s, 18500, 19500) - _band(s, 20500, 21500)
+    f["slope_mid"] = (_band(s, 12000, 14000) - _band(s, 18500, 19500)) / 11.0
+    # per-slice deficit below the track's own reference
+    for h in HZ:
+        f["r%d" % h] = ref - s[IDX[h]]
+    return f
+
+
+def load(ds, results, extended):
+    ext = {}
+    with gzip.open(os.path.join(CAL, extended), "rt") as fh:
+        for ln in fh:
+            p = ln.rstrip("\n").split("\t")
+            if len(p) >= 6 and p[2]:
+                ext[p[1]] = [float(x) for x in p[2:6]]
+    rows = []
+    with gzip.open(os.path.join(CAL, results), "rt") as fh:
+        for ln in fh:
+            p = ln.rstrip("\n").split("\t")
+            if len(p) < 27 or not p[11] or not p[10]:
+                continue
+            e = ext.get(p[5])
+            if e is None:
+                continue
+            s = [float(x) for x in p[11:27]] + e
+            ref = float(p[10])
+            f = track_feats(ref, s)
+            f.update({
+                "ds": ds,
+                "slug": p[0],
+                "variant": p[1],
+                "path": p[5],
+                "grade": p[6],
+                "cliff": int(p[7]) if p[7] else None,
+                "hfdef": float(p[9]) if p[9] else 0.0,
+                "slices": s,
+            })
+            rows.append(f)
+    return rows
+
+
+def main():
+    allrows = []
+    for ds, (r, e) in SOURCES.items():
+        rr = load(ds, r, e)
+        allrows += rr
+        na = len({(x["slug"], x["variant"]) for x in rr})
+        print(f"{ds:8s} tracks={len(rr):6d} album_variants={na:5d} "
+              f"albums={len({x['slug'] for x in rr}):4d} variants={len({x['variant'] for x in rr}):3d}")
+    with gzip.open(os.path.join(OUT, "tracks.json.gz"), "wt") as fh:
+        json.dump(allrows, fh)
+    print("total tracks", len(allrows))
+    by = defaultdict(int)
+    for x in allrows:
+        by[(x["ds"], x["slug"], x["variant"])] += 1
+    print("album_variant groups", len(by))
+
+
+if __name__ == "__main__":
+    main()

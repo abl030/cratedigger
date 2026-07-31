@@ -13,9 +13,9 @@ than against a summary of it.
 ## Sub-directories
 
 Each is a self-contained measurement record with its own README carrying the
-exact commands, tool versions and column layouts. **The research they belong to
-is unfinished; the later four are deliberately descriptive and draw no
-conclusions.**
+exact commands, tool versions and column layouts. **The 2026-07-30 directories
+are deliberately descriptive and draw no conclusions; the 2026-07-31
+directories DO draw conclusions**, and each states its verdict up front.
 
 | directory | what it holds | measured |
 |---|---|---|
@@ -23,7 +23,11 @@ conclusions.**
 | `launder-matrix/` | 31 encoder variants × 19 albums, built as real launders, measured through the production analyzer and scored with the frozen gate | 2026-07-30 |
 | `derrien/` | a validated numpy port of Derrien's MDCT-lattice AAC-transcode detector, plus paired and wild measurement arms | 2026-07-30 |
 | `floor-analysis/` | re-reading of the four committed arms plus the launder matrix — preconditions, bitrate floors, a three-state framing | 2026-07-30 |
-| `provenance/` | read-only AccurateRip / CUETools DB / MusicBrainz DiscID probes over the library's FLAC albums | 2026-07-30 |
+| `provenance/` | read-only AccurateRip / CUETools DB / MusicBrainz DiscID probes over the library's FLAC albums — **its AR/CTDB results are superseded by `provenance-round2/`** | 2026-07-30 |
+| `homogeneity/` | within-album track-to-track dispersion as a discriminator — **VERDICT: no**, falsified with the sign inverted | 2026-07-31 |
+| `shape-analysis/` | the slice vector as a rolloff shape — **VERDICT: no**; SNR > 1 ⇔ the gate already catches it | 2026-07-31 |
+| `derrien-refinement/` | which Derrien statistics are deployable — **VERDICT: yes, partial**; a parameter-free offset-concentration rule closes the whole Apple/CoreAudio family | 2026-07-31 |
+| `provenance-round2/` | the corrected AccurateRip / CTDB verification — **VERDICT: partial**; 27 of 42 lossless albums bit-verified, a positive-only badge tier | 2026-07-31 |
 
 ## Provenance
 
@@ -192,6 +196,14 @@ per-class, **not** posterior odds. Real peer-shared content is roughly 49% mp3
    Still the lowest perceptual severity of any fraud class (near-transparent
    source), and no cheap discriminator is known — the V0/Opus probe axis
    (`probe_pair.tsv.gz`) fails against it too.
+   **Update 2026-07-31: no *spectral* discriminator exists, and this is now
+   proved twice over (`homogeneity/`, `shape-analysis/`) — but the class is
+   closable off the spectrum. `derrien-refinement/` scores the Apple family
+   against the already-measured Derrien detector for the first time (the
+   launder-matrix union table excluded `qaac-*` by a hardcoded `ORDER` list)
+   and finds 0 of 10 Apple launders survive the spectral ∪ Derrien union, plus
+   a parameter-free offset-concentration rule with an analytic false-positive
+   floor of ~0.0023 albums per 5000.**
 2. **Lossy-side band assertions are weak on HF-poor material.**
 3. **No-cliff asserts nothing** — the high end of every ladder is invisible.
    A permanent property, not a defect.

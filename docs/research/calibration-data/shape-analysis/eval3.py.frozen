@@ -1,0 +1,160 @@
+"""Step 3c — the decisive control: NULL RECALL.
+
+Every recall number in eval2 is contaminated: the 17 matrix launder albums are
+a fixed subset of the 114 genuine controls, so a feature on which those
+particular albums happen to sit high will "detect" them with no codec
+information whatsoever.
+
+The control is to run the identical LOO rule over those albums' OWN GENUINE
+measurements. NET = recall(launder) - recall(genuine twin) is the only part of
+the number that the codec produced.
+
+Also computes the black-box ceiling (LOO-by-album logistic regression on the
+full 19-dim adjacent-band-difference shape vector) as context.
+"""
+import sys
+
+import numpy as np
+
+sys.path.insert(0, "/home/abl030/.claude/jobs/7dbdc6f4/tmp/shapes")
+from eval import ESCAPE_TARGETS, CAUGHT_TARGETS, HIRES_SLUGS, build, genuine_population  # noqa: E402
+from feat import FEATURE_NAMES  # noqa: E402
+
+
+def main():
+    recs, aid, table, grp = build()
+    gpop = genuine_population(aid, table)
+    gen_ids = sorted(gpop)
+    gidx = {p: j for j, p in enumerate(gen_ids)}
+
+    targets = {}
+    for corpus, variant, label in ESCAPE_TARGETS + CAUGHT_TARGETS:
+        d = {}
+        for (c, slug, v), (f, n) in table.items():
+            if c == corpus and v == variant:
+                if corpus.startswith("MTX") and slug.startswith(HIRES_SLUGS):
+                    continue
+                pid = aid[(c, slug)]
+                if pid in gpop:
+                    d[pid] = f
+        targets[label] = d
+    esc = [l for _, _, l in ESCAPE_TARGETS]
+    cau = [l for _, _, l in CAUGHT_TARGETS]
+
+    print("=" * 170)
+    print("C. NET RECALL = recall(launder albums) - recall(THOSE SAME ALBUMS' genuine twins),")
+    print("   identical leave-one-album-out rule, threshold = q-quantile of the other genuine albums.")
+    print("   'null' is the twin recall; NET is the only part the codec produced. NET<=0 means zero power.")
+    print("=" * 170)
+
+    for q in (0.95, 0.90, 0.80):
+        print(f"--- q={q}  (nominal album FP budget {100*(1-q):.0f}%) ---")
+        print(f"{'feature':14s}{'dir':>4s}{'genFP':>9s}" + "".join(f"{l[:12]:>15s}" for l in esc + cau))
+        for name in FEATURE_NAMES:
+            gvals = {p: gpop[p][1][name] for p in gen_ids}
+            arr = np.array([gvals[p] for p in gen_ids])
+            # direction from the pooled escape-class mean shift
+            shifts = []
+            for l in esc:
+                tv = np.array([f[name] for f in targets[l].values()])
+                gv = np.array([gvals[p] for p in targets[l]])
+                shifts.append(np.median(tv - gv))
+            hib = float(np.mean(shifts)) >= 0
+            d = "hi" if hib else "lo"
+            fp = 0
+            for j, p in enumerate(gen_ids):
+                rest = np.delete(arr, j)
+                tau = np.quantile(rest, q if hib else 1 - q)
+                if (gvals[p] > tau) if hib else (gvals[p] < tau):
+                    fp += 1
+            cells = []
+            for label in esc + cau:
+                hits = nul = 0
+                for pid, f in targets[label].items():
+                    rest = np.delete(arr, gidx[pid])
+                    tau = np.quantile(rest, q if hib else 1 - q)
+                    v, g = f[name], gvals[pid]
+                    if (v > tau) if hib else (v < tau):
+                        hits += 1
+                    if (g > tau) if hib else (g < tau):
+                        nul += 1
+                n = len(targets[label])
+                cells.append(f"{hits}-{nul}={hits-nul:+d}/{n}")
+            print(f"{name:14s}{d:>4s}{fp:>4d}/{n and len(gen_ids):<4d}" + "".join(f"{c:>15s}" for c in cells))
+        print()
+
+    # ---------------- ceiling: LOO-by-album logistic on the 19-dim shape vector ----------------
+    print("=" * 170)
+    print("D. CEILING CONTEXT ONLY (not deployable — a legible gate is required).")
+    print("   Leave-one-ALBUM-out logistic regression on the 19 adjacent-band differences")
+    print("   d[k] = n[k+1]-n[k] of the album-mean level-normalized vector.  One model per")
+    print("   escape variant, trained on all OTHER albums (genuine vs that variant's launder).")
+    print("=" * 170)
+
+    # album-mean 20-vectors
+    vec20 = {}
+    for (c, slug, v), fs in grp.items():
+        pid = aid.get((c, slug))
+        if pid is None:
+            continue
+        rows = [r for r in recs if r["corpus"] == c and r["slug"] == slug and r["variant"] == v]
+        m = np.mean([r["vec"] - r["ref"] for r in rows], axis=0)
+        vec20[(c, slug, v)] = (pid, m)
+
+    gen_vec = {}
+    pref = ["MTX-local", "MTX-apple", "APL-apple", "APL-apple2", "TRAIN", "R1", "R2", "R3"]
+    for (c, slug, v), (pid, m) in vec20.items():
+        if v not in {"control-flac1644", "genuine", "null-flac"} or pid not in gpop:
+            continue
+        rank = pref.index(c) if c in pref else 99
+        if pid not in gen_vec or rank < gen_vec[pid][0]:
+            gen_vec[pid] = (rank, m)
+    G = {p: np.diff(gen_vec[p][1]) for p in gen_vec}
+
+    def logistic_fit(X, y, iters=400, lr=0.5, l2=1.0):
+        mu, sd = X.mean(0), X.std(0) + 1e-9
+        Z = (X - mu) / sd
+        Z = np.hstack([Z, np.ones((len(Z), 1))])
+        w = np.zeros(Z.shape[1])
+        for _ in range(iters):
+            p = 1 / (1 + np.exp(-Z @ w))
+            g = Z.T @ (p - y) / len(y) + l2 * np.r_[w[:-1], 0.0] / len(y)
+            w -= lr * g
+        return (mu, sd, w)
+
+    def logistic_pred(model, x):
+        mu, sd, w = model
+        z = np.r_[(x - mu) / sd, 1.0]
+        return 1 / (1 + np.exp(-z @ w))
+
+    print(f"{'variant':18s}{'n_alb':>7s}{'LOO AUC':>10s}{'recall@5%FP':>14s}{'recall@10%FP':>14s}")
+    for corpus, variant, label in ESCAPE_TARGETS + CAUGHT_TARGETS:
+        L = {}
+        for (c, slug, v), (pid, m) in vec20.items():
+            if c == corpus and v == variant and pid in G:
+                if corpus.startswith("MTX") and slug.startswith(HIRES_SLUGS):
+                    continue
+                L[pid] = np.diff(m)
+        if not L:
+            continue
+        ids = sorted(G)
+        scores_g, scores_l = [], []
+        for held in ids:
+            tr_ids = [p for p in ids if p != held]
+            X = np.array([G[p] for p in tr_ids] + [L[p] for p in tr_ids if p in L])
+            y = np.array([0.0] * len(tr_ids) + [1.0] * len([p for p in tr_ids if p in L]))
+            mdl = logistic_fit(X, y)
+            scores_g.append(logistic_pred(mdl, G[held]))
+            if held in L:
+                scores_l.append(logistic_pred(mdl, L[held]))
+        sg = np.array(scores_g)
+        sl = np.array(scores_l)
+        a = float(((sl[:, None] > sg[None, :]).sum() + 0.5 * (sl[:, None] == sg[None, :]).sum())
+                  / (len(sl) * len(sg)))
+        r5 = int((sl > np.quantile(sg, 0.95)).sum())
+        r10 = int((sl > np.quantile(sg, 0.90)).sum())
+        print(f"{label:18s}{len(sl):>7d}{a:>10.3f}{f'{r5}/{len(sl)}':>14s}{f'{r10}/{len(sl)}':>14s}")
+
+
+if __name__ == "__main__":
+    main()

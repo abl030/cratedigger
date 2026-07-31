@@ -1,0 +1,66 @@
+"""NON-DEPLOYABLE CEILING: the paired oracle.
+
+If you were handed the album's own genuine twin (which production never has),
+could within-album dispersion tell laundered from genuine?  Exact binomial
+sign test on the paired delta.  This is the absolute upper bound on the
+mechanism -- no threshold, no corpus, perfect per-album calibration.
+"""
+import numpy as np
+from scipy import stats
+
+import eval as E
+
+E.add_derived()
+rows, idx = E.rows, E.idx
+
+STATS = ["U_sd", "U_iqr", "U_mad", "d18_195_sd", "drop_hi_sd",
+         "shape_mpd_ul", "shape_mpd_hi", "shape_mpd_all",
+         "rat_mpdhi_over_mpdlo"]
+SPEC = dict((l, s) for l, s, _c in E.FLAC_LAUNDER + E.NATIVE_LAUNDER)
+ORDER = E.ESCAPE + ["lame-cbr128*", "t-mp3128-flac*", "t-vorbisq5-flac*",
+                    "lame-v0 (native mp3)", "vorbis-q6 (native ogg)",
+                    "vorbis-q9 (native ogg)", "apple-cvbr256 (native m4a)"]
+
+print("=== PAIRED ORACLE CEILING (non-deployable: needs the album's genuine twin)")
+print("up/n = albums whose dispersion INCREASED under laundering; p = two-sided")
+print("exact binomial vs 0.5.  50% = the mechanism carries no information at all,")
+print("even with perfect per-album calibration.\n")
+hdr = "%-28s" % "variant"
+for s in STATS:
+    hdr += " %-16s" % s[:16]
+print(hdr)
+for label in ORDER:
+    line = "%-28s" % label
+    for s in STATS:
+        pairs = []
+        for r in E.launder_rows(SPEC[label], s):
+            tds, tv = E.TWIN_DS[r["ds"]]
+            g = idx.get((tds, r["slug"], tv))
+            if g and g.get(s) is not None:
+                pairs.append(r[s] - g[s])
+        if not pairs:
+            line += " %-16s" % "-"
+            continue
+        up = sum(1 for d in pairs if d > 0)
+        p = stats.binomtest(up, len(pairs), 0.5).pvalue
+        line += " %3d/%-3d %4.0f%% %s" % (up, len(pairs), 100.0 * up / len(pairs),
+                                          ("p=%.3f" % p) if p >= 0.001 else "p<.001")
+    print(line)
+
+print("\n=== genuine-corpus dispersion spread (the confound, measured)")
+for s in ("U_sd", "shape_mpd_hi", "shape_mpd_ul", "d18_195_sd"):
+    v = np.array([r[s] for _t, r in E.GENUINE
+                  if r.get(s) is not None and not E.is_hires(r["slug"])], float)
+    print("  %-14s n=%d  min=%.2f p10=%.2f median=%.2f p90=%.2f max=%.2f  spread=%.2f"
+          % (s, len(v), v.min(), np.percentile(v, 10), np.median(v),
+             np.percentile(v, 90), v.max(), v.max() - v.min()))
+print("\n  compare: median paired launder effect on U_sd (escape class)")
+for label in E.ESCAPE:
+    pairs = []
+    for r in E.launder_rows(SPEC[label], "U_sd"):
+        tds, tv = E.TWIN_DS[r["ds"]]
+        g = idx.get((tds, r["slug"], tv))
+        if g and g.get("U_sd") is not None:
+            pairs.append(r["U_sd"] - g["U_sd"])
+    print("    %-18s median delta = %+.3f dB (n=%d)"
+          % (label, float(np.median(pairs)), len(pairs)))

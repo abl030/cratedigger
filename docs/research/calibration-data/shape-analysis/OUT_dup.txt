@@ -1,0 +1,9 @@
+cratedigger dev shell — run: python3 -m unittest discover -s tests -t . -v
+matrix qaac-cvbr256 rows=230  apple-arm t-apple256-flac rows=215  same (slug,file)=215
+  max |slice diff| over 215 paired rows: max=0.000e+00  mean=0.000e+00
+  max |ref  diff|: 0.000e+00
+  identical rows: 215/215
+
+sample paths:
+  MTX: /mnt/virtio/Music/matrix/qaac-cvbr256/8916/000.flac
+  APL: /mnt/virtio/Music/apple-arm/launder/8916/000.flac

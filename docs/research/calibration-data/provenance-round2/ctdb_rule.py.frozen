@@ -1,0 +1,70 @@
+"""Validate the derived CTDB trim rule on several albums.
+
+Derived from Death Magnetic (AR conf-200 bit-verified, CTDB conf 8026):
+  CTDB CRCs are plain zlib CRC-32 over the disc PCM restricted to
+  [stride, total - stride - (total mod stride)) samples, stride = 5880
+  samples = 10 CD sectors.  Per-track CRCs are that trimmed image
+  intersected with each track; middle tracks are therefore untrimmed.
+"""
+import os
+import re
+import sys
+import zlib
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from provlib import (album_dirs, build_toc, ctdb_fetch_cached, decode,  # noqa: E402
+                     toc_from_dir)
+
+M32 = 0xFFFFFFFF
+BPS = 4  # bytes per stereo 16-bit sample
+
+
+def ctdb_crcs(raws, stride=5880):
+    total = sum(len(r) // BPS for r in raws)
+    lead = stride
+    tail = stride + (total % stride)
+    lo, hi = lead * BPS, (total - tail) * BPS
+    tcrcs, pos, whole = [], 0, []
+    for r in raws:
+        a, b = max(lo, pos), min(hi, pos + len(r))
+        chunk = r[a - pos:b - pos] if b > a else b""
+        tcrcs.append(zlib.crc32(chunk) & M32)
+        whole.append(chunk)
+        pos += len(r)
+    return tcrcs, zlib.crc32(b"".join(whole)) & M32
+
+
+def main():
+    dirs = {os.path.basename(d): d for d in album_dirs()}
+    for name in ("2008 - Death Magnetic",
+                 "1990 - Ambient 1_ Music for Airports [EEGCD 17]",
+                 "1996 - The Velvet Underground & Nico [31453 1250 2]",
+                 "2001 - Jane Doe"):
+        d = dirs[name]
+        files, meta, lens = toc_from_dir(d)
+        toc = build_toc(lens)
+        _u, xml, _s = ctdb_fetch_cached(toc)
+        ents = re.findall(
+            r'<entry confidence="(\d+)"\s+crc32="([0-9a-f]+)"[^>]*?'
+            r'stride="(\d+)"[^>]*?trackcrcs="([^"]*)"', xml)
+        if not ents:
+            ents = re.findall(
+                r'<entry confidence="(\d+)"\s+crc32="([0-9a-f]+)"[^>]*?'
+                r'trackcrcs="([^"]*)"', xml)
+            ents = [(c, d_, "5880", t) for c, d_, t in ents]
+        raws = [decode(os.path.join(d, f)) for f in files]
+        tcrcs, disc = ctdb_crcs(raws)
+        best = None
+        for conf, dcrc, stride, tcs in ents:
+            want = [int(x, 16) for x in tcs.split()]
+            hit = sum(1 for a, b in zip(tcrcs, want) if a == b)
+            dm = int(dcrc, 16) == disc
+            if best is None or (hit, dm, int(conf)) > best[0]:
+                best = ((hit, dm, int(conf)), conf, dcrc, stride)
+        print(f"{name[:48]:48s} entries={len(ents):3d} "
+              f"best trackhit={best[0][0]}/{len(tcrcs)} disc_match={best[0][1]} "
+              f"conf={best[1]} stride={best[3]} ourdisc={disc:08x} theirs={best[2]}")
+
+
+if __name__ == "__main__":
+    main()

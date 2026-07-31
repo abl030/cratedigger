@@ -1073,6 +1073,140 @@ are the rebuild recipe (~5 min and ~6 GB per variant per the recorded timings).
 
 ---
 
+## 2026-07-31 — four-thread verification round: conclusions
+
+**Nothing in this document above this line has been revised.** The 2026-07-30
+section deliberately deferred every conclusion; **this section draws them.**
+Four bounded threads ran against the committed data, each with a verdict up
+front in its own dataset README under `docs/research/calibration-data/`. No new
+audio was encoded and no production constant changed.
+
+### 1. Within-album homogeneity — `homogeneity/` — **NO**
+
+Does a laundered album's tracks cluster more tightly than a genuine album's,
+because they went through one encoder at one setting? No — and the hypothesis
+is falsified with its sign inverted. Where laundering moves within-album
+dispersion at all it **inflates** it (`lame-v0` +0.84 dB, `vorbis-q6/7/8`
++1.4 to +1.7 dB median paired `U_sd`, 88–100 % of albums up). On the classes
+that actually escape the gate the effect is absent in both directions: median
+paired `U_sd` deltas of −0.012 / −0.036 / −0.003 / +0.011 dB for
+`aacffm-256` / `aacffm-320` / `qaac-cvbr256` / `qaac-cvbr320`, and a **paired
+oracle** handed the album's own genuine twin — which production never has —
+sits at a coin flip (p ≈ 1.0). A 33-feature grouped leave-one-album-out model
+scores **AUC 0.508**. The cause is the same confound the 2026-07-30 section
+recorded for levels: genuine `U_sd` spans 1.88 → 21.36 dB across 137 albums, a
+19.5 dB range against a ≤1.7 dB launder effect — **album identity dominates
+second moments exactly as it dominates levels.** The durable methodological
+result is the null-feature control: `ref_sd`, which a transparent encoder
+provably cannot move (±0.01 dB paired delta everywhere), still scores
+**AUC 0.60** on this corpus. Any AUC in the 0.55–0.65 band here must be read
+against that floor, not against 0.5, and several statistics that looked
+promising never clear their own null feature.
+
+### 2. The slice vector as a shape — `shape-analysis/` — **NO**
+
+Every gate leg reduces the 16–20 band-RMS values to one scalar; is there
+information in the rolloff *shape* the scalars threw away? No. After level
+normalization the AAC/Apple paired shape delta is **≤ 0.24 dB in all 20 bands**
+over 197 paired tracks, against −7.65 dB for `vorbis-q6` and −26.08 dB for the
+already-caught `aacffm-192`. The decisive number is the signal-to-noise ratio
+of codec shape displacement against genuine-album-to-genuine-album shape
+distance in the same space: **0.031–0.086** for the six AAC/Apple escape
+classes — 25–40× below the confound, with **0.0 %** of genuine album pairs
+closer together than the median codec displacement. An unconstrained
+leave-one-album-out black box over the full 19-dim shape vector scores
+**AUC 0.408–0.590** on those classes while scoring **1.000** on `lame-cbr320`
+and `aacffm-192`. That yields a structural law worth recording: **every class
+the frozen gate catches has shape SNR > 1 and every class that escapes has
+SNR < 1.** Transparency is now a measured property of the production
+measurement granularity, not a suspicion. Two corpus facts fall out and bound
+future Apple claims: `launder-matrix/qaac-cvbr256` and `apple-arm`
+`t-apple256-flac` (arm A) are **215/215 byte-identical measurements** — one
+dataset under two names, qaac being deterministic over the same corpus and
+argv — so the only album-independent Apple evidence is arm B's 20 albums; and
+the Apple shape signal concentrates on the six albums whose genuine twin the
+gate already denies (median displacement 2.363 there against 0.160 on the
+eleven provable ones), which is the one population where a discriminator would
+be useless.
+
+### 3. Derrien refinement — `derrien-refinement/` — **YES, partial**
+
+Which of the MDCT-lattice detector's statistics survive a deployable rule? The
+NAC probe is dead (track AUC 0.760 against 0.995 for `proba`; no combination
+helps) and the `mode=low` frame selection is dead (AUC 0.644, and `proba` at
+`mode=low` saturates at exactly 1.0). The pooled `proba` threshold is a
+**two-album artifact** — max/median-album ratio 5.012, halved by removing two
+albums. The `z` threshold is corpus-supported (ratio 1.114) but an honest
+Gumbel fit to the 17 genuine album-max values (μ = 5.598, β = 0.580) prices the
+naive zero-false-positive point `z > 6.914` at **~490 false positives per 5000
+albums**, demoting it to triage grade; `z > 12` is the conservative point
+(0/1136 wild tracks). **The deployable finding is the offset-concentration
+rule**: ≥ 4 tracks of an album recovering the same MDCT frame offset. Genuine
+offsets are uniform (182 distinct in 197 tracks, χ² 19.5 on 31 df, zero
+within-album k ≥ 2 coincidences), giving an **analytic** false-positive floor
+of ~0.0023 albums per 5000 — a calculation, not a fitted threshold. It catches
+100 % of `qaac-cvbr256`, `qaac-cvbr320`, `qaac-tvbr91`, `qaac-abr192` and 16/17
+of `qaac-cbr128`, reproduces on an independent second Apple build, and the
+mechanism is exact: CoreAudio primes 2112 samples → 2112 mod 1024 = 64 →
+lattice offset 960, while ffmpeg's native AAC primes 1024 → offset 0.
+
+**Premise correction.** `launder-matrix/FINAL_REPORT.txt` § D — the
+gate ∪ Derrien union table — contains no `qaac-*` row, because its producing
+script's hardcoded `ORDER` list excludes the five Apple variants. **The Apple
+class was never scored against Derrien at all.** Scored now, the *existing*
+pooled rule already closes it completely: **0 of 10** Apple launder albums
+survive the spectral ∪ Derrien union, and 17/17 are flagged. `ffmpeg`-native
+AAC 256/320 remains roughly half-invisible (best union: 5/10 and 4/10 survive
+under `offset k ≥ 4 OR z > 12`), and `lame-v0` / `vorbis-q10` carry no AAC
+lattice, so the detector cannot see them by construction.
+
+### 4. Provenance round 2 — `provenance-round2/` — **PARTIAL**
+
+The 2026-07-30 `provenance/` results were wrong for three implementation
+reasons, all now diagnosed and fixed. **(A)** An AccurateRip response's
+per-track fields are `checksum` — holding *either* the v1 or the v2 value, the
+database does not say which — and `checksum_450`, a frame-450 CRC used only for
+read-offset detection. Round 1 compared ARv2 against `checksum_450`, so
+"ARv2 matched 0 tracks everywhere" was **structurally guaranteed** rather than
+an anomaly. **(B)** A track-1 off-by-one in the checksum window (skip
+5 × 588 = 2940 samples, not 2941) — invisible whenever CD frame 2939 is
+silence, which is exactly why round 1's 25-of-25 `arver` cross-check passed;
+fixed, 82 of 82 tracks across five albums now match `arver` 1.5.0's C extension
+on both versions. **(C)** float64 promotion in the offset-scan prefix sums
+(53-bit mantissa against ~2^60 sums), which is why "the offset search rescued
+nothing"; exact `uint64` arithmetic rescues **9 albums at a constant read
+offset**. The CTDB CRC convention, never determined in round 1, was
+reverse-engineered from a confidence-200 AccurateRip-verified album and
+validated: plain `zlib.crc32` over the disc PCM restricted to
+`[stride, total − stride − (total mod stride))`, stride 5880 samples; **12
+whole-disc exact matches**. Result: **25 of 38 FLAC albums (66 %) bit-verified**
+against 9 partial before, **27 of 42 including ALAC**, four of them ARv2-only.
+The ceiling is the binding constraint: 42 lossless albums are **0.49 % of the
+8,490-album library**, 27 are already verified, and the six with no TOC in
+either database are exactly the long-tail pressings this archive exists for.
+**Verdict: a positive-only badge tier, never load-bearing** — a non-match must
+never deny anything.
+
+### What this round settles
+
+- **Within the production spectral instrument the transparent-escape class is
+  unreachable in principle**, not under-tuned. Two independent falsifications
+  now say so: the second-moment axis (`homogeneity/`) and the shape axis
+  (`shape-analysis/`), the latter with a measured SNR boundary explaining
+  *why*.
+- **The Apple / CoreAudio family is closable at proof grade off the spectrum**,
+  via the Derrien offset-concentration rule — and the already-committed pooled
+  Derrien rule closes it too; it was simply never scored against it.
+- **The permanent spectral residual is now precisely named**: `lame-v0`,
+  `vorbis-q10`, and roughly half of `ffmpeg`-native AAC 256/320.
+- **Provenance is a real but narrow positive axis** — 27 albums, 0.49 % of the
+  library reachable at all, badge only.
+
+The research phase of issue #829 is closed by this round. Nothing above the
+2026-07-30 divider is revised, and no production constant changes here.
+
+---
+
 ## Data and reproduction
 
 All under `/mnt/virtio/Music/calibration-tmp/` on shared storage. The temporary

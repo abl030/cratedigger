@@ -1,0 +1,27 @@
+"""Are MTX-apple/qaac-cvbr256 and APL-apple/t-apple256-flac independent encodes, or the same bits?"""
+import sys
+import numpy as np
+sys.path.insert(0, "/home/abl030/.claude/jobs/7dbdc6f4/tmp/shapes")
+from load import load_all
+recs = load_all()
+A = {}
+for r in recs:
+    if r["corpus"] == "MTX-apple" and r["variant"] == "qaac-cvbr256":
+        A[(r["slug"], r["path"].split("/")[-1])] = r
+B = {}
+for r in recs:
+    if r["corpus"] == "APL-apple" and r["variant"] == "t-apple256-flac":
+        B[(r["slug"], r["path"].split("/")[-1])] = r
+common = sorted(set(A) & set(B))
+print(f"matrix qaac-cvbr256 rows={len(A)}  apple-arm t-apple256-flac rows={len(B)}  same (slug,file)={len(common)}")
+if common:
+    d = np.array([np.abs(A[k]["vec"] - B[k]["vec"]).max() for k in common])
+    dr = np.array([abs(A[k]["ref"] - B[k]["ref"]) for k in common])
+    print(f"  max |slice diff| over {len(common)} paired rows: max={d.max():.3e}  mean={d.mean():.3e}")
+    print(f"  max |ref  diff|: {dr.max():.3e}")
+    print(f"  identical rows: {(d < 1e-9).sum()}/{len(common)}")
+print()
+print("sample paths:")
+k = common[0]
+print("  MTX:", A[k]["path"])
+print("  APL:", B[k]["path"])

@@ -1,0 +1,105 @@
+"""Step 2 — effect size: paired codec effect vs genuine cross-album spread.
+
+For every shape feature:
+  * paired album-level delta (launder album mean - its own genuine album mean)
+  * genuine cross-album SD over ALL genuine controls (arms + matrix)
+A feature can only work as a global-threshold gate if |paired delta| is large
+relative to the genuine cross-album spread.
+"""
+import sys
+from collections import defaultdict
+
+import numpy as np
+
+sys.path.insert(0, "/home/abl030/.claude/jobs/7dbdc6f4/tmp/shapes")
+from feat import FEATURE_NAMES, features  # noqa: E402
+from load import load_all, variant_map  # noqa: E402
+
+HIRES = {"8920", "8931"}
+ESCAPE = ["lame-v0", "aacffm-256", "aacffm-320", "vorbis-q10", "vorbis-q8", "vorbis-q7",
+          "vorbis-q6", "qaac-cvbr256", "qaac-cvbr320"]
+REF_CAUGHT = ["lame-cbr320", "aacffm-192", "vorbis-q5", "opus-256", "qaac-tvbr91"]
+
+
+def main():
+    recs = load_all()
+    for r in recs:
+        r["f"] = features(r["vec"], r["ref"])
+
+    # ---- genuine control population (album-level means) ----
+    gen_albums = {}   # (corpus, slug) -> feature dict of album mean
+    for key, corpora, variants in [
+        ("arms", {"TRAIN", "R1", "R2", "R3"}, {"control-flac1644"}),
+        ("mtx", {"MTX-local"}, {"genuine"}),
+        ("apl", {"APL-apple", "APL-apple2"}, {"control-flac1644"}),
+    ]:
+        grp = defaultdict(list)
+        for r in recs:
+            if r["corpus"] in corpora and r["variant"] in variants:
+                grp[(key, r["corpus"], r["slug"])].append(r["f"])
+        for k, fs in grp.items():
+            gen_albums[k] = {n: float(np.mean([x[n] for x in fs])) for n in FEATURE_NAMES}
+
+    print(f"genuine control albums pooled: {len(gen_albums)}")
+    by_src = defaultdict(int)
+    for k in gen_albums:
+        by_src[k[0]] += 1
+    print("  ", dict(by_src))
+    print()
+
+    # ---- paired album-level deltas from the launder matrix ----
+    by_path = {(r["variant"], r["path"]): r for r in recs if r["corpus"].startswith("MTX-")}
+    vmap = variant_map()
+    paired = defaultdict(lambda: defaultdict(list))  # variant -> req -> list of (fg, fl)
+    for variant, per_req in vmap.items():
+        for req, info in per_req.items():
+            if req in HIRES:
+                continue
+            for m in info.get("map", []):
+                g = by_path.get(("genuine", m["genuine"]))
+                l = by_path.get((variant, m["launder"]))
+                if g is not None and l is not None:
+                    paired[variant][req].append((g["f"], l["f"]))
+
+    print(f"{'feature':14s}{'gen SD':>8s}{'gen IQR':>9s}  " +
+          "".join(f"{v[:11]:>12s}" for v in ESCAPE))
+    print(f"{'':14s}{'':8s}{'':9s}  " + "".join(f"{'medΔ/genSD':>12s}" for _ in ESCAPE))
+    rows = {}
+    for name in FEATURE_NAMES:
+        vals = np.array([g[name] for g in gen_albums.values()])
+        sd = float(np.std(vals))
+        iqr = float(np.percentile(vals, 75) - np.percentile(vals, 25))
+        cells = []
+        for v in ESCAPE:
+            if v not in paired:
+                cells.append(float("nan"))
+                continue
+            d = []
+            for req, pairs in paired[v].items():
+                dg = np.mean([p[0][name] for p in pairs])
+                dl = np.mean([p[1][name] for p in pairs])
+                d.append(dl - dg)
+            cells.append(float(np.median(d)) / sd if sd > 0 else float("nan"))
+        rows[name] = (sd, iqr, cells)
+        print(f"{name:14s}{sd:8.3f}{iqr:9.3f}  " + "".join(f"{c:12.3f}" for c in cells))
+
+    print()
+    print("=== raw median paired album delta (dB or dB/500Hz), same layout ===")
+    print(f"{'feature':14s}  " + "".join(f"{v[:11]:>12s}" for v in ESCAPE + REF_CAUGHT))
+    for name in FEATURE_NAMES:
+        cells = []
+        for v in ESCAPE + REF_CAUGHT:
+            if v not in paired:
+                cells.append(float("nan"))
+                continue
+            d = []
+            for req, pairs in paired[v].items():
+                dg = np.mean([p[0][name] for p in pairs])
+                dl = np.mean([p[1][name] for p in pairs])
+                d.append(dl - dg)
+            cells.append(float(np.median(d)))
+        print(f"{name:14s}  " + "".join(f"{c:12.3f}" for c in cells))
+
+
+if __name__ == "__main__":
+    main()
