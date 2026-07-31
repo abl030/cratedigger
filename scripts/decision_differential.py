@@ -59,6 +59,7 @@ if REPO_ROOT not in sys.path:
 
 import msgspec
 
+from lib.json_narrow import is_object_list, is_str_object_dict
 from lib.pipeline_db.evidence import _EvidenceMixin
 from lib.quality import (
     AlbumQualityEvidence,
@@ -140,15 +141,15 @@ def _evidence_from_corpus_row(
     payload = dict(row)
     raw_files = payload.pop("files", None)
     file_rows: list[dict[str, object]] = []
-    if isinstance(raw_files, list):
+    if raw_files is not None:
+        if not is_object_list(raw_files):
+            raise RenderDifferentialError(
+                "corpus row 'files' must be a list of objects")
         for entry in raw_files:
-            if not isinstance(entry, dict):
+            if not is_str_object_dict(entry):
                 raise RenderDifferentialError(
                     "corpus row 'files' must be a list of objects")
             file_rows.append(dict(entry))
-    elif raw_files is not None:
-        raise RenderDifferentialError(
-            "corpus row 'files' must be a list of objects")
     measured_at = payload.get("measured_at")
     if isinstance(measured_at, str):
         # PG hands psycopg2 a datetime; a JSONL export hands us its ISO
@@ -240,11 +241,24 @@ def decide_row(row: Mapping[str, object]) -> RenderedRow:
         spectral_grade=evidence.measurement.spectral_grade,
         ultrasonic_leg=leg,
     )
-    fields["verified_lossless_classifier"] = (
-        proof.classifier if proof is not None else None
-    )
-    fields["ultrasonic_leg_outcome"] = leg.outcome
-    fields["ultrasonic_leg_reason"] = leg.reason
+    fields.update({
+        "verified_lossless_classifier": (
+            proof.classifier if proof is not None else None
+        ),
+        "ultrasonic_leg_outcome": leg.outcome,
+        "ultrasonic_leg_reason": leg.reason,
+    })
+    # The emitted field set is checked against the declared contract on
+    # every row rather than trusted: a proof fact added above without
+    # joining ``PROOF_FIELDS`` would be compared by the diff engine but
+    # invisible to anyone reading what this harness claims to watch, and
+    # one dropped would be silently uncompared.
+    expected = {DECISION_ERROR_FIELD, *DECISION_KEYS, *PROOF_FIELDS}
+    if set(fields) != expected:
+        raise RenderDifferentialError(
+            "decided row field set does not match the declared contract: "
+            f"extra {sorted(set(fields) - expected)}, "
+            f"missing {sorted(expected - set(fields))}")
     return RenderedRow(id=row_id, fields=fields)
 
 

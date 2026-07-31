@@ -177,6 +177,20 @@ class TestDecideRow(unittest.TestCase):
         for key in DECISION_KEYS:
             self.assertIsNone(refused.fields[key], key)
 
+    def test_the_declared_contract_is_checked_on_every_row(self):
+        """``PROOF_FIELDS`` is enforced, not decoration: a proof fact that
+        stopped being emitted fails the run rather than going silently
+        uncompared."""
+        import scripts.decision_differential as dd
+
+        original = dd.PROOF_FIELDS
+        dd.PROOF_FIELDS = (*original, "a_proof_fact_nothing_emits")
+        try:
+            with self.assertRaises(RenderDifferentialError):
+                decide_row(_corpus_row())
+        finally:
+            dd.PROOF_FIELDS = original
+
     def test_a_corpus_row_without_an_id_fails_closed(self):
         with self.assertRaises(RenderDifferentialError):
             decide_row(_corpus_row(id=None))
