@@ -35,6 +35,10 @@ from lib.import_queue import (
 )
 from lib.pipeline_db._shared import ADVISORY_LOCK_NAMESPACE_IMPORT
 from lib.quality import (
+    DECISION_LOSSLESS_SOURCE_LOCKED,
+    DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
+    DECISION_SUSPECT_LOSSLESS_DOWNGRADE,
+    DECISION_SUSPECT_LOSSLESS_PROBE_MISSING,
     EVIDENCE_PROVENANCE_MEASURED,
     EVIDENCE_SUBJECT_INSTALLED,
     EVIDENCE_SUBJECT_SOURCE,
@@ -619,6 +623,24 @@ def claim_next_import_preview_job(
     )
 
 
+#: Every ``stage2_import`` decision produced by the provisional-lossless
+#: lane (``lib/quality/decisions.py::provisional_lossless_decision``) — the
+#: lane the V0 trust override routes an album AROUND. Membership is the
+#: observable answer to "which lane decided this album", which the v3
+#: ultrasonic leg must never change (issue #829 Phase 5 PR3): three of the
+#: four are confident rejects that also denylist the offering peer, so a
+#: leg that could re-route into this lane would turn a withheld proof into
+#: a discarded album. Spelled from the production constants, once, for the
+#: pins in ``tests/test_quality_classification.py`` and the property in
+#: ``tests/test_quality_generated.py``.
+PROVISIONAL_LANE_DECISIONS = frozenset({
+    DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
+    DECISION_SUSPECT_LOSSLESS_DOWNGRADE,
+    DECISION_SUSPECT_LOSSLESS_PROBE_MISSING,
+    DECISION_LOSSLESS_SOURCE_LOCKED,
+})
+
+
 def build_parity_candidate_evidence(
     *,
     is_flac: bool,
@@ -642,6 +664,11 @@ def build_parity_candidate_evidence(
     cliff_hz: int | None = None,
     codec_family: CodecFamily | None = None,
     filetype_band: str | None = None,
+    ultrasonic_deficit_db: float | None = None,
+    spectral_measurement_version: int | None = 2,
+    was_converted_from: str | None = None,
+    lossless_container: str = "flac",
+    lossless_codec: str = "flac",
 ) -> AlbumQualityEvidence:
     """Build an ``AlbumQualityEvidence`` candidate row matching the
     simulator's flat-kwargs shape (post-U2/U3 schema).
@@ -655,34 +682,18 @@ def build_parity_candidate_evidence(
     # Candidate evidence always describes the downloaded source bytes.
     # Conversion policy/output stay on the target contract and decision facts;
     # a temporary V0 probe must never make a FLAC source wear an MP3 label.
-    if is_flac and post_conversion_min_bitrate is not None:
-        container = "flac"
-        codec = "flac"
-        storage_format = "flac"
+    # The two lossless branches (converting and kept-on-disk) built the
+    # identical row and were only ever spelled apart; PR3's
+    # container/codec split made that literally true, so they are one.
+    if is_flac:
+        container = lossless_container
+        codec = lossless_codec
+        storage_format = lossless_codec
         measurement = AudioQualityMeasurement(
             min_bitrate_kbps=min_bitrate or 900,
             avg_bitrate_kbps=min_bitrate or 900,
             median_bitrate_kbps=min_bitrate or 900,
-            format="FLAC",
-            is_cbr=False,
-            spectral_grade=spectral_grade,
-            spectral_bitrate_kbps=spectral_bitrate,
-            spectral_subject=(
-                EVIDENCE_SUBJECT_SOURCE if spectral_grade is not None else None
-            ),
-            spectral_provenance=(
-                EVIDENCE_PROVENANCE_MEASURED
-                if spectral_grade is not None else None
-            ),
-        )
-    elif is_flac:
-        container = codec = "flac"
-        storage_format = "flac"
-        measurement = AudioQualityMeasurement(
-            min_bitrate_kbps=min_bitrate or 900,
-            avg_bitrate_kbps=min_bitrate or 900,
-            median_bitrate_kbps=min_bitrate or 900,
-            format="FLAC",
+            format=lossless_codec.upper(),
             is_cbr=False,
             spectral_grade=spectral_grade,
             spectral_bitrate_kbps=spectral_bitrate,
@@ -719,13 +730,21 @@ def build_parity_candidate_evidence(
     # three candidate shapes carry it identically; a row with no spectral
     # grade may not carry these facts at all (evidence-row validation).
     if spectral_grade is not None and (
-        cliff_hz is not None or codec_family is not None
+        cliff_hz is not None
+        or codec_family is not None
+        or ultrasonic_deficit_db is not None
+        or was_converted_from is not None
     ):
+        # ``spectral_measurement_version`` defaults to 2 (the PR1+ capture
+        # code) because that is what any producer of these facts stamps.
+        # A caller pins it to None to build the legacy world explicitly.
         measurement = msgspec.structs.replace(
             measurement,
             cliff_hz=cliff_hz,
             codec_family=codec_family,
-            spectral_measurement_version=2,
+            ultrasonic_deficit_db=ultrasonic_deficit_db,
+            was_converted_from=was_converted_from,
+            spectral_measurement_version=spectral_measurement_version,
         )
 
     v0_metric = None

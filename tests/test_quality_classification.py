@@ -22,6 +22,7 @@ from lib.quality import (
     full_pipeline_decision,
 )
 from tests.helpers import (
+    PROVISIONAL_LANE_DECISIONS,
     build_parity_candidate_evidence,
     build_parity_current_evidence,
 )
@@ -1734,6 +1735,563 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
         self.assertEqual(basis["new_value_kbps"], 128)
         self.assertEqual(basis["existing_metric"], "avg")
         self.assertEqual(basis["existing_value_kbps"], 256)
+
+
+class TestUltrasonicProofGateV3(unittest.TestCase):
+    """Proof gate v3 — the ultrasonic deficit leg (issue #829 Phase 5 PR3).
+
+    The album test set for the leg that replaced v2.1's relative
+    affirmative-content test. Every scenario runs through BOTH twins: the
+    flat-kwargs simulator and ``full_pipeline_decision_from_evidence``,
+    the function the importer actually calls.
+
+    Every pin asserts the DECIDED OUTCOME, not a proxy field. In this
+    library's default configuration (``verified_lossless_target='opus
+    128'``) the flip is terminal-versus-still-searching:
+
+        proof granted   stage3='accept', final_status='imported',
+                        keep_searching=False, target='opus 128'
+        proof withheld  stage3='requeue_lossless', final_status='wanted',
+                        keep_searching=True, target=None
+
+    which is exactly the archivist semantics the plan requires: a denial
+    is NOT a rejection. The album still imports; it simply carries no
+    proof and stays on the search surface (Phase 5 plan §2, §1.7).
+
+    The measured worlds below use real launder deficits from the four
+    committed calibration arms, not invented numbers.
+    """
+
+    #: ROUND-3 / William Basinski, measured ``U=65.16`` on both its
+    #: ``t-mp3128-flac`` and ``t-vorbisq5-flac`` launders — a FLAC-container
+    #: fraud the album grade alone does not catch. Above the frozen 59.5
+    #: threshold; the ultrasonic leg is the only thing between it and a
+    #: verified-lossless stamp.
+    LAUNDER_DEFICIT_DB = 65.16
+
+    #: A genuine control comfortably below the threshold.
+    GENUINE_DEFICIT_DB = 45.0
+
+    _FACTS_TARGET = "opus 128"
+
+    def _evidence_decision(self, **candidate_kwargs):
+        from lib.quality import (
+            AlbumQualityEvidenceDecisionFacts,
+            full_pipeline_decision_from_evidence,
+        )
+        candidate = build_parity_candidate_evidence(
+            is_flac=True, min_bitrate=0, is_cbr=False,
+            spectral_grade="genuine",
+            post_conversion_min_bitrate=245,
+            candidate_v0_probe_avg=245,
+            candidate_v0_probe_min=245,
+            codec_family="lossless",
+            **candidate_kwargs,
+        )
+        return full_pipeline_decision_from_evidence(
+            candidate, None,
+            facts=AlbumQualityEvidenceDecisionFacts(
+                verified_lossless_target=self._FACTS_TARGET,
+            ),
+        )
+
+    def _simulator_decision(self, *, spectral_grade="genuine", **context_kwargs):
+        from lib.quality import SpectralCodecContext
+        return full_pipeline_decision(
+            is_flac=True, min_bitrate=0, is_cbr=False,
+            spectral_grade=spectral_grade,
+            converted_count=1,
+            post_conversion_min_bitrate=245,
+            post_conversion_is_cbr=False,
+            candidate_v0_probe_avg=245,
+            candidate_v0_probe_min=245,
+            candidate_v0_probe_kind="lossless_source_v0",
+            verified_lossless_target=self._FACTS_TARGET,
+            candidate_spectral_context=SpectralCodecContext(
+                codec_family="lossless",
+                spectral_measurement_version=2,
+                **context_kwargs,
+            ),
+        )
+
+    def _assert_proof_granted(self, r, where):
+        self.assertTrue(r["verified_lossless"], where)
+        self.assertEqual(r["stage3_quality_gate"], "accept", where)
+        self.assertEqual(r["final_status"], "imported", where)
+        self.assertFalse(r["keep_searching"], where)
+        self.assertEqual(r["target_final_format"], self._FACTS_TARGET, where)
+
+    def _assert_proof_withheld(self, r, where):
+        self.assertFalse(r["verified_lossless"], where)
+        self.assertEqual(r["stage3_quality_gate"], "requeue_lossless", where)
+        self.assertEqual(r["final_status"], "wanted", where)
+        self.assertTrue(r["keep_searching"], where)
+        self.assertIsNone(r["target_final_format"], where)
+        # The load-bearing half of the archivist semantics: withholding a
+        # proof is NOT rejecting the album. It imported.
+        self.assertTrue(r["imported"], where)
+
+    # -- the leg denies ----------------------------------------------------
+
+    def test_a_launder_deficit_withholds_the_proof_on_both_twins(self):
+        """The flip the leg exists for. Identical album, identical grade;
+        only ``ultrasonic_deficit_db`` moves, and the pipeline goes from
+        terminal-imported to imported-and-still-searching."""
+        self._assert_proof_granted(
+            self._evidence_decision(
+                ultrasonic_deficit_db=self.GENUINE_DEFICIT_DB,
+            ),
+            "evidence twin, genuine deficit",
+        )
+        self._assert_proof_withheld(
+            self._evidence_decision(
+                ultrasonic_deficit_db=self.LAUNDER_DEFICIT_DB,
+            ),
+            "evidence twin, launder deficit",
+        )
+        self._assert_proof_granted(
+            self._simulator_decision(
+                ultrasonic_deficit_db=self.GENUINE_DEFICIT_DB,
+                spectral_decode_path="sox_native",
+            ),
+            "simulator twin, genuine deficit",
+        )
+        self._assert_proof_withheld(
+            self._simulator_decision(
+                ultrasonic_deficit_db=self.LAUNDER_DEFICIT_DB,
+                spectral_decode_path="sox_native",
+            ),
+            "simulator twin, launder deficit",
+        )
+
+    def test_the_frozen_threshold_is_the_boundary(self):
+        """Both sides of 59.5, on the production decider. The constant is
+        READ, not restated — a pin spelling 59.5 would pass a module that
+        had drifted to any other value."""
+        from lib.quality import ULTRASONIC_PROOF_DENY_DEFICIT_DB
+        self._assert_proof_granted(
+            self._evidence_decision(
+                ultrasonic_deficit_db=ULTRASONIC_PROOF_DENY_DEFICIT_DB - 0.01,
+            ),
+            "one hundredth of a dB below the threshold",
+        )
+        self._assert_proof_withheld(
+            self._evidence_decision(
+                ultrasonic_deficit_db=ULTRASONIC_PROOF_DENY_DEFICIT_DB,
+            ),
+            "exactly at the threshold — inclusive",
+        )
+
+    def test_the_v0_override_cannot_outrank_a_denial(self):
+        """The Bill Hicks shape (``suspect`` grade rescued by a
+        lossless_source_v0 probe at avg 241 / min 219) does NOT rescue a
+        launder deficit.
+
+        Measured basis: the V0/Opus re-encode probe axis
+        (``docs/research/calibration-data/probe_pair.tsv.gz``, 5,670 files)
+        separates only mp3-128 — the one class the cliff leg already
+        catches. Letting the override win here would reopen the exact hole
+        the leg closes, to rescue albums whose only cost is staying
+        searchable."""
+        from lib.quality import (
+            AlbumQualityEvidenceDecisionFacts,
+            full_pipeline_decision_from_evidence,
+        )
+
+        def decide(deficit):
+            candidate = build_parity_candidate_evidence(
+                is_flac=True, min_bitrate=0, is_cbr=False,
+                spectral_grade="suspect",
+                post_conversion_min_bitrate=219,
+                candidate_v0_probe_avg=241,
+                candidate_v0_probe_min=219,
+                codec_family="lossless",
+                ultrasonic_deficit_db=deficit,
+            )
+            return full_pipeline_decision_from_evidence(
+                candidate, None,
+                facts=AlbumQualityEvidenceDecisionFacts(
+                    verified_lossless_target=self._FACTS_TARGET,
+                ),
+            )
+
+        rescued = decide(self.GENUINE_DEFICIT_DB)
+        self.assertTrue(
+            rescued["verified_lossless"],
+            "the V0-avg trust override must still rescue HF-poor lossless "
+            "when the ultrasonic leg has no objection",
+        )
+        denied = decide(self.LAUNDER_DEFICIT_DB)
+        self.assertFalse(
+            denied["verified_lossless"],
+            "a denied ultrasonic leg is a hard veto ahead of the V0 override",
+        )
+
+    # -- a denial withholds the proof and NOTHING else ---------------------
+
+    #: The installed side of the worlds below: a provisional-cohort album.
+    #: It was imported from a lossless source we ground down, so the linked
+    #: ``lossless_source_v0`` probe (avg 240) is its only comparable
+    #: anchor, and it carries no verified-lossless proof. A candidate probe
+    #: at avg 241 does NOT clear that anchor by the rank tolerance, so the
+    #: provisional lane answers ``suspect_lossless_downgrade`` — a
+    #: confident reject that also denylists the offering peer.
+    _HAVE_PROVISIONAL_V0_AVG = 240
+
+    def _denial_pair_evidence(self, deficit, *, have_min, have_format,
+                              have_is_cbr):
+        from lib.quality import (
+            EVIDENCE_SUBJECT_SOURCE,
+            AlbumQualityEvidenceDecisionFacts,
+            AlbumQualityV0Metric,
+            full_pipeline_decision_from_evidence,
+        )
+        candidate = build_parity_candidate_evidence(
+            is_flac=True, min_bitrate=0, is_cbr=False,
+            spectral_grade="suspect",
+            post_conversion_min_bitrate=219,
+            candidate_v0_probe_avg=241,
+            candidate_v0_probe_min=219,
+            codec_family="lossless",
+            ultrasonic_deficit_db=deficit,
+        )
+        current = build_parity_current_evidence(
+            min_bitrate=have_min, avg_bitrate=have_min, format=have_format,
+            is_cbr=have_is_cbr,
+            v0_metric=AlbumQualityV0Metric(
+                subject=EVIDENCE_SUBJECT_SOURCE,
+                min_bitrate_kbps=219,
+                avg_bitrate_kbps=self._HAVE_PROVISIONAL_V0_AVG,
+            ),
+        )
+        return full_pipeline_decision_from_evidence(
+            candidate, current,
+            facts=AlbumQualityEvidenceDecisionFacts(
+                verified_lossless_target=self._FACTS_TARGET,
+            ),
+        )
+
+    def _denial_pair_simulator(self, deficit, *, have_min, have_format,
+                               have_is_cbr):
+        """The convert branch: the lossless source is ground to V0."""
+        from lib.quality import SpectralCodecContext
+        return full_pipeline_decision(
+            is_flac=True, min_bitrate=0, is_cbr=False,
+            spectral_grade="suspect",
+            converted_count=1,
+            post_conversion_min_bitrate=219,
+            post_conversion_is_cbr=False,
+            candidate_v0_probe_avg=241,
+            candidate_v0_probe_min=219,
+            candidate_v0_probe_kind="lossless_source_v0",
+            existing_min_bitrate=have_min,
+            existing_avg_bitrate=have_min,
+            existing_format=have_format.lower(),
+            existing_is_cbr=have_is_cbr,
+            existing_v0_probe_avg=self._HAVE_PROVISIONAL_V0_AVG,
+            existing_v0_probe_kind="lossless_source_v0",
+            verified_lossless_target=self._FACTS_TARGET,
+            candidate_spectral_context=SpectralCodecContext(
+                codec_family="lossless",
+                spectral_measurement_version=2,
+                spectral_decode_path="sox_native",
+                ultrasonic_deficit_db=deficit,
+            ),
+        )
+
+    def _denial_pair_flac_keep(self, deficit, *, have_min, have_format,
+                               have_is_cbr):
+        """The kept-on-disk branch of the same world (``target_format`` is
+        flac, so nothing is converted)."""
+        from lib.quality import SpectralCodecContext
+        return full_pipeline_decision(
+            is_flac=True, min_bitrate=900, is_cbr=False,
+            spectral_grade="suspect",
+            converted_count=0,
+            target_format="flac",
+            candidate_v0_probe_avg=241,
+            candidate_v0_probe_min=219,
+            candidate_v0_probe_kind="lossless_source_v0",
+            existing_min_bitrate=have_min,
+            existing_avg_bitrate=have_min,
+            existing_format=have_format.lower(),
+            existing_is_cbr=have_is_cbr,
+            existing_v0_probe_avg=self._HAVE_PROVISIONAL_V0_AVG,
+            existing_v0_probe_kind="lossless_source_v0",
+            candidate_spectral_context=SpectralCodecContext(
+                codec_family="lossless",
+                spectral_measurement_version=2,
+                spectral_decode_path="sox_native",
+                ultrasonic_deficit_db=deficit,
+            ),
+        )
+
+    _DENIAL_TWINS = (
+        ("evidence twin", "_denial_pair_evidence"),
+        ("simulator twin, convert branch", "_denial_pair_simulator"),
+        ("simulator twin, flac-keep branch", "_denial_pair_flac_keep"),
+    )
+
+    def test_a_denial_never_costs_the_album_its_import(self):
+        """A denial withholds the PROOF. It must not take the ALBUM.
+
+        The world is the one the V0-avg trust override exists to rescue —
+        HF-poor lossless graded ``suspect`` with a ``lossless_source_v0``
+        probe at avg 241 / min 219 — against an INSTALLED side the earlier
+        pins did not have: a provisional-cohort MP3 128 whose own
+        comparable probe sits at avg 240. That probe is what arms the
+        provisional lane: 241 does not clear 240 by the rank tolerance, so
+        the lane answers ``suspect_lossless_downgrade``, a confident reject
+        that denylists the peer as well.
+
+        A denied album that reached that lane therefore lost its import
+        outright — on exactly the HF-poor genuine-lossless cohort the leg
+        promised never to touch (Phase 5 plan §2, §1.7: withholding a proof
+        never rejects, denylists or accuses). Deciding the lane is the V0
+        PROBE's job and the probe's answer does not change; the leg's whole
+        effect is the proof and the search surface."""
+        for label, method in self._DENIAL_TWINS:
+            with self.subTest(twin=label):
+                def decide(deficit, method=method):
+                    return getattr(self, method)(
+                        deficit, have_min=128, have_format="MP3",
+                        have_is_cbr=True,
+                    )
+                rescued = decide(self.GENUINE_DEFICIT_DB)
+                denied = decide(self.LAUNDER_DEFICIT_DB)
+                self.assertTrue(
+                    rescued["imported"],
+                    f"{label}: the V0-rescued world imports",
+                )
+                self.assertTrue(
+                    rescued["verified_lossless"],
+                    f"{label}: the V0-avg trust override still rescues an "
+                    "HF-poor lossless the leg has no objection to",
+                )
+                self.assertFalse(rescued["keep_searching"], label)
+                self.assertTrue(
+                    denied["imported"],
+                    f"{label}: withholding a proof is NOT taking the album",
+                )
+                self.assertFalse(
+                    denied["verified_lossless"],
+                    f"{label}: the denial's first effect — no proof",
+                )
+                self.assertTrue(
+                    denied["keep_searching"],
+                    f"{label}: and its second — the album stays on the "
+                    "search surface",
+                )
+
+    def test_a_denial_never_reroutes_the_album_into_the_provisional_lane(self):
+        """The same world against a HAVE the unproved candidate cannot
+        beat: an Opus 245 with the same provisional probe.
+
+        Here the denial legitimately costs the import — an album with no
+        proof is compared on what it measures, and a V0 grind does not beat
+        an installed 245 — but it must lose that comparison in the MEASURED
+        lane, with a comparison basis the operator can read, and never by
+        being re-routed into the provisional lane's confident reject. The
+        lane is the V0 probe's answer; the leg does not get a vote in it."""
+        for label, method in self._DENIAL_TWINS:
+            with self.subTest(twin=label):
+                denied = getattr(self, method)(
+                    self.LAUNDER_DEFICIT_DB, have_min=245,
+                    have_format="Opus", have_is_cbr=False,
+                )
+                self.assertNotIn(
+                    denied["stage2_import"],
+                    PROVISIONAL_LANE_DECISIONS,
+                    f"{label}: a denial re-routed the album into the "
+                    "provisional lossless lane",
+                )
+
+    # -- the leg withholds: the decode-path scope --------------------------
+
+    def test_an_ffmpeg_path_deficit_is_never_gated(self):
+        """Phase 5 plan §1.5c. The SAME BITS measure 50.26 dB through
+        ``_ffmpeg_to_wav`` at 48kHz and 47.17 dB sox-native at 44.1kHz — a
+        +3.09 dB skew, larger than the gate's whole 2.05 dB margin
+        (isolated on request 8923's ALAC control). A value on that scale
+        is not comparable to a threshold frozen on the other one, so the
+        leg refuses to gate it in EITHER direction."""
+        r = self._evidence_decision(
+            ultrasonic_deficit_db=self.LAUNDER_DEFICIT_DB,
+            lossless_container="m4a", lossless_codec="alac",
+        )
+        self._assert_proof_granted(r, "ALAC source, ffmpeg decode path")
+        self._assert_proof_granted(
+            self._simulator_decision(
+                ultrasonic_deficit_db=self.LAUNDER_DEFICIT_DB,
+                spectral_decode_path="ffmpeg_resampled",
+            ),
+            "simulator twin, ffmpeg decode path",
+        )
+
+    def test_an_unknown_decode_path_is_never_gated(self):
+        """No containers, no answer. Fail closed means the leg asserts
+        nothing — not that it denies."""
+        self._assert_proof_granted(
+            self._simulator_decision(
+                ultrasonic_deficit_db=self.LAUNDER_DEFICIT_DB,
+                spectral_decode_path=None,
+            ),
+            "simulator twin, unresolved decode path",
+        )
+
+    # -- the leg withholds: the NULL tristate ------------------------------
+
+    def test_the_three_null_states_never_demote_and_stay_distinct(self):
+        """PR3 hard constraint 1. ``ultrasonic_deficit_db IS NULL`` is
+        three different facts about the world, and every one of them must
+        leave the pre-v3 outcome untouched — 6,273 proof rows can never be
+        re-measured at any price, and demoting them would be exactly the
+        retroactive demotion the plan forbids."""
+        from lib.quality import ultrasonic_proof_leg
+
+        # (a) R19 preserved source: a converted copy wearing its source's
+        #     pre-capture spectral. The source was converted away.
+        self._assert_proof_granted(
+            self._evidence_decision(
+                ultrasonic_deficit_db=None,
+                spectral_measurement_version=None,
+                was_converted_from="flac",
+            ),
+            "(a) preserved source spectral",
+        )
+        # (b) legacy row, measured before PR1's capture shipped.
+        self._assert_proof_granted(
+            self._evidence_decision(
+                ultrasonic_deficit_db=None,
+                spectral_measurement_version=None,
+            ),
+            "(b) legacy measurement",
+        )
+        # (c) the capture code ran and honestly reported no value — the
+        #     20.5-22kHz bands were outside the file's Nyquist.
+        self._assert_proof_granted(
+            self._evidence_decision(
+                ultrasonic_deficit_db=None,
+                spectral_measurement_version=2,
+                cliff_hz=19500,
+            ),
+            "(c) not measured",
+        )
+        # ...and the decision path tells them apart, which is what makes
+        # them three states rather than one.
+        reasons = {
+            ultrasonic_proof_leg(
+                deficit_db=None, spectral_measurement_version=None,
+                decode_path="sox_native", preserved_source_spectral=True,
+            ).reason,
+            ultrasonic_proof_leg(
+                deficit_db=None, spectral_measurement_version=None,
+                decode_path="sox_native", preserved_source_spectral=False,
+            ).reason,
+            ultrasonic_proof_leg(
+                deficit_db=None, spectral_measurement_version=2,
+                decode_path="sox_native", preserved_source_spectral=False,
+            ).reason,
+        }
+        self.assertEqual(
+            reasons,
+            {"preserved_source_spectral", "legacy_measurement",
+             "not_measured"},
+        )
+
+    def test_a_carried_flac_source_deficit_does_adjudicate(self):
+        """Carried values are the COMMON case — 15,399 of 15,547 live
+        proofs carry ``spectral_provenance='carried'`` — and a carried
+        deficit describes exactly the lossless SOURCE the proof is about.
+        It must be gated, not skipped, whenever its decode path is
+        comparable."""
+        self._assert_proof_withheld(
+            self._evidence_decision(
+                ultrasonic_deficit_db=self.LAUNDER_DEFICIT_DB,
+                spectral_measurement_version=2,
+                was_converted_from="flac",
+            ),
+            "carried FLAC-source deficit above the threshold",
+        )
+        self._assert_proof_granted(
+            self._evidence_decision(
+                ultrasonic_deficit_db=self.LAUNDER_DEFICIT_DB,
+                spectral_measurement_version=2,
+                was_converted_from="alac",
+            ),
+            "carried ALAC-source deficit — different instrument, no gate",
+        )
+
+
+class TestVerifiedLosslessClassifierGeneration(unittest.TestCase):
+    """``verified_lossless_classifier`` names WHICH MODEL proved a row.
+
+    Issue #829 Phase 5 PR3 makes that load-bearing rather than
+    decorative: the v3 name is minted only when the ultrasonic leg
+    ADJUDICATED and passed, never merely because v3 code ran. A withheld
+    leg proved nothing new, and stamping v3 on it would make the column
+    mean two things again — the exact ambiguity it exists to remove.
+    """
+
+    @staticmethod
+    def _mint(leg):
+        from lib.quality import mint_verified_lossless_proof
+        return mint_verified_lossless_proof(
+            True,
+            was_converted_from="flac",
+            detected_source_format="flac",
+            spectral_grade="genuine",
+            ultrasonic_leg=leg,
+        )
+
+    def test_an_adjudicated_pass_mints_v3(self):
+        from lib.quality import (
+            VERIFIED_LOSSLESS_CLASSIFIER_V3,
+            ultrasonic_proof_leg,
+        )
+        leg = ultrasonic_proof_leg(
+            deficit_db=45.0, spectral_measurement_version=2,
+            decode_path="sox_native", preserved_source_spectral=False,
+        )
+        self.assertEqual(leg.outcome, "passed")
+        proof = self._mint(leg)
+        assert proof is not None
+        self.assertEqual(proof.classifier, VERIFIED_LOSSLESS_CLASSIFIER_V3)
+
+    def test_a_withheld_leg_keeps_the_old_classifier(self):
+        from lib.quality import (
+            VERIFIED_LOSSLESS_CLASSIFIER,
+            ultrasonic_proof_leg,
+        )
+        for reason_world in (
+            {"deficit_db": None, "spectral_measurement_version": None,
+             "decode_path": "sox_native", "preserved_source_spectral": True},
+            {"deficit_db": None, "spectral_measurement_version": None,
+             "decode_path": "sox_native", "preserved_source_spectral": False},
+            {"deficit_db": None, "spectral_measurement_version": 2,
+             "decode_path": "sox_native", "preserved_source_spectral": False},
+            {"deficit_db": 45.0, "spectral_measurement_version": 2,
+             "decode_path": "ffmpeg_resampled",
+             "preserved_source_spectral": False},
+            {"deficit_db": 45.0, "spectral_measurement_version": 2,
+             "decode_path": None, "preserved_source_spectral": False},
+        ):
+            leg = ultrasonic_proof_leg(**reason_world)
+            with self.subTest(reason=leg.reason):
+                self.assertEqual(leg.outcome, "withheld")
+                proof = self._mint(leg)
+                assert proof is not None
+                self.assertEqual(
+                    proof.classifier, VERIFIED_LOSSLESS_CLASSIFIER,
+                )
+
+    def test_no_leg_at_all_keeps_the_old_classifier(self):
+        """A caller with no ultrasonic evidence is the pre-v3 world and
+        must mint the pre-v3 name."""
+        from lib.quality import VERIFIED_LOSSLESS_CLASSIFIER
+        proof = self._mint(None)
+        assert proof is not None
+        self.assertEqual(proof.classifier, VERIFIED_LOSSLESS_CLASSIFIER)
 
 
 class TestPreimportFactRejects(unittest.TestCase):

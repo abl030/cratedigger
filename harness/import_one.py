@@ -87,6 +87,7 @@ from lib.quality import (
     SpectralDetail,
     TargetQualityContract,
     V0ProbeEvidence,
+    album_ultrasonic_proof_leg,
     bounded_audio_tool_diagnostic,
     build_existing_quality_measurement,
     comparison_basis_from_decision,
@@ -2269,6 +2270,7 @@ def main():
     # verified-lossless. Look at the original source directory (``args.path``)
     # — ``work_path`` has already been mutated by conversion so it contains
     # the V0 outputs alongside the kept FLAC originals.
+    _source_audio_files: list[str] = []
     try:
         source_dir: str = args.path
         _source_audio_files = [
@@ -2285,6 +2287,32 @@ def main():
     except OSError:
         has_lossy_passthrough = False
 
+    # The v3 ultrasonic proof leg (issue #829 Phase 5 PR3). The subject is
+    # stated as the SOURCE with no conversion lineage because that is
+    # literally what was measured: ``collect_attempt_spectral_audit`` ran
+    # over the downloaded folder in this process, before any conversion.
+    #
+    # ``args.path`` is the right container list for the decode-path
+    # question on the path that matters. The evidence-authorized
+    # production import returns above (``NoReturn``) carrying the proof
+    # the PREVIEW minted, and preview runs ``--dry-run``, where
+    # ``work_path`` is an isolated copy and ``args.path`` stays pristine.
+    # A legacy non-preview caller converts in place, so its list can mix
+    # kept originals with V0 outputs — which resolves to an unknown decode
+    # path and withholds the leg. Fail closed, and the same direction the
+    # adjacent ``has_lossy_passthrough`` read already takes there.
+    # An unreadable source directory leaves no containers at all, which
+    # withholds it too.
+    candidate_ultrasonic_leg = album_ultrasonic_proof_leg(
+        ultrasonic_deficit_db=spectral_ultrasonic_deficit_db,
+        spectral_measurement_version=spectral_measurement_version,
+        spectral_subject=EVIDENCE_SUBJECT_SOURCE,
+        was_converted_from=None,
+        container_labels=[
+            os.path.splitext(f)[1] for f in _source_audio_files
+        ],
+    )
+
     # Verified lossless: single source of truth in quality.py. r.v0_probe is
     # populated above (lossless source path) and lets the V0-avg trust
     # override flip a spectral suspect/likely_transcode sparse-HF lossless
@@ -2292,9 +2320,25 @@ def main():
     will_be_verified_lossless = determine_verified_lossless(
         args.target_format, spectral_grade, converted, is_transcode,
         v0_probe=r.v0_probe,
+        has_lossy_passthrough=has_lossy_passthrough,
+        ultrasonic_leg=candidate_ultrasonic_leg)
+    # The SAME certification with the v3 ultrasonic leg left out. The leg's
+    # authority is the PROOF — ``will_be_verified_lossless`` above, which
+    # feeds ``mint_verified_lossless_proof`` and the proof-licensed target
+    # conversion. It must never reach the IMPORT ROUTING below: the
+    # override suppresses the provisional-lossless lane, whose
+    # ``suspect_lossless_downgrade`` is a confident reject that denylists
+    # the offering peer, and a denied album is exactly the HF-poor
+    # genuine-lossless cohort the V0 probe exists to rescue. A denied,
+    # probe-rescued album imports WITHOUT a proof and stays on the search
+    # surface (Phase 5 plan §2, §1.7). Mirrors ``v0_verified_override`` in
+    # ``lib/quality/pipeline.py``, which the decision twins share.
+    certified_without_ultrasonic_leg = determine_verified_lossless(
+        args.target_format, spectral_grade, converted, is_transcode,
+        v0_probe=r.v0_probe,
         has_lossy_passthrough=has_lossy_passthrough)
     v0_verified_lossless_override = (
-        will_be_verified_lossless
+        certified_without_ultrasonic_leg
         and spectral_grade in SPECTRAL_TRANSCODE_GRADES
         and v0_probe_overrides_spectral(r.v0_probe)
     )
@@ -2309,6 +2353,15 @@ def main():
              "→ verified_lossless=True")
 
     # Compute the projected target contract before the quality decision.
+    #
+    # This one reads the PROOF-bearing certification on purpose. The
+    # verified-lossless target (e.g. "opus 128") is licensed BY the proof:
+    # the decider gates the post-import quality gate's format on the same
+    # fact (``gate_format`` in ``lib/quality/pipeline.py``), so materializing
+    # a 128kbps target for an album that carries no proof would both break
+    # that mirror and grind the album down further than the un-proved V0 it
+    # otherwise keeps. A denial therefore keeps V0 on disk — a strictly
+    # better artifact, and never a rejection.
     new_conv_target = conversion_target(
         args.target_format, will_be_verified_lossless,
         args.verified_lossless_target)
@@ -2363,6 +2416,7 @@ def main():
         was_converted_from=r.conversion.original_filetype,
         detected_source_format=source_format,
         spectral_grade=spectral_grade,
+        ultrasonic_leg=candidate_ultrasonic_leg,
     )
     r.current_measurement = existing_m
     r.target_quality_contract = target_contract
@@ -2473,13 +2527,20 @@ def main():
         _log("  [QUALITY] no existing album in beets — importing transcode")
 
     if (not keep_lossless
-            and (will_be_verified_lossless
+            and (certified_without_ultrasonic_leg
                  or decision == "provisional_lossless_upgrade")
             and converted > 0
             and not should_run_target_conversion(new_conv_target)):
         # Persist the V0 label for the post-import quality gate and any
         # downstream UI/CLI consumers. Beets only stores the bare "MP3"
         # codec family, which is not enough to recover the V0 contract later.
+        #
+        # This label is a statement about the BYTES on disk — lossless
+        # ground to V0 with no target pass to follow — so it reads the
+        # leg-free certification. A denial withholds the proof and the
+        # proof-licensed target conversion with it; the files that remain
+        # are still V0, and mislabelling them would carry the denial into
+        # the post-import gate and every later comparison.
         r.final_format = V0_SPEC.label
 
     # --- Target format conversion (after V0 verdict, before import) ---

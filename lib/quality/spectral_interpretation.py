@@ -38,19 +38,28 @@ opus (>=32k)       nothing at all. Statistically indistinguishable from
                    genuine lossless on every arm. Audit-only,
                    unconditional.
 HE-AAC (SBR)       nothing at all. ``fdk-he1-64`` is 96-100% no-cliff,
-                   i.e. it READS AS LOSSLESS. Audit-only whenever
-                   ``sbr_present`` is True — for every family EXCEPT
-                   lossless, where audit-only would fail OPEN.
+                   i.e. it READS AS LOSSLESS. There is no object-type
+                   pre-gate: see "The SBR pre-gate is not implemented"
+                   below.
 lossless           unchanged from today: the cliff is the fake-FLAC
                    detector and ``genuine`` is the affirmative input
                    verified-lossless proof requires. This module never
-                   derives a kbps class for a lossless container, and
-                   ``sbr_present`` never demotes one: for a lossless
-                   container the unrecoverable error is failing to detect
-                   a FAKE, so the detector stays armed whatever an
-                   object-type probe reports.
+                   derives a kbps class for a lossless container.
 other / unknown    nothing. Fail closed.
 =================  ====================================================
+
+The SBR pre-gate is not implemented
+-----------------------------------
+PR2a's plan reserved an ``sbr_present`` fact (AAC object type 5/29) to
+demote HE-AAC to audit-only. PR3 deleted that parameter unwired
+(``scope.md``: inert plumbing is dead code). It was measured not to be
+needed: doc2 carries **zero HE-AAC** (409 AAC-LC and 39 ALAC in the
+library, 22 ALAC in slskd), and HE-AAC cannot structurally reach the
+verified-lossless proof gate anyway — ``converted_count`` only counts
+files ``_is_lossless_file`` accepts and HE-AAC probes as plain ``aac``.
+The genuinely dangerous shape, HE-AAC laundered INTO a FLAC container,
+has no AAC object type left to read; that case is the ultrasonic proof
+leg's, not a pre-gate's. Evidence: the Phase 5 plan §1.5e.
 
 **No cliff asserts NOTHING for any codec.** The high end of every ladder
 is invisible in the 12-20 kHz production window. That is a permanent
@@ -123,6 +132,7 @@ branch that shape lands in is never reached by an interpretation. Recorded
 here so it does not get re-litigated.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import cache
 from typing import Literal
@@ -140,6 +150,7 @@ from lib.quality.evidence_types import (
     CodecFamily,
     EvidenceSubject,
 )
+from lib.quality.filetypes import SOX_NATIVE_AUDIO_EXTENSIONS
 
 # ---------------------------------------------------------------------------
 # Measured constants. Four arms, 60,102 measurements. Do not adjust.
@@ -227,7 +238,6 @@ SpectralInterpretationReason = Literal[
     "aac_cliff_below_measurable_floor",
     "aac_no_cliff",
     "opus_no_spectral_signal",
-    "sbr_audit_only",
     "lossless_transcode_grade",
     "lossless_grade_not_transcode",
     "uncalibrated_codec_family",
@@ -242,6 +252,15 @@ SpectralComparabilityReason = Literal[
     "mixed_derivation_basis",
     "cross_codec_legacy_bucket",
 ]
+
+#: Which decoder produced a spectral measurement. NOT a cosmetic detail:
+#: ``ultrasonic_deficit_db`` is not comparable across the two, so the
+#: proof leg's threshold is scoped by it (issue #829 Phase 5 plan §1.5c).
+SpectralDecodePath = Literal["sox_native", "ffmpeg_resampled"]
+SPECTRAL_DECODE_PATH_SOX_NATIVE: SpectralDecodePath = "sox_native"
+SPECTRAL_DECODE_PATH_FFMPEG_RESAMPLED: SpectralDecodePath = (
+    "ffmpeg_resampled"
+)
 
 REASON_LADDER_CLASS_FROM_CLIFF: SpectralInterpretationReason = (
     "ladder_class_from_cliff"
@@ -269,7 +288,6 @@ REASON_AAC_NO_CLIFF: SpectralInterpretationReason = "aac_no_cliff"
 REASON_OPUS_NO_SPECTRAL_SIGNAL: SpectralInterpretationReason = (
     "opus_no_spectral_signal"
 )
-REASON_SBR_AUDIT_ONLY: SpectralInterpretationReason = "sbr_audit_only"
 REASON_LOSSLESS_TRANSCODE_GRADE: SpectralInterpretationReason = (
     "lossless_transcode_grade"
 )
@@ -313,10 +331,6 @@ class SpectralEvidenceFacts:
 
     ``spectral_grade`` is production's spectral VERDICT and is required
     input, not decoration — see ``interpret_spectral_cliff``.
-
-    ``sbr_present`` has no producer yet: PR3 captures the AAC object type
-    (5/29). ``None`` means "not captured", which is not the same as False
-    and is why the parameter is tri-state.
     """
 
     spectral_grade: str | None = None
@@ -328,7 +342,6 @@ class SpectralEvidenceFacts:
     filetype_band: str = ""
     cliff_hz: int | None = None
     spectral_bitrate_kbps: int | None = None
-    sbr_present: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -343,10 +356,16 @@ class SpectralCodecContext:
     the flat scalars so there is never a second source of truth for the
     grade, the stored bucket or the format label.
 
-    Every field is consumed by ``resolve_measured_codec_family`` or
-    ``interpret_spectral_cliff``. ``sbr_present`` is deliberately absent:
-    it has no producer until PR3 captures the AAC object type, and inert
-    plumbing is dead code.
+    Every field is consumed by ``resolve_measured_codec_family``,
+    ``interpret_spectral_cliff`` or the ultrasonic proof leg.
+
+    The last three are the proof-leg facts (issue #829 Phase 5 PR3). They
+    are NOT passed to ``facts()``: codec interpretation does not read
+    them, and a field that reaches an interpreter that ignores it is the
+    inert plumbing PR3 deleted elsewhere in this module.
+    ``spectral_decode_path`` is resolved by the adapter that holds the
+    real containers (``resolve_spectral_decode_path``), never re-derived
+    from the format label a decision path may have defaulted.
     """
 
     codec_family: CodecFamily | None = None
@@ -355,6 +374,9 @@ class SpectralCodecContext:
     storage_format: str | None = None
     spectral_subject: EvidenceSubject | None = None
     was_converted_from: str | None = None
+    ultrasonic_deficit_db: float | None = None
+    spectral_measurement_version: int | None = None
+    spectral_decode_path: SpectralDecodePath | None = None
 
     def interpret(
         self,
@@ -520,6 +542,81 @@ def is_mixed_codec_album(filetype_band: str) -> bool:
     if not band:
         return False
     return "," in band or band in _MIXED_FILETYPE_BANDS
+
+
+#: Bare container tokens sox decodes natively, derived from the ONE
+#: routing table in ``lib/quality/filetypes.py`` (which
+#: ``lib/spectral_check.py`` also consumes). Deriving rather than
+#: restating is load-bearing: the router and the ultrasonic threshold's
+#: scope must never be able to drift apart.
+_SOX_NATIVE_CONTAINER_TOKENS: frozenset[str] = frozenset(
+    ext.lstrip(".") for ext in SOX_NATIVE_AUDIO_EXTENSIONS
+)
+
+
+def spectral_decode_path_for_container(
+    label: str | None,
+) -> SpectralDecodePath | None:
+    """Which decoder ``lib/spectral_check.py`` routes this container to.
+
+    ``None`` is an explicit unknown — an empty, ambiguous or unrecognised
+    label. ``m4a``/``mp4``/``ogg``/``oga`` are NOT ambiguous for this
+    question the way they are for codec family: ``analyze_track`` routes
+    purely on the file extension, so ``.ogg`` is sox-native whether it
+    holds Vorbis or Opus and ``.m4a`` is ffmpeg-routed whether it holds
+    AAC or ALAC. Only a label naming no container at all is unknown.
+    """
+    token = _normalise_format_token(label)
+    if token is None:
+        return None
+    if token in _SOX_NATIVE_CONTAINER_TOKENS:
+        return SPECTRAL_DECODE_PATH_SOX_NATIVE
+    if token in _FORMAT_TOKEN_TO_FAMILY or token in _AMBIGUOUS_FORMAT_TOKENS:
+        # A container we recognise and sox cannot open natively: the
+        # analyzer decodes it through ``_ffmpeg_to_wav`` at 48kHz.
+        return SPECTRAL_DECODE_PATH_FFMPEG_RESAMPLED
+    return None
+
+
+def resolve_spectral_decode_path(
+    *,
+    spectral_subject: EvidenceSubject | None,
+    was_converted_from: str | None,
+    container_labels: Sequence[str],
+) -> SpectralDecodePath | None:
+    """Which decode path produced this row's spectral measurement.
+
+    The container axis of the same measured-subject ladder
+    ``resolve_measured_codec_family`` walks, and it needs its own walk:
+    ``codec_family`` short-circuits that ladder, and one family spans
+    several containers with different decoders (``lossless`` covers
+    sox-native ``.flac``/``.wav`` AND ffmpeg-routed ``.m4a`` ALAC). The
+    PR1-captured rows that carry an ``ultrasonic_deficit_db`` at all are
+    exactly the rows that short-circuit, so reusing the family resolution
+    would answer "unknown" for every row this matters for.
+
+    Two cases, mirroring the family ladder:
+
+    * A converted row wearing its SOURCE's spectral under R19
+      (``spectral_subject='source'`` and ``was_converted_from`` set) was
+      measured on the SOURCE container, not on the files now on disk.
+      This is the common case: 15,399 of 15,547 live proofs carry
+      ``spectral_provenance='carried'``.
+    * Otherwise the measured subject IS the snapshot, so its own file
+      containers answer. They must all agree; a mixed fileset is an
+      explicit unknown rather than a first-file guess.
+
+    ``None`` means "cannot be established" and is the fail-closed answer.
+    """
+    if spectral_subject == EVIDENCE_SUBJECT_SOURCE and was_converted_from:
+        return spectral_decode_path_for_container(was_converted_from)
+    paths: set[SpectralDecodePath | None] = {
+        spectral_decode_path_for_container(label)
+        for label in container_labels
+    }
+    if len(paths) != 1:
+        return None
+    return next(iter(paths))
 
 
 def resolve_measured_codec_family(
@@ -709,7 +806,6 @@ def interpret_spectral_cliff(
     spectral_grade: str | None,
     cliff_hz: int | None = None,
     stored_bitrate_kbps: int | None = None,
-    sbr_present: bool | None = None,
 ) -> SpectralInterpretation:
     """Interpret one album's spectral evidence in its own codec's terms.
 
@@ -736,9 +832,6 @@ def interpret_spectral_cliff(
     minority carry it. **The stored value never becomes a class for AAC,
     Opus, HE-AAC, ``other`` or an unknown family** — that is exactly the
     download-37946 defect.
-
-    ``sbr_present`` demotes every family EXCEPT lossless to audit-only;
-    the lossless branch below owns the reasoning for that exception.
     """
     if codec_family is None:
         return _audit_only(None, REASON_UNKNOWN_CODEC_FAMILY)
@@ -748,17 +841,6 @@ def interpret_spectral_cliff(
         # detector and this module never derives a kbps class for it. A
         # legacy lossless row records its cliff only as a stored bucket, so
         # either field counts as cliff presence.
-        #
-        # ``sbr_present`` is deliberately NOT consulted on this branch, and
-        # that asymmetry is load-bearing. Ask which of the two possible
-        # errors is unrecoverable. For AAC/HE-AAC it is wrongly ASSERTING
-        # quality, so audit-only is right. For a lossless container it is
-        # failing to detect a FAKE, so audit-only is wrong: demoting here
-        # would clear ``supports_transcode_accusation`` and silently
-        # disable the fake-FLAC detector that the whole verified-lossless
-        # proof rests on. An SBR flag on a FLAC row is unproducible today,
-        # but PR2b/PR3 wire a real object-type producer and a mis-probe
-        # must not be able to fail OPEN with respect to fraud.
         #
         # The detector is armed by the GRADE, never by cliff presence:
         # evidence 33735 is a FLAC graded ``likely_transcode`` with
@@ -781,13 +863,6 @@ def interpret_spectral_cliff(
                 else REASON_LOSSLESS_GRADE_NOT_TRANSCODE
             ),
         )
-
-    if sbr_present:
-        # HE-AAC reads as lossless (fdk-he1-64 is 96-100% no-cliff), so a
-        # cliff-based grade asserts nothing about an SBR stream in either
-        # direction. Positioned AFTER the lossless branch on purpose — see
-        # the comment there.
-        return _audit_only(codec_family, REASON_SBR_AUDIT_ONLY)
 
     if codec_family in LADDER_CODEC_FAMILIES:
         # ``decision_grade`` is DERIVED from "a class was actually
@@ -916,7 +991,6 @@ def interpret_spectral_evidence(
         spectral_grade=facts.spectral_grade,
         cliff_hz=facts.cliff_hz,
         stored_bitrate_kbps=facts.spectral_bitrate_kbps,
-        sbr_present=facts.sbr_present,
     )
 
 
@@ -971,12 +1045,20 @@ def codec_context_from_measurement(
     *,
     storage_format: str | None = None,
     filetype_band: str = "",
+    container_labels: Sequence[str] = (),
 ) -> SpectralCodecContext:
     """Lift a measurement's codec-resolution fields into a context.
 
-    The adapter from a persisted ``AudioQualityMeasurement`` (plus the two
+    The adapter from a persisted ``AudioQualityMeasurement`` (plus the
     album-level fields that live on ``AlbumQualityEvidence``) to the one
     keyword ``full_pipeline_decision`` takes per side.
+
+    ``container_labels`` are the snapshot's own file containers. They
+    answer the ultrasonic proof leg's decode-path question for a row whose
+    spectral describes the files on disk; a converted row wearing its
+    source's spectral is answered by ``was_converted_from`` instead. A
+    caller that has no snapshot passes none, and the decode path stays an
+    explicit unknown — fail closed.
     """
     if measurement is None:
         return SpectralCodecContext(
@@ -990,6 +1072,15 @@ def codec_context_from_measurement(
         storage_format=storage_format,
         spectral_subject=measurement.spectral_subject,
         was_converted_from=measurement.was_converted_from,
+        ultrasonic_deficit_db=measurement.ultrasonic_deficit_db,
+        spectral_measurement_version=(
+            measurement.spectral_measurement_version
+        ),
+        spectral_decode_path=resolve_spectral_decode_path(
+            spectral_subject=measurement.spectral_subject,
+            was_converted_from=measurement.was_converted_from,
+            container_labels=container_labels,
+        ),
     )
 
 
@@ -998,7 +1089,6 @@ def interpret_measurement(
     *,
     storage_format: str | None = None,
     filetype_band: str = "",
-    sbr_present: bool | None = None,
 ) -> SpectralInterpretation:
     """Interpret an ``AudioQualityMeasurement``'s own spectral fields.
 
@@ -1024,7 +1114,6 @@ def interpret_measurement(
         filetype_band=filetype_band,
         cliff_hz=measurement.cliff_hz,
         spectral_bitrate_kbps=measurement.spectral_bitrate_kbps,
-        sbr_present=sbr_present,
     ))
 
 

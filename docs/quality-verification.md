@@ -249,9 +249,17 @@ The wide-band energy ratio approach (v1) produces too many false positives on lo
 
 ### Per-track classification
 
-- **SUSPECT**: cliff detected, OR HF deficit > 60dB
-- **MARGINAL**: HF deficit 40-60dB, no cliff
-- **GENUINE**: HF deficit < 40dB, no cliff
+- **SUSPECT**: cliff detected, OR HF deficit ≥ 69dB
+- **MARGINAL**: HF deficit 65-69dB, no cliff
+- **GENUINE**: HF deficit < 65dB, no cliff
+
+The 65/69 pair is MEASURED, not tuned (issue #829 Phase 5 PR3). It
+replaces the original guessed 40/60, which flagged 4-17% of genuine
+lossless CONTROLS as marginal-or-worse across the four calibration arms;
+the measured pair flags 1-8% of the same controls. Provenance:
+`docs/research/calibration-data/README.md` § "What this data
+established". Forward-only — rows already carrying a grade keep the grade
+the old thresholds produced.
 
 ### Album-level classification
 
@@ -277,11 +285,167 @@ errors, dispatch records `have_analysis_error`. Both are environment failures,
 not quality verdicts: the request returns to ordinary wanted searching with no
 denylist or narrowing consequence. A later attempt measures again from scratch.
 
-### Tuning results (Mountain Goats library, 65 albums)
+## Proof gate v3 — the ultrasonic deficit leg (issue #829 Phase 5 PR3)
+
+### What `verified_lossless` claims
+
+> **No evidence of lossy origin was found by the tests we have** — the
+> in-window cliff (production's album spectral GRADE, the union of the
+> cliff and HF-deficit legs) and the ultrasonic deficit. **Not** "this is
+> bit-faithful to a lossless source."
+
+That wording is deliberate and binding. The Apple/CoreAudio family
+applies essentially no lowpass in the measured band (2.1 dB down at
+21.5 kHz), so no spectral leg has anything to see: measured on 17 paired
+launders, 10 reach proof and the conditional false-accept is 91-92%. Two
+further 2026-07-31 threads proved no *spectral* instrument separates the
+class (`docs/research/calibration-data/homogeneity/`,
+`.../shape-analysis/`). The claim is bounded rather than abandoned
+because its failure modes are now **enumerated** rather than unknown.
+Copy must never widen it to "guaranteed bit-perfect".
+
+### The leg
+
+`U = mean_over_tracks[ref_db(1-4kHz) − mean(20.5-22kHz)]`, measured by
+`lib/spectral_check.py` and persisted album-level as
+`ultrasonic_deficit_db`. Promotion is denied when `U ≥ 59.5`.
+
+Normalising against the album's OWN midband is what makes the statistic
+comparable across masters — in absolute dB a quiet record's genuine
+ultrasonic content is indistinguishable from a loud record's launder
+leakage. It replaced v2.1's RELATIVE affirmative-content test, which
+conflated "no gap" with "this album never had the dynamic range to show
+one" and promoted 12 FLAC-container launders on exactly such albums.
+
+**A denial is not a rejection.** The album imports normally, carries no
+spectral verified-lossless proof, and stays on the search surface.
+
+The boundary is exactly that, and it is worth stating precisely because
+one review round got it wrong. The leg's authority is the PROOF: it is
+read at `determine_verified_lossless` and `mint_verified_lossless_proof`
+and nowhere else. It must NOT reach the V0 trust override
+(`v0_verified_override` in `lib/quality/pipeline.py`,
+`v0_verified_lossless_override` in `harness/import_one.py`), because that
+flag routes the import — it decides whether the album is compared on its
+measured quality or handed to the provisional-lossless lane, three of
+whose four outcomes are confident rejects that also denylist the offering
+peer. A denial that re-routed that choice would discard albums on exactly
+the HF-poor genuine-lossless cohort the V0 probe exists to rescue. The
+override is therefore keyed on the probe alone, and the harness derives it
+from a second, leg-free `determine_verified_lossless` call.
+
+What a denial DOES cost, beyond the proof, is everything the proof
+licensed: no `verified_lossless_target` conversion (the album keeps its
+V0 grind — a higher-bitrate artifact, and the decider gates the
+post-import quality gate's format on the same fact), no verified-lossless
+bypass in the measured comparison, and a post-import gate that requeues
+instead of accepting. So an unproved candidate compared against an
+EQUIVALENT-OR-BETTER installed copy can still lose that comparison as an
+ordinary `downgrade` — the proof is the tie-breaker on an `equivalent`
+verdict, and in every measured world that is the mechanism (identical
+ranks on both sides), not a rank loss. That is the proof doing its job, not
+the leg passing a verdict: the existing copy is untouched and the request
+stays searchable.
+
+### Threshold provenance
+
+Frozen 2026-07-31 by re-running the frozen scorer's own leg logic
+(`docs/research/calibration-data/score_v3.py.frozen`) over all four
+committed arms at production's single measurement window — 100 genuine
+controls, 300 FLAC-container launders:
+
+| T | leaked launders | genuine denied |
+|---|---:|---:|
+| 57.0 | 0 | 43/100 |
+| **59.5** | **0** | **34/100** |
+| 61.5 | 0 | 28/100 |
+| 62.0 | 1 | 26/100 |
+
+The binding minimum — the lowest `U` over launder albums where this leg
+is the last line — is 61.55 dB, so 59.5 carries 2.05 dB of headroom.
+
+**Known residual.** Production evaluates two of the frozen scorer's three
+legs: its cliff leg is the album spectral grade, and it has no ceiling
+leg (which needs per-track slice vectors production does not persist).
+Against that reduced set one launder of 300 survives above 57.03 dB
+(TRAINING / `t-vorbisq5-flac` / Autechre, caught by the ceiling leg
+alone). Dropping the threshold to catch it would leave 0.03 dB of
+headroom — a coincidence, not a margin — and deny 9 more genuine albums
+per 100.
+
+### Decode-path scope
+
+`ultrasonic_deficit_db` is **not comparable across decode paths**. The
+same bits measure 50.26 dB through `_ffmpeg_to_wav` at 48 kHz versus
+47.17 dB sox-native at 44.1 kHz — a +3.09 dB skew, larger than the whole
+2.05 dB margin (isolated on request 8923, the only
+`was_converted_from='alac'` control). The threshold was frozen on
+sox-native decodes, so the leg refuses to gate a value from any other
+path, in either direction. The sox-versus-ffmpeg routing table lives in
+`lib/quality/filetypes.py` and both the analyzer and the gate read it, so
+the router and the threshold's scope cannot drift apart.
+
+### `ultrasonic_deficit_db IS NULL` is three states
+
+They are named separately in the decision path and never conflated:
+
+| state | reason | why |
+|---|---|---|
+| R19 preserved source | `preserved_source_spectral` | a converted copy wearing its source's pre-capture spectral; the source was converted away, so it can never be re-measured |
+| legacy | `legacy_measurement` | measured before the capture shipped; re-measurable in principle |
+| unmeasurable | `not_measured` | the capture ran and honestly reported no value — the 20.5-22 kHz bands were outside the file's Nyquist |
+
+All three **withhold**: the leg asserts nothing and every pre-v3 rule
+applies unchanged. Withholding is neither evidence nor denial, and most
+of the library is permanently in that state.
+
+### `verified_lossless_classifier` names the model
+
+- `spectral_verified_lossless` — the cliff/grade gate alone.
+- `spectral_verified_lossless_v3` — the ultrasonic leg ADJUDICATED and
+  passed.
+
+v3 is never stamped merely because v3 code ran; a withheld leg proved
+nothing new. `spectral_measurement_version` is deliberately not this
+axis — it is a measurement-shape version, and 47 live proofs carry
+version 2 while having been proved under the old gate.
+
+**Existing stamps are never retroactively demoted.** A row whose source
+is gone cannot be re-proved and must not thereby lose the proof it holds;
+proof carry-forward preserves it verbatim.
+
+### Measuring a change to this policy
+
+`scripts/decision_differential.py` re-decides real persisted
+`album_quality_evidence` rows through the real decider and reports
+changed rows by field — the decision-level sibling of
+`scripts/render_differential.py`, sharing its diff engine and its
+two-tree runbook (recipe in the module docstring). A quality-policy
+change is measured on the live corpus, not reasoned about from the diff.
+
+Two flags decide whether the run can SEE a promotion-gate change, and a
+zero from a run without them is not evidence:
+
+- `--counterfactual` drops each candidate's persisted proof first. A row
+  that already holds a proof never runs the promotion the gate governs,
+  so the as-persisted arm's honest answer for a proof-gate change is zero.
+- `--pair-with` supplies the installed album's evidence per candidate
+  (`{"id": <candidate id>, "current": {<evidence row>}}`), the way
+  production decides. Unpaired, every row is a fresh request with nothing
+  installed, and no branch that compares against a HAVE — including the
+  provisional lane's confident rejects — is reachable at all.
+
+### Tuning results (Mountain Goats library, 65 albums) — HISTORICAL
 
 Tested across the entire Mountain Goats catalogue — a worst-case scenario as the band's early work (1991-2000) was recorded on boomboxes and cassette recorders with genuinely minimal high-frequency content.
 
-At `HF_DEFICIT_SUSPECT=60dB + cliff detection`:
+**Superseded by the four-arm calibration**, which is why the thresholds
+moved to 65/69: this 65-album single-artist corpus is what the guessed
+40/60 pair was fitted on, and it could not see the 4-17% control
+false-flag rate the 60,102-measurement corpus exposed. Retained as the
+provenance of the numbers it produced.
+
+At the historical `HF_DEFICIT_SUSPECT=60dB + cliff detection`:
 - **19 correctly flagged SUSPECT** (confirmed bad source, transcodes, or upsampled 320s)
 - **46 correctly GENUINE** (including lo-fi albums with good V0 conversion bitrates)
 - **0 false positives** on albums with verified good sources

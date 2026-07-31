@@ -23,12 +23,14 @@ from lib.quality.decisions import (
     ProvisionalLosslessDecisionResult,
     build_existing_quality_measurement,
     determine_verified_lossless,
+    is_preserved_source_spectral,
     measured_import_decision,
     post_import_search_action,
     provisional_lossless_decision,
     quality_gate_decision,
     spectral_import_decision,
     transcode_detection,
+    ultrasonic_proof_leg,
     v0_probe_overrides_spectral,
 )
 from lib.quality.dispatch_actions import (
@@ -293,6 +295,32 @@ def full_pipeline_decision(
     ))
     candidate_spectral_class = decision_class_kbps(candidate_spectral)
     existing_spectral_class = decision_class_kbps(existing_spectral)
+    # The v3 ultrasonic proof leg, computed ONCE per call from the
+    # candidate context (issue #829 Phase 5 PR3). Only the candidate side
+    # has one: this leg gates a PROMOTION, and the installed side is never
+    # promoted by this decision — its own proof, if it has one, was minted
+    # when it was the candidate and is already the acquisition ceiling
+    # (decision 21, the ``current_verified_lossless_proof`` guard above).
+    #
+    # The leg is built from the context's own measured facts, never from
+    # the flat ``candidate_format_label`` below: that label falls back to
+    # a literal "flac" for a lossless source converting to a lossy target,
+    # which is the dominant shape in this library. Reading a decode path
+    # out of a defaulted label would claim sox-native for every ALAC
+    # source and gate a +3.09 dB-skewed value against a threshold frozen
+    # on a different instrument.
+    candidate_ultrasonic_leg = ultrasonic_proof_leg(
+        deficit_db=candidate_context.ultrasonic_deficit_db,
+        spectral_measurement_version=(
+            candidate_context.spectral_measurement_version
+        ),
+        decode_path=candidate_context.spectral_decode_path,
+        preserved_source_spectral=is_preserved_source_spectral(
+            candidate_context.spectral_subject,
+            candidate_context.was_converted_from,
+        ),
+    )
+
     # ONE predicate, computed once, for every seam that asks "does the
     # spectral leg govern this pair?" — Stage 1's comparison AND the
     # symmetric-representation gate below. They were the same condition
@@ -462,7 +490,21 @@ def full_pipeline_decision(
             will_be_verified = determine_verified_lossless(
                 target_format, spectral_grade,
                 converted_count=0, is_transcode=False,
-                v0_probe=candidate_probe_full)
+                v0_probe=candidate_probe_full,
+                ultrasonic_leg=candidate_ultrasonic_leg)
+            # The ultrasonic leg's authority is the PROOF, and its veto
+            # lives at the one site that mints one
+            # (``determine_verified_lossless`` above, and
+            # ``mint_verified_lossless_proof`` in the harness). This flag
+            # ROUTES THE IMPORT — it suppresses the provisional-lossless
+            # lane — so a denial must never reach it: the provisional
+            # lane's ``suspect_lossless_downgrade`` is a confident reject
+            # that also denylists the offering peer, and a denied album is
+            # exactly the HF-poor genuine-lossless cohort this override
+            # exists to rescue. A denied, probe-rescued album imports as
+            # provisional lossless WITHOUT a proof and stays on the search
+            # surface (Phase 5 plan §2, §1.7: withholding a proof never
+            # rejects, denylists or accuses).
             v0_verified_override = (
                 spectral_grade in SPECTRAL_TRANSCODE_GRADES
                 and v0_probe_overrides_spectral(candidate_probe_full)
@@ -581,7 +623,14 @@ def full_pipeline_decision(
                 target_format, spectral_grade,
                 converted_count=converted_count,
                 is_transcode=is_transcode,
-                v0_probe=candidate_probe_full)
+                v0_probe=candidate_probe_full,
+                ultrasonic_leg=candidate_ultrasonic_leg)
+            # Same boundary as the flac-keep branch above: the leg's
+            # authority is the proof, which ``will_be_verified`` already
+            # carries. This flag routes the import (and, through
+            # ``policy_is_transcode``, the comparison), so keying it on the
+            # leg would turn a withheld proof into a rejection plus a peer
+            # denylist for the provisional cohort.
             v0_verified_override = (
                 is_transcode and v0_probe_overrides_spectral(candidate_probe_full)
             )
@@ -1284,6 +1333,14 @@ def evidence_spectral_context(
     the measurement, and only the row can fail closed on a mixed-codec
     album — whose album-level spectral grade was averaged ACROSS codec
     families and whose ``codec_family`` capture is only the first track's.
+
+    The snapshot's own file extensions are the ONLY honest answer to the
+    ultrasonic proof leg's decode-path question for a row whose spectral
+    describes the files on disk. ``extension`` is a required, validated
+    field on every snapshot row, whereas ``storage_format``/``format``
+    can carry a codec name a container does not determine (``ALAC`` and
+    ``AAC`` both live in ``.m4a``, and only the extension decides which
+    decoder ``analyze_track`` reached for).
     """
     if evidence is None:
         return SpectralCodecContext()
@@ -1291,6 +1348,7 @@ def evidence_spectral_context(
         evidence.measurement,
         storage_format=evidence.storage_format,
         filetype_band=evidence.filetype_band,
+        container_labels=[file.extension for file in evidence.files],
     )
 
 

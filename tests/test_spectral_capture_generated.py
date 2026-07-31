@@ -17,15 +17,22 @@ Three invariants, each shipped as pin + generated property per
    established convention that generated tests here use the fake, not
    real PG: see ``tests/_hypothesis_profiles.py``).
 2. ``full_pipeline_decision_from_evidence`` produces a bit-identical
-   decision dict whether or not the four fields are populated, on EITHER
-   side of the comparison (``candidate`` and ``current``) and across
-   varied mutation values (review round 2, should-fix 5).
+   decision dict whether or not the CURRENT side's proof-leg fields
+   (``ultrasonic_deficit_db`` / ``spectral_measurement_version``) are
+   populated, across varied mutation values. The candidate side left this
+   invariant's scope in PR3, which promoted those two fields to the
+   ultrasonic proof leg's inputs.
 3. The four 20-22kHz extension-slice dB values never change
    ``analyze_track``'s in-window outcome (grade/cliff_detected/
    cliff_freq_hz/estimated_bitrate_kbps/hf_deficit_db) — complements the
    deterministic pin in
    ``tests/test_spectral_check.py::TestExtensionSlicesNeverFeedCliffDetection``
    (review round 2, should-fix 4).
+4. A carried spectral fact and its capture facts move atomically.
+5. The per-track HF-deficit grade ladder is exactly the two shipped
+   MEASURED constants (issue #829 Phase 5 PR3's 65/69, replacing the
+   guessed 40/60), both boundaries inclusive, with a detected cliff
+   dominating at any deficit.
 
 Every checker is a module-level pure function with a known-bad self-test
 proving it actually trips on a planted violation.
@@ -60,7 +67,14 @@ from lib.quality_evidence import (
     backfill_current_evidence_from_album_info,
     snapshot_audio_files,
 )
-from lib.spectral_check import EXTENSION_SLICE_FREQS, SLICE_FREQS, TrackResult
+from lib.spectral_check import (
+    EXTENSION_SLICE_FREQS,
+    HF_DEFICIT_MARGINAL,
+    HF_DEFICIT_SUSPECT,
+    SLICE_FREQS,
+    TrackResult,
+    classify_track,
+)
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_album_quality_evidence, make_request_row
 from tests.test_quality_generated import wild_ready_candidate_evidence
@@ -210,28 +224,31 @@ class TestCaptureFieldsRoundTripFakeDB(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Invariant 2: the PROOF-LEG capture fields never change a decision.
+# Invariant 2: the CURRENT side's proof-leg capture fields never change a
+# decision.
 # ---------------------------------------------------------------------------
 #
-# Scope correction, issue #829 Phase 5 PR2b. PR1 captured four fields and
-# this invariant covered all four, because PR1 changed no decision. PR2b
-# deliberately promotes TWO of them — ``cliff_hz`` and ``codec_family`` —
-# to decision inputs: they are what let a spectral number be read in its
-# own codec's terms instead of through LAME's MP3 encoder table (download
-# 37946). Their decision effect is now patrolled in the positive direction
-# by ``tests/test_spectral_decision_seam_generated.py``.
+# Scope, narrowed twice as the capture fields were promoted. PR1 captured
+# four fields and this invariant covered all four on both sides, because
+# PR1 changed no decision. PR2b promoted ``cliff_hz`` and ``codec_family``
+# to decision inputs on both sides (they are what let a spectral number be
+# read in its own codec's terms instead of through LAME's MP3 encoder
+# table, download 37946); their effect is patrolled in the positive
+# direction by ``tests/test_spectral_decision_seam_generated.py``.
 #
-# ``ultrasonic_deficit_db`` and ``spectral_measurement_version`` remain
-# pure passengers until PR3 wires the ultrasonic proof leg, and this
-# property keeps them honest.
+# PR3 promotes ``ultrasonic_deficit_db`` and
+# ``spectral_measurement_version`` — on the CANDIDATE side only. The
+# ultrasonic leg gates a PROMOTION, and the installed side is never
+# promoted by this decision: its own proof, if it holds one, is already
+# the acquisition ceiling. So the surviving invariant is that the CURRENT
+# side's proof-leg facts stay inert, which is the half that can silently
+# rot — nothing else in the decider has any reason to read them, and a
+# stray read there would let an installed album's measurement change what
+# a candidate is allowed to become.
 #
-# Review round 2 (should-fix 5): the original version only ever mutated
-# `candidate` and always passed `current=None`, but
-# `full_pipeline_decision_from_evidence` also reads `current.measurement`
-# (`lib/quality/pipeline.py` — the existing_spectral_grade/bitrate lines).
-# A decider that read `current.measurement.ultrasonic_deficit_db` would
-# have survived the old checker. This version mutates BOTH sides with an
-# arbitrary (Hypothesis-drawn, not fixed) mutation tuple.
+# Review round 2 (should-fix 5) originally widened this checker from
+# candidate-only to both sides. That widening is what makes the narrowed
+# version worth keeping rather than deleting.
 
 def _mutated_capture_measurement(
     measurement: AudioQualityMeasurement,
@@ -265,20 +282,21 @@ def decision_ignores_capture_fields(
     decider: Decider = full_pipeline_decision_from_evidence,
 ) -> bool:
     """Invariant checker: does ``decider`` produce the same decision dict
-    for ``(candidate, current)`` whether or not EITHER side's measurement
-    carries the issue #829 Phase 5 PR3 proof-leg capture fields
+    for ``(candidate, current)`` whether or not the CURRENT side's
+    measurement carries the proof-leg capture fields
     (``ultrasonic_deficit_db`` / ``spectral_measurement_version``), for an
     arbitrary ``mutation`` tuple?
+
+    The candidate side left this invariant's scope in PR3, which promoted
+    those two fields to the ultrasonic proof leg's inputs. A candidate
+    with no ``current`` is therefore vacuously true here, and the property
+    below always supplies one.
 
     ``decider`` is injectable ONLY so the known-bad self-tests below can
     prove this checker actually trips — production always calls it with
     the real ``full_pipeline_decision_from_evidence`` default.
     """
     baseline = decider(candidate, current)
-    mutated_candidate = msgspec.structs.replace(
-        candidate,
-        measurement=_mutated_capture_measurement(candidate.measurement, mutation),
-    )
     mutated_current = (
         msgspec.structs.replace(
             current,
@@ -288,22 +306,27 @@ def decision_ignores_capture_fields(
         )
         if current is not None else None
     )
-    mutated = decider(mutated_candidate, mutated_current)
+    mutated = decider(candidate, mutated_current)
     return baseline == mutated
 
 
-def _decoy_decider_reads_candidate_capture_fields(
+def _decoy_decider_reads_current_ultrasonic_deficit(
     candidate: AlbumQualityEvidence,
     current: "AlbumQualityEvidence | None" = None,
 ) -> "dict[str, object]":
-    """A decider that (wrongly) lets candidate.ultrasonic_deficit_db
-    influence its output — used only to prove the checker can detect
-    that. PR3's proof leg is the code that will legitimately read it."""
+    """A decider that (wrongly) lets current.ultrasonic_deficit_db
+    influence its output. The realistic rot this invariant guards: PR3
+    made the CANDIDATE's deficit a legitimate decision input, so the next
+    reader of that field is one keystroke from reading the installed
+    album's."""
     result: dict[str, object] = dict(
         full_pipeline_decision_from_evidence(candidate, current)
     )
-    if candidate.measurement.ultrasonic_deficit_db is not None:
-        result["final_status"] = "CORRUPTED_BY_CANDIDATE_ULTRASONIC_DEFICIT"
+    if (
+        current is not None
+        and current.measurement.ultrasonic_deficit_db is not None
+    ):
+        result["final_status"] = "CORRUPTED_BY_CURRENT_ULTRASONIC_DEFICIT"
     return result
 
 
@@ -330,16 +353,20 @@ _DEFAULT_MUTATION: CaptureFieldsWorld = (17000, "mp3", 61.0, 2)
 
 class TestDecisionIgnoresCaptureFieldsCheckerSelfTest(unittest.TestCase):
     """Known-bad self-test: decision_ignores_capture_fields must trip when
-    a decider (wrongly) reads one of the new fields, on EITHER side."""
+    a decider (wrongly) reads either proof-leg field on the CURRENT
+    side."""
 
-    def test_checker_trips_on_a_decider_that_reads_candidate_ultrasonic(self):
-        evidence = make_album_quality_evidence(
-            mb_release_id="capture-fields-checker-selftest-candidate",
+    def test_checker_trips_on_a_decider_that_reads_current_ultrasonic(self):
+        candidate = make_album_quality_evidence(
+            mb_release_id="capture-fields-selftest-current-ultra-candidate",
+        )
+        current = make_album_quality_evidence(
+            mb_release_id="capture-fields-selftest-current-ultra-current",
         )
         self.assertFalse(
             decision_ignores_capture_fields(
-                evidence, None, _DEFAULT_MUTATION,
-                decider=_decoy_decider_reads_candidate_capture_fields,
+                candidate, current, _DEFAULT_MUTATION,
+                decider=_decoy_decider_reads_current_ultrasonic_deficit,
             )
         )
 
@@ -373,13 +400,14 @@ class TestDecisionIgnoresCaptureFieldsCheckerSelfTest(unittest.TestCase):
 
 class TestNewCaptureFieldsNeverChangeDecision(unittest.TestCase):
     """Pin + generated property: full_pipeline_decision_from_evidence is
-    blind to the issue #829 Phase 5 PR3 proof-leg capture fields
-    (``ultrasonic_deficit_db`` / ``spectral_measurement_version``), on the
-    candidate AND current side.
+    blind to the CURRENT side's proof-leg capture fields
+    (``ultrasonic_deficit_db`` / ``spectral_measurement_version``).
 
-    ``cliff_hz`` and ``codec_family`` left this invariant's scope in PR2b,
-    which promoted them to decision inputs on purpose; their behaviour is
-    patrolled in ``tests/test_spectral_decision_seam_generated.py``."""
+    ``cliff_hz`` and ``codec_family`` left this invariant's scope in PR2b
+    and the CANDIDATE side left it in PR3, both by deliberate promotion;
+    their behaviour is patrolled positively in
+    ``tests/test_spectral_decision_seam_generated.py`` and
+    ``tests/test_quality_classification.py::TestUltrasonicProofGateV3``."""
 
     def test_pin_genuine_mp3_import_with_a_current_side(self):
         candidate = make_album_quality_evidence(
@@ -413,7 +441,7 @@ class TestNewCaptureFieldsNeverChangeDecision(unittest.TestCase):
         )
 
     def test_pin_likely_transcode_reject(self):
-        evidence = make_album_quality_evidence(
+        candidate = make_album_quality_evidence(
             mb_release_id="capture-fields-pin-transcode",
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=320,
@@ -427,18 +455,36 @@ class TestNewCaptureFieldsNeverChangeDecision(unittest.TestCase):
                 spectral_provenance="measured",
             ),
         )
+        current = make_album_quality_evidence(
+            mb_release_id="capture-fields-pin-transcode-current",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=320,
+                avg_bitrate_kbps=320,
+                median_bitrate_kbps=320,
+                format="MP3",
+                is_cbr=True,
+                spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=128,
+                spectral_subject="installed",
+                spectral_provenance="measured",
+            ),
+        )
         self.assertTrue(
-            decision_ignores_capture_fields(evidence, None, _DEFAULT_MUTATION)
+            decision_ignores_capture_fields(
+                candidate, current, _DEFAULT_MUTATION,
+            )
         )
 
     @given(
         candidate=wild_ready_candidate_evidence(),
-        current=st.one_of(st.none(), wild_ready_candidate_evidence()),
+        current=wild_ready_candidate_evidence(),
         mutation=_capture_field_worlds(),
     )
     def test_never_changes_decision_across_generated_worlds(
         self, candidate, current, mutation,
     ):
+        # ``current`` is never None here: the invariant is about the
+        # current side, and a vacuous world proves nothing.
         self.assertTrue(
             decision_ignores_capture_fields(candidate, current, mutation)
         )
@@ -763,6 +809,182 @@ class TestBackfillCurrentEvidenceCaptureFactsAreAtomic(unittest.TestCase):
     @given(world=_atomic_backfill_worlds())
     def test_capture_facts_move_atomically_across_generated_worlds(self, world):
         self.assertTrue(self._run_backfill(world))
+
+
+# ---------------------------------------------------------------------------
+# Invariant 5: the HF-deficit grade ladder is exactly the two shipped
+# MEASURED constants, and a detected cliff always dominates it.
+#
+# Issue #829 Phase 5 PR3 replaced the guessed 40/60 dB thresholds with the
+# measured 65/69 pair. The risk a bare pin cannot cover is the ladder
+# drifting away from the constants it is supposed to embody — a branch
+# that hardcodes a literal, an inverted comparison, or a boundary that
+# stops being inclusive. This property reads the constants and requires
+# the real classifier to agree with them at every deficit, including the
+# ones no pin lists.
+# ---------------------------------------------------------------------------
+
+Classifier = Callable[..., TrackResult]
+
+
+def hf_deficit_ladder_follows_the_shipped_constants(
+    hf_deficit_db: float,
+    cliff_freq_hz: "int | None",
+    *,
+    classifier: Classifier = classify_track,
+) -> bool:
+    """Invariant checker: the grade is the shipped constants' own ladder.
+
+    Both boundaries are inclusive (``>=``) and the constants are READ,
+    never restated — a checker spelling 65/69 as literals would pass a
+    production module that had drifted to any other pair, which is the
+    whole failure mode. A detected cliff dominates: it forces ``suspect``
+    at any deficit, because the cliff leg is an independent detection.
+
+    ``classifier`` is injectable ONLY so the known-bad self-tests can
+    plant a drifted ladder; production always uses the default.
+    """
+    grade = classifier(
+        hf_deficit_db=hf_deficit_db, cliff_freq_hz=cliff_freq_hz,
+    ).grade
+    if cliff_freq_hz is not None:
+        return grade == "suspect"
+    if hf_deficit_db >= HF_DEFICIT_SUSPECT:
+        expected = "suspect"
+    elif hf_deficit_db >= HF_DEFICIT_MARGINAL:
+        expected = "marginal"
+    else:
+        expected = "genuine"
+    return grade == expected
+
+
+def _decoy_classifier_with_the_old_guessed_thresholds(
+    hf_deficit_db: float,
+    cliff_freq_hz: "int | None",
+    **_kwargs: object,
+) -> TrackResult:
+    """The pre-PR3 ladder: 40 dB marginal, 60 dB suspect. Used only to
+    prove the checker trips on a drifted pair."""
+    if cliff_freq_hz is not None or hf_deficit_db >= 60.0:
+        grade = "suspect"
+    elif hf_deficit_db >= 40.0:
+        grade = "marginal"
+    else:
+        grade = "genuine"
+    return TrackResult(grade=grade, hf_deficit_db=hf_deficit_db)
+
+
+def _decoy_classifier_with_an_exclusive_boundary(
+    hf_deficit_db: float,
+    cliff_freq_hz: "int | None",
+    **_kwargs: object,
+) -> TrackResult:
+    """The off-by-one ladder: strictly-greater instead of at-or-above, so
+    a deficit landing exactly on a constant grades one tier better."""
+    if cliff_freq_hz is not None or hf_deficit_db > HF_DEFICIT_SUSPECT:
+        grade = "suspect"
+    elif hf_deficit_db > HF_DEFICIT_MARGINAL:
+        grade = "marginal"
+    else:
+        grade = "genuine"
+    return TrackResult(grade=grade, hf_deficit_db=hf_deficit_db)
+
+
+def _decoy_classifier_that_lets_the_deficit_outrank_the_cliff(
+    hf_deficit_db: float,
+    cliff_freq_hz: "int | None",
+    **_kwargs: object,
+) -> TrackResult:
+    """A ladder where a low deficit rescues a cliffed track — the
+    fail-OPEN direction the cliff leg exists to prevent."""
+    del cliff_freq_hz
+    if hf_deficit_db >= HF_DEFICIT_SUSPECT:
+        grade = "suspect"
+    elif hf_deficit_db >= HF_DEFICIT_MARGINAL:
+        grade = "marginal"
+    else:
+        grade = "genuine"
+    return TrackResult(grade=grade, hf_deficit_db=hf_deficit_db)
+
+
+class TestHfDeficitLadderCheckerSelfTest(unittest.TestCase):
+    """Known-bad self-tests: the checker must trip on a drifted pair, an
+    exclusive boundary, and a cliff the deficit is allowed to outrank."""
+
+    def test_checker_passes_for_the_real_classifier(self):
+        for deficit in (0.0, 64.9, 65.0, 68.9, 69.0, 200.0):
+            with self.subTest(deficit=deficit):
+                self.assertTrue(
+                    hf_deficit_ladder_follows_the_shipped_constants(
+                        deficit, None,
+                    )
+                )
+        self.assertTrue(
+            hf_deficit_ladder_follows_the_shipped_constants(0.0, 16000)
+        )
+
+    def test_checker_trips_on_the_old_guessed_thresholds(self):
+        self.assertFalse(
+            hf_deficit_ladder_follows_the_shipped_constants(
+                50.0, None,
+                classifier=_decoy_classifier_with_the_old_guessed_thresholds,
+            )
+        )
+
+    def test_checker_trips_on_an_exclusive_boundary(self):
+        self.assertFalse(
+            hf_deficit_ladder_follows_the_shipped_constants(
+                HF_DEFICIT_SUSPECT, None,
+                classifier=_decoy_classifier_with_an_exclusive_boundary,
+            )
+        )
+
+    def test_checker_trips_when_a_low_deficit_rescues_a_cliffed_track(self):
+        self.assertFalse(
+            hf_deficit_ladder_follows_the_shipped_constants(
+                0.0, 16000,
+                classifier=(
+                    _decoy_classifier_that_lets_the_deficit_outrank_the_cliff
+                ),
+            )
+        )
+
+
+class TestHfDeficitLadderFollowsTheShippedConstants(unittest.TestCase):
+    """Pin + generated property for the measured 65/69 HF-deficit ladder.
+
+    The deterministic boundary pins live in
+    ``tests/test_spectral_check.py::TestClassifyTrack``; this patrols the
+    whole deficit line, cliffed and uncliffed."""
+
+    def test_pin_the_measured_boundaries(self):
+        for deficit, expected in (
+            (64.9, "genuine"), (65.0, "marginal"),
+            (68.9, "marginal"), (69.0, "suspect"),
+        ):
+            with self.subTest(deficit=deficit):
+                self.assertEqual(
+                    classify_track(
+                        hf_deficit_db=deficit, cliff_freq_hz=None,
+                    ).grade,
+                    expected,
+                )
+
+    @given(
+        hf_deficit_db=st.floats(
+            min_value=-200.0, max_value=200.0,
+            allow_nan=False, allow_infinity=False,
+        ),
+        cliff_freq_hz=st.one_of(
+            st.none(), st.integers(min_value=0, max_value=24000),
+        ),
+    )
+    def test_across_generated_worlds(self, hf_deficit_db, cliff_freq_hz):
+        self.assertTrue(
+            hf_deficit_ladder_follows_the_shipped_constants(
+                hf_deficit_db, cliff_freq_hz,
+            )
+        )
 
 
 if __name__ == "__main__":

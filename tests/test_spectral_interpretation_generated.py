@@ -25,9 +25,8 @@ actually trips on a planted violation:
 6. A stored legacy ``spectral_bitrate_kbps`` never becomes an inferred
    class for a codec with no invertible ladder — the download-37946
    defect, as a permanent law.
-7. ``sbr_present`` never disarms the lossless fake-lossless detector,
-   whatever an object-type probe reports, and that detector tracks
-   production's spectral GRADE.
+7. The lossless fake-lossless detector tracks production's spectral
+   GRADE exactly, never a reconstruction from cliff presence.
 8. A granted cross-codec comparison is always in ``cliff_hz`` basis —
    two codecs are never weighed against each other through the single
    LAME-shaped legacy table.
@@ -37,6 +36,10 @@ actually trips on a planted violation:
 10. A class derived from the legacy stored column is always a
     ``LAME_LOWPASS`` member — a container bitrate parked in that column
     never becomes a ladder class.
+11. The decode-path resolution IS ``lib/spectral_check.py``'s own
+    sox-versus-ffmpeg routing, and an unrecognised label never gets a
+    path invented for it. This is what makes the ultrasonic proof
+    threshold's decode-path scope honest (issue #829 Phase 5 PR3).
 
 Checkers that would otherwise need a mutated production module take their
 dependency as a keyword-only argument defaulting to the real function
@@ -72,6 +75,7 @@ from lib.quality import (
     ladder_class_kbps,
     resolve_measured_codec_family,
     spectral_classes_comparable,
+    spectral_decode_path_for_container,
 )
 
 Comparator = Callable[
@@ -135,7 +139,6 @@ _STORED = st.one_of(
     st.sampled_from(_LIVE_NON_BUCKET_SAMPLES),
     st.integers(min_value=-10, max_value=1400),
 )
-_SBR = st.one_of(st.none(), st.booleans())
 _GRADES = st.sampled_from(_GRADE_VALUES)
 
 
@@ -161,7 +164,6 @@ def _spectral_evidence_facts(draw: st.DrawFn) -> SpectralEvidenceFacts:
         filetype_band=draw(st.sampled_from(_FILETYPE_BANDS)),
         cliff_hz=draw(_CLIFFS),
         spectral_bitrate_kbps=draw(_STORED),
-        sbr_present=draw(_SBR),
     )
 
 
@@ -173,7 +175,6 @@ def _interpretations(draw: st.DrawFn) -> SpectralInterpretation:
         spectral_grade=draw(_GRADES),
         cliff_hz=draw(_CLIFFS),
         stored_bitrate_kbps=draw(_STORED),
-        sbr_present=draw(_SBR),
     )
 
 
@@ -522,16 +523,16 @@ class TestAacNeverAccuses(unittest.TestCase):
             )
         )
 
-    @given(grade=_GRADES, cliff_hz=_CLIFFS, stored=_STORED, sbr=_SBR)
-    @example(grade=_T, cliff_hz=None, stored=128, sbr=None)
-    @example(grade=_T, cliff_hz=12999, stored=None, sbr=None)
-    @example(grade="genuine", cliff_hz=18500, stored=320, sbr=False)
-    def test_across_generated_worlds(self, grade, cliff_hz, stored, sbr):
+    @given(grade=_GRADES, cliff_hz=_CLIFFS, stored=_STORED)
+    @example(grade=_T, cliff_hz=None, stored=128)
+    @example(grade=_T, cliff_hz=12999, stored=None)
+    @example(grade="genuine", cliff_hz=18500, stored=320)
+    def test_across_generated_worlds(self, grade, cliff_hz, stored):
         self.assertTrue(
             aac_is_floor_only_and_never_accuses(
                 interpret_spectral_cliff(
                     "aac", spectral_grade=grade, cliff_hz=cliff_hz,
-                    stored_bitrate_kbps=stored, sbr_present=sbr,
+                    stored_bitrate_kbps=stored,
                 )
             )
         )
@@ -612,14 +613,14 @@ class TestOpusNeverDecisionGrade(unittest.TestCase):
             )
         )
 
-    @given(grade=_GRADES, cliff_hz=_CLIFFS, stored=_STORED, sbr=_SBR)
-    @example(grade=_T, cliff_hz=16500, stored=128, sbr=None)
-    def test_across_generated_worlds(self, grade, cliff_hz, stored, sbr):
+    @given(grade=_GRADES, cliff_hz=_CLIFFS, stored=_STORED)
+    @example(grade=_T, cliff_hz=16500, stored=128)
+    def test_across_generated_worlds(self, grade, cliff_hz, stored):
         self.assertTrue(
             opus_is_audit_only(
                 interpret_spectral_cliff(
                     "opus", spectral_grade=grade, cliff_hz=cliff_hz,
-                    stored_bitrate_kbps=stored, sbr_present=sbr,
+                    stored_bitrate_kbps=stored,
                 )
             )
         )
@@ -863,7 +864,6 @@ class TestLaddersAreMonotonic(unittest.TestCase):
 def stored_bucket_never_becomes_an_off_ladder_class(
     codec_family: "CodecFamily | None",
     stored_bitrate_kbps: "int | None",
-    sbr_present: "bool | None",
     *,
     spectral_grade: "str | None" = _T,
     interpreter: Interpreter = interpret_spectral_cliff,
@@ -889,7 +889,6 @@ def stored_bucket_never_becomes_an_off_ladder_class(
         spectral_grade=spectral_grade,
         cliff_hz=None,
         stored_bitrate_kbps=stored_bitrate_kbps,
-        sbr_present=sbr_present,
     )
     return (
         result.inferred_class_kbps is None
@@ -904,13 +903,12 @@ def _decoy_interpreter_reads_the_bucket_for_every_codec(
     spectral_grade: "str | None" = None,
     cliff_hz: "int | None" = None,
     stored_bitrate_kbps: "int | None" = None,
-    sbr_present: "bool | None" = None,
 ) -> SpectralInterpretation:
     """The pre-fix behaviour: every codec keeps the legacy LAME bucket as a
     decision-grade class. Used only to prove the checker trips."""
     result = interpret_spectral_cliff(
         codec_family, spectral_grade=spectral_grade, cliff_hz=cliff_hz,
-        stored_bitrate_kbps=stored_bitrate_kbps, sbr_present=sbr_present,
+        stored_bitrate_kbps=stored_bitrate_kbps,
     )
     if stored_bitrate_kbps is not None and stored_bitrate_kbps > 0:
         return replace(
@@ -932,7 +930,7 @@ class TestStoredBucketOffLadderCheckerSelfTest(unittest.TestCase):
             with self.subTest(family=family):
                 self.assertTrue(
                     stored_bucket_never_becomes_an_off_ladder_class(
-                        family, 128, None,
+                        family, 128,
                     )
                 )
 
@@ -941,7 +939,7 @@ class TestStoredBucketOffLadderCheckerSelfTest(unittest.TestCase):
             with self.subTest(family=family):
                 self.assertFalse(
                     stored_bucket_never_becomes_an_off_ladder_class(
-                        family, 128, None,
+                        family, 128,
                         interpreter=(
                             _decoy_interpreter_reads_the_bucket_for_every_codec
                         ),
@@ -951,7 +949,7 @@ class TestStoredBucketOffLadderCheckerSelfTest(unittest.TestCase):
     def test_checker_is_vacuous_for_ladder_codecs(self):
         self.assertTrue(
             stored_bucket_never_becomes_an_off_ladder_class(
-                "mp3", 128, None,
+                "mp3", 128,
                 interpreter=_decoy_interpreter_reads_the_bucket_for_every_codec,
             )
         )
@@ -963,7 +961,7 @@ class TestStoredBucketNeverCrossesOffLadder(unittest.TestCase):
 
     def test_pin_wavves_evidence_33591(self):
         self.assertTrue(
-            stored_bucket_never_becomes_an_off_ladder_class("aac", 128, None)
+            stored_bucket_never_becomes_an_off_ladder_class("aac", 128)
         )
 
     def test_pin_lossless_bucket_is_authenticity_only(self):
@@ -974,102 +972,59 @@ class TestStoredBucketNeverCrossesOffLadder(unittest.TestCase):
         self.assertTrue(result.supports_transcode_accusation)
         self.assertTrue(
             stored_bucket_never_becomes_an_off_ladder_class(
-                "lossless", 128, None,
+                "lossless", 128,
             )
         )
 
     @given(
         codec_family=st.one_of(st.none(), st.sampled_from(_CODEC_FAMILIES)),
         stored=_STORED,
-        sbr=_SBR,
         grade=_GRADES,
     )
-    @example(codec_family="aac", stored=128, sbr=None, grade=_T)
-    @example(codec_family="opus", stored=320, sbr=None, grade=_T)
-    @example(codec_family=None, stored=96, sbr=None, grade="genuine")
-    def test_across_generated_worlds(self, codec_family, stored, sbr, grade):
+    @example(codec_family="aac", stored=128, grade=_T)
+    @example(codec_family="opus", stored=320, grade=_T)
+    @example(codec_family=None, stored=96, grade="genuine")
+    def test_across_generated_worlds(self, codec_family, stored, grade):
         self.assertTrue(
             stored_bucket_never_becomes_an_off_ladder_class(
-                codec_family, stored, sbr, spectral_grade=grade,
+                codec_family, stored, spectral_grade=grade,
             )
         )
 
 
 # ---------------------------------------------------------------------------
-# Invariant 7: an SBR flag never disarms the lossless fake detector.
+# Invariant 7: the lossless fake detector tracks production's spectral
+# GRADE, never a reconstruction from cliff presence.
 # ---------------------------------------------------------------------------
 
-def sbr_never_disarms_the_lossless_detector(
+def lossless_detector_tracks_the_grade(
     spectral_grade: "str | None",
     cliff_hz: "int | None",
     stored_bitrate_kbps: "int | None",
     *,
     interpreter: Interpreter = interpret_spectral_cliff,
 ) -> bool:
-    """Invariant checker, two clauses.
+    """Invariant checker: the fake-lossless detector is armed by
+    production's spectral GRADE exactly, never by a reconstruction from
+    cliff presence.
 
-    First: for a lossless container ``sbr_present`` is inert — all three
-    tri-state values must produce the identical interpretation. Demoting a
-    lossless row to audit-only on an SBR flag would clear
-    ``supports_transcode_accusation`` and silently disable the fake-FLAC
-    detector the whole verified-lossless proof rests on. For AAC the
-    unrecoverable error is wrongly ASSERTING quality; for lossless it is
-    failing to detect a FAKE, so the two families resolve the flag in
-    opposite directions.
-
-    Second: the detector tracks production's spectral GRADE exactly,
-    never a reconstruction from cliff presence. ``spectral_grade`` is the
-    union of BOTH detector legs, and 890 live lossless rows are flagged by
-    the HF-deficit leg alone with no ``cliff_hz`` and no stored bucket
-    (evidence 33735). Reading cliff presence would disarm every one.
+    ``spectral_grade`` is the union of BOTH detector legs, and 890 live
+    lossless rows are flagged by the HF-deficit leg alone with no
+    ``cliff_hz`` and no stored bucket (evidence 33735). Reading cliff
+    presence would disarm every one — the unrecoverable error for a
+    lossless container is failing to detect a FAKE.
 
     ``interpreter`` is injectable ONLY so the known-bad self-tests can
-    plant the pre-fix behaviours; production always uses the default.
+    plant the pre-fix behaviour; production always uses the default.
     """
-    results = [
-        interpreter(
-            "lossless",
-            spectral_grade=spectral_grade,
-            cliff_hz=cliff_hz,
-            stored_bitrate_kbps=stored_bitrate_kbps,
-            sbr_present=sbr,
-        )
-        for sbr in (None, False, True)
-    ]
-    if any(result != results[0] for result in results):
-        return False
-    authorized = spectral_grade in ("suspect", "likely_transcode")
-    return results[0].supports_transcode_accusation is authorized
-
-
-def _decoy_interpreter_sbr_before_the_lossless_branch(
-    codec_family: "CodecFamily | None",
-    *,
-    spectral_grade: "str | None" = None,
-    cliff_hz: "int | None" = None,
-    stored_bitrate_kbps: "int | None" = None,
-    sbr_present: "bool | None" = None,
-) -> SpectralInterpretation:
-    """The pre-fix ordering: ``sbr_present`` demotes EVERY family to
-    audit-only, lossless included. Used only to prove the checker trips."""
-    if sbr_present:
-        return replace(
-            interpret_spectral_cliff(
-                codec_family, spectral_grade=spectral_grade,
-            ),
-            semantics="audit_only",
-            inferred_class_kbps=None,
-            decision_grade=False,
-            invertible_ladder=False,
-            floor_only=False,
-            supports_transcode_accusation=False,
-            basis="none",
-            reason="sbr_audit_only",
-        )
-    return interpret_spectral_cliff(
-        codec_family, spectral_grade=spectral_grade, cliff_hz=cliff_hz,
-        stored_bitrate_kbps=stored_bitrate_kbps, sbr_present=sbr_present,
+    result = interpreter(
+        "lossless",
+        spectral_grade=spectral_grade,
+        cliff_hz=cliff_hz,
+        stored_bitrate_kbps=stored_bitrate_kbps,
     )
+    authorized = spectral_grade in ("suspect", "likely_transcode")
+    return result.supports_transcode_accusation is authorized
 
 
 def _decoy_interpreter_lossless_detector_reads_cliff_presence(
@@ -1078,13 +1033,10 @@ def _decoy_interpreter_lossless_detector_reads_cliff_presence(
     spectral_grade: "str | None" = None,
     cliff_hz: "int | None" = None,
     stored_bitrate_kbps: "int | None" = None,
-    sbr_present: "bool | None" = None,
 ) -> SpectralInterpretation:
-    """The other pre-fix behaviour: the lossless detector reconstructs a
-    verdict from cliff presence instead of reading the grade, so a
-    deficit-only fake FLAC stops accusing. Used only to prove the checker
-    trips."""
-    del sbr_present
+    """The pre-fix behaviour: the lossless detector reconstructs a verdict
+    from cliff presence instead of reading the grade, so a deficit-only
+    fake FLAC stops accusing. Used only to prove the checker trips."""
     cliff_seen = cliff_hz is not None or (
         stored_bitrate_kbps is not None and stored_bitrate_kbps > 0
     )
@@ -1097,27 +1049,19 @@ def _decoy_interpreter_lossless_detector_reads_cliff_presence(
     )
 
 
-class TestSbrLosslessCheckerSelfTest(unittest.TestCase):
-    """Known-bad self-test: the checker must trip on BOTH pre-fix
-    behaviours — the SBR ordering and the cliff-presence reconstruction."""
+class TestLosslessDetectorCheckerSelfTest(unittest.TestCase):
+    """Known-bad self-test: the checker must trip on the cliff-presence
+    reconstruction, in both directions."""
 
     def test_checker_passes_for_the_real_interpreter(self):
         self.assertTrue(
-            sbr_never_disarms_the_lossless_detector(_T, 16500, None)
+            lossless_detector_tracks_the_grade(_T, 16500, None)
         )
         self.assertTrue(
-            sbr_never_disarms_the_lossless_detector(_T, None, None)
+            lossless_detector_tracks_the_grade(_T, None, None)
         )
         self.assertTrue(
-            sbr_never_disarms_the_lossless_detector("genuine", None, 198)
-        )
-
-    def test_checker_trips_when_sbr_precedes_the_lossless_branch(self):
-        self.assertFalse(
-            sbr_never_disarms_the_lossless_detector(
-                _T, 16500, None,
-                interpreter=_decoy_interpreter_sbr_before_the_lossless_branch,
-            )
+            lossless_detector_tracks_the_grade("genuine", None, 198)
         )
 
     def test_checker_trips_on_a_deficit_only_fake_flac_that_stops_accusing(self):
@@ -1125,7 +1069,7 @@ class TestSbrLosslessCheckerSelfTest(unittest.TestCase):
         cliff and no bucket. The cliff-presence reconstruction disarms it;
         the grade does not."""
         self.assertFalse(
-            sbr_never_disarms_the_lossless_detector(
+            lossless_detector_tracks_the_grade(
                 _T, None, None,
                 interpreter=(
                     _decoy_interpreter_lossless_detector_reads_cliff_presence
@@ -1137,7 +1081,7 @@ class TestSbrLosslessCheckerSelfTest(unittest.TestCase):
         """Evidence 3689's exact shape: ``genuine`` with a stored bucket of
         198. The reconstruction accuses off a non-verdict value."""
         self.assertFalse(
-            sbr_never_disarms_the_lossless_detector(
+            lossless_detector_tracks_the_grade(
                 "genuine", None, 198,
                 interpreter=(
                     _decoy_interpreter_lossless_detector_reads_cliff_presence
@@ -1146,33 +1090,35 @@ class TestSbrLosslessCheckerSelfTest(unittest.TestCase):
         )
 
 
-class TestSbrNeverDisarmsLossless(unittest.TestCase):
-    """Pin + generated property: an object-type probe can never fail OPEN
-    with respect to fake-lossless detection, and the detector reads
+class TestLosslessDetectorTracksTheGrade(unittest.TestCase):
+    """Pin + generated property: the fake-lossless detector reads
     production's verdict rather than reconstructing one."""
 
-    def test_pin_sbr_flag_on_a_cliffed_flac_keeps_the_detector_armed(self):
+    def test_pin_a_cliffed_flac_keeps_the_detector_armed(self):
         armed = interpret_spectral_cliff(
-            "lossless", spectral_grade=_T, cliff_hz=16500, sbr_present=True,
+            "lossless", spectral_grade=_T, cliff_hz=16500,
         )
         self.assertEqual(armed.semantics, "lossless_authenticity")
         self.assertTrue(armed.supports_transcode_accusation)
         self.assertTrue(
-            sbr_never_disarms_the_lossless_detector(_T, 16500, None)
+            lossless_detector_tracks_the_grade(_T, 16500, None)
         )
 
     def test_pin_evidence_33735_deficit_only_fake_flac(self):
         self.assertTrue(
-            sbr_never_disarms_the_lossless_detector(_T, None, None)
+            lossless_detector_tracks_the_grade(_T, None, None)
         )
 
-    def test_pin_sbr_still_demotes_aac(self):
-        """The other half of the asymmetry: AAC must still go audit-only."""
+    def test_pin_he_aac_lands_on_the_aac_content_floor(self):
+        """The deleted SBR pre-gate (Phase 5 plan §1.5e) left no hole: an
+        HE-AAC stream probes as plain ``aac``, and the AAC branch already
+        asserts no class and no accusation."""
         demoted = interpret_spectral_cliff(
-            "aac", spectral_grade=_T, cliff_hz=16500, sbr_present=True,
+            "aac", spectral_grade=_T, cliff_hz=16500,
         )
-        self.assertEqual(demoted.semantics, "audit_only")
-        self.assertEqual(demoted.reason, "sbr_audit_only")
+        self.assertEqual(demoted.semantics, "content_floor")
+        self.assertFalse(demoted.decision_grade)
+        self.assertFalse(demoted.supports_transcode_accusation)
 
     @given(grade=_GRADES, cliff_hz=_CLIFFS, stored=_STORED)
     @example(grade=_T, cliff_hz=16500, stored=None)
@@ -1181,7 +1127,7 @@ class TestSbrNeverDisarmsLossless(unittest.TestCase):
     @example(grade="suspect", cliff_hz=None, stored=None)
     def test_across_generated_worlds(self, grade, cliff_hz, stored):
         self.assertTrue(
-            sbr_never_disarms_the_lossless_detector(grade, cliff_hz, stored)
+            lossless_detector_tracks_the_grade(grade, cliff_hz, stored)
         )
 
 
@@ -1484,13 +1430,12 @@ def _decoy_interpreter_without_the_bucket_allowlist(
     spectral_grade: "str | None" = None,
     cliff_hz: "int | None" = None,
     stored_bitrate_kbps: "int | None" = None,
-    sbr_present: "bool | None" = None,
 ) -> SpectralInterpretation:
     """The pre-allowlist behaviour: any positive stored value becomes a
     ladder class. Used only to prove the checker trips."""
     result = interpret_spectral_cliff(
         codec_family, spectral_grade=spectral_grade, cliff_hz=cliff_hz,
-        stored_bitrate_kbps=stored_bitrate_kbps, sbr_present=sbr_present,
+        stored_bitrate_kbps=stored_bitrate_kbps,
     )
     if (
         codec_family in ("mp3", "vorbis")
@@ -1598,6 +1543,130 @@ class TestStoredBucketIsAlwaysALameBucket(unittest.TestCase):
                 interpret_spectral_evidence(facts)
             )
         )
+
+
+# ---------------------------------------------------------------------------
+# Invariant 11: the decode-path resolution IS the analyzer's own routing.
+#
+# Issue #829 Phase 5 PR3 scopes the ultrasonic proof threshold to the
+# sox-native decode path, because the same bits read +3.09 dB through
+# ``_ffmpeg_to_wav`` at 48kHz — more than the gate's whole 2.05 dB margin.
+# That scope is only honest if this module's idea of "sox-native" is the
+# analyzer's idea of "sox-native", which is why the two share ONE routing
+# table. The property drives that identity over every label the live
+# corpus and the junk tail can produce.
+# ---------------------------------------------------------------------------
+
+PathResolver = Callable[["str | None"], "str | None"]
+
+
+def decode_path_matches_the_analyzers_router(
+    label: "str | None",
+    *,
+    resolver: PathResolver = spectral_decode_path_for_container,
+) -> bool:
+    """Invariant checker: a container resolves to ``sox_native`` exactly
+    when ``lib/spectral_check.py`` would decode it with sox directly, and
+    a resolution is never invented for a label that names no container.
+
+    The oracle reads the ANALYZER's own routing set, not this module's
+    derived token set, so a mutant that widened either one apart from the
+    other is caught rather than confirmed.
+
+    ``resolver`` is injectable ONLY so the known-bad self-tests can plant
+    a drifted router; production always uses the default.
+    """
+    from lib.spectral_check import _SOX_NATIVE_EXTS
+
+    resolved = resolver(label)
+    if resolved not in (None, "sox_native", "ffmpeg_resampled"):
+        return False
+    if label is None:
+        return resolved is None
+    token = label.strip().lower().split()[0].lstrip(".") if label.strip() else ""
+    if not token:
+        return resolved is None
+    if f".{token}" in _SOX_NATIVE_EXTS:
+        return resolved == "sox_native"
+    # Not sox-native: either a container the analyzer sends through
+    # ffmpeg, or a label naming no container at all. Never sox_native.
+    return resolved != "sox_native"
+
+
+def _decoy_resolver_treats_m4a_as_sox_native(
+    label: "str | None",
+) -> "str | None":
+    """The drift that matters: ALAC in ``.m4a`` is lossless, so it is
+    tempting to group it with FLAC. sox cannot open it — the analyzer
+    resamples it to 48kHz, which is the +3.09 dB skew. Used only to prove
+    the checker trips."""
+    if label is not None and label.strip().lower().lstrip(".") in (
+        "m4a", "alac", "mp4",
+    ):
+        return "sox_native"
+    return spectral_decode_path_for_container(label)
+
+
+def _decoy_resolver_guesses_a_path_for_an_unknown_label(
+    label: "str | None",
+) -> "str | None":
+    """Fail-open: assume anything unrecognised went through ffmpeg. That
+    turns "we do not know which instrument measured this" into a claim,
+    and the whole point of the scope is that an unknown instrument gates
+    nothing. Used only to prove the checker trips."""
+    resolved = spectral_decode_path_for_container(label)
+    return "ffmpeg_resampled" if resolved is None else resolved
+
+
+class TestDecodePathCheckerSelfTest(unittest.TestCase):
+    """Known-bad self-tests for the decode-path invariant."""
+
+    def test_checker_passes_for_the_real_resolver(self):
+        for label in ("flac", "m4a", "opus", None, "", "shorten"):
+            with self.subTest(label=label):
+                self.assertTrue(
+                    decode_path_matches_the_analyzers_router(label)
+                )
+
+    def test_checker_trips_when_m4a_is_called_sox_native(self):
+        self.assertFalse(
+            decode_path_matches_the_analyzers_router(
+                "m4a", resolver=_decoy_resolver_treats_m4a_as_sox_native,
+            )
+        )
+
+    def test_checker_trips_when_an_unknown_label_gets_a_path(self):
+        self.assertFalse(
+            decode_path_matches_the_analyzers_router(
+                None,
+                resolver=_decoy_resolver_guesses_a_path_for_an_unknown_label,
+            )
+        )
+
+
+class TestDecodePathMatchesTheAnalyzersRouter(unittest.TestCase):
+    """Pin + generated property. The deterministic container table lives in
+    ``tests/test_spectral_interpretation.py::TestSpectralDecodePathResolution``.
+    """
+
+    def test_pin_the_two_containers_the_skew_was_measured_on(self):
+        """Request 8923's ALAC control against an ordinary FLAC: the two
+        instruments the +3.09 dB skew was isolated between."""
+        self.assertEqual(
+            spectral_decode_path_for_container("flac"), "sox_native",
+        )
+        self.assertEqual(
+            spectral_decode_path_for_container("alac"), "ffmpeg_resampled",
+        )
+
+    @given(label=st.one_of(st.none(), st.sampled_from(_FORMAT_LABELS)))
+    @example(label="flac")
+    @example(label="m4a")
+    @example(label="alac")
+    @example(label="ogg")
+    @example(label=None)
+    def test_across_generated_worlds(self, label):
+        self.assertTrue(decode_path_matches_the_analyzers_router(label))
 
 
 if __name__ == "__main__":

@@ -882,11 +882,19 @@ class _EvidenceMixin(_PipelineDBBase):
         return int(row["current_evidence_id"])
 
 
+    @staticmethod
     def _album_quality_evidence_from_row(
-        self,
         row: dict[str, Any],
         file_rows: list[dict[str, Any]],
     ) -> AlbumQualityEvidence:
+        """Decode one ``album_quality_evidence`` read into its Struct.
+
+        Static because it touches no connection state, and that is
+        load-bearing rather than tidiness: ``scripts/decision_differential.py``
+        re-decides an exported corpus through THIS function so a policy
+        differential measures the shape production reads, not a bespoke
+        decoder's idea of it.
+        """
         v0_metric = None
         if (
             row.get("v0_min_bitrate_kbps") is not None

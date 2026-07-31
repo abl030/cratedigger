@@ -25,12 +25,26 @@ from lib.quality import (
     CODEC_FAMILY_OPUS,
     CODEC_FAMILY_OTHER,
     CODEC_FAMILY_VORBIS,
+    SOX_NATIVE_AUDIO_EXTENSIONS,
     CodecFamily,
 )
 
 # --- Thresholds ---
-HF_DEFICIT_SUSPECT = 60.0   # dB — above this = suspect (no cliff needed)
-HF_DEFICIT_MARGINAL = 40.0  # dB — above this = marginal
+#
+# HF-deficit thresholds are MEASURED, not tuned (issue #829 Phase 5 PR3).
+# They replace the original guessed 40/60 pair, which flagged 4-17% of
+# genuine lossless controls as marginal-or-worse across the four
+# calibration arms; the measured 65/69 pair flags 1-8% of the same
+# controls. Provenance: the Phase 5 plan §1 "Constants to implement" and
+# docs/research/calibration-data/README.md § "What this data established"
+# (60,102 production-primitive measurements, TRAINING / ROUND-1 /
+# ROUND-2 / ROUND-3). Do not re-derive or "improve" them.
+#
+# Forward-only: rows already carrying a grade keep the grade the old
+# thresholds produced. Nothing is re-scored (scope.md, and the Phase 5
+# plan §2's "existing stamps remain proofs under the OLD model").
+HF_DEFICIT_SUSPECT = 69.0   # dB — at or above this = suspect (no cliff needed)
+HF_DEFICIT_MARGINAL = 65.0  # dB — at or above this = marginal
 CLIFF_THRESHOLD_DB_PER_KHZ = -12.0  # steeper than this = cliff
 MIN_CLIFF_SLICES = 2        # consecutive steep slices to confirm cliff
 ALBUM_SUSPECT_PCT = 60.0    # % of tracks that must be suspect for album flag
@@ -419,9 +433,13 @@ def aggregate_album_spectral_capture(
 # Extensions sox can decode natively in our nix shell (see `sox --help`).
 # Anything outside this set must be transcoded via ffmpeg first or sox will
 # emit "FAIL formats: no handler for file extension X" and produce no RMS.
-_SOX_NATIVE_EXTS: frozenset[str] = frozenset({
-    ".mp3", ".flac", ".ogg", ".opus", ".wav", ".aif", ".aiff", ".au",
-})
+#
+# The set itself lives in ``lib/quality/filetypes.py``: it became a
+# DECISION input in issue #829 Phase 5 PR3 (the ultrasonic proof leg's
+# threshold is scoped to the sox-native decode path, because the same bits
+# read +3.09 dB through ``_ffmpeg_to_wav``). One definition, so the router
+# below and the threshold's scope cannot drift apart.
+_SOX_NATIVE_EXTS: frozenset[str] = SOX_NATIVE_AUDIO_EXTENSIONS
 
 
 class _DecodeFailedError(Exception):
