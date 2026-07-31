@@ -328,10 +328,13 @@ class TestCaptureSurvivesALatticelessRePersist(unittest.TestCase):
 # Equivalence for the retired half: the candidate side's inertness is now
 # conditional on the leg, and is covered by
 # ``tests/test_quality_generated.py`` — ``the_lattice_leg_only_ever_subtracts``
-# (L2, the pure decision) and ``withheld_lattice_leg_leaves_the_decision_
+# (L2, the pure decision) and ``a_non_denying_lattice_leg_leaves_the_decision_
 # untouched`` (L2b, the whole evidence decider, over the same
-# ``wild_ready_candidate_evidence`` world space). Restating either here would
-# be a parallel copy of a live invariant.
+# ``wild_ready_candidate_evidence`` world space). Both cover PASSED as well as
+# withheld — a clean lattice is as inert as an unmeasured one — so between
+# them the retired claim survives everywhere except a genuine denial, which is
+# the only place PR-B intends it not to. Restating either here would be a
+# parallel copy of a live invariant.
 # ---------------------------------------------------------------------------
 
 def decision_ignores_the_installed_lattice(

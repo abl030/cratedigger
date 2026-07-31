@@ -1189,6 +1189,7 @@ def mint_verified_lossless_proof(
     what was tested, and claiming the top rung for a row that skipped a
     rung would make the column mean two things again. A DENIED leg never
     reaches here at all — the proof was already vetoed.
+
     ``spectral_measurement_version`` is deliberately NOT used as this
     axis: it is a measurement-shape version, and 47 live proofs carry
     version 2 while having been proved under the OLD gate — 7 of them

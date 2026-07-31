@@ -526,12 +526,22 @@ cohort and no row measured before it shipped has one — and a withheld leg
 leaves the entire decision bit-identical.
 
 **The leg's authority is the proof, never the lane.** A denial withholds
-the verified-lossless proof and nothing else: the album still imports, no
-peer is denylisted by the leg, the provisional-lossless lane is not
-re-routed, and the request stays on the search surface. This is the same
-boundary PR3 shipped a blocking defect on, pinned here from birth
+the verified-lossless proof and nothing else. It never re-routes the
+provisional-lossless lane — whose decisions are confident rejects that
+denylist the offering peer — and it introduces no denylist class of its
+own: every denylist a denied album attracts is the pre-existing
+post-import policy any unproved album attracts.
+
+What a denial *does* cost is the proof's comparison privilege, and that
+is not a leg verdict. An album with no proof is compared on what it
+measures, so against a better installed copy it can lose that comparison
+and not be imported — in the MEASURED lane, with a comparison basis the
+operator can read, exactly as any unproved album can. That residual is
+byte-identical to the ultrasonic leg's and is pinned as such
 (`tests/test_quality_classification.py::TestAacLatticeProofGate`,
-`tests/test_quality_generated.py::TestAacLatticeProofLegProperties`).
+`tests/test_quality_generated.py::TestAacLatticeProofLegProperties`);
+the lane boundary is the one PR3 shipped a blocking defect on, and this
+leg is pinned against it from birth.
 
 **Where the leg is evaluated.** Both decision twins build it once per call
 from the candidate's persisted capture. The dry-run harness — which is

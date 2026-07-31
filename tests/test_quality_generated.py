@@ -47,7 +47,6 @@ from lib.dispatch.types import QualityGateState
 from lib.quality import (
     AAC_LATTICE_PROOF_DENY_MAX_Z,
     AAC_LATTICE_PROOF_DENY_MODAL_COUNT,
-    AAC_LATTICE_PROOF_MIN_SCORED_TRACKS,
     CODEC_FAMILY_MP3,
     COMPARISON_BASIS_BRANCHES,
     EVIDENCE_SUBJECT_INSTALLED,
@@ -4381,17 +4380,32 @@ def _aac_lattice_captures(draw) -> AacLatticeCapture:
     Offsets are drawn from a deliberately SMALL pool so coincidences
     actually happen: over the real 0-1023 range four tracks sharing an
     offset is a ~1e-9 event and the denial branch would never be reached.
+
+    ``z`` is drawn mostly from the MEASURED genuine range (album maxima
+    4.58-6.91 over the 17-album control arm) and only sometimes from the
+    launder range. A uniform 0-40 draw puts ~70% of tracks over the
+    threshold of 12, so nearly every generated album denied on
+    ``z_exceeded`` and the ``offset_concentration`` and ``passed``
+    branches went hungry at the suite tier's example budget.
     """
     count = draw(st.integers(min_value=0, max_value=6))
     tracks: list[tuple[int | None, float | None]] = []
     for _ in range(count):
-        if draw(st.booleans()):
+        # Per-track detector errors are the exception in production (96 kHz
+        # input, an undecodable file), not half the album. A fair coin here
+        # also starved the concentration branch, which needs four SCORED
+        # tracks to coincide.
+        if draw(st.integers(min_value=0, max_value=4)) == 0:
             tracks.append((None, None))
             continue
         tracks.append((
             draw(st.sampled_from((0, 137, 512, 803, 960))),
-            draw(st.floats(min_value=0.0, max_value=40.0,
-                           allow_nan=False, allow_infinity=False)),
+            draw(st.one_of(
+                st.floats(min_value=3.0, max_value=12.0,
+                          allow_nan=False, allow_infinity=False),
+                st.floats(min_value=0.0, max_value=40.0,
+                          allow_nan=False, allow_infinity=False),
+            )),
         ))
     return make_aac_lattice_capture(tracks)
 
@@ -4404,14 +4418,23 @@ def _aac_lattice_legs(draw) -> AacLatticeProofLeg:
     )
 
 
-def _lattice_leg_is_withheld_by_oracle(
+def _lattice_leg_does_not_deny_by_oracle(
     candidate: AlbumQualityEvidence,
 ) -> bool:
-    """Independent oracle for "the lattice leg cannot adjudicate".
+    """Independent oracle for "the lattice leg does not deny this album".
 
-    Restates the rule from the research README rather than asking the
-    production evaluator, so a mutant that widened or narrowed
-    adjudication cannot make the property vacuous.
+    Restates the two denial conditions from the research README rather
+    than asking the production evaluator, so a mutant that widened or
+    narrowed them cannot make the property vacuous.
+
+    Deliberately "not denying", NOT "cannot adjudicate". A ``passed`` leg
+    is every bit as inert as a withheld one — the leg is a denial
+    instrument and a clean lattice grants nothing (``the_lattice_leg_only_
+    ever_subtracts``) — so scoping the oracle to withheld worlds would
+    leave L2b vacuous on exactly the population the leg newly adjudicates,
+    and would leave the A-I1 retirement's equivalence claim
+    (``tests/test_aac_lattice_capture_generated.py``, the section header
+    above ``decision_ignores_the_installed_lattice``) only half proven.
     """
     capture = candidate.aac_lattice
     if capture is None:
@@ -4423,9 +4446,7 @@ def _lattice_leg_is_withheld_by_oracle(
     ):
         return False
     max_z = capture.max_z
-    if max_z is not None and max_z > AAC_LATTICE_PROOF_DENY_MAX_Z:
-        return False
-    return capture.scored_tracks < AAC_LATTICE_PROOF_MIN_SCORED_TRACKS
+    return not (max_z is not None and max_z > AAC_LATTICE_PROOF_DENY_MAX_Z)
 
 
 def _without_lattice_capture(
@@ -4585,7 +4606,7 @@ def _decoy_decider_lets_a_clean_lattice_grant_proof(
     )
 
 
-def withheld_lattice_leg_leaves_the_decision_untouched(
+def a_non_denying_lattice_leg_leaves_the_decision_untouched(
     candidate: AlbumQualityEvidence,
     current: "AlbumQualityEvidence | None",
     *,
@@ -4593,18 +4614,23 @@ def withheld_lattice_leg_leaves_the_decision_untouched(
         full_pipeline_decision_from_evidence
     ),
 ) -> bool:
-    """Invariant checker L2b, the composed half: when the leg cannot
-    adjudicate, the WHOLE decision dict is bit-identical to the same album
-    carrying no lattice capture at all.
+    """Invariant checker L2b, the composed half: unless the leg DENIES,
+    the WHOLE decision dict is bit-identical to the same album carrying no
+    lattice capture at all.
+
+    Covers withheld AND passed, because both are inert: the leg is a
+    denial instrument, and a clean lattice grants nothing the pre-existing
+    rules refused. Scoping this to withheld worlds would go vacuous on
+    exactly the population the leg newly adjudicates.
 
     L2 pins the pure decision; this one drives the real evidence decider
     end to end, so a reader that picked the raw capture up somewhere other
     than ``determine_verified_lossless`` is caught too.
 
-    ``decider`` is injectable ONLY so the known-bad self-test can plant
+    ``decider`` is injectable ONLY so the known-bad self-tests can plant
     such a reader; production always uses the default.
     """
-    if not _lattice_leg_is_withheld_by_oracle(candidate):
+    if not _lattice_leg_does_not_deny_by_oracle(candidate):
         return True
     return decider(candidate, current) == decider(
         _without_lattice_capture(candidate), current,
@@ -4624,6 +4650,25 @@ def _decoy_decider_reads_the_raw_modal_count_outside_the_leg(
     capture = candidate.aac_lattice
     if capture is not None and (capture.modal_count or 0) >= 2:
         result["verified_lossless"] = False
+    return result
+
+
+def _decoy_decider_lets_a_clean_lattice_leak_into_the_decision(
+    candidate: AlbumQualityEvidence,
+    current: "AlbumQualityEvidence | None" = None,
+) -> "dict[str, object]":
+    """The half the narrower oracle could not see: a reader that acts on a
+    leg that ADJUDICATED AND PASSED.
+
+    Plausible rot — "the detector cleared this album, so record that" — and
+    it moves rows the leg has no authority over. Only reachable by a
+    checker whose oracle admits passing worlds. Used only to prove the
+    checker trips."""
+    result: dict[str, object] = dict(
+        full_pipeline_decision_from_evidence(candidate, current)
+    )
+    if aac_lattice_proof_leg(candidate.aac_lattice).proves_no_aac_lattice:
+        result["final_status"] = "CORRUPTED_BY_A_CLEAN_LATTICE"
     return result
 
 
@@ -4922,11 +4967,11 @@ class TestAacLatticeProofLegProperties(unittest.TestCase):
         candidate=wild_ready_candidate_evidence(),
         current=st.one_of(st.none(), wild_ready_candidate_evidence()),
     )
-    def test_l2b_a_withheld_leg_leaves_the_whole_decision_untouched(
+    def test_l2b_a_non_denying_leg_leaves_the_whole_decision_untouched(
         self, candidate, current,
     ):
         self.assertTrue(
-            withheld_lattice_leg_leaves_the_decision_untouched(
+            a_non_denying_lattice_leg_leaves_the_decision_untouched(
                 candidate, current,
             )
         )
@@ -5049,11 +5094,50 @@ class TestAacLatticeProofLegCheckerSelfTests(unittest.TestCase):
             aac_lattice=_THIN_LATTICE_CAPTURE,
         )
 
+    def _passing_capture_candidate(self) -> AlbumQualityEvidence:
+        """The same album with a capture the leg ADJUDICATES and clears.
+
+        The oracle must admit this world, or L2b never patrols the
+        population the leg newly speaks about."""
+        return msgspec.structs.replace(
+            self._thin_capture_candidate(),
+            aac_lattice=_PASSING_LATTICE_CAPTURE,
+        )
+
     def test_l2b_checker_passes_for_the_real_decider(self):
-        candidate = self._thin_capture_candidate()
-        self.assertTrue(_lattice_leg_is_withheld_by_oracle(candidate))
-        self.assertTrue(
-            withheld_lattice_leg_leaves_the_decision_untouched(candidate, None)
+        for name, candidate in (
+            ("withheld", self._thin_capture_candidate()),
+            ("passed", self._passing_capture_candidate()),
+        ):
+            with self.subTest(leg=name):
+                self.assertTrue(
+                    _lattice_leg_does_not_deny_by_oracle(candidate)
+                )
+                self.assertTrue(
+                    a_non_denying_lattice_leg_leaves_the_decision_untouched(
+                        candidate, None,
+                    )
+                )
+
+    def test_l2b_checker_trips_on_a_clean_lattice_leaking_into_the_decision(
+        self,
+    ):
+        """The half a withheld-only oracle cannot reach: the leg
+        ADJUDICATED and PASSED, and a reader acted on it anyway. A clean
+        lattice is one negative finding about one laundering family; it
+        licenses nothing but the v4 classifier."""
+        candidate = self._passing_capture_candidate()
+        self.assertEqual(
+            aac_lattice_proof_leg(candidate.aac_lattice).outcome, "passed",
+        )
+        self.assertTrue(_lattice_leg_does_not_deny_by_oracle(candidate))
+        self.assertFalse(
+            a_non_denying_lattice_leg_leaves_the_decision_untouched(
+                candidate, None,
+                decider=(
+                    _decoy_decider_lets_a_clean_lattice_leak_into_the_decision
+                ),
+            )
         )
 
     def test_l2b_checker_trips_on_a_raw_concentration_reader(self):
@@ -5069,9 +5153,9 @@ class TestAacLatticeProofLegCheckerSelfTests(unittest.TestCase):
         candidate = msgspec.structs.replace(
             self._thin_capture_candidate(), aac_lattice=two_of_three,
         )
-        self.assertTrue(_lattice_leg_is_withheld_by_oracle(candidate))
+        self.assertTrue(_lattice_leg_does_not_deny_by_oracle(candidate))
         self.assertFalse(
-            withheld_lattice_leg_leaves_the_decision_untouched(
+            a_non_denying_lattice_leg_leaves_the_decision_untouched(
                 candidate, None,
                 decider=(
                     _decoy_decider_reads_the_raw_modal_count_outside_the_leg
