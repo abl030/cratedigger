@@ -56,6 +56,7 @@ from lib.pipeline_db import (
     wrong_match_candidate_row,
 )
 from lib.quality import (
+    AacLatticeCapture,
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
     SpectralMeasurement,
@@ -120,6 +121,13 @@ CONTRACTS: list[tuple[str, str, set[str]]] = [
     # struct — each field name IS the album_quality_evidence column name.
     ("AudioQualityMeasurement", "album_quality_evidence",
      _struct_columns(AudioQualityMeasurement)),
+    # issue #829 AAC-lattice leg PR-A: the capture's five fields persist as
+    # five ``aac_lattice_``-prefixed columns, so the contract is the same
+    # structural guard with the prefix applied. A field added to the Struct
+    # without a migration column fails here instead of silently reading
+    # back NULL.
+    ("AacLatticeCapture", "album_quality_evidence",
+     {f"aac_lattice_{name}" for name in _struct_columns(AacLatticeCapture)}),
 ]
 
 

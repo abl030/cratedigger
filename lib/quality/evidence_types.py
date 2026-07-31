@@ -539,6 +539,13 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
     filetype_band: str = ""
     matched_bad_audio_hash_id: int | None = None
     matched_bad_audio_hash_path: str | None = None
+    # issue #829 AAC-lattice leg PR-A capture. Measured by the preview
+    # worker on the promotion-plausible cohort only (lossless containers
+    # whose album spectral grade is genuine/marginal) because it costs tens
+    # of seconds of CPU per track. NULL means never measured; a capture with
+    # ``scored_tracks == 0`` means measured and nothing scored. No decision
+    # reads it in PR-A.
+    aac_lattice: AacLatticeCapture | None = None
 
     def sorted_for_storage(self) -> "AlbumQualityEvidence":
         return AlbumQualityEvidence(
@@ -569,6 +576,7 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
             filetype_band=self.filetype_band,
             matched_bad_audio_hash_id=self.matched_bad_audio_hash_id,
             matched_bad_audio_hash_path=self.matched_bad_audio_hash_path,
+            aac_lattice=self.aac_lattice,
         )
 
     def storage_validation_errors(self) -> list[str]:
@@ -671,6 +679,8 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
             errors.extend(self.v0_metric.validation_errors())
         if self.lineage_version == 4 and self.verified_lossless_proof is not None:
             errors.extend(self.verified_lossless_proof.validation_errors())
+        if self.aac_lattice is not None:
+            errors.extend(self.aac_lattice.validation_errors())
         return errors
 
     def policy_incomplete_reasons(self) -> list[str]:

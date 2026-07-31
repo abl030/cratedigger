@@ -6495,6 +6495,206 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         self.assertEqual(loaded.measurement.ultrasonic_deficit_db, 55.0)
         self.assertEqual(loaded.measurement.spectral_measurement_version, 2)
 
+    def test_upsert_round_trips_every_aac_lattice_field(self):
+        """Rule A for the issue #829 AAC-lattice capture (invariant A-I3):
+        EVERY field of ``AacLatticeCapture`` and of every per-track row must
+        read back through real PostgreSQL unchanged. ``FakePipelineDB``
+        stores the Struct verbatim, so only this catches a missing INSERT
+        column, a lossy numeric type, or a JSONB row that decodes short."""
+        from lib.quality import AacLatticeCapture, AacLatticeTrackScore
+
+        tracks_in = [
+            AacLatticeTrackScore(
+                filename="01 - Alpha.flac",
+                offset=960, z=28.531250014901161, proba=0.1198,
+            ),
+            AacLatticeTrackScore(
+                filename="02 - Beta.flac",
+                offset=960, z=31.134000000000001, proba=0.2207,
+            ),
+            AacLatticeTrackScore(
+                filename="03 - Gamma.flac",
+                error=(
+                    "AacLatticeUnsupportedRateError: "
+                    "unsupported sample rate 96 kHz"
+                ),
+            ),
+        ]
+        capture_in = AacLatticeCapture.from_tracks(tracks_in)
+        evidence = self._seed(
+            mb_release_id="mbid-aac-lattice-round-trip",
+            aac_lattice=capture_in,
+        )
+
+        self.db.upsert_album_quality_evidence(evidence)
+        loaded = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+
+        assert loaded is not None
+        capture_out = loaded.aac_lattice
+        assert capture_out is not None
+        for field in msgspec.structs.fields(AacLatticeCapture):
+            with self.subTest(field=field.name):
+                self.assertEqual(
+                    getattr(capture_out, field.name),
+                    getattr(capture_in, field.name),
+                    f"aac_lattice.{field.name} was dropped at the PG boundary",
+                )
+        for index, track_in in enumerate(tracks_in):
+            for field in msgspec.structs.fields(AacLatticeTrackScore):
+                with self.subTest(track=index, field=field.name):
+                    self.assertEqual(
+                        getattr(capture_out.tracks[index], field.name),
+                        getattr(track_in, field.name),
+                        f"aac_lattice_tracks[{index}].{field.name} was "
+                        "dropped at the PG boundary",
+                    )
+        # The scalars are the SQL-queryable projection of the same fact and
+        # must agree with the array they were derived from.
+        self.assertEqual(capture_out.modal_offset, 960)
+        self.assertEqual(capture_out.modal_count, 2)
+        self.assertEqual(capture_out.scored_tracks, 2)
+        self.assertEqual(capture_out.max_z, 31.134000000000001)
+
+    def test_upsert_aac_lattice_is_null_when_never_measured(self):
+        """NULL across all five columns means never measured — the cohort
+        gate skips most albums, and a fabricated empty capture would lie
+        about that (forward-only, no backfill)."""
+        evidence = self._seed(mb_release_id="mbid-aac-lattice-null")
+
+        self.db.upsert_album_quality_evidence(evidence)
+        loaded = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+
+        assert loaded is not None
+        self.assertIsNone(loaded.aac_lattice)
+        cur = self.db._execute(
+            "SELECT aac_lattice_tracks, aac_lattice_modal_offset, "
+            "aac_lattice_modal_count, aac_lattice_scored_tracks, "
+            "aac_lattice_max_z FROM album_quality_evidence WHERE id = %s",
+            (loaded.id,),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        for column, value in dict(row).items():
+            with self.subTest(column=column):
+                self.assertIsNone(value)
+
+    def test_upsert_measured_but_unscored_lattice_is_not_null(self):
+        """"Measured, nothing scored" is a distinct, storable fact from
+        "never measured" — a 96 kHz album has no lattice and that is
+        evidence, not silence."""
+        from lib.quality import AacLatticeCapture, AacLatticeTrackScore
+
+        capture = AacLatticeCapture.from_tracks([
+            AacLatticeTrackScore(
+                filename="01.flac",
+                error=(
+                    "AacLatticeUnsupportedRateError: "
+                    "unsupported sample rate 96 kHz"
+                ),
+            ),
+        ])
+        evidence = self._seed(
+            mb_release_id="mbid-aac-lattice-unscored",
+            aac_lattice=capture,
+        )
+
+        self.db.upsert_album_quality_evidence(evidence)
+        loaded = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+
+        assert loaded is not None
+        assert loaded.aac_lattice is not None
+        self.assertEqual(loaded.aac_lattice.scored_tracks, 0)
+        self.assertEqual(len(loaded.aac_lattice.tracks), 1)
+        self.assertIsNone(loaded.aac_lattice.modal_offset)
+
+    def test_upsert_without_a_lattice_preserves_the_stored_capture(self):
+        """The lattice follows the V0 tuple's guard, not the spectral one: a
+        same-address writer that never ran the cohort gate must not erase a
+        ~49 s/track measurement taken on the exact same bytes."""
+        from lib.quality import AacLatticeCapture, AacLatticeTrackScore
+
+        capture = AacLatticeCapture.from_tracks([
+            AacLatticeTrackScore(
+                filename="01.flac", offset=960, z=28.0, proba=0.13,
+            ),
+        ])
+        evidence = self._seed(
+            mb_release_id="mbid-aac-lattice-preserve",
+            aac_lattice=capture,
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        self.db.upsert_album_quality_evidence(
+            msgspec.structs.replace(evidence, aac_lattice=None)
+        )
+
+        loaded = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+
+        assert loaded is not None
+        assert loaded.aac_lattice is not None
+        self.assertEqual(loaded.aac_lattice.modal_offset, 960)
+        self.assertEqual(loaded.aac_lattice.max_z, 28.0)
+        self.assertEqual(len(loaded.aac_lattice.tracks), 1)
+
+    def test_upsert_with_a_fresh_lattice_replaces_the_stored_one(self):
+        from lib.quality import AacLatticeCapture, AacLatticeTrackScore
+
+        first = AacLatticeCapture.from_tracks([
+            AacLatticeTrackScore(
+                filename="01.flac", offset=960, z=28.0, proba=0.13,
+            ),
+        ])
+        second = AacLatticeCapture.from_tracks([
+            AacLatticeTrackScore(filename="01.flac", error="boom"),
+        ])
+        evidence = self._seed(
+            mb_release_id="mbid-aac-lattice-replace",
+            aac_lattice=first,
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        self.db.upsert_album_quality_evidence(
+            msgspec.structs.replace(evidence, aac_lattice=second)
+        )
+
+        loaded = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+
+        assert loaded is not None
+        self.assertEqual(loaded.aac_lattice, second)
+
+    def test_aac_lattice_shape_constraint_rejects_stranded_scalars(self):
+        """Migration 069's shape CHECK is the last line: it must reject an
+        album statistic with no per-track array behind it, whatever bypassed
+        the Python validation."""
+        import psycopg2.errors
+
+        evidence = self._seed(mb_release_id="mbid-aac-lattice-check")
+        self.db.upsert_album_quality_evidence(evidence)
+        loaded = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert loaded is not None
+        with self.assertRaises(psycopg2.errors.CheckViolation):
+            self.db._execute(
+                "UPDATE album_quality_evidence SET aac_lattice_modal_offset "
+                "= 960 WHERE id = %s",
+                (loaded.id,),
+            )
+
     def test_same_address_upsert_cannot_clear_current_enrichment_gate(self):
         evidence = self._seed(
             mb_release_id="mbid-enrichment-gate",
