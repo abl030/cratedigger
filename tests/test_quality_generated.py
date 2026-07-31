@@ -45,6 +45,9 @@ import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.dispatch.quality_gate import QualityGatePlan, _check_quality_gate_core
 from lib.dispatch.types import QualityGateState
 from lib.quality import (
+    AAC_LATTICE_PROOF_DENY_MAX_Z,
+    AAC_LATTICE_PROOF_DENY_MODAL_COUNT,
+    AAC_LATTICE_PROOF_MIN_SCORED_TRACKS,
     CODEC_FAMILY_MP3,
     COMPARISON_BASIS_BRANCHES,
     EVIDENCE_SUBJECT_INSTALLED,
@@ -53,6 +56,9 @@ from lib.quality import (
     ULTRASONIC_PROOF_DENY_DEFICIT_DB,
     VERIFIED_LOSSLESS_CLASSIFIER,
     VERIFIED_LOSSLESS_CLASSIFIER_V3,
+    VERIFIED_LOSSLESS_CLASSIFIER_V4,
+    AacLatticeCapture,
+    AacLatticeProofLeg,
     AlbumQualityEvidence,
     AlbumQualityEvidenceDecisionFacts,
     AlbumQualityEvidenceFile,
@@ -70,6 +76,7 @@ from lib.quality import (
     UltrasonicProofLeg,
     V0ProbeEvidence,
     VerifiedLosslessProof,
+    aac_lattice_proof_leg,
     album_ultrasonic_proof_leg,
     classify_full_pipeline_decision,
     compute_effective_override_bitrate,
@@ -104,6 +111,7 @@ from tests.helpers import (
     PROVISIONAL_LANE_DECISIONS,
     build_parity_candidate_evidence,
     build_parity_current_evidence,
+    make_aac_lattice_capture,
     make_audio_corrupt_validation_report,
 )
 from tests.test_simulator_scenarios import (
@@ -3173,6 +3181,11 @@ def wild_ready_candidate_evidence(draw) -> AlbumQualityEvidence:
         filetype_band="generated",
         matched_bad_audio_hash_id=(1 if has_bad_hash else None),
         matched_bad_audio_hash_path=("01.mp3" if has_bad_hash else None),
+        # issue #829 AAC-lattice leg PR-B. Drawn WIDE and unfiltered, so
+        # the wild properties reach the leg's denial branches instead of
+        # only its unmeasured default. Unlike the ultrasonic facts the
+        # evidence row places no grade prerequisite on this column.
+        aac_lattice=draw(st.one_of(st.none(), _aac_lattice_captures())),
     )
 
 
@@ -4328,6 +4341,792 @@ class TestUltrasonicProofLegCheckerSelfTests(unittest.TestCase):
                 decider=_decoy_decider_lets_a_denial_reject_the_album,
             )
         )
+
+# ===========================================================================
+# Proof gate v4 — the AAC frame-lattice leg (issue #829 AAC-lattice leg PR-B)
+#
+# The v3 block above is the template, deliberately: this is the SAME kind
+# of instrument (a measured statistic that can only ever withhold a proof)
+# reading a different fact, so it owes the same invariants. The
+# deterministic pins live in
+# ``tests/test_quality_classification.py::TestAacLatticeProofGate`` and
+# ``::TestVerifiedLosslessClassifierGeneration``.
+#
+#   L1  A denying leg is a hard veto: no verified-lossless status survives
+#       it, by ANY other route, including the V0-avg trust override.
+#   L2  The leg's ENTIRE effect is a veto: result(leg) == result(no leg)
+#       AND NOT leg.denies. A withheld leg is completely inert — which is
+#       where essentially the whole library is, because the capture is
+#       gated to the promotion-plausible cohort — and a PASSING leg never
+#       grants proof the pre-existing rules refused. L2b drives the same
+#       law through the whole evidence decider.
+#   L3  ``verified_lossless_classifier`` says v4 exactly when BOTH legs
+#       adjudicated and passed, never merely because the lattice ran.
+#   L5  The leg decides the PROOF, never the LANE. PR3 shipped a blocking
+#       defect on exactly this boundary; the lattice leg inherits the
+#       invariant from birth rather than after an incident.
+# ===========================================================================
+
+
+@st.composite
+def _aac_lattice_captures(draw) -> AacLatticeCapture:
+    """Captures built by the PRODUCTION derivation over generated tracks.
+
+    Per-track ``(offset, z)`` rows go through
+    ``AacLatticeCapture.from_tracks`` — the function
+    ``lib/aac_lattice.py::measure_album_aac_lattice`` itself calls — so no
+    property can assert on an album statistic no measurement could produce
+    (test-fidelity.md Rule C).
+
+    Offsets are drawn from a deliberately SMALL pool so coincidences
+    actually happen: over the real 0-1023 range four tracks sharing an
+    offset is a ~1e-9 event and the denial branch would never be reached.
+    """
+    count = draw(st.integers(min_value=0, max_value=6))
+    tracks: list[tuple[int | None, float | None]] = []
+    for _ in range(count):
+        if draw(st.booleans()):
+            tracks.append((None, None))
+            continue
+        tracks.append((
+            draw(st.sampled_from((0, 137, 512, 803, 960))),
+            draw(st.floats(min_value=0.0, max_value=40.0,
+                           allow_nan=False, allow_infinity=False)),
+        ))
+    return make_aac_lattice_capture(tracks)
+
+
+@st.composite
+def _aac_lattice_legs(draw) -> AacLatticeProofLeg:
+    """Every leg the production evaluator can emit, built by CALLING it."""
+    return aac_lattice_proof_leg(
+        draw(st.one_of(st.none(), _aac_lattice_captures()))
+    )
+
+
+def _lattice_leg_is_withheld_by_oracle(
+    candidate: AlbumQualityEvidence,
+) -> bool:
+    """Independent oracle for "the lattice leg cannot adjudicate".
+
+    Restates the rule from the research README rather than asking the
+    production evaluator, so a mutant that widened or narrowed
+    adjudication cannot make the property vacuous.
+    """
+    capture = candidate.aac_lattice
+    if capture is None:
+        return True
+    modal_count = capture.modal_count
+    if (
+        modal_count is not None
+        and modal_count >= AAC_LATTICE_PROOF_DENY_MODAL_COUNT
+    ):
+        return False
+    max_z = capture.max_z
+    if max_z is not None and max_z > AAC_LATTICE_PROOF_DENY_MAX_Z:
+        return False
+    return capture.scored_tracks < AAC_LATTICE_PROOF_MIN_SCORED_TRACKS
+
+
+def _without_lattice_capture(
+    candidate: AlbumQualityEvidence,
+) -> AlbumQualityEvidence:
+    """The same album with no lattice evidence at all — the pre-PR-A world,
+    which is where every row measured before the capture shipped lives."""
+    return msgspec.structs.replace(candidate, aac_lattice=None)
+
+
+def denying_lattice_leg_is_a_hard_veto(
+    *,
+    spectral_grade: "str | None",
+    target_format: "str | None",
+    converted_count: int,
+    is_transcode: bool,
+    v0_probe: "V0ProbeEvidence | None",
+    leg: AacLatticeProofLeg,
+    decider: "Callable[..., bool]" = determine_verified_lossless,
+) -> bool:
+    """Invariant checker L1: a ``denied`` leg admits no verified-lossless
+    status through any other route.
+
+    The route that matters is the V0-avg trust override. It measures how
+    hard the source is to re-encode; it cannot see an MDCT frame grid at
+    all, so it has nothing to say about the evidence this leg carries. If
+    the override could outrank the leg, the leg would be decorative.
+
+    ``decider`` is injectable ONLY so the known-bad self-test can plant
+    the wrong ordering; production always uses the default.
+    """
+    if leg.outcome != "denied":
+        return True
+    return decider(
+        target_format, spectral_grade, converted_count, is_transcode,
+        v0_probe=v0_probe, aac_lattice_leg=leg,
+    ) is False
+
+
+def _decoy_decider_checks_the_lattice_after_the_v0_override(
+    target_format: "str | None",
+    spectral_grade: "str | None",
+    converted_count: int,
+    is_transcode: bool,
+    *,
+    v0_probe: "V0ProbeEvidence | None" = None,
+    has_lossy_passthrough: bool = False,
+    ultrasonic_leg: "UltrasonicProofLeg | None" = None,
+    aac_lattice_leg: "AacLatticeProofLeg | None" = None,
+) -> bool:
+    """The ordering bug: consult the lattice only when nothing else already
+    said yes, so a V0-rescued suspect Apple launder keeps its proof. Used
+    only to prove the checker trips."""
+    verified = determine_verified_lossless(
+        target_format, spectral_grade, converted_count, is_transcode,
+        v0_probe=v0_probe, has_lossy_passthrough=has_lossy_passthrough,
+        ultrasonic_leg=ultrasonic_leg,
+    )
+    if not verified:
+        return False
+    rescued = (
+        spectral_grade in ("suspect", "likely_transcode")
+        and v0_probe_overrides_spectral(v0_probe)
+    )
+    if rescued:
+        return True
+    return not (
+        aac_lattice_leg is not None and aac_lattice_leg.denies_promotion
+    )
+
+
+def the_lattice_leg_only_ever_subtracts(
+    *,
+    spectral_grade: "str | None",
+    target_format: "str | None",
+    converted_count: int,
+    is_transcode: bool,
+    v0_probe: "V0ProbeEvidence | None",
+    leg: AacLatticeProofLeg,
+    decider: "Callable[..., bool]" = determine_verified_lossless,
+) -> bool:
+    """Invariant checker L2: the leg's ENTIRE effect on verified-lossless
+    status is a veto.
+
+        result(leg) == result(no leg) AND NOT leg.denies_promotion
+
+    Both halves are load-bearing:
+
+    * A withheld leg is completely inert. The capture is gated to the
+      promotion-plausible cohort and every row measured before it shipped
+      has none, so a leg that could move a withheld row would silently
+      change the shipped behaviour of the entire library.
+    * A ``passed`` leg is inert too — a clean lattice NEVER grants proof
+      the pre-existing rules would have refused. "This album is not an AAC
+      transcode" is not "this album is lossless": it is one negative
+      finding about one laundering family. All a pass earns is the v4
+      classifier.
+
+    ``decider`` is injectable ONLY so the known-bad self-tests can plant a
+    reader that violates one half; production always uses the default.
+    """
+    with_leg = decider(
+        target_format, spectral_grade, converted_count, is_transcode,
+        v0_probe=v0_probe, aac_lattice_leg=leg,
+    )
+    without_leg = decider(
+        target_format, spectral_grade, converted_count, is_transcode,
+        v0_probe=v0_probe, aac_lattice_leg=None,
+    )
+    return with_leg == (without_leg and not leg.denies_promotion)
+
+
+def _decoy_decider_treats_a_withheld_lattice_as_denying(
+    target_format: "str | None",
+    spectral_grade: "str | None",
+    converted_count: int,
+    is_transcode: bool,
+    *,
+    v0_probe: "V0ProbeEvidence | None" = None,
+    has_lossy_passthrough: bool = False,
+    ultrasonic_leg: "UltrasonicProofLeg | None" = None,
+    aac_lattice_leg: "AacLatticeProofLeg | None" = None,
+) -> bool:
+    """The fail-closed-too-hard reader: "no lattice evidence" read as "not
+    cleared of an AAC lattice". It demotes every row outside the cohort
+    gate, i.e. almost all of them. Used only to prove the checker trips."""
+    if aac_lattice_leg is not None and aac_lattice_leg.outcome != "passed":
+        return False
+    return determine_verified_lossless(
+        target_format, spectral_grade, converted_count, is_transcode,
+        v0_probe=v0_probe, has_lossy_passthrough=has_lossy_passthrough,
+        ultrasonic_leg=ultrasonic_leg, aac_lattice_leg=aac_lattice_leg,
+    )
+
+
+def _decoy_decider_lets_a_clean_lattice_grant_proof(
+    target_format: "str | None",
+    spectral_grade: "str | None",
+    converted_count: int,
+    is_transcode: bool,
+    *,
+    v0_probe: "V0ProbeEvidence | None" = None,
+    has_lossy_passthrough: bool = False,
+    ultrasonic_leg: "UltrasonicProofLeg | None" = None,
+    aac_lattice_leg: "AacLatticeProofLeg | None" = None,
+) -> bool:
+    """The seductive direction: a clean lattice is affirmative evidence, so
+    let it certify an album the pre-existing rules refused. That would make
+    an errored or ungraded album verified-lossless on one negative finding.
+    Used only to prove the checker trips."""
+    if aac_lattice_leg is not None and aac_lattice_leg.outcome == "passed":
+        return True
+    return determine_verified_lossless(
+        target_format, spectral_grade, converted_count, is_transcode,
+        v0_probe=v0_probe, has_lossy_passthrough=has_lossy_passthrough,
+        ultrasonic_leg=ultrasonic_leg, aac_lattice_leg=aac_lattice_leg,
+    )
+
+
+def withheld_lattice_leg_leaves_the_decision_untouched(
+    candidate: AlbumQualityEvidence,
+    current: "AlbumQualityEvidence | None",
+    *,
+    decider: "Callable[..., dict[str, object]]" = (
+        full_pipeline_decision_from_evidence
+    ),
+) -> bool:
+    """Invariant checker L2b, the composed half: when the leg cannot
+    adjudicate, the WHOLE decision dict is bit-identical to the same album
+    carrying no lattice capture at all.
+
+    L2 pins the pure decision; this one drives the real evidence decider
+    end to end, so a reader that picked the raw capture up somewhere other
+    than ``determine_verified_lossless`` is caught too.
+
+    ``decider`` is injectable ONLY so the known-bad self-test can plant
+    such a reader; production always uses the default.
+    """
+    if not _lattice_leg_is_withheld_by_oracle(candidate):
+        return True
+    return decider(candidate, current) == decider(
+        _without_lattice_capture(candidate), current,
+    )
+
+
+def _decoy_decider_reads_the_raw_modal_count_outside_the_leg(
+    candidate: AlbumQualityEvidence,
+    current: "AlbumQualityEvidence | None" = None,
+) -> "dict[str, object]":
+    """A reader that consults the raw persisted concentration directly
+    instead of going through the leg, so a capture too thin to adjudicate
+    demotes the album anyway. Used only to prove the checker trips."""
+    result: dict[str, object] = dict(
+        full_pipeline_decision_from_evidence(candidate, current)
+    )
+    capture = candidate.aac_lattice
+    if capture is not None and (capture.modal_count or 0) >= 2:
+        result["verified_lossless"] = False
+    return result
+
+
+#: A denying capture and a passing one, built from the measured shapes:
+#: ``qaac-cvbr256`` puts ~97.5% of an album's tracks on one offset (17/17
+#: albums at k>=4), while the 17-album genuine control arm never reached
+#: even k>=2 and topped out at album-max z 6.91. Both worlds are built by
+#: swapping ONE field on an otherwise identical album, so the comparison
+#: can attribute a difference only to the leg.
+_DENYING_LATTICE_CAPTURE = make_aac_lattice_capture([
+    (960, 28.60), (960, 29.11), (960, 30.02), (960, 28.35),
+    (960, 31.13), (512, 27.44),
+])
+_PASSING_LATTICE_CAPTURE = make_aac_lattice_capture([
+    (13, 4.58), (205, 4.80), (418, 4.97),
+    (611, 5.17), (803, 5.28), (1001, 6.91),
+])
+#: Measured and unusable: three scored tracks and three detector errors
+#: (the 96 kHz / undecodable shape). Adjudicates nothing.
+_THIN_LATTICE_CAPTURE = make_aac_lattice_capture([
+    (13, 4.58), (205, 4.80), (418, 4.97),
+    (None, None), (None, None), (None, None),
+])
+
+#: A passing ultrasonic leg, built by calling the v3 evaluator, for the
+#: classifier-composition cells that need both legs adjudicating.
+_ULTRASONIC_PASSING_LEG = ultrasonic_proof_leg(
+    deficit_db=45.0, spectral_measurement_version=2,
+    decode_path="sox_native", preserved_source_spectral=False,
+)
+
+
+def _with_lattice_capture(
+    candidate: AlbumQualityEvidence, capture: AacLatticeCapture,
+) -> AlbumQualityEvidence:
+    """The same album as measured by the PR-A capture."""
+    return msgspec.structs.replace(candidate, aac_lattice=capture)
+
+
+def a_lattice_denial_never_reroutes_the_provisional_lane(
+    candidate: AlbumQualityEvidence,
+    current: "AlbumQualityEvidence | None",
+    *,
+    facts: "AlbumQualityEvidenceDecisionFacts | None" = None,
+    decider: "Callable[..., dict[str, object]]" = (
+        full_pipeline_decision_from_evidence
+    ),
+) -> bool:
+    """Invariant checker L5: the leg decides the PROOF, never the LANE.
+
+    The V0-avg trust override answers "did the probe certify this source?"
+    and that answer selects the lane: certified albums are compared on
+    their measured quality, uncertified ones go to the provisional-lossless
+    lane. Three of the four provisional-lane decisions are CONFIDENT
+    REJECTS that denylist the offering peer, so an album whose only fault
+    was a withheld proof would be discarded and its peer accused.
+
+    Two halves:
+
+    * denied and passing agree on WHETHER the provisional lane decided the
+      album; and
+    * when it did, they agree on every decided field — the lane's inputs
+      are the probes and the grade, so the leg cannot legitimately move
+      anything inside it.
+
+    Outside the lane the leg's effect is real and correct: an album with no
+    proof is compared on what it measures, which can cost it an import
+    against a better installed copy. That is the proof doing its job, with
+    a comparison basis behind it, not the leg passing a verdict.
+
+    ``decider`` is injectable ONLY so the known-bad self-test can plant the
+    shape PR3 shipped; production always uses the default.
+    """
+    denied = decider(
+        _with_lattice_capture(candidate, _DENYING_LATTICE_CAPTURE),
+        current, facts=facts,
+    )
+    passing = decider(
+        _with_lattice_capture(candidate, _PASSING_LATTICE_CAPTURE),
+        current, facts=facts,
+    )
+    denied_in_lane = denied["stage2_import"] in PROVISIONAL_LANE_DECISIONS
+    passing_in_lane = passing["stage2_import"] in PROVISIONAL_LANE_DECISIONS
+    if denied_in_lane != passing_in_lane:
+        return False
+    if not denied_in_lane:
+        return True
+    return all(
+        denied[key] == passing[key]
+        for key in _PROVISIONAL_LANE_DECIDED_KEYS
+    )
+
+
+def _decoy_decider_lets_a_lattice_denial_reject_the_album(
+    candidate: AlbumQualityEvidence,
+    current: "AlbumQualityEvidence | None" = None,
+    *,
+    facts: "AlbumQualityEvidenceDecisionFacts | None" = None,
+) -> "dict[str, object]":
+    """The shape PR3 shipped, keyed on the lattice leg: extend the denial
+    past the proof into the V0 trust override's downstream routing, so a
+    denied album falls back into the provisional-lossless lane. Against a
+    provisional installed album that lane answers
+    ``suspect_lossless_downgrade`` — a CONFIDENT reject — turning a
+    withheld proof into a rejection plus a peer denylist. Used only to
+    prove the checker trips."""
+    result: dict[str, object] = dict(
+        full_pipeline_decision_from_evidence(candidate, current, facts=facts)
+    )
+    leg = aac_lattice_proof_leg(candidate.aac_lattice)
+    if not leg.denies_promotion:
+        return result
+    provisional = provisional_lossless_decision(
+        ProvisionalLosslessDecisionInput(
+            candidate_probe=_policy_v0_probe_from_metric(candidate.v0_metric),
+            existing_probe=(
+                _policy_v0_probe_from_metric(current.v0_metric)
+                if current is not None else None
+            ),
+            spectral_grade=candidate.measurement.spectral_grade,
+            supported_lossless_source=_lossless_source_from_evidence(candidate),
+        ),
+    )
+    if provisional.decision is not None and provisional.confident_reject:
+        result["stage2_import"] = provisional.decision
+        result["imported"] = False
+        result["denylisted"] = True
+        result["final_status"] = "wanted"
+        result["keep_searching"] = True
+    return result
+
+
+def classifier_names_both_models_that_proved_it(
+    ultrasonic_leg: "UltrasonicProofLeg | None",
+    lattice_leg: "AacLatticeProofLeg | None",
+    *,
+    minter: "Callable[..., VerifiedLosslessProof | None]" = (
+        mint_verified_lossless_proof
+    ),
+) -> bool:
+    """Invariant checker L3: the classifier composes over BOTH legs.
+
+    v4 exactly when both adjudicated and passed; v3 when the ultrasonic
+    leg did and the lattice did not; the base name otherwise. A lattice
+    pass with no ultrasonic adjudication is deliberately the BASE name —
+    the classifier is a ladder of what was tested, and skipping a rung
+    must not buy the top one.
+    """
+    proof = minter(
+        True,
+        was_converted_from="flac",
+        detected_source_format="flac",
+        spectral_grade="genuine",
+        ultrasonic_leg=ultrasonic_leg,
+        aac_lattice_leg=lattice_leg,
+    )
+    if proof is None:
+        return False
+    ultrasonic_passed = (
+        ultrasonic_leg is not None and ultrasonic_leg.outcome == "passed"
+    )
+    lattice_passed = (
+        lattice_leg is not None and lattice_leg.outcome == "passed"
+    )
+    if ultrasonic_passed and lattice_passed:
+        expected = VERIFIED_LOSSLESS_CLASSIFIER_V4
+    elif ultrasonic_passed:
+        expected = VERIFIED_LOSSLESS_CLASSIFIER_V3
+    else:
+        expected = VERIFIED_LOSSLESS_CLASSIFIER
+    return proof.classifier == expected
+
+
+def _decoy_minter_stamps_v4_whenever_the_lattice_ran(
+    will_be_verified_lossless: bool,
+    *,
+    was_converted_from: "str | None",
+    detected_source_format: "str | None",
+    spectral_grade: "str | None",
+    ultrasonic_leg: "UltrasonicProofLeg | None" = None,
+    aac_lattice_leg: "AacLatticeProofLeg | None" = None,
+) -> "VerifiedLosslessProof | None":
+    """The plausible mistake: the lattice measurement exists, so stamp v4.
+    It claims the Apple family was cleared on rows whose capture was too
+    thin to test it, and on rows whose ultrasonic leg never adjudicated.
+    Used only to prove the checker trips."""
+    proof = mint_verified_lossless_proof(
+        will_be_verified_lossless,
+        was_converted_from=was_converted_from,
+        detected_source_format=detected_source_format,
+        spectral_grade=spectral_grade,
+        ultrasonic_leg=ultrasonic_leg,
+    )
+    if proof is None or aac_lattice_leg is None:
+        return proof
+    return msgspec.structs.replace(
+        proof, classifier=VERIFIED_LOSSLESS_CLASSIFIER_V4,
+    )
+
+
+class TestAacLatticeProofLegProperties(unittest.TestCase):
+    """Generated half of the v4 proof-gate invariant pairs."""
+
+    @given(
+        leg=_aac_lattice_legs(),
+        spectral_grade=st.sampled_from(_GRADES),
+        target_format=st.sampled_from(_TARGET_FORMATS),
+        converted_count=st.integers(min_value=0, max_value=24),
+        is_transcode=st.booleans(),
+        probe_kind=st.one_of(
+            st.none(),
+            st.sampled_from(("lossless_source_v0", "native_lossy_research_v0")),
+        ),
+        v0_avg=_optional_bitrates(max_value=400),
+        v0_min=_optional_bitrates(max_value=400),
+    )
+    @example(
+        # The Bill Hicks shape against an Apple launder: the world where
+        # the V0 override and the leg actively disagree.
+        leg=aac_lattice_proof_leg(_DENYING_LATTICE_CAPTURE),
+        spectral_grade="suspect", target_format=None, converted_count=10,
+        is_transcode=True, probe_kind="lossless_source_v0",
+        v0_avg=241, v0_min=219,
+    )
+    def test_l1_a_denying_leg_is_a_hard_veto(
+        self, leg, spectral_grade, target_format, converted_count,
+        is_transcode, probe_kind, v0_avg, v0_min,
+    ):
+        probe = (
+            V0ProbeEvidence(
+                kind=probe_kind, avg_bitrate_kbps=v0_avg,
+                min_bitrate_kbps=v0_min,
+            )
+            if probe_kind is not None else None
+        )
+        self.assertTrue(
+            denying_lattice_leg_is_a_hard_veto(
+                spectral_grade=spectral_grade,
+                target_format=target_format,
+                converted_count=converted_count,
+                is_transcode=is_transcode,
+                v0_probe=probe,
+                leg=leg,
+            )
+        )
+
+    @given(
+        leg=_aac_lattice_legs(),
+        spectral_grade=st.sampled_from(_GRADES),
+        target_format=st.sampled_from(_TARGET_FORMATS),
+        converted_count=st.integers(min_value=0, max_value=24),
+        is_transcode=st.booleans(),
+        probe_kind=st.one_of(
+            st.none(),
+            st.sampled_from(("lossless_source_v0", "native_lossy_research_v0")),
+        ),
+        v0_avg=_optional_bitrates(max_value=400),
+        v0_min=_optional_bitrates(max_value=400),
+    )
+    @example(
+        # The un-measurable shape: a genuine lossless source outside the
+        # cohort gate, which is where almost the whole library sits.
+        leg=aac_lattice_proof_leg(None),
+        spectral_grade="genuine", target_format=None, converted_count=12,
+        is_transcode=False, probe_kind=None, v0_avg=None, v0_min=None,
+    )
+    @example(
+        # A clean lattice on a world the pre-existing rules refuse.
+        leg=aac_lattice_proof_leg(_PASSING_LATTICE_CAPTURE),
+        spectral_grade="error", target_format="flac", converted_count=0,
+        is_transcode=False, probe_kind=None, v0_avg=None, v0_min=None,
+    )
+    def test_l2_the_leg_only_ever_subtracts(
+        self, leg, spectral_grade, target_format, converted_count,
+        is_transcode, probe_kind, v0_avg, v0_min,
+    ):
+        probe = (
+            V0ProbeEvidence(
+                kind=probe_kind, avg_bitrate_kbps=v0_avg,
+                min_bitrate_kbps=v0_min,
+            )
+            if probe_kind is not None else None
+        )
+        self.assertTrue(
+            the_lattice_leg_only_ever_subtracts(
+                spectral_grade=spectral_grade,
+                target_format=target_format,
+                converted_count=converted_count,
+                is_transcode=is_transcode,
+                v0_probe=probe,
+                leg=leg,
+            )
+        )
+
+    @given(
+        candidate=wild_ready_candidate_evidence(),
+        current=st.one_of(st.none(), wild_ready_candidate_evidence()),
+    )
+    def test_l2b_a_withheld_leg_leaves_the_whole_decision_untouched(
+        self, candidate, current,
+    ):
+        self.assertTrue(
+            withheld_lattice_leg_leaves_the_decision_untouched(
+                candidate, current,
+            )
+        )
+
+    @given(
+        ultrasonic_leg=st.one_of(st.none(), _ultrasonic_legs()),
+        lattice_leg=st.one_of(st.none(), _aac_lattice_legs()),
+    )
+    def test_l3_the_classifier_names_both_models(
+        self, ultrasonic_leg, lattice_leg,
+    ):
+        self.assertTrue(
+            classifier_names_both_models_that_proved_it(
+                ultrasonic_leg, lattice_leg,
+            )
+        )
+
+    @given(world=parity_worlds())
+    @example(world=_DENIAL_PROVISIONAL_COHORT_WORLD)
+    def test_l5_a_denial_never_reroutes_the_provisional_lane(self, world):
+        candidate, current, facts = _parity_evidence_inputs(world)
+        self.assertTrue(
+            a_lattice_denial_never_reroutes_the_provisional_lane(
+                candidate, current, facts=facts,
+            )
+        )
+
+
+class TestAacLatticeProofLegCheckerSelfTests(unittest.TestCase):
+    """Known-bad self-tests for the v4 proof-gate invariant checkers.
+
+    Each checker gets both halves: it passes for the real decider/minter,
+    and it TRIPS on a planted reader that violates the invariant.
+    """
+
+    _DENYING_LEG = aac_lattice_proof_leg(_DENYING_LATTICE_CAPTURE)
+    _PASSING_LEG = aac_lattice_proof_leg(_PASSING_LATTICE_CAPTURE)
+    _WITHHELD_LEG = aac_lattice_proof_leg(_THIN_LATTICE_CAPTURE)
+
+    def test_the_fixtures_have_the_outcomes_they_claim(self):
+        """The fixtures are only evidence if the production evaluator
+        actually reads them the way their names assert."""
+        self.assertEqual(self._DENYING_LEG.outcome, "denied")
+        self.assertEqual(self._DENYING_LEG.reason, "offset_concentration")
+        self.assertEqual(self._PASSING_LEG.outcome, "passed")
+        self.assertEqual(self._WITHHELD_LEG.outcome, "withheld")
+        self.assertEqual(
+            self._WITHHELD_LEG.reason, "insufficient_scored_tracks",
+        )
+        self.assertEqual(_ULTRASONIC_PASSING_LEG.outcome, "passed")
+
+    def test_l1_checker_passes_for_the_real_decider(self):
+        self.assertTrue(
+            denying_lattice_leg_is_a_hard_veto(
+                spectral_grade="suspect", target_format=None,
+                converted_count=10, is_transcode=True,
+                v0_probe=V0ProbeEvidence(
+                    kind="lossless_source_v0",
+                    avg_bitrate_kbps=241, min_bitrate_kbps=219,
+                ),
+                leg=self._DENYING_LEG,
+            )
+        )
+
+    def test_l1_checker_trips_when_the_v0_override_outranks_the_leg(self):
+        self.assertFalse(
+            denying_lattice_leg_is_a_hard_veto(
+                spectral_grade="suspect", target_format=None,
+                converted_count=10, is_transcode=True,
+                v0_probe=V0ProbeEvidence(
+                    kind="lossless_source_v0",
+                    avg_bitrate_kbps=241, min_bitrate_kbps=219,
+                ),
+                leg=self._DENYING_LEG,
+                decider=(
+                    _decoy_decider_checks_the_lattice_after_the_v0_override
+                ),
+            )
+        )
+
+    def _subtracts(self, leg, **overrides):
+        world = {
+            "spectral_grade": "genuine", "target_format": None,
+            "converted_count": 12, "is_transcode": False, "v0_probe": None,
+        }
+        world.update(overrides)
+        return the_lattice_leg_only_ever_subtracts(leg=leg, **world)
+
+    def test_l2_checker_passes_for_the_real_decider(self):
+        for leg in (self._WITHHELD_LEG, self._PASSING_LEG, self._DENYING_LEG):
+            with self.subTest(outcome=leg.outcome):
+                self.assertTrue(self._subtracts(leg))
+
+    def test_l2_checker_trips_when_withheld_is_read_as_denying(self):
+        self.assertFalse(
+            self._subtracts(
+                self._WITHHELD_LEG,
+                decider=_decoy_decider_treats_a_withheld_lattice_as_denying,
+            )
+        )
+
+    def test_l2_checker_trips_when_a_clean_lattice_is_affirmative(self):
+        self.assertFalse(
+            self._subtracts(
+                self._PASSING_LEG, spectral_grade="error",
+                target_format="flac", converted_count=0,
+                decider=_decoy_decider_lets_a_clean_lattice_grant_proof,
+            )
+        )
+
+    def _thin_capture_candidate(self) -> AlbumQualityEvidence:
+        """A lossless candidate whose capture ran but scored too few
+        tracks to test anything — the shape a raw reader mis-reads."""
+        return build_parity_candidate_evidence(
+            is_flac=True, min_bitrate=0, is_cbr=False,
+            spectral_grade="genuine",
+            post_conversion_min_bitrate=245,
+            candidate_v0_probe_avg=245, candidate_v0_probe_min=245,
+            codec_family="lossless",
+            aac_lattice=_THIN_LATTICE_CAPTURE,
+        )
+
+    def test_l2b_checker_passes_for_the_real_decider(self):
+        candidate = self._thin_capture_candidate()
+        self.assertTrue(_lattice_leg_is_withheld_by_oracle(candidate))
+        self.assertTrue(
+            withheld_lattice_leg_leaves_the_decision_untouched(candidate, None)
+        )
+
+    def test_l2b_checker_trips_on_a_raw_concentration_reader(self):
+        """Two of the three scored tracks coincide — a modal count of 2,
+        which the concentration rule prices at ~322 false positives per
+        5000 albums and therefore ignores. A raw reader that treats any
+        coincidence as evidence demotes the album anyway."""
+        two_of_three = make_aac_lattice_capture([
+            (13, 4.58), (13, 4.80), (418, 4.97),
+            (None, None), (None, None), (None, None),
+        ])
+        self.assertEqual(two_of_three.modal_count, 2)
+        candidate = msgspec.structs.replace(
+            self._thin_capture_candidate(), aac_lattice=two_of_three,
+        )
+        self.assertTrue(_lattice_leg_is_withheld_by_oracle(candidate))
+        self.assertFalse(
+            withheld_lattice_leg_leaves_the_decision_untouched(
+                candidate, None,
+                decider=(
+                    _decoy_decider_reads_the_raw_modal_count_outside_the_leg
+                ),
+            )
+        )
+
+    def test_l3_checker_passes_for_the_real_minter(self):
+        for ultrasonic in (None, _ULTRASONIC_PASSING_LEG):
+            for lattice in (None, self._PASSING_LEG, self._WITHHELD_LEG,
+                            self._DENYING_LEG):
+                with self.subTest(
+                    ultrasonic=ultrasonic is not None,
+                    lattice=lattice.outcome if lattice else None,
+                ):
+                    self.assertTrue(
+                        classifier_names_both_models_that_proved_it(
+                            ultrasonic, lattice,
+                        )
+                    )
+
+    def test_l3_checker_trips_when_v4_is_stamped_for_a_leg_that_only_ran(self):
+        self.assertFalse(
+            classifier_names_both_models_that_proved_it(
+                _ULTRASONIC_PASSING_LEG, self._WITHHELD_LEG,
+                minter=_decoy_minter_stamps_v4_whenever_the_lattice_ran,
+            )
+        )
+
+    def test_l5_checker_passes_for_the_real_decider(self):
+        candidate, current, facts = _parity_evidence_inputs(
+            _DENIAL_PROVISIONAL_COHORT_WORLD,
+        )
+        self.assertTrue(
+            a_lattice_denial_never_reroutes_the_provisional_lane(
+                candidate, current, facts=facts,
+            )
+        )
+
+    def test_l5_checker_trips_when_a_denial_reroutes_the_lane(self):
+        """PR3's review world, keyed on the lattice leg: an installed
+        provisional album whose own ``lossless_source_v0`` probe (avg 240)
+        sits a hair under the candidate's (avg 241). A decider that lets
+        the denial suppress the V0 trust override drops that album into
+        the provisional lane, where that pair is a confident reject."""
+        candidate, current, facts = _parity_evidence_inputs(
+            _DENIAL_PROVISIONAL_COHORT_WORLD,
+        )
+        self.assertFalse(
+            a_lattice_denial_never_reroutes_the_provisional_lane(
+                candidate, current, facts=facts,
+                decider=_decoy_decider_lets_a_lattice_denial_reject_the_album,
+            )
+        )
+
 
 class TestInvariantCheckersTripOnViolations(unittest.TestCase):
     """Known-bad self-tests: prove the harness detects what it claims to."""

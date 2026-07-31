@@ -7946,7 +7946,10 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
 
     def test_flac_preview_persists_one_affirmative_spectral_scan(self):
         """Lossless preview measures once and carries that grade into harness."""
-        from harness.import_one import _preview_spectral_audit_from_action_file
+        from harness.import_one import (
+            _preview_candidate_evidence,
+            _preview_spectral_audit,
+        )
         from lib.dispatch.types import ImportOneRun
         from lib.import_preview import measure_and_persist_candidate_evidence
         from scripts import import_preview_worker
@@ -7983,7 +7986,9 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
             def run_import(**kwargs: Any) -> ImportOneRun:
                 action_file = kwargs.get("quality_evidence_action_file")
                 self.assertIsInstance(action_file, str)
-                audit = _preview_spectral_audit_from_action_file(action_file)
+                audit = _preview_spectral_audit(
+                    _preview_candidate_evidence(action_file)
+                )
                 assert audit is not None and audit.candidate is not None
                 self.assertEqual(audit.candidate.grade, "genuine")
                 result = ImportResult(
@@ -8046,6 +8051,154 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
             persisted = db.load_album_quality_evidence_by_id(evidence_id)
             assert persisted is not None
             self.assertEqual(persisted.measurement.spectral_grade, "genuine")
+
+    def test_preview_lattice_capture_reaches_the_harness_proof_leg(self):
+        """The AAC-lattice capture survives the preview -> harness wire.
+
+        Issue #829 AAC-lattice leg PR-B, at the widest boundary the change
+        touches. The capture is measured by ONE worker and read as policy
+        by ANOTHER process: preview measures it, ``lib/evidence_action_file``
+        carries it, and the dry-run harness builds the proof leg from it.
+        Every module-scope test on either side can pass while that wire is
+        broken — which is exactly how #859 shipped — so this composes the
+        REAL writer with the REAL reader over a real tempfile and asserts
+        the leg the harness would actually build.
+
+        Only the detector's ffmpeg edge is stubbed: ``analyze_fn`` is the
+        kwarg-DI seam ``lib/aac_lattice.py`` exposes for this, and the real
+        ``measure_album_aac_lattice`` recording loop runs over the real
+        folder.
+        """
+        from harness.import_one import _preview_candidate_evidence
+        from lib.aac_lattice import (
+            AacLatticeAnalysis,
+            measure_album_aac_lattice,
+        )
+        from lib.dispatch.types import ImportOneRun
+        from lib.import_preview import measure_and_persist_candidate_evidence
+        from lib.quality import aac_lattice_proof_leg
+        from scripts import import_preview_worker
+
+        db = FakePipelineDB()
+        with tempfile.TemporaryDirectory() as root:
+            staging_dir = os.path.join(root, "Incoming")
+            source = os.path.join(staging_dir, "failed_imports", "candidate")
+            os.makedirs(source)
+            os.makedirs(os.path.join(root, "slskd"))
+            os.makedirs(os.path.join(root, "processing"), mode=0o700)
+            os.makedirs(os.path.join(root, "processing", "albums"), mode=0o700)
+            os.makedirs(os.path.join(root, "processing", "preview"), mode=0o700)
+            for index in range(6):
+                path = os.path.join(source, f"{index + 1:02d}.flac")
+                with open(path, "wb") as handle:
+                    handle.write(b"lossless-audio")
+            claimed, download_log_id = self._seed_force_job(
+                db,
+                request_id=42,
+                source_path=source,
+            )
+
+            def analyze(path: str, trim_seconds: int = 30):
+                del path, trim_seconds
+                return AlbumResult(
+                    grade="genuine",
+                    estimated_bitrate_kbps=None,
+                    suspect_pct=0.0,
+                    tracks=[],
+                )
+
+            # qaac/CoreAudio's lattice, on every track: the shape the
+            # offset-concentration rule exists to catch.
+            def analyze_track(_path: str) -> AacLatticeAnalysis:
+                return AacLatticeAnalysis(
+                    offset=960, z=28.6, proba=0.12,
+                    sample_rate=44100, channels=2,
+                )
+
+            def measure_lattice(folder: str):
+                return measure_album_aac_lattice(
+                    folder, analyze_fn=analyze_track,
+                )
+
+            harness_legs = []
+
+            def run_import(**kwargs: object) -> ImportOneRun:
+                action_file = kwargs.get("quality_evidence_action_file")
+                assert isinstance(action_file, str)
+                # The harness's own reader, on the harness's own wire.
+                candidate = _preview_candidate_evidence(action_file)
+                assert candidate is not None
+                harness_legs.append(
+                    aac_lattice_proof_leg(candidate.aac_lattice)
+                )
+                return ImportOneRun(
+                    command=("import_one",),
+                    returncode=0,
+                    stdout="",
+                    stderr="",
+                    import_result=ImportResult(
+                        decision="import",
+                        source_measurement=AudioQualityMeasurement(
+                            min_bitrate_kbps=900,
+                            avg_bitrate_kbps=900,
+                            median_bitrate_kbps=900,
+                            format="FLAC",
+                            spectral_grade="genuine",
+                            spectral_subject="source",
+                            spectral_provenance="measured",
+                        ),
+                    ),
+                )
+
+            preview_cfg = _preview_worker_config(
+                staging_dir=staging_dir,
+                processing_dir=os.path.join(root, "processing"),
+            )
+
+            def preview(db_arg, _job):
+                return measure_and_persist_candidate_evidence(
+                    db_arg,
+                    request_id=42,
+                    path=source,
+                    force=True,
+                    download_log_id=download_log_id,
+                    import_job_id=claimed.id,
+                    run_import_fn=run_import,
+                    runtime_config=preview_cfg,
+                    aac_lattice_measure_fn=measure_lattice,
+                )
+
+            with (
+                patch("lib.measurement.spectral_analyze", side_effect=analyze),
+                patch("lib.beets_db.BeetsDB", _mock_beets_db(None)),
+            ):
+                updated = import_preview_worker.process_claimed_preview_job(
+                    db,
+                    claimed,
+                    preview_fn=preview,
+                    runtime_config=preview_cfg,
+                )
+
+            assert updated is not None
+            self.assertEqual(updated.preview_status, "evidence_ready")
+            # The wire: what the harness read, and what it decided.
+            self.assertEqual(len(harness_legs), 1)
+            self.assertEqual(harness_legs[0].outcome, "denied")
+            self.assertEqual(harness_legs[0].reason, "offset_concentration")
+            self.assertEqual(harness_legs[0].scored_tracks, 6)
+            # ...and the same capture is what got persisted for the
+            # importer's own decider to read on the next pass.
+            evidence_id = db.get_download_log_candidate_evidence_id(
+                download_log_id
+            )
+            persisted = db.load_album_quality_evidence_by_id(evidence_id)
+            assert persisted is not None
+            assert persisted.aac_lattice is not None
+            self.assertEqual(persisted.aac_lattice.modal_offset, 960)
+            self.assertEqual(persisted.aac_lattice.modal_count, 6)
+            self.assertEqual(
+                aac_lattice_proof_leg(persisted.aac_lattice).outcome, "denied",
+            )
 
     def test_flac_preview_spectral_error_preserves_operator_status(self):
         """A failed lossless scan aborts without clearing the operator stop."""

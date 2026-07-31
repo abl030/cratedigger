@@ -25,6 +25,7 @@ from tests.helpers import (
     PROVISIONAL_LANE_DECISIONS,
     build_parity_candidate_evidence,
     build_parity_current_evidence,
+    make_aac_lattice_capture,
 )
 
 
@@ -2223,6 +2224,560 @@ class TestUltrasonicProofGateV3(unittest.TestCase):
         )
 
 
+#: Measured genuine per-track lattice contrasts — the 17 genuine
+#: ALBUM-MAX z values from
+#: ``docs/research/calibration-data/derrien-refinement/q3d_out.txt``. The
+#: highest real genuine album ever measured tops out at 6.91, which is why
+#: the leg's operating point sits at 12.
+_GENUINE_Z_VALUES = (4.58, 4.80, 4.97, 5.17, 5.28, 5.54, 6.91)
+
+#: Measured Apple CVBR-256 launder contrasts (``q2_out.txt``: LAU median
+#: 28.598, max 31.134 at ``mode=high``).
+_LAUNDER_Z_MEDIAN = 28.598
+
+#: qaac/CoreAudio primes 2112 samples, ``2112 mod 1024 = 64``, so its
+#: lattice lands at ``1024 - 64``. Used here only to BUILD a realistic
+#: launder world — the leg itself never compares an offset to a constant.
+_APPLE_MODAL_OFFSET = 960
+
+
+class TestAacLatticeProofGate(unittest.TestCase):
+    """Proof gate v4 — the AAC frame-lattice leg (issue #829 PR-B).
+
+    The album test set for the leg that closes the Apple/CoreAudio blind
+    spot v3 explicitly names. Every scenario runs through BOTH twins: the
+    flat-kwargs simulator and ``full_pipeline_decision_from_evidence``,
+    the function the importer actually calls.
+
+    Every pin asserts the DECIDED OUTCOME, not a proxy field. In this
+    library's default configuration (``verified_lossless_target='opus
+    128'``) the flip is terminal-versus-still-searching:
+
+        proof granted   stage3='accept', final_status='imported',
+                        keep_searching=False, target='opus 128'
+        proof withheld  stage3='requeue_lossless', final_status='wanted',
+                        keep_searching=True, target=None
+
+    A denial is NOT a rejection: the album still imports, carries no
+    proof, and stays on the search surface (Phase 5 plan §2, §1.7).
+
+    Every capture below is built by ``AacLatticeCapture.from_tracks`` from
+    per-track ``(offset, z)`` rows, using measured values from the
+    committed calibration arms — never a hand-written album statistic.
+    """
+
+    _FACTS_TARGET = "opus 128"
+
+    # -- the measured worlds ----------------------------------------------
+
+    @staticmethod
+    def _apple_launder_capture():
+        """The Apple/CoreAudio shape: five of six tracks on one offset.
+
+        ``qaac-cvbr256`` puts 97.5% of tracks on offset 960 and hits
+        ``k >= 4`` on 17/17 albums (derrien-refinement README § coverage).
+        """
+        return make_aac_lattice_capture([
+            (_APPLE_MODAL_OFFSET, 28.60),
+            (_APPLE_MODAL_OFFSET, 29.11),
+            (_APPLE_MODAL_OFFSET, 30.02),
+            (_APPLE_MODAL_OFFSET, 28.35),
+            (_APPLE_MODAL_OFFSET, 31.13),
+            (512, 27.44),
+        ])
+
+    @staticmethod
+    def _offset_concentration_only_capture():
+        """Concentration WITHOUT an extreme sweep contrast.
+
+        The ``aacffm-*`` shape, where the offsets still coincide but the
+        contrast stays inside the genuine range. Isolates the
+        parameter-free rule as the sole cause of the denial.
+        """
+        return make_aac_lattice_capture([
+            (0, 5.11), (0, 4.92), (0, 6.30), (0, 5.77),
+            (311, 4.61), (742, 5.02),
+        ])
+
+    @staticmethod
+    def _z_exceeded_only_capture():
+        """A scattered-offset album with one spiking sweep.
+
+        ``k`` never reaches 4, so only the contrast rule can deny — and it
+        must, on one track, which is why a denial is not gated on having
+        four scored tracks.
+        """
+        return make_aac_lattice_capture([
+            (12, 4.80), (455, 5.28), (901, _LAUNDER_Z_MEDIAN),
+            (77, 4.97), (630, 5.54),
+        ])
+
+    @staticmethod
+    def _genuine_capture():
+        """A genuine album: uniform offsets, contrasts inside the measured
+        genuine range (album maxima 4.58-6.91 over the 17-album arm)."""
+        return make_aac_lattice_capture(list(zip(
+            (13, 205, 418, 611, 803, 1001), _GENUINE_Z_VALUES, strict=False,
+        )))
+
+    @staticmethod
+    def _thin_capture():
+        """Three scored tracks and three detector errors — the 96 kHz /
+        undecodable shape. The concentration rule could not have fired
+        whatever the audio was, so a clean result means nothing."""
+        return make_aac_lattice_capture([
+            (13, 4.58), (205, 4.80), (418, 4.97),
+            (None, None), (None, None), (None, None),
+        ])
+
+    # -- twins -------------------------------------------------------------
+
+    def _evidence_decision(self, capture, **candidate_kwargs):
+        from lib.quality import (
+            AlbumQualityEvidenceDecisionFacts,
+            full_pipeline_decision_from_evidence,
+        )
+        candidate = build_parity_candidate_evidence(
+            is_flac=True, min_bitrate=0, is_cbr=False,
+            spectral_grade="genuine",
+            post_conversion_min_bitrate=245,
+            candidate_v0_probe_avg=245,
+            candidate_v0_probe_min=245,
+            codec_family="lossless",
+            aac_lattice=capture,
+            **candidate_kwargs,
+        )
+        return full_pipeline_decision_from_evidence(
+            candidate, None,
+            facts=AlbumQualityEvidenceDecisionFacts(
+                verified_lossless_target=self._FACTS_TARGET,
+            ),
+        )
+
+    def _simulator_decision(self, capture, *, spectral_grade="genuine"):
+        from lib.quality import SpectralCodecContext
+        return full_pipeline_decision(
+            is_flac=True, min_bitrate=0, is_cbr=False,
+            spectral_grade=spectral_grade,
+            converted_count=1,
+            post_conversion_min_bitrate=245,
+            post_conversion_is_cbr=False,
+            candidate_v0_probe_avg=245,
+            candidate_v0_probe_min=245,
+            candidate_v0_probe_kind="lossless_source_v0",
+            verified_lossless_target=self._FACTS_TARGET,
+            candidate_spectral_context=SpectralCodecContext(
+                codec_family="lossless",
+                spectral_measurement_version=2,
+                spectral_decode_path="sox_native",
+            ),
+            candidate_aac_lattice=capture,
+        )
+
+    def _assert_proof_granted(self, r, where):
+        self.assertTrue(r["verified_lossless"], where)
+        self.assertEqual(r["stage3_quality_gate"], "accept", where)
+        self.assertEqual(r["final_status"], "imported", where)
+        self.assertFalse(r["keep_searching"], where)
+        self.assertEqual(r["target_final_format"], self._FACTS_TARGET, where)
+
+    def _assert_proof_withheld(self, r, where):
+        self.assertFalse(r["verified_lossless"], where)
+        self.assertEqual(r["stage3_quality_gate"], "requeue_lossless", where)
+        self.assertEqual(r["final_status"], "wanted", where)
+        self.assertTrue(r["keep_searching"], where)
+        self.assertIsNone(r["target_final_format"], where)
+        # Withholding a proof is NOT rejecting the album. It imported.
+        self.assertTrue(r["imported"], where)
+
+    def _both_twins(self, capture):
+        return (
+            ("evidence twin", self._evidence_decision(capture)),
+            ("simulator twin", self._simulator_decision(capture)),
+        )
+
+    # -- the leg denies ----------------------------------------------------
+
+    def test_an_apple_launder_withholds_the_proof_on_both_twins(self):
+        """The flip the leg exists for. This album is spectrally
+        indistinguishable from lossless — grade ``genuine``, V0 probe at
+        245 — and every pre-v4 rule certifies it. Five of its six tracks
+        recover the same MDCT frame offset, which no genuine album in the
+        17-album control arm ever did (0/17 even at ``k >= 2``)."""
+        for where, r in self._both_twins(self._apple_launder_capture()):
+            self._assert_proof_withheld(r, where)
+        for where, r in self._both_twins(self._genuine_capture()):
+            self._assert_proof_granted(r, where)
+
+    def test_offset_concentration_alone_denies(self):
+        """No track exceeds the contrast threshold; the parameter-free
+        coincidence count is the whole cause."""
+        from lib.quality import (
+            AAC_LATTICE_PROOF_DENY_MAX_Z,
+            aac_lattice_proof_leg,
+        )
+        capture = self._offset_concentration_only_capture()
+        leg = aac_lattice_proof_leg(capture)
+        self.assertEqual(leg.reason, "offset_concentration")
+        assert capture.max_z is not None
+        self.assertLessEqual(capture.max_z, AAC_LATTICE_PROOF_DENY_MAX_Z)
+        for where, r in self._both_twins(capture):
+            self._assert_proof_withheld(r, where)
+
+    def test_a_single_spiking_track_denies_without_four_scored_tracks(self):
+        """A denial reads whatever evidence exists. ``k`` never reaches 4
+        here, so refusing to act on one z=28.6 track — measured 0/197 on
+        the genuine arm and 0/1136 on the wild arm above 12 — would fail
+        OPEN, the wrong direction for a proof gate."""
+        from lib.quality import aac_lattice_proof_leg
+        capture = self._z_exceeded_only_capture()
+        leg = aac_lattice_proof_leg(capture)
+        self.assertEqual(leg.reason, "z_exceeded")
+        assert leg.modal_count is not None
+        self.assertLess(leg.modal_count, 4)
+        for where, r in self._both_twins(capture):
+            self._assert_proof_withheld(r, where)
+
+    def test_the_thresholds_are_the_boundary(self):
+        """Both sides of each operating point, on the production decider.
+        The constants are READ, not restated — a pin spelling 4 or 12 would
+        pass a module that had drifted to any other value."""
+        from lib.quality import (
+            AAC_LATTICE_PROOF_DENY_MAX_Z,
+            AAC_LATTICE_PROOF_DENY_MODAL_COUNT,
+        )
+        k = AAC_LATTICE_PROOF_DENY_MODAL_COUNT
+        shared = [(_APPLE_MODAL_OFFSET, 5.0)] * (k - 1)
+        distinct = [(100 + i, 5.0) for i in range(3)]
+        self._assert_proof_granted(
+            self._evidence_decision(
+                make_aac_lattice_capture([*shared, *distinct]),
+            ),
+            "one track short of the concentration count",
+        )
+        self._assert_proof_withheld(
+            self._evidence_decision(
+                make_aac_lattice_capture([
+                    *shared, (_APPLE_MODAL_OFFSET, 5.0), *distinct[:2],
+                ]),
+            ),
+            "exactly at the concentration count — inclusive",
+        )
+        z = AAC_LATTICE_PROOF_DENY_MAX_Z
+        self._assert_proof_granted(
+            self._evidence_decision(make_aac_lattice_capture([
+                (13, z), (205, 4.8), (418, 5.0), (611, 5.2),
+            ])),
+            "exactly at the contrast threshold — exclusive",
+        )
+        self._assert_proof_withheld(
+            self._evidence_decision(make_aac_lattice_capture([
+                (13, z + 0.01), (205, 4.8), (418, 5.0), (611, 5.2),
+            ])),
+            "one hundredth above the contrast threshold",
+        )
+
+    def test_the_v0_override_cannot_outrank_a_denial(self):
+        """The Bill Hicks shape (``suspect`` grade rescued by a
+        lossless_source_v0 probe at avg 241 / min 219) does NOT rescue an
+        album whose tracks share a frame lattice. The V0 probe measures
+        re-encode difficulty; it cannot see an MDCT grid at all."""
+        from lib.quality import (
+            AlbumQualityEvidenceDecisionFacts,
+            full_pipeline_decision_from_evidence,
+        )
+
+        def decide(capture):
+            candidate = build_parity_candidate_evidence(
+                is_flac=True, min_bitrate=0, is_cbr=False,
+                spectral_grade="suspect",
+                post_conversion_min_bitrate=219,
+                candidate_v0_probe_avg=241,
+                candidate_v0_probe_min=219,
+                codec_family="lossless",
+                aac_lattice=capture,
+            )
+            return full_pipeline_decision_from_evidence(
+                candidate, None,
+                facts=AlbumQualityEvidenceDecisionFacts(
+                    verified_lossless_target=self._FACTS_TARGET,
+                ),
+            )
+
+        self.assertTrue(
+            decide(self._genuine_capture())["verified_lossless"],
+            "the V0-avg trust override must still rescue HF-poor lossless "
+            "when the lattice leg has no objection",
+        )
+        self.assertFalse(
+            decide(self._apple_launder_capture())["verified_lossless"],
+            "a denied lattice leg is a hard veto ahead of the V0 override",
+        )
+
+    def test_neither_leg_can_overrule_the_other(self):
+        """Two independent conditions on one proof. A clean lattice does
+        not buy back an ultrasonic denial, and a clean ultrasonic does not
+        buy back a lattice denial."""
+        launder_deficit = TestUltrasonicProofGateV3.LAUNDER_DEFICIT_DB
+        genuine_deficit = TestUltrasonicProofGateV3.GENUINE_DEFICIT_DB
+        self._assert_proof_withheld(
+            self._evidence_decision(
+                self._genuine_capture(),
+                ultrasonic_deficit_db=launder_deficit,
+            ),
+            "clean lattice, ultrasonic denial",
+        )
+        self._assert_proof_withheld(
+            self._evidence_decision(
+                self._apple_launder_capture(),
+                ultrasonic_deficit_db=genuine_deficit,
+            ),
+            "clean ultrasonic, lattice denial",
+        )
+
+    # -- a denial withholds the proof and NOTHING else ---------------------
+
+    #: The installed side of the worlds below, from PR3's V5 pins: a
+    #: provisional-cohort album whose ``lossless_source_v0`` probe (avg
+    #: 240) is its only comparable anchor. A candidate probe at avg 241
+    #: does not clear it by the rank tolerance, so the provisional lane
+    #: answers ``suspect_lossless_downgrade`` — a confident reject that
+    #: also denylists the offering peer.
+    _HAVE_PROVISIONAL_V0_AVG = 240
+
+    def _denial_pair_evidence(self, capture, *, have_min, have_format,
+                              have_is_cbr):
+        from lib.quality import (
+            EVIDENCE_SUBJECT_SOURCE,
+            AlbumQualityEvidenceDecisionFacts,
+            AlbumQualityV0Metric,
+            full_pipeline_decision_from_evidence,
+        )
+        candidate = build_parity_candidate_evidence(
+            is_flac=True, min_bitrate=0, is_cbr=False,
+            spectral_grade="suspect",
+            post_conversion_min_bitrate=219,
+            candidate_v0_probe_avg=241,
+            candidate_v0_probe_min=219,
+            codec_family="lossless",
+            aac_lattice=capture,
+        )
+        current = build_parity_current_evidence(
+            min_bitrate=have_min, avg_bitrate=have_min, format=have_format,
+            is_cbr=have_is_cbr,
+            v0_metric=AlbumQualityV0Metric(
+                subject=EVIDENCE_SUBJECT_SOURCE,
+                min_bitrate_kbps=219,
+                avg_bitrate_kbps=self._HAVE_PROVISIONAL_V0_AVG,
+            ),
+        )
+        return full_pipeline_decision_from_evidence(
+            candidate, current,
+            facts=AlbumQualityEvidenceDecisionFacts(
+                verified_lossless_target=self._FACTS_TARGET,
+            ),
+        )
+
+    def _denial_pair_simulator(self, capture, *, have_min, have_format,
+                               have_is_cbr):
+        """The convert branch: the lossless source is ground to V0."""
+        from lib.quality import SpectralCodecContext
+        return full_pipeline_decision(
+            is_flac=True, min_bitrate=0, is_cbr=False,
+            spectral_grade="suspect",
+            converted_count=1,
+            post_conversion_min_bitrate=219,
+            post_conversion_is_cbr=False,
+            candidate_v0_probe_avg=241,
+            candidate_v0_probe_min=219,
+            candidate_v0_probe_kind="lossless_source_v0",
+            existing_min_bitrate=have_min,
+            existing_avg_bitrate=have_min,
+            existing_format=have_format.lower(),
+            existing_is_cbr=have_is_cbr,
+            existing_v0_probe_avg=self._HAVE_PROVISIONAL_V0_AVG,
+            existing_v0_probe_kind="lossless_source_v0",
+            verified_lossless_target=self._FACTS_TARGET,
+            candidate_spectral_context=SpectralCodecContext(
+                codec_family="lossless",
+                spectral_measurement_version=2,
+                spectral_decode_path="sox_native",
+            ),
+            candidate_aac_lattice=capture,
+        )
+
+    def _denial_pair_flac_keep(self, capture, *, have_min, have_format,
+                               have_is_cbr):
+        """The kept-on-disk branch of the same world."""
+        from lib.quality import SpectralCodecContext
+        return full_pipeline_decision(
+            is_flac=True, min_bitrate=900, is_cbr=False,
+            spectral_grade="suspect",
+            converted_count=0,
+            target_format="flac",
+            candidate_v0_probe_avg=241,
+            candidate_v0_probe_min=219,
+            candidate_v0_probe_kind="lossless_source_v0",
+            existing_min_bitrate=have_min,
+            existing_avg_bitrate=have_min,
+            existing_format=have_format.lower(),
+            existing_is_cbr=have_is_cbr,
+            existing_v0_probe_avg=self._HAVE_PROVISIONAL_V0_AVG,
+            existing_v0_probe_kind="lossless_source_v0",
+            candidate_spectral_context=SpectralCodecContext(
+                codec_family="lossless",
+                spectral_measurement_version=2,
+                spectral_decode_path="sox_native",
+            ),
+            candidate_aac_lattice=capture,
+        )
+
+    _DENIAL_TWINS = (
+        ("evidence twin", "_denial_pair_evidence"),
+        ("simulator twin, convert branch", "_denial_pair_simulator"),
+        ("simulator twin, flac-keep branch", "_denial_pair_flac_keep"),
+    )
+
+    def test_a_denial_never_costs_the_album_its_import(self):
+        """B-I1, against a HAVE-POPULATED world. A lattice denial withholds
+        the PROOF; it must not take the ALBUM.
+
+        The world is the one the V0-avg trust override exists to rescue —
+        HF-poor lossless graded ``suspect`` with a ``lossless_source_v0``
+        probe at avg 241 / min 219 — against a provisional-cohort MP3 128
+        whose own comparable probe sits at avg 240. A denial that reached
+        the lane choice would drop the album into
+        ``suspect_lossless_downgrade``: a confident reject plus a peer
+        denylist, on exactly the cohort the leg promised never to touch.
+        This is the world PR3 shipped a blocking defect on; PR-B pins it
+        for the lattice leg from birth."""
+        for label, method in self._DENIAL_TWINS:
+            with self.subTest(twin=label):
+                def decide(capture, method=method):
+                    return getattr(self, method)(
+                        capture, have_min=128, have_format="MP3",
+                        have_is_cbr=True,
+                    )
+                rescued = decide(self._genuine_capture())
+                denied = decide(self._apple_launder_capture())
+                self.assertTrue(
+                    rescued["imported"],
+                    f"{label}: the V0-rescued world imports",
+                )
+                self.assertTrue(
+                    rescued["verified_lossless"],
+                    f"{label}: the V0-avg trust override still rescues an "
+                    "HF-poor lossless the leg has no objection to",
+                )
+                self.assertFalse(rescued["keep_searching"], label)
+                self.assertTrue(
+                    denied["imported"],
+                    f"{label}: withholding a proof is NOT taking the album",
+                )
+                self.assertFalse(
+                    denied["verified_lossless"],
+                    f"{label}: the denial's first effect — no proof",
+                )
+                self.assertTrue(
+                    denied["keep_searching"],
+                    f"{label}: and its second — the album stays on the "
+                    "search surface",
+                )
+                # The import lane itself does not move: Stage 2 decides
+                # ``import`` either way, and the whole difference lands in
+                # Stage 3, which is the ordinary "this V0 carries no proof,
+                # keep looking" answer any unproved album gets.
+                self.assertEqual(
+                    denied["stage2_import"], rescued["stage2_import"],
+                    f"{label}: a denial moved the Stage-2 import lane",
+                )
+                self.assertEqual(
+                    denied["stage3_quality_gate"], "requeue_upgrade", label,
+                )
+                # ...and every denylist the denial causes is that ordinary
+                # post-import policy, not a new class the leg introduced:
+                # nothing Stage 2 decided denylists anything.
+                from lib.quality import decision_denylists
+                self.assertFalse(
+                    decision_denylists(denied["stage2_import"]),
+                    f"{label}: a denial minted a Stage-2 denylist",
+                )
+                self.assertEqual(
+                    denied["denylisted"],
+                    decision_denylists(denied["stage3_quality_gate"]),
+                    f"{label}: the denylist is not the pre-existing "
+                    "post-import policy's",
+                )
+
+    def test_a_denial_never_reroutes_the_album_into_the_provisional_lane(self):
+        """The same world against a HAVE the unproved candidate cannot
+        beat. The denial legitimately costs the import here — an album
+        with no proof is compared on what it measures — but it must lose
+        in the MEASURED lane, never by being re-routed into the
+        provisional lane's confident reject."""
+        for label, method in self._DENIAL_TWINS:
+            with self.subTest(twin=label):
+                denied = getattr(self, method)(
+                    self._apple_launder_capture(), have_min=245,
+                    have_format="Opus", have_is_cbr=False,
+                )
+                self.assertNotIn(
+                    denied["stage2_import"],
+                    PROVISIONAL_LANE_DECISIONS,
+                    f"{label}: a denial re-routed the album into the "
+                    "provisional lossless lane",
+                )
+
+    # -- the leg withholds -------------------------------------------------
+
+    def test_an_unmeasured_album_is_untouched(self):
+        """B-I2. NULL across all five columns means never measured, which
+        is where essentially the whole library sits: the capture is gated
+        to the promotion-plausible cohort and every pre-PR-A row has none.
+        Withheld asserts nothing, and the pre-v4 outcome stands."""
+        for where, r in self._both_twins(None):
+            self._assert_proof_granted(r, f"{where}, no capture")
+
+    def test_too_few_scored_tracks_withholds_rather_than_clearing(self):
+        """Measured, and nothing usable found — three scored tracks and
+        three detector errors. The concentration rule could not have fired
+        whatever the audio was, so "it did not fire" is not a finding and
+        must not be minted as one."""
+        from lib.quality import aac_lattice_proof_leg
+        capture = self._thin_capture()
+        leg = aac_lattice_proof_leg(capture)
+        self.assertEqual(leg.outcome, "withheld")
+        self.assertEqual(leg.reason, "insufficient_scored_tracks")
+        self.assertEqual(leg.scored_tracks, 3)
+        for where, r in self._both_twins(capture):
+            self._assert_proof_granted(r, f"{where}, thin capture")
+
+    def test_a_measured_album_with_nothing_scored_withholds(self):
+        """Every track errored — 96 kHz input has no scalefactor-band
+        table at all. That is measured evidence of NOTHING, and it must
+        never read as clean."""
+        from lib.quality import aac_lattice_proof_leg
+        capture = make_aac_lattice_capture([(None, None)] * 6)
+        self.assertEqual(capture.scored_tracks, 0)
+        leg = aac_lattice_proof_leg(capture)
+        self.assertEqual(leg.outcome, "withheld")
+        for where, r in self._both_twins(capture):
+            self._assert_proof_granted(r, f"{where}, all tracks errored")
+
+    def test_the_leg_never_reads_an_absolute_offset(self):
+        """Absolute modal offsets are decode-path relative: a container
+        whose decoder applies encoder-delay priming shifts the sample
+        origin, so 960 and 0 are not portable facts. Concentration is —
+        the SAME six tracks, moved off both constants, still deny."""
+        shifted = make_aac_lattice_capture([
+            (137, 5.11), (137, 4.92), (137, 6.30), (137, 5.77),
+            (311, 4.61), (742, 5.02),
+        ])
+        self.assertNotIn(shifted.modal_offset, (0, _APPLE_MODAL_OFFSET))
+        for where, r in self._both_twins(shifted):
+            self._assert_proof_withheld(r, f"{where}, shifted lattice")
+
+
 class TestVerifiedLosslessClassifierGeneration(unittest.TestCase):
     """``verified_lossless_classifier`` names WHICH MODEL proved a row.
 
@@ -2234,7 +2789,7 @@ class TestVerifiedLosslessClassifierGeneration(unittest.TestCase):
     """
 
     @staticmethod
-    def _mint(leg):
+    def _mint(leg, lattice_leg=None):
         from lib.quality import mint_verified_lossless_proof
         return mint_verified_lossless_proof(
             True,
@@ -2242,6 +2797,7 @@ class TestVerifiedLosslessClassifierGeneration(unittest.TestCase):
             detected_source_format="flac",
             spectral_grade="genuine",
             ultrasonic_leg=leg,
+            aac_lattice_leg=lattice_leg,
         )
 
     def test_an_adjudicated_pass_mints_v3(self):
@@ -2292,6 +2848,69 @@ class TestVerifiedLosslessClassifierGeneration(unittest.TestCase):
         proof = self._mint(None)
         assert proof is not None
         self.assertEqual(proof.classifier, VERIFIED_LOSSLESS_CLASSIFIER)
+
+    # -- v4 composition (issue #829 AAC-lattice leg PR-B, B-I3) ------------
+
+    def test_the_classifier_composes_over_both_legs(self):
+        """Every cell of the composition table, on the real minter.
+
+        The classifier names WHICH MODELS ran. v4 is claimed only when
+        BOTH adjudicated and passed; a lattice pass with no ultrasonic
+        adjudication is the BASE name, not v4 and not a v4-minus — the
+        names are a ladder of what was tested, and skipping a rung must
+        not buy the top one. A DENIED leg never reaches the minter at all,
+        because ``determine_verified_lossless`` already vetoed the proof;
+        the denied rows below prove the minter does not mistake a denial
+        for an adjudication if it ever did.
+        """
+        from lib.quality import (
+            VERIFIED_LOSSLESS_CLASSIFIER,
+            VERIFIED_LOSSLESS_CLASSIFIER_V3,
+            VERIFIED_LOSSLESS_CLASSIFIER_V4,
+            aac_lattice_proof_leg,
+            ultrasonic_proof_leg,
+        )
+
+        def ultrasonic(outcome):
+            if outcome == "absent":
+                return None
+            leg = ultrasonic_proof_leg(
+                deficit_db={"passed": 45.0, "denied": 65.16,
+                            "withheld": None}[outcome],
+                spectral_measurement_version=(
+                    None if outcome == "withheld" else 2
+                ),
+                decode_path="sox_native", preserved_source_spectral=False,
+            )
+            self.assertEqual(leg.outcome, outcome)
+            return leg
+
+        def lattice(outcome):
+            if outcome == "absent":
+                return None
+            captures = {
+                "passed": TestAacLatticeProofGate._genuine_capture(),
+                "denied": TestAacLatticeProofGate._apple_launder_capture(),
+                "withheld": TestAacLatticeProofGate._thin_capture(),
+            }
+            leg = aac_lattice_proof_leg(captures[outcome])
+            self.assertEqual(leg.outcome, outcome)
+            return leg
+
+        states = ("passed", "withheld", "denied", "absent")
+        for ultra in states:
+            for lat in states:
+                expected = VERIFIED_LOSSLESS_CLASSIFIER
+                if ultra == "passed":
+                    expected = (
+                        VERIFIED_LOSSLESS_CLASSIFIER_V4
+                        if lat == "passed"
+                        else VERIFIED_LOSSLESS_CLASSIFIER_V3
+                    )
+                with self.subTest(ultrasonic=ultra, lattice=lat):
+                    proof = self._mint(ultrasonic(ultra), lattice(lat))
+                    assert proof is not None
+                    self.assertEqual(proof.classifier, expected)
 
 
 class TestPreimportFactRejects(unittest.TestCase):
