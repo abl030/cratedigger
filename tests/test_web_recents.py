@@ -26,6 +26,7 @@ from lib.quality import (
     SpectralDetail,
     TargetQualityContract,
     V0ProbeEvidence,
+    mint_verified_lossless_proof,
 )
 from web.classify import (
     ClassifiedEntry,
@@ -68,6 +69,24 @@ def _entry(**overrides: object) -> LogEntry:
     return replace(_DEFAULTS, **overrides)
 
 
+def _minted_proof_classifier() -> str:
+    """The classifier literal the real minting policy writes (Rule C).
+
+    ``mint_verified_lossless_proof`` is the single production writer of
+    ``album_quality_evidence.verified_lossless_classifier``, so taking the
+    string from it is what keeps every "verified lossless" pin below
+    describing a world the pipeline can actually reach.
+    """
+    proof = mint_verified_lossless_proof(
+        True,
+        was_converted_from="flac",
+        detected_source_format="flac",
+        spectral_grade="genuine",
+    )
+    assert proof is not None
+    return proof.classifier
+
+
 # ============================================================================
 # LogEntry
 # ============================================================================
@@ -95,6 +114,31 @@ class TestLogEntry(unittest.TestCase):
         self.assertIsNone(entry.soulseek_username)
         self.assertEqual(entry.was_converted, False)
         self.assertEqual(entry.album_title, "")
+
+    def test_from_row_maps_the_candidate_proof_alias(self):
+        """The minted proof reaches LogEntry under its SELECT alias.
+
+        ``verified_lossless_classifier`` is not a ``download_log`` column;
+        the candidate-evidence join hands it over as
+        ``_evidence_verified_lossless_classifier``, and dropping it as an
+        unknown key is what forced the render path to guess.
+        """
+        classifier = _minted_proof_classifier()
+        entry = LogEntry.from_row({
+            "id": 1,
+            "outcome": "success",
+            "_evidence_verified_lossless_classifier": classifier,
+        })
+        self.assertEqual(entry.verified_lossless_classifier, classifier)
+
+    def test_from_row_leaves_the_proof_unset_without_candidate_evidence(self):
+        """A row with no candidate evidence carries no proof, not a guess."""
+        entry = LogEntry.from_row({
+            "id": 1,
+            "outcome": "success",
+            "_evidence_verified_lossless_classifier": None,
+        })
+        self.assertIsNone(entry.verified_lossless_classifier)
 
     def test_from_row_datetime_serialized(self):
         """Datetime objects get serialized to ISO strings."""
@@ -1115,8 +1159,23 @@ class TestClassifyVerdict(unittest.TestCase):
         result = classify_log_entry(_entry(
             outcome="success", was_converted=True, original_filetype="flac",
             actual_filetype="mp3", actual_min_bitrate=243,
-            existing_min_bitrate=192, spectral_grade="genuine"))
+            existing_min_bitrate=192, spectral_grade="genuine",
+            verified_lossless_classifier=_minted_proof_classifier()))
         self.assertIn("verified lossless", result.verdict.lower())
+
+    def test_upgrade_verdict_never_re_derives_the_proof(self):
+        """Live dl 39094 req 2147: converted from FLAC, graded genuine, and
+        the decider minted NO proof. The identical world without a
+        classifier must not claim one."""
+        result = classify_log_entry(_entry(
+            outcome="success", was_converted=True, original_filetype="flac",
+            actual_filetype="mp3", actual_min_bitrate=243,
+            existing_min_bitrate=192, spectral_grade="genuine",
+            verified_lossless_classifier=None))
+        self.assertNotIn("verified lossless", result.verdict.lower())
+        self.assertNotIn("verified lossless", result.summary.lower())
+        # The conversion is still reported — only the proof claim is gone.
+        self.assertIn("from FLAC", result.verdict)
 
     def test_timeout_verdict(self):
         result = classify_log_entry(_entry(
@@ -1952,6 +2011,60 @@ class TestPerRowBitrateIsPointInTime(unittest.TestCase):
         self.assertNotIn("320", result.verdict,
                          f"verdict leaked current-state 320 tier: {result.verdict!r}")
 
+    def test_search_filetype_override_names_the_replaced_codec(self):
+        """Live dl 39120 req 2066: an OPUS have, replaced under a
+        lossless-only search scope, and described as an 'unverified CBR'.
+        ``search_filetype_override`` narrows the SEARCH; it says nothing
+        about the codec on disk, so the only nameable side-fact is the
+        decider's own persisted ``existing_format``."""
+        from lib.quality import QualityRankConfig, compare_quality
+
+        # The real decider over dl 39120's measurements, which reproduces
+        # that row's persisted basis exactly — the trigger comes from the
+        # producer, not from a transcribed literal.
+        basis = msgspec.to_builtins(compare_quality(
+            AudioQualityMeasurement(avg_bitrate_kbps=128, format="opus 128"),
+            AudioQualityMeasurement(
+                min_bitrate_kbps=93, avg_bitrate_kbps=108, format="opus"),
+            QualityRankConfig.defaults(),
+        ))
+        self.assertEqual(basis["existing_format"], "opus")
+        self.assertEqual(basis["verdict"], "better")
+        entry = _entry(
+            outcome="success",
+            search_filetype_override="lossless",
+            was_converted=True,
+            original_filetype="flac",
+            spectral_grade="genuine",
+            actual_filetype="opus",
+            actual_min_bitrate=93,
+            existing_min_bitrate=93,
+            bitrate=93000,
+            filetype="opus",
+            verified_lossless_classifier=None,
+            import_result={"version": 2, "decision": "import",
+                           "comparison_basis": basis},
+        )
+        result = classify_log_entry(entry)
+        self.assertEqual(result.badge, "Upgraded")
+        self.assertEqual(
+            result.verdict, "Replaced OPUS with OPUS 93k, from FLAC")
+
+    def test_search_filetype_override_without_a_basis_names_no_codec(self):
+        """No persisted basis, no invented fact about the replaced side."""
+        entry = _entry(
+            outcome="success",
+            search_filetype_override="lossless",
+            existing_min_bitrate=192,
+            actual_filetype="mp3",
+            actual_min_bitrate=243,
+            verified_lossless_classifier=None,
+            import_result=None,
+        )
+        result = classify_log_entry(entry)
+        self.assertEqual(
+            result.verdict, "Replaced the existing copy with MP3 V0")
+
     # ---- _build_downloaded_label (line 432-434) ----
 
     def test_downloaded_label_uses_point_in_time_bitrate(self):
@@ -2401,6 +2514,9 @@ class TestClassifyComparisonBasis(unittest.TestCase):
         )
 
     def test_flac_conversion_suffixes_survive_basis_path(self):
+        """Without a minted proof the basis path keeps the conversion suffix
+        and drops the proof claim: 'converted from FLAC and graded genuine'
+        is not what the decider tests for."""
         basis = self._basis_dict(self._SAY_HELLO_NEW, self._SAY_HELLO_EXISTING)
         entry = _entry(
             outcome="success",
@@ -2409,6 +2525,28 @@ class TestClassifyComparisonBasis(unittest.TestCase):
             spectral_grade="genuine",
             existing_min_bitrate=194,
             actual_min_bitrate=194,
+            verified_lossless_classifier=None,
+            import_result={"version": 2, "decision": "import",
+                           "comparison_basis": basis},
+        )
+        c = classify_log_entry(entry)
+        self.assertEqual(
+            c.verdict,
+            "Upgrade: MP3 avg 196k (good) → avg 288k (transparent), "
+            "from FLAC")
+
+    def test_flac_conversion_with_minted_proof_keeps_both_suffixes(self):
+        """The must-still-work half: a row the decider DID prove still says
+        so, through the same basis path."""
+        basis = self._basis_dict(self._SAY_HELLO_NEW, self._SAY_HELLO_EXISTING)
+        entry = _entry(
+            outcome="success",
+            was_converted=True,
+            original_filetype="flac",
+            spectral_grade="genuine",
+            existing_min_bitrate=194,
+            actual_min_bitrate=194,
+            verified_lossless_classifier=_minted_proof_classifier(),
             import_result={"version": 2, "decision": "import",
                            "comparison_basis": basis},
         )
