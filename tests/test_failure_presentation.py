@@ -42,6 +42,7 @@ from lib.failure_presentation import (
     bounded_text,
     decode_transfer_detail,
     materialize_reason_copy,
+    non_automation_import_failure_message,
     peer_failure_family,
     present_failure,
     transfer_detail_unreadable,
@@ -965,6 +966,26 @@ class TestMaterializeReasonCopy(unittest.TestCase):
 
 class TestFailedRowCopy(unittest.TestCase):
 
+    def test_producer_backed_force_and_youtube_attempt_failures_keep_identity(self):
+        for job_type, label in (
+            ("force_import", "Force import attempt failed:"),
+            ("youtube_import", "YouTube import attempt failed:"),
+        ):
+            with self.subTest(job_type=job_type):
+                producer_message = non_automation_import_failure_message(
+                    job_type,
+                    "harness acknowledgement disappeared",
+                )
+                presentation = present_failure(_evidence(
+                    outcome="failed",
+                    error_message=producer_message,
+                ))
+                self.assertEqual(
+                    presentation.verdict,
+                    f"{label} harness acknowledgement disappeared",
+                )
+                self.assertNotIn("Import error", presentation.verdict or "")
+
     def test_grace_expiry_row_is_not_labelled_an_import_error(self):
         presentation = present_failure(_evidence(
             outcome="failed",
@@ -1244,6 +1265,22 @@ _OWN_MESSAGE_TRIGGERS: tuple[_Trigger, ...] = (
         evidence="",
         probe="Abandoned interrupted auto-import; queued for redownload",
         expect="Interrupted import abandoned and requeued",
+        outcome="failed",
+    ),
+    _Trigger(
+        trigger="force import attempt failed:",
+        produced_by="lib/terminal_outcomes.py",
+        evidence="non_automation_import_failure_message(",
+        probe="Force import attempt failed: producer crash",
+        expect="Force import attempt failed: producer crash",
+        outcome="failed",
+    ),
+    _Trigger(
+        trigger="youtube import attempt failed:",
+        produced_by="lib/terminal_outcomes.py",
+        evidence="non_automation_import_failure_message(",
+        probe="YouTube import attempt failed: producer crash",
+        expect="YouTube import attempt failed: producer crash",
         outcome="failed",
     ),
 )

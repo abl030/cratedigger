@@ -2031,6 +2031,8 @@ class FakePipelineDB:
         recovery_message: str,
         limit: int = 50,
     ) -> list[ImportJob]:
+        from lib.terminal_outcomes import non_automation_failure_terminal_outcome
+
         running = [
             row for row in self._import_jobs
             if row.get("status") == "running"
@@ -2041,18 +2043,31 @@ class FakePipelineDB:
         for row in running[:limit]:
             now = _utcnow()
             launched = row.get("beets_launch_authorized_at") is not None
-            row["status"] = "failed" if launched else "queued"
-            row["message"] = recovery_message if launched else requeue_message
-            row["error"] = (
-                "Automatic replay refused because Beets may have mutated "
-                "the library"
-                if launched else None
-            )
+            if launched:
+                job = ImportJob.from_row(copy.deepcopy(row))
+                terminal = self.persist_import_terminal_outcome(
+                    non_automation_failure_terminal_outcome(
+                        job,
+                        error=(
+                            "Automatic replay refused because Beets may have "
+                            "mutated the library"
+                        ),
+                        message=recovery_message,
+                        result={
+                            "success": False,
+                            "recovery": "launch_authorized_no_replay",
+                        },
+                    )
+                )
+                updated_jobs.append(terminal.job)
+                continue
+            row["status"] = "queued"
+            row["message"] = requeue_message
+            row["error"] = None
             row["worker_id"] = None
-            if not launched:
-                row["started_at"] = None
+            row["started_at"] = None
             row["heartbeat_at"] = None
-            row["completed_at"] = now if launched else None
+            row["completed_at"] = None
             row["updated_at"] = now
             updated_jobs.append(ImportJob.from_row(copy.deepcopy(row)))
         return updated_jobs

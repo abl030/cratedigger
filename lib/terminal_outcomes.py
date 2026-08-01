@@ -8,8 +8,14 @@ from typing import TYPE_CHECKING, Literal
 
 import msgspec
 
+from lib.failure_presentation import non_automation_import_failure_message
 from lib.import_execution import ExecutionLeaseSnapshot
-from lib.import_queue import ImportJob
+from lib.import_queue import (
+    IMPORT_JOB_AUTOMATION,
+    ForceImportPayload,
+    ImportJob,
+    YoutubeImportPayload,
+)
 from lib.transitions import RequestTransition, TransitionApplied
 from lib.validation_envelope import (
     VALIDATION_PROJECTION_UNSET,
@@ -327,6 +333,50 @@ class PendingImportTerminalOutcome:
     ) -> PendingImportTerminalOutcome:
         """Authorize the successful-import stop-supersession exception."""
         return replace(self, successful_terminal_acceptance=True)
+
+
+def non_automation_failure_terminal_outcome(
+    job: ImportJob,
+    *,
+    error: str,
+    message: str,
+    result: dict[str, object],
+) -> ImportTerminalOutcome:
+    """Build the sole terminal-and-visible failure command for force/YouTube.
+
+    Non-automation attempts do not own a request lifecycle transition.  Their
+    terminal record is instead one atomic pair: the exact job becomes failed
+    and its origin download row gains a linked, operator-readable failure.
+    """
+    if job.job_type == IMPORT_JOB_AUTOMATION:
+        raise ValueError("automation failures require owner-terminal authority")
+    if job.request_id is None:
+        raise ValueError("non-automation import job requires a request")
+    payload = job.payload
+    if not isinstance(payload, (ForceImportPayload, YoutubeImportPayload)):
+        raise TypeError("non-automation import job has no source download log")
+    diagnostic = message.strip() or error.strip()
+    if not diagnostic:
+        raise ValueError("non-automation failure requires a diagnostic")
+    return ImportTerminalOutcome(
+        request_id=job.request_id,
+        import_job_id=job.id,
+        initial_transition=None,
+        audit=TerminalDownloadAudit(
+            outcome="failed",
+            error_message=non_automation_import_failure_message(
+                job.job_type,
+                diagnostic,
+            ),
+            source_download_log_id=payload.download_log_id,
+        ),
+        job=ImportJobTerminal(
+            status="failed",
+            error=error,
+            message=message,
+            result=result,
+        ),
+    )
 
 @dataclass(frozen=True)
 class PreviewTerminalOutcome:

@@ -117,7 +117,8 @@ def assert_operation_fence(
     ``download_log`` audit row carries the world-failure label so the
     operator reads it in Recents. Force/YouTube own no request lifecycle, so
     an ambiguous operation of theirs leaves the request exactly as the
-    caller left it — the terminal job row alone is that outcome's surface.
+    caller left it while one linked failed audit row surfaces the attempt in
+    Recents.
     """
     if len(beets_invocations) > 1:
         raise AssertionError("one operation identity reached Beets more than once")
@@ -170,6 +171,16 @@ def assert_operation_fence(
             f"{row['status']!r}; force/YouTube own no request lifecycle to "
             "self-heal"
         )
+    else:
+        linked = [
+            entry for entry in db.download_logs
+            if entry.outcome == "failed"
+            and entry.source_download_log_id is not None
+        ]
+        if len(linked) != 1:
+            raise AssertionError(
+                "non-automation failure recorded no linked Recents audit row"
+            )
 
 
 def assert_startup_force_action_lifecycle(
@@ -224,16 +235,28 @@ def _exercise_world(
         mb_release_id=release_id,
         status="wanted",
     ))
+    source_download_log_id = (
+        None if world.job_type == IMPORT_JOB_AUTOMATION else db.log_download(
+            request_id,
+            outcome="rejected",
+            error_message="generated non-automation source",
+        )
+    )
     if world.job_type == IMPORT_JOB_AUTOMATION:
         payload: dict[str, object] = {}
     elif world.job_type == IMPORT_JOB_FORCE:
-        payload = {"download_log_id": request_id, "failed_path": source_path}
+        assert source_download_log_id is not None
+        payload = {
+            "download_log_id": source_download_log_id,
+            "failed_path": source_path,
+        }
     else:
+        assert source_download_log_id is not None
         payload = youtube_import_payload(
             staged_path=source_path,
             request_id=request_id,
             browse_id="MPREb_fence",
-            download_log_id=request_id,
+            download_log_id=source_download_log_id,
         )
     if world.job_type == IMPORT_JOB_AUTOMATION:
         assert active_state is not None
@@ -737,6 +760,17 @@ class TestImportOperationFenceChecker(unittest.TestCase):
         """Known-bad: a force/YouTube job that mutated the caller's request
         lifecycle — invariant 11 reserves that self-heal for automation,
         which is the only job type that owns ``processing``."""
+        db = self._db(status="unsearchable")
+        source = db.log_download(
+            _OPERATION_FENCE_REQUEST_ID,
+            outcome="rejected",
+        )
+        db.log_download(
+            _OPERATION_FENCE_REQUEST_ID,
+            outcome="failed",
+            source_download_log_id=source,
+            error_message="Force import attempt failed: known-bad",
+        )
         with self.assertRaisesRegex(AssertionError, "own no request lifecycle"):
             assert_operation_fence(
                 job_type=IMPORT_JOB_FORCE,
@@ -744,7 +778,19 @@ class TestImportOperationFenceChecker(unittest.TestCase):
                 final_status="failed",
                 beets_invocations=[703],
                 replay_claimed=False,
-                db=self._db(status="unsearchable"),
+                db=db,
+            )
+
+    def test_checker_rejects_silent_non_automation_terminal(self) -> None:
+        """Known-bad: a terminal force job with no Recents-visible audit."""
+        with self.assertRaisesRegex(AssertionError, "linked Recents audit"):
+            assert_operation_fence(
+                job_type=IMPORT_JOB_FORCE,
+                authorized=True,
+                final_status="failed",
+                beets_invocations=[703],
+                replay_claimed=False,
+                db=self._db(),
             )
 
     def test_checker_rejects_leaked_terminal_force_action_copy(self) -> None:

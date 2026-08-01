@@ -119,6 +119,12 @@ show ``source_open_failed_ESTALE`` under a label that says "beets detail".
 The token belongs there (forensics is where internals go, and the verdict
 carries the sentence), but it should say what it is."""
 
+NON_AUTOMATION_IMPORT_FAILURE_PREFIXES: Final[frozenset[str]] = frozenset({
+    "Force import attempt failed:",
+    "YouTube import attempt failed:",
+})
+"""Producer-owned prefixes for failed non-owning import attempts."""
+
 
 # --------------------------------------------------------------------------
 # Peer-failure families
@@ -316,6 +322,21 @@ def bounded_text(text: str, *, limit: int = MAX_RAW_MESSAGE_CHARS) -> str:
     if len(collapsed) <= limit:
         return collapsed
     return collapsed[: max(limit - 1, 0)].rstrip() + "\u2026"
+
+
+def non_automation_import_failure_message(
+    job_type: str,
+    diagnostic: str,
+) -> str:
+    """Build the bounded Recents diagnostic for one force/YouTube attempt."""
+    prefix = {
+        "force_import": "Force import attempt failed:",
+        "youtube_import": "YouTube import attempt failed:",
+    }.get(job_type)
+    if prefix is None:
+        raise ValueError(f"non-automation failure does not support {job_type!r}")
+    detail = bounded_text(diagnostic, limit=MAX_DIAGNOSTIC_CHARS)
+    return prefix if not detail else f"{prefix} {detail}"
 
 
 def _quoted(text: str) -> str:
@@ -968,6 +989,8 @@ def _present_failed_message(
     if not error_message:
         return None
     probe = error_message.strip()
+    if any(probe.startswith(prefix) for prefix in NON_AUTOMATION_IMPORT_FAILURE_PREFIXES):
+        return bounded_text(probe, limit=MAX_DIAGNOSTIC_CHARS)
     lowered = probe.casefold()
     if lowered.startswith(_MATERIALIZE_GRACE_PREFIX):
         return _GRACE_COPY
@@ -1125,6 +1148,7 @@ __all__ = [
     "MAX_PEER_NAME_CHARS",
     "MAX_RAW_MESSAGE_CHARS",
     "MAX_RAW_MESSAGE_GROUPS",
+    "NON_AUTOMATION_IMPORT_FAILURE_PREFIXES",
     "TRANSFER_MESSAGE_LABEL_MIXED",
     "TRANSFER_MESSAGE_LABEL_PEER",
     "TRANSFER_MESSAGE_LABEL_STATE",
@@ -1135,6 +1159,7 @@ __all__ = [
     "bounded_text",
     "decode_transfer_detail",
     "materialize_reason_copy",
+    "non_automation_import_failure_message",
     "peer_failure_family",
     "present_failure",
     "transfer_detail_unreadable",

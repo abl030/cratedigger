@@ -837,12 +837,17 @@ class TestImportOperationFencePostgres(unittest.TestCase):
                 mb_release_id="release-pg-startup-force",
                 status="wanted",
             )
+            source_download_log_id = db.log_download(
+                request_id,
+                outcome="rejected",
+                error_message="startup force source",
+            )
             job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=request_id,
                 dedupe_key="force:postgres-startup-cleanup",
                 payload={
-                    "download_log_id": 1,
+                    "download_log_id": source_download_log_id,
                     "failed_path": "/failed-imports/startup-force",
                 },
             )
@@ -886,6 +891,16 @@ class TestImportOperationFencePostgres(unittest.TestCase):
             )
             self.assertEqual([item.id for item in terminalized], [job.id])
             self.assertEqual(terminalized[0].status, "failed")
+            history = db.get_download_history(request_id)
+            self.assertEqual(len(history), 2)
+            self.assertEqual(history[0]["outcome"], "failed")
+            self.assertEqual(
+                history[0]["source_download_log_id"],
+                source_download_log_id,
+            )
+            request = db.get_request(request_id)
+            assert request is not None
+            self.assertEqual(request["status"], "wanted")
             self.assertTrue(os.path.exists(action_path))
 
             with patch("lib.config.read_runtime_config", return_value=cfg):
@@ -911,11 +926,19 @@ class TestImportOperationFencePostgres(unittest.TestCase):
             mb_release_id="release-pg-relocated",
             status="wanted",
         )
+        source_download_log_id = db.log_download(
+            request_id,
+            outcome="rejected",
+            error_message="launch marker source",
+        )
         job = db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=request_id,
             dedupe_key="force:postgres-relocated",
-            payload={"download_log_id": 1, "failed_path": source_path},
+            payload={
+                "download_log_id": source_download_log_id,
+                "failed_path": source_path,
+            },
         )
         evidence = make_album_quality_evidence(
             mb_release_id="release-pg-relocated",
@@ -957,11 +980,19 @@ class TestImportOperationFencePostgres(unittest.TestCase):
             mb_release_id="release-pg",
             status="wanted",
         )
+        source_download_log_id = db.log_download(
+            request_id,
+            outcome="rejected",
+            error_message="terminal rollback source",
+        )
         job = db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=request_id,
             dedupe_key="force:postgres-fence",
-            payload={"download_log_id": 1, "failed_path": source_path},
+            payload={
+                "download_log_id": source_download_log_id,
+                "failed_path": source_path,
+            },
         )
         evidence = make_album_quality_evidence(
             mb_release_id="release-pg",
@@ -1002,6 +1033,12 @@ class TestImportOperationFencePostgres(unittest.TestCase):
         )
         self.assertIsNone(claim_next_import_job(observer, worker_id="replay"))
         self.assertIsNotNone(recovered[0].completed_at)
+        history = observer.get_download_history(request_id)
+        self.assertEqual(history[0]["outcome"], "failed")
+        self.assertEqual(
+            history[0]["source_download_log_id"],
+            source_download_log_id,
+        )
 
     def test_unlaunched_running_job_is_requeued(self) -> None:
         db = make_db()
@@ -1052,11 +1089,19 @@ class TestImportOperationFencePostgres(unittest.TestCase):
             mb_release_id="release-terminal-rollback",
             status="wanted",
         )
+        source_download_log_id = db.log_download(
+            request_id,
+            outcome="rejected",
+            error_message="terminal rollback source",
+        )
         job = db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=request_id,
             dedupe_key="force:postgres-terminal-rollback",
-            payload={"download_log_id": 1, "failed_path": source_path},
+            payload={
+                "download_log_id": source_download_log_id,
+                "failed_path": source_path,
+            },
         )
         evidence = make_album_quality_evidence(
             mb_release_id="release-terminal-rollback",
@@ -1102,6 +1147,115 @@ class TestImportOperationFencePostgres(unittest.TestCase):
         self.assertEqual(recovered[0].status, "failed")
         self.assertIsNotNone(recovered[0].completed_at)
         self.assertIsNone(claim_next_import_job(observer, worker_id="replay"))
+
+    def test_non_automation_failure_terminal_is_atomic_and_fake_real_parity(
+        self,
+    ) -> None:
+        """The new audit+job command is all-or-nothing in both DB adapters."""
+        from lib.terminal_outcomes import non_automation_failure_terminal_outcome
+        from tests.test_terminal_outcomes import (
+            FaultInjectingPipelineDB,
+            InjectedTerminalWriteFailure,
+        )
+        from web.classify import LogEntry, classify_log_entry
+
+        assert TEST_DSN is not None
+        db = make_db()
+        self.addCleanup(db.close)
+        request_id = db.add_request(
+            artist_name="Fence",
+            album_title="Visible terminal rollback",
+            source="request",
+            mb_release_id="release-visible-terminal",
+            status="wanted",
+        )
+        source_download_log_id = db.log_download(
+            request_id,
+            outcome="rejected",
+            error_message="force source for terminal rollback",
+        )
+        job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=request_id,
+            dedupe_key="force:visible-terminal-rollback",
+            payload={
+                "download_log_id": source_download_log_id,
+                "failed_path": "/tmp/visible-terminal-rollback",
+            },
+        )
+        db.mark_import_job_preview_importable(job.id, preview_result={"ready": True})
+        claimed = claim_next_import_job(db, worker_id="postgres-worker")
+        assert claimed is not None
+        command = non_automation_failure_terminal_outcome(
+            claimed,
+            error="RuntimeError",
+            message="force executor crashed after launch authority",
+            result={"success": False, "kind": "crash"},
+        )
+
+        failing = FaultInjectingPipelineDB(TEST_DSN, fail_after_write=1)
+        try:
+            with self.assertRaises(InjectedTerminalWriteFailure):
+                failing.persist_import_terminal_outcome(command)
+        finally:
+            failing.close()
+
+        observer = PipelineDB(TEST_DSN)
+        self.addCleanup(observer.close)
+        still_running = observer.get_import_job(claimed.id)
+        assert still_running is not None
+        self.assertEqual(still_running.status, "running")
+        self.assertEqual(len(observer.get_download_history(request_id)), 1)
+        request = observer.get_request(request_id)
+        assert request is not None
+        self.assertEqual(request["status"], "wanted")
+
+        terminal = observer.persist_import_terminal_outcome(command)
+        self.assertEqual(terminal.job.status, "failed")
+        audit = observer.get_download_log_entry(terminal.download_log_id)
+        assert audit is not None
+        self.assertEqual(audit["source_download_log_id"], source_download_log_id)
+        self.assertEqual(
+            classify_log_entry(LogEntry.from_row(dict(audit))).verdict,
+            "Force import attempt failed: force executor crashed after launch "
+            "authority",
+        )
+
+        fake = FakePipelineDB()
+        fake.seed_request(make_request_row(
+            id=42,
+            mb_release_id="fake-visible-terminal",
+            status="wanted",
+        ))
+        fake_source = fake.log_download(42, outcome="rejected")
+        fake_job = fake.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            dedupe_key="force:fake-visible-terminal",
+            payload={
+                "download_log_id": fake_source,
+                "failed_path": "/tmp/fake-visible-terminal",
+            },
+        )
+        fake.mark_import_job_preview_importable(fake_job.id, preview_result={})
+        fake_claimed = claim_next_import_job(fake, worker_id="fake-worker")
+        assert fake_claimed is not None
+        fake_terminal = fake.persist_import_terminal_outcome(
+            non_automation_failure_terminal_outcome(
+                fake_claimed,
+                error="RuntimeError",
+                message="force executor crashed after launch authority",
+                result={"success": False, "kind": "crash"},
+            )
+        )
+        fake_audit = fake.get_download_log_entry(fake_terminal.download_log_id)
+        assert fake_audit is not None
+        self.assertEqual(fake_terminal.job.status, terminal.job.status)
+        self.assertEqual(
+            fake_audit["source_download_log_id"],
+            fake_source,
+        )
+        self.assertEqual(fake.request(42)["status"], "wanted")
 
 
 if __name__ == "__main__":

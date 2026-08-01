@@ -90,6 +90,7 @@ from lib.terminal_outcomes import (
     AutomationTerminalAuthority,
     ImportJobTerminal,
     PendingImportTerminalOutcome,
+    non_automation_failure_terminal_outcome,
 )
 from lib.youtube_ingest_service import (
     YOUTUBE_IMPORT_ALLOWED_REQUEST_STATUSES,
@@ -1452,6 +1453,26 @@ def _process_force_claim(
         stage_db.close()
 
 
+def _terminalize_non_automation_failure(
+    db: PipelineDB,
+    job: ImportJob,
+    *,
+    error: str,
+    message: str,
+    result: dict[str, object],
+) -> ImportJob | None:
+    """Persist one failed force/YouTube attempt and its Recents audit atomically."""
+    terminal = db.persist_import_terminal_outcome(
+        non_automation_failure_terminal_outcome(
+            job,
+            error=error,
+            message=message,
+            result=result,
+        )
+    )
+    return terminal.job
+
+
 def process_claimed_job(
     db: PipelineDB,
     job: ImportJob,
@@ -1545,10 +1566,11 @@ def process_claimed_job(
                 expected_execution_lease=current_lease,
             )
         # Force and YouTube jobs do not own their request's ``processing``
-        # status, so a crashed one has nothing to self-heal: the terminal
-        # failed status IS the surface, and it never stops the request.
-        failed = db.mark_import_job_failed(
-            job.id,
+        # status. Their shared terminal command records the failed attempt in
+        # Recents while leaving that request exactly as the operator left it.
+        failed = _terminalize_non_automation_failure(
+            db,
+            job,
             error=type(exc).__name__,
             message=str(exc),
             result={"success": False},
@@ -1787,8 +1809,9 @@ def process_claimed_job(
             job.request_id,
             outcome.message,
         )
-        failed = db.mark_import_job_failed(
-            job.id,
+        failed = _terminalize_non_automation_failure(
+            db,
+            job,
             error=outcome.message,
             message=f"requeue-to-preview failed: {outcome.message}",
             result=result,
@@ -1831,8 +1854,9 @@ def process_claimed_job(
         return _record_terminal_force_action_cleanup(db, job, terminal_job)
     # Same as the success branch above: a bundle-less force/YouTube failure is
     # recorded terminally rather than parked. No request is stopped by it.
-    failed = db.mark_import_job_failed(
-        job.id,
+    failed = _terminalize_non_automation_failure(
+        db,
+        job,
         error=outcome.message,
         message=outcome.message,
         result=result,

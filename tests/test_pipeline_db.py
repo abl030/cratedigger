@@ -1327,12 +1327,17 @@ class TestImportJobQueueAPI(unittest.TestCase):
             state.to_json(),
             expected_status="wanted",
         ))
+        source_download_log_id = self.db.log_download(
+            request_id,
+            outcome="rejected",
+            error_message="force owner source",
+        )
         job = self.db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=request_id,
             dedupe_key=f"force-owner:{suffix}",
             payload=force_import_payload(
-                download_log_id=request_id,
+                download_log_id=source_download_log_id,
                 failed_path=exact_source_path,
             ),
         )
