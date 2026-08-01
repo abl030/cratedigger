@@ -108,7 +108,7 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"^requests\."),
     # OS / filesystem leaf seams (stdlib os.*)
     re.compile(r"\.os\.path\."),
-    re.compile(r"\.os\.(remove|rename|makedirs|mkdir|listdir|stat|write|unlink|rmdir|getcwd|getpgid|killpg|kill|chmod|symlink)$"),
+    re.compile(r"\.os\.(remove|rename|makedirs|mkdir|listdir|stat|write|unlink|rmdir|getcwd|getpgid|killpg|kill|chmod|symlink|umask)$"),
     re.compile(r"\.shutil\."),
     re.compile(r"^os\.path\."),
     re.compile(r"^shutil\."),
@@ -144,6 +144,7 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"\.print$"),
     re.compile(r"^json\."),
     re.compile(r"\.select\.select$"),  # select.select syscall
+    re.compile(r"^socket\.socket$"),
     # Cratedigger entry-point shims (the top-level cratedigger.py wrapper
     # functions are thin and patched on a per-test basis; the real ones
     # live in lib/* and have their own audit coverage)
@@ -284,6 +285,13 @@ _LEAF_SEAM_PATTERNS = [
     # only caller, now lives in ``scripts/pipeline_cli/cli.py``) alongside
     # single-segment scripts like ``scripts.repair.PipelineDB``.
     re.compile(r"^scripts\.\w+(\.\w+)?\.PipelineDB$"),
+    # The web entrypoint imports the same PipelineDB constructor directly;
+    # replacing that binding stops at the PostgreSQL connection boundary.
+    re.compile(r"^web\.server\.PipelineDB$"),
+
+    # psycopg's connector is the database socket leaf. Startup placement tests
+    # stop there after exercising the real contract and schema-gate code.
+    re.compile(r"^lib\.migrator\.psycopg2\.connect$"),
 
     # web.server.db — module-level pipeline DB connection cache.
     # Tests patch.object(server, "db", fake) to inject a per-test DB.
