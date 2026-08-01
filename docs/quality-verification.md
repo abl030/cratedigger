@@ -617,28 +617,46 @@ that opened issue #829 (download 37946 — a 256 kbps CBR AAC graded
 
 ### Which surfaces carry the audit-only flag
 
-The flag is server-derived and only reaches the surfaces that are wired to
-it. As of issue #829 PR4 that is:
+All six operator surfaces that paint a spectral grade carry it:
 
-- **carried** — the Recents list evidence strip and the expanded
-  download-history card, on BOTH the IN and HAVE sides
-  (`web/js/history.js`), and `pipeline-cli quality` for the candidate and
-  the installed HAVE.
-- **NOT carried** — four surfaces still render `spectral_grade` /
-  `current_spectral_grade` through the raw palette and can therefore still
-  paint an audit-only codec as a transcode: the request-detail Quality
-  header (`web/js/pipeline.js`), the Wrong Matches group badge and
-  per-entry candidate chip (`web/js/wrong-matches.js`), and the long-tail
-  console worklist chip (`web/js/long_tail_console.js`). Each needs its
-  route to project the same flag; the derivation
-  (`web/classify.py::proof_gate_projection` /
-  `current_evidence_accusation_withheld`) is already reusable, and the
-  request-detail header needs BOTH flags because its fallback chain mixes
-  the current and last-download grades.
+- the Recents list evidence strip and the expanded download-history card,
+  on BOTH the IN and HAVE sides (`web/js/history.js`);
+- the request-detail Quality header (`web/js/pipeline.js`);
+- the Wrong Matches group badge and per-entry candidate chip
+  (`web/js/wrong-matches.js`);
+- the long-tail console worklist chip (`web/js/long_tail_console.js`);
+- `pipeline-cli quality`, for the candidate and the installed HAVE.
 
-A row with no `candidate_evidence_id` keeps the historical render on every
-surface — the flag is absent rather than False, which is the fail-open
-direction for a display-only fact.
+There is ONE server-side rule,
+`web/classify.py::accusation_flags`, reached through three input adapters:
+`evidence_accusation_flags` (a whole `AlbumQualityEvidence`, what the
+request-detail route loads), `evidence_column_accusation_flags` (a joined
+column block under either alias prefix, what Wrong Matches and the
+long-tail cohort read), and `proof_gate_projection` (the verdict, what
+Recents reads). The nine evidence columns those joins project are named
+once, by `lib/pipeline_db/_shared.py::accusation_evidence_columns`, under
+two shared alias prefixes. Three queries spell the block inline as a SQL
+literal instead of calling the generator — that literal is what keeps them
+statically resolvable for `tests/test_replaced_write_audit.py`, and
+`tests/test_pipeline_db_column_contract.py` pins every spelling against the
+generator so a query cannot project eight of the nine and have a surface
+silently resolve a different codec. In JavaScript the rule is
+`spectralGradeIsAdmissible` + `spectralWithheldPresentation` in
+`web/js/quality_palette.js`; every surface composes those, none reimplements
+them. The generated property V7 in `tests/test_verdict_tiers_generated.py`
+proves the adapters cannot disagree about one album.
+
+The request-detail header carries BOTH pairs — `current_spectral_*` and
+`last_download_spectral_*` — because its fallback chain mixes the installed
+and last-download grades, and it applies whichever pair belongs to the
+grade the chain selected. The last-download pair is taken from the newest
+retained attempt whose own grade still equals the denormalised column, so a
+flag never describes a different measurement than the grade beside it.
+
+A row with no evidence join keeps the historical accusing render on every
+surface — the flag is absent rather than False. For a display-only fact
+that is the fail-accusing direction: an unflagged album is shown exactly as
+it was before the flag existed, never neutralized by default.
 
 ### Where the operator sees all of this
 

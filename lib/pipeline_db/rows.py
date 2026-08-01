@@ -395,6 +395,30 @@ class WrongMatchCandidateRow(TypedDict):
     request_verified_lossless: bool | None
     request_current_spectral_grade: str | None
     request_current_spectral_bitrate: int | None
+    # issue #829 Phase 5 PR4 — the codec-resolution facts behind the two
+    # audit-only accusation flags this view renders: the candidate's own
+    # for the per-entry chip, the installed copy's for the group badge.
+    # Projected by ``accusation_evidence_columns`` under the two shared
+    # alias prefixes and read back by
+    # ``web/classify.py::evidence_column_accusation_flags``.
+    _evidence_format: str | None
+    _evidence_spectral_grade: str | None
+    _evidence_spectral_bitrate: int | None
+    _evidence_spectral_subject: str | None
+    _evidence_was_converted_from: str | None
+    _evidence_cliff_hz: int | None
+    _evidence_codec_family: str | None
+    _evidence_storage_format: str | None
+    _evidence_filetype_band: str | None
+    _current_evidence_format: str | None
+    _current_evidence_spectral_grade: str | None
+    _current_evidence_spectral_bitrate: int | None
+    _current_evidence_spectral_subject: str | None
+    _current_evidence_was_converted_from: str | None
+    _current_evidence_cliff_hz: int | None
+    _current_evidence_codec_family: str | None
+    _current_evidence_storage_format: str | None
+    _current_evidence_filetype_band: str | None
 
 
 def wrong_match_candidate_row(raw: Mapping[str, object]) -> WrongMatchCandidateRow:

@@ -1343,6 +1343,17 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
     DETAIL_RESPONSE_REQUIRED_FIELDS: ClassVar = {
         "request", "history", "tracks", "last_search", "current_library",
     }
+    #: Issue #829 Phase 5 PR4 — the detail header's Quality row picks its
+    #: grade from a chain over BOTH the installed copy and the last
+    #: download, so it needs BOTH audit-only pairs and applies whichever
+    #: matches the grade it selected. Detail-only: the queue routes that
+    #: share ``PIPELINE_ITEM_REQUIRED_FIELDS`` render no spectral chip.
+    DETAIL_ACCUSATION_REQUIRED_FIELDS: ClassVar = {
+        "current_spectral_accusation_admissible",
+        "current_spectral_accusation_withheld",
+        "last_download_spectral_accusation_admissible",
+        "last_download_spectral_accusation_withheld",
+    }
     LAST_SEARCH_REQUIRED_FIELDS: ClassVar = {
         "variant", "final_state", "outcome", "top_candidates",
     }
@@ -1359,10 +1370,196 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
                                 "pipeline detail response")
         _assert_required_fields(self, data["request"], self.PIPELINE_ITEM_REQUIRED_FIELDS,
                                 "pipeline detail request")
+        _assert_required_fields(
+            self, data["request"], self.DETAIL_ACCUSATION_REQUIRED_FIELDS,
+            "pipeline detail request audit-only flags")
         _assert_required_fields(self, data["history"][0], self.HISTORY_REQUIRED_FIELDS,
                                 "pipeline detail history item")
         # Default mock state: no search history → last_search is None.
         self.assertIsNone(data["last_search"])
+
+    def _seed_installed_evidence(self, measurement, **evidence_kwargs):
+        """Link a production-shaped installed evidence row to request 100."""
+        from tests.helpers import make_album_quality_evidence
+
+        installed = make_album_quality_evidence(
+            mb_release_id="test-mbid-0100",
+            source_path="/mnt/virtio/Music/Beets/installed",
+            measurement=measurement,
+            **evidence_kwargs,
+        )
+        self.db.upsert_album_quality_evidence(installed)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=installed.mb_release_id,
+            snapshot_fingerprint=installed.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.assertTrue(self.db.set_request_current_evidence(100, stored.id))
+        return stored
+
+    def test_pipeline_detail_withholds_the_have_accusation_for_audit_only(self):
+        """Request 6387's shape at the detail header: the INSTALLED copy is
+        the AAC the codec-blind analyzer graded ``likely_transcode``."""
+        from lib.quality import AudioQualityMeasurement
+
+        self._seed_installed_evidence(
+            AudioQualityMeasurement(
+                min_bitrate_kbps=256, avg_bitrate_kbps=256, is_cbr=True,
+                format="AAC", spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=128, spectral_subject="installed",
+                spectral_provenance="measured", cliff_hz=15000,
+                codec_family="aac", spectral_measurement_version=2,
+            ),
+            codec="aac", container="m4a", storage_format="AAC",
+        )
+
+        status, data = self._get("/api/pipeline/100")
+
+        self.assertEqual(status, 200)
+        self.assertIs(
+            data["request"]["current_spectral_accusation_admissible"], False)
+        self.assertEqual(
+            data["request"]["current_spectral_accusation_withheld"],
+            "audit_only_codec")
+
+    def test_pipeline_detail_keeps_the_have_accusation_for_a_real_codec(self):
+        """The must-still-work half: a LAME MP3 cliff still accuses."""
+        from lib.quality import AudioQualityMeasurement
+
+        self._seed_installed_evidence(
+            AudioQualityMeasurement(
+                min_bitrate_kbps=320, avg_bitrate_kbps=320, is_cbr=True,
+                format="MP3", spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=128, spectral_subject="installed",
+                spectral_provenance="measured", cliff_hz=16000,
+                codec_family="mp3", spectral_measurement_version=2,
+            ),
+            codec="mp3", container="mp3", storage_format="MP3",
+        )
+
+        status, data = self._get("/api/pipeline/100")
+
+        self.assertEqual(status, 200)
+        self.assertIs(
+            data["request"]["current_spectral_accusation_admissible"], True)
+        self.assertIsNone(
+            data["request"]["current_spectral_accusation_withheld"])
+
+    def test_pipeline_detail_reports_an_unresolved_codec_separately(self):
+        """An unresolved family may not be described as encoder rolloff."""
+        from lib.quality import AudioQualityMeasurement
+
+        self._seed_installed_evidence(
+            AudioQualityMeasurement(
+                min_bitrate_kbps=192, avg_bitrate_kbps=192,
+                format=None, spectral_grade="suspect",
+                spectral_bitrate_kbps=192, spectral_subject="installed",
+                spectral_provenance="measured", cliff_hz=18000,
+                codec_family=None, spectral_measurement_version=2,
+            ),
+            codec=None, container=None, storage_format=None,
+        )
+
+        status, data = self._get("/api/pipeline/100")
+
+        self.assertEqual(status, 200)
+        self.assertIs(
+            data["request"]["current_spectral_accusation_admissible"], False)
+        self.assertEqual(
+            data["request"]["current_spectral_accusation_withheld"],
+            "codec_unresolved")
+
+    def test_pipeline_detail_have_flags_are_absent_without_evidence(self):
+        """Fail-accusing: no linked current evidence, no flags, so the
+        header keeps its historical accusing render."""
+        status, data = self._get("/api/pipeline/100")
+
+        self.assertEqual(status, 200)
+        self.assertIsNone(
+            data["request"]["current_spectral_accusation_admissible"])
+        self.assertIsNone(
+            data["request"]["current_spectral_accusation_withheld"])
+        self.assertIsNone(
+            data["request"]["last_download_spectral_accusation_admissible"])
+
+    def test_pipeline_detail_last_download_flags_track_the_denorm_grade(self):
+        """The candidate half of the chain: the flags must belong to the
+        attempt whose grade ``last_download_spectral_grade`` copied."""
+        from lib.quality import AudioQualityMeasurement
+        from tests.helpers import make_album_quality_evidence
+
+        candidate = make_album_quality_evidence(
+            mb_release_id="test-mbid-0100",
+            source_path="/mnt/virtio/music/slskd/candidate",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=256, avg_bitrate_kbps=256, is_cbr=True,
+                format="AAC", spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=128, spectral_subject="source",
+                spectral_provenance="measured", cliff_hz=15000,
+                codec_family="aac", spectral_measurement_version=2,
+            ),
+            codec="aac", container="m4a", storage_format="AAC",
+        )
+        self.db.upsert_album_quality_evidence(candidate)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=candidate.mb_release_id,
+            snapshot_fingerprint=candidate.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        log_id = self.db.log_download(
+            100, outcome="rejected", beets_scenario="quality_reject")
+        self.db.set_download_log_candidate_evidence(log_id, stored.id)
+        self.db.update_request_fields(
+            100, last_download_spectral_grade="likely_transcode")
+
+        status, data = self._get("/api/pipeline/100")
+
+        self.assertEqual(status, 200)
+        self.assertIs(
+            data["request"][
+                "last_download_spectral_accusation_admissible"], False)
+        self.assertEqual(
+            data["request"]["last_download_spectral_accusation_withheld"],
+            "audit_only_codec")
+
+    def test_pipeline_detail_last_download_flags_drop_on_a_grade_mismatch(self):
+        """Fail-accusing: when the denorm names a grade no retained attempt
+        measured, the pair is empty rather than a different album's."""
+        from lib.quality import AudioQualityMeasurement
+        from tests.helpers import make_album_quality_evidence
+
+        candidate = make_album_quality_evidence(
+            mb_release_id="test-mbid-0100",
+            source_path="/mnt/virtio/music/slskd/candidate",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=256, avg_bitrate_kbps=256, is_cbr=True,
+                format="AAC", spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=128, spectral_subject="source",
+                spectral_provenance="measured", cliff_hz=15000,
+                codec_family="aac", spectral_measurement_version=2,
+            ),
+            codec="aac", container="m4a", storage_format="AAC",
+        )
+        self.db.upsert_album_quality_evidence(candidate)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=candidate.mb_release_id,
+            snapshot_fingerprint=candidate.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        log_id = self.db.log_download(
+            100, outcome="rejected", beets_scenario="quality_reject")
+        self.db.set_download_log_candidate_evidence(log_id, stored.id)
+        # The denorm names a DIFFERENT grade than any retained attempt.
+        self.db.update_request_fields(
+            100, last_download_spectral_grade="suspect")
+
+        status, data = self._get("/api/pipeline/100")
+
+        self.assertEqual(status, 200)
+        self.assertIsNone(
+            data["request"]["last_download_spectral_accusation_admissible"])
+        self.assertIsNone(
+            data["request"]["last_download_spectral_accusation_withheld"])
 
     def test_pipeline_detail_history_derives_apply_beets_distance(self):
         """Issue #865: the apply-time beets distance persisted by #863 in

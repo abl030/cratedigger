@@ -41,6 +41,18 @@ plan §1.7 and §1's base-rate caveat).
 "nothing was found" and "nothing was looked for" are different facts;
 ``has_finding`` separates them and the statement says so.
 
+**V7 — every surface's audit-only flags come from the one rule.** Six
+operator surfaces now render a spectral grade, reaching the rule through
+three different input adapters: a whole ``AlbumQualityEvidence``
+(``evidence_accusation_flags``, the request-detail header), a joined
+column block under either alias prefix
+(``evidence_column_accusation_flags``, Wrong Matches and the long-tail
+console), and the proof-gate verdict (``proof_gate_projection``, Recents).
+Over any world all four answers are the same pair, so no two surfaces can
+state different facts about one album — and the withheld reason is never
+``audit_only_codec`` when no codec was resolved, which is the fabrication
+Rule C exists to stop.
+
 Checkers take their production dependency as a keyword-only argument
 defaulting to the real function, so the known-bad self-tests can pass a
 decoy explicitly while production always gets the default.
@@ -62,6 +74,10 @@ from hypothesis import strategies as st
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
+from lib.pipeline_db._shared import (
+    CANDIDATE_EVIDENCE_PREFIX,
+    CURRENT_EVIDENCE_PREFIX,
+)
 from lib.quality import (
     PRODUCIBLE_PROOF_TIERS,
     PROOF_LEG_AAC_LATTICE,
@@ -90,7 +106,15 @@ from lib.quality.decisions import (
     aac_lattice_proof_leg,
     ultrasonic_proof_leg,
 )
-from web.classify import ProofGateProjection, proof_gate_projection
+from web.classify import (
+    ACCUSATION_WITHHELD_AUDIT_ONLY_CODEC,
+    ACCUSATION_WITHHELD_CODEC_UNRESOLVED,
+    AccusationFlags,
+    ProofGateProjection,
+    evidence_accusation_flags,
+    evidence_column_accusation_flags,
+    proof_gate_projection,
+)
 
 _CODEC_FAMILIES = ("mp3", "aac", "opus", "vorbis", "lossless", "other")
 _AUDIT_ONLY_FAMILIES = ("aac", "opus", "other")
@@ -234,6 +258,27 @@ def _row_aliases_from_facts(facts: dict[str, object]) -> dict[str, object]:
             lattice.max_z if isinstance(lattice, AacLatticeCapture) else None
         ),
         "_evidence_verified_lossless_classifier": None,
+    }
+
+
+def _accusation_column_row(
+    facts: dict[str, object], prefix: str,
+) -> dict[str, object]:
+    """The nine accusation aliases a join projects under ``prefix``.
+
+    Mirrors ``lib/pipeline_db/_shared.py::accusation_evidence_columns``,
+    which is what the four production queries actually emit.
+    """
+    return {
+        f"{prefix}format": facts["format"],
+        f"{prefix}spectral_grade": facts["spectral_grade"],
+        f"{prefix}spectral_bitrate": facts["spectral_bitrate_kbps"],
+        f"{prefix}spectral_subject": facts["spectral_subject"],
+        f"{prefix}was_converted_from": facts["was_converted_from"],
+        f"{prefix}cliff_hz": facts["cliff_hz"],
+        f"{prefix}codec_family": facts["codec_family"],
+        f"{prefix}storage_format": facts["storage_format"],
+        f"{prefix}filetype_band": facts["filetype_band"],
     }
 
 
@@ -382,6 +427,52 @@ _CLAIM_WIDENING_TOKENS = (
 )
 
 
+def check_accusation_flags_agree(
+    flags: "Sequence[tuple[str, AccusationFlags]]",
+) -> None:
+    """V7: every adapter into the audit-only rule answers identically.
+
+    ``flags`` is ``(surface-name, pair)``. Disagreement here is exactly
+    the failure mode issue #829 PR4 shipped against: one surface calling
+    an album a transcode while another says its codec cannot support the
+    accusation.
+    """
+    if not flags:
+        raise AssertionError("no surfaces supplied to compare")
+    first_name, first = flags[0]
+    for name, pair in flags[1:]:
+        if pair != first:
+            raise AssertionError(
+                f"{name} and {first_name} disagree about one album: "
+                f"{pair} vs {first}")
+
+
+def check_withheld_reason_matches_the_world(
+    pair: "AccusationFlags", family: "str | None",
+) -> None:
+    """V7: only one of the two withholding worlds may be described.
+
+    ``audit_only_codec`` is a claim ABOUT a resolved codec, so it may
+    never be the reason on a row where none resolved; ``codec_unresolved``
+    is the converse. A reason at all requires the accusation to have been
+    withheld from an accusing grade.
+    """
+    if pair.withheld is None:
+        return
+    if pair.admissible is not False:
+        raise AssertionError(
+            f"withheld reason {pair.withheld!r} on an admissible grade "
+            f"({pair.admissible!r})")
+    if family is None and pair.withheld != ACCUSATION_WITHHELD_CODEC_UNRESOLVED:
+        raise AssertionError(
+            f"reason {pair.withheld!r} describes a codec, but none resolved")
+    if family is not None and (
+        pair.withheld != ACCUSATION_WITHHELD_AUDIT_ONLY_CODEC
+    ):
+        raise AssertionError(
+            f"reason {pair.withheld!r} on a resolved {family!r} album")
+
+
 def check_statement_does_not_widen_the_claim(statement: str) -> None:
     """V5: no tier sentence may claim more than the tests support."""
     lowered = statement.lower()
@@ -466,6 +557,88 @@ class TestVerdictTierProperties(unittest.TestCase):
         check_statement_does_not_widen_the_claim(statement)
         check_untested_album_is_not_a_clearance(facts_verdict, statement)
 
+    @example(facts={
+        # The audit-only HAVE world the four newly-carried surfaces exist
+        # for: a 256 kbps CBR AAC the codec-blind analyzer graded
+        # ``likely_transcode`` with a LAME-table 128 bucket (download
+        # 37946, issue #829's opening defect).
+        "spectral_grade": "likely_transcode",
+        "spectral_bitrate_kbps": 128,
+        "cliff_hz": 15000,
+        "codec_family": "aac",
+        "format": "AAC",
+        "storage_format": "AAC",
+        "filetype_band": "m4a",
+        "spectral_subject": "installed",
+        "was_converted_from": None,
+        "container_labels": [".m4a"],
+        "ultrasonic_deficit_db": None,
+        "spectral_measurement_version": 2,
+        "aac_lattice": None,
+    })
+    @example(facts={
+        # Nothing resolved a codec: the reason must be the unresolved one,
+        # never a claim about an encoder that was never identified.
+        "spectral_grade": "suspect",
+        "spectral_bitrate_kbps": 192,
+        "cliff_hz": 18000,
+        "codec_family": None,
+        "format": None,
+        "storage_format": None,
+        "filetype_band": "",
+        "spectral_subject": "installed",
+        "was_converted_from": None,
+        "container_labels": [],
+        "ultrasonic_deficit_db": None,
+        "spectral_measurement_version": 2,
+        "aac_lattice": None,
+    })
+    @given(facts=_evidence_facts())
+    def test_every_surface_derives_the_same_audit_only_flags(
+        self, facts,
+    ) -> None:
+        """V7 over any world: one album, one audit-only pair, six surfaces."""
+        verdict = proof_verdict_from_facts(**facts)
+        projection = proof_gate_projection(_row_aliases_from_facts(facts))
+        pairs: list[tuple[str, AccusationFlags]] = [
+            ("Recents (proof_gate_projection)", AccusationFlags(
+                admissible=projection.spectral_accusation_admissible,
+                withheld=projection.spectral_accusation_withheld,
+            )),
+            ("request detail (whole evidence row)",
+             evidence_accusation_flags(_evidence_from_facts(facts))),
+            ("Wrong Matches candidate chip (candidate aliases)",
+             evidence_column_accusation_flags(
+                 _accusation_column_row(facts, CANDIDATE_EVIDENCE_PREFIX),
+                 prefix=CANDIDATE_EVIDENCE_PREFIX)),
+            ("long-tail console chip (current aliases)",
+             evidence_column_accusation_flags(
+                 _accusation_column_row(facts, CURRENT_EVIDENCE_PREFIX),
+                 prefix=CURRENT_EVIDENCE_PREFIX)),
+        ]
+        check_accusation_flags_agree(pairs)
+        check_withheld_reason_matches_the_world(
+            pairs[0][1], verdict.codec_family)
+
+    @given(facts=_evidence_facts())
+    def test_an_unjoined_row_keeps_the_accusing_render(self, facts) -> None:
+        """V7's fail-accusing half: no evidence join, no flags, ever.
+
+        A LEFT JOIN that matched nothing hands the adapter all-NULL
+        columns. Both flags must come back empty so every surface falls
+        back to its historical accusing render — the safe direction for a
+        display-only fact, and the reason the flags are tri-state rather
+        than boolean.
+        """
+        for prefix in (CANDIDATE_EVIDENCE_PREFIX, CURRENT_EVIDENCE_PREFIX):
+            unjoined = dict.fromkeys(
+                _accusation_column_row(facts, prefix), None)
+            self.assertEqual(
+                evidence_column_accusation_flags(unjoined, prefix=prefix),
+                AccusationFlags(),
+            )
+        self.assertEqual(evidence_accusation_flags(None), AccusationFlags())
+
 
 class TestInvariantCheckersTripOnViolations(unittest.TestCase):
     """Every checker owes a planted violation proving it can fail."""
@@ -522,6 +695,42 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         with self.assertRaises(AssertionError):
             check_surfaces_agree(
                 self._verdict(), self._verdict(tier=PROOF_TIER_DETECTED))
+
+    def test_accusation_agreement_checker_trips_on_a_split_surface(self):
+        with self.assertRaises(AssertionError):
+            check_accusation_flags_agree([
+                ("Recents", AccusationFlags(
+                    admissible=False,
+                    withheld=ACCUSATION_WITHHELD_AUDIT_ONLY_CODEC)),
+                ("long-tail console", AccusationFlags(admissible=True)),
+            ])
+        with self.assertRaises(AssertionError):
+            check_accusation_flags_agree([])
+
+    def test_withheld_reason_checker_trips_on_a_fabricated_codec_claim(self):
+        # The Rule C failure this checker exists for: describing native
+        # encoder rolloff on a row where no encoder was ever resolved.
+        with self.assertRaises(AssertionError):
+            check_withheld_reason_matches_the_world(
+                AccusationFlags(
+                    admissible=False,
+                    withheld=ACCUSATION_WITHHELD_AUDIT_ONLY_CODEC),
+                None,
+            )
+        with self.assertRaises(AssertionError):
+            check_withheld_reason_matches_the_world(
+                AccusationFlags(
+                    admissible=False,
+                    withheld=ACCUSATION_WITHHELD_CODEC_UNRESOLVED),
+                "aac",
+            )
+        with self.assertRaises(AssertionError):
+            check_withheld_reason_matches_the_world(
+                AccusationFlags(
+                    admissible=True,
+                    withheld=ACCUSATION_WITHHELD_AUDIT_ONLY_CODEC),
+                "aac",
+            )
 
     def test_projection_checker_trips_on_a_lineage_gated_read(self):
         """The exact defect: the adapter reading the overlaid format key.

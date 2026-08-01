@@ -9169,6 +9169,85 @@ class TestGetWrongMatches(unittest.TestCase):
             validation_result=json.dumps(vr),
         )
 
+    def test_wrong_match_rows_carry_both_accusation_column_blocks(self):
+        """Issue #829 PR4/N3: real PG must return BOTH evidence joins.
+
+        The per-entry chip reads the candidate's codec facts and the group
+        badge reads the installed copy's, so an alias pointing at the
+        wrong join, or missing entirely, silently reverts a surface to
+        accusing an audit-only codec. Asserted through the production
+        adapter, not by eyeballing column names.
+        """
+        from lib.pipeline_db._shared import (
+            CANDIDATE_EVIDENCE_PREFIX,
+            CURRENT_EVIDENCE_PREFIX,
+        )
+        from lib.quality import (
+            AudioQualityMeasurement,
+            CodecFamily,
+            EvidenceSubject,
+        )
+        from web.classify import (
+            AccusationFlags,
+            evidence_column_accusation_flags,
+        )
+
+        def _link(
+            subject: EvidenceSubject, fmt: str, family: CodecFamily,
+            path: str,
+        ) -> int:
+            # Distinct files, so the content-addressed fingerprint differs
+            # and the two upserts are two rows rather than one overwrite.
+            evidence = make_album_quality_evidence(
+                mb_release_id="wm-uuid-1",
+                source_path=path,
+                files=[AlbumQualityEvidenceFile(
+                    relative_path=f"01 - {subject}.{fmt.lower()}",
+                    size_bytes=123456,
+                    mtime_ns=1_700_000_000_000_000_000,
+                    extension=fmt.lower(),
+                    container=fmt.lower(),
+                    codec=family,
+                )],
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=256, avg_bitrate_kbps=256, is_cbr=True,
+                    format=fmt, spectral_grade="likely_transcode",
+                    spectral_bitrate_kbps=128, spectral_subject=subject,
+                    spectral_provenance="measured", cliff_hz=15000,
+                    codec_family=family, spectral_measurement_version=2,
+                ),
+                codec=family, container=fmt.lower(), storage_format=fmt,
+            )
+            self.db.upsert_album_quality_evidence(evidence)
+            persisted = self.db.find_album_quality_evidence(
+                mb_release_id=evidence.mb_release_id,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert persisted is not None and persisted.id is not None
+            return persisted.id
+
+        self._log_rejected(self.req1, "peer", "/failed/Pressing")
+        log_id = self.db.get_wrong_matches()[0]["download_log_id"]
+        # The candidate is an audit-only AAC; the installed copy is an MP3
+        # whose cliff IS admissible, so a swapped join is visible.
+        self.db.set_download_log_candidate_evidence(
+            log_id, _link("source", "AAC", "aac", "/slskd/candidate"))
+        self.assertTrue(self.db.set_request_current_evidence(
+            self.req1, _link("installed", "MP3", "mp3", "/Beets/installed")))
+
+        row = self.db.get_wrong_matches()[0]
+
+        self.assertEqual(
+            evidence_column_accusation_flags(
+                row, prefix=CANDIDATE_EVIDENCE_PREFIX),
+            AccusationFlags(admissible=False, withheld="audit_only_codec"),
+        )
+        self.assertEqual(
+            evidence_column_accusation_flags(
+                row, prefix=CURRENT_EVIDENCE_PREFIX),
+            AccusationFlags(admissible=True),
+        )
+
     def test_terminal_audio_corrupt_retained_auto_import_is_not_wrong_match(self):
         """#867: terminal evidence outranks an earlier strong match envelope."""
         from lib.dispatch.types import PostCommitQuarantineAudit
@@ -14500,6 +14579,49 @@ class TestReadProjectionParity(unittest.TestCase):
         fake_rows = self.fake.get_long_tail_cohort()
         self._assert_keyset_parity(
             self, real_rows, fake_rows, "get_long_tail_cohort")
+
+    def test_long_tail_cohort_carries_the_current_accusation_columns(self):
+        """Issue #829 PR4/N3: the worklist chip's codec facts come from a
+        real join, so real PG must actually return them."""
+        from lib.pipeline_db._shared import CURRENT_EVIDENCE_PREFIX
+        from lib.quality import AudioQualityMeasurement
+        from web.classify import (
+            AccusationFlags,
+            evidence_column_accusation_flags,
+        )
+
+        rid = self._seed_long_tail_request(
+            self.db, mb_release_id="lt-audit-only", with_tracks=False,
+            with_rescue=False)
+        evidence = make_album_quality_evidence(
+            mb_release_id="lt-audit-only",
+            source_path="/Beets/installed",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=256, avg_bitrate_kbps=256, is_cbr=True,
+                format="AAC", spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=128, spectral_subject="installed",
+                spectral_provenance="measured", cliff_hz=15000,
+                codec_family="aac", spectral_measurement_version=2,
+            ),
+            codec="aac", container="m4a", storage_format="AAC",
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        persisted = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        self.assertTrue(
+            self.db.set_request_current_evidence(rid, persisted.id))
+
+        row = next(
+            r for r in self.db.get_long_tail_cohort() if r["id"] == rid)
+
+        self.assertEqual(
+            evidence_column_accusation_flags(
+                row, prefix=CURRENT_EVIDENCE_PREFIX),
+            AccusationFlags(admissible=False, withheld="audit_only_codec"),
+        )
 
     def test_get_long_tail_request_keyset_parity(self):
         real_id = self._seed_long_tail_request(

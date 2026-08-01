@@ -144,7 +144,9 @@ import { bandLabel, renderLongTail, loadLongTail } from './long_tail.js';
 import {
   qualityRankBadgeClass,
   spectralGradeClass,
+  spectralGradeIsAdmissible,
   spectralGradeLabel,
+  spectralWithheldPresentation,
 } from './quality_palette.js';
 import {
   handleProcessingLockedConflict,
@@ -844,6 +846,12 @@ function renderYoutubeBody(result, id) {
  * unknown (NULL `current_spectral_grade` — pre-2026-05-17 imports or
  * lossy-source transcodes): "if known". Pure.
  *
+ * The measured grade stays visible whatever its codec, but an installed
+ * copy whose codec cannot support a transcode accusation loses the
+ * accusing colour and gains the shared suffix (issue #829 Phase 5 PR4).
+ * A row with no linked current evidence carries no flags and keeps the
+ * historical accusing render.
+ *
  * @param {Object} row  The worklist row.
  * @returns {string}
  */
@@ -853,7 +861,16 @@ function renderSpectralFragment(row) {
   if (!grade) return '';
   const br = (row.current_spectral_bitrate != null)
     ? ` ~${Number(row.current_spectral_bitrate)}kbps` : '';
-  return ` · <span class="${spectralGradeClass(grade)}">spectral: ${esc(spectralGradeLabel(grade))}${esc(br)}</span>`;
+  const label = `spectral: ${esc(spectralGradeLabel(grade))}${esc(br)}`;
+  if (spectralGradeIsAdmissible(
+    grade, row.current_spectral_accusation_admissible,
+  )) {
+    return ` · <span class="${spectralGradeClass(grade)}">${label}</span>`;
+  }
+  const withholding = spectralWithheldPresentation(
+    row.current_spectral_accusation_withheld);
+  return ` · <span class="${withholding.className}"`
+    + ` title="${withholding.title}">${label}${withholding.suffix}</span>`;
 }
 
 /**

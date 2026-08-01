@@ -11,7 +11,9 @@ import {
   qualityToneClass,
   spectralGradeBadgeClass,
   spectralGradeClass,
+  spectralGradeIsAdmissible,
   spectralGradeLabel,
+  spectralWithheldPresentation,
 } from './quality_palette.js';
 
 /** @type {boolean} */
@@ -540,6 +542,30 @@ function formatEntryEvidence(entry) {
 }
 
 /**
+ * The candidate row's spectral cell, audit-only aware (issue #829 Phase 5
+ * PR4). The measured grade text stays exactly as `formatEntryEvidence`
+ * composed it; only the accusing colour is withheld, and a suffix plus
+ * hover explanation say why. A candidate with no evidence join carries no
+ * flags, so it keeps the historical accusing render.
+ * @param {any} entry - the wrong-match entry payload
+ * @param {string} spectralText - `formatEntryEvidence(entry).spectral`
+ * @returns {string}
+ */
+function entrySpectralCell(entry, spectralText) {
+  const grade = entry && entry.spectral_grade ? entry.spectral_grade : null;
+  if (!grade) {
+    return `<span class="${qualityToneClass('unknown')}">spectral: ${esc(spectralText)}</span>`;
+  }
+  if (spectralGradeIsAdmissible(grade, entry.spectral_accusation_admissible)) {
+    return `<span class="${spectralGradeClass(grade)}">spectral: ${esc(spectralText)}</span>`;
+  }
+  const withholding = spectralWithheldPresentation(
+    entry.spectral_accusation_withheld);
+  return `<span class="${withholding.className}" title="${withholding.title}">`
+    + `spectral: ${esc(spectralText)}${withholding.suffix}</span>`;
+}
+
+/**
  * @param {any} data
  * @returns {string}
  */
@@ -859,10 +885,23 @@ function renderQualityBadges(g) {
   if (g.verified_lossless) {
     parts.push('<span class="badge badge-verified badge-rank-lossless">verified lossless</span>');
   }
-  // Spectral badge only when it's worth flagging.
+  // Spectral badge only when it's worth flagging — and never as an
+  // accusation when the installed copy's codec cannot support one
+  // (issue #829 Phase 5 PR4). The gate below is exactly the accusing
+  // case, so an audit-only family reached the red badge until now.
   if (g.current_spectral_grade && g.current_spectral_grade !== 'genuine') {
     const suffix = g.current_spectral_bitrate ? ` (${g.current_spectral_bitrate}k)` : '';
-    parts.push(`<span class="${spectralGradeBadgeClass(g.current_spectral_grade)}">${esc(spectralGradeLabel(g.current_spectral_grade))}${suffix}</span>`);
+    const label = `${esc(spectralGradeLabel(g.current_spectral_grade))}${suffix}`;
+    if (spectralGradeIsAdmissible(
+      g.current_spectral_grade, g.current_spectral_accusation_admissible,
+    )) {
+      parts.push(`<span class="${spectralGradeBadgeClass(g.current_spectral_grade)}">${label}</span>`);
+    } else {
+      const withholding = spectralWithheldPresentation(
+        g.current_spectral_accusation_withheld);
+      parts.push(`<span class="${withholding.badgeClass}"`
+        + ` title="${withholding.title}">${label}${withholding.suffix}</span>`);
+    }
   }
   if (g.quality_rank) {
     parts.push(`<span class="badge ${qualityRankBadgeClass(g.quality_rank)}" style="font-family:monospace;font-size:0.72em;">${esc(g.quality_rank)}</span>`);
@@ -1052,7 +1091,7 @@ function renderEntry(e, thresholdMilli, requestId) {
         <span id="wm-entry-dist-${e.download_log_id}" style="color:${distColor};">dist: ${dist}</span>
         <span>${esc(e.scenario || '')}</span>
         <span style="color:#bbb;">${esc(evidence.format)}</span>
-        <span class="${e.spectral_grade ? spectralGradeClass(e.spectral_grade) : qualityToneClass('unknown')}">spectral: ${esc(evidence.spectral)}</span>
+        ${entrySpectralCell(e, evidence.spectral)}
         <span style="color:#888;">${esc(evidence.v0)}</span>
       </div>
     </div>
@@ -1330,6 +1369,7 @@ export const __test__ = {
   deleteWrongMatch,
   deleteWrongMatchGroup,
   deleteUnmatchedOnConverge,
+  entrySpectralCell,
   formatEntryEvidence,
   greenEntries,
   isConvergeGreen,

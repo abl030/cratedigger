@@ -9,12 +9,13 @@ from dataclasses import dataclass
 import msgspec
 
 from lib.json_narrow import json_dict
+from lib.pipeline_db._shared import CURRENT_EVIDENCE_PREFIX
 from web.classify import (
+    AccusationFlags,
     ClassifiedEntry,
     LogEntry,
     classify_log_entry,
-    current_evidence_accusation_admissible,
-    current_evidence_accusation_withheld,
+    evidence_column_accusation_flags,
     proof_gate_projection,
 )
 
@@ -152,6 +153,40 @@ def build_download_history_rows(
     return [build_download_history_row(row) for row in rows]
 
 
+def last_download_accusation_flags(
+    history_items: Sequence[Mapping[str, object]],
+    last_download_spectral_grade: object,
+) -> AccusationFlags:
+    """The audit-only pair for ``last_download_spectral_grade``.
+
+    That column is a denormalised copy of ONE attempt's grade, and a flag
+    must describe the measurement that produced the grade rendered beside
+    it — the same rule ``_project_current_library_have`` follows for the
+    HAVE side. So this returns the flags of the newest attempt whose own
+    grade still equals the denorm, and an empty pair when no attempt does
+    (a later attempt overwrote it, or the producing row predates the
+    retained history). An empty pair leaves the surface on its historical
+    accusing render, which is the fail-accusing direction.
+
+    ``history_items`` are ``DownloadHistoryViewRow`` dicts in
+    ``get_download_history`` order — newest first.
+    """
+    if not isinstance(last_download_spectral_grade, str) or (
+        not last_download_spectral_grade
+    ):
+        return AccusationFlags()
+    for item in history_items:
+        if item.get("spectral_grade") != last_download_spectral_grade:
+            continue
+        admissible = item.get("spectral_accusation_admissible")
+        withheld = item.get("spectral_accusation_withheld")
+        return AccusationFlags(
+            admissible=admissible if isinstance(admissible, bool) else None,
+            withheld=withheld if isinstance(withheld, str) else None,
+        )
+    return AccusationFlags()
+
+
 def classify_download_log_row(
     row: Mapping[str, object],
 ) -> ClassifiedDownloadLogRow:
@@ -245,6 +280,12 @@ def _project_current_library_have(
     ):
         return
 
+    # Re-derived, never carried: the current-evidence grade below comes
+    # from a different measurement than the attempt's own HAVE snapshot,
+    # so the audit-only flags beside it have to describe THAT measurement
+    # (issue #829 Phase 5 PR4).
+    current_flags = evidence_column_accusation_flags(
+        row, prefix=CURRENT_EVIDENCE_PREFIX)
     current_projection = {
         "existing_format": row.get("_current_evidence_format"),
         "existing_min_bitrate": row.get("_current_evidence_min_bitrate"),
@@ -258,16 +299,8 @@ def _project_current_library_have(
         "existing_spectral_bitrate": row.get(
             "_current_evidence_spectral_bitrate"
         ),
-        # Re-derived, never carried: this grade comes from a different
-        # measurement than the attempt's own HAVE snapshot, so the
-        # audit-only flag beside it has to describe THAT measurement
-        # (issue #829 Phase 5 PR4).
-        "existing_spectral_accusation_admissible": (
-            current_evidence_accusation_admissible(row)
-        ),
-        "existing_spectral_accusation_withheld": (
-            current_evidence_accusation_withheld(row)
-        ),
+        "existing_spectral_accusation_admissible": current_flags.admissible,
+        "existing_spectral_accusation_withheld": current_flags.withheld,
         "existing_v0_probe_kind": row.get(
             "_current_evidence_v0_probe_kind"
         ),

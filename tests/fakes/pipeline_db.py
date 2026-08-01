@@ -122,6 +122,8 @@ from lib.pipeline_db import (
 from lib.pipeline_db._core import OwnerSessionLost, ReadOnlyQueryCursor
 from lib.pipeline_db._shared import (
     ACQUISITION_REQUEST_STATUSES,
+    CANDIDATE_EVIDENCE_PREFIX,
+    CURRENT_EVIDENCE_PREFIX,
     processing_owner_payload,
     validate_request_metadata_fields,
 )
@@ -5992,10 +5994,6 @@ class FakePipelineDB:
                     current_evidence.measured_at <= entry.created_at
                     if current_evidence is not None else None
                 ),
-                "_current_evidence_format": (
-                    current_measurement.format
-                    if current_measurement is not None else None
-                ),
                 "_current_evidence_min_bitrate": (
                     current_measurement.min_bitrate_kbps
                     if current_measurement is not None else None
@@ -6008,42 +6006,13 @@ class FakePipelineDB:
                     current_measurement.median_bitrate_kbps
                     if current_measurement is not None else None
                 ),
-                "_current_evidence_spectral_grade": (
-                    current_measurement.spectral_grade
-                    if current_measurement is not None else None
-                ),
-                "_current_evidence_spectral_bitrate": (
-                    current_measurement.spectral_bitrate_kbps
-                    if current_measurement is not None else None
-                ),
                 # issue #829 Phase 5 PR4 — the installed album's own
                 # codec-resolution facts, seeded from the evidence row so
                 # the HAVE grade chip's audit-only flag is derived, never
-                # invented.
-                "_current_evidence_codec_family": (
-                    current_measurement.codec_family
-                    if current_measurement is not None else None
-                ),
-                "_current_evidence_cliff_hz": (
-                    current_measurement.cliff_hz
-                    if current_measurement is not None else None
-                ),
-                "_current_evidence_storage_format": (
-                    current_evidence.storage_format
-                    if current_evidence is not None else None
-                ),
-                "_current_evidence_filetype_band": (
-                    current_evidence.filetype_band
-                    if current_evidence is not None else None
-                ),
-                "_current_evidence_spectral_subject": (
-                    current_measurement.spectral_subject
-                    if current_measurement is not None else None
-                ),
-                "_current_evidence_was_converted_from": (
-                    current_measurement.was_converted_from
-                    if current_measurement is not None else None
-                ),
+                # invented. Same nine aliases the production fragment
+                # projects, from the same helper the other two joins use.
+                **self._accusation_alias_projection(
+                    current_evidence, CURRENT_EVIDENCE_PREFIX),
                 "_current_evidence_v0_probe_kind": (
                     current_v0.subject if current_v0 is not None else None
                 ),
@@ -6140,12 +6109,62 @@ class FakePipelineDB:
             for entry in self.download_logs
         )
 
+    @staticmethod
+    def _accusation_alias_projection(
+        evidence: AlbumQualityEvidence | None,
+        prefix: str,
+    ) -> dict[str, object]:
+        """Mirror ``accusation_evidence_columns`` for one evidence join.
+
+        The production queries project these nine aliases from a LEFT
+        JOIN, so an unmatched join yields all-NULL — exactly what a fake
+        with no linked evidence must hand back, or the fake would be more
+        permissive than production about which flags a surface can see.
+        """
+        measurement = evidence.measurement if evidence is not None else None
+        return {
+            f"{prefix}format": (
+                measurement.format if measurement is not None else None),
+            f"{prefix}spectral_grade": (
+                measurement.spectral_grade
+                if measurement is not None else None),
+            f"{prefix}spectral_bitrate": (
+                measurement.spectral_bitrate_kbps
+                if measurement is not None else None),
+            f"{prefix}spectral_subject": (
+                measurement.spectral_subject
+                if measurement is not None else None),
+            f"{prefix}was_converted_from": (
+                measurement.was_converted_from
+                if measurement is not None else None),
+            f"{prefix}cliff_hz": (
+                measurement.cliff_hz if measurement is not None else None),
+            f"{prefix}codec_family": (
+                measurement.codec_family
+                if measurement is not None else None),
+            f"{prefix}storage_format": (
+                evidence.storage_format if evidence is not None else None),
+            f"{prefix}filetype_band": (
+                evidence.filetype_band if evidence is not None else None),
+        }
+
+    def _current_evidence_for_request(
+        self, row: Mapping[str, object],
+    ) -> AlbumQualityEvidence | None:
+        """The evidence row ``album_requests.current_evidence_id`` names."""
+        evidence_id = row.get("current_evidence_id")
+        if not isinstance(evidence_id, int) or isinstance(evidence_id, bool):
+            return None
+        return self._evidence_by_id.get(evidence_id)
+
     def _long_tail_projection(self, row: dict[str, Any]) -> dict[str, Any]:
         """Project a request row to the long-tail cohort SELECT shape.
 
         Mirrors ``PipelineDB._LONG_TAIL_SELECT``'s narrow column list +
         the ``in_flight_rescue`` stamp so tests can't rely on a column
-        the production query doesn't return.
+        the production query doesn't return, plus the current-evidence
+        accusation aliases the worklist chip's audit-only flags derive
+        from.
         """
         keys = (
             "id", "artist_name", "album_title", "year", "status", "source",
@@ -6158,6 +6177,10 @@ class FakePipelineDB:
         # track_count mirrors the production COUNT(*) over album_tracks.
         out["track_count"] = len(self._tracks.get(int(row["id"]), []))
         out["in_flight_rescue"] = self._has_youtube_running(int(row["id"]))
+        out.update(self._accusation_alias_projection(
+            self._current_evidence_for_request(row),
+            CURRENT_EVIDENCE_PREFIX,
+        ))
         return out
 
     def get_long_tail_cohort(self) -> list[dict[str, Any]]:
@@ -7345,6 +7368,11 @@ class FakePipelineDB:
                     "current_spectral_grade"),
                 "request_current_spectral_bitrate": req.get(
                     "current_spectral_bitrate"),
+                **self._accusation_alias_projection(
+                    ev, CANDIDATE_EVIDENCE_PREFIX),
+                **self._accusation_alias_projection(
+                    self._current_evidence_for_request(req),
+                    CURRENT_EVIDENCE_PREFIX),
             }
             if wrong_match_row_is_visible(row, include_replaced=True):
                 rows.append(row)

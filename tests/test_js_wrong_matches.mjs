@@ -1208,5 +1208,97 @@ console.log('renderLatestImport() distinguishes absent / in-library / verified-l
   assert(!html.includes('No previous import'), 'present: does not render absent copy');
 }
 
+// --- issue #829 Phase 5 PR4/N3: audit-only flags on both WM surfaces ---
+
+console.log('renderQualityBadges() withholds an audit-only HAVE accusation');
+{
+  const group = {
+    in_library: true,
+    quality_label: 'AAC 256k',
+    format: 'AAC',
+    current_spectral_grade: 'likely_transcode',
+    current_spectral_bitrate: 128,
+  };
+  let html = __test__.renderQualityBadges({
+    ...group,
+    current_spectral_accusation_admissible: false,
+    current_spectral_accusation_withheld: 'audit_only_codec',
+  });
+  assert(html.includes('likely transcode'), 'the measured grade stays visible');
+  assert(html.includes('audit-only'), 'the withheld suffix is stated');
+  assert(html.includes('native encoder behaviour'), 'the hover explains why');
+  assert(!html.includes('badge-rank-poor'),
+    'the accusing red badge is withheld');
+
+  html = __test__.renderQualityBadges({
+    ...group,
+    current_spectral_accusation_admissible: true,
+    current_spectral_accusation_withheld: null,
+  });
+  assert(html.includes('badge-rank-poor'),
+    'an admissible grade still gets the accusing badge');
+  assert(!html.includes('audit-only'), 'nothing is withheld on a real finding');
+
+  html = __test__.renderQualityBadges(group);
+  assert(html.includes('badge-rank-poor'),
+    'absent flags keep the historical accusing badge (fail-accusing)');
+
+  html = __test__.renderQualityBadges({
+    ...group,
+    current_spectral_grade: 'suspect',
+    current_spectral_accusation_admissible: false,
+    current_spectral_accusation_withheld: 'codec_unresolved',
+  });
+  assert(html.includes('codec unresolved'), 'the unresolved world is named');
+  assert(!html.includes('native encoder behaviour'),
+    'an unresolved codec is never described as native encoder rolloff');
+  assert(!html.includes('audit-only'),
+    'the two withholding worlds are never conflated');
+}
+
+console.log('entrySpectralCell() withholds an audit-only candidate accusation');
+{
+  const entry = { spectral_grade: 'likely_transcode', spectral_bitrate: 128 };
+  const text = __test__.formatEntryEvidence(entry).spectral;
+
+  let html = __test__.entrySpectralCell({
+    ...entry,
+    spectral_accusation_admissible: false,
+    spectral_accusation_withheld: 'audit_only_codec',
+  }, text);
+  assert(html.includes('likely transcode'), 'the measured grade stays visible');
+  assert(html.includes('audit-only'), 'the withheld suffix is stated');
+  assert(html.includes('quality-tone-unknown'), 'the neutral tone is used');
+  assert(!html.includes('quality-tone-poor'), 'the accusing red is withheld');
+
+  html = __test__.entrySpectralCell({
+    ...entry,
+    spectral_accusation_admissible: true,
+    spectral_accusation_withheld: null,
+  }, text);
+  assert(html.includes('quality-tone-poor'),
+    'an admissible candidate grade still accuses');
+  assert(!html.includes('audit-only'), 'nothing is withheld on a real finding');
+
+  html = __test__.entrySpectralCell(entry, text);
+  assert(html.includes('quality-tone-poor'),
+    'a pre-evidence candidate keeps the accusing chip (fail-accusing)');
+
+  html = __test__.entrySpectralCell({
+    spectral_grade: 'suspect',
+    spectral_bitrate: 192,
+    spectral_accusation_admissible: false,
+    spectral_accusation_withheld: 'codec_unresolved',
+  }, 'suspect · 192 kbps');
+  assert(html.includes('codec unresolved'), 'the unresolved world is named');
+  assert(!html.includes('native encoder behaviour'),
+    'an unresolved codec is never described as native encoder rolloff');
+
+  // A candidate with no grade at all keeps the pre-existing neutral cell.
+  html = __test__.entrySpectralCell({}, '—');
+  assert(html.includes('quality-tone-unknown'), 'a gradeless candidate is neutral');
+  assert(!html.includes('audit-only'), 'a gradeless candidate withholds nothing');
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

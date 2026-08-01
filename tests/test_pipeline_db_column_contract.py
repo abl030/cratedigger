@@ -23,6 +23,7 @@ set, so this never skips — see CLAUDE.md § "Skipped tests are an anti-pattern
 import dataclasses
 import json
 import os
+import re
 import sys
 import unittest
 from datetime import datetime
@@ -55,6 +56,16 @@ from lib.pipeline_db import (
     download_log_with_request_row,
     wrong_match_candidate_row,
 )
+from lib.pipeline_db._shared import (
+    CANDIDATE_EVIDENCE_PREFIX,
+    CURRENT_EVIDENCE_PREFIX,
+    accusation_evidence_columns,
+)
+from lib.pipeline_db.download_log import (
+    _CANDIDATE_EVIDENCE_COLUMNS,
+    _LOG_QUERY_TEMPLATE,
+)
+from lib.pipeline_db.requests import _RequestsMixin
 from lib.quality import (
     AacLatticeCapture,
     AlbumQualityV0Metric,
@@ -784,6 +795,74 @@ class TestWrongMatchCandidateRowRuntimeContract(unittest.TestCase):
         bad["request_id"] = "not-an-int"
         with self.assertRaises(msgspec.ValidationError):
             wrong_match_candidate_row(bad)
+
+
+class TestAccusationEvidenceColumnsAreSpelledOnce(unittest.TestCase):
+    """Every accusation-column block projects the SAME nine aliases.
+
+    Issue #829 Phase 5 PR4/N3. Four queries in two modules hand
+    ``web/classify.py::evidence_column_accusation_flags`` an evidence
+    column block; a block that projects eight of the nine silently
+    resolves a different codec than the surface beside it, and the flag
+    fails accusing rather than loudly. Three of those blocks are spelled
+    inline as SQL literals on purpose — an interpolated generator call
+    would demote their queries out of the replaced-write audit's static
+    resolution — so this test is what keeps the literals and the
+    generator in lockstep.
+    """
+
+    @staticmethod
+    def _aliases(fragment: str) -> set[str]:
+        """The ``AS <alias>`` names one SQL fragment projects."""
+        return set(re.findall(r"AS\s+(_\w+)", fragment))
+
+    def _expected(self, table: str, prefix: str) -> set[str]:
+        return self._aliases(accusation_evidence_columns(table, prefix))
+
+    def test_generator_projects_nine_aliases_under_each_prefix(self) -> None:
+        candidate = self._expected("e", CANDIDATE_EVIDENCE_PREFIX)
+        current = self._expected("current_evidence", CURRENT_EVIDENCE_PREFIX)
+        self.assertEqual(len(candidate), 9)
+        self.assertEqual(len(current), 9)
+        self.assertEqual(
+            {alias.removeprefix(CANDIDATE_EVIDENCE_PREFIX)
+             for alias in candidate},
+            {alias.removeprefix(CURRENT_EVIDENCE_PREFIX) for alias in current},
+            "the two prefixes must project the same measurement",
+        )
+
+    def test_inline_candidate_block_matches_the_generator(self) -> None:
+        self.assertLessEqual(
+            self._expected("e", CANDIDATE_EVIDENCE_PREFIX),
+            self._aliases(_CANDIDATE_EVIDENCE_COLUMNS),
+            "_CANDIDATE_EVIDENCE_COLUMNS dropped an accusation column",
+        )
+
+    def test_inline_current_blocks_match_the_generator(self) -> None:
+        expected = self._expected(
+            "current_evidence", CURRENT_EVIDENCE_PREFIX)
+        for label, fragment in (
+            ("_LOG_QUERY_TEMPLATE", _LOG_QUERY_TEMPLATE),
+            ("_LONG_TAIL_SELECT", _RequestsMixin._LONG_TAIL_SELECT),
+        ):
+            with self.subTest(label):
+                self.assertLessEqual(
+                    expected, self._aliases(fragment),
+                    f"{label} dropped an accusation column",
+                )
+
+    def test_the_alias_check_trips_on_a_dropped_column(self) -> None:
+        """Known-bad self-test: the checker must fail on a short block."""
+        short = "\n".join(
+            accusation_evidence_columns(
+                "current_evidence", CURRENT_EVIDENCE_PREFIX,
+            ).splitlines()[:-1]
+        )
+        self.assertFalse(
+            self._expected("current_evidence", CURRENT_EVIDENCE_PREFIX)
+            <= self._aliases(short),
+            "a block missing one column must not compare equal",
+        )
 
 
 if __name__ == "__main__":

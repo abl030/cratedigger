@@ -77,6 +77,57 @@ for (const [grade, tone] of [
   if (grade.includes('_')) assert(!html.includes(grade), `${grade} raw token stays hidden`);
 }
 
+// --- issue #829 Phase 5 PR4/N3: the worklist chip's audit-only flags ---
+console.log('long-tail worklist chip never accuses an audit-only codec');
+{
+  const row = {
+    current_spectral_grade: 'likely_transcode',
+    current_spectral_bitrate: 128,
+  };
+
+  let html = renderSpectralFragment({
+    ...row,
+    current_spectral_accusation_admissible: false,
+    current_spectral_accusation_withheld: 'audit_only_codec',
+  });
+  assert(html.includes('likely transcode'), 'the measured grade stays visible');
+  assert(html.includes('audit-only'), 'the withheld suffix is stated');
+  assert(html.includes('native encoder behaviour'), 'the hover explains why');
+  assert(html.includes('quality-tone-unknown'), 'the neutral tone is used');
+  assert(!html.includes('quality-tone-poor'), 'the accusing red is withheld');
+
+  html = renderSpectralFragment({
+    ...row,
+    current_spectral_accusation_admissible: true,
+    current_spectral_accusation_withheld: null,
+  });
+  assert(html.includes('quality-tone-poor'),
+    'an admissible grade still accuses');
+  assert(!html.includes('audit-only'), 'nothing is withheld on a real finding');
+
+  html = renderSpectralFragment(row);
+  assert(html.includes('quality-tone-poor'),
+    'a row with no linked evidence keeps the accusing chip (fail-accusing)');
+
+  html = renderSpectralFragment({
+    current_spectral_grade: 'suspect',
+    current_spectral_bitrate: 192,
+    current_spectral_accusation_admissible: false,
+    current_spectral_accusation_withheld: 'codec_unresolved',
+  });
+  assert(html.includes('codec unresolved'), 'the unresolved world is named');
+  assert(!html.includes('native encoder behaviour'),
+    'an unresolved codec is never described as native encoder rolloff');
+  assert(!html.includes('audit-only'),
+    'the two withholding worlds are never conflated');
+
+  assertEqual(renderSpectralFragment({
+    current_spectral_grade: null,
+    current_spectral_accusation_admissible: false,
+    current_spectral_accusation_withheld: 'audit_only_codec',
+  }), '', 'no grade still renders nothing at all');
+}
+
 // --- consoleOpen / consoleClose / consoleIsOpen / consoleToken ---
 console.log('consoleOpen / consoleClose / consoleIsOpen / consoleToken');
 {

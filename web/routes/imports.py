@@ -22,6 +22,10 @@ from lib.import_preview import (
     preview_import_from_values,
 )
 from lib.import_queue import ForceImportPayload, ImportJob, YoutubeImportPayload
+from lib.pipeline_db._shared import (
+    CANDIDATE_EVIDENCE_PREFIX,
+    CURRENT_EVIDENCE_PREFIX,
+)
 from lib.quality import _is_explicit_label
 from lib.util import resolve_failed_path
 from lib.validation_envelope import (
@@ -57,6 +61,7 @@ from lib.wrong_match_delete_service import (
     delete_wrong_match_group,
 )
 from lib.wrong_matches import wrong_match_row_is_visible
+from web.classify import evidence_column_accusation_flags
 from web.routes._pydantic import parse_body
 from web.routes._registry import RouteHandler, RouteRegistration, route
 from web.routes._server_access import _server
@@ -164,6 +169,8 @@ def _quality_summary(row: Mapping[str, object],
             "verified_lossless": False,
             "current_spectral_grade": None,
             "current_spectral_bitrate": None,
+            "current_spectral_accusation_admissible": None,
+            "current_spectral_accusation_withheld": None,
             "quality_label": None,
             "quality_rank": None,
         }
@@ -195,6 +202,13 @@ def _quality_summary(row: Mapping[str, object],
             label = average_quality_label(fmt, beets_avg_kbps)
         rank = srv.compute_library_rank(fmt, beets_avg_kbps)
 
+    # The badge renders ``album_requests.current_spectral_grade``; these
+    # two flags are re-derived from the request's linked current evidence
+    # so the badge stops accusing an audit-only codec of transcoding
+    # (issue #829 Phase 5 PR4). Absent evidence leaves both None and the
+    # badge keeps its historical accusing form.
+    have_flags = evidence_column_accusation_flags(
+        row, prefix=CURRENT_EVIDENCE_PREFIX)
     return {
         "status": status,
         "min_bitrate": beets_min_kbps if beets_min_kbps is not None else db_kbps,
@@ -203,6 +217,8 @@ def _quality_summary(row: Mapping[str, object],
         "verified_lossless": bool(row.get("request_verified_lossless") or False),
         "current_spectral_grade": row.get("request_current_spectral_grade"),
         "current_spectral_bitrate": row.get("request_current_spectral_bitrate"),
+        "current_spectral_accusation_admissible": have_flags.admissible,
+        "current_spectral_accusation_withheld": have_flags.withheld,
         "quality_label": label,
         "quality_rank": rank,
     }
@@ -374,6 +390,11 @@ def _build_wrong_match_groups(
             evidence_format if isinstance(evidence_format, str) else None,
             evidence_avg_bitrate if isinstance(evidence_avg_bitrate, int) else None,
         )
+        # The per-entry chip renders the candidate's OWN grade, so its
+        # audit-only flags come from the candidate evidence join, never
+        # the request's installed copy (issue #829 Phase 5 PR4).
+        candidate_flags = evidence_column_accusation_flags(
+            row, prefix=CANDIDATE_EVIDENCE_PREFIX)
         entries_list.append({
             "download_log_id": log_id,
             "failed_path": resolved_path or failed_path,
@@ -389,6 +410,8 @@ def _build_wrong_match_groups(
             "import_job": import_job,
             "spectral_grade": row.get("spectral_grade"),
             "spectral_bitrate": row.get("spectral_bitrate"),
+            "spectral_accusation_admissible": candidate_flags.admissible,
+            "spectral_accusation_withheld": candidate_flags.withheld,
             "v0_probe_kind": row.get("v0_probe_kind"),
             "v0_probe_avg_bitrate": row.get("v0_probe_avg_bitrate"),
             "source_codec": row.get("evidence_source_codec"),

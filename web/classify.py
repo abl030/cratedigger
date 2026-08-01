@@ -28,6 +28,7 @@ from lib.json_narrow import is_list_like, json_list
 from lib.quality import (
     SPECTRAL_TRANSCODE_GRADES,
     AacLatticeCapture,
+    AlbumQualityEvidence,
     AudioQualityMeasurement,
     CodecFamily,
     EvidenceSubject,
@@ -1028,51 +1029,104 @@ def proof_gate_projection(row: Mapping[str, object]) -> ProofGateProjection:
     )
 
 
-def current_evidence_accusation_withheld(
-    row: Mapping[str, object],
-) -> str | None:
-    """``spectral_accusation_withheld`` for the request's CURRENT evidence."""
-    return _measurement_accusation_withheld_reason(
-        _current_evidence_measurement(row),
-        storage_format=_as_str(row.get("_current_evidence_storage_format")),
-        filetype_band=_as_str(row.get("_current_evidence_filetype_band")) or "",
-    )
+class AccusationFlags(msgspec.Struct, frozen=True):
+    """The audit-only display pair for ONE measured spectral grade.
 
-
-def _current_evidence_measurement(
-    row: Mapping[str, object],
-) -> AudioQualityMeasurement:
-    """The installed album's measurement, from the current-evidence join."""
-    return AudioQualityMeasurement(
-        format=_as_str(row.get("_current_evidence_format")),
-        spectral_grade=_as_str(row.get("_current_evidence_spectral_grade")),
-        spectral_bitrate_kbps=_as_int(
-            row.get("_current_evidence_spectral_bitrate")),
-        spectral_subject=_as_evidence_subject(
-            row.get("_current_evidence_spectral_subject")),
-        was_converted_from=_as_str(
-            row.get("_current_evidence_was_converted_from")),
-        cliff_hz=_as_int(row.get("_current_evidence_cliff_hz")),
-        codec_family=_as_codec_family(
-            row.get("_current_evidence_codec_family")),
-    )
-
-
-def current_evidence_accusation_admissible(
-    row: Mapping[str, object],
-) -> bool | None:
-    """The HAVE flag for the request's CURRENT evidence row.
-
-    Used only where ``_project_current_library_have`` replaces the
-    attempt's HAVE snapshot wholesale: the flag must describe the same
-    measurement as the grade rendered beside it, so it is re-derived from
-    the current-evidence columns rather than carried over from the
-    attempt's own snapshot of a possibly-different installed album.
+    Every operator surface that paints a spectral grade renders it through
+    this pair (issue #829 Phase 5 PR4): ``admissible`` says whether the
+    grade may be shown AS a transcode accusation, ``withheld`` says which
+    of the two withholding worlds it is in when it may not. Both are
+    ``None`` when there is nothing to withhold — no grade, a grade that
+    does not accuse, or no evidence joined at all — and every consumer
+    treats that as "render the historical accusing form", which is the
+    fail-accusing direction for a display-only fact.
     """
-    return _accusation_admissible(
-        _current_evidence_measurement(row),
-        storage_format=_as_str(row.get("_current_evidence_storage_format")),
-        filetype_band=_as_str(row.get("_current_evidence_filetype_band")) or "",
+
+    admissible: bool | None = None
+    withheld: str | None = None
+
+
+def accusation_flags(
+    measurement: AudioQualityMeasurement | None,
+    *,
+    storage_format: str | None = None,
+    filetype_band: str = "",
+) -> AccusationFlags:
+    """THE derivation: both audit-only flags for one measurement.
+
+    Six operator surfaces read this one function through three input
+    adapters (a whole evidence row, a joined column block, a proof-gate
+    verdict). The flags and the rule behind them therefore cannot differ
+    between two surfaces describing the same album, which is the same
+    property ``proof_verdict_from_facts`` gives the verdict tier.
+    """
+    return AccusationFlags(
+        admissible=_accusation_admissible(
+            measurement,
+            storage_format=storage_format,
+            filetype_band=filetype_band,
+        ),
+        withheld=_measurement_accusation_withheld_reason(
+            measurement,
+            storage_format=storage_format,
+            filetype_band=filetype_band,
+        ),
+    )
+
+
+def evidence_accusation_flags(
+    evidence: "AlbumQualityEvidence | None",
+) -> AccusationFlags:
+    """``accusation_flags`` for a caller holding a whole evidence row.
+
+    The storage-format and filetype-band arguments come off the evidence
+    exactly as ``lib/import_preview.py`` passes them to the decider, so a
+    surface reading the loaded row resolves the same codec the decision
+    path did.
+    """
+    if evidence is None:
+        return AccusationFlags()
+    return accusation_flags(
+        evidence.measurement,
+        storage_format=evidence.storage_format,
+        filetype_band=evidence.filetype_band,
+    )
+
+
+def evidence_column_accusation_flags(
+    row: Mapping[str, object],
+    *,
+    prefix: str,
+) -> AccusationFlags:
+    """``accusation_flags`` for a caller holding a joined column block.
+
+    ``prefix`` selects which of a row's evidence joins to read —
+    ``CANDIDATE_EVIDENCE_PREFIX`` for the attempt's own candidate,
+    ``CURRENT_EVIDENCE_PREFIX`` for the request's installed copy. The
+    columns are projected by
+    ``lib/pipeline_db/_shared.py::accusation_evidence_columns`` under the
+    same two prefixes, so the SQL and this adapter cannot drift into
+    reading different measurements.
+
+    A join that matched nothing yields all-NULL columns, hence a
+    measurement with no grade, hence ``AccusationFlags()`` — the surface
+    keeps its historical render.
+    """
+    return accusation_flags(
+        AudioQualityMeasurement(
+            format=_as_str(row.get(f"{prefix}format")),
+            spectral_grade=_as_str(row.get(f"{prefix}spectral_grade")),
+            spectral_bitrate_kbps=_as_int(
+                row.get(f"{prefix}spectral_bitrate")),
+            spectral_subject=_as_evidence_subject(
+                row.get(f"{prefix}spectral_subject")),
+            was_converted_from=_as_str(
+                row.get(f"{prefix}was_converted_from")),
+            cliff_hz=_as_int(row.get(f"{prefix}cliff_hz")),
+            codec_family=_as_codec_family(row.get(f"{prefix}codec_family")),
+        ),
+        storage_format=_as_str(row.get(f"{prefix}storage_format")),
+        filetype_band=_as_str(row.get(f"{prefix}filetype_band")) or "",
     )
 
 

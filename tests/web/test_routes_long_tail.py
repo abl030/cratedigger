@@ -41,6 +41,11 @@ class TestLongTailRouteContracts(_FakeDbWebServerCase):
         "band", "in_flight_rescue",
         # Card meta (year · MB/Discogs · N tracks) + on-disk spectral strip.
         "track_count", "current_spectral_grade", "current_spectral_bitrate",
+        # issue #829 Phase 5 PR4 — the worklist chip's audit-only pair,
+        # derived from the request's linked current evidence so the
+        # console stops painting an audit-only codec as a transcode.
+        "current_spectral_accusation_admissible",
+        "current_spectral_accusation_withheld",
         # The accept-sibling control + siblings panel read the rg straight
         # off the row — the single-row refetch must not drop it (#398).
         "mb_release_group_id",
@@ -74,6 +79,109 @@ class TestLongTailRouteContracts(_FakeDbWebServerCase):
         # Wire shape IS the Struct shape — round-trips cleanly.
         back = msgspec.convert(row, type=LongTailRow)
         self.assertEqual(back.id, 1)
+
+    def _link_installed_evidence(self, request_id: int, measurement,
+                                 **evidence_kwargs) -> None:
+        """Link a production-shaped installed evidence row to a request."""
+        from tests.helpers import make_album_quality_evidence
+
+        installed = make_album_quality_evidence(
+            mb_release_id=f"installed-{request_id}",
+            source_path="/mnt/virtio/Music/Beets/installed",
+            measurement=measurement,
+            **evidence_kwargs,
+        )
+        self.db.upsert_album_quality_evidence(installed)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=installed.mb_release_id,
+            snapshot_fingerprint=installed.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.assertTrue(
+            self.db.set_request_current_evidence(request_id, stored.id))
+
+    def test_worklist_chip_withholds_an_audit_only_accusation(self):
+        """Issue #829 PR4/N3: an installed AAC graded ``likely_transcode``
+        by the codec-blind analyzer must not reach the console's red chip."""
+        from lib.quality import AudioQualityMeasurement
+
+        self.db.seed_request(make_request_row(
+            id=1, status="wanted", mb_release_id="rel-1",
+            current_spectral_grade="likely_transcode",
+            current_spectral_bitrate=128))
+        self._link_installed_evidence(
+            1,
+            AudioQualityMeasurement(
+                min_bitrate_kbps=256, avg_bitrate_kbps=256, is_cbr=True,
+                format="AAC", spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=128, spectral_subject="installed",
+                spectral_provenance="measured", cliff_hz=15000,
+                codec_family="aac", spectral_measurement_version=2,
+            ),
+            codec="aac", container="m4a", storage_format="AAC",
+        )
+
+        status, data = self._get("/api/pipeline/long-tail")
+
+        self.assertEqual(status, 200)
+        row = data["results"][0]
+        self.assertEqual(row["current_spectral_grade"], "likely_transcode")
+        self.assertIs(row["current_spectral_accusation_admissible"], False)
+        self.assertEqual(
+            row["current_spectral_accusation_withheld"], "audit_only_codec")
+
+    def test_worklist_chip_keeps_a_real_transcode_accusation(self):
+        """The must-still-work half: an MP3 cliff still accuses."""
+        from lib.quality import AudioQualityMeasurement
+
+        self.db.seed_request(make_request_row(
+            id=1, status="wanted", mb_release_id="rel-1",
+            current_spectral_grade="likely_transcode",
+            current_spectral_bitrate=128))
+        self._link_installed_evidence(
+            1,
+            AudioQualityMeasurement(
+                min_bitrate_kbps=320, avg_bitrate_kbps=320, is_cbr=True,
+                format="MP3", spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=128, spectral_subject="installed",
+                spectral_provenance="measured", cliff_hz=16000,
+                codec_family="mp3", spectral_measurement_version=2,
+            ),
+            codec="mp3", container="mp3", storage_format="MP3",
+        )
+
+        status, data = self._get("/api/pipeline/long-tail")
+
+        self.assertEqual(status, 200)
+        row = data["results"][0]
+        self.assertIs(row["current_spectral_accusation_admissible"], True)
+        self.assertIsNone(row["current_spectral_accusation_withheld"])
+
+    def test_worklist_chip_has_no_flags_without_linked_evidence(self):
+        """Fail-accusing: no linked evidence, no flags, accusing render.
+
+        Also covers the single-row refetch (KTD8), which must project the
+        same pair as the cohort read or a post-action patch would flip the
+        chip's colour on its own.
+        """
+        self.db.seed_request(make_request_row(
+            id=1, status="wanted", mb_release_id="rel-1",
+            current_spectral_grade="likely_transcode",
+            current_spectral_bitrate=128))
+
+        status, data = self._get("/api/pipeline/long-tail")
+        self.assertEqual(status, 200)
+        row = data["results"][0]
+        self.assertIsNone(row["current_spectral_accusation_admissible"])
+        self.assertIsNone(row["current_spectral_accusation_withheld"])
+
+        one_status, one = self._get("/api/pipeline/long-tail?id=1")
+        self.assertEqual(one_status, 200)
+        _assert_required_fields(
+            self, one["result"], self.ROW_REQUIRED_FIELDS,
+            "long-tail single row")
+        self.assertIsNone(
+            one["result"]["current_spectral_accusation_admissible"])
 
     def test_transparent_band_via_beets_seam(self):
         """AE2 at the HTTP boundary: a wanted row whose beets copy

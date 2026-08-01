@@ -7,6 +7,11 @@ import psycopg2
 import psycopg2.extras
 
 from lib.dispatch.types import PostCommitQuarantineAudit
+from lib.pipeline_db._shared import (
+    CANDIDATE_EVIDENCE_PREFIX,
+    CURRENT_EVIDENCE_PREFIX,
+    accusation_evidence_columns,
+)
 from lib.pipeline_db.rows import (
     DownloadLogWithEvidenceRow,
     DownloadLogWithOriginRow,
@@ -87,6 +92,14 @@ class LatestDownloadSummary(TypedDict):
 #: adjudicated, and the panel would state a verdict production never
 #: reached (Phase 5 plan §1.5c: the same bits measure 3.09 dB apart across
 #: decode paths).
+#: The nine measurement columns the audit-only accusation derivation reads
+#: are spelled inline here rather than generated from
+#: ``accusation_evidence_columns``: this literal is what lets
+#: ``tests/test_replaced_write_audit.py`` resolve the four queries that
+#: embed it as STATIC SQL, and an interpolated call would demote all four
+#: into the reviewed-dynamic registry. ``tests/test_pipeline_db_column_
+#: contract.py`` pins this block against the generator instead, so the
+#: two cannot drift into projecting different subsets.
 _CANDIDATE_EVIDENCE_COLUMNS = """
     e.format AS _evidence_source_format,
     e.min_bitrate_kbps AS _evidence_source_min_bitrate,
@@ -679,6 +692,11 @@ class _DownloadLogMixin(_PipelineDBBase):
         # wrong-match reject — they only get populated for the request's
         # current-state row. COALESCE keeps the older audit history working
         # if any pre-evidence rows are still around.
+        #
+        # Both evidence joins also project the audit-only accusation
+        # columns (issue #829 Phase 5 PR4): the per-entry chip renders the
+        # candidate's grade and the group badge renders the installed
+        # copy's, so each needs the codec facts for ITS OWN measurement.
         cur = self._execute(f"""
             SELECT DISTINCT ON (dl.request_id, dl.validation_result->>'{FAILED_PATH_KEY}')
                 dl.id AS download_log_id,
@@ -714,11 +732,14 @@ class _DownloadLogMixin(_PipelineDBBase):
                 ar.min_bitrate AS request_min_bitrate,
                 ar.verified_lossless AS request_verified_lossless,
                 ar.current_spectral_grade AS request_current_spectral_grade,
-                ar.current_spectral_bitrate AS request_current_spectral_bitrate
+                ar.current_spectral_bitrate AS request_current_spectral_bitrate,
+{accusation_evidence_columns('e', CANDIDATE_EVIDENCE_PREFIX)}{accusation_evidence_columns('current_evidence', CURRENT_EVIDENCE_PREFIX).rstrip().rstrip(',')}
             FROM download_log dl
             JOIN album_requests ar ON dl.request_id = ar.id
             LEFT JOIN album_quality_evidence e
                 ON e.id = dl.candidate_evidence_id
+            LEFT JOIN album_quality_evidence current_evidence
+                ON current_evidence.id = ar.current_evidence_id
             WHERE dl.outcome = 'rejected'
               AND dl.validation_result->>'{FAILED_PATH_KEY}' IS NOT NULL
             ORDER BY dl.request_id, dl.validation_result->>'{FAILED_PATH_KEY}', dl.id DESC

@@ -1,9 +1,12 @@
 // @ts-check
 import { awstDateTime, esc, withApplyDistance } from './util.js';
 import {
+  ACCUSATION_WITHHELD_CODEC_UNRESOLVED,
   qualityToneClass,
   spectralGradeClass,
+  spectralGradeIsAdmissible,
   spectralGradeLabel,
+  spectralWithheldPresentation,
 } from './quality_palette.js';
 
 /**
@@ -71,31 +74,10 @@ function formatSpectral(grade, bitrate) {
 }
 
 /**
- * Whether a measured spectral grade may be RENDERED as a transcode
- * accusation for the codec that produced it (issue #829 Phase 5 PR4).
- *
- * The server answers this in `spectral_accusation_admissible`, derived
- * from the same codec-aware interpretation the decider uses: it is false
- * for AAC, Opus, HE-AAC and unresolved families, whose natural rolloff the
- * codec-blind analyzer grades `suspect`/`likely_transcode` anyway (issue
- * #829's opening defect — download 37946, a 256 kbps CBR AAC graded
- * `likely_transcode` with a LAME-table 128 bucket). The grade stays
- * visible as the measured fact it is; only the accusing colour and
- * wording are withheld. `undefined` — a row with no candidate-evidence
- * join — keeps the historical rendering.
- * @param {string} grade
- * @param {boolean|undefined} admissible
- * @returns {boolean}
- */
-function spectralGradeIsAdmissible(grade, admissible) {
-  if (admissible !== false) return true;
-  return grade !== 'suspect' && grade !== 'likely_transcode';
-}
-
-/**
  * Grade chip that never accuses a codec whose spectral evidence cannot
  * support the accusation. An audit-only grade drops to the neutral tone
- * and carries an explicit suffix plus a hover explanation.
+ * and carries an explicit suffix plus a hover explanation, both from the
+ * shared palette so the other five surfaces say the same thing.
  * @param {string} grade
  * @param {number|string|undefined} bitrate
  * @param {boolean|undefined} admissible
@@ -107,21 +89,9 @@ function spectralChip(grade, bitrate, admissible, withheld = undefined) {
     return formatSpectral(grade, bitrate);
   }
   const floor = bitrate ? ` (~${esc(bitrate)}kbps)` : '';
-  if (withheld === 'codec_unresolved') {
-    // "This codec's rolloff is native encoder behaviour" is a claim ABOUT
-    // a codec. When none could be resolved there is no codec to make it
-    // about, so the honest statement is that the grade is withheld.
-    return `<span class="${qualityToneClass('unknown')}" title="`
-      + `The codec that produced this measurement could not be identified, `
-      + `so its cliff supports no finding either way. The grade is kept as `
-      + `the measured fact.`
-      + `">${esc(spectralGradeLabel(grade))}${floor} · codec unresolved`
-      + `</span>`;
-  }
-  return `<span class="${qualityToneClass('unknown')}" title="`
-    + `This codec's spectral rolloff is native encoder behaviour, not `
-    + `evidence of a transcode. The grade is kept as the measured fact.`
-    + `">${esc(spectralGradeLabel(grade))}${floor} · audit-only</span>`;
+  const withholding = spectralWithheldPresentation(withheld);
+  return `<span class="${withholding.className}" title="${withholding.title}">`
+    + `${esc(spectralGradeLabel(grade))}${floor}${withholding.suffix}</span>`;
 }
 
 /**
@@ -143,7 +113,7 @@ function spectralStripCell(grade, floor, admissible, withheld = undefined) {
   if (spectralGradeIsAdmissible(grade, admissible)) {
     return `<span class="${spectralGradeClass(grade)}">${floor}${esc(spectralGradeLabel(grade))}</span>`;
   }
-  if (withheld === 'codec_unresolved') {
+  if (withheld === ACCUSATION_WITHHELD_CODEC_UNRESOLVED) {
     return `<span class="${qualityToneClass('unknown')}" title="`
       + `Measured grade: ${esc(spectralGradeLabel(grade))} — the codec that `
       + `produced it could not be identified, so the grade is withheld`
