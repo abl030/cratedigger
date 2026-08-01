@@ -251,6 +251,28 @@ class DownloadLogWithEvidenceRow(DownloadLogRow):
     source_min_bitrate: int | None
     source_avg_bitrate: int | None
     source_median_bitrate: int | None
+    # issue #829 Phase 5 PR4 — the candidate-evidence columns the
+    # proof-gate verdict derivation reads
+    # (``lib/quality/verdict_tiers.py::proof_verdict_from_facts``). Unlike
+    # the folded ``_evidence_*`` aliases these have no legacy
+    # ``download_log`` counterpart, so the overlay leaves them alone and
+    # they reach the renderer under these names.
+    # ``_evidence_container_extensions`` is the snapshot's own distinct
+    # file extensions — the ultrasonic leg's decode-path input.
+    _evidence_format: str | None
+    _evidence_codec_family: str | None
+    _evidence_cliff_hz: int | None
+    _evidence_storage_format: str | None
+    _evidence_filetype_band: str | None
+    _evidence_spectral_subject: str | None
+    _evidence_was_converted_from: str | None
+    _evidence_ultrasonic_deficit_db: float | None
+    _evidence_spectral_measurement_version: int | None
+    _evidence_aac_lattice_modal_count: int | None
+    _evidence_aac_lattice_scored_tracks: int | None
+    _evidence_aac_lattice_max_z: float | None
+    _evidence_verified_lossless_classifier: str | None
+    _evidence_container_extensions: list[str] | None
 
 
 def download_log_with_evidence_row(
@@ -286,6 +308,16 @@ class DownloadLogWithRequestRow(DownloadLogWithEvidenceRow):
     _current_evidence_v0_probe_min_bitrate: int | None
     _current_evidence_v0_probe_avg_bitrate: int | None
     _current_evidence_v0_probe_median_bitrate: int | None
+    # issue #829 Phase 5 PR4 — the installed album's own codec-resolution
+    # facts, so the HAVE grade chip can stop accusing an audit-only codec
+    # on the rows where the current-evidence overlay replaces the attempt's
+    # snapshot wholesale.
+    _current_evidence_codec_family: str | None
+    _current_evidence_cliff_hz: int | None
+    _current_evidence_storage_format: str | None
+    _current_evidence_filetype_band: str | None
+    _current_evidence_spectral_subject: str | None
+    _current_evidence_was_converted_from: str | None
     album_title: str
     artist_name: str
     mb_release_id: str | None
@@ -363,6 +395,30 @@ class WrongMatchCandidateRow(TypedDict):
     request_verified_lossless: bool | None
     request_current_spectral_grade: str | None
     request_current_spectral_bitrate: int | None
+    # issue #829 Phase 5 PR4 — the codec-resolution facts behind the two
+    # audit-only accusation flags this view renders: the candidate's own
+    # for the per-entry chip, the installed copy's for the group badge.
+    # Projected by ``accusation_evidence_columns`` under the two shared
+    # alias prefixes and read back by
+    # ``web/classify.py::evidence_column_accusation_flags``.
+    _evidence_format: str | None
+    _evidence_spectral_grade: str | None
+    _evidence_spectral_bitrate: int | None
+    _evidence_spectral_subject: str | None
+    _evidence_was_converted_from: str | None
+    _evidence_cliff_hz: int | None
+    _evidence_codec_family: str | None
+    _evidence_storage_format: str | None
+    _evidence_filetype_band: str | None
+    _current_evidence_format: str | None
+    _current_evidence_spectral_grade: str | None
+    _current_evidence_spectral_bitrate: int | None
+    _current_evidence_spectral_subject: str | None
+    _current_evidence_was_converted_from: str | None
+    _current_evidence_cliff_hz: int | None
+    _current_evidence_codec_family: str | None
+    _current_evidence_storage_format: str | None
+    _current_evidence_filetype_band: str | None
 
 
 def wrong_match_candidate_row(raw: Mapping[str, object]) -> WrongMatchCandidateRow:

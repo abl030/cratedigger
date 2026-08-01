@@ -72,6 +72,47 @@ class ProcessingOwnerProjection(msgspec.Struct, frozen=True):
     preview_status: str
 
 
+#: The two alias prefixes an evidence-column block is projected under: the
+#: attempt's own candidate evidence, and the request's linked current
+#: (installed) evidence. ``web/classify.py`` reads a row through one of
+#: them, so a query and the render adapter cannot disagree about WHICH
+#: measurement a rendered flag describes.
+CANDIDATE_EVIDENCE_PREFIX = "_evidence_"
+CURRENT_EVIDENCE_PREFIX = "_current_evidence_"
+
+#: ``(column, alias suffix)`` for exactly the ``album_quality_evidence``
+#: columns the audit-only accusation derivation reads — the measurement
+#: fields ``web/classify.py::evidence_column_accusation_flags`` rebuilds.
+#: Four queries in two modules project them now that six operator surfaces
+#: render a spectral grade through that derivation; one spelling is what
+#: stops a query projecting eight of the nine columns and silently
+#: resolving a different codec than the surface beside it.
+_ACCUSATION_EVIDENCE_ALIASES: tuple[tuple[str, str], ...] = (
+    ("format", "format"),
+    ("spectral_grade", "spectral_grade"),
+    ("spectral_bitrate_kbps", "spectral_bitrate"),
+    ("spectral_subject", "spectral_subject"),
+    ("was_converted_from", "was_converted_from"),
+    ("cliff_hz", "cliff_hz"),
+    ("codec_family", "codec_family"),
+    ("storage_format", "storage_format"),
+    ("filetype_band", "filetype_band"),
+)
+
+
+def accusation_evidence_columns(table: str, prefix: str) -> str:
+    """SQL fragment projecting one evidence join's accusation columns.
+
+    ``table`` is the join's SQL alias, ``prefix`` one of the two alias
+    prefixes above. The fragment always ends with a trailing comma so it
+    drops into the middle of a select list.
+    """
+    return "".join(
+        f"    {table}.{column} AS {prefix}{alias},\n"
+        for column, alias in _ACCUSATION_EVIDENCE_ALIASES
+    )
+
+
 # Every request presentation query uses these exact aliases and joins only
 # through ``album_requests.active_automation_import_job_id``.  Keeping the
 # projection here prevents browse/library/search routes from reconstructing an

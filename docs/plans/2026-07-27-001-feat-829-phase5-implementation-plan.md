@@ -621,6 +621,44 @@ validated detector port and its reference validation.
 
 ### PR4 — Tiered verdict persistence + display semantics
 
+**Update 2026-08-01 — the convergence-signal item is SPLIT OUT of PR4.**
+Operator decision, recorded in the issue #829 comment "Operator decisions
+2026-08-01": the inter-candidate `cliff_hz` constancy prompt (the last
+bullet of this section) is not PR4's. It is struck through below and left
+in place for provenance; PR4 ships the four remaining items only.
+
+**Tier mapping as shipped (2026-08-01), and why it is not five tiers.**
+`lib/quality/verdict_tiers.py` derives the tier from the legs PRODUCTION
+evaluates, which are not the frozen scorer's three:
+
+| tier | fired legs | production source |
+|---|---|---|
+| 1 | in-window cliff **or** AAC frame lattice | `SpectralInterpretation.supports_transcode_accusation`; `aac_lattice_proof_leg` denial |
+| 2 | ceiling + no-ultrasonic | **not producible** — no ceiling leg exists |
+| 3 | ceiling only | **not producible** |
+| 4 | no-ultrasonic only | `ultrasonic_proof_leg` denial |
+| 5 | none | every evaluable leg cleared |
+
+Tiers 2 and 3 need the ceiling leg — a ≥15 dB step at a consistent slice
+index across an album's tracks — which requires per-track slice vectors
+production does not persist and has never measured. §1.5b's threshold
+freeze already records this as a known residual ("production evaluates
+only TWO of the frozen scorer's three legs"). **Their copy is therefore
+NOT shipped**: keying operator wording on a scenario no producer emits is
+exactly `.claude/rules/test-fidelity.md` Rule C's forbidden shape (issue
+#882's `no_candidates`). Their numbers stay reserved rather than
+renumbered so the shipped tiers keep meaning what the measured table
+says.
+
+The AAC frame-lattice leg post-dates the tier table and is a positive
+detection at the same severity as the in-window cliff (analytic FP floor
+~0.0023 albums per 5000), so it joins tier 1 rather than taking a new
+number; the persisted fired-leg set says which of the two fired.
+
+**A tier-5 verdict over an empty evaluated-leg set is not a clearance**
+and the glance surfaces do not render it — "nothing was found" and
+"nothing was looked for" are different facts (`AlbumProofVerdict.has_finding`).
+
 - Persist the **fired-leg set** and derived tier, not just the boolean.
 - Tier 1 surfaces as a transcode finding, reconciled with the existing
   `likely_transcode` spectral grade so there is ONE statement, not two.
@@ -641,11 +679,12 @@ validated detector port and its reference validation.
   counterfactual — `pipeline-cli quality` does. Leaving the persisted
   stage-chain builders alone was verified correct (fixed key allowlists, zero
   JSONB drift), so this is additive display work.
-- **Also PR4's:** the convergence-signal surfacing from the 2026-07-27
+- ~~**Also PR4's:** the convergence-signal surfacing from the 2026-07-27
   issue comments — inter-candidate `cliff_hz` constancy as a
   "the network has converged, stop searching?" triage prompt. `cliff_hz` is
   the primitive that makes it measurable and it has been accruing since
-  PR1 shipped.
+  PR1 shipped.~~ **SPLIT OUT of PR4 by operator decision 2026-08-01** (issue
+  #829 comment "Operator decisions 2026-08-01"). Not implemented here.
 
 ### PR5 — Research tables, docs, teardown
 

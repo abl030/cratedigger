@@ -2,6 +2,8 @@
 
 import fs from 'node:fs';
 import {
+  ACCUSATION_WITHHELD_AUDIT_ONLY_CODEC,
+  ACCUSATION_WITHHELD_CODEC_UNRESOLVED,
   QUALITY_RANK_ORDER,
   SPECTRAL_GRADE_ORDER,
   SPECTRAL_GRADE_TONES,
@@ -9,8 +11,10 @@ import {
   qualityToneClass,
   spectralGradeBadgeClass,
   spectralGradeClass,
+  spectralGradeIsAdmissible,
   spectralGradeLabel,
   spectralGradeTone,
+  spectralWithheldPresentation,
 } from '../web/js/quality_palette.js';
 
 let passed = 0;
@@ -117,6 +121,56 @@ for (const [rank, foreground] of Object.entries({
 }
 assert(css.includes('.badge-quality-outline { border: 1px solid currentColor; }'),
   'quality badge outlines preserve their canonical rank background');
+
+// --- issue #829 Phase 5 PR4/N3: the shared audit-only render rule ---
+//
+// Six surfaces render a spectral grade through these two primitives, so
+// their behaviour is the one place the rule is stated in JS.
+
+console.log('spectralGradeIsAdmissible() withholds only the accusing grades');
+for (const grade of SPECTRAL_GRADE_ORDER) {
+  const accusing = grade === 'suspect' || grade === 'likely_transcode';
+  assertEqual(spectralGradeIsAdmissible(grade, false), !accusing,
+    `${grade} with admissible=false`);
+  // Every non-false flag value is the fail-accusing fallback: a surface
+  // whose route did not join evidence keeps its historical render.
+  for (const absent of [undefined, null, true]) {
+    assertEqual(spectralGradeIsAdmissible(grade, absent), true,
+      `${grade} with admissible=${JSON.stringify(absent)} stays accusing`);
+  }
+}
+
+console.log('spectralWithheldPresentation() never conflates the two worlds');
+{
+  const auditOnly = spectralWithheldPresentation(
+    ACCUSATION_WITHHELD_AUDIT_ONLY_CODEC);
+  const unresolved = spectralWithheldPresentation(
+    ACCUSATION_WITHHELD_CODEC_UNRESOLVED);
+
+  assertEqual(auditOnly.suffix, ' · audit-only', 'audit-only suffix');
+  assertEqual(unresolved.suffix, ' · codec unresolved', 'unresolved suffix');
+  assert(auditOnly.title.includes('native encoder behaviour'),
+    'a resolved audit-only codec states the encoder fact');
+  assert(!unresolved.title.includes('native encoder behaviour'),
+    'an unresolved codec never claims a fact about an encoder');
+  assert(unresolved.title.includes('could not be identified'),
+    'the unresolved copy says what is actually unknown');
+
+  for (const presentation of [auditOnly, unresolved]) {
+    assertEqual(presentation.className, qualityToneClass('unknown'),
+      'a withheld grade always drops to the neutral tone');
+    assertEqual(presentation.badgeClass,
+      `badge spectral-grade ${qualityRankBadgeClass('unknown')}`,
+      'a withheld badge always drops to the neutral rank badge');
+    assert(!presentation.className.includes('quality-tone-poor'),
+      'a withheld grade never carries the accusing class');
+  }
+
+  // An unknown / absent reason token degrades to the audit-only copy
+  // rather than inventing a third world.
+  assertEqual(spectralWithheldPresentation(undefined).suffix,
+    ' · audit-only', 'an absent reason falls back to the audit-only copy');
+}
 
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

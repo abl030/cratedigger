@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     # ``TestCmdQuality``/``TestCmdRepairSpectral``), which is exactly
     # what makes this concrete annotation safe to add here.
     from lib.pipeline_db import PipelineDB
-    from lib.quality import QualityRankConfig
+    from lib.quality import AlbumQualityEvidence, QualityRankConfig
 
 
 class _ScenarioParams(TypedDict, total=False):
@@ -163,6 +163,67 @@ def _print_decision_outcome(
                   "(attempt-local HAVE audit not modeled; keep all tiers)")
 
 
+def _print_proof_gate_verdict(
+    side: str,
+    evidence: AlbumQualityEvidence,
+) -> None:
+    """Print one album's proof-gate tier, fired legs and proof generation.
+
+    Issue #829 Phase 5 PR4. Read-only display over facts the evidence row
+    already carries, through the SAME derivation the web evidence panel
+    uses (``proof_verdict_from_evidence`` /
+    ``verified_lossless_generation_label``) so the two surfaces cannot
+    state different findings for the same album.
+
+    A fired leg is a triage signal, never an accusation: withholding a
+    proof never rejects, denylists or accuses (Phase 5 plan §2).
+    """
+    from lib.quality import (
+        SPECTRAL_TRANSCODE_GRADES,
+        proof_tier_statement,
+        proof_verdict_from_evidence,
+        verified_lossless_generation_label,
+    )
+
+    verdict = proof_verdict_from_evidence(evidence)
+    legs = ", ".join(verdict.fired_legs) if verdict.fired_legs else "none"
+    # A tier number is meaningless when no leg adjudicated: "tier 5" over an
+    # empty evaluated set would read as a clearance nothing tested for.
+    tier = f"tier {verdict.tier} — " if verdict.has_finding else ""
+    print(f"      proof gate {side}: {tier}"
+          f"{proof_tier_statement(verdict)} (fired legs: {legs})")
+    # WHICH legs ran, and how they came out. The distinction between a leg
+    # that PASSED and one that WITHHELD is the whole reason those outcomes
+    # are three-state: a withheld leg asserts nothing, and most of the
+    # library will never have ultrasonic or lattice evidence at any price.
+    print(f"      legs {side}: ultrasonic="
+          f"{verdict.ultrasonic_outcome or 'not evaluated'}, "
+          f"aac-lattice={verdict.aac_lattice_outcome or 'not evaluated'}")
+    proof = evidence.verified_lossless_proof
+    generation = (
+        verified_lossless_generation_label(proof.classifier)
+        if proof is not None
+        else None
+    )
+    if generation is not None:
+        print(f"      verified lossless {side}: proved by {generation}")
+    grade = evidence.measurement.spectral_grade
+    if not verdict.spectral_accusation_admissible and (
+        grade in SPECTRAL_TRANSCODE_GRADES
+    ):
+        # The measured grade stays visible as the audit fact it is, but it
+        # is NOT a transcode finding — the download-37946 defect (a 256 kbps
+        # CBR AAC graded ``likely_transcode``). WHY it is not a finding
+        # matters: an unresolved codec supports no statement about any
+        # encoder, so it must not be described as native rolloff.
+        reason = (
+            "the codec could not be resolved, so the grade is withheld"
+            if verdict.codec_family is None
+            else "audit-only for this codec — not a transcode finding"
+        )
+        print(f"      note {side}: spectral grade {grade!r} is {reason}")
+
+
 def _print_live_candidate_replay(
     db: PipelineDB,
     request_id: int,
@@ -238,6 +299,9 @@ def _print_live_candidate_replay(
         q_override=q_override,
         gate_unavailable_reason=gate_unavailable_reason,
     )
+    _print_proof_gate_verdict("IN", candidate)
+    if current is not None:
+        _print_proof_gate_verdict("HAVE", current)
 
 
 def cmd_quality(db: PipelineDB, args: argparse.Namespace) -> None:

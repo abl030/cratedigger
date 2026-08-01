@@ -68,6 +68,7 @@ from lib.quality.spectral_interpretation import (
     interpret_spectral_evidence,
     spectral_classes_comparable,
 )
+from lib.quality.verdict_tiers import AlbumProofVerdict, proof_verdict_from_facts
 
 # ---------------------------------------------------------------------------
 # Full pipeline decision — combines all three stages
@@ -1148,6 +1149,8 @@ def _finalize_denylist(result: dict[str, object]) -> dict[str, object]:
 
 def comparison_basis_from_decision(
     result: "dict[str, Any] | None",
+    *,
+    key: str = "comparison_basis",
 ) -> QualityComparisonBasis | None:
     """Re-type the JSON-plain ``comparison_basis`` a decision dict carries.
 
@@ -1157,13 +1160,36 @@ def comparison_basis_from_decision(
     when synthesizing the reject-side ImportResult and by the harness when
     consuming the action file. Strict convert: dispatch and harness ship in
     the same deploy, so shape drift is a bug worth failing on.
+
+    ``key`` selects WHICH basis: the decided one, or PR2d's Stage-1-reject
+    counterfactual (``comparison_basis_if_stage1_deferred``). Both are the
+    same shape written by the same code, so one converter serves both
+    rather than a near-copy that could decode them differently.
     """
     if not result:
         return None
-    raw = result.get("comparison_basis")
+    raw = result.get(key)
     if raw is None:
         return None
     return msgspec.convert(raw, type=QualityComparisonBasis)
+
+
+def stage2_counterfactual_from_decision(
+    result: "dict[str, Any] | None",
+) -> str | None:
+    """The Stage-2 decision a Stage-1 reject short-circuited past (PR2d).
+
+    ``None`` means Stage 1 never short-circuited, so there is no
+    counterfactual — deliberately distinct from
+    ``STAGE2_COUNTERFACTUAL_UNAVAILABLE``, which means the audit ran and
+    could not be evaluated. Issue #829 Phase 5 PR4 persists this onto
+    ``ImportResult`` so the operator surfaces can show the disagreement
+    issue #813 is about instead of it living only in an in-memory dict.
+    """
+    if not result:
+        return None
+    value = result.get("stage2_import_if_stage1_deferred")
+    return value if isinstance(value, str) and value else None
 
 
 QUALITY_DECISION_IMPORT_STAGE_DECISIONS: frozenset[str] = frozenset({
@@ -1386,6 +1412,40 @@ def evidence_spectral_context(
         storage_format=evidence.storage_format,
         filetype_band=evidence.filetype_band,
         container_labels=[file.extension for file in evidence.files],
+    )
+
+
+def proof_verdict_from_evidence(
+    evidence: AlbumQualityEvidence,
+) -> AlbumProofVerdict:
+    """The proof-gate verdict one whole evidence row implies (issue #829 PR4).
+
+    A thin field extraction over ``proof_verdict_from_facts`` — deliberately
+    NOT a second derivation. The Recents render path holds the same columns
+    as a flat projection and calls that function directly; a caller holding
+    the row calls this one. Both surfaces therefore state the same verdict
+    for the same album by construction, which is the property
+    ``tests/test_verdict_tiers_generated.py`` patrols.
+
+    Display only: no branch in the decision path reads a verdict.
+    """
+    measurement = evidence.measurement
+    return proof_verdict_from_facts(
+        spectral_grade=measurement.spectral_grade,
+        spectral_bitrate_kbps=measurement.spectral_bitrate_kbps,
+        cliff_hz=measurement.cliff_hz,
+        codec_family=measurement.codec_family,
+        format=measurement.format,
+        storage_format=evidence.storage_format,
+        filetype_band=evidence.filetype_band,
+        spectral_subject=measurement.spectral_subject,
+        was_converted_from=measurement.was_converted_from,
+        container_labels=[file.extension for file in evidence.files],
+        ultrasonic_deficit_db=measurement.ultrasonic_deficit_db,
+        spectral_measurement_version=(
+            measurement.spectral_measurement_version
+        ),
+        aac_lattice=evidence.aac_lattice,
     )
 
 

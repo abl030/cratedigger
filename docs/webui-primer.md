@@ -242,6 +242,30 @@ operation.
   and refetches only that request while preserving tab/filter/expansion,
   scroll, and focus. A failed refetch keeps the lock and exposes an accessible
   retry.
+- **Proof-gate verdict rows (issue #829 Phase 5 PR4)** — the expanded
+  download-history card carries a `Proof gate` row with ONE statement about
+  what the proof legs found (`Transcode detected: in-window spectral cliff`,
+  `No ultrasonic content — not spectrally provable`, `No evidence of lossy
+  origin from the tests that ran`) and a `Verified lossless` row naming the
+  model that minted the proof (`proved by cliff/grade + ultrasonic legs`).
+  Neither row appears when no leg could adjudicate — "nothing was found" and
+  "nothing was looked for" are different facts. The Spectral row remains the
+  measurement the finding came from, not a second verdict; on a codec whose
+  spectral evidence cannot support a transcode accusation (AAC, Opus,
+  HE-AAC) the grade chip keeps the measured grade but drops the accusing
+  colour and reads `· audit-only` — or `· codec unresolved` when no codec
+  family could be resolved at all, because "native encoder rolloff" is a
+  claim about a codec and there is none to make it about. The flag reaches
+  the Recents strip and the download-history card only; the request-detail
+  Quality header, the Wrong Matches badges and the long-tail worklist chip
+  still render the raw grade (named in `docs/quality-verification.md`
+  § "Which surfaces carry the audit-only flag"). The forensics toggle gains
+  `If stage 1 had deferred` (PR2d's Stage-2 counterfactual, worded exactly
+  as `pipeline-cli quality` prints it) and `Fired proof legs`. Every string
+  is server-owned: `web/classify.py::proof_gate_projection` derives them
+  through `lib/quality/verdict_tiers.py`, the same function
+  `pipeline-cli quality` calls. Details: `docs/quality-verification.md`
+  § "Verdict tiers and their display".
 - **Recents evidence schema (#575 PR2)** — History list rows carry a compact
   monospace `IN … HAVE …` evidence strip (measured incoming bitrate/spectral/
   V0 probe vs on-disk at download time); rows with no measurements (download-

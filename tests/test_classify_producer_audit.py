@@ -195,6 +195,12 @@ MATCH_SUBJECTS: dict[str, _Producers] = {
     "entry.spectral_grade": _Producers(
         ("lib/spectral_check.py",), "a spectral grade the analyser assigns",
     ),
+    "SPECTRAL_TRANSCODE_GRADES": _Producers(
+        ("lib/spectral_check.py",),
+        "the two accusing spectral grades classify_album assigns — the "
+        "membership test that gates issue #829 PR4's audit-only flag reads "
+        "the shared frozenset rather than restating the names",
+    ),
     "entry.original_filetype.lower()": _Producers(
         ("lib/quality/filetypes.py",), "a codec token, already lower-cased",
     ),
@@ -250,6 +256,18 @@ HISTORICAL_LITERALS: dict[str, _Historical] = {
 
 
 NON_MATCH_TARGETS: dict[str, str] = {
+    # Output copy this module RETURNS for the frontend to branch on, not a
+    # value it matches against a producer. web/classify.py is the sole
+    # producer of both tokens; the JS side's equality against them is
+    # pinned by tests/test_js_history.mjs.
+    "ACCUSATION_WITHHELD_AUDIT_ONLY_CODEC": (
+        "output copy: the reason token this module emits when a resolved "
+        "audit-only codec's grade is withheld"
+    ),
+    "ACCUSATION_WITHHELD_CODEC_UNRESOLVED": (
+        "output copy: the reason token this module emits when no codec "
+        "family could be resolved at all"
+    ),
     # Output copy assigned for return, never compared against a producer
     # value. The badge vocabulary they carry IS audited — as the ``badge``
     # subject, where this module is its own registered producer.

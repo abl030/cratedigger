@@ -9,7 +9,15 @@ from dataclasses import dataclass
 import msgspec
 
 from lib.json_narrow import json_dict
-from web.classify import ClassifiedEntry, LogEntry, classify_log_entry
+from lib.pipeline_db._shared import CURRENT_EVIDENCE_PREFIX
+from web.classify import (
+    AccusationFlags,
+    ClassifiedEntry,
+    LogEntry,
+    classify_log_entry,
+    evidence_column_accusation_flags,
+    proof_gate_projection,
+)
 
 
 @dataclass(frozen=True)
@@ -117,6 +125,20 @@ class DownloadHistoryViewRow(msgspec.Struct, frozen=True):
     request_min_bitrate: int | None
     search_filetype_override: str | None
     source: str | None
+    # issue #829 Phase 5 PR4 — the proof-gate verdict and the model that
+    # minted any verified-lossless proof. Defaults keep historical callers
+    # (and every row with no candidate-evidence join) building cleanly.
+    verdict_tier: int | None = None
+    verdict_tier_statement: str | None = None
+    verdict_fired_legs: list[str] = msgspec.field(default_factory=list[str])
+    spectral_accusation_admissible: bool | None = None
+    spectral_accusation_withheld: str | None = None
+    existing_spectral_accusation_admissible: bool | None = None
+    existing_spectral_accusation_withheld: str | None = None
+    verified_lossless_classifier: str | None = None
+    verified_lossless_generation: str | None = None
+    stage2_if_stage1_deferred: str | None = None
+    stage2_if_stage1_deferred_verdict: str | None = None
     request_source: str | None = None
     youtube_metadata: dict[str, object] | None = None
 
@@ -131,14 +153,60 @@ def build_download_history_rows(
     return [build_download_history_row(row) for row in rows]
 
 
+def last_download_accusation_flags(
+    history_items: Sequence[Mapping[str, object]],
+    last_download_spectral_grade: object,
+) -> AccusationFlags:
+    """The audit-only pair for ``last_download_spectral_grade``.
+
+    That column is a denormalised copy of ONE attempt's grade, and a flag
+    must describe the measurement that produced the grade rendered beside
+    it — the same rule ``_project_current_library_have`` follows for the
+    HAVE side. So this returns the flags of the newest attempt whose own
+    grade still equals the denorm, and an empty pair when no attempt does
+    (a later attempt overwrote it, or the producing row predates the
+    retained history). An empty pair leaves the surface on its historical
+    accusing render, which is the fail-accusing direction.
+
+    ``history_items`` are ``DownloadHistoryViewRow`` dicts in
+    ``get_download_history`` order — newest first.
+    """
+    if not isinstance(last_download_spectral_grade, str) or (
+        not last_download_spectral_grade
+    ):
+        return AccusationFlags()
+    for item in history_items:
+        if item.get("spectral_grade") != last_download_spectral_grade:
+            continue
+        admissible = item.get("spectral_accusation_admissible")
+        withheld = item.get("spectral_accusation_withheld")
+        return AccusationFlags(
+            admissible=admissible if isinstance(admissible, bool) else None,
+            withheld=withheld if isinstance(withheld, str) else None,
+        )
+    return AccusationFlags()
+
+
 def classify_download_log_row(
     row: Mapping[str, object],
 ) -> ClassifiedDownloadLogRow:
-    """Build the shared typed classification for one raw download_log row."""
+    """Build the shared typed classification for one raw download_log row.
+
+    The proof-gate verdict (issue #829 Phase 5 PR4) is projected here
+    rather than inside ``classify_log_entry`` because it is derived from
+    the candidate-evidence JOIN aliases, which live on the raw row and are
+    deliberately not folded into ``LogEntry``'s legacy columns. Doing it at
+    this one seam means every consumer of a classified row — the Recents
+    page and the detail-view history panel alike — carries the same
+    verdict.
+    """
     entry = LogEntry.from_row(dict(row))
     return ClassifiedDownloadLogRow(
         entry=entry,
-        classified=classify_log_entry(entry),
+        classified=msgspec.structs.replace(
+            classify_log_entry(entry),
+            **msgspec.structs.asdict(proof_gate_projection(row)),
+        ),
     )
 
 
@@ -212,6 +280,12 @@ def _project_current_library_have(
     ):
         return
 
+    # Re-derived, never carried: the current-evidence grade below comes
+    # from a different measurement than the attempt's own HAVE snapshot,
+    # so the audit-only flags beside it have to describe THAT measurement
+    # (issue #829 Phase 5 PR4).
+    current_flags = evidence_column_accusation_flags(
+        row, prefix=CURRENT_EVIDENCE_PREFIX)
     current_projection = {
         "existing_format": row.get("_current_evidence_format"),
         "existing_min_bitrate": row.get("_current_evidence_min_bitrate"),
@@ -225,6 +299,8 @@ def _project_current_library_have(
         "existing_spectral_bitrate": row.get(
             "_current_evidence_spectral_bitrate"
         ),
+        "existing_spectral_accusation_admissible": current_flags.admissible,
+        "existing_spectral_accusation_withheld": current_flags.withheld,
         "existing_v0_probe_kind": row.get(
             "_current_evidence_v0_probe_kind"
         ),
@@ -263,6 +339,7 @@ _LINKED_IMPORT_EVIDENCE_FIELDS = (
     "existing_spectral_bitrate",
     "existing_spectral_attempted",
     "existing_spectral_error",
+    "existing_spectral_accusation_admissible",
     "existing_v0_probe_kind",
     "existing_v0_probe_min_bitrate",
     "existing_v0_probe_avg_bitrate",

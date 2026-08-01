@@ -1,9 +1,12 @@
 // @ts-check
 import { awstDateTime, esc, withApplyDistance } from './util.js';
 import {
+  ACCUSATION_WITHHELD_CODEC_UNRESOLVED,
   qualityToneClass,
   spectralGradeClass,
+  spectralGradeIsAdmissible,
   spectralGradeLabel,
+  spectralWithheldPresentation,
 } from './quality_palette.js';
 
 /**
@@ -68,6 +71,58 @@ function formatSpectral(grade, bitrate) {
     ? `${esc(spectralGradeLabel(grade))} (~${esc(bitrate)}kbps)`
     : esc(spectralGradeLabel(grade));
   return `<span class="${spectralGradeClass(grade)}">${label}</span>`;
+}
+
+/**
+ * Grade chip that never accuses a codec whose spectral evidence cannot
+ * support the accusation. An audit-only grade drops to the neutral tone
+ * and carries an explicit suffix plus a hover explanation, both from the
+ * shared palette so the other five surfaces say the same thing.
+ * @param {string} grade
+ * @param {number|string|undefined} bitrate
+ * @param {boolean|undefined} admissible
+ * @param {string|undefined} withheld - ProofGateProjection reason token
+ * @returns {string}
+ */
+function spectralChip(grade, bitrate, admissible, withheld = undefined) {
+  if (spectralGradeIsAdmissible(grade, admissible)) {
+    return formatSpectral(grade, bitrate);
+  }
+  const floor = bitrate ? ` (~${esc(bitrate)}kbps)` : '';
+  const withholding = spectralWithheldPresentation(withheld);
+  return `<span class="${withholding.className}" title="${withholding.title}">`
+    + `${esc(spectralGradeLabel(grade))}${floor}${withholding.suffix}</span>`;
+}
+
+/**
+ * The compact strip's spectral cell.
+ *
+ * The one-line strip has a fixed grid column, so it cannot carry the
+ * detail card's `likely transcode · audit-only` wording without spilling
+ * into the V0 column. For an audit-only codec it therefore states the
+ * FACT rather than the withheld accusation — the measured cliff is that
+ * codec's native rolloff — and keeps the measured grade in the hover
+ * title, where the detail card spells it out in full.
+ * @param {string} grade
+ * @param {string} floor - already-escaped "~128k " prefix, or ''
+ * @param {boolean|undefined} admissible
+ * @param {string|undefined} withheld - ProofGateProjection reason token
+ * @returns {string}
+ */
+function spectralStripCell(grade, floor, admissible, withheld = undefined) {
+  if (spectralGradeIsAdmissible(grade, admissible)) {
+    return `<span class="${spectralGradeClass(grade)}">${floor}${esc(spectralGradeLabel(grade))}</span>`;
+  }
+  if (withheld === ACCUSATION_WITHHELD_CODEC_UNRESOLVED) {
+    return `<span class="${qualityToneClass('unknown')}" title="`
+      + `Measured grade: ${esc(spectralGradeLabel(grade))} — the codec that `
+      + `produced it could not be identified, so the grade is withheld`
+      + `">${floor}codec unresolved</span>`;
+  }
+  return `<span class="${qualityToneClass('unknown')}" title="`
+    + `Measured grade: ${esc(spectralGradeLabel(grade))} — native encoder `
+    + `rolloff for this codec, not a transcode finding`
+    + `">${floor}codec rolloff</span>`;
 }
 
 /**
@@ -288,7 +343,11 @@ function buildEvidenceCardModel(h) {
     );
     const floor = (h.spectral_bitrate && !basisAlreadyHasFloor)
       ? `~${esc(h.spectral_bitrate)}k ` : '';
-    inCells.spectral = `<span class="${spectralGradeClass(h.spectral_grade)}">${floor}${esc(spectralGradeLabel(h.spectral_grade))}</span>`;
+    // An audit-only codec's cliff is native encoder rolloff, never an
+    // accusation (issue #829 PR4).
+    inCells.spectral = spectralStripCell(
+      h.spectral_grade, floor, h.spectral_accusation_admissible,
+      h.spectral_accusation_withheld);
   } else if (h.spectral_attempted && h.spectral_error) {
     inCells.spectral = `<span class="${qualityToneClass('poor')}" title="${esc(h.spectral_error)}">spectral failed</span>`;
   }
@@ -327,7 +386,10 @@ function buildEvidenceCardModel(h) {
   }
   if (h.existing_spectral_grade) {
     const floor = h.existing_spectral_bitrate ? `~${esc(h.existing_spectral_bitrate)}k ` : '';
-    haveCells.spectral = `<span class="${spectralGradeClass(h.existing_spectral_grade)}">${floor}${esc(spectralGradeLabel(h.existing_spectral_grade))}</span>`;
+    haveCells.spectral = spectralStripCell(
+      h.existing_spectral_grade, floor,
+      h.existing_spectral_accusation_admissible,
+      h.existing_spectral_accusation_withheld);
   } else if (h.existing_spectral_attempted && h.existing_spectral_error) {
     haveCells.spectral = `<span class="${qualityToneClass('poor')}" title="${esc(h.existing_spectral_error)}">spectral failed</span>`;
   } else if (h.existing_spectral_bitrate) {
@@ -524,12 +586,18 @@ export function renderDownloadHistoryItem(h) {
     const candidate = h.spectral_error
       ? `<span class="${qualityToneClass('poor')}" title="${esc(h.spectral_error)}">analysis failed</span>`
       : h.spectral_grade
-      ? formatSpectral(h.spectral_grade, h.spectral_bitrate)
+      ? spectralChip(
+        h.spectral_grade, h.spectral_bitrate,
+        h.spectral_accusation_admissible, h.spectral_accusation_withheld)
       : 'unmeasured';
     const existing = h.existing_spectral_error
       ? `<span class="${qualityToneClass('poor')}" title="${esc(h.existing_spectral_error)}">analysis failed</span>`
       : h.existing_spectral_grade
-      ? formatSpectral(h.existing_spectral_grade, h.existing_spectral_bitrate)
+      ? spectralChip(
+        h.existing_spectral_grade,
+        h.existing_spectral_bitrate,
+        h.existing_spectral_accusation_admissible,
+        h.existing_spectral_accusation_withheld)
       : h.existing_spectral_bitrate
         ? `<span class="${qualityToneClass('unknown')}">ungraded (~${esc(h.existing_spectral_bitrate)}kbps)</span>`
         : 'unmeasured';
@@ -537,6 +605,34 @@ export function renderDownloadHistoryItem(h) {
       + `<span class="r-ev-tag">HAVE</span> ${existing}`]);
   } else {
     rows.push(['Spectral', '—']);
+  }
+
+  // Proof gate (issue #829 Phase 5 PR4). ONE statement about what the
+  // proof legs found — the Spectral row above is the measurement it came
+  // from, not a competing verdict. Absent on rows where no leg could
+  // adjudicate: "nothing was found" and "nothing was looked for" are
+  // different facts, and only the server knows which this row is.
+  if (h.verdict_tier_statement) {
+    const tone = h.verdict_tier === 1 ? 'poor'
+      : h.verdict_tier === 4 ? 'acceptable' : 'lossless';
+    rows.push([
+      'Proof gate',
+      `<span class="${qualityToneClass(tone)}" title="A fired leg is a `
+      + `triage signal, not an accusation: withholding a proof never `
+      + `rejects or denylists.">${esc(h.verdict_tier_statement)}</span>`,
+    ]);
+  }
+  // Which model minted the verified-lossless proof this row carries. The
+  // stamp meant two different things across the library until it was
+  // rendered (Phase 5 plan, PR3 hard constraint 3).
+  if (h.verified_lossless_generation) {
+    rows.push([
+      'Verified lossless',
+      `<span class="${qualityToneClass('lossless')}" title="No evidence of `
+      + `lossy origin was found by these tests — not a claim of `
+      + `bit-faithfulness.">proved by ${esc(h.verified_lossless_generation)}`
+      + `</span>`,
+    ]);
   }
 
   // V0 probe row: render whichever side exists and label both sides
@@ -634,6 +730,29 @@ export function renderDownloadHistoryItem(h) {
   }
 
   const forensicRows = [];
+  // PR2d's Stage-1-reject counterfactual (issue #829 Phase 5 PR4). A
+  // Stage-1 spectral reject short-circuits before Stage 2 runs, so the
+  // chain stops at `stage1_spectral:reject` and says nothing about whether
+  // the candidate was actually an upgrade — which IS issue #813's
+  // disagreement question. `pipeline-cli quality` has shown this since
+  // PR2d; this is the same fact on the card, worded the same way.
+  if (h.stage2_if_stage1_deferred) {
+    const scored = h.stage2_if_stage1_deferred_verdict
+      ? `, scoring the candidate ${esc(h.stage2_if_stage1_deferred_verdict)}`
+      : '';
+    forensicRows.push([
+      'If stage 1 had deferred',
+      h.stage2_if_stage1_deferred === 'unavailable'
+        ? 'stage 2 could not be evaluated'
+        : `stage2=${esc(h.stage2_if_stage1_deferred)}${scored}`,
+    ]);
+  }
+  if (h.verdict_fired_legs && h.verdict_fired_legs.length > 0) {
+    forensicRows.push([
+      'Fired proof legs',
+      esc(h.verdict_fired_legs.join(' · ')),
+    ]);
+  }
   if (h.spectral_error) {
     forensicRows.push(['Spectral IN error', esc(h.spectral_error)]);
   }
@@ -692,6 +811,9 @@ export function renderDownloadHistoryItem(h) {
 export const __test__ = {
   formatV0Probe,
   formatSpectral,
+  spectralChip,
+  spectralGradeIsAdmissible,
+  spectralStripCell,
   storageFormatLabel,
   withWas,
 };

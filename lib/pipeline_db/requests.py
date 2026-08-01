@@ -1538,8 +1538,30 @@ class _RequestsMixin(_PipelineDBBase):
     # ``ar.*`` would carry the full row, but the worklist only renders this
     # subset plus ``in_flight_rescue``; pinning the list keeps the wire payload
     # narrow and the contract explicit.
+    # The current-evidence join carries the codec facts behind the
+    # worklist chip's audit-only flags (issue #829 Phase 5 PR4); the
+    # service derives them per row via the shared adapter. The nine
+    # aliases are spelled inline rather than generated so this SELECT
+    # stays statically resolvable for the replaced-write audit;
+    # ``tests/test_pipeline_db_column_contract.py`` pins them against
+    # ``accusation_evidence_columns`` so the spellings cannot drift.
     _LONG_TAIL_SELECT = """
         SELECT
+            current_evidence.format AS _current_evidence_format,
+            current_evidence.spectral_grade
+                AS _current_evidence_spectral_grade,
+            current_evidence.spectral_bitrate_kbps
+                AS _current_evidence_spectral_bitrate,
+            current_evidence.spectral_subject
+                AS _current_evidence_spectral_subject,
+            current_evidence.was_converted_from
+                AS _current_evidence_was_converted_from,
+            current_evidence.cliff_hz AS _current_evidence_cliff_hz,
+            current_evidence.codec_family AS _current_evidence_codec_family,
+            current_evidence.storage_format
+                AS _current_evidence_storage_format,
+            current_evidence.filetype_band
+                AS _current_evidence_filetype_band,
             ar.id,
             ar.artist_name,
             ar.album_title,
@@ -1566,6 +1588,8 @@ class _RequestsMixin(_PipelineDBBase):
                   AND dl.outcome = 'youtube_running'
             ) AS in_flight_rescue
         FROM album_requests ar
+        LEFT JOIN album_quality_evidence current_evidence
+          ON current_evidence.id = ar.current_evidence_id
     """
 
     def get_long_tail_cohort(self) -> list[dict[str, Any]]:
