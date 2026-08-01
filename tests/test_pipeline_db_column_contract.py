@@ -26,6 +26,7 @@ import os
 import re
 import sys
 import unittest
+from collections.abc import Mapping
 from datetime import datetime
 from typing import cast
 
@@ -64,6 +65,7 @@ from lib.pipeline_db._shared import (
 from lib.pipeline_db.download_log import (
     _CANDIDATE_EVIDENCE_COLUMNS,
     _LOG_QUERY_TEMPLATE,
+    _DownloadLogMixin,
 )
 from lib.pipeline_db.requests import _RequestsMixin
 from lib.quality import (
@@ -80,7 +82,7 @@ from tests.helpers import (
     make_validation_result,
 )
 from tests.test_pipeline_db import make_db, requires_postgres
-from web.classify import _ROW_FIELD_ALIASES, LogEntry
+from web.classify import _ROW_FIELD_ALIASES, LogEntry, proof_gate_projection
 
 # conftest boots an ephemeral PostgreSQL and exports TEST_DB_DSN for the whole
 # suite, so this runs unconditionally — NO skip gate (CLAUDE.md § "Skipped tests
@@ -866,21 +868,97 @@ class TestAccusationEvidenceColumnsAreSpelledOnce(unittest.TestCase):
         )
 
 
+class _RecordingRow(dict[str, object]):
+    """A row that records which keys a production reader actually asks for.
+
+    Behavioural observation, not source analysis: the real reader runs
+    against a real mapping and names its own inputs.
+    """
+
+    def __init__(self, values: dict[str, object]) -> None:
+        super().__init__(values)
+        self.read: set[str] = set()
+
+    def get(self, key: str, default: object = None) -> object:
+        self.read.add(key)
+        return super().get(key, default)
+
+    def __getitem__(self, key: str) -> object:
+        self.read.add(key)
+        return super().__getitem__(key)
+
+
+def unclassified_candidate_aliases(
+    fragment: str,
+    *,
+    folded: set[str],
+    gate_input: set[str],
+    projection_read: set[str],
+    alias_mapped: set[str],
+    registered_unused: Mapping[str, str],
+) -> set[str]:
+    """Candidate-evidence aliases nothing in the render path consumes.
+
+    Module-level so the known-bad self-test can drive it directly. Every
+    alias must land in one of the five roles; anything left over is an
+    alias the SELECT block pays for and no consumer reads — which is
+    exactly how ``_evidence_verified_lossless_classifier`` sat unread while
+    the renderer guessed.
+    """
+    aliases = set(re.findall(r"AS\s+(_evidence_\w+)", fragment))
+    return aliases - (
+        folded | gate_input | projection_read | alias_mapped
+        | set(registered_unused)
+    )
+
+
 class TestRenderAliasMap(unittest.TestCase):
-    """``web/classify.py``'s inbound alias map names real SELECT aliases.
+    """Every candidate-evidence alias has a consumer, and the map is exact.
 
     Most candidate-evidence aliases are folded into legacy ``download_log``
-    keys by ``_overlay_evidence_onto_download_log_row``. The few with no
-    legacy counterpart reach ``LogEntry.from_row`` under the alias, and
-    ``from_row`` drops every key it does not know — so a stale alias here
-    is silent: the field simply stays ``None`` forever and the renderer
-    falls back to guessing, which is the defect that put "verified
-    lossless" on rows the decider refused to prove.
+    keys by ``_overlay_evidence_onto_download_log_row``. The rest reach the
+    render path under their own alias — some read straight off the row dict
+    by ``proof_gate_projection``, one renamed into ``LogEntry`` by
+    ``_ROW_FIELD_ALIASES``. Every consumer drops what it does not recognise
+    silently, so the failure mode is a column the SELECT pays for and the
+    card never shows.
+
+    Three things fail here: a key naming a column the block does not
+    project, a target ``LogEntry`` does not declare, and an alias NO
+    consumer reads. The narrower case — an alias one consumer reads and
+    another silently drops, which is what left the minted proof unread
+    while the verdict guessed — is caught downstream, by the composed
+    overlay → ``LogEntry`` → ``classify_log_entry`` property in
+    ``tests/test_web_recents_generated.py``.
     """
 
     @staticmethod
     def _aliases(fragment: str) -> set[str]:
         return set(re.findall(r"AS\s+(_\w+)", fragment))
+
+    @staticmethod
+    def _folded() -> set[str]:
+        return {
+            alias
+            for _legacy, alias, _gated in _DownloadLogMixin._EVIDENCE_OVERLAY_FOLD
+        }
+
+    @classmethod
+    def _projection_read(cls) -> set[str]:
+        """The aliases ``proof_gate_projection`` reads, observed by running it.
+
+        Values are chosen so no branch short-circuits away a read: the AAC
+        lattice capture is only built — and its two companion columns only
+        consulted — when ``scored_tracks`` is a real integer.
+        """
+        row = _RecordingRow({
+            "candidate_evidence_id": 1,
+            "_evidence_aac_lattice_scored_tracks": 6,
+            "_evidence_aac_lattice_modal_count": 2,
+            "_evidence_aac_lattice_max_z": 4.25,
+        })
+        proof_gate_projection(row)
+        return {key for key in row.read if key.startswith("_evidence_")}
 
     def test_every_alias_key_is_projected_by_the_candidate_block(self) -> None:
         self.assertLessEqual(
@@ -899,12 +977,99 @@ class TestRenderAliasMap(unittest.TestCase):
             "from_row would silently drop it",
         )
 
+    def test_every_candidate_alias_has_a_consumer(self) -> None:
+        """Fail-closed partition: fold it, gate on it, read it, or map it."""
+        self.assertEqual(
+            unclassified_candidate_aliases(
+                _CANDIDATE_EVIDENCE_COLUMNS,
+                folded=self._folded(),
+                gate_input=set(_DownloadLogMixin._EVIDENCE_GATE_INPUT_ALIASES),
+                projection_read=self._projection_read(),
+                alias_mapped=set(_ROW_FIELD_ALIASES),
+                registered_unused={},
+            ),
+            set(),
+            "the candidate-evidence SELECT block projects a column no "
+            "consumer reads — fold it into a legacy key, read it in "
+            "proof_gate_projection, map it into LogEntry, or drop it",
+        )
+
+    def test_the_attributable_proof_aliases_are_projected_and_not_folded(
+        self,
+    ) -> None:
+        """The gated-in-place set keeps its own alias all the way through.
+
+        Folding it would defeat the gate: the legacy key it folded into
+        would be read by a renderer that never learns the lineage.
+        """
+        gated = set(_DownloadLogMixin._EVIDENCE_ATTRIBUTABLE_PROOF_ALIASES)
+        self.assertLessEqual(
+            gated, self._aliases(_CANDIDATE_EVIDENCE_COLUMNS))
+        self.assertEqual(gated & self._folded(), set())
+
+    def test_every_gate_input_is_projected_and_consumed(self) -> None:
+        """The predicate's inputs must reach the overlay and stop there.
+
+        A gate input that the SELECT never projects reads as NULL, which
+        fails the attribution closed for every row; one that survives the
+        overlay would reach a renderer as an undeclared key.
+        """
+        gate_inputs = set(_DownloadLogMixin._EVIDENCE_GATE_INPUT_ALIASES)
+        self.assertLessEqual(
+            gate_inputs, self._aliases(_CANDIDATE_EVIDENCE_COLUMNS),
+            "a gate input the candidate block never projects",
+        )
+        overlaid = _DownloadLogMixin._overlay_evidence_onto_download_log_row(
+            dict.fromkeys(gate_inputs, "measured"))
+        self.assertEqual(
+            gate_inputs & set(overlaid), set(),
+            "a gate input survived the overlay into the rendered row",
+        )
+
     def test_the_alias_check_trips_on_a_stale_alias(self) -> None:
         """Known-bad self-test: a renamed column must not pass."""
         self.assertFalse(
             {"_evidence_verified_lossless_classifer"}
             <= self._aliases(_CANDIDATE_EVIDENCE_COLUMNS),
             "a misspelled alias must not resolve against the SELECT block",
+        )
+
+    def test_the_partition_trips_on_an_unconsumed_alias(self) -> None:
+        """Known-bad self-test: a projected column nobody reads is named."""
+        widened = _CANDIDATE_EVIDENCE_COLUMNS + (
+            "    e.some_new_fact AS _evidence_some_new_fact,\n"
+        )
+        self.assertEqual(
+            unclassified_candidate_aliases(
+                widened,
+                folded=self._folded(),
+                gate_input=set(_DownloadLogMixin._EVIDENCE_GATE_INPUT_ALIASES),
+                projection_read=self._projection_read(),
+                alias_mapped=set(_ROW_FIELD_ALIASES),
+                registered_unused={},
+            ),
+            {"_evidence_some_new_fact"},
+        )
+
+    def test_the_partition_accepts_an_explicitly_registered_alias(
+        self,
+    ) -> None:
+        """The escape hatch is a registered reason, not silence."""
+        widened = _CANDIDATE_EVIDENCE_COLUMNS + (
+            "    e.some_new_fact AS _evidence_some_new_fact,\n"
+        )
+        self.assertEqual(
+            unclassified_candidate_aliases(
+                widened,
+                folded=self._folded(),
+                gate_input=set(_DownloadLogMixin._EVIDENCE_GATE_INPUT_ALIASES),
+                projection_read=self._projection_read(),
+                alias_mapped=set(_ROW_FIELD_ALIASES),
+                registered_unused={
+                    "_evidence_some_new_fact": "reserved for a follow-up",
+                },
+            ),
+            set(),
         )
 
 

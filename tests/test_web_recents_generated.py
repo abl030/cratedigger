@@ -10,6 +10,7 @@ from hypothesis import example, given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
+from lib.pipeline_db.download_log import _DownloadLogMixin
 from lib.quality import (
     AudioQualityMeasurement,
     ImportResult,
@@ -24,7 +25,7 @@ from lib.quality.decisions import (
     mint_verified_lossless_proof,
 )
 from tests.test_web_recents import _entry
-from web.classify import classify_log_entry
+from web.classify import ClassifiedEntry, LogEntry, classify_log_entry
 from web.download_history_view import (
     _project_current_library_have,
     _project_linked_import_evidence,
@@ -352,13 +353,15 @@ def assert_verified_lossless_claim_is_minted(
 ) -> None:
     """The phrase is a report of a minted proof, never a re-derivation.
 
-    ``album_quality_evidence``'s ``verified_proof_shape`` CHECK makes
-    ``verified_lossless_classifier`` non-NULL exactly when the decider
-    proved the row, and ``QualityComparisonBasis.verified_lossless_bypass``
-    is the same decision persisted on the import result. Those two are the
-    complete set of things that may put the phrase in front of an operator;
-    container, conversion and spectral columns are what the decider
-    CONSIDERED, not what it concluded.
+    ``classifier`` is the proof that actually REACHED the render path:
+    ``album_quality_evidence.verified_lossless_classifier`` once the read
+    seam's source-semantic gate has had its say, or the one this attempt's
+    own ``ImportResult`` persisted. ``basis_bypass`` is the same decision
+    persisted on the comparison basis. Those are the complete set of things
+    that may put the phrase in front of an operator; container, conversion
+    and spectral columns are what the decider CONSIDERED, not what it
+    concluded, and a legacy-lineage evidence row's proof was minted from
+    another attempt's bytes.
     """
     proved = classifier is not None or basis_bypass
     if proved:
@@ -369,6 +372,51 @@ def assert_verified_lossless_claim_is_minted(
                 f"{field_name} claims verified lossless with no minted "
                 f"proof: {text!r}"
             )
+
+
+#: A real v3 ``import_result`` blob whose ``source_measurement`` carries the
+#: era's ``verified_lossless`` flag (live dl 36970 req 2937). Production's own
+#: legacy reader projects it into ``ImportResult.verified_lossless_proof``, so
+#: this is a row that genuinely HAS a persisted proof object — and must still
+#: not move the verdict, because the projection stamps the same
+#: ``legacy_import_result`` classifier on the v1/v2 heuristic flag.
+_V3_PERSISTED_PROOF_BLOB: dict[str, object] = {
+    "version": 3,
+    "decision": "import",
+    "source_measurement": {
+        "format": "FLAC",
+        "min_bitrate_kbps": 742,
+        "verified_lossless": True,
+    },
+}
+
+
+def _raw_download_log_row(
+    *,
+    lineage: int | None,
+    classifier: str | None,
+    **columns: object,
+) -> dict[str, object]:
+    """One joined ``download_log`` row exactly as ``get_log`` hands it over.
+
+    The candidate-evidence aliases are the join's own names — the shape the
+    read seam receives BEFORE ``_overlay_evidence_onto_download_log_row``
+    adjudicates them.
+    """
+    entry = _entry(outcome="success", beets_scenario="strong_match", **columns)
+    return {
+        **entry.to_json_dict(),
+        "verified_lossless_classifier": None,
+        "_evidence_lineage_version": lineage,
+        "_evidence_verified_lossless_classifier": classifier,
+    }
+
+
+def render_through_the_read_seam(row: dict[str, object]) -> ClassifiedEntry:
+    """Raw joined row → production overlay → ``LogEntry`` → verdict."""
+    overlaid = _DownloadLogMixin._overlay_evidence_onto_download_log_row(
+        dict(row))
+    return classify_log_entry(LogEntry.from_row(overlaid))
 
 
 def assert_minted_proof_is_reported(verdict: str) -> None:
@@ -1342,6 +1390,140 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
         """Known-bad for the must-still-work half."""
         with self.assertRaisesRegex(AssertionError, "dropped a minted"):
             assert_minted_proof_is_reported("MP3 V0 - from FLAC")
+
+    @given(
+        lineage=st.sampled_from((None, 1, 2, 3, 4)),
+        classifier=st.sampled_from((None, *MINTED_CLASSIFIERS)),
+        was_converted=st.booleans(),
+        original_filetype=st.sampled_from((None, "flac", "FLAC", "wav")),
+        spectral_grade=st.sampled_from(
+            (None, "genuine", "suspect", "likely_transcode")),
+        actual_filetype=st.sampled_from(("mp3", "opus", "flac")),
+        actual_min_bitrate=st.integers(min_value=1, max_value=1_200),
+        existing_min_bitrate=st.sampled_from((None, 0, 192, 320)),
+        search_filetype_override=st.sampled_from((None, "lossless")),
+        import_result_proof=st.booleans(),
+    )
+    @example(  # the shipped defect's shape: a cross-walked legacy proof
+        lineage=1,
+        classifier=MINTED_CLASSIFIERS[0],
+        was_converted=False,
+        original_filetype=None,
+        spectral_grade=None,
+        actual_filetype="mp3",
+        actual_min_bitrate=320,
+        existing_min_bitrate=192,
+        search_filetype_override=None,
+        import_result_proof=False,
+    )
+    @example(  # the must-still-work twin: same proof, source-semantic row
+        lineage=4,
+        classifier=MINTED_CLASSIFIERS[0],
+        was_converted=False,
+        original_filetype=None,
+        spectral_grade=None,
+        actual_filetype="mp3",
+        actual_min_bitrate=320,
+        existing_min_bitrate=192,
+        search_filetype_override=None,
+        import_result_proof=False,
+    )
+    @example(  # live dl 36970 req 2937 — no evidence, proof on the blob only
+        lineage=None,
+        classifier=None,
+        was_converted=True,
+        original_filetype="flac",
+        spectral_grade="genuine",
+        actual_filetype="opus",
+        actual_min_bitrate=112,
+        existing_min_bitrate=192,
+        search_filetype_override=None,
+        import_result_proof=True,
+    )
+    def test_only_an_attributable_evidence_proof_reaches_the_verdict(
+        self,
+        lineage: int | None,
+        classifier: str | None,
+        was_converted: bool,
+        original_filetype: str | None,
+        spectral_grade: str | None,
+        actual_filetype: str,
+        actual_min_bitrate: int,
+        existing_min_bitrate: int | None,
+        search_filetype_override: str | None,
+        import_result_proof: bool,
+    ) -> None:
+        """Composed patrol: the real read seam plus the real renderer.
+
+        The gate and the copy live in different modules — the overlay
+        decides whether a proof may speak for this attempt's bytes, the
+        verdict decides whether to say so — and the defect lived in their
+        composition: ``candidate_evidence_id`` was cross-walked by migration
+        021 §6b, so a legacy-lineage row's proof belongs to a sibling
+        attempt. Neither module alone can see that, so the property drives
+        the raw joined row through BOTH.
+
+        ``import_result_proof`` crosses the whole space with a row whose own
+        audit blob DOES project a ``verified_lossless_proof``. It must never
+        move the verdict: every historical projection mints the same
+        ``legacy_import_result`` stamp out of the era's
+        ``will_be_verified_lossless``, which on the converted path is
+        ``converted_count > 0 and not is_transcode`` — the retired heuristic
+        itself. An evidence row is the only thing that carries an
+        attributable proof.
+        """
+        row = _raw_download_log_row(
+            lineage=lineage,
+            classifier=classifier,
+            was_converted=was_converted,
+            original_filetype=original_filetype,
+            spectral_grade=spectral_grade,
+            actual_filetype=actual_filetype,
+            actual_min_bitrate=actual_min_bitrate,
+            existing_min_bitrate=existing_min_bitrate,
+            search_filetype_override=search_filetype_override,
+            import_result=(
+                _V3_PERSISTED_PROOF_BLOB if import_result_proof else None
+            ),
+        )
+        result = render_through_the_read_seam(row)
+        proved = classifier is not None and lineage in (3, 4)
+        assert_verified_lossless_claim_is_minted(
+            result.verdict,
+            result.summary,
+            classifier=classifier if proved else None,
+            basis_bypass=False,
+        )
+        if proved:
+            assert_minted_proof_is_reported(result.verdict)
+
+    def test_the_composed_checker_trips_on_the_ungated_render(self) -> None:
+        """Known-bad: re-feed a cross-walked lineage-1 classifier.
+
+        No mutant needed — skipping the read seam IS the pre-fix path, so
+        the real renderer over the real cross-walked row produces the
+        shipped falsehood and the checker must name it.
+        """
+        row = _raw_download_log_row(
+            lineage=1,
+            classifier=MINTED_CLASSIFIERS[0],
+            was_converted=False,
+            original_filetype=None,
+            spectral_grade=None,
+            actual_filetype="mp3",
+            actual_min_bitrate=320,
+            existing_min_bitrate=192,
+            search_filetype_override=None,
+        )
+        ungated = classify_log_entry(LogEntry.from_row(dict(row)))
+        self.assertIn("verified lossless", ungated.verdict.lower())
+        with self.assertRaisesRegex(AssertionError, "no minted proof"):
+            assert_verified_lossless_claim_is_minted(
+                ungated.verdict,
+                ungated.summary,
+                classifier=None,
+                basis_bypass=False,
+            )
 
     @given(
         source_id=st.integers(min_value=1, max_value=1_000),

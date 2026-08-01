@@ -180,6 +180,7 @@ def _print_proof_gate_verdict(
     """
     from lib.quality import (
         SPECTRAL_TRANSCODE_GRADES,
+        evidence_is_source_semantic,
         proof_tier_statement,
         proof_verdict_from_evidence,
         verified_lossless_generation_label,
@@ -199,10 +200,19 @@ def _print_proof_gate_verdict(
     print(f"      legs {side}: ultrasonic="
           f"{verdict.ultrasonic_outcome or 'not evaluated'}, "
           f"aac-lattice={verdict.aac_lattice_outcome or 'not evaluated'}")
+    # The same attribution gate Recents applies at its read seam, through
+    # the same predicate. A legacy-lineage row is not always this album's own
+    # snapshot — migration 021 §6b cross-walked pre-content-addressing rows
+    # onto whichever content-addressed row their release already had — so an
+    # ungated read attributed a sibling's proof on 4,910 live requests
+    # (6,608 IN/HAVE sides) while Recents said nothing about the same album.
+    # Two operator surfaces stating different proofs for one album is the
+    # drift ``proof_verdict_from_evidence`` already exists to prevent.
     proof = evidence.verified_lossless_proof
     generation = (
         verified_lossless_generation_label(proof.classifier)
         if proof is not None
+        and evidence_is_source_semantic(evidence.lineage_version)
         else None
     )
     if generation is not None:

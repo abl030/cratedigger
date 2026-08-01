@@ -127,6 +127,7 @@ from lib.quality.evidence_types import (
     EVIDENCE_PROVENANCE_MEASURED,
     EVIDENCE_SUBJECT_INSTALLED,
     EVIDENCE_SUBJECT_SOURCE,
+    SOURCE_SEMANTIC_LINEAGE_VERSIONS,
     SPECTRAL_TRANSCODE_GRADES,
     V0_PROBE_KINDS,
     V0_PROBE_LOSSLESS_SOURCE,
@@ -145,6 +146,7 @@ from lib.quality.evidence_types import (
     TargetQualityContract,
     V0ProbeEvidence,
     VerifiedLosslessProof,
+    evidence_is_source_semantic,
     is_comparable_lossless_source_probe,
 )
 from lib.quality.filetypes import (
@@ -383,6 +385,7 @@ __all__ = [
     "REASON_OPUS_NO_SPECTRAL_SIGNAL",
     "REASON_UNCALIBRATED_CODEC_FAMILY",
     "REASON_UNKNOWN_CODEC_FAMILY",
+    "SOURCE_SEMANTIC_LINEAGE_VERSIONS",
     "SOX_NATIVE_AUDIO_EXTENSIONS",
     "SPECTRAL_DECODE_PATH_FFMPEG_RESAMPLED",
     "SPECTRAL_DECODE_PATH_SOX_NATIVE",
@@ -534,6 +537,7 @@ __all__ = [
     "dispatch_action",
     "effective_search_tiers",
     "evidence_decision_name",
+    "evidence_is_source_semantic",
     "extract_usernames",
     "file_identity",
     "filetype_matches",

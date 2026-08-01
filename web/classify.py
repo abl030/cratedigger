@@ -54,9 +54,24 @@ from lib.validation_envelope import decode_validation_envelope
 #: dropped by ``from_row``'s unknown-key filter — which is precisely how the
 #: render path came to re-derive "verified lossless" from container and
 #: conversion columns instead of reading the minted proof.
+#:
+#: An alias is the ONLY legitimate source for its target: the target is not a
+#: ``download_log`` column, so nothing else can legally supply it. ``from_row``
+#: therefore applies these AFTER the plain keys, and the mapping is total in
+#: both directions — every key must be a real SELECT alias and every value a
+#: real ``LogEntry`` field, pinned by
+#: ``tests/test_pipeline_db_column_contract.py::TestRenderAliasMap``.
 _ROW_FIELD_ALIASES: dict[str, str] = {
     "_evidence_verified_lossless_classifier": "verified_lossless_classifier",
 }
+
+
+def _serialised_row_value(value: object) -> object:
+    """Serialize a DB value for ``LogEntry``: datetimes become ISO strings."""
+    isoformat = getattr(value, "isoformat", None)
+    if callable(isoformat):
+        return str(isoformat())
+    return value
 
 
 @dataclass
@@ -122,10 +137,23 @@ class LogEntry:
     existing_v0_probe_median_bitrate: int | None = None
     # The model that MINTED this candidate's verified-lossless proof, read
     # straight off the candidate-evidence join under its SELECT alias (see
-    # ``_ROW_FIELD_ALIASES``). ``None`` means the decider minted no proof —
-    # ``album_quality_evidence``'s ``verified_proof_shape`` CHECK makes the
-    # column non-NULL exactly when ``verified_lossless`` is TRUE — so this
-    # is the single fact the render path may key "verified lossless" on.
+    # ``_ROW_FIELD_ALIASES``), and NULLed by
+    # ``_overlay_evidence_onto_download_log_row`` when that join's lineage is
+    # not source-semantic — a cross-walked ``candidate_evidence_id``
+    # (migration 021 §6b) names a sibling attempt's snapshot, and a proof
+    # minted from other bytes says nothing about this attempt's.
+    #
+    # ``None`` means no attributable proof reached the render path. On
+    # lineage 4 the ``album_quality_evidence_verified_proof_shape`` CHECK
+    # makes the column non-NULL exactly when ``verified_lossless`` is TRUE;
+    # on the older lineages that CHECK is explicitly exempt
+    # (``lineage_version < 4 OR …``, migration 055) and the equivalence
+    # holds only by writer discipline — ``upsert_album_quality_evidence``
+    # writes the whole proof tuple or none of it. Either way the column is a
+    # REPORT of a decision, never an input to one. Together with
+    # ``QualityComparisonBasis.verified_lossless_bypass`` (rendered by the
+    # basis verdict itself) it is the complete set of facts the phrase may
+    # be keyed on.
     verified_lossless_classifier: str | None = None
 
     # album_requests columns (from JOIN — empty for history-only queries)
@@ -146,17 +174,24 @@ class LogEntry:
         Handles datetime serialization and missing fields gracefully.
         Aliased evidence columns are renamed on the way in; every other
         unknown key is dropped.
+
+        Aliases are applied in a SECOND pass so the result cannot depend on
+        dict ordering. A single pass would let a row carrying both a mapped
+        alias and a same-named plain key resolve to whichever appeared last —
+        a silent, ordering-dependent verdict. The alias wins, because it is
+        the only legitimate source for its target: the target is not a
+        ``download_log`` column, so a plain key of that name can only be
+        something else's value wearing the field's name.
         """
         known = {f.name for f in fields(cls)}
         kwargs: dict[str, Any] = {}
         for key, value in row.items():
-            name = _ROW_FIELD_ALIASES.get(key, key)
-            if name not in known:
+            if key in _ROW_FIELD_ALIASES or key not in known:
                 continue
-            # Serialize datetime objects to ISO strings
-            if hasattr(value, "isoformat"):
-                value = str(value.isoformat())
-            kwargs[name] = value
+            kwargs[key] = _serialised_row_value(value)
+        for alias, name in _ROW_FIELD_ALIASES.items():
+            if alias in row and name in known:
+                kwargs[name] = _serialised_row_value(row[alias])
         return cls(**kwargs)
 
     def to_json_dict(self) -> dict[str, Any]:
@@ -1569,20 +1604,17 @@ def _classify(
         if entry.beets_scenario in ("transcode_upgrade", "transcode_first"):
             return _classify_transcode(entry)
 
-        # The MINTED proof, never a re-derivation. The single writer of
-        # this column is ``mint_verified_lossless_proof``, and it refuses
-        # far more rows than "converted from FLAC and graded genuine"
-        # does — a withheld ultrasonic or AAC-lattice leg, an R19
-        # preserved source, a denied leg. Re-deriving the phrase from
-        # container and conversion columns therefore told the operator the
-        # decider had proved something it explicitly declined to prove
-        # (live: dl 39094 req 2147, dl 39120 req 2066, dl 39122 req 1034 —
-        # all graded genuine from FLAC with a NULL classifier), and
-        # withheld it on 122 live rows the decider DID prove: imports
-        # nothing converted, an ALAC source, and rows whose denormalised
-        # grade column disagreed with the evidence. Rows predating the
-        # evidence join simply lose the phrase; there is no era-aware
-        # fallback, because a fallback is the same guess wearing a date.
+        # The attributable minted proof, never a re-derivation. The retired
+        # heuristic (``was_converted`` AND ``original_filetype == "flac"``
+        # AND ``spectral_grade == "genuine"``) read what the decider
+        # CONSIDERED and called it a conclusion, so it claimed a proof on
+        # rows the gate explicitly refused (live: dl 39094 req 2147,
+        # dl 39120 req 2066, dl 39122 req 1034) and withheld one on rows the
+        # gate granted. This column is the decider's own answer, already
+        # gated by ``verified_lossless_proof_is_attributable`` at the read
+        # seam. A row that carries no attributable proof simply has no
+        # suffix; there is no era-aware fallback, because a fallback is the
+        # same guess wearing a date.
         is_verified_lossless = entry.verified_lossless_classifier is not None
 
         # Upgrade vs new import — use existing_min_bitrate from the
@@ -1992,10 +2024,16 @@ def _replaced_side_phrase(entry: LogEntry) -> str:
     while ``cur_label`` is a floor, so pairing "avg 108k" with "OPUS 93k"
     would read as a downgrade on a row the decider ranked an upgrade. The
     per-side metrics, ranks and branch are the basis strip's job. A row
-    with no basis gets the bare noun rather than a guess.
+    with no basis, or a basis whose HAVE side had no resolvable codec, gets
+    the bare noun rather than a guess.
+
+    ``compare_quality`` is the sole producer of ``existing_format`` and
+    writes ``existing.format.lower()`` or ``None`` — never an empty string —
+    so ``is None`` is the exact producible absence, not a truthiness sweep
+    over a shape nothing can emit.
     """
     basis = _entry_comparison_basis(entry)
-    if basis is None or not basis.existing_format:
+    if basis is None or basis.existing_format is None:
         return "the existing copy"
     return basis.existing_format.upper()
 
