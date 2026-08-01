@@ -785,21 +785,29 @@ class TestFinalExitDecision(unittest.TestCase):
 # ============================================================================
 
 class TestConversionTarget(unittest.TestCase):
-    """Test conversion_target: what should lossless files become on disk?"""
+    """Test conversion_target: what should lossless files become on disk?
 
-    def _target(self, target_format=None, verified=False, vl_target=None):
+    The keying fact is the LOSSLESS SOURCE, never the proof (issue #829,
+    operator decision 2026-08-01): "no we always want it opus, the
+    contract is not around verified or not, is the stored format for
+    lossless absolutely."
+    """
+
+    def _target(self, target_format=None, lossless_source=False,
+                vl_target=None):
         from harness.import_one import conversion_target
-        return conversion_target(target_format, verified, vl_target)
+        return conversion_target(target_format, lossless_source, vl_target)
 
     def test_default_is_none(self):
-        """No target configured, not verified → None (keep V0)."""
+        """No target configured, no lossless source → None (keep V0)."""
         self.assertIsNone(self._target())
 
     def test_target_format_flac_keeps_lossless(self):
         self.assertEqual(self._target(target_format="flac"), "lossless")
 
     def test_target_format_flac_overrides_target(self):
-        self.assertEqual(self._target(target_format="flac", verified=True,
+        self.assertEqual(self._target(target_format="flac",
+                                      lossless_source=True,
                                       vl_target="opus 128"), "lossless")
 
     def test_target_format_lossless_keeps_lossless(self):
@@ -819,15 +827,33 @@ class TestConversionTarget(unittest.TestCase):
         self.assertEqual(contract.format, "flac")
         self.assertFalse(contract.is_cbr)
 
-    def test_verified_with_target_returns_target(self):
-        self.assertEqual(self._target(verified=True, vl_target="opus 128"),
-                         "opus 128")
+    def test_lossless_source_with_target_returns_target(self):
+        self.assertEqual(
+            self._target(lossless_source=True, vl_target="opus 128"),
+            "opus 128")
 
-    def test_verified_without_target_returns_none(self):
-        self.assertIsNone(self._target(verified=True, vl_target=None))
+    def test_lossless_source_without_target_returns_none(self):
+        self.assertIsNone(self._target(lossless_source=True, vl_target=None))
 
-    def test_not_verified_with_target_returns_none(self):
-        self.assertIsNone(self._target(verified=False, vl_target="opus 128"))
+    def test_native_lossy_source_never_gets_a_target(self):
+        """Nothing lossless was converted, so there is nothing to convert
+        and no honest target label to claim."""
+        self.assertIsNone(
+            self._target(lossless_source=False, vl_target="opus 128"))
+
+    def test_the_proof_is_not_an_input_at_all(self):
+        """The keying fix, stated where it cannot rot: the signature has
+        exactly three parameters and none of them is the proof.
+
+        A pin on values alone would still pass if a fourth,
+        proof-shaped parameter were added and consulted."""
+        import inspect
+
+        from harness.import_one import conversion_target
+        self.assertEqual(
+            list(inspect.signature(conversion_target).parameters),
+            ["target_format", "lossless_source", "verified_lossless_target"],
+        )
 
 
 class TestShouldRunTargetConversion(unittest.TestCase):

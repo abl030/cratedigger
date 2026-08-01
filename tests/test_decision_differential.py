@@ -279,6 +279,45 @@ class TestDecideCorpusSeesTheProofGateChange(unittest.TestCase):
                          "uncalibrated_decode_path")
 
 
+class TestConfiguredTargetIsAnActionTimeFact(unittest.TestCase):
+    """``verified_lossless_target`` is configuration, not an evidence
+    column, so the harness has to be told it.
+
+    Without it every row decides as if nothing were configured, and
+    ``target_final_format`` — plus the gate format it feeds — is
+    identical on both trees whatever changed. That is a false zero of
+    exactly the shape Rule D's "read the zeros" clause is about, and it
+    is why the option exists.
+    """
+
+    def test_omitting_the_target_makes_the_stored_format_unmeasurable(self):
+        without = decide_row(_corpus_row()).fields
+        self.assertIsNone(without["target_final_format"])
+
+    def test_passing_the_live_target_reaches_the_decision(self):
+        decided = decide_row(
+            _corpus_row(), verified_lossless_target="opus 128",
+        ).fields
+        self.assertEqual(decided["target_final_format"], "opus 128")
+
+    def test_the_cli_threads_the_target_through(self):
+        with TemporaryDirectory() as d:
+            corpus = Path(d) / "corpus.jsonl"
+            out = Path(d) / "decided.jsonl"
+            corpus.write_text(
+                json.dumps(_corpus_row()) + "\n", encoding="utf-8")
+            self.assertEqual(
+                main([
+                    "decide", "--corpus", str(corpus), "--out", str(out),
+                    "--verified-lossless-target", "opus 128",
+                ]),
+                0,
+            )
+            decided = json.loads(out.read_text(encoding="utf-8").strip())
+            self.assertEqual(
+                decided["fields"]["target_final_format"], "opus 128")
+
+
 class TestCounterfactualArm(unittest.TestCase):
     """The arm that measures a PROMOTION gate.
 

@@ -241,6 +241,15 @@ def import_quality_decision(
     # still import, but "worse" is blocked regardless of proof status.
     # This prevents a deliberately too-low verified-lossless target from
     # blindly replacing a good existing album (issue #60 acceptance criterion).
+    #
+    # It is a preference in ONE direction only. The comparison itself stays
+    # proof-blind: a proof-DENIED album that measures better imports and
+    # replaces, and no brake may ever be added here. Authority: "we measure,
+    # we assign evidence, grade and whatever else. then, we import, it
+    # compares to whats on disk, if its better it imports. it makes no
+    # difference if it's laundered or not, is it better? if you denied
+    # laundered audio you'd never get anything for this particular release."
+    # — https://github.com/abl030/cratedigger/issues/829
     if verified_lossless_proof and verdict == "equivalent":
         return ImportQualityDecision(
             decision="transcode_upgrade" if is_transcode else "import",
@@ -628,7 +637,12 @@ V0_OVERRIDE_MIN_KBPS: int = 200
 #:
 #: A denial is NOT a rejection. The album imports normally and simply
 #: carries no spectral verified-lossless proof, so it stays on the search
-#: surface (Phase 5 plan §2's authority; §1.7's claim).
+#: surface (Phase 5 plan §2's authority; §1.7's claim). It does not change
+#: the album's stored format either: the configured
+#: ``verified_lossless_target`` applies to every lossless-sourced import,
+#: proved or not (issue #829, operator decision 2026-08-01 — "the contract
+#: is not around verified or not, is the stored format for lossless
+#: absolutely"). Proof decides names; config decides formats.
 #:
 #: KNOWN RESIDUAL, measured in the same run: production evaluates only
 #: TWO of the frozen scorer's three legs — its cliff leg is the album
