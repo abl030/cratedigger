@@ -8,9 +8,13 @@ import unittest
 from dataclasses import dataclass
 from unittest.mock import patch
 
+from hypothesis import example, given
+from hypothesis import strategies as st
+
+import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.config import CratediggerConfig
-from lib.dispatch import dispatch_import_core
-from lib.dispatch.types import EvidenceImportGate, ImportOneRun
+from lib.dispatch import DISPATCH_CODE_REQUEUE_FAILED, dispatch_import_core
+from lib.dispatch.types import DispatchOutcome, EvidenceImportGate, ImportOneRun
 from lib.import_execution import (
     ExecutionCancelled,
     ExecutionLeaseSnapshot,
@@ -44,12 +48,20 @@ from tests.helpers import (
     noop_quality_gate,
     pinned_dispatch_authority,
 )
+from web.classify import LogEntry, classify_log_entry
 
 # The request id every generated world seeds and self-heal checks read back.
 _OPERATION_FENCE_REQUEST_ID = 703
 # ``_exercise_world``'s seeded request status. Force/YouTube own no request
 # lifecycle, so an ambiguous operation of theirs must leave this untouched.
 _SEEDED_REQUEST_STATUS = "wanted"
+_NON_AUTOMATION_FAILURE_CLASSES = (
+    "executor_crash",
+    "bundle_less_failure",
+    "requeue_failed",
+    "startup_ambiguity",
+)
+_NON_AUTOMATION_REQUEST_STATUSES = ("wanted", "unsearchable", "imported")
 
 
 @dataclass(frozen=True)
@@ -117,7 +129,8 @@ def assert_operation_fence(
     ``download_log`` audit row carries the world-failure label so the
     operator reads it in Recents. Force/YouTube own no request lifecycle, so
     an ambiguous operation of theirs leaves the request exactly as the
-    caller left it — the terminal job row alone is that outcome's surface.
+    caller left it while one linked failed audit row surfaces the attempt in
+    Recents.
     """
     if len(beets_invocations) > 1:
         raise AssertionError("one operation identity reached Beets more than once")
@@ -170,6 +183,16 @@ def assert_operation_fence(
             f"{row['status']!r}; force/YouTube own no request lifecycle to "
             "self-heal"
         )
+    else:
+        linked = [
+            entry for entry in db.download_logs
+            if entry.outcome == "failed"
+            and entry.source_download_log_id is not None
+        ]
+        if len(linked) != 1:
+            raise AssertionError(
+                "non-automation failure recorded no linked Recents audit row"
+            )
 
 
 def assert_startup_force_action_lifecycle(
@@ -200,6 +223,161 @@ def assert_startup_force_action_lifecycle(
         )
 
 
+def assert_non_automation_failure_lifecycle(
+    *,
+    db: FakePipelineDB,
+    job_type: str,
+    request_id: int,
+    request_status: str,
+    source_download_log_id: int,
+) -> None:
+    """A force/YouTube failure is visible, linked, source-correct and inert."""
+    job = next(
+        row for row in db._import_jobs
+        if row.get("request_id") == request_id and row.get("job_type") == job_type
+    )
+    if job["status"] != "failed":
+        raise AssertionError(f"non-automation job ended {job['status']!r}")
+    if db.request(request_id)["status"] != request_status:
+        raise AssertionError("non-automation failure changed request lifecycle")
+    origin = next(
+        row for row in db.download_logs if row.id == source_download_log_id
+    )
+    if job_type == IMPORT_JOB_YOUTUBE and origin.outcome != "youtube_success":
+        raise AssertionError("YouTube import did not use the canonical handoff")
+    failed = [
+        row for row in db.download_logs
+        if row.outcome == "failed"
+        and row.source_download_log_id == source_download_log_id
+    ]
+    if len(failed) != 1:
+        raise AssertionError("non-automation failure did not write one audit row")
+    if failed[0].source != origin.source:
+        raise AssertionError("terminal audit source drifted from its origin")
+    audit = db.get_download_log_entry(failed[0].id)
+    if audit is None:
+        raise AssertionError("linked terminal audit disappeared")
+    rendered = classify_log_entry(LogEntry.from_row(dict(audit)))
+    expected_prefix = (
+        "Force import attempt failed:"
+        if job_type == IMPORT_JOB_FORCE
+        else "YouTube import attempt failed:"
+    )
+    if not (rendered.verdict or "").startswith(expected_prefix):
+        raise AssertionError("Recents lost the failed job-type identity")
+
+
+def _drive_non_automation_failure(
+    *,
+    job_type: str,
+    failure_class: str,
+    request_status: str,
+) -> tuple[FakePipelineDB, int]:
+    """Drive each residual path through importer/startup production code."""
+    db = FakePipelineDB()
+    request_id = _OPERATION_FENCE_REQUEST_ID
+    db.seed_request(make_request_row(
+        id=request_id,
+        mb_release_id="generated-non-automation-failure",
+        status=(
+            "wanted"
+            if failure_class == "startup_ambiguity" and request_status == "imported"
+            else request_status
+        ),
+    ))
+    if job_type == IMPORT_JOB_FORCE:
+        source_download_log_id = db.log_download(request_id, outcome="rejected")
+        payload: dict[str, object] = {
+            "download_log_id": source_download_log_id,
+            "failed_path": "/tmp/generated-non-automation-force",
+        }
+        launch_source = "/tmp/generated-non-automation-force"
+    else:
+        source_download_log_id = db.insert_youtube_running(
+            request_id=request_id,
+            browse_id="MPREb_generated_failure",
+            audio_playlist_id=None,
+            yt_url="https://music.youtube.com/watch?v=generated-failure",
+            expected_track_count=1,
+        )
+        payload = youtube_import_payload(
+            staged_path="/tmp/generated-non-automation-youtube",
+            request_id=request_id,
+            browse_id="MPREb_generated_failure",
+            download_log_id=source_download_log_id,
+        )
+        launch_source = "/tmp/generated-non-automation-youtube"
+    dedupe_key = f"{job_type}:{failure_class}:{request_status}:{source_download_log_id}"
+    job = (
+        db.enqueue_import_job(
+            job_type,
+            request_id=request_id,
+            dedupe_key=dedupe_key,
+            payload=payload,
+        )
+        if job_type == IMPORT_JOB_FORCE
+        else db.enqueue_youtube_import_and_mark_success(
+            download_log_id=source_download_log_id,
+            request_id=request_id,
+            dedupe_key=dedupe_key,
+            payload=payload,
+            message="generated YouTube rescue staged",
+            terminal_metadata={},
+        )
+    )
+    evidence = make_album_quality_evidence(
+        mb_release_id="generated-non-automation-failure",
+        source_path=launch_source,
+    )
+    db.upsert_album_quality_evidence(evidence)
+    persisted = db.find_album_quality_evidence(
+        mb_release_id=evidence.mb_release_id,
+        snapshot_fingerprint=evidence.snapshot_fingerprint,
+    )
+    assert persisted is not None and persisted.id is not None
+    assert db.set_import_job_candidate_evidence(job.id, persisted.id)
+    db.mark_import_job_preview_importable(job.id, preview_result={})
+    claimed = claim_next_import_job(db, worker_id="generated-worker")
+    assert claimed is not None
+
+    if failure_class == "startup_ambiguity":
+        assert db.authorize_import_job_launch(
+            claimed.id,
+            request_id=request_id,
+            release_id="generated-non-automation-failure",
+            source_path=launch_source,
+        ) is not None
+        if request_status == "imported":
+            db.request(request_id)["status"] = "imported"
+        db.recover_running_import_jobs(
+            requeue_message="generated retry",
+            recovery_message="generated startup ambiguity",
+        )
+        if claim_next_import_job(db, worker_id="replay") is not None:
+            raise AssertionError("launched startup ambiguity replayed")
+        return db, source_download_log_id
+
+    def execute(*_args: object, **_kwargs: object) -> DispatchOutcome:
+        if failure_class == "executor_crash":
+            raise RuntimeError("generated executor acknowledgement vanished")
+        if failure_class == "bundle_less_failure":
+            return DispatchOutcome(False, "generated terminal bundle missing")
+        assert failure_class == "requeue_failed"
+        return DispatchOutcome(
+            False,
+            "generated preview requeue update failed",
+            code=DISPATCH_CODE_REQUEUE_FAILED,
+        )
+
+    process_claimed_job(
+        db,  # pyright: ignore[reportArgumentType]
+        claimed,
+        ctx=object(),
+        execute_fn=execute,
+    )
+    return db, source_download_log_id
+
+
 def _exercise_world(
     world: OperationWorld,
     *,
@@ -224,16 +402,38 @@ def _exercise_world(
         mb_release_id=release_id,
         status="wanted",
     ))
+    source_download_log_id = (
+        None
+        if world.job_type == IMPORT_JOB_AUTOMATION
+        else db.log_download(
+            request_id,
+            outcome="rejected",
+            error_message="generated non-automation source",
+        )
+        if world.job_type == IMPORT_JOB_FORCE
+        else db.insert_youtube_running(
+            request_id=request_id,
+            browse_id="MPREb_fence",
+            audio_playlist_id=None,
+            yt_url="https://music.youtube.com/watch?v=generated-fence",
+            expected_track_count=1,
+        )
+    )
     if world.job_type == IMPORT_JOB_AUTOMATION:
         payload: dict[str, object] = {}
     elif world.job_type == IMPORT_JOB_FORCE:
-        payload = {"download_log_id": request_id, "failed_path": source_path}
+        assert source_download_log_id is not None
+        payload = {
+            "download_log_id": source_download_log_id,
+            "failed_path": source_path,
+        }
     else:
+        assert source_download_log_id is not None
         payload = youtube_import_payload(
             staged_path=source_path,
             request_id=request_id,
             browse_id="MPREb_fence",
-            download_log_id=request_id,
+            download_log_id=source_download_log_id,
         )
     if world.job_type == IMPORT_JOB_AUTOMATION:
         assert active_state is not None
@@ -244,12 +444,22 @@ def _exercise_world(
             canonical_path=source_path,
             message="generated operation-fence owner",
         )
-    else:
+    elif world.job_type == IMPORT_JOB_FORCE:
         job = db.enqueue_import_job(
             world.job_type,
             request_id=request_id,
             dedupe_key=f"{world.job_type}:generated:{request_id}",
             payload=payload,
+        )
+    else:
+        assert source_download_log_id is not None
+        job = db.enqueue_youtube_import_and_mark_success(
+            download_log_id=source_download_log_id,
+            request_id=request_id,
+            dedupe_key=f"{world.job_type}:generated:{request_id}",
+            payload=payload,
+            message="generated YouTube rescue staged",
+            terminal_metadata={},
         )
     evidence = make_album_quality_evidence(
         mb_release_id=release_id,
@@ -425,6 +635,51 @@ class TestGeneratedImportOperationFence(unittest.TestCase):
         self.runtime.start()
         self.addCleanup(self.runtime.stop)
 
+    @example(
+        job_type=IMPORT_JOB_FORCE,
+        failure_class="executor_crash",
+        request_status="wanted",
+    )
+    @example(
+        job_type=IMPORT_JOB_YOUTUBE,
+        failure_class="bundle_less_failure",
+        request_status="unsearchable",
+    )
+    @example(
+        job_type=IMPORT_JOB_FORCE,
+        failure_class="requeue_failed",
+        request_status="imported",
+    )
+    @example(
+        job_type=IMPORT_JOB_YOUTUBE,
+        failure_class="startup_ambiguity",
+        request_status="wanted",
+    )
+    @given(
+        job_type=st.sampled_from((IMPORT_JOB_FORCE, IMPORT_JOB_YOUTUBE)),
+        failure_class=st.sampled_from(_NON_AUTOMATION_FAILURE_CLASSES),
+        request_status=st.sampled_from(_NON_AUTOMATION_REQUEST_STATUSES),
+    )
+    def test_generated_non_automation_failures_are_visible_and_inert(
+        self,
+        job_type: str,
+        failure_class: str,
+        request_status: str,
+    ) -> None:
+        """All four residual paths preserve source, state, and no replay."""
+        db, source_download_log_id = _drive_non_automation_failure(
+            job_type=job_type,
+            failure_class=failure_class,
+            request_status=request_status,
+        )
+        assert_non_automation_failure_lifecycle(
+            db=db,
+            job_type=job_type,
+            request_id=_OPERATION_FENCE_REQUEST_ID,
+            request_status=request_status,
+            source_download_log_id=source_download_log_id,
+        )
+
     def test_stale_authority_never_launches_beets(self) -> None:
         for job_type in (
             IMPORT_JOB_AUTOMATION,
@@ -581,6 +836,10 @@ class TestGeneratedImportOperationFence(unittest.TestCase):
             mb_release_id="generated-startup-force",
             status="wanted",
         ))
+        source_download_log_id = db.log_download(
+            _OPERATION_FENCE_REQUEST_ID,
+            outcome="rejected",
+        )
         job = db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=_OPERATION_FENCE_REQUEST_ID,
@@ -590,7 +849,7 @@ class TestGeneratedImportOperationFence(unittest.TestCase):
                 f"{file_count}"
             ),
             payload={
-                "download_log_id": 703,
+                "download_log_id": source_download_log_id,
                 "failed_path": "/failed/generated-startup-force",
             },
         )
@@ -737,6 +996,17 @@ class TestImportOperationFenceChecker(unittest.TestCase):
         """Known-bad: a force/YouTube job that mutated the caller's request
         lifecycle — invariant 11 reserves that self-heal for automation,
         which is the only job type that owns ``processing``."""
+        db = self._db(status="unsearchable")
+        source = db.log_download(
+            _OPERATION_FENCE_REQUEST_ID,
+            outcome="rejected",
+        )
+        db.log_download(
+            _OPERATION_FENCE_REQUEST_ID,
+            outcome="failed",
+            source_download_log_id=source,
+            error_message="Force import attempt failed: known-bad",
+        )
         with self.assertRaisesRegex(AssertionError, "own no request lifecycle"):
             assert_operation_fence(
                 job_type=IMPORT_JOB_FORCE,
@@ -744,7 +1014,37 @@ class TestImportOperationFenceChecker(unittest.TestCase):
                 final_status="failed",
                 beets_invocations=[703],
                 replay_claimed=False,
-                db=self._db(status="unsearchable"),
+                db=db,
+            )
+
+    def test_checker_rejects_silent_non_automation_terminal(self) -> None:
+        """Known-bad: a terminal force job with no Recents-visible audit."""
+        with self.assertRaisesRegex(AssertionError, "linked Recents audit"):
+            assert_operation_fence(
+                job_type=IMPORT_JOB_FORCE,
+                authorized=True,
+                final_status="failed",
+                beets_invocations=[703],
+                replay_claimed=False,
+                db=self._db(),
+            )
+
+    def test_checker_rejects_terminal_source_drift(self) -> None:
+        """Known-bad: a YT failure that defaulted to slskd must trip."""
+        db, source_download_log_id = _drive_non_automation_failure(
+            job_type=IMPORT_JOB_YOUTUBE,
+            failure_class="bundle_less_failure",
+            request_status="wanted",
+        )
+        failed = next(row for row in db.download_logs if row.outcome == "failed")
+        failed.source = "slskd"
+        with self.assertRaisesRegex(AssertionError, "source drifted"):
+            assert_non_automation_failure_lifecycle(
+                db=db,
+                job_type=IMPORT_JOB_YOUTUBE,
+                request_id=_OPERATION_FENCE_REQUEST_ID,
+                request_status="wanted",
+                source_download_log_id=source_download_log_id,
             )
 
     def test_checker_rejects_leaked_terminal_force_action_copy(self) -> None:

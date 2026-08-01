@@ -546,11 +546,12 @@ function youtubeHistoryRows(history) {
 }
 
 /**
- * Extract the classified failure reason for a terminal `youtube_failed`
- * download-history row. Pure. The reason is persisted in the
- * `youtube_metadata` JSONB blob (`reason`) by the ingest worker's terminal
- * write — see `lib/youtube_ingest_service.py::YoutubeIngestMetadata.reason`.
- * Falls back to the row's `error_message` then `verdict` (the shared
+ * Extract the classified failure reason for a terminal `youtube_failed` or
+ * linked importer `failed` download-history row. Pure. The ingest worker
+ * persists `youtube_failed` reasons in `youtube_metadata.reason` — see
+ * `lib/youtube_ingest_service.py::YoutubeIngestMetadata.reason`; the importer
+ * persists its linked failure's bounded operator diagnostic in `error_message`.
+ * The helper falls back from metadata to `error_message` then `verdict` (the shared
  * download-history-view fields) and finally a generic sentinel so the
  * panel never shows an empty reason.
  *
@@ -575,7 +576,8 @@ function youtubeFailureReason(row) {
  *   * "rescue running" when an active `youtube_running` row exists, OR the
  *     worklist row carried `in_flight_rescue` (the same predicate).
  *   * "last rescue failed: <reason>" when the latest terminal youtube row
- *     is `youtube_failed` SPECIFICALLY (distinct from `youtube_success`).
+ *     is `youtube_failed` or the linked importer outcome `failed` (both
+ *     distinct from `youtube_success`).
  *   * the recent attempts list otherwise.
  *
  * @param {Array<Object>|null|undefined} history  Pipeline-detail history.
@@ -588,10 +590,13 @@ function renderRescuesBody(history, inFlightFlag) {
   if (running || inFlightFlag) {
     return `<div class="lt-rescue-status"><span class="badge badge-new">rescue running</span>${running && running.created_at ? `<span class="lt-meta-chip">since ${esc(consoleTimestamp(running.created_at))}</span>` : ''}</div>`;
   }
-  // The latest TERMINAL youtube row (youtube_failed / youtube_success).
+  // The latest TERMINAL youtube row: ingest failure/success or linked importer
+  // failure. The latter follows the canonical youtube_success handoff.
   const terminal = rows.find(
-    (h) => h.outcome === 'youtube_failed' || h.outcome === 'youtube_success');
-  if (terminal && terminal.outcome === 'youtube_failed') {
+    (h) => h.outcome === 'youtube_failed'
+      || h.outcome === 'youtube_success'
+      || h.outcome === 'failed');
+  if (terminal && (terminal.outcome === 'youtube_failed' || terminal.outcome === 'failed')) {
     const reason = youtubeFailureReason(terminal);
     return `<div class="lt-rescue-status"><span class="badge badge-muted">last rescue failed</span> <span class="lt-rescue-reason">${esc(reason)}</span></div>`;
   }

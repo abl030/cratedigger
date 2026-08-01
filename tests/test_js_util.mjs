@@ -1466,6 +1466,20 @@ console.log('long_tail_console.js __test__ (U4 console)');
        youtube_metadata: { reason: 'track_count_mismatch' } }], false);
   assert(failed.includes('last rescue failed') && failed.includes('track_count_mismatch'),
     'renderRescuesBody shows the failure reason (from youtube_metadata) for a terminal youtube_failed row');
+  // The importer records a linked failure as source=youtube, outcome=failed.
+  // It is newer than the canonical handoff's older youtube_success origin and
+  // must win as the terminal rescue result with its persisted diagnosis.
+  const importerFailed = renderRescuesBody([
+    { source: 'youtube', outcome: 'failed', created_at: '2026-05-27T00:00:00Z',
+      source_download_log_id: 42,
+      error_message: 'YouTube import attempt failed: beets acknowledgement was ambiguous' },
+    { source: 'youtube', outcome: 'youtube_success', created_at: '2026-05-26T00:00:00Z' },
+  ], false);
+  assert(importerFailed.includes('last rescue failed')
+    && importerFailed.includes('YouTube import attempt failed: beets acknowledgement was ambiguous'),
+  'renderRescuesBody treats the newest linked importer failure as terminal and actionable');
+  assert(!importerFailed.includes('youtube_success'),
+    'renderRescuesBody does not fall back to the older canonical handoff after an importer failure');
   // A terminal youtube_success is NOT a failure (distinct from youtube_failed).
   const succeeded = renderRescuesBody(
     [{ source: 'youtube', outcome: 'youtube_success', created_at: '2026-05-24T00:00:00Z' }], false);

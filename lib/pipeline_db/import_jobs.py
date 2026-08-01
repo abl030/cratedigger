@@ -44,6 +44,7 @@ from lib.terminal_outcomes import (
     CleanupJournalRefusalDisposition,
     ImportJobTerminal,
     cleanup_journal_refusal_disposition,
+    non_automation_failure_terminal_outcome,
 )
 
 if TYPE_CHECKING:
@@ -1208,50 +1209,61 @@ class _ImportJobsMixin(
         recovery_message: str,
         limit: int = 50,
     ) -> list[ImportJob]:
-        """Requeue unlaunched jobs and fail launched ambiguous operations."""
+        """Requeue unlaunched jobs; terminalize launched jobs visibly.
+
+        A launch-authorized job may already have reached Beets, so startup
+        must never requeue it.  Its terminal command is the same atomic audit
+        plus job-failure path used by in-frame force/YouTube executor errors.
+        """
         cur = self._execute("""
-            WITH running AS (
-                SELECT id, beets_launch_authorized_at
-                FROM import_jobs
-                WHERE status = 'running'
+            SELECT *
+            FROM import_jobs
+            WHERE status = 'running'
+              AND job_type <> 'automation_import'
+            ORDER BY updated_at ASC, id ASC
+            LIMIT %s
+        """, (limit,))
+        running = [ImportJob.from_row(dict(row)) for row in cur.fetchall()]
+        recovered: list[ImportJob] = []
+        for job in running:
+            if job.beets_launch_authorized_at is not None:
+                no_replay_reason = (
+                    "Automatic replay refused because Beets may have mutated "
+                    "the library"
+                )
+                terminal = self.persist_import_terminal_outcome(
+                    non_automation_failure_terminal_outcome(
+                        job,
+                        error=no_replay_reason,
+                        message=f"{recovery_message}: {no_replay_reason}",
+                        result={
+                            "success": False,
+                            "recovery": "launch_authorized_no_replay",
+                        },
+                    )
+                )
+                recovered.append(terminal.job)
+                continue
+            cur = self._execute("""
+                UPDATE import_jobs
+                SET status = 'queued',
+                    message = %s,
+                    error = NULL,
+                    worker_id = NULL,
+                    started_at = NULL,
+                    heartbeat_at = NULL,
+                    completed_at = NULL,
+                    updated_at = NOW()
+                WHERE id = %s
+                  AND status = 'running'
                   AND job_type <> 'automation_import'
-                ORDER BY updated_at ASC, id ASC
-                LIMIT %s
-            )
-            UPDATE import_jobs
-            SET status = CASE
-                    WHEN running.beets_launch_authorized_at IS NULL
-                        THEN 'queued'
-                    ELSE 'failed'
-                END,
-                message = CASE
-                    WHEN running.beets_launch_authorized_at IS NULL
-                        THEN %s
-                    ELSE %s
-                END,
-                error = CASE
-                    WHEN running.beets_launch_authorized_at IS NULL
-                        THEN NULL
-                    ELSE 'Automatic replay refused because Beets may have mutated the library'
-                END,
-                worker_id = NULL,
-                started_at = CASE
-                    WHEN running.beets_launch_authorized_at IS NULL
-                        THEN NULL
-                    ELSE import_jobs.started_at
-                END,
-                heartbeat_at = NULL,
-                completed_at = CASE
-                    WHEN running.beets_launch_authorized_at IS NULL
-                        THEN NULL
-                    ELSE NOW()
-                END,
-                updated_at = NOW()
-            FROM running
-            WHERE import_jobs.id = running.id
-            RETURNING import_jobs.*
-        """, (limit, requeue_message, recovery_message))
-        return [ImportJob.from_row(dict(row)) for row in cur.fetchall()]
+                  AND beets_launch_authorized_at IS NULL
+                RETURNING *
+            """, (requeue_message, job.id))
+            row = cur.fetchone()
+            if row is not None:
+                recovered.append(ImportJob.from_row(dict(row)))
+        return recovered
 
 
     def recover_automation_import_job(

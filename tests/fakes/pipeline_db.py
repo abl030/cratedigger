@@ -2031,6 +2031,8 @@ class FakePipelineDB:
         recovery_message: str,
         limit: int = 50,
     ) -> list[ImportJob]:
+        from lib.terminal_outcomes import non_automation_failure_terminal_outcome
+
         running = [
             row for row in self._import_jobs
             if row.get("status") == "running"
@@ -2041,18 +2043,32 @@ class FakePipelineDB:
         for row in running[:limit]:
             now = _utcnow()
             launched = row.get("beets_launch_authorized_at") is not None
-            row["status"] = "failed" if launched else "queued"
-            row["message"] = recovery_message if launched else requeue_message
-            row["error"] = (
-                "Automatic replay refused because Beets may have mutated "
-                "the library"
-                if launched else None
-            )
+            if launched:
+                no_replay_reason = (
+                    "Automatic replay refused because Beets may have mutated "
+                    "the library"
+                )
+                job = ImportJob.from_row(copy.deepcopy(row))
+                terminal = self.persist_import_terminal_outcome(
+                    non_automation_failure_terminal_outcome(
+                        job,
+                        error=no_replay_reason,
+                        message=f"{recovery_message}: {no_replay_reason}",
+                        result={
+                            "success": False,
+                            "recovery": "launch_authorized_no_replay",
+                        },
+                    )
+                )
+                updated_jobs.append(terminal.job)
+                continue
+            row["status"] = "queued"
+            row["message"] = requeue_message
+            row["error"] = None
             row["worker_id"] = None
-            if not launched:
-                row["started_at"] = None
+            row["started_at"] = None
             row["heartbeat_at"] = None
-            row["completed_at"] = now if launched else None
+            row["completed_at"] = None
             row["updated_at"] = now
             updated_jobs.append(ImportJob.from_row(copy.deepcopy(row)))
         return updated_jobs
@@ -2973,9 +2989,10 @@ class FakePipelineDB:
                         command.successful_terminal_acceptance
                     ),
                 ))
-            download_log_id = cast(Any, self.log_download)(
-                request_id=command.request_id,
-                **command.audit.as_log_kwargs(),
+            download_log_id = self._log_terminal_audit(
+                command.request_id,
+                command.import_job_id,
+                command.audit,
             )
             self.set_download_log_candidate_evidence(
                 download_log_id,
@@ -3291,11 +3308,44 @@ class FakePipelineDB:
         boundary(f"request.processing_to_{virtual}")
         return tuple(applied)
 
-    def _log_terminal_audit(self, request_id: int, audit):
-        return self.log_download(
-            request_id=request_id,
-            **audit.as_log_kwargs(),
+    def _log_terminal_audit(self, request_id: int, import_job_id: int, audit):
+        from lib.failure_presentation import unlinked_source_provenance_message
+
+        source = None
+        if audit.source_download_log_id is not None:
+            source = next(
+                (
+                    entry for entry in self.download_logs
+                    if entry.id == audit.source_download_log_id
+                    and entry.request_id == request_id
+                ),
+                None,
+            )
+        job = next(
+            (row for row in self._import_jobs if row["id"] == import_job_id),
+            None,
         )
+        fallback_source = (
+            "youtube"
+            if job is not None and job.get("job_type") == IMPORT_JOB_YOUTUBE
+            else "slskd"
+        )
+        kwargs = audit.as_log_kwargs()
+        if audit.source_download_log_id is not None and source is None:
+            kwargs["source_download_log_id"] = None
+            kwargs["error_message"] = unlinked_source_provenance_message(
+                audit.error_message,
+            )
+        download_log_id = self.log_download(
+            request_id=request_id,
+            **kwargs,
+        )
+        terminal = next(
+            entry for entry in self.download_logs
+            if entry.id == download_log_id
+        )
+        terminal.source = source.source if source is not None else fallback_source
+        return download_log_id
 
     def _persist_automation_import_terminal_outcome(
         self,
@@ -3325,6 +3375,7 @@ class FakePipelineDB:
             audit = self._fake_automation_audit(command.audit, authority)
             download_log_id = self._log_terminal_audit(
                 command.request_id,
+                command.import_job_id,
                 audit,
             )
             boundary("download_log")
@@ -3436,6 +3487,7 @@ class FakePipelineDB:
                 ))
             download_log_id = self._log_terminal_audit(
                 command.request_id,
+                command.import_job_id,
                 command.audit,
             )
             self.set_download_log_candidate_evidence(
