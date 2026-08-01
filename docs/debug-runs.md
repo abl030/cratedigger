@@ -106,6 +106,14 @@ Mountain Goats only. Both fixes deployed:
    - Cliff: 2+ consecutive slices with gradient < -12 dB/kHz
    - Album: >60% tracks suspect → SUSPECT album
 
+   > **Pointer added 2026-08-01 (issue #829 Phase 5 PR5).** The 40/60 pair
+   > was superseded by 65/69, measured on 60,102 encodes across four blind
+   > album arms; this 65-album single-artist corpus could not see the
+   > 4–17% genuine-control false-flag rate it was producing. Cliff
+   > constants unchanged. Current model:
+   > `docs/quality-verification.md`,
+   > `docs/research/spectral-calibration-findings.md`.
+
 ---
 
 ## Run 3 Results (15:00-15:36, PID 1693403, both fixes deployed)

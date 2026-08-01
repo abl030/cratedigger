@@ -187,6 +187,13 @@ All numbers live in `lib.quality.QualityRankConfig` defaults and in the
 material. `excellent=88` matches Opus 96 quality (hydrogenaudio/Kamedo2
 4.65/5 listening test). Full rationale in `docs/opus-encoding.md`.
 
+Container bitrate is the *only* Opus signal there is. Opus ≥32 kbps is
+statistically indistinguishable from genuine lossless on every calibration
+arm (94–100% no-cliff, deficit 43–48 dB against a control's 44–48), so the
+spectral leg asserts nothing about an Opus album at any bitrate — audit-only,
+unconditional. Measured tables: `docs/research/spectral-opus.md` §
+"Measured — Phase 3/4 results".
+
 ### MP3 VBR (LAME V0-V9 targets)
 
 | Band | Threshold (kbps) |
@@ -280,6 +287,13 @@ with its own encoding mode.
 Hydrogenaudio consensus places the "not worth going higher for music" ceiling
 for AAC at 192.
 
+**No spectral class ever classifies through this table.** An AAC cliff is a
+one-sided *content floor*, never a bitrate and never a transcode
+accusation: 94–96% of all AAC cliffs on every calibration arm land in
+13–18 kHz, produced by encoder rates from 96 all the way to 320 kbps across
+ffmpeg-native, libfdk and Apple CoreAudio alike. Measured tables:
+`docs/research/spectral-aac.md` § "Measured — Phase 3/4 results".
+
 ### Vorbis (quality-based VBR)
 
 | Band | Threshold (kbps) |
@@ -295,6 +309,11 @@ encoder's q2/q3/q5/q6 regions. Vorbis uses one table: the unreliable generic
 search selector, not a rank family; an Opus stream inside Ogg is still `opus`,
 while a true Vorbis stream is `vorbis`.
 
+**This is the table a Vorbis spectral class classifies through** — q0–q4 is
+the second (and only other) invertible ladder, and it replicated exactly on
+all four calibration arms. Measured tables:
+`docs/research/spectral-vorbis.md` § "Measured — Phase 3/4 results".
+
 ### WMA
 
 | Band | Threshold (kbps) |
@@ -305,7 +324,10 @@ while a true Vorbis stream is `vorbis`.
 | acceptable | 128 |
 
 WMA uses one conservative table mirroring MP3 CBR. It does not branch on
-`is_cbr`.
+`is_cbr`. WMA was deliberately never spectrally calibrated and never will
+be — the only Linux-encodable variant is ffmpeg's clean-room `wmav2`, which
+would calibrate the wrong encoder — so it stays audit-only forever. Reasoning
+and the one measured run: `docs/research/spectral-wma.md`.
 
 Band rank and spectral authority are separate. A Vorbis or WMA measurement at
 or above the transparent threshold does not become spectrally genuine: a
@@ -439,6 +461,13 @@ every request) and waiting for the next `cratedigger.timer` fire (5 min).
 - Issue #60 (this PR)
 - Issue #31 — original quality pipeline bugs that drove this rewrite
 - `docs/opus-encoding.md` — Opus 128 rationale and listening test references
+- `docs/research/spectral-calibration-findings.md` — the 60,102-measurement,
+  four-arm record every per-codec spectral constant is derived from, plus
+  the six per-codec documents beside it (`docs/research/spectral-mp3-lame.md`,
+  `docs/research/spectral-aac.md`, `docs/research/spectral-opus.md`,
+  `docs/research/spectral-vorbis.md`, `docs/research/spectral-wma.md`,
+  `docs/research/spectral-transcode-detection.md`) and the raw data under
+  `docs/research/calibration-data/`
 
 ## Tuning reference (Nix options)
 

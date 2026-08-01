@@ -727,7 +727,7 @@ bitrate alone is not proof in the current policy.
 - **CBR 320 downloads**: V0 conversion only happens for FLACs. Native MP3 320 downloads skip conversion entirely. Spectral check catches upsampled garbage (e.g. Hot Garden Stomp at 52dB deficit, Songs for Peter Hughes at 72dB + cliffs).
 - **Pre-pipeline imports**: Albums imported before the pipeline existed have no download history or V0 conversion data. Spectral check is the only way to assess their quality.
 
-### Reference: HF deficit ranges observed
+### Reference: HF deficit ranges observed — HISTORICAL (2026-03-28 corpus)
 
 | Source quality | HF deficit range | Cliffs? |
 |---------------|-----------------|---------|
@@ -739,6 +739,27 @@ bitrate alone is not proof in the current policy.
 | Upsampled CBR 320 (from ~96kbps) | 52-97dB | Sometimes |
 | Quiet jazz/classical (genuine CD) | 33-57dB | None |
 | Children's choir (genuine CD) | 31-62dB | None |
+
+**Superseded 2026-08-01 (issue #829 Phase 5 PR5)** by the four-arm measured
+control distribution. Retained above as the provenance of the 40/60 pair.
+The calibration measured genuine-lossless controls at **p50 = 48 dB,
+p95 = 65, p99 = 69, max = 78** — so the old 40 dB "marginal" line sat below
+the *median genuine track*. Control false-flag rate at the shipped 65/69,
+track level, per arm:
+
+| arm | ≥65 (marginal) | ≥69 (suspect) | at the old 40 / 60 |
+|---|---|---|---|
+| TRAINING | 5% | 1% | 75% / 14% |
+| ROUND-1 | 2% | 0% | 73% / 4% |
+| ROUND-2 | 11% | 8% | 80% / 17% |
+| ROUND-3 | 2% | 1% | 68% / 9% |
+
+The metric's honest role is narrow: a backstop for sub-window junk with no
+visible cliff, and one of the two legs that expose AAC→MP3 launders (the
+cliff leg alone exposes 6/34 training albums; adding the deficit leg raises
+it to 31/34). Full derivation and the per-codec measured tables:
+`docs/research/spectral-calibration-findings.md` and the six per-codec docs
+under `docs/research/`.
 
 ## Edge cases
 

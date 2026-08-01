@@ -221,6 +221,9 @@ anyway, predictions worth pinning now so Phase 3 can check them:
    transparency" reputation should show up most visibly** — expect early,
    broad-band HF loss rather than a clean cliff, possibly triggering
    suspect grades via `HF_DEFICIT_SUSPECT` (60 dB) rather than `detect_cliff`.
+   [The 60 dB constant is the Phase 0 state of the code; it was measured
+   wrong and is now 69 — pointer added 2026-08-01, see "Measured —
+   Phase 3/4 results" below.]
 4. **WMA Pro/Lossless cannot be added to any matrix on Linux** — a hard
    tooling constraint, not a probabilistic guess.
 5. If real WMP9 files are later sourced for genuine ground truth (e.g.
@@ -229,6 +232,50 @@ anyway, predictions worth pinning now so Phase 3 can check them:
    mid bitrates (contemporary tests rated WMA roughly comparable to
    LAME-era MP3) — and diverge more at low bitrates where WMA's
    LSP/noise-substitution mechanisms have no LAME analogue.
+
+## Measured — Phase 3/4 results (committed 2026-08-01, Phase 5 PR5)
+
+**The recommendation held: WMA was dropped from the Phase 2 encode matrix
+and never calibrated, and it stays audit-only forever.** No `LAME_LOWPASS`
+bucket, no ladder, no `likely_transcode` stamp derived from a WMA cliff —
+`REASON_UNCALIBRATED_CODEC_FAMILY` in
+`lib/quality/spectral_interpretation.py` is where that lands in production.
+Compiled analysis: `docs/research/spectral-calibration-findings.md`.
+
+`wmav2` did get measured once, in the 2026-07-30 launder matrix
+(`docs/research/calibration-data/launder-matrix/`) — as a *launder source*,
+not as a calibration target — and that run supplies the only WMA numbers
+this project has.
+
+### Prediction 2 is confirmed, and it is the reason for the whole recommendation
+
+**ffmpeg's `wmav2` overshoots its requested rate badly**: measured
+`-b:a 128k` → ~138 kbps, `192k` → ~276, `320k` → ~551. The variant label is
+the *request*, not the result. It also cannot encode 96 kHz input at all,
+so the WMA arm covers 17 of the matrix's 19 albums. A ladder built from
+this encoder would have described neither WMA9 nor the requested bitrates —
+exactly the "wrong-but-present table looks authoritative later" failure the
+drop decision was made to avoid.
+
+### As a launder source it is caught, which is all we needed
+
+WMA → FLAC escapes from the frozen gate, out of the albums whose genuine
+twin is provable at all (`FINAL_REPORT.txt` § A):
+
+| launder | escapes at T=62 | escapes at the shipped T=59.5 |
+|---|---:|---:|
+| wma-128 | 1/11 | 0/10 |
+| wma-192 | 0/11 | 0/10 |
+| wma-320 | 0/11 | 0/10 |
+
+That is the property the audit-only treatment relies on: a cliff on a
+supposedly-lossless file remains meaningful whatever the codec, even though
+the codec's own bitrate is not inferable. Prediction 1 (more `marginal`
+than `suspect` at mid bitrates) was **not tested** — the matrix scored gate
+outcomes, not the WMA grade distribution. Predictions 4 and 5 remain
+untested for the same tooling reason they were written about: WMA
+Pro/Lossless cannot be encoded on Linux, and no genuine WMP9-era ground
+truth was ever sourced.
 
 ## Sources
 

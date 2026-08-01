@@ -280,6 +280,9 @@ overlap. Three things make it more than "swap in a second lookup table":
    `hf_deficit_db` alone (smooth psychoacoustic attenuation without a
    hard wall could plausibly cross `HF_DEFICIT_MARGINAL = 40.0` dB on
    fine material — needs real files, not source-reading, to answer).
+   [The 40 dB constant is the Phase 0 state of the code; it was measured
+   wrong and is now 65 — pointer added 2026-08-01, see "Measured —
+   Phase 3/4 results" below.]
 
 ## Predictions for Phase 3 (testable)
 
@@ -294,6 +297,94 @@ overlap. Three things make it more than "swap in a second lookup table":
 | Spotify Premium / Zotify/Soggfy Very-High (~320 kbps, `-q9`) | none (uncapped) | no cliff → `genuine` | Correct if confirmed — verify it isn't landing as a false cliff from container/decode artifacts |
 | Legacy YouTube itag 171 (128 kbps Vorbis, webm) | ~18900 (reference) or ~18000 (if aoTuV-tuned) | 18050-19000 → 192, or <18050 → 160 | If `yt-dlp` ever hands back this itag on an old cached stream, same reference-vs-aoTuV bucket ambiguity as the `-q4` row applies |
 | Scene rip with `lowpass_frequency=99` (disabled) | none, regardless of bitrate | no cliff → `genuine` | A deliberately low-bitrate (e.g. `-q0`, ~64 kbps) file reads genuine purely because the encoder-side filter was off — same blind-spot class as LAME's `--lowpass -1` |
+
+## Measured — Phase 3/4 results (committed 2026-08-01, Phase 5 PR5)
+
+The predictions above were checked against **60,102 production-primitive
+measurements over four independent album arms** — TRAINING (34 albums),
+ROUND-1 (15), ROUND-2 (27), ROUND-3 (24). Compiled analysis:
+`docs/research/spectral-calibration-findings.md`. Raw record:
+`docs/research/calibration-data/`.
+
+### The source-extracted ladder replicated EXACTLY
+
+Median cliff Hz, all four arms, against the value fitted on TRAINING:
+
+| variant | fitted on TRAINING | TRAINING | ROUND-1 | ROUND-2 | ROUND-3 |
+|---|---|---|---|---|---|
+| vorbis-q0 | 14500 | 14500 | 14500 | 14500 | 14500 |
+| vorbis-q2 | 16000 | 16000 | 16000 | 16000 | 16000 |
+| vorbis-q3 | 17000 | 17000 | 17000 | 17000 | 17000 |
+| vorbis-q4 | 18500 | 18500 | 18500 | 18500 | 18500 |
+
+Four-for-four on three independent blind arms. **Vorbis q0–q4 is the only
+codec family besides MP3 with a decision-grade invertible ladder**, and it
+is confirmed rather than asserted. The same one-tier detector bias as LAME
+applies (`detect_cliff` reports the first slice of the steep run).
+
+TRAINING arm distributions, 402 tracks per variant
+(`docs/research/calibration-data/tables.md`). These are **in-window
+(12–20 kHz) detections**, so the q5/q6/q9 rows are 82–98% no-cliff and
+their medians are truncation artifacts from the cliffing minority, not the
+ladder:
+
+| variant | no-cliff | cliff p10 / med / p90 (Hz) | est. mode via `LAME_LOWPASS` |
+|---|---:|---|---|
+| vorbis-q-1 | 35% | 17000 / 17000 / 17500 | 128 (53%) |
+| vorbis-q0 | 45% | 14500 / 14500 / 15000 | 96 (55%) |
+| vorbis-q2 | 5% | 16000 / 16000 / 16000 | 128 (95%) |
+| vorbis-q3 | 35% | 17000 / 17000 / 17500 | 128 (53%) |
+| vorbis-q4 | 37% | 16500 / 18500 / 18500 | **192 (42%)** |
+| vorbis-q5 | 82% | 16600 / 18500 / 18500 | 192 (9%) |
+| vorbis-q6 | 90% | 17000 / 18500 / 18500 | 192 (7%) |
+| vorbis-q9 | 98% | 15500 / 18500 / 15500 | 192 (1%) |
+
+**Shipped constant** — `VORBIS_DETECTOR_CLASS_BUCKETS` /
+`VORBIS_TOP_CLASS_KBPS` in `lib/quality/spectral_interpretation.py`:
+
+`<15250→64 | <16500→96 | <17750→112 | <19000→128 | ≥19000→160`
+
+Those classes classify through the **Vorbis** band table in
+`docs/quality-ranks.md`, never the MP3-CBR one.
+
+### Prediction scorecard
+
+| Phase 0 prediction | verdict |
+|---|---|
+| Reference `-q0` ~15100, buckets 96 | **held** — median 14500, est. mode 96 |
+| Reference `-q2` ~16500, buckets 128 | **held** — median 16000, est. mode 128 (95%) |
+| Reference `-q4` ~18900, buckets 192 | **held on the bucket, and that is the bug** — median 18500, est. mode 192 on 42%, when q4 is really ~128 kbps. Where the LAME-shaped table caught a Vorbis cliff it **over-estimated one-directionally**: Vorbis keeps more top end per kbps than LAME |
+| **Headline test:** `-q5` / Spotify Normal cuts at 20.1 kHz, past the window → likely no cliff | **held** — 82–91% no-cliff in-window across the arms, visible only with the 20–22 kHz extension slices |
+| `-q9` / Spotify Premium uncapped → no cliff | **held** — 98% no-cliff |
+| ffmpeg `-q:a -1` behaves like a distinct rung | **falsified in a useful way** — it measures identically to q3 (17000), an encoder-mapping artifact, not a ladder violation |
+| aoTuV lands in a different bucket from reference at the same nominal bitrate | **untested** — the encode matrix used reference libvorbis via ffmpeg only; no aoTuV build was in the toolchain. The bucket-ambiguity risk is unmeasured, not disproved |
+| Scene rip with the lowpass disabled reads genuine at any bitrate | **untested**; same blind-spot class as LAME's `--lowpass -1` |
+
+### The residual: q6 and above
+
+q6+ has no encoder lowpass at all, so the ladder simply ends — and the
+2026-07-30 launder matrix measured what that costs. Vorbis → FLAC launder
+escapes from the frozen gate, out of the albums whose genuine twin is
+provable at all (`docs/research/calibration-data/launder-matrix/`,
+`FINAL_REPORT.txt` § A):
+
+| launder | escapes at T=62 | escapes at the shipped T=59.5 |
+|---|---:|---:|
+| vorbis-q4 | 0/11 | 0/10 |
+| vorbis-q5 | 0/11 | 0/10 |
+| vorbis-q6 | 7/11 | 7/10 |
+| vorbis-q7 | 7/11 | 7/10 |
+| vorbis-q8 | 7/11 | 7/10 |
+| vorbis-q10 | 10/11 | 10/10 |
+
+q5 is caught by the ceiling/ultrasonic machinery even though it is
+in-window invisible — the extension slices are doing the work. **`vorbis-q10`
+is one of the three named permanent residuals**: it carries no AAC lattice,
+so the frame-lattice leg cannot reach it either. Nor does the lattice leg
+rescue q6–q8 in practice: at its deployable pooled threshold 6 of 11 still
+survive the union (`FINAL_REPORT.txt` § D). All 7 escapes close under
+per-album Derrien thresholds, but those are computed from each album's own
+genuine control — which production never has.
 
 ## Sources
 

@@ -23,6 +23,17 @@ duplicate that plan here; this file is the *evidence*. As of 2026-07-27,
 Phase 5 PR1 (evidence primitive capture — migration 065, the additive extension
 slices, `ultrasonic_deficit_db`) has shipped and PR2 onward has not.
 
+**Status update 2026-08-01.** Phase 5 is implemented and deployed: PR1
+(capture), PR2a–PR2d (per-codec interpretation, the codec-aware decider seam,
+cross-codec parity, the Stage-2 counterfactual audit), PR3 (proof gate v3 —
+the ultrasonic leg at 59.5 dB, single production window, HF deficit 65/69),
+the AAC frame-lattice pair (capture + the v4 proof leg), the
+format-consistency fix, and PR4 (tiered verdicts and their display). **PR5
+— this promotion of the measured tables into the six per-codec documents —
+is the last item.** Each per-codec document now carries its own
+"Measured — Phase 3/4 results" section scoring its Phase 0 predictions
+against the arms.
+
 Per-phase chronology lives on issue #829. Raw data and one-shot analysis
 scripts (uncommitted, per `.claude/rules/scope.md`) live under
 `/mnt/virtio/Music/calibration-tmp/` on shared storage.
@@ -939,6 +950,20 @@ was the right call.
   `ultrasonic_deficit_db IS NULL`, no retroactive demotion, and operator
   surfaces saying which model proved a row — are specified in the Phase 5 plan,
   § "PR3 hard constraint".
+  **Corrected twice since, and now closed.** The "93%" counts lossless
+  *lineage*, which is not the same as a vanished source: when the target is
+  FLAC the conversion output IS the lossless file. Re-measured 2026-07-29,
+  the genuinely un-backfillable cohort was 6,273 rows / 40% (plan § 1.5a).
+  Then measured again on 2026-08-01 against *current* evidence: of 7,187
+  proof rows, **7,053 are opus, 110 mp3, 2 aac** — the lossless sources are
+  converted away and cannot be re-measured at any price, and the only 22
+  FLAC proof rows were the borrowed research corpus (since released) plus
+  two requests. The re-measurement sweep is therefore moot rather than
+  merely declined. The back catalogue instead upgrades itself organically:
+  the never-stop-searching upgrade cohort re-acquires lossless forever, and
+  every fresh FLAC is measured under all three legs at preview.
+  Authority: *"can we remeasure this? its all opus now"* —
+  https://github.com/abl030/cratedigger/issues/829
 - **Lossy-side band assertions on HF-poor material** — open, non-blocking; see
   above.
 - **Portishead's unexplained `t-aac128-mp3320` miss** — open.
@@ -1209,6 +1234,19 @@ The research phase of issue #829 is closed by this round. Nothing above the
 
 ## Data and reproduction
 
+> **Superseded 2026-08-01 (Phase 5 PR5) — the paths below are historical.**
+> The temporary calibration instance was **torn down on 2026-07-29**: the
+> `cratedigger_calib` database dropped, `/var/lib/cratedigger-calib` removed,
+> the encode matrices and the ground-truth FLAC corpus deleted, and 1,003
+> calib-owned files swept from the shared slskd directory using calib's own
+> transfer ledger *before* the DB went (that ordering is the load-bearing
+> part, and it held). Teardown state re-verified on 2026-08-01: the
+> database and state directory are gone and only ~6 MB of measurement TSVs
+> remain on shared storage — duplicates of what is committed here.
+> **`docs/research/calibration-data/` is now the only surviving evidence for
+> every constant in this document.** The inventory below is kept as the
+> record of what existed and what each file held.
+
 All under `/mnt/virtio/Music/calibration-tmp/` on shared storage. The temporary
 calibration instance was still running as of 2026-07-27 and is kept alive until
 Phase 5 PR5; the ownership-ordered teardown checklist (which must run *before*
@@ -1231,3 +1269,13 @@ is in `docs/plans/2026-07-22-001-feat-829-spectral-calibration-plan.md` and
 Analysis scripts are one-shots and are deliberately uncommitted
 (`.claude/rules/scope.md`). The encode matrices (~371 GB) are prunable once the
 per-codec tables are committed into the six research docs.
+
+**2026-08-01:** those matrices were destroyed at the 2026-07-29 teardown,
+and the per-codec tables are now committed into the six research docs, so
+that condition is closed. The 2026-07-30 round left its own disposable
+audio behind — `/mnt/virtio/Music/matrix/` (163 GB) and
+`/mnt/virtio/Music/derrien-arm/` (5.5 GB), both still on disk as of
+2026-08-01. Every measurement derived from them is committed here and each
+dataset README carries the exact `argv` templates to rebuild, so they are
+disposable at the operator's convenience; deleting them is an operator
+action, not part of this documentation pass.
