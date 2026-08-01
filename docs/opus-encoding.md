@@ -90,8 +90,9 @@ Not a concern for this pipeline. All playback devices are Opus-native. Plex tran
 ## Architecture reference
 
 Opus is one of several configurable target formats via `verified_lossless_target` in `config.ini`. Conversion runs in `harness/import_one.py`:
-1. `conversion_target()` — decides target format based on target_format, verified_lossless, verified_lossless_target config
+1. `conversion_target()` — decides the target from `target_format` (the keep-lossless intent), the LOSSLESS-SOURCE fact, and the `verified_lossless_target` config
 2. `convert_lossless(path, spec)` — single conversion function parameterized by `ConversionSpec`
 3. `parse_verified_lossless_target("opus 128")` — parses config string into `ConversionSpec`
-4. Only runs on verified lossless (genuine FLAC confirmed by spectral analysis + V0 verification)
-5. Transcodes detected by spectral analysis are not converted — target is skipped, V0 fallback used
+4. Runs for EVERY lossless-sourced import, proved or not (issue #829, operator decision 2026-08-01: "the contract is not around verified or not, is the stored format for lossless absolutely"). A withheld or denied verified-lossless proof changes what the row is called, never what is stored; only "nothing configured" falls back to V0
+5. The conversion always consumes the lossless ORIGINALS (`convert_lossless` selects lossless files only), never the V0 proxies the grind leaves beside them — there is no lossy→lossy chain
+6. The production path is the evidence-authorized one: `_materialize_quality_evidence_action` reads `target_final_format` from the decider's decision and converts the downloaded lossless files straight to it, with no V0 pass at all

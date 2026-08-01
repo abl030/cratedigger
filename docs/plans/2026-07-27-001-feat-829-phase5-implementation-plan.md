@@ -461,6 +461,16 @@ checker owes a known-bad self-test.
 - HF-deficit thresholds → 65 / 69.
 - Denial semantics per §2: stays provisional, surfaces in triage, never
   rejects or accuses. **Withholding proof is not rejecting an album.**
+  **CORRECTED 2026-08-01 — a denial does not change the stored format
+  either.** As shipped, PR3 left the configured `verified_lossless_target`
+  keyed on the proof in both twins, so a denied album was stored as MP3 V0
+  (download 39087, Dirty Beaches *Badlands*) — on ~34% of genuine-graded
+  lossless. The operator ruling: quality decides imports, proof decides
+  names, config decides formats. Authority: "no we always want it opus,
+  the contract is not around verified or not, is the stored format for
+  lossless absolutely. whatever people choose, v0,opus,aac it just has to
+  be consistent" — https://github.com/abl030/cratedigger/issues/829.
+  Both twins now key the target on the lossless SOURCE.
 - Mint `verified_lossless_classifier = 'spectral_verified_lossless_v3'` —
   reuse the existing column, do NOT add a new one. It is already the
   "which model proved it" axis, is written at exactly one site

@@ -334,18 +334,48 @@ the HF-poor genuine-lossless cohort the V0 probe exists to rescue. The
 override is therefore keyed on the probe alone, and the harness derives it
 from a second, leg-free `determine_verified_lossless` call.
 
-What a denial DOES cost, beyond the proof, is everything the proof
-licensed: no `verified_lossless_target` conversion (the album keeps its
-V0 grind — a higher-bitrate artifact, and the decider gates the
-post-import quality gate's format on the same fact), no verified-lossless
-bypass in the measured comparison, and a post-import gate that requeues
-instead of accepting. So an unproved candidate compared against an
-EQUIVALENT-OR-BETTER installed copy can still lose that comparison as an
-ordinary `downgrade` — the proof is the tie-breaker on an `equivalent`
-verdict, and in every measured world that is the mechanism (identical
-ranks on both sides), not a rank loss. That is the proof doing its job, not
-the leg passing a verdict: the existing copy is untouched and the request
-stays searchable.
+**Quality decides imports, proof decides names, config decides formats.**
+That is the whole model, and each clause is exclusive of the others.
+
+- *Quality decides imports.* The rank/measured comparison is proof-blind:
+  a proof-denied album that measures better imports and replaces. There
+  is no brake, and adding one would mean never acquiring anything for a
+  release whose only available copies are laundered. Authority: "we
+  measure, we assign evidence, grade and whatever else. then, we import,
+  it compares to whats on disk, if its better it imports. it makes no
+  difference if it's laundered or not, is it better? if you denied
+  laundered audio you'd never get anything for this particular release."
+  — https://github.com/abl030/cratedigger/issues/829
+- *Proof decides names.* verified vs provisional, base vs v3 vs v4 —
+  labelling, plus the post-import gate that requeues instead of
+  accepting, so the search continues until the claim is as strong as the
+  operator wants.
+- *Config decides formats.* `verified_lossless_target` is the stored
+  format for EVERY lossless-sourced import, proved or not. Authority: "no
+  we always want it opus, the contract is not around verified or not, is
+  the stored format for lossless absolutely. whatever people choose,
+  v0,opus,aac it just has to be consistent" —
+  https://github.com/abl030/cratedigger/issues/829
+
+So what a denial costs, beyond the proof itself, is the proof's
+tie-breaking privilege in the measured comparison: an unproved candidate
+compared against an EQUIVALENT-OR-BETTER installed copy can lose that
+comparison as an ordinary `downgrade` — the proof is the tie-breaker on
+an `equivalent` verdict, and in every measured world that is the
+mechanism (identical ranks on both sides), not a rank loss. That is the
+proof doing its job, not the leg passing a verdict: the existing copy is
+untouched and the request stays searchable.
+
+It does NOT cost the album its stored format. Until 2026-08-01 both the
+harness's `conversion_target` and the decider's `target_final_format`
+keyed the configured target on the proof, so a denial silently stored the
+album as MP3 V0 instead — download 39087 (Dirty Beaches, *Badlands*), on
+a cohort that is ~34% of genuine-graded lossless. Both twins now key on
+the lossless SOURCE, and the invariant is pinned in
+`tests/test_quality_classification.py::TestLosslessStoredFormatIsProofBlind`,
+`tests/test_conversion_e2e.py::TestDeniedProofStillStoresTheConfiguredTarget`
+(real decider → real materializer → real ffmpeg) and
+`tests/test_quality_generated.py::TestStoredFormatIsProofBlindProperties`.
 
 ### Threshold provenance
 
@@ -620,7 +650,7 @@ bitrate alone is not proof in the current policy.
 - `ImportResult.verified_lossless_proof` is the sole acquisition claim. `AudioQualityMeasurement` contains only byte observations; evidence persistence derives its CHECK-tied convenience boolean from proof presence rather than re-deriving verification from a measurement.
 - Spectral request-state writes always go through `RequestSpectralStateUpdate` so the historical grade/bitrate stamps stay atomic. Active decisions use the linked evidence row's spectral fact, not those request scalars.
 - `--target-format` flag: when `target_format="lossless"` (or legacy `"flac"`), keeps lossless on disk. ALAC/WAV sources are normalized to FLAC via `FLAC_SPEC`. A temporary V0 probe is still produced when needed for provisional source comparison. Keeping a lossless container does not itself verify it; the import needs affirmative proof.
-- `--verified-lossless-target` flag: target format after verified lossless, and the configured lossless-source storage target for accepted provisional imports (e.g. "opus 128", "mp3 v2", "aac 128"). Passed from `dispatch_import_core()` when `cfg.verified_lossless_target` is set. When the target has the same `.mp3` extension as V0, V0 files are removed before target conversion.
+- `--verified-lossless-target` flag: the configured storage format for EVERY lossless-sourced import (e.g. "opus 128", "mp3 v2", "aac 128"), whatever the proof legs decided — see "Quality decides imports, proof decides names, config decides formats" above. Passed from `dispatch_import_core()` when `cfg.verified_lossless_target` is set. When the target has the same `.mp3` extension as V0, V0 files are removed before target conversion.
 - `--force` flag: skips the distance check (`max_distance=999`) for force-importing rejected albums. Used by `pipeline_cli.py force-import` and `POST /api/pipeline/force-import`.
 - Exit codes: 0=imported, 1=conversion failed, 2=beets failed, 3=path not found, 5=downgrade or suspect-lossless rejection, 6=transcode/provisional path (may or may not have imported as an upgrade).
 
