@@ -47,11 +47,11 @@ def enforce_beets_startup(
         confuse.ConfigError,
         msgspec.ValidationError,
         ValueError,
-    ) as exc:
-        # Native parser/load context is intentionally retained (issue #759
-        # KD9). It is not copied into the typed, token-free report surface.
-        logger.error("Beets configuration load failed: %s", exc)
-        raise BeetsStartupError("Beets configuration load failed") from exc
+    ):
+        logger.error(
+            "Beets configuration load failed [runtime_config_load_error]"
+        )
+        raise BeetsStartupError("Beets configuration load failed") from None
 
     try:
         report = check_beets_config(cfg, role=role)
@@ -62,9 +62,11 @@ def enforce_beets_startup(
         confuse.ConfigError,
         msgspec.ValidationError,
         BeetsConfigError,
-    ) as exc:
-        logger.error("Beets configuration check failed: %s", exc)
-        raise BeetsStartupError("Beets configuration check failed") from exc
+    ):
+        logger.error(
+            "Beets configuration check failed [beets_config_load_error]"
+        )
+        raise BeetsStartupError("Beets configuration check failed") from None
 
     for warning in report.warnings:
         logger.warning(

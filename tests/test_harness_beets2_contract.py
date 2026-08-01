@@ -374,7 +374,7 @@ import sys
 from pathlib import Path
 
 from lib.beets_config_contract import check_beets_config
-from tests.test_beets_config_contract import BeetsContractWorld
+from tests.fakes.beets_contract import BeetsContractWorld
 
 
 def manifest(root):

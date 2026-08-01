@@ -53,10 +53,11 @@ def main(argv: list[str] | None = None) -> int:
         confuse.ConfigError,
         msgspec.ValidationError,
         ValueError,
-    ) as exc:
-        # Native parser/load detail intentionally remains on stderr (KD9); the
-        # machine channel stays token-free and schema-stable.
-        print(f"Beets configuration load failed: {exc}", file=sys.stderr)
+    ):
+        print(
+            "ERROR [runtime_config_load_error] Beets configuration load failed",
+            file=sys.stderr,
+        )
         print(msgspec.json.encode(CheckerResult(ok=False, error="config_load_error")).decode())
         return 1
 
@@ -69,10 +70,11 @@ def main(argv: list[str] | None = None) -> int:
         confuse.ConfigError,
         msgspec.ValidationError,
         BeetsConfigError,
-    ) as exc:
-        # Native parser/load detail intentionally remains on stderr (KD9); the
-        # machine channel stays token-free and schema-stable.
-        print(f"Beets configuration load failed: {exc}", file=sys.stderr)
+    ):
+        print(
+            "ERROR [beets_config_load_error] Beets configuration load failed",
+            file=sys.stderr,
+        )
         print(msgspec.json.encode(CheckerResult(ok=False, error="config_load_error")).decode())
         return 1
 

@@ -887,7 +887,7 @@ class TestMainCLIParsing(unittest.TestCase):
         """Lock file path is var_dir/.cratedigger.lock."""
         import cratedigger
         from lib import config as runtime_config_module
-        from tests.test_beets_config_contract import BeetsContractWorld
+        from tests.fakes.beets_contract import BeetsContractWorld
 
         world = BeetsContractWorld(role="main")
         self.addCleanup(world.close)
@@ -918,7 +918,7 @@ class TestMainCLIParsing(unittest.TestCase):
         """--no-lock-file reaches schema startup without ever making a lock."""
         import cratedigger
         from lib import config as runtime_config_module
-        from tests.test_beets_config_contract import BeetsContractWorld
+        from tests.fakes.beets_contract import BeetsContractWorld
 
         world = BeetsContractWorld(role="main")
         self.addCleanup(world.close)

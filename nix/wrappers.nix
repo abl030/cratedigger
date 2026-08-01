@@ -27,7 +27,7 @@ let
 
   mkCliTool = name: script: pkgs.writeShellScriptBin name ''
     export PATH="${runtimePath}:$PATH"
-    export PYTHONPATH="${src}''${PYTHONPATH:+:$PYTHONPATH}"
+    export PYTHONPATH="${src}"
     exec ${pythonEnv}/bin/python ${src}/${script} "$@"
   '';
 in

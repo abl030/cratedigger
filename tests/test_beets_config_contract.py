@@ -2,515 +2,27 @@
 
 from __future__ import annotations
 
-import configparser
+import errno
 import os
 import stat
-import subprocess
 import sys
-import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
 import msgspec
 import yaml
 
 from lib.beets_config_contract import BeetsConfigError, check_beets_config
-from lib.config import read_runtime_config_strict
-from scripts.check_beets_config import CheckerResult
-
-SAFE_DEFAULT_PATH = (
-    "$albumartist/$year - $album%aunique{albumartist album,path_disambig}/"
-    "$track $title"
+from tests.fakes.beets_contract import (
+    RUNTIME_AUTHORITIES,
+    SAFE_COMP_PATH,
+    SAFE_DEFAULT_PATH,
+    SAFE_SINGLETON_PATH,
+    BeetsContractWorld,
+    assert_app_owned_root_anchor_is_rejected,
 )
-SAFE_COMP_PATH = (
-    "Compilations/$album%aunique{albumartist album,path_disambig}/$track $title"
-)
-SAFE_SINGLETON_PATH = "Non-Album/$artist/$title"
-SAFE_PATH_DISAMBIG = (
-    "albumdisambig or releasegroupdisambig or catalognum or label or str(year)"
-)
-
-RUNTIME_AUTHORITIES = (
-    "beets_config_dir",
-    "beets_library_db",
-    "beets_directory",
-    "beets_state_file",
-    "beets_python",
-    "beets_secret_include",
-)
-
-
-_ROOT_ANCHOR_PROBE = r"""
-import os
-import sys
-from pathlib import Path
-
-from lib.beets_config_contract import _declared_path, _immutable_declared_file
-
-root = Path(sys.argv[1])
-depth = int(sys.argv[2])
-current = root
-relative_parts = []
-for index in range(depth):
-    relative_parts.append(f"authority-{index}")
-    current /= relative_parts[-1]
-    current.mkdir()
-target = current / "runtime.ini"
-target.write_text("[Beets]\n", encoding="utf-8")
-
-for path in (*tuple(root.joinpath(*relative_parts[:index]) for index in range(1, depth + 1)), target):
-    os.chown(path, 1, 1)
-    path.chmod(0o555 if path.is_dir() else 0o444)
-os.chown(root, 2, 2)
-root.chmod(0o555)
-
-pid = os.fork()
-if pid == 0:
-    os.chroot(root)
-    os.chdir("/")
-    os.setgroups([])
-    os.setgid(2)
-    os.setuid(2)
-    declared = Path("/").joinpath(*relative_parts, "runtime.ini")
-    if Path("/").stat().st_uid != os.geteuid():
-        raise AssertionError("application does not own the chroot anchor")
-    for component in (
-        Path("/").joinpath(*relative_parts[:index])
-        for index in range(1, depth + 1)
-    ):
-        if component.stat().st_uid == os.geteuid():
-            raise AssertionError(f"application unexpectedly owns {component}")
-        if component.stat().st_mode & 0o222:
-            raise AssertionError(f"authority component is writable: {component}")
-    if declared.stat().st_uid == os.geteuid() or declared.stat().st_mode & 0o222:
-        raise AssertionError("declared file is not externally owned and read-only")
-    if _immutable_declared_file(_declared_path(str(declared))):
-        raise AssertionError(
-            "app-owned filesystem root was omitted from immutability proof"
-        )
-    os._exit(0)
-
-_, status = os.waitpid(pid, 0)
-exit_code = os.waitstatus_to_exitcode(status)
-
-# Restore host-user ownership so TemporaryDirectory can clean up outside the
-# user namespace even when the child found a regression.
-root.chmod(0o700)
-for current_dir, directories, files in os.walk(root):
-    current_path = Path(current_dir)
-    current_path.chmod(0o700)
-    os.chown(current_path, 0, 0)
-    for name in directories:
-        child = current_path / name
-        child.chmod(0o700)
-        os.chown(child, 0, 0)
-    for name in files:
-        child = current_path / name
-        child.chmod(0o600)
-        os.chown(child, 0, 0)
-os.chown(root, 0, 0)
-sys.exit(exit_code)
-"""
-
-
-def assert_app_owned_root_anchor_is_rejected(*, depth: int) -> None:
-    """Exercise the real path guard with only the filesystem root app-owned."""
-    with tempfile.TemporaryDirectory(
-        prefix="beets-contract-root-anchor-",
-        dir="/dev/shm",
-    ) as root:
-        proc = subprocess.run(
-            [
-                "unshare",
-                "--map-root-user",
-                "--map-auto",
-                sys.executable,
-                "-c",
-                _ROOT_ANCHOR_PROBE,
-                root,
-                str(depth),
-            ],
-            cwd=Path(__file__).resolve().parent.parent,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    if proc.returncode != 0:
-        raise AssertionError(
-            "app-owned chroot anchor was admitted\n"
-            f"stdout:\n{proc.stdout}\n"
-            f"stderr:\n{proc.stderr}"
-        )
-
-
-def _snapshot_tree(root: Path) -> tuple[tuple[str, str, bytes | None], ...]:
-    """Capture names, kinds, and bytes without mutating the observed tree."""
-    if not root.exists():
-        return ()
-    snapshot: list[tuple[str, str, bytes | None]] = []
-    for path in sorted(root.rglob("*")):
-        relative = str(path.relative_to(root))
-        if path.is_file():
-            snapshot.append((relative, "file", path.read_bytes()))
-        elif path.is_dir():
-            snapshot.append((relative, "dir", None))
-        else:
-            snapshot.append((relative, "other", None))
-    return tuple(snapshot)
-
-
-def snapshot_contract_world(world: BeetsContractWorld) -> dict[str, object]:
-    """Snapshot every file/tree whose purity the standalone checker claims."""
-    return {
-        "runtime": world.runtime_config.read_bytes(),
-        "main": world.main_config.read_bytes(),
-        "secret": world.secret_include.read_bytes(),
-        "state": world.state_file.read_bytes(),
-        "database": (
-            world.library_db.read_bytes() if world.library_db.exists() else None
-        ),
-        "library": _snapshot_tree(world.library_root),
-    }
-
-
-class BeetsContractWorld:
-    """One real file/config world; filesystem permissions are the capability."""
-
-    _scratch_validated = False
-
-    @classmethod
-    def _validate_authority_scratch(cls) -> None:
-        if cls._scratch_validated:
-            return
-        scratch = Path("/dev/shm")
-        filesystem = subprocess.run(
-            ["stat", "-f", "-c", "%T", str(scratch)],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-        metadata = scratch.stat()
-        if (
-            filesystem != "tmpfs"
-            or metadata.st_uid != 0
-            or stat.S_IMODE(metadata.st_mode) != 0o1777
-        ):
-            raise AssertionError(
-                "Beets contract tests require root-owned 01777 tmpfs /dev/shm"
-            )
-        cls._scratch_validated = True
-
-    def __init__(self, *, role: str = "importer", token: str = "safe-token"):
-        self._validate_authority_scratch()
-        self._tmp = tempfile.TemporaryDirectory(prefix="beets-contract-")
-        # Declared configuration lives under a subordinate-UID-owned entry in
-        # root-owned sticky /dev/shm. The test identity can read it but cannot
-        # rename that entry, so the fixture models a real deployment authority
-        # instead of pretending chmod beneath a user-owned temp root is enough.
-        self._authority_tmp = tempfile.TemporaryDirectory(
-            prefix="beets-contract-authority-", dir="/dev/shm"
-        )
-        self._closed = False
-        self.root = Path(self._tmp.name)
-        self.authority_root = Path(self._authority_tmp.name)
-        self.contract_dir = self.authority_root / "contract"
-        self.runtime_dir = self.root / "runtime"
-        self.beets_dir = self.authority_root / "beets"
-        self.secret_dir = self.authority_root / "secret"
-        self.state_dir = self.authority_root / "state"
-        self.library_root = self.root / "library"
-        self.library_db = self.root / "library.db"
-        self.state_file = self.state_dir / "state.pickle"
-        for path in (
-            self.contract_dir,
-            self.runtime_dir,
-            self.beets_dir,
-            self.secret_dir,
-            self.state_dir,
-            self.library_root,
-        ):
-            path.mkdir()
-        from beets.library import Library
-
-        library = Library(str(self.library_db), str(self.library_root))
-        library._close()
-        self.state_file.write_bytes(b"state-before")
-        self.secret_include = self.secret_dir / "discogs.yaml"
-        self.secret_include.write_text(
-            yaml.safe_dump({"discogs": {"user_token": token}}),
-            encoding="utf-8",
-        )
-        self.main_config = self.beets_dir / "config.yaml"
-        self._write_main_config()
-        self.runtime_config = self.contract_dir / "runtime.ini"
-        self._write_runtime_config()
-        self._seal(role)
-
-    def _write_main_config(self, **overrides: object) -> None:
-        config: dict[str, object] = {
-            "library": str(self.library_db),
-            "directory": str(self.library_root),
-            "statefile": str(self.state_file),
-            "include": [str(self.secret_include)],
-            "plugins": [
-                "musicbrainz", "discogs", "inline", "permissions", "fetchart",
-            ],
-            "import": {
-                "autotag": True,
-                "move": True,
-                "write": True,
-                "duplicate_keys": {
-                    "album": ["mb_albumid", "discogs_albumid"],
-                },
-            },
-            "paths": {"default": SAFE_DEFAULT_PATH, "comp": SAFE_COMP_PATH},
-            "album_fields": {"path_disambig": SAFE_PATH_DISAMBIG},
-            "permissions": {"file": "0664", "dir": "02775"},
-            "musicbrainz": {"host": "musicbrainz.org", "https": True},
-            "convert": {"auto": False, "auto_keep": False},
-            "fetchart": {"auto": True},
-        }
-        config.update(overrides)
-        self.main_config.write_text(yaml.safe_dump(config), encoding="utf-8")
-
-    def _write_runtime_config(
-        self,
-        *,
-        musicbrainz_api_base: str = "https://musicbrainz.org",
-        **overrides: str,
-    ) -> None:
-        values = {
-            "config_dir": str(self.beets_dir),
-            "library": str(self.library_db),
-            "directory": str(self.library_root),
-            "state_file": str(self.state_file),
-            "python": sys.executable,
-            "secret_include": str(self.secret_include),
-        }
-        values.update(overrides)
-        parser = configparser.RawConfigParser()
-        parser["Beets"] = values
-        parser["MusicBrainz"] = {"api_base": musicbrainz_api_base}
-        with self.runtime_config.open("w", encoding="utf-8") as handle:
-            parser.write(handle)
-
-    def _seal(self, role: str) -> None:
-        for path in (self.runtime_config, self.main_config):
-            if path.exists():
-                path.chmod(stat.S_IRUSR | stat.S_IRGRP)
-        for path in (self.contract_dir, self.beets_dir, self.state_dir):
-            path.chmod(
-                stat.S_IRUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IXGRP
-            )
-        if self.secret_include.exists():
-            self.secret_include.chmod(stat.S_IRUSR | stat.S_IRGRP)
-        self.secret_dir.chmod(
-            stat.S_IRUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IXGRP
-        )
-        self.authority_root.chmod(
-            stat.S_IRUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IXGRP
-        )
-        self.state_file.chmod(
-            stat.S_IRUSR
-            | stat.S_IWUSR
-            | stat.S_IRGRP
-            | (stat.S_IWGRP if role == "importer" else 0)
-        )
-        self._chown_authority("1:0")
-
-    def unseal(self) -> None:
-        self._chown_authority("0:0")
-        self.authority_root.chmod(stat.S_IRWXU)
-        for path in (
-            self.contract_dir,
-            self.beets_dir,
-            self.secret_dir,
-            self.state_dir,
-        ):
-            path.chmod(stat.S_IRWXU)
-        for path in (self.runtime_config, self.main_config, self.secret_include):
-            if path.exists():
-                path.chmod(stat.S_IRUSR | stat.S_IWUSR)
-
-    def _chown_authority(self, owner: str) -> None:
-        self._chown_path(self.authority_root, owner, recursive=True)
-
-    def _chown_path(self, path: Path, owner: str, *, recursive: bool = False) -> None:
-        recursive_flag = ["-R"] if recursive else []
-        subprocess.run(
-            [
-                "unshare", "--map-root-user", "--map-auto", "chown",
-                *recursive_flag, owner, str(path),
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-
-    def set_state_mode(self, mode: int) -> None:
-        """Change the external state mode through its owning user namespace."""
-        self.set_authority_mode(self.state_file, mode)
-
-    def set_authority_mode(self, path: Path, mode: int) -> None:
-        """Change a sealed authority entry through its owning user namespace."""
-        subprocess.run(
-            [
-                "unshare", "--map-root-user", "--map-auto", "chmod",
-                f"{mode:o}", str(path),
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-
-    def make_state_leaf_app_owned(self, mode: int) -> None:
-        """Give only the state leaf to this process under external ancestors."""
-        self._chown_path(self.state_file, "0:0")
-        self.state_file.chmod(mode)
-        if self.state_file.stat().st_uid != os.geteuid():
-            raise AssertionError("state fixture leaf is not application-owned")
-        if self.state_dir.stat().st_uid == os.geteuid():
-            raise AssertionError("state fixture ancestor must remain externally owned")
-
-    def alias_state_to_library(self, kind: str) -> None:
-        """Make the declared state and catalog paths name one inode."""
-        self.unseal()
-        if kind == "same_path":
-            self.state_file = self.library_db
-        elif kind == "hardlink":
-            external_library = self.state_dir / "library.db"
-            external_library.write_bytes(self.library_db.read_bytes())
-            self.state_file.unlink()
-            os.link(external_library, self.state_file)
-            self.library_db = external_library
-        else:
-            raise AssertionError(f"unknown state/library alias kind: {kind}")
-        self._write_runtime_config(
-            library=str(self.library_db),
-            state_file=str(self.state_file),
-        )
-        self._write_main_config(
-            library=str(self.library_db),
-            statefile=str(self.state_file),
-        )
-        self._seal("importer")
-
-    def cfg(self):
-        return read_runtime_config_strict(str(self.runtime_config), str(self.runtime_dir))
-
-    def put_authority_behind_writable_ancestor(self, kind: str) -> str:
-        """Plant a readonly leaf below a replaceable ordinary ancestor."""
-        self.unseal()
-        attacker = self.root / f"writable-ancestor-{kind}"
-        sealed = attacker / "sealed"
-        sealed.mkdir(parents=True)
-        attacker.chmod(stat.S_IRWXU)
-
-        if kind == "runtime":
-            candidate = sealed / "runtime.ini"
-            candidate.write_text(
-                self.runtime_config.read_text(encoding="utf-8"), encoding="utf-8"
-            )
-            self.runtime_config = candidate
-            expected = "mutable_runtime_config"
-        elif kind == "main":
-            candidate = sealed / "config.yaml"
-            candidate.write_text(
-                self.main_config.read_text(encoding="utf-8"), encoding="utf-8"
-            )
-            self._write_runtime_config(config_dir=str(sealed))
-            expected = "mutable_main_config"
-        elif kind == "include":
-            candidate = sealed / "extra.yaml"
-            candidate.write_text("fetchart:\n  auto: true\n", encoding="utf-8")
-            self._write_main_config(
-                include=[str(candidate), str(self.secret_include)]
-            )
-            expected = "mutable_include"
-        elif kind == "secret":
-            candidate = sealed / "discogs.yaml"
-            candidate.write_text(
-                self.secret_include.read_text(encoding="utf-8"), encoding="utf-8"
-            )
-            self._write_main_config(include=[str(candidate)])
-            self._write_runtime_config(secret_include=str(candidate))
-            expected = "mutable_secret_include"
-        else:
-            raise AssertionError(f"unknown declared authority kind: {kind}")
-
-        candidate.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
-        sealed.chmod(
-            stat.S_IRUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IXGRP
-            | stat.S_IROTH | stat.S_IXOTH
-        )
-        self._seal("importer")
-        return expected
-
-    def put_app_owned_readonly_authority(
-        self,
-        kind: str,
-        *,
-        component: str,
-    ) -> str:
-        """Transfer one readonly declared leaf or ancestor to the app UID."""
-        self.unseal()
-        if kind == "runtime":
-            candidate = self.runtime_config
-            expected = "mutable_runtime_config"
-        elif kind == "main":
-            candidate = self.main_config
-            expected = "mutable_main_config"
-        elif kind == "include":
-            include_dir = self.authority_root / "nonsecret"
-            include_dir.mkdir()
-            candidate = include_dir / "extra.yaml"
-            candidate.write_text("fetchart:\n  auto: true\n", encoding="utf-8")
-            candidate.chmod(stat.S_IRUSR | stat.S_IRGRP)
-            include_dir.chmod(
-                stat.S_IRUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IXGRP
-            )
-            self._write_main_config(
-                include=[str(candidate), str(self.secret_include)]
-            )
-            expected = "mutable_include"
-        elif kind == "secret":
-            candidate = self.secret_include
-            expected = "mutable_secret_include"
-        else:
-            raise AssertionError(f"unknown declared authority kind: {kind}")
-
-        self._seal("importer")
-        owned = candidate if component == "leaf" else candidate.parent
-        self._chown_path(owned, "0:0")
-        self.assert_readonly(owned)
-        return expected
-
-    @staticmethod
-    def assert_readonly(path: Path) -> None:
-        if path.stat().st_mode & stat.S_IWUSR:
-            raise AssertionError(f"expected readonly fixture component: {path}")
-
-    def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        try:
-            self.unseal()
-            self.state_file.chmod(stat.S_IRUSR | stat.S_IWUSR)
-            for current, directories, files in os.walk(self.root):
-                Path(current).chmod(stat.S_IRWXU)
-                for name in files:
-                    child = Path(current, name)
-                    if not child.is_symlink():
-                        child.chmod(stat.S_IRUSR | stat.S_IWUSR)
-                for name in directories:
-                    child = Path(current, name)
-                    if not child.is_symlink():
-                        child.chmod(stat.S_IRWXU)
-        finally:
-            self._authority_tmp.cleanup()
-            self._tmp.cleanup()
 
 
 class TestBeetsConfigContract(unittest.TestCase):
@@ -931,6 +443,47 @@ class TestBeetsConfigContract(unittest.TestCase):
         self.assertIn("state_not_writable_by_importer", [f.code for f in report.hard_failures])
         self.assertEqual(world.state_file.read_bytes(), before)
 
+    def test_inconclusive_write_probe_os_errors_fail_startup_closed(self):
+        for error_number in (errno.EIO, errno.ESTALE):
+            with self.subTest(error_number=error_number), mock.patch(
+                "os.open",
+                side_effect=OSError(error_number, os.strerror(error_number)),
+            ), self.assertRaisesRegex(
+                BeetsConfigError,
+                "cannot determine whether Beets authority is writable",
+            ):
+                check_beets_config(self.world.cfg(), role="importer")
+
+    def test_readonly_filesystem_write_probe_proves_state_nonwritability(self):
+        with mock.patch(
+            "os.open",
+            side_effect=OSError(errno.EROFS, os.strerror(errno.EROFS)),
+        ):
+            report = check_beets_config(self.world.cfg(), role="importer")
+
+        self.assertIn(
+            "state_not_writable_by_importer",
+            [finding.code for finding in report.hard_failures],
+        )
+
+    def test_invalid_designated_discogs_token_values_are_missing(self):
+        invalid_tokens = ("", " \t\n", None, False, True, 0, 42, [], {})
+        for token in invalid_tokens:
+            with self.subTest(token=repr(token)):
+                self.world.unseal()
+                self.world.secret_include.write_text(
+                    yaml.safe_dump({"discogs": {"user_token": token}}),
+                    encoding="utf-8",
+                )
+                self.world._seal("importer")
+
+                report = check_beets_config(self.world.cfg(), role="importer")
+
+                self.assertIn(
+                    "discogs_token_missing",
+                    [finding.code for finding in report.hard_failures],
+                )
+
     def test_scalar_include_is_rejected_as_beets_rejects_it(self):
         self.world.unseal()
         self.world._write_main_config(include=str(self.world.secret_include))
@@ -1214,12 +767,19 @@ class TestBeetsConfigContract(unittest.TestCase):
                 finally:
                     world.close()
 
-    def test_malformed_yaml_preserves_native_parser_diagnostic(self):
+    def test_malformed_yaml_remains_a_contract_load_failure(self):
+        token = "PLANTED_CONTRACT_TOKEN_759"
         self.world.unseal()
-        self.world.secret_include.write_text("discogs: [\n", encoding="utf-8")
+        self.world.secret_include.write_text(
+            f"discogs:\n  user_token: [{token}\n",
+            encoding="utf-8",
+        )
         self.world._seal("importer")
-        with self.assertRaisesRegex(BeetsConfigError, "while parsing"):
+        with self.assertRaises(BeetsConfigError) as caught:
             check_beets_config(self.world.cfg(), role="importer")
+        self.assertIn("ParserError", str(caught.exception))
+        self.assertNotIn(token, str(caught.exception))
+        self.assertNotIn("while parsing", str(caught.exception))
 
     def test_mutable_runtime_contract_is_rejected(self):
         self.world.unseal()
@@ -1244,367 +804,3 @@ class TestBeetsConfigContract(unittest.TestCase):
         self.world._seal("importer")
         second = check_beets_config(self.world.cfg(), role="importer")
         self.assertEqual(first.fingerprint, second.fingerprint)
-
-
-class TestBeetsConfigIntegrationFindings(unittest.TestCase):
-    def setUp(self) -> None:
-        self.world = BeetsContractWorld()
-        self.addCleanup(self.world.close)
-
-    def test_included_file_cannot_redirect_beets_to_an_unchecked_source(self):
-        self.world.unseal()
-        immutable_dir = self.world.beets_dir / "immutable-includes"
-        immutable_dir.mkdir()
-        redirect = self.world.runtime_dir / "unchecked.yaml"
-        redirect.write_text("import:\n  write: false\n", encoding="utf-8")
-        first = immutable_dir / "first.yaml"
-        first.write_text(f"include:\n  - {redirect}\n", encoding="utf-8")
-        first.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
-        immutable_dir.chmod(
-            stat.S_IRUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IXGRP
-            | stat.S_IROTH | stat.S_IXOTH
-        )
-        self.world._write_main_config(include=[str(first), str(self.world.secret_include)])
-        self.world._seal("importer")
-        report = check_beets_config(self.world.cfg(), role="importer")
-        self.assertEqual(
-            [finding.code for finding in report.hard_failures],
-            ["included_include_forbidden"],
-        )
-
-    def test_every_declared_file_rejects_a_writable_ordinary_ancestor(self):
-        for kind in ("runtime", "main", "include", "secret"):
-            with self.subTest(kind=kind):
-                world = BeetsContractWorld()
-                try:
-                    expected = world.put_authority_behind_writable_ancestor(kind)
-                    report = check_beets_config(world.cfg(), role="importer")
-                    self.assertIn(
-                        expected, [finding.code for finding in report.hard_failures]
-                    )
-                finally:
-                    world.close()
-
-    def test_active_plugins_follow_pinned_disabled_and_musicbrainz_semantics(self):
-        cases: tuple[tuple[str, dict[str, object], bool, str | None], ...] = (
-            ("disabled required", {"disabled_plugins": ["permissions"]}, False,
-             "permissions_plugin_missing"),
-            ("disabled convert", {
-                "plugins": ["musicbrainz", "discogs", "inline", "permissions", "convert"],
-                "disabled_plugins": ["convert"],
-                "convert": {"auto": True, "auto_keep": True},
-            }, True, None),
-            ("mb enabled", {
-                "plugins": ["discogs", "inline", "permissions"],
-                "musicbrainz": {"enabled": True, "host": "musicbrainz.org", "https": True},
-            }, True, None),
-            ("mb false", {
-                "musicbrainz": {"enabled": False, "host": "musicbrainz.org", "https": True},
-            }, False, "musicbrainz_plugin_missing"),
-        )
-        for description, overrides, expected_ok, expected_code in cases:
-            with self.subTest(description=description):
-                world = BeetsContractWorld()
-                try:
-                    world.unseal()
-                    world._write_main_config(**overrides)
-                    world._seal("importer")
-                    report = check_beets_config(world.cfg(), role="importer")
-                    self.assertEqual(report.ok, expected_ok, report.hard_failures)
-                    if expected_code is not None:
-                        self.assertIn(expected_code, [f.code for f in report.hard_failures])
-                finally:
-                    world.close()
-
-    def test_active_convert_with_omitted_options_uses_pinned_false_defaults(self):
-        self.world.unseal()
-        self.world._write_main_config(
-            plugins=["musicbrainz", "discogs", "inline", "permissions", "convert"],
-            convert={},
-        )
-        self.world._seal("importer")
-        report = check_beets_config(self.world.cfg(), role="importer")
-        self.assertTrue(report.ok, report.hard_failures)
-
-    def test_effective_nonabsolute_statefile_is_rejected_before_expansion(self):
-        values = (
-            os.path.relpath(self.world.state_file, self.world.beets_dir),
-            "~/state.pickle",
-            "~root/state.pickle",
-        )
-        for value in values:
-            with self.subTest(value=value):
-                self.world.unseal()
-                self.world._write_main_config(statefile=value)
-                self.world._seal("importer")
-                report = check_beets_config(self.world.cfg(), role="importer")
-                self.assertIn(
-                    "effective_state_relative",
-                    [finding.code for finding in report.hard_failures],
-                )
-
-    def test_runtime_state_authority_must_also_be_absolute(self):
-        self.world.unseal()
-        self.world._write_runtime_config(state_file="state.pickle")
-        self.world._seal("importer")
-        report = check_beets_config(self.world.cfg(), role="importer")
-        self.assertIn("state_relative", [f.code for f in report.hard_failures])
-
-    def test_unreadable_statefile_is_rejected(self):
-        self.world.set_state_mode(0)
-        report = check_beets_config(self.world.cfg(), role="importer")
-        self.assertIn("state_unreadable", [f.code for f in report.hard_failures])
-
-    def test_mutable_designated_secret_is_rejected(self):
-        self.world.unseal()
-        self.world.secret_dir.chmod(stat.S_IRWXU)
-        self.world.secret_include.chmod(stat.S_IRUSR | stat.S_IWUSR)
-        report = check_beets_config(self.world.cfg(), role="importer")
-        self.assertIn("mutable_secret_include", [f.code for f in report.hard_failures])
-
-    def test_replaceable_runtime_config_symlink_is_rejected(self):
-        self.world.unseal()
-        target = self.world.contract_dir / "target.ini"
-        self.world.runtime_config.replace(target)
-        target.chmod(stat.S_IRUSR)
-        self.world.contract_dir.chmod(stat.S_IRUSR | stat.S_IXUSR)
-        link = self.world.runtime_dir / "runtime-link.ini"
-        link.symlink_to(target)
-        self.world.runtime_config = link
-        report = check_beets_config(self.world.cfg(), role="importer")
-        self.assertIn("mutable_runtime_config", [f.code for f in report.hard_failures])
-
-    def test_replaceable_declared_secret_symlink_is_rejected(self):
-        self.world.unseal()
-        link = self.world.runtime_dir / "secret-link.yaml"
-        link.symlink_to(self.world.secret_include)
-        self.world._write_main_config(include=[str(link)])
-        self.world._seal("importer")
-        report = check_beets_config(self.world.cfg(), role="importer")
-        self.assertIn("mutable_secret_include", [f.code for f in report.hard_failures])
-
-    def test_owned_output_never_echoes_arbitrary_plugin_text(self):
-        token = "SECRET::plugin-shaped-token::TOKEN"
-        self.world.unseal()
-        self.world._write_main_config(
-            plugins=["musicbrainz", "discogs", "inline", "permissions", token]
-        )
-        self.world._seal("importer")
-        encoded = msgspec.json.encode(
-            check_beets_config(self.world.cfg(), role="importer")
-        ).decode()
-        self.assertNotIn(token, encoded)
-
-    def test_missing_unreadable_and_malformed_nonsecret_includes_are_hard(self):
-        for case in ("missing", "unreadable", "malformed"):
-            with self.subTest(case=case):
-                world = BeetsContractWorld()
-                try:
-                    world.unseal()
-                    extra_dir = world.root / f"extra-{case}"
-                    extra_dir.mkdir()
-                    extra = extra_dir / "extra.yaml"
-                    if case == "malformed":
-                        extra.write_text("fetchart: [\n", encoding="utf-8")
-                        extra.chmod(stat.S_IRUSR)
-                    elif case == "unreadable":
-                        extra.write_text("fetchart:\n  auto: true\n", encoding="utf-8")
-                        extra.chmod(0)
-                    extra_dir.chmod(stat.S_IRUSR | stat.S_IXUSR)
-                    world._write_main_config(include=[str(extra), str(world.secret_include)])
-                    world._seal("importer")
-                    with self.assertRaises(BeetsConfigError):
-                        check_beets_config(world.cfg(), role="importer")
-                finally:
-                    world.close()
-
-    def test_designated_secret_rejects_nonmapping_empty_and_nested_extra(self):
-        invalid_values = (
-            "- token\n",
-            "",
-            "discogs:\n  user_token: safe\n  consumer_key: extra\n",
-        )
-        for value in invalid_values:
-            with self.subTest(value=value):
-                self.world.unseal()
-                self.world.secret_include.write_text(value, encoding="utf-8")
-                self.world._seal("importer")
-                report = check_beets_config(self.world.cfg(), role="importer")
-                self.assertIn("secret_schema", [f.code for f in report.hard_failures])
-
-    def test_missing_designated_secret_is_a_load_failure(self):
-        self.world.unseal()
-        self.world.secret_include.unlink()
-        self.world._seal("importer")
-        with self.assertRaises(BeetsConfigError):
-            check_beets_config(self.world.cfg(), role="importer")
-
-    def test_both_exact_duplicate_key_orders_are_accepted(self):
-        for keys in (
-            ["mb_albumid", "discogs_albumid"],
-            ["discogs_albumid", "mb_albumid"],
-        ):
-            with self.subTest(keys=keys):
-                self.world.unseal()
-                config = yaml.safe_load(self.world.main_config.read_text(encoding="utf-8"))
-                config["import"]["duplicate_keys"]["album"] = keys
-                self.world.main_config.write_text(yaml.safe_dump(config), encoding="utf-8")
-                self.world._seal("importer")
-                report = check_beets_config(self.world.cfg(), role="importer")
-                self.assertTrue(report.ok, report.hard_failures)
-
-    def test_duplicate_key_contract_rejects_extra_and_repeated_entries(self):
-        unsafe_lists = (
-            ["mb_albumid", "discogs_albumid", "mb_albumid"],
-            ["mb_albumid", "mb_albumid"],
-            ["discogs_albumid", "discogs_albumid"],
-        )
-        for keys in unsafe_lists:
-            with self.subTest(keys=keys):
-                world = BeetsContractWorld()
-                try:
-                    world.unseal()
-                    config = yaml.safe_load(
-                        world.main_config.read_text(encoding="utf-8")
-                    )
-                    config["import"]["duplicate_keys"]["album"] = keys
-                    world.main_config.write_text(
-                        yaml.safe_dump(config), encoding="utf-8"
-                    )
-                    world._seal("importer")
-                    report = check_beets_config(world.cfg(), role="importer")
-                    self.assertIn(
-                        "duplicate_keys_unsafe",
-                        [finding.code for finding in report.hard_failures],
-                    )
-                finally:
-                    world.close()
-
-    def test_later_include_cannot_blank_effective_discogs_token(self):
-        self.world.unseal()
-        extra_dir = self.world.beets_dir / "token-override"
-        extra_dir.mkdir()
-        override = extra_dir / "override.yaml"
-        override.write_text("discogs:\n  user_token: '   '\n", encoding="utf-8")
-        override.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
-        extra_dir.chmod(
-            stat.S_IRUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IXGRP
-            | stat.S_IROTH | stat.S_IXOTH
-        )
-        self.world._write_main_config(include=[str(self.world.secret_include), str(override)])
-        self.world._seal("importer")
-        report = check_beets_config(self.world.cfg(), role="importer")
-        self.assertIn(
-            "discogs_token_outside_secret_include",
-            [f.code for f in report.hard_failures],
-        )
-
-
-class TestStandaloneBeetsConfigChecker(unittest.TestCase):
-    def setUp(self) -> None:
-        self.world = BeetsContractWorld()
-        self.addCleanup(self.world.close)
-
-    def _run(self, role: str = "importer") -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [
-                sys.executable,
-                "scripts/check_beets_config.py",
-                "--config", str(self.world.runtime_config),
-                "--runtime-dir", str(self.world.runtime_dir),
-                "--role", role,
-            ],
-            cwd=Path(__file__).resolve().parent.parent,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-
-    def _decode(self, proc: subprocess.CompletedProcess[str]) -> CheckerResult:
-        return msgspec.json.decode(proc.stdout, type=CheckerResult)
-
-    def test_machine_json_is_stable_and_success_has_no_side_effects(self):
-        before = snapshot_contract_world(self.world)
-        proc = self._run()
-        payload = self._decode(proc)
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertTrue(payload.ok)
-        self.assertIsNotNone(payload.report)
-        assert payload.report is not None
-        self.assertTrue(payload.report.ok)
-        self.assertIsNone(payload.error)
-        self.assertEqual(proc.stderr, "")
-        self.assertEqual(snapshot_contract_world(self.world), before)
-
-    def test_hard_failure_is_json_on_stdout_and_human_on_stderr(self):
-        proc = self._run(role="web")
-        payload = self._decode(proc)
-        self.assertNotEqual(proc.returncode, 0)
-        self.assertFalse(payload.ok)
-        self.assertIn("state_writable_by_reader", proc.stderr)
-
-    def test_native_runtime_load_failure_keeps_json_machine_channel(self):
-        self.world.unseal()
-        self.world.runtime_config.write_text("[Beets\nbroken = true\n", encoding="utf-8")
-        self.world._seal("importer")
-        proc = self._run()
-        payload = self._decode(proc)
-        self.assertNotEqual(proc.returncode, 0)
-        self.assertEqual(payload.error, "config_load_error")
-        self.assertIn("Beets configuration load failed", proc.stderr)
-
-    def test_runtime_value_error_keeps_json_machine_channel(self):
-        self.world.unseal()
-        with self.world.runtime_config.open("a", encoding="utf-8") as handle:
-            handle.write(
-                "\n[Search Settings]\n"
-                "number_of_albums_to_grab = many\n"
-            )
-        self.world._seal("importer")
-
-        proc = self._run()
-        payload = self._decode(proc)
-
-        self.assertNotEqual(proc.returncode, 0)
-        self.assertEqual(payload.error, "config_load_error")
-        self.assertIn("invalid literal", proc.stderr)
-
-    def test_malformed_authority_path_keeps_json_machine_channel(self):
-        self.world.unseal()
-        self.world._write_runtime_config(
-            config_dir="~cratedigger-no-such-user-759/config",
-        )
-        self.world._seal("importer")
-
-        proc = self._run()
-        payload = self._decode(proc)
-
-        self.assertNotEqual(proc.returncode, 0)
-        self.assertEqual(payload.error, "config_load_error")
-        self.assertIn("Beets configuration load failed", proc.stderr)
-
-    def test_unhashable_secret_key_has_stable_machine_output(self):
-        self.world.unseal()
-        self.world.secret_include.write_text(
-            "? [unhashable, key]\n: value\n",
-            encoding="utf-8",
-        )
-        self.world._seal("importer")
-
-        proc = self._run()
-        payload = self._decode(proc)
-
-        self.assertNotEqual(proc.returncode, 0)
-        self.assertEqual(payload.error, "config_load_error")
-        self.assertIn("unhashable YAML mapping key", proc.stderr)
-
-    def test_checker_result_rejects_wrong_wire_types(self):
-        with self.assertRaises(msgspec.ValidationError):
-            msgspec.json.decode(
-                b'{"ok":"false","report":null,"error":null}',
-                type=CheckerResult,
-            )
-
-
-if __name__ == "__main__":
-    unittest.main()

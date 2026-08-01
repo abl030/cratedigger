@@ -2604,8 +2604,8 @@ class TestImporterWorker(unittest.TestCase):
     def test_main_reuses_one_scan_cursor_across_polls(self) -> None:
         """The process loop, not callers, owns the persistent import cursor."""
         from scripts import importer
-        from tests.test_beets_config_contract import BeetsContractWorld
-        from tests.test_beets_config_startup import _isolated_installed_authority
+        from tests.beets_config_startup_support import _isolated_installed_authority
+        from tests.fakes.beets_contract import BeetsContractWorld
 
         class PollProbeComplete(RuntimeError):
             pass
@@ -5175,8 +5175,8 @@ class TestImportPreviewWorker(unittest.TestCase):
         window. Mirrors the importer's startup self-heal.
         """
         from scripts import import_preview_worker
-        from tests.test_beets_config_contract import BeetsContractWorld
-        from tests.test_beets_config_startup import _isolated_installed_authority
+        from tests.beets_config_startup_support import _isolated_installed_authority
+        from tests.fakes.beets_contract import BeetsContractWorld
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="wanted"))

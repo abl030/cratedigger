@@ -80,8 +80,8 @@ class TestInheritedUnixListener(unittest.TestCase):
     ) -> None:
         from beets import config as active_beets_config
 
-        from tests.test_beets_config_contract import BeetsContractWorld
-        from tests.test_beets_config_startup import _isolated_installed_authority
+        from tests.beets_config_startup_support import _isolated_installed_authority
+        from tests.fakes.beets_contract import BeetsContractWorld
         from web import server as srv
 
         world = BeetsContractWorld(role="web")
@@ -125,14 +125,14 @@ class TestInheritedUnixListener(unittest.TestCase):
     def test_hard_invalid_dev_startup_never_constructs_a_server(self) -> None:
         from beets import config as active_beets_config
 
-        from tests.test_beets_config_contract import (
-            BeetsContractWorld,
-            snapshot_contract_world,
-        )
-        from tests.test_beets_config_startup import (
+        from tests.beets_config_startup_support import (
             _isolated_installed_authority,
             _snapshot_runtime_tree,
             _snapshot_web_process_state,
+        )
+        from tests.fakes.beets_contract import (
+            BeetsContractWorld,
+            snapshot_contract_world,
         )
         from web import server as srv
 
@@ -773,12 +773,12 @@ class TestPerThreadBeetsHandles(unittest.TestCase):
         """Production boot must load the root before opening the server."""
         from beets import config as active_beets_config
 
-        from tests.test_beets_config_contract import BeetsContractWorld
-        from tests.test_beets_config_startup import (
+        from tests.beets_config_startup_support import (
             _isolated_installed_authority,
             _record_admission_events,
             _RestartCase,
         )
+        from tests.fakes.beets_contract import BeetsContractWorld
 
         class BootStop(Exception):
             pass

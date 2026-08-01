@@ -3,22 +3,28 @@
 from __future__ import annotations
 
 import logging
+import subprocess
+import sys
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-from hypothesis import given
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
 from lib.beets_config_contract import BeetsRole
 from lib.beets_startup import BeetsStartupError, enforce_beets_startup
-from tests.test_beets_config_contract import BeetsContractWorld
-from tests.test_beets_config_startup import (
+from tests.beets_config_startup_support import (
     _RESTART_CASES,
     _exercise_real_rejection_and_restart,
     _isolated_installed_authority,
     _RestartCase,
     assert_one_admission_before_effect,
+)
+from tests.fakes.beets_contract import (
+    BeetsContractWorld,
+    assert_redacted_load_failure,
 )
 
 ROLES: tuple[BeetsRole, ...] = ("main", "importer", "preview", "web")
@@ -107,6 +113,94 @@ class TestGeneratedStartupBoundary(unittest.TestCase):
         case: _RestartCase,
     ) -> None:
         _exercise_real_rejection_and_restart(self, case)
+
+    @settings(max_examples=100)
+    @given(
+        role=st.sampled_from(ROLES),
+        adapter=st.sampled_from(("startup", "checker")),
+        malformed_source=st.sampled_from(("runtime", "secret", "main")),
+        suffix=st.text(
+            alphabet="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+            min_size=1,
+            max_size=32,
+        ),
+    )
+    def test_hostile_malformed_content_never_reaches_process_output(
+        self,
+        role: BeetsRole,
+        adapter: str,
+        malformed_source: str,
+        suffix: str,
+    ) -> None:
+        token = f"PLANTED_TOKEN_759_{suffix}"
+        world = BeetsContractWorld(role=role)
+        self.addCleanup(world.close)
+        world.unseal()
+        if malformed_source == "runtime":
+            world.runtime_config.write_text(
+                f"[Beets\nuser_token = [{token}\n",
+                encoding="utf-8",
+            )
+        elif malformed_source == "secret":
+            world.secret_include.write_text(
+                f"discogs:\n  user_token: [{token}\n",
+                encoding="utf-8",
+            )
+        else:
+            world.main_config.write_text(
+                f"plugins: [musicbrainz, {token}\n",
+                encoding="utf-8",
+            )
+        world._seal(role)
+
+        if adapter == "startup":
+            logger = logging.getLogger("test.generated-beets-redaction")
+            with (
+                _isolated_installed_authority(),
+                self.assertLogs(logger, level="ERROR") as captured,
+                self.assertRaises(BeetsStartupError),
+            ):
+                enforce_beets_startup(
+                    role=role,
+                    config_path=str(world.runtime_config),
+                    runtime_dir=str(world.runtime_dir),
+                    logger=logger,
+                )
+            output = "\n".join(captured.output)
+        else:
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "scripts/check_beets_config.py",
+                    "--config",
+                    str(world.runtime_config),
+                    "--runtime-dir",
+                    str(world.runtime_dir),
+                    "--role",
+                    role,
+                ],
+                cwd=Path(__file__).resolve().parent.parent,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(proc.returncode, 0)
+            output = proc.stderr + proc.stdout
+
+        assert_redacted_load_failure(output, token)
+
+    def test_known_bad_raw_parser_diagnostic_trips_redaction_checker(self) -> None:
+        token = "PLANTED_TOKEN_759_KNOWN_BAD"
+        leaked = (
+            "ERROR [config_load_error] while parsing a flow sequence\n"
+            f"  user_token: [{token}\n"
+            "              ^\n"
+        )
+        with self.assertRaisesRegex(
+            AssertionError,
+            "raw parser/load diagnostic leaked",
+        ):
+            assert_redacted_load_failure(leaked, token)
 
     def test_known_bad_omitted_guard_trips(self) -> None:
         with self.assertRaisesRegex(AssertionError, "exactly one admitted"):

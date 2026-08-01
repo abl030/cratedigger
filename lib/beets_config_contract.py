@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import importlib
 import os
@@ -216,8 +217,13 @@ def _can_open_for_write(path: Path) -> bool:
         fd = os.open(path, os.O_WRONLY | getattr(os, "O_CLOEXEC", 0))
     except PermissionError:
         return False
-    except OSError:
-        return False
+    except OSError as exc:
+        if exc.errno == errno.EROFS:
+            return False
+        raise BeetsConfigError(
+            f"cannot determine whether Beets authority is writable {path}: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
     else:
         os.close(fd)
         return True
@@ -304,8 +310,9 @@ def _read_yaml_mapping(path: Path) -> dict[str, object]:
     try:
         value: object = yaml.safe_load(raw)
     except yaml.YAMLError as exc:
-        # Preserve the native parser diagnostic and source context (KD9).
-        raise BeetsConfigError(f"invalid Beets YAML {path}: {exc}") from exc
+        raise BeetsConfigError(
+            f"invalid Beets YAML {path}: {type(exc).__name__}"
+        ) from None
     if value is None:
         return {}
     try:
@@ -333,7 +340,9 @@ def _read_secret(path: Path) -> tuple[dict[str, object] | None, ContractFinding 
             f"invalid Beets YAML {path}: unhashable YAML mapping key"
         ) from exc
     except yaml.YAMLError as exc:
-        raise BeetsConfigError(f"invalid Beets YAML {path}: {exc}") from exc
+        raise BeetsConfigError(
+            f"invalid Beets YAML {path}: {type(exc).__name__}"
+        ) from None
     try:
         mapping = msgspec.convert(value, type=dict[str, object])
     except msgspec.ValidationError:
