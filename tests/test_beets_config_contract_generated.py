@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import configparser
+import os
 import stat
+import sys
 import unittest
 from collections.abc import Callable
 from dataclasses import replace
+from pathlib import Path
 
 import msgspec
 import yaml
@@ -390,6 +393,99 @@ class TestGeneratedEffectiveSettings(unittest.TestCase):
         report = check_beets_config(cfg, role="importer")
 
         assert_hard_code(report.hard_failures, expected_code)
+
+    @given(
+        role=st.sampled_from(("main", "preview", "web")),
+        mode=st.sampled_from((0o400, 0o440, 0o444)),
+    )
+    def test_reader_cannot_own_even_a_readonly_state_leaf(
+        self,
+        role: BeetsRole,
+        mode: int,
+    ) -> None:
+        world = BeetsContractWorld(role=role)
+        self.addCleanup(world.close)
+        world.make_state_leaf_app_owned(mode)
+        before = world.state_file.read_bytes()
+
+        report = check_beets_config(world.cfg(), role=role)
+
+        assert_hard_code(report.hard_failures, "state_owned_by_reader")
+        self.assertNotIn(
+            "state_writable_by_reader",
+            [finding.code for finding in report.hard_failures],
+        )
+        world.state_file.chmod(mode | stat.S_IWUSR)
+        fd = os.open(world.state_file, os.O_WRONLY)
+        os.close(fd)
+        self.assertEqual(world.state_file.read_bytes(), before)
+
+    @given(mode=st.sampled_from((0o600, 0o620, 0o640, 0o660)))
+    def test_importer_may_own_its_writable_state_leaf(self, mode: int) -> None:
+        world = BeetsContractWorld(role="importer")
+        self.addCleanup(world.close)
+        world.make_state_leaf_app_owned(mode)
+
+        report = check_beets_config(world.cfg(), role="importer")
+
+        self.assertTrue(report.ok, report.hard_failures)
+        self.assertEqual(world.state_file.stat().st_uid, os.geteuid())
+        self.assertNotEqual(world.state_dir.stat().st_uid, os.geteuid())
+
+    @given(
+        variant=st.sampled_from((
+            "exact",
+            "dot_segment",
+            "relative",
+            "resolved_target",
+            "app_symlink",
+            "nested_app_symlink",
+        )),
+    )
+    def test_python_authority_is_the_normalized_invocation_entry(
+        self,
+        variant: str,
+    ) -> None:
+        world = BeetsContractWorld()
+        self.addCleanup(world.close)
+        invocation = Path(sys.executable)
+        resolved = invocation.resolve()
+        self.assertNotEqual(invocation, resolved)
+
+        if variant == "exact":
+            spelling = sys.executable
+            admitted = True
+        elif variant == "dot_segment":
+            spelling = f"{invocation.parent}/./{invocation.name}"
+            admitted = True
+        elif variant == "relative":
+            spelling = os.path.relpath(invocation, Path.cwd())
+            admitted = True
+        elif variant == "resolved_target":
+            spelling = str(resolved)
+            admitted = False
+        else:
+            alias_parent = world.root
+            if variant == "nested_app_symlink":
+                alias_parent = world.root / "python-aliases"
+                alias_parent.mkdir()
+            alias = alias_parent / "python"
+            alias.symlink_to(invocation)
+            spelling = str(alias)
+            admitted = False
+
+        report = check_beets_config(
+            replace(world.cfg(), beets_python=spelling),
+            role="importer",
+        )
+
+        if admitted:
+            self.assertTrue(report.ok, report.hard_failures)
+            self.assertEqual(report.authority.python, sys.executable)
+        else:
+            assert_hard_code(report.hard_failures, "python_mismatch")
+            if variant in {"app_symlink", "nested_app_symlink"}:
+                assert_hard_code(report.hard_failures, "mutable_python")
 
     @given(kind=st.sampled_from(("same_path", "hardlink")))
     def test_state_and_library_must_never_share_an_inode(self, kind: str) -> None:

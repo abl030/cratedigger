@@ -261,6 +261,15 @@ class BeetsContractWorld:
             text=True,
         )
 
+    def make_state_leaf_app_owned(self, mode: int) -> None:
+        """Give only the state leaf to this process under external ancestors."""
+        self._chown_path(self.state_file, "0:0")
+        self.state_file.chmod(mode)
+        if self.state_file.stat().st_uid != os.geteuid():
+            raise AssertionError("state fixture leaf is not application-owned")
+        if self.state_dir.stat().st_uid == os.geteuid():
+            raise AssertionError("state fixture ancestor must remain externally owned")
+
     def alias_state_to_library(self, kind: str) -> None:
         """Make the declared state and catalog paths name one inode."""
         self.unseal()
@@ -389,9 +398,13 @@ class BeetsContractWorld:
             for current, directories, files in os.walk(self.root):
                 Path(current).chmod(stat.S_IRWXU)
                 for name in files:
-                    Path(current, name).chmod(stat.S_IRUSR | stat.S_IWUSR)
+                    child = Path(current, name)
+                    if not child.is_symlink():
+                        child.chmod(stat.S_IRUSR | stat.S_IWUSR)
                 for name in directories:
-                    Path(current, name).chmod(stat.S_IRWXU)
+                    child = Path(current, name)
+                    if not child.is_symlink():
+                        child.chmod(stat.S_IRWXU)
         finally:
             self._authority_tmp.cleanup()
             self._tmp.cleanup()
@@ -929,11 +942,86 @@ class TestBeetsConfigContract(unittest.TestCase):
         self.assertIn("mutable_include", [finding.code for finding in report.hard_failures])
 
     def test_python_authority_must_name_the_active_interpreter(self):
-        self.world.unseal()
-        self.world._write_runtime_config(python=str(self.world.root / "other-python"))
-        self.world._seal("importer")
-        report = check_beets_config(self.world.cfg(), role="importer")
-        self.assertIn("python_mismatch", [finding.code for finding in report.hard_failures])
+        invocation = Path(sys.executable)
+        resolved = invocation.resolve()
+        self.assertNotEqual(invocation, resolved)
+
+        admitted = check_beets_config(self.world.cfg(), role="importer")
+        self.assertTrue(admitted.ok, admitted.hard_failures)
+        self.assertEqual(admitted.authority.python, sys.executable)
+
+        normalized_spellings = (
+            f"{invocation.parent}/./{invocation.name}",
+            os.path.relpath(invocation, Path.cwd()),
+        )
+        for spelling in normalized_spellings:
+            with self.subTest(admitted_spelling=spelling):
+                report = check_beets_config(
+                    replace(self.world.cfg(), beets_python=spelling),
+                    role="importer",
+                )
+                self.assertTrue(report.ok, report.hard_failures)
+                self.assertEqual(report.authority.python, sys.executable)
+
+        alias = self.world.root / "python-alias"
+        alias.symlink_to(invocation)
+        for spelling in (str(resolved), str(alias)):
+            with self.subTest(rejected_spelling=spelling):
+                report = check_beets_config(
+                    replace(self.world.cfg(), beets_python=spelling),
+                    role="importer",
+                )
+                self.assertIn(
+                    "python_mismatch",
+                    [finding.code for finding in report.hard_failures],
+                )
+
+    def test_app_owned_python_alias_is_rejected_as_mutable(self):
+        alias = self.world.root / "app-owned-python"
+        alias.symlink_to(sys.executable)
+
+        report = check_beets_config(
+            replace(self.world.cfg(), beets_python=str(alias)),
+            role="importer",
+        )
+
+        self.assertIn(
+            "mutable_python",
+            [finding.code for finding in report.hard_failures],
+        )
+
+    def test_reader_owned_readonly_state_is_rejected_but_importer_owned_passes(
+        self,
+    ) -> None:
+        for role in ("main", "preview", "web"):
+            with self.subTest(role=role):
+                world = BeetsContractWorld(role=role)
+                try:
+                    world.make_state_leaf_app_owned(0o440)
+                    before = world.state_file.read_bytes()
+
+                    report = check_beets_config(world.cfg(), role=role)
+
+                    codes = [finding.code for finding in report.hard_failures]
+                    self.assertIn("state_owned_by_reader", codes)
+                    self.assertNotIn("state_writable_by_reader", codes)
+                    self.assertNotIn("state_replaceable", codes)
+                    world.state_file.chmod(0o640)
+                    fd = os.open(world.state_file, os.O_WRONLY)
+                    os.close(fd)
+                    self.assertEqual(world.state_file.read_bytes(), before)
+                finally:
+                    world.close()
+
+        importer = BeetsContractWorld(role="importer")
+        self.addCleanup(importer.close)
+        importer.make_state_leaf_app_owned(0o640)
+
+        report = check_beets_config(importer.cfg(), role="importer")
+
+        self.assertTrue(report.ok, report.hard_failures)
+        self.assertEqual(importer.state_file.stat().st_uid, os.geteuid())
+        self.assertNotEqual(importer.state_dir.stat().st_uid, os.geteuid())
 
     def test_state_path_must_be_existing_regular_file_outside_beetsdir(self):
         cases = ("absent", "directory", "inside")

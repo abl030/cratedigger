@@ -152,6 +152,27 @@ def _path(value: str) -> Path:
         ) from exc
 
 
+def _invocation_path(value: str) -> Path:
+    """Normalize an executable spelling without resolving its environment.
+
+    A conventional virtualenv's ``bin/python`` is a symlink to the base
+    interpreter.  Resolving that symlink changes Python's prefix discovery and
+    can therefore select a different site-packages set when a child is
+    launched.  The admitted authority is the exact path used to invoke this
+    process, not merely another directory entry for the same executable inode.
+    """
+    try:
+        expanded = Path(value).expanduser()
+        lexical = Path(os.path.abspath(expanded))
+        if "\x00" in os.fspath(lexical):
+            raise ValueError("embedded null byte")
+        return lexical
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise BeetsConfigError(
+            f"invalid Beets authority path: {type(exc).__name__}: {exc}"
+        ) from exc
+
+
 def _declared_path(value: str, *, relative_to: Path | None = None) -> _DeclaredPath:
     try:
         expanded = Path(value).expanduser()
@@ -175,7 +196,9 @@ def _authority(cfg: CratediggerConfig) -> BeetsAuthority:
         library=str(_path(cfg.beets_library_db)) if cfg.beets_library_db else "",
         directory=str(_path(cfg.beets_directory)) if cfg.beets_directory else "",
         state_file=str(_path(cfg.beets_state_file)) if cfg.beets_state_file else "",
-        python=str(_path(cfg.beets_python)) if cfg.beets_python else "",
+        python=(
+            str(_invocation_path(cfg.beets_python)) if cfg.beets_python else ""
+        ),
         secret_include=(
             str(_path(cfg.beets_secret_include)) if cfg.beets_secret_include else ""
         ),
@@ -495,10 +518,7 @@ def _optional_bool(active: IncludeLazyConfig, section: str, key: str) -> bool:
 def _same_executable(expected: str) -> bool:
     if not expected:
         return False
-    try:
-        return os.path.samefile(expected, sys.executable)
-    except OSError:
-        return _path(expected) == _path(sys.executable)
+    return _invocation_path(expected) == _invocation_path(sys.executable)
 
 
 def _state_access_issues(
@@ -529,6 +549,16 @@ def _state_access_issues(
             "Beets state file is not readable by this process",
         ))
         return tuple(issues)
+    if role != "importer":
+        try:
+            state_owned_by_reader = state.stat().st_uid == os.geteuid()
+        except OSError:
+            state_owned_by_reader = True
+        if state_owned_by_reader:
+            issues.append(_finding(
+                "state_owned_by_reader",
+                f"{role} owns the Beets state file and can make it writable",
+            ))
     writable = _can_open_for_write(state)
     if role == "importer" and not writable:
         issues.append(_finding(
@@ -699,6 +729,12 @@ def check_beets_config(
         hard.append(_finding(
             "directory_not_directory",
             "Beets library root must be an existing directory",
+        ))
+    python_source = _declared_path(authority.python)
+    if not _immutable_declared_file(python_source):
+        hard.append(_finding(
+            "mutable_python",
+            "[Beets] Python interpreter is writable or replaceable by this process",
         ))
     if not _same_executable(authority.python):
         hard.append(_finding(

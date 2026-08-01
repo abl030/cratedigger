@@ -394,6 +394,8 @@ def _exercise_real_rejection_and_restart(
 class TestBeetsStartupAdapter(unittest.TestCase):
     def test_warning_logs_and_returns_the_exact_strict_config(self) -> None:
         from lib.beets_startup import enforce_beets_startup
+        from lib.config import read_runtime_config
+        from lib.util import beets_subprocess_env
 
         world = BeetsContractWorld(role="web")
         self.addCleanup(world.close)
@@ -413,17 +415,58 @@ class TestBeetsStartupAdapter(unittest.TestCase):
                 runtime_dir=str(world.runtime_dir),
                 logger=logger,
             )
+            self.assertIs(read_runtime_config(), admitted)
+            child_env = beets_subprocess_env()
+            self.assertEqual(
+                child_env["CRATEDIGGER_BEETS_PYTHON"],
+                sys.executable,
+            )
 
         self.assertEqual(admitted.beets_config_dir, str(world.beets_dir))
         self.assertEqual(admitted.beets_library_db, str(world.library_db))
         self.assertEqual(admitted.beets_directory, str(world.library_root))
         self.assertEqual(admitted.beets_state_file, str(world.state_file))
-        self.assertEqual(admitted.beets_python, str(Path(sys.executable).resolve()))
+        self.assertEqual(admitted.beets_python, sys.executable)
         self.assertEqual(
             admitted.beets_secret_include,
             str(world.secret_include),
         )
         self.assertIn("musicbrainz_endpoint_drift", captured.output[0])
+
+    def test_real_virtualenv_keeps_its_invocation_symlink_identity(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/dev/shm") as directory:
+            venv_dir = Path(directory) / "venv"
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "venv",
+                    "--system-site-packages",
+                    str(venv_dir),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            invoked = venv_dir / "bin" / "python"
+            proc = subprocess.run(
+                [
+                    str(invoked),
+                    "-c",
+                    (
+                        "import os, sys; "
+                        "print(sys.executable); "
+                        "print(os.path.realpath(sys.executable))"
+                    ),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+        invocation, resolved = proc.stdout.splitlines()
+        self.assertEqual(invocation, str(invoked))
+        self.assertNotEqual(invocation, resolved)
 
     def test_hard_report_logs_bounded_reason_and_refuses_startup(self) -> None:
         from lib.beets_startup import BeetsStartupError, enforce_beets_startup
