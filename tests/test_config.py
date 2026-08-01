@@ -13,6 +13,7 @@ from lib.config import (
     CratediggerConfig,
     invalidate_secret_cache,
     read_runtime_config,
+    read_runtime_config_strict,
     read_runtime_rank_config,
     read_secret_file,
     read_verified_lossless_target,
@@ -440,6 +441,49 @@ class TestReadRuntimeConfig(unittest.TestCase):
             os.unlink(config_path)
         self.assertEqual(cfg.beets_directory, "/srv/music/Beets")
         self.assertEqual(cfg.beets_library_db, "/srv/music/beets-library.db")
+
+
+class TestReadRuntimeConfigStrict(unittest.TestCase):
+    def test_missing_config_is_a_hard_failure(self):
+        with tempfile.TemporaryDirectory() as runtime_dir, \
+                self.assertRaises(FileNotFoundError):
+            read_runtime_config_strict(
+                "/nonexistent/cratedigger-config.ini", runtime_dir
+            )
+
+    def test_malformed_config_is_a_hard_failure(self):
+        with tempfile.TemporaryDirectory() as root:
+            config_path = os.path.join(root, "runtime.ini")
+            with open(config_path, "w", encoding="utf-8") as handle:
+                handle.write("[Beets\nconfig_dir = broken\n")
+            with self.assertRaises(configparser.Error):
+                read_runtime_config_strict(config_path, os.path.join(root, "state"))
+
+    def test_keeps_immutable_config_location_separate_from_runtime_directory(self):
+        with tempfile.TemporaryDirectory() as root:
+            immutable_dir = os.path.join(root, "immutable")
+            runtime_dir = os.path.join(root, "runtime")
+            os.makedirs(immutable_dir)
+            os.makedirs(runtime_dir)
+            config_path = os.path.join(immutable_dir, "runtime.ini")
+            with open(config_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "[Beets]\n"
+                    "config_dir = /srv/beets/config\n"
+                    "library = /srv/beets/library.db\n"
+                    "directory = /srv/music\n"
+                    "state_file = /srv/beets/state.pickle\n"
+                    "python = /srv/beets/python\n"
+                    "secret_include = /run/secrets/beets.yaml\n"
+                )
+
+            cfg = read_runtime_config_strict(config_path, runtime_dir)
+
+        self.assertEqual(cfg.config_file_path, os.path.realpath(config_path))
+        self.assertEqual(cfg.var_dir, os.path.realpath(runtime_dir))
+        self.assertEqual(cfg.lock_file_path, os.path.join(runtime_dir, ".cratedigger.lock"))
+        self.assertEqual(cfg.beets_state_file, "/srv/beets/state.pickle")
+        self.assertEqual(cfg.beets_secret_include, "/run/secrets/beets.yaml")
 
 
 class TestReadRuntimeRankConfig(unittest.TestCase):

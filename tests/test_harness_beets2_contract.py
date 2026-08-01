@@ -362,6 +362,88 @@ with tempfile.TemporaryDirectory() as d:
 '''
 
 
+# Real Beets incremental-import proof for the externally provisioned absolute
+# statefile. The immutable BEETSDIR manifest must stay byte-identical while the
+# separate state file records the completed source directory.
+_EXTERNAL_STATEFILE_CONTRACT = r'''
+import hashlib
+import os
+import pickle
+import stat
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+
+def manifest(root):
+    values = []
+    for path in sorted(Path(root).rglob("*")):
+        relative = str(path.relative_to(root))
+        if path.is_file():
+            values.append(("file", relative, hashlib.sha256(path.read_bytes()).hexdigest()))
+        else:
+            values.append(("dir", relative))
+    return values
+
+
+with tempfile.TemporaryDirectory(prefix="beets-external-state-") as raw_root:
+    root = Path(raw_root)
+    beetsdir = root / "immutable-config"
+    runtime = root / "runtime"
+    source = root / "source"
+    library_root = root / "library"
+    for path in (beetsdir, runtime, source, library_root):
+        path.mkdir()
+    library_db = root / "library.db"
+    statefile = runtime / "state.pickle"
+    statefile.write_bytes(pickle.dumps({"tagprogress": {}, "taghistory": set()}))
+
+    audio = source / "01 - State Proof.flac"
+    subprocess.run([
+        "ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i",
+        "sine=frequency=440:duration=0.1", "-metadata", "artist=State Artist",
+        "-metadata", "album=State Album", "-metadata", "title=State Proof",
+        "-c:a", "flac", str(audio),
+    ], check=True)
+    config = beetsdir / "config.yaml"
+    config.write_text(
+        "library: %s\ndirectory: %s\nstatefile: %s\nplugins: []\n"
+        "import:\n  incremental: true\n  incremental_skip_later: true\n"
+        "  copy: false\n  move: false\n  write: false\n"
+        % (library_db, library_root, statefile),
+        encoding="utf-8",
+    )
+    config.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+    beetsdir.chmod(
+        stat.S_IRUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IXGRP
+        | stat.S_IROTH | stat.S_IXOTH
+    )
+    before_config = manifest(beetsdir)
+    before_state = statefile.read_bytes()
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "beets", "import", "-A", "-q", str(source)],
+        env={**os.environ, "BEETSDIR": str(beetsdir)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert manifest(beetsdir) == before_config, (before_config, manifest(beetsdir))
+    assert statefile.read_bytes() != before_state, "incremental import did not update statefile"
+    with statefile.open("rb") as handle:
+        state = pickle.load(handle)
+    source_bytes = os.fsencode(str(source))
+    assert any(source_bytes in paths for paths in state["taghistory"]), state
+    assert library_db.is_file(), library_db
+    print("EXTERNAL_STATEFILE_OK")
+
+    beetsdir.chmod(stat.S_IRWXU)
+    config.chmod(stat.S_IRUSR | stat.S_IWUSR)
+'''
+
+
 def _shipped_aunique_config() -> dict:
     """Extract the shipped beets path template + inline album_fields from
     nix/module.nix — the test patrols what production actually renders."""
@@ -379,6 +461,19 @@ def _shipped_aunique_config() -> dict:
 
 
 class TestAuniqueCollisionContract(unittest.TestCase):
+    def test_checker_literals_match_the_real_collision_qualified_contract(self):
+        from lib.beets_config_contract import (
+            SAFE_DEFAULT_PATH,
+            SAFE_PATH_DISAMBIG,
+        )
+
+        shipped = _shipped_aunique_config()
+        self.assertEqual(SAFE_DEFAULT_PATH, shipped["template"])
+        self.assertEqual(
+            SAFE_PATH_DISAMBIG,
+            shipped["album_fields"]["path_disambig"],
+        )
+
     def test_shipped_template_never_collides_same_key_siblings(self):
         import json as _json
 
@@ -402,6 +497,24 @@ class TestAuniqueCollisionContract(unittest.TestCase):
 
 
 class TestHarnessBeets2Contract(unittest.TestCase):
+    def test_real_incremental_import_uses_external_statefile_only(self):
+        proc = subprocess.run(
+            [sys.executable, "-c", _EXTERNAL_STATEFILE_CONTRACT],
+            cwd=_REPO,
+            env={**os.environ,
+                 "PYTHONPATH": _REPO + os.pathsep + os.environ.get("PYTHONPATH", "")},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(
+            proc.returncode,
+            0,
+            f"external Beets statefile contract failed\n"
+            f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}",
+        )
+        self.assertIn("EXTERNAL_STATEFILE_OK", proc.stdout)
+
     def test_real_harness_pretend_keeps_source_manifest_unchanged(self):
         """A completed pretend run leaves its source tree unchanged.
 
