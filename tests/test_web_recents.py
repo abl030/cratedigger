@@ -140,6 +140,29 @@ class TestLogEntry(unittest.TestCase):
         })
         self.assertIsNone(entry.verified_lossless_classifier)
 
+    def test_from_row_resolves_the_alias_independent_of_key_order(self):
+        """A colliding plain key must not decide the proof by dict order.
+
+        The alias is the only legitimate source for its target — the target
+        is not a ``download_log`` column — so it wins in both orders. A
+        single-pass rename would hand the verdict to whichever key the
+        cursor happened to yield last.
+        """
+        classifier = _minted_proof_classifier()
+        collision = "spectral_verified_lossless_from_somewhere_else"
+        alias_first = LogEntry.from_row({
+            "id": 1,
+            "_evidence_verified_lossless_classifier": classifier,
+            "verified_lossless_classifier": collision,
+        })
+        plain_first = LogEntry.from_row({
+            "id": 1,
+            "verified_lossless_classifier": collision,
+            "_evidence_verified_lossless_classifier": classifier,
+        })
+        self.assertEqual(alias_first, plain_first)
+        self.assertEqual(alias_first.verified_lossless_classifier, classifier)
+
     def test_from_row_datetime_serialized(self):
         """Datetime objects get serialized to ISO strings."""
         from datetime import datetime
@@ -1177,6 +1200,76 @@ class TestClassifyVerdict(unittest.TestCase):
         # The conversion is still reported — only the proof claim is gone.
         self.assertIn("from FLAC", result.verdict)
 
+    def test_upgrade_verdict_reports_a_persisted_import_result_proof(self):
+        """Live dl 36970 req 2937: no candidate evidence, proof on the blob.
+
+        The v3 harness wrote ``determine_verified_lossless``'s answer onto
+        ``source_measurement.verified_lossless``; production's own v3 reader
+        projects it into ``ImportResult.verified_lossless_proof``. That blob
+        is THIS attempt's, never content-addressed and never cross-walked,
+        so it is a report of the decider's conclusion exactly like the
+        evidence classifier — and the row has no candidate evidence at all.
+        """
+        entry = _entry(
+            outcome="success", was_converted=True, original_filetype="flac",
+            actual_filetype="opus", actual_min_bitrate=112,
+            existing_min_bitrate=173, spectral_grade="genuine",
+            verified_lossless_classifier=None,
+            import_result={
+                "version": 3,
+                "decision": "import",
+                "source_measurement": {
+                    "format": "FLAC",
+                    "min_bitrate_kbps": 742,
+                    "avg_bitrate_kbps": 1043,
+                    "median_bitrate_kbps": 1074,
+                    "spectral_grade": "genuine",
+                    "verified_lossless": True,
+                },
+            },
+        )
+        projected = _parse_import_result(entry)
+        assert projected is not None
+        assert projected.verified_lossless_proof is not None
+        self.assertIn(
+            "verified lossless", classify_log_entry(entry).verdict.lower())
+
+    def test_upgrade_verdict_ignores_a_v1_v2_synthesized_proof(self):
+        """The v1/v2 "proof" IS the retired heuristic, persisted.
+
+        Those rows carried ``quality.will_be_verified_lossless``, which the
+        harness of that era computed as ``converted > 0 and not
+        is_transcode``. The v2 reader turns it into a
+        ``legacy_import_result`` proof so the audit stays readable;
+        consuming it here would put the guess back on 5,894 live rows with
+        a persisted column as its alibi.
+        """
+        entry = _entry(
+            outcome="success", was_converted=True, original_filetype="flac",
+            actual_filetype="mp3", actual_min_bitrate=243,
+            existing_min_bitrate=192, spectral_grade="genuine",
+            verified_lossless_classifier=None,
+            import_result={
+                "version": 2,
+                "decision": "import",
+                "new_measurement": {
+                    "min_bitrate_kbps": 243,
+                    "spectral_grade": "genuine",
+                    "verified_lossless": True,
+                },
+                "conversion": {
+                    "was_converted": True, "original_filetype": "flac"},
+            },
+        )
+        projected = _parse_import_result(entry)
+        assert projected is not None
+        # The projection DOES mint one — this is not an absent-proof world.
+        self.assertIsNotNone(projected.verified_lossless_proof)
+        self.assertEqual(projected.legacy_projection_version, 2)
+        result = classify_log_entry(entry)
+        self.assertNotIn("verified lossless", result.verdict.lower())
+        self.assertNotIn("verified lossless", result.summary.lower())
+
     def test_timeout_verdict(self):
         result = classify_log_entry(_entry(
             outcome="timeout", beets_scenario=None,
@@ -2060,6 +2153,40 @@ class TestPerRowBitrateIsPointInTime(unittest.TestCase):
             actual_min_bitrate=243,
             verified_lossless_classifier=None,
             import_result=None,
+        )
+        result = classify_log_entry(entry)
+        self.assertEqual(
+            result.verdict, "Replaced the existing copy with MP3 V0")
+
+    def test_search_filetype_override_with_a_codecless_basis_names_no_codec(
+        self,
+    ):
+        """A basis whose HAVE side had no resolvable codec names none.
+
+        ``compare_quality`` is the sole producer of ``existing_format`` and
+        writes ``None`` whenever the installed measurement carried no format
+        — an unmeasurable HAVE ranks ``unknown`` and still compares. The
+        second half of the guard is that world, not a truthiness sweep: the
+        real decider is run here so the basis under test is one production
+        can actually persist.
+        """
+        from lib.quality import QualityRankConfig, compare_quality
+
+        basis = msgspec.to_builtins(compare_quality(
+            AudioQualityMeasurement(avg_bitrate_kbps=243, format="mp3 v0"),
+            AudioQualityMeasurement(min_bitrate_kbps=192, avg_bitrate_kbps=192),
+            QualityRankConfig.defaults(),
+        ))
+        self.assertIsNone(basis["existing_format"])
+        entry = _entry(
+            outcome="success",
+            search_filetype_override="lossless",
+            existing_min_bitrate=192,
+            actual_filetype="mp3",
+            actual_min_bitrate=243,
+            verified_lossless_classifier=None,
+            import_result={"version": 2, "decision": "import",
+                           "comparison_basis": basis},
         )
         result = classify_log_entry(entry)
         self.assertEqual(

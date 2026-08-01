@@ -4403,6 +4403,74 @@ class TestDownloadLog(unittest.TestCase):
                 sorted({file.extension for file in evidence.files}),
             )
 
+    def test_legacy_lineage_evidence_never_lends_its_proof(self):
+        """A cross-walked evidence row's proof must not reach the renderer.
+
+        Migration 021 §6b pointed pre-content-addressing ``download_log``
+        rows at whichever content-addressed evidence row their release
+        already had, so a legacy-lineage ``candidate_evidence_id`` can name
+        a SIBLING attempt's snapshot. The measurement facts are already
+        gated on lineage 3/4 for exactly that reason; the minted proof is
+        the same kind of fact and is gated in place beside them. Ungated,
+        109 live rows wore another attempt's proof — a never-converted MP3
+        rendering "MP3 320, verified lossless".
+
+        Spectral facts were never target projections, so they must still
+        fold through from the same row: the gate is about which bytes the
+        conclusion describes, not a blanket distrust of legacy evidence.
+        """
+        from lib.quality import (
+            VERIFIED_LOSSLESS_CLASSIFIER_V4,
+            AudioQualityMeasurement,
+            VerifiedLosslessProof,
+        )
+
+        log_id = self.db.log_download(self.req_id, outcome="success")
+        evidence = make_album_quality_evidence(
+            mb_release_id="download-overlay-legacy-proof",
+            lineage_version=1,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=900,
+                avg_bitrate_kbps=950,
+                format="FLAC",
+                spectral_grade="genuine",
+                spectral_subject="source",
+                spectral_provenance="measured",
+                was_converted_from="flac",
+            ),
+            verified_lossless_proof=VerifiedLosslessProof(
+                provenance="measured",
+                source="flac",
+                classifier=VERIFIED_LOSSLESS_CLASSIFIER_V4,
+            ),
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.db.set_download_log_candidate_evidence(log_id, stored.id)
+
+        rows = [
+            self.db.get_download_log_entry(log_id),
+            self.db.get_download_history(self.req_id)[0],
+            self.db.get_download_history_batch([self.req_id])[self.req_id][0],
+            next(row for row in self.db.get_log() if row["id"] == log_id),
+            self.db.get_latest_download_summaries(
+                [self.req_id]
+            )[self.req_id]["latest"],
+        ]
+        for row in rows:
+            assert row is not None
+            self.assertIsNone(
+                row["_evidence_verified_lossless_classifier"],
+                "a legacy-lineage evidence row lent its proof to the "
+                "renderer",
+            )
+            self.assertIsNone(row["source_format"])
+            self.assertEqual(row["spectral_grade"], "genuine")
+
     def test_get_log_returns_the_current_evidence_codec_columns(self):
         """The HAVE-side codec facts survive real PG (issue #829 PR4).
 

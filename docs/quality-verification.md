@@ -698,13 +698,34 @@ it was before the flag existed, never neutralized by default.
   row naming the proof generation and, in the forensics block, PR2d's
   Stage-1-reject counterfactual and the fired-leg set.
 - The Recents verdict sentence — the `verified lossless` suffix on a
-  successful import reports `verified_lossless_classifier` and nothing
-  else. It is never re-derived from the row's container, conversion or
-  spectral columns: those are what the decider CONSIDERED, and a
-  re-derivation claimed a proof on rows the gate had explicitly refused
-  while withholding it on proved rows nothing converted. A row with no
-  candidate evidence carries no proof and no suffix — there is no
-  era-aware fallback.
+  successful import REPORTS a persisted proof and is never re-derived from
+  the row's container, conversion or spectral columns: those are what the
+  decider CONSIDERED, and a re-derivation claimed a proof on rows the gate
+  had explicitly refused while withholding it on proved rows nothing
+  converted. Exactly three persisted facts can put it in front of an
+  operator, and nothing else may:
+  - `album_quality_evidence.verified_lossless_classifier`, read through the
+    candidate-evidence join — and only when that join is source-semantic
+    (lineage 3/4). Migration 021 §6b cross-walked pre-content-addressing
+    rows onto a sibling attempt's snapshot, so on a legacy-lineage row the
+    classifier is a *different* attempt's proof;
+    `_overlay_evidence_onto_download_log_row` NULLs it under the same rule
+    that already gates the `source_*` measurement facts. Ungated it lent a
+    proof to 5,014 live rows and put the suffix in 281 live verdicts — 250
+    of them pointing at an evidence row another attempt also claims, and
+    109 that converted nothing at all.
+  - `ImportResult.verified_lossless_proof`, this attempt's own audit blob —
+    never content-addressed, so never another attempt's. The v1/v2 legacy
+    projections are excluded: those rows carried no proof at all, only
+    `quality.will_be_verified_lossless`, which that era's harness computed
+    as `converted > 0 and not is_transcode` — the retired heuristic itself.
+  - `QualityComparisonBasis.verified_lossless_bypass`, the decision
+    persisted on the import result when a proof forced an
+    equivalent-quality import. The basis verdict renders that one, so the
+    suffix helpers suppress the other two there rather than saying it twice.
+
+  A row carrying none of the three gets no suffix. There is no era-aware
+  fallback — a fallback is the same guess wearing a date.
 
 Both surfaces call the same `proof_verdict_from_facts`; the generated
 property in `tests/test_verdict_tiers_generated.py` (V4) proves they

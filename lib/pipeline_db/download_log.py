@@ -80,6 +80,11 @@ class LatestDownloadSummary(TypedDict):
 #: columns by ``_overlay_evidence_onto_download_log_row``. The PR4 aliases
 #: below them have no legacy counterpart, so they reach the renderer under
 #: these names and are declared on ``DownloadLogWithEvidenceRow``.
+#: ``_evidence_verified_lossless_classifier`` is the one of those the overlay
+#: still adjudicates: it keeps its own alias but is NULLed on a
+#: non-source-semantic lineage, because a cross-walked
+#: ``candidate_evidence_id`` (migration 021 §6b) names a sibling attempt's
+#: snapshot and a proof minted from other bytes is not this attempt's proof.
 #: ``_evidence_format`` is deliberately a SECOND alias over the same
 #: column as ``_evidence_source_format``: the overlay folds that one into
 #: the legacy ``source_format`` key ONLY for lineage 3/4 rows, so 26,503 of
@@ -486,6 +491,49 @@ class _DownloadLogMixin(_PipelineDBBase):
         "on_disk_research": "on_disk_research_v0",
     }
 
+    #: The alias the overlay consumes as its own gate input and pops before
+    #: any renderer sees the row. Named here so the SELECT-block partition in
+    #: ``tests/test_pipeline_db_column_contract.py`` derives it from
+    #: production rather than restating it.
+    _EVIDENCE_LINEAGE_ALIAS: ClassVar = "_evidence_lineage_version"
+
+    #: ``(legacy download_log key, candidate-evidence alias, gated)`` — the
+    #: aliases this overlay CONSUMES, folding each into the legacy column
+    #: downstream code already reads. Hoisted out of the method body so
+    #: ``tests/test_pipeline_db_column_contract.py::TestRenderAliasMap`` can
+    #: partition the SELECT block by what actually happens to each alias
+    #: instead of restating the list.
+    _EVIDENCE_OVERLAY_FOLD: ClassVar = (
+        ("source_format",          "_evidence_source_format", True),
+        ("source_min_bitrate",     "_evidence_source_min_bitrate", True),
+        ("source_avg_bitrate",     "_evidence_source_avg_bitrate", True),
+        ("source_median_bitrate",  "_evidence_source_median_bitrate", True),
+        ("spectral_grade",       "_evidence_spectral_grade", False),
+        ("spectral_bitrate",     "_evidence_spectral_bitrate", False),
+        ("v0_probe_kind",        "_evidence_v0_probe_kind", False),
+        ("v0_probe_min_bitrate", "_evidence_v0_probe_min_bitrate", False),
+        ("v0_probe_avg_bitrate", "_evidence_v0_probe_avg_bitrate", False),
+        ("v0_probe_median_bitrate", "_evidence_v0_probe_median_bitrate", False),
+    )
+
+    #: The alias whose lineage gate is the same as the ``source_*`` fold's but
+    #: which has no legacy column to fold into, so it is gated IN PLACE.
+    #:
+    #: ``candidate_evidence_id`` does not always name evidence measured from
+    #: THIS attempt's bytes: migration 021 §6b cross-walked pre-content-
+    #: addressing rows onto whichever content-addressed row their release
+    #: already had, so a legacy-lineage attempt can point at a sibling
+    #: attempt's snapshot. That is exactly why the ``source_*`` fold is gated
+    #: on lineage 3/4, and the minted proof is the same kind of fact — a
+    #: conclusion about the measured source bytes. Ungated it lent a proof to
+    #: 5,014 live rows and put "verified lossless" in 281 live verdicts, 250
+    #: of which point at an evidence row another attempt also claims and 109
+    #: of which converted nothing at all — a plain MP3 import rendering
+    #: "MP3 320, verified lossless" off its FLAC sibling's snapshot.
+    _EVIDENCE_SOURCE_SEMANTIC_ALIASES: ClassVar = (
+        "_evidence_verified_lossless_classifier",
+    )
+
     @classmethod
     def _overlay_evidence_onto_download_log_row(
         cls, row: dict[str, object]
@@ -495,20 +543,16 @@ class _DownloadLogMixin(_PipelineDBBase):
         # than facts about the downloaded source. Only v3 proves those fields
         # source-semantic. Spectral and V0 facts were never target projections,
         # so they remain safe to recover from either lineage.
-        evidence_lineage = row.pop("_evidence_lineage_version", None)
+        evidence_lineage = row.pop(cls._EVIDENCE_LINEAGE_ALIAS, None)
         source_semantic = evidence_lineage in (3, 4)
-        for legacy, overlay, requires_source_semantic in (
-            ("source_format",          "_evidence_source_format", True),
-            ("source_min_bitrate",     "_evidence_source_min_bitrate", True),
-            ("source_avg_bitrate",     "_evidence_source_avg_bitrate", True),
-            ("source_median_bitrate",  "_evidence_source_median_bitrate", True),
-            ("spectral_grade",       "_evidence_spectral_grade", False),
-            ("spectral_bitrate",     "_evidence_spectral_bitrate", False),
-            ("v0_probe_kind",        "_evidence_v0_probe_kind", False),
-            ("v0_probe_min_bitrate", "_evidence_v0_probe_min_bitrate", False),
-            ("v0_probe_avg_bitrate", "_evidence_v0_probe_avg_bitrate", False),
-            ("v0_probe_median_bitrate", "_evidence_v0_probe_median_bitrate", False),
-        ):
+        for alias in cls._EVIDENCE_SOURCE_SEMANTIC_ALIASES:
+            # Same stable-shape contract as the ``source_*`` keys: always
+            # present, NULL when this row's evidence cannot speak for this
+            # attempt's source bytes.
+            row.setdefault(alias, None)
+            if not source_semantic:
+                row[alias] = None
+        for legacy, overlay, requires_source_semantic in cls._EVIDENCE_OVERLAY_FOLD:
             evidence_value = row.pop(overlay, None)
             if requires_source_semantic:
                 # The four ``source_*`` legacy keys are NOT real
