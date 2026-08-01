@@ -255,6 +255,11 @@ def _has_app_owned_component(path: Path) -> bool:
     """Whether the application UID owns any entry in this declared path."""
     uid = os.geteuid()
     current = Path(path.anchor)
+    try:
+        if current.lstat().st_uid == uid:
+            return True
+    except OSError:
+        return True
     for part in path.parts[1:]:
         current /= part
         try:

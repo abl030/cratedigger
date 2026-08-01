@@ -41,6 +41,109 @@ RUNTIME_AUTHORITIES = (
 )
 
 
+_ROOT_ANCHOR_PROBE = r"""
+import os
+import sys
+from pathlib import Path
+
+from lib.beets_config_contract import _declared_path, _immutable_declared_file
+
+root = Path(sys.argv[1])
+depth = int(sys.argv[2])
+current = root
+relative_parts = []
+for index in range(depth):
+    relative_parts.append(f"authority-{index}")
+    current /= relative_parts[-1]
+    current.mkdir()
+target = current / "runtime.ini"
+target.write_text("[Beets]\n", encoding="utf-8")
+
+for path in (*tuple(root.joinpath(*relative_parts[:index]) for index in range(1, depth + 1)), target):
+    os.chown(path, 1, 1)
+    path.chmod(0o555 if path.is_dir() else 0o444)
+os.chown(root, 2, 2)
+root.chmod(0o555)
+
+pid = os.fork()
+if pid == 0:
+    os.chroot(root)
+    os.chdir("/")
+    os.setgroups([])
+    os.setgid(2)
+    os.setuid(2)
+    declared = Path("/").joinpath(*relative_parts, "runtime.ini")
+    if Path("/").stat().st_uid != os.geteuid():
+        raise AssertionError("application does not own the chroot anchor")
+    for component in (
+        Path("/").joinpath(*relative_parts[:index])
+        for index in range(1, depth + 1)
+    ):
+        if component.stat().st_uid == os.geteuid():
+            raise AssertionError(f"application unexpectedly owns {component}")
+        if component.stat().st_mode & 0o222:
+            raise AssertionError(f"authority component is writable: {component}")
+    if declared.stat().st_uid == os.geteuid() or declared.stat().st_mode & 0o222:
+        raise AssertionError("declared file is not externally owned and read-only")
+    if _immutable_declared_file(_declared_path(str(declared))):
+        raise AssertionError(
+            "app-owned filesystem root was omitted from immutability proof"
+        )
+    os._exit(0)
+
+_, status = os.waitpid(pid, 0)
+exit_code = os.waitstatus_to_exitcode(status)
+
+# Restore host-user ownership so TemporaryDirectory can clean up outside the
+# user namespace even when the child found a regression.
+root.chmod(0o700)
+for current_dir, directories, files in os.walk(root):
+    current_path = Path(current_dir)
+    current_path.chmod(0o700)
+    os.chown(current_path, 0, 0)
+    for name in directories:
+        child = current_path / name
+        child.chmod(0o700)
+        os.chown(child, 0, 0)
+    for name in files:
+        child = current_path / name
+        child.chmod(0o600)
+        os.chown(child, 0, 0)
+os.chown(root, 0, 0)
+sys.exit(exit_code)
+"""
+
+
+def assert_app_owned_root_anchor_is_rejected(*, depth: int) -> None:
+    """Exercise the real path guard with only the filesystem root app-owned."""
+    with tempfile.TemporaryDirectory(
+        prefix="beets-contract-root-anchor-",
+        dir="/dev/shm",
+    ) as root:
+        proc = subprocess.run(
+            [
+                "unshare",
+                "--map-root-user",
+                "--map-auto",
+                sys.executable,
+                "-c",
+                _ROOT_ANCHOR_PROBE,
+                root,
+                str(depth),
+            ],
+            cwd=Path(__file__).resolve().parent.parent,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    if proc.returncode != 0:
+        raise AssertionError(
+            "app-owned chroot anchor was admitted\n"
+            f"stdout:\n{proc.stdout}\n"
+            f"stderr:\n{proc.stderr}"
+        )
+
+
 def _snapshot_tree(root: Path) -> tuple[tuple[str, str, bytes | None], ...]:
     """Capture names, kinds, and bytes without mutating the observed tree."""
     if not root.exists():
@@ -505,6 +608,9 @@ class TestBeetsConfigContract(unittest.TestCase):
             "mutable_runtime_config",
             [finding.code for finding in rejected.hard_failures],
         )
+
+    def test_app_owned_filesystem_root_invalidates_readonly_authority(self):
+        assert_app_owned_root_anchor_is_rejected(depth=1)
 
     def test_app_owned_readonly_declared_files_and_ancestors_are_rejected(self):
         for kind in ("runtime", "main", "include", "secret"):

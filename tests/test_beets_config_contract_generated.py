@@ -30,6 +30,7 @@ from tests.test_beets_config_contract import (
     SAFE_DEFAULT_PATH,
     SAFE_SINGLETON_PATH,
     BeetsContractWorld,
+    assert_app_owned_root_anchor_is_rejected,
 )
 
 
@@ -309,6 +310,14 @@ class TestGeneratedTokenOnlySecret(unittest.TestCase):
 
 
 class TestGeneratedEffectiveSettings(unittest.TestCase):
+    @settings(max_examples=5)
+    @given(depth=st.integers(min_value=1, max_value=5))
+    def test_app_owned_filesystem_root_rejects_every_authority_depth(
+        self,
+        depth: int,
+    ) -> None:
+        assert_app_owned_root_anchor_is_rejected(depth=depth)
+
     @given(
         field=st.sampled_from(RUNTIME_AUTHORITIES),
         role=st.sampled_from(("main", "importer", "preview", "web")),
