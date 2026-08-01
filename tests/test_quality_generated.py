@@ -42,6 +42,11 @@ from hypothesis import assume, example, given, settings
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
+
+# The harness twin of the stored-format decision. Imported here rather
+# than lazily because checker F2 compares it against the decider's own
+# answer, and the two must be read side by side to mean anything.
+from harness.import_one import conversion_target
 from lib.dispatch.quality_gate import QualityGatePlan, _check_quality_gate_core
 from lib.dispatch.types import QualityGateState
 from lib.quality import (
@@ -96,6 +101,7 @@ from lib.quality import (
     ultrasonic_proof_leg,
     v0_probe_overrides_spectral,
 )
+from lib.quality.decisions import DECISION_VERIFIED_LOSSLESS_LOCKED
 from lib.quality.filetypes import has_mixed_lossless_and_lossy
 from lib.quality.pipeline import (
     _lossless_source_from_evidence,
@@ -4801,6 +4807,177 @@ def _decoy_decider_lets_a_lattice_denial_reject_the_album(
     return result
 
 
+def _proof_world_perturbations(
+    candidate: AlbumQualityEvidence,
+) -> "list[AlbumQualityEvidence]":
+    """One album under every producible proof world.
+
+    Each perturbation moves ONLY proof evidence — a deficit or a lattice
+    capture — so anything that differs between the decisions is
+    attributable to the proof and nothing else.
+    """
+    worlds = [
+        candidate,
+        _with_lattice_capture(candidate, _DENYING_LATTICE_CAPTURE),
+        _with_lattice_capture(candidate, _PASSING_LATTICE_CAPTURE),
+    ]
+    if candidate.measurement.spectral_grade is not None:
+        # Evidence-row validation forbids proof-leg facts without a grade,
+        # so an ungraded album simply has no producible ultrasonic twin.
+        worlds += [
+            _with_adjudicable_ultrasonic(candidate, _DENYING_DEFICIT_DB),
+            _with_adjudicable_ultrasonic(candidate, _PASSING_DEFICIT_DB),
+        ]
+    return worlds
+
+
+def the_stored_format_never_depends_on_the_proof(
+    candidate: AlbumQualityEvidence,
+    current: "AlbumQualityEvidence | None",
+    *,
+    facts: "AlbumQualityEvidenceDecisionFacts | None" = None,
+    decider: "Callable[..., dict[str, object]]" = (
+        full_pipeline_decision_from_evidence
+    ),
+) -> bool:
+    """Invariant checker F1: the proof decides the NAME, never the FORMAT.
+
+    ``target_final_format`` is what the harness materializes
+    (``_materialize_quality_evidence_action`` parses it into the
+    ConversionSpec), so a proof-keyed value silently changes the bytes on
+    disk. Download 39087 is the incident: genuine FLAC, ultrasonic leg
+    denied, stored as MP3 V0 instead of the configured ``opus 128``.
+
+    Authority: "no we always want it opus, the contract is not around
+    verified or not, is the stored format for lossless absolutely.
+    whatever people choose, v0,opus,aac it just has to be consistent" —
+    https://github.com/abl030/cratedigger/issues/829
+
+    Two halves, both load-bearing:
+
+    * every producible proof world for one album stores the SAME format;
+      and
+    * a lossless source converting under a configured target stores THAT
+      target — otherwise a decider that never stores anything would be
+      trivially proof-blind.
+
+    ``decider`` is injectable ONLY so the known-bad self-tests can plant a
+    reader that violates one half; production always uses the default.
+    """
+    formats = {
+        decider(perturbed, current, facts=facts)["target_final_format"]
+        for perturbed in _proof_world_perturbations(candidate)
+    }
+    if len(formats) != 1:
+        return False
+
+    baseline = decider(candidate, current, facts=facts)
+    target_format = facts.target_format if facts is not None else None
+    configured = facts.verified_lossless_target if facts is not None else None
+    reached_the_lossless_branch = (
+        _lossless_source_from_evidence(candidate)
+        and target_format not in ("flac", "lossless")
+        # An early reject, a Stage-1 short-circuit and the installed-proof
+        # ceiling all return before the branch runs at all.
+        and baseline["stage2_import"] not in (
+            None, DECISION_VERIFIED_LOSSLESS_LOCKED,
+        )
+    )
+    if not reached_the_lossless_branch:
+        return True
+    return baseline["target_final_format"] == configured
+
+
+def _decoy_decider_keys_the_stored_format_on_the_proof(
+    candidate: AlbumQualityEvidence,
+    current: "AlbumQualityEvidence | None" = None,
+    *,
+    facts: "AlbumQualityEvidenceDecisionFacts | None" = None,
+) -> "dict[str, object]":
+    """The shipped defect: license the configured target with the proof,
+    so a denial quietly grinds the album to V0 instead. Used only to prove
+    the checker trips."""
+    result: dict[str, object] = dict(
+        full_pipeline_decision_from_evidence(candidate, current, facts=facts)
+    )
+    if not result["verified_lossless"]:
+        result["target_final_format"] = None
+    return result
+
+
+def _decoy_decider_never_stores_the_configured_target(
+    candidate: AlbumQualityEvidence,
+    current: "AlbumQualityEvidence | None" = None,
+    *,
+    facts: "AlbumQualityEvidenceDecisionFacts | None" = None,
+) -> "dict[str, object]":
+    """Perfectly proof-blind and perfectly wrong: never store a target at
+    all. Used only to prove the checker's second half trips."""
+    result: dict[str, object] = dict(
+        full_pipeline_decision_from_evidence(candidate, current, facts=facts)
+    )
+    result["target_final_format"] = None
+    return result
+
+
+def _production_stored_format(
+    *,
+    target_format: "str | None",
+    lossless_source: bool,
+    verified_lossless_target: "str | None",
+    will_be_verified_lossless: bool,
+) -> "str | None":
+    """The harness's ConversionSpec choice for this world.
+
+    ``will_be_verified_lossless`` is accepted and IGNORED — that is the
+    invariant, and giving the property an argument to vary is the only way
+    to state it about a function that no longer takes the proof at all.
+    """
+    del will_be_verified_lossless
+    return conversion_target(
+        target_format, lossless_source, verified_lossless_target,
+    )
+
+
+def _decoy_stored_format_keyed_on_the_proof(
+    *,
+    target_format: "str | None",
+    lossless_source: bool,
+    verified_lossless_target: "str | None",
+    will_be_verified_lossless: bool,
+) -> "str | None":
+    """The pre-fix call site: pass the PROOF where the lossless-source
+    fact belongs. Used only to prove the checker trips."""
+    del lossless_source
+    return conversion_target(
+        target_format, will_be_verified_lossless, verified_lossless_target,
+    )
+
+
+def the_harness_stored_format_never_reads_the_proof(
+    *,
+    target_format: "str | None",
+    lossless_source: bool,
+    verified_lossless_target: "str | None",
+    stored_format_fn: "Callable[..., str | None]" = _production_stored_format,
+) -> bool:
+    """Invariant checker F2: F1 for the harness's own twin.
+
+    The legacy (non-evidence-authorized) harness path chooses its target
+    with ``conversion_target``. The two twins must key on the same fact,
+    so this asks the same question of it: does the proof move the answer?
+    """
+    return len({
+        stored_format_fn(
+            target_format=target_format,
+            lossless_source=lossless_source,
+            verified_lossless_target=verified_lossless_target,
+            will_be_verified_lossless=proof,
+        )
+        for proof in (True, False)
+    }) == 1
+
+
 def classifier_names_both_models_that_proved_it(
     ultrasonic_leg: "UltrasonicProofLeg | None",
     lattice_leg: "AacLatticeProofLeg | None",
@@ -5208,6 +5385,119 @@ class TestAacLatticeProofLegCheckerSelfTests(unittest.TestCase):
             a_lattice_denial_never_reroutes_the_provisional_lane(
                 candidate, current, facts=facts,
                 decider=_decoy_decider_lets_a_lattice_denial_reject_the_album,
+            )
+        )
+
+
+class TestStoredFormatIsProofBlindProperties(unittest.TestCase):
+    """Generated half of the stored-format invariant pair (issue #829).
+
+    Deterministic twin:
+    ``tests/test_quality_classification.py::TestLosslessStoredFormatIsProofBlind``
+    and ``tests/test_conversion_e2e.py::
+    TestDeniedProofStillStoresTheConfiguredTarget``.
+    """
+
+    @given(world=parity_worlds())
+    @example(world=_DENIAL_PROVISIONAL_COHORT_WORLD)
+    @example(
+        # The Badlands shape: a genuine-graded lossless source converting
+        # to the library's configured target, with an installed album to
+        # be compared against.
+        world=replace(
+            _DENIAL_PROVISIONAL_COHORT_WORLD,
+            grade="genuine",
+            verified_lossless_target="opus 128",
+            target_format=None,
+        ),
+    )
+    def test_f1_the_stored_format_never_depends_on_the_proof(self, world):
+        candidate, current, facts = _parity_evidence_inputs(world)
+        self.assertTrue(
+            the_stored_format_never_depends_on_the_proof(
+                candidate, current, facts=facts,
+            )
+        )
+
+    @given(
+        target_format=st.sampled_from(_TARGET_FORMATS),
+        lossless_source=st.booleans(),
+        verified_lossless_target=st.sampled_from(_VL_TARGETS),
+    )
+    def test_f2_the_harness_target_never_reads_the_proof(
+        self, target_format, lossless_source, verified_lossless_target,
+    ):
+        self.assertTrue(
+            the_harness_stored_format_never_reads_the_proof(
+                target_format=target_format,
+                lossless_source=lossless_source,
+                verified_lossless_target=verified_lossless_target,
+            )
+        )
+
+
+class TestStoredFormatCheckerSelfTests(unittest.TestCase):
+    """Known-bad self-tests for the stored-format invariant checkers."""
+
+    #: A genuine-graded lossless source with the library's configured
+    #: target — the population the whole invariant is about.
+    _WORLD = replace(
+        _DENIAL_PROVISIONAL_COHORT_WORLD,
+        grade="genuine",
+        verified_lossless_target="opus 128",
+        target_format=None,
+    )
+
+    def _inputs(self):
+        return _parity_evidence_inputs(self._WORLD)
+
+    def test_f1_checker_passes_for_the_real_decider(self):
+        candidate, current, facts = self._inputs()
+        self.assertTrue(
+            the_stored_format_never_depends_on_the_proof(
+                candidate, current, facts=facts,
+            )
+        )
+
+    def test_f1_checker_trips_when_the_proof_gates_the_format(self):
+        """The shipped defect, planted: withhold the configured target
+        whenever the proof was withheld. That is exactly what download
+        39087 did — a genuine FLAC stored as MP3 V0."""
+        candidate, current, facts = self._inputs()
+        self.assertFalse(
+            the_stored_format_never_depends_on_the_proof(
+                candidate, current, facts=facts,
+                decider=_decoy_decider_keys_the_stored_format_on_the_proof,
+            )
+        )
+
+    def test_f1_checker_trips_when_no_world_stores_a_target(self):
+        """The other half: a decider that never stores the configured
+        format is perfectly proof-blind and perfectly wrong."""
+        candidate, current, facts = self._inputs()
+        self.assertFalse(
+            the_stored_format_never_depends_on_the_proof(
+                candidate, current, facts=facts,
+                decider=_decoy_decider_never_stores_the_configured_target,
+            )
+        )
+
+    def test_f2_checker_passes_for_the_real_harness(self):
+        self.assertTrue(
+            the_harness_stored_format_never_reads_the_proof(
+                target_format=None, lossless_source=True,
+                verified_lossless_target="opus 128",
+            )
+        )
+
+    def test_f2_checker_trips_on_the_proof_keyed_call_site(self):
+        """``harness/import_one.py`` used to pass
+        ``will_be_verified_lossless`` into this slot."""
+        self.assertFalse(
+            the_harness_stored_format_never_reads_the_proof(
+                target_format=None, lossless_source=True,
+                verified_lossless_target="opus 128",
+                stored_format_fn=_decoy_stored_format_keyed_on_the_proof,
             )
         )
 

@@ -1751,13 +1751,18 @@ class TestUltrasonicProofGateV3(unittest.TestCase):
     128'``) the flip is terminal-versus-still-searching:
 
         proof granted   stage3='accept', final_status='imported',
-                        keep_searching=False, target='opus 128'
+                        keep_searching=False
         proof withheld  stage3='requeue_lossless', final_status='wanted',
-                        keep_searching=True, target=None
+                        keep_searching=True
 
     which is exactly the archivist semantics the plan requires: a denial
     is NOT a rejection. The album still imports; it simply carries no
     proof and stays on the search surface (Phase 5 plan §2, §1.7).
+
+    ``target_final_format`` is deliberately NOT in that list: the stored
+    format is config, not proof (issue #829, operator decision
+    2026-08-01), so it reads ``opus 128`` on both sides. See
+    ``TestLosslessStoredFormatIsProofBlind``.
 
     The measured worlds below use real launder deficits from the four
     committed calibration arms, not invented numbers.
@@ -1827,7 +1832,9 @@ class TestUltrasonicProofGateV3(unittest.TestCase):
         self.assertEqual(r["stage3_quality_gate"], "requeue_lossless", where)
         self.assertEqual(r["final_status"], "wanted", where)
         self.assertTrue(r["keep_searching"], where)
-        self.assertIsNone(r["target_final_format"], where)
+        # The stored format does NOT move with the proof (issue #829): the
+        # same assertion as the granted case, on purpose.
+        self.assertEqual(r["target_final_format"], self._FACTS_TARGET, where)
         # The load-bearing half of the archivist semantics: withholding a
         # proof is NOT rejecting the album. It imported.
         self.assertTrue(r["imported"], where)
@@ -2254,12 +2261,14 @@ class TestAacLatticeProofGate(unittest.TestCase):
     128'``) the flip is terminal-versus-still-searching:
 
         proof granted   stage3='accept', final_status='imported',
-                        keep_searching=False, target='opus 128'
+                        keep_searching=False
         proof withheld  stage3='requeue_lossless', final_status='wanted',
-                        keep_searching=True, target=None
+                        keep_searching=True
 
     A denial is NOT a rejection: the album still imports, carries no
-    proof, and stays on the search surface (Phase 5 plan §2, §1.7).
+    proof, and stays on the search surface (Phase 5 plan §2, §1.7). It
+    does not change the stored format either — that is config, not proof
+    (issue #829; see ``TestLosslessStoredFormatIsProofBlind``).
 
     Every capture below is built by ``AacLatticeCapture.from_tracks`` from
     per-track ``(offset, z)`` rows, using measured values from the
@@ -2386,7 +2395,9 @@ class TestAacLatticeProofGate(unittest.TestCase):
         self.assertEqual(r["stage3_quality_gate"], "requeue_lossless", where)
         self.assertEqual(r["final_status"], "wanted", where)
         self.assertTrue(r["keep_searching"], where)
-        self.assertIsNone(r["target_final_format"], where)
+        # Same as the granted case, on purpose: the stored format is
+        # config, never proof (issue #829).
+        self.assertEqual(r["target_final_format"], self._FACTS_TARGET, where)
         # Withholding a proof is NOT rejecting the album. It imported.
         self.assertTrue(r["imported"], where)
 
@@ -2776,6 +2787,171 @@ class TestAacLatticeProofGate(unittest.TestCase):
         self.assertNotIn(shifted.modal_offset, (0, _APPLE_MODAL_OFFSET))
         for where, r in self._both_twins(shifted):
             self._assert_proof_withheld(r, f"{where}, shifted lattice")
+
+
+class TestLosslessStoredFormatIsProofBlind(unittest.TestCase):
+    """The stored format of a lossless-sourced import is CONFIG, not proof.
+
+    Issue #829, operator decision 2026-08-01, surfaced by the Badlands
+    force import (Dirty Beaches, request 2147 / download 39087): a
+    genuine-graded FLAC whose ultrasonic leg denied promotion landed on
+    disk as MP3 V0 instead of the configured ``opus 128``, because both
+    the harness's ``conversion_target`` and the decider's
+    ``target_final_format`` keyed the target on the PROOF. Denial reaches
+    ~34% of genuine-graded lossless, so that was live common behaviour.
+
+    Authority: "no we always want it opus, the contract is not around
+    verified or not, is the stored format for lossless absolutely.
+    whatever people choose, v0,opus,aac it just has to be consistent" —
+    https://github.com/abl030/cratedigger/issues/829
+
+    The three-sentence model these pins encode: quality decides imports,
+    proof decides names, config decides formats. So every scenario below
+    asserts BOTH halves — the format does NOT move with the proof, and
+    the proof itself still does.
+    """
+
+    _FACTS_TARGET = "opus 128"
+
+    #: Download 39087's own measured deficit — the world that shipped the
+    #: defect. Above the frozen 59.5 threshold, so the leg denies.
+    BADLANDS_DENYING_DEFICIT_DB = 65.73
+
+    #: The same album one measurement below the threshold.
+    PASSING_DEFICIT_DB = 45.0
+
+    def _evidence_decision(self, **candidate_kwargs):
+        from lib.quality import (
+            AlbumQualityEvidenceDecisionFacts,
+            full_pipeline_decision_from_evidence,
+        )
+        candidate = build_parity_candidate_evidence(
+            is_flac=True, min_bitrate=0, is_cbr=False,
+            spectral_grade="genuine",
+            post_conversion_min_bitrate=245,
+            candidate_v0_probe_avg=245,
+            candidate_v0_probe_min=245,
+            codec_family="lossless",
+            **candidate_kwargs,
+        )
+        return full_pipeline_decision_from_evidence(
+            candidate, None,
+            facts=AlbumQualityEvidenceDecisionFacts(
+                verified_lossless_target=self._FACTS_TARGET,
+            ),
+        )
+
+    def _simulator_decision(self, *, aac_lattice=None, **context_kwargs):
+        from lib.quality import SpectralCodecContext
+        return full_pipeline_decision(
+            is_flac=True, min_bitrate=0, is_cbr=False,
+            spectral_grade="genuine",
+            converted_count=1,
+            post_conversion_min_bitrate=245,
+            post_conversion_is_cbr=False,
+            candidate_v0_probe_avg=245,
+            candidate_v0_probe_min=245,
+            candidate_v0_probe_kind="lossless_source_v0",
+            verified_lossless_target=self._FACTS_TARGET,
+            candidate_spectral_context=SpectralCodecContext(
+                codec_family="lossless",
+                spectral_measurement_version=2,
+                spectral_decode_path="sox_native",
+                **context_kwargs,
+            ),
+            candidate_aac_lattice=aac_lattice,
+        )
+
+    def _assert_stored_as_configured(self, r, where):
+        self.assertEqual(r["target_final_format"], self._FACTS_TARGET, where)
+        # The album still lands: a withheld proof was never a rejection.
+        self.assertTrue(r["imported"], where)
+
+    def test_the_badlands_denial_still_stores_the_configured_target(self):
+        """The incident, both twins. Only ``ultrasonic_deficit_db`` moves;
+        the proof flips and the stored format does not."""
+        denied_evidence = self._evidence_decision(
+            ultrasonic_deficit_db=self.BADLANDS_DENYING_DEFICIT_DB)
+        passed_evidence = self._evidence_decision(
+            ultrasonic_deficit_db=self.PASSING_DEFICIT_DB)
+        denied_sim = self._simulator_decision(
+            ultrasonic_deficit_db=self.BADLANDS_DENYING_DEFICIT_DB)
+        passed_sim = self._simulator_decision(
+            ultrasonic_deficit_db=self.PASSING_DEFICIT_DB)
+
+        # The proof leg still does its job — otherwise this pin would pass
+        # on a tree where the leg had simply stopped denying.
+        self.assertFalse(denied_evidence["verified_lossless"], "evidence twin")
+        self.assertTrue(passed_evidence["verified_lossless"], "evidence twin")
+        self.assertFalse(denied_sim["verified_lossless"], "simulator twin")
+        self.assertTrue(passed_sim["verified_lossless"], "simulator twin")
+
+        self._assert_stored_as_configured(denied_evidence, "evidence, denied")
+        self._assert_stored_as_configured(passed_evidence, "evidence, passed")
+        self._assert_stored_as_configured(denied_sim, "simulator, denied")
+        self._assert_stored_as_configured(passed_sim, "simulator, passed")
+
+    def test_a_lattice_denial_still_stores_the_configured_target(self):
+        """The v4 leg's denial is the same shape of fact and costs the
+        same nothing: an Apple/CoreAudio launder that imports is stored in
+        the configured format like every other lossless-sourced import."""
+        from lib.quality import aac_lattice_proof_leg
+        capture = make_aac_lattice_capture([
+            (960, 28.60), (960, 29.11), (960, 30.02),
+            (960, 28.35), (960, 31.13), (512, 27.44),
+        ])
+        self.assertTrue(aac_lattice_proof_leg(capture).denies_promotion)
+
+        denied_evidence = self._evidence_decision(aac_lattice=capture)
+        denied_sim = self._simulator_decision(aac_lattice=capture)
+        self.assertFalse(denied_evidence["verified_lossless"])
+        self.assertFalse(denied_sim["verified_lossless"])
+        self._assert_stored_as_configured(denied_evidence, "evidence, lattice")
+        self._assert_stored_as_configured(denied_sim, "simulator, lattice")
+
+    def test_an_ungraded_lossless_source_still_stores_the_configured_target(
+        self,
+    ):
+        """No proof is possible at all here — the spectral analysis never
+        produced a grade — and the stored format is still the config's.
+        Absence of proof is not a different contract from denial."""
+        from lib.quality import SpectralCodecContext
+        ungraded_sim = full_pipeline_decision(
+            is_flac=True, min_bitrate=0, is_cbr=False,
+            spectral_grade=None,
+            converted_count=1,
+            post_conversion_min_bitrate=245,
+            post_conversion_is_cbr=False,
+            verified_lossless_target=self._FACTS_TARGET,
+            candidate_spectral_context=SpectralCodecContext(
+                codec_family="lossless",
+            ),
+        )
+        self.assertFalse(ungraded_sim["verified_lossless"])
+        self._assert_stored_as_configured(ungraded_sim, "simulator, ungraded")
+
+    def test_no_configured_target_still_means_v0(self):
+        """The must-still-work half. With nothing configured there is no
+        target to store, and the decision must not invent one."""
+        from lib.quality import SpectralCodecContext
+        r = full_pipeline_decision(
+            is_flac=True, min_bitrate=0, is_cbr=False,
+            spectral_grade="genuine",
+            converted_count=1,
+            post_conversion_min_bitrate=245,
+            post_conversion_is_cbr=False,
+            candidate_v0_probe_avg=245,
+            candidate_v0_probe_min=245,
+            candidate_v0_probe_kind="lossless_source_v0",
+            verified_lossless_target=None,
+            candidate_spectral_context=SpectralCodecContext(
+                codec_family="lossless", spectral_measurement_version=2,
+                spectral_decode_path="sox_native",
+                ultrasonic_deficit_db=self.PASSING_DEFICIT_DB,
+            ),
+        )
+        self.assertTrue(r["verified_lossless"])
+        self.assertIsNone(r["target_final_format"])
 
 
 class TestVerifiedLosslessClassifierGeneration(unittest.TestCase):
