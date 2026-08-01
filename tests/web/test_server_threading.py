@@ -122,6 +122,67 @@ class TestInheritedUnixListener(unittest.TestCase):
             ) = prior_web_authority
         self.assertEqual(exited.exception.code, 2)
 
+    def test_hard_invalid_dev_startup_never_constructs_a_server(self) -> None:
+        from beets import config as active_beets_config
+
+        from tests.test_beets_config_contract import (
+            BeetsContractWorld,
+            snapshot_contract_world,
+        )
+        from tests.test_beets_config_startup import (
+            _isolated_installed_authority,
+            _snapshot_runtime_tree,
+            _snapshot_web_process_state,
+        )
+        from web import server as srv
+
+        world = BeetsContractWorld(role="web")
+        self.addCleanup(world.close)
+        world.unseal()
+        world._write_main_config(**{
+            "import": {
+                "autotag": True,
+                "move": True,
+                "write": False,
+                "duplicate_keys": {
+                    "album": ["mb_albumid", "discogs_albumid"],
+                },
+            },
+        })
+        world._seal("web")
+        before_contract = snapshot_contract_world(world)
+        before_runtime = _snapshot_runtime_tree(world.runtime_dir)
+        before_process = _snapshot_web_process_state()
+        prior_runtime = os.environ.get("CRATEDIGGER_RUNTIME_CONFIG")
+        prior_beetsdir = os.environ.get("BEETSDIR")
+
+        try:
+            with (
+                _isolated_installed_authority(),
+                patch.object(sys, "argv", [
+                    "server.py",
+                    "--config", str(world.runtime_config),
+                    "--runtime-dir", str(world.runtime_dir),
+                    "--canonical-origin", "https://music.ablz.au",
+                    "--dev-port", "0",
+                ]),
+                patch.object(socket, "socket") as socket_constructor,
+            ):
+                self.assertEqual(srv.main(), 1)
+        finally:
+            active_beets_config.clear()
+            active_beets_config.read(user=True, defaults=True)
+
+        socket_constructor.assert_not_called()
+        self.assertEqual(snapshot_contract_world(world), before_contract)
+        self.assertEqual(_snapshot_runtime_tree(world.runtime_dir), before_runtime)
+        self.assertEqual(_snapshot_web_process_state(), before_process)
+        self.assertEqual(
+            os.environ.get("CRATEDIGGER_RUNTIME_CONFIG"),
+            prior_runtime,
+        )
+        self.assertEqual(os.environ.get("BEETSDIR"), prior_beetsdir)
+
     def test_wrong_family_and_non_listening_fds_fail_closed(self) -> None:
         from web import server as srv
 
@@ -713,7 +774,11 @@ class TestPerThreadBeetsHandles(unittest.TestCase):
         from beets import config as active_beets_config
 
         from tests.test_beets_config_contract import BeetsContractWorld
-        from tests.test_beets_config_startup import _isolated_installed_authority
+        from tests.test_beets_config_startup import (
+            _isolated_installed_authority,
+            _record_admission_events,
+            _RestartCase,
+        )
 
         class BootStop(Exception):
             pass
@@ -721,9 +786,20 @@ class TestPerThreadBeetsHandles(unittest.TestCase):
         srv = self._srv
         world = BeetsContractWorld(role="web")
         self.addCleanup(world.close)
+        events: list[str] = []
+        case = _RestartCase("web", srv.main)
+
+        def observe_server(
+            *_args: object,
+            **_kwargs: object,
+        ) -> None:
+            events.append("server")
+            raise BootStop
+
         try:
             with (
                 _isolated_installed_authority(),
+                _record_admission_events(case, events),
                 patch.object(
                     sys,
                     "argv",
@@ -743,7 +819,7 @@ class TestPerThreadBeetsHandles(unittest.TestCase):
                 ),
                 patch(
                     "web.server.ThreadingHTTPServer",
-                    side_effect=BootStop,
+                    side_effect=observe_server,
                 ) as tcp_server,
                 self.assertRaises(BootStop),
             ):
@@ -754,6 +830,7 @@ class TestPerThreadBeetsHandles(unittest.TestCase):
 
         self.assertEqual(srv.beets_db_path, str(world.library_db))
         self.assertEqual(srv.beets_library_root, str(world.library_root))
+        self.assertEqual(events, ["admitted", "server"])
         tcp_server.assert_called_once_with(("127.0.0.1", 0), srv.Handler)
 
 
