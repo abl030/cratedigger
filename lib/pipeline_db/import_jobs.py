@@ -1227,14 +1227,15 @@ class _ImportJobsMixin(
         recovered: list[ImportJob] = []
         for job in running:
             if job.beets_launch_authorized_at is not None:
+                no_replay_reason = (
+                    "Automatic replay refused because Beets may have mutated "
+                    "the library"
+                )
                 terminal = self.persist_import_terminal_outcome(
                     non_automation_failure_terminal_outcome(
                         job,
-                        error=(
-                            "Automatic replay refused because Beets may have "
-                            "mutated the library"
-                        ),
-                        message=recovery_message,
+                        error=no_replay_reason,
+                        message=f"{recovery_message}: {no_replay_reason}",
                         result={
                             "success": False,
                             "recovery": "launch_authorized_no_replay",

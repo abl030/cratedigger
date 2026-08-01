@@ -58,6 +58,7 @@ from lib.failure_presentation import (
     FAMILY_REFUSAL,
     FAMILY_TRANSPORT,
     FAMILY_UNKNOWN,
+    MAX_DIAGNOSTIC_CHARS,
     MAX_RAW_MESSAGE_CHARS,
     MAX_RAW_MESSAGE_GROUPS,
     TRANSFER_MESSAGE_LABEL_PEER,
@@ -953,6 +954,8 @@ class TestUnknownTextStaysBounded(unittest.TestCase):
             diagnostic, presentation)
         self.assertIsNone(violation, violation)
 
+    @example(job_type="force_import", diagnostic="x" * 500)
+    @example(job_type="youtube_import", diagnostic="\x00\n\t")
     @given(
         job_type=st.sampled_from(("force_import", "youtube_import")),
         diagnostic=st.text(min_size=1, max_size=500),
@@ -973,6 +976,7 @@ class TestUnknownTextStaysBounded(unittest.TestCase):
             presentation,
         )
         self.assertIsNone(violation, violation)
+        self.assertLessEqual(len(message), MAX_DIAGNOSTIC_CHARS)
 
     @given(
         states=st.lists(

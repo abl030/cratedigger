@@ -8944,7 +8944,7 @@ class TestForceJobFailuresAreRecordedNotParked(unittest.TestCase):
         stored = db.get_import_job(claimed.id)
         assert stored is not None
         self.assertEqual(stored.status, "failed")
-        self.assertEqual(stored.error, "RuntimeError")
+        self.assertEqual(stored.error, "RuntimeError: force wrapper vanished")
         self._assert_recents_visible_failure(db, claimed)
 
     def test_bundleless_force_failure_is_failed_not_parked(self) -> None:
@@ -8997,7 +8997,7 @@ class TestForceJobFailuresAreRecordedNotParked(unittest.TestCase):
 
         assert updated is not None
         self.assertEqual(updated.status, "failed")
-        self.assertIn("requeue-to-preview failed", updated.message or "")
+        self.assertIn("Requeue to preview failed", updated.message or "")
         self._assert_recents_visible_failure(db, claimed)
 
     def test_failed_force_attempt_preserves_operator_or_terminal_request_state(

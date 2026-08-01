@@ -317,26 +317,38 @@ def transfer_detail_unreadable(raw: object) -> bool:
 
 def bounded_text(text: str, *, limit: int = MAX_RAW_MESSAGE_CHARS) -> str:
     """Collapse whitespace, drop unprintables, truncate with an ellipsis."""
-    cleaned = "".join(ch if ch.isprintable() else " " for ch in text)
-    collapsed = " ".join(cleaned.split())
+    collapsed = _collapsed_text(text)
     if len(collapsed) <= limit:
         return collapsed
     return collapsed[: max(limit - 1, 0)].rstrip() + "\u2026"
 
 
+def _collapsed_text(text: str) -> str:
+    """Remove controls and collapse whitespace without applying a bound."""
+    cleaned = "".join(ch if ch.isprintable() else " " for ch in text)
+    return " ".join(cleaned.split())
+
+
 def non_automation_import_failure_message(
     job_type: str,
     diagnostic: str,
+    fallback_diagnostic: str = "",
 ) -> str:
-    """Build the bounded Recents diagnostic for one force/YouTube attempt."""
+    """Build one bounded force/YouTube Recents failure message.
+
+    Control-only primary diagnostics cannot hide a useful fallback.  The
+    bound applies to the complete persisted sentence, including its producer
+    identity prefix, so the presenter can reproduce it exactly.
+    """
     prefix = {
         "force_import": "Force import attempt failed:",
         "youtube_import": "YouTube import attempt failed:",
     }.get(job_type)
     if prefix is None:
         raise ValueError(f"non-automation failure does not support {job_type!r}")
-    detail = bounded_text(diagnostic, limit=MAX_DIAGNOSTIC_CHARS)
-    return prefix if not detail else f"{prefix} {detail}"
+    detail = _collapsed_text(diagnostic) or _collapsed_text(fallback_diagnostic)
+    message = prefix if not detail else f"{prefix} {detail}"
+    return bounded_text(message, limit=MAX_DIAGNOSTIC_CHARS)
 
 
 def _quoted(text: str) -> str:

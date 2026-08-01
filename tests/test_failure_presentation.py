@@ -33,6 +33,7 @@ from lib.failure_presentation import (
     FAMILY_REFUSAL,
     FAMILY_TRANSPORT,
     FAMILY_UNKNOWN,
+    MAX_DIAGNOSTIC_CHARS,
     MAX_RAW_MESSAGE_CHARS,
     TRANSFER_MESSAGE_LABEL_MIXED,
     TRANSFER_MESSAGE_LABEL_PEER,
@@ -985,6 +986,34 @@ class TestFailedRowCopy(unittest.TestCase):
                     f"{label} harness acknowledgement disappeared",
                 )
                 self.assertNotIn("Import error", presentation.verdict or "")
+
+    def test_non_automation_attempt_copy_bounds_the_final_prefixed_message(self):
+        message = non_automation_import_failure_message(
+            "force_import",
+            "x" * 500,
+        )
+        presentation = present_failure(_evidence(
+            outcome="failed",
+            error_message=message,
+        ))
+        self.assertEqual(len(message), MAX_DIAGNOSTIC_CHARS)
+        self.assertEqual(presentation.verdict, message)
+
+    def test_non_automation_attempt_copy_uses_error_after_control_only_message(self):
+        message = non_automation_import_failure_message(
+            "youtube_import",
+            "\x00\n\t",
+            "Beets acknowledgement was ambiguous",
+        )
+        presentation = present_failure(_evidence(
+            outcome="failed",
+            error_message=message,
+        ))
+        self.assertEqual(
+            message,
+            "YouTube import attempt failed: Beets acknowledgement was ambiguous",
+        )
+        self.assertEqual(presentation.verdict, message)
 
     def test_grace_expiry_row_is_not_labelled_an_import_error(self):
         presentation = present_failure(_evidence(

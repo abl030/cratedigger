@@ -1571,8 +1571,10 @@ def process_claimed_job(
         failed = _terminalize_non_automation_failure(
             db,
             job,
-            error=type(exc).__name__,
-            message=str(exc),
+            error=f"{type(exc).__name__}: {exc}",
+            message=(
+                f"Executor crashed: {type(exc).__name__}: {exc}"
+            ),
             result={"success": False},
         )
         return _record_terminal_force_action_cleanup(db, job, failed)
@@ -1813,7 +1815,7 @@ def process_claimed_job(
             db,
             job,
             error=outcome.message,
-            message=f"requeue-to-preview failed: {outcome.message}",
+            message=f"Requeue to preview failed: {outcome.message}",
             result=result,
         )
         return _record_terminal_force_action_cleanup(db, job, failed)
@@ -1858,7 +1860,10 @@ def process_claimed_job(
         db,
         job,
         error=outcome.message,
-        message=outcome.message,
+        message=(
+            "Importer completed without a terminal outcome: "
+            f"{outcome.message}"
+        ),
         result=result,
     )
     if failed is None:

@@ -687,6 +687,15 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
         )
         cur = self._execute(
             """
+            WITH origin AS (
+                SELECT source
+                FROM download_log
+                WHERE id = %s
+                  AND request_id = %s
+            ), source_guard AS (
+                SELECT 1
+                WHERE %s IS NULL OR EXISTS (SELECT 1 FROM origin)
+            )
             INSERT INTO download_log (
                 request_id, soulseek_username, filetype, download_path,
                 beets_distance, beets_scenario, beets_detail, valid,
@@ -701,16 +710,22 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                 v0_probe_avg_bitrate, v0_probe_median_bitrate,
                 existing_v0_probe_kind, existing_v0_probe_min_bitrate,
                 existing_v0_probe_avg_bitrate, existing_v0_probe_median_bitrate,
-                source_download_log_id, candidate_evidence_id
-            ) VALUES (
+                source, source_download_log_id, candidate_evidence_id
+            ) SELECT
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s,
+                COALESCE((SELECT source FROM origin), 'slskd'),
+                %s,
                 (SELECT candidate_evidence_id FROM import_jobs
                  WHERE id = %s AND request_id = %s)
-            ) RETURNING id
+            FROM source_guard
+            RETURNING id
             """,
             (
+                audit.source_download_log_id,
+                request_id,
+                audit.source_download_log_id,
                 request_id,
                 audit.soulseek_username,
                 audit.filetype,
@@ -752,7 +767,10 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
             ),
         )
         row = cur.fetchone()
-        assert row is not None
+        if row is None:
+            raise ImportJobTerminalConflict(
+                "terminal audit source download log must belong to its request"
+            )
         boundary("download_log")
         return int(row["id"])
 

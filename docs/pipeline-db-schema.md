@@ -249,10 +249,13 @@ that audit trail.
 - A failed force-import or YouTube-import execution writes one linked
   `outcome='failed'` row (`source_download_log_id` points to the action's
   original force/YouTube row) in the same transaction that terminalizes its
-  `import_jobs` row. Its bounded diagnostic explicitly names the failed
-  attempt so Recents remains the durable operator surface. This non-owning
-  action never transitions the request: `wanted`, an explicit `unsearchable`
-  stop, and terminal `imported` remain exactly as they were.
+  `import_jobs` row. The terminal row derives `source` from that exact origin
+  in the same INSERT (and refuses an origin belonging to another request), so
+  a YouTube attempt never becomes a misleading slskd row. Its bounded,
+  prefix-inclusive diagnostic explicitly names the failed attempt so Recents
+  remains the durable operator surface. This non-owning action never
+  transitions the request: `wanted`, an explicit `unsearchable` stop, and
+  terminal `imported` remain exactly as they were.
 - `source TEXT NOT NULL DEFAULT 'slskd'` — sourcing-channel discriminator added by migration 037. CHECK constraint admits `'slskd'` and `'youtube'`. The default backfilled every pre-037 row to `'slskd'` in one ALTER (no separate backfill script per the single-operator no-backfill-script rule). Consumers rendering `download_log` rows (`pipeline-cli show`, web routes' "recent attempts") use this column to distinguish channels.
 - `youtube_metadata JSONB` — YT-specific audit payload added by migration 037. Nullable; populated only for `source='youtube'` rows. Typed at the read seam as `lib.youtube_ingest_service.YoutubeIngestMetadata: msgspec.Struct`. Carries `yt_url`, `browse_id`, `audio_playlist_id`, optional `expected_track_count`, `resolver_mapping_id`, `per_track_video_ids`, and terminal-state fields (`reason`, `stderr_excerpt`, `observed_track_count`).
 - **Partial unique index `one_youtube_running_per_request` ON `download_log (request_id) WHERE source = 'youtube' AND outcome = 'youtube_running'`** — added by migration 037. Enforces idempotency at the DB layer: at most one in-flight YT rescue per `request_id` at any time. Application-level pre-insert checks would race; this index is atomic. Once the row transitions to a terminal `youtube_success` / `youtube_failed`, the index admits the next submission.

@@ -2044,15 +2044,16 @@ class FakePipelineDB:
             now = _utcnow()
             launched = row.get("beets_launch_authorized_at") is not None
             if launched:
+                no_replay_reason = (
+                    "Automatic replay refused because Beets may have mutated "
+                    "the library"
+                )
                 job = ImportJob.from_row(copy.deepcopy(row))
                 terminal = self.persist_import_terminal_outcome(
                     non_automation_failure_terminal_outcome(
                         job,
-                        error=(
-                            "Automatic replay refused because Beets may have "
-                            "mutated the library"
-                        ),
-                        message=recovery_message,
+                        error=no_replay_reason,
+                        message=f"{recovery_message}: {no_replay_reason}",
                         result={
                             "success": False,
                             "recovery": "launch_authorized_no_replay",
@@ -2988,9 +2989,9 @@ class FakePipelineDB:
                         command.successful_terminal_acceptance
                     ),
                 ))
-            download_log_id = cast(Any, self.log_download)(
-                request_id=command.request_id,
-                **command.audit.as_log_kwargs(),
+            download_log_id = self._log_terminal_audit(
+                command.request_id,
+                command.audit,
             )
             self.set_download_log_candidate_evidence(
                 download_log_id,
@@ -3307,10 +3308,31 @@ class FakePipelineDB:
         return tuple(applied)
 
     def _log_terminal_audit(self, request_id: int, audit):
-        return self.log_download(
+        source = None
+        if audit.source_download_log_id is not None:
+            source = next(
+                (
+                    entry for entry in self.download_logs
+                    if entry.id == audit.source_download_log_id
+                    and entry.request_id == request_id
+                ),
+                None,
+            )
+            if source is None:
+                raise ImportJobTerminalConflict(
+                    "terminal audit source download log must belong to its request"
+                )
+        download_log_id = self.log_download(
             request_id=request_id,
             **audit.as_log_kwargs(),
         )
+        if source is not None:
+            terminal = next(
+                entry for entry in self.download_logs
+                if entry.id == download_log_id
+            )
+            terminal.source = source.source
+        return download_log_id
 
     def _persist_automation_import_terminal_outcome(
         self,
