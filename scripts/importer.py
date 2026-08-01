@@ -20,7 +20,11 @@ if REPO_ROOT not in sys.path:
 import msgspec
 
 from lib import transitions
-from lib.config import CratediggerConfig
+from lib.beets_startup import BeetsStartupError, enforce_beets_startup
+from lib.config import (
+    CratediggerConfig,
+    resolve_startup_config_paths,
+)
 from lib.dispatch import (
     DISPATCH_CODE_REQUEUE_FAILED,
     DISPATCH_CODE_REQUEUED_FOR_PREVIEW,
@@ -626,7 +630,11 @@ def execute_import_job(
             )
         if cancellation_token is not None:
             cancellation_token.raise_if_cancelled()
-        runtime_config = force_runtime_config or read_runtime_config()
+        runtime_config = (
+            force_runtime_config
+            or getattr(ctx, "cfg", None)
+            or read_runtime_config()
+        )
         action_path = _force_action_path(job)
         expected_action_path = force_action_copy_path(runtime_config, job.id)
         if (
@@ -2065,12 +2073,36 @@ def main() -> int:
     parser.add_argument("--poll-interval", type=float, default=5.0)
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--worker-id", default=None)
+    parser.add_argument(
+        "--config",
+        default=None,
+        help="Immutable runtime config (default: env or cwd/config.ini)",
+    )
+    parser.add_argument(
+        "--runtime-dir",
+        default=None,
+        help="Mutable runtime directory (default: cwd)",
+    )
     args = parser.parse_args()
+    config_path, runtime_dir = resolve_startup_config_paths(
+        config_path=args.config,
+        runtime_dir=args.runtime_dir,
+    )
 
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
     )
+    try:
+        enforce_beets_startup(
+            role="importer",
+            config_path=config_path,
+            runtime_dir=runtime_dir,
+            logger=logger,
+        )
+    except BeetsStartupError:
+        return 1
+
     worker_id = args.worker_id or f"{socket.gethostname()}:{os.getpid()}"
     db = PipelineDB(args.dsn)
     try:

@@ -13,6 +13,7 @@ from lib.config import (
     CratediggerConfig,
     invalidate_secret_cache,
     read_runtime_config,
+    read_runtime_config_strict,
     read_runtime_rank_config,
     read_secret_file,
     read_verified_lossless_target,
@@ -442,6 +443,95 @@ class TestReadRuntimeConfig(unittest.TestCase):
         self.assertEqual(cfg.beets_library_db, "/srv/music/beets-library.db")
 
 
+class TestReadRuntimeConfigStrict(unittest.TestCase):
+    _BEETS_AUTHORITIES = (
+        ("config_dir", "/srv/beets/config"),
+        ("library", "/srv/beets/library.db"),
+        ("directory", "/srv/music"),
+        ("state_file", "/srv/beets/state.pickle"),
+        ("python", "/srv/beets/python"),
+        ("secret_include", "/run/secrets/beets.yaml"),
+    )
+
+    def _write_contract(
+        self,
+        path: str,
+        *,
+        omitted: str | None = None,
+        blank: str | None = None,
+    ) -> None:
+        parser = configparser.RawConfigParser()
+        parser["Beets"] = {
+            key: ("   " if key == blank else value)
+            for key, value in self._BEETS_AUTHORITIES
+            if key != omitted
+        }
+        with open(path, "w", encoding="utf-8") as handle:
+            parser.write(handle)
+
+    def test_missing_config_is_a_hard_failure(self):
+        with tempfile.TemporaryDirectory() as runtime_dir, \
+                self.assertRaises(FileNotFoundError):
+            read_runtime_config_strict(
+                "/nonexistent/cratedigger-config.ini", runtime_dir
+            )
+
+    def test_malformed_config_is_a_hard_failure(self):
+        with tempfile.TemporaryDirectory() as root:
+            config_path = os.path.join(root, "runtime.ini")
+            with open(config_path, "w", encoding="utf-8") as handle:
+                handle.write("[Beets\nconfig_dir = broken\n")
+            with self.assertRaises(configparser.Error):
+                read_runtime_config_strict(config_path, os.path.join(root, "state"))
+
+    def test_keeps_immutable_config_location_separate_from_runtime_directory(self):
+        with tempfile.TemporaryDirectory() as root:
+            immutable_dir = os.path.join(root, "immutable")
+            runtime_dir = os.path.join(root, "runtime")
+            os.makedirs(immutable_dir)
+            os.makedirs(runtime_dir)
+            config_path = os.path.join(immutable_dir, "runtime.ini")
+            with open(config_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "[Beets]\n"
+                    "config_dir = /srv/beets/config\n"
+                    "library = /srv/beets/library.db\n"
+                    "directory = /srv/music\n"
+                    "state_file = /srv/beets/state.pickle\n"
+                    "python = /srv/beets/python\n"
+                    "secret_include = /run/secrets/beets.yaml\n"
+                )
+
+            cfg = read_runtime_config_strict(config_path, runtime_dir)
+
+        self.assertEqual(cfg.config_file_path, os.path.realpath(config_path))
+        self.assertEqual(cfg.var_dir, os.path.realpath(runtime_dir))
+        self.assertEqual(cfg.lock_file_path, os.path.join(runtime_dir, ".cratedigger.lock"))
+        self.assertEqual(cfg.beets_state_file, "/srv/beets/state.pickle")
+        self.assertEqual(cfg.beets_secret_include, "/run/secrets/beets.yaml")
+
+    def test_all_six_raw_beets_authorities_are_required(self):
+        for option, _value in self._BEETS_AUTHORITIES:
+            for case in ("missing", "blank"):
+                with self.subTest(option=option, case=case), \
+                        tempfile.TemporaryDirectory() as root:
+                    config_path = os.path.join(root, "runtime.ini")
+                    self._write_contract(
+                        config_path,
+                        omitted=option if case == "missing" else None,
+                        blank=option if case == "blank" else None,
+                    )
+
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        rf"required raw \[Beets\] option {option}",
+                    ):
+                        read_runtime_config_strict(
+                            config_path,
+                            os.path.join(root, "runtime"),
+                        )
+
+
 class TestReadRuntimeRankConfig(unittest.TestCase):
     def test_missing_config_returns_defaults(self):
         cfg = read_runtime_rank_config("/nonexistent/config.ini")
@@ -701,12 +791,33 @@ class TestMainCLIParsing(unittest.TestCase):
     """Test the CLI argument parsing and config loading path in main()."""
 
     def setUp(self):
+        import cratedigger
+        from lib import config as runtime_config_module
+
         # cratedigger.main() calls reset_umask() (sets umask to 0o002 for the
         # pipeline's subprocess chain, GH #84). Restore the prior umask so
         # later tests in the same process keep their expected default.
         self._saved_umask = os.umask(0o022)
         os.umask(self._saved_umask)
         self.addCleanup(os.umask, self._saved_umask)
+        prior_runtime_config = os.environ.get("CRATEDIGGER_RUNTIME_CONFIG")
+        prior_beetsdir = os.environ.get("BEETSDIR")
+        prior_admitted = runtime_config_module._admitted_runtime_config
+        prior_main_config = cratedigger.cfg
+
+        def restore_runtime_config() -> None:
+            if prior_runtime_config is None:
+                os.environ.pop("CRATEDIGGER_RUNTIME_CONFIG", None)
+            else:
+                os.environ["CRATEDIGGER_RUNTIME_CONFIG"] = prior_runtime_config
+            if prior_beetsdir is None:
+                os.environ.pop("BEETSDIR", None)
+            else:
+                os.environ["BEETSDIR"] = prior_beetsdir
+            runtime_config_module._admitted_runtime_config = prior_admitted
+            cratedigger.cfg = prior_main_config
+
+        self.addCleanup(restore_runtime_config)
 
     class _StopMain(Exception):
         """Sentinel to stop main() after config parsing in tests."""
@@ -722,6 +833,13 @@ class TestMainCLIParsing(unittest.TestCase):
                 "[Pipeline DB]\n"
                 "enabled = True\n"
                 "dsn = postgresql://test@localhost/test\n"
+                "[Beets]\n"
+                "config_dir = /test/beets\n"
+                "library = /test/beets/library.db\n"
+                "directory = /test/music\n"
+                "state_file = /test/state.pickle\n"
+                "python = /test/python\n"
+                "secret_include = /test/secret.yaml\n"
             )
         return path
 
@@ -741,15 +859,13 @@ class TestMainCLIParsing(unittest.TestCase):
             cratedigger.main()
 
     def test_missing_config_exits_with_error(self):
-        """main() exits 1 when config.ini doesn't exist at --config-dir."""
+        """main() returns 1 when config.ini doesn't exist at --config-dir."""
         import cratedigger
 
-        with tempfile.TemporaryDirectory() as d:
-            with patch.object(sys, "argv", [
-                "cratedigger", "--config-dir", d, "--var-dir", d, "--no-lock-file"
-            ]), self.assertRaises(SystemExit) as cm:
-                cratedigger.main()
-            self.assertEqual(cm.exception.code, 1)
+        with tempfile.TemporaryDirectory() as d, patch.object(sys, "argv", [
+            "cratedigger", "--config-dir", d, "--var-dir", d, "--no-lock-file"
+        ]):
+            self.assertEqual(cratedigger.main(), 1)
 
     def test_config_dir_resolves_config_path(self):
         """--config-dir joins with config.ini to find the config file."""
@@ -769,35 +885,68 @@ class TestMainCLIParsing(unittest.TestCase):
 
     def test_lock_file_created_in_var_dir(self):
         """Lock file path is var_dir/.cratedigger.lock."""
-        with tempfile.TemporaryDirectory() as config_dir, tempfile.TemporaryDirectory() as var_dir:
-            self._write_minimal_config(config_dir)
-            lock_path = os.path.join(var_dir, ".cratedigger.lock")
+        import cratedigger
+        from lib import config as runtime_config_module
+        from tests.test_beets_config_contract import BeetsContractWorld
 
-            def assert_from_ini(config, actual_config_dir, actual_var_dir):
-                self.assertEqual(actual_config_dir, config_dir)
-                self.assertEqual(actual_var_dir, var_dir)
-                self.assertTrue(os.path.exists(lock_path))
+        world = BeetsContractWorld(role="main")
+        self.addCleanup(world.close)
+        runtime_config_module._admitted_runtime_config = None
+        os.environ.pop("CRATEDIGGER_RUNTIME_CONFIG", None)
+        os.environ.pop("BEETSDIR", None)
+        lock_path = os.path.join(str(world.runtime_dir), ".cratedigger.lock")
 
-            self._run_main_until_config_parse(
-                ["cratedigger", "--config-dir", config_dir, "--var-dir", var_dir],
-                assert_from_ini,
-            )
+        def stop_at_database_connect(
+            _dsn: str,
+            **_kwargs: object,
+        ) -> None:
+            self.assertTrue(os.path.exists(lock_path))
+            raise self._StopMain()
+
+        with (
+            patch.object(sys, "argv", [
+                "cratedigger", "--config", str(world.runtime_config),
+                "--runtime-dir", str(world.runtime_dir),
+            ]),
+            patch("lib.migrator.psycopg2.connect", side_effect=stop_at_database_connect),
+            self.assertRaises(self._StopMain),
+        ):
+            cratedigger.main()
+        self.assertFalse(os.path.exists(lock_path))
 
     def test_no_lock_file_flag(self):
-        """--no-lock-file sets the flag to True."""
-        with tempfile.TemporaryDirectory() as d:
-            self._write_minimal_config(d)
-            lock_path = os.path.join(d, ".cratedigger.lock")
+        """--no-lock-file reaches schema startup without ever making a lock."""
+        import cratedigger
+        from lib import config as runtime_config_module
+        from tests.test_beets_config_contract import BeetsContractWorld
 
-            def assert_from_ini(config, config_dir, var_dir):
-                self.assertEqual(config_dir, d)
-                self.assertEqual(var_dir, d)
-                self.assertFalse(os.path.exists(lock_path))
+        world = BeetsContractWorld(role="main")
+        self.addCleanup(world.close)
+        runtime_config_module._admitted_runtime_config = None
+        os.environ.pop("CRATEDIGGER_RUNTIME_CONFIG", None)
+        os.environ.pop("BEETSDIR", None)
+        lock_path = os.path.join(str(world.runtime_dir), ".cratedigger.lock")
+        observed: list[bool] = []
 
-            self._run_main_until_config_parse(
-                ["cratedigger", "--config-dir", d, "--var-dir", d, "--no-lock-file"],
-                assert_from_ini,
-            )
+        def stop_at_database_connect(
+            _dsn: str,
+            **_kwargs: object,
+        ) -> None:
+            observed.append(os.path.exists(lock_path))
+            raise self._StopMain()
+
+        with (
+            patch.object(sys, "argv", [
+                "cratedigger", "--config", str(world.runtime_config),
+                "--runtime-dir", str(world.runtime_dir), "--no-lock-file",
+            ]),
+            patch("lib.migrator.psycopg2.connect", side_effect=stop_at_database_connect),
+            self.assertRaises(self._StopMain),
+        ):
+            cratedigger.main()
+
+        self.assertEqual(observed, [False])
+        self.assertFalse(os.path.exists(lock_path))
 
     def test_default_args(self):
         """Default config-dir and var-dir are cwd."""

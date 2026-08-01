@@ -146,6 +146,13 @@ class CratediggerConfig:
     # Empty string -> unset (dev shells / tests provide env fallbacks).
     beets_config_dir: str = ""
     beets_python: str = ""
+    # Externally provisioned Beets importer state. This is deliberately
+    # outside BEETSDIR so an immutable configuration authority can coexist
+    # with Beets' incremental-import state.
+    beets_state_file: str = ""
+    # The one include permitted to carry a mutable secret. Its schema is
+    # enforced by lib.beets_config_contract before effective-config loading.
+    beets_secret_include: str = ""
 
     # One MB value for every consumer (tier-2 plan U6 / KTD6): web/mb.py,
     # pipeline-cli lookups, DatabaseSource track population, and the rendered
@@ -340,6 +347,8 @@ class CratediggerConfig:
             ),
             beets_config_dir=get("Beets", "config_dir", ""),
             beets_python=get("Beets", "python", ""),
+            beets_state_file=get("Beets", "state_file", ""),
+            beets_secret_include=get("Beets", "secret_include", ""),
             musicbrainz_api_base=get("MusicBrainz", "api_base", "https://musicbrainz.org"),
             discogs_api_base=get("Discogs", "api_base", ""),
             # Quality Ranks — codec-aware comparison policy. Missing section
@@ -379,10 +388,49 @@ class CratediggerConfig:
 
 DEFAULT_RUNTIME_CONFIG_PATH = "/var/lib/cratedigger/config.ini"
 
+# A top-level Beets-dependent application installs its strictly checked,
+# authority-normalized configuration once at startup.  Optional readers in
+# that same process must not later weaken that boundary by reparsing the raw
+# file and recovering relative or otherwise noncanonical path spellings.
+_admitted_runtime_config: tuple[str, CratediggerConfig] | None = None
+
 
 def _runtime_config_path(config_path: str | None = None) -> str:
     """Resolve the active runtime config.ini path."""
     return config_path or os.environ.get("CRATEDIGGER_RUNTIME_CONFIG") or DEFAULT_RUNTIME_CONFIG_PATH
+
+
+def resolve_startup_config_paths(
+    *,
+    config_path: str | None,
+    runtime_dir: str | None,
+    config_dir: str | None = None,
+) -> tuple[str, str]:
+    """Resolve deployment-neutral startup authorities from args, env, or cwd."""
+    resolved_config = (
+        config_path
+        or (
+            os.path.join(config_dir, "config.ini")
+            if config_dir is not None
+            else None
+        )
+        or os.environ.get("CRATEDIGGER_RUNTIME_CONFIG")
+        or os.path.join(os.getcwd(), "config.ini")
+    )
+    return resolved_config, runtime_dir or os.getcwd()
+
+
+def install_admitted_runtime_config(
+    config_path: str,
+    config: CratediggerConfig,
+) -> None:
+    """Install one checked process authority for all downstream readers."""
+    global _admitted_runtime_config
+
+    path = os.path.abspath(os.path.expanduser(config_path))
+    _admitted_runtime_config = (path, config)
+    os.environ["CRATEDIGGER_RUNTIME_CONFIG"] = path
+    os.environ["BEETSDIR"] = config.beets_config_dir
 
 
 def read_runtime_config(config_path: str | None = None) -> CratediggerConfig:
@@ -404,6 +452,11 @@ def read_runtime_config(config_path: str | None = None) -> CratediggerConfig:
     fallout downstream.
     """
     path = _runtime_config_path(config_path)
+    admitted = _admitted_runtime_config
+    if admitted is not None:
+        admitted_path, admitted_config = admitted
+        if os.path.abspath(os.path.expanduser(path)) == admitted_path:
+            return admitted_config
     if not path or not os.path.exists(path):
         return CratediggerConfig()
 
@@ -426,6 +479,50 @@ def read_runtime_config(config_path: str | None = None) -> CratediggerConfig:
         config_dir=runtime_dir,
         var_dir=runtime_dir,
     )
+
+
+def read_runtime_config_strict(
+    config_path: str,
+    runtime_dir: str,
+) -> CratediggerConfig:
+    """Read a required startup contract without permissive fallbacks.
+
+    ``config_path`` is the deployment-owned immutable authority;
+    ``runtime_dir`` is the separate mutable directory used for locks and
+    processing state. Missing, unreadable, and malformed input propagates as
+    the native filesystem/configparser failure for the startup adapter to log.
+    """
+    # Preserve the lexical authority that the caller supplied.  Resolving a
+    # symlink here would hide a replaceable link (or one of its writable
+    # parents) from the startup contract checker.
+    path = os.path.abspath(os.path.expanduser(config_path))
+    state_dir = os.path.realpath(runtime_dir)
+    parser = configparser.RawConfigParser()
+    with open(path, "r", encoding="utf-8") as handle:
+        parser.read_file(handle, source=path)
+    for option in (
+        "config_dir",
+        "library",
+        "directory",
+        "state_file",
+        "python",
+        "secret_include",
+    ):
+        if not parser.has_option("Beets", option) or not parser.get(
+            "Beets", option, raw=True
+        ).strip():
+            raise ValueError(f"required raw [Beets] option {option} is missing or empty")
+    parsed = CratediggerConfig.from_ini(
+        parser,
+        config_dir=os.path.dirname(path),
+        var_dir=state_dir,
+    )
+    # ``from_ini`` historically derives config.ini from config_dir. Strict
+    # callers may receive a differently named immutable file, so preserve the
+    # exact authority they opened.
+    from dataclasses import replace
+
+    return replace(parsed, config_file_path=path)
 
 
 def read_runtime_rank_config(config_path: str | None = None) -> QualityRankConfig:

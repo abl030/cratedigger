@@ -155,6 +155,27 @@ class TestPinnedBeetsDelete(unittest.TestCase):
             ) as beets:
                 self.assertIsNotNone(beets.get_album_detail(album_id))
 
+    def test_ordinary_plugin_load_failure_is_typed_and_zero_mutation(self) -> None:
+        album_id, album_dir = self._seed()
+        track = album_dir / "01 Track.flac"
+        config_path = self.config_dir / "config.yaml"
+        config_path.write_text(
+            f"directory: {self.root}\n"
+            f"library: {self.db_path}\n"
+            "plugins: [definitely_missing_plugin]\n",
+            encoding="utf-8",
+        )
+
+        result = self._run(album_id)
+
+        self.assertIsInstance(result, BeetsDeleteFailed)
+        assert isinstance(result, BeetsDeleteFailed)
+        self.assertEqual(result.reason, "configuration_error")
+        self.assertIn("plugins failed to load", result.detail)
+        self.assertTrue(track.exists())
+        with BeetsDB(str(self.db_path), library_root=str(self.root)) as beets:
+            self.assertIsNotNone(beets.get_album_detail(album_id))
+
     def test_subprocess_argv_and_malformed_json_protocol_fail_closed(self) -> None:
         album_id, _album_dir = self._seed()
         calls: list[tuple[list[str], dict[str, object]]] = []
