@@ -50,6 +50,12 @@ LAME_LOWPASS = [
 ]
 ```
 
+> **Pointer added 2026-08-01 (Phase 5 PR5).** The 60/40 deficit pair quoted
+> above is the Phase 0 state of the code. It was **measured wrong** and
+> replaced by 69/65 in Phase 5 PR3 — see "Measured — Phase 3/4 results"
+> below. This paragraph is left as written because it records what the
+> analyzer did when this research was done.
+
 (`lib/spectral_check.py` lines 31-40.) At the album level,
 `classify_album()` grades `likely_transcode` at ≥75% suspect tracks,
 `suspect` at ≥`ALBUM_SUSPECT_PCT = 60.0`%, else `genuine`; `analyze_album()`
@@ -261,6 +267,94 @@ on files that were already fine.
 | Shine-encoded file | No cliff at all | No cliff → `genuine` (false negative on quality, not bandwidth) | Confirms "invisible to bandwidth detection"; would need a separate signal (missing Xing/LAME header, flat/noisy spectrum below 12 kHz) to catch Shine's real quality problem |
 | `--lowpass -1` / full-bandwidth LAME | No cliff (content-dependent rolloff only) | No cliff → `genuine` | Rare in practice; same blind spot as Shine if found |
 | Mono-sourced CBR file | ~1.5× stereo-table value for the same bitrate | Systematic under-estimate | If Phase 3 samples include mono-source rips (common for older mono originals), expect our bitrate estimate to read low relative to tags/history |
+
+## Measured — Phase 3/4 results (committed 2026-08-01, Phase 5 PR5)
+
+The predictions above were checked against **60,102 production-primitive
+measurements over four independent album arms** — TRAINING (34 albums),
+ROUND-1 (15), ROUND-2 (27), ROUND-3 (24). Compiled analysis:
+`docs/research/spectral-calibration-findings.md`. Raw record:
+`docs/research/calibration-data/`.
+
+### The headline: the detector reads one tier low
+
+The `LAME_LOWPASS` transcription is faithful to the encoder, and that is
+exactly what made it wrong to invert. `detect_cliff` reports the **first
+slice of the steep run**, roughly 500–1000 Hz below the encoder's actual
+lowpass, so mapping a detected cliff through the encoder's own table
+systematically under-rates the file.
+
+TRAINING arm, 402 tracks per variant
+(`docs/research/calibration-data/tables.md`). These are **in-window
+(12–20 kHz) detections**: CBR-224/256/320 and V0 are 84–99% no-cliff here,
+so their medians below are truncation artifacts computed from the small
+cliffing minority, not the ladder:
+
+| variant | no-cliff | cliff p10 / med / p90 (Hz) | est. mode via `LAME_LOWPASS` |
+|---|---:|---|---|
+| lame-cbr64 | 100% | — | — (11 kHz lowpass sits below the 12 kHz window floor) |
+| lame-cbr96 | 24% | 14500 / 14500 / 14500 | 96 (76%) |
+| lame-cbr128 | 8% | 15500 / 15500 / 16000 | 128 (91%) |
+| lame-cbr160 | 48% | 15500 / 16500 / 17000 | 128 (52%) |
+| lame-cbr192 | 17% | 18000 / 18000 / 18000 | **160 (75%)** |
+| lame-cbr224 | 84% | 15500 / 18500 / 18500 | 192 (10%) |
+| lame-cbr256 | 89% | 15500 / 18500 / 18500 | 192 (8%) |
+| lame-cbr320 | 99% | 15500 / 17250 / 15500 | 128 (1%) |
+| lame-v0 | 91% | 15500 / 15500 / 18000 | 128 (7%) |
+| lame-v2 | 17% | 15500 / 18000 / 18000 | **160 (58%)** |
+| lame-v4 | 39% | 15500 / 15500 / 17000 | 128 (57%) |
+| lame-v6 | 19% | 12500 / 15500 / 16000 | 128 (65%) |
+
+The four-arm ladder the buckets were actually derived from, in detector
+space: CBR-96 → 14500, 128 → 15500, 160 → 16500, 192 → 18000,
+**224/256 → 19000, 320 → 19500** — the last three visible only once the
+20–22 kHz extension slices are added, which is why they disagree with the
+truncated in-window medians in the table above.
+
+**Shipped constant** — `MP3_DETECTOR_CLASS_BUCKETS` in
+`lib/quality/spectral_interpretation.py`, derived in detector space from
+those medians rather than from the encoder spec:
+
+`<15000→96 | <16000→128 | <17250→160 | <18250→192 | <19250→256 | ≥19250→320`
+
+### Prediction scorecard
+
+| Phase 0 prediction | verdict |
+|---|---|
+| CBR 128 → cliff ~17000, buckets 128 | **bucket held, Hz did not** — detector median 15500, still buckets 128 on 91% |
+| CBR 192 → cliff ~18600, buckets 192 | **falsified** — detector median 18000, buckets **160** on 75% |
+| CBR 320 → no cliff (window too narrow) | **held** — 99% no-cliff |
+| `-V2` unlabeled straddles the 192/256 boundary | **falsified in direction** — reads one tier LOW (160 on 58%), never high |
+| `-V0`/`-V1` → no cliff, `genuine` | **held** — 91% no-cliff; the 9% that do cliff bucket 128 |
+| Xing/Helix reads as ~128 at any bitrate | **untested** — neither encoder is packaged for Linux (not in nixpkgs), so no control arm could be built. Encoder identity is header-sniffable (LAME/Xing info tags) if this hole ever needs closing; fail direction stays conservative |
+| Shine → no cliff at all | **untested**, same reason |
+| `--lowpass -1` full-bandwidth LAME | **untested**; behaves as the V0 no-cliff class by construction |
+| Mono-sourced CBR reads ~1.5× high | **not isolated** — the encode matrix normalised everything to 16/44.1 |
+
+### Band-assertion accuracy, and where it degrades
+
+The redesigned ±1-tier band assertion, first blind test (ROUND-2, 337
+tracks): **94–100% across the whole CBR ladder** — cbr96/128 100%, cbr160
+98%, cbr320 97%, cbr192 96%, cbr224/256 94% — with 147–263 tracks asserting
+per variant. "No cliff asserts nothing" behaved as intended.
+
+`lame-v2`'s ±1-tier accuracy tracks the cohort's high-frequency-poor share
+almost exactly: **93% (TRAINING, ~6% HF-poor) → 87% (ROUND-2, 26%) → 78%
+(ROUND-3, 46%)**. The band machinery is not wrong so much as **unqualified
+on HF-poor material**, and the honest fix is to assert nothing rather than
+assert weakly. Open, non-blocking — an MP3 container can never receive
+lossless proof.
+
+### The permanent residual
+
+`lame-v0` is one of the three classes no shipped leg can see. In the
+2026-07-30 launder matrix (19 ground-truth albums re-encoded and decoded
+back to FLAC, `docs/research/calibration-data/launder-matrix/`), a
+`lame-v0 → FLAC` launder reached proof on **10 of the 11 albums whose
+genuine twin is provable at all** (T=62; 10 of 10 at the shipped T=59.5),
+and the AAC frame-lattice leg cannot help because V0 carries no AAC
+lattice. Every CBR rung and `lame-v2` is denied 0/11 — the cliff leg sees
+them all.
 
 ## Sources
 

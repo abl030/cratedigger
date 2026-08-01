@@ -241,7 +241,10 @@ at 32/48/64/96/128/192/256 kbps stereo music, run through
    False`**, because all of them select FB bandwidth per the thresholds
    above.
 2. **`hf_deficit_db` should stay well under `HF_DEFICIT_MARGINAL = 40.0`
-   for 64 kbps and above**, and should *not* shrink monotonically as
+   for 64 kbps and above** [the 40 dB constant is the Phase 0 state of the
+   code; it was measured wrong and is now 65 — pointer added 2026-08-01,
+   see "Measured — Phase 3/4 results" below], and should *not* shrink
+   monotonically as
    bitrate rises the way it does for LAME — if it does, the folding
    mechanism doesn't fully mask the energy differences our slice widths
    can see, and that's a genuine finding against this doc's prediction.
@@ -257,6 +260,59 @@ at 32/48/64/96/128/192/256 kbps stereo music, run through
 5. A very-low-bitrate control point (12-16 kbps, voice-ish content) should
    show a real, reproducible cliff near 12 kHz — the one place this doc
    predicts the detector's mechanism still corresponds to something real.
+
+## Measured — Phase 3/4 results (committed 2026-08-01, Phase 5 PR5)
+
+The predictions above were checked against **60,102 production-primitive
+measurements over four independent album arms** — TRAINING (34 albums),
+ROUND-1 (15), ROUND-2 (27), ROUND-3 (24). Compiled analysis:
+`docs/research/spectral-calibration-findings.md`. Raw record:
+`docs/research/calibration-data/`.
+
+### Opus is statistically indistinguishable from lossless, on every arm
+
+Percent no-cliff / median HF deficit:
+
+| variant | TRAINING | ROUND-1 | ROUND-2 | ROUND-3 |
+|---|---|---|---|---|
+| opus-32 | 94% / 45 dB | 97% / 44 | 94% / 44 | 96% / 43 |
+| opus-96 | 99% / 46 dB | 100% / 45 | 99% / 44 | 99% / 43 |
+| opus-256 | 99% / 48 dB | 100% / 46 | 99% / 46 | 99% / 44 |
+| **control-flac1644** | **99% / 48 dB** | **100% / 47** | **99% / 47** | **99% / 44** |
+
+The full TRAINING ladder (402 tracks per variant,
+`docs/research/calibration-data/tables.md`) is flat the whole way:
+opus-12 98% no-cliff, opus-32 95%, opus-48 97%, opus-64 99%, opus-96 99%,
+opus-128 99%, opus-192 99%, opus-256 100%. Only opus-12 separates at all,
+and it does so on the deficit (57–64 dB), not on a cliff.
+
+**This is the strongest per-codec result of the campaign, and it is a
+negative one.** CELT's band-energy preservation plus spectral folding keep
+*measured* energy in every band regardless of actual coding precision, so
+there is nothing for a bandwidth-shaped detector to read. Opus is
+**audit-only, unconditionally** — no spectral quality inference at any
+bitrate.
+
+### Prediction scorecard
+
+| Phase 0 prediction | verdict |
+|---|---|
+| 1. 32–256 kbps all report no cliff | **held** — 94–100% no-cliff on every arm |
+| 2. Deficit stays "well under 40 dB" and does not fall monotonically with bitrate | **the shape held, the number was wrong** — Opus sits at 43–48 dB, but so does genuine lossless (44–48 dB), and the two do not separate. 40 dB was flagging the *median genuine track* as marginal; the campaign re-derived the pair as 65/69 |
+| 3. An in-window cliff means a band-limited SOURCE, not the Opus bitrate | **held** — no Opus rung above 12 kbps produces a bitrate-correlated cliff |
+| 4. `estimate_bitrate_from_cliff` must never run on an Opus file | **shipped as the production contract** — `interpret_spectral_cliff` in `lib/quality/spectral_interpretation.py` returns audit-only for the Opus family unconditionally, and `decision_class_kbps` yields `None` |
+| 5. A 12–16 kbps control shows a real cliff near 12 kHz | **partially held** — opus-12 is still 98% no-cliff; the separation shows in the deficit (57–64 dB), so even the one place the mechanism corresponds to something real is not reliably a *cliff* |
+
+### As a launder source, Opus is the easiest class to catch
+
+Opus → FLAC is the fake the ultrasonic ceiling machinery exists for, and it
+is caught completely: **34/34, 15/15, 27/27, 24/24 denied** across the four
+arms under the frozen v3 gate, and **0 escapes at every rung**
+(96/192/256 kbps — 0/11 at T=62, 0/10 at the shipped T=59.5) in the
+2026-07-30 launder matrix
+(`docs/research/calibration-data/launder-matrix/`). One caveat the matrix
+recorded: libopus encodes at 48 kHz unconditionally, so every Opus launder
+decodes to a 48 kHz FLAC and sample rate is entangled in every Opus row.
 
 ## Sources
 
