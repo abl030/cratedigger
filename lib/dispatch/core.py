@@ -74,10 +74,12 @@ from lib.processing_paths import (
     processing_albums_dir,
 )
 from lib.quality import (
+    AlbumQualityEvidence,
     AlbumQualityEvidenceDecisionFacts,
     DownloadInfo,
     ImportResult,
     TargetQualityContract,
+    V0ProbeEvidence,
     ValidationResult,
     comparison_basis_from_decision,
     dispatch_action,
@@ -86,6 +88,7 @@ from lib.quality import (
     narrow_override_on_lossless_source_lock,
     override_bitrate_from_current_evidence,
     resolve_rejection_search_override,
+    stage2_counterfactual_from_decision,
 )
 from lib.quality_evidence import EvidenceBuildResult, audit_v0_probe_from_metric
 from lib.terminal_outcomes import PendingImportTerminalOutcome
@@ -599,6 +602,57 @@ def _resolve_dispatch_beets_paths(
     return cfg.beets_library_db, cfg.beets_directory
 
 
+def _evidence_reject_import_result(
+    *,
+    decision: str,
+    candidate: AlbumQualityEvidence,
+    current: AlbumQualityEvidence | None,
+    evidence_decision: dict[str, object],
+    existing_v0_probe: V0ProbeEvidence | None,
+) -> ImportResult:
+    """The audit ``ImportResult`` a persisted-evidence rejection persists.
+
+    Extracted from ``dispatch_import_core`` — it is a pure projection of
+    the gate's own evidence plus the decision dict, and inlining it pushed
+    that already-large function past Pyright's analysis-complexity limit.
+
+    The two ``*_if_stage1_deferred`` fields are AUDIT ONLY (issue #829
+    Phase 5 PR4): a Stage-1 spectral reject short-circuits before Stage 2
+    runs, so without them the persisted trail stops at
+    ``stage1_spectral:reject`` and says nothing about whether the candidate
+    was actually an upgrade — which IS issue #813's disagreement question.
+    Nothing branches on either field.
+    """
+    if candidate.target_format is None:
+        target_contract = None
+    elif candidate.target_is_cbr is not None:
+        target_contract = TargetQualityContract.from_projection(
+            candidate.target_format,
+            projected_is_cbr=candidate.target_is_cbr,
+        )
+    else:
+        target_contract = TargetQualityContract.from_explicit_label(
+            candidate.target_format
+        )
+    return ImportResult(
+        decision=decision,
+        source_measurement=candidate.measurement,
+        current_measurement=(
+            current.measurement if current is not None else None
+        ),
+        target_quality_contract=target_contract,
+        v0_probe=audit_v0_probe_from_metric(candidate.v0_metric),
+        existing_v0_probe=existing_v0_probe,
+        comparison_basis=comparison_basis_from_decision(evidence_decision),
+        stage2_import_if_stage1_deferred=(
+            stage2_counterfactual_from_decision(evidence_decision)
+        ),
+        comparison_basis_if_stage1_deferred=comparison_basis_from_decision(
+            evidence_decision, key="comparison_basis_if_stage1_deferred",
+        ),
+    )
+
+
 def dispatch_import_core(
     *,
     path: str,
@@ -942,42 +996,12 @@ def dispatch_import_core(
                             f"(decision={decision})"
                         )
                     )
-                    attempt_result.merge(ImportResult(
+                    attempt_result.merge(_evidence_reject_import_result(
                         decision=decision,
-                        source_measurement=evidence_gate.candidate.measurement,
-                        current_measurement=(
-                            evidence_gate.current.measurement
-                            if evidence_gate.current is not None
-                            else None
-                        ),
-                        target_quality_contract=(
-                            TargetQualityContract.from_projection(
-                                evidence_gate.candidate.target_format,
-                                projected_is_cbr=(
-                                    evidence_gate.candidate.target_is_cbr
-                                ),
-                            )
-                            if (
-                                evidence_gate.candidate.target_format is not None
-                                and evidence_gate.candidate.target_is_cbr
-                                is not None
-                            )
-                            else (
-                                TargetQualityContract.from_explicit_label(
-                                    evidence_gate.candidate.target_format
-                                )
-                                if evidence_gate.candidate.target_format
-                                is not None
-                                else None
-                            )
-                        ),
-                        v0_probe=audit_v0_probe_from_metric(
-                            evidence_gate.candidate.v0_metric
-                        ),
+                        candidate=evidence_gate.candidate,
+                        current=evidence_gate.current,
+                        evidence_decision=evidence_decision,
                         existing_v0_probe=existing_v0_probe,
-                        comparison_basis=comparison_basis_from_decision(
-                            evidence_decision
-                        ),
                     ))
                     return _reject_import_from_evidence_decision(
                         db=db,
