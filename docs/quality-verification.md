@@ -692,40 +692,56 @@ it was before the flag existed, never neutralized by default.
 
 - `pipeline-cli quality <request-id>` — proof-gate tier, fired legs and
   proof generation for the last real candidate AND the installed HAVE,
-  through `proof_verdict_from_evidence`.
+  through `proof_verdict_from_evidence`. Its `verified lossless … proved
+  by` line reports the minted proof only when that proof is *attributable*
+  (below); ungated it stated a sibling's proof on 4,910 live requests
+  while Recents said nothing about the same album.
 - The Recents evidence panel — the same statement via
   `web/classify.py::proof_gate_projection`, plus the `Verified lossless`
   row naming the proof generation and, in the forensics block, PR2d's
-  Stage-1-reject counterfactual and the fired-leg set.
+  Stage-1-reject counterfactual and the fired-leg set. It reads the same
+  attributable proof, gated at the read seam.
 - The Recents verdict sentence — the `verified lossless` suffix on a
   successful import REPORTS a persisted proof and is never re-derived from
   the row's container, conversion or spectral columns: those are what the
   decider CONSIDERED, and a re-derivation claimed a proof on rows the gate
   had explicitly refused while withholding it on proved rows nothing
-  converted. Exactly three persisted facts can put it in front of an
+  converted. Exactly two persisted facts can put it in front of an
   operator, and nothing else may:
-  - `album_quality_evidence.verified_lossless_classifier`, read through the
-    candidate-evidence join — and only when that join is source-semantic
-    (lineage 3/4). Migration 021 §6b cross-walked pre-content-addressing
-    rows onto a sibling attempt's snapshot, so on a legacy-lineage row the
-    classifier is a *different* attempt's proof;
-    `_overlay_evidence_onto_download_log_row` NULLs it under the same rule
-    that already gates the `source_*` measurement facts. Ungated it lent a
-    proof to 5,014 live rows and put the suffix in 281 live verdicts — 250
-    of them pointing at an evidence row another attempt also claims, and
-    109 that converted nothing at all.
-  - `ImportResult.verified_lossless_proof`, this attempt's own audit blob —
-    never content-addressed, so never another attempt's. The v1/v2 legacy
-    projections are excluded: those rows carried no proof at all, only
-    `quality.will_be_verified_lossless`, which that era's harness computed
-    as `converted > 0 and not is_transcode` — the retired heuristic itself.
+  - an **attributable** `album_quality_evidence.verified_lossless_classifier`,
+    read through the candidate-evidence join;
   - `QualityComparisonBasis.verified_lossless_bypass`, the decision
     persisted on the import result when a proof forced an
     equivalent-quality import. The basis verdict renders that one, so the
-    suffix helpers suppress the other two there rather than saying it twice.
+    suffix helpers suppress the other there rather than saying it twice.
 
-  A row carrying none of the three gets no suffix. There is no era-aware
-  fallback — a fallback is the same guess wearing a date.
+  A row carrying neither gets no suffix. In particular
+  `ImportResult.verified_lossless_proof` does NOT count: every historical
+  reader mints the same `legacy_import_result` stamp from that era's
+  `will_be_verified_lossless`, which on the converted path is
+  `converted_count > 0 and not is_transcode` — the retired heuristic
+  itself — so a "proof" there is not attributable to any evidence row. And
+  there is no era-aware fallback: a fallback is the same guess wearing a
+  date.
+
+**Attributable** is one predicate,
+`lib/quality/evidence_types.py::evidence_is_source_semantic` — the same one
+that already gates the `source_*` measurement facts, called by the read seam
+and by the CLI so the two surfaces cannot state different proofs for one
+album. The question is WHOSE bytes were tested: migration 021 §6b
+cross-walked pre-content-addressing rows onto a sibling attempt's snapshot,
+so on a legacy-lineage (v1) row the classifier is a *different* attempt's
+proof. Ungated it lent a proof to 5,014 live `download_log` rows, put the
+Recents suffix in 281 live verdicts (250 pointing at an evidence row another
+attempt also claims, 109 that converted nothing at all), and made the CLI
+state a sibling's proof on 4,910 requests / 6,608 IN+HAVE sides.
+
+`verified_lossless_provenance` is deliberately NOT part of the rule.
+`carried` does not mean "another album's proof": `lib/quality_evidence.py`
+stamps it when the just-imported candidate's OWN proof is carried onto the
+library row for that same album — the lossless-source-gated propagation
+described above. Gating on it would delete a true "proved by" line from
+2,241 live requests, which is the population the line exists for.
 
 Both surfaces call the same `proof_verdict_from_facts`; the generated
 property in `tests/test_verdict_tiers_generated.py` (V4) proves they

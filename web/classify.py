@@ -143,15 +143,17 @@ class LogEntry:
     # (migration 021 §6b) names a sibling attempt's snapshot, and a proof
     # minted from other bytes says nothing about this attempt's.
     #
-    # ``None`` means no proof reached the render path. On lineage 4 the
-    # ``album_quality_evidence_verified_proof_shape`` CHECK makes the column
-    # non-NULL exactly when ``verified_lossless`` is TRUE; on the older
-    # lineages that CHECK is explicitly exempt (``lineage_version < 4 OR …``,
-    # migration 055) and the equivalence holds only by writer discipline —
-    # ``upsert_album_quality_evidence`` writes the whole proof tuple or none
-    # of it. Either way the column is a REPORT of a decision, never an input
-    # to one; see ``_verified_lossless_proof_classifier`` for the complete
-    # set of persisted facts the phrase may be keyed on.
+    # ``None`` means no attributable proof reached the render path. On
+    # lineage 4 the ``album_quality_evidence_verified_proof_shape`` CHECK
+    # makes the column non-NULL exactly when ``verified_lossless`` is TRUE;
+    # on the older lineages that CHECK is explicitly exempt
+    # (``lineage_version < 4 OR …``, migration 055) and the equivalence
+    # holds only by writer discipline — ``upsert_album_quality_evidence``
+    # writes the whole proof tuple or none of it. Either way the column is a
+    # REPORT of a decision, never an input to one. Together with
+    # ``QualityComparisonBasis.verified_lossless_bypass`` (rendered by the
+    # basis verdict itself) it is the complete set of facts the phrase may
+    # be keyed on.
     verified_lossless_classifier: str | None = None
 
     # album_requests columns (from JOIN — empty for history-only queries)
@@ -1477,62 +1479,6 @@ def _candidate_audio_is_corrupt(
     )
 
 
-#: ``ImportResult.legacy_projection_version`` values whose
-#: ``verified_lossless_proof`` the v1/v2 reader SYNTHESIZED rather than read.
-#: Those rows never carried a proof on the wire at all: they carried
-#: ``quality.will_be_verified_lossless``, which the harness of that era
-#: computed as ``converted > 0 and not is_transcode`` — the retired render
-#: heuristic itself, persisted. ``_project_legacy_v2`` turns that boolean into
-#: a ``legacy_import_result`` proof so the historical audit stays readable,
-#: and consuming it here would reinstate the guess through the projection
-#: layer on 5,894 live rows. The v3 reader projects a different fact:
-#: ``source_measurement.verified_lossless``, which that era's harness wrote
-#: from ``determine_verified_lossless`` — a real decision, on 3 live rows.
-_SYNTHESIZED_PROOF_PROJECTIONS = (1, 2)
-
-
-def _verified_lossless_proof_classifier(entry: LogEntry) -> str | None:
-    """The classifier of a verified-lossless proof this row PERSISTED.
-
-    ``None`` means no proof reached the render path, and the phrase is not
-    said. It is never re-derived: the retired heuristic (``was_converted``
-    AND ``original_filetype == "flac"`` AND ``spectral_grade == "genuine"``)
-    read what the decider CONSIDERED and called it a conclusion, so it
-    claimed a proof on rows the gate explicitly refused (live: dl 39094
-    req 2147, dl 39120 req 2066, dl 39122 req 1034) and withheld one on rows
-    the gate granted.
-
-    Two persisted facts can answer, and this is the whole set the branch
-    below may key on:
-
-    * ``entry.verified_lossless_classifier`` — the candidate evidence row's
-      minted proof, already NULLed by
-      ``_overlay_evidence_onto_download_log_row`` when that row's lineage is
-      not source-semantic (a cross-walked ``candidate_evidence_id`` names a
-      sibling attempt's snapshot).
-    * ``ImportResult.verified_lossless_proof`` — the proof persisted on THIS
-      attempt's own audit blob. No lineage gate applies: the blob is written
-      by the import that produced this row and is never addressed by
-      content, so it cannot belong to another attempt. The v1/v2 projections
-      are excluded because their "proof" is a projection of the retired
-      heuristic — see ``_SYNTHESIZED_PROOF_PROJECTIONS``.
-
-    The third persisted answer, ``QualityComparisonBasis``'s
-    ``verified_lossless_bypass``, is rendered by the basis verdict itself
-    (``_verdict_from_basis`` / ``_proof_upgrade_verdict_from_basis``), which
-    is why the suffix helpers suppress this one when a bypass basis is
-    present rather than saying it twice.
-    """
-    if entry.verified_lossless_classifier is not None:
-        return entry.verified_lossless_classifier
-    ir = _parse_import_result(entry)
-    if ir is None or ir.verified_lossless_proof is None:
-        return None
-    if ir.legacy_projection_version in _SYNTHESIZED_PROOF_PROJECTIONS:
-        return None
-    return ir.verified_lossless_proof.classifier
-
-
 def _classify(
     entry: LogEntry,
     *,
@@ -1658,9 +1604,18 @@ def _classify(
         if entry.beets_scenario in ("transcode_upgrade", "transcode_first"):
             return _classify_transcode(entry)
 
-        is_verified_lossless = (
-            _verified_lossless_proof_classifier(entry) is not None
-        )
+        # The attributable minted proof, never a re-derivation. The retired
+        # heuristic (``was_converted`` AND ``original_filetype == "flac"``
+        # AND ``spectral_grade == "genuine"``) read what the decider
+        # CONSIDERED and called it a conclusion, so it claimed a proof on
+        # rows the gate explicitly refused (live: dl 39094 req 2147,
+        # dl 39120 req 2066, dl 39122 req 1034) and withheld one on rows the
+        # gate granted. This column is the decider's own answer, already
+        # gated by ``verified_lossless_proof_is_attributable`` at the read
+        # seam. A row that carries no attributable proof simply has no
+        # suffix; there is no era-aware fallback, because a fallback is the
+        # same guess wearing a date.
+        is_verified_lossless = entry.verified_lossless_classifier is not None
 
         # Upgrade vs new import — use existing_min_bitrate from the
         # download_log entry (what was on disk at the time of THIS download)

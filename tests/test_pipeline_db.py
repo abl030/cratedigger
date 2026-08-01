@@ -4403,6 +4403,60 @@ class TestDownloadLog(unittest.TestCase):
                 sorted({file.extension for file in evidence.files}),
             )
 
+    def test_a_carried_proof_still_reaches_the_renderer(self):
+        """``carried`` is this album's OWN proof, propagated to its library row.
+
+        ``lib/quality_evidence.py`` stamps ``EVIDENCE_PROVENANCE_CARRIED``
+        when the just-imported candidate's proof is carried onto the current
+        evidence for the same album — the documented lossless-source-gated
+        propagation, not another album's proof. Gating on it would delete a
+        true "proved by" line from 2,241 live requests, so the attribution
+        rule is lineage and lineage only.
+        """
+        from lib.quality import (
+            VERIFIED_LOSSLESS_CLASSIFIER_V4,
+            AudioQualityMeasurement,
+            VerifiedLosslessProof,
+        )
+
+        log_id = self.db.log_download(self.req_id, outcome="success")
+        evidence = make_album_quality_evidence(
+            mb_release_id="download-overlay-carried-proof",
+            lineage_version=4,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=900,
+                avg_bitrate_kbps=950,
+                format="FLAC",
+                spectral_grade="genuine",
+                spectral_subject="source",
+                spectral_provenance="measured",
+                was_converted_from="flac",
+            ),
+            codec="flac",
+            container="flac",
+            storage_format="FLAC",
+            verified_lossless_proof=VerifiedLosslessProof(
+                provenance="carried",
+                source="flac",
+                classifier=VERIFIED_LOSSLESS_CLASSIFIER_V4,
+            ),
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.db.set_download_log_candidate_evidence(log_id, stored.id)
+
+        row = self.db.get_download_log_entry(log_id)
+        assert row is not None
+        self.assertEqual(
+            row["_evidence_verified_lossless_classifier"],
+            VERIFIED_LOSSLESS_CLASSIFIER_V4,
+        )
+        self.assertEqual(row["source_format"], "FLAC")
+
     def test_legacy_lineage_evidence_never_lends_its_proof(self):
         """A cross-walked evidence row's proof must not reach the renderer.
 

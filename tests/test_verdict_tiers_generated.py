@@ -61,13 +61,16 @@ Profiles and promotion policy: tests/_hypothesis_profiles.py and
 docs/generated-testing.md.
 """
 
+import contextlib
 import datetime
+import io
 import os
 import sys
 import unittest
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 
+import msgspec.structs
 from hypothesis import example, given
 from hypothesis import strategies as st
 
@@ -78,7 +81,10 @@ from lib.pipeline_db._shared import (
     CANDIDATE_EVIDENCE_PREFIX,
     CURRENT_EVIDENCE_PREFIX,
 )
+from lib.pipeline_db.download_log import _DownloadLogMixin
 from lib.quality import (
+    EVIDENCE_PROVENANCE_CARRIED,
+    EVIDENCE_PROVENANCE_MEASURED,
     PRODUCIBLE_PROOF_TIERS,
     PROOF_LEG_AAC_LATTICE,
     PROOF_LEG_IN_WINDOW_CLIFF,
@@ -96,6 +102,7 @@ from lib.quality import (
     AlbumQualityEvidenceFile,
     AudioQualityMeasurement,
     SpectralDecodePath,
+    VerifiedLosslessProof,
     album_proof_verdict,
     interpret_spectral_cliff,
     proof_tier_statement,
@@ -106,6 +113,7 @@ from lib.quality.decisions import (
     aac_lattice_proof_leg,
     ultrasonic_proof_leg,
 )
+from scripts.pipeline_cli.quality import _print_proof_gate_verdict
 from web.classify import (
     ACCUSATION_WITHHELD_AUDIT_ONLY_CODEC,
     ACCUSATION_WITHHELD_CODEC_UNRESOLVED,
@@ -482,6 +490,107 @@ def check_statement_does_not_widen_the_claim(statement: str) -> None:
                 f"tier statement {statement!r} widens the claim via {token!r}")
 
 
+def _proof_evidence(
+    *, lineage: int, provenance: str, classifier: str | None,
+) -> AlbumQualityEvidence:
+    """One evidence row on the proof-attribution axis only.
+
+    The spectral world is deliberately blank: attribution answers "whose
+    bytes were tested", which is orthogonal to what the tests found.
+    """
+    return msgspec.structs.replace(
+        _evidence_from_facts({
+            "format": "FLAC",
+            "spectral_grade": None,
+            "spectral_bitrate_kbps": None,
+            "spectral_subject": None,
+            "was_converted_from": None,
+            "cliff_hz": None,
+            "codec_family": "lossless",
+            "storage_format": "FLAC",
+            "filetype_band": "flac",
+            "container_labels": [".flac"],
+            "ultrasonic_deficit_db": None,
+            "spectral_measurement_version": 2,
+            "aac_lattice": None,
+        }),
+        lineage_version=lineage,
+        verified_lossless_proof=(
+            None if classifier is None else VerifiedLosslessProof(
+                provenance=provenance,  # pyright: ignore[reportArgumentType]
+                source="flac",
+                classifier=classifier,
+            )
+        ),
+    )
+
+
+def cli_states_a_proof(
+    evidence: AlbumQualityEvidence,
+    *,
+    printer: "Callable[..., None]" = _print_proof_gate_verdict,
+) -> bool:
+    """Whether ``pipeline-cli quality`` prints a "proved by" line.
+
+    Drives the real printer and reads its real stdout, so the answer is the
+    operator's, not a re-derivation of it. The printer is injected so the
+    known-bad self-test can hand in the ungated decoy.
+    """
+    captured = io.StringIO()
+    with contextlib.redirect_stdout(captured):
+        printer("IN", evidence)
+    return "proved by" in captured.getvalue()
+
+
+def recents_states_a_proof(evidence: AlbumQualityEvidence) -> bool:
+    """Whether the Recents card renders a proof generation for the same row.
+
+    Goes through the production read seam
+    (``_overlay_evidence_onto_download_log_row``) exactly as ``get_log``
+    does, because that seam is where Recents' half of the attribution rule
+    is applied.
+    """
+    proof = evidence.verified_lossless_proof
+    row: dict[str, object] = {
+        "candidate_evidence_id": 1,
+        "_evidence_lineage_version": evidence.lineage_version,
+        "_evidence_verified_lossless_classifier": (
+            proof.classifier if proof is not None else None),
+    }
+    overlaid = _DownloadLogMixin._overlay_evidence_onto_download_log_row(row)
+    projection = proof_gate_projection(overlaid)
+    return projection.verified_lossless_generation is not None
+
+
+def check_proof_attribution_agrees(
+    cli_says: bool,
+    recents_says: bool,
+    *,
+    attributable: bool,
+) -> None:
+    """V8: both operator surfaces state the SAME proof for one album.
+
+    ``pipeline-cli quality`` and the Recents card each report
+    ``album_quality_evidence``'s minted proof, and each read it off a
+    different shape — a whole evidence row, a joined column block behind
+    the read seam. Both were ungated: Recents put "MP3 320, verified
+    lossless" on a never-converted MP3 wearing its FLAC sibling's proof,
+    and the CLI attributed a cross-walked sibling's proof on 4,910 live
+    requests. One predicate now answers for both, so a divergence here is
+    a second spelling of the rule.
+    """
+    if cli_says != recents_says:
+        raise AssertionError(
+            f"pipeline-cli says proved={cli_says} while Recents says "
+            f"proved={recents_says} for the same album"
+        )
+    if cli_says != attributable:
+        raise AssertionError(
+            f"surfaces say proved={cli_says} for an album whose proof is "
+            f"attributable={attributable}"
+        )
+
+
 def check_untested_album_is_not_a_clearance(
     verdict: AlbumProofVerdict, statement: str,
 ) -> None:
@@ -639,6 +748,49 @@ class TestVerdictTierProperties(unittest.TestCase):
             )
         self.assertEqual(evidence_accusation_flags(None), AccusationFlags())
 
+    @given(
+        lineage=st.sampled_from((1, 3, 4)),
+        provenance=st.sampled_from(
+            (EVIDENCE_PROVENANCE_MEASURED, EVIDENCE_PROVENANCE_CARRIED)),
+        classifier=st.sampled_from(
+            (None, "spectral_verified_lossless",
+             "spectral_verified_lossless_v3", "spectral_verified_lossless_v4")),
+    )
+    @example(  # the live shape: a cross-walked v1 row, 4,910 CLI requests
+        lineage=1,
+        provenance=EVIDENCE_PROVENANCE_MEASURED,
+        classifier="spectral_verified_lossless",
+    )
+    @example(  # the must-still-work twin
+        lineage=4,
+        provenance=EVIDENCE_PROVENANCE_MEASURED,
+        classifier="spectral_verified_lossless_v4",
+    )
+    @example(  # a library row holding its OWN album's carried proof
+        lineage=4,
+        provenance=EVIDENCE_PROVENANCE_CARRIED,
+        classifier="spectral_verified_lossless_v4",
+    )
+    def test_both_operator_surfaces_attribute_the_same_proof(
+        self, lineage: int, provenance: str, classifier: str | None,
+    ) -> None:
+        """V8 over any world: one rule, two surfaces, one answer per album.
+
+        The expectation restates the invariant rather than calling the
+        production predicate: a property that asks the implementation what
+        the answer should be can only patrol agreement, and would pass with
+        the rule deleted. Provenance is generated deliberately and is NOT in
+        the expectation — a carried proof is the album's own, propagated to
+        its library row, and both surfaces must keep stating it.
+        """
+        evidence = _proof_evidence(
+            lineage=lineage, provenance=provenance, classifier=classifier)
+        check_proof_attribution_agrees(
+            cli_states_a_proof(evidence),
+            recents_states_a_proof(evidence),
+            attributable=classifier is not None and lineage in (3, 4),
+        )
+
 
 class TestInvariantCheckersTripOnViolations(unittest.TestCase):
     """Every checker owes a planted violation proving it can fail."""
@@ -730,6 +882,35 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
                     admissible=True,
                     withheld=ACCUSATION_WITHHELD_AUDIT_ONLY_CODEC),
                 "aac",
+            )
+
+    def test_attribution_checker_trips_on_an_ungated_cli_read(self) -> None:
+        """Known-bad: the pre-fix CLI read, planted as an explicit decoy.
+
+        The decoy is the shipped line — print the generation whenever a
+        proof object exists — so the checker is proved against the real
+        divergence rather than a hypothetical one.
+        """
+        from lib.quality import verified_lossless_generation_label
+
+        def ungated(side: str, evidence: AlbumQualityEvidence) -> None:
+            proof = evidence.verified_lossless_proof
+            if proof is not None:
+                print(f"      verified lossless {side}: proved by "
+                      f"{verified_lossless_generation_label(proof.classifier)}")
+
+        evidence = _proof_evidence(
+            lineage=1,
+            provenance=EVIDENCE_PROVENANCE_MEASURED,
+            classifier="spectral_verified_lossless",
+        )
+        self.assertTrue(cli_states_a_proof(evidence, printer=ungated))
+        self.assertFalse(recents_states_a_proof(evidence))
+        with self.assertRaisesRegex(AssertionError, "while Recents says"):
+            check_proof_attribution_agrees(
+                cli_states_a_proof(evidence, printer=ungated),
+                recents_states_a_proof(evidence),
+                attributable=False,
             )
 
     def test_projection_checker_trips_on_a_lineage_gated_read(self):

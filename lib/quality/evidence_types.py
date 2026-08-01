@@ -476,6 +476,46 @@ class VerifiedLosslessProof(msgspec.Struct, frozen=True):
         return errors
 
 
+#: The lineage versions whose facts describe the bytes of the attempt or
+#: album holding the row. Migration 050 marks everything older as v1
+#: precisely because its measurement may be a projected target rather than a
+#: fact about a source, and migration 021 §6b cross-walked those older rows
+#: onto whichever content-addressed evidence row their release already had —
+#: so a v1 row can belong to a sibling attempt entirely.
+#: ``lineage_version`` is constrained to 1, 3 or 4.
+SOURCE_SEMANTIC_LINEAGE_VERSIONS: tuple[int, ...] = (3, 4)
+
+
+def evidence_is_source_semantic(lineage_version: object) -> bool:
+    """Whether this evidence row's facts describe its holder's own bytes.
+
+    ONE spelling, because it gates two different kinds of fact for the same
+    reason. The measurement facts have always been gated on it (a v1
+    measurement may be a projected target). The minted verified-lossless
+    proof is now gated on it too, and by exactly this predicate rather than
+    a second copy of the rule: three operator surfaces state that proof —
+    the Recents verdict, the Recents expanded card and ``pipeline-cli
+    quality``'s "proved by" line — and all three were ungated. Recents put
+    "MP3 320, verified lossless" on a never-converted MP3 wearing its FLAC
+    sibling's proof; the CLI attributed a cross-walked sibling's proof on
+    4,910 live requests.
+
+    Provenance is deliberately NOT part of this rule.
+    ``EVIDENCE_PROVENANCE_CARRIED`` does not mean "another album's proof" —
+    ``lib/quality_evidence.py`` writes it when the just-imported candidate's
+    OWN proof is carried onto the library row for that same album, which is
+    the documented lossless-source-gated propagation. Refusing it would
+    delete a true "proved by" line from 2,241 live requests, which is the
+    population the line exists for.
+
+    Deliberately takes ``object``: the overlay reads the value off a raw
+    joined row dict where it is untyped, and an unexpected value must fail
+    CLOSED to "not source-semantic" rather than reach a comparison that
+    assumes a shape.
+    """
+    return lineage_version in SOURCE_SEMANTIC_LINEAGE_VERSIONS
+
+
 class AlbumQualityEvidence(msgspec.Struct, frozen=True):
     """Active neutral album-quality evidence for candidates and current files.
 

@@ -983,7 +983,7 @@ class TestRenderAliasMap(unittest.TestCase):
             unclassified_candidate_aliases(
                 _CANDIDATE_EVIDENCE_COLUMNS,
                 folded=self._folded(),
-                gate_input={_DownloadLogMixin._EVIDENCE_LINEAGE_ALIAS},
+                gate_input=set(_DownloadLogMixin._EVIDENCE_GATE_INPUT_ALIASES),
                 projection_read=self._projection_read(),
                 alias_mapped=set(_ROW_FIELD_ALIASES),
                 registered_unused={},
@@ -994,7 +994,7 @@ class TestRenderAliasMap(unittest.TestCase):
             "proof_gate_projection, map it into LogEntry, or drop it",
         )
 
-    def test_the_source_semantic_aliases_are_projected_and_not_folded(
+    def test_the_attributable_proof_aliases_are_projected_and_not_folded(
         self,
     ) -> None:
         """The gated-in-place set keeps its own alias all the way through.
@@ -1002,10 +1002,29 @@ class TestRenderAliasMap(unittest.TestCase):
         Folding it would defeat the gate: the legacy key it folded into
         would be read by a renderer that never learns the lineage.
         """
-        gated = set(_DownloadLogMixin._EVIDENCE_SOURCE_SEMANTIC_ALIASES)
+        gated = set(_DownloadLogMixin._EVIDENCE_ATTRIBUTABLE_PROOF_ALIASES)
         self.assertLessEqual(
             gated, self._aliases(_CANDIDATE_EVIDENCE_COLUMNS))
         self.assertEqual(gated & self._folded(), set())
+
+    def test_every_gate_input_is_projected_and_consumed(self) -> None:
+        """The predicate's inputs must reach the overlay and stop there.
+
+        A gate input that the SELECT never projects reads as NULL, which
+        fails the attribution closed for every row; one that survives the
+        overlay would reach a renderer as an undeclared key.
+        """
+        gate_inputs = set(_DownloadLogMixin._EVIDENCE_GATE_INPUT_ALIASES)
+        self.assertLessEqual(
+            gate_inputs, self._aliases(_CANDIDATE_EVIDENCE_COLUMNS),
+            "a gate input the candidate block never projects",
+        )
+        overlaid = _DownloadLogMixin._overlay_evidence_onto_download_log_row(
+            dict.fromkeys(gate_inputs, "measured"))
+        self.assertEqual(
+            gate_inputs & set(overlaid), set(),
+            "a gate input survived the overlay into the rendered row",
+        )
 
     def test_the_alias_check_trips_on_a_stale_alias(self) -> None:
         """Known-bad self-test: a renamed column must not pass."""
@@ -1024,7 +1043,7 @@ class TestRenderAliasMap(unittest.TestCase):
             unclassified_candidate_aliases(
                 widened,
                 folded=self._folded(),
-                gate_input={_DownloadLogMixin._EVIDENCE_LINEAGE_ALIAS},
+                gate_input=set(_DownloadLogMixin._EVIDENCE_GATE_INPUT_ALIASES),
                 projection_read=self._projection_read(),
                 alias_mapped=set(_ROW_FIELD_ALIASES),
                 registered_unused={},
@@ -1043,7 +1062,7 @@ class TestRenderAliasMap(unittest.TestCase):
             unclassified_candidate_aliases(
                 widened,
                 folded=self._folded(),
-                gate_input={_DownloadLogMixin._EVIDENCE_LINEAGE_ALIAS},
+                gate_input=set(_DownloadLogMixin._EVIDENCE_GATE_INPUT_ALIASES),
                 projection_read=self._projection_read(),
                 alias_mapped=set(_ROW_FIELD_ALIASES),
                 registered_unused={

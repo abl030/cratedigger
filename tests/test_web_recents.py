@@ -1200,15 +1200,20 @@ class TestClassifyVerdict(unittest.TestCase):
         # The conversion is still reported — only the proof claim is gone.
         self.assertIn("from FLAC", result.verdict)
 
-    def test_upgrade_verdict_reports_a_persisted_import_result_proof(self):
-        """Live dl 36970 req 2937: no candidate evidence, proof on the blob.
+    def test_upgrade_verdict_ignores_a_persisted_import_result_proof(self):
+        """An ``ImportResult`` proof is not an attributable evidence row.
 
-        The v3 harness wrote ``determine_verified_lossless``'s answer onto
-        ``source_measurement.verified_lossless``; production's own v3 reader
-        projects it into ``ImportResult.verified_lossless_proof``. That blob
-        is THIS attempt's, never content-addressed and never cross-walked,
-        so it is a report of the decider's conclusion exactly like the
-        evidence classifier — and the row has no candidate evidence at all.
+        Live dl 36970 req 2937 (v3, ``source_measurement.verified_lossless``
+        true, no candidate evidence at all). Production's legacy reader does
+        project that into ``ImportResult.verified_lossless_proof``, so the
+        blob is not empty — but the v1/v2 reader mints the same
+        ``legacy_import_result`` proof out of
+        ``quality.will_be_verified_lossless``, and by v2 both eras were
+        computing it from the SAME ``determine_verified_lossless`` surface,
+        which on the converted path returns ``converted_count > 0 and not
+        is_transcode``. There is no line to draw between them that anyone
+        can justify, so the phrase keys on the attributable evidence row and
+        nothing else.
         """
         entry = _entry(
             outcome="success", was_converted=True, original_filetype="flac",
@@ -1230,42 +1235,9 @@ class TestClassifyVerdict(unittest.TestCase):
         )
         projected = _parse_import_result(entry)
         assert projected is not None
-        assert projected.verified_lossless_proof is not None
-        self.assertIn(
-            "verified lossless", classify_log_entry(entry).verdict.lower())
-
-    def test_upgrade_verdict_ignores_a_v1_v2_synthesized_proof(self):
-        """The v1/v2 "proof" IS the retired heuristic, persisted.
-
-        Those rows carried ``quality.will_be_verified_lossless``, which the
-        harness of that era computed as ``converted > 0 and not
-        is_transcode``. The v2 reader turns it into a
-        ``legacy_import_result`` proof so the audit stays readable;
-        consuming it here would put the guess back on 5,894 live rows with
-        a persisted column as its alibi.
-        """
-        entry = _entry(
-            outcome="success", was_converted=True, original_filetype="flac",
-            actual_filetype="mp3", actual_min_bitrate=243,
-            existing_min_bitrate=192, spectral_grade="genuine",
-            verified_lossless_classifier=None,
-            import_result={
-                "version": 2,
-                "decision": "import",
-                "new_measurement": {
-                    "min_bitrate_kbps": 243,
-                    "spectral_grade": "genuine",
-                    "verified_lossless": True,
-                },
-                "conversion": {
-                    "was_converted": True, "original_filetype": "flac"},
-            },
-        )
-        projected = _parse_import_result(entry)
-        assert projected is not None
-        # The projection DOES mint one — this is not an absent-proof world.
+        # The blob DOES carry a projected proof — this is not an
+        # absent-proof world, it is a not-attributable one.
         self.assertIsNotNone(projected.verified_lossless_proof)
-        self.assertEqual(projected.legacy_projection_version, 2)
         result = classify_log_entry(entry)
         self.assertNotIn("verified lossless", result.verdict.lower())
         self.assertNotIn("verified lossless", result.summary.lower())

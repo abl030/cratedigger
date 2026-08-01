@@ -22,6 +22,7 @@ from lib.pipeline_db.rows import (
     download_log_with_request_row,
     wrong_match_candidate_row,
 )
+from lib.quality import evidence_is_source_semantic
 
 # Canonical ``download_log.outcome`` taxonomy — the Python mirror of the
 # ``download_log_outcome_check`` CHECK constraint (latest definition:
@@ -491,11 +492,12 @@ class _DownloadLogMixin(_PipelineDBBase):
         "on_disk_research": "on_disk_research_v0",
     }
 
-    #: The alias the overlay consumes as its own gate input and pops before
-    #: any renderer sees the row. Named here so the SELECT-block partition in
-    #: ``tests/test_pipeline_db_column_contract.py`` derives it from
-    #: production rather than restating it.
+    #: The aliases the overlay consumes as its own gate inputs and pops
+    #: before any renderer sees the row. Named here so the SELECT-block
+    #: partition in ``tests/test_pipeline_db_column_contract.py`` derives
+    #: them from production rather than restating them.
     _EVIDENCE_LINEAGE_ALIAS: ClassVar = "_evidence_lineage_version"
+    _EVIDENCE_GATE_INPUT_ALIASES: ClassVar = (_EVIDENCE_LINEAGE_ALIAS,)
 
     #: ``(legacy download_log key, candidate-evidence alias, gated)`` — the
     #: aliases this overlay CONSUMES, folding each into the legacy column
@@ -516,8 +518,10 @@ class _DownloadLogMixin(_PipelineDBBase):
         ("v0_probe_median_bitrate", "_evidence_v0_probe_median_bitrate", False),
     )
 
-    #: The alias whose lineage gate is the same as the ``source_*`` fold's but
-    #: which has no legacy column to fold into, so it is gated IN PLACE.
+    #: The aliases with no legacy column to fold into, so they are gated IN
+    #: PLACE by ``evidence_is_source_semantic`` — the ONE spelling of that
+    #: rule, shared with ``pipeline-cli quality`` so the two surfaces cannot
+    #: state different proofs for the same album.
     #:
     #: ``candidate_evidence_id`` does not always name evidence measured from
     #: THIS attempt's bytes: migration 021 §6b cross-walked pre-content-
@@ -530,7 +534,7 @@ class _DownloadLogMixin(_PipelineDBBase):
     #: of which point at an evidence row another attempt also claims and 109
     #: of which converted nothing at all — a plain MP3 import rendering
     #: "MP3 320, verified lossless" off its FLAC sibling's snapshot.
-    _EVIDENCE_SOURCE_SEMANTIC_ALIASES: ClassVar = (
+    _EVIDENCE_ATTRIBUTABLE_PROOF_ALIASES: ClassVar = (
         "_evidence_verified_lossless_classifier",
     )
 
@@ -544,8 +548,8 @@ class _DownloadLogMixin(_PipelineDBBase):
         # source-semantic. Spectral and V0 facts were never target projections,
         # so they remain safe to recover from either lineage.
         evidence_lineage = row.pop(cls._EVIDENCE_LINEAGE_ALIAS, None)
-        source_semantic = evidence_lineage in (3, 4)
-        for alias in cls._EVIDENCE_SOURCE_SEMANTIC_ALIASES:
+        source_semantic = evidence_is_source_semantic(evidence_lineage)
+        for alias in cls._EVIDENCE_ATTRIBUTABLE_PROOF_ALIASES:
             # Same stable-shape contract as the ``source_*`` keys: always
             # present, NULL when this row's evidence cannot speak for this
             # attempt's source bytes.

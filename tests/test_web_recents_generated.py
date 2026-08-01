@@ -374,53 +374,20 @@ def assert_verified_lossless_claim_is_minted(
             )
 
 
-#: The persisted ``import_result`` proof shapes, keyed by whether the blob
-#: carries a real conclusion. ``v1_v2`` rows never carried a proof at all:
-#: they carried ``quality.will_be_verified_lossless``, which that era's
-#: harness computed as ``converted > 0 and not is_transcode`` — the retired
-#: render heuristic itself — and the v2 reader synthesizes a
-#: ``legacy_import_result`` proof from it. ``v3`` wrote
-#: ``determine_verified_lossless``'s answer onto the source measurement, and
-#: ``v4`` persists the minted proof directly.
-_IMPORT_RESULT_PROOF_BLOBS: dict[str, tuple[dict[str, object] | None, bool]] = {
-    "none": (None, False),
-    "v1_v2_synthesized": (
-        {
-            "version": 2,
-            "decision": "import",
-            "new_measurement": {
-                "min_bitrate_kbps": 243, "verified_lossless": True},
-            "conversion": {"was_converted": True, "original_filetype": "flac"},
-        },
-        False,
-    ),
-    "v3_persisted": (
-        {
-            "version": 3,
-            "decision": "import",
-            "source_measurement": {
-                "format": "FLAC",
-                "min_bitrate_kbps": 742,
-                "verified_lossless": True,
-            },
-        },
-        True,
-    ),
-    "v4_minted": (
-        {
-            "version": 4,
-            "decision": "import",
-            "verified_lossless_proof": msgspec.to_builtins(
-                mint_verified_lossless_proof(
-                    True,
-                    was_converted_from="flac",
-                    detected_source_format="flac",
-                    spectral_grade="genuine",
-                )
-            ),
-        },
-        True,
-    ),
+#: A real v3 ``import_result`` blob whose ``source_measurement`` carries the
+#: era's ``verified_lossless`` flag (live dl 36970 req 2937). Production's own
+#: legacy reader projects it into ``ImportResult.verified_lossless_proof``, so
+#: this is a row that genuinely HAS a persisted proof object — and must still
+#: not move the verdict, because the projection stamps the same
+#: ``legacy_import_result`` classifier on the v1/v2 heuristic flag.
+_V3_PERSISTED_PROOF_BLOB: dict[str, object] = {
+    "version": 3,
+    "decision": "import",
+    "source_measurement": {
+        "format": "FLAC",
+        "min_bitrate_kbps": 742,
+        "verified_lossless": True,
+    },
 }
 
 
@@ -1435,7 +1402,7 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
         actual_min_bitrate=st.integers(min_value=1, max_value=1_200),
         existing_min_bitrate=st.sampled_from((None, 0, 192, 320)),
         search_filetype_override=st.sampled_from((None, "lossless")),
-        proof_blob=st.sampled_from(tuple(_IMPORT_RESULT_PROOF_BLOBS)),
+        import_result_proof=st.booleans(),
     )
     @example(  # the shipped defect's shape: a cross-walked legacy proof
         lineage=1,
@@ -1447,7 +1414,7 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
         actual_min_bitrate=320,
         existing_min_bitrate=192,
         search_filetype_override=None,
-        proof_blob="none",
+        import_result_proof=False,
     )
     @example(  # the must-still-work twin: same proof, source-semantic row
         lineage=4,
@@ -1459,9 +1426,9 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
         actual_min_bitrate=320,
         existing_min_bitrate=192,
         search_filetype_override=None,
-        proof_blob="none",
+        import_result_proof=False,
     )
-    @example(  # live dl 36970 req 2937 — no evidence, proof on the blob
+    @example(  # live dl 36970 req 2937 — no evidence, proof on the blob only
         lineage=None,
         classifier=None,
         was_converted=True,
@@ -1471,9 +1438,9 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
         actual_min_bitrate=112,
         existing_min_bitrate=192,
         search_filetype_override=None,
-        proof_blob="v3_persisted",
+        import_result_proof=True,
     )
-    def test_only_source_semantic_evidence_lends_its_proof_to_the_verdict(
+    def test_only_an_attributable_evidence_proof_reaches_the_verdict(
         self,
         lineage: int | None,
         classifier: str | None,
@@ -1484,7 +1451,7 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
         actual_min_bitrate: int,
         existing_min_bitrate: int | None,
         search_filetype_override: str | None,
-        proof_blob: str,
+        import_result_proof: bool,
     ) -> None:
         """Composed patrol: the real read seam plus the real renderer.
 
@@ -1496,12 +1463,15 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
         attempt. Neither module alone can see that, so the property drives
         the raw joined row through BOTH.
 
-        The second axis is the row's OWN persisted proof. That blob is
-        never cross-walked, so no lineage gate applies to it — but the
-        v1/v2 reader synthesizes one out of the retired heuristic, and a
-        proof that is a guess in disguise must not speak either.
+        ``import_result_proof`` crosses the whole space with a row whose own
+        audit blob DOES project a ``verified_lossless_proof``. It must never
+        move the verdict: every historical projection mints the same
+        ``legacy_import_result`` stamp out of the era's
+        ``will_be_verified_lossless``, which on the converted path is
+        ``converted_count > 0 and not is_transcode`` — the retired heuristic
+        itself. An evidence row is the only thing that carries an
+        attributable proof.
         """
-        blob, blob_proves = _IMPORT_RESULT_PROOF_BLOBS[proof_blob]
         row = _raw_download_log_row(
             lineage=lineage,
             classifier=classifier,
@@ -1512,15 +1482,16 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
             actual_min_bitrate=actual_min_bitrate,
             existing_min_bitrate=existing_min_bitrate,
             search_filetype_override=search_filetype_override,
-            import_result=blob,
+            import_result=(
+                _V3_PERSISTED_PROOF_BLOB if import_result_proof else None
+            ),
         )
         result = render_through_the_read_seam(row)
-        source_semantic = lineage in (3, 4)
-        proved = (source_semantic and classifier is not None) or blob_proves
+        proved = classifier is not None and lineage in (3, 4)
         assert_verified_lossless_claim_is_minted(
             result.verdict,
             result.summary,
-            classifier="proved" if proved else None,
+            classifier=classifier if proved else None,
             basis_bypass=False,
         )
         if proved:
@@ -1543,7 +1514,6 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
             actual_min_bitrate=320,
             existing_min_bitrate=192,
             search_filetype_override=None,
-            import_result=None,
         )
         ungated = classify_log_entry(LogEntry.from_row(dict(row)))
         self.assertIn("verified lossless", ungated.verdict.lower())
