@@ -297,9 +297,8 @@ _LEAF_SEAM_PATTERNS = [
     # Equivalent to the constructor-replacement pattern.
     re.compile(r"^web\.server\.db$"),
 
-    # Known-bad mutation test: the wrapper calls the real atomic startup guard,
-    # then deliberately corrupts only its returned authority. The real web
-    # entrypoint must expose the drift before its first database effect.
+    # Web threading tests inject admission at the argparse-dispatched
+    # entrypoint before exercising listener lifecycles.
     re.compile(r"^web\.server\.enforce_beets_startup$"),
 
     # web.routes re-exports of allowlisted helpers. Same physical

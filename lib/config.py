@@ -500,6 +500,18 @@ def read_runtime_config_strict(
     parser = configparser.RawConfigParser()
     with open(path, "r", encoding="utf-8") as handle:
         parser.read_file(handle, source=path)
+    for option in (
+        "config_dir",
+        "library",
+        "directory",
+        "state_file",
+        "python",
+        "secret_include",
+    ):
+        if not parser.has_option("Beets", option) or not parser.get(
+            "Beets", option, raw=True
+        ).strip():
+            raise ValueError(f"required raw [Beets] option {option} is missing or empty")
     parsed = CratediggerConfig.from_ini(
         parser,
         config_dir=os.path.dirname(path),

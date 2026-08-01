@@ -444,6 +444,31 @@ class TestReadRuntimeConfig(unittest.TestCase):
 
 
 class TestReadRuntimeConfigStrict(unittest.TestCase):
+    _BEETS_AUTHORITIES = (
+        ("config_dir", "/srv/beets/config"),
+        ("library", "/srv/beets/library.db"),
+        ("directory", "/srv/music"),
+        ("state_file", "/srv/beets/state.pickle"),
+        ("python", "/srv/beets/python"),
+        ("secret_include", "/run/secrets/beets.yaml"),
+    )
+
+    def _write_contract(
+        self,
+        path: str,
+        *,
+        omitted: str | None = None,
+        blank: str | None = None,
+    ) -> None:
+        parser = configparser.RawConfigParser()
+        parser["Beets"] = {
+            key: ("   " if key == blank else value)
+            for key, value in self._BEETS_AUTHORITIES
+            if key != omitted
+        }
+        with open(path, "w", encoding="utf-8") as handle:
+            parser.write(handle)
+
     def test_missing_config_is_a_hard_failure(self):
         with tempfile.TemporaryDirectory() as runtime_dir, \
                 self.assertRaises(FileNotFoundError):
@@ -484,6 +509,27 @@ class TestReadRuntimeConfigStrict(unittest.TestCase):
         self.assertEqual(cfg.lock_file_path, os.path.join(runtime_dir, ".cratedigger.lock"))
         self.assertEqual(cfg.beets_state_file, "/srv/beets/state.pickle")
         self.assertEqual(cfg.beets_secret_include, "/run/secrets/beets.yaml")
+
+    def test_all_six_raw_beets_authorities_are_required(self):
+        for option, _value in self._BEETS_AUTHORITIES:
+            for case in ("missing", "blank"):
+                with self.subTest(option=option, case=case), \
+                        tempfile.TemporaryDirectory() as root:
+                    config_path = os.path.join(root, "runtime.ini")
+                    self._write_contract(
+                        config_path,
+                        omitted=option if case == "missing" else None,
+                        blank=option if case == "blank" else None,
+                    )
+
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        rf"required raw \[Beets\] option {option}",
+                    ):
+                        read_runtime_config_strict(
+                            config_path,
+                            os.path.join(root, "runtime"),
+                        )
 
 
 class TestReadRuntimeRankConfig(unittest.TestCase):
@@ -787,6 +833,13 @@ class TestMainCLIParsing(unittest.TestCase):
                 "[Pipeline DB]\n"
                 "enabled = True\n"
                 "dsn = postgresql://test@localhost/test\n"
+                "[Beets]\n"
+                "config_dir = /test/beets\n"
+                "library = /test/beets/library.db\n"
+                "directory = /test/music\n"
+                "state_file = /test/state.pickle\n"
+                "python = /test/python\n"
+                "secret_include = /test/secret.yaml\n"
             )
         return path
 

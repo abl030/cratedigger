@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import configparser
 import stat
 import unittest
+from collections.abc import Callable
 from dataclasses import replace
 
 import msgspec
 import yaml
-from hypothesis import example, given
+from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
@@ -47,6 +49,24 @@ def assert_loader_is_strict(loader) -> None:
     except OSError:
         return
     raise AssertionError("runtime loader admitted a missing contract")
+
+
+def assert_native_config_rejection(check: Callable[[], object]) -> None:
+    try:
+        check()
+    except BeetsConfigError:
+        return
+    except Exception as exc:
+        raise AssertionError("config load escaped as a non-contract error") from exc
+    raise AssertionError("config loader admitted malformed authority")
+
+
+def assert_raw_authority_rejected(load: Callable[[], object]) -> None:
+    try:
+        load()
+    except ValueError:
+        return
+    raise AssertionError("strict loader admitted blank runtime authority")
 
 
 _SETTING_MUTANTS: tuple[tuple[str, dict[str, object], str], ...] = (
@@ -101,6 +121,7 @@ _SETTING_MUTANTS: tuple[tuple[str, dict[str, object], str], ...] = (
 class TestGeneratedTokenOnlySecret(unittest.TestCase):
     @example("SECRET::library: /attacker/library.db\nplugins: []::TOKEN")
     @example("SECRET::quoted: ' value\nwith:newline'::TOKEN")
+    @settings(max_examples=40)
     @given(st.text(min_size=1, max_size=60).map(lambda value: f"SECRET::{value}::TOKEN"))
     def test_any_scalar_token_remains_data_and_never_report_content(self, token: str) -> None:
         world = BeetsContractWorld(token=token)
@@ -142,6 +163,62 @@ class TestGeneratedTokenOnlySecret(unittest.TestCase):
         else:
             assert_hard_code(report.hard_failures, "secret_include_count")
 
+    @given(st.sampled_from(("discogs.yaml", "", 0, False, True)))
+    def test_every_scalar_include_shape_is_rejected(self, include: object) -> None:
+        world = BeetsContractWorld()
+        self.addCleanup(world.close)
+        world.unseal()
+        world._write_main_config(include=include)
+        world._seal("importer")
+
+        report = check_beets_config(world.cfg(), role="importer")
+
+        assert_hard_code(report.hard_failures, "include_shape")
+
+    @given(st.sampled_from(("top_level", "nested_token")))
+    def test_duplicate_designated_secret_keys_are_always_rejected(
+        self,
+        duplicate_at: str,
+    ) -> None:
+        world = BeetsContractWorld()
+        self.addCleanup(world.close)
+        world.unseal()
+        if duplicate_at == "top_level":
+            raw = (
+                "discogs:\n  user_token: first\n"
+                "discogs:\n  user_token: second\n"
+            )
+        else:
+            raw = (
+                "discogs:\n"
+                "  user_token: first\n"
+                "  user_token: second\n"
+            )
+        world.secret_include.write_text(raw, encoding="utf-8")
+        world._seal("importer")
+
+        report = check_beets_config(world.cfg(), role="importer")
+
+        assert_hard_code(report.hard_failures, "secret_duplicate_key")
+
+    @given(st.sampled_from((
+        "? [discogs]\n: token\n",
+        "? {discogs: token}\n: value\n",
+    )))
+    def test_unhashable_designated_secret_keys_are_native_load_errors(
+        self,
+        raw: str,
+    ) -> None:
+        world = BeetsContractWorld()
+        self.addCleanup(world.close)
+        world.unseal()
+        world.secret_include.write_text(raw, encoding="utf-8")
+        world._seal("importer")
+
+        assert_native_config_rejection(
+            lambda: check_beets_config(world.cfg(), role="importer")
+        )
+
 
 class TestGeneratedEffectiveSettings(unittest.TestCase):
     @given(
@@ -162,6 +239,211 @@ class TestGeneratedEffectiveSettings(unittest.TestCase):
         )
 
         assert_hard_code(report.hard_failures, "runtime_authority_missing")
+
+    @given(
+        field=st.sampled_from(RUNTIME_AUTHORITIES),
+        raw_case=st.sampled_from(("missing", "empty", "whitespace")),
+    )
+    def test_raw_runtime_authority_omission_never_reaches_normalization(
+        self,
+        field: str,
+        raw_case: str,
+    ) -> None:
+        world = BeetsContractWorld()
+        self.addCleanup(world.close)
+        ini_key = {
+            "beets_config_dir": "config_dir",
+            "beets_library_db": "library",
+            "beets_directory": "directory",
+            "beets_state_file": "state_file",
+            "beets_python": "python",
+            "beets_secret_include": "secret_include",
+        }[field]
+        world.unseal()
+        if raw_case == "missing":
+            parser = configparser.RawConfigParser()
+            parser.read(world.runtime_config, encoding="utf-8")
+            parser.remove_option("Beets", ini_key)
+            with world.runtime_config.open("w", encoding="utf-8") as handle:
+                parser.write(handle)
+        else:
+            blank = "" if raw_case == "empty" else " \t "
+            world._write_runtime_config(**{ini_key: blank})
+        world._seal("importer")
+
+        assert_raw_authority_rejected(world.cfg)
+
+    @given(st.sampled_from((
+        ("python", "python_mismatch"),
+        ("library", "library_mismatch"),
+        ("directory", "directory_mismatch"),
+        ("state", "state_mismatch"),
+    )))
+    def test_runtime_authority_must_equal_effective_beets_authority(
+        self,
+        case: tuple[str, str],
+    ) -> None:
+        authority, expected_code = case
+        world = BeetsContractWorld()
+        self.addCleanup(world.close)
+        cfg = world.cfg()
+        if authority == "python":
+            cfg = replace(cfg, beets_python=str(world.root / "other-python"))
+        elif authority == "library":
+            other_library = world.root / "other-library.db"
+            other_library.write_bytes(world.library_db.read_bytes())
+            cfg = replace(cfg, beets_library_db=str(other_library))
+        elif authority == "directory":
+            other_directory = world.root / "other-library-root"
+            other_directory.mkdir()
+            cfg = replace(cfg, beets_directory=str(other_directory))
+        else:
+            other_state = world.root / "other-state.pickle"
+            other_state.write_bytes(b"other-state")
+            cfg = replace(cfg, beets_state_file=str(other_state))
+
+        report = check_beets_config(cfg, role="importer")
+
+        assert_hard_code(report.hard_failures, expected_code)
+
+    @given(
+        kind=st.sampled_from(("runtime", "main", "include", "secret")),
+        component=st.sampled_from(("leaf", "ancestor")),
+    )
+    def test_app_owned_declared_authority_is_replaceable_even_when_readonly(
+        self,
+        kind: str,
+        component: str,
+    ) -> None:
+        world = BeetsContractWorld()
+        self.addCleanup(world.close)
+        expected_code = world.put_app_owned_readonly_authority(
+            kind,
+            component=component,
+        )
+
+        report = check_beets_config(world.cfg(), role="importer")
+
+        assert_hard_code(report.hard_failures, expected_code)
+
+    @given(st.sampled_from((
+        "replaceable_parent",
+        "app_owned_readonly_parent",
+        "replaceable_symlink",
+    )))
+    def test_state_identity_must_not_be_replaceable(self, mutation: str) -> None:
+        world = BeetsContractWorld()
+        self.addCleanup(world.close)
+        world.unseal()
+        if mutation in {"replaceable_parent", "app_owned_readonly_parent"}:
+            state_dir = world.root / f"{mutation}-state"
+            state_dir.mkdir()
+            state = state_dir / "state.pickle"
+            state.write_bytes(world.state_file.read_bytes())
+            if mutation == "app_owned_readonly_parent":
+                state_dir.chmod(
+                    stat.S_IRUSR
+                    | stat.S_IXUSR
+                    | stat.S_IRGRP
+                    | stat.S_IXGRP
+                )
+        else:
+            state = world.runtime_dir / "state-link.pickle"
+            state.symlink_to(world.state_file)
+        world._write_runtime_config(state_file=str(state))
+        world._write_main_config(statefile=str(state))
+        world._seal("importer")
+
+        report = check_beets_config(world.cfg(), role="importer")
+
+        assert_hard_code(report.hard_failures, "state_replaceable")
+
+    @given(st.sampled_from(("main", "nonsecret_include")))
+    def test_only_designated_secret_include_may_supply_discogs_token(
+        self,
+        source: str,
+    ) -> None:
+        world = BeetsContractWorld()
+        self.addCleanup(world.close)
+        world.unseal()
+        if source == "main":
+            world._write_main_config(
+                discogs={"user_token": "outside-designated-secret"}
+            )
+        else:
+            extra = world.beets_dir / "nonsecret-token.yaml"
+            extra.write_text(
+                "discogs:\n  user_token: outside-designated-secret\n",
+                encoding="utf-8",
+            )
+            world._write_main_config(
+                include=[str(extra), str(world.secret_include)]
+            )
+        world._seal("importer")
+
+        report = check_beets_config(world.cfg(), role="importer")
+
+        assert_hard_code(
+            report.hard_failures,
+            "discogs_token_outside_secret_include",
+        )
+
+    @given(st.sampled_from((
+        ("absent", "state_not_regular"),
+        ("nonregular", "state_not_regular"),
+        ("inside_config", "state_inside_config_dir"),
+        ("unreadable", "state_unreadable"),
+        ("importer_readonly", "state_not_writable_by_importer"),
+    )))
+    def test_state_authority_must_be_safe_for_the_importer(
+        self,
+        case: tuple[str, str],
+    ) -> None:
+        mutation, expected_code = case
+        world = BeetsContractWorld(
+            role="web" if mutation == "importer_readonly" else "importer"
+        )
+        self.addCleanup(world.close)
+        if mutation in {"absent", "nonregular", "inside_config"}:
+            world.unseal()
+            if mutation == "absent":
+                state = world.state_dir / "absent-state.pickle"
+            elif mutation == "nonregular":
+                state = world.state_dir / "state-directory"
+                state.mkdir()
+            else:
+                state = world.beets_dir / "state.pickle"
+                state.write_bytes(b"state")
+            world._write_runtime_config(state_file=str(state))
+            world._write_main_config(statefile=str(state))
+            world._seal("importer")
+        elif mutation == "unreadable":
+            world.set_state_mode(0)
+
+        report = check_beets_config(world.cfg(), role="importer")
+
+        assert_hard_code(report.hard_failures, expected_code)
+
+    @given(st.sampled_from((
+        "",
+        "musicbrainz.org",
+        "ftp://musicbrainz.org",
+        "https://[",
+        "://missing-scheme",
+    )))
+    def test_malformed_musicbrainz_authority_is_warning_only(
+        self,
+        expected_endpoint: str,
+    ) -> None:
+        world = BeetsContractWorld()
+        self.addCleanup(world.close)
+        report = check_beets_config(
+            replace(world.cfg(), musicbrainz_api_base=expected_endpoint),
+            role="importer",
+        )
+
+        self.assertTrue(report.ok, report.hard_failures)
+        assert_hard_code(report.warnings, "musicbrainz_endpoint_drift")
 
     @given(st.sampled_from(("main", "importer", "preview", "web")))
     def test_missing_main_config_never_reaches_effective_loading(
@@ -270,6 +552,7 @@ class TestGeneratedEffectiveSettings(unittest.TestCase):
             expected,
         )
 
+    @settings(max_examples=40)
     @given(
         query_key=st.text(
             alphabet="abcdefghijklmnopqrstuvwxyz_:",
@@ -353,6 +636,19 @@ class TestKnownBadContractCheckers(unittest.TestCase):
         assert_loader_is_strict(read_runtime_config_strict)
         with self.assertRaisesRegex(AssertionError, "missing contract"):
             assert_loader_is_strict(lambda _path, _runtime: CratediggerConfig())
+
+    def test_native_config_error_checker_rejects_escape_and_admission(self) -> None:
+        def escaped_error() -> None:
+            raise TypeError("unhashable key escaped its contract boundary")
+
+        with self.assertRaisesRegex(AssertionError, "non-contract error"):
+            assert_native_config_rejection(escaped_error)
+        with self.assertRaisesRegex(AssertionError, "admitted malformed"):
+            assert_native_config_rejection(lambda: None)
+
+    def test_raw_authority_checker_rejects_a_permissive_loader(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "admitted blank"):
+            assert_raw_authority_rejected(lambda: CratediggerConfig())
 
     def test_broad_secret_overlay_mutant_is_detected(self) -> None:
         world = BeetsContractWorld()
@@ -450,6 +746,7 @@ class TestKnownBadContractCheckers(unittest.TestCase):
 
 
 class TestGeneratedIntegrationRegressions(unittest.TestCase):
+    @settings(max_examples=40)
     @given(st.text(alphabet="abcdefghijklmnopqrstuvwxyz", min_size=1, max_size=24))
     def test_any_nonempty_pluginpath_is_rejected_without_owned_output_leak(
         self, suffix: str
@@ -502,6 +799,7 @@ class TestGeneratedIntegrationRegressions(unittest.TestCase):
         else:
             assert_hard_code(report.hard_failures, f"{plugin}_plugin_missing")
 
+    @settings(max_examples=40)
     @given(st.text(min_size=1, max_size=40).map(lambda text: f"SECRET::{text}::TOKEN"))
     def test_arbitrary_plugin_names_never_reach_owned_output(self, token: str) -> None:
         world = BeetsContractWorld()

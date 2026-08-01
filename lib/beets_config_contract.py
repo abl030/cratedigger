@@ -48,6 +48,10 @@ class _DuplicateKeyError(ValueError):
     pass
 
 
+class _UnhashableKeyError(ValueError):
+    pass
+
+
 class ContractFinding(msgspec.Struct, frozen=True):
     """One token-free checker-owned diagnostic."""
 
@@ -123,7 +127,11 @@ def _construct_unique_mapping(
     result: dict[object, object] = {}
     for key_node, value_node in node.value:
         key = _construct_yaml_object(loader, key_node, deep=deep)
-        if key in result:
+        try:
+            duplicate = key in result
+        except TypeError as exc:
+            raise _UnhashableKeyError("unhashable YAML mapping key") from exc
+        if duplicate:
             raise _DuplicateKeyError(f"duplicate YAML key: {key!r}")
         result[key] = _construct_yaml_object(loader, value_node, deep=deep)
     return result
@@ -208,11 +216,41 @@ def _has_replaceable_component(path: Path) -> bool:
     return False
 
 
+def _has_app_owned_component(path: Path) -> bool:
+    """Whether the application UID owns any entry in this declared path."""
+    uid = os.geteuid()
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current /= part
+        try:
+            if current.lstat().st_uid == uid:
+                return True
+        except OSError:
+            return True
+    return False
+
+
+def _has_app_owned_ancestor(path: Path) -> bool:
+    """Whether the application UID can chmod a parent then replace this entry."""
+    return _has_app_owned_component(path.parent)
+
+
 def _immutable_declared_file(path: _DeclaredPath) -> bool:
     return (
         not _can_open_for_write(path.resolved)
         and not _has_replaceable_component(path.lexical)
         and not _has_replaceable_component(path.resolved)
+        and not _has_app_owned_component(path.lexical)
+        and not _has_app_owned_component(path.resolved)
+    )
+
+
+def _nonreplaceable_declared_path(path: _DeclaredPath) -> bool:
+    return (
+        not _has_replaceable_component(path.lexical)
+        and not _has_replaceable_component(path.resolved)
+        and not _has_app_owned_ancestor(path.lexical)
+        and not _has_app_owned_ancestor(path.resolved)
     )
 
 
@@ -250,6 +288,10 @@ def _read_secret(path: Path) -> tuple[dict[str, object] | None, ContractFinding 
             "secret_duplicate_key",
             f"designated Beets secret include {path} contains a duplicate key",
         )
+    except _UnhashableKeyError as exc:
+        raise BeetsConfigError(
+            f"invalid Beets YAML {path}: unhashable YAML mapping key"
+        ) from exc
     except yaml.YAMLError as exc:
         raise BeetsConfigError(f"invalid Beets YAML {path}: {exc}") from exc
     try:
@@ -288,6 +330,11 @@ def _read_secret(path: Path) -> tuple[dict[str, object] | None, ContractFinding 
     return mapping, None
 
 
+def _declares_discogs_token(config: dict[str, object]) -> bool:
+    discogs = config.get("discogs")
+    return isinstance(discogs, dict) and "user_token" in discogs
+
+
 def _declared_includes(
     config_dir: _DeclaredPath,
     designated_secret: _DeclaredPath,
@@ -295,6 +342,11 @@ def _declared_includes(
     main = _declared_path("config.yaml", relative_to=config_dir.lexical)
     config = _read_yaml_mapping(main.lexical)
     issues: list[ContractFinding] = []
+    if _declares_discogs_token(config):
+        issues.append(_finding(
+            "discogs_token_outside_secret_include",
+            "discogs.user_token may only be declared by the designated secret include",
+        ))
     if not _immutable_declared_file(main):
         issues.append(_finding(
             "mutable_main_config",
@@ -350,6 +402,11 @@ def _declared_includes(
                 issues.append(secret_issue)
         else:
             included_config = _read_yaml_mapping(include)
+            if _declares_discogs_token(included_config):
+                issues.append(_finding(
+                    "discogs_token_outside_secret_include",
+                    "discogs.user_token may only be declared by the designated secret include",
+                ))
             if "include" in included_config:
                 issues.append(_finding(
                     "included_include_forbidden",
@@ -432,22 +489,46 @@ def _same_executable(expected: str) -> bool:
         return _path(expected) == _path(sys.executable)
 
 
-def _state_access_issues(state: Path, role: BeetsRole) -> tuple[ContractFinding, ...]:
+def _state_access_issues(
+    state_source: _DeclaredPath,
+    role: BeetsRole,
+) -> tuple[ContractFinding, ...]:
+    state = state_source.resolved
     if not state.is_absolute():
         return (_finding("state_relative", "Beets state file must be absolute"),)
+    issues: list[ContractFinding] = []
+    if not _nonreplaceable_declared_path(state_source):
+        issues.append(_finding(
+            "state_replaceable",
+            "Beets state path is replaceable by this process",
+        ))
     if not state.is_file():
-        return (_finding("state_not_regular", "Beets state path must be an existing regular file"),)
+        issues.append(_finding(
+            "state_not_regular",
+            "Beets state path must be an existing regular file",
+        ))
+        return tuple(issues)
     try:
         with state.open("rb"):
             pass
     except OSError:
-        return (_finding("state_unreadable", "Beets state file is not readable by this process"),)
+        issues.append(_finding(
+            "state_unreadable",
+            "Beets state file is not readable by this process",
+        ))
+        return tuple(issues)
     writable = _can_open_for_write(state)
     if role == "importer" and not writable:
-        return (_finding("state_not_writable_by_importer", "importer cannot open the Beets state file for writing"),)
+        issues.append(_finding(
+            "state_not_writable_by_importer",
+            "importer cannot open the Beets state file for writing",
+        ))
     if role != "importer" and writable:
-        return (_finding("state_writable_by_reader", f"{role} can open the Beets state file for writing"),)
-    return ()
+        issues.append(_finding(
+            "state_writable_by_reader",
+            f"{role} can open the Beets state file for writing",
+        ))
+    return tuple(issues)
 
 
 def _library_db_access_issues(library: Path) -> tuple[ContractFinding, ...]:
@@ -581,7 +662,8 @@ def check_beets_config(
 
     hard: list[ContractFinding] = []
     warnings: list[ContractFinding] = []
-    state = _path(authority.state_file)
+    state_source = _declared_path(cfg.beets_state_file)
+    state = state_source.resolved
     try:
         if os.path.commonpath((str(config_dir), str(state))) == str(config_dir):
             hard.append(_finding(
@@ -589,7 +671,7 @@ def check_beets_config(
             ))
     except ValueError:
         pass
-    hard.extend(_state_access_issues(state, role))
+    hard.extend(_state_access_issues(state_source, role))
     hard.extend(_library_db_access_issues(_path(authority.library)))
     if not _path(authority.directory).is_dir():
         hard.append(_finding(
@@ -693,12 +775,18 @@ def check_beets_config(
 
         configured_endpoint = _endpoint(active)
         expected_endpoint = cfg.musicbrainz_api_base.rstrip("/")
-        parsed_expected = urlsplit(expected_endpoint)
-        if (
-            parsed_expected.scheme not in ("http", "https")
-            or not parsed_expected.netloc
-            or configured_endpoint != expected_endpoint
-        ):
+        try:
+            parsed_expected = urlsplit(expected_endpoint)
+            # Accessing port also validates malformed bracket/port syntax.
+            _ = parsed_expected.port
+            endpoint_matches = (
+                parsed_expected.scheme in ("http", "https")
+                and bool(parsed_expected.netloc)
+                and configured_endpoint == expected_endpoint
+            )
+        except ValueError:
+            endpoint_matches = False
+        if not endpoint_matches:
             warnings.append(_finding(
                 "musicbrainz_endpoint_drift",
                 "effective MusicBrainz endpoint differs from the runtime authority",

@@ -466,7 +466,6 @@ try:
     assert digest(world.library_db) != before_database
     after_world = manifest(world.root)
     assert changed_paths(before_world, after_world) == {
-        str(world.state_file.relative_to(world.root)),
         str(world.library_db.relative_to(world.root)),
     }, changed_paths(before_world, after_world)
     with world.state_file.open("rb") as handle:
