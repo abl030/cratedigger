@@ -640,23 +640,3 @@ def check_beets_config(
         fingerprint_values=fingerprint_values,
         secret_token_present=True,
     )
-
-
-def validate_beets_config(config_dir: str) -> frozenset[str]:
-    """Transitional exact-loader adapter for the existing delete child.
-
-    U2 removes this action-time call. Until then, retain its narrow return
-    contract while eliminating the old hand-written include merge.
-    """
-    if not config_dir:
-        raise BeetsConfigError("BEETSDIR is empty")
-    root = _path(config_dir)
-    config = _read_yaml_mapping(root / "config.yaml")
-    declared = config.get("include", [])
-    if not isinstance(declared, list) or not all(isinstance(v, str) for v in declared):
-        raise BeetsConfigError("Beets include must be a YAML list of path strings")
-    for value in declared:
-        include = _path(value if os.path.isabs(value) else str(root / value))
-        _read_yaml_mapping(include)
-    with _effective_config(root) as active:
-        return frozenset(active["plugins"].as_str_seq())

@@ -388,10 +388,29 @@ class CratediggerConfig:
 
 DEFAULT_RUNTIME_CONFIG_PATH = "/var/lib/cratedigger/config.ini"
 
+# A top-level Beets-dependent application installs its strictly checked,
+# authority-normalized configuration once at startup.  Optional readers in
+# that same process must not later weaken that boundary by reparsing the raw
+# file and recovering relative or otherwise noncanonical path spellings.
+_ADMITTED_RUNTIME_CONFIG: tuple[str, CratediggerConfig] | None = None
+
 
 def _runtime_config_path(config_path: str | None = None) -> str:
     """Resolve the active runtime config.ini path."""
     return config_path or os.environ.get("CRATEDIGGER_RUNTIME_CONFIG") or DEFAULT_RUNTIME_CONFIG_PATH
+
+
+def install_admitted_runtime_config(
+    config_path: str,
+    config: CratediggerConfig,
+) -> None:
+    """Install one checked process authority for all downstream readers."""
+    global _ADMITTED_RUNTIME_CONFIG
+
+    path = os.path.abspath(os.path.expanduser(config_path))
+    _ADMITTED_RUNTIME_CONFIG = (path, config)
+    os.environ["CRATEDIGGER_RUNTIME_CONFIG"] = path
+    os.environ["BEETSDIR"] = config.beets_config_dir
 
 
 def read_runtime_config(config_path: str | None = None) -> CratediggerConfig:
@@ -413,6 +432,11 @@ def read_runtime_config(config_path: str | None = None) -> CratediggerConfig:
     fallout downstream.
     """
     path = _runtime_config_path(config_path)
+    admitted = _ADMITTED_RUNTIME_CONFIG
+    if admitted is not None:
+        admitted_path, admitted_config = admitted
+        if os.path.abspath(os.path.expanduser(path)) == admitted_path:
+            return admitted_config
     if not path or not os.path.exists(path):
         return CratediggerConfig()
 

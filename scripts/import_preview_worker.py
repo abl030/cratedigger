@@ -24,7 +24,13 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from lib.config import CratediggerConfig, read_runtime_config
+from lib.beets_startup import BeetsStartupError, enforce_beets_startup
+from lib.config import (
+    DEFAULT_RUNTIME_CONFIG_PATH,
+    CratediggerConfig,
+    install_admitted_runtime_config,
+    read_runtime_config,
+)
 from lib.dispatch import _record_preview_measurement_failed
 from lib.dispatch.types import DispatchOutcome, PostCommitCleanup
 from lib.import_evidence import (
@@ -1874,6 +1880,7 @@ def run_threaded_workers(
     worker_id: str,
     worker_count: int,
     poll_interval: float,
+    runtime_config: CratediggerConfig | None = None,
 ) -> int:
     stop = threading.Event()
     errors: list[BaseException] = []
@@ -1894,6 +1901,7 @@ def run_threaded_workers(
                     job = run_once(
                         thread_db,
                         worker_id=thread_worker_id,
+                        runtime_config=runtime_config,
                         scan_cursor=scan_cursor,
                     )
                 except (psycopg2.OperationalError, psycopg2.InterfaceError) as exc:
@@ -1969,6 +1977,19 @@ def main() -> int:
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--worker-id", default=None)
     parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument(
+        "--config",
+        default=(
+            os.environ.get("CRATEDIGGER_RUNTIME_CONFIG")
+            or DEFAULT_RUNTIME_CONFIG_PATH
+        ),
+        help="Immutable Cratedigger runtime config",
+    )
+    parser.add_argument(
+        "--runtime-dir",
+        default=os.path.dirname(DEFAULT_RUNTIME_CONFIG_PATH),
+        help="Mutable Cratedigger runtime directory",
+    )
     args = parser.parse_args()
     if args.workers < 1:
         parser.error("--workers must be >= 1")
@@ -1977,6 +1998,17 @@ def main() -> int:
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
     )
+    try:
+        admitted_config = enforce_beets_startup(
+            role="preview",
+            config_path=args.config,
+            runtime_dir=args.runtime_dir,
+            logger=logger,
+        )
+    except BeetsStartupError:
+        return 1
+
+    install_admitted_runtime_config(args.config, admitted_config)
     worker_id = args.worker_id or f"{socket.gethostname()}:{os.getpid()}"
     db = PipelineDB(args.dsn)
     try:
@@ -1993,11 +2025,13 @@ def main() -> int:
                 worker_id=worker_id,
                 worker_count=args.workers,
                 poll_interval=args.poll_interval,
+                runtime_config=admitted_config,
             )
 
         run_once(
             db,
             worker_id=worker_id,
+            runtime_config=admitted_config,
             scan_cursor=_CandidateScanCursor(),
         )
         return 0

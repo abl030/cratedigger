@@ -20,7 +20,12 @@ if REPO_ROOT not in sys.path:
 import msgspec
 
 from lib import transitions
-from lib.config import CratediggerConfig
+from lib.beets_startup import BeetsStartupError, enforce_beets_startup
+from lib.config import (
+    DEFAULT_RUNTIME_CONFIG_PATH,
+    CratediggerConfig,
+    install_admitted_runtime_config,
+)
 from lib.dispatch import (
     DISPATCH_CODE_REQUEUE_FAILED,
     DISPATCH_CODE_REQUEUED_FOR_PREVIEW,
@@ -625,7 +630,11 @@ def execute_import_job(
             )
         if cancellation_token is not None:
             cancellation_token.raise_if_cancelled()
-        runtime_config = force_runtime_config or read_runtime_config()
+        runtime_config = (
+            force_runtime_config
+            or getattr(ctx, "cfg", None)
+            or read_runtime_config()
+        )
         action_path = _force_action_path(job)
         expected_action_path = force_action_copy_path(runtime_config, job.id)
         if (
@@ -2038,12 +2047,36 @@ def main() -> int:
     parser.add_argument("--poll-interval", type=float, default=5.0)
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--worker-id", default=None)
+    parser.add_argument(
+        "--config",
+        default=(
+            os.environ.get("CRATEDIGGER_RUNTIME_CONFIG")
+            or DEFAULT_RUNTIME_CONFIG_PATH
+        ),
+        help="Immutable Cratedigger runtime config",
+    )
+    parser.add_argument(
+        "--runtime-dir",
+        default=os.path.dirname(DEFAULT_RUNTIME_CONFIG_PATH),
+        help="Mutable Cratedigger runtime directory",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
     )
+    try:
+        admitted_config = enforce_beets_startup(
+            role="importer",
+            config_path=args.config,
+            runtime_dir=args.runtime_dir,
+            logger=logger,
+        )
+    except BeetsStartupError:
+        return 1
+
+    install_admitted_runtime_config(args.config, admitted_config)
     worker_id = args.worker_id or f"{socket.gethostname()}:{os.getpid()}"
     db = PipelineDB(args.dsn)
     try:

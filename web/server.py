@@ -60,6 +60,11 @@ if __name__ == "__main__" or "web.server" not in sys.modules:
     sys.modules["web.server"] = sys.modules[__name__]
 
 from lib.beets_db import BeetsDB, open_beets_db
+from lib.beets_startup import BeetsStartupError, enforce_beets_startup
+from lib.config import (
+    DEFAULT_RUNTIME_CONFIG_PATH,
+    install_admitted_runtime_config,
+)
 from lib.json_narrow import is_str_object_dict as _is_str_object_dict
 from lib.pipeline_db import AlbumRequestRow, PipelineDB
 from web import cache
@@ -290,33 +295,22 @@ def _beets_db() -> BeetsDB | None:
     handle on first use. An injected `_beets` (tests) wins."""
     if _beets is not None:
         return _beets
-    # DSN-less mode is dependency-injected (tests and the web dev server).
-    # An absent explicit pair means Beets is deliberately unavailable; never
-    # fall through to the operator's production runtime config in that mode.
-    if not _db_dsn and beets_db_path is None:
+    # Startup installs the exact admitted pair. An absent pair is deliberate
+    # dependency injection (tests/dev) and must never trigger a second runtime
+    # config read after the one startup admission.
+    if beets_db_path is None:
         return None
     handle = getattr(_thread_state, "beets", None)
     if handle is None:
         try:
-            if beets_db_path is not None:
-                handle = open_beets_db(
-                    db_path=beets_db_path,
-                    library_root=beets_library_root,
-                )
-            else:
-                handle = open_beets_db()
+            handle = open_beets_db(
+                db_path=beets_db_path,
+                library_root=beets_library_root,
+            )
         except FileNotFoundError:
             return None
         _thread_state.beets = handle
     return handle
-
-
-def _configure_beets_library_root_from_runtime_config() -> None:
-    """Load the canonical Beets directory for per-thread path resolution."""
-    from lib.config import read_runtime_config
-
-    global beets_library_root
-    beets_library_root = read_runtime_config().beets_directory
 
 
 def _close_thread_handles() -> None:
@@ -725,7 +719,7 @@ class Handler(BaseHTTPRequestHandler):
         self._html("index.html")
 
 
-def main():
+def main() -> int:
     global beets_db_path, beets_library_root, canonical_origin
 
     parser = argparse.ArgumentParser(description="Cratedigger Web UI")
@@ -756,20 +750,17 @@ def main():
         ),
     )
     parser.add_argument(
-        "--beets-db",
-        default=None,
-        help=(
-            "Dev/test-only Beets SQLite override. Production reads the paired "
-            "[Beets] library and directory values from config.ini."
+        "--config",
+        default=(
+            os.environ.get("CRATEDIGGER_RUNTIME_CONFIG")
+            or DEFAULT_RUNTIME_CONFIG_PATH
         ),
+        help="Immutable Cratedigger runtime config",
     )
     parser.add_argument(
-        "--beets-directory",
-        default=None,
-        help=(
-            "Dev/test-only library root paired with --beets-db. The two "
-            "override flags must always be supplied together."
-        ),
+        "--runtime-dir",
+        default=os.path.dirname(DEFAULT_RUNTIME_CONFIG_PATH),
+        help="Mutable Cratedigger runtime directory",
     )
     parser.add_argument("--mb-api", default=None,
                         help="MusicBrainz API base URL (full base incl. /ws/2). Dev-only override — "
@@ -788,12 +779,27 @@ def main():
         validate_canonical_origin(args.canonical_origin)
     except RequestSecurityError as exc:
         parser.error(f"invalid --canonical-origin: {exc}")
+    try:
+        admitted_config = enforce_beets_startup(
+            role="web",
+            config_path=args.config,
+            runtime_dir=args.runtime_dir,
+            logger=log,
+        )
+    except BeetsStartupError:
+        return 1
+
+    install_admitted_runtime_config(args.config, admitted_config)
+    # The distance modules above import Beets eagerly. Rebind their shared
+    # LazyConfig only after admission so they cannot retain a caller's
+    # inherited BEETSDIR authority.
+    from beets import config as active_beets_config
+    active_beets_config.clear()
+    active_beets_config.read(user=True, defaults=True)
     canonical_origin = args.canonical_origin
     configure_insecure_mode(args.insecure_mode)
-    if (args.beets_db is None) != (args.beets_directory is None):
-        parser.error(
-            "--beets-db and --beets-directory must be supplied together"
-        )
+    beets_db_path = admitted_config.beets_library_db
+    beets_library_root = admitted_config.beets_directory
     inherited_listener: socket.socket | None = None
     if args.dev_port is None:
         try:
@@ -824,13 +830,6 @@ def main():
     # then serves a clear 503 mirror-required (R13).
     from web.api_bases import configure_api_bases_from_runtime_config
     configure_api_bases_from_runtime_config()
-    # The same module-rendered [Beets] directory value that drives the
-    # importer must anchor paths read from the relative-path Beets DB. Without
-    # it, filesystem consumers such as bad-rip hashing resolve paths from the
-    # web service's cwd and silently miss every imported track.
-    _configure_beets_library_root_from_runtime_config()
-    if args.beets_directory is not None:
-        beets_library_root = args.beets_directory
     if args.mb_api:
         mb_api.MB_API_BASE = args.mb_api
     if args.discogs_api:
@@ -841,7 +840,6 @@ def main():
     # Fail fast at boot if the DB is unreachable; request threads open
     # their own handles via `_db()`, so this one is connect-check only.
     PipelineDB(args.dsn).close()
-    beets_db_path = args.beets_db
     if beets_db_path is not None and not os.path.exists(beets_db_path):
         log.warning("Beets DB not found at %s; library routes degrade", beets_db_path)
 
@@ -860,13 +858,7 @@ def main():
         listener_display = f"unix:{inherited_listener.getsockname()}"
     print(f"Cratedigger Web UI listening on {listener_display}")
     print(f"  Pipeline DB: {args.dsn}")
-    if beets_db_path is not None:
-        beets_display = f"{beets_db_path} (dev/test override)"
-    else:
-        from lib.config import read_runtime_config
-
-        beets_display = read_runtime_config().beets_library_db
-    print(f"  Beets DB: {beets_display}")
+    print(f"  Beets DB: {beets_db_path}")
     print(f"  MB API: {mb_api.MB_API_BASE}")
     print(f"  Redis: {args.redis_host or 'disabled'}")
     try:
@@ -875,7 +867,8 @@ def main():
         pass
     server.server_close()
     _db().close()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

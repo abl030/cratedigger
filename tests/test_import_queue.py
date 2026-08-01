@@ -2630,7 +2630,6 @@ class TestImporterWorker(unittest.TestCase):
             limit=importer.IMPORT_CANDIDATE_SCAN_LIMIT,
         )
         observed_offsets: list[int] = []
-
         class CursorProbeDB:
             @contextmanager
             def advisory_lock(self, _namespace: int, _key: int):
@@ -2685,6 +2684,11 @@ class TestImporterWorker(unittest.TestCase):
         ]
         with (
             patch("sys.argv", argv),
+            patch.dict(os.environ, {}, clear=False),
+            patch(
+                "scripts.importer.enforce_beets_startup",
+                return_value=CratediggerConfig(),
+            ),
             patch("scripts.importer.PipelineDB", return_value=db),
             patch("scripts.importer.time.sleep"),
             self.assertRaises(PollProbeComplete),
@@ -4993,8 +4997,14 @@ class TestImportPreviewWorker(unittest.TestCase):
         calls = 0
         calls_lock = threading.Lock()
 
-        def run_once(db, *, worker_id, scan_cursor=None):
-            del scan_cursor
+        def run_once(
+            db,
+            *,
+            worker_id,
+            runtime_config=None,
+            scan_cursor=None,
+        ):
+            del runtime_config, scan_cursor
             nonlocal calls
             with calls_lock:
                 calls += 1
@@ -5044,8 +5054,14 @@ class TestImportPreviewWorker(unittest.TestCase):
         calls_lock = threading.Lock()
         stop_holder: dict[str, Any] = {}
 
-        def run_once(db, *, worker_id, scan_cursor=None):
-            del scan_cursor
+        def run_once(
+            db,
+            *,
+            worker_id,
+            runtime_config=None,
+            scan_cursor=None,
+        ):
+            del runtime_config, scan_cursor
             nonlocal calls
             with calls_lock:
                 calls += 1
@@ -5109,9 +5125,10 @@ class TestImportPreviewWorker(unittest.TestCase):
             _db: object,
             *,
             worker_id: str,
+            runtime_config: CratediggerConfig | None,
             scan_cursor: object,
         ) -> None:
-            del worker_id
+            del worker_id, runtime_config
             observed.append(scan_cursor)
             if len(observed) == 2:
                 raise PollProbeComplete
@@ -5153,6 +5170,7 @@ class TestImportPreviewWorker(unittest.TestCase):
         ``main()`` runs — not after the 15-minute stale-recovery
         window. Mirrors the importer's startup self-heal.
         """
+        from lib import config as runtime_config_module
         from scripts import import_preview_worker
 
         db = FakePipelineDB()
@@ -5172,16 +5190,40 @@ class TestImportPreviewWorker(unittest.TestCase):
         self.assertEqual(claimed.preview_status, "running")
 
         argv = ["import_preview_worker.py", "--dsn", "postgresql://fake", "--once"]
+        admitted = CratediggerConfig(
+            beets_config_dir="/normalized/beets",
+            beets_library_db="/normalized/library.db",
+            beets_directory="/normalized/music",
+        )
         with (
             patch("sys.argv", argv),
+            patch.dict(os.environ, {}, clear=False),
+            patch(
+                "scripts.import_preview_worker.enforce_beets_startup",
+                return_value=admitted,
+            ),
+            patch.object(
+                runtime_config_module,
+                "_ADMITTED_RUNTIME_CONFIG",
+                None,
+            ),
             patch("scripts.import_preview_worker.PipelineDB",
                   side_effect=lambda dsn: db),
-            patch("scripts.import_preview_worker.run_once", return_value=None),
+            patch(
+                "scripts.import_preview_worker.run_once",
+                return_value=None,
+            ) as run_once,
             patch("scripts.import_preview_worker.logger.warning"),
         ):
             exit_code = import_preview_worker.main()
 
         self.assertEqual(exit_code, 0)
+        run_once.assert_called_once_with(
+            db,
+            worker_id=ANY,
+            runtime_config=admitted,
+            scan_cursor=ANY,
+        )
         recovered = db.get_import_job(claimed.id)
         assert recovered is not None
         self.assertEqual(recovered.preview_status, "waiting")

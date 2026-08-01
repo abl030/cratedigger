@@ -745,12 +745,33 @@ class TestMainCLIParsing(unittest.TestCase):
     """Test the CLI argument parsing and config loading path in main()."""
 
     def setUp(self):
+        import cratedigger
+        from lib import config as runtime_config_module
+
         # cratedigger.main() calls reset_umask() (sets umask to 0o002 for the
         # pipeline's subprocess chain, GH #84). Restore the prior umask so
         # later tests in the same process keep their expected default.
         self._saved_umask = os.umask(0o022)
         os.umask(self._saved_umask)
         self.addCleanup(os.umask, self._saved_umask)
+        prior_runtime_config = os.environ.get("CRATEDIGGER_RUNTIME_CONFIG")
+        prior_beetsdir = os.environ.get("BEETSDIR")
+        prior_admitted = runtime_config_module._ADMITTED_RUNTIME_CONFIG
+        prior_main_config = cratedigger.cfg
+
+        def restore_runtime_config() -> None:
+            if prior_runtime_config is None:
+                os.environ.pop("CRATEDIGGER_RUNTIME_CONFIG", None)
+            else:
+                os.environ["CRATEDIGGER_RUNTIME_CONFIG"] = prior_runtime_config
+            if prior_beetsdir is None:
+                os.environ.pop("BEETSDIR", None)
+            else:
+                os.environ["BEETSDIR"] = prior_beetsdir
+            runtime_config_module._ADMITTED_RUNTIME_CONFIG = prior_admitted
+            cratedigger.cfg = prior_main_config
+
+        self.addCleanup(restore_runtime_config)
 
     class _StopMain(Exception):
         """Sentinel to stop main() after config parsing in tests."""
@@ -785,15 +806,13 @@ class TestMainCLIParsing(unittest.TestCase):
             cratedigger.main()
 
     def test_missing_config_exits_with_error(self):
-        """main() exits 1 when config.ini doesn't exist at --config-dir."""
+        """main() returns 1 when config.ini doesn't exist at --config-dir."""
         import cratedigger
 
-        with tempfile.TemporaryDirectory() as d:
-            with patch.object(sys, "argv", [
-                "cratedigger", "--config-dir", d, "--var-dir", d, "--no-lock-file"
-            ]), self.assertRaises(SystemExit) as cm:
-                cratedigger.main()
-            self.assertEqual(cm.exception.code, 1)
+        with tempfile.TemporaryDirectory() as d, patch.object(sys, "argv", [
+            "cratedigger", "--config-dir", d, "--var-dir", d, "--no-lock-file"
+        ]):
+            self.assertEqual(cratedigger.main(), 1)
 
     def test_config_dir_resolves_config_path(self):
         """--config-dir joins with config.ini to find the config file."""
@@ -813,35 +832,68 @@ class TestMainCLIParsing(unittest.TestCase):
 
     def test_lock_file_created_in_var_dir(self):
         """Lock file path is var_dir/.cratedigger.lock."""
+        import cratedigger
+
         with tempfile.TemporaryDirectory() as config_dir, tempfile.TemporaryDirectory() as var_dir:
-            self._write_minimal_config(config_dir)
+            config_path = self._write_minimal_config(config_dir)
             lock_path = os.path.join(var_dir, ".cratedigger.lock")
 
-            def assert_from_ini(config, actual_config_dir, actual_var_dir):
-                self.assertEqual(actual_config_dir, config_dir)
-                self.assertEqual(actual_var_dir, var_dir)
+            def stop_at_schema_gate(_dsn: str) -> None:
                 self.assertTrue(os.path.exists(lock_path))
+                raise self._StopMain()
 
-            self._run_main_until_config_parse(
-                ["cratedigger", "--config-dir", config_dir, "--var-dir", var_dir],
-                assert_from_ini,
-            )
+            with (
+                patch.object(sys, "argv", [
+                    "cratedigger", "--config", config_path,
+                    "--runtime-dir", var_dir,
+                ]),
+                patch(
+                    "cratedigger.enforce_beets_startup",
+                    return_value=CratediggerConfig(),
+                ),
+                patch(
+                    "lib.migrator.assert_schema_current",
+                    side_effect=stop_at_schema_gate,
+                ),
+                self.assertRaises(self._StopMain),
+            ):
+                cratedigger.main()
+            self.assertFalse(os.path.exists(lock_path))
 
     def test_no_lock_file_flag(self):
-        """--no-lock-file sets the flag to True."""
+        """--no-lock-file reaches schema startup without ever making a lock."""
+        import cratedigger
+
         with tempfile.TemporaryDirectory() as d:
-            self._write_minimal_config(d)
+            config_path = self._write_minimal_config(d)
             lock_path = os.path.join(d, ".cratedigger.lock")
+            observed: list[bool] = []
 
-            def assert_from_ini(config, config_dir, var_dir):
-                self.assertEqual(config_dir, d)
-                self.assertEqual(var_dir, d)
-                self.assertFalse(os.path.exists(lock_path))
+            def stop_at_schema_gate(_dsn: str) -> None:
+                observed.append(os.path.exists(lock_path))
+                raise self._StopMain()
 
-            self._run_main_until_config_parse(
-                ["cratedigger", "--config-dir", d, "--var-dir", d, "--no-lock-file"],
-                assert_from_ini,
-            )
+            with (
+                patch.object(sys, "argv", [
+                    "cratedigger", "--config", config_path,
+                    "--runtime-dir", d, "--no-lock-file",
+                ]),
+                patch(
+                    "cratedigger.enforce_beets_startup",
+                    return_value=CratediggerConfig(),
+                ),
+                patch(
+                    "lib.migrator.assert_schema_current",
+                    side_effect=stop_at_schema_gate,
+                ),
+                patch("lib.config._ADMITTED_RUNTIME_CONFIG", None),
+                patch.dict(os.environ, {}, clear=False),
+                self.assertRaises(self._StopMain),
+            ):
+                cratedigger.main()
+
+            self.assertEqual(observed, [False])
+            self.assertFalse(os.path.exists(lock_path))
 
     def test_default_args(self):
         """Default config-dir and var-dir are cwd."""
