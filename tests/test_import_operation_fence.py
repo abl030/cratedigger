@@ -25,7 +25,6 @@ from lib.import_execution import (
 from lib.import_queue import (
     IMPORT_JOB_FORCE,
     IMPORT_JOB_RECOVERY_REQUIRED,
-    IMPORT_JOB_YOUTUBE,
     ForceImportPayload,
     ImportJob,
     force_import_dedupe_key,
@@ -739,15 +738,18 @@ class TestImportOperationFence(unittest.TestCase):
                 yt_url="https://music.youtube.com/watch?v=fence",
                 expected_track_count=1,
             )
-            job = db.enqueue_import_job(
-                IMPORT_JOB_YOUTUBE,
+            job = db.enqueue_youtube_import_and_mark_success(
+                download_log_id=source_download_log_id,
                 request_id=42,
+                dedupe_key="youtube:cleanup-order",
                 payload=youtube_import_payload(
                     staged_path=staged_path,
                     request_id=42,
                     browse_id="MPREb_fence",
                     download_log_id=source_download_log_id,
                 ),
+                message="youtube staged",
+                terminal_metadata={},
             )
             db.mark_import_job_preview_importable(
                 job.id,
@@ -798,15 +800,18 @@ class TestImportOperationFence(unittest.TestCase):
                 yt_url="https://music.youtube.com/watch?v=fence",
                 expected_track_count=1,
             )
-            job = db.enqueue_import_job(
-                IMPORT_JOB_YOUTUBE,
+            job = db.enqueue_youtube_import_and_mark_success(
+                download_log_id=source_download_log_id,
                 request_id=42,
+                dedupe_key="youtube:cleanup-ack-failure",
                 payload=youtube_import_payload(
                     staged_path=staged_path,
                     request_id=42,
                     browse_id="MPREb_fence",
                     download_log_id=source_download_log_id,
                 ),
+                message="youtube staged",
+                terminal_metadata={},
             )
             db.mark_import_job_preview_importable(
                 job.id,
@@ -1307,8 +1312,8 @@ class TestImportOperationFencePostgres(unittest.TestCase):
             yt_url="https://music.youtube.com/watch?v=terminal-provenance",
             expected_track_count=1,
         )
-        job = db.enqueue_import_job(
-            IMPORT_JOB_YOUTUBE,
+        job = db.enqueue_youtube_import_and_mark_success(
+            download_log_id=source_download_log_id,
             request_id=request_id,
             dedupe_key="youtube:terminal-provenance",
             payload=youtube_import_payload(
@@ -1317,7 +1322,12 @@ class TestImportOperationFencePostgres(unittest.TestCase):
                 browse_id="MPREb_terminal_provenance",
                 download_log_id=source_download_log_id,
             ),
+            message="youtube rescue staged",
+            terminal_metadata={},
         )
+        origin = db.get_download_log_entry(source_download_log_id)
+        assert origin is not None
+        self.assertEqual(origin["outcome"], "youtube_success")
         db.mark_import_job_preview_importable(job.id, preview_result={})
         claimed = claim_next_import_job(db, worker_id="postgres-worker")
         assert claimed is not None
@@ -1349,6 +1359,32 @@ class TestImportOperationFencePostgres(unittest.TestCase):
         self.assertEqual(audit["source"], "youtube")
         self.assertEqual(terminal.job.status, "failed")
 
+        retry_source = observer.insert_youtube_running(
+            request_id=request_id,
+            browse_id="MPREb_terminal_provenance_retry",
+            audio_playlist_id=None,
+            yt_url="https://music.youtube.com/watch?v=terminal-provenance-retry",
+            expected_track_count=1,
+        )
+        retry = observer.enqueue_youtube_import_and_mark_success(
+            download_log_id=retry_source,
+            request_id=request_id,
+            dedupe_key="youtube:terminal-provenance-retry",
+            payload=youtube_import_payload(
+                staged_path="/tmp/youtube-terminal-provenance-retry",
+                request_id=request_id,
+                browse_id="MPREb_terminal_provenance_retry",
+                download_log_id=retry_source,
+            ),
+            message="operator requested YouTube retry",
+            terminal_metadata={},
+        )
+        self.assertFalse(retry.deduped)
+        self.assertNotEqual(retry.id, job.id)
+        retry_origin = observer.get_download_log_entry(retry_source)
+        assert retry_origin is not None
+        self.assertEqual(retry_origin["outcome"], "youtube_success")
+
         fake = FakePipelineDB()
         fake.seed_request(make_request_row(
             id=42,
@@ -1362,8 +1398,8 @@ class TestImportOperationFencePostgres(unittest.TestCase):
             yt_url="https://music.youtube.com/watch?v=fake-terminal",
             expected_track_count=1,
         )
-        fake_job = fake.enqueue_import_job(
-            IMPORT_JOB_YOUTUBE,
+        fake_job = fake.enqueue_youtube_import_and_mark_success(
+            download_log_id=fake_source,
             request_id=42,
             dedupe_key="youtube:fake-terminal-provenance",
             payload=youtube_import_payload(
@@ -1372,7 +1408,12 @@ class TestImportOperationFencePostgres(unittest.TestCase):
                 browse_id="MPREb_fake_terminal",
                 download_log_id=fake_source,
             ),
+            message="youtube rescue staged",
+            terminal_metadata={},
         )
+        fake_origin = fake.get_download_log_entry(fake_source)
+        assert fake_origin is not None
+        self.assertEqual(fake_origin["outcome"], "youtube_success")
         fake.mark_import_job_preview_importable(fake_job.id, preview_result={})
         fake_claimed = claim_next_import_job(fake, worker_id="fake-worker")
         assert fake_claimed is not None
@@ -1389,9 +1430,9 @@ class TestImportOperationFencePostgres(unittest.TestCase):
         self.assertEqual(fake_audit["source_download_log_id"], fake_source)
         self.assertEqual(fake_audit["source"], "youtube")
 
-    def test_non_automation_terminal_refuses_cross_request_source_origin(self) -> None:
-        """Origin-derived source is a same-request provenance boundary."""
-        from lib.pipeline_db.terminal_outcomes import ImportJobTerminalConflict
+    def test_non_automation_terminal_unlinks_invalid_source_origin(self) -> None:
+        """Broken origin provenance is visible but cannot park the job."""
+        from lib.failure_presentation import MAX_DIAGNOSTIC_CHARS
         from lib.terminal_outcomes import non_automation_failure_terminal_outcome
 
         db = make_db()
@@ -1426,15 +1467,30 @@ class TestImportOperationFencePostgres(unittest.TestCase):
         command = non_automation_failure_terminal_outcome(
             claimed,
             error="RuntimeError: source ownership failed",
-            message="Executor crashed: RuntimeError: source ownership failed",
+            message="Executor crashed: " + "source ownership failed " * 30,
             result={"success": False},
         )
-        with self.assertRaises(ImportJobTerminalConflict):
-            db.persist_import_terminal_outcome(command)
-        self.assertEqual(len(db.get_download_history(request_id)), 0)
+        terminal = db.persist_import_terminal_outcome(command)
+        self.assertEqual(terminal.job.status, "failed")
+        audit = db.get_download_log_entry(terminal.download_log_id)
+        assert audit is not None
+        self.assertIsNone(audit["source_download_log_id"])
+        self.assertEqual(audit["source"], "slskd")
+        self.assertIn(
+            "Source provenance link was unavailable or refused",
+            audit["error_message"] or "",
+        )
+        self.assertLessEqual(len(audit["error_message"] or ""), MAX_DIAGNOSTIC_CHARS)
         current = db.get_import_job(job.id)
         assert current is not None
-        self.assertEqual(current.status, "running")
+        self.assertEqual(current.status, "failed")
+        self.assertEqual(
+            db.recover_running_import_jobs(
+                requeue_message="retry",
+                recovery_message="startup recovery",
+            ),
+            [],
+        )
 
         fake = FakePipelineDB()
         fake.seed_request(make_request_row(id=42, status="wanted"))
@@ -1452,21 +1508,132 @@ class TestImportOperationFencePostgres(unittest.TestCase):
         fake.mark_import_job_preview_importable(fake_job.id, preview_result={})
         fake_claimed = claim_next_import_job(fake, worker_id="fake-worker")
         assert fake_claimed is not None
-        with self.assertRaises(ImportJobTerminalConflict):
-            fake.persist_import_terminal_outcome(
-                non_automation_failure_terminal_outcome(
-                    fake_claimed,
-                    error="RuntimeError: source ownership failed",
-                    message=(
-                        "Executor crashed: RuntimeError: source ownership failed"
-                    ),
-                    result={"success": False},
-                )
+        fake_terminal = fake.persist_import_terminal_outcome(
+            non_automation_failure_terminal_outcome(
+                fake_claimed,
+                error="RuntimeError: source ownership failed",
+                message="Executor crashed: " + "source ownership failed " * 30,
+                result={"success": False},
             )
-        self.assertEqual(len(fake.download_logs), 1)
+        )
+        fake_audit = fake.get_download_log_entry(fake_terminal.download_log_id)
+        assert fake_audit is not None
+        self.assertIsNone(fake_audit["source_download_log_id"])
+        self.assertEqual(fake_audit["source"], "slskd")
+        self.assertIn(
+            "Source provenance link was unavailable or refused",
+            fake_audit["error_message"] or "",
+        )
+        self.assertLessEqual(
+            len(fake_audit["error_message"] or ""),
+            MAX_DIAGNOSTIC_CHARS,
+        )
         fake_current = fake.get_import_job(fake_job.id)
         assert fake_current is not None
-        self.assertEqual(fake_current.status, "running")
+        self.assertEqual(fake_current.status, "failed")
+        self.assertEqual(
+            fake.recover_running_import_jobs(
+                requeue_message="retry",
+                recovery_message="startup recovery",
+            ),
+            [],
+        )
+
+    def test_youtube_terminal_unlinks_missing_source_with_job_type_source(self) -> None:
+        """A corrupt YT payload cannot revive the running-row uniqueness guard."""
+        from lib.terminal_outcomes import non_automation_failure_terminal_outcome
+
+        def enqueue_corrupt_youtube(db: PipelineDB | FakePipelineDB, request_id: int):
+            source = db.insert_youtube_running(
+                request_id=request_id,
+                browse_id="MPREb_missing_origin",
+                audio_playlist_id=None,
+                yt_url="https://music.youtube.com/watch?v=missing-origin",
+                expected_track_count=1,
+            )
+            payload = youtube_import_payload(
+                staged_path="/tmp/missing-youtube-origin",
+                request_id=request_id,
+                browse_id="MPREb_missing_origin",
+                download_log_id=source + 99_999,
+            )
+            return db.enqueue_youtube_import_and_mark_success(
+                download_log_id=source,
+                request_id=request_id,
+                dedupe_key=f"youtube:missing-origin:{request_id}",
+                payload=payload,
+                message="youtube rescue staged",
+                terminal_metadata={},
+            )
+
+        db = make_db()
+        self.addCleanup(db.close)
+        request_id = db.add_request(
+            artist_name="Fence",
+            album_title="Missing YouTube terminal origin",
+            source="request",
+            mb_release_id="release-missing-youtube-terminal-origin",
+            status="wanted",
+        )
+        job = enqueue_corrupt_youtube(db, request_id)
+        db.mark_import_job_preview_importable(job.id, preview_result={})
+        claimed = claim_next_import_job(db, worker_id="postgres-worker")
+        assert claimed is not None
+        terminal = db.persist_import_terminal_outcome(
+            non_automation_failure_terminal_outcome(
+                claimed,
+                error="RuntimeError: missing source audit",
+                message="Executor crashed: RuntimeError: missing source audit",
+                result={"success": False},
+            )
+        )
+        audit = db.get_download_log_entry(terminal.download_log_id)
+        assert audit is not None
+        self.assertEqual(terminal.job.status, "failed")
+        self.assertEqual(audit["source"], "youtube")
+        self.assertIsNone(audit["source_download_log_id"])
+        self.assertIn(
+            "Source provenance link was unavailable or refused",
+            audit["error_message"] or "",
+        )
+        self.assertEqual(
+            db.recover_running_import_jobs(
+                requeue_message="retry",
+                recovery_message="startup recovery",
+            ),
+            [],
+        )
+
+        fake = FakePipelineDB()
+        fake.seed_request(make_request_row(id=42, status="wanted"))
+        fake_job = enqueue_corrupt_youtube(fake, 42)
+        fake.mark_import_job_preview_importable(fake_job.id, preview_result={})
+        fake_claimed = claim_next_import_job(fake, worker_id="fake-worker")
+        assert fake_claimed is not None
+        fake_terminal = fake.persist_import_terminal_outcome(
+            non_automation_failure_terminal_outcome(
+                fake_claimed,
+                error="RuntimeError: missing source audit",
+                message="Executor crashed: RuntimeError: missing source audit",
+                result={"success": False},
+            )
+        )
+        fake_audit = fake.get_download_log_entry(fake_terminal.download_log_id)
+        assert fake_audit is not None
+        self.assertEqual(fake_terminal.job.status, "failed")
+        self.assertEqual(fake_audit["source"], "youtube")
+        self.assertIsNone(fake_audit["source_download_log_id"])
+        self.assertIn(
+            "Source provenance link was unavailable or refused",
+            fake_audit["error_message"] or "",
+        )
+        self.assertEqual(
+            fake.recover_running_import_jobs(
+                requeue_message="retry",
+                recovery_message="startup recovery",
+            ),
+            [],
+        )
 
 
 if __name__ == "__main__":

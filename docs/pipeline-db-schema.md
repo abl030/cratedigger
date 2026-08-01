@@ -250,8 +250,11 @@ that audit trail.
   `outcome='failed'` row (`source_download_log_id` points to the action's
   original force/YouTube row) in the same transaction that terminalizes its
   `import_jobs` row. The terminal row derives `source` from that exact origin
-  in the same INSERT (and refuses an origin belonging to another request), so
-  a YouTube attempt never becomes a misleading slskd row. Its bounded,
+  in the same INSERT. A missing or cross-request origin is refused as a link,
+  but still terminalizes atomically with an unlinked audit whose source is
+  derived from the exact job type and whose bounded diagnostic names the
+  provenance refusal; it never parks a running job. Thus a YouTube attempt
+  never becomes a misleading slskd row. Its bounded,
   prefix-inclusive diagnostic explicitly names the failed attempt so Recents
   remains the durable operator surface. This non-owning action never
   transitions the request: `wanted`, an explicit `unsearchable` stop, and

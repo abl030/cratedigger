@@ -2991,6 +2991,7 @@ class FakePipelineDB:
                 ))
             download_log_id = self._log_terminal_audit(
                 command.request_id,
+                command.import_job_id,
                 command.audit,
             )
             self.set_download_log_candidate_evidence(
@@ -3307,7 +3308,9 @@ class FakePipelineDB:
         boundary(f"request.processing_to_{virtual}")
         return tuple(applied)
 
-    def _log_terminal_audit(self, request_id: int, audit):
+    def _log_terminal_audit(self, request_id: int, import_job_id: int, audit):
+        from lib.failure_presentation import unlinked_source_provenance_message
+
         source = None
         if audit.source_download_log_id is not None:
             source = next(
@@ -3318,20 +3321,30 @@ class FakePipelineDB:
                 ),
                 None,
             )
-            if source is None:
-                raise ImportJobTerminalConflict(
-                    "terminal audit source download log must belong to its request"
-                )
+        job = next(
+            (row for row in self._import_jobs if row["id"] == import_job_id),
+            None,
+        )
+        fallback_source = (
+            "youtube"
+            if job is not None and job.get("job_type") == IMPORT_JOB_YOUTUBE
+            else "slskd"
+        )
+        kwargs = audit.as_log_kwargs()
+        if audit.source_download_log_id is not None and source is None:
+            kwargs["source_download_log_id"] = None
+            kwargs["error_message"] = unlinked_source_provenance_message(
+                audit.error_message,
+            )
         download_log_id = self.log_download(
             request_id=request_id,
-            **audit.as_log_kwargs(),
+            **kwargs,
         )
-        if source is not None:
-            terminal = next(
-                entry for entry in self.download_logs
-                if entry.id == download_log_id
-            )
-            terminal.source = source.source
+        terminal = next(
+            entry for entry in self.download_logs
+            if entry.id == download_log_id
+        )
+        terminal.source = source.source if source is not None else fallback_source
         return download_log_id
 
     def _persist_automation_import_terminal_outcome(
@@ -3362,6 +3375,7 @@ class FakePipelineDB:
             audit = self._fake_automation_audit(command.audit, authority)
             download_log_id = self._log_terminal_audit(
                 command.request_id,
+                command.import_job_id,
                 audit,
             )
             boundary("download_log")
@@ -3473,6 +3487,7 @@ class FakePipelineDB:
                 ))
             download_log_id = self._log_terminal_audit(
                 command.request_id,
+                command.import_job_id,
                 command.audit,
             )
             self.set_download_log_candidate_evidence(

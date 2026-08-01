@@ -1391,6 +1391,7 @@ _NON_TRIGGER_TABLES: dict[str, str] = {
 
 _NON_TRIGGER_CONSTANTS: dict[str, str] = {
     # Output copy: rendered, never matched.
+    "UNLINKED_SOURCE_PROVENANCE_SUFFIX": "output qualifier",
     "TRANSFER_MESSAGE_LABEL_PEER": "output label",
     "TRANSFER_MESSAGE_LABEL_STORAGE": "output label",
     "TRANSFER_MESSAGE_LABEL_MIXED": "output label",

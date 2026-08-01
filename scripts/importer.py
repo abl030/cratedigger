@@ -1815,7 +1815,7 @@ def process_claimed_job(
             db,
             job,
             error=outcome.message,
-            message=f"Requeue to preview failed: {outcome.message}",
+            message=outcome.message,
             result=result,
         )
         return _record_terminal_force_action_cleanup(db, job, failed)

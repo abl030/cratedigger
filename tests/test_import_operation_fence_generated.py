@@ -243,6 +243,8 @@ def assert_non_automation_failure_lifecycle(
     origin = next(
         row for row in db.download_logs if row.id == source_download_log_id
     )
+    if job_type == IMPORT_JOB_YOUTUBE and origin.outcome != "youtube_success":
+        raise AssertionError("YouTube import did not use the canonical handoff")
     failed = [
         row for row in db.download_logs
         if row.outcome == "failed"
@@ -305,13 +307,23 @@ def _drive_non_automation_failure(
             download_log_id=source_download_log_id,
         )
         launch_source = "/tmp/generated-non-automation-youtube"
-    job = db.enqueue_import_job(
-        job_type,
-        request_id=request_id,
-        dedupe_key=(
-            f"{job_type}:{failure_class}:{request_status}:{source_download_log_id}"
-        ),
-        payload=payload,
+    dedupe_key = f"{job_type}:{failure_class}:{request_status}:{source_download_log_id}"
+    job = (
+        db.enqueue_import_job(
+            job_type,
+            request_id=request_id,
+            dedupe_key=dedupe_key,
+            payload=payload,
+        )
+        if job_type == IMPORT_JOB_FORCE
+        else db.enqueue_youtube_import_and_mark_success(
+            download_log_id=source_download_log_id,
+            request_id=request_id,
+            dedupe_key=dedupe_key,
+            payload=payload,
+            message="generated YouTube rescue staged",
+            terminal_metadata={},
+        )
     )
     evidence = make_album_quality_evidence(
         mb_release_id="generated-non-automation-failure",
@@ -391,10 +403,20 @@ def _exercise_world(
         status="wanted",
     ))
     source_download_log_id = (
-        None if world.job_type == IMPORT_JOB_AUTOMATION else db.log_download(
+        None
+        if world.job_type == IMPORT_JOB_AUTOMATION
+        else db.log_download(
             request_id,
             outcome="rejected",
             error_message="generated non-automation source",
+        )
+        if world.job_type == IMPORT_JOB_FORCE
+        else db.insert_youtube_running(
+            request_id=request_id,
+            browse_id="MPREb_fence",
+            audio_playlist_id=None,
+            yt_url="https://music.youtube.com/watch?v=generated-fence",
+            expected_track_count=1,
         )
     )
     if world.job_type == IMPORT_JOB_AUTOMATION:
@@ -422,12 +444,22 @@ def _exercise_world(
             canonical_path=source_path,
             message="generated operation-fence owner",
         )
-    else:
+    elif world.job_type == IMPORT_JOB_FORCE:
         job = db.enqueue_import_job(
             world.job_type,
             request_id=request_id,
             dedupe_key=f"{world.job_type}:generated:{request_id}",
             payload=payload,
+        )
+    else:
+        assert source_download_log_id is not None
+        job = db.enqueue_youtube_import_and_mark_success(
+            download_log_id=source_download_log_id,
+            request_id=request_id,
+            dedupe_key=f"{world.job_type}:generated:{request_id}",
+            payload=payload,
+            message="generated YouTube rescue staged",
+            terminal_metadata={},
         )
     evidence = make_album_quality_evidence(
         mb_release_id=release_id,

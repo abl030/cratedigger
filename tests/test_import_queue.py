@@ -8997,7 +8997,38 @@ class TestForceJobFailuresAreRecordedNotParked(unittest.TestCase):
 
         assert updated is not None
         self.assertEqual(updated.status, "failed")
-        self.assertIn("Requeue to preview failed", updated.message or "")
+        self.assertEqual(updated.message, "requeue UPDATE failed: boom")
+        self._assert_recents_visible_failure(db, claimed)
+
+    def test_real_requeue_failure_producer_is_not_prefixed_twice(self) -> None:
+        """The producer's contextual requeue prefix is persisted verbatim."""
+        from lib.dispatch.evidence_gate import _requeue_import_job_to_preview
+
+        class RequeueFailureDB(FakePipelineDB):
+            def requeue_import_job_for_preview(self, *args: object, **kwargs: object):
+                del args, kwargs
+                raise RuntimeError("connection dropped")
+
+        db = RequeueFailureDB()
+        claimed = self._force_job(db)
+        outcome = _requeue_import_job_to_preview(
+            db,  # pyright: ignore[reportArgumentType]
+            import_job_id=claimed.id,
+            reason="candidate evidence changed",
+        )
+        self.assertEqual(
+            outcome.message,
+            "Requeue to preview failed: RuntimeError: connection dropped",
+        )
+
+        updated = self._run(db, claimed, _fixed_outcome_execute_fn(outcome))
+
+        assert updated is not None
+        self.assertEqual(updated.status, "failed")
+        self.assertEqual(updated.message, outcome.message)
+        self.assertEqual(
+            (updated.message or "").count("Requeue to preview failed:"), 1,
+        )
         self._assert_recents_visible_failure(db, claimed)
 
     def test_failed_force_attempt_preserves_operator_or_terminal_request_state(

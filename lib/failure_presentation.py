@@ -125,6 +125,11 @@ NON_AUTOMATION_IMPORT_FAILURE_PREFIXES: Final[frozenset[str]] = frozenset({
 })
 """Producer-owned prefixes for failed non-owning import attempts."""
 
+UNLINKED_SOURCE_PROVENANCE_SUFFIX: Final = (
+    " Source provenance link was unavailable or refused; terminal audit is unlinked."
+)
+"""Visible qualifier for a terminal audit whose requested origin was invalid."""
+
 
 # --------------------------------------------------------------------------
 # Peer-failure families
@@ -349,6 +354,18 @@ def non_automation_import_failure_message(
     detail = _collapsed_text(diagnostic) or _collapsed_text(fallback_diagnostic)
     message = prefix if not detail else f"{prefix} {detail}"
     return bounded_text(message, limit=MAX_DIAGNOSTIC_CHARS)
+
+
+def unlinked_source_provenance_message(diagnostic: str | None) -> str:
+    """Keep a provenance refusal visible without exceeding the row bound."""
+    detail_limit = MAX_DIAGNOSTIC_CHARS - len(
+        UNLINKED_SOURCE_PROVENANCE_SUFFIX,
+    )
+    detail = bounded_text(
+        _collapsed_text(diagnostic or ""),
+        limit=detail_limit,
+    )
+    return f"{detail}{UNLINKED_SOURCE_PROVENANCE_SUFFIX}"
 
 
 def _quoted(text: str) -> str:

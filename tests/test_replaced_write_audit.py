@@ -201,7 +201,7 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "and every value remains a direct placeholder; an attached processing "
         "owner makes the compare-and-set a zero-write conflict"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 1105, "ebb50341a8d836f6"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 1119, "ebb50341a8d836f6"): (
         "processing-terminal metadata keys use the validated request-field "
         "vocabulary while exact request and owner predicates retain authority; "
         "the static owner-clearing status CAS remains the final request write "
@@ -234,7 +234,7 @@ _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, int, str], str] = {
     ("lib/pipeline_db/terminal_outcomes.py", 456, "9b11fb540dfe44e3"): (
         "atomic terminal typed transition CASes the source status selected by the DAG"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 1132, "6674811fa5453c86"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 1146, "6674811fa5453c86"): (
         "automation terminalization performs the final exact processing-owner "
         "CAS and clears the owner in the same static request write "
         "(review #2: retry counters are now policy-derived placeholders read "
