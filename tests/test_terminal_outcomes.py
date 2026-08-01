@@ -2163,6 +2163,36 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
         self.assertAlmostEqual(
             float(cast(float, row["original_beets_distance"])), 0.2328)
 
+    def test_job_backed_source_less_terminal_audit_persists_typed_null(self):
+        """A source-less non-automation outcome inserts a bigint NULL."""
+        db, request_id, job_id = _seed_running_import()
+        self.addCleanup(db.close)
+        outcome = ImportTerminalOutcome(
+            request_id=request_id,
+            import_job_id=job_id,
+            initial_transition=transitions.RequestTransition.to_wanted(
+                attempt_type="validation",
+            ),
+            audit=TerminalDownloadAudit(
+                outcome="failed",
+                error_message="source-less terminal audit",
+            ),
+            job=ImportJobTerminal(
+                status="failed",
+                error="source-less terminal audit",
+                result={"success": False},
+                message="source-less terminal audit",
+            ),
+        )
+
+        result = db.persist_import_terminal_outcome(outcome)
+
+        row = db.get_download_log_entry(result.download_log_id)
+        assert row is not None
+        self.assertIsNone(row["source_download_log_id"])
+        self.assertEqual(row["source"], "slskd")
+        self.assertEqual(result.job.status, "failed")
+
     def _run_job_backed_automation_result(
         self,
         db: PipelineDB,

@@ -1854,16 +1854,14 @@ def process_claimed_job(
                 outcome,
             )
         return _record_terminal_force_action_cleanup(db, job, terminal_job)
-    # Same as the success branch above: a bundle-less force/YouTube failure is
-    # recorded terminally rather than parked. No request is stopped by it.
+    # A bundle-less force/YouTube failure is recorded terminally rather than
+    # parked. No request is stopped by it, and the producer diagnostic stays
+    # intact for the Recents audit.
     failed = _terminalize_non_automation_failure(
         db,
         job,
         error=outcome.message,
-        message=(
-            "Importer completed without a terminal outcome: "
-            f"{outcome.message}"
-        ),
+        message=outcome.message,
         result=result,
     )
     if failed is None:

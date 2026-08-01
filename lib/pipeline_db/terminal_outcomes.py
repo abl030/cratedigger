@@ -720,7 +720,7 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                      WHERE id = %s AND request_id = %s),
                     'slskd'
                 ),
-                CASE WHEN EXISTS (SELECT 1 FROM origin) THEN %s END,
+                CASE WHEN EXISTS (SELECT 1 FROM origin) THEN %s::bigint END,
                 (SELECT candidate_evidence_id FROM import_jobs
                  WHERE id = %s AND request_id = %s)
             RETURNING id, (SELECT EXISTS (SELECT 1 FROM origin)) AS origin_exists
