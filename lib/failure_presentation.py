@@ -119,6 +119,17 @@ show ``source_open_failed_ESTALE`` under a label that says "beets detail".
 The token belongs there (forensics is where internals go, and the verdict
 carries the sentence), but it should say what it is."""
 
+NON_AUTOMATION_IMPORT_FAILURE_PREFIXES: Final[frozenset[str]] = frozenset({
+    "Force import attempt failed:",
+    "YouTube import attempt failed:",
+})
+"""Producer-owned prefixes for failed non-owning import attempts."""
+
+UNLINKED_SOURCE_PROVENANCE_SUFFIX: Final = (
+    " Source provenance link was unavailable or refused; terminal audit is unlinked."
+)
+"""Visible qualifier for a terminal audit whose requested origin was invalid."""
+
 
 # --------------------------------------------------------------------------
 # Peer-failure families
@@ -311,11 +322,50 @@ def transfer_detail_unreadable(raw: object) -> bool:
 
 def bounded_text(text: str, *, limit: int = MAX_RAW_MESSAGE_CHARS) -> str:
     """Collapse whitespace, drop unprintables, truncate with an ellipsis."""
-    cleaned = "".join(ch if ch.isprintable() else " " for ch in text)
-    collapsed = " ".join(cleaned.split())
+    collapsed = _collapsed_text(text)
     if len(collapsed) <= limit:
         return collapsed
     return collapsed[: max(limit - 1, 0)].rstrip() + "\u2026"
+
+
+def _collapsed_text(text: str) -> str:
+    """Remove controls and collapse whitespace without applying a bound."""
+    cleaned = "".join(ch if ch.isprintable() else " " for ch in text)
+    return " ".join(cleaned.split())
+
+
+def non_automation_import_failure_message(
+    job_type: str,
+    diagnostic: str,
+    fallback_diagnostic: str = "",
+) -> str:
+    """Build one bounded force/YouTube Recents failure message.
+
+    Control-only primary diagnostics cannot hide a useful fallback.  The
+    bound applies to the complete persisted sentence, including its producer
+    identity prefix, so the presenter can reproduce it exactly.
+    """
+    prefix = {
+        "force_import": "Force import attempt failed:",
+        "youtube_import": "YouTube import attempt failed:",
+    }.get(job_type)
+    if prefix is None:
+        raise ValueError(f"non-automation failure does not support {job_type!r}")
+    detail = _collapsed_text(diagnostic) or _collapsed_text(fallback_diagnostic)
+    message = prefix if not detail else f"{prefix} {detail}"
+    return bounded_text(message, limit=MAX_DIAGNOSTIC_CHARS)
+
+
+def unlinked_source_provenance_message(diagnostic: str | None) -> str:
+    """Keep a provenance refusal visible without exceeding the row bound."""
+    detail_limit = MAX_DIAGNOSTIC_CHARS - len(
+        UNLINKED_SOURCE_PROVENANCE_SUFFIX,
+    )
+    detail = bounded_text(
+        _collapsed_text(diagnostic or ""),
+        limit=detail_limit,
+    )
+    return f"{detail}{UNLINKED_SOURCE_PROVENANCE_SUFFIX}"
 
 
 def _quoted(text: str) -> str:
@@ -968,6 +1018,8 @@ def _present_failed_message(
     if not error_message:
         return None
     probe = error_message.strip()
+    if any(probe.startswith(prefix) for prefix in NON_AUTOMATION_IMPORT_FAILURE_PREFIXES):
+        return bounded_text(probe, limit=MAX_DIAGNOSTIC_CHARS)
     lowered = probe.casefold()
     if lowered.startswith(_MATERIALIZE_GRACE_PREFIX):
         return _GRACE_COPY
@@ -1125,6 +1177,7 @@ __all__ = [
     "MAX_PEER_NAME_CHARS",
     "MAX_RAW_MESSAGE_CHARS",
     "MAX_RAW_MESSAGE_GROUPS",
+    "NON_AUTOMATION_IMPORT_FAILURE_PREFIXES",
     "TRANSFER_MESSAGE_LABEL_MIXED",
     "TRANSFER_MESSAGE_LABEL_PEER",
     "TRANSFER_MESSAGE_LABEL_STATE",
@@ -1135,6 +1188,7 @@ __all__ = [
     "bounded_text",
     "decode_transfer_detail",
     "materialize_reason_copy",
+    "non_automation_import_failure_message",
     "peer_failure_family",
     "present_failure",
     "transfer_detail_unreadable",

@@ -77,6 +77,12 @@ class LongTailRow(msgspec.Struct, frozen=True):
     client-side stamp from the pipeline-detail fetch, so the single-row
     refetch-and-patch (KTD8) can never drop it. NULL for Discogs-sourced
     requests and legacy MB rows that predate the column.
+
+    ``current_spectral_accusation_admissible`` /
+    ``current_spectral_accusation_withheld`` are the audit-only display
+    pair for the grade above them (issue #829 Phase 5 PR4) — derived, not
+    stored, and both NULL on a request with no linked current evidence,
+    which leaves the console chip on its historical accusing render.
     """
 
     id: int
@@ -97,6 +103,8 @@ class LongTailRow(msgspec.Struct, frozen=True):
     current_spectral_bitrate: int | None
     band: str
     in_flight_rescue: bool
+    current_spectral_accusation_admissible: bool | None = None
+    current_spectral_accusation_withheld: str | None = None
 
 
 class LongTailResult(msgspec.Struct, frozen=True):
@@ -200,8 +208,19 @@ def _band_rows(
 
 
 def _band_row(row: dict[str, Any], bands: dict[str, str]) -> LongTailRow:
+    # Deferred so the service module keeps importing nothing from the web
+    # layer at load time (the same shape ``lib/mbid_replace_service.py``
+    # uses for ``web.mb``). The audit-only accusation rule has exactly one
+    # owner and both worklist surfaces — API and ``pipeline-cli
+    # long-tail`` — reach it through this call rather than through an
+    # injected collaborator neither caller could vary meaningfully.
+    from lib.pipeline_db._shared import CURRENT_EVIDENCE_PREFIX
+    from web.classify import evidence_column_accusation_flags
+
     rid = row.get("mb_release_id")
     band = bands.get(str(rid), BAND_MISSING) if rid else BAND_MISSING
+    flags = evidence_column_accusation_flags(
+        row, prefix=CURRENT_EVIDENCE_PREFIX)
     return LongTailRow(
         id=int(row["id"]),
         artist_name=str(row.get("artist_name") or ""),
@@ -222,6 +241,8 @@ def _band_row(row: dict[str, Any], bands: dict[str, str]) -> LongTailRow:
             row.get("current_spectral_bitrate")),
         band=band,
         in_flight_rescue=bool(row.get("in_flight_rescue")),
+        current_spectral_accusation_admissible=flags.admissible,
+        current_spectral_accusation_withheld=flags.withheld,
     )
 
 

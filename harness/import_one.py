@@ -455,18 +455,30 @@ def _materialized_measurement_from_album_info(
 
 
 def conversion_target(target_format: str | None,
-                      will_be_verified_lossless: bool,
+                      lossless_source: bool,
                       verified_lossless_target: str | None) -> str | None:
     """What should lossless files become on disk? (pure)
+
+    Keyed on the LOSSLESS SOURCE, never on the proof: the configured
+    target is the stored format for every lossless-sourced import, and a
+    withheld or denied verified-lossless proof changes only what the row
+    is CALLED. Keying this on the proof is how download 39087 (Dirty
+    Beaches, *Badlands*) landed as MP3 V0 under an ``opus 128`` config.
+
+    Authority: "no we always want it opus, the contract is not around
+    verified or not, is the stored format for lossless absolutely.
+    whatever people choose, v0,opus,aac it just has to be consistent" —
+    https://github.com/abl030/cratedigger/issues/829
 
     Returns:
         "lossless" — keep lossless on disk (user intent via target_format)
         str        — verified_lossless_target spec (e.g. "opus 128", "mp3 v2")
-        None       — keep V0 (default, or not verified lossless)
+        None       — keep V0 (nothing configured, or nothing lossless to
+                     convert)
     """
     if target_format in ("flac", "lossless"):
         return "lossless"
-    if not will_be_verified_lossless:
+    if not lossless_source:
         return None
     if verified_lossless_target:
         return verified_lossless_target
@@ -514,10 +526,13 @@ def target_cleanup_decision(target_achieved: bool,
     V0 conversion may have preserved lossless originals for two reasons:
 
     1. A ``verified_lossless_target`` was configured — the second conversion
-       pass planned to consume them. If that pass was skipped (transcode
-       detected → not verified lossless), originals must be removed so beets
-       only sees V0 MP3s. Gated on ``sources_kept > 0`` because without a
-       kept source there is nothing to clean.
+       pass planned to consume them. If that pass did not run, originals
+       must be removed so beets only sees V0 MP3s. Gated on
+       ``sources_kept > 0`` because without a kept source there is nothing
+       to clean. Since issue #829 keyed the target on the lossless source
+       rather than the proof, a configured target always runs when
+       anything lossless was converted, so this is now a fail-safe rather
+       than the transcode-denied path it was written for.
     2. ``--preserve-source`` was set (force-import, issue #111) — we
        held originals back in case the quality decision rejected the import,
        so the user's source FLACs in ``failed_imports/`` would not be
@@ -2367,8 +2382,9 @@ def main():
         aac_lattice_leg=candidate_aac_lattice_leg)
     # The SAME certification with BOTH proof legs left out. Their authority
     # is the PROOF — ``will_be_verified_lossless`` above, which feeds
-    # ``mint_verified_lossless_proof`` and the proof-licensed target
-    # conversion. It must never reach the IMPORT ROUTING below: the
+    # ``mint_verified_lossless_proof`` and nothing else. It never licenses
+    # the target conversion either (issue #829: config decides formats),
+    # and it must never reach the IMPORT ROUTING below: the
     # override suppresses the provisional-lossless lane, whose
     # ``suspect_lossless_downgrade`` is a confident reject that denylists
     # the offering peer, and a denied album is exactly the HF-poor
@@ -2397,16 +2413,18 @@ def main():
 
     # Compute the projected target contract before the quality decision.
     #
-    # This one reads the PROOF-bearing certification on purpose. The
-    # verified-lossless target (e.g. "opus 128") is licensed BY the proof:
-    # the decider gates the post-import quality gate's format on the same
-    # fact (``gate_format`` in ``lib/quality/pipeline.py``), so materializing
-    # a 128kbps target for an album that carries no proof would both break
-    # that mirror and grind the album down further than the un-proved V0 it
-    # otherwise keeps. A denial therefore keeps V0 on disk — a strictly
-    # better artifact, and never a rejection.
+    # Keyed on the LOSSLESS SOURCE, never on the proof (issue #829,
+    # operator decision 2026-08-01). The configured target is simply the
+    # stored format for lossless: a proof denial withholds the CLAIM, not
+    # the format, and the decider mirrors this on the same fact
+    # (``target_final_format`` / ``gate_format`` in
+    # ``lib/quality/pipeline.py``). ``supported_lossless_source`` is true
+    # exactly when the V0 pass converted lossless containers and their
+    # originals were kept, which is also what the target pass consumes —
+    # the target conversion always reads the ORIGINALS, never our own V0
+    # proxies (``convert_lossless`` selects ``_lossless_filenames``).
     new_conv_target = conversion_target(
-        args.target_format, will_be_verified_lossless,
+        args.target_format, supported_lossless_source,
         args.verified_lossless_target)
     # Probe the real native codec once and reuse at both comparison_format_hint
     # call sites. ``comparison_format_hint`` only consumes this on the native
@@ -2484,23 +2502,14 @@ def main():
         r.decision = decision
         r.error = provisional.reason if provisional.confident_reject else None
         if decision == "provisional_lossless_upgrade":
+            # No target re-derivation here any more. This lane used to be
+            # the ONE place the configured target was applied without a
+            # proof; issue #829's stored-format ruling made that the
+            # general rule, so ``new_conv_target`` above is already the
+            # configured target (the lane requires a supported lossless
+            # source, which is the fact that keys it).
             _log(f"  [QUALITY] provisional lossless-source upgrade: "
                  f"source_v0_avg={r.v0_probe.avg_bitrate_kbps if r.v0_probe else None}kbps")
-            if not keep_lossless and args.verified_lossless_target:
-                new_conv_target = args.verified_lossless_target
-                new_format_label = comparison_format_hint(
-                    target_format=args.target_format,
-                    verified_lossless_target=new_conv_target,
-                    converted_count=converted,
-                    is_transcode=is_transcode,
-                    native_codec_family=native_codec_family,
-                )
-                if new_format_label is not None:
-                    target_contract = TargetQualityContract.from_projection(
-                        new_format_label,
-                        projected_is_cbr=projected_is_cbr,
-                    )
-                    r.target_quality_contract = target_contract
     else:
         qd = quality_decision_stage(
             new_m, existing_m, is_transcode=quality_is_transcode,
@@ -2580,11 +2589,13 @@ def main():
         # codec family, which is not enough to recover the V0 contract later.
         #
         # This label is a statement about the BYTES on disk — lossless
-        # ground to V0 with no target pass to follow — so it reads the
-        # leg-free certification. A denial withholds the proof and the
-        # proof-licensed target conversion with it; the files that remain
-        # are still V0, and mislabelling them would carry the denial into
-        # the post-import gate and every later comparison.
+        # ground to V0 with no target pass to follow, which since issue
+        # #829's stored-format ruling means no target was CONFIGURED (a
+        # configured one now runs for every lossless source, proved or
+        # not). It reads the leg-free certification because it describes
+        # what was materialized, and carrying a proof denial into the
+        # label would mislabel those bytes for the post-import gate and
+        # every later comparison.
         r.final_format = V0_SPEC.label
 
     # --- Target format conversion (after V0 verdict, before import) ---

@@ -687,6 +687,12 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
         )
         cur = self._execute(
             """
+            WITH origin AS (
+                SELECT source
+                FROM download_log
+                WHERE id = %s
+                  AND request_id = %s
+            )
             INSERT INTO download_log (
                 request_id, soulseek_username, filetype, download_path,
                 beets_distance, beets_scenario, beets_detail, valid,
@@ -701,16 +707,27 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                 v0_probe_avg_bitrate, v0_probe_median_bitrate,
                 existing_v0_probe_kind, existing_v0_probe_min_bitrate,
                 existing_v0_probe_avg_bitrate, existing_v0_probe_median_bitrate,
-                source_download_log_id, candidate_evidence_id
-            ) VALUES (
+                source, source_download_log_id, candidate_evidence_id
+            ) SELECT
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s,
+                COALESCE(
+                    (SELECT source FROM origin),
+                    (SELECT CASE WHEN job_type = 'youtube_import'
+                                 THEN 'youtube' ELSE 'slskd' END
+                     FROM import_jobs
+                     WHERE id = %s AND request_id = %s),
+                    'slskd'
+                ),
+                CASE WHEN EXISTS (SELECT 1 FROM origin) THEN %s::bigint END,
                 (SELECT candidate_evidence_id FROM import_jobs
                  WHERE id = %s AND request_id = %s)
-            ) RETURNING id
+            RETURNING id, (SELECT EXISTS (SELECT 1 FROM origin)) AS origin_exists
             """,
             (
+                audit.source_download_log_id,
+                request_id,
                 request_id,
                 audit.soulseek_username,
                 audit.filetype,
@@ -746,13 +763,28 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                 audit.existing_v0_probe_min_bitrate,
                 audit.existing_v0_probe_avg_bitrate,
                 audit.existing_v0_probe_median_bitrate,
+                import_job_id,
+                request_id,
                 audit.source_download_log_id,
                 import_job_id,
                 request_id,
             ),
         )
         row = cur.fetchone()
-        assert row is not None
+        assert row is not None, "INSERT RETURNING should always return a row"
+        if (
+            audit.source_download_log_id is not None
+            and not bool(row["origin_exists"])
+        ):
+            from lib.failure_presentation import unlinked_source_provenance_message
+
+            self._execute(
+                "UPDATE download_log SET error_message = %s WHERE id = %s",
+                (
+                    unlinked_source_provenance_message(audit.error_message),
+                    int(row["id"]),
+                ),
+            )
         boundary("download_log")
         return int(row["id"])
 

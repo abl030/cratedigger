@@ -246,6 +246,19 @@ that audit trail.
 - `existing_v0_probe_kind TEXT` — lineage of the comparable probe state used before this attempt, when present.
 - `existing_v0_probe_min_bitrate INTEGER`, `existing_v0_probe_avg_bitrate INTEGER`, `existing_v0_probe_median_bitrate INTEGER` — point-in-time baseline probe values used for history rendering and audit.
 - `outcome TEXT` — CHECK-constrained vocabulary: `success`, `rejected`, `failed`, `timeout`, `force_import`, historical `manual_import`, `curator_ban`, `measurement_failed`, `user_offline`, `have_analysis_error`, `youtube_running`, `youtube_success`, `youtube_failed`. New manual imports cannot be submitted; the value remains readable for existing audit rows. `measurement_failed` is a candidate-preview environment failure; `have_analysis_error` is a failed fresh analysis of the installed HAVE. Automation returns to `wanted`; operator jobs preserve their current lifecycle state. Neither failure mints a quality verdict, denylist entry, or narrowing decision.
+- A failed force-import or YouTube-import execution writes one linked
+  `outcome='failed'` row (`source_download_log_id` points to the action's
+  original force/YouTube row) in the same transaction that terminalizes its
+  `import_jobs` row. The terminal row derives `source` from that exact origin
+  in the same INSERT. A missing or cross-request origin is refused as a link,
+  but still terminalizes atomically with an unlinked audit whose source is
+  derived from the exact job type and whose bounded diagnostic names the
+  provenance refusal; it never parks a running job. Thus a YouTube attempt
+  never becomes a misleading slskd row. Its bounded,
+  prefix-inclusive diagnostic explicitly names the failed attempt so Recents
+  remains the durable operator surface. This non-owning action never
+  transitions the request: `wanted`, an explicit `unsearchable` stop, and
+  terminal `imported` remain exactly as they were.
 - `source TEXT NOT NULL DEFAULT 'slskd'` — sourcing-channel discriminator added by migration 037. CHECK constraint admits `'slskd'` and `'youtube'`. The default backfilled every pre-037 row to `'slskd'` in one ALTER (no separate backfill script per the single-operator no-backfill-script rule). Consumers rendering `download_log` rows (`pipeline-cli show`, web routes' "recent attempts") use this column to distinguish channels.
 - `youtube_metadata JSONB` — YT-specific audit payload added by migration 037. Nullable; populated only for `source='youtube'` rows. Typed at the read seam as `lib.youtube_ingest_service.YoutubeIngestMetadata: msgspec.Struct`. Carries `yt_url`, `browse_id`, `audio_playlist_id`, optional `expected_track_count`, `resolver_mapping_id`, `per_track_video_ids`, and terminal-state fields (`reason`, `stderr_excerpt`, `observed_track_count`).
 - **Partial unique index `one_youtube_running_per_request` ON `download_log (request_id) WHERE source = 'youtube' AND outcome = 'youtube_running'`** — added by migration 037. Enforces idempotency at the DB layer: at most one in-flight YT rescue per `request_id` at any time. Application-level pre-insert checks would race; this index is atomic. Once the row transitions to a terminal `youtube_success` / `youtube_failed`, the index admits the next submission.
@@ -295,6 +308,11 @@ Key fields:
   committed. No current writer creates that status; startup convergence closes
   a positively dead historical row through the same fail-to-`wanted` terminal
   bundle used for current abandoned executions.
+- Startup handles current non-automation `running` rows by launch authority:
+  unlaunched force/YouTube jobs safely return to `queued`; launch-authorized
+  jobs never replay Beets and instead use the linked failed-audit terminal
+  command above. There is no backfill or compatibility recovery path for old
+  non-automation `recovery_required` rows.
 - `request_id INTEGER` — the related `album_requests.id`.
 - `dedupe_key TEXT` — active queue dedupe key. A partial unique index prevents
   duplicate queued/running/historical-recovery jobs while allowing a later job

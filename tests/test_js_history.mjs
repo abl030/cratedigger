@@ -9,7 +9,10 @@ import {
   __test__,
 } from '../web/js/history.js';
 import { readFileSync } from 'node:fs';
-const { formatV0Probe, formatSpectral, withWas, storageFormatLabel } = __test__;
+const {
+  formatV0Probe, formatSpectral, spectralChip, spectralGradeIsAdmissible,
+  spectralStripCell, withWas, storageFormatLabel,
+} = __test__;
 
 let passed = 0;
 let failed = 0;
@@ -1779,6 +1782,193 @@ console.log('renderDownloadHistoryItem() keeps the Detail label for beets prose'
   });
   assertContains(html, 'class="p-hist-label">Detail</span>',
     'unlabelled details keep the historical caption');
+}
+
+console.log('spectralGradeIsAdmissible() withholds only the accusation');
+{
+  // Issue #829 PR4: undefined (no evidence join) keeps the historical
+  // rendering; false neutralizes ONLY the two accusing grades.
+  const cases = [
+    ['likely_transcode', undefined, true],
+    ['likely_transcode', true, true],
+    ['likely_transcode', false, false],
+    ['suspect', false, false],
+    ['genuine', false, true],
+    ['marginal', false, true],
+  ];
+  for (const [grade, admissible, expected] of cases) {
+    if (spectralGradeIsAdmissible(grade, admissible) === expected) {
+      passed++;
+    } else {
+      failed++;
+      console.error(`  FAIL: ${grade}/${admissible} should be ${expected}`);
+    }
+  }
+}
+
+console.log('spectralChip() keeps the grade but drops the accusing colour');
+{
+  const accused = spectralChip('likely_transcode', 128, true);
+  assertContains(accused, 'quality-tone-poor',
+    'an admissible transcode grade keeps its red tone');
+  assertExcludes(accused, 'audit-only',
+    'an admissible grade carries no audit-only suffix');
+
+  const audited = spectralChip('likely_transcode', 128, false);
+  assertContains(audited, 'likely transcode',
+    'the measured grade stays visible as the audit fact');
+  assertContains(audited, 'audit-only',
+    'an inadmissible grade is labelled audit-only');
+  assertContains(audited, 'quality-tone-unknown',
+    'an inadmissible grade loses the accusing tone');
+  assertExcludes(audited, 'quality-tone-poor',
+    'an inadmissible grade is never painted as a transcode');
+}
+
+console.log('renderDownloadHistoryItem() states the proof gate exactly once');
+{
+  const html = renderDownloadHistoryFixture({
+    outcome: 'rejected',
+    soulseek_username: 'testuser',
+    created_at: '2026-08-01T02:10:00+00:00',
+    verdict: 'Rejected',
+    spectral_grade: 'likely_transcode',
+    spectral_bitrate: 128,
+    spectral_accusation_admissible: true,
+    verdict_tier: 1,
+    verdict_tier_statement: 'Transcode detected: in-window spectral cliff',
+    verdict_fired_legs: ['in_window_cliff'],
+  });
+  assertContains(html, 'class="p-hist-label">Proof gate</span>',
+    'the proof-gate row renders');
+  assertContains(html, 'Transcode detected: in-window spectral cliff',
+    'the tier statement renders verbatim');
+  const statements = html.split('Transcode detected').length - 1;
+  if (statements === 1) {
+    passed++;
+  } else {
+    failed++;
+    console.error(`  FAIL: ${statements} transcode statements, expected 1`);
+  }
+}
+
+console.log('renderDownloadHistoryItem() names the proof generation');
+{
+  const html = renderDownloadHistoryFixture({
+    outcome: 'success',
+    soulseek_username: 'testuser',
+    created_at: '2026-08-01T02:10:00+00:00',
+    verdict: 'Imported',
+    verified_lossless_generation: 'cliff/grade + ultrasonic legs',
+  });
+  assertContains(html, 'class="p-hist-label">Verified lossless</span>',
+    'the proof-generation row renders');
+  assertContains(html, 'proved by cliff/grade + ultrasonic legs',
+    'the generation label renders verbatim');
+}
+
+console.log('renderDownloadHistoryItem() surfaces the stage-2 counterfactual');
+{
+  const html = renderDownloadHistoryFixture({
+    outcome: 'rejected',
+    soulseek_username: 'testuser',
+    created_at: '2026-08-01T02:10:00+00:00',
+    verdict: 'Rejected',
+    stage2_if_stage1_deferred: 'downgrade',
+    stage2_if_stage1_deferred_verdict: 'worse',
+  });
+  assertContains(html, 'If stage 1 had deferred',
+    'the counterfactual row renders in forensics');
+  assertContains(html, 'stage2=downgrade, scoring the candidate worse',
+    'the counterfactual reads the same way pipeline-cli quality prints it');
+}
+
+console.log('renderDownloadHistoryItem() reports an unevaluable counterfactual');
+{
+  const html = renderDownloadHistoryFixture({
+    outcome: 'rejected',
+    soulseek_username: 'testuser',
+    created_at: '2026-08-01T02:10:00+00:00',
+    verdict: 'Rejected',
+    stage2_if_stage1_deferred: 'unavailable',
+  });
+  assertContains(html, 'stage 2 could not be evaluated',
+    '"could not run" is distinct from "had nothing to say"');
+}
+
+console.log('spectralStripCell() states the fact instead of the accusation');
+{
+  const audited = spectralStripCell('likely_transcode', '~128k ', false);
+  assertContains(audited, 'codec rolloff',
+    'the strip states native rolloff for an audit-only codec');
+  assertExcludes(audited, '>~128k likely transcode<',
+    'the strip does not stamp the grade');
+  assertContains(audited, 'Measured grade: likely transcode',
+    'the measured grade stays reachable in the hover title');
+  assertContains(audited, 'quality-tone-unknown',
+    'the strip cell loses the accusing tone');
+  const accused = spectralStripCell('likely_transcode', '~128k ', true);
+  assertContains(accused, 'quality-tone-poor',
+    'an admissible grade keeps its tone in the strip');
+  assertContains(accused, 'likely transcode',
+    'an admissible grade keeps its wording in the strip');
+}
+
+console.log('an unresolved codec never claims native encoder rolloff');
+{
+  const strip = spectralStripCell(
+    'likely_transcode', '~128k ', false, 'codec_unresolved');
+  assertContains(strip, 'codec unresolved',
+    'the strip says the codec is unknown');
+  assertExcludes(strip, 'rolloff',
+    'the strip never describes an encoder it could not identify');
+  const chip = spectralChip('likely_transcode', 128, false, 'codec_unresolved');
+  assertContains(chip, 'codec unresolved',
+    'the card says the codec is unknown');
+  assertExcludes(chip, 'native encoder behaviour',
+    'the card never describes an encoder it could not identify');
+  const auditOnly = spectralChip(
+    'likely_transcode', 128, false, 'audit_only_codec');
+  assertContains(auditOnly, 'native encoder behaviour',
+    'a resolved audit-only codec keeps the measured explanation');
+}
+
+console.log('renderEvidenceStrip() neutralizes an audit-only grade chip');
+{
+  const audited = renderEvidenceFixture({
+    outcome: 'rejected',
+    actual_min_bitrate: 256,
+    spectral_grade: 'likely_transcode',
+    spectral_bitrate: 128,
+    spectral_accusation_admissible: false,
+  });
+  assertContains(audited, 'codec rolloff',
+    'the strip states native rolloff for an audit-only IN codec');
+  assertExcludes(audited, 'quality-tone-poor',
+    'the strip never paints an audit-only codec as a transcode');
+
+  const accused = renderEvidenceFixture({
+    outcome: 'rejected',
+    actual_min_bitrate: 256,
+    spectral_grade: 'likely_transcode',
+    spectral_bitrate: 128,
+    spectral_accusation_admissible: true,
+  });
+  assertContains(accused, 'quality-tone-poor',
+    'an admissible transcode grade still reads as one');
+
+  const auditedHave = renderEvidenceFixture({
+    outcome: 'rejected',
+    actual_min_bitrate: 256,
+    existing_min_bitrate: 256,
+    existing_spectral_grade: 'likely_transcode',
+    existing_spectral_bitrate: 128,
+    existing_spectral_accusation_admissible: false,
+  });
+  assertContains(auditedHave, 'codec rolloff',
+    'the HAVE side is neutralized too (request 6387: the AAC is installed)');
+  assertExcludes(auditedHave, 'quality-tone-poor',
+    'the HAVE side never paints an audit-only codec as a transcode');
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

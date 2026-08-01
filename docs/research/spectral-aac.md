@@ -109,7 +109,7 @@ The **SBR crossover frequency** — where "real, transmitted" switches to "encod
 - **libfdk_aac: yes.** A public, source-level bitrate→bandwidth table (above) that's stable across versions (the header calls the values deliberately fixed). A ladder keyed on FDK's CBR/VBR-mode bandwidths is directly buildable and testable.
 - **ffmpeg native `aac`: partially.** No public table, but the encoder is open source and deterministic — Phase 3 can build an empirical ladder by encoding reference material at target bitrates and measuring the actual cutoff, pinning the results as the calibration table. Buildable, but requires new measurement, not a source-table transcription.
 - **Apple AAC: no fixed ladder — only an empirical, re-validated one.** No published spec exists, the qaac maintainer confirms none exists, and the closed-source encoder can change silently across OS/Core Audio versions. Treat as the least stable of the three, most likely to need re-calibration after an undocumented Apple change.
-- **HE-AAC/SBR: no ladder makes sense in cliff-detection terms.** The fix is a **pre-classification gate**: if the stream signals SBR (AAC object type 5/29), skip cliff-based grading for that file entirely rather than run the existing 12-20 kHz LAME-shaped detector against it (a dedicated SBR-crossover estimator is out of scope for this calibration pass).
+- **HE-AAC/SBR: no ladder makes sense in cliff-detection terms.** The fix is a **pre-classification gate**: if the stream signals SBR (AAC object type 5/29), skip cliff-based grading for that file entirely rather than run the existing 12-20 kHz LAME-shaped detector against it (a dedicated SBR-crossover estimator is out of scope for this calibration pass). **Pointer added 2026-08-01 (Phase 5 PR5): this gate was measured unnecessary and NOT shipped — see "The SBR pre-classification gate was NOT shipped" below.**
 
 **Distinguishability**: FDK's CBR cutoffs (14-16 kHz mono, 15.5-17 kHz stereo, hard-capping at 17 kHz) sit close enough to LAME's 128-160 kbps window that cliff position alone can't separate "genuine FDK-AAC 128" from "MP3 128 transcoded to AAC" — some other signal (container/encoder tag, or a wide "AAC-plausible" band that simply never fires `"suspect"` across that whole range) will be needed. Apple's cutoffs are undocumented, so distinguishability there can only be established empirically in Phase 3.
 
@@ -132,6 +132,142 @@ Testable claims — encode X at bitrate Y with real reference material, then mea
 | HE-AAC v2 | 24-32 kbps stereo | Crossover pushed lower still (likely <8 kHz); nearly all our slice window is synthetic | Low — mechanics-based inference, no numeric source at this exact bitrate |
 
 Recommended Phase 3 minimum test matrix: encode the same reference album through (a) libfdk_aac CBR at 96/128/192/320, (b) ffmpeg native `aac` at the same four rates, (c) a real Apple Music or iTunes Plus purchase (cannot be synthesized — must be sourced from an actual Apple encode), and (d) libfdk_aac HE-AAC/HE-AACv2 at 48/64/96 — then run each through the existing `analyze_track` and record the actual `cliff_freq_hz` / `hf_deficit_db` against the predictions above.
+
+## Measured — Phase 3/4 results (committed 2026-08-01, Phase 5 PR5)
+
+The predictions above were checked against **60,102 production-primitive
+measurements over four independent album arms** — TRAINING (34 albums),
+ROUND-1 (15), ROUND-2 (27), ROUND-3 (24) — including **2,928 genuine Apple
+CoreAudio encodes** measured across the three holdout cohorts so that
+Apple, the last training-only family, became four-arm. Compiled analysis:
+`docs/research/spectral-calibration-findings.md`. Raw record:
+`docs/research/calibration-data/`.
+
+### Three encoders, three behaviours, one honest semantic
+
+**libfdk — the cap is real, and it is an identity signature.** FDK
+192/256/320 all cliff at a **16500 Hz median on all four arms**, i.e. they
+read as "MP3 128" through the LAME table. FDK's cutoff is an *identity*
+signature, not a quality ladder.
+
+TRAINING arm, 402 tracks per variant, both AAC-LC encoder families
+(`docs/research/calibration-data/tables.md`). These are **in-window
+(12–20 kHz) detections**, so a variant whose real cutoff sits near or above
+20 kHz shows a truncated, unreliable median:
+
+| variant | no-cliff | cliff p10 / med / p90 (Hz) | est. mode via `LAME_LOWPASS` |
+|---|---:|---|---|
+| fdk-cbr96 | 51% | 14000 / 14000 / 14000 | 96 (47%) |
+| fdk-cbr128 | 9% | 15000 / 15000 / 15000 | 96 (91%) |
+| fdk-cbr192 | 11% | 16500 / 16500 / 16500 | 128 (89%) |
+| fdk-cbr256 | 9% | 16500 / 16500 / 16500 | 128 (91%) |
+| fdk-cbr320 | 9% | 16500 / 16500 / 16500 | 128 (91%) |
+| fdk-vbr3 | 50% | 15000 / 15500 / 15500 | 128 (43%) |
+| fdk-vbr5 | 93% | 14600 / 18500 / 18500 | 192 (5%) |
+| aacffm-96 | 24% | 15500 / 15500 / 16000 | 128 (75%) |
+| aacffm-128 | 75% | 16500 / 17000 / 17000 | 128 (25%) |
+| aacffm-192 | 98% | 13250 / 18250 / 18500 | 192 (1%) |
+| aacffm-256 | 99% | 13000 / 16750 / 13000 | 160 (0%) |
+| aacffm-320 | 99% | 13000 / 16750 / 13000 | 160 (0%) |
+
+**ffmpeg-native — a rising ladder with a dynamic cutoff.** 96 → 15500,
+128 → 17000, 192 → 18250, 256/320 → mostly no cliff; on dense/loud material
+the cutoff climbs past 18 kHz. That dynamism makes the ladder probabilistic
+and creates a thin-evidence fraud class (see residual 3 in the findings doc).
+
+**Apple CoreAudio — measured on four arms, % no-cliff / median cliff Hz:**
+
+| variant | TRAINING | ROUND-1 | ROUND-2 | ROUND-3 |
+|---|---|---|---|---|
+| apple-cbr128 | 16% / 16500 | 13% / 17000 | 27% / 17000 | 29% / 16500 |
+| apple-abr192 | 75% / 18500 | 80% / 18500 | 82% / 18250 | 74% / 18000 |
+| apple-tvbr91 | 75% / 18500 | 80% / 18500 | 82% / 18000 | 77% / 18000 |
+| apple-cvbr256 | 98% / 18000 | 99% / 18500 | 96% / 16000 | 98% / 17500 |
+
+Legacy CBR-128 is visible and stable; ABR-192 / TVBR-91 are ~75–82%
+invisible; **CVBR-256 — iTunes Plus and Apple Music, the dominant
+real-world AAC population — is indistinguishable from lossless.** Against
+the genuine-FLAC control on the same arms (% no-cliff / median HF deficit):
+apple-cvbr256 reads 98% / 49 dB, 99% / 48, 96% / 47, 98% / 45, and
+control-flac1644 reads 99% / 48 dB, 100% / 47, 99% / 47, 99% / 44.
+
+### The pooled content floor — the shipped semantic
+
+An AAC cliff anywhere in **13000–18000 Hz** is produced by encoder rates
+from 96 all the way to 320 kbps across all three encoder families. Share of
+all AAC cliffs landing in that band, Apple holdout encodes included:
+
+| TRAINING | ROUND-1 | ROUND-2 | ROUND-3 |
+|---|---|---|---|
+| 95% | 94% | 96% | 95% |
+
+So an AAC cliff supports a **content floor, never a bitrate, and is never a
+transcode accusation** — native AAC behaviour looks exactly like the thing
+the LAME table calls a 128 kbps transcode. That is the live defect
+(download 37946) this whole campaign was opened for.
+
+**Shipped constants** — `lib/quality/spectral_interpretation.py`:
+`AAC_FLOOR_JUNK_BELOW_HZ` 13000 (below it, no floor at all),
+`AAC_FLOOR_LOW_CLASS_KBPS` 96 (the only floor a 13–18.5 kHz cliff supports),
+`AAC_FLOOR_LIFT_AT_HZ` 18500 → `AAC_FLOOR_HIGH_CLASS_KBPS` 190.
+
+### Prediction scorecard
+
+| Phase 0 prediction | verdict |
+|---|---|
+| libfdk CBR 96 → ~16–17 kHz (the 96 kbps+ cap row) | **falsified as stated** — 14000 median. The prediction read the FDK table's **per-channel** key as a total: a 96 kbps stereo stream is 48 kbps/channel, which lands on the table's ~14,260 Hz row, not the cap |
+| libfdk CBR 128 → ~17000, capped | **falsified the same way** — 15000 median; 128 total is 64 kbps/channel |
+| libfdk CBR 192–320 → flat at the cap, no increase over 128 | **held, and worth the regression test it asked for** — 16500 flat from 192 up, on all four arms. This is where the cap genuinely binds (96–160 kbps/channel), and it is one tier low in detector space as everywhere |
+| libfdk VBR 3 → ~15750 | **held** — 15500 median |
+| libfdk VBR 5 → ~19293 | **held** — 18500 median where a cliff shows at all (93% no-cliff) |
+| ffmpeg-native 128 → 15–17 kHz | **held** — 17000 median |
+| ffmpeg-native 256–320 → wider than FDK, no 17 kHz cap | **held** — 99% no-cliff |
+| Apple CVBR-256 → unknown, plausibly wider than FDK | **held, and worse than feared** — 96–99% no-cliff on every arm, statistically identical to the FLAC control |
+| HE-AACv1 64 → crossover below the window, our slices are synthetic | **held, with a worse consequence than predicted** — `fdk-he1-64` measures **96–100% no-cliff on every arm**: it reads as lossless |
+| HE-AACv2 24–32 → nearly all synthetic | **held** — `fdk-he2-32` 66–71% no-cliff; on TRAINING, 91% of its tracks were caught by the deficit metric instead |
+
+### The SBR pre-classification gate was NOT shipped — deliberately
+
+This document (and Phase 5 PR2's plan) called an AAC-object-type 5/29
+pre-gate **mandatory**, on the strength of `fdk-he1-64` reading as lossless.
+Measured before implementing it (issue #829 §1.5e, 2026-07-29): probing
+every candidate file on the deployment found **zero HE-AAC anywhere** — 409
+AAC-LC and 39 ALAC in the library, 22 ALAC in the slskd tree. HE-AAC also
+cannot structurally reach the proof gate, because the promotion path counts
+only files `_is_lossless_file` accepts and HE-AAC probes as plain `aac`; and
+the genuinely dangerous case — HE-AAC laundered *into* a FLAC container —
+has no AAC object type left to read, which is what the ultrasonic leg is
+for. The reserved `sbr_present` evidence fact was therefore deleted as dead
+plumbing in Phase 5 PR3 rather than wired. The reasoning is recorded in
+`lib/quality/spectral_interpretation.py`'s module docstring.
+
+### The Apple class is closed off the spectrum, not on it
+
+Two independent 2026-07-31 threads proved that **no spectral instrument at
+production granularity can separate Apple CVBR-256** — the paired
+level-normalized shape delta is ≤ 0.24 dB in all 20 bands, with a
+signal-to-noise ratio of 0.031–0.086 against genuine album-to-album
+variation (`docs/research/calibration-data/shape-analysis/`), and the
+within-album dispersion axis is falsified with its sign inverted
+(`docs/research/calibration-data/homogeneity/`). Measured against the gate
+directly (`docs/research/calibration-data/apple-arm/`), 10 of 17 Apple
+launders reach proof and the conditional false-accept is 91–92%.
+
+What closed it was **not spectral**: an MDCT frame-lattice detector
+recovered from decoded PCM. ≥ 4 tracks of an album recovering the same
+lattice offset is a parameter-free rule with an analytic false-positive
+floor of ~0.0023 albums per 5000, and the mechanism is exact — CoreAudio
+primes 2112 samples (2112 mod 1024 = 64 → lattice offset 960) while
+ffmpeg-native AAC primes 1024 → offset 0. It catches 100% of `qaac-cvbr256`,
+`qaac-cvbr320`, `qaac-tvbr91`, `qaac-abr192` and 16/17 of `qaac-cbr128`
+(`docs/research/calibration-data/derrien-refinement/`), and ships as the
+production AAC frame-lattice proof leg (`lib/aac_lattice.py`,
+`aac_lattice_proof_leg` in `lib/quality/decisions.py`, classifier
+`spectral_verified_lossless_v4`).
+
+**The measured permanent residual on the AAC side is roughly half of
+`ffmpeg`-native 256/320** — best union `offset k ≥ 4 OR z > 12` leaves 5/10
+and 4/10 surviving.
 
 ## Sources
 

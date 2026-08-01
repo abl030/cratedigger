@@ -103,6 +103,10 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         # Quality summary for the collapsed card (issue: "show quality on disk").
         "status", "min_bitrate", "avg_bitrate", "format", "verified_lossless",
         "current_spectral_grade", "current_spectral_bitrate",
+        # issue #829 Phase 5 PR4 — the group badge renders the INSTALLED
+        # copy's grade, so it carries the installed copy's audit-only pair.
+        "current_spectral_accusation_admissible",
+        "current_spectral_accusation_withheld",
         "quality_label", "quality_rank",
         # Summary of the last successful import for the request — tells the
         # user what's actually on disk, not the most recent attempt.
@@ -116,6 +120,9 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         # candidates by audio quality. Always present in the payload;
         # values are None when the underlying row lacks evidence.
         "spectral_grade", "spectral_bitrate",
+        # issue #829 Phase 5 PR4 — the per-entry chip renders the
+        # CANDIDATE's grade, so it carries the candidate's own pair.
+        "spectral_accusation_admissible", "spectral_accusation_withheld",
         "v0_probe_kind", "v0_probe_avg_bitrate",
         # Storage format + explicit min/avg bitrates + computed quality rank — read
         # from album_quality_evidence via download_log.candidate_evidence_id
@@ -401,6 +408,183 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
                 self.assertIsInstance(
                     group[field], expected_type,
                     f"group.{field}={group[field]!r} should be {expected_type}")
+
+    def _link_installed_evidence(
+        self, request_id: int, measurement, **evidence_kwargs,
+    ) -> None:
+        """Link a production-shaped installed evidence row to a request."""
+        from tests.helpers import make_album_quality_evidence
+
+        installed = make_album_quality_evidence(
+            mb_release_id=f"installed-{request_id}",
+            source_path="/mnt/virtio/Music/Beets/installed",
+            measurement=measurement,
+            **evidence_kwargs,
+        )
+        self.db.upsert_album_quality_evidence(installed)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=installed.mb_release_id,
+            snapshot_fingerprint=installed.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.assertTrue(
+            self.db.set_request_current_evidence(request_id, stored.id))
+
+    _IN_LIBRARY_BEETS: ClassVar = {
+        "abc-123": {"beets_format": "AAC", "beets_bitrate": 256,
+                    "beets_avg_bitrate": 256, "beets_tracks": 10},
+    }
+
+    @patch("web.server.check_beets_library_detail",
+           return_value=_IN_LIBRARY_BEETS)
+    def test_group_badge_withholds_the_accusation_for_an_audit_only_have(
+        self, _mock_beets,
+    ):
+        """Request 6387's shape at the group badge: the installed copy is
+        an AAC the codec-blind analyzer graded ``likely_transcode``."""
+        from lib.quality import AudioQualityMeasurement
+
+        self._reseed_request(
+            100, status="imported", current_spectral_grade="likely_transcode",
+            current_spectral_bitrate=128,
+        )
+        self._link_installed_evidence(
+            100,
+            AudioQualityMeasurement(
+                min_bitrate_kbps=256, avg_bitrate_kbps=256, is_cbr=True,
+                format="AAC", spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=128, spectral_subject="installed",
+                spectral_provenance="measured", cliff_hz=15000,
+                codec_family="aac", spectral_measurement_version=2,
+            ),
+            codec="aac", container="m4a", storage_format="AAC",
+        )
+
+        _status, data = self._get("/api/wrong-matches")
+
+        group = next(g for g in data["groups"] if g["request_id"] == 100)
+        self.assertTrue(group["in_library"])
+        self.assertEqual(group["current_spectral_grade"], "likely_transcode")
+        self.assertIs(group["current_spectral_accusation_admissible"], False)
+        self.assertEqual(
+            group["current_spectral_accusation_withheld"], "audit_only_codec")
+
+    @patch("web.server.check_beets_library_detail",
+           return_value=_IN_LIBRARY_BEETS)
+    def test_group_badge_keeps_the_accusation_for_a_real_codec(
+        self, _mock_beets,
+    ):
+        """The must-still-work half: an MP3 cliff still accuses."""
+        from lib.quality import AudioQualityMeasurement
+
+        self._reseed_request(
+            100, status="imported", current_spectral_grade="likely_transcode",
+            current_spectral_bitrate=128,
+        )
+        self._link_installed_evidence(
+            100,
+            AudioQualityMeasurement(
+                min_bitrate_kbps=320, avg_bitrate_kbps=320, is_cbr=True,
+                format="MP3", spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=128, spectral_subject="installed",
+                spectral_provenance="measured", cliff_hz=16000,
+                codec_family="mp3", spectral_measurement_version=2,
+            ),
+            codec="mp3", container="mp3", storage_format="MP3",
+        )
+
+        _status, data = self._get("/api/wrong-matches")
+
+        group = next(g for g in data["groups"] if g["request_id"] == 100)
+        self.assertIs(group["current_spectral_accusation_admissible"], True)
+        self.assertIsNone(group["current_spectral_accusation_withheld"])
+
+    @patch("web.server.check_beets_library_detail",
+           return_value=_IN_LIBRARY_BEETS)
+    def test_group_badge_has_no_flags_without_linked_evidence(
+        self, _mock_beets,
+    ):
+        """Fail-accusing: an unlinked request keeps the accusing badge."""
+        self._reseed_request(
+            100, status="imported", current_spectral_grade="likely_transcode",
+            current_spectral_bitrate=128,
+        )
+
+        _status, data = self._get("/api/wrong-matches")
+
+        group = next(g for g in data["groups"] if g["request_id"] == 100)
+        self.assertEqual(group["current_spectral_grade"], "likely_transcode")
+        self.assertIsNone(group["current_spectral_accusation_admissible"])
+        self.assertIsNone(group["current_spectral_accusation_withheld"])
+
+    def test_entry_chip_withholds_the_accusation_for_an_audit_only_codec(self):
+        """The CANDIDATE's own codec decides the per-entry chip."""
+        from lib.quality import AudioQualityMeasurement
+        from tests.helpers import make_album_quality_evidence
+
+        log_id = self._seed_wrong_match(
+            request_id=143, mb_release_id="abc-143")
+        candidate = make_album_quality_evidence(
+            mb_release_id=f"ev-{log_id}",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=256, avg_bitrate_kbps=256, is_cbr=True,
+                format="AAC", spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=128, spectral_subject="source",
+                spectral_provenance="measured", cliff_hz=15000,
+                codec_family="aac", spectral_measurement_version=2,
+            ),
+            codec="aac", container="m4a", storage_format="AAC",
+        )
+        self.db.upsert_album_quality_evidence(candidate)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=candidate.mb_release_id,
+            snapshot_fingerprint=candidate.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.db.set_download_log_candidate_evidence(log_id, stored.id)
+
+        _status, data = self._get("/api/wrong-matches")
+
+        group = next(g for g in data["groups"] if g["request_id"] == 143)
+        entry = next(
+            e for e in group["entries"] if e["download_log_id"] == log_id)
+        self.assertEqual(entry["spectral_grade"], "likely_transcode")
+        self.assertIs(entry["spectral_accusation_admissible"], False)
+        self.assertEqual(
+            entry["spectral_accusation_withheld"], "audit_only_codec")
+
+    def test_entry_chip_keeps_the_accusation_for_a_real_codec(self):
+        """The must-still-work half at the candidate chip."""
+        log_id = self._seed_wrong_match(
+            request_id=144, mb_release_id="abc-144")
+        self._seed_entry_evidence(
+            log_id, storage_format="MP3", min_bitrate=320,
+            spectral_grade="likely_transcode", spectral_bitrate=128,
+        )
+
+        _status, data = self._get("/api/wrong-matches")
+
+        group = next(g for g in data["groups"] if g["request_id"] == 144)
+        entry = next(
+            e for e in group["entries"] if e["download_log_id"] == log_id)
+        self.assertIs(entry["spectral_accusation_admissible"], True)
+        self.assertIsNone(entry["spectral_accusation_withheld"])
+
+    def test_entry_chip_has_no_flags_without_candidate_evidence(self):
+        """Fail-accusing: a pre-evidence row keeps the accusing chip."""
+        log_id = self._seed_wrong_match(
+            request_id=145, mb_release_id="abc-145",
+            log_overrides={"spectral_grade": "likely_transcode"},
+        )
+
+        _status, data = self._get("/api/wrong-matches")
+
+        group = next(g for g in data["groups"] if g["request_id"] == 145)
+        entry = next(
+            e for e in group["entries"] if e["download_log_id"] == log_id)
+        self.assertEqual(entry["spectral_grade"], "likely_transcode")
+        self.assertIsNone(entry["spectral_accusation_admissible"])
+        self.assertIsNone(entry["spectral_accusation_withheld"])
 
     def test_entry_has_required_fields_and_types(self):
         _status, data = self._get("/api/wrong-matches")

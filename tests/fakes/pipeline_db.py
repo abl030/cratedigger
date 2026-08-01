@@ -122,6 +122,8 @@ from lib.pipeline_db import (
 from lib.pipeline_db._core import OwnerSessionLost, ReadOnlyQueryCursor
 from lib.pipeline_db._shared import (
     ACQUISITION_REQUEST_STATUSES,
+    CANDIDATE_EVIDENCE_PREFIX,
+    CURRENT_EVIDENCE_PREFIX,
     processing_owner_payload,
     validate_request_metadata_fields,
 )
@@ -2031,6 +2033,8 @@ class FakePipelineDB:
         recovery_message: str,
         limit: int = 50,
     ) -> list[ImportJob]:
+        from lib.terminal_outcomes import non_automation_failure_terminal_outcome
+
         running = [
             row for row in self._import_jobs
             if row.get("status") == "running"
@@ -2041,18 +2045,32 @@ class FakePipelineDB:
         for row in running[:limit]:
             now = _utcnow()
             launched = row.get("beets_launch_authorized_at") is not None
-            row["status"] = "failed" if launched else "queued"
-            row["message"] = recovery_message if launched else requeue_message
-            row["error"] = (
-                "Automatic replay refused because Beets may have mutated "
-                "the library"
-                if launched else None
-            )
+            if launched:
+                no_replay_reason = (
+                    "Automatic replay refused because Beets may have mutated "
+                    "the library"
+                )
+                job = ImportJob.from_row(copy.deepcopy(row))
+                terminal = self.persist_import_terminal_outcome(
+                    non_automation_failure_terminal_outcome(
+                        job,
+                        error=no_replay_reason,
+                        message=f"{recovery_message}: {no_replay_reason}",
+                        result={
+                            "success": False,
+                            "recovery": "launch_authorized_no_replay",
+                        },
+                    )
+                )
+                updated_jobs.append(terminal.job)
+                continue
+            row["status"] = "queued"
+            row["message"] = requeue_message
+            row["error"] = None
             row["worker_id"] = None
-            if not launched:
-                row["started_at"] = None
+            row["started_at"] = None
             row["heartbeat_at"] = None
-            row["completed_at"] = now if launched else None
+            row["completed_at"] = None
             row["updated_at"] = now
             updated_jobs.append(ImportJob.from_row(copy.deepcopy(row)))
         return updated_jobs
@@ -2973,9 +2991,10 @@ class FakePipelineDB:
                         command.successful_terminal_acceptance
                     ),
                 ))
-            download_log_id = cast(Any, self.log_download)(
-                request_id=command.request_id,
-                **command.audit.as_log_kwargs(),
+            download_log_id = self._log_terminal_audit(
+                command.request_id,
+                command.import_job_id,
+                command.audit,
             )
             self.set_download_log_candidate_evidence(
                 download_log_id,
@@ -3291,11 +3310,44 @@ class FakePipelineDB:
         boundary(f"request.processing_to_{virtual}")
         return tuple(applied)
 
-    def _log_terminal_audit(self, request_id: int, audit):
-        return self.log_download(
-            request_id=request_id,
-            **audit.as_log_kwargs(),
+    def _log_terminal_audit(self, request_id: int, import_job_id: int, audit):
+        from lib.failure_presentation import unlinked_source_provenance_message
+
+        source = None
+        if audit.source_download_log_id is not None:
+            source = next(
+                (
+                    entry for entry in self.download_logs
+                    if entry.id == audit.source_download_log_id
+                    and entry.request_id == request_id
+                ),
+                None,
+            )
+        job = next(
+            (row for row in self._import_jobs if row["id"] == import_job_id),
+            None,
         )
+        fallback_source = (
+            "youtube"
+            if job is not None and job.get("job_type") == IMPORT_JOB_YOUTUBE
+            else "slskd"
+        )
+        kwargs = audit.as_log_kwargs()
+        if audit.source_download_log_id is not None and source is None:
+            kwargs["source_download_log_id"] = None
+            kwargs["error_message"] = unlinked_source_provenance_message(
+                audit.error_message,
+            )
+        download_log_id = self.log_download(
+            request_id=request_id,
+            **kwargs,
+        )
+        terminal = next(
+            entry for entry in self.download_logs
+            if entry.id == download_log_id
+        )
+        terminal.source = source.source if source is not None else fallback_source
+        return download_log_id
 
     def _persist_automation_import_terminal_outcome(
         self,
@@ -3325,6 +3377,7 @@ class FakePipelineDB:
             audit = self._fake_automation_audit(command.audit, authority)
             download_log_id = self._log_terminal_audit(
                 command.request_id,
+                command.import_job_id,
                 audit,
             )
             boundary("download_log")
@@ -3436,6 +3489,7 @@ class FakePipelineDB:
                 ))
             download_log_id = self._log_terminal_audit(
                 command.request_id,
+                command.import_job_id,
                 command.audit,
             )
             self.set_download_log_candidate_evidence(
@@ -5992,10 +6046,6 @@ class FakePipelineDB:
                     current_evidence.measured_at <= entry.created_at
                     if current_evidence is not None else None
                 ),
-                "_current_evidence_format": (
-                    current_measurement.format
-                    if current_measurement is not None else None
-                ),
                 "_current_evidence_min_bitrate": (
                     current_measurement.min_bitrate_kbps
                     if current_measurement is not None else None
@@ -6008,14 +6058,13 @@ class FakePipelineDB:
                     current_measurement.median_bitrate_kbps
                     if current_measurement is not None else None
                 ),
-                "_current_evidence_spectral_grade": (
-                    current_measurement.spectral_grade
-                    if current_measurement is not None else None
-                ),
-                "_current_evidence_spectral_bitrate": (
-                    current_measurement.spectral_bitrate_kbps
-                    if current_measurement is not None else None
-                ),
+                # issue #829 Phase 5 PR4 — the installed album's own
+                # codec-resolution facts, seeded from the evidence row so
+                # the HAVE grade chip's audit-only flag is derived, never
+                # invented. Same nine aliases the production fragment
+                # projects, from the same helper the other two joins use.
+                **self._accusation_alias_projection(
+                    current_evidence, CURRENT_EVIDENCE_PREFIX),
                 "_current_evidence_v0_probe_kind": (
                     current_v0.subject if current_v0 is not None else None
                 ),
@@ -6112,12 +6161,62 @@ class FakePipelineDB:
             for entry in self.download_logs
         )
 
+    @staticmethod
+    def _accusation_alias_projection(
+        evidence: AlbumQualityEvidence | None,
+        prefix: str,
+    ) -> dict[str, object]:
+        """Mirror ``accusation_evidence_columns`` for one evidence join.
+
+        The production queries project these nine aliases from a LEFT
+        JOIN, so an unmatched join yields all-NULL — exactly what a fake
+        with no linked evidence must hand back, or the fake would be more
+        permissive than production about which flags a surface can see.
+        """
+        measurement = evidence.measurement if evidence is not None else None
+        return {
+            f"{prefix}format": (
+                measurement.format if measurement is not None else None),
+            f"{prefix}spectral_grade": (
+                measurement.spectral_grade
+                if measurement is not None else None),
+            f"{prefix}spectral_bitrate": (
+                measurement.spectral_bitrate_kbps
+                if measurement is not None else None),
+            f"{prefix}spectral_subject": (
+                measurement.spectral_subject
+                if measurement is not None else None),
+            f"{prefix}was_converted_from": (
+                measurement.was_converted_from
+                if measurement is not None else None),
+            f"{prefix}cliff_hz": (
+                measurement.cliff_hz if measurement is not None else None),
+            f"{prefix}codec_family": (
+                measurement.codec_family
+                if measurement is not None else None),
+            f"{prefix}storage_format": (
+                evidence.storage_format if evidence is not None else None),
+            f"{prefix}filetype_band": (
+                evidence.filetype_band if evidence is not None else None),
+        }
+
+    def _current_evidence_for_request(
+        self, row: Mapping[str, object],
+    ) -> AlbumQualityEvidence | None:
+        """The evidence row ``album_requests.current_evidence_id`` names."""
+        evidence_id = row.get("current_evidence_id")
+        if not isinstance(evidence_id, int) or isinstance(evidence_id, bool):
+            return None
+        return self._evidence_by_id.get(evidence_id)
+
     def _long_tail_projection(self, row: dict[str, Any]) -> dict[str, Any]:
         """Project a request row to the long-tail cohort SELECT shape.
 
         Mirrors ``PipelineDB._LONG_TAIL_SELECT``'s narrow column list +
         the ``in_flight_rescue`` stamp so tests can't rely on a column
-        the production query doesn't return.
+        the production query doesn't return, plus the current-evidence
+        accusation aliases the worklist chip's audit-only flags derive
+        from.
         """
         keys = (
             "id", "artist_name", "album_title", "year", "status", "source",
@@ -6130,6 +6229,10 @@ class FakePipelineDB:
         # track_count mirrors the production COUNT(*) over album_tracks.
         out["track_count"] = len(self._tracks.get(int(row["id"]), []))
         out["in_flight_rescue"] = self._has_youtube_running(int(row["id"]))
+        out.update(self._accusation_alias_projection(
+            self._current_evidence_for_request(row),
+            CURRENT_EVIDENCE_PREFIX,
+        ))
         return out
 
     def get_long_tail_cohort(self) -> list[dict[str, Any]]:
@@ -7139,6 +7242,71 @@ class FakePipelineDB:
         row.setdefault("source_min_bitrate", None)
         row.setdefault("source_avg_bitrate", None)
         row.setdefault("source_median_bitrate", None)
+        # issue #829 Phase 5 PR4 — the candidate-evidence columns the
+        # proof-gate verdict derivation reads
+        # (``_CANDIDATE_EVIDENCE_COLUMNS``). Sourced from the SEEDED
+        # evidence row, never invented: a fake that stamped None here
+        # would hide every verdict the render path is supposed to show.
+        evidence = (
+            self._evidence_by_id.get(entry.candidate_evidence_id)
+            if entry.candidate_evidence_id is not None
+            else None
+        )
+        measurement = evidence.measurement if evidence is not None else None
+        lattice = evidence.aac_lattice if evidence is not None else None
+        proof = (
+            evidence.verified_lossless_proof if evidence is not None else None
+        )
+        row.update({
+            "_evidence_format": (
+                measurement.format if measurement is not None else None
+            ),
+            "_evidence_codec_family": (
+                measurement.codec_family if measurement is not None else None
+            ),
+            "_evidence_cliff_hz": (
+                measurement.cliff_hz if measurement is not None else None
+            ),
+            "_evidence_storage_format": (
+                evidence.storage_format if evidence is not None else None
+            ),
+            "_evidence_filetype_band": (
+                evidence.filetype_band if evidence is not None else None
+            ),
+            "_evidence_spectral_subject": (
+                measurement.spectral_subject
+                if measurement is not None else None
+            ),
+            "_evidence_was_converted_from": (
+                measurement.was_converted_from
+                if measurement is not None else None
+            ),
+            "_evidence_ultrasonic_deficit_db": (
+                measurement.ultrasonic_deficit_db
+                if measurement is not None else None
+            ),
+            "_evidence_spectral_measurement_version": (
+                measurement.spectral_measurement_version
+                if measurement is not None else None
+            ),
+            "_evidence_aac_lattice_modal_count": (
+                lattice.modal_count if lattice is not None else None
+            ),
+            "_evidence_aac_lattice_scored_tracks": (
+                lattice.scored_tracks if lattice is not None else None
+            ),
+            "_evidence_aac_lattice_max_z": (
+                lattice.max_z if lattice is not None else None
+            ),
+            "_evidence_verified_lossless_classifier": (
+                proof.classifier if proof is not None else None
+            ),
+            "_evidence_container_extensions": (
+                sorted({file.extension for file in evidence.files})
+                if evidence is not None and evidence.files
+                else None
+            ),
+        })
         return row
 
     # --- Wrong-match review queue ---
@@ -7252,6 +7420,11 @@ class FakePipelineDB:
                     "current_spectral_grade"),
                 "request_current_spectral_bitrate": req.get(
                     "current_spectral_bitrate"),
+                **self._accusation_alias_projection(
+                    ev, CANDIDATE_EVIDENCE_PREFIX),
+                **self._accusation_alias_projection(
+                    self._current_evidence_for_request(req),
+                    CURRENT_EVIDENCE_PREFIX),
             }
             if wrong_match_row_is_visible(row, include_replaced=True):
                 rows.append(row)

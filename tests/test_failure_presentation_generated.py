@@ -58,6 +58,7 @@ from lib.failure_presentation import (
     FAMILY_REFUSAL,
     FAMILY_TRANSPORT,
     FAMILY_UNKNOWN,
+    MAX_DIAGNOSTIC_CHARS,
     MAX_RAW_MESSAGE_CHARS,
     MAX_RAW_MESSAGE_GROUPS,
     TRANSFER_MESSAGE_LABEL_PEER,
@@ -69,6 +70,7 @@ from lib.failure_presentation import (
     bounded_text,
     decode_transfer_detail,
     materialize_reason_copy,
+    non_automation_import_failure_message,
     peer_failure_family,
     present_failure,
 )
@@ -425,6 +427,21 @@ def check_unrecognised_text_is_passed_through(
         return (
             f"unrecognised diagnostic was rewritten: {diagnostic!r} -> "
             f"{verdict!r}"
+        )
+    return None
+
+
+def check_non_automation_attempt_copy(
+    job_type: str,
+    diagnostic: str,
+    presentation: FailurePresentation,
+) -> str | None:
+    """A produced force/YouTube failure remains identified and bounded."""
+    expected = non_automation_import_failure_message(job_type, diagnostic)
+    if presentation.verdict != expected:
+        return (
+            "non-automation failure copy drifted from its producer: "
+            f"{presentation.verdict!r} != {expected!r}"
         )
     return None
 
@@ -937,6 +954,30 @@ class TestUnknownTextStaysBounded(unittest.TestCase):
             diagnostic, presentation)
         self.assertIsNone(violation, violation)
 
+    @example(job_type="force_import", diagnostic="x" * 500)
+    @example(job_type="youtube_import", diagnostic="\x00\n\t")
+    @given(
+        job_type=st.sampled_from(("force_import", "youtube_import")),
+        diagnostic=st.text(min_size=1, max_size=500),
+    )
+    def test_non_automation_attempt_copy_keeps_producer_identity(
+        self,
+        job_type: str,
+        diagnostic: str,
+    ) -> None:
+        message = non_automation_import_failure_message(job_type, diagnostic)
+        presentation = present_failure(FailureEvidence(
+            outcome="failed",
+            error_message=message,
+        ))
+        violation = check_non_automation_attempt_copy(
+            job_type,
+            diagnostic,
+            presentation,
+        )
+        self.assertIsNone(violation, violation)
+        self.assertLessEqual(len(message), MAX_DIAGNOSTIC_CHARS)
+
     @given(
         states=st.lists(
             st.sampled_from(_TERMINAL_ERROR_STATES), min_size=1, max_size=20),
@@ -1235,6 +1276,13 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
     def test_bounded_checker_trips_on_an_unbounded_verdict(self) -> None:
         self.assertIsNotNone(check_rendered_text_is_bounded(
             FailurePresentation(verdict="x" * 10000),
+        ))
+
+    def test_non_automation_copy_checker_trips_on_lost_attempt_identity(self) -> None:
+        self.assertIsNotNone(check_non_automation_attempt_copy(
+            "force_import",
+            "lost acknowledgement",
+            FailurePresentation(verdict="Import error: lost acknowledgement"),
         ))
 
 

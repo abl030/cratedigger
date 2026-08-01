@@ -8907,6 +8907,11 @@ class TestForceJobFailuresAreRecordedNotParked(unittest.TestCase):
         pins below only prove the policy change on a launched job.
         """
         db.seed_request(make_request_row(id=42, mb_release_id="force-release"))
+        source_download_log_id = db.log_download(
+            42,
+            outcome="rejected",
+            error_message="manual force-import source",
+        )
         source = tempfile.mkdtemp(prefix="cratedigger-force-never-parks-")
         self.addCleanup(shutil.rmtree, source, ignore_errors=True)
         with open(os.path.join(source, "01.mp3"), "wb") as handle:
@@ -8914,9 +8919,9 @@ class TestForceJobFailuresAreRecordedNotParked(unittest.TestCase):
         job = db.enqueue_import_job(
             IMPORT_JOB_FORCE,
             request_id=42,
-            dedupe_key=force_import_dedupe_key(11),
+            dedupe_key=force_import_dedupe_key(source_download_log_id),
             payload=force_import_payload(
-                download_log_id=11,
+                download_log_id=source_download_log_id,
                 failed_path=source,
             ),
         )
@@ -8938,6 +8943,27 @@ class TestForceJobFailuresAreRecordedNotParked(unittest.TestCase):
         )
         assert authorized is not None
         return claimed
+
+    def _assert_recents_visible_failure(
+        self,
+        db: FakePipelineDB,
+        claimed: ImportJob,
+    ) -> None:
+        """The failure contract is the real Recents classifier, not a job row."""
+        from web.classify import LogEntry, classify_log_entry
+
+        assert isinstance(claimed.payload, ForceImportPayload)
+        failed_rows = [
+            row for row in db.download_logs
+            if row.outcome == "failed"
+            and row.source_download_log_id == claimed.payload.download_log_id
+        ]
+        self.assertEqual(len(failed_rows), 1)
+        audit = db.get_download_log_entry(failed_rows[0].id)
+        assert audit is not None
+        rendered = classify_log_entry(LogEntry.from_row(dict(audit)))
+        self.assertEqual(rendered.badge, "Failed")
+        self.assertTrue(rendered.verdict.startswith("Force import attempt failed:"))
 
     def _run(
         self,
@@ -8968,7 +8994,8 @@ class TestForceJobFailuresAreRecordedNotParked(unittest.TestCase):
         stored = db.get_import_job(claimed.id)
         assert stored is not None
         self.assertEqual(stored.status, "failed")
-        self.assertEqual(stored.error, "RuntimeError")
+        self.assertEqual(stored.error, "RuntimeError: force wrapper vanished")
+        self._assert_recents_visible_failure(db, claimed)
 
     def test_bundleless_force_failure_is_failed_not_parked(self) -> None:
         db = FakePipelineDB()
@@ -8985,6 +9012,7 @@ class TestForceJobFailuresAreRecordedNotParked(unittest.TestCase):
         assert updated is not None
         self.assertEqual(updated.status, "failed")
         self.assertEqual(updated.error, "force import produced no bundle")
+        self._assert_recents_visible_failure(db, claimed)
 
     def test_bundleless_force_success_is_completed_not_parked(self) -> None:
         db = FakePipelineDB()
@@ -9019,7 +9047,59 @@ class TestForceJobFailuresAreRecordedNotParked(unittest.TestCase):
 
         assert updated is not None
         self.assertEqual(updated.status, "failed")
-        self.assertIn("requeue-to-preview failed", updated.message or "")
+        self.assertEqual(updated.message, "requeue UPDATE failed: boom")
+        self._assert_recents_visible_failure(db, claimed)
+
+    def test_real_requeue_failure_producer_is_not_prefixed_twice(self) -> None:
+        """The producer's contextual requeue prefix is persisted verbatim."""
+        from lib.dispatch.evidence_gate import _requeue_import_job_to_preview
+
+        class RequeueFailureDB(FakePipelineDB):
+            def requeue_import_job_for_preview(self, *args: object, **kwargs: object):
+                del args, kwargs
+                raise RuntimeError("connection dropped")
+
+        db = RequeueFailureDB()
+        claimed = self._force_job(db)
+        outcome = _requeue_import_job_to_preview(
+            db,  # pyright: ignore[reportArgumentType]
+            import_job_id=claimed.id,
+            reason="candidate evidence changed",
+        )
+        self.assertEqual(
+            outcome.message,
+            "Requeue to preview failed: RuntimeError: connection dropped",
+        )
+
+        updated = self._run(db, claimed, _fixed_outcome_execute_fn(outcome))
+
+        assert updated is not None
+        self.assertEqual(updated.status, "failed")
+        self.assertEqual(updated.message, outcome.message)
+        self.assertEqual(
+            (updated.message or "").count("Requeue to preview failed:"), 1,
+        )
+        self._assert_recents_visible_failure(db, claimed)
+
+    def test_failed_force_attempt_preserves_operator_or_terminal_request_state(
+        self,
+    ) -> None:
+        """A non-owning failure cannot undo a current explicit request state."""
+        for status in ("unsearchable", "imported"):
+            with self.subTest(status=status):
+                db = FakePipelineDB()
+                claimed = self._force_job(db)
+                db.request(42)["status"] = status
+                updated = self._run(
+                    db,
+                    claimed,
+                    _fixed_outcome_execute_fn(
+                        DispatchOutcome(False, "failed after operator action"),
+                    ),
+                )
+                assert updated is not None
+                self.assertEqual(db.request(42)["status"], status)
+                self._assert_recents_visible_failure(db, claimed)
 
 
 class TestTerminalStageInvariantCheckersTripOnViolations(unittest.TestCase):

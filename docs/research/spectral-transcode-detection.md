@@ -303,6 +303,103 @@ follow-up research spike only if the Phase 3 calibration corpus shows
 residual false negatives the deployable set can't explain — don't build
 speculatively now.
 
+## Measured — Phase 3/4 results (committed 2026-08-01, Phase 5 PR5)
+
+Every item on the shortlist above was either measured, shipped, or
+falsified. Compiled analysis:
+`docs/research/spectral-calibration-findings.md`. Raw record:
+`docs/research/calibration-data/`.
+
+### Shortlist scorecard
+
+| # | shortlist item | verdict |
+|---|---|---|
+| 1 | Multi-window cliff-consistency check | **measured, then REJECTED for production.** It was in the v2.1/v3 scorer (offsets 0/60/120/180, unioned) and the ablation says single-window wins: max leak-free `T` is 61.50 for window 0 alone against 64.00 for the union, but the union costs 34/100 genuine denials against 28/100 — and window 0 is the *strongest* single window (299/300 launders denied vs 296/294/295). On the leak-vs-cost frontier single-window weakly dominates at every operating point, and each extra window is a full re-decode plus 21 sox band-RMS passes per track on every import. Production ships **one window** |
+| 2 | Per-codec cutoff-and-shape table cross-check | **shipped — it is the whole model.** `lib/quality/spectral_interpretation.py`. The *cross-check* half was falsified though: see "cutoff Hz is not a currency" below |
+| 3 | Full-spectrum multi-cliff scan | **partially, and deliberately narrower.** Four 20–22 kHz extension slices ship as an **additive** capture that never feeds `detect_cliff` — widening the detector's input would shift every historical cliff detection. There is still no multi-cliff scan |
+| 4 | HF noise-floor variance, not just mean | **FALSIFIED 2026-07-31** (`docs/research/calibration-data/homogeneity/`). The second-moment axis is dead: a 33-feature grouped leave-one-album-out model scores AUC **0.508**, against a null-feature floor of 0.60 — and on the classes that actually escape, a paired oracle handed the album's own genuine twin sits at a coin flip |
+| 5 | sfb21 bump detector | **not built.** `lame-v0` is one of the three named permanent residuals |
+| 6 | Stereo mid/side correlation above cutoff | **not built** |
+
+### The "not deployable near-term" list was wrong about the important one
+
+> "MDCT/Benford's-law statistics (#10) need bitstream-internal access
+> sox/ffmpeg can't provide."
+
+**Falsified, and it became the most valuable leg in the system.** Derrien
+(JAES 2019, 67(3) 116–123) recovers the AAC frame lattice **from decoded
+PCM** — no bitstream access at all. A validated numpy port
+(`docs/research/calibration-data/derrien/`) plus a 2026-07-31 refinement
+thread (`docs/research/calibration-data/derrien-refinement/`) produced a
+parameter-free rule: **≥ 4 tracks of an album recovering the same MDCT
+frame offset**, with an *analytic* false-positive floor of ~0.0023 albums
+per 5000 rather than a fitted threshold. Genuine offsets are uniform (182
+distinct in 197 tracks, zero within-album coincidences); the mechanism is
+exact (CoreAudio primes 2112 samples → offset 960, ffmpeg-native primes
+1024 → offset 0). It closes the entire Apple/CoreAudio family — the one
+class no spectral instrument can reach — and ships as `lib/aac_lattice.py`
+with `aac_lattice_proof_leg` in `lib/quality/decisions.py`, minting
+`spectral_verified_lossless_v4`.
+
+The other two deferrals stand: SBR-mirror cross-correlation (#4) was never
+needed (the deployment has zero HE-AAC — see
+`docs/research/spectral-aac.md`), and pre-echo/transient smear (#9) was
+never built.
+
+### Cutoff Hz is not a cross-codec currency
+
+The load-bearing negative result, and the direct cause of the live defect
+(download 37946) that opened the issue. Top classes each codec's own ladder
+infers for the same measured cliff:
+
+| measured cliff | MP3 says | VORBIS says | AAC says |
+|---|---|---|---|
+| 13.0–15.0 kHz | cbr96, v6, cbr128 | q0, q4, q5 | cbr96, cbr128, vbr3 |
+| 15.0–16.5 kHz | cbr128, v6, v4 | q2, q0, q4 | cbr128, cbr96, vbr3 |
+| **16.5–18.0 kHz** | **cbr160, v4, v2** | q-1, q3, q4 | **cbr256, cbr320** |
+| 18.0–19.25 kHz | cbr192, v2, cbr224 | q4, q5, q6 | abr192, tvbr91 |
+
+A 17 kHz cliff means ~160 kbps in MP3 and 256–320 kbps in AAC. Comparison
+IS valid in **inferred-class** space — 98% ordering accuracy over 9,713
+MP3↔Vorbis pairs pooled across four arms — but the binding limit is
+coverage, not accuracy: **74% of pairs are no-call** because at least one
+side has no cliff. The shipped rule fails closed: compare only when BOTH
+sides have an invertible ladder (MP3, Vorbis q0–q4); AAC contributes a
+one-sided floor; Opus and HE-AAC contribute nothing; no ladder ⇒ no
+comparison — unknown, not equal.
+
+### The gate's output is a tier, not a boolean
+
+Pooled over all four arms, 100 genuine albums vs 300 launders (per-class
+detection rates on a corpus that is 1 genuine : 3 launders **by
+construction** — these are not posterior odds):
+
+| tier | fired legs | genuine | mp3128 | opus96 | vorbisq5 |
+|---|---|---:|---:|---:|---:|
+| 1 | in-window cliff | **0** | 91 | 0 | 8 |
+| 2 | ceiling + no-ultrasonic | 18 | 0 | 97 | 58 |
+| 3 | ceiling only | 2 | 0 | 0 | 1 |
+| 4 | no-ultrasonic only | 16 | 9 | 3 | 33 |
+| 5 | none → PROOF | 64 | **0** | **0** | **0** |
+
+Tier 1 is a **positive detection** with a 0/100 false-positive rate across
+four independent arms. Tier 5 is absolute: no launder of those three
+classes ever reached proof on any arm. Production evaluates only the legs
+it can actually produce — the ceiling leg needs per-track slice vectors that
+are not persisted — so tiers 2 and 3 are reserved rather than shipped; see
+`docs/quality-verification.md` § "Verdict tiers and their display".
+
+### One axis that is real, and off the spectrum entirely
+
+`docs/research/calibration-data/provenance-round2/` asks a different
+question — "is this exact audio a known CD rip?" — via AccurateRip, the
+CUETools DB and MusicBrainz DiscID. **27 of 42 lossless albums
+bit-verified**, cryptographically, immune to the transparent blind spot.
+The ceiling is the binding constraint: 42 lossless albums are 0.49% of the
+library, and the ones with no TOC in either database are exactly the
+long-tail pressings this archive exists for. Verdict: **a positive-only
+badge tier, never load-bearing** — a non-match must never deny anything.
+
 ## Sources
 
 - https://secure.aes.org/forum/pubs/conventions/?elib=17972

@@ -334,18 +334,48 @@ the HF-poor genuine-lossless cohort the V0 probe exists to rescue. The
 override is therefore keyed on the probe alone, and the harness derives it
 from a second, leg-free `determine_verified_lossless` call.
 
-What a denial DOES cost, beyond the proof, is everything the proof
-licensed: no `verified_lossless_target` conversion (the album keeps its
-V0 grind — a higher-bitrate artifact, and the decider gates the
-post-import quality gate's format on the same fact), no verified-lossless
-bypass in the measured comparison, and a post-import gate that requeues
-instead of accepting. So an unproved candidate compared against an
-EQUIVALENT-OR-BETTER installed copy can still lose that comparison as an
-ordinary `downgrade` — the proof is the tie-breaker on an `equivalent`
-verdict, and in every measured world that is the mechanism (identical
-ranks on both sides), not a rank loss. That is the proof doing its job, not
-the leg passing a verdict: the existing copy is untouched and the request
-stays searchable.
+**Quality decides imports, proof decides names, config decides formats.**
+That is the whole model, and each clause is exclusive of the others.
+
+- *Quality decides imports.* The rank/measured comparison is proof-blind:
+  a proof-denied album that measures better imports and replaces. There
+  is no brake, and adding one would mean never acquiring anything for a
+  release whose only available copies are laundered. Authority: "we
+  measure, we assign evidence, grade and whatever else. then, we import,
+  it compares to whats on disk, if its better it imports. it makes no
+  difference if it's laundered or not, is it better? if you denied
+  laundered audio you'd never get anything for this particular release."
+  — https://github.com/abl030/cratedigger/issues/829
+- *Proof decides names.* verified vs provisional, base vs v3 vs v4 —
+  labelling, plus the post-import gate that requeues instead of
+  accepting, so the search continues until the claim is as strong as the
+  operator wants.
+- *Config decides formats.* `verified_lossless_target` is the stored
+  format for EVERY lossless-sourced import, proved or not. Authority: "no
+  we always want it opus, the contract is not around verified or not, is
+  the stored format for lossless absolutely. whatever people choose,
+  v0,opus,aac it just has to be consistent" —
+  https://github.com/abl030/cratedigger/issues/829
+
+So what a denial costs, beyond the proof itself, is the proof's
+tie-breaking privilege in the measured comparison: an unproved candidate
+compared against an EQUIVALENT-OR-BETTER installed copy can lose that
+comparison as an ordinary `downgrade` — the proof is the tie-breaker on
+an `equivalent` verdict, and in every measured world that is the
+mechanism (identical ranks on both sides), not a rank loss. That is the
+proof doing its job, not the leg passing a verdict: the existing copy is
+untouched and the request stays searchable.
+
+It does NOT cost the album its stored format. Until 2026-08-01 both the
+harness's `conversion_target` and the decider's `target_final_format`
+keyed the configured target on the proof, so a denial silently stored the
+album as MP3 V0 instead — download 39087 (Dirty Beaches, *Badlands*), on
+a cohort that is ~34% of genuine-graded lossless. Both twins now key on
+the lossless SOURCE, and the invariant is pinned in
+`tests/test_quality_classification.py::TestLosslessStoredFormatIsProofBlind`,
+`tests/test_conversion_e2e.py::TestDeniedProofStillStoresTheConfiguredTarget`
+(real decider → real materializer → real ffmpeg) and
+`tests/test_quality_generated.py::TestStoredFormatIsProofBlindProperties`.
 
 ### Threshold provenance
 
@@ -565,6 +595,113 @@ the names are a ladder of what was tested and skipping a rung must not buy
 the top one. As with v3, a name is never stamped merely because the code
 ran.
 
+## Verdict tiers and their display (issue #829 Phase 5 PR4)
+
+`lib/quality/verdict_tiers.py` turns the leg outcomes above into the one
+severity band and the one operator sentence the surfaces print. It is a
+pure derivation over facts already persisted by migrations 065 and 069 —
+no decision reads it, and nothing new is stored.
+
+| tier | fired legs | statement |
+|---|---|---|
+| 1 | in-window cliff and/or AAC frame lattice | `Transcode detected: <instrument>` |
+| 2 | ceiling + no-ultrasonic | **never produced** |
+| 3 | ceiling only | **never produced** |
+| 4 | no-ultrasonic only | `No ultrasonic content — not spectrally provable` |
+| 5 | none | `No evidence of lossy origin from the tests that ran` |
+
+Tiers 2 and 3 are reserved, not implemented: the frozen scorer's ceiling
+leg needs per-track slice vectors production does not persist (see the
+threshold provenance above — production evaluates two of the scorer's
+three legs). No copy is shipped for them, because copy keyed on a
+scenario no producer emits is unreachable by construction
+(`.claude/rules/test-fidelity.md` Rule C).
+
+The AAC frame-lattice leg post-dates the measured tier table and is a
+positive detection at the same severity as the in-window cliff, so it
+joins tier 1; the fired-leg set says which instrument fired.
+
+**A tier-5 verdict over an empty evaluated-leg set is not a clearance.**
+`AlbumProofVerdict.has_finding` separates "nothing was found" from
+"nothing was looked for", and the glance surfaces render nothing in the
+second case. `pipeline-cli quality` prints `No proof-gate test could run
+on this album` instead, because a diagnostic command owes the reason.
+
+### Audit-only codecs are never rendered as transcode accusations
+
+`SpectralInterpretation.supports_transcode_accusation` is hard-False for
+AAC, Opus, HE-AAC, `other` and unresolved families. PR4 wires it to the
+operator surfaces as `spectral_accusation_admissible`: the measured grade
+stays visible as the audit fact it is, but it loses the accusing colour
+and gains an `audit-only` suffix.
+
+**Why it was withheld is a second fact, and only one of the two may be
+described.** `spectral_accusation_withheld` distinguishes them: an
+`audit_only_codec` album's cliff IS that encoder's native rolloff, whereas
+a `codec_unresolved` album's cliff supports no statement about any encoder
+— the pipeline could not identify one. Rendering the first sentence over
+the second world fabricates a fact about a codec nothing resolved, so the
+unresolved surfaces read `codec unresolved` / `grade withheld` instead. This is the display half of the defect
+that opened issue #829 (download 37946 — a 256 kbps CBR AAC graded
+`likely_transcode` with a LAME-table 128 bucket).
+
+### Which surfaces carry the audit-only flag
+
+All six operator surfaces that paint a spectral grade carry it:
+
+- the Recents list evidence strip and the expanded download-history card,
+  on BOTH the IN and HAVE sides (`web/js/history.js`);
+- the request-detail Quality header (`web/js/pipeline.js`);
+- the Wrong Matches group badge and per-entry candidate chip
+  (`web/js/wrong-matches.js`);
+- the long-tail console worklist chip (`web/js/long_tail_console.js`);
+- `pipeline-cli quality`, for the candidate and the installed HAVE.
+
+There is ONE server-side rule,
+`web/classify.py::accusation_flags`, reached through three input adapters:
+`evidence_accusation_flags` (a whole `AlbumQualityEvidence`, what the
+request-detail route loads), `evidence_column_accusation_flags` (a joined
+column block under either alias prefix, what Wrong Matches and the
+long-tail cohort read), and `proof_gate_projection` (the verdict, what
+Recents reads). The nine evidence columns those joins project are named
+once, by `lib/pipeline_db/_shared.py::accusation_evidence_columns`, under
+two shared alias prefixes. Three queries spell the block inline as a SQL
+literal instead of calling the generator — that literal is what keeps them
+statically resolvable for `tests/test_replaced_write_audit.py`, and
+`tests/test_pipeline_db_column_contract.py` pins every spelling against the
+generator so a query cannot project eight of the nine and have a surface
+silently resolve a different codec. In JavaScript the rule is
+`spectralGradeIsAdmissible` + `spectralWithheldPresentation` in
+`web/js/quality_palette.js`; every surface composes those, none reimplements
+them. The generated property V7 in `tests/test_verdict_tiers_generated.py`
+proves the adapters cannot disagree about one album.
+
+The request-detail header carries BOTH pairs — `current_spectral_*` and
+`last_download_spectral_*` — because its fallback chain mixes the installed
+and last-download grades, and it applies whichever pair belongs to the
+grade the chain selected. The last-download pair is taken from the newest
+retained attempt whose own grade still equals the denormalised column, so a
+flag never describes a different measurement than the grade beside it.
+
+A row with no evidence join keeps the historical accusing render on every
+surface — the flag is absent rather than False. For a display-only fact
+that is the fail-accusing direction: an unflagged album is shown exactly as
+it was before the flag existed, never neutralized by default.
+
+### Where the operator sees all of this
+
+- `pipeline-cli quality <request-id>` — proof-gate tier, fired legs and
+  proof generation for the last real candidate AND the installed HAVE,
+  through `proof_verdict_from_evidence`.
+- The Recents evidence panel — the same statement via
+  `web/classify.py::proof_gate_projection`, plus the `Verified lossless`
+  row naming the proof generation and, in the forensics block, PR2d's
+  Stage-1-reject counterfactual and the fired-leg set.
+
+Both surfaces call the same `proof_verdict_from_facts`; the generated
+property in `tests/test_verdict_tiers_generated.py` (V4) proves they
+cannot disagree about one album.
+
 ### Tuning results (Mountain Goats library, 65 albums) — HISTORICAL
 
 Tested across the entire Mountain Goats catalogue — a worst-case scenario as the band's early work (1991-2000) was recorded on boomboxes and cassette recorders with genuinely minimal high-frequency content.
@@ -590,7 +727,7 @@ bitrate alone is not proof in the current policy.
 - **CBR 320 downloads**: V0 conversion only happens for FLACs. Native MP3 320 downloads skip conversion entirely. Spectral check catches upsampled garbage (e.g. Hot Garden Stomp at 52dB deficit, Songs for Peter Hughes at 72dB + cliffs).
 - **Pre-pipeline imports**: Albums imported before the pipeline existed have no download history or V0 conversion data. Spectral check is the only way to assess their quality.
 
-### Reference: HF deficit ranges observed
+### Reference: HF deficit ranges observed — HISTORICAL (2026-03-28 corpus)
 
 | Source quality | HF deficit range | Cliffs? |
 |---------------|-----------------|---------|
@@ -602,6 +739,27 @@ bitrate alone is not proof in the current policy.
 | Upsampled CBR 320 (from ~96kbps) | 52-97dB | Sometimes |
 | Quiet jazz/classical (genuine CD) | 33-57dB | None |
 | Children's choir (genuine CD) | 31-62dB | None |
+
+**Superseded 2026-08-01 (issue #829 Phase 5 PR5)** by the four-arm measured
+control distribution. Retained above as the provenance of the 40/60 pair.
+The calibration measured genuine-lossless controls at **p50 = 48 dB,
+p95 = 65, p99 = 69, max = 78** — so the old 40 dB "marginal" line sat below
+the *median genuine track*. Control false-flag rate at the shipped 65/69,
+track level, per arm:
+
+| arm | ≥65 (marginal) | ≥69 (suspect) | at the old 40 / 60 |
+|---|---|---|---|
+| TRAINING | 5% | 1% | 75% / 14% |
+| ROUND-1 | 2% | 0% | 73% / 4% |
+| ROUND-2 | 11% | 8% | 80% / 17% |
+| ROUND-3 | 2% | 1% | 68% / 9% |
+
+The metric's honest role is narrow: a backstop for sub-window junk with no
+visible cliff, and one of the two legs that expose AAC→MP3 launders (the
+cliff leg alone exposes 6/34 training albums; adding the deficit leg raises
+it to 31/34). Full derivation and the per-codec measured tables:
+`docs/research/spectral-calibration-findings.md` and the six per-codec docs
+under `docs/research/`.
 
 ## Edge cases
 
@@ -620,7 +778,7 @@ bitrate alone is not proof in the current policy.
 - `ImportResult.verified_lossless_proof` is the sole acquisition claim. `AudioQualityMeasurement` contains only byte observations; evidence persistence derives its CHECK-tied convenience boolean from proof presence rather than re-deriving verification from a measurement.
 - Spectral request-state writes always go through `RequestSpectralStateUpdate` so the historical grade/bitrate stamps stay atomic. Active decisions use the linked evidence row's spectral fact, not those request scalars.
 - `--target-format` flag: when `target_format="lossless"` (or legacy `"flac"`), keeps lossless on disk. ALAC/WAV sources are normalized to FLAC via `FLAC_SPEC`. A temporary V0 probe is still produced when needed for provisional source comparison. Keeping a lossless container does not itself verify it; the import needs affirmative proof.
-- `--verified-lossless-target` flag: target format after verified lossless, and the configured lossless-source storage target for accepted provisional imports (e.g. "opus 128", "mp3 v2", "aac 128"). Passed from `dispatch_import_core()` when `cfg.verified_lossless_target` is set. When the target has the same `.mp3` extension as V0, V0 files are removed before target conversion.
+- `--verified-lossless-target` flag: the configured storage format for EVERY lossless-sourced import (e.g. "opus 128", "mp3 v2", "aac 128"), whatever the proof legs decided — see "Quality decides imports, proof decides names, config decides formats" above. Passed from `dispatch_import_core()` when `cfg.verified_lossless_target` is set. When the target has the same `.mp3` extension as V0, V0 files are removed before target conversion.
 - `--force` flag: skips the distance check (`max_distance=999`) for force-importing rejected albums. Used by `pipeline_cli.py force-import` and `POST /api/pipeline/force-import`.
 - Exit codes: 0=imported, 1=conversion failed, 2=beets failed, 3=path not found, 5=downgrade or suspect-lossless rejection, 6=transcode/provisional path (may or may not have imported as an upgrade).
 

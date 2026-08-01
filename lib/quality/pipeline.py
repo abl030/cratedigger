@@ -68,6 +68,7 @@ from lib.quality.spectral_interpretation import (
     interpret_spectral_evidence,
     spectral_classes_comparable,
 )
+from lib.quality.verdict_tiers import AlbumProofVerdict, proof_verdict_from_facts
 
 # ---------------------------------------------------------------------------
 # Full pipeline decision — combines all three stages
@@ -657,10 +658,21 @@ def full_pipeline_decision(
                 is_transcode and v0_probe_overrides_spectral(candidate_probe_full)
             )
             policy_is_transcode = is_transcode and not v0_verified_override
+            # The configured target, unconditionally: this branch IS the
+            # lossless-source-converting path, and the stored format for a
+            # lossless source is config, never proof (issue #829, operator
+            # decision 2026-08-01). The comparison label must keep naming
+            # what will actually be materialized — the two moved together
+            # to MP3 V0 on a denial before this change, consistent with
+            # each other and both wrong about the operator's config.
+            # Authority: "no we always want it opus, the contract is not
+            # around verified or not, is the stored format for lossless
+            # absolutely. whatever people choose, v0,opus,aac it just has
+            # to be consistent" —
+            # https://github.com/abl030/cratedigger/issues/829
             stage2_new_format = comparison_format_hint(
                 explicit_format=new_format,
-                verified_lossless_target=(
-                    verified_lossless_target if will_be_verified else None),
+                verified_lossless_target=verified_lossless_target,
                 converted_count=converted_count,
                 is_transcode=policy_is_transcode,
             )
@@ -692,14 +704,15 @@ def full_pipeline_decision(
                     candidate_context.codec_family
                     if spectral_grade is not None else None
                 ))
-            # The audit target names only an output policy that would actually be
-            # materialized. The temporary V0 comparison proxy and a rejected
-            # transcode are not final targets.
-            result["target_final_format"] = (
-                verified_lossless_target
-                if will_be_verified and verified_lossless_target
-                else None
-            )
+            # What the harness will materialize. ``import_one.py``'s
+            # ``_materialize_quality_evidence_action`` parses this exact
+            # string into its ConversionSpec, so it is the stored format,
+            # not an audit note — and the stored format of a lossless
+            # source is the operator's configured target whatever the
+            # proof legs said (issue #829; download 39087 landed as MP3 V0
+            # because a denial withheld it). ``None`` here still means
+            # "nothing configured", which the harness reads as V0.
+            result["target_final_format"] = verified_lossless_target
             provisional_probe_avg = (
                 candidate_v0_probe_avg
                 if candidate_v0_probe_avg is not None
@@ -734,8 +747,10 @@ def full_pipeline_decision(
                 result["imported"] = True
                 result["keep_searching"] = search_action.status == "wanted"
                 result["final_status"] = search_action.status
-                if verified_lossless_target:
-                    result["target_final_format"] = verified_lossless_target
+                # ``target_final_format`` is already the configured target
+                # (set above for every lossless source). This lane used to
+                # re-assert it because it was the one proof-free path that
+                # still materialized one; issue #829 made that the rule.
                 return _finalize_denylist(result)
             target_contract = None
             if stage2_new_format is not None:
@@ -801,11 +816,12 @@ def full_pipeline_decision(
                 verified_proof = True
                 result["verified_lossless"] = True
 
-            # Target format conversion: if verified lossless + target configured,
-            # use the target label for the quality gate (e.g. "opus 128") so the
-            # rank model classifies against the actual on-disk contract.
-            if verified_proof and verified_lossless_target:
-                result["target_final_format"] = verified_lossless_target
+            # The post-import gate classifies what is ON DISK, so it reads
+            # the same configured target the harness materializes — never
+            # the proof. Keying the two on different facts is precisely how
+            # a denied album could be ground to V0 and then gated as
+            # "opus 128" (or the reverse); one fact, both places.
+            if verified_lossless_target:
                 gate_format = verified_lossless_target
             else:
                 gate_format = stage2_new_format
@@ -1133,6 +1149,8 @@ def _finalize_denylist(result: dict[str, object]) -> dict[str, object]:
 
 def comparison_basis_from_decision(
     result: "dict[str, Any] | None",
+    *,
+    key: str = "comparison_basis",
 ) -> QualityComparisonBasis | None:
     """Re-type the JSON-plain ``comparison_basis`` a decision dict carries.
 
@@ -1142,13 +1160,36 @@ def comparison_basis_from_decision(
     when synthesizing the reject-side ImportResult and by the harness when
     consuming the action file. Strict convert: dispatch and harness ship in
     the same deploy, so shape drift is a bug worth failing on.
+
+    ``key`` selects WHICH basis: the decided one, or PR2d's Stage-1-reject
+    counterfactual (``comparison_basis_if_stage1_deferred``). Both are the
+    same shape written by the same code, so one converter serves both
+    rather than a near-copy that could decode them differently.
     """
     if not result:
         return None
-    raw = result.get("comparison_basis")
+    raw = result.get(key)
     if raw is None:
         return None
     return msgspec.convert(raw, type=QualityComparisonBasis)
+
+
+def stage2_counterfactual_from_decision(
+    result: "dict[str, Any] | None",
+) -> str | None:
+    """The Stage-2 decision a Stage-1 reject short-circuited past (PR2d).
+
+    ``None`` means Stage 1 never short-circuited, so there is no
+    counterfactual — deliberately distinct from
+    ``STAGE2_COUNTERFACTUAL_UNAVAILABLE``, which means the audit ran and
+    could not be evaluated. Issue #829 Phase 5 PR4 persists this onto
+    ``ImportResult`` so the operator surfaces can show the disagreement
+    issue #813 is about instead of it living only in an in-memory dict.
+    """
+    if not result:
+        return None
+    value = result.get("stage2_import_if_stage1_deferred")
+    return value if isinstance(value, str) and value else None
 
 
 QUALITY_DECISION_IMPORT_STAGE_DECISIONS: frozenset[str] = frozenset({
@@ -1371,6 +1412,40 @@ def evidence_spectral_context(
         storage_format=evidence.storage_format,
         filetype_band=evidence.filetype_band,
         container_labels=[file.extension for file in evidence.files],
+    )
+
+
+def proof_verdict_from_evidence(
+    evidence: AlbumQualityEvidence,
+) -> AlbumProofVerdict:
+    """The proof-gate verdict one whole evidence row implies (issue #829 PR4).
+
+    A thin field extraction over ``proof_verdict_from_facts`` — deliberately
+    NOT a second derivation. The Recents render path holds the same columns
+    as a flat projection and calls that function directly; a caller holding
+    the row calls this one. Both surfaces therefore state the same verdict
+    for the same album by construction, which is the property
+    ``tests/test_verdict_tiers_generated.py`` patrols.
+
+    Display only: no branch in the decision path reads a verdict.
+    """
+    measurement = evidence.measurement
+    return proof_verdict_from_facts(
+        spectral_grade=measurement.spectral_grade,
+        spectral_bitrate_kbps=measurement.spectral_bitrate_kbps,
+        cliff_hz=measurement.cliff_hz,
+        codec_family=measurement.codec_family,
+        format=measurement.format,
+        storage_format=evidence.storage_format,
+        filetype_band=evidence.filetype_band,
+        spectral_subject=measurement.spectral_subject,
+        was_converted_from=measurement.was_converted_from,
+        container_labels=[file.extension for file in evidence.files],
+        ultrasonic_deficit_db=measurement.ultrasonic_deficit_db,
+        spectral_measurement_version=(
+            measurement.spectral_measurement_version
+        ),
+        aac_lattice=evidence.aac_lattice,
     )
 
 

@@ -19,7 +19,13 @@ import { renderSearchPlanDetail } from './search_plan.js';
 import { loadLongTail, renderLongTailBody } from './long_tail.js';
 import { restoreLongTailConsoles } from './long_tail_console.js';
 import { renderPipelineDashboard as renderDashboardCards } from './pipeline_dashboard.js';
-import { qualityToneClass, spectralGradeClass, spectralGradeLabel } from './quality_palette.js';
+import {
+  qualityToneClass,
+  spectralGradeClass,
+  spectralGradeIsAdmissible,
+  spectralGradeLabel,
+  spectralWithheldPresentation,
+} from './quality_palette.js';
 
 const VISIBLE_HISTORY_ATTEMPTS = 10;
 
@@ -374,6 +380,17 @@ function renderCurrentQualityRow(req, beetsTracks) {
     req.current_spectral_bitrate || req.last_download_spectral_bitrate || null;
   const spectralGrade =
     req.current_spectral_grade || req.last_download_spectral_grade || null;
+  // The chain mixes two measurements, so the audit-only pair has to be the
+  // one belonging to the grade it actually selected (issue #829 Phase 5
+  // PR4). Reading the HAVE flag beside a last-download grade would be a
+  // codec verdict on a different album.
+  const fromCurrent = Boolean(req.current_spectral_grade);
+  const admissible = fromCurrent
+    ? req.current_spectral_accusation_admissible
+    : req.last_download_spectral_accusation_admissible;
+  const withheld = fromCurrent
+    ? req.current_spectral_accusation_withheld
+    : req.last_download_spectral_accusation_withheld;
   const verified = req.verified_lossless === true || req.verified_lossless === 'True';
   let qualitySummary = nominal;
   if (verified) {
@@ -384,7 +401,14 @@ function renderCurrentQualityRow(req, beetsTracks) {
     // tracks tripped the cliff detector below the album suspect threshold,
     // and the shared-spectral clamp still consults that floor (Eno case).
     const brStr = spectralBr ? ` ~${spectralBr}kbps` : '';
-    qualitySummary += ` <span class="${spectralGradeClass(spectralGrade)}">spectral: ${esc(spectralGradeLabel(spectralGrade))}${brStr}</span>`;
+    const label = `spectral: ${esc(spectralGradeLabel(spectralGrade))}${brStr}`;
+    if (spectralGradeIsAdmissible(spectralGrade, admissible)) {
+      qualitySummary += ` <span class="${spectralGradeClass(spectralGrade)}">${label}</span>`;
+    } else {
+      const withholding = spectralWithheldPresentation(withheld);
+      qualitySummary += ` <span class="${withholding.className}"`
+        + ` title="${withholding.title}">${label}${withholding.suffix}</span>`;
+    }
   }
   return renderDetailRow('Quality', qualitySummary);
 }

@@ -70,6 +70,37 @@ confident rejects. A proof-gate differential run without a current side
 will under-report; the current side's OWN proof is never stripped, because
 an installed proof is real evidence and is the acquisition ceiling.
 
+**Action-time facts are not on the row.** ``target_format`` falls back to
+the candidate's own persisted column, but ``verified_lossless_target`` —
+the operator's configured stored format for lossless sources — is
+configuration the evidence row never carries. Pass ``--verified-lossless-
+target "$(the live value)"``, or every row decides as if nothing were
+configured and ``target_final_format`` plus the gate format it feeds are
+identical on both trees no matter what changed.
+
+**What this instrument CANNOT see: measurement-time changes.** The corpus
+is persisted evidence — grades, buckets, deficits, captures — so a change
+to how those values are PRODUCED (``lib/spectral_check.py``'s
+``classify_track``, the HF-deficit ladder, the slice windows, the cliff
+detector) moves nothing here by construction: both trees re-decide the
+same stored numbers. That is a structural blind spot, not a zero. Such a
+change owes a live grade-count instead, before and after, run on doc2
+(``pipeline-cli query -``, SQL on stdin):
+
+```sql
+SELECT spectral_grade, spectral_measurement_version, COUNT(*)
+FROM album_quality_evidence
+WHERE spectral_grade IS NOT NULL
+GROUP BY 1, 2 ORDER BY 3 DESC;
+```
+
+The version column separates the measurement era, so a ladder change can
+be reported against the cohort it will actually reach. Name the
+population that will be re-measured explicitly —
+rows are re-graded under the CURRENT ladder whenever they are measured
+again (a re-download, a re-preview, a force-import retry), and only rows
+that are never re-measured keep their old-era grade.
+
 Three properties keep the measurement honest, and each is the mirror of a
 way a differential can lie:
 
@@ -106,6 +137,7 @@ from lib.pipeline_db.evidence import _EvidenceMixin
 from lib.quality import (
     AacLatticeProofLeg,
     AlbumQualityEvidence,
+    AlbumQualityEvidenceDecisionFacts,
     UltrasonicProofLeg,
     aac_lattice_proof_leg,
     full_pipeline_decision_from_evidence,
@@ -286,6 +318,7 @@ def decide_row(
     *,
     current: Mapping[str, object] | None = None,
     counterfactual: bool = False,
+    verified_lossless_target: str | None = None,
 ) -> RenderedRow:
     """Re-decide one corpus row through the real decider.
 
@@ -295,6 +328,14 @@ def decide_row(
     can reach. ``counterfactual`` drops the candidate's persisted proof
     first (see ``without_persisted_proof``); the current side keeps its
     own, because an installed proof is real evidence.
+
+    ``verified_lossless_target`` is the operator's configured stored
+    format for lossless sources (``[Beets] verified_lossless_target``).
+    It is an action-time FACT, not an evidence column, so a run that omits
+    it decides every row as if nothing were configured — which makes
+    ``target_final_format`` and the gate format it feeds trivially
+    identical on both trees. Pass the live value when the change under
+    measurement can touch them, or read a false zero.
     """
     row_id = row.get("id")
     if not isinstance(row_id, int) or isinstance(row_id, bool):
@@ -307,9 +348,12 @@ def decide_row(
         _evidence_from_corpus_row(current) if current is not None else None
     )
     fields: dict[str, object] = {}
+    facts = AlbumQualityEvidenceDecisionFacts(
+        verified_lossless_target=verified_lossless_target,
+    )
     try:
         decision = full_pipeline_decision_from_evidence(
-            evidence, current_evidence,
+            evidence, current_evidence, facts=facts,
         )
     except ValueError as exc:
         # A row the decider refuses is a real outcome and is compared as
@@ -411,6 +455,7 @@ def decide_corpus(
     *,
     pairs_path: str | None = None,
     counterfactual: bool = False,
+    verified_lossless_target: str | None = None,
 ) -> int:
     """Decide every corpus row, streaming so a large corpus stays bounded."""
     count = 0
@@ -428,6 +473,7 @@ def decide_corpus(
             )
             decided = decide_row(
                 row, current=current, counterfactual=counterfactual,
+                verified_lossless_target=verified_lossless_target,
             )
             handle.write(msgspec.json.encode(decided).decode())
             handle.write("\n")
@@ -466,6 +512,14 @@ def _build_parser() -> argparse.ArgumentParser:
               "{<evidence row>}} pairing each candidate against the "
               "installed album, the way production decides"))
     decide.add_argument(
+        "--verified-lossless-target", default=None,
+        dest="verified_lossless_target",
+        help=("The operator's configured stored format for lossless "
+              "sources (doc2 config.ini [Beets] verified_lossless_target, "
+              "e.g. 'opus 128'). Omitting it decides every row as if "
+              "nothing were configured, which makes target_final_format "
+              "and the gate format it feeds unmeasurable"))
+    decide.add_argument(
         "--counterfactual", action="store_true",
         help=("Drop each candidate's persisted verified-lossless proof "
               "first — the fresh-mint arm, where a promotion-gate change "
@@ -495,6 +549,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.corpus, args.out,
                 pairs_path=args.pair_with,
                 counterfactual=args.counterfactual,
+                verified_lossless_target=args.verified_lossless_target,
             )
             print(f"decided {count} rows", file=sys.stderr)
             return 0

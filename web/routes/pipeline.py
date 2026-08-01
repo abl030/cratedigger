@@ -38,11 +38,12 @@ from web.routes._server_access import _server
 logger = logging.getLogger(__name__)
 
 from lib.quality import CandidateScore, top_candidates
-from web.classify import classify_import_job_display
+from web.classify import classify_import_job_display, evidence_accusation_flags
 from web.download_history_view import (
     build_download_history_row,
     build_download_history_rows,
     build_recents_download_log_rows,
+    last_download_accusation_flags,
 )
 
 DEFAULT_PIPELINE_LOG_LIMIT = 50
@@ -302,6 +303,25 @@ def get_pipeline_detail(h: RouteHandler, params: dict[str, list[str]], req_id_st
     search_history = s._db().get_search_history(req_id)
     last_search = _build_last_search_payload(search_history)
     request_payload = s._serialize_row(req)
+    # The detail header's Quality row picks its grade from a fallback
+    # chain over BOTH the installed copy and the last download, so it
+    # needs both audit-only pairs and applies whichever matches the grade
+    # it selected (issue #829 Phase 5 PR4). Each pair is derived by the
+    # one shared rule from the measurement that produced ITS grade; an
+    # absent pair keeps the historical accusing render.
+    have_flags = evidence_accusation_flags(
+        s._db().load_album_quality_evidence_by_id(req["current_evidence_id"])
+    )
+    candidate_flags = last_download_accusation_flags(
+        history_items, req["last_download_spectral_grade"]
+    )
+    request_payload["current_spectral_accusation_admissible"] = (
+        have_flags.admissible)
+    request_payload["current_spectral_accusation_withheld"] = have_flags.withheld
+    request_payload["last_download_spectral_accusation_admissible"] = (
+        candidate_flags.admissible)
+    request_payload["last_download_spectral_accusation_withheld"] = (
+        candidate_flags.withheld)
     try:
         b = s._beets_db()
         current = resolve_request_current_library(req, b)

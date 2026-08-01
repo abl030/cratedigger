@@ -7,6 +7,11 @@ import psycopg2
 import psycopg2.extras
 
 from lib.dispatch.types import PostCommitQuarantineAudit
+from lib.pipeline_db._shared import (
+    CANDIDATE_EVIDENCE_PREFIX,
+    CURRENT_EVIDENCE_PREFIX,
+    accusation_evidence_columns,
+)
 from lib.pipeline_db.rows import (
     DownloadLogWithEvidenceRow,
     DownloadLogWithOriginRow,
@@ -62,6 +67,126 @@ class LatestDownloadSummary(TypedDict):
 
     latest: DownloadLogWithEvidenceRow
     count: int
+
+
+#: The candidate-evidence aliases every ``download_log`` reader joins.
+#:
+#: Five queries carried verbatim copies of this block. Issue #829 Phase 5
+#: PR4 had to add the proof-gate columns to all of them, and a block that
+#: must be edited five identically-or-else times is the duplication
+#: ``scope.md`` says to fix rather than extend.
+#:
+#: The first eleven aliases are folded into their legacy ``download_log``
+#: columns by ``_overlay_evidence_onto_download_log_row``. The PR4 aliases
+#: below them have no legacy counterpart, so they reach the renderer under
+#: these names and are declared on ``DownloadLogWithEvidenceRow``.
+#: ``_evidence_format`` is deliberately a SECOND alias over the same
+#: column as ``_evidence_source_format``: the overlay folds that one into
+#: the legacy ``source_format`` key ONLY for lineage 3/4 rows, so 26,503 of
+#: 30,467 live rows hand the renderer ``None`` there while the decider's
+#: ``measurement.format`` is never NULL. Reusing it would let the render
+#: adapter resolve a different codec from the same evidence row.
+#: ``_evidence_container_extensions`` is the snapshot's own distinct file
+#: extensions — the ultrasonic proof leg's decode-path input. Without it
+#: that leg would withhold on the render path while the decider
+#: adjudicated, and the panel would state a verdict production never
+#: reached (Phase 5 plan §1.5c: the same bits measure 3.09 dB apart across
+#: decode paths).
+#: The nine measurement columns the audit-only accusation derivation reads
+#: are spelled inline here rather than generated from
+#: ``accusation_evidence_columns``: this literal is what lets
+#: ``tests/test_replaced_write_audit.py`` resolve the four queries that
+#: embed it as STATIC SQL, and an interpolated call would demote all four
+#: into the reviewed-dynamic registry. ``tests/test_pipeline_db_column_
+#: contract.py`` pins this block against the generator instead, so the
+#: two cannot drift into projecting different subsets.
+_CANDIDATE_EVIDENCE_COLUMNS = """
+    e.format AS _evidence_source_format,
+    e.min_bitrate_kbps AS _evidence_source_min_bitrate,
+    e.avg_bitrate_kbps AS _evidence_source_avg_bitrate,
+    e.median_bitrate_kbps AS _evidence_source_median_bitrate,
+    e.lineage_version AS _evidence_lineage_version,
+    e.spectral_grade AS _evidence_spectral_grade,
+    e.spectral_bitrate_kbps AS _evidence_spectral_bitrate,
+    e.v0_subject AS _evidence_v0_probe_kind,
+    e.v0_min_bitrate_kbps AS _evidence_v0_probe_min_bitrate,
+    e.v0_avg_bitrate_kbps AS _evidence_v0_probe_avg_bitrate,
+    e.v0_median_bitrate_kbps AS _evidence_v0_probe_median_bitrate,
+    e.format AS _evidence_format,
+    e.codec_family AS _evidence_codec_family,
+    e.cliff_hz AS _evidence_cliff_hz,
+    e.storage_format AS _evidence_storage_format,
+    e.filetype_band AS _evidence_filetype_band,
+    e.spectral_subject AS _evidence_spectral_subject,
+    e.was_converted_from AS _evidence_was_converted_from,
+    e.ultrasonic_deficit_db AS _evidence_ultrasonic_deficit_db,
+    e.spectral_measurement_version AS _evidence_spectral_measurement_version,
+    e.aac_lattice_modal_count AS _evidence_aac_lattice_modal_count,
+    e.aac_lattice_scored_tracks AS _evidence_aac_lattice_scored_tracks,
+    e.aac_lattice_max_z AS _evidence_aac_lattice_max_z,
+    e.verified_lossless_classifier AS _evidence_verified_lossless_classifier,
+    (SELECT array_agg(DISTINCT f.extension)
+       FROM album_quality_evidence_files f
+      WHERE f.evidence_id = e.id) AS _evidence_container_extensions,
+"""
+
+
+#: ``get_log``'s three variants differed ONLY in their outcome filter and
+#: were three verbatim copies of a 40-line SELECT. Issue #829 Phase 5 PR4
+#: needed one more evidence join on every variant, and a change that has to
+#: be made three identically-or-else times is the duplication ``scope.md``
+#: says to fix rather than extend. The ``{where}`` slot is the only
+#: difference; it is filled from the closed literal map below, never from
+#: caller input.
+_LOG_QUERY_TEMPLATE = """
+    SELECT dl.*,
+           {candidate_evidence_columns}
+           current_evidence.id AS _current_evidence_id,
+           (current_evidence.measured_at <= dl.created_at)
+               AS _current_evidence_is_pre_attempt,
+           current_evidence.format AS _current_evidence_format,
+           current_evidence.min_bitrate_kbps AS _current_evidence_min_bitrate,
+           current_evidence.avg_bitrate_kbps AS _current_evidence_avg_bitrate,
+           current_evidence.median_bitrate_kbps AS _current_evidence_median_bitrate,
+           current_evidence.spectral_grade AS _current_evidence_spectral_grade,
+           current_evidence.spectral_bitrate_kbps AS _current_evidence_spectral_bitrate,
+           current_evidence.v0_subject AS _current_evidence_v0_probe_kind,
+           current_evidence.v0_min_bitrate_kbps AS _current_evidence_v0_probe_min_bitrate,
+           current_evidence.v0_avg_bitrate_kbps AS _current_evidence_v0_probe_avg_bitrate,
+           current_evidence.v0_median_bitrate_kbps AS _current_evidence_v0_probe_median_bitrate,
+           current_evidence.codec_family AS _current_evidence_codec_family,
+           current_evidence.cliff_hz AS _current_evidence_cliff_hz,
+           current_evidence.storage_format AS _current_evidence_storage_format,
+           current_evidence.filetype_band AS _current_evidence_filetype_band,
+           current_evidence.spectral_subject AS _current_evidence_spectral_subject,
+           current_evidence.was_converted_from
+               AS _current_evidence_was_converted_from,
+           origin.beets_distance AS original_beets_distance,
+           ar.album_title, ar.artist_name, ar.mb_release_id,
+           ar.year, ar.country, ar.status AS request_status,
+           ar.min_bitrate AS request_min_bitrate,
+           ar.prev_min_bitrate, ar.search_filetype_override,
+           ar.source AS request_source
+    FROM download_log dl
+    LEFT JOIN album_quality_evidence e
+        ON e.id = dl.candidate_evidence_id
+    LEFT JOIN download_log origin
+        ON origin.id = dl.source_download_log_id
+    JOIN album_requests ar ON dl.request_id = ar.id
+    LEFT JOIN album_quality_evidence current_evidence
+        ON current_evidence.id = ar.current_evidence_id
+    {where}
+    ORDER BY dl.created_at DESC LIMIT %s
+"""
+
+#: The only outcome filters ``get_log`` accepts, as literal SQL fragments.
+_LOG_OUTCOME_FILTERS: dict[str, str] = {
+    "imported": "WHERE dl.outcome IN ('success', 'force_import')",
+    "rejected": (
+        "WHERE dl.outcome IN "
+        "('rejected', 'failed', 'timeout', 'measurement_failed')"
+    ),
+}
 
 
 class _DownloadLogMixin(_PipelineDBBase):
@@ -189,139 +314,10 @@ class _DownloadLogMixin(_PipelineDBBase):
                            measurement_failed),
                            or None for all
         """
-        if outcome_filter == "imported":
-            query = """
-                SELECT dl.*,
-                       e.format AS _evidence_source_format,
-                       e.min_bitrate_kbps AS _evidence_source_min_bitrate,
-                       e.avg_bitrate_kbps AS _evidence_source_avg_bitrate,
-                       e.median_bitrate_kbps AS _evidence_source_median_bitrate,
-                       e.lineage_version AS _evidence_lineage_version,
-                       e.spectral_grade AS _evidence_spectral_grade,
-                       e.spectral_bitrate_kbps AS _evidence_spectral_bitrate,
-                       e.v0_subject AS _evidence_v0_probe_kind,
-                       e.v0_min_bitrate_kbps AS _evidence_v0_probe_min_bitrate,
-                       e.v0_avg_bitrate_kbps AS _evidence_v0_probe_avg_bitrate,
-                       e.v0_median_bitrate_kbps AS _evidence_v0_probe_median_bitrate,
-                       current_evidence.id AS _current_evidence_id,
-                       (current_evidence.measured_at <= dl.created_at)
-                           AS _current_evidence_is_pre_attempt,
-                       current_evidence.format AS _current_evidence_format,
-                       current_evidence.min_bitrate_kbps AS _current_evidence_min_bitrate,
-                       current_evidence.avg_bitrate_kbps AS _current_evidence_avg_bitrate,
-                       current_evidence.median_bitrate_kbps AS _current_evidence_median_bitrate,
-                       current_evidence.spectral_grade AS _current_evidence_spectral_grade,
-                       current_evidence.spectral_bitrate_kbps AS _current_evidence_spectral_bitrate,
-                       current_evidence.v0_subject AS _current_evidence_v0_probe_kind,
-                       current_evidence.v0_min_bitrate_kbps AS _current_evidence_v0_probe_min_bitrate,
-                       current_evidence.v0_avg_bitrate_kbps AS _current_evidence_v0_probe_avg_bitrate,
-                       current_evidence.v0_median_bitrate_kbps AS _current_evidence_v0_probe_median_bitrate,
-                       origin.beets_distance AS original_beets_distance,
-                       ar.album_title, ar.artist_name, ar.mb_release_id,
-                       ar.year, ar.country, ar.status AS request_status,
-                       ar.min_bitrate AS request_min_bitrate,
-                       ar.prev_min_bitrate, ar.search_filetype_override,
-                       ar.source AS request_source
-                FROM download_log dl
-                LEFT JOIN album_quality_evidence e
-                    ON e.id = dl.candidate_evidence_id
-                LEFT JOIN download_log origin
-                    ON origin.id = dl.source_download_log_id
-                JOIN album_requests ar ON dl.request_id = ar.id
-                LEFT JOIN album_quality_evidence current_evidence
-                    ON current_evidence.id = ar.current_evidence_id
-                WHERE dl.outcome IN ('success', 'force_import')
-                ORDER BY dl.created_at DESC LIMIT %s
-            """
-        elif outcome_filter == "rejected":
-            query = """
-                SELECT dl.*,
-                       e.format AS _evidence_source_format,
-                       e.min_bitrate_kbps AS _evidence_source_min_bitrate,
-                       e.avg_bitrate_kbps AS _evidence_source_avg_bitrate,
-                       e.median_bitrate_kbps AS _evidence_source_median_bitrate,
-                       e.lineage_version AS _evidence_lineage_version,
-                       e.spectral_grade AS _evidence_spectral_grade,
-                       e.spectral_bitrate_kbps AS _evidence_spectral_bitrate,
-                       e.v0_subject AS _evidence_v0_probe_kind,
-                       e.v0_min_bitrate_kbps AS _evidence_v0_probe_min_bitrate,
-                       e.v0_avg_bitrate_kbps AS _evidence_v0_probe_avg_bitrate,
-                       e.v0_median_bitrate_kbps AS _evidence_v0_probe_median_bitrate,
-                       current_evidence.id AS _current_evidence_id,
-                       (current_evidence.measured_at <= dl.created_at)
-                           AS _current_evidence_is_pre_attempt,
-                       current_evidence.format AS _current_evidence_format,
-                       current_evidence.min_bitrate_kbps AS _current_evidence_min_bitrate,
-                       current_evidence.avg_bitrate_kbps AS _current_evidence_avg_bitrate,
-                       current_evidence.median_bitrate_kbps AS _current_evidence_median_bitrate,
-                       current_evidence.spectral_grade AS _current_evidence_spectral_grade,
-                       current_evidence.spectral_bitrate_kbps AS _current_evidence_spectral_bitrate,
-                       current_evidence.v0_subject AS _current_evidence_v0_probe_kind,
-                       current_evidence.v0_min_bitrate_kbps AS _current_evidence_v0_probe_min_bitrate,
-                       current_evidence.v0_avg_bitrate_kbps AS _current_evidence_v0_probe_avg_bitrate,
-                       current_evidence.v0_median_bitrate_kbps AS _current_evidence_v0_probe_median_bitrate,
-                       origin.beets_distance AS original_beets_distance,
-                       ar.album_title, ar.artist_name, ar.mb_release_id,
-                       ar.year, ar.country, ar.status AS request_status,
-                       ar.min_bitrate AS request_min_bitrate,
-                       ar.prev_min_bitrate, ar.search_filetype_override,
-                       ar.source AS request_source
-                FROM download_log dl
-                LEFT JOIN album_quality_evidence e
-                    ON e.id = dl.candidate_evidence_id
-                LEFT JOIN download_log origin
-                    ON origin.id = dl.source_download_log_id
-                JOIN album_requests ar ON dl.request_id = ar.id
-                LEFT JOIN album_quality_evidence current_evidence
-                    ON current_evidence.id = ar.current_evidence_id
-                WHERE dl.outcome IN (
-                    'rejected', 'failed', 'timeout', 'measurement_failed'
-                )
-                ORDER BY dl.created_at DESC LIMIT %s
-            """
-        else:
-            query = """
-                SELECT dl.*,
-                       e.format AS _evidence_source_format,
-                       e.min_bitrate_kbps AS _evidence_source_min_bitrate,
-                       e.avg_bitrate_kbps AS _evidence_source_avg_bitrate,
-                       e.median_bitrate_kbps AS _evidence_source_median_bitrate,
-                       e.lineage_version AS _evidence_lineage_version,
-                       e.spectral_grade AS _evidence_spectral_grade,
-                       e.spectral_bitrate_kbps AS _evidence_spectral_bitrate,
-                       e.v0_subject AS _evidence_v0_probe_kind,
-                       e.v0_min_bitrate_kbps AS _evidence_v0_probe_min_bitrate,
-                       e.v0_avg_bitrate_kbps AS _evidence_v0_probe_avg_bitrate,
-                       e.v0_median_bitrate_kbps AS _evidence_v0_probe_median_bitrate,
-                       current_evidence.id AS _current_evidence_id,
-                       (current_evidence.measured_at <= dl.created_at)
-                           AS _current_evidence_is_pre_attempt,
-                       current_evidence.format AS _current_evidence_format,
-                       current_evidence.min_bitrate_kbps AS _current_evidence_min_bitrate,
-                       current_evidence.avg_bitrate_kbps AS _current_evidence_avg_bitrate,
-                       current_evidence.median_bitrate_kbps AS _current_evidence_median_bitrate,
-                       current_evidence.spectral_grade AS _current_evidence_spectral_grade,
-                       current_evidence.spectral_bitrate_kbps AS _current_evidence_spectral_bitrate,
-                       current_evidence.v0_subject AS _current_evidence_v0_probe_kind,
-                       current_evidence.v0_min_bitrate_kbps AS _current_evidence_v0_probe_min_bitrate,
-                       current_evidence.v0_avg_bitrate_kbps AS _current_evidence_v0_probe_avg_bitrate,
-                       current_evidence.v0_median_bitrate_kbps AS _current_evidence_v0_probe_median_bitrate,
-                       origin.beets_distance AS original_beets_distance,
-                       ar.album_title, ar.artist_name, ar.mb_release_id,
-                       ar.year, ar.country, ar.status AS request_status,
-                       ar.min_bitrate AS request_min_bitrate,
-                       ar.prev_min_bitrate, ar.search_filetype_override,
-                       ar.source AS request_source
-                FROM download_log dl
-                LEFT JOIN album_quality_evidence e
-                    ON e.id = dl.candidate_evidence_id
-                LEFT JOIN download_log origin
-                    ON origin.id = dl.source_download_log_id
-                JOIN album_requests ar ON dl.request_id = ar.id
-                LEFT JOIN album_quality_evidence current_evidence
-                    ON current_evidence.id = ar.current_evidence_id
-                ORDER BY dl.created_at DESC LIMIT %s
-            """
+        query = _LOG_QUERY_TEMPLATE.format(
+            candidate_evidence_columns=_CANDIDATE_EVIDENCE_COLUMNS,
+            where=_LOG_OUTCOME_FILTERS.get(outcome_filter or "", ""),
+        )
         cur = self._execute(query, (limit,))
         return [
             download_log_with_request_row(
@@ -538,19 +534,9 @@ class _DownloadLogMixin(_PipelineDBBase):
     ) -> DownloadLogWithEvidenceRow | None:
         """Get a single download_log entry by its ID."""
         cur = self._execute(
-            """
+            f"""
             SELECT dl.*,
-                   e.format AS _evidence_source_format,
-                   e.min_bitrate_kbps AS _evidence_source_min_bitrate,
-                   e.avg_bitrate_kbps AS _evidence_source_avg_bitrate,
-                   e.median_bitrate_kbps AS _evidence_source_median_bitrate,
-                   e.lineage_version AS _evidence_lineage_version,
-                   e.spectral_grade AS _evidence_spectral_grade,
-                   e.spectral_bitrate_kbps AS _evidence_spectral_bitrate,
-                   e.v0_subject AS _evidence_v0_probe_kind,
-                   e.v0_min_bitrate_kbps AS _evidence_v0_probe_min_bitrate,
-                   e.v0_avg_bitrate_kbps AS _evidence_v0_probe_avg_bitrate,
-                   e.v0_median_bitrate_kbps AS _evidence_v0_probe_median_bitrate,
+                   {_CANDIDATE_EVIDENCE_COLUMNS}
                    origin.beets_distance AS original_beets_distance
             FROM download_log dl
             LEFT JOIN album_quality_evidence e
@@ -571,19 +557,9 @@ class _DownloadLogMixin(_PipelineDBBase):
         self, request_id: int,
     ) -> list[DownloadLogWithEvidenceRow]:
         cur = self._execute(
-            """
+            f"""
             SELECT dl.*,
-                   e.format AS _evidence_source_format,
-                   e.min_bitrate_kbps AS _evidence_source_min_bitrate,
-                   e.avg_bitrate_kbps AS _evidence_source_avg_bitrate,
-                   e.median_bitrate_kbps AS _evidence_source_median_bitrate,
-                   e.lineage_version AS _evidence_lineage_version,
-                   e.spectral_grade AS _evidence_spectral_grade,
-                   e.spectral_bitrate_kbps AS _evidence_spectral_bitrate,
-                   e.v0_subject AS _evidence_v0_probe_kind,
-                   e.v0_min_bitrate_kbps AS _evidence_v0_probe_min_bitrate,
-                   e.v0_avg_bitrate_kbps AS _evidence_v0_probe_avg_bitrate,
-                   e.v0_median_bitrate_kbps AS _evidence_v0_probe_median_bitrate,
+                   {_CANDIDATE_EVIDENCE_COLUMNS}
                    origin.beets_distance AS original_beets_distance
             FROM download_log dl
             LEFT JOIN album_quality_evidence e
@@ -613,19 +589,9 @@ class _DownloadLogMixin(_PipelineDBBase):
         if not request_ids:
             return {}
         cur = self._execute(
-            """
+            f"""
             SELECT dl.*,
-                   e.format AS _evidence_source_format,
-                   e.min_bitrate_kbps AS _evidence_source_min_bitrate,
-                   e.avg_bitrate_kbps AS _evidence_source_avg_bitrate,
-                   e.median_bitrate_kbps AS _evidence_source_median_bitrate,
-                   e.lineage_version AS _evidence_lineage_version,
-                   e.spectral_grade AS _evidence_spectral_grade,
-                   e.spectral_bitrate_kbps AS _evidence_spectral_bitrate,
-                   e.v0_subject AS _evidence_v0_probe_kind,
-                   e.v0_min_bitrate_kbps AS _evidence_v0_probe_min_bitrate,
-                   e.v0_avg_bitrate_kbps AS _evidence_v0_probe_avg_bitrate,
-                   e.v0_median_bitrate_kbps AS _evidence_v0_probe_median_bitrate,
+                   {_CANDIDATE_EVIDENCE_COLUMNS}
                    origin.beets_distance AS original_beets_distance
             FROM download_log dl
             LEFT JOIN album_quality_evidence e
@@ -665,21 +631,11 @@ class _DownloadLogMixin(_PipelineDBBase):
             return {}
         ids = [int(r) for r in request_ids]
         latest_cur = self._execute(
-            """
+            f"""
             SELECT * FROM (
                 SELECT DISTINCT ON (dl.request_id)
                        dl.*,
-                       e.format AS _evidence_source_format,
-                       e.min_bitrate_kbps AS _evidence_source_min_bitrate,
-                       e.avg_bitrate_kbps AS _evidence_source_avg_bitrate,
-                       e.median_bitrate_kbps AS _evidence_source_median_bitrate,
-                       e.lineage_version AS _evidence_lineage_version,
-                       e.spectral_grade AS _evidence_spectral_grade,
-                       e.spectral_bitrate_kbps AS _evidence_spectral_bitrate,
-                       e.v0_subject AS _evidence_v0_probe_kind,
-                       e.v0_min_bitrate_kbps AS _evidence_v0_probe_min_bitrate,
-                       e.v0_avg_bitrate_kbps AS _evidence_v0_probe_avg_bitrate,
-                       e.v0_median_bitrate_kbps AS _evidence_v0_probe_median_bitrate,
+                       {_CANDIDATE_EVIDENCE_COLUMNS}
                        origin.beets_distance AS original_beets_distance
                 FROM download_log dl
                 LEFT JOIN album_quality_evidence e
@@ -736,6 +692,11 @@ class _DownloadLogMixin(_PipelineDBBase):
         # wrong-match reject — they only get populated for the request's
         # current-state row. COALESCE keeps the older audit history working
         # if any pre-evidence rows are still around.
+        #
+        # Both evidence joins also project the audit-only accusation
+        # columns (issue #829 Phase 5 PR4): the per-entry chip renders the
+        # candidate's grade and the group badge renders the installed
+        # copy's, so each needs the codec facts for ITS OWN measurement.
         cur = self._execute(f"""
             SELECT DISTINCT ON (dl.request_id, dl.validation_result->>'{FAILED_PATH_KEY}')
                 dl.id AS download_log_id,
@@ -771,11 +732,14 @@ class _DownloadLogMixin(_PipelineDBBase):
                 ar.min_bitrate AS request_min_bitrate,
                 ar.verified_lossless AS request_verified_lossless,
                 ar.current_spectral_grade AS request_current_spectral_grade,
-                ar.current_spectral_bitrate AS request_current_spectral_bitrate
+                ar.current_spectral_bitrate AS request_current_spectral_bitrate,
+{accusation_evidence_columns('e', CANDIDATE_EVIDENCE_PREFIX)}{accusation_evidence_columns('current_evidence', CURRENT_EVIDENCE_PREFIX).rstrip().rstrip(',')}
             FROM download_log dl
             JOIN album_requests ar ON dl.request_id = ar.id
             LEFT JOIN album_quality_evidence e
                 ON e.id = dl.candidate_evidence_id
+            LEFT JOIN album_quality_evidence current_evidence
+                ON current_evidence.id = ar.current_evidence_id
             WHERE dl.outcome = 'rejected'
               AND dl.validation_result->>'{FAILED_PATH_KEY}' IS NOT NULL
             ORDER BY dl.request_id, dl.validation_result->>'{FAILED_PATH_KEY}', dl.id DESC

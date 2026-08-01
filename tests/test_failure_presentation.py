@@ -33,6 +33,7 @@ from lib.failure_presentation import (
     FAMILY_REFUSAL,
     FAMILY_TRANSPORT,
     FAMILY_UNKNOWN,
+    MAX_DIAGNOSTIC_CHARS,
     MAX_RAW_MESSAGE_CHARS,
     TRANSFER_MESSAGE_LABEL_MIXED,
     TRANSFER_MESSAGE_LABEL_PEER,
@@ -42,6 +43,7 @@ from lib.failure_presentation import (
     bounded_text,
     decode_transfer_detail,
     materialize_reason_copy,
+    non_automation_import_failure_message,
     peer_failure_family,
     present_failure,
     transfer_detail_unreadable,
@@ -965,6 +967,54 @@ class TestMaterializeReasonCopy(unittest.TestCase):
 
 class TestFailedRowCopy(unittest.TestCase):
 
+    def test_producer_backed_force_and_youtube_attempt_failures_keep_identity(self):
+        for job_type, label in (
+            ("force_import", "Force import attempt failed:"),
+            ("youtube_import", "YouTube import attempt failed:"),
+        ):
+            with self.subTest(job_type=job_type):
+                producer_message = non_automation_import_failure_message(
+                    job_type,
+                    "harness acknowledgement disappeared",
+                )
+                presentation = present_failure(_evidence(
+                    outcome="failed",
+                    error_message=producer_message,
+                ))
+                self.assertEqual(
+                    presentation.verdict,
+                    f"{label} harness acknowledgement disappeared",
+                )
+                self.assertNotIn("Import error", presentation.verdict or "")
+
+    def test_non_automation_attempt_copy_bounds_the_final_prefixed_message(self):
+        message = non_automation_import_failure_message(
+            "force_import",
+            "x" * 500,
+        )
+        presentation = present_failure(_evidence(
+            outcome="failed",
+            error_message=message,
+        ))
+        self.assertEqual(len(message), MAX_DIAGNOSTIC_CHARS)
+        self.assertEqual(presentation.verdict, message)
+
+    def test_non_automation_attempt_copy_uses_error_after_control_only_message(self):
+        message = non_automation_import_failure_message(
+            "youtube_import",
+            "\x00\n\t",
+            "Beets acknowledgement was ambiguous",
+        )
+        presentation = present_failure(_evidence(
+            outcome="failed",
+            error_message=message,
+        ))
+        self.assertEqual(
+            message,
+            "YouTube import attempt failed: Beets acknowledgement was ambiguous",
+        )
+        self.assertEqual(presentation.verdict, message)
+
     def test_grace_expiry_row_is_not_labelled_an_import_error(self):
         presentation = present_failure(_evidence(
             outcome="failed",
@@ -1246,6 +1296,22 @@ _OWN_MESSAGE_TRIGGERS: tuple[_Trigger, ...] = (
         expect="Interrupted import abandoned and requeued",
         outcome="failed",
     ),
+    _Trigger(
+        trigger="force import attempt failed:",
+        produced_by="lib/terminal_outcomes.py",
+        evidence="non_automation_import_failure_message(",
+        probe="Force import attempt failed: producer crash",
+        expect="Force import attempt failed: producer crash",
+        outcome="failed",
+    ),
+    _Trigger(
+        trigger="youtube import attempt failed:",
+        produced_by="lib/terminal_outcomes.py",
+        evidence="non_automation_import_failure_message(",
+        probe="YouTube import attempt failed: producer crash",
+        expect="YouTube import attempt failed: producer crash",
+        outcome="failed",
+    ),
 )
 
 _MEASUREMENT_TRIGGERS: tuple[_Trigger, ...] = (
@@ -1325,6 +1391,7 @@ _NON_TRIGGER_TABLES: dict[str, str] = {
 
 _NON_TRIGGER_CONSTANTS: dict[str, str] = {
     # Output copy: rendered, never matched.
+    "UNLINKED_SOURCE_PROVENANCE_SUFFIX": "output qualifier",
     "TRANSFER_MESSAGE_LABEL_PEER": "output label",
     "TRANSFER_MESSAGE_LABEL_STORAGE": "output label",
     "TRANSFER_MESSAGE_LABEL_MIXED": "output label",

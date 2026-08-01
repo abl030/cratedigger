@@ -578,6 +578,39 @@ class TestConvertLosslessE2E(unittest.TestCase):
             self.assertEqual(exts.get(".opus", 0), 2)
             self.assertNotIn(".flac", exts)
 
+    def test_target_conversion_consumes_only_the_lossless_originals(self):
+        """No lossy→lossy chain, ever.
+
+        After the V0 grind the work directory holds the V0 MP3s beside
+        the kept FLAC originals, and the target pass runs over that
+        directory. It must read the FLACs — an opus encoded from our own
+        V0 proxy would be a second generation of loss on every album the
+        widened keying newly converts (issue #829).
+        """
+        from harness.import_one import (
+            V0_SPEC,
+            convert_lossless,
+            parse_verified_lossless_target,
+        )
+        with tempfile.TemporaryDirectory() as d:
+            album = os.path.join(d, "album")
+            make_test_album(album, track_count=2, cutoff_hz=15500)
+            convert_lossless(album, V0_SPEC, keep_source=True)
+            self.assertEqual(self._count_by_ext(album).get(".mp3", 0), 2,
+                             "the V0 grind must have left its proxies")
+
+            spec = parse_verified_lossless_target("opus 128")
+            converted, failed, orig_ext, _ = convert_lossless(
+                album, spec, keep_source=True)
+            self.assertEqual((converted, failed), (2, 0))
+            # The source list is the lossless files — the two MP3s beside
+            # them are neither counted nor read.
+            self.assertEqual(orig_ext, "flac")
+            exts = self._count_by_ext(album)
+            self.assertEqual(exts.get(".opus", 0), 2)
+            self.assertEqual(exts.get(".mp3", 0), 2, "V0 proxies untouched")
+            self.assertEqual(exts.get(".flac", 0), 2, "originals kept")
+
     def test_mp3_v2_conversion(self):
         """FLAC → MP3 V2: .mp3 files, bitrate lower than V0."""
         from harness.import_one import convert_lossless, parse_verified_lossless_target
@@ -969,6 +1002,121 @@ class TestProbeNativeLossyAsV0(unittest.TestCase):
             probe = _probe_native_lossy_as_v0(album)
             self.assertIsNotNone(probe)
             self.assertFalse(is_comparable_lossless_source_probe(probe))
+
+
+# ============================================================================
+# A denied proof does not change what lands on disk (issue #829)
+# ============================================================================
+
+class TestDeniedProofStillStoresTheConfiguredTarget(unittest.TestCase):
+    """The Badlands incident, composed across the real boundary it crossed.
+
+    The defect lived between two modules, not inside either: the decider
+    withheld ``target_final_format`` on a denied proof, and the harness's
+    materializer reads exactly that field to choose its ConversionSpec —
+    so a denial silently rewrote the stored format. Module-scope tests on
+    either side were green throughout. These pins therefore run the REAL
+    decider, hand its REAL decision dict to the REAL materializer, and
+    look at the bytes ffmpeg actually left in the album directory.
+
+    Authority: "no we always want it opus, the contract is not around
+    verified or not, is the stored format for lossless absolutely.
+    whatever people choose, v0,opus,aac it just has to be consistent" —
+    https://github.com/abl030/cratedigger/issues/829
+    """
+
+    _TARGET = "opus 128"
+
+    #: Download 39087's own measured ultrasonic deficit (denies at 59.5),
+    #: and a genuine control below the threshold.
+    _DENYING_DEFICIT_DB = 65.73
+    _PASSING_DEFICIT_DB = 45.0
+
+    def _decision(self, deficit_db):
+        """The production decision for a genuine-graded lossless source."""
+        from lib.quality import (
+            AlbumQualityEvidenceDecisionFacts,
+            full_pipeline_decision_from_evidence,
+        )
+        from tests.helpers import build_parity_candidate_evidence
+
+        candidate = build_parity_candidate_evidence(
+            is_flac=True, min_bitrate=0, is_cbr=False,
+            spectral_grade="genuine",
+            post_conversion_min_bitrate=245,
+            candidate_v0_probe_avg=245,
+            candidate_v0_probe_min=245,
+            codec_family="lossless",
+            ultrasonic_deficit_db=deficit_db,
+        )
+        decision = full_pipeline_decision_from_evidence(
+            candidate, None,
+            facts=AlbumQualityEvidenceDecisionFacts(
+                verified_lossless_target=self._TARGET,
+            ),
+        )
+        return candidate, decision
+
+    def _materialize(self, album_dir, candidate, decision):
+        from harness.import_one import _materialize_quality_evidence_action
+        from lib.quality import (
+            ImportResult,
+            QualityEvidenceActionPayload,
+            evidence_decision_name,
+        )
+
+        r = ImportResult()
+        payload = QualityEvidenceActionPayload(
+            candidate=candidate,
+            current=None,
+            decision=decision,
+            decision_name=evidence_decision_name(decision),
+            target_format=None,
+            verified_lossless_target=self._TARGET,
+        )
+        _materialize_quality_evidence_action(
+            work_path=album_dir, payload=payload, r=r,
+        )
+        return r
+
+    def _extensions(self, directory):
+        return sorted(
+            os.path.splitext(f)[1].lower() for f in os.listdir(directory)
+        )
+
+    def test_a_denied_album_lands_in_the_configured_format(self):
+        """The regression. Denied proof, genuine grade, opus configured —
+        the album must land as opus, converted straight from the FLAC."""
+        candidate, decision = self._decision(self._DENYING_DEFICIT_DB)
+        self.assertFalse(decision["verified_lossless"],
+                         "the leg must actually deny, or this pins nothing")
+        with tempfile.TemporaryDirectory() as d:
+            album = os.path.join(d, "album")
+            make_test_album(album, track_count=2, cutoff_hz=15500)
+            r = self._materialize(album, candidate, decision)
+            self.assertEqual(self._extensions(album), [".opus", ".opus"])
+            self.assertEqual(r.final_format, self._TARGET)
+            # The audio chain: the conversion consumed the LOSSLESS
+            # originals. A V0 intermediate would show up here as "mp3".
+            self.assertEqual(r.conversion.original_filetype, "flac")
+            self.assertEqual(r.conversion.target_filetype, "opus")
+
+    def test_the_proof_outcome_does_not_change_the_bytes(self):
+        """Same album, same config, only the proof moves — the two runs
+        must leave the identical file set behind."""
+        landed = {}
+        for label, deficit in (
+            ("denied", self._DENYING_DEFICIT_DB),
+            ("passed", self._PASSING_DEFICIT_DB),
+        ):
+            candidate, decision = self._decision(deficit)
+            with tempfile.TemporaryDirectory() as d:
+                album = os.path.join(d, "album")
+                make_test_album(album, track_count=2, cutoff_hz=15500)
+                r = self._materialize(album, candidate, decision)
+                landed[label] = (self._extensions(album), r.final_format)
+        self.assertEqual(landed["denied"], landed["passed"])
+        self.assertEqual(landed["denied"][1], self._TARGET)
 
 
 if __name__ == "__main__":

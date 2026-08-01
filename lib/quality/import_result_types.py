@@ -311,6 +311,15 @@ class ImportResult(msgspec.Struct):
     # on avg). None on rows predating the field and when no existing album
     # was compared — the UI falls back to the legacy min-based labels.
     comparison_basis: QualityComparisonBasis | None = None
+    # PR2d's Stage-1-reject counterfactual, persisted by issue #829 Phase 5
+    # PR4. A Stage-1 spectral reject short-circuits before Stage 2 runs, so
+    # the audit trail stopped at ``stage1_spectral:reject`` and said nothing
+    # about whether the candidate was actually an upgrade — which IS issue
+    # #813's disagreement question. AUDIT ONLY: no branch reads either
+    # field, and both are None on every row that did not short-circuit
+    # Stage 1 and on every row predating them.
+    stage2_import_if_stage1_deferred: str | None = None
+    comparison_basis_if_stage1_deferred: QualityComparisonBasis | None = None
 
     def to_json(self) -> str:
         """Serialize to JSON string via msgspec.json.encode."""

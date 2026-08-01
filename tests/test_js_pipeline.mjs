@@ -173,5 +173,129 @@ for (const [grade, tone] of [
     `${grade} never leaks a raw token`);
 }
 
+// --- issue #829 Phase 5 PR4/N3: the Quality header's audit-only flags ---
+//
+// The header's grade comes from a fallback chain over the installed copy
+// AND the last download, so it must apply the pair belonging to whichever
+// grade the chain selected. A missing pair keeps the accusing render.
+
+const BEETS_MP3 = [{ format: 'MP3', bitrate: 256000 }];
+
+console.log('current Quality withholds an audit-only HAVE accusation');
+{
+  const html = __test__.renderCurrentQualityRow(
+    {
+      current_spectral_bitrate: 128,
+      current_spectral_grade: 'likely_transcode',
+      current_spectral_accusation_admissible: false,
+      current_spectral_accusation_withheld: 'audit_only_codec',
+      last_download_spectral_grade: null,
+      verified_lossless: false,
+    },
+    BEETS_MP3,
+  );
+  assertContains(html, 'likely transcode', 'the measured grade stays visible');
+  assertContains(html, 'audit-only', 'the withheld suffix is stated');
+  assertContains(html, 'native encoder behaviour', 'the hover explains why');
+  assertContains(html, 'quality-tone-unknown', 'the neutral tone is used');
+  assertExcludes(html, 'quality-tone-poor', 'the accusing red is withheld');
+}
+
+console.log('current Quality keeps the accusation for a real codec');
+{
+  const html = __test__.renderCurrentQualityRow(
+    {
+      current_spectral_bitrate: 128,
+      current_spectral_grade: 'likely_transcode',
+      current_spectral_accusation_admissible: true,
+      current_spectral_accusation_withheld: null,
+      last_download_spectral_grade: null,
+      verified_lossless: false,
+    },
+    BEETS_MP3,
+  );
+  assertContains(html, 'quality-tone-poor', 'an admissible grade still accuses');
+  assertExcludes(html, 'audit-only', 'no withheld suffix on a real finding');
+}
+
+console.log('current Quality falls back to accusing when the flags are absent');
+{
+  const html = __test__.renderCurrentQualityRow(
+    {
+      current_spectral_bitrate: 128,
+      current_spectral_grade: 'likely_transcode',
+      last_download_spectral_grade: null,
+      verified_lossless: false,
+    },
+    BEETS_MP3,
+  );
+  assertContains(html, 'quality-tone-poor',
+    'a row with no evidence join keeps the historical accusing render');
+  assertExcludes(html, 'audit-only', 'nothing is withheld without a flag');
+}
+
+console.log('current Quality applies the pair belonging to the chosen grade');
+{
+  // The chain fell through to the last download, so the HAVE pair must
+  // NOT be read — it describes a different album.
+  const html = __test__.renderCurrentQualityRow(
+    {
+      current_spectral_grade: null,
+      current_spectral_accusation_admissible: true,
+      current_spectral_accusation_withheld: null,
+      last_download_spectral_bitrate: 128,
+      last_download_spectral_grade: 'likely_transcode',
+      last_download_spectral_accusation_admissible: false,
+      last_download_spectral_accusation_withheld: 'audit_only_codec',
+      verified_lossless: false,
+    },
+    BEETS_MP3,
+  );
+  assertContains(html, 'audit-only',
+    'the last-download pair is applied to the last-download grade');
+  assertExcludes(html, 'quality-tone-poor',
+    'the HAVE pair never overrides the grade the chain selected');
+
+  // ...and the converse: a HAVE grade must not read the candidate pair.
+  const haveHtml = __test__.renderCurrentQualityRow(
+    {
+      current_spectral_bitrate: 128,
+      current_spectral_grade: 'likely_transcode',
+      current_spectral_accusation_admissible: true,
+      current_spectral_accusation_withheld: null,
+      last_download_spectral_grade: 'likely_transcode',
+      last_download_spectral_accusation_admissible: false,
+      last_download_spectral_accusation_withheld: 'audit_only_codec',
+      verified_lossless: false,
+    },
+    BEETS_MP3,
+  );
+  assertContains(haveHtml, 'quality-tone-poor',
+    'the HAVE grade keeps its own admissible finding');
+  assertExcludes(haveHtml, 'audit-only',
+    'the candidate pair never neutralizes a HAVE accusation');
+}
+
+console.log('current Quality never claims encoder facts for an unresolved codec');
+{
+  const html = __test__.renderCurrentQualityRow(
+    {
+      current_spectral_bitrate: 192,
+      current_spectral_grade: 'suspect',
+      current_spectral_accusation_admissible: false,
+      current_spectral_accusation_withheld: 'codec_unresolved',
+      last_download_spectral_grade: null,
+      verified_lossless: false,
+    },
+    BEETS_MP3,
+  );
+  assertContains(html, 'codec unresolved', 'the unresolved world is named');
+  assertContains(html, 'could not be identified', 'the hover says why');
+  assertExcludes(html, 'native encoder behaviour',
+    'an unresolved codec is never described as native encoder rolloff');
+  assertExcludes(html, 'audit-only',
+    'the two withholding worlds are never conflated');
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

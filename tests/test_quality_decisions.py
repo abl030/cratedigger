@@ -1882,8 +1882,16 @@ class TestFullPipelineContract(unittest.TestCase):
         self.assertIsNone(r["target_final_format"])
         self.assertTrue(r["imported"])
 
-    def test_target_conversion_transcode_skips(self):
-        """Transcode FLAC + verified_lossless_target → no target conversion."""
+    def test_target_conversion_transcode_still_stores_the_target(self):
+        """Transcode FLAC + verified_lossless_target → still the target.
+
+        Superseded by issue #829's stored-format ruling (2026-08-01):
+        the grade decides the PROOF and the comparison, never the stored
+        format. This album is a lossless source being converted, so it is
+        stored in the configured format like every other one — while the
+        pre-import comparison stays pessimistic (``MP3``) because the
+        transcode grade is what that comparison is about.
+        """
         r = full_pipeline_decision(
             is_flac=True, min_bitrate=0, is_cbr=False,
             spectral_grade="suspect", converted_count=10,
@@ -1891,7 +1899,8 @@ class TestFullPipelineContract(unittest.TestCase):
             post_conversion_is_cbr=False,
             verified_lossless_target="aac 128",
             supported_lossless_source=False)
-        self.assertIsNone(r["target_final_format"])
+        self.assertEqual(r["target_final_format"], "aac 128")
+        self.assertFalse(r["verified_lossless"])
 
     def test_provisional_lossless_upgrade_uses_probe_avg(self):
         r = full_pipeline_decision(
@@ -2079,7 +2088,12 @@ class TestFullPipelineContract(unittest.TestCase):
         self.assertTrue(r["denylisted"])
         self.assertTrue(r["keep_searching"])
         self.assertEqual(r["final_status"], "wanted")
-        self.assertIsNone(r["target_final_format"])
+        # ``target_final_format`` names the configured stored format for a
+        # lossless source and no longer moves with the proof (issue #829);
+        # it is inert on a reject, which ``imported=False`` above owns and
+        # ``_evidence_action_allows_import`` enforces before the harness
+        # would ever read it.
+        self.assertEqual(r["target_final_format"], "opus 128")
         self.assertIsNone(r["stage3_quality_gate"])
 
     def test_lossy_candidate_locked_by_existing_lossless_source_probe(self):

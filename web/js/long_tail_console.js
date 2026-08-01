@@ -144,7 +144,9 @@ import { bandLabel, renderLongTail, loadLongTail } from './long_tail.js';
 import {
   qualityRankBadgeClass,
   spectralGradeClass,
+  spectralGradeIsAdmissible,
   spectralGradeLabel,
+  spectralWithheldPresentation,
 } from './quality_palette.js';
 import {
   handleProcessingLockedConflict,
@@ -546,11 +548,12 @@ function youtubeHistoryRows(history) {
 }
 
 /**
- * Extract the classified failure reason for a terminal `youtube_failed`
- * download-history row. Pure. The reason is persisted in the
- * `youtube_metadata` JSONB blob (`reason`) by the ingest worker's terminal
- * write — see `lib/youtube_ingest_service.py::YoutubeIngestMetadata.reason`.
- * Falls back to the row's `error_message` then `verdict` (the shared
+ * Extract the classified failure reason for a terminal `youtube_failed` or
+ * linked importer `failed` download-history row. Pure. The ingest worker
+ * persists `youtube_failed` reasons in `youtube_metadata.reason` — see
+ * `lib/youtube_ingest_service.py::YoutubeIngestMetadata.reason`; the importer
+ * persists its linked failure's bounded operator diagnostic in `error_message`.
+ * The helper falls back from metadata to `error_message` then `verdict` (the shared
  * download-history-view fields) and finally a generic sentinel so the
  * panel never shows an empty reason.
  *
@@ -575,7 +578,8 @@ function youtubeFailureReason(row) {
  *   * "rescue running" when an active `youtube_running` row exists, OR the
  *     worklist row carried `in_flight_rescue` (the same predicate).
  *   * "last rescue failed: <reason>" when the latest terminal youtube row
- *     is `youtube_failed` SPECIFICALLY (distinct from `youtube_success`).
+ *     is `youtube_failed` or the linked importer outcome `failed` (both
+ *     distinct from `youtube_success`).
  *   * the recent attempts list otherwise.
  *
  * @param {Array<Object>|null|undefined} history  Pipeline-detail history.
@@ -588,10 +592,13 @@ function renderRescuesBody(history, inFlightFlag) {
   if (running || inFlightFlag) {
     return `<div class="lt-rescue-status"><span class="badge badge-new">rescue running</span>${running && running.created_at ? `<span class="lt-meta-chip">since ${esc(consoleTimestamp(running.created_at))}</span>` : ''}</div>`;
   }
-  // The latest TERMINAL youtube row (youtube_failed / youtube_success).
+  // The latest TERMINAL youtube row: ingest failure/success or linked importer
+  // failure. The latter follows the canonical youtube_success handoff.
   const terminal = rows.find(
-    (h) => h.outcome === 'youtube_failed' || h.outcome === 'youtube_success');
-  if (terminal && terminal.outcome === 'youtube_failed') {
+    (h) => h.outcome === 'youtube_failed'
+      || h.outcome === 'youtube_success'
+      || h.outcome === 'failed');
+  if (terminal && (terminal.outcome === 'youtube_failed' || terminal.outcome === 'failed')) {
     const reason = youtubeFailureReason(terminal);
     return `<div class="lt-rescue-status"><span class="badge badge-muted">last rescue failed</span> <span class="lt-rescue-reason">${esc(reason)}</span></div>`;
   }
@@ -844,6 +851,12 @@ function renderYoutubeBody(result, id) {
  * unknown (NULL `current_spectral_grade` — pre-2026-05-17 imports or
  * lossy-source transcodes): "if known". Pure.
  *
+ * The measured grade stays visible whatever its codec, but an installed
+ * copy whose codec cannot support a transcode accusation loses the
+ * accusing colour and gains the shared suffix (issue #829 Phase 5 PR4).
+ * A row with no linked current evidence carries no flags and keeps the
+ * historical accusing render.
+ *
  * @param {Object} row  The worklist row.
  * @returns {string}
  */
@@ -853,7 +866,16 @@ function renderSpectralFragment(row) {
   if (!grade) return '';
   const br = (row.current_spectral_bitrate != null)
     ? ` ~${Number(row.current_spectral_bitrate)}kbps` : '';
-  return ` · <span class="${spectralGradeClass(grade)}">spectral: ${esc(spectralGradeLabel(grade))}${esc(br)}</span>`;
+  const label = `spectral: ${esc(spectralGradeLabel(grade))}${esc(br)}`;
+  if (spectralGradeIsAdmissible(
+    grade, row.current_spectral_accusation_admissible,
+  )) {
+    return ` · <span class="${spectralGradeClass(grade)}">${label}</span>`;
+  }
+  const withholding = spectralWithheldPresentation(
+    row.current_spectral_accusation_withheld);
+  return ` · <span class="${withholding.className}"`
+    + ` title="${withholding.title}">${label}${withholding.suffix}</span>`;
 }
 
 /**

@@ -40,9 +40,21 @@ from lib.quality import (
 # (60,102 production-primitive measurements, TRAINING / ROUND-1 /
 # ROUND-2 / ROUND-3). Do not re-derive or "improve" them.
 #
-# Forward-only: rows already carrying a grade keep the grade the old
-# thresholds produced. Nothing is re-scored (scope.md, and the Phase 5
-# plan §2's "existing stamps remain proofs under the OLD model").
+# Forward-only in the sense that matters for proofs: an existing stamp is
+# never demoted, and no sweep re-reads stored audio to re-grade the
+# library (scope.md, and the Phase 5 plan §2's "existing stamps remain
+# proofs under the OLD model").
+#
+# That is NOT "nothing is re-scored", and the difference matters when
+# reasoning about blast radius. These thresholds live in
+# ``classify_track``, so any row that is MEASURED AGAIN — a re-download, a
+# re-preview, a force-import retry — is graded under whatever ladder is
+# current, not the one its first grade came from. Only rows that are never
+# re-measured keep their old-era grade. A change to ``classify_track`` or
+# to the constants below therefore moves future grades silently: the
+# decision differential reads PERSISTED grades and is structurally blind
+# to it (see ``scripts/decision_differential.py``), so such a change owes
+# a live grade-count query instead.
 HF_DEFICIT_SUSPECT = 69.0   # dB — at or above this = suspect (no cliff needed)
 HF_DEFICIT_MARGINAL = 65.0  # dB — at or above this = marginal
 CLIFF_THRESHOLD_DB_PER_KHZ = -12.0  # steeper than this = cliff

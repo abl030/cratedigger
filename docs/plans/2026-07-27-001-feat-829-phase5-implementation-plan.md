@@ -1,5 +1,12 @@
 # Phase 5 — Per-Codec Spectral Model Implementation (issue #829)
 
+**Status (2026-08-01)**: **every PR in this plan is merged, deployed and
+live-verified.** PR1 → PR2a–d → PR3 → the AAC frame-lattice pair → the
+format-consistency fix → PR4 → PR5 (this document's own docs/teardown
+item). The only Phase 5 work left is the convergence-signal prompt that was
+split out of PR4 by operator decision, and the post-series reflection. The
+sequencing narrative below is preserved as written.
+
 **Status (2026-07-29)**: **PR1, PR2a, PR2b, PR2c and PR2d are merged and
 deployed.** The codec-blind defect that opened the issue is fixed and live.
 **PR3 is next**, and its design changed materially — read §1.5 before §3.
@@ -18,9 +25,12 @@ replaying the research.
 | PR2c | #828-item-1 cross-codec parity closure | merged (#931) |
 | PR2d | Stage-2 counterfactual audit; kills the #827 harness's blindness | merged (#934) |
 | — | calibration record committed to the repo | merged (#929) |
-| **PR3** | **proof gate v3** | **next — design revised, see §1.5** |
-| PR4 | tiered verdict persistence + display | not started |
-| PR5 | research tables, docs, teardown | teardown done; docs remain |
+| PR3 | proof gate v3 | merged (#966), deployed + cycle-verified 2026-07-31 |
+| PR-A / PR-B | AAC frame-lattice leg (capture + proof leg, migration 069) | merged (#968, #969), deployed 2026-08-01 |
+| — | lossless stored format is config-unconditional | merged (#972), deployed 2026-08-01 |
+| PR4 | tiered verdict persistence + display | merged (#973), deployed 2026-08-01 |
+| **PR5** | **research tables, docs, teardown** | **DONE 2026-08-01 — see § "PR5" below** |
+| — | convergence-signal prompt (split out of PR4) | not started |
 
 The temporary calibration instance is **torn down** (2026-07-29): DB dropped,
 encode matrices and ground-truth FLACs deleted, 1,003 calib-owned slskd files
@@ -274,6 +284,14 @@ qaac CVBR-256 → FLAC, measure the ultrasonic extension with the production
 analyzer, run the frozen scorer. Note the qaac VM (nixosconfig#46) may need
 re-standing.
 
+**RELEASED 2026-08-01.** All 20 rows were deleted through
+`pipeline-cli library-delete --purge-pipeline` (beets albums 19715–19747)
+after the Apple measurement was complete, and a census of `8916..8935`
+returns zero rows in both databases (re-verified 2026-08-01 during PR5).
+The `launder-matrix` manifests plus `corpus-manifest.json` remain the
+reacquisition recipe. Authority: *"yes delete them"* —
+https://github.com/abl030/cratedigger/issues/829
+
 #### These are borrowed rows — remove them when the work is done
 
 **They are not part of the operator's curated collection.** They were seeded
@@ -461,6 +479,16 @@ checker owes a known-bad self-test.
 - HF-deficit thresholds → 65 / 69.
 - Denial semantics per §2: stays provisional, surfaces in triage, never
   rejects or accuses. **Withholding proof is not rejecting an album.**
+  **CORRECTED 2026-08-01 — a denial does not change the stored format
+  either.** As shipped, PR3 left the configured `verified_lossless_target`
+  keyed on the proof in both twins, so a denied album was stored as MP3 V0
+  (download 39087, Dirty Beaches *Badlands*) — on ~34% of genuine-graded
+  lossless. The operator ruling: quality decides imports, proof decides
+  names, config decides formats. Authority: "no we always want it opus,
+  the contract is not around verified or not, is the stored format for
+  lossless absolutely. whatever people choose, v0,opus,aac it just has to
+  be consistent" — https://github.com/abl030/cratedigger/issues/829.
+  Both twins now key the target on the lossless SOURCE.
 - Mint `verified_lossless_classifier = 'spectral_verified_lossless_v3'` —
   reuse the existing column, do NOT add a new one. It is already the
   "which model proved it" axis, is written at exactly one site
@@ -611,6 +639,44 @@ validated detector port and its reference validation.
 
 ### PR4 — Tiered verdict persistence + display semantics
 
+**Update 2026-08-01 — the convergence-signal item is SPLIT OUT of PR4.**
+Operator decision, recorded in the issue #829 comment "Operator decisions
+2026-08-01": the inter-candidate `cliff_hz` constancy prompt (the last
+bullet of this section) is not PR4's. It is struck through below and left
+in place for provenance; PR4 ships the four remaining items only.
+
+**Tier mapping as shipped (2026-08-01), and why it is not five tiers.**
+`lib/quality/verdict_tiers.py` derives the tier from the legs PRODUCTION
+evaluates, which are not the frozen scorer's three:
+
+| tier | fired legs | production source |
+|---|---|---|
+| 1 | in-window cliff **or** AAC frame lattice | `SpectralInterpretation.supports_transcode_accusation`; `aac_lattice_proof_leg` denial |
+| 2 | ceiling + no-ultrasonic | **not producible** — no ceiling leg exists |
+| 3 | ceiling only | **not producible** |
+| 4 | no-ultrasonic only | `ultrasonic_proof_leg` denial |
+| 5 | none | every evaluable leg cleared |
+
+Tiers 2 and 3 need the ceiling leg — a ≥15 dB step at a consistent slice
+index across an album's tracks — which requires per-track slice vectors
+production does not persist and has never measured. §1.5b's threshold
+freeze already records this as a known residual ("production evaluates
+only TWO of the frozen scorer's three legs"). **Their copy is therefore
+NOT shipped**: keying operator wording on a scenario no producer emits is
+exactly `.claude/rules/test-fidelity.md` Rule C's forbidden shape (issue
+#882's `no_candidates`). Their numbers stay reserved rather than
+renumbered so the shipped tiers keep meaning what the measured table
+says.
+
+The AAC frame-lattice leg post-dates the tier table and is a positive
+detection at the same severity as the in-window cliff (analytic FP floor
+~0.0023 albums per 5000), so it joins tier 1 rather than taking a new
+number; the persisted fired-leg set says which of the two fired.
+
+**A tier-5 verdict over an empty evaluated-leg set is not a clearance**
+and the glance surfaces do not render it — "nothing was found" and
+"nothing was looked for" are different facts (`AlbumProofVerdict.has_finding`).
+
 - Persist the **fired-leg set** and derived tier, not just the boolean.
 - Tier 1 surfaces as a transcode finding, reconciled with the existing
   `likely_transcode` spectral grade so there is ONE statement, not two.
@@ -631,18 +697,39 @@ validated detector port and its reference validation.
   counterfactual — `pipeline-cli quality` does. Leaving the persisted
   stage-chain builders alone was verified correct (fixed key allowlists, zero
   JSONB drift), so this is additive display work.
-- **Also PR4's:** the convergence-signal surfacing from the 2026-07-27
+- ~~**Also PR4's:** the convergence-signal surfacing from the 2026-07-27
   issue comments — inter-candidate `cliff_hz` constancy as a
   "the network has converged, stop searching?" triage prompt. `cliff_hz` is
   the primitive that makes it measurable and it has been accruing since
-  PR1 shipped.
+  PR1 shipped.~~ **SPLIT OUT of PR4 by operator decision 2026-08-01** (issue
+  #829 comment "Operator decisions 2026-08-01"). Not implemented here.
 
-### PR5 — Research tables, docs, teardown
+### PR5 — Research tables, docs, teardown — DONE 2026-08-01
 
 - Commit the calibration tables into `docs/research/spectral-*.md` (the six
   Phase 0 docs get their measured Phase 3/4 tables).
 - Update `docs/quality-verification.md`, `docs/quality-ranks.md`, CLAUDE.md.
 - Ownership-ordered calib teardown (see §5).
+
+**Disposition, 2026-08-01:**
+
+| item | state |
+|---|---|
+| six Phase 0 docs get their measured tables | **done** — each now carries a "Measured — Phase 3/4 results" section: the measured tables, the shipped production constants they produced, and a **prediction scorecard** marking every Phase 0 prediction held / falsified / untested |
+| `docs/quality-verification.md` | **done** — the pre-calibration "HF deficit ranges observed" table is marked historical and joined by the four-arm control distribution (p50 48 / p95 65 / p99 69 / max 78) and the per-arm false-flag rates. The proof-gate, lattice-leg and verdict-tier sections were already written by PR3/PR-B/PR4 |
+| `docs/quality-ranks.md` | **done** — each per-codec band table now says what its codec's spectral class may and may not do (AAC floor-only, Vorbis q0–q4 ladder, Opus audit-only, WMA never calibrated), with pointers into the measured docs; the research record is added to § Related |
+| CLAUDE.md | **done, and budget-constrained** — the quality-model line now states the three-sentence model and points at the measured record. It had to *replace* the old wording rather than extend it: `CLAUDE.md` was **10 bytes** under Codex's hard 32 KiB instruction limit (`tests/test_ai_portability.py`), so any addition needs a matching trim. Worth knowing before the next edit |
+| stale 40/60 deficit thresholds elsewhere | **done** — dated pointers (never retcons) added at `docs/audio-classification-research.md`, `docs/debug-runs.md`, and the four per-codec docs that quote the old constants. Those documents are self-dated records and stay as written |
+| §5 ownership-ordered teardown | **already done 2026-07-29**, re-verified 2026-08-01 (below) |
+| borrowed corpus rows 8916–8935 | **already released 2026-08-01** by operator decision (below) |
+
+Deliberately NOT done here: deleting the 2026-07-30 round's disposable audio
+(`/mnt/virtio/Music/matrix/`, 163 GB; `/mnt/virtio/Music/derrien-arm/`,
+5.5 GB). Both are rebuildable from the committed `argv` manifests and every
+measurement derived from them is committed, but they post-date §5's checklist
+and destroying 168 GB is an operator action, not a documentation pass. State
+recorded in `docs/research/spectral-calibration-findings.md` § "Data and
+reproduction" so the next session does not have to rediscover it.
 
 ---
 
@@ -673,10 +760,25 @@ validated detector port and its reference validation.
 
 ---
 
-## 5. Artifacts and teardown — DONE 2026-07-29
+## 5. Artifacts and teardown — DONE 2026-07-29, re-verified 2026-08-01
 
 **The calibration instance is torn down.** What follows is the record of what
 was kept, what was destroyed, and the one thing that should not have been.
+
+**PR5 verification, 2026-08-01** — each checklist item checked against the
+live world rather than against this record:
+
+| checklist item | verified state |
+|---|---|
+| 1. final calib cycle → its own convergence/reapers | **not possible then, and moot now** — the transient units had already been GC'd by an earlier prod deploy, so step 2 was done directly against the DB instead (see below) |
+| 2. sweep calib's slskd files using calib's ledger **before** dropping the DB | **done in the right order** — 1,003 files / 42.76 GiB swept, excluding 40 paths prod also claimed, touching no protected quarantine tree |
+| 3. corpus FLACs are keepers | **superseded and closed** — the corpus was deleted (the recorded mistake), 20 albums were re-seeded to close §1.5c, and those rows were released on 2026-08-01 once the Apple measurement was done (§1.6) |
+| 4. `DROP DATABASE cratedigger_calib`; stop the transient units | **verified gone** — the cluster lists only `cratedigger`/`postgres`/`template0`/`template1`, and `/var/lib/cratedigger-calib` does not exist |
+| encode matrices + quarantine archive | **verified gone** — `/mnt/virtio/Music/calibration-tmp/` is down to ~6 MB of measurement TSVs, all of which are committed under `docs/research/calibration-data/` |
+
+Nothing in §5's checklist remains open. The one live residue is the
+2026-07-30 round's disposable audio, which §5 predates — see the PR5
+disposition table in §3.
 
 **Kept, and now the only surviving evidence for every constant in this plan:**
 `docs/research/calibration-data/` (PR #929) — 60,102 measurements across four
