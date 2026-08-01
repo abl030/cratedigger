@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from beets.autotag.hooks import JSONDict
     from beets.dbcore.db import Results
     from beets.importer.tasks import ImportTask
+    from confuse import ConfigView
 
     def _lib_albums(
         lib: library.Library, query: object = None, sort: object = None,
@@ -318,6 +319,45 @@ def _append_mutation_log(
     except OSError as e:
         print(f"[harness] mutation log write failed ({log_path}): {e}",
               file=sys.stderr)
+
+
+def _assert_duplicate_keys_include_mb_albumid(cfg: ConfigView) -> None:
+    """Fail loud unless beets duplicate detection uses exact release IDs only.
+
+    Beets reads this strictly from `config["import"]["duplicate_keys"]["album"]`.
+    If the key is misplaced (e.g. top-level `duplicate_keys =` in config.yaml)
+    the user's override is silently ignored and beets falls back to the default
+    `[albumartist, album]`. `find_duplicates()` then matches cross-MBID siblings
+    on album title alone, and the harness's duplicate resolution can answer
+    `DuplicateAction.REMOVE`, whose `remove_duplicates` blast radius is the
+    exact shape of the 2026-04-20 Shearwater "Palo Santo" data-loss event.
+
+    The key set also must not include mutable metadata like albumartist/album:
+    live upgrade attempts can carry normalized artist/title differences, which
+    makes Beets miss the duplicate callback. Cratedigger no longer owns a
+    post-import replacement cleanup state machine, so exact release identifiers
+    are the durable duplicate boundary.
+
+    This assertion turns those silent misconfigs into loud startup failures.
+    Raises SystemExit(1) on regression.
+    """
+    keys = list(cfg["import"]["duplicate_keys"]["album"].as_str_seq())
+    expected = {"mb_albumid", "discogs_albumid"}
+    if set(keys) != expected:
+        msg = (
+            "FATAL: beets config import.duplicate_keys.album must be exactly "
+            f"{sorted(expected)!r} (got {keys!r}). Missing mb_albumid enables "
+            "cross-MBID sibling destruction via find_duplicates — the "
+            "2026-04-20 Palo Santo bug. Extra mutable keys like albumartist or "
+            "album make same-release upgrades miss Beets' duplicate callback, "
+            "so replacement would not be atomic. The config is rendered by "
+            "the cratedigger NixOS module into ${stateDir}/beets/config.yaml "
+            "(BEETSDIR) — duplicate_keys is a hard-coded literal there "
+            "(nix/module.nix, tier-2 plan R5), so if this fires the rendered "
+            "file was bypassed or hand-edited."
+        )
+        print(msg, file=sys.stderr)
+        sys.exit(1)
 
 
 def _duplicate_lookup_metadata(task: ImportTask) -> JSONDict:
@@ -750,6 +790,9 @@ def main() -> None:
     # Load beets configuration
     config.read()
 
+    # Structural guard against the 2026-04-20 Palo Santo misconfig class.
+    # Must fire before any import work touches beets' duplicate-detection path.
+    _assert_duplicate_keys_include_mb_albumid(config)
     _install_release_id_duplicate_lookup()
 
     # Config overrides MUST happen before plugins.load_plugins() because the

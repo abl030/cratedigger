@@ -2604,8 +2604,6 @@ class TestImporterWorker(unittest.TestCase):
     def test_main_reuses_one_scan_cursor_across_polls(self) -> None:
         """The process loop, not callers, owns the persistent import cursor."""
         from scripts import importer
-        from tests.test_beets_config_contract import BeetsContractWorld
-        from tests.test_beets_config_startup import _isolated_installed_authority
 
         class PollProbeComplete(RuntimeError):
             pass
@@ -2632,6 +2630,7 @@ class TestImporterWorker(unittest.TestCase):
             limit=importer.IMPORT_CANDIDATE_SCAN_LIMIT,
         )
         observed_offsets: list[int] = []
+
         class CursorProbeDB:
             @contextmanager
             def advisory_lock(self, _namespace: int, _key: int):
@@ -2675,14 +2674,8 @@ class TestImporterWorker(unittest.TestCase):
 
         db = CursorProbeDB()
 
-        world = BeetsContractWorld(role="importer")
-        self.addCleanup(world.close)
         argv = [
             "importer.py",
-            "--config",
-            str(world.runtime_config),
-            "--runtime-dir",
-            str(world.runtime_dir),
             "--dsn",
             "postgresql://fake",
             "--poll-interval",
@@ -2691,7 +2684,6 @@ class TestImporterWorker(unittest.TestCase):
             "cursor-probe",
         ]
         with (
-            _isolated_installed_authority(),
             patch("sys.argv", argv),
             patch("scripts.importer.PipelineDB", return_value=db),
             patch("scripts.importer.time.sleep"),
@@ -5001,14 +4993,8 @@ class TestImportPreviewWorker(unittest.TestCase):
         calls = 0
         calls_lock = threading.Lock()
 
-        def run_once(
-            db,
-            *,
-            worker_id,
-            runtime_config=None,
-            scan_cursor=None,
-        ):
-            del runtime_config, scan_cursor
+        def run_once(db, *, worker_id, scan_cursor=None):
+            del scan_cursor
             nonlocal calls
             with calls_lock:
                 calls += 1
@@ -5058,14 +5044,8 @@ class TestImportPreviewWorker(unittest.TestCase):
         calls_lock = threading.Lock()
         stop_holder: dict[str, Any] = {}
 
-        def run_once(
-            db,
-            *,
-            worker_id,
-            runtime_config=None,
-            scan_cursor=None,
-        ):
-            del runtime_config, scan_cursor
+        def run_once(db, *, worker_id, scan_cursor=None):
+            del scan_cursor
             nonlocal calls
             with calls_lock:
                 calls += 1
@@ -5129,10 +5109,9 @@ class TestImportPreviewWorker(unittest.TestCase):
             _db: object,
             *,
             worker_id: str,
-            runtime_config: CratediggerConfig | None,
             scan_cursor: object,
         ) -> None:
-            del worker_id, runtime_config
+            del worker_id
             observed.append(scan_cursor)
             if len(observed) == 2:
                 raise PollProbeComplete
@@ -5175,8 +5154,6 @@ class TestImportPreviewWorker(unittest.TestCase):
         window. Mirrors the importer's startup self-heal.
         """
         from scripts import import_preview_worker
-        from tests.test_beets_config_contract import BeetsContractWorld
-        from tests.test_beets_config_startup import _isolated_installed_authority
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="wanted"))
@@ -5194,44 +5171,17 @@ class TestImportPreviewWorker(unittest.TestCase):
         assert claimed is not None
         self.assertEqual(claimed.preview_status, "running")
 
-        world = BeetsContractWorld(role="preview")
-        self.addCleanup(world.close)
-        argv = [
-            "import_preview_worker.py",
-            "--config", str(world.runtime_config),
-            "--runtime-dir", str(world.runtime_dir),
-            "--dsn", "postgresql://fake",
-            "--once",
-        ]
+        argv = ["import_preview_worker.py", "--dsn", "postgresql://fake", "--once"]
         with (
-            _isolated_installed_authority(),
             patch("sys.argv", argv),
             patch("scripts.import_preview_worker.PipelineDB",
                   side_effect=lambda dsn: db),
-            patch(
-                "scripts.import_preview_worker.run_once",
-                return_value=None,
-            ) as run_once,
+            patch("scripts.import_preview_worker.run_once", return_value=None),
             patch("scripts.import_preview_worker.logger.warning"),
         ):
             exit_code = import_preview_worker.main()
 
         self.assertEqual(exit_code, 0)
-        run_once.assert_called_once_with(
-            db,
-            worker_id=ANY,
-            runtime_config=ANY,
-            scan_cursor=ANY,
-        )
-        runtime_config = run_once.call_args.kwargs["runtime_config"]
-        self.assertEqual(
-            runtime_config.beets_config_dir,
-            str(world.beets_dir.resolve()),
-        )
-        self.assertEqual(
-            runtime_config.beets_library_db,
-            str(world.library_db.resolve()),
-        )
         recovered = db.get_import_job(claimed.id)
         assert recovered is not None
         self.assertEqual(recovered.preview_status, "waiting")

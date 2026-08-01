@@ -47,11 +47,9 @@
         default = import ./nix/shell.nix { inherit pkgs; };
       });
 
-      packages = forAllSystems ({ pkgs, ... }: let
-        beetsPackage = import ./nix/beets.nix { inherit pkgs; };
-      in rec {
+      packages = forAllSystems ({ pkgs, ... }: rec {
         default = import ./nix/wrappers.nix {
-          inherit pkgs version beetsPackage;
+          inherit pkgs version;
           src = runtimeSrc;
         };
         cratedigger = default;

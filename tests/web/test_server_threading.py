@@ -14,6 +14,7 @@ the four load-bearing properties:
 4. A client abort after becoming a metadata-flight leader cannot cancel
    the fill; the next HTTP request reads the completed cache entry.
 """
+import configparser
 import http.client
 import io
 import os
@@ -78,110 +79,25 @@ class TestInheritedUnixListener(unittest.TestCase):
     def test_default_startup_never_falls_back_to_tcp_without_systemd_fd(
         self,
     ) -> None:
-        from beets import config as active_beets_config
-
-        from tests.test_beets_config_contract import BeetsContractWorld
-        from tests.test_beets_config_startup import _isolated_installed_authority
         from web import server as srv
 
-        world = BeetsContractWorld(role="web")
-        self.addCleanup(world.close)
-        prior_web_authority = (
-            srv.beets_db_path,
-            srv.beets_library_root,
-            srv.canonical_origin,
-            srv.insecure_mode,
-        )
-        try:
-            with (
-                _isolated_installed_authority(),
-                patch.object(
-                    sys,
-                    "argv",
-                    [
-                        "server.py",
-                        "--config", str(world.runtime_config),
-                        "--runtime-dir", str(world.runtime_dir),
-                        "--canonical-origin",
-                        "https://music.ablz.au",
-                    ],
-                ),
-                patch.dict(os.environ, {}, clear=True),
-                redirect_stderr(io.StringIO()),
-                self.assertRaises(SystemExit) as exited,
-            ):
-                srv.main()
-        finally:
-            active_beets_config.clear()
-            active_beets_config.read(user=True, defaults=True)
-            (
-                srv.beets_db_path,
-                srv.beets_library_root,
-                srv.canonical_origin,
-                srv.insecure_mode,
-            ) = prior_web_authority
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "server.py",
+                "--canonical-origin",
+                "https://music.ablz.au",
+            ],
+        ), patch.dict(
+            os.environ,
+            {},
+            clear=True,
+        ), redirect_stderr(io.StringIO()), self.assertRaises(
+            SystemExit,
+        ) as exited:
+            srv.main()
         self.assertEqual(exited.exception.code, 2)
-
-    def test_hard_invalid_dev_startup_never_constructs_a_server(self) -> None:
-        from beets import config as active_beets_config
-
-        from tests.test_beets_config_contract import (
-            BeetsContractWorld,
-            snapshot_contract_world,
-        )
-        from tests.test_beets_config_startup import (
-            _isolated_installed_authority,
-            _snapshot_runtime_tree,
-            _snapshot_web_process_state,
-        )
-        from web import server as srv
-
-        world = BeetsContractWorld(role="web")
-        self.addCleanup(world.close)
-        world.unseal()
-        world._write_main_config(**{
-            "import": {
-                "autotag": True,
-                "move": True,
-                "write": False,
-                "duplicate_keys": {
-                    "album": ["mb_albumid", "discogs_albumid"],
-                },
-            },
-        })
-        world._seal("web")
-        before_contract = snapshot_contract_world(world)
-        before_runtime = _snapshot_runtime_tree(world.runtime_dir)
-        before_process = _snapshot_web_process_state()
-        prior_runtime = os.environ.get("CRATEDIGGER_RUNTIME_CONFIG")
-        prior_beetsdir = os.environ.get("BEETSDIR")
-
-        try:
-            with (
-                _isolated_installed_authority(),
-                patch.object(sys, "argv", [
-                    "server.py",
-                    "--config", str(world.runtime_config),
-                    "--runtime-dir", str(world.runtime_dir),
-                    "--canonical-origin", "https://music.ablz.au",
-                    "--dev-port", "0",
-                ]),
-                patch.object(socket, "socket") as socket_constructor,
-            ):
-                self.assertEqual(srv.main(), 1)
-        finally:
-            active_beets_config.clear()
-            active_beets_config.read(user=True, defaults=True)
-
-        socket_constructor.assert_not_called()
-        self.assertEqual(snapshot_contract_world(world), before_contract)
-        self.assertEqual(_snapshot_runtime_tree(world.runtime_dir), before_runtime)
-        self.assertEqual(_snapshot_web_process_state(), before_process)
-        self.assertEqual(
-            os.environ.get("CRATEDIGGER_RUNTIME_CONFIG"),
-            prior_runtime,
-        )
-        self.assertEqual(os.environ.get("BEETSDIR"), prior_beetsdir)
 
     def test_wrong_family_and_non_listening_fds_fail_closed(self) -> None:
         from web import server as srv
@@ -740,13 +656,19 @@ class TestPerThreadBeetsHandles(unittest.TestCase):
         self._srv._discogs.DISCOGS_API_BASE = self._saved_discogs_api_base
 
     def test_constructor_receives_library_root(self):
+        from lib.config import CratediggerConfig
+
         srv = self._srv
+        ini = configparser.ConfigParser()
+        ini["Beets"] = {"directory": "/mnt/virtio/Music/Beets"}
+        cfg = CratediggerConfig.from_ini(ini)
         with tempfile.NamedTemporaryFile() as db_file:
             srv.beets_db_path = db_file.name
-            srv.beets_library_root = "/mnt/virtio/Music/Beets"
             srv._beets = None
 
-            handle = srv._beets_db()
+            with patch("lib.config.read_runtime_config", return_value=cfg):
+                srv._configure_beets_library_root_from_runtime_config()
+                handle = srv._beets_db()
 
             self.assertIsNotNone(handle)
             assert handle is not None
@@ -756,13 +678,21 @@ class TestPerThreadBeetsHandles(unittest.TestCase):
             )
 
     def test_production_uses_runtime_library_and_root_pair(self):
+        from lib.config import CratediggerConfig
+
         srv = self._srv
         with tempfile.NamedTemporaryFile() as db_file:
-            srv.beets_db_path = db_file.name
-            srv.beets_library_root = "/runtime/Music/Beets"
+            ini = configparser.ConfigParser()
+            ini["Beets"] = {
+                "directory": "/runtime/Music/Beets",
+                "library": db_file.name,
+            }
+            cfg = CratediggerConfig.from_ini(ini)
+            srv.beets_db_path = None
             srv._beets = None
             srv._db_dsn = "postgresql://runtime-production"
-            handle = srv._beets_db()
+            with patch("lib.config.read_runtime_config", return_value=cfg):
+                handle = srv._beets_db()
 
             self.assertIsNotNone(handle)
             assert handle is not None
@@ -771,66 +701,41 @@ class TestPerThreadBeetsHandles(unittest.TestCase):
 
     def test_main_executes_runtime_root_wiring(self):
         """Production boot must load the root before opening the server."""
-        from beets import config as active_beets_config
-
-        from tests.test_beets_config_contract import BeetsContractWorld
-        from tests.test_beets_config_startup import (
-            _isolated_installed_authority,
-            _record_admission_events,
-            _RestartCase,
-        )
+        from lib.config import CratediggerConfig
 
         class BootStop(Exception):
             pass
 
         srv = self._srv
-        world = BeetsContractWorld(role="web")
-        self.addCleanup(world.close)
-        events: list[str] = []
-        case = _RestartCase("web", srv.main)
+        ini = configparser.ConfigParser()
+        ini["Beets"] = {"directory": "/boot-config/Music/Beets"}
+        cfg = CratediggerConfig.from_ini(ini)
+        with tempfile.NamedTemporaryFile() as db_file, patch.object(
+            sys,
+            "argv",
+            [
+                "server.py",
+                "--canonical-origin",
+                "https://music.ablz.au",
+                "--dev-port",
+                "0",
+                "--dsn",
+                str(TEST_DSN),
+                "--beets-db",
+                db_file.name,
+                "--beets-directory",
+                "/scratch/Music/Beets",
+            ],
+        ), patch(
+            "lib.config.read_runtime_config",
+            return_value=cfg,
+        ), patch(
+            "web.server.ThreadingHTTPServer",
+            side_effect=BootStop,
+        ) as tcp_server, self.assertRaises(BootStop):
+            srv.main()
 
-        def observe_server(
-            *_args: object,
-            **_kwargs: object,
-        ) -> None:
-            events.append("server")
-            raise BootStop
-
-        try:
-            with (
-                _isolated_installed_authority(),
-                _record_admission_events(case, events),
-                patch.object(
-                    sys,
-                    "argv",
-                    [
-                        "server.py",
-                        "--canonical-origin",
-                        "https://music.ablz.au",
-                        "--dev-port",
-                        "0",
-                        "--dsn",
-                        str(TEST_DSN),
-                        "--config",
-                        str(world.runtime_config),
-                        "--runtime-dir",
-                        str(world.runtime_dir),
-                    ],
-                ),
-                patch(
-                    "web.server.ThreadingHTTPServer",
-                    side_effect=observe_server,
-                ) as tcp_server,
-                self.assertRaises(BootStop),
-            ):
-                srv.main()
-        finally:
-            active_beets_config.clear()
-            active_beets_config.read(user=True, defaults=True)
-
-        self.assertEqual(srv.beets_db_path, str(world.library_db))
-        self.assertEqual(srv.beets_library_root, str(world.library_root))
-        self.assertEqual(events, ["admitted", "server"])
+        self.assertEqual(srv.beets_library_root, "/scratch/Music/Beets")
         tcp_server.assert_called_once_with(("127.0.0.1", 0), srv.Handler)
 
 
