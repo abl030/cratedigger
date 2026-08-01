@@ -18,6 +18,11 @@ from lib.quality import (
     SpectralDetail,
     V0ProbeEvidence,
 )
+from lib.quality.decisions import (
+    AacLatticeProofLeg,
+    UltrasonicProofLeg,
+    mint_verified_lossless_proof,
+)
 from tests.test_web_recents import _entry
 from web.classify import classify_log_entry
 from web.download_history_view import (
@@ -302,6 +307,82 @@ def assert_verified_lossless_proof_upgrade_names_basis(
         raise AssertionError("proof upgrade invented MP3 outside the basis")
     if "verified lossless" not in verdict:
         raise AssertionError("verified-lossless reason disappeared")
+
+
+def minted_classifiers() -> tuple[str, ...]:
+    """Every classifier the real minting policy can write (Rule C).
+
+    Derived by driving ``mint_verified_lossless_proof`` over its three
+    adjudicating leg combinations rather than restating its literals, so a
+    new proof generation enters this property the moment the producer can
+    mint one.
+    """
+    ultrasonic = UltrasonicProofLeg(
+        outcome="passed", reason="deficit_below_threshold")
+    lattice = AacLatticeProofLeg(outcome="passed", reason="adjudicated_clean")
+    minted: list[str] = []
+    for ultrasonic_leg, lattice_leg in (
+        (None, None),
+        (ultrasonic, None),
+        (ultrasonic, lattice),
+    ):
+        proof = mint_verified_lossless_proof(
+            True,
+            was_converted_from="flac",
+            detected_source_format="flac",
+            spectral_grade="genuine",
+            ultrasonic_leg=ultrasonic_leg,
+            aac_lattice_leg=lattice_leg,
+        )
+        if proof is None:
+            raise AssertionError("minting policy refused an adjudicated world")
+        minted.append(proof.classifier)
+    return tuple(dict.fromkeys(minted))
+
+
+MINTED_CLASSIFIERS = minted_classifiers()
+
+
+def assert_verified_lossless_claim_is_minted(
+    verdict: str,
+    summary: str,
+    *,
+    classifier: str | None,
+    basis_bypass: bool,
+) -> None:
+    """The phrase is a report of a minted proof, never a re-derivation.
+
+    ``album_quality_evidence``'s ``verified_proof_shape`` CHECK makes
+    ``verified_lossless_classifier`` non-NULL exactly when the decider
+    proved the row, and ``QualityComparisonBasis.verified_lossless_bypass``
+    is the same decision persisted on the import result. Those two are the
+    complete set of things that may put the phrase in front of an operator;
+    container, conversion and spectral columns are what the decider
+    CONSIDERED, not what it concluded.
+    """
+    proved = classifier is not None or basis_bypass
+    if proved:
+        return
+    for field_name, text in (("verdict", verdict), ("summary", summary)):
+        if "verified lossless" in text.lower():
+            raise AssertionError(
+                f"{field_name} claims verified lossless with no minted "
+                f"proof: {text!r}"
+            )
+
+
+def assert_minted_proof_is_reported(verdict: str) -> None:
+    """The must-still-work half: a proved row still says so.
+
+    Verdict only. The collapsed-card summary for a new import (badge
+    "Imported") is deliberately its own short format label rather than the
+    verdict, and has never carried the phrase; requiring it there would be
+    the checker inventing policy instead of patrolling it.
+    """
+    if "verified lossless" not in verdict.lower():
+        raise AssertionError(
+            f"verdict dropped a minted verified-lossless proof: {verdict!r}"
+        )
 
 
 class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
@@ -1123,6 +1204,144 @@ class TestGeneratedRejectVerdictGrammar(unittest.TestCase):
         ))
         assert_verified_lossless_proof_upgrade_names_basis(
             result.verdict, decision.basis)
+
+    @staticmethod
+    def _plain_basis(bypass: bool) -> dict[str, object] | None:
+        """A real persisted basis for the same MP3 pair, with/without bypass."""
+        from lib.quality import (
+            AudioQualityMeasurement,
+            QualityRankConfig,
+            compare_quality,
+            import_quality_decision,
+        )
+
+        new = AudioQualityMeasurement(avg_bitrate_kbps=250, format="mp3 v0")
+        existing = AudioQualityMeasurement(
+            min_bitrate_kbps=230, avg_bitrate_kbps=248, format="mp3")
+        if not bypass:
+            return msgspec.to_builtins(
+                compare_quality(new, existing, QualityRankConfig.defaults()))
+        decision = import_quality_decision(
+            new,
+            existing,
+            cfg=QualityRankConfig.defaults(),
+            verified_lossless_proof=True,
+        )
+        if decision.basis is None or not decision.basis.verified_lossless_bypass:
+            raise AssertionError("bypass world did not persist a bypass basis")
+        return msgspec.to_builtins(decision.basis)
+
+    @given(
+        classifier=st.sampled_from((None, *MINTED_CLASSIFIERS)),
+        was_converted=st.booleans(),
+        original_filetype=st.sampled_from((None, "flac", "FLAC", "wav", "mp3")),
+        spectral_grade=st.sampled_from(
+            (None, "genuine", "suspect", "likely_transcode")),
+        actual_filetype=st.sampled_from(("mp3", "opus", "flac")),
+        actual_min_bitrate=st.integers(min_value=1, max_value=1_200),
+        existing_min_bitrate=st.sampled_from((None, 0, 192, 320)),
+        search_filetype_override=st.sampled_from(
+            (None, "lossless", "flac,mp3 v0,mp3 320")),
+        basis_mode=st.sampled_from(("none", "plain", "bypass")),
+    )
+    @example(  # live dl 39120 req 2066 — the shipped defect
+        classifier=None,
+        was_converted=True,
+        original_filetype="flac",
+        spectral_grade="genuine",
+        actual_filetype="opus",
+        actual_min_bitrate=93,
+        existing_min_bitrate=192,
+        search_filetype_override="lossless",
+        basis_mode="none",
+    )
+    @example(  # live dl 39094 req 2147 — same world, MP3 target
+        classifier=None,
+        was_converted=True,
+        original_filetype="flac",
+        spectral_grade="genuine",
+        actual_filetype="mp3",
+        actual_min_bitrate=183,
+        existing_min_bitrate=192,
+        search_filetype_override="lossless",
+        basis_mode="plain",
+    )
+    def test_verified_lossless_copy_never_outruns_the_minted_proof(
+        self,
+        classifier: str | None,
+        was_converted: bool,
+        original_filetype: str | None,
+        spectral_grade: str | None,
+        actual_filetype: str,
+        actual_min_bitrate: int,
+        existing_min_bitrate: int | None,
+        search_filetype_override: str | None,
+        basis_mode: str,
+    ) -> None:
+        """The phrase is a report of the decider's proof, never a guess.
+
+        The world space is exactly the columns the retired heuristic keyed
+        on — conversion, original filetype, spectral grade — crossed with
+        every render branch a successful import can take.
+        """
+        basis = (
+            None if basis_mode == "none"
+            else self._plain_basis(basis_mode == "bypass")
+        )
+        result = classify_log_entry(_entry(
+            outcome="success",
+            beets_scenario="strong_match",
+            was_converted=was_converted,
+            original_filetype=original_filetype,
+            spectral_grade=spectral_grade,
+            actual_filetype=actual_filetype,
+            actual_min_bitrate=actual_min_bitrate,
+            existing_min_bitrate=existing_min_bitrate,
+            search_filetype_override=search_filetype_override,
+            verified_lossless_classifier=classifier,
+            import_result=(
+                None if basis is None
+                else {"version": 2, "decision": "import",
+                      "comparison_basis": basis}
+            ),
+        ))
+        assert_verified_lossless_claim_is_minted(
+            result.verdict,
+            result.summary,
+            classifier=classifier,
+            basis_bypass=basis_mode == "bypass",
+        )
+        if classifier is not None and basis_mode != "bypass":
+            assert_minted_proof_is_reported(result.verdict)
+
+    def test_minted_proof_checker_rejects_the_retired_heuristic(self) -> None:
+        """Known-bad: the pre-fix derivation, planted as its own output."""
+        with self.assertRaisesRegex(AssertionError, "no minted proof"):
+            assert_verified_lossless_claim_is_minted(
+                "Replaced unverified CBR with OPUS 93k, from FLAC, "
+                "verified lossless",
+                "Replaced unverified CBR with OPUS 93k, from FLAC, "
+                "verified lossless · algernon",
+                classifier=None,
+                basis_bypass=False,
+            )
+
+    def test_minted_proof_checker_rejects_a_summary_only_claim(self) -> None:
+        """The claim survives in the OTHER renderer — issue #868's lesson."""
+        with self.assertRaisesRegex(AssertionError, "summary claims"):
+            assert_verified_lossless_claim_is_minted(
+                "MP3 V0 - from FLAC",
+                "MP3 V0 - from FLAC, verified lossless · algernon",
+                classifier=None,
+                basis_bypass=False,
+            )
+
+    def test_minted_proof_reporting_checker_rejects_a_dropped_proof(
+        self,
+    ) -> None:
+        """Known-bad for the must-still-work half."""
+        with self.assertRaisesRegex(AssertionError, "dropped a minted"):
+            assert_minted_proof_is_reported("MP3 V0 - from FLAC")
 
     @given(
         source_id=st.integers(min_value=1, max_value=1_000),

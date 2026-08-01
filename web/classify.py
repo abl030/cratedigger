@@ -46,6 +46,19 @@ from lib.validation_envelope import decode_validation_envelope
 # Types
 # ---------------------------------------------------------------------------
 
+#: Candidate-evidence SELECT aliases that reach ``LogEntry`` under a different
+#: name. ``lib/pipeline_db/download_log.py::_CANDIDATE_EVIDENCE_COLUMNS`` folds
+#: most of its aliases into legacy ``download_log`` columns inside
+#: ``_overlay_evidence_onto_download_log_row``; the proof classifier has no
+#: legacy counterpart, so it arrives under its own alias and was silently
+#: dropped by ``from_row``'s unknown-key filter — which is precisely how the
+#: render path came to re-derive "verified lossless" from container and
+#: conversion columns instead of reading the minted proof.
+_ROW_FIELD_ALIASES: dict[str, str] = {
+    "_evidence_verified_lossless_classifier": "verified_lossless_classifier",
+}
+
+
 @dataclass
 class LogEntry:
     """A download_log row, optionally joined with album_requests fields.
@@ -107,6 +120,13 @@ class LogEntry:
     existing_v0_probe_min_bitrate: int | None = None
     existing_v0_probe_avg_bitrate: int | None = None
     existing_v0_probe_median_bitrate: int | None = None
+    # The model that MINTED this candidate's verified-lossless proof, read
+    # straight off the candidate-evidence join under its SELECT alias (see
+    # ``_ROW_FIELD_ALIASES``). ``None`` means the decider minted no proof —
+    # ``album_quality_evidence``'s ``verified_proof_shape`` CHECK makes the
+    # column non-NULL exactly when ``verified_lossless`` is TRUE — so this
+    # is the single fact the render path may key "verified lossless" on.
+    verified_lossless_classifier: str | None = None
 
     # album_requests columns (from JOIN — empty for history-only queries)
     album_title: str = ""
@@ -124,16 +144,19 @@ class LogEntry:
         """Construct from a psycopg2 RealDictRow or plain dict.
 
         Handles datetime serialization and missing fields gracefully.
+        Aliased evidence columns are renamed on the way in; every other
+        unknown key is dropped.
         """
         known = {f.name for f in fields(cls)}
         kwargs: dict[str, Any] = {}
         for key, value in row.items():
-            if key not in known:
+            name = _ROW_FIELD_ALIASES.get(key, key)
+            if name not in known:
                 continue
             # Serialize datetime objects to ISO strings
             if hasattr(value, "isoformat"):
                 value = str(value.isoformat())
-            kwargs[key] = value
+            kwargs[name] = value
         return cls(**kwargs)
 
     def to_json_dict(self) -> dict[str, Any]:
@@ -1546,12 +1569,21 @@ def _classify(
         if entry.beets_scenario in ("transcode_upgrade", "transcode_first"):
             return _classify_transcode(entry)
 
-        is_verified_lossless = (
-            entry.was_converted
-            and entry.original_filetype is not None
-            and entry.original_filetype.lower() == "flac"
-            and entry.spectral_grade == "genuine"
-        )
+        # The MINTED proof, never a re-derivation. The single writer of
+        # this column is ``mint_verified_lossless_proof``, and it refuses
+        # far more rows than "converted from FLAC and graded genuine"
+        # does — a withheld ultrasonic or AAC-lattice leg, an R19
+        # preserved source, a denied leg. Re-deriving the phrase from
+        # container and conversion columns therefore told the operator the
+        # decider had proved something it explicitly declined to prove
+        # (live: dl 39094 req 2147, dl 39120 req 2066, dl 39122 req 1034 —
+        # all graded genuine from FLAC with a NULL classifier), and
+        # withheld it on 122 live rows the decider DID prove: imports
+        # nothing converted, an ALAC source, and rows whose denormalised
+        # grade column disagreed with the evidence. Rows predating the
+        # evidence join simply lose the phrase; there is no era-aware
+        # fallback, because a fallback is the same guess wearing a date.
+        is_verified_lossless = entry.verified_lossless_classifier is not None
 
         # Upgrade vs new import — use existing_min_bitrate from the
         # download_log entry (what was on disk at the time of THIS download)
@@ -1946,14 +1978,36 @@ def _classify_provisional(entry: LogEntry) -> _Classification:
     )
 
 
+def _replaced_side_phrase(entry: LogEntry) -> str:
+    """Name what this row replaced, from the decider's own persisted basis.
+
+    ``search_filetype_override`` narrows the SEARCH scope for a request; it
+    records nothing about the codec sitting on disk, so the "unverified
+    CBR" this branch used to assert was an invented fact. Live
+    counterexample: dl 39120 replaced an OPUS average and was still
+    described as replacing a CBR.
+
+    The codec is the only side-fact this line can state without inviting a
+    comparison it cannot support: the replaced side's metric is an average
+    while ``cur_label`` is a floor, so pairing "avg 108k" with "OPUS 93k"
+    would read as a downgrade on a row the decider ranked an upgrade. The
+    per-side metrics, ranks and branch are the basis strip's job. A row
+    with no basis gets the bare noun rather than a guess.
+    """
+    basis = _entry_comparison_basis(entry)
+    if basis is None or not basis.existing_format:
+        return "the existing copy"
+    return basis.existing_format.upper()
+
+
 def _classify_search_filetype_override(
     entry: LogEntry,
     is_verified_lossless: bool,
 ) -> _Classification:
-    """Classify a search_filetype_override upgrade (replacing unverified CBR)."""
+    """Classify an upgrade made under a narrowed search-filetype scope."""
     fmt = entry.actual_filetype or entry.filetype or "mp3"
     cur_label = legacy_floor_quality_label(fmt, _downloaded_min_bitrate_kbps(entry) or 0)
-    parts = [f"Replaced unverified CBR with {cur_label}"]
+    parts = [f"Replaced {_replaced_side_phrase(entry)} with {cur_label}"]
     if entry.was_converted and entry.original_filetype:
         parts.append(f"from {entry.original_filetype.upper()}")
     if is_verified_lossless:

@@ -80,6 +80,7 @@ from tests.helpers import (
     make_validation_result,
 )
 from tests.test_pipeline_db import make_db, requires_postgres
+from web.classify import _ROW_FIELD_ALIASES, LogEntry
 
 # conftest boots an ephemeral PostgreSQL and exports TEST_DB_DSN for the whole
 # suite, so this runs unconditionally — NO skip gate (CLAUDE.md § "Skipped tests
@@ -862,6 +863,48 @@ class TestAccusationEvidenceColumnsAreSpelledOnce(unittest.TestCase):
             self._expected("current_evidence", CURRENT_EVIDENCE_PREFIX)
             <= self._aliases(short),
             "a block missing one column must not compare equal",
+        )
+
+
+class TestRenderAliasMap(unittest.TestCase):
+    """``web/classify.py``'s inbound alias map names real SELECT aliases.
+
+    Most candidate-evidence aliases are folded into legacy ``download_log``
+    keys by ``_overlay_evidence_onto_download_log_row``. The few with no
+    legacy counterpart reach ``LogEntry.from_row`` under the alias, and
+    ``from_row`` drops every key it does not know — so a stale alias here
+    is silent: the field simply stays ``None`` forever and the renderer
+    falls back to guessing, which is the defect that put "verified
+    lossless" on rows the decider refused to prove.
+    """
+
+    @staticmethod
+    def _aliases(fragment: str) -> set[str]:
+        return set(re.findall(r"AS\s+(_\w+)", fragment))
+
+    def test_every_alias_key_is_projected_by_the_candidate_block(self) -> None:
+        self.assertLessEqual(
+            set(_ROW_FIELD_ALIASES),
+            self._aliases(_CANDIDATE_EVIDENCE_COLUMNS),
+            "alias map names a column the candidate-evidence block never "
+            "projects",
+        )
+
+    def test_every_alias_target_is_a_log_entry_field(self) -> None:
+        known = {field.name for field in dataclasses.fields(LogEntry)}
+        self.assertLessEqual(
+            set(_ROW_FIELD_ALIASES.values()),
+            known,
+            "alias map targets a field LogEntry does not declare, so "
+            "from_row would silently drop it",
+        )
+
+    def test_the_alias_check_trips_on_a_stale_alias(self) -> None:
+        """Known-bad self-test: a renamed column must not pass."""
+        self.assertFalse(
+            {"_evidence_verified_lossless_classifer"}
+            <= self._aliases(_CANDIDATE_EVIDENCE_COLUMNS),
+            "a misspelled alias must not resolve against the SELECT block",
         )
 
 

@@ -192,17 +192,11 @@ MATCH_SUBJECTS: dict[str, _Producers] = {
         ("lib/quality/compare.py",),
         "the metric label compare_quality selected",
     ),
-    "entry.spectral_grade": _Producers(
-        ("lib/spectral_check.py",), "a spectral grade the analyser assigns",
-    ),
     "SPECTRAL_TRANSCODE_GRADES": _Producers(
         ("lib/spectral_check.py",),
         "the two accusing spectral grades classify_album assigns — the "
         "membership test that gates issue #829 PR4's audit-only flag reads "
         "the shared frozenset rather than restating the names",
-    ),
-    "entry.original_filetype.lower()": _Producers(
-        ("lib/quality/filetypes.py",), "a codec token, already lower-cased",
     ),
     "fmt": _Producers(
         ("lib/quality/filetypes.py",),
@@ -278,6 +272,19 @@ NON_MATCH_TARGETS: dict[str, str] = {
     "classify_import_job_display.(badge, badge_class, border_color)": (
         "output copy: the badge, class and border colour this module returns "
         "for a preview status, not a value it matches against"
+    ),
+    # Not decision copy at all: an INBOUND column-alias map, whose keys are
+    # SQL ``AS`` names rather than values any producer emits. A file-level
+    # spelling check cannot see them — every candidate-evidence alias lives
+    # inside one long static SQL literal, the exact "mention, not a
+    # spelling" shape this audit refuses to accept as evidence. The
+    # stronger check exists instead: ``tests/test_pipeline_db_column_
+    # contract.py::TestRenderAliasMap`` reads the aliases straight out of
+    # ``_CANDIDATE_EVIDENCE_COLUMNS`` and requires every key to be one of
+    # them and every target to be a real ``LogEntry`` field.
+    "_ROW_FIELD_ALIASES": (
+        "inbound SQL column-alias map, not decision copy: pinned against "
+        "the live SELECT block by the pipeline-db column contract"
     ),
 }
 

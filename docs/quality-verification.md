@@ -697,6 +697,14 @@ it was before the flag existed, never neutralized by default.
   `web/classify.py::proof_gate_projection`, plus the `Verified lossless`
   row naming the proof generation and, in the forensics block, PR2d's
   Stage-1-reject counterfactual and the fired-leg set.
+- The Recents verdict sentence — the `verified lossless` suffix on a
+  successful import reports `verified_lossless_classifier` and nothing
+  else. It is never re-derived from the row's container, conversion or
+  spectral columns: those are what the decider CONSIDERED, and a
+  re-derivation claimed a proof on rows the gate had explicitly refused
+  while withholding it on proved rows nothing converted. A row with no
+  candidate evidence carries no proof and no suffix — there is no
+  era-aware fallback.
 
 Both surfaces call the same `proof_verdict_from_facts`; the generated
 property in `tests/test_verdict_tiers_generated.py` (V4) proves they
