@@ -75,6 +75,12 @@ class LatestDownloadSummary(TypedDict):
 #: columns by ``_overlay_evidence_onto_download_log_row``. The PR4 aliases
 #: below them have no legacy counterpart, so they reach the renderer under
 #: these names and are declared on ``DownloadLogWithEvidenceRow``.
+#: ``_evidence_format`` is deliberately a SECOND alias over the same
+#: column as ``_evidence_source_format``: the overlay folds that one into
+#: the legacy ``source_format`` key ONLY for lineage 3/4 rows, so 26,503 of
+#: 30,467 live rows hand the renderer ``None`` there while the decider's
+#: ``measurement.format`` is never NULL. Reusing it would let the render
+#: adapter resolve a different codec from the same evidence row.
 #: ``_evidence_container_extensions`` is the snapshot's own distinct file
 #: extensions — the ultrasonic proof leg's decode-path input. Without it
 #: that leg would withhold on the render path while the decider
@@ -93,6 +99,7 @@ _CANDIDATE_EVIDENCE_COLUMNS = """
     e.v0_min_bitrate_kbps AS _evidence_v0_probe_min_bitrate,
     e.v0_avg_bitrate_kbps AS _evidence_v0_probe_avg_bitrate,
     e.v0_median_bitrate_kbps AS _evidence_v0_probe_median_bitrate,
+    e.format AS _evidence_format,
     e.codec_family AS _evidence_codec_family,
     e.cliff_hz AS _evidence_cliff_hz,
     e.storage_format AS _evidence_storage_format,

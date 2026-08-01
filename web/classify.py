@@ -259,6 +259,12 @@ class ClassifiedEntry(msgspec.Struct):
     # opening defect, download 37946 (a 256 kbps CBR AAC graded
     # ``likely_transcode`` with a LAME-table 128 bucket).
     spectral_accusation_admissible: bool | None = None
+    # WHY the accusation is withheld, when it is: an audit-only codec's
+    # cliff IS native encoder behaviour, an unresolved or mixed-codec
+    # album's says nothing about any encoder. Only the first may be
+    # described to the operator.
+    spectral_accusation_withheld: str | None = None
+    existing_spectral_accusation_withheld: str | None = None
     # The HAVE side's own answer to the same question. Separate because the
     # rendered HAVE grade has two possible sources — the attempt's own
     # snapshot of the installed album, or the request's current evidence
@@ -455,9 +461,12 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
     # ``_project_current_library_have`` later replaces the snapshot
     # wholesale it replaces this flag too.
     existing_ir = _parse_import_result(entry)
-    existing_admissible = _accusation_admissible(
+    existing_current = (
         existing_ir.current_measurement if existing_ir is not None else None
     )
+    existing_admissible = _accusation_admissible(existing_current)
+    existing_withheld = _measurement_accusation_withheld_reason(
+        existing_current)
     candidate_measurement = triage["candidate_measurement"]
     current_measurement = triage["current_measurement"]
     if candidate_measurement is not None:
@@ -483,6 +492,8 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
         # The triage snapshot replaces the HAVE grade, so the flag beside
         # it has to describe the triage snapshot's measurement too.
         existing_admissible = _accusation_admissible(current_measurement)
+        existing_withheld = _measurement_accusation_withheld_reason(
+            current_measurement)
         spectral = (
             spectral[0], spectral[1],
             current_measurement.spectral_grade,
@@ -551,6 +562,7 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
         existing_spectral_grade=spectral[2],
         existing_spectral_bitrate=spectral[3],
         existing_spectral_accusation_admissible=existing_admissible,
+        existing_spectral_accusation_withheld=existing_withheld,
         spectral_attempted=spectral[4],
         spectral_error=spectral[5],
         existing_spectral_attempted=spectral[6],
@@ -805,6 +817,57 @@ def _extract_disambiguation_failure(
     return (fail.reason, fail.detail)
 
 
+#: WHY a grade's accusation is withheld. The two reasons are different
+#: facts and only one of them may be described to the operator: an
+#: audit-only family's cliff IS native encoder behaviour, whereas an
+#: unresolved or mixed-codec album's cliff means nothing is known about
+#: the encoder at all. Asserting the first sentence over the second world
+#: fabricates a fact about a codec the pipeline could not identify.
+ACCUSATION_WITHHELD_AUDIT_ONLY_CODEC = "audit_only_codec"
+ACCUSATION_WITHHELD_CODEC_UNRESOLVED = "codec_unresolved"
+
+
+def _accusation_withheld_reason(
+    *,
+    admissible: bool,
+    codec_family: "CodecFamily | None",
+    grade: object,
+) -> str | None:
+    """Which of the two withholding worlds this row is in, or None.
+
+    ``None`` whenever there is no accusation to withhold — no grade, a
+    grade that does not accuse, or an admissible finding.
+    """
+    if grade not in SPECTRAL_TRANSCODE_GRADES:
+        return None
+    if admissible:
+        return None
+    if codec_family is None:
+        return ACCUSATION_WITHHELD_CODEC_UNRESOLVED
+    return ACCUSATION_WITHHELD_AUDIT_ONLY_CODEC
+
+
+def _measurement_accusation_withheld_reason(
+    measurement: "AudioQualityMeasurement | None",
+    *,
+    storage_format: str | None = None,
+    filetype_band: str = "",
+) -> str | None:
+    """``_accusation_withheld_reason`` for a caller holding a measurement."""
+    if measurement is None:
+        return None
+    interpretation = interpret_measurement(
+        measurement,
+        storage_format=storage_format,
+        filetype_band=filetype_band,
+    )
+    return _accusation_withheld_reason(
+        admissible=interpretation.supports_transcode_accusation,
+        codec_family=interpretation.codec_family,
+        grade=measurement.spectral_grade,
+    )
+
+
 def _accusation_admissible(
     measurement: "AudioQualityMeasurement | None",
     *,
@@ -878,6 +941,7 @@ class ProofGateProjection(msgspec.Struct, frozen=True):
     verdict_tier_statement: str | None = None
     verdict_fired_legs: list[str] = msgspec.field(default_factory=list[str])
     spectral_accusation_admissible: bool | None = None
+    spectral_accusation_withheld: str | None = None
     verified_lossless_classifier: str | None = None
     verified_lossless_generation: str | None = None
 
@@ -920,7 +984,11 @@ def proof_gate_projection(row: Mapping[str, object]) -> ProofGateProjection:
         spectral_bitrate_kbps=_as_int(row.get("spectral_bitrate")),
         cliff_hz=_as_int(row.get("_evidence_cliff_hz")),
         codec_family=_as_codec_family(row.get("_evidence_codec_family")),
-        format=_as_str(row.get("source_format")),
+        # ``_evidence_format``, never the overlaid ``source_format``: the
+        # overlay gates that key on lineage 3/4, so on a legacy row it is
+        # None while the decider still sees the measurement's own format.
+        # Reading it here is how the two derivations drift apart.
+        format=_as_str(row.get("_evidence_format")),
         storage_format=_as_str(row.get("_evidence_storage_format")),
         filetype_band=_as_str(row.get("_evidence_filetype_band")) or "",
         spectral_subject=_as_evidence_subject(
@@ -938,6 +1006,11 @@ def proof_gate_projection(row: Mapping[str, object]) -> ProofGateProjection:
     classifier = _as_str(row.get("_evidence_verified_lossless_classifier"))
     grade = row.get("spectral_grade")
     return ProofGateProjection(
+        spectral_accusation_withheld=_accusation_withheld_reason(
+            admissible=verdict.spectral_accusation_admissible,
+            codec_family=verdict.codec_family,
+            grade=grade,
+        ),
         verdict_tier=verdict.tier if verdict.has_finding else None,
         verdict_tier_statement=(
             proof_tier_statement(verdict) if verdict.has_finding else None
@@ -955,6 +1028,36 @@ def proof_gate_projection(row: Mapping[str, object]) -> ProofGateProjection:
     )
 
 
+def current_evidence_accusation_withheld(
+    row: Mapping[str, object],
+) -> str | None:
+    """``spectral_accusation_withheld`` for the request's CURRENT evidence."""
+    return _measurement_accusation_withheld_reason(
+        _current_evidence_measurement(row),
+        storage_format=_as_str(row.get("_current_evidence_storage_format")),
+        filetype_band=_as_str(row.get("_current_evidence_filetype_band")) or "",
+    )
+
+
+def _current_evidence_measurement(
+    row: Mapping[str, object],
+) -> AudioQualityMeasurement:
+    """The installed album's measurement, from the current-evidence join."""
+    return AudioQualityMeasurement(
+        format=_as_str(row.get("_current_evidence_format")),
+        spectral_grade=_as_str(row.get("_current_evidence_spectral_grade")),
+        spectral_bitrate_kbps=_as_int(
+            row.get("_current_evidence_spectral_bitrate")),
+        spectral_subject=_as_evidence_subject(
+            row.get("_current_evidence_spectral_subject")),
+        was_converted_from=_as_str(
+            row.get("_current_evidence_was_converted_from")),
+        cliff_hz=_as_int(row.get("_current_evidence_cliff_hz")),
+        codec_family=_as_codec_family(
+            row.get("_current_evidence_codec_family")),
+    )
+
+
 def current_evidence_accusation_admissible(
     row: Mapping[str, object],
 ) -> bool | None:
@@ -967,20 +1070,7 @@ def current_evidence_accusation_admissible(
     attempt's own snapshot of a possibly-different installed album.
     """
     return _accusation_admissible(
-        AudioQualityMeasurement(
-            format=_as_str(row.get("_current_evidence_format")),
-            spectral_grade=_as_str(
-                row.get("_current_evidence_spectral_grade")),
-            spectral_bitrate_kbps=_as_int(
-                row.get("_current_evidence_spectral_bitrate")),
-            spectral_subject=_as_evidence_subject(
-                row.get("_current_evidence_spectral_subject")),
-            was_converted_from=_as_str(
-                row.get("_current_evidence_was_converted_from")),
-            cliff_hz=_as_int(row.get("_current_evidence_cliff_hz")),
-            codec_family=_as_codec_family(
-                row.get("_current_evidence_codec_family")),
-        ),
+        _current_evidence_measurement(row),
         storage_format=_as_str(row.get("_current_evidence_storage_format")),
         filetype_band=_as_str(row.get("_current_evidence_filetype_band")) or "",
     )

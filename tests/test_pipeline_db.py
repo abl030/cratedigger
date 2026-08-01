@@ -4362,6 +4362,8 @@ class TestDownloadLog(unittest.TestCase):
         self.db.set_download_log_candidate_evidence(log_id, stored.id)
 
         expected = {
+            "_evidence_format": "FLAC",
+            "_evidence_filetype_band": evidence.filetype_band,
             "_evidence_codec_family": "lossless",
             "_evidence_cliff_hz": 18250,
             "_evidence_storage_format": "FLAC",
@@ -4396,10 +4398,60 @@ class TestDownloadLog(unittest.TestCase):
                 sorted({file.extension for file in evidence.files}),
             )
 
+    def test_get_log_returns_the_current_evidence_codec_columns(self):
+        """The HAVE-side codec facts survive real PG (issue #829 PR4).
+
+        Only ``get_log`` joins the request's CURRENT evidence, and the
+        audit-only flag beside the HAVE grade chip is derived from exactly
+        these six columns. A dropped one silently returns the historical
+        accusing render on the 1,735 live rows the flag exists for.
+        """
+        from lib.quality import AudioQualityMeasurement
+
+        log_id = self.db.log_download(self.req_id, outcome="rejected")
+        installed = make_album_quality_evidence(
+            mb_release_id="download-overlay-current-codec",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=256,
+                avg_bitrate_kbps=256,
+                is_cbr=True,
+                format="AAC",
+                spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=128,
+                spectral_subject="installed",
+                spectral_provenance="measured",
+                was_converted_from=None,
+                cliff_hz=15000,
+                codec_family="aac",
+                spectral_measurement_version=2,
+            ),
+            codec="aac",
+            container="m4a",
+            storage_format="AAC",
+        )
+        self.db.upsert_album_quality_evidence(installed)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=installed.mb_release_id,
+            snapshot_fingerprint=installed.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.assertTrue(
+            self.db.set_request_current_evidence(self.req_id, stored.id))
+
+        row = next(row for row in self.db.get_log() if row["id"] == log_id)
+        self.assertEqual(row["_current_evidence_codec_family"], "aac")
+        self.assertEqual(row["_current_evidence_cliff_hz"], 15000)
+        self.assertEqual(row["_current_evidence_storage_format"], "AAC")
+        self.assertEqual(
+            row["_current_evidence_filetype_band"], installed.filetype_band)
+        self.assertEqual(row["_current_evidence_spectral_subject"], "installed")
+        self.assertIsNone(row["_current_evidence_was_converted_from"])
+
     def test_proof_gate_columns_are_null_without_candidate_evidence(self):
         """No evidence join means no verdict — never a fabricated clearance."""
         log_id = self.db.log_download(self.req_id, outcome="rejected")
         row = next(row for row in self.db.get_log() if row["id"] == log_id)
+        self.assertIsNone(row["_evidence_format"])
         self.assertIsNone(row["_evidence_codec_family"])
         self.assertIsNone(row["_evidence_verified_lossless_classifier"])
         self.assertIsNone(row["_evidence_container_extensions"])

@@ -7183,6 +7183,9 @@ class FakePipelineDB:
             evidence.verified_lossless_proof if evidence is not None else None
         )
         row.update({
+            "_evidence_format": (
+                measurement.format if measurement is not None else None
+            ),
             "_evidence_codec_family": (
                 measurement.codec_family if measurement is not None else None
             ),

@@ -259,6 +259,7 @@ class DownloadLogWithEvidenceRow(DownloadLogRow):
     # they reach the renderer under these names.
     # ``_evidence_container_extensions`` is the snapshot's own distinct
     # file extensions — the ultrasonic leg's decode-path input.
+    _evidence_format: str | None
     _evidence_codec_family: str | None
     _evidence_cliff_hz: int | None
     _evidence_storage_format: str | None

@@ -23,11 +23,15 @@ evaluated, whatever the codec-blind analyzer graded. This is issue #829's
 opening defect stated as a permanent law over the DISPLAY surface.
 
 **V4 — the verdict a surface renders is the verdict the decider's legs
-produce.** ``proof_verdict_from_evidence`` (whole row, what
-``pipeline-cli quality`` runs) and ``proof_verdict_from_facts`` (flat
-columns, what the Recents render path runs) agree on every world. Two
-surfaces disagreeing about one album is the drift this pair exists to
-prevent.
+produce.** Three derivations must agree on every world:
+``proof_verdict_from_evidence`` (whole row, what ``pipeline-cli quality``
+runs), ``proof_verdict_from_facts`` (flat columns), and — the one that
+actually ships to the browser — ``web.classify.proof_gate_projection``
+driven over the SQL row aliases the render path really receives. The
+adapter is included deliberately: reading a lineage-gated overlay key
+instead of its own evidence alias made the two surfaces disagree on 26,503
+live rows while both library functions stayed in lockstep, and a property
+that stops at the library cannot see it.
 
 **V5 — no statement widens the claim.** No tier sentence, at any tier,
 ever asserts bit-faithfulness, a guarantee, or posterior odds (Phase 5
@@ -86,6 +90,7 @@ from lib.quality.decisions import (
     aac_lattice_proof_leg,
     ultrasonic_proof_leg,
 )
+from web.classify import ProofGateProjection, proof_gate_projection
 
 _CODEC_FAMILIES = ("mp3", "aac", "opus", "vorbis", "lossless", "other")
 _AUDIT_ONLY_FAMILIES = ("aac", "opus", "other")
@@ -188,6 +193,47 @@ def _evidence_facts(draw: st.DrawFn) -> dict[str, object]:
             max_z=st.one_of(
                 st.none(), st.floats(min_value=0.0, max_value=40.0)),
         ))),
+    }
+
+
+def _row_aliases_from_facts(facts: dict[str, object]) -> dict[str, object]:
+    """The same world as the SQL row the Recents render path receives.
+
+    Deliberately includes the LINEAGE-GATED ``source_format`` key set to
+    None, which is what the overlay leaves on 26,503 of 30,467 live rows.
+    An adapter that reads it instead of ``_evidence_format`` resolves a
+    different codec from the same evidence and the property fails.
+    """
+    labels: Sequence[str] = facts["container_labels"]  # pyright: ignore[reportAssignmentType]
+    lattice = facts["aac_lattice"]
+    return {
+        "candidate_evidence_id": 1,
+        "source_format": None,
+        "spectral_grade": facts["spectral_grade"],
+        "spectral_bitrate": facts["spectral_bitrate_kbps"],
+        "_evidence_format": facts["format"],
+        "_evidence_cliff_hz": facts["cliff_hz"],
+        "_evidence_codec_family": facts["codec_family"],
+        "_evidence_storage_format": facts["storage_format"],
+        "_evidence_filetype_band": facts["filetype_band"],
+        "_evidence_spectral_subject": facts["spectral_subject"],
+        "_evidence_was_converted_from": facts["was_converted_from"],
+        "_evidence_container_extensions": list(labels),
+        "_evidence_ultrasonic_deficit_db": facts["ultrasonic_deficit_db"],
+        "_evidence_spectral_measurement_version": (
+            facts["spectral_measurement_version"]),
+        "_evidence_aac_lattice_modal_count": (
+            lattice.modal_count if isinstance(lattice, AacLatticeCapture)
+            else None
+        ),
+        "_evidence_aac_lattice_scored_tracks": (
+            lattice.scored_tracks if isinstance(lattice, AacLatticeCapture)
+            else None
+        ),
+        "_evidence_aac_lattice_max_z": (
+            lattice.max_z if isinstance(lattice, AacLatticeCapture) else None
+        ),
+        "_evidence_verified_lossless_classifier": None,
     }
 
 
@@ -298,6 +344,37 @@ def check_surfaces_agree(
             f"{row_verdict} vs {facts_verdict}")
 
 
+def check_projection_matches_verdict(
+    projection: "ProofGateProjection",
+    verdict: AlbumProofVerdict,
+    *,
+    project: "Callable[[AlbumProofVerdict], tuple[object, ...]] | None" = None,
+) -> None:
+    """V4, at the adapter: what the browser gets IS the derived verdict.
+
+    The projection nulls the tier and statement when no leg adjudicated —
+    that is the ``has_finding`` rule, not a disagreement — so the check is
+    against the verdict's own reduction, never against the raw fields.
+    """
+    def _expected(source: AlbumProofVerdict) -> tuple[object, ...]:
+        return (
+            source.tier if source.has_finding else None,
+            proof_tier_statement(source) if source.has_finding else None,
+            list(source.fired_legs),
+        )
+
+    reduce = project if project is not None else _expected
+    actual = (
+        projection.verdict_tier,
+        projection.verdict_tier_statement,
+        projection.verdict_fired_legs,
+    )
+    if actual != reduce(verdict):
+        raise AssertionError(
+            "the render adapter projected a different verdict than the "
+            f"derivation produced: {actual} vs {reduce(verdict)}")
+
+
 _CLAIM_WIDENING_TOKENS = (
     "bit-perfect", "bit perfect", "bit-faithful", "bit faithful",
     "guarantee", "guaranteed", "certain", "probably fake", "definitely",
@@ -373,10 +450,16 @@ class TestVerdictTierProperties(unittest.TestCase):
     })
     @given(facts=_evidence_facts())
     def test_render_path_and_cli_agree(self, facts) -> None:
-        """V4 over any world: one album, one verdict, both surfaces."""
+        """V4 over any world: one album, one verdict, every surface."""
         facts_verdict = proof_verdict_from_facts(**facts)
         row_verdict = proof_verdict_from_evidence(_evidence_from_facts(facts))
         check_surfaces_agree(row_verdict, facts_verdict)
+        # The adapter the browser actually gets, over the SQL row aliases
+        # the render path really receives.
+        check_projection_matches_verdict(
+            proof_gate_projection(_row_aliases_from_facts(facts)),
+            facts_verdict,
+        )
         check_tier_follows_fired_legs(facts_verdict)
         check_reserved_ceiling_tiers_unused(facts_verdict)
         statement = proof_tier_statement(facts_verdict)
@@ -439,6 +522,49 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         with self.assertRaises(AssertionError):
             check_surfaces_agree(
                 self._verdict(), self._verdict(tier=PROOF_TIER_DETECTED))
+
+    def test_projection_checker_trips_on_a_lineage_gated_read(self):
+        """The exact defect: the adapter reading the overlaid format key.
+
+        ``source_format`` is only overlaid for lineage 3/4 rows, so on a
+        legacy row it is None while the decider still sees the
+        measurement's own format. Re-deriving through it resolves no codec,
+        which withholds a finding the CLI reports — a real divergence on
+        26,503 live rows. The decoy adapter below reads that key; the
+        checker must catch it.
+        """
+        facts = {
+            "spectral_grade": "likely_transcode",
+            "spectral_bitrate_kbps": 128,
+            "cliff_hz": 15500,
+            "codec_family": None,
+            "format": "FLAC",
+            "storage_format": None,
+            "filetype_band": "",
+            "spectral_subject": "installed",
+            "was_converted_from": None,
+            "container_labels": [".flac"],
+            "ultrasonic_deficit_db": None,
+            "spectral_measurement_version": 2,
+            "aac_lattice": None,
+        }
+        verdict = proof_verdict_from_facts(**facts)
+        self.assertEqual(verdict.tier, PROOF_TIER_DETECTED)
+        row = _row_aliases_from_facts(facts)
+        lineage_gated = dict(row)
+        lineage_gated["_evidence_format"] = lineage_gated["source_format"]
+        with self.assertRaises(AssertionError):
+            check_projection_matches_verdict(
+                proof_gate_projection(lineage_gated), verdict)
+        # …and the real adapter over the real row agrees with the verdict.
+        check_projection_matches_verdict(proof_gate_projection(row), verdict)
+
+    def test_projection_checker_trips_on_a_drifted_reduction(self):
+        with self.assertRaises(AssertionError):
+            check_projection_matches_verdict(
+                ProofGateProjection(),
+                self._verdict(evaluated_legs=(PROOF_LEG_IN_WINDOW_CLIFF,)),
+            )
 
     def test_claim_checker_trips_on_widened_copy(self):
         with self.assertRaises(AssertionError):
