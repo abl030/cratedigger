@@ -87,7 +87,7 @@ function formatSpectral(grade, bitrate) {
  * @param {boolean|undefined} admissible
  * @returns {boolean}
  */
-export function spectralGradeIsAdmissible(grade, admissible) {
+function spectralGradeIsAdmissible(grade, admissible) {
   if (admissible !== false) return true;
   return grade !== 'suspect' && grade !== 'likely_transcode';
 }
@@ -99,13 +99,25 @@ export function spectralGradeIsAdmissible(grade, admissible) {
  * @param {string} grade
  * @param {number|string|undefined} bitrate
  * @param {boolean|undefined} admissible
+ * @param {string|undefined} withheld - ProofGateProjection reason token
  * @returns {string}
  */
-function spectralChip(grade, bitrate, admissible) {
+function spectralChip(grade, bitrate, admissible, withheld = undefined) {
   if (spectralGradeIsAdmissible(grade, admissible)) {
     return formatSpectral(grade, bitrate);
   }
   const floor = bitrate ? ` (~${esc(bitrate)}kbps)` : '';
+  if (withheld === 'codec_unresolved') {
+    // "This codec's rolloff is native encoder behaviour" is a claim ABOUT
+    // a codec. When none could be resolved there is no codec to make it
+    // about, so the honest statement is that the grade is withheld.
+    return `<span class="${qualityToneClass('unknown')}" title="`
+      + `The codec that produced this measurement could not be identified, `
+      + `so its cliff supports no finding either way. The grade is kept as `
+      + `the measured fact.`
+      + `">${esc(spectralGradeLabel(grade))}${floor} · codec unresolved`
+      + `</span>`;
+  }
   return `<span class="${qualityToneClass('unknown')}" title="`
     + `This codec's spectral rolloff is native encoder behaviour, not `
     + `evidence of a transcode. The grade is kept as the measured fact.`
@@ -124,11 +136,18 @@ function spectralChip(grade, bitrate, admissible) {
  * @param {string} grade
  * @param {string} floor - already-escaped "~128k " prefix, or ''
  * @param {boolean|undefined} admissible
+ * @param {string|undefined} withheld - ProofGateProjection reason token
  * @returns {string}
  */
-function spectralStripCell(grade, floor, admissible) {
+function spectralStripCell(grade, floor, admissible, withheld = undefined) {
   if (spectralGradeIsAdmissible(grade, admissible)) {
     return `<span class="${spectralGradeClass(grade)}">${floor}${esc(spectralGradeLabel(grade))}</span>`;
+  }
+  if (withheld === 'codec_unresolved') {
+    return `<span class="${qualityToneClass('unknown')}" title="`
+      + `Measured grade: ${esc(spectralGradeLabel(grade))} — the codec that `
+      + `produced it could not be identified, so the grade is withheld`
+      + `">${floor}codec unresolved</span>`;
   }
   return `<span class="${qualityToneClass('unknown')}" title="`
     + `Measured grade: ${esc(spectralGradeLabel(grade))} — native encoder `
@@ -357,7 +376,8 @@ function buildEvidenceCardModel(h) {
     // An audit-only codec's cliff is native encoder rolloff, never an
     // accusation (issue #829 PR4).
     inCells.spectral = spectralStripCell(
-      h.spectral_grade, floor, h.spectral_accusation_admissible);
+      h.spectral_grade, floor, h.spectral_accusation_admissible,
+      h.spectral_accusation_withheld);
   } else if (h.spectral_attempted && h.spectral_error) {
     inCells.spectral = `<span class="${qualityToneClass('poor')}" title="${esc(h.spectral_error)}">spectral failed</span>`;
   }
@@ -398,7 +418,8 @@ function buildEvidenceCardModel(h) {
     const floor = h.existing_spectral_bitrate ? `~${esc(h.existing_spectral_bitrate)}k ` : '';
     haveCells.spectral = spectralStripCell(
       h.existing_spectral_grade, floor,
-      h.existing_spectral_accusation_admissible);
+      h.existing_spectral_accusation_admissible,
+      h.existing_spectral_accusation_withheld);
   } else if (h.existing_spectral_attempted && h.existing_spectral_error) {
     haveCells.spectral = `<span class="${qualityToneClass('poor')}" title="${esc(h.existing_spectral_error)}">spectral failed</span>`;
   } else if (h.existing_spectral_bitrate) {
@@ -596,7 +617,8 @@ export function renderDownloadHistoryItem(h) {
       ? `<span class="${qualityToneClass('poor')}" title="${esc(h.spectral_error)}">analysis failed</span>`
       : h.spectral_grade
       ? spectralChip(
-        h.spectral_grade, h.spectral_bitrate, h.spectral_accusation_admissible)
+        h.spectral_grade, h.spectral_bitrate,
+        h.spectral_accusation_admissible, h.spectral_accusation_withheld)
       : 'unmeasured';
     const existing = h.existing_spectral_error
       ? `<span class="${qualityToneClass('poor')}" title="${esc(h.existing_spectral_error)}">analysis failed</span>`
@@ -604,7 +626,8 @@ export function renderDownloadHistoryItem(h) {
       ? spectralChip(
         h.existing_spectral_grade,
         h.existing_spectral_bitrate,
-        h.existing_spectral_accusation_admissible)
+        h.existing_spectral_accusation_admissible,
+        h.existing_spectral_accusation_withheld)
       : h.existing_spectral_bitrate
         ? `<span class="${qualityToneClass('unknown')}">ungraded (~${esc(h.existing_spectral_bitrate)}kbps)</span>`
         : 'unmeasured';
@@ -819,6 +842,7 @@ export const __test__ = {
   formatV0Probe,
   formatSpectral,
   spectralChip,
+  spectralGradeIsAdmissible,
   spectralStripCell,
   storageFormatLabel,
   withWas,

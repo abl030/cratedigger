@@ -6,13 +6,12 @@
 import {
   renderDownloadHistoryItem as renderDownloadHistoryFixture,
   renderEvidenceStrip as renderEvidenceFixture,
-  spectralGradeIsAdmissible,
   __test__,
 } from '../web/js/history.js';
 import { readFileSync } from 'node:fs';
 const {
-  formatV0Probe, formatSpectral, spectralChip, spectralStripCell, withWas,
-  storageFormatLabel,
+  formatV0Probe, formatSpectral, spectralChip, spectralGradeIsAdmissible,
+  spectralStripCell, withWas, storageFormatLabel,
 } = __test__;
 
 let passed = 0;
@@ -1913,6 +1912,25 @@ console.log('spectralStripCell() states the fact instead of the accusation');
     'an admissible grade keeps its tone in the strip');
   assertContains(accused, 'likely transcode',
     'an admissible grade keeps its wording in the strip');
+}
+
+console.log('an unresolved codec never claims native encoder rolloff');
+{
+  const strip = spectralStripCell(
+    'likely_transcode', '~128k ', false, 'codec_unresolved');
+  assertContains(strip, 'codec unresolved',
+    'the strip says the codec is unknown');
+  assertExcludes(strip, 'rolloff',
+    'the strip never describes an encoder it could not identify');
+  const chip = spectralChip('likely_transcode', 128, false, 'codec_unresolved');
+  assertContains(chip, 'codec unresolved',
+    'the card says the codec is unknown');
+  assertExcludes(chip, 'native encoder behaviour',
+    'the card never describes an encoder it could not identify');
+  const auditOnly = spectralChip(
+    'likely_transcode', 128, false, 'audit_only_codec');
+  assertContains(auditOnly, 'native encoder behaviour',
+    'a resolved audit-only codec keeps the measured explanation');
 }
 
 console.log('renderEvidenceStrip() neutralizes an audit-only grade chip');

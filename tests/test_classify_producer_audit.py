@@ -256,6 +256,18 @@ HISTORICAL_LITERALS: dict[str, _Historical] = {
 
 
 NON_MATCH_TARGETS: dict[str, str] = {
+    # Output copy this module RETURNS for the frontend to branch on, not a
+    # value it matches against a producer. web/classify.py is the sole
+    # producer of both tokens; the JS side's equality against them is
+    # pinned by tests/test_js_history.mjs.
+    "ACCUSATION_WITHHELD_AUDIT_ONLY_CODEC": (
+        "output copy: the reason token this module emits when a resolved "
+        "audit-only codec's grade is withheld"
+    ),
+    "ACCUSATION_WITHHELD_CODEC_UNRESOLVED": (
+        "output copy: the reason token this module emits when no codec "
+        "family could be resolved at all"
+    ),
     # Output copy assigned for return, never compared against a producer
     # value. The badge vocabulary they carry IS audited — as the ``badge``
     # subject, where this module is its own registered producer.

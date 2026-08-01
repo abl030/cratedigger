@@ -14,6 +14,7 @@ from web.classify import (
     LogEntry,
     classify_log_entry,
     current_evidence_accusation_admissible,
+    current_evidence_accusation_withheld,
     proof_gate_projection,
 )
 
@@ -130,7 +131,9 @@ class DownloadHistoryViewRow(msgspec.Struct, frozen=True):
     verdict_tier_statement: str | None = None
     verdict_fired_legs: list[str] = msgspec.field(default_factory=list[str])
     spectral_accusation_admissible: bool | None = None
+    spectral_accusation_withheld: str | None = None
     existing_spectral_accusation_admissible: bool | None = None
+    existing_spectral_accusation_withheld: str | None = None
     verified_lossless_classifier: str | None = None
     verified_lossless_generation: str | None = None
     stage2_if_stage1_deferred: str | None = None
@@ -261,6 +264,9 @@ def _project_current_library_have(
         # (issue #829 Phase 5 PR4).
         "existing_spectral_accusation_admissible": (
             current_evidence_accusation_admissible(row)
+        ),
+        "existing_spectral_accusation_withheld": (
+            current_evidence_accusation_withheld(row)
         ),
         "existing_v0_probe_kind": row.get(
             "_current_evidence_v0_probe_kind"
