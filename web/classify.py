@@ -7,6 +7,7 @@ No I/O, no database — fully unit-testable.
 """
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, fields
 from typing import Any, Self
 
@@ -24,7 +25,20 @@ from lib.failure_presentation import (
 from lib.import_evidence import HaveAnalysisFailure
 from lib.import_queue import ImportJob
 from lib.json_narrow import is_list_like, json_list
-from lib.quality import ImportResult, QualityComparisonBasis, dispatch_action
+from lib.quality import (
+    SPECTRAL_TRANSCODE_GRADES,
+    AacLatticeCapture,
+    AudioQualityMeasurement,
+    CodecFamily,
+    EvidenceSubject,
+    ImportResult,
+    QualityComparisonBasis,
+    dispatch_action,
+    interpret_measurement,
+    proof_tier_statement,
+    proof_verdict_from_facts,
+    verified_lossless_generation_label,
+)
 from lib.validation_envelope import decode_validation_envelope
 
 # ---------------------------------------------------------------------------
@@ -227,6 +241,42 @@ class ClassifiedEntry(msgspec.Struct):
     analysis_error: str | None = None
     installed_path: str | None = None
     candidate_reference: str | None = None
+    # --- issue #829 Phase 5 PR4: the proof-gate verdict ---
+    # ``verdict_tier`` is the severity band (see
+    # ``lib/quality/verdict_tiers.py``); ``verdict_tier_statement`` is the
+    # ONE operator sentence for it, shared verbatim with
+    # ``pipeline-cli quality`` so the two surfaces cannot state different
+    # findings for the same album. All None when the row carries no
+    # candidate evidence, or when no proof-gate leg could adjudicate — the
+    # card must not report a clearance nothing tested for.
+    verdict_tier: int | None = None
+    verdict_tier_statement: str | None = None
+    verdict_fired_legs: list[str] = msgspec.field(default_factory=list[str])
+    # False when the measured codec's spectral evidence cannot support a
+    # transcode accusation at all (AAC, Opus, HE-AAC, unknown families).
+    # The grade stays visible as the measured audit fact it is; this flag
+    # is what stops the UI rendering it AS an accusation — issue #829's
+    # opening defect, download 37946 (a 256 kbps CBR AAC graded
+    # ``likely_transcode`` with a LAME-table 128 bucket).
+    spectral_accusation_admissible: bool | None = None
+    # The HAVE side's own answer to the same question. Separate because the
+    # rendered HAVE grade has two possible sources — the attempt's own
+    # snapshot of the installed album, or the request's current evidence
+    # when ``_project_current_library_have`` overlays it — and the flag has
+    # to follow whichever measurement produced the grade beside it.
+    existing_spectral_accusation_admissible: bool | None = None
+    # Which model minted this candidate's verified-lossless proof, and its
+    # operator label. Until PR4 the column was rendered nowhere, so
+    # "verified lossless" silently meant two different things across the
+    # library (Phase 5 plan, PR3 hard constraint 3).
+    verified_lossless_classifier: str | None = None
+    verified_lossless_generation: str | None = None
+    # PR2d's Stage-1-reject counterfactual, persisted on ImportResult by
+    # this PR: "Stage 1 rejected this — what would Stage 2 have said?".
+    # Audit-only; None on every row that did not short-circuit Stage 1 and
+    # on every row predating the field.
+    stage2_if_stage1_deferred: str | None = None
+    stage2_if_stage1_deferred_verdict: str | None = None
 
 
 class ImportJobDisplay(msgspec.Struct, frozen=True):
@@ -397,7 +447,17 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
     disambig_reason, disambig_detail = _extract_disambiguation_failure(entry)
     bad_extensions = _extract_bad_extensions(entry)
     basis = _entry_comparison_basis(entry)
+    counterfactual = _extract_stage1_deferred_counterfactual(entry)
     spectral = _extract_attempt_spectral(entry)
+    # The HAVE grade beside this flag is the attempt's own snapshot of the
+    # installed album (``ImportResult.current_measurement``), so the codec
+    # resolution has to come from that same measurement. When
+    # ``_project_current_library_have`` later replaces the snapshot
+    # wholesale it replaces this flag too.
+    existing_ir = _parse_import_result(entry)
+    existing_admissible = _accusation_admissible(
+        existing_ir.current_measurement if existing_ir is not None else None
+    )
     candidate_measurement = triage["candidate_measurement"]
     current_measurement = triage["current_measurement"]
     if candidate_measurement is not None:
@@ -420,6 +480,9 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
         existing_min_bitrate = current_measurement.min_bitrate_kbps
         existing_avg_bitrate = current_measurement.avg_bitrate_kbps
         existing_median_bitrate = current_measurement.median_bitrate_kbps
+        # The triage snapshot replaces the HAVE grade, so the flag beside
+        # it has to describe the triage snapshot's measurement too.
+        existing_admissible = _accusation_admissible(current_measurement)
         spectral = (
             spectral[0], spectral[1],
             current_measurement.spectral_grade,
@@ -462,6 +525,8 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
         ),
         disambiguation_failure=disambig_reason,
         disambiguation_detail=disambig_detail,
+        stage2_if_stage1_deferred=counterfactual[0],
+        stage2_if_stage1_deferred_verdict=counterfactual[1],
         bad_extensions=bad_extensions,
         wrong_match_triage_action=triage["action"],
         wrong_match_triage_summary=triage["summary"],
@@ -485,6 +550,7 @@ def classify_log_entry(entry: LogEntry) -> ClassifiedEntry:
         spectral_bitrate=spectral[1],
         existing_spectral_grade=spectral[2],
         existing_spectral_bitrate=spectral[3],
+        existing_spectral_accusation_admissible=existing_admissible,
         spectral_attempted=spectral[4],
         spectral_error=spectral[5],
         existing_spectral_attempted=spectral[6],
@@ -739,12 +805,223 @@ def _extract_disambiguation_failure(
     return (fail.reason, fail.detail)
 
 
+def _accusation_admissible(
+    measurement: "AudioQualityMeasurement | None",
+    *,
+    storage_format: str | None = None,
+    filetype_band: str = "",
+) -> bool | None:
+    """Whether a measurement's grade may be rendered as an accusation.
+
+    ``None`` when there is no grade, or when the grade is not one that
+    could accuse anything — a ``genuine`` album has no accusation to
+    withhold, and reporting "not admissible" there would read as a codec
+    verdict rather than a not-applicable.
+
+    The resolution is production's own ``interpret_measurement``, never a
+    codec guessed from a format label: an Opus copy wearing its source
+    FLAC's spectral under R19 must resolve to the LOSSLESS family, and a
+    label-only shortcut would neutralize a real transcode finding on it.
+    """
+    if measurement is None:
+        return None
+    if measurement.spectral_grade not in SPECTRAL_TRANSCODE_GRADES:
+        return None
+    return interpret_measurement(
+        measurement,
+        storage_format=storage_format,
+        filetype_band=filetype_band,
+    ).supports_transcode_accusation
+
+
+def _extract_stage1_deferred_counterfactual(
+    entry: LogEntry,
+) -> tuple[str | None, str | None]:
+    """Pull PR2d's Stage-1-reject counterfactual out of ImportResult JSONB.
+
+    Returns ``(stage-2 decision, that decision's verdict)``. Both None when
+    Stage 1 never short-circuited, and on every row predating the persisted
+    fields — a Stage-1 reject with nothing to say here is indistinguishable
+    from a row that never reached the audit, which is why the CLI's
+    ``unavailable`` sentinel is carried through verbatim rather than
+    collapsed to None.
+    """
+    ir = _parse_import_result(entry)
+    if ir is None:
+        return None, None
+    basis = ir.comparison_basis_if_stage1_deferred
+    return (
+        ir.stage2_import_if_stage1_deferred,
+        basis.verdict if basis is not None else None,
+    )
+
+
 def _extract_bad_extensions(entry: LogEntry) -> list[str]:
     """Pull postflight bad-extension filenames out of ImportResult JSONB."""
     ir = _parse_import_result(entry)
     if ir is None:
         return []
     return list(ir.postflight.bad_extensions)
+
+
+class ProofGateProjection(msgspec.Struct, frozen=True):
+    """The display-safe proof-gate verdict for one download-log row.
+
+    Issue #829 Phase 5 PR4. Every field is derived — nothing here is a new
+    persisted fact — and the derivation is
+    ``lib/quality/verdict_tiers.py::proof_verdict_from_facts``, the same one
+    ``pipeline-cli quality`` runs, so the two operator surfaces cannot
+    state different findings for the same album.
+    """
+
+    verdict_tier: int | None = None
+    verdict_tier_statement: str | None = None
+    verdict_fired_legs: list[str] = msgspec.field(default_factory=list[str])
+    spectral_accusation_admissible: bool | None = None
+    verified_lossless_classifier: str | None = None
+    verified_lossless_generation: str | None = None
+
+
+def proof_gate_projection(row: Mapping[str, object]) -> ProofGateProjection:
+    """Derive one row's proof-gate verdict from its candidate-evidence join.
+
+    Reads the ``_evidence_*`` aliases
+    (``lib/pipeline_db/download_log.py::_CANDIDATE_EVIDENCE_COLUMNS``).
+    A row with no candidate evidence, or whose evidence let no leg
+    adjudicate, projects an empty verdict: the card must never report a
+    clearance nothing tested for, which is the tier-5-without-evidence lie
+    ``AlbumProofVerdict.has_finding`` exists to separate.
+
+    ``spectral_accusation_admissible`` answers "may THIS row's grade be
+    rendered as a transcode accusation?", so it is ``None`` unless the
+    grade is one that could be an accusation at all. For a ``genuine``
+    album the underlying leg fact is also False — the grade does not
+    authorize a finding — but reporting that as "not admissible" would
+    read as a codec verdict on a row that has no accusation to withhold.
+    For a ``suspect``/``likely_transcode`` grade the flag is exactly the
+    #829 fix: False means the measured codec's rolloff is native encoder
+    behaviour and the accusation is withheld.
+    """
+    if row.get("candidate_evidence_id") is None:
+        return ProofGateProjection()
+    lattice_scored = row.get("_evidence_aac_lattice_scored_tracks")
+    capture = (
+        AacLatticeCapture(
+            modal_count=_as_int(row.get("_evidence_aac_lattice_modal_count")),
+            scored_tracks=int(lattice_scored),
+            max_z=_as_float(row.get("_evidence_aac_lattice_max_z")),
+        )
+        if isinstance(lattice_scored, int) and not isinstance(lattice_scored, bool)
+        else None
+    )
+    extensions = row.get("_evidence_container_extensions")
+    verdict = proof_verdict_from_facts(
+        spectral_grade=_as_str(row.get("spectral_grade")),
+        spectral_bitrate_kbps=_as_int(row.get("spectral_bitrate")),
+        cliff_hz=_as_int(row.get("_evidence_cliff_hz")),
+        codec_family=_as_codec_family(row.get("_evidence_codec_family")),
+        format=_as_str(row.get("source_format")),
+        storage_format=_as_str(row.get("_evidence_storage_format")),
+        filetype_band=_as_str(row.get("_evidence_filetype_band")) or "",
+        spectral_subject=_as_evidence_subject(
+            row.get("_evidence_spectral_subject")),
+        was_converted_from=_as_str(row.get("_evidence_was_converted_from")),
+        container_labels=[
+            label for label in json_list(extensions) if isinstance(label, str)
+        ],
+        ultrasonic_deficit_db=_as_float(
+            row.get("_evidence_ultrasonic_deficit_db")),
+        spectral_measurement_version=_as_int(
+            row.get("_evidence_spectral_measurement_version")),
+        aac_lattice=capture,
+    )
+    classifier = _as_str(row.get("_evidence_verified_lossless_classifier"))
+    grade = row.get("spectral_grade")
+    return ProofGateProjection(
+        verdict_tier=verdict.tier if verdict.has_finding else None,
+        verdict_tier_statement=(
+            proof_tier_statement(verdict) if verdict.has_finding else None
+        ),
+        verdict_fired_legs=list(verdict.fired_legs),
+        spectral_accusation_admissible=(
+            verdict.spectral_accusation_admissible
+            if grade in SPECTRAL_TRANSCODE_GRADES
+            else None
+        ),
+        verified_lossless_classifier=classifier,
+        verified_lossless_generation=(
+            verified_lossless_generation_label(classifier)
+        ),
+    )
+
+
+def current_evidence_accusation_admissible(
+    row: Mapping[str, object],
+) -> bool | None:
+    """The HAVE flag for the request's CURRENT evidence row.
+
+    Used only where ``_project_current_library_have`` replaces the
+    attempt's HAVE snapshot wholesale: the flag must describe the same
+    measurement as the grade rendered beside it, so it is re-derived from
+    the current-evidence columns rather than carried over from the
+    attempt's own snapshot of a possibly-different installed album.
+    """
+    return _accusation_admissible(
+        AudioQualityMeasurement(
+            format=_as_str(row.get("_current_evidence_format")),
+            spectral_grade=_as_str(
+                row.get("_current_evidence_spectral_grade")),
+            spectral_bitrate_kbps=_as_int(
+                row.get("_current_evidence_spectral_bitrate")),
+            spectral_subject=_as_evidence_subject(
+                row.get("_current_evidence_spectral_subject")),
+            was_converted_from=_as_str(
+                row.get("_current_evidence_was_converted_from")),
+            cliff_hz=_as_int(row.get("_current_evidence_cliff_hz")),
+            codec_family=_as_codec_family(
+                row.get("_current_evidence_codec_family")),
+        ),
+        storage_format=_as_str(row.get("_current_evidence_storage_format")),
+        filetype_band=_as_str(row.get("_current_evidence_filetype_band")) or "",
+    )
+
+
+def _as_str(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _as_int(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _as_float(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _as_codec_family(value: object) -> CodecFamily | None:
+    """Narrow a persisted ``codec_family`` column to its Literal.
+
+    Decoded through the Literal itself rather than against a restated list
+    of family names, so the vocabulary has exactly one owner. Fails CLOSED:
+    an unrecognised family withholds every spectral opinion, which is the
+    direction issue #829 installed. Migration 065's CHECK makes the failure
+    branch unreachable in production; it exists so a future vocabulary
+    change cannot reach the interpreter as an unvalidated string.
+    """
+    try:
+        return msgspec.convert(value, type=CodecFamily)
+    except msgspec.ValidationError:
+        return None
+
+
+def _as_evidence_subject(value: object) -> EvidenceSubject | None:
+    """Narrow a persisted ``spectral_subject`` column to its Literal."""
+    try:
+        return msgspec.convert(value, type=EvidenceSubject)
+    except msgspec.ValidationError:
+        return None
 
 
 def _empty_wrong_match_triage() -> dict[str, Any]:

@@ -945,6 +945,167 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(item["v0_probe_avg_bitrate"], 259)
         self.assertEqual(item["v0_probe_median_bitrate"], 255)
 
+    def _seed_verdict_evidence(self, *, log_id, **evidence_kwargs):
+        """Attach production-shaped candidate evidence to a download-log row."""
+        from tests.helpers import make_album_quality_evidence
+
+        evidence = make_album_quality_evidence(
+            mb_release_id="test-mbid-0100", **evidence_kwargs)
+        self.db.upsert_album_quality_evidence(evidence)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.db.set_download_log_candidate_evidence(log_id, stored.id)
+        status, data = self._get("/api/pipeline/log")
+        self.assertEqual(status, 200)
+        return next(row for row in data["log"] if row["id"] == log_id)
+
+    def test_pipeline_log_carries_a_tier_one_proof_gate_verdict(self):
+        """A laundered FLAC gets ONE transcode statement (issue #829 PR4)."""
+        from lib.quality import AudioQualityMeasurement
+
+        log_id = self.db.log_download(
+            100, outcome="rejected", beets_scenario="quality_reject")
+        item = self._seed_verdict_evidence(
+            log_id=log_id,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=900,
+                avg_bitrate_kbps=950,
+                format="FLAC",
+                spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=128,
+                spectral_subject="source",
+                spectral_provenance="measured",
+                cliff_hz=15500,
+                codec_family="lossless",
+                spectral_measurement_version=2,
+            ),
+            codec="flac", container="flac", storage_format="FLAC",
+        )
+        self.assertEqual(item["verdict_tier"], 1)
+        self.assertEqual(
+            item["verdict_tier_statement"],
+            "Transcode detected: in-window spectral cliff")
+        self.assertEqual(item["verdict_fired_legs"], ["in_window_cliff"])
+        self.assertTrue(item["spectral_accusation_admissible"])
+
+    def test_pipeline_log_never_accuses_an_audit_only_codec(self):
+        """download 37946's shape: a 256 kbps AAC graded likely_transcode."""
+        from lib.quality import AudioQualityMeasurement
+
+        log_id = self.db.log_download(
+            100, outcome="rejected", beets_scenario="quality_reject")
+        item = self._seed_verdict_evidence(
+            log_id=log_id,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=256,
+                avg_bitrate_kbps=256,
+                is_cbr=True,
+                format="AAC",
+                spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=128,
+                spectral_subject="installed",
+                spectral_provenance="measured",
+                cliff_hz=15000,
+                codec_family="aac",
+                spectral_measurement_version=2,
+            ),
+            codec="aac", container="m4a", storage_format="AAC",
+        )
+        self.assertFalse(item["spectral_accusation_admissible"])
+        self.assertEqual(item["verdict_fired_legs"], [])
+        # No leg could adjudicate, so the card states nothing rather than
+        # reporting a clearance nothing tested for.
+        self.assertIsNone(item["verdict_tier"])
+        self.assertIsNone(item["verdict_tier_statement"])
+        # The measured grade itself is untouched — it stays the audit fact.
+        self.assertEqual(item["spectral_grade"], "likely_transcode")
+
+    def test_pipeline_log_never_accuses_an_audit_only_have(self):
+        """Request 6387's shape: the INSTALLED copy is the AAC (#829)."""
+        from lib.quality import AudioQualityMeasurement
+        from tests.helpers import make_album_quality_evidence
+
+        log_id = self.db.log_download(
+            100, outcome="rejected", beets_scenario="quality_reject")
+        installed = make_album_quality_evidence(
+            mb_release_id="test-mbid-0100",
+            source_path="/mnt/virtio/Music/Beets/installed",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=256,
+                avg_bitrate_kbps=256,
+                is_cbr=True,
+                format="AAC",
+                spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=128,
+                spectral_subject="installed",
+                spectral_provenance="measured",
+                cliff_hz=15000,
+                codec_family="aac",
+                spectral_measurement_version=2,
+            ),
+            codec="aac", container="m4a", storage_format="AAC",
+        )
+        self.db.upsert_album_quality_evidence(installed)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=installed.mb_release_id,
+            snapshot_fingerprint=installed.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.assertTrue(self.db.set_request_current_evidence(100, stored.id))
+
+        status, data = self._get("/api/pipeline/log")
+        self.assertEqual(status, 200)
+        item = next(row for row in data["log"] if row["id"] == log_id)
+        self.assertEqual(item["existing_spectral_grade"], "likely_transcode")
+        self.assertFalse(item["existing_spectral_accusation_admissible"])
+
+    def test_pipeline_log_names_the_proof_generation(self):
+        """"verified lossless" stops meaning two things (PR3 constraint 3)."""
+        from lib.quality import (
+            VERIFIED_LOSSLESS_CLASSIFIER_V3,
+            AudioQualityMeasurement,
+            VerifiedLosslessProof,
+        )
+
+        log_id = self.db.log_download(100, outcome="success")
+        item = self._seed_verdict_evidence(
+            log_id=log_id,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=900,
+                avg_bitrate_kbps=950,
+                format="FLAC",
+                spectral_grade="genuine",
+                spectral_subject="source",
+                spectral_provenance="measured",
+                codec_family="lossless",
+                ultrasonic_deficit_db=42.0,
+                spectral_measurement_version=2,
+            ),
+            verified_lossless_proof=VerifiedLosslessProof(
+                provenance="measured",
+                source="flac",
+                classifier=VERIFIED_LOSSLESS_CLASSIFIER_V3,
+                detail="genuine",
+            ),
+            codec="flac", container="flac", storage_format="FLAC",
+        )
+        self.assertEqual(
+            item["verified_lossless_classifier"],
+            VERIFIED_LOSSLESS_CLASSIFIER_V3)
+        self.assertEqual(
+            item["verified_lossless_generation"],
+            "cliff/grade + ultrasonic legs")
+        self.assertEqual(item["verdict_tier"], 5)
+        self.assertEqual(
+            item["verdict_tier_statement"],
+            "No evidence of lossy origin from the tests that ran")
+        # A genuine grade has no accusation to withhold, so the flag is
+        # not-applicable rather than a codec verdict on the row.
+        self.assertIsNone(item["spectral_accusation_admissible"])
+
     def test_disk_coverage_contract(self):
         import web.server as srv
 

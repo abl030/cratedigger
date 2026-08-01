@@ -195,6 +195,12 @@ MATCH_SUBJECTS: dict[str, _Producers] = {
     "entry.spectral_grade": _Producers(
         ("lib/spectral_check.py",), "a spectral grade the analyser assigns",
     ),
+    "SPECTRAL_TRANSCODE_GRADES": _Producers(
+        ("lib/spectral_check.py",),
+        "the two accusing spectral grades classify_album assigns — the "
+        "membership test that gates issue #829 PR4's audit-only flag reads "
+        "the shared frozenset rather than restating the names",
+    ),
     "entry.original_filetype.lower()": _Producers(
         ("lib/quality/filetypes.py",), "a codec token, already lower-cased",
     ),
