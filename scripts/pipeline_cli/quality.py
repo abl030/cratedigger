@@ -179,6 +179,7 @@ def _print_proof_gate_verdict(
     proof never rejects, denylists or accuses (Phase 5 plan §2).
     """
     from lib.quality import (
+        SPECTRAL_TRANSCODE_GRADES,
         proof_tier_statement,
         proof_verdict_from_evidence,
         verified_lossless_generation_label,
@@ -186,8 +187,18 @@ def _print_proof_gate_verdict(
 
     verdict = proof_verdict_from_evidence(evidence)
     legs = ", ".join(verdict.fired_legs) if verdict.fired_legs else "none"
-    print(f"      proof gate {side}: tier {verdict.tier} — "
+    # A tier number is meaningless when no leg adjudicated: "tier 5" over an
+    # empty evaluated set would read as a clearance nothing tested for.
+    tier = f"tier {verdict.tier} — " if verdict.has_finding else ""
+    print(f"      proof gate {side}: {tier}"
           f"{proof_tier_statement(verdict)} (fired legs: {legs})")
+    # WHICH legs ran, and how they came out. The distinction between a leg
+    # that PASSED and one that WITHHELD is the whole reason those outcomes
+    # are three-state: a withheld leg asserts nothing, and most of the
+    # library will never have ultrasonic or lattice evidence at any price.
+    print(f"      legs {side}: ultrasonic="
+          f"{verdict.ultrasonic_outcome or 'not evaluated'}, "
+          f"aac-lattice={verdict.aac_lattice_outcome or 'not evaluated'}")
     proof = evidence.verified_lossless_proof
     generation = (
         verified_lossless_generation_label(proof.classifier)
@@ -196,15 +207,21 @@ def _print_proof_gate_verdict(
     )
     if generation is not None:
         print(f"      verified lossless {side}: proved by {generation}")
+    grade = evidence.measurement.spectral_grade
     if not verdict.spectral_accusation_admissible and (
-        evidence.measurement.spectral_grade in ("suspect", "likely_transcode")
+        grade in SPECTRAL_TRANSCODE_GRADES
     ):
         # The measured grade stays visible as the audit fact it is, but it
-        # is NOT a transcode finding for this codec — the download-37946
-        # defect (a 256 kbps CBR AAC graded ``likely_transcode``).
-        print(f"      note {side}: spectral grade "
-              f"{evidence.measurement.spectral_grade!r} is audit-only for "
-              "this codec — not a transcode finding")
+        # is NOT a transcode finding — the download-37946 defect (a 256 kbps
+        # CBR AAC graded ``likely_transcode``). WHY it is not a finding
+        # matters: an unresolved codec supports no statement about any
+        # encoder, so it must not be described as native rolloff.
+        reason = (
+            "the codec could not be resolved, so the grade is withheld"
+            if verdict.codec_family is None
+            else "audit-only for this codec — not a transcode finding"
+        )
+        print(f"      note {side}: spectral grade {grade!r} is {reason}")
 
 
 def _print_live_candidate_replay(
@@ -237,7 +254,6 @@ def _print_live_candidate_replay(
     )
 
     print("\n  What the last real candidate actually decided:")
-
 
     candidate_evidence_id = db.get_latest_download_log_candidate_evidence_id(
         request_id)

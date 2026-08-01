@@ -252,8 +252,14 @@ operation.
   "nothing was looked for" are different facts. The Spectral row remains the
   measurement the finding came from, not a second verdict; on a codec whose
   spectral evidence cannot support a transcode accusation (AAC, Opus,
-  HE-AAC, unresolved) the grade chip keeps the measured grade but drops the
-  accusing colour and reads `· audit-only`. The forensics toggle gains
+  HE-AAC) the grade chip keeps the measured grade but drops the accusing
+  colour and reads `· audit-only` — or `· codec unresolved` when no codec
+  family could be resolved at all, because "native encoder rolloff" is a
+  claim about a codec and there is none to make it about. The flag reaches
+  the Recents strip and the download-history card only; the request-detail
+  Quality header, the Wrong Matches badges and the long-tail worklist chip
+  still render the raw grade (named in `docs/quality-verification.md`
+  § "Which surfaces carry the audit-only flag"). The forensics toggle gains
   `If stage 1 had deferred` (PR2d's Stage-2 counterfactual, worded exactly
   as `pipeline-cli quality` prints it) and `Fired proof legs`. Every string
   is server-owned: `web/classify.py::proof_gate_projection` derives them

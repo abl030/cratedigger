@@ -154,13 +154,14 @@ class AlbumProofVerdict:
     fired_legs: tuple[ProofLeg, ...]
     evaluated_legs: tuple[ProofLeg, ...]
     spectral_accusation_admissible: bool
+    #: The measured subject's codec family, or ``None`` when it could not
+    #: be resolved. Carried because "this codec's rolloff is native
+    #: encoder behaviour" and "no codec could be identified" are different
+    #: facts, and a surface that withholds an accusation must not describe
+    #: the first world when it is in the second.
+    codec_family: CodecFamily | None = None
     ultrasonic_outcome: str | None = None
     aac_lattice_outcome: str | None = None
-
-    @property
-    def detected_lossy_origin(self) -> bool:
-        """Whether a positive-detection leg fired (tier 1)."""
-        return self.tier == PROOF_TIER_DETECTED
 
     @property
     def has_finding(self) -> bool:
@@ -239,6 +240,7 @@ def album_proof_verdict(
         spectral_accusation_admissible=(
             spectral.supports_transcode_accusation
         ),
+        codec_family=spectral.codec_family,
         ultrasonic_outcome=(
             ultrasonic_leg.outcome if ultrasonic_leg is not None else None
         ),

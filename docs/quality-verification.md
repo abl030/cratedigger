@@ -603,9 +603,42 @@ on this album` instead, because a diagnostic command owes the reason.
 AAC, Opus, HE-AAC, `other` and unresolved families. PR4 wires it to the
 operator surfaces as `spectral_accusation_admissible`: the measured grade
 stays visible as the audit fact it is, but it loses the accusing colour
-and gains an `audit-only` suffix. This is the display half of the defect
+and gains an `audit-only` suffix.
+
+**Why it was withheld is a second fact, and only one of the two may be
+described.** `spectral_accusation_withheld` distinguishes them: an
+`audit_only_codec` album's cliff IS that encoder's native rolloff, whereas
+a `codec_unresolved` album's cliff supports no statement about any encoder
+— the pipeline could not identify one. Rendering the first sentence over
+the second world fabricates a fact about a codec nothing resolved, so the
+unresolved surfaces read `codec unresolved` / `grade withheld` instead. This is the display half of the defect
 that opened issue #829 (download 37946 — a 256 kbps CBR AAC graded
 `likely_transcode` with a LAME-table 128 bucket).
+
+### Which surfaces carry the audit-only flag
+
+The flag is server-derived and only reaches the surfaces that are wired to
+it. As of issue #829 PR4 that is:
+
+- **carried** — the Recents list evidence strip and the expanded
+  download-history card, on BOTH the IN and HAVE sides
+  (`web/js/history.js`), and `pipeline-cli quality` for the candidate and
+  the installed HAVE.
+- **NOT carried** — four surfaces still render `spectral_grade` /
+  `current_spectral_grade` through the raw palette and can therefore still
+  paint an audit-only codec as a transcode: the request-detail Quality
+  header (`web/js/pipeline.js`), the Wrong Matches group badge and
+  per-entry candidate chip (`web/js/wrong-matches.js`), and the long-tail
+  console worklist chip (`web/js/long_tail_console.js`). Each needs its
+  route to project the same flag; the derivation
+  (`web/classify.py::proof_gate_projection` /
+  `current_evidence_accusation_withheld`) is already reusable, and the
+  request-detail header needs BOTH flags because its fallback chain mixes
+  the current and last-download grades.
+
+A row with no `candidate_evidence_id` keeps the historical render on every
+surface — the flag is absent rather than False, which is the fail-open
+direction for a display-only fact.
 
 ### Where the operator sees all of this
 
