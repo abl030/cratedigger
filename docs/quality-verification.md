@@ -565,6 +565,62 @@ the names are a ladder of what was tested and skipping a rung must not buy
 the top one. As with v3, a name is never stamped merely because the code
 ran.
 
+## Verdict tiers and their display (issue #829 Phase 5 PR4)
+
+`lib/quality/verdict_tiers.py` turns the leg outcomes above into the one
+severity band and the one operator sentence the surfaces print. It is a
+pure derivation over facts already persisted by migrations 065 and 069 —
+no decision reads it, and nothing new is stored.
+
+| tier | fired legs | statement |
+|---|---|---|
+| 1 | in-window cliff and/or AAC frame lattice | `Transcode detected: <instrument>` |
+| 2 | ceiling + no-ultrasonic | **never produced** |
+| 3 | ceiling only | **never produced** |
+| 4 | no-ultrasonic only | `No ultrasonic content — not spectrally provable` |
+| 5 | none | `No evidence of lossy origin from the tests that ran` |
+
+Tiers 2 and 3 are reserved, not implemented: the frozen scorer's ceiling
+leg needs per-track slice vectors production does not persist (see the
+threshold provenance above — production evaluates two of the scorer's
+three legs). No copy is shipped for them, because copy keyed on a
+scenario no producer emits is unreachable by construction
+(`.claude/rules/test-fidelity.md` Rule C).
+
+The AAC frame-lattice leg post-dates the measured tier table and is a
+positive detection at the same severity as the in-window cliff, so it
+joins tier 1; the fired-leg set says which instrument fired.
+
+**A tier-5 verdict over an empty evaluated-leg set is not a clearance.**
+`AlbumProofVerdict.has_finding` separates "nothing was found" from
+"nothing was looked for", and the glance surfaces render nothing in the
+second case. `pipeline-cli quality` prints `No proof-gate test could run
+on this album` instead, because a diagnostic command owes the reason.
+
+### Audit-only codecs are never rendered as transcode accusations
+
+`SpectralInterpretation.supports_transcode_accusation` is hard-False for
+AAC, Opus, HE-AAC, `other` and unresolved families. PR4 wires it to the
+operator surfaces as `spectral_accusation_admissible`: the measured grade
+stays visible as the audit fact it is, but it loses the accusing colour
+and gains an `audit-only` suffix. This is the display half of the defect
+that opened issue #829 (download 37946 — a 256 kbps CBR AAC graded
+`likely_transcode` with a LAME-table 128 bucket).
+
+### Where the operator sees all of this
+
+- `pipeline-cli quality <request-id>` — proof-gate tier, fired legs and
+  proof generation for the last real candidate AND the installed HAVE,
+  through `proof_verdict_from_evidence`.
+- The Recents evidence panel — the same statement via
+  `web/classify.py::proof_gate_projection`, plus the `Verified lossless`
+  row naming the proof generation and, in the forensics block, PR2d's
+  Stage-1-reject counterfactual and the fired-leg set.
+
+Both surfaces call the same `proof_verdict_from_facts`; the generated
+property in `tests/test_verdict_tiers_generated.py` (V4) proves they
+cannot disagree about one album.
+
 ### Tuning results (Mountain Goats library, 65 albums) — HISTORICAL
 
 Tested across the entire Mountain Goats catalogue — a worst-case scenario as the band's early work (1991-2000) was recorded on boomboxes and cassette recorders with genuinely minimal high-frequency content.

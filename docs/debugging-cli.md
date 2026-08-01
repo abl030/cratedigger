@@ -293,6 +293,21 @@ SELECT dl.*,
        e.v0_min_bitrate_kbps AS _evidence_v0_probe_min_bitrate,
        e.v0_avg_bitrate_kbps AS _evidence_v0_probe_avg_bitrate,
        e.v0_median_bitrate_kbps AS _evidence_v0_probe_median_bitrate,
+       e.codec_family AS _evidence_codec_family,
+       e.cliff_hz AS _evidence_cliff_hz,
+       e.storage_format AS _evidence_storage_format,
+       e.filetype_band AS _evidence_filetype_band,
+       e.spectral_subject AS _evidence_spectral_subject,
+       e.was_converted_from AS _evidence_was_converted_from,
+       e.ultrasonic_deficit_db AS _evidence_ultrasonic_deficit_db,
+       e.spectral_measurement_version AS _evidence_spectral_measurement_version,
+       e.aac_lattice_modal_count AS _evidence_aac_lattice_modal_count,
+       e.aac_lattice_scored_tracks AS _evidence_aac_lattice_scored_tracks,
+       e.aac_lattice_max_z AS _evidence_aac_lattice_max_z,
+       e.verified_lossless_classifier AS _evidence_verified_lossless_classifier,
+       (SELECT array_agg(DISTINCT f.extension)
+          FROM album_quality_evidence_files f
+         WHERE f.evidence_id = e.id) AS _evidence_container_extensions,
        current_evidence.id AS _current_evidence_id,
        (current_evidence.measured_at <= dl.created_at)
            AS _current_evidence_is_pre_attempt,
@@ -322,6 +337,13 @@ WHERE dl.id > 0 AND dl.id <= 4000
 ORDER BY dl.id;
 SQL
 ```
+
+The third block (`_evidence_codec_family` onward, issue #829 Phase 5 PR4)
+is what `web/classify.py::proof_gate_projection` reads to derive the
+proof-gate verdict, the audit-only-codec flag, and the proof generation.
+`_evidence_container_extensions` is the ultrasonic leg's decode-path input;
+dropping it does not fail, it silently withholds a leg the decider
+adjudicated.
 
 **Export the whole table, not a filtered slice.** The classify target's
 `prepare` pass indexes every row that points back at another through

@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     # ``TestCmdQuality``/``TestCmdRepairSpectral``), which is exactly
     # what makes this concrete annotation safe to add here.
     from lib.pipeline_db import PipelineDB
-    from lib.quality import QualityRankConfig
+    from lib.quality import AlbumQualityEvidence, QualityRankConfig
 
 
 class _ScenarioParams(TypedDict, total=False):
@@ -163,6 +163,50 @@ def _print_decision_outcome(
                   "(attempt-local HAVE audit not modeled; keep all tiers)")
 
 
+def _print_proof_gate_verdict(
+    side: str,
+    evidence: AlbumQualityEvidence,
+) -> None:
+    """Print one album's proof-gate tier, fired legs and proof generation.
+
+    Issue #829 Phase 5 PR4. Read-only display over facts the evidence row
+    already carries, through the SAME derivation the web evidence panel
+    uses (``proof_verdict_from_evidence`` /
+    ``verified_lossless_generation_label``) so the two surfaces cannot
+    state different findings for the same album.
+
+    A fired leg is a triage signal, never an accusation: withholding a
+    proof never rejects, denylists or accuses (Phase 5 plan §2).
+    """
+    from lib.quality import (
+        proof_tier_statement,
+        proof_verdict_from_evidence,
+        verified_lossless_generation_label,
+    )
+
+    verdict = proof_verdict_from_evidence(evidence)
+    legs = ", ".join(verdict.fired_legs) if verdict.fired_legs else "none"
+    print(f"      proof gate {side}: tier {verdict.tier} — "
+          f"{proof_tier_statement(verdict)} (fired legs: {legs})")
+    proof = evidence.verified_lossless_proof
+    generation = (
+        verified_lossless_generation_label(proof.classifier)
+        if proof is not None
+        else None
+    )
+    if generation is not None:
+        print(f"      verified lossless {side}: proved by {generation}")
+    if not verdict.spectral_accusation_admissible and (
+        evidence.measurement.spectral_grade in ("suspect", "likely_transcode")
+    ):
+        # The measured grade stays visible as the audit fact it is, but it
+        # is NOT a transcode finding for this codec — the download-37946
+        # defect (a 256 kbps CBR AAC graded ``likely_transcode``).
+        print(f"      note {side}: spectral grade "
+              f"{evidence.measurement.spectral_grade!r} is audit-only for "
+              "this codec — not a transcode finding")
+
+
 def _print_live_candidate_replay(
     db: PipelineDB,
     request_id: int,
@@ -193,6 +237,7 @@ def _print_live_candidate_replay(
     )
 
     print("\n  What the last real candidate actually decided:")
+
 
     candidate_evidence_id = db.get_latest_download_log_candidate_evidence_id(
         request_id)
@@ -238,6 +283,9 @@ def _print_live_candidate_replay(
         q_override=q_override,
         gate_unavailable_reason=gate_unavailable_reason,
     )
+    _print_proof_gate_verdict("IN", candidate)
+    if current is not None:
+        _print_proof_gate_verdict("HAVE", current)
 
 
 def cmd_quality(db: PipelineDB, args: argparse.Namespace) -> None:
