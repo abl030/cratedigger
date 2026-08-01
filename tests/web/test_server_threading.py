@@ -78,28 +78,48 @@ class TestInheritedUnixListener(unittest.TestCase):
     def test_default_startup_never_falls_back_to_tcp_without_systemd_fd(
         self,
     ) -> None:
-        from lib.config import CratediggerConfig
+        from beets import config as active_beets_config
+
+        from tests.test_beets_config_contract import BeetsContractWorld
+        from tests.test_beets_config_startup import _isolated_installed_authority
         from web import server as srv
 
-        with patch.object(
-            sys,
-            "argv",
-            [
-                "server.py",
-                "--canonical-origin",
-                "https://music.ablz.au",
-            ],
-        ), patch.dict(
-            os.environ,
-            {},
-            clear=True,
-        ), patch(
-            "web.server.enforce_beets_startup",
-            return_value=CratediggerConfig(),
-        ), redirect_stderr(io.StringIO()), self.assertRaises(
-            SystemExit,
-        ) as exited:
-            srv.main()
+        world = BeetsContractWorld(role="web")
+        self.addCleanup(world.close)
+        prior_web_authority = (
+            srv.beets_db_path,
+            srv.beets_library_root,
+            srv.canonical_origin,
+            srv.insecure_mode,
+        )
+        try:
+            with (
+                _isolated_installed_authority(),
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "server.py",
+                        "--config", str(world.runtime_config),
+                        "--runtime-dir", str(world.runtime_dir),
+                        "--canonical-origin",
+                        "https://music.ablz.au",
+                    ],
+                ),
+                patch.dict(os.environ, {}, clear=True),
+                redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit) as exited,
+            ):
+                srv.main()
+        finally:
+            active_beets_config.clear()
+            active_beets_config.read(user=True, defaults=True)
+            (
+                srv.beets_db_path,
+                srv.beets_library_root,
+                srv.canonical_origin,
+                srv.insecure_mode,
+            ) = prior_web_authority
         self.assertEqual(exited.exception.code, 2)
 
     def test_wrong_family_and_non_listening_fds_fail_closed(self) -> None:
@@ -690,42 +710,50 @@ class TestPerThreadBeetsHandles(unittest.TestCase):
 
     def test_main_executes_runtime_root_wiring(self):
         """Production boot must load the root before opening the server."""
-        from lib.config import CratediggerConfig
+        from beets import config as active_beets_config
+
+        from tests.test_beets_config_contract import BeetsContractWorld
+        from tests.test_beets_config_startup import _isolated_installed_authority
 
         class BootStop(Exception):
             pass
 
         srv = self._srv
-        with tempfile.NamedTemporaryFile() as db_file, patch.object(
-            sys,
-            "argv",
-            [
-                "server.py",
-                "--canonical-origin",
-                "https://music.ablz.au",
-                "--dev-port",
-                "0",
-                "--dsn",
-                str(TEST_DSN),
-                "--config",
-                "/immutable/runtime.ini",
-                "--runtime-dir",
-                "/mutable/runtime",
-            ],
-        ), patch(
-            "web.server.enforce_beets_startup",
-            return_value=CratediggerConfig(
-                beets_library_db=db_file.name,
-                beets_directory="/boot-config/Music/Beets",
-            ),
-        ), patch(
-            "web.server.ThreadingHTTPServer",
-            side_effect=BootStop,
-        ) as tcp_server, self.assertRaises(BootStop):
-            srv.main()
+        world = BeetsContractWorld(role="web")
+        self.addCleanup(world.close)
+        try:
+            with (
+                _isolated_installed_authority(),
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "server.py",
+                        "--canonical-origin",
+                        "https://music.ablz.au",
+                        "--dev-port",
+                        "0",
+                        "--dsn",
+                        str(TEST_DSN),
+                        "--config",
+                        str(world.runtime_config),
+                        "--runtime-dir",
+                        str(world.runtime_dir),
+                    ],
+                ),
+                patch(
+                    "web.server.ThreadingHTTPServer",
+                    side_effect=BootStop,
+                ) as tcp_server,
+                self.assertRaises(BootStop),
+            ):
+                srv.main()
+        finally:
+            active_beets_config.clear()
+            active_beets_config.read(user=True, defaults=True)
 
-        self.assertEqual(srv.beets_db_path, db_file.name)
-        self.assertEqual(srv.beets_library_root, "/boot-config/Music/Beets")
+        self.assertEqual(srv.beets_db_path, str(world.library_db))
+        self.assertEqual(srv.beets_library_root, str(world.library_root))
         tcp_server.assert_called_once_with(("127.0.0.1", 0), srv.Handler)
 
 

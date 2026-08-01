@@ -139,8 +139,8 @@ insecure_mode = False
 # unset (tests, web_dev_server live-db mode), `db` is the injected
 # shared handle and the caller owns its thread-safety.
 db: PipelineDB | None = None
-# Explicit dev/test override only. Production leaves this unset and opens the
-# runtime [Beets] library+directory pair through ``open_beets_db``.
+# ``main()`` installs the admitted production library+directory pair here;
+# tests and the development server may inject the same pair before startup.
 beets_db_path: str | None = None
 beets_library_root: str = ""
 _beets: BeetsDB | None = None

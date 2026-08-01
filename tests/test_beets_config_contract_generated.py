@@ -117,6 +117,91 @@ _SETTING_MUTANTS: tuple[tuple[str, dict[str, object], str], ...] = (
     }, "convert_auto_keep_conflict"),
 )
 
+_DECLARED_CORRUPTION_CASES: tuple[tuple[str, str], ...] = tuple(
+    (authority, corruption)
+    for authority in ("runtime", "main", "include", "secret")
+    for corruption in ("missing", "unreadable", "malformed", "nonmapping")
+)
+
+
+def _corrupt_declared_authority(
+    world: BeetsContractWorld,
+    *,
+    authority: str,
+    corruption: str,
+) -> None:
+    """Plant one declared-file failure while retaining external ownership."""
+    world.unseal()
+    if authority == "runtime":
+        target = world.runtime_config
+    elif authority == "main":
+        target = world.main_config
+    elif authority == "include":
+        target = world.beets_dir / "nonsecret.yaml"
+        target.write_text("fetchart:\n  auto: true\n", encoding="utf-8")
+        world._write_main_config(
+            include=[str(target), str(world.secret_include)]
+        )
+    elif authority == "secret":
+        target = world.secret_include
+    else:
+        raise AssertionError(f"unknown declared authority: {authority}")
+
+    if corruption == "missing":
+        target.unlink()
+    elif corruption == "malformed":
+        target.write_text(
+            "[Beets\nbroken = true\n"
+            if authority == "runtime"
+            else "broken: [\n",
+            encoding="utf-8",
+        )
+    elif corruption == "nonmapping":
+        target.write_text(
+            "[Other]\nvalue = present\n"
+            if authority == "runtime"
+            else "- not-a-mapping\n",
+            encoding="utf-8",
+        )
+    elif corruption != "unreadable":
+        raise AssertionError(f"unknown corruption: {corruption}")
+
+    world._seal("importer")
+    if corruption == "unreadable":
+        world.set_authority_mode(target, 0)
+
+
+class TestGeneratedDeclaredFileFailures(unittest.TestCase):
+    @settings(max_examples=len(_DECLARED_CORRUPTION_CASES))
+    @given(case=st.sampled_from(_DECLARED_CORRUPTION_CASES))
+    def test_every_declared_file_corruption_fails_closed(
+        self,
+        case: tuple[str, str],
+    ) -> None:
+        authority, corruption = case
+        world = BeetsContractWorld()
+        self.addCleanup(world.close)
+        _corrupt_declared_authority(
+            world,
+            authority=authority,
+            corruption=corruption,
+        )
+
+        if authority == "runtime":
+            with self.assertRaises(
+                (OSError, UnicodeError, configparser.Error, ValueError)
+            ):
+                world.cfg()
+            return
+
+        if authority == "secret" and corruption == "nonmapping":
+            report = check_beets_config(world.cfg(), role="importer")
+            assert_hard_code(report.hard_failures, "secret_schema")
+            return
+
+        with self.assertRaises(BeetsConfigError):
+            check_beets_config(world.cfg(), role="importer")
+
 
 class TestGeneratedTokenOnlySecret(unittest.TestCase):
     @example("SECRET::library: /attacker/library.db\nplugins: []::TOKEN")
@@ -305,6 +390,37 @@ class TestGeneratedEffectiveSettings(unittest.TestCase):
         report = check_beets_config(cfg, role="importer")
 
         assert_hard_code(report.hard_failures, expected_code)
+
+    @given(kind=st.sampled_from(("same_path", "hardlink")))
+    def test_state_and_library_must_never_share_an_inode(self, kind: str) -> None:
+        world = BeetsContractWorld()
+        self.addCleanup(world.close)
+        world.alias_state_to_library(kind)
+
+        report = check_beets_config(world.cfg(), role="importer")
+
+        assert_hard_code(report.hard_failures, "state_library_alias")
+
+    @given(
+        field=st.sampled_from(RUNTIME_AUTHORITIES),
+        value=st.sampled_from((
+            "~cratedigger-no-such-user-759/authority",
+            "invalid\x00authority",
+        )),
+    )
+    def test_authority_path_resolution_failures_stay_inside_contract_boundary(
+        self,
+        field: str,
+        value: str,
+    ) -> None:
+        world = BeetsContractWorld()
+        self.addCleanup(world.close)
+
+        with self.assertRaises(BeetsConfigError):
+            check_beets_config(
+                replace(world.cfg(), **{field: value}),
+                role="importer",
+            )
 
     @given(
         kind=st.sampled_from(("runtime", "main", "include", "secret")),

@@ -144,15 +144,27 @@ _UniqueKeyLoader.add_constructor(
 
 
 def _path(value: str) -> Path:
-    return Path(value).expanduser().resolve()
+    try:
+        return Path(value).expanduser().resolve()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise BeetsConfigError(
+            f"invalid Beets authority path: {type(exc).__name__}: {exc}"
+        ) from exc
 
 
 def _declared_path(value: str, *, relative_to: Path | None = None) -> _DeclaredPath:
-    expanded = Path(value).expanduser()
-    if not expanded.is_absolute():
-        expanded = (relative_to if relative_to is not None else Path.cwd()) / expanded
-    lexical = Path(os.path.abspath(expanded))
-    return _DeclaredPath(lexical=lexical, resolved=lexical.resolve())
+    try:
+        expanded = Path(value).expanduser()
+        if not expanded.is_absolute():
+            expanded = (
+                relative_to if relative_to is not None else Path.cwd()
+            ) / expanded
+        lexical = Path(os.path.abspath(expanded))
+        return _DeclaredPath(lexical=lexical, resolved=lexical.resolve())
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise BeetsConfigError(
+            f"invalid Beets authority path: {type(exc).__name__}: {exc}"
+        ) from exc
 
 
 def _authority(cfg: CratediggerConfig) -> BeetsAuthority:
@@ -672,7 +684,17 @@ def check_beets_config(
     except ValueError:
         pass
     hard.extend(_state_access_issues(state_source, role))
-    hard.extend(_library_db_access_issues(_path(authority.library)))
+    library_path = _path(authority.library)
+    try:
+        state_aliases_library = os.path.samefile(state, library_path)
+    except OSError:
+        state_aliases_library = False
+    if state_aliases_library:
+        hard.append(_finding(
+            "state_library_alias",
+            "Beets state file must not alias the library database",
+        ))
+    hard.extend(_library_db_access_issues(library_path))
     if not _path(authority.directory).is_dir():
         hard.append(_finding(
             "directory_not_directory",

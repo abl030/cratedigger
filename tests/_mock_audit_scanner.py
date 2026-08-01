@@ -108,7 +108,7 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"^requests\."),
     # OS / filesystem leaf seams (stdlib os.*)
     re.compile(r"\.os\.path\."),
-    re.compile(r"\.os\.(remove|rename|makedirs|mkdir|listdir|stat|write|unlink|rmdir|getcwd|getpgid|killpg|kill|chmod|symlink)$"),
+    re.compile(r"\.os\.(remove|rename|makedirs|mkdir|listdir|stat|write|unlink|rmdir|getcwd|getpgid|killpg|kill|chmod|symlink|umask)$"),
     re.compile(r"\.shutil\."),
     re.compile(r"^os\.path\."),
     re.compile(r"^shutil\."),
@@ -144,6 +144,7 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"\.print$"),
     re.compile(r"^json\."),
     re.compile(r"\.select\.select$"),  # select.select syscall
+    re.compile(r"^socket\.socket$"),
     # Cratedigger entry-point shims (the top-level cratedigger.py wrapper
     # functions are thin and patched on a per-test basis; the real ones
     # live in lib/* and have their own audit coverage)
@@ -296,10 +297,6 @@ _LEAF_SEAM_PATTERNS = [
     # Tests patch.object(server, "db", fake) to inject a per-test DB.
     # Equivalent to the constructor-replacement pattern.
     re.compile(r"^web\.server\.db$"),
-
-    # Web threading tests inject admission at the argparse-dispatched
-    # entrypoint before exercising listener lifecycles.
-    re.compile(r"^web\.server\.enforce_beets_startup$"),
 
     # web.routes re-exports of allowlisted helpers. Same physical
     # function lives in lib.* and is allowlisted there; tests just

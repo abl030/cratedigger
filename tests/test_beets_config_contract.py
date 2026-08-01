@@ -247,15 +247,42 @@ class BeetsContractWorld:
 
     def set_state_mode(self, mode: int) -> None:
         """Change the external state mode through its owning user namespace."""
+        self.set_authority_mode(self.state_file, mode)
+
+    def set_authority_mode(self, path: Path, mode: int) -> None:
+        """Change a sealed authority entry through its owning user namespace."""
         subprocess.run(
             [
                 "unshare", "--map-root-user", "--map-auto", "chmod",
-                f"{mode:o}", str(self.state_file),
+                f"{mode:o}", str(path),
             ],
             check=True,
             capture_output=True,
             text=True,
         )
+
+    def alias_state_to_library(self, kind: str) -> None:
+        """Make the declared state and catalog paths name one inode."""
+        self.unseal()
+        if kind == "same_path":
+            self.state_file = self.library_db
+        elif kind == "hardlink":
+            external_library = self.state_dir / "library.db"
+            external_library.write_bytes(self.library_db.read_bytes())
+            self.state_file.unlink()
+            os.link(external_library, self.state_file)
+            self.library_db = external_library
+        else:
+            raise AssertionError(f"unknown state/library alias kind: {kind}")
+        self._write_runtime_config(
+            library=str(self.library_db),
+            state_file=str(self.state_file),
+        )
+        self._write_main_config(
+            library=str(self.library_db),
+            statefile=str(self.state_file),
+        )
+        self._seal("importer")
 
     def cfg(self):
         return read_runtime_config_strict(str(self.runtime_config), str(self.runtime_dir))
@@ -409,6 +436,44 @@ class TestBeetsConfigContract(unittest.TestCase):
         self.world._seal("importer")
 
         with self.assertRaisesRegex(BeetsConfigError, "config.yaml"):
+            check_beets_config(self.world.cfg(), role="importer")
+
+    def test_unreadable_runtime_and_main_config_fail_before_effective_loading(self):
+        for authority in ("runtime", "main"):
+            with self.subTest(authority=authority):
+                world = BeetsContractWorld()
+                try:
+                    target = (
+                        world.runtime_config
+                        if authority == "runtime"
+                        else world.main_config
+                    )
+                    world.set_authority_mode(target, 0)
+                    if authority == "runtime":
+                        with self.assertRaises(PermissionError):
+                            world.cfg()
+                    else:
+                        with self.assertRaisesRegex(BeetsConfigError, "config.yaml"):
+                            check_beets_config(world.cfg(), role="importer")
+                finally:
+                    world.close()
+
+    def test_malformed_and_nonmapping_main_config_are_native_load_failures(self):
+        for raw in ("broken: [\n", "- not-a-mapping\n"):
+            with self.subTest(raw=raw):
+                world = BeetsContractWorld()
+                try:
+                    world.unseal()
+                    world.main_config.write_text(raw, encoding="utf-8")
+                    world._seal("importer")
+                    with self.assertRaises(BeetsConfigError):
+                        check_beets_config(world.cfg(), role="importer")
+                finally:
+                    world.close()
+
+    def test_unreadable_designated_secret_is_a_native_load_failure(self):
+        self.world.set_authority_mode(self.world.secret_include, 0)
+        with self.assertRaisesRegex(BeetsConfigError, "discogs.yaml"):
             check_beets_config(self.world.cfg(), role="importer")
 
     def test_sticky_scratch_trust_depends_on_authority_entry_owner(self):
@@ -894,6 +959,29 @@ class TestBeetsConfigContract(unittest.TestCase):
                 finally:
                     world.close()
 
+    def test_state_file_must_not_alias_the_library_database(self):
+        for kind in ("same_path", "hardlink"):
+            with self.subTest(kind=kind):
+                world = BeetsContractWorld()
+                try:
+                    world.alias_state_to_library(kind)
+                    report = check_beets_config(world.cfg(), role="importer")
+                    self.assertIn(
+                        "state_library_alias",
+                        [finding.code for finding in report.hard_failures],
+                    )
+                finally:
+                    world.close()
+
+    def test_malformed_authority_paths_are_stable_contract_load_failures(self):
+        cfg = self.world.cfg()
+        for value in ("~cratedigger-no-such-user-759/config", "invalid\x00path"):
+            with self.subTest(value=value), self.assertRaises(BeetsConfigError):
+                check_beets_config(
+                    replace(cfg, beets_config_dir=value),
+                    role="importer",
+                )
+
     def test_state_path_identity_must_not_be_replaceable(self):
         for case in (
             "replaceable_parent",
@@ -1286,6 +1374,20 @@ class TestStandaloneBeetsConfigChecker(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertEqual(payload.error, "config_load_error")
         self.assertIn("invalid literal", proc.stderr)
+
+    def test_malformed_authority_path_keeps_json_machine_channel(self):
+        self.world.unseal()
+        self.world._write_runtime_config(
+            config_dir="~cratedigger-no-such-user-759/config",
+        )
+        self.world._seal("importer")
+
+        proc = self._run()
+        payload = self._decode(proc)
+
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(payload.error, "config_load_error")
+        self.assertIn("Beets configuration load failed", proc.stderr)
 
     def test_unhashable_secret_key_has_stable_machine_output(self):
         self.world.unseal()

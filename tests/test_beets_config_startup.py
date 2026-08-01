@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import builtins
 import logging
 import os
+import socket
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -504,6 +507,32 @@ class TestBeetsStartupAdapter(unittest.TestCase):
 
         self.assertIn("invalid literal", captured.output[0])
 
+    def test_malformed_authority_path_is_a_stable_startup_failure(self) -> None:
+        from lib.beets_startup import BeetsStartupError, enforce_beets_startup
+
+        world = BeetsContractWorld(role="main")
+        self.addCleanup(world.close)
+        world.unseal()
+        world._write_runtime_config(
+            config_dir="~cratedigger-no-such-user-759/config",
+        )
+        world._seal("main")
+        logger = logging.getLogger("test.beets-startup-malformed-path")
+
+        with (
+            _isolated_installed_authority(),
+            self.assertLogs(logger, level="ERROR") as captured,
+            self.assertRaises(BeetsStartupError),
+        ):
+            enforce_beets_startup(
+                role="main",
+                config_path=str(world.runtime_config),
+                runtime_dir=str(world.runtime_dir),
+                logger=logger,
+            )
+
+        self.assertIn("Beets configuration check failed", captured.output[0])
+
     def test_install_caches_normalized_authority_without_downstream_reparse(
         self,
     ) -> None:
@@ -817,19 +846,41 @@ class TestEntrypointStartupPlacement(unittest.TestCase):
         prior_runtime = os.environ.get("CRATEDIGGER_RUNTIME_CONFIG")
         prior_beetsdir = os.environ.get("BEETSDIR")
         prior_admitted = runtime_config_module._admitted_runtime_config
+        real_open = builtins.open
+        lock_opens: list[str] = []
+
+        def observe_open(
+            file: str | bytes | int | os.PathLike[str] | os.PathLike[bytes],
+            mode: str = "r",
+            *,
+            encoding: str | None = None,
+        ):
+            opened_path = (
+                file
+                if isinstance(file, str)
+                else str(file) if isinstance(file, os.PathLike) else ""
+            )
+            if opened_path == str(lock_path):
+                lock_opens.append(opened_path)
+            return real_open(file, mode, encoding=encoding)
+
         self.assertFalse(lock_path.exists())
         saved_umask = os.umask(0o022)
         try:
-            with patch.object(sys, "argv", [
-                "cratedigger.py",
-                "--config", str(invalid),
-                "--runtime-dir", self.tmp.name,
-            ]):
+            with (
+                patch.object(sys, "argv", [
+                    "cratedigger.py",
+                    "--config", str(invalid),
+                    "--runtime-dir", self.tmp.name,
+                ]),
+                patch("builtins.open", side_effect=observe_open),
+            ):
                 self.assertEqual(cratedigger.main(), 1)
         finally:
             observed_umask = os.umask(saved_umask)
 
         self.assertEqual(observed_umask, 0o022)
+        self.assertEqual(lock_opens, [])
         self.assertFalse(lock_path.exists())
         self.assertEqual(_snapshot_runtime_tree(runtime_root), before_runtime)
         self.assertIs(cratedigger.cfg, prior_main_config)
@@ -837,6 +888,205 @@ class TestEntrypointStartupPlacement(unittest.TestCase):
         self.assertEqual(os.environ.get("BEETSDIR"), prior_beetsdir)
         self.assertIs(runtime_config_module._admitted_runtime_config, prior_admitted)
         self.assertEqual(self.fixture.read_bytes(), b"no application state")
+
+    def test_main_admission_precedes_umask_lock_and_database_effects(self) -> None:
+        world = BeetsContractWorld(role="main")
+        self.addCleanup(world.close)
+        events: list[str] = []
+        lock_path = world.runtime_dir / ".cratedigger.lock"
+        real_open = builtins.open
+        real_umask = os.umask
+
+        def observe_open(
+            file: str | bytes | int | os.PathLike[str] | os.PathLike[bytes],
+            mode: str = "r",
+            *,
+            encoding: str | None = None,
+        ):
+            opened_path = (
+                file
+                if isinstance(file, str)
+                else str(file) if isinstance(file, os.PathLike) else ""
+            )
+            if opened_path == str(lock_path):
+                events.append("lock")
+            return real_open(file, mode, encoding=encoding)
+
+        def observe_umask(mask: int) -> int:
+            events.append("umask")
+            return real_umask(mask)
+
+        def observe_database(*_args: object, **_kwargs: object) -> None:
+            events.append("database")
+            raise _PostGateEffect
+
+        saved_umask = os.umask(0o022)
+        try:
+            with (
+                _isolated_installed_authority(),
+                patch.object(sys, "argv", _restart_argv(
+                    _RestartCase("main", cratedigger.main),
+                    world,
+                )),
+                _record_admission_events(
+                    _RestartCase("main", cratedigger.main),
+                    events,
+                ),
+                patch("builtins.open", side_effect=observe_open),
+                patch("lib.permissions.os.umask", side_effect=observe_umask),
+                patch(
+                    "lib.migrator.psycopg2.connect",
+                    side_effect=observe_database,
+                ),
+                self.assertRaises(_PostGateEffect),
+            ):
+                cratedigger.main()
+        finally:
+            real_umask(saved_umask)
+
+        self.assertEqual(events, ["admitted", "umask", "lock", "database"])
+
+    def test_web_hard_failure_precedes_production_listener_takeover(self) -> None:
+        world = BeetsContractWorld(role="web")
+        self.addCleanup(world.close)
+        world.unseal()
+        world._write_main_config(**{
+            "import": {
+                "autotag": True,
+                "move": True,
+                "write": False,
+                "duplicate_keys": {
+                    "album": ["mb_albumid", "discogs_albumid"],
+                },
+            },
+        })
+        world._seal("web")
+        argv = [
+            "server.py",
+            "--config", str(world.runtime_config),
+            "--runtime-dir", str(world.runtime_dir),
+            "--canonical-origin", "https://music.example",
+        ]
+        environment = {
+            "LISTEN_PID": str(os.getpid()),
+            "LISTEN_FDS": "1",
+        }
+
+        with (
+            _isolated_installed_authority(),
+            patch.object(sys, "argv", argv),
+            patch.dict(os.environ, environment, clear=False),
+            patch.object(socket, "socket") as listener_takeover,
+        ):
+            self.assertEqual(server.main(), 1)
+
+        listener_takeover.assert_not_called()
+
+    def test_web_admission_precedes_beets_rebind_and_listener_takeover(self) -> None:
+        from beets import config as active_beets_config
+
+        world = BeetsContractWorld(role="web")
+        self.addCleanup(world.close)
+        events: list[str] = []
+        case = _RestartCase("web", server.main)
+        real_clear = active_beets_config.clear
+        real_read = active_beets_config.read
+
+        def observe_clear() -> None:
+            events.append("beets-clear")
+            real_clear()
+
+        def observe_read(*, user: bool, defaults: bool) -> None:
+            events.append("beets-read")
+            real_read(user=user, defaults=defaults)
+
+        def observe_listener(*, fileno: int) -> None:
+            self.assertEqual(fileno, 3)
+            events.append("listener")
+            raise _PostGateEffect
+
+        argv = [
+            "server.py",
+            "--config", str(world.runtime_config),
+            "--runtime-dir", str(world.runtime_dir),
+            "--canonical-origin", "https://music.example",
+        ]
+        environment = {
+            "LISTEN_PID": str(os.getpid()),
+            "LISTEN_FDS": "1",
+        }
+        try:
+            with (
+                _isolated_installed_authority(),
+                patch.object(sys, "argv", argv),
+                patch.dict(os.environ, environment, clear=False),
+                _record_admission_events(case, events),
+                patch.object(active_beets_config, "clear", side_effect=observe_clear),
+                patch.object(active_beets_config, "read", side_effect=observe_read),
+                patch.object(socket, "socket", side_effect=observe_listener),
+                self.assertRaises(_PostGateEffect),
+            ):
+                server.main()
+        finally:
+            active_beets_config.clear()
+            active_beets_config.read(user=True, defaults=True)
+
+        self.assertEqual(
+            events,
+            ["admitted", "beets-clear", "beets-read", "listener"],
+        )
+
+    def test_real_script_boundaries_exit_nonzero_without_state_mutation(self) -> None:
+        repo_root = Path(__file__).resolve().parent.parent
+        invalid = Path(self.tmp.name) / "subprocess-invalid.ini"
+        invalid.write_text("[Beets\nbroken = true\n", encoding="utf-8")
+        runtime_dir = Path(self.tmp.name) / "subprocess-runtime"
+        runtime_dir.mkdir()
+        before = _snapshot_runtime_tree(Path(self.tmp.name))
+        commands = (
+            (
+                "main",
+                [sys.executable, "cratedigger.py"],
+                (),
+            ),
+            (
+                "importer",
+                [sys.executable, "scripts/importer.py"],
+                ("--once",),
+            ),
+            (
+                "preview",
+                [sys.executable, "scripts/import_preview_worker.py"],
+                ("--once",),
+            ),
+            (
+                "web",
+                [sys.executable, "web/server.py"],
+                ("--canonical-origin", "https://music.example", "--dev-port", "0"),
+            ),
+        )
+
+        for role, executable, extra in commands:
+            with self.subTest(role=role):
+                proc = subprocess.run(
+                    [
+                        *executable,
+                        "--config", str(invalid),
+                        "--runtime-dir", str(runtime_dir),
+                        *extra,
+                    ],
+                    cwd=repo_root,
+                    env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(proc.returncode, 1, proc.stderr)
+                self.assertIn("Beets configuration load failed", proc.stderr)
+                self.assertEqual(
+                    _snapshot_runtime_tree(Path(self.tmp.name)),
+                    before,
+                )
 
     def test_web_rejects_retired_post_check_beets_overrides(self) -> None:
         for flag in ("--beets-db", "--beets-directory"):
