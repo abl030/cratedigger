@@ -51,6 +51,16 @@ As of this research pass, the important thresholds are:
 - album suspect threshold = `60%`
 - album likely-transcode threshold = `75%`
 
+> **Pointer added 2026-08-01 (issue #829 Phase 5 PR5).** The deficit pair
+> above was guessed, and the four-arm spectral calibration measured it
+> wrong: 40 dB sat *below the median genuine lossless track* and flagged
+> 4–17% of genuine controls as marginal-or-worse. It is now
+> `HF_DEFICIT_SUSPECT = 69` / `HF_DEFICIT_MARGINAL = 65`, which flags
+> 1–8% of the same controls. The cliff constants are unchanged. This
+> document is left as the April 2026 record it is; the current model lives
+> in `docs/quality-verification.md` and
+> `docs/research/spectral-calibration-findings.md`.
+
 Current behavior in plain English:
 
 - any detected cliff marks a track `suspect`
