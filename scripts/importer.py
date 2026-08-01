@@ -22,9 +22,8 @@ import msgspec
 from lib import transitions
 from lib.beets_startup import BeetsStartupError, enforce_beets_startup
 from lib.config import (
-    DEFAULT_RUNTIME_CONFIG_PATH,
     CratediggerConfig,
-    install_admitted_runtime_config,
+    resolve_startup_config_paths,
 )
 from lib.dispatch import (
     DISPATCH_CODE_REQUEUE_FAILED,
@@ -2049,34 +2048,34 @@ def main() -> int:
     parser.add_argument("--worker-id", default=None)
     parser.add_argument(
         "--config",
-        default=(
-            os.environ.get("CRATEDIGGER_RUNTIME_CONFIG")
-            or DEFAULT_RUNTIME_CONFIG_PATH
-        ),
-        help="Immutable Cratedigger runtime config",
+        default=None,
+        help="Immutable runtime config (default: env or cwd/config.ini)",
     )
     parser.add_argument(
         "--runtime-dir",
-        default=os.path.dirname(DEFAULT_RUNTIME_CONFIG_PATH),
-        help="Mutable Cratedigger runtime directory",
+        default=None,
+        help="Mutable runtime directory (default: cwd)",
     )
     args = parser.parse_args()
+    config_path, runtime_dir = resolve_startup_config_paths(
+        config_path=args.config,
+        runtime_dir=args.runtime_dir,
+    )
 
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
     )
     try:
-        admitted_config = enforce_beets_startup(
+        enforce_beets_startup(
             role="importer",
-            config_path=args.config,
-            runtime_dir=args.runtime_dir,
+            config_path=config_path,
+            runtime_dir=runtime_dir,
             logger=logger,
         )
     except BeetsStartupError:
         return 1
 
-    install_admitted_runtime_config(args.config, admitted_config)
     worker_id = args.worker_id or f"{socket.gethostname()}:{os.getpid()}"
     db = PipelineDB(args.dsn)
     try:

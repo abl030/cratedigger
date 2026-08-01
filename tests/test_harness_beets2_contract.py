@@ -369,11 +369,12 @@ _EXTERNAL_STATEFILE_CONTRACT = r'''
 import hashlib
 import os
 import pickle
-import stat
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
+
+from lib.beets_config_contract import check_beets_config
+from tests.test_beets_config_contract import BeetsContractWorld
 
 
 def manifest(root):
@@ -387,18 +388,47 @@ def manifest(root):
     return values
 
 
-with tempfile.TemporaryDirectory(prefix="beets-external-state-") as raw_root:
-    root = Path(raw_root)
-    beetsdir = root / "immutable-config"
-    runtime = root / "runtime"
-    source = root / "source"
-    library_root = root / "library"
-    for path in (beetsdir, runtime, source, library_root):
-        path.mkdir()
-    library_db = root / "library.db"
-    statefile = runtime / "state.pickle"
-    statefile.write_bytes(pickle.dumps({"tagprogress": {}, "taghistory": set()}))
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
 
+
+def changed_paths(before, after):
+    before_by_path = {entry[1]: entry for entry in before}
+    after_by_path = {entry[1]: entry for entry in after}
+    return {
+        path
+        for path in before_by_path.keys() | after_by_path.keys()
+        if before_by_path.get(path) != after_by_path.get(path)
+    }
+
+
+world = BeetsContractWorld(role="importer")
+try:
+    world.state_file.write_bytes(
+        pickle.dumps({"tagprogress": {}, "taghistory": set()})
+    )
+    world.unseal()
+    world._write_main_config(**{
+        "import": {
+            "autotag": True,
+            "move": True,
+            "write": True,
+            "incremental": True,
+            "incremental_skip_later": True,
+            "duplicate_keys": {
+                "album": ["mb_albumid", "discogs_albumid"],
+            },
+        },
+    })
+    world._seal("importer")
+
+    # The exact authority/config used by the real Beets run must first pass
+    # the shipped checker; this is one connected world, not a lookalike file.
+    admitted = check_beets_config(world.cfg(), role="importer")
+    assert admitted.ok, admitted.hard_failures
+
+    source = world.root / "source"
+    source.mkdir()
     audio = source / "01 - State Proof.flac"
     subprocess.run([
         "ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i",
@@ -406,41 +436,46 @@ with tempfile.TemporaryDirectory(prefix="beets-external-state-") as raw_root:
         "-metadata", "album=State Album", "-metadata", "title=State Proof",
         "-c:a", "flac", str(audio),
     ], check=True)
-    config = beetsdir / "config.yaml"
-    config.write_text(
-        "library: %s\ndirectory: %s\nstatefile: %s\nplugins: []\n"
-        "import:\n  incremental: true\n  incremental_skip_later: true\n"
-        "  copy: false\n  move: false\n  write: false\n"
-        % (library_db, library_root, statefile),
-        encoding="utf-8",
-    )
-    config.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
-    beetsdir.chmod(
-        stat.S_IRUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IXGRP
-        | stat.S_IROTH | stat.S_IXOTH
-    )
-    before_config = manifest(beetsdir)
-    before_state = statefile.read_bytes()
+    before_beetsdir = manifest(world.beets_dir)
+    before_runtime = digest(world.runtime_config)
+    before_secret = digest(world.secret_include)
+    before_source = manifest(source)
+    before_state = world.state_file.read_bytes()
+    before_database = digest(world.library_db)
+    before_library = manifest(world.library_root)
+    before_world = manifest(world.root)
 
     proc = subprocess.run(
-        [sys.executable, "-m", "beets", "import", "-A", "-q", str(source)],
-        env={**os.environ, "BEETSDIR": str(beetsdir)},
+        [
+            sys.executable, "-m", "beets", "import", "-A", "-q",
+            "--nocopy", "--nomove", "--nowrite", str(source),
+        ],
+        env={**os.environ, "BEETSDIR": admitted.authority.config_dir},
         text=True,
         capture_output=True,
         check=False,
     )
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
-    assert manifest(beetsdir) == before_config, (before_config, manifest(beetsdir))
-    assert statefile.read_bytes() != before_state, "incremental import did not update statefile"
-    with statefile.open("rb") as handle:
+    assert manifest(world.beets_dir) == before_beetsdir
+    assert digest(world.runtime_config) == before_runtime
+    assert digest(world.secret_include) == before_secret
+    assert manifest(source) == before_source
+    assert manifest(world.library_root) == before_library
+    assert world.state_file.read_bytes() != before_state
+    assert world.library_db.is_file(), world.library_db
+    assert digest(world.library_db) != before_database
+    after_world = manifest(world.root)
+    assert changed_paths(before_world, after_world) == {
+        str(world.state_file.relative_to(world.root)),
+        str(world.library_db.relative_to(world.root)),
+    }, changed_paths(before_world, after_world)
+    with world.state_file.open("rb") as handle:
         state = pickle.load(handle)
     source_bytes = os.fsencode(str(source))
     assert any(source_bytes in paths for paths in state["taghistory"]), state
-    assert library_db.is_file(), library_db
     print("EXTERNAL_STATEFILE_OK")
-
-    beetsdir.chmod(stat.S_IRWXU)
-    config.chmod(stat.S_IRUSR | stat.S_IWUSR)
+finally:
+    world.close()
 '''
 
 

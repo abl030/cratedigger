@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 import msgspec
@@ -25,9 +26,49 @@ SAFE_DEFAULT_PATH = (
 SAFE_COMP_PATH = (
     "Compilations/$album%aunique{albumartist album,path_disambig}/$track $title"
 )
+SAFE_SINGLETON_PATH = "Non-Album/$artist/$title"
 SAFE_PATH_DISAMBIG = (
     "albumdisambig or releasegroupdisambig or catalognum or label or str(year)"
 )
+
+RUNTIME_AUTHORITIES = (
+    "beets_config_dir",
+    "beets_library_db",
+    "beets_directory",
+    "beets_state_file",
+    "beets_python",
+    "beets_secret_include",
+)
+
+
+def _snapshot_tree(root: Path) -> tuple[tuple[str, str, bytes | None], ...]:
+    """Capture names, kinds, and bytes without mutating the observed tree."""
+    if not root.exists():
+        return ()
+    snapshot: list[tuple[str, str, bytes | None]] = []
+    for path in sorted(root.rglob("*")):
+        relative = str(path.relative_to(root))
+        if path.is_file():
+            snapshot.append((relative, "file", path.read_bytes()))
+        elif path.is_dir():
+            snapshot.append((relative, "dir", None))
+        else:
+            snapshot.append((relative, "other", None))
+    return tuple(snapshot)
+
+
+def snapshot_contract_world(world: BeetsContractWorld) -> dict[str, object]:
+    """Snapshot every file/tree whose purity the standalone checker claims."""
+    return {
+        "runtime": world.runtime_config.read_bytes(),
+        "main": world.main_config.read_bytes(),
+        "secret": world.secret_include.read_bytes(),
+        "state": world.state_file.read_bytes(),
+        "database": (
+            world.library_db.read_bytes() if world.library_db.exists() else None
+        ),
+        "library": _snapshot_tree(world.library_root),
+    }
 
 
 class BeetsContractWorld:
@@ -85,6 +126,10 @@ class BeetsContractWorld:
             self.library_root,
         ):
             path.mkdir()
+        from beets.library import Library
+
+        library = Library(str(self.library_db), str(self.library_root))
+        library._close()
         self.state_file.write_bytes(b"state-before")
         self.secret_include = self.secret_dir / "discogs.yaml"
         self.secret_include.write_text(
@@ -142,7 +187,8 @@ class BeetsContractWorld:
 
     def _seal(self, role: str) -> None:
         for path in (self.runtime_config, self.main_config):
-            path.chmod(stat.S_IRUSR | stat.S_IRGRP)
+            if path.exists():
+                path.chmod(stat.S_IRUSR | stat.S_IRGRP)
         for path in (self.contract_dir, self.beets_dir):
             path.chmod(
                 stat.S_IRUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IXGRP
@@ -263,6 +309,27 @@ class TestBeetsConfigContract(unittest.TestCase):
         self.assertEqual(self.world.state_file.read_bytes(), before)
         self.assertEqual(report.authority.config_dir, str(self.world.beets_dir))
         self.assertEqual(report.authority.state_file, str(self.world.state_file))
+
+    def test_each_runtime_authority_is_required_independently(self):
+        cfg = self.world.cfg()
+        for field in RUNTIME_AUTHORITIES:
+            with self.subTest(field=field):
+                report = check_beets_config(
+                    replace(cfg, **{field: ""}),
+                    role="importer",
+                )
+                self.assertEqual(
+                    [finding.code for finding in report.hard_failures],
+                    ["runtime_authority_missing"],
+                )
+
+    def test_missing_main_config_is_a_native_contract_load_failure(self):
+        self.world.unseal()
+        self.world.main_config.unlink()
+        self.world._seal("importer")
+
+        with self.assertRaisesRegex(BeetsConfigError, "config.yaml"):
+            check_beets_config(self.world.cfg(), role="importer")
 
     def test_sticky_scratch_trust_depends_on_authority_entry_owner(self):
         self.assertNotEqual(os.geteuid(), 0)
@@ -392,7 +459,26 @@ class TestBeetsConfigContract(unittest.TestCase):
                 "import_write_disabled",
             ),
             ("unsafe default path", {"paths": {"default": "$album", "comp": SAFE_COMP_PATH}}, "default_path_unsafe"),
+            (
+                "unsafe singleton path",
+                {"paths": {
+                    "default": SAFE_DEFAULT_PATH,
+                    "singleton": "$title",
+                    "comp": SAFE_COMP_PATH,
+                }},
+                "singleton_path_unsafe",
+            ),
             ("unsafe comp path", {"paths": {"default": SAFE_DEFAULT_PATH, "comp": "$album"}}, "comp_path_unsafe"),
+            (
+                "query-specific path override",
+                {"paths": {
+                    "default": SAFE_DEFAULT_PATH,
+                    "singleton": SAFE_SINGLETON_PATH,
+                    "comp": SAFE_COMP_PATH,
+                    "albumtype:soundtrack": "Soundtracks/$album",
+                }},
+                "paths_keys_unsupported",
+            ),
             ("unsafe path field", {"album_fields": {"path_disambig": "label"}}, "path_disambig_unsafe"),
             ("unsafe file mode", {"permissions": {"file": "0644", "dir": "02775"}}, "permissions_file_unsafe"),
             ("unsafe dir mode", {"permissions": {"file": "0664", "dir": "0755"}}, "permissions_dir_unsafe"),
@@ -421,6 +507,76 @@ class TestBeetsConfigContract(unittest.TestCase):
                     world._seal("importer")
                     report = check_beets_config(world.cfg(), role="importer")
                     self.assertIn(expected_code, [finding.code for finding in report.hard_failures])
+                finally:
+                    world.close()
+
+    def test_package_level_musicbrainz_absence_is_rejected(self):
+        available_without_musicbrainz = frozenset((
+            "discogs",
+            "inline",
+            "permissions",
+            "fetchart",
+        ))
+        report = check_beets_config(
+            self.world.cfg(),
+            role="importer",
+            available_plugins=lambda: available_without_musicbrainz,
+        )
+
+        self.assertIn(
+            "plugin_unavailable",
+            [finding.code for finding in report.hard_failures],
+        )
+
+    def test_library_database_and_root_must_exist_with_exact_types(self):
+        cases = (
+            ("missing database", "library", "missing", "library_not_regular"),
+            ("directory database", "library", "wrong", "library_not_regular"),
+            ("empty database", "library", "empty", "library_schema_missing"),
+            ("corrupt database", "library", "corrupt", "library_unreadable"),
+            (
+                "missing library root",
+                "directory",
+                "missing",
+                "directory_not_directory",
+            ),
+            (
+                "file library root",
+                "directory",
+                "wrong",
+                "directory_not_directory",
+            ),
+        )
+        for description, authority, mutation, expected in cases:
+            with self.subTest(description=description):
+                world = BeetsContractWorld()
+                try:
+                    target = (
+                        world.library_db
+                        if authority == "library"
+                        else world.library_root
+                    )
+                    if mutation in ("missing", "wrong"):
+                        if target.is_dir():
+                            target.rmdir()
+                        else:
+                            target.unlink()
+                    if mutation == "wrong":
+                        if authority == "library":
+                            target.mkdir()
+                        else:
+                            target.write_bytes(b"not a directory")
+                    elif mutation == "empty":
+                        target.write_bytes(b"")
+                    elif mutation == "corrupt":
+                        target.write_bytes(b"not sqlite")
+
+                    report = check_beets_config(world.cfg(), role="importer")
+
+                    self.assertIn(
+                        expected,
+                        [finding.code for finding in report.hard_failures],
+                    )
                 finally:
                     world.close()
 
@@ -824,6 +980,33 @@ class TestBeetsConfigIntegrationFindings(unittest.TestCase):
                 report = check_beets_config(self.world.cfg(), role="importer")
                 self.assertTrue(report.ok, report.hard_failures)
 
+    def test_duplicate_key_contract_rejects_extra_and_repeated_entries(self):
+        unsafe_lists = (
+            ["mb_albumid", "discogs_albumid", "mb_albumid"],
+            ["mb_albumid", "mb_albumid"],
+            ["discogs_albumid", "discogs_albumid"],
+        )
+        for keys in unsafe_lists:
+            with self.subTest(keys=keys):
+                world = BeetsContractWorld()
+                try:
+                    world.unseal()
+                    config = yaml.safe_load(
+                        world.main_config.read_text(encoding="utf-8")
+                    )
+                    config["import"]["duplicate_keys"]["album"] = keys
+                    world.main_config.write_text(
+                        yaml.safe_dump(config), encoding="utf-8"
+                    )
+                    world._seal("importer")
+                    report = check_beets_config(world.cfg(), role="importer")
+                    self.assertIn(
+                        "duplicate_keys_unsafe",
+                        [finding.code for finding in report.hard_failures],
+                    )
+                finally:
+                    world.close()
+
     def test_later_include_cannot_blank_effective_discogs_token(self):
         self.world.unseal()
         extra_dir = self.world.beets_dir / "token-override"
@@ -862,7 +1045,7 @@ class TestStandaloneBeetsConfigChecker(unittest.TestCase):
         )
 
     def test_machine_json_is_stable_and_success_has_no_side_effects(self):
-        state_before = self.world.state_file.read_bytes()
+        before = snapshot_contract_world(self.world)
         proc = self._run()
         payload = json.loads(proc.stdout)
         self.assertEqual(proc.returncode, 0, proc.stderr)
@@ -870,7 +1053,7 @@ class TestStandaloneBeetsConfigChecker(unittest.TestCase):
         self.assertTrue(payload["report"]["ok"])
         self.assertIsNone(payload["error"])
         self.assertEqual(proc.stderr, "")
-        self.assertEqual(self.world.state_file.read_bytes(), state_before)
+        self.assertEqual(snapshot_contract_world(self.world), before)
 
     def test_hard_failure_is_json_on_stdout_and_human_on_stderr(self):
         proc = self._run(role="web")
@@ -888,6 +1071,22 @@ class TestStandaloneBeetsConfigChecker(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertEqual(payload["error"], "config_load_error")
         self.assertIn("Beets configuration load failed", proc.stderr)
+
+    def test_runtime_value_error_keeps_json_machine_channel(self):
+        self.world.unseal()
+        with self.world.runtime_config.open("a", encoding="utf-8") as handle:
+            handle.write(
+                "\n[Search Settings]\n"
+                "number_of_albums_to_grab = many\n"
+            )
+        self.world._seal("importer")
+
+        proc = self._run()
+        payload = json.loads(proc.stdout)
+
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(payload["error"], "config_load_error")
+        self.assertIn("invalid literal", proc.stderr)
 
 
 if __name__ == "__main__":

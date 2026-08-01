@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import stat
 import unittest
+from dataclasses import replace
 
 import msgspec
 import yaml
@@ -11,9 +12,20 @@ from hypothesis import example, given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
-from lib.beets_config_contract import BeetsRole, ContractFinding, check_beets_config
+from lib.beets_config_contract import (
+    BeetsConfigError,
+    BeetsRole,
+    ContractFinding,
+    check_beets_config,
+)
 from lib.config import CratediggerConfig, read_runtime_config_strict
-from tests.test_beets_config_contract import BeetsContractWorld
+from tests.test_beets_config_contract import (
+    RUNTIME_AUTHORITIES,
+    SAFE_COMP_PATH,
+    SAFE_DEFAULT_PATH,
+    SAFE_SINGLETON_PATH,
+    BeetsContractWorld,
+)
 
 
 def assert_token_absent_from_owned_report(encoded_report: str, token: str) -> None:
@@ -58,6 +70,11 @@ _SETTING_MUTANTS: tuple[tuple[str, dict[str, object], str], ...] = (
      "duplicate_keys_unsafe"),
     ("path", {"paths": {"default": "$album", "comp": "$album"}},
      "default_path_unsafe"),
+    ("singleton-path", {"paths": {
+        "default": SAFE_DEFAULT_PATH,
+        "singleton": "$title",
+        "comp": SAFE_COMP_PATH,
+    }}, "singleton_path_unsafe"),
     ("comp-path", {"paths": {
         "default": "$albumartist/$year - $album%aunique{albumartist album,path_disambig}/$track $title",
         "comp": "$album",
@@ -127,6 +144,162 @@ class TestGeneratedTokenOnlySecret(unittest.TestCase):
 
 
 class TestGeneratedEffectiveSettings(unittest.TestCase):
+    @given(
+        field=st.sampled_from(RUNTIME_AUTHORITIES),
+        role=st.sampled_from(("main", "importer", "preview", "web")),
+    )
+    def test_no_runtime_authority_can_be_omitted(
+        self,
+        field: str,
+        role: BeetsRole,
+    ) -> None:
+        world = BeetsContractWorld(role=role)
+        self.addCleanup(world.close)
+
+        report = check_beets_config(
+            replace(world.cfg(), **{field: ""}),
+            role=role,
+        )
+
+        assert_hard_code(report.hard_failures, "runtime_authority_missing")
+
+    @given(st.sampled_from(("main", "importer", "preview", "web")))
+    def test_missing_main_config_never_reaches_effective_loading(
+        self,
+        role: BeetsRole,
+    ) -> None:
+        world = BeetsContractWorld(role=role)
+        self.addCleanup(world.close)
+        world.unseal()
+        world.main_config.unlink()
+        world._seal(role)
+
+        with self.assertRaisesRegex(BeetsConfigError, "config.yaml"):
+            check_beets_config(world.cfg(), role=role)
+
+    @given(
+        additionally_absent=st.sets(
+            st.sampled_from(("discogs", "inline", "permissions", "fetchart")),
+        )
+    )
+    def test_configured_musicbrainz_requires_package_level_availability(
+        self,
+        additionally_absent: set[str],
+    ) -> None:
+        world = BeetsContractWorld()
+        self.addCleanup(world.close)
+        available_without_musicbrainz = frozenset((
+            "discogs",
+            "inline",
+            "permissions",
+            "fetchart",
+        )) - additionally_absent
+        report = check_beets_config(
+            world.cfg(),
+            role="importer",
+            available_plugins=lambda: available_without_musicbrainz,
+        )
+
+        assert_hard_code(report.hard_failures, "plugin_unavailable")
+
+    @given(
+        keys=st.lists(
+            st.sampled_from(("mb_albumid", "discogs_albumid")),
+            min_size=0,
+            max_size=5,
+        ).filter(
+            lambda values: not (
+                len(values) == 2
+                and set(values) == {"mb_albumid", "discogs_albumid"}
+            )
+        )
+    )
+    def test_only_two_distinct_exact_duplicate_keys_are_admitted(
+        self,
+        keys: list[str],
+    ) -> None:
+        world = BeetsContractWorld()
+        self.addCleanup(world.close)
+        world.unseal()
+        config = yaml.safe_load(world.main_config.read_text(encoding="utf-8"))
+        config["import"]["duplicate_keys"]["album"] = keys
+        world.main_config.write_text(yaml.safe_dump(config), encoding="utf-8")
+        world._seal("importer")
+
+        report = check_beets_config(world.cfg(), role="importer")
+
+        assert_hard_code(report.hard_failures, "duplicate_keys_unsafe")
+
+    @given(case=st.sampled_from((
+        ("library", "missing", "library_not_regular"),
+        ("library", "wrong_type", "library_not_regular"),
+        ("library", "empty", "library_schema_missing"),
+        ("library", "corrupt", "library_unreadable"),
+        ("directory", "missing", "directory_not_directory"),
+        ("directory", "wrong_type", "directory_not_directory"),
+    )))
+    def test_library_authority_requires_existing_exact_object_types(
+        self,
+        case: tuple[str, str, str],
+    ) -> None:
+        authority, object_kind, expected = case
+        world = BeetsContractWorld()
+        self.addCleanup(world.close)
+        target = (
+            world.library_db if authority == "library" else world.library_root
+        )
+        if object_kind in ("missing", "wrong_type"):
+            if target.is_dir():
+                target.rmdir()
+            else:
+                target.unlink()
+        if object_kind == "wrong_type":
+            if authority == "library":
+                target.mkdir()
+            else:
+                target.write_bytes(b"not a directory")
+        elif object_kind == "empty":
+            target.write_bytes(b"")
+        elif object_kind == "corrupt":
+            target.write_bytes(b"not sqlite")
+
+        report = check_beets_config(world.cfg(), role="importer")
+
+        assert_hard_code(
+            report.hard_failures,
+            expected,
+        )
+
+    @given(
+        query_key=st.text(
+            alphabet="abcdefghijklmnopqrstuvwxyz_:",
+            min_size=1,
+            max_size=30,
+        ).filter(
+            lambda value: value not in {"default", "singleton", "comp"}
+        ),
+        template=st.text(min_size=0, max_size=40),
+    )
+    def test_query_specific_path_keys_are_never_admitted(
+        self,
+        query_key: str,
+        template: str,
+    ) -> None:
+        world = BeetsContractWorld()
+        self.addCleanup(world.close)
+        world.unseal()
+        world._write_main_config(paths={
+            "default": SAFE_DEFAULT_PATH,
+            "singleton": SAFE_SINGLETON_PATH,
+            "comp": SAFE_COMP_PATH,
+            query_key: template,
+        })
+        world._seal("importer")
+
+        report = check_beets_config(world.cfg(), role="importer")
+
+        assert_hard_code(report.hard_failures, "paths_keys_unsupported")
+
     @given(st.sampled_from(_SETTING_MUTANTS))
     def test_every_generated_effective_mutant_is_rejected(
         self, mutant: tuple[str, dict[str, object], str]

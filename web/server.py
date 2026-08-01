@@ -62,8 +62,7 @@ if __name__ == "__main__" or "web.server" not in sys.modules:
 from lib.beets_db import BeetsDB, open_beets_db
 from lib.beets_startup import BeetsStartupError, enforce_beets_startup
 from lib.config import (
-    DEFAULT_RUNTIME_CONFIG_PATH,
-    install_admitted_runtime_config,
+    resolve_startup_config_paths,
 )
 from lib.json_narrow import is_str_object_dict as _is_str_object_dict
 from lib.pipeline_db import AlbumRequestRow, PipelineDB
@@ -751,16 +750,13 @@ def main() -> int:
     )
     parser.add_argument(
         "--config",
-        default=(
-            os.environ.get("CRATEDIGGER_RUNTIME_CONFIG")
-            or DEFAULT_RUNTIME_CONFIG_PATH
-        ),
-        help="Immutable Cratedigger runtime config",
+        default=None,
+        help="Immutable runtime config (default: env or cwd/config.ini)",
     )
     parser.add_argument(
         "--runtime-dir",
-        default=os.path.dirname(DEFAULT_RUNTIME_CONFIG_PATH),
-        help="Mutable Cratedigger runtime directory",
+        default=None,
+        help="Mutable runtime directory (default: cwd)",
     )
     parser.add_argument("--mb-api", default=None,
                         help="MusicBrainz API base URL (full base incl. /ws/2). Dev-only override — "
@@ -773,6 +769,10 @@ def main() -> int:
     parser.add_argument("--redis-host", default=None, help="Redis host for caching (optional)")
     parser.add_argument("--redis-port", type=int, default=6379)
     args = parser.parse_args()
+    config_path, runtime_dir = resolve_startup_config_paths(
+        config_path=args.config,
+        runtime_dir=args.runtime_dir,
+    )
     if args.canonical_origin is None:
         parser.error("--canonical-origin is required")
     try:
@@ -782,14 +782,13 @@ def main() -> int:
     try:
         admitted_config = enforce_beets_startup(
             role="web",
-            config_path=args.config,
-            runtime_dir=args.runtime_dir,
+            config_path=config_path,
+            runtime_dir=runtime_dir,
             logger=log,
         )
     except BeetsStartupError:
         return 1
 
-    install_admitted_runtime_config(args.config, admitted_config)
     # The distance modules above import Beets eagerly. Rebind their shared
     # LazyConfig only after admission so they cannot retain a caller's
     # inherited BEETSDIR authority.
@@ -840,7 +839,7 @@ def main() -> int:
     # Fail fast at boot if the DB is unreachable; request threads open
     # their own handles via `_db()`, so this one is connect-check only.
     PipelineDB(args.dsn).close()
-    if beets_db_path is not None and not os.path.exists(beets_db_path):
+    if not os.path.exists(beets_db_path):
         log.warning("Beets DB not found at %s; library routes degrade", beets_db_path)
 
     if inherited_listener is None:

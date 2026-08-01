@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, NotRequired, Protocol, TypedDict
 
 from lib.beets_startup import BeetsStartupError, enforce_beets_startup
-from lib.config import install_admitted_runtime_config
+from lib.config import resolve_startup_config_paths
 
 # Unified slskd search lifecycle (issue #466).
 from lib.search_exec import (
@@ -1352,7 +1352,7 @@ def main() -> int:
         help="Immutable runtime config file (default: --config-dir/config.ini)",
     )
     parser.add_argument("-v", "--var-dir", "--runtime-dir",
-                        dest="runtime_dir", default=os.getcwd(),
+                        dest="runtime_dir", default=None,
                         help="Var directory for lock file and caches (default: cwd)")
     parser.add_argument("--no-lock-file", action="store_true",
                         help="Disable lock file creation")
@@ -1367,20 +1367,15 @@ def main() -> int:
                              "classification counts are emitted.")
     args = parser.parse_args()
 
-    config_file_path = (
-        args.config
-        or (
-            os.path.join(args.config_dir, "config.ini")
-            if args.config_dir is not None
-            else None
-        )
-        or os.environ.get("CRATEDIGGER_RUNTIME_CONFIG")
-        or os.path.join(os.getcwd(), "config.ini")
+    config_file_path, runtime_dir = resolve_startup_config_paths(
+        config_path=args.config,
+        runtime_dir=args.runtime_dir,
+        config_dir=args.config_dir,
     )
     config = configparser.RawConfigParser()
     try:
         config.read(config_file_path)
-    except (OSError, configparser.Error):
+    except (OSError, UnicodeError, configparser.Error):
         # The strict startup loader below logs the native parse failure. This
         # first read exists only to retain the configured logging format.
         pass
@@ -1389,13 +1384,11 @@ def main() -> int:
         cfg = enforce_beets_startup(
             role="main",
             config_path=config_file_path,
-            runtime_dir=args.runtime_dir,
+            runtime_dir=runtime_dir,
             logger=logger,
         )
     except BeetsStartupError:
         return 1
-
-    install_admitted_runtime_config(config_file_path, cfg)
 
     # Belt-and-suspenders for systemd's UMask=0000 — see
     # lib/permissions.py / GH #84. This changes process state, so it follows
@@ -1403,7 +1396,7 @@ def main() -> int:
     from lib.permissions import reset_umask
     reset_umask()
 
-    lock_file_path = os.path.join(args.runtime_dir, ".cratedigger.lock")
+    lock_file_path = os.path.join(runtime_dir, ".cratedigger.lock")
 
     if not args.no_lock_file and os.path.exists(lock_file_path):
         logger.info("Cratedigger instance is already running.")

@@ -2604,6 +2604,8 @@ class TestImporterWorker(unittest.TestCase):
     def test_main_reuses_one_scan_cursor_across_polls(self) -> None:
         """The process loop, not callers, owns the persistent import cursor."""
         from scripts import importer
+        from tests.test_beets_config_contract import BeetsContractWorld
+        from tests.test_beets_config_startup import _isolated_installed_authority
 
         class PollProbeComplete(RuntimeError):
             pass
@@ -2673,8 +2675,14 @@ class TestImporterWorker(unittest.TestCase):
 
         db = CursorProbeDB()
 
+        world = BeetsContractWorld(role="importer")
+        self.addCleanup(world.close)
         argv = [
             "importer.py",
+            "--config",
+            str(world.runtime_config),
+            "--runtime-dir",
+            str(world.runtime_dir),
             "--dsn",
             "postgresql://fake",
             "--poll-interval",
@@ -2683,12 +2691,8 @@ class TestImporterWorker(unittest.TestCase):
             "cursor-probe",
         ]
         with (
+            _isolated_installed_authority(),
             patch("sys.argv", argv),
-            patch.dict(os.environ, {}, clear=False),
-            patch(
-                "scripts.importer.enforce_beets_startup",
-                return_value=CratediggerConfig(),
-            ),
             patch("scripts.importer.PipelineDB", return_value=db),
             patch("scripts.importer.time.sleep"),
             self.assertRaises(PollProbeComplete),
@@ -5170,8 +5174,9 @@ class TestImportPreviewWorker(unittest.TestCase):
         ``main()`` runs — not after the 15-minute stale-recovery
         window. Mirrors the importer's startup self-heal.
         """
-        from lib import config as runtime_config_module
         from scripts import import_preview_worker
+        from tests.test_beets_config_contract import BeetsContractWorld
+        from tests.test_beets_config_startup import _isolated_installed_authority
 
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="wanted"))
@@ -5189,24 +5194,18 @@ class TestImportPreviewWorker(unittest.TestCase):
         assert claimed is not None
         self.assertEqual(claimed.preview_status, "running")
 
-        argv = ["import_preview_worker.py", "--dsn", "postgresql://fake", "--once"]
-        admitted = CratediggerConfig(
-            beets_config_dir="/normalized/beets",
-            beets_library_db="/normalized/library.db",
-            beets_directory="/normalized/music",
-        )
+        world = BeetsContractWorld(role="preview")
+        self.addCleanup(world.close)
+        argv = [
+            "import_preview_worker.py",
+            "--config", str(world.runtime_config),
+            "--runtime-dir", str(world.runtime_dir),
+            "--dsn", "postgresql://fake",
+            "--once",
+        ]
         with (
+            _isolated_installed_authority(),
             patch("sys.argv", argv),
-            patch.dict(os.environ, {}, clear=False),
-            patch(
-                "scripts.import_preview_worker.enforce_beets_startup",
-                return_value=admitted,
-            ),
-            patch.object(
-                runtime_config_module,
-                "_ADMITTED_RUNTIME_CONFIG",
-                None,
-            ),
             patch("scripts.import_preview_worker.PipelineDB",
                   side_effect=lambda dsn: db),
             patch(
@@ -5221,8 +5220,17 @@ class TestImportPreviewWorker(unittest.TestCase):
         run_once.assert_called_once_with(
             db,
             worker_id=ANY,
-            runtime_config=admitted,
+            runtime_config=ANY,
             scan_cursor=ANY,
+        )
+        runtime_config = run_once.call_args.kwargs["runtime_config"]
+        self.assertEqual(
+            runtime_config.beets_config_dir,
+            str(world.beets_dir.resolve()),
+        )
+        self.assertEqual(
+            runtime_config.beets_library_db,
+            str(world.library_db.resolve()),
         )
         recovered = db.get_import_job(claimed.id)
         assert recovered is not None

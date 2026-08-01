@@ -392,7 +392,7 @@ DEFAULT_RUNTIME_CONFIG_PATH = "/var/lib/cratedigger/config.ini"
 # authority-normalized configuration once at startup.  Optional readers in
 # that same process must not later weaken that boundary by reparsing the raw
 # file and recovering relative or otherwise noncanonical path spellings.
-_ADMITTED_RUNTIME_CONFIG: tuple[str, CratediggerConfig] | None = None
+_admitted_runtime_config: tuple[str, CratediggerConfig] | None = None
 
 
 def _runtime_config_path(config_path: str | None = None) -> str:
@@ -400,15 +400,35 @@ def _runtime_config_path(config_path: str | None = None) -> str:
     return config_path or os.environ.get("CRATEDIGGER_RUNTIME_CONFIG") or DEFAULT_RUNTIME_CONFIG_PATH
 
 
+def resolve_startup_config_paths(
+    *,
+    config_path: str | None,
+    runtime_dir: str | None,
+    config_dir: str | None = None,
+) -> tuple[str, str]:
+    """Resolve deployment-neutral startup authorities from args, env, or cwd."""
+    resolved_config = (
+        config_path
+        or (
+            os.path.join(config_dir, "config.ini")
+            if config_dir is not None
+            else None
+        )
+        or os.environ.get("CRATEDIGGER_RUNTIME_CONFIG")
+        or os.path.join(os.getcwd(), "config.ini")
+    )
+    return resolved_config, runtime_dir or os.getcwd()
+
+
 def install_admitted_runtime_config(
     config_path: str,
     config: CratediggerConfig,
 ) -> None:
     """Install one checked process authority for all downstream readers."""
-    global _ADMITTED_RUNTIME_CONFIG
+    global _admitted_runtime_config
 
     path = os.path.abspath(os.path.expanduser(config_path))
-    _ADMITTED_RUNTIME_CONFIG = (path, config)
+    _admitted_runtime_config = (path, config)
     os.environ["CRATEDIGGER_RUNTIME_CONFIG"] = path
     os.environ["BEETSDIR"] = config.beets_config_dir
 
@@ -432,7 +452,7 @@ def read_runtime_config(config_path: str | None = None) -> CratediggerConfig:
     fallout downstream.
     """
     path = _runtime_config_path(config_path)
-    admitted = _ADMITTED_RUNTIME_CONFIG
+    admitted = _admitted_runtime_config
     if admitted is not None:
         admitted_path, admitted_config = admitted
         if os.path.abspath(os.path.expanduser(path)) == admitted_path:

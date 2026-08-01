@@ -6,13 +6,14 @@ import hashlib
 import importlib
 import os
 import pkgutil
+import sqlite3
 import stat
 import sys
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
 from urllib.parse import urlsplit
 
 import confuse
@@ -32,6 +33,7 @@ SAFE_DEFAULT_PATH = (
 SAFE_COMP_PATH = (
     "Compilations/$album%aunique{albumartist album,path_disambig}/$track $title"
 )
+SAFE_SINGLETON_PATH = "Non-Album/$artist/$title"
 SAFE_PATH_DISAMBIG = (
     "albumdisambig or releasegroupdisambig or catalognum or label or str(year)"
 )
@@ -92,6 +94,19 @@ class _UniqueKeyLoader(yaml.SafeLoader):
     pass
 
 
+class _YamlObjectConstructor(Protocol):
+    def construct_object(self, node: yaml.Node, deep: bool = False) -> object: ...
+
+
+def _construct_yaml_object(
+    loader: _YamlObjectConstructor,
+    node: yaml.Node,
+    *,
+    deep: bool,
+) -> object:
+    return loader.construct_object(node, deep=deep)
+
+
 @dataclass(frozen=True)
 class _DeclaredPath:
     """One path's lexical identity and resolved target."""
@@ -107,10 +122,10 @@ def _construct_unique_mapping(
 ) -> dict[object, object]:
     result: dict[object, object] = {}
     for key_node, value_node in node.value:
-        key = loader.construct_object(key_node, deep=deep)
+        key = _construct_yaml_object(loader, key_node, deep=deep)
         if key in result:
             raise _DuplicateKeyError(f"duplicate YAML key: {key!r}")
-        result[key] = loader.construct_object(value_node, deep=deep)
+        result[key] = _construct_yaml_object(loader, value_node, deep=deep)
     return result
 
 
@@ -249,8 +264,17 @@ def _read_secret(path: Path) -> tuple[dict[str, object] | None, ContractFinding 
             "secret_schema",
             "designated Beets secret include must contain only discogs.user_token",
         )
-    discogs = mapping.get("discogs")
-    if not isinstance(discogs, Mapping) or set(discogs) != {"user_token"}:
+    try:
+        discogs = msgspec.convert(
+            mapping.get("discogs"),
+            type=dict[str, object],
+        )
+    except msgspec.ValidationError:
+        return mapping, _finding(
+            "secret_schema",
+            "designated Beets secret include must contain only discogs.user_token",
+        )
+    if set(discogs) != {"user_token"}:
         return mapping, _finding(
             "secret_schema",
             "designated Beets secret include must contain only discogs.user_token",
@@ -276,16 +300,22 @@ def _declared_includes(
             "mutable_main_config",
             "Beets main config is writable or replaceable by this process",
         ))
-    declared = config.get("include", [])
-    if not isinstance(declared, list) or not all(
-        isinstance(value, str) for value in declared
-    ):
+    declared: object = config.get("include", [])
+    if not isinstance(declared, list):
+        return (), (_finding(
+            "include_shape",
+            "Beets include must be a YAML list of path strings",
+        ),)
+    try:
+        declared_paths = msgspec.convert(declared, type=list[str])
+    except msgspec.ValidationError:
         return (), (_finding(
             "include_shape",
             "Beets include must be a YAML list of path strings",
         ),)
     include_sources = tuple(
-        _declared_path(value, relative_to=config_dir.lexical) for value in declared
+        _declared_path(value, relative_to=config_dir.lexical)
+        for value in declared_paths
     )
     includes = tuple(source.resolved for source in include_sources)
     count = sum(
@@ -334,7 +364,7 @@ def _declared_includes(
 
 
 @contextmanager
-def _effective_config(config_dir: Path) -> Iterator[IncludeLazyConfig]:
+def _effective_config(config_dir: Path) -> Generator[IncludeLazyConfig]:
     """Read Beets' exact Confuse view in a fresh, isolated config object."""
     prior = os.environ.get("BEETSDIR")
     os.environ["BEETSDIR"] = str(config_dir)
@@ -365,7 +395,7 @@ def _active_plugin_names(active: IncludeLazyConfig) -> tuple[str, ...]:
     """Mirror pinned Beets get_plugin_names without mutating global paths."""
     plugins = tuple(dict.fromkeys(active["plugins"].as_str_seq()))
     try:
-        disabled = set(active["disabled_plugins"].as_str_seq())
+        disabled: set[str] = set(active["disabled_plugins"].as_str_seq())
     except confuse.NotFoundError:
         disabled = set()
     mb_enabled = active["musicbrainz"].flatten().get("enabled")
@@ -420,6 +450,41 @@ def _state_access_issues(state: Path, role: BeetsRole) -> tuple[ContractFinding,
     return ()
 
 
+def _library_db_access_issues(library: Path) -> tuple[ContractFinding, ...]:
+    """Prove an existing Beets catalog without creating or locking one."""
+    if not library.is_file():
+        return (_finding(
+            "library_not_regular",
+            "Beets library database must be an existing regular file",
+        ),)
+    try:
+        connection = sqlite3.connect(
+            f"{library.as_uri()}?mode=ro&immutable=1",
+            uri=True,
+        )
+        try:
+            tables = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type = 'table' AND name IN ('albums', 'items')"
+                )
+            }
+        finally:
+            connection.close()
+    except sqlite3.Error:
+        return (_finding(
+            "library_unreadable",
+            "Beets library database is not a readable SQLite catalog",
+        ),)
+    if tables != {"albums", "items"}:
+        return (_finding(
+            "library_schema_missing",
+            "Beets library database is missing its required catalog tables",
+        ),)
+    return ()
+
+
 def _effective_paths(active: IncludeLazyConfig) -> tuple[str, str, str]:
     return (
         str(_path(active["library"].as_filename())),
@@ -469,6 +534,7 @@ def check_beets_config(
     cfg: CratediggerConfig,
     *,
     role: BeetsRole,
+    available_plugins: Callable[[], frozenset[str]] = _available_plugins,
 ) -> BeetsConfigReport:
     """Validate declared files, then Beets' exact active effective config."""
     authority = _authority(cfg)
@@ -524,6 +590,12 @@ def check_beets_config(
     except ValueError:
         pass
     hard.extend(_state_access_issues(state, role))
+    hard.extend(_library_db_access_issues(_path(authority.library)))
+    if not _path(authority.directory).is_dir():
+        hard.append(_finding(
+            "directory_not_directory",
+            "Beets library root must be an existing directory",
+        ))
     if not _same_executable(authority.python):
         hard.append(_finding(
             "python_mismatch", "active Python interpreter differs from [Beets] python"
@@ -554,8 +626,8 @@ def check_beets_config(
                 "pluginpath_unsupported",
                 "effective Beets pluginpath must be empty",
             ))
-        available = _available_plugins()
-        if configured - available:
+        available_plugin_names = available_plugins()
+        if configured - available_plugin_names:
             hard.append(_finding(
                 "plugin_unavailable",
                 "one or more configured Beets plugins are unavailable",
@@ -585,11 +657,23 @@ def check_beets_config(
                     f"import_{key}_disabled", f"effective import.{key} must be true"
                 ))
 
+        path_formats = active["paths"].flatten()
+        if set(path_formats) != {"default", "singleton", "comp"}:
+            hard.append(_finding(
+                "paths_keys_unsupported",
+                "effective Beets paths contains unsupported query-specific formats",
+            ))
         default_path = active["paths"]["default"].as_str()
+        singleton_path = active["paths"]["singleton"].as_str()
         comp_path = active["paths"]["comp"].as_str()
         path_disambig = active["album_fields"]["path_disambig"].as_str()
         if default_path != SAFE_DEFAULT_PATH:
             hard.append(_finding("default_path_unsafe", "effective default album path is not admitted"))
+        if singleton_path != SAFE_SINGLETON_PATH:
+            hard.append(_finding(
+                "singleton_path_unsafe",
+                "effective singleton path is not admitted",
+            ))
         if comp_path != SAFE_COMP_PATH:
             hard.append(_finding("comp_path_unsafe", "effective compilation album path is not admitted"))
         if path_disambig != SAFE_PATH_DISAMBIG:
@@ -623,7 +707,7 @@ def check_beets_config(
         fingerprint_values = {
             "import": {key: active["import"][key].get(bool) for key in ("autotag", "move", "write")},
             "duplicate_keys": tuple(duplicate_keys),
-            "paths": (default_path, comp_path, path_disambig),
+            "paths": (default_path, singleton_path, comp_path, path_disambig),
             "permissions": (
                 active["permissions"]["file"].as_str(),
                 active["permissions"]["dir"].as_str(),

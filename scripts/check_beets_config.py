@@ -46,6 +46,21 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         cfg = read_runtime_config_strict(args.config, args.runtime_dir)
+    except (
+        OSError,
+        UnicodeError,
+        configparser.Error,
+        confuse.ConfigError,
+        msgspec.ValidationError,
+        ValueError,
+    ) as exc:
+        # Native parser/load detail intentionally remains on stderr (KD9); the
+        # machine channel stays token-free and schema-stable.
+        print(f"Beets configuration load failed: {exc}", file=sys.stderr)
+        print(msgspec.json.encode(CheckerResult(ok=False, error="config_load_error")).decode())
+        return 1
+
+    try:
         report = check_beets_config(cfg, role=args.role)
     except (
         OSError,

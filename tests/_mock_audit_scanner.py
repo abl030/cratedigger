@@ -284,11 +284,23 @@ _LEAF_SEAM_PATTERNS = [
     # only caller, now lives in ``scripts/pipeline_cli/cli.py``) alongside
     # single-segment scripts like ``scripts.repair.PipelineDB``.
     re.compile(r"^scripts\.\w+(\.\w+)?\.PipelineDB$"),
+    # The web entrypoint imports the same PipelineDB constructor directly;
+    # replacing that binding stops at the PostgreSQL connection boundary.
+    re.compile(r"^web\.server\.PipelineDB$"),
+
+    # psycopg's connector is the database socket leaf. Startup placement tests
+    # stop there after exercising the real contract and schema-gate code.
+    re.compile(r"^lib\.migrator\.psycopg2\.connect$"),
 
     # web.server.db — module-level pipeline DB connection cache.
     # Tests patch.object(server, "db", fake) to inject a per-test DB.
     # Equivalent to the constructor-replacement pattern.
     re.compile(r"^web\.server\.db$"),
+
+    # Known-bad mutation test: the wrapper calls the real atomic startup guard,
+    # then deliberately corrupts only its returned authority. The real web
+    # entrypoint must expose the drift before its first database effect.
+    re.compile(r"^web\.server\.enforce_beets_startup$"),
 
     # web.routes re-exports of allowlisted helpers. Same physical
     # function lives in lib.* and is allowlisted there; tests just

@@ -2,25 +2,25 @@
 
 from __future__ import annotations
 
-import configparser
 import logging
 import os
 import sys
 import tempfile
 import unittest
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from unittest.mock import ANY, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import cratedigger
-from lib.beets_config_contract import (
-    BeetsAuthority,
-    BeetsConfigReport,
-    BeetsPluginContract,
-    ContractFinding,
-)
+from lib.beets_config_contract import BeetsRole
 from lib.config import CratediggerConfig
 from scripts import import_preview_worker, importer
-from tests.test_beets_config_contract import BeetsContractWorld
+from tests.test_beets_config_contract import (
+    BeetsContractWorld,
+    snapshot_contract_world,
+)
 from web import server
 
 
@@ -28,187 +28,259 @@ class _PostGateEffect(Exception):
     """Stop an entrypoint at its first admitted application effect."""
 
 
-def _authority() -> BeetsAuthority:
-    return BeetsAuthority(
-        config_dir="/immutable/beets",
-        library="/library.db",
-        directory="/music",
-        state_file="/state/import-state.pickle",
-        python=sys.executable,
-        secret_include="/run/secrets/beets.yaml",
-        beets_version="2.12.0",
-        beets_package="/package/beets",
-    )
+@contextmanager
+def _isolated_installed_authority() -> Iterator[None]:
+    """Restore process-global startup authority after a real admission."""
+    from lib import config as runtime_config_module
+
+    prior_runtime = os.environ.get("CRATEDIGGER_RUNTIME_CONFIG")
+    prior_beetsdir = os.environ.get("BEETSDIR")
+    prior_admitted = runtime_config_module._admitted_runtime_config
+    runtime_config_module._admitted_runtime_config = None
+    try:
+        yield
+    finally:
+        runtime_config_module._admitted_runtime_config = prior_admitted
+        if prior_runtime is None:
+            os.environ.pop("CRATEDIGGER_RUNTIME_CONFIG", None)
+        else:
+            os.environ["CRATEDIGGER_RUNTIME_CONFIG"] = prior_runtime
+        if prior_beetsdir is None:
+            os.environ.pop("BEETSDIR", None)
+        else:
+            os.environ["BEETSDIR"] = prior_beetsdir
 
 
-def _report(
+@dataclass(frozen=True)
+class _RestartCase:
+    role: BeetsRole
+    entrypoint: Callable[[], int]
+
+
+_RESTART_CASES: tuple[_RestartCase, ...] = (
+    _RestartCase("main", cratedigger.main),
+    _RestartCase("importer", importer.main),
+    _RestartCase("preview", import_preview_worker.main),
+    _RestartCase("web", server.main),
+)
+
+
+@contextmanager
+def _patched_restart_boundary(
+    case: _RestartCase,
     *,
-    hard: tuple[ContractFinding, ...] = (),
-    warnings: tuple[ContractFinding, ...] = (),
-) -> BeetsConfigReport:
-    return BeetsConfigReport(
-        ok=not hard,
-        role="web",
-        authority=_authority(),
-        plugin_contract=BeetsPluginContract(
-            musicbrainz=True,
-            permissions=True,
-            inline=True,
-        ),
-        hard_failures=hard,
-        warnings=warnings,
-        fingerprint="f" * 64,
-    )
+    side_effect: object | None = None,
+) -> Iterator[MagicMock]:
+    """Stop a real entrypoint only at its external database boundary."""
+    if case.role == "main":
+        with patch("lib.migrator.psycopg2.connect", side_effect=side_effect) as boundary:
+            yield boundary
+        return
+    if case.role == "importer":
+        with patch("scripts.importer.PipelineDB", side_effect=side_effect) as boundary:
+            yield boundary
+        return
+    if case.role == "preview":
+        with patch("scripts.import_preview_worker.PipelineDB", side_effect=side_effect) as boundary:
+            yield boundary
+        return
+    with patch("web.server.PipelineDB", side_effect=side_effect) as boundary:
+        yield boundary
+
+
+def _restart_argv(case: _RestartCase, world: BeetsContractWorld) -> list[str]:
+    common = [
+        "--config", str(world.runtime_config),
+        "--runtime-dir", str(world.runtime_dir),
+    ]
+    if case.role == "main":
+        return ["cratedigger.py", *common, "--no-lock-file"]
+    if case.role == "importer":
+        return ["importer.py", *common, "--once"]
+    if case.role == "preview":
+        return ["import_preview_worker.py", *common, "--once"]
+    return [
+        "server.py", *common,
+        "--canonical-origin", "https://music.example",
+        "--dev-port", "0",
+    ]
+
+
+def _exercise_real_rejection_and_restart(
+    test: unittest.TestCase,
+    case: _RestartCase,
+) -> None:
+    """Reject, repair, and restart one real top-level application."""
+    from lib import config as runtime_config_module
+
+    world = BeetsContractWorld(role=case.role)
+    prior_main_config = cratedigger.cfg
+    try:
+        world.unseal()
+        world._write_main_config(**{
+            "import": {
+                "autotag": True,
+                "move": True,
+                "write": False,
+                "duplicate_keys": {
+                    "album": ["mb_albumid", "discogs_albumid"],
+                },
+            },
+        })
+        world._seal(case.role)
+        argv = _restart_argv(case, world)
+        before_rejection = snapshot_contract_world(world)
+        with (
+            _isolated_installed_authority(),
+            patch.object(sys, "argv", argv),
+            _patched_restart_boundary(case) as effect,
+        ):
+            prior_runtime = os.environ.get("CRATEDIGGER_RUNTIME_CONFIG")
+            prior_beetsdir = os.environ.get("BEETSDIR")
+            test.assertEqual(case.entrypoint(), 1)
+            effect.assert_not_called()
+            test.assertEqual(
+                os.environ.get("CRATEDIGGER_RUNTIME_CONFIG"),
+                prior_runtime,
+            )
+            test.assertEqual(os.environ.get("BEETSDIR"), prior_beetsdir)
+            test.assertIsNone(runtime_config_module._admitted_runtime_config)
+        test.assertEqual(snapshot_contract_world(world), before_rejection)
+
+        world.unseal()
+        world._write_main_config()
+        world._seal(case.role)
+        before_restart = snapshot_contract_world(world)
+        with (
+            _isolated_installed_authority(),
+            patch.object(sys, "argv", argv),
+            _patched_restart_boundary(
+                case,
+                side_effect=_PostGateEffect,
+            ) as effect,
+            test.assertRaises(_PostGateEffect),
+        ):
+            case.entrypoint()
+        effect.assert_called_once()
+        test.assertEqual(snapshot_contract_world(world), before_restart)
+    finally:
+        cratedigger.cfg = prior_main_config
+        world.close()
 
 
 class TestBeetsStartupAdapter(unittest.TestCase):
     def test_warning_logs_and_returns_the_exact_strict_config(self) -> None:
         from lib.beets_startup import enforce_beets_startup
 
-        cfg = CratediggerConfig()
-        report = _report(
-            warnings=(ContractFinding(
-                code="musicbrainz_endpoint_drift",
-                message="effective MusicBrainz endpoint differs",
-            ),),
+        world = BeetsContractWorld(role="web")
+        self.addCleanup(world.close)
+        world.unseal()
+        world._write_main_config(
+            musicbrainz={"host": "mirror.invalid", "https": True},
         )
+        world._seal("web")
         logger = logging.getLogger("test.beets-startup-warning")
         with (
-            patch(
-                "lib.beets_startup.read_runtime_config_strict",
-                return_value=cfg,
-            ) as strict_load,
-            patch(
-                "lib.beets_startup.check_beets_config",
-                return_value=report,
-            ) as check,
+            _isolated_installed_authority(),
             self.assertLogs(logger, level="WARNING") as captured,
         ):
             admitted = enforce_beets_startup(
                 role="web",
-                config_path="/immutable/runtime.ini",
-                runtime_dir="/mutable/state",
+                config_path=str(world.runtime_config),
+                runtime_dir=str(world.runtime_dir),
                 logger=logger,
             )
 
-        self.assertIsNot(admitted, cfg)
-        self.assertEqual(admitted.beets_config_dir, "/immutable/beets")
-        self.assertEqual(admitted.beets_library_db, "/library.db")
-        self.assertEqual(admitted.beets_directory, "/music")
-        self.assertEqual(admitted.beets_state_file, "/state/import-state.pickle")
-        self.assertEqual(admitted.beets_python, sys.executable)
+        self.assertEqual(admitted.beets_config_dir, str(world.beets_dir))
+        self.assertEqual(admitted.beets_library_db, str(world.library_db))
+        self.assertEqual(admitted.beets_directory, str(world.library_root))
+        self.assertEqual(admitted.beets_state_file, str(world.state_file))
+        self.assertEqual(admitted.beets_python, str(Path(sys.executable).resolve()))
         self.assertEqual(
             admitted.beets_secret_include,
-            "/run/secrets/beets.yaml",
+            str(world.secret_include),
         )
-        strict_load.assert_called_once_with(
-            "/immutable/runtime.ini", "/mutable/state",
-        )
-        check.assert_called_once_with(cfg, role="web")
         self.assertIn("musicbrainz_endpoint_drift", captured.output[0])
 
     def test_hard_report_logs_bounded_reason_and_refuses_startup(self) -> None:
         from lib.beets_startup import BeetsStartupError, enforce_beets_startup
 
-        cfg = CratediggerConfig()
-        report = _report(hard=(ContractFinding(
-            code="duplicate_keys_unsafe",
-            message="album duplicate keys are unsafe",
-        ),))
+        world = BeetsContractWorld(role="main")
+        self.addCleanup(world.close)
+        world.unseal()
+        world._write_main_config(**{
+            "import": {
+                "autotag": True,
+                "move": True,
+                "write": False,
+                "duplicate_keys": {
+                    "album": ["mb_albumid", "discogs_albumid"],
+                },
+            },
+        })
+        world._seal("main")
         logger = logging.getLogger("test.beets-startup-hard")
         with (
-            patch(
-                "lib.beets_startup.read_runtime_config_strict",
-                return_value=cfg,
-            ),
-            patch(
-                "lib.beets_startup.check_beets_config",
-                return_value=report,
-            ),
+            _isolated_installed_authority(),
             self.assertLogs(logger, level="ERROR") as captured,
             self.assertRaises(BeetsStartupError),
         ):
             enforce_beets_startup(
                 role="main",
-                config_path="/immutable/runtime.ini",
-                runtime_dir="/mutable/state",
+                config_path=str(world.runtime_config),
+                runtime_dir=str(world.runtime_dir),
                 logger=logger,
             )
 
-        self.assertIn("duplicate_keys_unsafe", captured.output[0])
+        self.assertIn("import_write_disabled", captured.output[0])
         self.assertNotIn("secret", captured.output[0].lower())
 
     def test_native_parser_failure_remains_actionable(self) -> None:
         from lib.beets_startup import BeetsStartupError, enforce_beets_startup
 
-        native = configparser.ParsingError("/immutable/runtime.ini")
-        native.append(7, "broken = [")
         logger = logging.getLogger("test.beets-startup-native")
-        with (
-            patch(
-                "lib.beets_startup.read_runtime_config_strict",
-                side_effect=native,
-            ),
-            patch("lib.beets_startup.check_beets_config") as check,
-            self.assertLogs(logger, level="ERROR") as captured,
-            self.assertRaises(BeetsStartupError),
-        ):
-            enforce_beets_startup(
-                role="preview",
-                config_path="/immutable/runtime.ini",
-                runtime_dir="/mutable/state",
-                logger=logger,
-            )
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "runtime.ini"
+            config_path.write_text("[Beets\nbroken = [\n", encoding="utf-8")
+            with (
+                _isolated_installed_authority(),
+                self.assertLogs(logger, level="ERROR") as captured,
+                self.assertRaises(BeetsStartupError),
+            ):
+                enforce_beets_startup(
+                    role="preview",
+                    config_path=str(config_path),
+                    runtime_dir=directory,
+                    logger=logger,
+                )
 
-        check.assert_not_called()
         self.assertIn("runtime.ini", captured.output[0])
-        self.assertIn("broken = [", captured.output[0])
+        self.assertIn("no section headers", captured.output[0])
+        self.assertIn("[Beets", captured.output[0])
 
     def test_loader_value_error_is_a_native_startup_failure(self) -> None:
         from lib.beets_startup import BeetsStartupError, enforce_beets_startup
 
         logger = logging.getLogger("test.beets-startup-value-error")
-        with (
-            patch(
-                "lib.beets_startup.read_runtime_config_strict",
-                side_effect=ValueError("invalid integer value: many"),
-            ),
-            patch("lib.beets_startup.check_beets_config") as check,
-            self.assertLogs(logger, level="ERROR") as captured,
-            self.assertRaises(BeetsStartupError),
-        ):
-            enforce_beets_startup(
-                role="main",
-                config_path="/immutable/runtime.ini",
-                runtime_dir="/mutable/state",
-                logger=logger,
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "runtime.ini"
+            config_path.write_text(
+                "[Search Settings]\nnumber_of_albums_to_grab = many\n",
+                encoding="utf-8",
             )
+            with (
+                _isolated_installed_authority(),
+                self.assertLogs(logger, level="ERROR") as captured,
+                self.assertRaises(BeetsStartupError),
+            ):
+                enforce_beets_startup(
+                    role="main",
+                    config_path=str(config_path),
+                    runtime_dir=directory,
+                    logger=logger,
+                )
 
-        check.assert_not_called()
-        self.assertIn("invalid integer value: many", captured.output[0])
-
-    def test_checker_value_error_is_not_reclassified_as_a_load_failure(self) -> None:
-        from lib.beets_startup import enforce_beets_startup
-
-        cfg = CratediggerConfig()
-        logger = logging.getLogger("test.beets-startup-checker-value-error")
-        with (
-            patch(
-                "lib.beets_startup.read_runtime_config_strict",
-                return_value=cfg,
-            ),
-            patch(
-                "lib.beets_startup.check_beets_config",
-                side_effect=ValueError("checker programming defect"),
-            ),
-            self.assertRaisesRegex(ValueError, "checker programming defect"),
-        ):
-            enforce_beets_startup(
-                role="web",
-                config_path="/immutable/runtime.ini",
-                runtime_dir="/mutable/state",
-                logger=logger,
-            )
+        self.assertIn("invalid literal", captured.output[0])
 
     def test_install_caches_normalized_authority_without_downstream_reparse(
         self,
@@ -227,12 +299,7 @@ class TestBeetsStartupAdapter(unittest.TestCase):
             raw_path = f"{directory}/./runtime.ini"
             Path(raw_path).write_text("[Pipeline DB]\n", encoding="utf-8")
             with (
-                patch.object(
-                    runtime_config_module,
-                    "_ADMITTED_RUNTIME_CONFIG",
-                    None,
-                ),
-                patch.dict(os.environ, {}, clear=False),
+                _isolated_installed_authority(),
                 patch(
                     "lib.config.CratediggerConfig.from_ini",
                     side_effect=AssertionError("raw config was reparsed"),
@@ -266,114 +333,60 @@ class TestBeetsStartupAdapter(unittest.TestCase):
                 runtime_ctx.pipeline_db_source.close()
                 parser.assert_not_called()
 
-    def test_real_hard_failure_is_zero_effect_and_corrected_restart_admits(
+    def test_startup_path_resolution_precedence_is_deployment_neutral(self) -> None:
+        from lib.config import resolve_startup_config_paths
+
+        with (
+            patch.dict(
+                os.environ,
+                {"CRATEDIGGER_RUNTIME_CONFIG": "/env/runtime.ini"},
+                clear=False,
+            ),
+            patch("lib.config.os.getcwd", return_value="/working"),
+        ):
+            self.assertEqual(
+                resolve_startup_config_paths(
+                    config_path="/arg/runtime.ini",
+                    config_dir="/arg/config-dir",
+                    runtime_dir="/arg/state",
+                ),
+                ("/arg/runtime.ini", "/arg/state"),
+            )
+            self.assertEqual(
+                resolve_startup_config_paths(
+                    config_path=None,
+                    config_dir="/arg/config-dir",
+                    runtime_dir=None,
+                ),
+                ("/arg/config-dir/config.ini", "/working"),
+            )
+            self.assertEqual(
+                resolve_startup_config_paths(
+                    config_path=None,
+                    config_dir=None,
+                    runtime_dir=None,
+                ),
+                ("/env/runtime.ini", "/working"),
+            )
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("lib.config.os.getcwd", return_value="/working"),
+        ):
+            self.assertEqual(
+                resolve_startup_config_paths(
+                    config_path=None,
+                    config_dir=None,
+                    runtime_dir=None,
+                ),
+                ("/working/config.ini", "/working"),
+            )
+
+    def test_real_invalid_contract_is_zero_effect_then_each_app_restarts(
         self,
     ) -> None:
-        """Drive the actual contract, importer entrypoint, and connected files."""
-        from lib import config as runtime_config_module
-        from scripts import importer as importer_module
-
-        prior_admitted = runtime_config_module._ADMITTED_RUNTIME_CONFIG
-        prior_beetsdir = os.environ.get("BEETSDIR")
-        self.addCleanup(
-            setattr,
-            runtime_config_module,
-            "_ADMITTED_RUNTIME_CONFIG",
-            prior_admitted,
-        )
-
-        def restore_beetsdir() -> None:
-            if prior_beetsdir is None:
-                os.environ.pop("BEETSDIR", None)
-            else:
-                os.environ["BEETSDIR"] = prior_beetsdir
-
-        self.addCleanup(restore_beetsdir)
-        world = BeetsContractWorld(role="importer")
-        self.addCleanup(world.close)
-        world.library_db.write_bytes(b"beets-library-sentinel")
-        world.unseal()
-        world._write_main_config(**{
-            "import": {
-                "autotag": True,
-                "move": True,
-                "write": False,
-                "duplicate_keys": {
-                    "album": ["mb_albumid", "discogs_albumid"],
-                },
-            },
-        })
-        world._seal("importer")
-
-        connected = (
-            world.runtime_config,
-            world.main_config,
-            world.secret_include,
-            world.state_file,
-            world.library_db,
-        )
-        before_failure = {path: path.read_bytes() for path in connected}
-        prior_runtime = "/caller/original-runtime.ini"
-        argv = [
-            "importer.py",
-            "--config", str(world.runtime_config),
-            "--runtime-dir", str(world.runtime_dir),
-            "--once",
-        ]
-        with (
-            patch.object(sys, "argv", argv),
-            patch.dict(
-                os.environ,
-                {"CRATEDIGGER_RUNTIME_CONFIG": prior_runtime},
-                clear=False,
-            ),
-            patch("scripts.importer.PipelineDB") as pipeline_db,
-        ):
-            self.assertEqual(importer_module.main(), 1)
-            pipeline_db.assert_not_called()
-            self.assertEqual(
-                os.environ["CRATEDIGGER_RUNTIME_CONFIG"],
-                prior_runtime,
-            )
-        self.assertEqual(
-            {path: path.read_bytes() for path in connected},
-            before_failure,
-        )
-
-        world.unseal()
-        world._write_main_config()
-        world._seal("importer")
-        stable_after_correction = {
-            path: path.read_bytes()
-            for path in (
-                world.runtime_config,
-                world.secret_include,
-                world.state_file,
-                world.library_db,
-            )
-        }
-        with (
-            patch.object(sys, "argv", argv),
-            patch.dict(
-                os.environ,
-                {"CRATEDIGGER_RUNTIME_CONFIG": prior_runtime},
-                clear=False,
-            ),
-            patch(
-                "scripts.importer.PipelineDB",
-                side_effect=_PostGateEffect,
-            ) as pipeline_db,
-            self.assertRaises(_PostGateEffect),
-        ):
-            importer_module.main()
-        pipeline_db.assert_called_once()
-        self.assertEqual(
-            {
-                path: path.read_bytes()
-                for path in stable_after_correction
-            },
-            stable_after_correction,
-        )
+        for case in _RESTART_CASES:
+            with self.subTest(role=case.role):
+                _exercise_real_rejection_and_restart(self, case)
 
     def test_direct_web_rebinds_eager_beets_config_to_normalized_authority(
         self,
@@ -458,11 +471,7 @@ class TestBeetsStartupAdapter(unittest.TestCase):
                 server._discogs.DISCOGS_API_BASE,
             ) = prior_web_globals
 
-        with patch.object(
-            runtime_config_module,
-            "_ADMITTED_RUNTIME_CONFIG",
-            None,
-        ):
+        with _isolated_installed_authority():
             try:
                 os.environ["BEETSDIR"] = str(wrong_dir)
                 os.environ["CRATEDIGGER_RUNTIME_CONFIG"] = "/caller/raw.ini"
@@ -521,10 +530,7 @@ class TestBeetsStartupAdapter(unittest.TestCase):
                         "--canonical-origin", "https://music.example",
                         "--dev-port", "0",
                     ]),
-                    patch(
-                        "web.server.PipelineDB",
-                        side_effect=observe_first_database,
-                    ),
+                    patch("web.server.PipelineDB", side_effect=observe_first_database),
                     self.assertRaises(_PostGateEffect),
                 ):
                     server.main()
@@ -538,7 +544,7 @@ class TestEntrypointStartupPlacement(unittest.TestCase):
 
         prior_runtime_config = os.environ.get("CRATEDIGGER_RUNTIME_CONFIG")
         prior_beetsdir = os.environ.get("BEETSDIR")
-        prior_admitted = runtime_config_module._ADMITTED_RUNTIME_CONFIG
+        prior_admitted = runtime_config_module._admitted_runtime_config
 
         def restore_runtime_config() -> None:
             if prior_runtime_config is None:
@@ -549,7 +555,7 @@ class TestEntrypointStartupPlacement(unittest.TestCase):
                 os.environ.pop("BEETSDIR", None)
             else:
                 os.environ["BEETSDIR"] = prior_beetsdir
-            runtime_config_module._ADMITTED_RUNTIME_CONFIG = prior_admitted
+            runtime_config_module._admitted_runtime_config = prior_admitted
 
         self.addCleanup(restore_runtime_config)
         prior_web_globals = (
@@ -575,190 +581,26 @@ class TestEntrypointStartupPlacement(unittest.TestCase):
         self.fixture = Path(self.tmp.name) / "fixture.bin"
         self.fixture.write_bytes(b"no application state")
 
-    def _guard_failure(self) -> Exception:
-        from lib.beets_startup import BeetsStartupError
-
-        return BeetsStartupError("external Beets authority rejected")
-
-    def test_main_hard_failure_precedes_umask_lock_and_runtime_context(self) -> None:
-        lock_path = Path(self.tmp.name) / ".cratedigger.lock"
-        with (
-            patch.object(sys, "argv", [
+    def test_main_invalid_utf8_reaches_strict_guard_and_has_zero_effects(
+        self,
+    ) -> None:
+        invalid = Path(self.tmp.name) / "invalid-utf8.ini"
+        invalid.write_bytes(b"[Beets]\nconfig_dir = \xff\n")
+        saved_umask = os.umask(0o022)
+        try:
+            with patch.object(sys, "argv", [
                 "cratedigger.py",
-                "--config", self.config_path,
+                "--config", str(invalid),
                 "--runtime-dir", self.tmp.name,
-            ]),
-            patch(
-                "cratedigger.enforce_beets_startup",
-                side_effect=self._guard_failure(),
-            ) as guard,
-            patch("lib.permissions.reset_umask") as reset_umask,
-        ):
-            self.assertEqual(cratedigger.main(), 1)
+                "--no-lock-file",
+            ]):
+                self.assertEqual(cratedigger.main(), 1)
+            observed_umask = os.umask(0o022)
+            self.assertEqual(observed_umask, 0o022)
+        finally:
+            os.umask(saved_umask)
 
-        guard.assert_called_once()
-        reset_umask.assert_not_called()
-        self.assertFalse(lock_path.exists())
         self.assertEqual(self.fixture.read_bytes(), b"no application state")
-
-    def test_importer_hard_failure_precedes_pipeline_db_and_recovery(self) -> None:
-        with (
-            patch.object(sys, "argv", [
-                "importer.py",
-                "--config", self.config_path,
-                "--runtime-dir", self.tmp.name,
-                "--dsn", "postgresql://unused",
-                "--once",
-            ]),
-            patch(
-                "scripts.importer.enforce_beets_startup",
-                side_effect=self._guard_failure(),
-            ) as guard,
-            patch("scripts.importer.PipelineDB") as pipeline_db,
-            patch("scripts.importer.recover_abandoned_running_jobs") as recovery,
-        ):
-            self.assertEqual(importer.main(), 1)
-
-        guard.assert_called_once()
-        pipeline_db.assert_not_called()
-        recovery.assert_not_called()
-        self.assertEqual(self.fixture.read_bytes(), b"no application state")
-
-    def test_preview_hard_failure_precedes_pipeline_db_and_recovery(self) -> None:
-        with (
-            patch.object(sys, "argv", [
-                "import_preview_worker.py",
-                "--config", self.config_path,
-                "--runtime-dir", self.tmp.name,
-                "--dsn", "postgresql://unused",
-                "--once",
-            ]),
-            patch(
-                "scripts.import_preview_worker.enforce_beets_startup",
-                side_effect=self._guard_failure(),
-            ) as guard,
-            patch("scripts.import_preview_worker.PipelineDB") as pipeline_db,
-            patch(
-                "scripts.import_preview_worker.recover_running_preview_jobs",
-            ) as recovery,
-        ):
-            self.assertEqual(import_preview_worker.main(), 1)
-
-        guard.assert_called_once()
-        pipeline_db.assert_not_called()
-        recovery.assert_not_called()
-        self.assertEqual(self.fixture.read_bytes(), b"no application state")
-
-    def test_web_hard_failure_precedes_auth_listener_cache_db_and_server(self) -> None:
-        from beets import config as active_beets_config
-
-        prior_origin = server.canonical_origin
-        prior_insecure = server.insecure_mode
-        with (
-            patch.dict(os.environ, {
-                "CRATEDIGGER_RUNTIME_CONFIG": "/caller/runtime.ini",
-                "BEETSDIR": "/caller/beets",
-            }),
-            patch.object(sys, "argv", [
-                "server.py",
-                "--config", self.config_path,
-                "--runtime-dir", self.tmp.name,
-                "--canonical-origin", "https://music.example",
-            ]),
-            patch(
-                "web.server.enforce_beets_startup",
-                side_effect=self._guard_failure(),
-            ) as guard,
-            patch("web.server.configure_insecure_mode") as insecure,
-            patch("web.server._take_systemd_unix_listener") as listener,
-            patch("web.server.cache.invalidate_pattern") as invalidate,
-            patch("web.server.PipelineDB") as pipeline_db,
-            patch("web.server.ThreadingUnixHTTPServer") as http_server,
-            patch.object(active_beets_config, "clear") as beets_clear,
-            patch.object(active_beets_config, "read") as beets_read,
-        ):
-            self.assertEqual(server.main(), 1)
-            self.assertEqual(
-                os.environ["CRATEDIGGER_RUNTIME_CONFIG"],
-                "/caller/runtime.ini",
-            )
-            self.assertEqual(os.environ["BEETSDIR"], "/caller/beets")
-
-        guard.assert_called_once()
-        insecure.assert_not_called()
-        listener.assert_not_called()
-        invalidate.assert_not_called()
-        pipeline_db.assert_not_called()
-        http_server.assert_not_called()
-        beets_clear.assert_not_called()
-        beets_read.assert_not_called()
-        self.assertEqual(server.canonical_origin, prior_origin)
-        self.assertEqual(server.insecure_mode, prior_insecure)
-        self.assertEqual(self.fixture.read_bytes(), b"no application state")
-
-    def test_each_entrypoint_checks_exactly_once_before_first_effect(self) -> None:
-        cfg = CratediggerConfig(
-            beets_library_db="/admitted/library.db",
-            beets_directory="/admitted/music",
-        )
-        cases = (
-            (
-                "main",
-                cratedigger.main,
-                [
-                    "cratedigger.py", "--config", self.config_path,
-                    "--runtime-dir", self.tmp.name, "--no-lock-file",
-                ],
-                "cratedigger.enforce_beets_startup",
-                "lib.permissions.reset_umask",
-            ),
-            (
-                "importer",
-                importer.main,
-                [
-                    "importer.py", "--config", self.config_path,
-                    "--runtime-dir", self.tmp.name, "--once",
-                ],
-                "scripts.importer.enforce_beets_startup",
-                "scripts.importer.PipelineDB",
-            ),
-            (
-                "preview",
-                import_preview_worker.main,
-                [
-                    "import_preview_worker.py", "--config", self.config_path,
-                    "--runtime-dir", self.tmp.name, "--once",
-                ],
-                "scripts.import_preview_worker.enforce_beets_startup",
-                "scripts.import_preview_worker.PipelineDB",
-            ),
-            (
-                "web",
-                server.main,
-                [
-                    "server.py", "--config", self.config_path,
-                    "--runtime-dir", self.tmp.name,
-                    "--canonical-origin", "https://music.example",
-                ],
-                "web.server.enforce_beets_startup",
-                "web.server.configure_insecure_mode",
-            ),
-        )
-        for role, entrypoint, argv, guard_path, effect_path in cases:
-            with self.subTest(role=role):
-                with (
-                    patch.object(sys, "argv", argv),
-                    patch(guard_path, return_value=cfg) as guard,
-                    patch(effect_path, side_effect=_PostGateEffect),
-                    self.assertRaises(_PostGateEffect),
-                ):
-                    entrypoint()
-                guard.assert_called_once_with(
-                    role=role,
-                    config_path=self.config_path,
-                    runtime_dir=self.tmp.name,
-                    logger=ANY,
-                )
 
     def test_web_rejects_retired_post_check_beets_overrides(self) -> None:
         for flag in ("--beets-db", "--beets-directory"):

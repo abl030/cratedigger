@@ -14,7 +14,11 @@ from lib.beets_config_contract import (
     BeetsRole,
     check_beets_config,
 )
-from lib.config import CratediggerConfig, read_runtime_config_strict
+from lib.config import (
+    CratediggerConfig,
+    install_admitted_runtime_config,
+    read_runtime_config_strict,
+)
 
 
 class BeetsStartupError(RuntimeError):
@@ -76,12 +80,7 @@ def enforce_beets_startup(
         )
     if not report.ok:
         raise BeetsStartupError("external Beets authority was rejected")
-    logger.info(
-        "Beets configuration admitted for %s (fingerprint=%s)",
-        role,
-        report.fingerprint,
-    )
-    return replace(
+    admitted = replace(
         cfg,
         beets_config_dir=report.authority.config_dir,
         beets_library_db=report.authority.library,
@@ -90,3 +89,10 @@ def enforce_beets_startup(
         beets_python=report.authority.python,
         beets_secret_include=report.authority.secret_include,
     )
+    install_admitted_runtime_config(config_path, admitted)
+    logger.info(
+        "Beets configuration admitted for %s (fingerprint=%s)",
+        role,
+        report.fingerprint,
+    )
+    return admitted
