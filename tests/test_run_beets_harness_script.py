@@ -7,9 +7,10 @@ from the module-rendered config), the harness resolves its beets config
 via BEETSDIR, and a missing interpreter is an actionable error rather
 than a silent fallback to a Home Manager profile.
 
-The BEETSDIR tests run the REAL harness on the REAL beets (dev-shell Python).
-They prove the wrapper selects the supplied configuration while deliberately
-leaving contract enforcement at the already-completed top-level startup gate.
+The BEETSDIR test runs the REAL harness on the REAL beets (dev-shell
+python) — it proves the whole chain production uses: wrapper → pinned
+interpreter → beets config.read() honouring BEETSDIR → the Palo Santo
+duplicate_keys guard evaluating the module-rendered config shape.
 """
 
 from __future__ import annotations
@@ -50,8 +51,11 @@ class TestRunBeetsHarnessScript(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("--search-id", proc.stdout)
 
-    def test_harness_does_not_repeat_duplicate_contract_validation(self) -> None:
-        """The child inherits an admitted BEETSDIR and never revalidates it."""
+    def test_harness_reads_beets_config_from_BEETSDIR(self) -> None:
+        """Launch exactly as production does (wrapper + env) against a
+        BEETSDIR whose config VIOLATES the duplicate_keys invariant: the
+        harness must read THAT config (not ~/.config/beets) and die with
+        the Palo Santo guard's message."""
         with tempfile.TemporaryDirectory() as beetsdir:
             with open(os.path.join(beetsdir, "config.yaml"), "w",
                       encoding="utf-8") as f:
@@ -64,11 +68,13 @@ class TestRunBeetsHarnessScript(unittest.TestCase):
                 capture_output=True, text=True, input="",
                 check=False,
             )
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertNotIn("duplicate_keys.album must be exactly", proc.stderr)
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn("duplicate_keys.album must be exactly", proc.stderr)
 
     def test_harness_accepts_module_shaped_config(self) -> None:
-        """A normal inherited configuration still reaches the Beets import."""
+        """Same launch, but the BEETSDIR carries the module-rendered
+        duplicate_keys shape — the guard passes and the harness proceeds
+        past config validation (empty dir -> clean run, no albums)."""
         with tempfile.TemporaryDirectory() as beetsdir, \
                 tempfile.TemporaryDirectory() as emptydir:
             with open(os.path.join(beetsdir, "config.yaml"), "w",

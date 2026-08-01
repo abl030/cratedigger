@@ -12,9 +12,6 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, NotRequired, Protocol, TypedDict
 
-from lib.beets_startup import BeetsStartupError, enforce_beets_startup
-from lib.config import resolve_startup_config_paths
-
 # Unified slskd search lifecycle (issue #466).
 from lib.search_exec import (
     SearchSubmitError,
@@ -1336,23 +1333,21 @@ def grab_most_wanted(albums: list[AlbumRecord]) -> int:
 from lib.util import setup_logging
 
 
-def main() -> int:
+def main():
     global \
         cfg, \
         slskd, \
         pipeline_db_source, \
         _module_ctx
 
+    # Belt-and-suspenders for systemd's UMask=0000 — see lib/permissions.py / GH #84.
+    from lib.permissions import reset_umask
+    reset_umask()
+
     parser = argparse.ArgumentParser(description="Cratedigger music download pipeline")
-    parser.add_argument("-c", "--config-dir", default=None,
+    parser.add_argument("-c", "--config-dir", default=os.getcwd(),
                         help="Config directory (default: cwd)")
-    parser.add_argument(
-        "--config",
-        default=None,
-        help="Immutable runtime config file (default: --config-dir/config.ini)",
-    )
-    parser.add_argument("-v", "--var-dir", "--runtime-dir",
-                        dest="runtime_dir", default=None,
+    parser.add_argument("-v", "--var-dir", default=os.getcwd(),
                         help="Var directory for lock file and caches (default: cwd)")
     parser.add_argument("--no-lock-file", action="store_true",
                         help="Disable lock file creation")
@@ -1367,46 +1362,34 @@ def main() -> int:
                              "classification counts are emitted.")
     args = parser.parse_args()
 
-    config_file_path, runtime_dir = resolve_startup_config_paths(
-        config_path=args.config,
-        runtime_dir=args.runtime_dir,
-        config_dir=args.config_dir,
-    )
-    config = configparser.RawConfigParser()
-    try:
-        config.read(config_file_path)
-    except (OSError, UnicodeError, configparser.Error):
-        # The strict startup loader below logs the native parse failure. This
-        # first read exists only to retain the configured logging format.
-        pass
-    setup_logging(config)
-    try:
-        cfg = enforce_beets_startup(
-            role="main",
-            config_path=config_file_path,
-            runtime_dir=runtime_dir,
-            logger=logger,
-        )
-    except BeetsStartupError:
-        return 1
-
-    # Belt-and-suspenders for systemd's UMask=0000 — see
-    # lib/permissions.py / GH #84. This changes process state, so it follows
-    # the startup contract gate.
-    from lib.permissions import reset_umask
-    reset_umask()
-
-    lock_file_path = os.path.join(runtime_dir, ".cratedigger.lock")
+    lock_file_path = os.path.join(args.var_dir, ".cratedigger.lock")
+    config_file_path = os.path.join(args.config_dir, "config.ini")
 
     if not args.no_lock_file and os.path.exists(lock_file_path):
         logger.info("Cratedigger instance is already running.")
-        return 1
+        sys.exit(1)
 
     try:
         if not args.no_lock_file:
             with open(lock_file_path, "w") as f:
                 f.write("locked")
 
+        config = configparser.RawConfigParser()
+
+        if os.path.exists(config_file_path):
+            config.read(config_file_path)
+        else:
+            logger.error(
+                f"Config file not found at {config_file_path}. "
+                "Pass --config-dir to specify its location. "
+                "Under the upstream NixOS module, /var/lib/cratedigger/config.ini "
+                "is rendered by preStartScript at boot."
+            )
+            sys.exit(1)
+
+        # --- Parse config into typed dataclass ---
+        from lib.config import CratediggerConfig
+        cfg = CratediggerConfig.from_ini(config, config_dir=args.config_dir, var_dir=args.var_dir)
         if args.redis_host is not None or args.redis_port is not None:
             redis_port = (
                 max(1, min(65535, args.redis_port))
@@ -1418,6 +1401,9 @@ def main() -> int:
                 peer_cache_redis_host=args.redis_host or cfg.peer_cache_redis_host,
                 peer_cache_redis_port=redis_port,
             )
+
+        setup_logging(config)
+
         if cfg.beets_validation_enabled:
             logger.info(f"Beets validation ENABLED: harness={cfg.beets_harness_path}, "
                         f"threshold={cfg.beets_distance_threshold}, staging={cfg.beets_staging_dir}")
@@ -1559,7 +1545,7 @@ def main() -> int:
             logger.info(
                 "--reconcile-dry-run set; skipping Phase 1 + Phase 2 "
                 "search execution.")
-            return 0
+            return
 
         # --- Plex addedAt pin reconciliation (migration 040) ---
         # Restore the original "added" date on albums that an upgrade
@@ -1707,8 +1693,7 @@ def main() -> int:
         # Remove the lock file after activity is done
         if not args.no_lock_file and os.path.exists(lock_file_path):
             os.remove(lock_file_path)
-    return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()
