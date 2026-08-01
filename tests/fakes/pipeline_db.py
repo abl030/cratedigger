@@ -6016,6 +6016,34 @@ class FakePipelineDB:
                     current_measurement.spectral_bitrate_kbps
                     if current_measurement is not None else None
                 ),
+                # issue #829 Phase 5 PR4 — the installed album's own
+                # codec-resolution facts, seeded from the evidence row so
+                # the HAVE grade chip's audit-only flag is derived, never
+                # invented.
+                "_current_evidence_codec_family": (
+                    current_measurement.codec_family
+                    if current_measurement is not None else None
+                ),
+                "_current_evidence_cliff_hz": (
+                    current_measurement.cliff_hz
+                    if current_measurement is not None else None
+                ),
+                "_current_evidence_storage_format": (
+                    current_evidence.storage_format
+                    if current_evidence is not None else None
+                ),
+                "_current_evidence_filetype_band": (
+                    current_evidence.filetype_band
+                    if current_evidence is not None else None
+                ),
+                "_current_evidence_spectral_subject": (
+                    current_measurement.spectral_subject
+                    if current_measurement is not None else None
+                ),
+                "_current_evidence_was_converted_from": (
+                    current_measurement.was_converted_from
+                    if current_measurement is not None else None
+                ),
                 "_current_evidence_v0_probe_kind": (
                     current_v0.subject if current_v0 is not None else None
                 ),
@@ -7139,6 +7167,68 @@ class FakePipelineDB:
         row.setdefault("source_min_bitrate", None)
         row.setdefault("source_avg_bitrate", None)
         row.setdefault("source_median_bitrate", None)
+        # issue #829 Phase 5 PR4 — the candidate-evidence columns the
+        # proof-gate verdict derivation reads
+        # (``_CANDIDATE_EVIDENCE_COLUMNS``). Sourced from the SEEDED
+        # evidence row, never invented: a fake that stamped None here
+        # would hide every verdict the render path is supposed to show.
+        evidence = (
+            self._evidence_by_id.get(entry.candidate_evidence_id)
+            if entry.candidate_evidence_id is not None
+            else None
+        )
+        measurement = evidence.measurement if evidence is not None else None
+        lattice = evidence.aac_lattice if evidence is not None else None
+        proof = (
+            evidence.verified_lossless_proof if evidence is not None else None
+        )
+        row.update({
+            "_evidence_codec_family": (
+                measurement.codec_family if measurement is not None else None
+            ),
+            "_evidence_cliff_hz": (
+                measurement.cliff_hz if measurement is not None else None
+            ),
+            "_evidence_storage_format": (
+                evidence.storage_format if evidence is not None else None
+            ),
+            "_evidence_filetype_band": (
+                evidence.filetype_band if evidence is not None else None
+            ),
+            "_evidence_spectral_subject": (
+                measurement.spectral_subject
+                if measurement is not None else None
+            ),
+            "_evidence_was_converted_from": (
+                measurement.was_converted_from
+                if measurement is not None else None
+            ),
+            "_evidence_ultrasonic_deficit_db": (
+                measurement.ultrasonic_deficit_db
+                if measurement is not None else None
+            ),
+            "_evidence_spectral_measurement_version": (
+                measurement.spectral_measurement_version
+                if measurement is not None else None
+            ),
+            "_evidence_aac_lattice_modal_count": (
+                lattice.modal_count if lattice is not None else None
+            ),
+            "_evidence_aac_lattice_scored_tracks": (
+                lattice.scored_tracks if lattice is not None else None
+            ),
+            "_evidence_aac_lattice_max_z": (
+                lattice.max_z if lattice is not None else None
+            ),
+            "_evidence_verified_lossless_classifier": (
+                proof.classifier if proof is not None else None
+            ),
+            "_evidence_container_extensions": (
+                sorted({file.extension for file in evidence.files})
+                if evidence is not None and evidence.files
+                else None
+            ),
+        })
         return row
 
     # --- Wrong-match review queue ---

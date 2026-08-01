@@ -4299,6 +4299,111 @@ class TestDownloadLog(unittest.TestCase):
             self.assertEqual(row["source_avg_bitrate"], 259)
             self.assertEqual(row["source_median_bitrate"], 255)
 
+    def test_every_reader_returns_the_proof_gate_evidence_columns(self):
+        """The PR4 aliases survive real PG on every download-log reader.
+
+        Issue #829 Phase 5 PR4 added one shared candidate-evidence column
+        block (``_CANDIDATE_EVIDENCE_COLUMNS``) to five queries. A column
+        that fails to reach the renderer produces a silently empty verdict,
+        which is exactly the shape ``.claude/rules/test-fidelity.md`` Rule A
+        exists to catch — so the assertion is that every declared alias
+        round-trips its seeded value, not just the obvious ones.
+        """
+        from lib.quality import (
+            VERIFIED_LOSSLESS_CLASSIFIER_V4,
+            AacLatticeCapture,
+            AacLatticeTrackScore,
+            AudioQualityMeasurement,
+            VerifiedLosslessProof,
+        )
+
+        log_id = self.db.log_download(self.req_id, outcome="success")
+        evidence = make_album_quality_evidence(
+            mb_release_id="download-overlay-proof-gate",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=900,
+                avg_bitrate_kbps=950,
+                format="FLAC",
+                spectral_grade="genuine",
+                spectral_bitrate_kbps=None,
+                spectral_subject="source",
+                spectral_provenance="measured",
+                was_converted_from="flac",
+                cliff_hz=18250,
+                codec_family="lossless",
+                ultrasonic_deficit_db=41.5,
+                spectral_measurement_version=2,
+            ),
+            codec="flac",
+            container="flac",
+            storage_format="FLAC",
+            aac_lattice=AacLatticeCapture.from_tracks([
+                AacLatticeTrackScore(
+                    filename=f"{index:02d}.flac",
+                    offset=64 if index < 2 else 100 + index,
+                    z=4.25 if index == 0 else 1.5,
+                    proba=0.5,
+                )
+                for index in range(6)
+            ]),
+            verified_lossless_proof=VerifiedLosslessProof(
+                provenance="measured",
+                source="flac",
+                classifier=VERIFIED_LOSSLESS_CLASSIFIER_V4,
+                detail="genuine",
+            ),
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.db.set_download_log_candidate_evidence(log_id, stored.id)
+
+        expected = {
+            "_evidence_codec_family": "lossless",
+            "_evidence_cliff_hz": 18250,
+            "_evidence_storage_format": "FLAC",
+            "_evidence_spectral_subject": "source",
+            "_evidence_was_converted_from": "flac",
+            "_evidence_ultrasonic_deficit_db": 41.5,
+            "_evidence_spectral_measurement_version": 2,
+            "_evidence_aac_lattice_modal_count": 2,
+            "_evidence_aac_lattice_scored_tracks": 6,
+            "_evidence_aac_lattice_max_z": 4.25,
+            "_evidence_verified_lossless_classifier": (
+                VERIFIED_LOSSLESS_CLASSIFIER_V4
+            ),
+        }
+        rows = [
+            self.db.get_download_log_entry(log_id),
+            self.db.get_download_history(self.req_id)[0],
+            self.db.get_download_history_batch([self.req_id])[self.req_id][0],
+            next(row for row in self.db.get_log() if row["id"] == log_id),
+            self.db.get_latest_download_summaries(
+                [self.req_id]
+            )[self.req_id]["latest"],
+        ]
+        for row in rows:
+            assert row is not None
+            for key, value in expected.items():
+                self.assertEqual(
+                    row[key], value,
+                    f"{key} was dropped at the PG boundary")
+            self.assertEqual(
+                sorted(row["_evidence_container_extensions"] or []),
+                sorted({file.extension for file in evidence.files}),
+            )
+
+    def test_proof_gate_columns_are_null_without_candidate_evidence(self):
+        """No evidence join means no verdict — never a fabricated clearance."""
+        log_id = self.db.log_download(self.req_id, outcome="rejected")
+        row = next(row for row in self.db.get_log() if row["id"] == log_id)
+        self.assertIsNone(row["_evidence_codec_family"])
+        self.assertIsNone(row["_evidence_verified_lossless_classifier"])
+        self.assertIsNone(row["_evidence_container_extensions"])
+
     def test_get_log_imported_filter_excludes_rejected_rows(self):
         """Contract guard: only truly-imported rows count as "imported".
 
