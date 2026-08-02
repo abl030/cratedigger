@@ -11,9 +11,16 @@
 #     flake = false;
 #   };
 #
-# Wire cratedigger at it with:
+# Wire Cratedigger browse at it with:
 #   services.cratedigger.discogs.apiBase = "http://localhost:8086";
-#   services.cratedigger.beets.package.discogsMirrorUrl = "http://localhost:8086";
+# Build the deployment-owned Beets package separately with:
+#   beetsPackage = import ../nix/beets.nix {
+#     inherit pkgs;
+#     discogsMirrorUrl = "http://localhost:8086";
+#   };
+# Then supply that package via `services.cratedigger.beets.runtime.package`,
+# keep the mirror policy in the external immutable BEETSDIR, and provide the
+# designated token-only include through `beets.runtime.expectedSecretInclude`.
 #
 # Two units:
 #   discogs-import.service/.timer — monthly oneshot: download the latest

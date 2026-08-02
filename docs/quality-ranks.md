@@ -481,11 +481,11 @@ every request) and waiting for the next `cratedigger.timer` fire (5 min).
 
 > Relocated from the README (tier-2 doc run, 2026-07-04) — this is the operational tuning reference; the sections above are the model rationale.
 
-Every threshold, enum, and per-codec band in the rank model is tunable via Nix options on the deployment side. The runtime parses them from `[Quality Ranks]` in `/var/lib/cratedigger/config.ini`, which is regenerated on every `nixos-rebuild switch` from the Nix module. Full rationale and per-band justification lives in [`docs/quality-ranks.md`](docs/quality-ranks.md); this section is the tuning reference.
+Every threshold, enum, and per-codec band in the rank model is tunable via Nix options on the deployment side. The runtime parses them from `[Quality Ranks]` in the immutable application config built by the Nix module. Full rationale and per-band justification lives in [`docs/quality-ranks.md`](docs/quality-ranks.md); this section is the tuning reference.
 
 ### Where to tune
 
-All options live under `services.cratedigger.qualityRanks.*` and are declared by the upstream NixOS module at [`nix/module.nix`](nix/module.nix) in this repo. Set them anywhere in your NixOS config that imports `cratedigger.nixosModules.default` — typically a host config or a homelab wrapper. The `[Quality Ranks]` section of `config.ini` is regenerated from these options on every `nixos-rebuild switch`; Cratedigger picks up the new values on its next 5-min timer fire.
+All options live under `services.cratedigger.qualityRanks.*` and are declared by the upstream NixOS module at [`nix/module.nix`](nix/module.nix) in this repo. Set them anywhere in your NixOS config that imports `cratedigger.nixosModules.default` — typically a host config or a homelab wrapper. Rebuild creates a new immutable config store path; Cratedigger picks it up on its next timer fire.
 
 **Source of truth**: `QualityRankConfig.defaults()` in `lib/quality/ranks.py`, pinned by `TestQualityRankConfigDefaults` in `tests/test_quality_decisions.py`. The Nix options mirror those defaults for declarative visibility -- you should be able to open `cratedigger.nix` and read your current policy without grepping Python. Drift between Python and Nix is caught at cratedigger test time: bump a default in either repo, the pin test fails and reminds you to update the other.
 
@@ -555,7 +555,14 @@ ssh doc2 'sudo nixos-rebuild switch --flake github:abl030/nixosconfig#doc2 --ref
 
 ### How to verify the new config is live
 
-1. **Read the generated file** -- `ssh doc2 'sudo cat /var/lib/cratedigger/config.ini | grep -A 30 "\[Quality Ranks\]"'`. The section should show the exact values from your Nix edit.
+1. **Read the active immutable file** -- derive the active wrapper and its fixed
+   config argument, never glob store generations:
+
+   ```bash
+   ssh doc2 'wrapper=$(systemctl show -P ExecStart cratedigger.service | sed -n "s/.*path=\([^ ;]*\).*/\1/p"); config=$(grep -o "/nix/store/[^\"]*cratedigger-config.ini" "$wrapper"); grep -A30 "^\[Quality Ranks\]" "$config"'
+   ```
+
+   The section should show the exact values from the Nix edit.
 
 2. **Check the runtime picks them up** -- `ssh doc2 'pipeline-cli quality <any_request_id>'`. The output prints the active `bitrate_metric` and simulates decisions with the configured codec thresholds. Mismatch means Cratedigger hasn't restarted since the rebuild (it's a 5-min timer) -- wait a cycle or `sudo systemctl start cratedigger --no-block`.
 

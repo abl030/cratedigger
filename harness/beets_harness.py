@@ -67,8 +67,8 @@ def _mutations_log_path() -> str:
     Without this log, those mutations are invisible to cratedigger's audit
     trail (see the 04-14 Lucksmiths case). Derived from the configured
     library path (next to it, so it survives host rebuilds and follows
-    whatever library the module-rendered BEETSDIR config points at —
-    tier-2 plan U5, no hardcoded operator paths).
+    whatever library the deployment-owned BEETSDIR config points at, with no
+    hardcoded operator paths).
     """
     lib_path = config["library"].as_filename()
     return os.path.join(os.path.dirname(lib_path), ".harness-mutations.jsonl")
