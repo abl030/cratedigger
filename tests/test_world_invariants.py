@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import ast
 import os
 import tempfile
 import unittest
+from pathlib import Path
 
 import msgspec
 
@@ -17,6 +19,7 @@ from lib.beets_db import (
 from lib.quality import ImportResult, ValidationResult
 from lib.release_identity import ReleaseIdentity
 from lib.world_invariants import (
+    WORLD_VIOLATION_BUCKETS,
     DenylistAuthoritySnapshot,
     EvidenceDiskSnapshot,
     LibraryAlbumSnapshot,
@@ -31,7 +34,31 @@ from lib.world_invariants import (
     check_proof_lock_terminality,
     check_status_membership,
     derive_denylist_authorities,
+    world_violation_bucket,
 )
+
+EXPECTED_WORLD_VIOLATION_BUCKETS = {
+    "proof_lock_broken": "A",
+    "lossy_tier_widened": "A",
+    "denylist_without_authority": "A",
+    "current_evidence_dangling": "A",
+    "evidence_release_mismatch": "A",
+    "evidence_capture_path_missing": "A",
+    "request_identity_missing": "A",
+    "current_beets_missing": "B",
+    "current_beets_ambiguous": "B",
+    "current_beets_authority_unavailable": "B",
+    "evidence_fingerprint_mismatch": "B",
+    "evidence_link_without_album": "B",
+    "current_evidence_missing": "B",
+    "album_fingerprint_unavailable": "B",
+    "album_empty": "C",
+    "item_outside_album_folder": "C",
+    "folder_shared": "C",
+    "album_folder_missing": "C",
+    "album_item_missing": "C",
+    "beets_identity_missing": "C",
+}
 
 
 def _identity(release_id: str) -> ReleaseIdentity:
@@ -52,6 +79,30 @@ def _unique(album: LibraryAlbumSnapshot) -> CurrentBeetsUnique:
 
 
 class TestWorldInvariantPins(unittest.TestCase):
+    def test_every_world_violation_code_has_its_settled_owner(self) -> None:
+        self.assertEqual(dict(WORLD_VIOLATION_BUCKETS), EXPECTED_WORLD_VIOLATION_BUCKETS)
+
+    def test_unknown_world_violation_fails_closed_to_bucket_a(self) -> None:
+        self.assertEqual(world_violation_bucket("future_unclassified_code"), "A")
+
+    def test_registry_covers_every_literal_world_violation_producer(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        emitted: set[str] = set()
+        for relative in ("lib/world_invariants.py", "lib/world_audit_service.py"):
+            tree = ast.parse((repo_root / relative).read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                if not isinstance(node.func, ast.Name) or node.func.id != "WorldViolation":
+                    continue
+                code = next(
+                    (keyword.value for keyword in node.keywords if keyword.arg == "code"),
+                    None,
+                )
+                if isinstance(code, ast.Constant) and isinstance(code.value, str):
+                    emitted.add(code.value)
+        self.assertEqual(emitted, set(WORLD_VIOLATION_BUCKETS))
+
     def test_distinct_folders_and_imported_membership_are_coherent(self) -> None:
         albums = (
             LibraryAlbumSnapshot(

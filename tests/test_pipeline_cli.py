@@ -6040,7 +6040,7 @@ class TestDestructiveCliAdapters(unittest.TestCase):
 
 
 class TestWorldAuditCLI(unittest.TestCase):
-    def test_json_uses_shared_report_and_violation_exit_code(self) -> None:
+    def test_json_keeps_bucket_b_visible_without_failing(self) -> None:
         import scripts.pipeline_cli.audit as audit_cli
 
         db = FakePipelineDB()
@@ -6064,11 +6064,71 @@ class TestWorldAuditCLI(unittest.TestCase):
             )
 
         payload = json.loads(output.getvalue())
-        self.assertEqual(rc, 1)
-        self.assertEqual(payload["status"], "violations")
+        self.assertEqual(rc, 0)
+        self.assertEqual(payload["status"], "observations_only")
+        self.assertTrue(payload["complete"])
         self.assertIn(
             "current_beets_missing",
-            {row["code"] for row in payload["violations"]},
+            {row["code"] for row in payload["groups"]["b"]["members"]},
+        )
+
+    def test_integrity_bucket_a_returns_one(self) -> None:
+        import scripts.pipeline_cli.audit as audit_cli
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=744,
+            mb_release_id=None,
+            discogs_release_id=None,
+            status="imported",
+        ))
+        output = io.StringIO()
+        with (
+            patch.object(audit_cli, "_open_beets", return_value=FakeBeetsDB()),
+            redirect_stdout(output),
+        ):
+            rc = pipeline_cli.cmd_audit_world(
+                db,
+                argparse.Namespace(
+                    beets_db="unused.db",
+                    beets_directory="/unused/library",
+                    json=True,
+                ),
+            )
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(rc, 1)
+        self.assertEqual(payload["status"], "integrity_failed")
+        self.assertEqual(
+            [row["code"] for row in payload["groups"]["a"]["members"]],
+            ["request_identity_missing"],
+        )
+
+    def test_unexpected_failure_remains_exit_five(self) -> None:
+        import scripts.pipeline_cli.audit as audit_cli
+
+        output = io.StringIO()
+        with (
+            patch.object(
+                audit_cli,
+                "_open_beets",
+                side_effect=RuntimeError("programmer defect"),
+            ),
+            redirect_stdout(output),
+        ):
+            rc = pipeline_cli.cmd_audit_world(
+                FakePipelineDB(),
+                argparse.Namespace(
+                    beets_db="unused.db",
+                    beets_directory="/unused/library",
+                    json=True,
+                ),
+            )
+
+        self.assertEqual(rc, 5)
+        self.assertEqual(
+            json.loads(output.getvalue())["error"],
+            "world_audit_failed",
         )
 
     def test_parser_exposes_nested_audit_world_command(self) -> None:

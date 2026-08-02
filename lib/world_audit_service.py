@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+import sqlite3
+from collections.abc import Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Literal, Never, Protocol, runtime_checkable
 
 import msgspec
 
@@ -31,6 +32,7 @@ from lib.world_invariants import (
     check_library_filesystem,
     check_status_membership,
     derive_denylist_authorities,
+    world_violation_bucket,
 )
 
 AUDITED_INVARIANTS = (
@@ -53,15 +55,53 @@ class WorldAuditCounts(msgspec.Struct, frozen=True):
     beets_albums: int
     linked_evidence: int
     denylist_rows: int
-    violations: int
+    bucket_a: int = 0
+    bucket_b: int = 0
+    bucket_c: int = 0
+
+    @property
+    def violations(self) -> int:
+        """Internal aggregate for non-public generic consumers."""
+
+        return self.bucket_a + self.bucket_b + self.bucket_c
+
+
+class WorldAuditGroup(msgspec.Struct, frozen=True):
+    bucket: Literal["A", "B", "C"]
+    owner: str
+    count: int
+    members: tuple[WorldViolation, ...]
+
+
+class WorldAuditGroups(msgspec.Struct, frozen=True):
+    a: WorldAuditGroup
+    b: WorldAuditGroup
+    c: WorldAuditGroup
 
 
 class WorldAuditReport(msgspec.Struct, frozen=True):
     status: str
+    complete: bool
     counts: WorldAuditCounts
     audited_invariants: tuple[str, ...]
     temporal_invariants_not_auditable: tuple[str, ...]
-    violations: tuple[WorldViolation, ...]
+    groups: WorldAuditGroups
+
+    @property
+    def violations(self) -> tuple[WorldViolation, ...]:
+        """Internal aggregate; public JSON remains grouped by owner."""
+
+        return (
+            self.groups.a.members
+            + self.groups.b.members
+            + self.groups.c.members
+        )
+
+
+class BeetsAuthorityUnavailable(msgspec.Struct, frozen=True):
+    """Closed expected failure while opening or querying Beets authority."""
+
+    category: str
 
 
 @runtime_checkable
@@ -90,6 +130,75 @@ class WorldAuditBeetsDB(Protocol):
         identities: list[ReleaseIdentity],
     ) -> dict[ReleaseIdentity, CurrentBeetsResolution]: ...
 
+    def close(self) -> None: ...
+
+
+type WorldAuditBeetsFactory = Callable[[], WorldAuditBeetsDB]
+
+
+class _BeetsQueryUnavailable(Exception):
+    def __init__(self, category: str) -> None:
+        super().__init__(category)
+        self.category = category
+
+
+_SQLITE_AUTHORITY_AVAILABILITY_CODES = frozenset({
+    sqlite3.SQLITE_AUTH,
+    sqlite3.SQLITE_BUSY,
+    sqlite3.SQLITE_CANTOPEN,
+    sqlite3.SQLITE_IOERR,
+    sqlite3.SQLITE_LOCKED,
+    sqlite3.SQLITE_PERM,
+})
+
+
+def _beets_authority_availability_category(exc: Exception) -> str | None:
+    if isinstance(exc, FileNotFoundError):
+        return "FileNotFoundError"
+    if isinstance(exc, PermissionError):
+        return "PermissionError"
+    if not isinstance(exc, sqlite3.OperationalError):
+        return None
+    raw_code = getattr(exc, "sqlite_errorcode", None)
+    if not isinstance(raw_code, int):
+        return None
+    primary_code = raw_code & 0xFF
+    if primary_code not in _SQLITE_AUTHORITY_AVAILABILITY_CODES:
+        return None
+    return f"sqlite_{primary_code}"
+
+
+def _translate_beets_query_failure(exc: Exception) -> Never:
+    category = _beets_authority_availability_category(exc)
+    if category is None:
+        raise exc
+    raise _BeetsQueryUnavailable(category) from exc
+
+
+class _AvailabilityMediatedBeetsDB:
+    """Translate only failures raised by the two Beets query calls."""
+
+    def __init__(self, beets: WorldAuditBeetsDB) -> None:
+        self._beets = beets
+
+    def list_world_albums(self) -> list[BeetsWorldAlbum]:
+        try:
+            return self._beets.list_world_albums()
+        except Exception as exc:  # noqa: BLE001 - closed classifier re-raises
+            _translate_beets_query_failure(exc)
+
+    def resolve_current_releases(
+        self,
+        identities: list[ReleaseIdentity],
+    ) -> dict[ReleaseIdentity, CurrentBeetsResolution]:
+        try:
+            return self._beets.resolve_current_releases(identities)
+        except Exception as exc:  # noqa: BLE001 - closed classifier re-raises
+            _translate_beets_query_failure(exc)
+
+    def close(self) -> None:
+        self._beets.close()
+
 
 def _current_evidence_id(row: Mapping[str, Any]) -> int | None:
     raw = row.get("current_evidence_id")
@@ -113,6 +222,67 @@ def _sorted_violations(
             violation.detail,
         ),
     ))
+
+
+_GROUP_OWNERS = {
+    "A": "cratedigger_integrity",
+    "B": "current_holdings_projection",
+    "C": "beets_library",
+}
+
+
+def build_world_audit_report(
+    *,
+    counts: WorldAuditCounts,
+    violations: Sequence[WorldViolation],
+    complete: bool = True,
+) -> WorldAuditReport:
+    """Build the one deterministic public ownership presentation."""
+
+    grouped: dict[Literal["A", "B", "C"], list[WorldViolation]] = {
+        "A": [],
+        "B": [],
+        "C": [],
+    }
+    for violation in _sorted_violations(violations):
+        grouped[world_violation_bucket(violation.code)].append(violation)
+
+    def make_group(bucket: Literal["A", "B", "C"]) -> WorldAuditGroup:
+        members = tuple(grouped[bucket])
+        return WorldAuditGroup(
+            bucket=bucket,
+            owner=_GROUP_OWNERS[bucket],
+            count=len(members),
+            members=members,
+        )
+
+    groups = WorldAuditGroups(
+        a=make_group("A"),
+        b=make_group("B"),
+        c=make_group("C"),
+    )
+    if groups.a.count:
+        status = "integrity_failed"
+    elif groups.b.count or groups.c.count:
+        status = "observations_only"
+    else:
+        status = "clean"
+    return WorldAuditReport(
+        status=status,
+        complete=complete,
+        counts=WorldAuditCounts(
+            active_requests=counts.active_requests,
+            beets_albums=counts.beets_albums,
+            linked_evidence=counts.linked_evidence,
+            denylist_rows=counts.denylist_rows,
+            bucket_a=groups.a.count,
+            bucket_b=groups.b.count,
+            bucket_c=groups.c.count,
+        ),
+        audited_invariants=AUDITED_INVARIANTS,
+        temporal_invariants_not_auditable=TEMPORAL_INVARIANTS_NOT_AUDITABLE,
+        groups=groups,
+    )
 
 
 def audit_world(
@@ -271,28 +441,96 @@ def audit_world(
         )
     )
     violations.extend(check_denylist_authority(denylist_snapshots))
-    rendered = _sorted_violations(violations)
-    return WorldAuditReport(
-        status="clean" if not rendered else "violations",
+    return build_world_audit_report(
         counts=WorldAuditCounts(
             active_requests=len(requests),
             beets_albums=len(raw_albums),
             linked_evidence=linked_evidence_count,
             denylist_rows=len(denylist_snapshots),
-            violations=len(rendered),
         ),
-        audited_invariants=AUDITED_INVARIANTS,
-        temporal_invariants_not_auditable=TEMPORAL_INVARIANTS_NOT_AUDITABLE,
-        violations=rendered,
+        violations=violations,
     )
+
+
+def _open_beets_authority(
+    beets_factory: WorldAuditBeetsFactory,
+) -> WorldAuditBeetsDB | BeetsAuthorityUnavailable:
+    try:
+        return beets_factory()
+    except Exception as exc:
+        category = _beets_authority_availability_category(exc)
+        if category is None:
+            raise
+        return BeetsAuthorityUnavailable(category=category)
+
+
+def _audit_world_with_mediated_beets(
+    pipeline_db: WorldAuditPipelineDB,
+    beets: WorldAuditBeetsDB,
+) -> WorldAuditReport | BeetsAuthorityUnavailable:
+    try:
+        return audit_world(pipeline_db, _AvailabilityMediatedBeetsDB(beets))
+    except _BeetsQueryUnavailable as exc:
+        return BeetsAuthorityUnavailable(category=exc.category)
+
+
+def _unavailable_beets_report(category: str) -> WorldAuditReport:
+    return build_world_audit_report(
+        counts=WorldAuditCounts(0, 0, 0, 0),
+        violations=(WorldViolation(
+            code="current_beets_authority_unavailable",
+            detail=f"current Beets authority unavailable ({category})",
+        ),),
+        complete=False,
+    )
+
+
+def audit_world_from_factory(
+    pipeline_db: WorldAuditPipelineDB,
+    beets_factory: WorldAuditBeetsFactory,
+) -> WorldAuditReport:
+    """Own Beets open/query/close and type only expected unavailability."""
+
+    opened = _open_beets_authority(beets_factory)
+    if isinstance(opened, BeetsAuthorityUnavailable):
+        return _unavailable_beets_report(opened.category)
+    try:
+        result = _audit_world_with_mediated_beets(pipeline_db, opened)
+    finally:
+        opened.close()
+    if isinstance(result, WorldAuditReport):
+        return result
+    return _unavailable_beets_report(result.category)
+
+
+def audit_world_from_borrowed_factory(
+    pipeline_db: WorldAuditPipelineDB,
+    beets_factory: WorldAuditBeetsFactory,
+) -> WorldAuditReport:
+    """Mediate a server-owned Beets handle without closing its lifecycle."""
+
+    opened = _open_beets_authority(beets_factory)
+    if isinstance(opened, BeetsAuthorityUnavailable):
+        return _unavailable_beets_report(opened.category)
+    result = _audit_world_with_mediated_beets(pipeline_db, opened)
+    if isinstance(result, WorldAuditReport):
+        return result
+    return _unavailable_beets_report(result.category)
 
 
 __all__ = [
     "AUDITED_INVARIANTS",
     "TEMPORAL_INVARIANTS_NOT_AUDITABLE",
+    "BeetsAuthorityUnavailable",
     "WorldAuditBeetsDB",
+    "WorldAuditBeetsFactory",
     "WorldAuditCounts",
+    "WorldAuditGroup",
+    "WorldAuditGroups",
     "WorldAuditPipelineDB",
     "WorldAuditReport",
     "audit_world",
+    "audit_world_from_borrowed_factory",
+    "audit_world_from_factory",
+    "build_world_audit_report",
 ]

@@ -20,12 +20,15 @@ from lib.beets_db import (
 from lib.quality import dispatch_action
 from lib.quality.decisions import post_import_search_action_if_known
 from lib.release_identity import ReleaseIdentity
+from lib.world_audit_service import WorldAuditCounts, build_world_audit_report
 from lib.world_invariants import (
+    WORLD_VIOLATION_BUCKETS,
     DenylistAuthoritySnapshot,
     EvidenceDiskSnapshot,
     LibraryAlbumSnapshot,
     LifecycleTransitionSnapshot,
     RequestMembershipSnapshot,
+    WorldViolation,
     check_denylist_authority,
     check_evidence_disk_coherence,
     check_folder_exclusivity,
@@ -34,6 +37,7 @@ from lib.world_invariants import (
     check_proof_lock_terminality,
     check_status_membership,
     derive_denylist_authorities,
+    world_violation_bucket,
 )
 
 _SEGMENT = st.text(
@@ -76,6 +80,45 @@ def _unique(release_id: str, album_id: int, folder: str) -> CurrentBeetsUnique:
 
 
 class TestWorldInvariantGenerated(unittest.TestCase):
+    @given(
+        codes=st.lists(
+            st.sampled_from(tuple(WORLD_VIOLATION_BUCKETS)),
+            min_size=0,
+            max_size=40,
+        ),
+        reverse=st.booleans(),
+    )
+    def test_every_generated_finding_is_grouped_once_by_owner(
+        self,
+        codes: list[str],
+        reverse: bool,
+    ) -> None:
+        violations = [
+            WorldViolation(code=code, detail=f"{index:03d}:{code}")
+            for index, code in enumerate(codes)
+        ]
+        if reverse:
+            violations.reverse()
+
+        report = build_world_audit_report(
+            counts=WorldAuditCounts(0, 0, 0, 0),
+            violations=tuple(violations),
+        )
+        grouped = tuple(
+            member
+            for group in (report.groups.a, report.groups.b, report.groups.c)
+            for member in group.members
+        )
+
+        self.assertCountEqual(grouped, violations)
+        for bucket, group in (
+            ("A", report.groups.a),
+            ("B", report.groups.b),
+            ("C", report.groups.c),
+        ):
+            self.assertTrue(all(world_violation_bucket(item.code) == bucket for item in group.members))
+            self.assertEqual(group.count, len(group.members))
+
     @given(release_ids=st.lists(_SEGMENT, min_size=1, max_size=8, unique=True))
     def test_unique_release_folders_are_coherent(self, release_ids: list[str]) -> None:
         albums: list[LibraryAlbumSnapshot] = []
