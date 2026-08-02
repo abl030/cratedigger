@@ -53,18 +53,23 @@ import { processingOwnerPresentation } from './release_action_state.js';
  */
 export function renderStatusBadges(item) {
   const key = item.id ? pipelineStoreKey(item.id) : '';
-  const stored = key ? pipelineStore.get(key) : null;
+  let stored = key ? pipelineStore.get(key) : null;
+  if (stored
+      && (item.pipeline_status || null) === stored.status
+      && (item.pipeline_id ?? null) === stored.id) {
+    // The authoritative row has acknowledged the local lifecycle mutation.
+    // Drop the overlay so later server-side transitions remain visible.
+    pipelineStore.delete(key);
+    stored = null;
+  }
   const pStatus = stored ? stored.status : (item.pipeline_status || null);
   const owner = stored
     ? stored.processing_owner
     : (item.processing_owner || null);
   // A local mutation owns lifecycle only. Suppress historical facts from a
-  // row whose status/id has not caught up yet, then trust them again after an
-  // authoritative refetch matches the stored lifecycle projection.
-  const itemFactsAreCurrent = !stored || (
-    (item.pipeline_status || null) === stored.status
-    && (item.pipeline_id ?? null) === stored.id
-  );
+  // row whose status/id has not caught up yet. A matching authoritative
+  // refetch clears the overlay above and restores every row-owned fact.
+  const itemFactsAreCurrent = !stored;
   const hasCapturedHistory = itemFactsAreCurrent
     && item.has_captured_history === true;
   const verifiedLossless = itemFactsAreCurrent
