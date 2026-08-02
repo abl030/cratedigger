@@ -26,6 +26,7 @@ from scripts.run_fuzz_tests import (
     is_structurally_shallow,
 )
 from scripts.run_python_tests import (
+    AUDITED_FRONTLOAD_MODULES,
     HOTSPOT_SHARD_POLICIES,
     HYPOTHESIS_CASE_STATUSES,
     STRATEGY_SPACE_EXHAUSTED,
@@ -130,6 +131,25 @@ class TestModuleDiscovery(unittest.TestCase):
             ],
         )
 
+    def test_only_the_audited_nix_straggler_is_frontloaded(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            tests_dir = root / "tests"
+            tests_dir.mkdir()
+            (tests_dir / "__init__.py").write_text("", encoding="utf-8")
+            (tests_dir / "test_nix_module.py").write_text("# nix\n", encoding="utf-8")
+            (tests_dir / "test_ordinary.py").write_text("# ordinary\n", encoding="utf-8")
+
+            modules = discover_test_modules(tests_dir, root, "test*.py")
+
+        self.assertEqual(
+            {module.name: module.frontload for module in modules},
+            {
+                "tests.test_nix_module": True,
+                "tests.test_ordinary": False,
+            },
+        )
+
 
 class TestModuleScheduling(unittest.TestCase):
     def test_worker_policy_scales_with_host_without_chasing_diminishing_returns(
@@ -187,9 +207,16 @@ class TestModuleScheduling(unittest.TestCase):
 
     def test_audited_hotspots_split_at_the_narrowest_safe_boundary(self) -> None:
         self.assertEqual(
+            AUDITED_FRONTLOAD_MODULES,
+            frozenset({"tests.test_nix_module"}),
+        )
+        self.assertEqual(
             HOTSPOT_SHARD_POLICIES,
             {
                 "tests.test_beets_destructive_configs_generated": "method_batch",
+                "tests.test_deploy_pin_generated": "method_batch",
+                "tests.test_deploy_pin_script": "method_batch",
+                "tests.test_nix_module": "method_batch",
                 "tests.test_pipeline_db": "class_batch",
             },
         )
