@@ -128,10 +128,12 @@ Policy:
   the source is accused (suspect/likely_transcode) — the historical
   fail-closed direction — or when a comparable anchor exists (no evidence
   can challenge the recorded truth-of-source). An unaccused, unanchored,
-  probe-less candidate falls through to the measured policy's historical
-  first-import behavior; on the production path the preview grinds the
-  probe into evidence before the importer decides, so that fall-through is
-  an abnormal-evidence seam.
+  probe-less candidate falls through to the measured policy — including
+  over an existing unanchored copy, which that compare may displace;
+  self-limiting, since the import records the anchor and every later
+  probe-carrying candidate takes the lane. On the production path the
+  preview grinds the probe into evidence before the importer decides, so
+  the fall-through is an abnormal-evidence seam.
 
 Provisional imports are deliberately not verified lossless. They may still use
 the configured lossless-source storage target, but `verified_lossless` remains

@@ -465,11 +465,13 @@ def provisional_lossless_decision(
                 stage_chain=[f"stage2_provisional:{decision}"],
             )
         # Unaccused, unanchored, and evidence-less: continue through the
-        # measured policy — there is no anchor to defend, and a first
-        # import is the historical behavior. On the production path the
-        # preview grinds the V0 probe into the evidence row BEFORE the
-        # importer decides, so this fall-through is an abnormal-evidence
-        # seam, not the ordinary route.
+        # measured policy — there is no anchor to defend. That includes an
+        # existing UNANCHORED copy, which the measured compare may still
+        # displace; self-limiting, because the import records the anchor
+        # and every later probe-carrying candidate takes the lane. On the
+        # production path the preview grinds the V0 probe into the
+        # evidence row BEFORE the importer decides, so this fall-through
+        # is an abnormal-evidence seam, not the ordinary route.
         return ProvisionalLosslessDecisionResult()
 
     candidate_probe = candidate.candidate_probe
