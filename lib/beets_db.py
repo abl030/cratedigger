@@ -125,6 +125,27 @@ class CurrentBeetsAmbiguous:
 type CurrentBeetsResolution = (
     CurrentBeetsUnique | CurrentBeetsMissing | CurrentBeetsAmbiguous
 )
+
+
+def _raise_conflicting_release_identities(
+    resolutions: dict[ReleaseIdentity, CurrentBeetsResolution],
+) -> None:
+    """Never project a requested conflicting exact identity as absence."""
+    conflicts = [
+        result.identity.release_id
+        for result in resolutions.values()
+        if (
+            isinstance(result, CurrentBeetsAmbiguous)
+            and result.reason == "conflicting_identity"
+        )
+    ]
+    if conflicts:
+        raise ConflictingReleaseIdentityError(
+            "conflicting numeric Discogs release identities for: "
+            + ", ".join(sorted(conflicts))
+        )
+
+
 type _RawCurrentItem = tuple[
     int,
     object,
@@ -745,6 +766,7 @@ class BeetsDB:
         resolutions = self.resolve_current_releases(
             list(identities_by_release_id.values()),
         )
+        _raise_conflicting_release_identities(resolutions)
         result: dict[str, int] = {}
         for release_id, identity in identities_by_release_id.items():
             resolution = resolutions[identity]
@@ -868,6 +890,7 @@ class BeetsDB:
         resolutions = self.resolve_current_releases(
             list(identities_by_release_id.values()),
         )
+        _raise_conflicting_release_identities(resolutions)
         result: dict[str, dict[str, object]] = {}
         for release_id, identity in identities_by_release_id.items():
             current = resolutions[identity]
@@ -1017,19 +1040,7 @@ class BeetsDB:
         if not identities:
             return []
         resolutions = self.resolve_current_releases(identities)
-        conflicts = [
-            result.identity.release_id
-            for result in resolutions.values()
-            if (
-                isinstance(result, CurrentBeetsAmbiguous)
-                and result.reason == "conflicting_identity"
-            )
-        ]
-        if conflicts:
-            raise ConflictingReleaseIdentityError(
-                "conflicting numeric Discogs release identities for: "
-                + ", ".join(sorted(conflicts))
-            )
+        _raise_conflicting_release_identities(resolutions)
         ambiguous = [
             result.identity.release_id
             for result in resolutions.values()
