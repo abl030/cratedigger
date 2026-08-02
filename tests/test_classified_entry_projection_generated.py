@@ -10,6 +10,7 @@ from __future__ import annotations
 import unittest
 from collections.abc import Mapping
 from itertools import product
+from unittest.mock import patch
 
 import msgspec
 from hypothesis import example, given
@@ -17,6 +18,7 @@ from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
 from lib.quality import ImportResult, ValidationResult
+from tests.fakes import FakeBeetsDB
 from tests.helpers import make_request_row
 from tests.web._harness import _FakeDbWebServerCase
 from web.classify import ClassifiedEntry
@@ -64,6 +66,14 @@ def assert_mixed_source_projection_is_honest(
 
 
 class _ClassifiedEntryProjectionHarness(_FakeDbWebServerCase):
+    def setUp(self) -> None:
+        super().setUp()
+        import web.server as srv
+
+        beets_patch = patch.object(srv, "_beets", FakeBeetsDB())
+        beets_patch.start()
+        self.addCleanup(beets_patch.stop)
+
     def outbound_surfaces(
         self,
         *,
