@@ -103,7 +103,7 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
         self.assertEqual(state["push_count"], 0)
         self.assertIn("lock commit failed", proc.stderr)
 
-    def test_state_paths_and_mirror_budget_are_explicit(self) -> None:
+    def test_state_paths_and_unattended_budgets_are_explicit(self) -> None:
         proc = self.fake.run(SCRIPT)
         state = self.fake.state
 
@@ -123,6 +123,7 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
             fuzz["CRATEDIGGER_FUZZ_OUTPUT_DIR"],
             str(self.fake.automation_state / "fuzz-failures"),
         )
+        self.assertEqual(fuzz["CRATEDIGGER_FUZZ_MAX_EXAMPLES"], "20000")
         self.assertEqual(mirror["CRATEDIGGER_WORLD_ENGINE"], "mirror-harness")
         self.assertEqual(
             mirror["CRATEDIGGER_WORLD_MIRROR_URL"],

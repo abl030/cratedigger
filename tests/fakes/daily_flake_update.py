@@ -112,6 +112,9 @@ with state_path.with_suffix(".lock").open("a+", encoding="utf-8") as lock:
         "CRATEDIGGER_FUZZ_OUTPUT_DIR": os.environ.get(
             "CRATEDIGGER_FUZZ_OUTPUT_DIR"
         ),
+        "CRATEDIGGER_FUZZ_MAX_EXAMPLES": os.environ.get(
+            "CRATEDIGGER_FUZZ_MAX_EXAMPLES"
+        ),
     }
     if state.get("fault") == stage:
         fail(f"fake {stage} failed")

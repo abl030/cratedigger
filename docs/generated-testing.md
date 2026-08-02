@@ -16,11 +16,11 @@ classifier so only an exact stable or shrinking approved cohort is green.
 `scripts/daily_flake_update.sh` is the single unattended entry point. It
 checks out current `main`, advances `flake.lock` to current nixpkgs unstable,
 and runs whole-repository Pyright, the deterministic suite, `nix flake check`,
-the default lifecycle hammer, the full fuzz burst, and the mirror-harness
-smoke. Independent test stages all run so one notification contains the whole
-day's result. A completely green candidate commits and pushes only
-`flake.lock`; a red candidate pushes nothing. Scheduling, state paths, and
-notification belong to the downstream nixosconfig service.
+the default lifecycle hammer, the 20,000-example fuzz burst, and the
+mirror-harness smoke. Independent test stages all run so one notification
+contains the whole day's result. A completely green candidate commits and
+pushes only `flake.lock`; a red candidate pushes nothing. Scheduling, state
+paths, and notification belong to the downstream nixosconfig service.
 
 ## Bug hunting — the house method
 
@@ -319,12 +319,13 @@ The readable named lifecycle is the durable regression artifact.
 - **`suite`** (default) — deterministic (`derandomize=True`, no example
   database), bounded examples. Runs on every `scripts/run_tests.sh`,
   identical on every machine. This is part of the final local gate.
-- **`fuzz`** — deep randomized burst (20k examples) for local exploration.
-  Fresh entropy per run, local example database (`.hypothesis/`,
+- **`fuzz`** — randomized burst for local exploration, with 500 examples by
+  default. Fresh entropy per run, local example database (`.hypothesis/`,
   gitignored) so found failures replay first on the next burst,
-  `print_blob=True` for exact reproduction.
+  `print_blob=True` for exact reproduction. The unattended overnight gate
+  explicitly sets `CRATEDIGGER_FUZZ_MAX_EXAMPLES=20000`.
 
-Run a deep burst whenever quality policy changes:
+Run a randomized burst whenever quality policy changes:
 
 ```bash
 nix-shell --run "bash scripts/fuzz_burst.sh"                    # all generated modules
@@ -370,19 +371,20 @@ Two independent gates enforce this:
 `scripts/fuzz_burst.sh` discovers the exact unittest IDs and effective
 Hypothesis settings in every generated module. Ordinary deterministic pins run
 once as a batch, and fixed per-test `@settings(max_examples=...)` budgets remain
-single-run. Each property using the default deep profile divides its 20k
+single-run. Each property using the default fuzz profile divides its 500
 generated examples exactly across independent entropy shards. The total budget
-does not grow: on a 30-core host, eight processes each receive 2,500 examples.
-The child runner loads the owning module and selects the exact discovered ID,
-so dynamically named state-machine tests can be sharded without repeating the
-module's other properties or pins. An exact-budget check rejects any schedule
-that omits a test, repeats a pin, changes a property's combined example count,
-or invents an ID.
+does not grow: on a 30-core host, eight processes receive 62 or 63 examples.
+The overnight gate raises the combined budget to 20,000, or 2,500 per shard on
+that host. The child runner loads the owning module and selects the exact
+discovered ID, so dynamically named state-machine tests can be sharded without
+repeating the module's other properties or pins. An exact-budget check rejects
+any schedule that omits a test, repeats a pin, changes a property's combined
+example count, or invents an ID.
 
 The queue uses every host core by default. Set `CRATEDIGGER_FUZZ_JOBS` to cap
 concurrent processes or `CRATEDIGGER_FUZZ_PROPERTY_SHARDS` to override the
 host-scaled entropy fan-out. On doc1's 30-core VM on 2026-07-23, the complete
-71-module, 769-test burst at the unchanged deep budgets completed in 607.8
+71-module, 769-test overnight burst at 20,000 examples completed in 607.8
 seconds. The worst subprocess-heavy generated module completed alone in 142.7
 seconds; its unsharded properties had still not completed after ten minutes.
 
@@ -390,9 +392,9 @@ seconds; its unsharded properties had still not completed after ten minutes.
 
 Issue #888 item 1. A budget is not depth: `@given(authorized=st.booleans(),
 missing=st.booleans())` has four distinct worlds, so Hypothesis exhausts it in
-four examples and stops — whether the budget is 150 or 20,000. A mutant that
-widens a quarantine authority boundary survived 215 tests across seven modules
-for exactly that reason, and nothing in the burst output said so.
+four examples and stops — whether the budget is 150, 500, or 20,000. A mutant
+that widens a quarantine authority boundary survived 215 tests across seven
+modules for exactly that reason, and nothing in the burst output said so.
 
 After the `SLOW` lines, every burst now prints what each property actually
 generated, measured from Hypothesis' own `statistics` collector in the child
@@ -439,12 +441,13 @@ today: no repository property reaches that state, precisely because the
 known-bad self-tests plant their bug in a dropped inner `@given`.
 
 **The ceiling is the per-child budget.** Only a space smaller than the
-`N examples per shard` figure — 150 at the deterministic tier, `budget /
-shards` (2,500 on a 30-core host) at the fuzz tier — can be observed at all.
-A 5,000-world property never exhausts, so it is reported as deep at both
-tiers, and every non-shallow property's worlds are bounded by that per-shard
-budget rather than by its real space. An empty SHALLOW section means "none
-found below the ceiling", never "no shallow properties".
+`N examples per shard` figure — 150 at the deterministic tier, 62 or 63 on a
+30-core host for the default 500-example fuzz burst, and 2,500 for its
+20,000-example overnight counterpart — can be observed at all. A world space
+larger than the applicable ceiling never exhausts, so it is reported as deep,
+and every non-shallow property's worlds are bounded by that per-shard budget
+rather than by its real space. An empty SHALLOW section means "none found
+below the ceiling", never "no shallow properties".
 
 **It cannot see a bare `return`.** A `return` spends the example as a PASS, so
 a vacuously-discarding property reads as a full budget of valid worlds. That
@@ -464,9 +467,9 @@ private per-shell tmpfs. A database named by
 its active database and logs without writing persistent storage. On failure,
 the active database is copied back so the shrunk example replays, and
 `CRATEDIGGER_FUZZ_OUTPUT_DIR` optionally receives the complete logs plus an
-exact target manifest beneath a unique `run.*` directory. The 20k-example
-budget is unchanged. The serial equivalent, when you need one module's live
-output:
+exact target manifest beneath a unique `run.*` directory. The ordinary burst
+uses 500 examples; the daily unattended gate preserves the 20,000-example
+depth. The serial equivalent, when you need one module's live output:
 
 ```bash
 nix-shell --run "CRATEDIGGER_HYPOTHESIS_PROFILE=fuzz \
