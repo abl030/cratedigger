@@ -90,6 +90,7 @@ from lib.quality import (
     full_pipeline_decision,
     full_pipeline_decision_from_evidence,
     interpret_spectral_evidence,
+    is_comparable_lossless_source_probe,
     ladder_class_kbps,
     legacy_unrecorded_audio_validation_report,
     mint_verified_lossless_proof,
@@ -3013,6 +3014,23 @@ _DENIAL_PROVISIONAL_COHORT_WORLD = ParityWorld(
     v0_avg=241, v0_min=219,
     target_format=None, verified_lossless_target="opus 128",
 )
+#: Request 2066 (Sound Dimension — *Jamaica Soul Shake, Vol. 1*), download
+#: 39207: a genuine-graded FLAC whose proof the ultrasonic leg denies
+#: (71.29 dB, injected by the checkers), converting to an opus-128 target
+#: that measures 110k avg on disk. Candidate probe 175 vs anchor 177 —
+#: within tolerance, NOT better. The world that bought issue #990.
+_REQUEST_2066_WORLD = ParityWorld(
+    current_min=95, current_avg=110, current_format="OPUS",
+    current_is_cbr=False, current_grade="genuine",
+    current_spectral_bitrate=None,
+    current_v0_avg=177, current_verified_lossless_proof=False,
+    candidate_kind="flac_converted", min_bitrate=354, is_cbr=False,
+    avg_bitrate=None, grade="genuine", spectral_bitrate=128,
+    candidate_format="FLAC", converted_count=1,
+    post_conversion_min_bitrate=93, post_conversion_is_cbr=False,
+    v0_avg=175, v0_min=148,
+    target_format=None, verified_lossless_target="opus 128",
+)
 _PARTS_AND_LABOR_VORBIS_WORLD = ParityWorld(
     current_min=128, current_avg=128, current_format="MP3",
     current_is_cbr=True, current_grade=None,
@@ -3851,6 +3869,81 @@ _PROVISIONAL_LANE_DECIDED_KEYS = (
 )
 
 
+def _lane_membership_follows_the_proof(
+    denied: "dict[str, object]",
+    passing: "dict[str, object]",
+    *,
+    spectral_grade: "str | None",
+    supported_lossless_source: bool,
+    candidate_probe_comparable: bool,
+) -> bool:
+    """Shared body of the amended V5/L5 checkers (issue #990).
+
+    Two cohorts, one law each:
+
+    * NON-AFFIRMING grades (suspect/likely_transcode/error), and every
+      lossy candidate: the legs cannot move the proof except through the
+      leg-blind V0-avg trust override question, so lane membership AND
+      every lane-decided field are leg-invariant. This is PR3's surviving
+      core — a denial must never suppress the override's rescue (the
+      decoy that reached review), and inside the lane the legs have no
+      voice.
+
+    * AFFIRMING grades (genuine/marginal) on a supported lossless source
+      — the #990 cohort, where the leg CAN flip the proof. Three rules,
+      each stated on observables so a reported field can't lie about a
+      world we cannot see:
+
+        R1  a lane-decided variant is never proven;
+        R2  when the candidate carries a comparable probe, an unproven
+            IMPORT only ever comes out of the lane — the measured compare
+            granting one is exactly the equal-copy churn request 2066
+            shipped. A probe-less unaccused candidate legitimately
+            continues to the measured policy: the harness twin re-decides
+            with the probe it grinds during the real conversion;
+        R3  when both variants are lane-decided, the legs moved nothing
+            inside it.
+
+      Decision record:
+      https://github.com/abl030/cratedigger/issues/990#issuecomment-5158156922
+    """
+    denied_in_lane = denied["stage2_import"] in PROVISIONAL_LANE_DECISIONS
+    passing_in_lane = passing["stage2_import"] in PROVISIONAL_LANE_DECISIONS
+    if supported_lossless_source and spectral_grade in ("genuine", "marginal"):
+        if denied["stage2_import"] is None or passing["stage2_import"] is None:
+            # A pre-stage-2 exit (preimport fact reject, Stage-1 short
+            # circuit) is leg-independent: both variants must have taken
+            # it, and the lane never saw the album.
+            return denied["stage2_import"] is None and (
+                passing["stage2_import"] is None
+            )
+        for variant in (denied, passing):
+            in_lane = variant["stage2_import"] in PROVISIONAL_LANE_DECISIONS
+            if in_lane and variant["verified_lossless"]:
+                return False  # R1
+            if (
+                candidate_probe_comparable
+                and variant["imported"]
+                and not variant["verified_lossless"]
+                and not in_lane
+            ):
+                return False  # R2
+        if denied_in_lane and passing_in_lane:
+            return all(  # R3
+                denied[key] == passing[key]
+                for key in _PROVISIONAL_LANE_DECIDED_KEYS
+            )
+        return True
+    if denied_in_lane != passing_in_lane:
+        return False
+    if not denied_in_lane:
+        return True
+    return all(
+        denied[key] == passing[key]
+        for key in _PROVISIONAL_LANE_DECIDED_KEYS
+    )
+
+
 def a_denial_never_reroutes_the_provisional_lane(
     candidate: AlbumQualityEvidence,
     current: "AlbumQualityEvidence | None",
@@ -3860,41 +3953,32 @@ def a_denial_never_reroutes_the_provisional_lane(
         full_pipeline_decision_from_evidence
     ),
 ) -> bool:
-    """Invariant checker V5: the leg decides the PROOF, never the LANE.
+    """Invariant checker V5 (amended, issue #990): the leg reaches the
+    lane only THROUGH the proof — never beside it.
 
-    The V0-avg trust override answers "did the probe certify this source?"
-    and that answer selects the lane: certified albums are compared on
-    their measured quality, uncertified ones go to the provisional-lossless
-    lane. The probe's answer does not change when the ultrasonic leg
-    objects — the leg examines a different statistic and its authority
-    (Phase 5 plan §2, §1.7) stops at the proof.
+    PR3's original blanket law ("the leg decides the PROOF, never the
+    LANE") was disproved by request 2066: if proof-absence cannot select
+    the anchor lane, the unproven-lossless cohort has no defense against
+    equal-copy churn, because the measured compare ranks the incoming
+    side by its target contract and the installed side by its measured
+    average. What survives, verbatim, is the core the decoy self-test
+    plants: a candidate the V0-avg trust override certifies is NEVER
+    rerouted by a denial, and inside the lane the legs move nothing —
+    the lane reads the probes and the lossless-source fact alone.
+    ``_lane_membership_follows_the_proof`` states both cohorts' laws.
 
-    Letting a denial re-route the lane is not a smaller proof; it is a
-    different verdict. Three of the four provisional-lane decisions are
-    CONFIDENT REJECTS that denylist the offering peer, so an album whose
-    only fault was a withheld proof gets discarded and its peer accused —
-    on exactly the HF-poor genuine-lossless cohort the override exists to
-    rescue.
-
-    Two halves:
-
-    * denied and passing agree on WHETHER the provisional lane decided the
-      album; and
-    * when it did, they agree on every decided field — the lane's inputs
-      are the probes and the grade, so the leg cannot legitimately move
-      anything inside it.
-
-    Outside the lane the leg's effect is real and correct: an album with no
-    proof is compared on what it measures, which can cost it an import
-    against a better installed copy. That is the proof doing its job, with
-    a comparison basis behind it, not the leg passing a verdict.
-
-    ``decider`` is injectable ONLY so the known-bad self-test can plant the
-    shape that reached review; production always uses the default.
+    ``decider`` is injectable ONLY so the known-bad self-tests can plant
+    the shape that reached review (denial suppresses the override) and
+    the shape that shipped (unproven album skips the anchor); production
+    always uses the default.
     """
     if candidate.measurement.spectral_grade is None:
         # Evidence-row validation forbids proof-leg facts without a grade,
         # so this world has no producible denying twin.
+        return True
+    if current is not None and current.verified_lossless_proof is not None:
+        # A proof-bearing HAVE locks every candidate out before stage 2;
+        # the legs are irrelevant to that ceiling.
         return True
     denied_candidate = _with_adjudicable_ultrasonic(
         candidate, _DENYING_DEFICIT_DB,
@@ -3906,15 +3990,13 @@ def a_denial_never_reroutes_the_provisional_lane(
         _with_adjudicable_ultrasonic(candidate, _PASSING_DEFICIT_DB),
         current, facts=facts,
     )
-    denied_in_lane = denied["stage2_import"] in PROVISIONAL_LANE_DECISIONS
-    passing_in_lane = passing["stage2_import"] in PROVISIONAL_LANE_DECISIONS
-    if denied_in_lane != passing_in_lane:
-        return False
-    if not denied_in_lane:
-        return True
-    return all(
-        denied[key] == passing[key]
-        for key in _PROVISIONAL_LANE_DECIDED_KEYS
+    return _lane_membership_follows_the_proof(
+        denied, passing,
+        spectral_grade=candidate.measurement.spectral_grade,
+        supported_lossless_source=_lossless_source_from_evidence(candidate),
+        candidate_probe_comparable=is_comparable_lossless_source_probe(
+            _policy_v0_probe_from_metric(candidate.v0_metric)
+        ),
     )
 
 
@@ -3950,7 +4032,8 @@ def _decoy_decider_lets_a_denial_reject_the_album(
                 _policy_v0_probe_from_metric(current.v0_metric)
                 if current is not None else None
             ),
-            spectral_grade=measurement.spectral_grade,
+            will_be_verified=False,
+            spectral_grade=candidate.measurement.spectral_grade,
             supported_lossless_source=_lossless_source_from_evidence(candidate),
         ),
     )
@@ -4162,10 +4245,21 @@ class TestUltrasonicProofLegProperties(unittest.TestCase):
 
     @given(world=parity_worlds())
     @example(world=_DENIAL_PROVISIONAL_COHORT_WORLD)
+    @example(world=_REQUEST_2066_WORLD)
     def test_v5_a_denial_never_reroutes_the_provisional_lane(self, world):
         candidate, current, facts = _parity_evidence_inputs(world)
         self.assertTrue(
             a_denial_never_reroutes_the_provisional_lane(
+                candidate, current, facts=facts,
+            )
+        )
+
+    @given(world=parity_worlds())
+    @example(world=_REQUEST_2066_WORLD)
+    def test_v6_an_unproven_source_never_outranks_its_anchor(self, world):
+        candidate, current, facts = _parity_evidence_inputs(world)
+        self.assertTrue(
+            an_unproven_lossless_source_never_outranks_its_anchor(
                 candidate, current, facts=facts,
             )
         )
@@ -4344,6 +4438,43 @@ class TestUltrasonicProofLegCheckerSelfTests(unittest.TestCase):
             a_denial_never_reroutes_the_provisional_lane(
                 candidate, current, facts=facts,
                 decider=_decoy_decider_lets_a_denial_reject_the_album,
+            )
+        )
+
+    def test_v5_checker_trips_on_the_shipped_grade_keyed_router(self):
+        """R2's known-bad: the pre-#990 production, where a genuine-graded
+        proof-denied FLAC skipped the anchor lane and the measured ranks
+        imported the equal copy — an unproven import outside the lane."""
+        candidate, current, facts = _parity_evidence_inputs(
+            _REQUEST_2066_WORLD,
+        )
+        self.assertFalse(
+            a_denial_never_reroutes_the_provisional_lane(
+                candidate, current, facts=facts,
+                decider=_decoy_decider_lets_an_unproven_album_skip_the_anchor,
+            )
+        )
+
+    def test_v6_checker_passes_for_the_real_decider(self):
+        candidate, current, facts = _parity_evidence_inputs(
+            _REQUEST_2066_WORLD,
+        )
+        self.assertTrue(
+            an_unproven_lossless_source_never_outranks_its_anchor(
+                candidate, current, facts=facts,
+            )
+        )
+
+    def test_v6_checker_trips_on_the_shipped_grade_keyed_router(self):
+        """The 2066 world under the decider that shipped it: probe 175 vs
+        anchor 177 imports anyway. The checker must call that out."""
+        candidate, current, facts = _parity_evidence_inputs(
+            _REQUEST_2066_WORLD,
+        )
+        self.assertFalse(
+            an_unproven_lossless_source_never_outranks_its_anchor(
+                candidate, current, facts=facts,
+                decider=_decoy_decider_lets_an_unproven_album_skip_the_anchor,
             )
         )
 
@@ -4723,31 +4854,20 @@ def a_lattice_denial_never_reroutes_the_provisional_lane(
         full_pipeline_decision_from_evidence
     ),
 ) -> bool:
-    """Invariant checker L5: the leg decides the PROOF, never the LANE.
+    """Invariant checker L5 (amended, issue #990): the leg reaches the
+    lane only THROUGH the proof — never beside it.
 
-    The V0-avg trust override answers "did the probe certify this source?"
-    and that answer selects the lane: certified albums are compared on
-    their measured quality, uncertified ones go to the provisional-lossless
-    lane. Three of the four provisional-lane decisions are CONFIDENT
-    REJECTS that denylist the offering peer, so an album whose only fault
-    was a withheld proof would be discarded and its peer accused.
+    The lattice twin of ``a_denial_never_reroutes_the_provisional_lane``;
+    ``_lane_membership_follows_the_proof`` states both cohorts' laws and
+    that docstring carries the amendment's rationale and decision record.
 
-    Two halves:
-
-    * denied and passing agree on WHETHER the provisional lane decided the
-      album; and
-    * when it did, they agree on every decided field — the lane's inputs
-      are the probes and the grade, so the leg cannot legitimately move
-      anything inside it.
-
-    Outside the lane the leg's effect is real and correct: an album with no
-    proof is compared on what it measures, which can cost it an import
-    against a better installed copy. That is the proof doing its job, with
-    a comparison basis behind it, not the leg passing a verdict.
-
-    ``decider`` is injectable ONLY so the known-bad self-test can plant the
-    shape PR3 shipped; production always uses the default.
+    ``decider`` is injectable ONLY so the known-bad self-tests can plant
+    the shape PR3 shipped; production always uses the default.
     """
+    if current is not None and current.verified_lossless_proof is not None:
+        # A proof-bearing HAVE locks every candidate out before stage 2;
+        # the legs are irrelevant to that ceiling.
+        return True
     denied = decider(
         _with_lattice_capture(candidate, _DENYING_LATTICE_CAPTURE),
         current, facts=facts,
@@ -4756,16 +4876,98 @@ def a_lattice_denial_never_reroutes_the_provisional_lane(
         _with_lattice_capture(candidate, _PASSING_LATTICE_CAPTURE),
         current, facts=facts,
     )
-    denied_in_lane = denied["stage2_import"] in PROVISIONAL_LANE_DECISIONS
-    passing_in_lane = passing["stage2_import"] in PROVISIONAL_LANE_DECISIONS
-    if denied_in_lane != passing_in_lane:
-        return False
-    if not denied_in_lane:
-        return True
-    return all(
-        denied[key] == passing[key]
-        for key in _PROVISIONAL_LANE_DECIDED_KEYS
+    return _lane_membership_follows_the_proof(
+        denied, passing,
+        spectral_grade=candidate.measurement.spectral_grade,
+        supported_lossless_source=_lossless_source_from_evidence(candidate),
+        candidate_probe_comparable=is_comparable_lossless_source_probe(
+            _policy_v0_probe_from_metric(candidate.v0_metric)
+        ),
     )
+
+
+def an_unproven_lossless_source_never_outranks_its_anchor(
+    candidate: AlbumQualityEvidence,
+    current: "AlbumQualityEvidence | None",
+    *,
+    facts: "AlbumQualityEvidenceDecisionFacts | None" = None,
+    decider: "Callable[..., dict[str, object]]" = (
+        full_pipeline_decision_from_evidence
+    ),
+) -> bool:
+    """Invariant checker for issue #990's churn-killer, stated directly.
+
+    An affirming-graded supported lossless-source candidate made unproven
+    by a denying ultrasonic leg, facing a comparable ``lossless_source_v0``
+    anchor it does not beat by more than the rank tolerance, is the
+    request-2066 world: the copy on disk is already as good as anything
+    this source can produce. The decided outcome must be the lane's
+    confident reject — never an import. 95 live downloads bought this
+    property.
+
+    Accused grades are out of scope on purpose: their lane/override laws
+    belong to V5/L5, and the V0-avg trust override may legitimately import
+    over a within-tolerance anchor (PR3's core).
+    """
+    if candidate.measurement.spectral_grade not in ("genuine", "marginal"):
+        return True
+    if current is None or current.verified_lossless_proof is not None:
+        return True
+    if not _lossless_source_from_evidence(candidate):
+        return True
+    candidate_probe = _policy_v0_probe_from_metric(candidate.v0_metric)
+    anchor = _policy_v0_probe_from_metric(current.v0_metric)
+    if not is_comparable_lossless_source_probe(candidate_probe):
+        return True
+    if not is_comparable_lossless_source_probe(anchor):
+        return True
+    assert candidate_probe is not None and anchor is not None
+    assert candidate_probe.avg_bitrate_kbps is not None
+    assert anchor.avg_bitrate_kbps is not None
+    tolerance = QualityRankConfig.defaults().within_rank_tolerance_kbps
+    if candidate_probe.avg_bitrate_kbps - anchor.avg_bitrate_kbps > tolerance:
+        return True
+    denied_candidate = _with_adjudicable_ultrasonic(
+        candidate, _DENYING_DEFICIT_DB,
+    )
+    if _leg_is_withheld_by_oracle(denied_candidate):
+        return True
+    r = decider(denied_candidate, current, facts=facts)
+    if r["stage2_import"] is None:
+        # A pre-stage-2 exit (preimport fact reject, Stage-1 short
+        # circuit) never reached the lane; nothing to assert.
+        return True
+    return (
+        r["stage2_import"] == "suspect_lossless_downgrade"
+        and not r["imported"]
+        and bool(r["keep_searching"])
+    )
+
+
+def _decoy_decider_lets_an_unproven_album_skip_the_anchor(
+    candidate: AlbumQualityEvidence,
+    current: "AlbumQualityEvidence | None" = None,
+    *,
+    facts: "AlbumQualityEvidenceDecisionFacts | None" = None,
+) -> "dict[str, object]":
+    """The shape that SHIPPED (issue #990, request 2066): lane entry keyed
+    on the spectral grade, so a genuine-graded, proof-denied candidate
+    skips the anchor compare and the measured lane's contract-vs-measured
+    ranks import an equal copy over the copy it equals. Used only to prove
+    the checkers trip."""
+    result: dict[str, object] = dict(
+        full_pipeline_decision_from_evidence(candidate, current, facts=facts)
+    )
+    if (
+        candidate.measurement.spectral_grade in ("genuine", "marginal")
+        and result["stage2_import"] in PROVISIONAL_LANE_DECISIONS
+    ):
+        result["stage2_import"] = "import"
+        result["imported"] = True
+        result["verified_lossless"] = False
+        result["final_status"] = "wanted"
+        result["keep_searching"] = True
+    return result
 
 
 def _decoy_decider_lets_a_lattice_denial_reject_the_album(
@@ -4794,6 +4996,7 @@ def _decoy_decider_lets_a_lattice_denial_reject_the_album(
                 _policy_v0_probe_from_metric(current.v0_metric)
                 if current is not None else None
             ),
+            will_be_verified=False,
             spectral_grade=candidate.measurement.spectral_grade,
             supported_lossless_source=_lossless_source_from_evidence(candidate),
         ),

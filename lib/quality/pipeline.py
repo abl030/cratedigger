@@ -574,6 +574,13 @@ def full_pipeline_decision(
                             kind=existing_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
                             avg_bitrate_kbps=existing_v0_probe_avg,
                         ) if existing_v0_probe_avg is not None else None,
+                        # A candidate that already CARRIES a proof is not
+                        # unproven, whatever the fresh legs say now —
+                        # existing stamps remain proofs under the old model
+                        # (issue #829 forward-only rule) — so the lane never
+                        # owns it. Caught by the as-persisted live-corpus
+                        # differential (issue #990: 40 pre-PR3-proof rows).
+                        will_be_verified=will_be_verified or verified_proof,
                         spectral_grade=spectral_grade,
                         supported_lossless_source=provisional_source_candidate,
                     ),
@@ -732,6 +739,13 @@ def full_pipeline_decision(
                             kind=existing_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
                             avg_bitrate_kbps=existing_v0_probe_avg,
                         ) if existing_v0_probe_avg is not None else None,
+                        # A candidate that already CARRIES a proof is not
+                        # unproven, whatever the fresh legs say now —
+                        # existing stamps remain proofs under the old model
+                        # (issue #829 forward-only rule) — so the lane never
+                        # owns it. Caught by the as-persisted live-corpus
+                        # differential (issue #990: 40 pre-PR3-proof rows).
+                        will_be_verified=will_be_verified or verified_proof,
                         spectral_grade=spectral_grade,
                         supported_lossless_source=provisional_source_candidate,
                     ),
@@ -896,7 +910,6 @@ def full_pipeline_decision(
                         kind=existing_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
                         avg_bitrate_kbps=existing_v0_probe_avg,
                     ) if existing_v0_probe_avg is not None else None,
-                    spectral_grade=spectral_grade,
                     supported_lossless_source=False,
                 ),
                 cfg=cfg,
