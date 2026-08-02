@@ -3,29 +3,99 @@
 # every `nix flake check`.
 #
 # Posture: pipelineDb.createLocally = true (module-provisioned postgres,
-# peer auth, no hand-rolled DB block), beets.validation ON, VM-local beets
-# paths, NO mirror knobs (public-MB defaults), and explicit operator-group
-# access to the rendered Discogs include.
+# peer auth, no hand-rolled DB block), beets.validation ON, externally owned
+# immutable Beets package/config plus mutable catalog/root/state, NO mirror
+# knobs (public-MB defaults), and explicit operator access to a token-only
+# secret include.
 #
-# Verifies: migrate green behind module-owned postgres ordering; rendered
-# config.ini (api keys as *File paths, [Beets] runtime keys, api_base
-# defaults, socket DSN with no credentials) AND rendered beets config.yaml
-# (duplicate_keys nesting, fixed plugin list, public-MB, included token);
-# service and operator load the same full plugin set; the web UI boots behind
-# the module-owned Basic-auth gateway and Unix socket, then transitions through
-# explicit insecure mode and back without weakening the remaining perimeter;
-# youtube-ingest + unfindable units structurally sound.
+# Verifies: migrate green behind module-owned postgres ordering; immutable
+# runtime config (api keys as *File paths, exact external Beets authorities,
+# api_base defaults, socket DSN with no credentials); deployment-owned
+# readiness; observer/importer state access; intrinsic Beets safe/hard/warning
+# startup policy; service/operator package identity; a real incremental-state
+# update and exact album deletion; the web UI behind the module-owned Basic-auth
+# gateway and Unix socket; and structurally sound youtube-ingest + unfindable
+# units.
 #
-# Does NOT exercise: slskd interaction, real downloads, real imports —
-# those need heavyweight fixtures that belong in the python suite.
+# Does NOT exercise: slskd interaction or real downloads. The Beets import is
+# deliberately synthetic and local; acquisition fixtures remain in Python.
 { pkgs, system, cratediggerModule, cratediggerSrc }:
 
 let
-  # Parses the module-rendered beets config and asserts the invariants that
-  # have bitten in production: duplicate_keys nesting (Palo Santo guard),
-  # the fixed plugin list with musicbrainz present (zero-candidates guard),
-  # public-MB defaults and the explicit included-token shape.
-  pyWithYaml = pkgs.python3.withPackages (ps: [ ps.pyyaml ]);
+  # Beets is deployment authority.  The VM supplies the same Python package
+  # to plain `beet`, the Cratedigger applications, their checker, and the
+  # harness; the public module only consumes it.
+  externalBeetsPackage = import ../beets.nix { inherit pkgs; };
+  externalBeetsPython = pkgs.python3.withPackages (_: [externalBeetsPackage]);
+  externalLibraryRoot = "/var/lib/cratedigger-music/Beets";
+  externalLibraryDb = "/var/lib/cratedigger-beets-db/beets-library.db";
+  externalLibraryDbParent = builtins.dirOf externalLibraryDb;
+  externalStateFile = "/var/lib/cratedigger-beets-state/state.pickle";
+  externalSecretInclude = "/run/cratedigger-test-beets/discogs.yaml";
+
+  externalBeetsSettings = {
+    library = externalLibraryDb;
+    directory = externalLibraryRoot;
+    statefile = externalStateFile;
+    asciify_paths = true;
+    include = [externalSecretInclude];
+    plugins = "musicbrainz discogs fetchart embedart lyrics lastgenre scrub info missing duplicates edit fromfilename ftintitle the inline permissions";
+    import = {
+      copy = false;
+      autotag = true;
+      write = true;
+      move = true;
+      timid = false;
+      incremental = true;
+      incremental_skip_later = true;
+      log = "/var/lib/cratedigger-beets-db/beets-import.log";
+      languages = ["en"];
+      duplicate_keys = {
+        album = ["mb_albumid" "discogs_albumid"];
+        item = ["artist" "title"];
+      };
+    };
+    paths = {
+      default = "$albumartist/$year - $album%aunique{albumartist album,path_disambig}/$track $title";
+      singleton = "Non-Album/$artist/$title";
+      comp = "Compilations/$album%aunique{albumartist album,path_disambig}/$track $title";
+    };
+    album_fields.path_disambig =
+      "albumdisambig or releasegroupdisambig or catalognum or label or str(year)";
+    musicbrainz = {
+      host = "musicbrainz.org";
+      https = true;
+      ratelimit = 1;
+    };
+    permissions = {
+      file = "0664";
+      dir = "02775";
+    };
+    convert = {
+      auto = false;
+      auto_keep = false;
+    };
+    fetchart.auto = true;
+  };
+  mkExternalBeetsConfig = name: settings: let
+    yaml = (pkgs.formats.yaml {}).generate "${name}.yaml" settings;
+  in pkgs.runCommand name {} ''
+    mkdir -p "$out"
+    ln -s ${yaml} "$out/config.yaml"
+  '';
+  externalBeetsConfigDir = mkExternalBeetsConfig
+    "cratedigger-test-external-beets-config"
+    externalBeetsSettings;
+  hardBeetsConfigDir = mkExternalBeetsConfig
+    "cratedigger-test-external-beets-config-hard"
+    (pkgs.lib.recursiveUpdate externalBeetsSettings {
+      import.write = false;
+    });
+  warningBeetsConfigDir = mkExternalBeetsConfig
+    "cratedigger-test-external-beets-config-warning"
+    (pkgs.lib.recursiveUpdate externalBeetsSettings {
+      musicbrainz.host = "musicbrainz-warning.invalid";
+    });
   # Generate a throwaway VM-only TLS pair in the build fixture. The private
   # key remains outside tracked source while certificateFiles installs the
   # generated public certificate into the guest trust store, so every HTTPS
@@ -47,43 +117,6 @@ let
   '';
   publicTlsCertificate = "${publicTlsFixture}/certificate.pem";
   publicTlsPrivateKey = "${publicTlsFixture}/private-key.pem";
-  checkRenderedBeetsConfig = pkgs.writeText "check-rendered-beets-config.py" ''
-    import yaml
-
-    with open("/var/lib/cratedigger/beets/config.yaml") as f:
-        cfg = yaml.safe_load(f)
-
-    dk = cfg["import"]["duplicate_keys"]
-    assert dk["album"] == ["mb_albumid", "discogs_albumid"], dk
-    assert dk["item"] == ["artist", "title"], dk
-
-    plugins = cfg["plugins"].split()
-    expected = (
-        "musicbrainz discogs fetchart embedart lyrics lastgenre scrub "
-        "info missing duplicates edit fromfilename ftintitle the inline "
-        "permissions"
-    ).split()
-    assert plugins == expected, plugins
-
-    mb = cfg["musicbrainz"]
-    assert mb["host"] == "musicbrainz.org", mb
-    assert mb["https"] is True, mb
-    assert mb["ratelimit"] == 1, mb
-
-    assert cfg["include"] == ["secrets.yaml"], cfg.get("include")
-    assert cfg["library"] == "/var/lib/cratedigger-beets-db/beets-library.db", cfg
-
-    # Path-affecting keys present and production-shaped. path_disambig is
-    # the never-empty aunique disambiguator (Passenger collision fix,
-    # 2026-07-18) — it must appear in the template AND be defined as an
-    # inline album field, or same-key sibling pressings collide into one
-    # folder again.
-    assert cfg["asciify_paths"] is True
-    assert "path_disambig" in cfg["paths"]["default"], cfg["paths"]
-    assert "path_disambig" in cfg["album_fields"], cfg.get("album_fields")
-
-    print("BEETS_CONFIG_OK")
-  '';
   beetsDestructiveFixture = pkgs.writeText "beets-destructive-fixture.py" ''
     import os
     import sys
@@ -105,7 +138,6 @@ let
         target_dir.mkdir(parents=True)
         child_target_dir.mkdir(parents=True)
         sibling_dir.mkdir(parents=True)
-        root.chmod(0o2775)
         items = []
         for index in range(1, 13):
             path = target_dir / f"{index:02d} Track.flac"
@@ -342,6 +374,97 @@ pkgs.testers.nixosTest {
     ];
     heldApplicationUnits = map (name: "${name}.service")
       heldApplicationServiceNames;
+    beetsReadinessFixture = pkgs.writeShellScript
+      "cratedigger-test-beets-readiness" ''
+        set -euo pipefail
+        if test -e /run/cratedigger-test-beets-readiness-fail; then
+          echo BEETS_EXTERNAL_READINESS_FAILED >&2
+          exit 1
+        fi
+        ${pkgs.coreutils}/bin/install -d \
+          -o root -g beets-library -m 2775 \
+          ${externalLibraryRoot} \
+          $(${pkgs.coreutils}/bin/dirname ${externalLibraryDb})
+        ${pkgs.coreutils}/bin/install -d \
+          -o root -g root -m 0755 \
+          $(${pkgs.coreutils}/bin/dirname ${externalStateFile})
+        ${pkgs.coreutils}/bin/install -d \
+          -o root -g beets-library -m 0750 \
+          $(${pkgs.coreutils}/bin/dirname ${externalSecretInclude})
+
+        ${pkgs.coreutils}/bin/head -c 24 /dev/urandom \
+          | ${pkgs.coreutils}/bin/base64 \
+          | ${pkgs.coreutils}/bin/tr -d '\n' \
+          > /run/cratedigger-test-beets/token
+        token="$(${pkgs.coreutils}/bin/cat /run/cratedigger-test-beets/token)"
+        ${pkgs.coreutils}/bin/printf \
+          'discogs:\n  user_token: "%s"\n' "$token" \
+          > ${externalSecretInclude}
+        ${pkgs.coreutils}/bin/rm -f /run/cratedigger-test-beets/token
+        ${pkgs.coreutils}/bin/chown root:beets-library ${externalSecretInclude}
+        ${pkgs.coreutils}/bin/chmod 0440 ${externalSecretInclude}
+
+        ${externalBeetsPython}/bin/python - <<'PY'
+        import pickle
+        from pathlib import Path
+
+        path = Path("${externalStateFile}")
+        path.write_bytes(pickle.dumps({}))
+        PY
+        ${pkgs.coreutils}/bin/chown root:beets-library ${externalStateFile}
+        ${pkgs.coreutils}/bin/chmod 0660 ${externalStateFile}
+
+        BEETSDIR=${externalBeetsConfigDir} \
+          ${externalBeetsPython}/bin/python - <<'PY'
+        from beets.library import Library
+
+        library = Library("${externalLibraryDb}", "${externalLibraryRoot}")
+        library._close()
+        PY
+        ${pkgs.coreutils}/bin/chown \
+          cratedigger:beets-library ${externalLibraryDb}
+        ${pkgs.coreutils}/bin/chmod 0664 ${externalLibraryDb}
+        ${pkgs.coreutils}/bin/echo BEETS_EXTERNAL_READINESS_OK
+      '';
+    mkBeetsAccessProbe = name: stateWritable:
+      pkgs.writeShellScript "cratedigger-test-beets-access-${name}" ''
+        set -euo pipefail
+        if ${pkgs.python3}/bin/python3 -c \
+          'import os; fd=os.open("${externalBeetsConfigDir}/config.yaml", os.O_WRONLY); os.close(fd)' \
+          2>/dev/null; then
+          echo "${name} could write immutable BEETSDIR" >&2
+          exit 1
+        fi
+        ${if stateWritable then ''
+          ${pkgs.python3}/bin/python3 -c \
+            'import os; fd=os.open("${externalStateFile}", os.O_WRONLY); os.close(fd)'
+        '' else ''
+          if ${pkgs.python3}/bin/python3 -c \
+            'import os; fd=os.open("${externalStateFile}", os.O_WRONLY); os.close(fd)' \
+            2>/dev/null; then
+            echo "${name} could write importer-only Beets state" >&2
+            exit 1
+          fi
+        ''}
+      '';
+    beetsObserverAccessProbe = mkBeetsAccessProbe "observer" false;
+    beetsMainAccessProbe = pkgs.writeShellScript
+      "cratedigger-test-beets-access-main" ''
+        set -euo pipefail
+        ${beetsObserverAccessProbe}
+        for probe in \
+          ${externalLibraryRoot}/.cratedigger-main-write-probe \
+          ${externalLibraryDbParent}/.cratedigger-main-write-probe
+        do
+          if ${pkgs.coreutils}/bin/touch "$probe" 2>/dev/null; then
+            ${pkgs.coreutils}/bin/rm -f "$probe"
+            echo "main could write external Beets library authority: $probe" >&2
+            exit 1
+          fi
+        done
+        echo BEETS_MAIN_WRITE_DENIAL_OK
+      '';
+    beetsImporterAccessProbe = mkBeetsAccessProbe "importer" true;
     metadataGateStateDir = "/var/lib/cratedigger-metadata-gate";
     metadataGateMainStartInhibitor =
       "${metadataGateStateDir}/inhibit-cratedigger.service";
@@ -351,7 +474,7 @@ pkgs.testers.nixosTest {
       set -euo pipefail
       probe_dir=/var/lib/cratedigger/processing/sandbox-probe
       ${pkgs.coreutils}/bin/install -d -m 0700 "$probe_dir"
-      test -f /var/lib/cratedigger/config.ini
+      test -f ${externalBeetsConfigDir}/config.yaml
 
       # Run representative shipped media/Beets tools inside the importer's
       # actual service sandbox and @system-service syscall filter.
@@ -361,7 +484,35 @@ pkgs.testers.nixosTest {
         -nostdin -loglevel error -y -i "$probe_dir/tone.wav" \
         -codec:a libmp3lame "$probe_dir/tone.mp3"
       ${pkgs.mp3val}/bin/mp3val "$probe_dir/tone.mp3" >/dev/null
-      /run/current-system/sw/bin/cratedigger-beet version >/dev/null
+      BEETSDIR=${externalBeetsConfigDir} \
+        ${externalBeetsPackage}/bin/beet version >/dev/null
+
+      # Exercise Beets' real incremental importer exactly once inside the
+      # importer's actual writable-state namespace.  It must update the
+      # external state file without changing immutable BEETSDIR.
+      incremental_receipt=/var/lib/cratedigger/beets-incremental-vm.receipt
+      if test ! -e "$incremental_receipt"; then
+        ${pkgs.coreutils}/bin/cp \
+          "$probe_dir/tone.mp3" "$probe_dir/incremental.mp3"
+        state_before="$(${pkgs.coreutils}/bin/sha256sum \
+          ${externalStateFile} | ${pkgs.coreutils}/bin/cut -d ' ' -f 1)"
+        config_before="$(${pkgs.coreutils}/bin/sha256sum \
+          ${externalBeetsConfigDir}/config.yaml \
+          | ${pkgs.coreutils}/bin/cut -d ' ' -f 1)"
+        BEETSDIR=${externalBeetsConfigDir} \
+          ${externalBeetsPackage}/bin/beet import -Aq -s \
+          "$probe_dir/incremental.mp3"
+        state_after="$(${pkgs.coreutils}/bin/sha256sum \
+          ${externalStateFile} | ${pkgs.coreutils}/bin/cut -d ' ' -f 1)"
+        config_after="$(${pkgs.coreutils}/bin/sha256sum \
+          ${externalBeetsConfigDir}/config.yaml \
+          | ${pkgs.coreutils}/bin/cut -d ' ' -f 1)"
+        test "$state_before" != "$state_after"
+        test "$config_before" = "$config_after"
+        ${pkgs.coreutils}/bin/printf '%s %s %s\n' \
+          "$state_before" "$state_after" "$config_after" \
+          > "$incremental_receipt"
+      fi
 
       # Each importer authority root must remain writable inside the mount
       # namespace. A world-writable directory outside ReadWritePaths must not.
@@ -541,17 +692,12 @@ pkgs.testers.nixosTest {
       user = "cratedigger";
       group = "beets-library";
     };
-    environment.etc."cratedigger/discogs-token" = {
-      text = "test-discogs-token-do-not-use\n";
-      mode = "0400";
-      user = "cratedigger";
-      group = "beets-library";
-    };
     users.users.beets-operator = {
       isNormalUser = true;
-      extraGroups = ["cratedigger-ops" "beets-library" "cratedigger-web"];
+      extraGroups = ["beets-library" "cratedigger-web"];
     };
     users.users.unrelated-user.isNormalUser = true;
+    users.groups.beets-library = {};
     users.groups.slskd-writer = {};
     users.users.slskd-writer = {
       isSystemUser = true;
@@ -560,24 +706,18 @@ pkgs.testers.nixosTest {
     # The source-owner group is separate from the private processor group.
     # The service can consume event-stamped source bytes but never grants
     # the writer any authority over its processing root.
-    users.users.cratedigger.extraGroups = [ "slskd-writer" ];
+    # Exercise the module's actual default cratedigger:cratedigger identity;
+    # deployment-owned groups provide only the external authorities it needs.
+    users.users.cratedigger.extraGroups = [ "beets-library" "slskd-writer" ];
     networking.hosts."127.0.0.1" = [
       "music.vm.test"
       "unrelated.vm.test"
     ];
     security.pki.certificateFiles = [publicTlsCertificate];
 
-    # Stub beets library DB so cratedigger-web can open it read-only.
-    environment.etc."cratedigger/beets.db" = {
-      text = "";
-      mode = "0644";
-    };
-
     services.cratedigger = {
       enable = true;
       src = cratediggerSrc;
-      user = "cratedigger";
-      group = "beets-library";
       slskd = {
         apiKeyFile = "/etc/cratedigger/slskd-api-key";
         hostUrl = "http://192.0.2.21:5030";
@@ -588,9 +728,6 @@ pkgs.testers.nixosTest {
       # peer auth, DSN defaulted to the socket. No hand-rolled postgres
       # block, no manual unit ordering, no password material anywhere.
       pipelineDb.createLocally = true;
-      # Stranger posture (U10/R12): beets validation ON — the full
-      # rendered-config surface (config.ini beets keys + config.yaml) is
-      # what a real first boot produces.
       beets.validation = {
         enable = true;
         stagingDir = "/var/lib/cratedigger-music/Incoming";
@@ -598,15 +735,14 @@ pkgs.testers.nixosTest {
         # contract proves it is derived from its own option.
         trackingFile = "/var/lib/cratedigger-music/Re-download/tracking.jsonl";
       };
-      beets.package = {
-        discogsTokenFile = "/etc/cratedigger/discogs-token";
-        discogsOperatorGroup = "cratedigger-ops";
-      };
-      # Keep the library root separate from the default DB parent. The module
-      # must create its sibling-of-stateDir default without granting writes to
-      # the music root.
-      beets.config = {
-        directory = "/var/lib/cratedigger-music/Beets";
+      beets.runtime = {
+        package = externalBeetsPackage;
+        configDir = toString externalBeetsConfigDir;
+        expectedLibrary = externalLibraryDb;
+        expectedDirectory = externalLibraryRoot;
+        expectedStateFile = externalStateFile;
+        expectedSecretInclude = externalSecretInclude;
+        readinessUnits = ["cratedigger-test-beets-readiness.service"];
       };
       web = {
         enable = true;
@@ -724,15 +860,40 @@ pkgs.testers.nixosTest {
         enableInsecure = lib.mkForce false;
       };
     };
+    specialisation.cratedigger-beets-hard.configuration = {
+      services.cratedigger.beets.runtime.configDir =
+        lib.mkForce (toString hardBeetsConfigDir);
+      systemd.services = lib.genAttrs heldApplicationServiceNames (name:
+        {
+          wantedBy = lib.mkForce [];
+          restartIfChanged = lib.mkForce false;
+        } // lib.optionalAttrs (builtins.elem name [
+          "cratedigger-importer"
+          "cratedigger-import-preview-worker"
+          "cratedigger-web"
+        ]) {
+          serviceConfig.Restart = lib.mkForce "no";
+        });
+    };
+    specialisation.cratedigger-beets-warning.configuration = {
+      services.cratedigger.beets.runtime.configDir =
+        lib.mkForce (toString warningBeetsConfigDir);
+      systemd.services = lib.genAttrs heldApplicationServiceNames (_: {
+        restartIfChanged = lib.mkForce false;
+      });
+    };
 
-    environment.systemPackages = [deployHoldTool metadataGateTool];
+    environment.systemPackages = [
+      deployHoldTool
+      metadataGateTool
+      externalBeetsPackage
+    ];
 
-    # Simulate a downstream metadata gate holding every application unit.
-    # Only the independent renderer may materialise runtime configuration on
-    # first boot; the test removes this hold before exercising the apps.
+    # Simulate a downstream metadata gate holding every application unit. The
+    # immutable runtime configuration already exists in the store; the test
+    # removes this hold before exercising the apps.
     systemd.tmpfiles.rules = [
       "d /var/lib/cratedigger-music 0777 root root -"
-      "d /var/lib/cratedigger-music/Beets 2775 cratedigger beets-library -"
       "d /var/lib/cratedigger-music/Incoming 2775 cratedigger beets-library -"
       "d /var/lib/cratedigger-music/Re-download 0755 cratedigger beets-library -"
       "d /var/lib/cratedigger-music/unrelated 0777 root root -"
@@ -773,6 +934,16 @@ pkgs.testers.nixosTest {
             RemainAfterExit = true;
           };
         };
+        cratedigger-test-beets-readiness = {
+          description = "Provision external Beets authority for the VM";
+          wantedBy = ["multi-user.target"];
+          before = heldApplicationUnits;
+          serviceConfig = {
+            Type = "oneshot";
+            RemainAfterExit = true;
+            ExecStart = beetsReadinessFixture;
+          };
+        };
         # Test-only runtime secret provisioning. The bcrypt hash is generated
         # in the VM, so neither the active file nor its resolved target is a
         # Nix-store path and the hash cannot be embedded in generated config.
@@ -797,15 +968,18 @@ pkgs.testers.nixosTest {
             "+${credentialMutationDuringReload}"
           ];
         };
-        # The probe is test-only and ordered after the module's config render.
+        cratedigger.serviceConfig.ExecStartPre =
+          lib.mkAfter [beetsMainAccessProbe];
         cratedigger-importer.serviceConfig.ExecStartPre =
-          lib.mkAfter [importerSandboxProbe];
+          lib.mkAfter [beetsImporterAccessProbe importerSandboxProbe];
         # Preview and YouTube retain stateDir for their established workflows,
         # but the sibling DB parent must remain unreachable in both sandboxes.
         cratedigger-import-preview-worker.serviceConfig.ExecStartPre =
-          lib.mkAfter [stateDbDenialProbe];
+          lib.mkAfter [beetsObserverAccessProbe stateDbDenialProbe];
         cratedigger-youtube-ingest.serviceConfig.ExecStartPre =
           lib.mkAfter [stateDbDenialProbe];
+        cratedigger-web.serviceConfig.ExecStartPre =
+          lib.mkAfter [beetsObserverAccessProbe];
         # The blocker has no dependency edge from the application units. Its
         # ordering matters only while the VM test has explicitly queued both
         # jobs, which gives us a deterministic real systemd `start/waiting`.
@@ -834,15 +1008,19 @@ pkgs.testers.nixosTest {
     };
 
     # NO manual postgres ordering: the module owns
-    # cratedigger-db-migrate's after/requires on postgresql.service when
+    # cratedigger-db-migrate's after/requires on postgresql-setup.service when
     # createLocally is set, and every app unit requires the migrate unit —
-    # transitively serialising first boot behind PostgreSQL.
+    # transitively serialising first boot behind role/database provisioning.
 
     # Speed up the VM
     virtualisation.memorySize = 2048;
   };
 
-  testScript = ''
+  # Keep the large Python program in its own store file. Nix otherwise places
+  # the whole script in one builder environment entry and eventually crosses
+  # Linux's per-string exec limit before the VM can start.
+  testScript = let
+    script = pkgs.writeText "cratedigger-module-vm-test.py" ''
     import base64
     import json
     import re
@@ -954,34 +1132,78 @@ pkgs.testers.nixosTest {
     state = machine.succeed("systemctl is-active cratedigger-db-migrate.service").strip()
     assert state == "active", f"migrator unit not active: {state}"
 
-    # A deploy must materialise the new runtime config independently of every
-    # application unit. Downstream consumers can intentionally gate those
-    # units with ExecCondition; systemd evaluates that before ExecStartPre, so
-    # an app-owned renderer leaves stale mutable config throughout an outage.
+    # The deployment-owned readiness unit supplies every mutable Beets
+    # authority before any guarded application.  Cratedigger contributes no
+    # renderer, Beets storage tmpfiles rule, or mutable config under stateDir.
     machine.wait_for_unit("cratedigger-test-config-hold.service")
     machine.succeed("test -f /run/cratedigger-test-config-hold")
-    machine.wait_for_unit("cratedigger-config-render.service")
-    state = machine.succeed("systemctl is-active cratedigger-config-render.service").strip()
-    assert state == "active", f"config renderer unit not active: {state}"
-    machine.succeed("test -f /var/lib/cratedigger/config.ini")
-    machine.succeed("grep -q '^host_url = http://192.0.2.21:5030$' /var/lib/cratedigger/config.ini")
+    machine.wait_for_unit("cratedigger-test-beets-readiness.service")
+    state = machine.succeed(
+        "systemctl is-active cratedigger-test-beets-readiness.service"
+    ).strip()
+    assert state == "active", f"external Beets readiness not active: {state}"
+    readiness_log = machine.succeed(
+        "journalctl -b -u cratedigger-test-beets-readiness.service -o cat"
+    )
+    assert readiness_log.count("BEETS_EXTERNAL_READINESS_OK") == 1, readiness_log
+    machine.fail("systemctl cat cratedigger-config-render.service")
+    machine.fail("test -e /var/lib/cratedigger/config.ini")
+    machine.fail("test -e /var/lib/cratedigger/beets")
+    machine.succeed("test -f ${externalLibraryDb}")
+    machine.succeed("test -f ${externalStateFile}")
+    machine.succeed("test -f ${externalSecretInclude}")
+    machine.succeed("test -f ${externalBeetsConfigDir}/config.yaml")
+    # The deployment identity deliberately owns write authority at the Unix
+    # permission layer. The main unit's denial probe therefore proves its
+    # service-local read-only bind mounts, not an incidental mode-bit denial.
+    machine.succeed(
+        "runuser -u cratedigger -- touch "
+        "${externalLibraryRoot}/.outside-main-sandbox; "
+        "runuser -u cratedigger -- touch "
+        "${externalLibraryDbParent}/.outside-main-sandbox; "
+        "rm ${externalLibraryRoot}/.outside-main-sandbox "
+        "${externalLibraryDbParent}/.outside-main-sandbox"
+    )
+    machine.succeed(
+        "systemd-tmpfiles --cat-config > /tmp/all-tmpfiles; "
+        "! grep -E '^[^#]* (/var/lib/cratedigger-music/Beets|"
+        "/var/lib/cratedigger-beets-db|/var/lib/cratedigger-beets-state|"
+        "/run/cratedigger-test-beets)( |$)' /tmp/all-tmpfiles"
+    )
 
-    # Re-rendering on a config-only deploy must neither remove nor recreate the
-    # main pipeline's active singleton lock. Pin both the fresh config and lock
-    # preservation across an explicit renderer restart.
+    for service in (
+        "cratedigger.service",
+        "cratedigger-importer.service",
+        "cratedigger-import-preview-worker.service",
+        "cratedigger-web.service",
+    ):
+        machine.succeed(
+            f"systemctl show -p After {service} "
+            "| grep -qw cratedigger-test-beets-readiness.service"
+        )
+        if service == "cratedigger.service":
+            machine.succeed(
+                f"systemctl show -p Wants {service} "
+                "| grep -qw cratedigger-test-beets-readiness.service"
+            )
+            machine.fail(
+                f"systemctl show -p Requires {service} "
+                "| grep -qw cratedigger-test-beets-readiness.service"
+            )
+        else:
+            machine.succeed(
+                f"systemctl show -p Requires {service} "
+                "| grep -qw cratedigger-test-beets-readiness.service"
+            )
+        machine.fail(
+            f"systemctl show -p ExecStartPre {service} "
+            "| grep -q cratedigger-check-beets-config"
+        )
+
+    # Immutable config exists while every application remains held, and no
+    # independent deployment action disturbs the main singleton lock.
     machine.succeed("printf 'active-cycle\\n' > /var/lib/cratedigger/.cratedigger.lock")
-    machine.succeed("sed -i 's#http://192.0.2.21:5030#http://stale.invalid#' /var/lib/cratedigger/config.ini")
-    machine.succeed("before=$(stat -c '%d:%i' /var/lib/cratedigger/.cratedigger.lock); systemctl restart cratedigger-config-render.service; after=$(stat -c '%d:%i' /var/lib/cratedigger/.cratedigger.lock); test \"$before\" = \"$after\"")
-    machine.succeed("grep -q '^host_url = http://192.0.2.21:5030$' /var/lib/cratedigger/config.ini")
     machine.succeed("grep -qx 'active-cycle' /var/lib/cratedigger/.cratedigger.lock")
-    # Long-running workers may restart when their unit changes, but their
-    # fallback is render-only. Only the timer-owned main service may clear the
-    # pipeline lock.
-    machine.succeed("systemctl cat cratedigger-importer.service | grep -q cratedigger-render-config")
-    machine.succeed("systemctl cat cratedigger-import-preview-worker.service | grep -q cratedigger-render-config")
-    machine.succeed("systemctl cat cratedigger-unfindable.service | grep -q cratedigger-render-config")
-    machine.succeed("systemctl cat cratedigger-youtube-ingest.service | grep -q cratedigger-render-config")
-    machine.succeed("systemctl cat cratedigger-web.service | grep -q cratedigger-render-config")
     machine.fail("systemctl cat cratedigger-importer.service | grep -q cratedigger-pipeline-prestart")
     machine.fail("systemctl cat cratedigger-import-preview-worker.service | grep -q cratedigger-pipeline-prestart")
     machine.fail("systemctl cat cratedigger-unfindable.service | grep -q cratedigger-pipeline-prestart")
@@ -1172,16 +1394,150 @@ pkgs.testers.nixosTest {
         state = machine.succeed(f"systemctl show {timer} --property=LoadState --value").strip()
         assert state == "loaded", f"{timer} not restored after release: {state}"
 
-    # Starting the main service remains safe: its idempotent pre-start render is
-    # retained as a fallback and clears the test's deliberately stale lock. It
-    # will fail because there is no real slskd.
+    # The timer-owned main service must survive both a healthy restart and a
+    # failed restart of an external readiness producer. Hold one live
+    # invocation in ExecStartPre and retain exactly the same invocation rather
+    # than merely observing that a later cycle happens to run. Stop the
+    # long-running workers first so the worlds below can separately prove the
+    # main service's soft edge and their hard Requires= edges.
+    machine.succeed(
+        "systemctl stop cratedigger-importer.service "
+        "cratedigger-import-preview-worker.service cratedigger-web.service"
+    )
+    machine.succeed(
+        "install -d /run/systemd/system/cratedigger.service.d; "
+        "printf '[Service]\\nRestart=no\\nExecStartPre=/run/current-system/sw/bin/sleep 30\\n' "
+        "> /run/systemd/system/cratedigger.service.d/hold-main.conf; "
+        "systemctl daemon-reload; "
+        "systemctl reset-failed cratedigger.service; "
+        "systemctl start --no-block cratedigger.service"
+    )
+    machine.wait_until_succeeds(
+        "systemctl show cratedigger.service -p ActiveState --value | grep -qx activating; "
+        "systemctl show cratedigger.service -p InvocationID --value | grep -Eq '^[0-9a-f]{32}$'"
+    )
+    main_invocation_before_readiness_restart = machine.succeed(
+        "systemctl show cratedigger.service -p InvocationID --value"
+    ).strip()
+    machine.succeed("systemctl restart cratedigger-test-beets-readiness.service")
+    machine.wait_for_unit("cratedigger-test-beets-readiness.service")
+    main_invocation_after_readiness_restart = machine.succeed(
+        "systemctl show cratedigger.service -p InvocationID --value"
+    ).strip()
+    assert main_invocation_after_readiness_restart == main_invocation_before_readiness_restart, (
+        main_invocation_before_readiness_restart,
+        main_invocation_after_readiness_restart,
+    )
+    machine.succeed("touch /run/cratedigger-test-beets-readiness-fail")
+    machine.fail("systemctl restart cratedigger-test-beets-readiness.service")
+    machine.wait_until_succeeds(
+        "systemctl is-failed cratedigger-test-beets-readiness.service"
+    )
+    main_invocation_after_failed_readiness_restart = machine.succeed(
+        "systemctl show cratedigger.service -p InvocationID --value"
+    ).strip()
+    assert (
+        main_invocation_after_failed_readiness_restart
+        == main_invocation_before_readiness_restart
+    ), (
+        main_invocation_before_readiness_restart,
+        main_invocation_after_failed_readiness_restart,
+    )
+    machine.succeed(
+        "systemctl show cratedigger.service -p ActiveState --value "
+        "| grep -qx activating"
+    )
+    machine.succeed(
+        "systemctl stop cratedigger.service; "
+        "rm -r /run/systemd/system/cratedigger.service.d; "
+        "systemctl daemon-reload; "
+        "systemctl reset-failed cratedigger.service"
+    )
+
+    # A fresh main start has only Wants=+After= on readiness. Even though the
+    # producer remains failed, the soft dependency must let intrinsic Beets
+    # admission run. The service will later fail because there is no real
+    # slskd, which is outside this contract.
     machine.succeed("systemctl start --no-block cratedigger.service")
     machine.wait_until_succeeds("test ! -f /var/lib/cratedigger/.cratedigger.lock")
+    machine.wait_until_succeeds(
+        "journalctl -b -u cratedigger.service -o cat "
+        "| grep -q 'Beets configuration admitted for main'"
+    )
     machine.succeed(
         "systemctl kill --kill-whom=all --signal=SIGKILL cratedigger.service || true"
     )
     machine.succeed("systemctl reset-failed cratedigger.service || true")
+
+    # Mutation/observer workers retain Requires=+After=. With readiness still
+    # forced to fail, each fresh start must be rejected before its intrinsic
+    # admission path executes.
+    hard_readiness_units = (
+        ("importer", "cratedigger-importer.service"),
+        ("preview", "cratedigger-import-preview-worker.service"),
+        ("web", "cratedigger-web.service"),
+    )
+    admissions_before_failed_readiness = {}
+    for role, unit in hard_readiness_units:
+        startup_log = machine.succeed(f"journalctl -b -u {unit} -o cat")
+        admissions_before_failed_readiness[unit] = startup_log.count(
+            f"Beets configuration admitted for {role}"
+        )
+        machine.fail(f"systemctl start {unit}")
+        machine.fail(f"systemctl is-active {unit}")
+        startup_log = machine.succeed(f"journalctl -b -u {unit} -o cat")
+        assert startup_log.count(
+            f"Beets configuration admitted for {role}"
+        ) == admissions_before_failed_readiness[unit], (unit, startup_log)
+    readiness_failure_log = machine.succeed(
+        "journalctl -b -u cratedigger-test-beets-readiness.service -o cat"
+    )
+    assert "BEETS_EXTERNAL_READINESS_FAILED" in readiness_failure_log, (
+        readiness_failure_log
+    )
+
+    # Once deployment restores readiness, all hard-dependent workers recover
+    # through their ordinary starts and reach intrinsic admission exactly once.
+    machine.succeed(
+        "rm /run/cratedigger-test-beets-readiness-fail; "
+        "systemctl reset-failed cratedigger-test-beets-readiness.service "
+        "cratedigger-importer.service "
+        "cratedigger-import-preview-worker.service cratedigger-web.service; "
+        "systemctl start cratedigger-test-beets-readiness.service"
+    )
+    machine.wait_for_unit("cratedigger-test-beets-readiness.service")
     machine.succeed("systemctl start cratedigger-importer.service cratedigger-import-preview-worker.service cratedigger-youtube-ingest.service cratedigger-web.service")
+    for role, unit in (
+        ("importer", "cratedigger-importer.service"),
+        ("preview", "cratedigger-import-preview-worker.service"),
+        ("web", "cratedigger-web.service"),
+    ):
+        machine.wait_until_succeeds(
+            f"journalctl -b -u {unit} -o cat "
+            f"| grep -c 'Beets configuration admitted for {role}' "
+            "| grep -qx 2"
+        )
+    for role, unit in (
+        ("main", "cratedigger.service"),
+        ("importer", "cratedigger-importer.service"),
+        ("preview", "cratedigger-import-preview-worker.service"),
+        ("web", "cratedigger-web.service"),
+    ):
+        startup_log = machine.succeed(
+            f"journalctl -b -u {unit} -o cat"
+        )
+        expected_admissions = 1 if role == "main" else 2
+        assert startup_log.count(
+            f"Beets configuration admitted for {role}"
+        ) == expected_admissions, (unit, startup_log)
+    runtime_config = machine.succeed(
+        "pid=$(systemctl show cratedigger-web.service -p MainPID --value); "
+        "tr '\\0' '\\n' < /proc/$pid/cmdline "
+        "| awk 'seen { print; exit } $0 == \"--config\" { seen=1 }'"
+    ).strip()
+    assert runtime_config.startswith("/nix/store/"), runtime_config
+    machine.succeed(f"test -f {runtime_config}")
+    machine.fail(f"runuser -u cratedigger -- sh -c 'printf x >> {runtime_config}'")
     # CD-SEC-04: the four long-running services which process untrusted
     # network/media input share a portable hardening baseline, while each
     # retains only the writable roots its real workflow needs.  This checks
@@ -1192,11 +1548,15 @@ pkgs.testers.nixosTest {
             "--property=NoNewPrivileges --property=PrivateTmp "
             "--property=ProtectSystem --property=ProtectHome "
             "--property=RestrictAddressFamilies --property=SystemCallFilter "
-            "--property=ReadWritePaths"
+            "--property=ReadWritePaths --property=BindReadOnlyPaths "
+            "--property=BindPaths"
         )
         return dict(line.split("=", 1) for line in out.splitlines())
 
-    def _assert_sandbox_properties(unit, properties, expected_paths):
+    def _assert_sandbox_properties(
+        unit, properties, expected_paths,
+        expected_read_only=None, expected_binds=None,
+    ):
         assert properties["NoNewPrivileges"] == "yes", (unit, properties)
         assert properties["PrivateTmp"] == "yes", (unit, properties)
         assert properties["ProtectSystem"] == "strict", (unit, properties)
@@ -1218,9 +1578,25 @@ pkgs.testers.nixosTest {
         assert set(properties["ReadWritePaths"].split()) == set(expected_paths), (
             unit, properties,
         )
+        def _mount_sources(value):
+            return {entry.split(":", 1)[0] for entry in value.split()}
 
-    def _assert_sandbox_contract(unit, expected_paths):
-        _assert_sandbox_properties(unit, _unit_properties(unit), expected_paths)
+        if expected_read_only is not None:
+            assert _mount_sources(properties["BindReadOnlyPaths"]) == set(
+                expected_read_only
+            ), (unit, properties)
+        if expected_binds is not None:
+            assert _mount_sources(properties["BindPaths"]) == set(expected_binds), (
+                unit, properties,
+            )
+
+    def _assert_sandbox_contract(
+        unit, expected_paths, expected_read_only=(), expected_binds=(),
+    ):
+        _assert_sandbox_properties(
+            unit, _unit_properties(unit), expected_paths,
+            expected_read_only, expected_binds,
+        )
         rendered_lines = machine.succeed(f"systemctl cat {unit}").splitlines()
         assert "SystemCallFilter=@system-service" in rendered_lines, (
             unit, rendered_lines,
@@ -1249,8 +1625,8 @@ pkgs.testers.nixosTest {
                 "/var/lib/cratedigger",
                 "/var/lib/cratedigger/processing",
                 "/var/lib/cratedigger-downloads",
-                "/var/lib/cratedigger-music/Beets",
-                "/var/lib/cratedigger-beets-db",
+                "-/var/lib/cratedigger-music/Beets",
+                "-/var/lib/cratedigger-beets-db",
                 "/var/lib/cratedigger-music/Incoming",
             ],
         )
@@ -1268,8 +1644,8 @@ pkgs.testers.nixosTest {
                 "/var/lib/cratedigger",
                 "/var/lib/cratedigger/processing",
                 "/var/lib/cratedigger-downloads",
-                "/var/lib/cratedigger-music/Beets",
-                "/var/lib/cratedigger-beets-db",
+                "-/var/lib/cratedigger-music/Beets",
+                "-/var/lib/cratedigger-beets-db",
                 "/var/lib/cratedigger-music/Incoming",
             ],
         )
@@ -1282,23 +1658,30 @@ pkgs.testers.nixosTest {
         "/var/lib/cratedigger",
         "/var/lib/cratedigger/processing",
         "/var/lib/cratedigger-downloads",
-        "/var/lib/cratedigger-music/Beets",
-        "/var/lib/cratedigger-beets-db",
+        "-/var/lib/cratedigger-music/Beets",
+        "-/var/lib/cratedigger-beets-db",
         "/var/lib/cratedigger-music/Incoming",
+    ], [
+        "-${externalBeetsConfigDir}",
+        "-${externalStateFile}",
     ])
     _assert_sandbox_contract("cratedigger-importer.service", [
         "/var/lib/cratedigger",
         "/var/lib/cratedigger/processing",
         "/var/lib/cratedigger-downloads",
-        "/var/lib/cratedigger-music/Beets",
-        "/var/lib/cratedigger-beets-db",
+        "-/var/lib/cratedigger-music/Beets",
+        "-/var/lib/cratedigger-beets-db",
         "/var/lib/cratedigger-music/Incoming",
         "/var/lib/cratedigger-music/Re-download",
-    ])
+        "-/var/lib/cratedigger-beets-state/state.pickle",
+    ], ["-${externalBeetsConfigDir}"], ["-${externalStateFile}"])
     _assert_sandbox_contract("cratedigger-import-preview-worker.service", [
         "/var/lib/cratedigger",
         "/var/lib/cratedigger/processing",
         "/var/lib/cratedigger-downloads",
+    ], [
+        "-${externalBeetsConfigDir}",
+        "-${externalStateFile}",
     ])
     _assert_sandbox_contract("cratedigger-youtube-ingest.service", [
         "/var/lib/cratedigger",
@@ -1318,17 +1701,36 @@ pkgs.testers.nixosTest {
         assert properties["RestrictAddressFamilies"] == "~", (unit, properties)
         assert properties["SystemCallFilter"] == "~", (unit, properties)
         assert properties["ReadWritePaths"] == "", (unit, properties)
+    main_properties = _unit_properties("cratedigger.service")
+    assert {
+        entry.split(":", 1)[0]
+        for entry in main_properties["BindReadOnlyPaths"].split()
+    } == {
+        "-${externalBeetsConfigDir}",
+        "-${externalStateFile}",
+        "-${externalLibraryRoot}",
+        "-${externalLibraryDbParent}",
+    }, main_properties
+    machine.succeed(
+        "journalctl -b -u cratedigger.service -o cat "
+        "| grep -q BEETS_MAIN_WRITE_DENIAL_OK"
+    )
 
     # The importer probe ran inside the unit's sandbox. These pins prove every
     # configured authority root was writable while unrelated world-writable
     # locations remained effectively read-only despite their Unix modes.
-    machine.succeed("test \"$(stat -c %U:%G:%a /var/lib/cratedigger-beets-db)\" = cratedigger:beets-library:2775")
+    machine.succeed("test \"$(stat -c %U:%G:%a /var/lib/cratedigger-beets-db)\" = root:beets-library:2775")
     machine.succeed("runuser -u cratedigger -- test -w /var/lib/cratedigger-beets-db")
     machine.succeed("test \"$(stat -c %a /var/lib/cratedigger-music/unrelated)\" = 777")
     machine.fail("test -e /var/lib/cratedigger-music/unrelated/escape")
     machine.succeed("test \"$(stat -c %a /var/lib/cratedigger-world-writable)\" = 777")
     machine.fail("test -e /var/lib/cratedigger-world-writable/escape")
     machine.succeed("test -s /var/lib/cratedigger/processing/sandbox-probe/tone.mp3")
+    machine.succeed(
+        "test -s /var/lib/cratedigger/beets-incremental-vm.receipt; "
+        "read before after config < /var/lib/cratedigger/beets-incremental-vm.receipt; "
+        "test \"$before\" != \"$after\"; test -n \"$config\""
+    )
     for root in (
         "/var/lib/cratedigger",
         "/var/lib/cratedigger/processing",
@@ -1344,10 +1746,10 @@ pkgs.testers.nixosTest {
     # User= value.  Its private processing descendants must be writable by it
     # and inaccessible to the unrelated VM user.
     machine.succeed("test $(id -u cratedigger) -ne 0")
-    machine.succeed("test \"$(stat -c %U:%G:%a /var/lib/cratedigger/processing)\" = cratedigger:beets-library:700")
-    machine.succeed("test \"$(stat -c %U:%G:%a /var/lib/cratedigger/processing/albums)\" = cratedigger:beets-library:700")
-    machine.succeed("test \"$(stat -c %U:%G:%a /var/lib/cratedigger/processing/albums/failed_imports)\" = cratedigger:beets-library:700")
-    machine.succeed("test \"$(stat -c %U:%G:%a /var/lib/cratedigger/processing/preview)\" = cratedigger:beets-library:700")
+    machine.succeed("test \"$(stat -c %U:%G:%a /var/lib/cratedigger/processing)\" = cratedigger:cratedigger:700")
+    machine.succeed("test \"$(stat -c %U:%G:%a /var/lib/cratedigger/processing/albums)\" = cratedigger:cratedigger:700")
+    machine.succeed("test \"$(stat -c %U:%G:%a /var/lib/cratedigger/processing/albums/failed_imports)\" = cratedigger:cratedigger:700")
+    machine.succeed("test \"$(stat -c %U:%G:%a /var/lib/cratedigger/processing/preview)\" = cratedigger:cratedigger:700")
     machine.succeed("runuser -u cratedigger -- mkdir /var/lib/cratedigger/processing/preview/vm-nonroot-snapshot")
     machine.fail("runuser -u unrelated-user -- test -r /var/lib/cratedigger/processing/preview")
     machine.succeed("runuser -u cratedigger -- rmdir /var/lib/cratedigger/processing/preview/vm-nonroot-snapshot")
@@ -1368,7 +1770,12 @@ pkgs.testers.nixosTest {
     machine.fail("runuser -u slskd-writer -- mv /var/lib/cratedigger/processing/albums/existing-canonical/track.flac /var/lib/cratedigger/processing/albums/existing-canonical/renamed-track.flac")
     machine.fail("runuser -u slskd-writer -- rm /var/lib/cratedigger/processing/albums/existing-canonical/track.flac")
     machine.fail("runuser -u slskd-writer -- rmdir /var/lib/cratedigger/processing/albums/existing-canonical")
-    machine.succeed("awk '$0 == \"[Paths]\" { in_paths=1; next } in_paths && /^\\[/ { exit } in_paths { print }' /var/lib/cratedigger/config.ini | grep -qx 'processing_dir = /var/lib/cratedigger/processing'")
+    machine.succeed(
+        f"awk '$0 == \"[Paths]\" {{ in_paths=1; next }} "
+        "in_paths && /^\\[/ { exit } in_paths { print }' "
+        f"{runtime_config} "
+        "| grep -qx 'processing_dir = /var/lib/cratedigger/processing'"
+    )
     # tmpfiles' age calculation includes the directory birth time.  Create a
     # genuine eight-day-old preview snapshot by temporarily moving the VM clock
     # back, then restore it before asking tmpfiles to clean.  Merely backdating
@@ -1382,35 +1789,97 @@ pkgs.testers.nixosTest {
     machine.succeed("test -d /var/lib/cratedigger/processing/albums/existing-canonical")
     machine.succeed("test \"$(cat /var/lib/cratedigger/processing/albums/existing-canonical/track.flac)\" = canonical")
     # config.ini points at the out-of-band secret, never its plaintext value.
-    machine.succeed("grep -q 'api_key_file = /etc/cratedigger/slskd-api-key' /var/lib/cratedigger/config.ini")
-    # The secret itself must NEVER appear in config.ini — that's the whole fix.
-    machine.fail("grep -q 'test-api-key-do-not-use' /var/lib/cratedigger/config.ini")
-    # config.ini is now world-readable since it contains no secrets.
-    mode = machine.succeed("stat -c %a /var/lib/cratedigger/config.ini").strip()
-    assert mode == "644", f"config.ini should be 0644, got {mode}"
-    machine.succeed("grep -q 'enabled = True' /var/lib/cratedigger/config.ini")  # beets validation ON (stranger posture)
-    machine.succeed("grep -q '\\[Quality Ranks\\]' /var/lib/cratedigger/config.ini")
-    machine.succeed("grep -q '^vorbis.transparent = 192$' /var/lib/cratedigger/config.ini")
-    machine.succeed("grep -q '^vorbis.excellent = 160$' /var/lib/cratedigger/config.ini")
-    machine.succeed("grep -q '^vorbis.good = 112$' /var/lib/cratedigger/config.ini")
-    machine.succeed("grep -q '^vorbis.acceptable = 96$' /var/lib/cratedigger/config.ini")
-    machine.succeed("grep -q '^wma.transparent = 320$' /var/lib/cratedigger/config.ini")
-    machine.succeed("grep -q '^wma.excellent = 256$' /var/lib/cratedigger/config.ini")
-    machine.succeed("grep -q '^wma.good = 192$' /var/lib/cratedigger/config.ini")
-    machine.succeed("grep -q '^wma.acceptable = 128$' /var/lib/cratedigger/config.ini")
-    # U5 (tier-2): the module renders the beets runtime keys so every
-    # beets subprocess resolves the pinned interpreter + rendered config.
-    machine.succeed("grep -q 'config_dir = /var/lib/cratedigger/beets' /var/lib/cratedigger/config.ini")
-    machine.succeed("grep -q '^library = /var/lib/cratedigger-beets-db/beets-library.db$' /var/lib/cratedigger/config.ini")
+    machine.succeed(
+        f"grep -q 'api_key_file = /etc/cratedigger/slskd-api-key' "
+        f"{runtime_config}"
+    )
+    machine.fail(f"grep -q 'test-api-key-do-not-use' {runtime_config}")
+    mode = machine.succeed(f"stat -c %a {runtime_config}").strip()
+    assert mode == "444", f"immutable runtime config should be 0444, got {mode}"
+    machine.succeed(f"grep -q 'enabled = True' {runtime_config}")
+    machine.succeed(f"grep -q '\\[Quality Ranks\\]' {runtime_config}")
+    machine.succeed(f"grep -q '^vorbis.transparent = 192$' {runtime_config}")
+    machine.succeed(f"grep -q '^vorbis.excellent = 160$' {runtime_config}")
+    machine.succeed(f"grep -q '^vorbis.good = 112$' {runtime_config}")
+    machine.succeed(f"grep -q '^vorbis.acceptable = 96$' {runtime_config}")
+    machine.succeed(f"grep -q '^wma.transparent = 320$' {runtime_config}")
+    machine.succeed(f"grep -q '^wma.excellent = 256$' {runtime_config}")
+    machine.succeed(f"grep -q '^wma.good = 192$' {runtime_config}")
+    machine.succeed(f"grep -q '^wma.acceptable = 128$' {runtime_config}")
+    # The store config carries the exact six externally supplied Beets
+    # authorities and only the secret include path, never its token value.
+    for expected_line in (
+        "config_dir = ${externalBeetsConfigDir}",
+        "library = ${externalLibraryDb}",
+        "directory = ${externalLibraryRoot}",
+        "state_file = ${externalStateFile}",
+        "python = /nix/store/",
+        "secret_include = ${externalSecretInclude}",
+    ):
+        machine.succeed(f"grep -Fq '{expected_line}' {runtime_config}")
+    beets_runtime_keys = machine.succeed(
+        f"awk '$0 == \"[Beets]\" {{ active=1; next }} "
+        "active && /^\\[/ { exit } "
+        "active && /=/ { sub(/[[:space:]]*=.*/, \"\"); print }' "
+        f"{runtime_config}"
+    ).splitlines()
+    assert len(beets_runtime_keys) == 6, beets_runtime_keys
+    assert set(beets_runtime_keys) == {
+        "config_dir", "library", "directory", "state_file", "python",
+        "secret_include",
+    }, beets_runtime_keys
+    machine.succeed(
+        "token=$(sed -n 's/^  user_token: \"\\(.*\\)\"$/\\1/p' "
+        "${externalSecretInclude}); test -n \"$token\"; "
+        f"! grep -F \"$token\" {runtime_config}; "
+        "! grep -F \"$token\" ${externalBeetsConfigDir}/config.yaml"
+    )
+    beets_python = machine.succeed(
+        f"sed -n 's/^python = //p' {runtime_config}"
+    ).strip()
+    machine.succeed(
+        "test \"$(readlink -f $(command -v beet))\" "
+        "= ${externalBeetsPackage}/bin/beet"
+    )
+    machine.succeed(
+        f"test \"$({beets_python} -c 'import beets; print(beets.__version__)')\" "
+        "= ${externalBeetsPackage.version}"
+    )
+    machine.succeed(
+        f"python_root={beets_python}; "
+        "python_root=''${python_root%/bin/python}; "
+        f"nix-store -qR \"$python_root\" | grep -Fx '${externalBeetsPackage}'"
+    )
+    for command in (
+        "cratedigger-importer",
+        "cratedigger-check-beets-config",
+    ):
+        machine.succeed(
+            f"root=$(readlink -f $(command -v {command})); "
+            "root=''${root%/bin/*}; "
+            f"nix-store -qR \"$root\" | grep -Fx '${externalBeetsPackage}'"
+        )
+    # Run the packaged checker inside the real role namespaces so its state
+    # access view matches each application rather than the host namespace.
+    for role, unit in (
+        ("main", "cratedigger-web.service"),
+        ("web", "cratedigger-web.service"),
+        ("preview", "cratedigger-import-preview-worker.service"),
+        ("importer", "cratedigger-importer.service"),
+    ):
+        machine.succeed(
+            f"pid=$(systemctl show {unit} -p MainPID --value); "
+            f"nsenter -t $pid -m -- runuser -u cratedigger -- "
+            f"cratedigger-check-beets-config --role {role} "
+            f"| grep -q '\"ok\":true'"
+        )
     machine.succeed("test -d /var/lib/cratedigger-beets-db")
     machine.succeed("test -f /var/lib/cratedigger-beets-db/.sandbox-probe")
-    machine.succeed("grep -q 'python = /nix/store/' /var/lib/cratedigger/config.ini")
-    # U6 (tier-2): one MB value, rendered for the python consumers too.
-    machine.succeed("grep -q 'api_base = https://musicbrainz.org' /var/lib/cratedigger/config.ini")
-    machine.succeed("grep -q '\\[Peer Cache\\]' /var/lib/cratedigger/config.ini")
-    machine.succeed("grep -q 'redis_host = 127.0.0.1' /var/lib/cratedigger/config.ini")
-    machine.succeed("grep -q 'ttl_seconds = 604800' /var/lib/cratedigger/config.ini")
-    machine.succeed("grep -q '^library_id = music-library-item-id$' /var/lib/cratedigger/config.ini")
+    machine.succeed(f"grep -q 'api_base = https://musicbrainz.org' {runtime_config}")
+    machine.succeed(f"grep -q '\\[Peer Cache\\]' {runtime_config}")
+    machine.succeed(f"grep -q 'redis_host = 127.0.0.1' {runtime_config}")
+    machine.succeed(f"grep -q 'ttl_seconds = 604800' {runtime_config}")
+    machine.succeed(f"grep -q '^library_id = music-library-item-id$' {runtime_config}")
     machine.succeed("${pkgs.redis}/bin/redis-cli -p 6379 CONFIG GET maxmemory-policy | grep -q allkeys-lru")
     machine.succeed("systemctl show -p After cratedigger.service | grep -q redis-cratedigger.service")
     machine.succeed("systemctl show -p Wants cratedigger.service | grep -q redis-cratedigger.service")
@@ -1441,20 +1910,20 @@ pkgs.testers.nixosTest {
 
     # Peer auth by construction (KTD5): the socket DSN carries no
     # password, and none exists in the rendered config or unit files.
-    machine.succeed("grep -q 'dsn = postgresql:///cratedigger?host=/run/postgresql' /var/lib/cratedigger/config.ini")
+    machine.succeed(f"grep -q 'dsn = postgresql:///cratedigger?host=/run/postgresql' {runtime_config}")
     # (password_file *keys* are fine — they are the #117 *File pattern;
     # what must not exist is an actual credential value.)
-    machine.fail("grep -Eqi 'password *= *[^ ]|pgpassword' /var/lib/cratedigger/config.ini")
+    machine.fail(f"grep -Eqi 'password *= *[^ ]|pgpassword' {runtime_config}")
     machine.succeed(
         "systemctl show cratedigger-db-migrate -p Environment"
         " | grep -q 'PIPELINE_DB_DSN=postgresql:///cratedigger?host=/run/postgresql'"
     )
 
-    # Module-owned first-boot ordering (U7/U10): migrate is serialised
-    # behind PostgreSQL; every app unit requires migrate — the stranger's
-    # first boot cannot race the database.
-    machine.succeed("systemctl show -p After cratedigger-db-migrate.service | grep -q postgresql.service")
-    machine.succeed("systemctl show -p Requires cratedigger-db-migrate.service | grep -q postgresql.service")
+    # Module-owned first-boot ordering (U7/U10): migrate is serialised behind
+    # NixOS's role/database setup oneshot; every app unit requires migrate —
+    # the stranger's first boot cannot race role creation or DB ownership.
+    machine.succeed("systemctl show -p After cratedigger-db-migrate.service | grep -q postgresql-setup.service")
+    machine.succeed("systemctl show -p Requires cratedigger-db-migrate.service | grep -q postgresql-setup.service")
 
     # pipeline-cli on PATH and connects (over the peer-auth socket)
     machine.succeed("sudo -u cratedigger pipeline-cli list wanted")
@@ -1529,7 +1998,7 @@ pkgs.testers.nixosTest {
         "test \"$(systemctl show cratedigger-web.service "
         "-p User --value)\" = cratedigger; "
         "test \"$(systemctl show cratedigger-web.service "
-        "-p Group --value)\" = beets-library; "
+        "-p Group --value)\" = cratedigger; "
         "systemctl show cratedigger-web.service -p ExecStartPre --value "
         "| grep -F cratedigger-web-basic-auth-validate; "
         "systemctl show cratedigger-web.service -p ExecStartPre --value "
@@ -2110,7 +2579,7 @@ pkgs.testers.nixosTest {
     )
     machine.succeed(
         "test \"$(systemctl show cratedigger-web.service -p Group --value)\" "
-        "= beets-library"
+        "= cratedigger"
     )
     machine.succeed(
         "systemctl show cratedigger-web.service "
@@ -3559,28 +4028,32 @@ pkgs.testers.nixosTest {
     # fails to acquire and returns 0 immediately.
     machine.succeed("sudo -u cratedigger cratedigger-youtube-ingest --once")
 
-    # U3+U4 (tier-2): cratedigger owns the beet runtime AND its config.
-    # The module rendered config.yaml into BEETSDIR during ExecStartPre
-    # (the `systemctl start cratedigger.service` above); cratedigger-beet
-    # resolves it and loads the FULL production plugin set with an included
-    # Discogs token readable by the explicit operator group.
-    machine.succeed("command -v cratedigger-beet")
-    machine.succeed("test -f /var/lib/cratedigger/beets/config.yaml")
-    mode = machine.succeed("stat -c %a /var/lib/cratedigger/beets/config.yaml").strip()
-    assert mode == "644", f"config.yaml should be 0644, got {mode}"
-    machine.succeed("test -f /var/lib/cratedigger/beets/secrets.yaml")
-    secret_mode = machine.succeed("stat -c %a /var/lib/cratedigger/beets/secrets.yaml").strip()
-    secret_group = machine.succeed("stat -c %G /var/lib/cratedigger/beets/secrets.yaml").strip()
-    assert secret_mode == "440", f"secrets.yaml should be 0440, got {secret_mode}"
-    assert secret_group == "cratedigger-ops", secret_group
-    machine.succeed("sudo -u beets-operator test -r /var/lib/cratedigger/beets/secrets.yaml")
-    machine.fail("sudo -u unrelated-user test -r /var/lib/cratedigger/beets/secrets.yaml")
+    # The deployment exposes plain `beet` from the supplied package and owns
+    # its immutable config plus token-only include.  The retired
+    # A Cratedigger operator wrapper and mutable application-owned BEETSDIR are absent.
+    machine.fail("command -v cratedigger-beet")
+    machine.succeed("command -v beet")
+    machine.succeed("test -f ${externalBeetsConfigDir}/config.yaml")
+    mode = machine.succeed(
+        "stat -Lc %a ${externalBeetsConfigDir}/config.yaml"
+    ).strip()
+    assert mode == "444", f"external config.yaml should be 0444, got {mode}"
+    secret_mode = machine.succeed(
+        "stat -c %a ${externalSecretInclude}"
+    ).strip()
+    secret_group = machine.succeed(
+        "stat -c %G ${externalSecretInclude}"
+    ).strip()
+    assert secret_mode == "440", f"token include should be 0440, got {secret_mode}"
+    assert secret_group == "beets-library", secret_group
+    machine.succeed(
+        "sudo -u beets-operator test -r ${externalSecretInclude}"
+    )
+    machine.fail("sudo -u unrelated-user test -r ${externalSecretInclude}")
 
-    # Semantic assertions on the rendered YAML (duplicate_keys nesting,
-    # plugin list, public-MB defaults, included token).
-    machine.succeed("${pyWithYaml}/bin/python3 ${checkRenderedBeetsConfig}")
-
-    version_out = machine.succeed("sudo -u cratedigger cratedigger-beet version")
+    version_out = machine.succeed(
+        "sudo -u cratedigger env BEETSDIR=${externalBeetsConfigDir} beet version"
+    )
     plugins_line = next(
         line for line in version_out.splitlines() if line.startswith("plugins:")
     )
@@ -3591,28 +4064,31 @@ pkgs.testers.nixosTest {
         "permissions"
     ).split():
         assert plugin in loaded, f"plugin {plugin} not loaded: {version_out}"
-    operator_version = machine.succeed("sudo -u beets-operator cratedigger-beet version")
+    operator_version = machine.succeed(
+        "sudo -u beets-operator env BEETSDIR=${externalBeetsConfigDir} "
+        "beet version"
+    )
     operator_plugins = next(
         line for line in operator_version.splitlines() if line.startswith("plugins:")
     )
     assert operator_plugins == plugins_line, (operator_plugins, plugins_line)
-    machine.succeed("sudo -u beets-operator cratedigger-beet config > /dev/null")
+    machine.succeed(
+        "sudo -u beets-operator env BEETSDIR=${externalBeetsConfigDir} "
+        "beet config > /dev/null"
+    )
     service_groups = machine.succeed("id -nG cratedigger").split()
-    assert "cratedigger-ops" in service_groups, service_groups
+    assert "cratedigger-ops" not in service_groups, service_groups
 
-    # Execute a real 12-track removal through the actual module-rendered
-    # config as an authorized non-root operator. This crosses renderer,
-    # include permissions, every shipped plugin, and pinned Beets itself.
-    beets_python = machine.succeed(
-        "sed -n 's/^python = //p' /var/lib/cratedigger/config.ini"
-    ).strip()
+    # Execute a real 12-track removal through the deployment-owned plain CLI,
+    # then the explicit exact-album child, against the same supplied package.
     seed_out = machine.succeed(
-        f"sudo -u cratedigger env BEETSDIR=/var/lib/cratedigger/beets "
+        f"sudo -u cratedigger env BEETSDIR=${externalBeetsConfigDir} "
         f"{beets_python} ${beetsDestructiveFixture} seed"
     )
     child_album_id = int(seed_out.strip().split("=", 1)[1])
     remove_out = machine.succeed(
-        "sudo -u beets-operator cratedigger-beet -P importsource "
+        "sudo -u beets-operator env BEETSDIR=${externalBeetsConfigDir} "
+        "beet -P importsource "
         "remove -a -f -d mb_albumid:cccccccc-cccc-cccc-cccc-cccccccccccc"
     )
     assert "Really?" not in remove_out, remove_out
@@ -3624,7 +4100,7 @@ pkgs.testers.nixosTest {
     }, separators=(",", ":"))
     child_out = machine.succeed(
         f"printf '%s' '{child_request}' | "
-        f"sudo -u beets-operator env BEETSDIR=/var/lib/cratedigger/beets "
+        f"sudo -u beets-operator env BEETSDIR=${externalBeetsConfigDir} "
         f"{beets_python} ${cratediggerSrc}/harness/delete_album.py "
         "2>/tmp/exact-delete.stderr"
     )
@@ -3633,8 +4109,205 @@ pkgs.testers.nixosTest {
     assert json.dumps(child_payload, separators=(",", ":")) == child_out
     machine.succeed("test ! -s /tmp/exact-delete.stderr")
     machine.succeed(
-        f"sudo -u cratedigger env BEETSDIR=/var/lib/cratedigger/beets "
+        f"sudo -u cratedigger env BEETSDIR=${externalBeetsConfigDir} "
         f"{beets_python} ${beetsDestructiveFixture} verify"
     )
+
+    # Exercise intrinsic application enforcement through two alternate
+    # deployment-owned authorities.  A hard conflict must stop before any
+    # PipelineDB/Beets effect; warning-only drift must admit startup; restoring
+    # the safe authority and restarting must converge without touching the
+    # fixture library.
+    def _beets_world_digest():
+        return machine.succeed(
+            "{ sha256sum ${externalLibraryDb} ${externalStateFile}; "
+            "find ${externalLibraryRoot} -type f -print0 "
+            "| sort -z | xargs -0 sha256sum; } "
+            "| sha256sum | cut -d ' ' -f 1"
+        ).strip()
+
+    def _pipeline_data_snapshot():
+        dump = machine.succeed(
+            "runuser -u postgres -- pg_dump --data-only --no-owner "
+            "cratedigger"
+        )
+        # PostgreSQL 18 emits a fresh random psql restriction key on every
+        # dump. It is transport metadata, not database state.
+        return "\n".join(
+            line for line in dump.splitlines()
+            if not line.startswith(("\\restrict ", "\\unrestrict "))
+        )
+
+    machine.succeed(
+        "systemctl stop cratedigger-web.service cratedigger-importer.service "
+        "cratedigger-import-preview-worker.service "
+        "cratedigger-youtube-ingest.service"
+    )
+    safe_system = machine.succeed("readlink -f /run/current-system").strip()
+    hard_system = machine.succeed(
+        "readlink -f /run/current-system/specialisation/cratedigger-beets-hard"
+    ).strip()
+    warning_system = machine.succeed(
+        "readlink -f /run/current-system/specialisation/"
+        "cratedigger-beets-warning"
+    ).strip()
+    beets_before_hard = _beets_world_digest()
+    pipeline_before_hard = _pipeline_data_snapshot()
+
+    # Keep every unrelated application stopped while installing the invalid
+    # authority, then exercise one exact startup attempt with retries disabled.
+    machine.succeed(f"{hard_system}/bin/switch-to-configuration test")
+    machine.succeed(
+        "systemctl start --no-block cratedigger-import-preview-worker.service"
+    )
+    machine.wait_until_succeeds(
+        "systemctl is-failed cratedigger-import-preview-worker.service"
+    )
+    hard_invocation = machine.succeed(
+        "systemctl show cratedigger-import-preview-worker.service "
+        "-p InvocationID --value"
+    ).strip()
+    hard_log = machine.succeed(
+        f"journalctl _SYSTEMD_INVOCATION_ID={hard_invocation} -o cat"
+    )
+    assert hard_log.count(
+        "Beets configuration rejected [import_write_disabled]"
+    ) == 1, hard_log
+    assert "Beets configuration admitted for preview" not in hard_log, hard_log
+    assert _beets_world_digest() == beets_before_hard
+    assert _pipeline_data_snapshot() == pipeline_before_hard
+
+    machine.succeed(f"{warning_system}/bin/switch-to-configuration test")
+    machine.succeed(
+        "systemctl reset-failed cratedigger-import-preview-worker.service; "
+        "systemctl start cratedigger-import-preview-worker.service"
+    )
+    machine.wait_for_unit("cratedigger-import-preview-worker.service")
+    warning_invocation = machine.succeed(
+        "systemctl show cratedigger-import-preview-worker.service "
+        "-p InvocationID --value"
+    ).strip()
+    warning_log = machine.succeed(
+        f"journalctl _SYSTEMD_INVOCATION_ID={warning_invocation} -o cat"
+    )
+    assert warning_log.count(
+        "Beets configuration warning [musicbrainz_endpoint_drift]"
+    ) == 1, warning_log
+    assert warning_log.count(
+        "Beets configuration admitted for preview"
+    ) == 1, warning_log
+    machine.succeed("systemctl stop cratedigger-import-preview-worker.service")
+
+    machine.succeed(f"{safe_system}/bin/switch-to-configuration test")
+    # A missing external state authority must reach Cratedigger's intrinsic
+    # admission check. The systemd missing-path modifier prevents namespace
+    # setup from failing first; the checker rejects the exact absent authority
+    # without creating it or mutating the catalog/library/pipeline world.
+    beets_before_missing_state = _beets_world_digest()
+    pipeline_before_missing_state = _pipeline_data_snapshot()
+    machine.succeed(
+        "systemctl stop cratedigger-importer.service "
+        "cratedigger-import-preview-worker.service cratedigger-web.service; "
+        "install -d /run/systemd/system/"
+        "cratedigger-import-preview-worker.service.d; "
+        "printf '[Service]\\nRestart=no\\n' > /run/systemd/system/"
+        "cratedigger-import-preview-worker.service.d/missing-state.conf; "
+        "systemctl daemon-reload; "
+        "mv ${externalStateFile} ${externalStateFile}.missing; "
+        "systemctl reset-failed cratedigger-import-preview-worker.service; "
+        "systemctl start --no-block cratedigger-import-preview-worker.service"
+    )
+    machine.wait_until_succeeds(
+        "systemctl is-failed cratedigger-import-preview-worker.service"
+    )
+    missing_state_invocation = machine.succeed(
+        "systemctl show cratedigger-import-preview-worker.service "
+        "-p InvocationID --value"
+    ).strip()
+    missing_state_log = machine.succeed(
+        f"journalctl _SYSTEMD_INVOCATION_ID={missing_state_invocation} -o cat"
+    )
+    assert missing_state_log.count(
+        "Beets configuration rejected [state_not_regular]"
+    ) == 1, missing_state_log
+    assert "Beets configuration admitted for preview" not in missing_state_log, missing_state_log
+    machine.fail("test -e ${externalStateFile}")
+    assert _pipeline_data_snapshot() == pipeline_before_missing_state
+    machine.succeed(
+        "mv ${externalStateFile}.missing ${externalStateFile}; "
+        "rm -r /run/systemd/system/"
+        "cratedigger-import-preview-worker.service.d; "
+        "systemctl daemon-reload; "
+        "systemctl reset-failed cratedigger-import-preview-worker.service"
+    )
+    assert _beets_world_digest() == beets_before_missing_state
+    machine.succeed(
+        "systemctl reset-failed cratedigger-import-preview-worker.service; "
+        "systemctl start cratedigger-import-preview-worker.service"
+    )
+    machine.wait_for_unit("cratedigger-import-preview-worker.service")
+    safe_invocation = machine.succeed(
+        "systemctl show cratedigger-import-preview-worker.service "
+        "-p InvocationID --value"
+    ).strip()
+    machine.wait_until_succeeds(
+        f"journalctl _SYSTEMD_INVOCATION_ID={safe_invocation} -o cat "
+        "| grep -q 'Beets configuration admitted for preview'"
+    )
+    safe_log = machine.succeed(
+        f"journalctl _SYSTEMD_INVOCATION_ID={safe_invocation} -o cat"
+    )
+    assert safe_log.count(
+        "Beets configuration admitted for preview"
+    ) == 1, safe_log
+    assert "Beets configuration rejected" not in safe_log, safe_log
+    assert _beets_world_digest() == beets_before_hard
+
+    # A lexical library path that resolves through a symlink to / must not
+    # turn the importer's narrow ReadWritePaths capability into a root-wide
+    # mutation namespace. Intrinsic admission rejects the resolved authority
+    # before the worker reaches any PipelineDB or Beets operation.
+    machine.succeed("systemctl stop cratedigger-import-preview-worker.service")
+    beets_before_root_alias = _beets_world_digest()
+    pipeline_before_root_alias = _pipeline_data_snapshot()
+    machine.succeed(
+        "install -d /run/systemd/system/cratedigger-importer.service.d; "
+        "printf '[Service]\\nRestart=no\\nExecStartPre=\\n' > /run/systemd/system/"
+        "cratedigger-importer.service.d/root-alias.conf; "
+        "mv ${externalLibraryRoot} ${externalLibraryRoot}.safe; "
+        "ln -s / ${externalLibraryRoot}; "
+        "systemctl daemon-reload; "
+        "systemctl reset-failed cratedigger-importer.service; "
+        "systemctl start --no-block cratedigger-importer.service"
+    )
+    machine.wait_until_succeeds("systemctl is-failed cratedigger-importer.service")
+    root_alias_invocation = machine.succeed(
+        "systemctl show cratedigger-importer.service -p InvocationID --value"
+    ).strip()
+    root_alias_log = machine.succeed(
+        f"journalctl _SYSTEMD_INVOCATION_ID={root_alias_invocation} -o cat"
+    )
+    assert root_alias_log.count(
+        "Beets configuration rejected [directory_root]"
+    ) == 1, root_alias_log
+    assert "Beets configuration admitted for importer" not in root_alias_log, root_alias_log
+    assert _pipeline_data_snapshot() == pipeline_before_root_alias
+    machine.succeed(
+        "rm ${externalLibraryRoot}; "
+        "mv ${externalLibraryRoot}.safe ${externalLibraryRoot}; "
+        "rm -r /run/systemd/system/cratedigger-importer.service.d; "
+        "systemctl daemon-reload; "
+        "systemctl reset-failed cratedigger-importer.service"
+    )
+    assert _beets_world_digest() == beets_before_root_alias
+    readiness_log = machine.succeed(
+        "journalctl -b -u cratedigger-test-beets-readiness.service -o cat"
+    )
+    # Initial activation, healthy lifecycle restart, then recovery from the
+    # deliberately failed producer world.
+    assert readiness_log.count("BEETS_EXTERNAL_READINESS_OK") == 3, readiness_log
+    '';
+  in ''
+    exec(compile(open("${script}", encoding="utf-8").read(), "${script}", "exec"))
   '';
 }

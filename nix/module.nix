@@ -4,9 +4,8 @@
 # wrappers (e.g. ~/nixosconfig) layer their secrets backend, DB host, and
 # reverse-proxy on top via standard NixOS option merging.
 #
-# Identity defaults to root because slskd downloads land outside the cratedigger
-# user's home and beets needs broad filesystem access. Override with
-# `services.cratedigger.user` / `services.cratedigger.group` if you're hardened.
+# Identity defaults to the dedicated Cratedigger account. Deployments retain
+# control of its supplementary groups and external Beets/slskd permissions.
 {
   config,
   lib,
@@ -17,21 +16,20 @@
 
   cfg = config.services.cratedigger;
   src = cfg.src;
-  # A canonical stateDir is a hard boundary: the default Beets DB is its
-  # sibling, while preview and YouTube retain stateDir itself for rendering
-  # and working-directory needs.
+  # stateDir is mutable Cratedigger state, distinct from the immutable
+  # deployment-owned runtime configuration rendered below.
   canonicalStateDir = cfg.stateDir;
+  isAbsoluteNormalizedPath = path:
+    path != null
+    && lib.hasPrefix "/" path
+    && (path == "/" || !lib.hasSuffix "/" path)
+    && !lib.hasInfix "//" path
+    && !lib.hasInfix "/./" path
+    && !lib.hasSuffix "/." path
+    && !lib.hasInfix "/../" path
+    && !lib.hasSuffix "/.." path;
   canonicalStateDirIsValid =
-    lib.hasPrefix "/" canonicalStateDir
-    && canonicalStateDir != "/"
-    && !lib.hasSuffix "/" canonicalStateDir
-    && !lib.hasInfix "//" canonicalStateDir
-    && !lib.hasInfix "/./" canonicalStateDir
-    && !lib.hasSuffix "/." canonicalStateDir
-    && !lib.hasInfix "/../" canonicalStateDir
-    && !lib.hasSuffix "/.." canonicalStateDir;
-  defaultBeetsDbDir = "${canonicalStateDir}-beets-db";
-
+    canonicalStateDir != "/" && isAbsoluteNormalizedPath canonicalStateDir;
   # Every unit/wrapper interpolates the DSN; guard it so a missing value
   # yields the actionable message even if string coercion is forced before
   # the module assertions run. createLocally mkDefaults this option to the
@@ -41,167 +39,14 @@
     then cfg.pipelineDb.dsn
     else throw "services.cratedigger.pipelineDb.dsn is not set: either set it to your PostgreSQL connection string, or set services.cratedigger.pipelineDb.createLocally = true to provision a local database.";
 
-  # The one beets (tier-2 plan U3, R4): pinned package + full built-in
-  # plugin closure, with the mirror patches applied only when the operator
-  # sets the knobs. This same derivation is the python library in pythonEnv
-  # (lib/beets_distance.py) and the bin/beet behind cratedigger-beet; the
-  # harness interpreter joins in U5.
-  beetsEnv = import ./beets.nix {
-    pkgs = cfg.packageSet;
-    discogsMirrorUrl = cfg.beets.package.discogsMirrorUrl;
-    lrclibUrl = cfg.beets.package.lrclibUrl;
-  };
+  # The deployment owns Beets. Cratedigger only consumes the exact supplied
+  # Python package and effective configuration authority.
+  beetsPackage = cfg.beets.runtime.package;
 
-  # Config dir every beets consumer resolves via BEETSDIR (beets' native
-  # config-dir override). preStart renders config.yaml (and, when a token
-  # file is configured, secrets.yaml) into it.
-  beetsConfigDir = "${cfg.stateDir}/beets";
-
-  # The module owns beets config.yaml (tier-2 plan U4, R5). The attrset
-  # mirrors the production config exactly (source of truth: the operator's
-  # live HM-rendered ~/.config/beets/config.yaml, 2026-07-03); the U12
-  # cutover gate diffs the rendered file against it, so change values here
-  # only in lockstep with production intent.
-  #
-  # HARD-CODED, not options:
-  #   - import.duplicate_keys.album = [mb_albumid discogs_albumid] — the
-  #     Palo Santo data-loss invariant. Beets reads it strictly from
-  #     config["import"]["duplicate_keys"]; a top-level duplicate_keys is
-  #     silently ignored and re-enables cross-MBID sibling destruction.
-  #     NEVER expose this as an option.
-  #   - plugins — fixed production list; musicbrainz must be present or
-  #     beets returns 0 candidates for everything.
-  #   - paths / asciify_paths — path-affecting keys; drift here plus the
-  #     importer's post-import `beet move` reproduces the 2026-05-18
-  #     asciify mass-split (1,178 albums).
-  #   - clutter includes the exact derived sidecar name `cratedigger.json` so
-  #     the canonical `beet remove -d` bad-rip/Replace cleanup can prune a
-  #     sidecar-only album directory. Files outside the configured clutter
-  #     patterns still block Beets pruning.
-  beetsSettings = let
-    bc = cfg.beets.config;
-  in {
-    directory = bc.directory;
-    library = bc.library;
-    asciify_paths = true;
-    clutter = [
-      "Thumbs.DB" "Thumbs.db" ".DS_Store" "*.jpg" "*.png" "AlbumArt*"
-      "Folder.*" "desktop.ini" "cratedigger.json"
-    ];
-    import = {
-      copy = false;
-      write = true;
-      move = true;
-      timid = false;
-      incremental = true;
-      incremental_skip_later = true;
-      log = "${dirOf bc.library}/beets-import.log";
-      languages = ["en"];
-      duplicate_keys = {
-        album = ["mb_albumid" "discogs_albumid"];
-        item = ["artist" "title"];
-      };
-    };
-    # %aunique disambiguates same-key (albumartist+album) sibling pressings
-    # into distinct folders. It picks the first disambiguator field whose
-    # values are all-distinct across the set, then renders each album's OWN
-    # value — an album whose value is EMPTY renders NO bracket and lands on
-    # the plain path, straight inside the sibling's sticky folder (the
-    # Passenger collision, 2026-07-18: old pressing label='ATO Records',
-    # new pressing label='' → label "won", new bracket empty). The fix is a
-    # single computed disambiguator that is never empty by construction
-    # (falling through pretty fields to $year); when siblings tie on it,
-    # beets' built-in album-id fallback still yields a non-empty bracket.
-    # Contract: tests/test_harness_beets2_contract.py
-    # (TestAuniqueCollisionContract) sweeps this exact shipped config
-    # against real beets.
-    paths = {
-      default = "$albumartist/$year - $album%aunique{albumartist album,path_disambig}/$track $title";
-      singleton = "Non-Album/$artist/$title";
-      comp = "Compilations/$album%aunique{albumartist album,path_disambig}/$track $title";
-    };
-    album_fields.path_disambig = "albumdisambig or releasegroupdisambig or catalognum or label or str(year)";
-    musicbrainz = {
-      host = bc.musicbrainz.host;
-      https = bc.musicbrainz.https;
-      ratelimit = bc.musicbrainz.ratelimit;
-    };
-    match = {
-      ignore_video_tracks = false;
-      strong_rec_thresh = 0.10;
-      medium_rec_thresh = 0.25;
-      preferred = {
-        countries = ["AU" "US" "GB|UK"];
-        media = ["Digital Media|File" "CD"];
-        original_year = true;
-      };
-    };
-    plugins = "musicbrainz discogs fetchart embedart lyrics lastgenre scrub info missing duplicates edit fromfilename ftintitle the inline permissions";
-    chroma.auto = false;
-    permissions = {
-      file = "0664";
-      dir = "02775";
-    };
-    fetchart = {
-      auto = true;
-      minwidth = bc.fetchart.minwidth;
-      maxwidth = bc.fetchart.maxwidth;
-      quality = 75;
-      high_resolution = false;
-      sources = ["coverart" "itunes" "amazon" "albumart" "cover_art_url" "filesystem"];
-    };
-    embedart.auto = true;
-    scrub.auto = true;
-    lyrics = {
-      auto = true;
-      synced = true;
-      sources = ["lrclib"];
-    };
-    lastgenre = {
-      auto = true;
-      count = 3;
-      source = "album";
-      canonical = true;
-      separator = ", ";
-      force = false;
-    };
-    the = {
-      a = true;
-      the = true;
-    };
-  } // (
-    if cfg.beets.package.discogsTokenFile != null then {
-      # Real token: issue #117 *File pattern — preStart materializes
-      # secrets.yaml (service-only 0400, or explicit operator-group 0440)
-      # next to config.yaml; the world-readable
-      # config.yaml carries only the include.
-      include = ["secrets.yaml"];
-    } else {
-      # Tokenless stranger default (R7): any non-empty user_token makes
-      # the discogs plugin skip its interactive OAuth flow at load, so
-      # every plugin loads cleanly offline. Public-Discogs lookups with
-      # this placeholder are documented token-required (they 401 per-use;
-      # beets logs and falls back to MB candidates).
-      discogs.user_token = "cratedigger-placeholder-token";
-    }
-  );
-
-  beetsConfigTemplate = (pkgs.formats.yaml {}).generate "cratedigger-beets-config.yaml" beetsSettings;
-
-  # Same python env the dev shell uses — single source of truth. Built from
-  # cfg.packageSet (the flake export pins it to cratedigger's own flake.lock,
-  # tier-2 plan U2/R1) so the runtime closure matches what the test suite ran
-  # against, not whatever nixpkgs the consumer happens to be on.
-  cratedigger = cfg.packageSet.callPackage ./package.nix { beetsPackage = beetsEnv; };
+  # Build every application and checker from the supplied Beets package.
+  # The assertion below requires that package to belong to packageSet.python3.
+  cratedigger = cfg.packageSet.callPackage ./package.nix { inherit beetsPackage; };
   pythonEnv = cratedigger.pythonEnv;
-
-  # Canonical manual-ops beet for the library cratedigger manages. Pins
-  # BEETSDIR so operator invocations and pipeline subprocesses read the
-  # SAME module-rendered config — never a per-user ~/.config/beets.
-  cratediggerBeet = pkgs.writeShellScriptBin "cratedigger-beet" ''
-    export BEETSDIR="${beetsConfigDir}"
-    exec ${pythonEnv}/bin/beet "$@"
-  '';
 
   pyRunner = "${pythonEnv}/bin/python";
 
@@ -818,18 +663,13 @@
   # Known high-authority groups must never double as the web socket boundary.
   # Arbitrary group purpose cannot be inferred from its name, so consumers
   # still own keeping any other configured accessGroup dedicated.
-  webForbiddenAuthorityGroupKeys = lib.unique (
-    [
-      cfg.group
-      "root"
-      "wheel"
-      "cratedigger-ops"
-      "users"
-    ]
-    ++ optional
-      (cfg.beets.package.discogsOperatorGroup != null)
-      cfg.beets.package.discogsOperatorGroup
-  );
+  webForbiddenAuthorityGroupKeys = lib.unique [
+    cfg.group
+    "root"
+    "wheel"
+    "cratedigger-ops"
+    "users"
+  ];
   webForbiddenAuthorityGroups = lib.unique (
     map
       (
@@ -904,6 +744,18 @@
   webApplicationServiceIdentityIsModuleOwned =
     webApplicationServiceUser == cfg.user
     && webApplicationServiceGroup == cfg.group;
+  applicationConfiguredUser = config.users.users.${cfg.user} or {};
+  applicationConfiguredGroup = config.users.groups.${cfg.group} or {};
+  applicationIdentityIsNamed = value:
+    builtins.match "[0-9]+" value == null;
+  applicationUserIsNonRoot =
+    cfg.user != "root"
+    && applicationIdentityIsNamed cfg.user
+    && (applicationConfiguredUser.uid or null) != 0;
+  applicationGroupIsNonRoot =
+    cfg.group != "root"
+    && applicationIdentityIsNamed cfg.group
+    && (applicationConfiguredGroup.gid or null) != 0;
 
   # CD-SEC-04: these are the only long-running units that accept untrusted
   # network/media input. Keep the systemd hardening literal and shared; each
@@ -914,9 +766,6 @@
     ProtectSystem = "strict";
     ProtectHome = true;
     RestrictAddressFamilies = ["AF_UNIX" "AF_INET" "AF_INET6"];
-    # The renderer's explicit operator-group secrets handoff uses chgrp
-    # (fchownat). @system-service is the portable systemd service profile
-    # that includes that required ordinary filesystem operation.
     SystemCallFilter = ["@system-service"];
     ReadWritePaths = lib.unique writePaths;
   };
@@ -928,19 +777,32 @@
   validationTrackingWritePaths = optional
     (cfg.beets.validation.trackingFile != null)
     (dirOf cfg.beets.validation.trackingFile);
-  beetsWritePaths = lib.unique [
-    cfg.beets.config.directory
-    (dirOf cfg.beets.config.library)
-  ];
+  beetsReadinessUnits = cfg.beets.runtime.readinessUnits;
+  presentExternalPath = path: optional (path != null) path;
+  missingOkExternalPath = path: map (value: "-${value}") (presentExternalPath path);
+  beetsConfigReadOnlyPaths = missingOkExternalPath cfg.beets.runtime.configDir;
+  beetsObserverReadOnlyPaths = beetsConfigReadOnlyPaths ++
+    missingOkExternalPath cfg.beets.runtime.expectedStateFile;
+  beetsLibraryAuthorityRoots = lib.unique (
+    presentExternalPath cfg.beets.runtime.expectedDirectory
+    ++ optional
+      (cfg.beets.runtime.expectedLibrary != null)
+      (dirOf cfg.beets.runtime.expectedLibrary)
+  );
+  beetsMainReadOnlyPaths = beetsObserverReadOnlyPaths
+    ++ map (path: "-${path}") beetsLibraryAuthorityRoots;
+  beetsMutationWritePaths =
+    map (path: "-${path}") beetsLibraryAuthorityRoots;
   webSandboxWritePaths = [
     cfg.stateDir
     cfg.processingDir
-  ] ++ slskdWritePaths ++ beetsWritePaths ++ validationStagingWritePaths;
+  ] ++ slskdWritePaths ++ beetsMutationWritePaths ++ validationStagingWritePaths;
   importerSandboxWritePaths = [
     cfg.stateDir
     cfg.processingDir
-  ] ++ slskdWritePaths ++ beetsWritePaths ++ validationStagingWritePaths
-    ++ validationTrackingWritePaths;
+  ] ++ slskdWritePaths ++ beetsMutationWritePaths ++ validationStagingWritePaths
+    ++ validationTrackingWritePaths
+    ++ missingOkExternalPath cfg.beets.runtime.expectedStateFile;
   previewWorkerSandboxWritePaths = [
     cfg.stateDir
     cfg.processingDir
@@ -949,13 +811,21 @@
     cfg.stateDir
     cfg.youtubeIngest.tempDir
   ] ++ validationStagingWritePaths;
+  beetsRuntimeEnvironment = ''
+    export BEETSDIR="${cfg.beets.runtime.configDir}"
+    export CRATEDIGGER_RUNTIME_CONFIG="${configTemplate}"
+  '';
 
   # CLI wrappers — the only place PYTHONPATH is set.
   cratediggerPkg = pkgs.writeShellScriptBin "cratedigger" ''
     export PATH="${runtimePath}:$PATH"
+    ${beetsRuntimeEnvironment}
     exec ${pyRunner} ${src}/cratedigger.py \
       --redis-host "${cfg.redis.host}" \
-      --redis-port ${toString cfg.redis.port} "$@"
+      --redis-port ${toString cfg.redis.port} \
+      "$@" \
+      --config "${configTemplate}" \
+      --runtime-dir "${cfg.stateDir}"
   '';
 
   # PYTHONPATH carries ONLY the repo root. Adding ${src}/lib or ${src}/web
@@ -972,6 +842,7 @@
   # in PYTHONPATH ahead of any explicitly inherited operator additions.
   pipelineCli = pkgs.writeShellScriptBin "pipeline-cli" ''
     export PATH="${runtimePath}:$PATH"
+    ${beetsRuntimeEnvironment}
     export PYTHONPATH="${src}''${PYTHONPATH:+:$PYTHONPATH}"
     exec ${pythonEnv}/bin/python -P -c \
       'from scripts.pipeline_cli.cli import main; main(api_socket="${webSocketPath}")' \
@@ -980,6 +851,7 @@
   '';
 
   pipelineMigrate = pkgs.writeShellScriptBin "pipeline-migrate" ''
+    ${beetsRuntimeEnvironment}
     export PYTHONPATH="${src}''${PYTHONPATH:+:$PYTHONPATH}"
     exec ${pythonEnv}/bin/python ${src}/scripts/migrate_db.py \
       --dsn "${pipelineDsn}" \
@@ -988,41 +860,56 @@
 
   importerPkg = pkgs.writeShellScriptBin "cratedigger-importer" ''
     export PATH="${runtimePath}:$PATH"
+    ${beetsRuntimeEnvironment}
     export PYTHONPATH="${src}''${PYTHONPATH:+:$PYTHONPATH}"
     exec ${pyRunner} ${src}/scripts/importer.py \
-      --dsn "${pipelineDsn}" "$@"
+      --dsn "${pipelineDsn}" \
+      "$@" \
+      --config "${configTemplate}" \
+      --runtime-dir "${cfg.stateDir}"
   '';
 
   previewWorkerPkg = pkgs.writeShellScriptBin "cratedigger-import-preview-worker" ''
     export PATH="${runtimePath}:$PATH"
+    ${beetsRuntimeEnvironment}
     export PYTHONPATH="${src}''${PYTHONPATH:+:$PYTHONPATH}"
     exec ${pyRunner} ${src}/scripts/import_preview_worker.py \
       --dsn "${pipelineDsn}" \
-      --workers ${toString cfg.importer.previewWorkers} "$@"
+      --workers ${toString cfg.importer.previewWorkers} \
+      "$@" \
+      --config "${configTemplate}" \
+      --runtime-dir "${cfg.stateDir}"
   '';
 
   webPkg = pkgs.writeShellScriptBin "cratedigger-web" ''
     export PATH="${runtimePath}:$PATH"
-    # cratedigger-web imports beets IN-PROCESS (lib/beets_distance.py);
-    # BEETSDIR points that import at the module-rendered config so
-    # Replace-picker distances use the same match config the importer
-    # sees (previously it silently read the invoking user's defaults).
-    export BEETSDIR="${beetsConfigDir}"
+    ${beetsRuntimeEnvironment}
     export PYTHONPATH="${src}''${PYTHONPATH:+:$PYTHONPATH}"
-    # MB/Discogs API bases are NOT passed here (issue #497): config.ini's
+    # MB/Discogs API bases are NOT passed here (issue #497): the immutable config's
     # [MusicBrainz]/[Discogs] api_base is the ONE production source, read at
     # startup via configure_api_bases_from_runtime_config(). The
     # --mb-api/--discogs-api flags still exist on web/server.py for
     # dev-only overrides for a manual `cratedigger-web` invocation — the module
     # deliberately stops passing them so there is no second path to keep
-    # in sync with config.ini.
+    # in sync with that runtime authority.
     exec ${pyRunner} ${src}/web/server.py \
       --canonical-origin "https://${webHostName}" \
       ${optionalString cfg.web.enableInsecure "--insecure-mode"} \
       --dsn "${pipelineDsn}" \
       --redis-host "${cfg.web.redis.host}" \
       --redis-port ${toString cfg.web.redis.port} \
-      "$@"
+      "$@" \
+      --config "${configTemplate}" \
+      --runtime-dir "${cfg.stateDir}"
+  '';
+
+  checkBeetsConfigPkg = pkgs.writeShellScriptBin "cratedigger-check-beets-config" ''
+    ${beetsRuntimeEnvironment}
+    export PYTHONPATH="${src}"
+    exec ${pyRunner} ${src}/scripts/check_beets_config.py \
+      "$@" \
+      --config "${configTemplate}" \
+      --runtime-dir "${cfg.stateDir}"
   '';
 
   # YouTube-rescue ingest drainer — see scripts/youtube_ingest_worker.py.
@@ -1034,6 +921,7 @@
   # subprocess and inherits this PATH from the wrapper.
   youtubeIngestWorkerPkg = pkgs.writeShellScriptBin "cratedigger-youtube-ingest" ''
     export PATH="${pkgs.yt-dlp}/bin:${runtimePath}:$PATH"
+    ${beetsRuntimeEnvironment}
     export PYTHONPATH="${src}''${PYTHONPATH:+:$PYTHONPATH}"
     exec ${pyRunner} ${src}/scripts/youtube_ingest_worker.py \
       --dsn "${pipelineDsn}" \
@@ -1049,6 +937,7 @@
   # no way to reach the regular 5-min plan loop's cursor mutators.
   unfindableDetectionPkg = pkgs.writeShellScriptBin "cratedigger-unfindable" ''
     export PATH="${runtimePath}:$PATH"
+    ${beetsRuntimeEnvironment}
     export PYTHONPATH="${src}''${PYTHONPATH:+:$PYTHONPATH}"
     exec ${pyRunner} ${src}/scripts/run_unfindable_detection.py \
       --dsn "${pipelineDsn}" "$@"
@@ -1078,10 +967,9 @@
       ${bandSection "wma" qr.bands.wma}
     '';
 
-  # Issue #117: secrets live at the *File paths referenced here. The cratedigger
+  # Runtime secrets live at the *File paths referenced here. The Cratedigger
   # Python code reads them on demand via CratediggerConfig.resolved_*() accessors,
-  # so nothing sensitive is ever embedded in config.ini and the file can be
-  # world-readable (see absence of chmod/chgrp in renderConfigScript).
+  # so nothing sensitive is embedded in this immutable Nix-store config.
   configTemplate = pkgs.writeText "cratedigger-config.ini" ''
     [Slskd]
     api_key_file = ${toString cfg.slskd.apiKeyFile}
@@ -1129,10 +1017,12 @@
     extensions_whitelist = ${concatStringsSep "," cfg.downloadSettings.extensionsWhitelist}
 
     [Beets]
-    directory = ${cfg.beets.config.directory}
-    library = ${cfg.beets.config.library}
-    config_dir = ${beetsConfigDir}
+    directory = ${cfg.beets.runtime.expectedDirectory}
+    library = ${cfg.beets.runtime.expectedLibrary}
+    config_dir = ${cfg.beets.runtime.configDir}
+    state_file = ${cfg.beets.runtime.expectedStateFile}
     python = ${pythonEnv}/bin/python
+    secret_include = ${cfg.beets.runtime.expectedSecretInclude}
 
     [Beets Validation]
     enabled = ${if cfg.beets.validation.enable then "True" else "False"}
@@ -1179,78 +1069,10 @@
     datefmt = ${cfg.logging.datefmt}
   '';
 
-  # Install the rendered template into stateDir. Since config.ini no longer
-  # embeds any plaintext secrets (issue #117 — they're *File paths now), there's
-  # no chmod dance, no sed substitution, and no group-ownership hack. The
-  # secrets themselves still need to be readable by cfg.user at whatever paths
-  # slskd.apiKeyFile / notifiers.*.tokenFile point to.
-  renderConfigScript = pkgs.writeShellScript "cratedigger-render-config" ''
-    set -euo pipefail
-    config_dir="${cfg.stateDir}"
-    mkdir -p "$config_dir"
-    tmp="$(${pkgs.coreutils}/bin/mktemp "$config_dir/.config.ini.XXXXXX")"
-    trap '${pkgs.coreutils}/bin/rm -f "$tmp"' EXIT
-    ${pkgs.coreutils}/bin/cp ${configTemplate} "$tmp"
-    ${pkgs.coreutils}/bin/chmod 0644 "$tmp"
-    ${pkgs.coreutils}/bin/mv -f "$tmp" "$config_dir/config.ini"
-    trap - EXIT
-    # Beets config (tier-2 plan U4): atomic render into BEETSDIR, same
-    # temp-file-and-rename dance as config.ini because the importer,
-    # preview worker and timer-driven oneshot can start concurrently.
-    beets_dir="${beetsConfigDir}"
-    mkdir -p "$beets_dir"
-    tmp_yaml="$(${pkgs.coreutils}/bin/mktemp "$beets_dir/.config.yaml.XXXXXX")"
-    trap '${pkgs.coreutils}/bin/rm -f "$tmp_yaml"' EXIT
-    ${pkgs.coreutils}/bin/cp ${beetsConfigTemplate} "$tmp_yaml"
-    ${pkgs.coreutils}/bin/chmod 0644 "$tmp_yaml"
-    ${pkgs.coreutils}/bin/mv -f "$tmp_yaml" "$beets_dir/config.yaml"
-    trap - EXIT
-    ${optionalString (cfg.beets.package.discogsTokenFile != null) ''
-      # Discogs token: *File pattern (issue #117) — the token lands only
-      # in a group-bounded secrets.yaml owned by the service user, never in the
-      # world-readable config.yaml. Bare assignment so a failed cat
-      # (unreadable secret) fails the unit under set -e instead of being
-      # swallowed inside a printf argument.
-      discogs_token="$(${pkgs.coreutils}/bin/cat "${cfg.beets.package.discogsTokenFile}")"
-      if [ -z "$discogs_token" ]; then
-        # An empty user_token re-enables the discogs plugin's interactive
-        # OAuth flow at load — the exact hazard the placeholder/token
-        # design exists to kill. Fail loud instead of deploying green
-        # with a broken beets.
-        echo "cratedigger: beets.package.discogsTokenFile (${cfg.beets.package.discogsTokenFile}) is empty — refusing to render an empty discogs user_token" >&2
-        exit 1
-      fi
-      # YAML single-quoted scalar; embedded single quotes doubled.
-      discogs_token="''${discogs_token//\'/\'\'}"
-      tmp_secrets="$(${pkgs.coreutils}/bin/mktemp "$beets_dir/.secrets.yaml.XXXXXX")"
-      trap '${pkgs.coreutils}/bin/rm -f "$tmp_secrets"' EXIT
-      {
-        echo 'discogs:'
-        echo "  user_token: '$discogs_token'"
-      } > "$tmp_secrets"
-      ${if cfg.beets.package.discogsOperatorGroup == null then ''
-        ${pkgs.coreutils}/bin/chmod 0400 "$tmp_secrets"
-      '' else ''
-        ${pkgs.coreutils}/bin/chgrp ${lib.escapeShellArg cfg.beets.package.discogsOperatorGroup} "$tmp_secrets"
-        ${pkgs.coreutils}/bin/chmod 0440 "$tmp_secrets"
-      ''}
-      ${pkgs.coreutils}/bin/mv -f "$tmp_secrets" "$beets_dir/secrets.yaml"
-      trap - EXIT
-    ''}
-    ${optionalString (cfg.beets.package.discogsTokenFile == null) ''
-      # Declarative convergence: switching back to the placeholder-token
-      # profile must revoke any previously group-readable rendered secret.
-      ${pkgs.coreutils}/bin/rm -f "$beets_dir/secrets.yaml"
-    ''}
-  '';
-
-  # Only the main pipeline owns this singleton lock. Its start retains an
-  # idempotent render fallback, then clears a stale lock left by a crashed
-  # predecessor. Workers and deployment-time rendering must never remove it:
-  # either can start while a timer-owned pipeline cycle is active.
+  # The main pipeline alone owns its singleton lock cleanup. Runtime and Beets
+  # configuration are immutable deployment inputs and are never rendered here.
   pipelinePreStartScript = pkgs.writeShellScript "cratedigger-pipeline-prestart" ''
     set -euo pipefail
-    ${renderConfigScript}
     rm -f "${cfg.stateDir}/.cratedigger.lock"
   '';
 
@@ -1335,26 +1157,25 @@ in {
 
     user = mkOption {
       type = types.str;
-      default = "root";
+      default = "cratedigger";
       description = ''
-        UNIX user to run cratedigger as. Defaults to root because slskd downloads
-        and the beets library typically live outside any service-user home and
-        cratedigger needs broad read/write access. Override only if you've set up
-        the surrounding permissions (slskd group membership, beets DB
-        ownership, /Incoming write access, etc.) for an unprivileged user.
+        Dedicated non-root UNIX user to run Cratedigger as. Configure its
+        surrounding permissions (slskd group membership, external Beets DB and
+        library access, /Incoming write access, etc.) through normal NixOS
+        account options. Root is rejected for the guarded application identity.
       '';
     };
 
     group = mkOption {
       type = types.str;
-      default = "root";
+      default = "cratedigger";
       description = "UNIX group to run cratedigger as. See `user` for context.";
     };
 
     stateDir = mkOption {
       type = types.str;
       default = "/var/lib/cratedigger";
-      description = "Runtime state directory (config.ini, lock file). Must be an absolute normalized non-root path without a trailing slash.";
+      description = "Mutable runtime state directory (lock and operational state). Must be an absolute normalized non-root path without a trailing slash.";
     };
 
     processingDir = mkOption {
@@ -1467,9 +1288,9 @@ in {
           Must be readable by services.cratedigger.user. Use sops/agenix or any
           out-of-band mechanism — the module just reads the file at runtime.
 
-          Since issue #117 this path is written directly into config.ini and
-          read on demand by the Python pipeline. No plaintext copy lives in
-          config.ini, and the rendered file is world-readable. If non-root
+          Since issue #117 this path is written directly into the immutable
+          application config and read on demand by the Python pipeline. No
+          plaintext copy lives in the Nix store. If non-root
           tooling (e.g. pipeline-cli force-import) also needs to reach slskd,
           that operator user must be able to read this file too — typically
           done by mode 0440 + an operator group, not by loosening config.ini.
@@ -1521,8 +1342,8 @@ in {
           named after services.cratedigger.user, so unix-socket PEER
           authentication works by construction — no password material
           anywhere (KTD5). The DSN defaults to the local socket and
-          cratedigger-db-migrate is ordered after postgresql.service so
-          first boot cannot race the database. The operator's external-DB
+          cratedigger-db-migrate is ordered after postgresql-setup.service so
+          first boot cannot race role and database provisioning. The operator's external-DB
           setup (createLocally = false + an explicit dsn) is unchanged.
         '';
       };
@@ -1583,131 +1404,49 @@ in {
       };
     };
 
-    # ONE beets option tree (issue #497): package build-time knobs
-    # (beets.package.*), the operator-tunable subset of the rendered
-    # config.yaml/runtime pair (beets.config.*), and the pipeline validation
-    # gate (beets.validation.*)
-    # all live under services.cratedigger.beets.*. Everything under
-    # beets.config NOT listed here (path templates, duplicate_keys, plugin
-    # list, match weights, ...) is rendered as a fixed production-parity
-    # literal — see beetsSettings above for why.
+    # Cratedigger consumes one external Beets runtime capability. Package,
+    # effective configuration, secret delivery, state provisioning, database,
+    # library root, and the operator CLI remain deployment-owned.
     beets = {
-      package = {
-        discogsMirrorUrl = mkOption {
+      runtime = {
+        package = mkOption {
+          type = types.nullOr types.package;
+          default = null;
+          description = ''
+            External Beets Python package consumed by every Cratedigger
+            application and checker. Required when Cratedigger is enabled and
+            must use services.cratedigger.packageSet.python3.
+          '';
+        };
+        configDir = mkOption {
           type = types.nullOr types.str;
           default = null;
-          example = "https://discogs.ablz.au";
-          description = ''
-            When set, the beets discogs plugin's client is patched
-            (substituteInPlace at build time) to use this base URL instead of
-            public api.discogs.com. Null = stock plugin behaviour (public
-            Discogs, token required for lookups — see the discogs token
-            handling in the rendered beets config).
-          '';
+          description = "External immutable BEETSDIR. Required when Cratedigger is enabled.";
         };
-        lrclibUrl = mkOption {
+        expectedLibrary = mkOption {
           type = types.nullOr types.str;
           default = null;
-          example = "http://192.168.1.35:3300/api";
-          description = ''
-            When set, the beets lyrics plugin's LRCLIB base URL is patched
-            (substituteInPlace at build time) to this value instead of public
-            lrclib.net. Null = stock plugin behaviour.
-          '';
+          description = "Canonical external Beets SQLite database path. Required when Cratedigger is enabled.";
         };
-        discogsTokenFile = mkOption {
-          type = types.nullOr types.path;
-          default = null;
-          description = ''
-            Path to a file containing a Discogs user token (raw, one line).
-            Same contract as slskd.apiKeyFile (issue #117): must be readable
-            by services.cratedigger.user. When set, preStart materializes it
-            into ''${stateDir}/beets/secrets.yaml and the rendered
-            config.yaml includes it. When null, a non-empty placeholder token
-            is rendered instead so the discogs plugin loads without its
-            interactive OAuth flow — public-Discogs lookups then fail
-            per-use until a real token is provided (documented
-            token-required).
-          '';
-        };
-        discogsOperatorGroup = mkOption {
+        expectedDirectory = mkOption {
           type = types.nullOr types.str;
           default = null;
-          example = "cratedigger-ops";
-          description = ''
-            Optional UNIX group authorized to run operator-side Beets actions
-            through the module-rendered config. When set with
-            discogsTokenFile, secrets.yaml is owned by this group at 0440;
-            otherwise it remains service-only at 0400. The module creates the
-            group and adds a non-root service user; authorized CLI operators
-            must be added separately.
-          '';
+          description = "Canonical external Beets library root. Required when Cratedigger is enabled.";
         };
-      };
-
-      config = {
-        directory = mkOption {
-          type = types.str;
-          default = "/mnt/virtio/Music/Beets";
-          description = ''
-            Beets library root (config.yaml `directory:`). Production-matching
-            default (tier-2 plan R5); strangers point this at their music
-            root.
-          '';
+        expectedStateFile = mkOption {
+          type = types.nullOr types.str;
+          default = null;
+          description = "Externally provisioned host-local Beets state file. Required when Cratedigger is enabled.";
         };
-        library = mkOption {
-          type = types.str;
-          default = "${defaultBeetsDbDir}/beets-library.db";
-          description = ''
-            Beets library SQLite DB (config.yaml `library:`). Defaults to a
-            dedicated sibling of stateDir so a fresh hardened install
-            does not need write access to its music root. The import log and
-            harness mutation audit render beside this file. The module creates
-            the default parent on first boot; an explicitly overridden parent
-            remains operator-owned and must already exist at runtime because
-            `beet` otherwise prompts interactively ("Create it (Y/n)?").
-          '';
+        expectedSecretInclude = mkOption {
+          type = types.nullOr types.str;
+          default = null;
+          description = "Designated external token-only Beets secret include. Required when Cratedigger is enabled.";
         };
-        fetchart = {
-          maxwidth = mkOption {
-            type = types.int;
-            default = 500;
-            description = ''
-              fetchart maxwidth. Load-bearing: embedded art is duplicated in
-              every track, so width drives library size (500px ≈ 71KB vs
-              1138KB unresized across ~83K tracks = ~85GB saved).
-            '';
-          };
-          minwidth = mkOption {
-            type = types.int;
-            default = 300;
-            description = ''
-              fetchart minwidth. Reject unusably small embedded artwork;
-              300px is the collection's established quality floor.
-            '';
-          };
-        };
-        musicbrainz = {
-          host = mkOption {
-            type = types.str;
-            default = "musicbrainz.org";
-            description = ''
-              MusicBrainz host for beets (config.yaml `musicbrainz.host`).
-              Default is public MB — functional but rate-limited (~1 req/s).
-              Point at a local mirror (host:port) for production-speed
-              matching; https and ratelimit below must be set coherently.
-            '';
-          };
-          https = mkOption {
-            type = types.bool;
-            default = true;
-            description = "Whether beets talks TLS to musicbrainz.host (true for public MB, typically false for a LAN mirror).";
-          };
-          ratelimit = mkOption {
-            type = types.int;
-            default = 1;
-            description = "beets musicbrainz ratelimit (req/s). 1 for public MB; 100 against a local mirror.";
-          };
+        readinessUnits = mkOption {
+          type = types.listOf types.str;
+          default = [];
+          description = "Deployment-owned units that must complete before guarded Cratedigger applications start.";
         };
       };
 
@@ -1754,10 +1493,10 @@ in {
         description = ''
           MusicBrainz API origin (scheme://host[:port], no path) — ONE value
           threaded to all consumers (tier-2 plan U6/KTD6): web/mb.py
-          (via config.ini [MusicBrainz] api_base, read at cratedigger-web
+          (via immutable runtime config [MusicBrainz] api_base, read at cratedigger-web
           startup by configure_api_bases_from_runtime_config()), pipeline-cli
-          release lookups, DatabaseSource track population, and the rendered
-          beets musicbrainz.{host,https,ratelimit}. Public MB default is
+          release lookups, and DatabaseSource track population. The external
+          Beets owner configures its own MusicBrainz endpoint. Public MB is
           functional but rate-limited (~1 req/s); point at a local mirror for
           production-speed matching.
         '';
@@ -1774,9 +1513,8 @@ in {
           population. Mirror-REQUIRED (R13): the Rust mirror's endpoint shape
           is not served by public api.discogs.com, so there is no public
           fallback. Null = Discogs browse off (clear 503 mirror-required
-          message); MusicBrainz browse is unaffected. The beets discogs
-          plugin's own path is separate — see beets.package.discogsMirrorUrl
-          for its mirror knob.
+          message); MusicBrainz browse is unaffected. The external Beets owner
+          separately configures the Discogs plugin.
         '';
       };
     };
@@ -1855,7 +1593,7 @@ in {
     };
 
     # Notifier credential *File options follow the same contract as
-    # slskd.apiKeyFile (issue #117): paths written into config.ini, read on
+    # slskd.apiKeyFile (issue #117): paths written into immutable config, read on
     # demand by CratediggerConfig.resolved_*(). They must be readable by
     # services.cratedigger.user. If the operator also triggers imports via
     # pipeline-cli from a non-root shell, the same files must be readable
@@ -2130,6 +1868,75 @@ in {
         message = "services.cratedigger.stateDir must be an absolute normalized non-root path without a trailing slash (for example, /var/lib/cratedigger).";
       }
       {
+        assertion = applicationUserIsNonRoot && applicationGroupIsNonRoot;
+        message = "services.cratedigger guarded application identity must use a named non-root user and group (numeric systemd identity spellings are forbidden, and neither name nor resolved UID/GID may be 0).";
+      }
+      {
+        assertion = cfg.beets.runtime.package != null;
+        message = "services.cratedigger.beets.runtime.package is required: supply the external Beets Python package used by this deployment.";
+      }
+      {
+        assertion = cfg.beets.runtime.configDir != null;
+        message = "services.cratedigger.beets.runtime.configDir is required: supply the external immutable BEETSDIR.";
+      }
+      {
+        assertion = cfg.beets.runtime.expectedLibrary != null;
+        message = "services.cratedigger.beets.runtime.expectedLibrary is required: supply the canonical Beets SQLite database path.";
+      }
+      {
+        assertion = cfg.beets.runtime.expectedDirectory != null;
+        message = "services.cratedigger.beets.runtime.expectedDirectory is required: supply the canonical Beets library root.";
+      }
+      {
+        assertion = cfg.beets.runtime.expectedStateFile != null;
+        message = "services.cratedigger.beets.runtime.expectedStateFile is required: supply the externally provisioned host-local Beets state file.";
+      }
+      {
+        assertion = cfg.beets.runtime.expectedSecretInclude != null;
+        message = "services.cratedigger.beets.runtime.expectedSecretInclude is required: supply the designated token-only Beets secret include.";
+      }
+      {
+        assertion =
+          cfg.beets.runtime.package == null
+          || (
+            cfg.beets.runtime.package ? pythonModule
+            && cfg.beets.runtime.package.pythonModule == cfg.packageSet.python3
+          );
+        message = "services.cratedigger.beets.runtime.package.pythonModule must match services.cratedigger.packageSet.python3 so every application and checker uses one Beets runtime.";
+      }
+      {
+        assertion = isAbsoluteNormalizedPath cfg.beets.runtime.configDir;
+        message = "services.cratedigger.beets.runtime.configDir must be an absolute normalized path.";
+      }
+      {
+        assertion = cfg.beets.runtime.configDir != "/";
+        message = "services.cratedigger.beets.runtime.configDir must not be /; a root BEETSDIR disables sandbox filesystem isolation.";
+      }
+      {
+        assertion = isAbsoluteNormalizedPath cfg.beets.runtime.expectedLibrary;
+        message = "services.cratedigger.beets.runtime.expectedLibrary must be an absolute normalized path.";
+      }
+      {
+        assertion = cfg.beets.runtime.expectedLibrary == null || dirOf cfg.beets.runtime.expectedLibrary != "/";
+        message = "services.cratedigger.beets.runtime.expectedLibrary parent directory must not be /; its mutation capability must remain narrower than the host root.";
+      }
+      {
+        assertion = isAbsoluteNormalizedPath cfg.beets.runtime.expectedDirectory;
+        message = "services.cratedigger.beets.runtime.expectedDirectory must be an absolute normalized path.";
+      }
+      {
+        assertion = cfg.beets.runtime.expectedDirectory != "/";
+        message = "services.cratedigger.beets.runtime.expectedDirectory must not be /; a root library capability disables sandbox filesystem isolation.";
+      }
+      {
+        assertion = isAbsoluteNormalizedPath cfg.beets.runtime.expectedStateFile;
+        message = "services.cratedigger.beets.runtime.expectedStateFile must be an absolute normalized path.";
+      }
+      {
+        assertion = isAbsoluteNormalizedPath cfg.beets.runtime.expectedSecretInclude;
+        message = "services.cratedigger.beets.runtime.expectedSecretInclude must be an absolute normalized path.";
+      }
+      {
         assertion = cfg.slskd.apiKeyFile != null;
         message = "services.cratedigger.slskd.apiKeyFile is not set: point it at a file containing your slskd API key (readable by services.cratedigger.user).";
       }
@@ -2172,10 +1979,6 @@ in {
       {
         assertion = cfg.discogs.apiBase == null || lib.hasPrefix "http://" cfg.discogs.apiBase || lib.hasPrefix "https://" cfg.discogs.apiBase;
         message = "services.cratedigger.discogs.apiBase must be an origin URL (scheme://host[:port]) when set, e.g. https://discogs.ablz.au.";
-      }
-      {
-        assertion = cfg.beets.package.discogsOperatorGroup == null || cfg.beets.package.discogsTokenFile != null;
-        message = "services.cratedigger.beets.package.discogsOperatorGroup requires discogsTokenFile";
       }
       {
         assertion = !cfg.notifiers.plex.enable || (cfg.notifiers.plex.tokenFile != null && cfg.notifiers.plex.url != "");
@@ -2223,7 +2026,7 @@ in {
       }
       {
         assertion = !cfg.web.enable || webAccessGroupIsSafe;
-        message = "services.cratedigger.web.accessGroup must be dedicated: it must differ from nginx's primary group and must not reuse a forbidden authority group (root, wheel, the Cratedigger service/media group, cratedigger-ops, users, or discogsOperatorGroup).";
+        message = "services.cratedigger.web.accessGroup must be dedicated: it must differ from nginx's primary group and must not reuse a forbidden authority group (root, wheel, the Cratedigger service/media group, cratedigger-ops, or users).";
       }
       {
         assertion = !cfg.web.enable || cfg.user != config.services.nginx.user;
@@ -2245,7 +2048,7 @@ in {
       }
       {
         assertion = !cfg.web.enable || webNginxForbiddenGroupOverlap == [];
-        message = "services.cratedigger.web forbids nginx account/service membership in root, wheel, cfg.group, discogsOperatorGroup, cratedigger-ops, or users.";
+        message = "services.cratedigger.web forbids nginx account/service membership in root, wheel, cfg.group, cratedigger-ops, or users.";
       }
       {
         assertion = !cfg.web.enable || webNginxHasAccessGroup;
@@ -2283,7 +2086,7 @@ in {
       }
     ];
 
-    environment.systemPackages = [pipelineCli pipelineMigrate importerPkg previewWorkerPkg youtubeIngestWorkerPkg cratediggerBeet pkgs.postgresql];
+    environment.systemPackages = [pipelineCli pipelineMigrate importerPkg previewWorkerPkg youtubeIngestWorkerPkg checkBeetsConfigPkg pkgs.postgresql];
     environment.etc."cratedigger/web-gateway-policy" = mkIf cfg.web.enable {
       text = webGatewayPolicyText;
       mode = "0444";
@@ -2294,10 +2097,7 @@ in {
         ${cfg.user} = {
           isSystemUser = true;
           group = cfg.group;
-          extraGroups = optional
-            (cfg.beets.package.discogsOperatorGroup != null)
-            cfg.beets.package.discogsOperatorGroup
-            ++ optional cfg.web.enable cfg.web.accessGroup;
+          extraGroups = optional cfg.web.enable cfg.web.accessGroup;
           description = "Cratedigger service user";
         };
       })
@@ -2307,14 +2107,11 @@ in {
     ];
     users.groups = lib.mkMerge [
       (mkIf (cfg.group != "root") { ${cfg.group} = {}; })
-      (mkIf (cfg.beets.package.discogsOperatorGroup != null) {
-        ${cfg.beets.package.discogsOperatorGroup} = {};
-      })
       (mkIf cfg.web.enable { ${cfg.web.accessGroup} = {}; })
     ];
 
-    # Since config.ini no longer embeds plaintext secrets (issue #117), the
-    # state directory and the rendered config can both be world-readable. The
+    # The state directory contains no config or plaintext secrets, so it can be
+    # world-readable; services read the immutable store config. The
     # secrets themselves live at operator-chosen paths (see slskd.apiKeyFile
     # / notifiers.*.tokenFile) and retain their own
     # restrictive modes from whatever provisioned them (sops-nix, agenix, etc).
@@ -2328,16 +2125,6 @@ in {
         # Only ephemeral preview children are age-cleaned.  Canonical albums
         # are durable in-flight state and are never a tmpfiles cleanup target.
         "e ${cfg.processingDir}/preview 0700 ${cfg.user} ${cfg.group} 7d"
-        # BEETSDIR for every beets consumer (cratedigger-beet, harness).
-        # U4 renders config.yaml into it; the dir must exist regardless so
-        # the wrapper works on a fresh boot.
-        "d ${beetsConfigDir} 0755 ${cfg.user} ${cfg.group} -"
-        # The default library parent is module-owned and outside stateDir: the
-        # preview and YouTube workers legitimately need stateDir but must not
-        # thereby gain database authority. Do not create or chown
-        # an arbitrary explicit library override: that path is the operator's
-        # authority and its parent must be provisioned by the operator.
-        "d ${defaultBeetsDbDir} 2775 ${cfg.user} ${cfg.group} -"
       ]
       # Parent traversal and socket access are separate boundaries: tmpfiles
       # owns root:<accessGroup> 0750 here, while the socket unit owns the
@@ -2368,20 +2155,6 @@ in {
 
     services.cratedigger.web.redis.host = lib.mkDefault cfg.redis.host;
     services.cratedigger.web.redis.port = lib.mkDefault cfg.redis.port;
-    # One MB value, three consumers (U6/KTD6): the rendered beets
-    # musicbrainz block derives from musicbrainz.apiBase — mirror =>
-    # host:port / plain http / ratelimit 100 (the harness --upstream
-    # block's inverse); public => musicbrainz.org / https / ratelimit 1.
-    # mkDefault so an operator can still pin the beets block explicitly.
-    services.cratedigger.beets.config.musicbrainz = let
-      mbHost = lib.removePrefix "https://" (lib.removePrefix "http://" cfg.musicbrainz.apiBase);
-      mbPublic = mbHost == "musicbrainz.org";
-    in {
-      host = lib.mkDefault mbHost;
-      https = lib.mkDefault (lib.hasPrefix "https://" cfg.musicbrainz.apiBase);
-      ratelimit = lib.mkDefault (if mbPublic then 1 else 100);
-    };
-
     services.redis.servers.cratedigger = {
       enable = cfg.redis.enable;
       bind = cfg.redis.host;
@@ -2513,11 +2286,11 @@ in {
     systemd.services.cratedigger-db-migrate = {
       description = "Apply Cratedigger pipeline DB schema migrations";
       wantedBy = ["multi-user.target"];
-      # With a locally-provisioned DB, first boot must not race PostgreSQL
-      # (this ordering used to live only in the VM test's hand-rolled
-      # node — now the module owns it, U7/R10).
-      after = optional cfg.pipelineDb.createLocally "postgresql.service";
-      requires = optional cfg.pipelineDb.createLocally "postgresql.service";
+      # With a locally provisioned DB, PostgreSQL accepting connections is
+      # not enough: NixOS creates ensureDatabases/ensureUsers in its separate
+      # setup oneshot. Migration must wait for that role/database authority.
+      after = optional cfg.pipelineDb.createLocally "postgresql-setup.service";
+      requires = optional cfg.pipelineDb.createLocally "postgresql-setup.service";
       restartIfChanged = true;
       serviceConfig = {
         Type = "oneshot";
@@ -2529,32 +2302,15 @@ in {
       };
     };
 
-    # Materialise declarative runtime configuration independently of every
-    # application unit. A downstream ExecCondition is evaluated before an
-    # application's ExecStartPre, so app-owned rendering alone leaves stale
-    # mutable config throughout an intentional dependency hold.
-    systemd.services.cratedigger-config-render = {
-      description = "Render Cratedigger runtime configuration";
-      wantedBy = ["multi-user.target"];
-      restartIfChanged = true;
-      serviceConfig = {
-        Type = "oneshot";
-        RemainAfterExit = true;
-        User = cfg.user;
-        Group = cfg.group;
-        ExecStart = renderConfigScript;
-      };
-    };
-
     systemd.services.cratedigger = {
       description = "Cratedigger — Soulseek download pipeline";
-      after = ["cratedigger-db-migrate.service"] ++ redisServiceUnits;
-      wants = ["cratedigger-db-migrate.service"] ++ redisServiceUnits;
+      after = ["cratedigger-db-migrate.service"] ++ redisServiceUnits ++ beetsReadinessUnits;
+      wants = ["cratedigger-db-migrate.service"] ++ redisServiceUnits ++ beetsReadinessUnits;
       restartIfChanged = false;
       # Deliberately exclude pythonEnv from PATH: the python interpreter is
-      # invoked via absolute path inside the wrappers, and every beets
-      # consumer resolves the pinned interpreter from the rendered
-      # [Beets] config keys (config_dir / python) rather than
+      # invoked via absolute path inside the wrappers, and every Beets
+      # consumer resolves the supplied interpreter from the guarded
+      # [Beets] runtime keys (config_dir / python) rather than
       # PATH lookup — keeping PATH lean avoids ever re-introducing an
       # ambient-beet dependency (tier-2 plan R6).
       path = [pkgs.bash pkgs.coreutils pkgs.gnugrep pkgs.gnused pkgs.curl pkgs.jq pkgs.ffmpeg pkgs.mp3val pkgs.flac pkgs.sox];
@@ -2567,10 +2323,11 @@ in {
         # regardless of cfg.user: its onFailureCommand (e.g. `systemctl
         # restart slskd.service`) needs root, and once cfg.user is
         # non-root a bare ExecStartPre would run as that user and be
-        # unable to restart slskd. pipelinePreStartScript must NOT get "+" — it
-        # renders config as cfg.user so ownership on the rendered files
-        # matches the service that reads them.
+        # unable to restart slskd. The second prestart only clears the main
+        # pipeline's singleton lock; the application entrypoint owns Beets
+        # validation and immutable configuration is never rendered here.
         ExecStartPre = lib.optional cfg.healthCheck.enable "+${slskdHealthCheck}" ++ [pipelinePreStartScript];
+        BindReadOnlyPaths = beetsMainReadOnlyPaths;
         Environment = "PIPELINE_DB_DSN=${pipelineDsn}";
         ExecStart = "${cratediggerPkg}/bin/cratedigger";
         WorkingDirectory = cfg.stateDir;
@@ -2622,14 +2379,14 @@ in {
         Group = cfg.group;
         UMask = "0000";
         # Same health-check shape as cratedigger.service (including the "+"
-        # root-escalation prefix — see the comment there), followed by a
-        # render-only fallback. The detection job never owns the main pipeline
+        # root-escalation prefix — see the comment there). The detection job
+        # never owns the main pipeline
         # lock, so it must not clear that lock while a cycle is active. It
         # gates on slskd reachability when the operator has health-check enabled
         # and hits slskd just as much as the main loop does, so a slskd
         # outage should fail the unit fast rather than write garbage
         # probe-failed rows for every cohort member.
-        ExecStartPre = lib.optional cfg.healthCheck.enable "+${slskdHealthCheck}" ++ [renderConfigScript];
+        ExecStartPre = lib.optional cfg.healthCheck.enable "+${slskdHealthCheck}";
         Environment = "PIPELINE_DB_DSN=${pipelineDsn}";
         ExecStart = "${unfindableDetectionPkg}/bin/cratedigger-unfindable";
         WorkingDirectory = cfg.stateDir;
@@ -2657,8 +2414,8 @@ in {
 
     systemd.services.cratedigger-importer = mkIf cfg.importer.enable {
       description = "Cratedigger importer queue worker";
-      after = ["cratedigger-db-migrate.service"];
-      requires = ["cratedigger-db-migrate.service"];
+      after = ["cratedigger-db-migrate.service"] ++ beetsReadinessUnits;
+      requires = ["cratedigger-db-migrate.service"] ++ beetsReadinessUnits;
       wantedBy = ["multi-user.target"];
       # Restart on deploy. The previous "skip restart to avoid killing
       # in-flight work" rationale failed in practice on 2026-05-16:
@@ -2676,7 +2433,8 @@ in {
         User = cfg.user;
         Group = cfg.group;
         UMask = "0000";
-        ExecStartPre = [renderConfigScript];
+        BindReadOnlyPaths = beetsConfigReadOnlyPaths;
+        BindPaths = missingOkExternalPath cfg.beets.runtime.expectedStateFile;
         Environment = "PIPELINE_DB_DSN=${pipelineDsn}";
         ExecStart = "${importerPkg}/bin/cratedigger-importer";
         WorkingDirectory = cfg.stateDir;
@@ -2687,8 +2445,8 @@ in {
 
     systemd.services.cratedigger-import-preview-worker = mkIf cfg.importer.enable {
       description = "Cratedigger async import preview worker";
-      after = ["cratedigger-db-migrate.service"];
-      requires = ["cratedigger-db-migrate.service"];
+      after = ["cratedigger-db-migrate.service"] ++ beetsReadinessUnits;
+      requires = ["cratedigger-db-migrate.service"] ++ beetsReadinessUnits;
       wantedBy = ["multi-user.target"];
       # Restart on deploy. Same reasoning as cratedigger-importer: deploy
       # SIGTERM'd this unit on 2026-05-16 and never brought it back.
@@ -2701,7 +2459,7 @@ in {
         User = cfg.user;
         Group = cfg.group;
         UMask = "0000";
-        ExecStartPre = [renderConfigScript];
+        BindReadOnlyPaths = beetsObserverReadOnlyPaths;
         Environment = "PIPELINE_DB_DSN=${pipelineDsn}";
         ExecStart = "${previewWorkerPkg}/bin/cratedigger-import-preview-worker";
         WorkingDirectory = cfg.stateDir;
@@ -2746,7 +2504,6 @@ in {
         User = cfg.user;
         Group = cfg.group;
         UMask = "0000";
-        ExecStartPre = [renderConfigScript];
         Environment = "PIPELINE_DB_DSN=${pipelineDsn}";
         ExecStart = "${youtubeIngestWorkerPkg}/bin/cratedigger-youtube-ingest";
         WorkingDirectory = cfg.stateDir;
@@ -2760,12 +2517,12 @@ in {
       after = [
         "cratedigger-db-migrate.service"
         "cratedigger-web.socket"
-      ] ++ redisServiceUnits;
+      ] ++ redisServiceUnits ++ beetsReadinessUnits;
       wants = redisServiceUnits;
       requires = [
         "cratedigger-db-migrate.service"
         "cratedigger-web.socket"
-      ];
+      ] ++ beetsReadinessUnits;
       wantedBy = ["multi-user.target"];
       serviceConfig = (untrustedInputSandbox webSandboxWritePaths) // {
         Type = "simple";
@@ -2779,8 +2536,8 @@ in {
           )
           ++ optional
             webBasicEnabled
-            webApplicationCredentialIsolationScript
-          ++ [renderConfigScript];
+            webApplicationCredentialIsolationScript;
+        BindReadOnlyPaths = beetsObserverReadOnlyPaths;
         ExecStart = "${webPkg}/bin/cratedigger-web";
         Restart = "on-failure";
         RestartSec = 5;

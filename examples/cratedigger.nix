@@ -11,14 +11,121 @@
 #     ];
 #   };
 #
-# The module builds its runtime (python env + beets) from CRATEDIGGER'S
-# OWN flake.lock — the exact closure its test suite ran against — not
-# your nixpkgs. That costs one extra nixpkgs evaluation and is the whole
-# point; `services.cratedigger.packageSet` is the escape hatch if you
-# refuse the trade.
+# Cratedigger consumes Beets; the deployment instantiates and owns the
+# package, immutable config, catalog, library, host-local state, token-only
+# include, readiness unit, and plain operator `beet` below.
+# This is the required downstream cutover shape for issue #759's held module
+# slice. Land the external owner before advancing an older Cratedigger pin;
+# removed beets.package/beets.config options have no compatibility aliases.
 { config, pkgs, ... }:
 
+let
+  cratediggerPkgs = config.services.cratedigger.packageSet;
+  beetsLibrary = "/var/lib/beets-library/beets-library.db";
+  beetsDirectory = "/srv/music/library";
+  beetsStateFile = "/var/lib/beets/state.pickle";
+  beetsSecretInclude = "/run/secrets/beets-discogs.yaml";
+
+  # Optional mirror patches are deployment package choices, not Cratedigger
+  # module options. Leave either value null for stock upstream behavior.
+  beetsPackage = import ../nix/beets.nix {
+    pkgs = cratediggerPkgs;
+    discogsMirrorUrl = null;
+    lrclibUrl = null;
+  };
+  beetsPython = cratediggerPkgs.python3.withPackages (_: [ beetsPackage ]);
+  beetsYaml = (cratediggerPkgs.formats.yaml { }).generate "config.yaml" {
+    library = beetsLibrary;
+    directory = beetsDirectory;
+    statefile = beetsStateFile;
+    include = [ beetsSecretInclude ];
+    asciify_paths = true;
+    plugins = "musicbrainz discogs fetchart embedart lyrics lastgenre scrub info missing duplicates edit fromfilename ftintitle the inline permissions";
+    import = {
+      copy = false;
+      autotag = true;
+      write = true;
+      move = true;
+      timid = false;
+      incremental = true;
+      incremental_skip_later = true;
+      log = "/var/lib/beets-library/beets-import.log";
+      languages = [ "en" ];
+      duplicate_keys = {
+        album = [ "mb_albumid" "discogs_albumid" ];
+        item = [ "artist" "title" ];
+      };
+    };
+    paths = {
+      default = "$albumartist/$year - $album%aunique{albumartist album,path_disambig}/$track $title";
+      singleton = "Non-Album/$artist/$title";
+      comp = "Compilations/$album%aunique{albumartist album,path_disambig}/$track $title";
+    };
+    album_fields.path_disambig =
+      "albumdisambig or releasegroupdisambig or catalognum or label or str(year)";
+    musicbrainz = {
+      host = "musicbrainz.org";
+      https = true;
+      ratelimit = 1;
+    };
+    permissions = {
+      file = "0664";
+      dir = "02775";
+    };
+    convert = {
+      auto = false;
+      auto_keep = false;
+    };
+    fetchart = {
+      auto = true;
+      minwidth = 300;
+      maxwidth = 500;
+    };
+  };
+  beetsConfigDir = cratediggerPkgs.runCommand
+    "cratedigger-example-external-beets-config" { } ''
+      mkdir -p "$out"
+      ln -s ${beetsYaml} "$out/config.yaml"
+    '';
+  # This is deliberately a deployment-owned command, rather than a global
+  # BEETSDIR export: every invocation resolves both the Beets package and its
+  # immutable configuration through this generation's wrapper.
+  beet = cratediggerPkgs.writeShellScriptBin "beet" ''
+    export BEETSDIR=${beetsConfigDir}
+    exec ${beetsPython}/bin/beet "$@"
+  '';
+
+  # Deployment-owned initialization/readiness. In an existing-library
+  # deployment, replace the initialization branch with a read-only assertion
+  # that the already-backed-up catalog exists; never copy or move it here.
+  beetsRuntimeReady = pkgs.writeShellScript "beets-runtime-ready" ''
+    set -euo pipefail
+    install -d -o cratedigger -g users -m 2775 ${beetsDirectory}
+    install -d -o cratedigger -g cratedigger-ops -m 2770 /var/lib/beets-library
+    install -d -o root -g cratedigger-ops -m 0750 /var/lib/beets
+    test -r ${beetsSecretInclude}
+    if test ! -e ${beetsStateFile}; then
+      ${beetsPython}/bin/python - <<'PY'
+    import pickle
+    from pathlib import Path
+    Path("${beetsStateFile}").write_bytes(pickle.dumps({}))
+    PY
+      chown root:cratedigger-ops ${beetsStateFile}
+      chmod 0660 ${beetsStateFile}
+    fi
+    if test ! -e ${beetsLibrary}; then
+      BEETSDIR=${beetsConfigDir} ${beetsPython}/bin/python - <<'PY'
+    from beets.library import Library
+    library = Library("${beetsLibrary}", "${beetsDirectory}")
+    library._close()
+    PY
+      chown cratedigger:cratedigger-ops ${beetsLibrary}
+      chmod 0660 ${beetsLibrary}
+    fi
+  '';
+in
 {
+  users.groups.cratedigger-ops = { };
   # The default example deliberately exercises the non-root service shape.
   # `users` is the shared media-reader group; slskd owns its download tree.
   users.users.cratedigger = {
@@ -75,16 +182,14 @@
     # handles, then panic when the next checkpoint opens pg_control.
     pipelineDb.createLocally = true;
 
-    # --- Beets: cratedigger owns the package, config, and binary ------
-    # `cratedigger-beet` lands on your PATH for manual ops. Run it as the
-    # configured cratedigger service identity so it uses the same ownership
-    # and rendered configuration as automated imports.
-    beets.config = {
-      directory = "/srv/music/library";          # where tagged albums live
-      # Keep DB, journals, import log, and harness audit outside the curated
-      # music root. Explicit override parents remain operator-provisioned.
-      library = "/var/lib/cratedigger-beets-db/beets-library.db";
-    };
+    # --- Beets: consume the external deployment-owned capability ------
+    beets.runtime.package = beetsPackage;
+    beets.runtime.configDir = toString beetsConfigDir;
+    beets.runtime.expectedLibrary = beetsLibrary;
+    beets.runtime.expectedDirectory = beetsDirectory;
+    beets.runtime.expectedStateFile = beetsStateFile;
+    beets.runtime.expectedSecretInclude = beetsSecretInclude;
+    beets.runtime.readinessUnits = [ "beets-runtime-ready.service" ];
     beets.validation = {
       stagingDir = "/srv/music/incoming";        # validated albums stage here
       trackingFile = "/srv/music/beets-validated.jsonl";
@@ -123,14 +228,34 @@
     #
     # musicbrainz.apiBase = "http://mb-mirror.lan:5200";
     # discogs.apiBase = "http://discogs-mirror.lan:8086";
-    # beets.package = {
-    #   discogsMirrorUrl = "http://discogs-mirror.lan:8086";
-    #   lrclibUrl = "http://lrclib.lan:3300/api";
-    #   # Discogs user token (https://www.discogs.com/settings/developers),
-    #   # raw, one line. Without it, public-Discogs lookups during import
-    #   # fail per-use (everything still loads cleanly).
-    #   discogsTokenFile = "/var/lib/secrets/discogs-token";
-    # };
+    # For Beets mirrors, set the arguments to nix/beets.nix above and update
+    # this immutable config's matching network policy. Provision
+    # beetsSecretInclude via sops/agenix as exactly:
+    #   discogs:
+    #     user_token: <non-empty scalar>
+    # No other key is admitted, and token/config rotation must restart the
+    # guarded Cratedigger application units.
+  };
+
+  # Deployment-owned plain operator authority. The `beet` wrapper points at
+  # the same immutable config Cratedigger admits; do not run mutations
+  # concurrently with the importer, raw imports, or `beet remove -d`.
+  environment.systemPackages = [ beet ];
+
+  systemd.services.beets-runtime-ready = {
+    description = "Provision deployment-owned Beets runtime authority";
+    wantedBy = [ "multi-user.target" ];
+    before = [
+      "cratedigger.service"
+      "cratedigger-importer.service"
+      "cratedigger-import-preview-worker.service"
+      "cratedigger-web.service"
+    ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      ExecStart = beetsRuntimeReady;
+    };
   };
 
   # A separate public HTTPS vhost must forward to the LOOPBACK gateway above,
@@ -167,22 +292,22 @@
   #   find /srv/music/library -type d -exec chmod 2775 {} +
   #   find /srv/music/library -type f -exec chmod 0664 {} +
   #
-  # The discogsTokenFile above must stay readable by the cratedigger user's
-  # secrets group. A root-owned 0400 token under the state dir can't be
-  # fixed by systemd-tmpfiles once the state dir itself is owned by a
-  # non-root user (tmpfiles refuses with "unsafe path transition") — do a
-  # one-time `chown root:cratedigger-ops` + `chmod 0440` on the token, or
-  # manage it via sops-nix with `owner = "cratedigger"` instead.
+  # The token-only include must stay runtime-managed outside the Nix store and
+  # readable by the dedicated cratedigger/operator group (for example
+  # root:cratedigger-ops 0440). Add trusted plain-beet operators to that group.
   #
   # Payoff: gid-`users` media servers (Jellyfin) can both read fetched
   # album art and write NFO/artwork alongside the media — see
   # docs/nixos-module.md § "Running non-root + filesystem permissions".
 
-  # The staging/library parents must exist; the module manages only its
-  # own state and private processing roots.
+  # The deployment owns Beets storage; Cratedigger manages only its own state
+  # and private processing roots. These declarative entries complement the
+  # readiness service and do not relocate an existing catalog.
   systemd.tmpfiles.rules = [
     "d /srv/music 0755 root root -"
     "d /srv/music/library 2775 cratedigger users -"
     "d /srv/music/incoming 2775 cratedigger users -"
+    "d /var/lib/beets-library 2770 cratedigger cratedigger-ops -"
+    "d /var/lib/beets 0750 root cratedigger-ops -"
   ];
 }

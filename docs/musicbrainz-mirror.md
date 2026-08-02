@@ -17,7 +17,13 @@ curl -s "http://192.168.1.35:5200/ws/2/release-group/RGID?inc=releases&fmt=json"
 
 ## Notes
 
-- The mirror URL is configuration, not a constant: `services.cratedigger.musicbrainz.apiBase` threads it to `web/mb.py`, `pipeline-cli`, and the rendered beets `musicbrainz.*` (public MB is the supported-but-slow default). Setup + fallback math in `docs/mirrors.md`. The `mb-api` Rust mirror is the planned replacement for this stack.
+- The mirror URL is configuration, not a constant:
+  `services.cratedigger.musicbrainz.apiBase` supplies Cratedigger web, CLI, and
+  pipeline lookups. The external Beets owner configures its own corresponding
+  `musicbrainz.*` endpoint; disagreement is a startup warning, not an automatic
+  rewrite. Public MB is the supported-but-slow Cratedigger default. Setup and
+  fallback math: `docs/mirrors.md`.
 - Timeout is ~15s — broad queries (e.g. `artist:Radiohead`) can hit it. Prefer specific artist+album pairs.
-- Beets is configured to use this mirror; the upstream server is only used as a fallback.
+- The deployment-owned Beets config uses this mirror; the upstream server is
+  only an intentional fallback selected by the librarian.
 - Pipeline entries store MB release UUIDs in `album_requests.mb_release_id`. Numeric IDs in the same column indicate a Discogs-sourced release (see `docs/discogs-mirror.md`).
