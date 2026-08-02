@@ -162,7 +162,10 @@ inside socket authorization, never credentials.
 - `pipeline-cli import-preview` — Inspect an import preview and its evidence inputs.
 - `pipeline-cli library-delete` — Delete one exact server-owned Beets album.
 - `pipeline-cli list` — List album requests.
-- `pipeline-cli long-tail` — Show the wanted long-tail worklist.
+- `pipeline-cli long-tail` — Show the wanted long-tail worklist. Exact-authority
+  conflicts emit the shared typed error and exit 4; expected Beets authority
+  unavailability emits the retryable typed error and exits 5. Neither condition
+  is rendered as an actionable Missing cohort.
 - `pipeline-cli pipeline-delete` — Delete a pipeline request through its canonical web route.
 - `pipeline-cli quality` — Simulate quality decisions and replay current candidate evidence.
 - `pipeline-cli query` — Run one read-only SQL statement, or the explicit write escape hatch.

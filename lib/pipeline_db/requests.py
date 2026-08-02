@@ -287,6 +287,48 @@ class _RequestsMixin(_PipelineDBBase):
                 overlays[release_id] = projected
         return overlays
 
+    def list_library_request_candidates(
+        self,
+        release_ids: list[str],
+    ) -> list[ArtistRequestRow]:
+        """Return every strict request candidate for exact library IDs.
+
+        This read intentionally preserves cardinality.  A library album may
+        match multiple historical request rows (including duplicate modern
+        Discogs rows or modern plus legacy Discogs storage), and its caller
+        must fail closed instead of accepting a ``fetchone``/dict winner.
+        """
+        requested_identities = {
+            identity.key
+            for release_id in release_ids
+            if (identity := ReleaseIdentity.from_id(release_id)) is not None
+        }
+        if not requested_identities:
+            return []
+        musicbrainz_ids, discogs_ids = _overlay_release_id_sets(release_ids)
+        cur = self._execute(
+            f"""
+            SELECT {REQUEST_PRESENTATION_SELECT},
+                   {_CAPTURE_AND_EVIDENCE_SELECT}
+            {REQUEST_PRESENTATION_FROM}
+            LEFT JOIN album_quality_evidence current_evidence
+              ON current_evidence.id = request_row.current_evidence_id
+            WHERE request_row.mb_release_id = ANY(%s)
+               OR request_row.discogs_release_id = ANY(%s)
+            ORDER BY request_row.id
+            """,
+            (musicbrainz_ids, discogs_ids),
+        )
+        candidates: list[ArtistRequestRow] = []
+        for raw in cur.fetchall():
+            identity = ReleaseIdentity.from_strict_fields(
+                raw.get("mb_release_id"),
+                raw.get("discogs_release_id"),
+            )
+            if identity is not None and identity.key in requested_identities:
+                candidates.append(self._artist_request_row(raw))
+        return candidates
+
     def get_request_by_mb_release_id(self, mb_release_id: str) -> AlbumRequestRow | None:
         cur = self._execute(
             f"""

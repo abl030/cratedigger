@@ -14,6 +14,7 @@ def get_beets_album(
     h: RouteHandler, params: dict[str, list[str]], album_id_str: str,
 ) -> None:
     from web.library_album_detail_service import load_library_album_detail
+    from web.library_album_row import AmbiguousLibraryRequestAttachmentError
 
     album_id = int(album_id_str)
     srv = _server()
@@ -21,11 +22,22 @@ def get_beets_album(
     if not b:
         h._error("Beets DB not available")
         return
-    detail = load_library_album_detail(
-        library_lookup=b,
-        pipeline_db=srv._db(),
-        album_id=album_id,
-    )
+    try:
+        detail = load_library_album_detail(
+            library_lookup=b,
+            pipeline_db=srv._db(),
+            album_id=album_id,
+        )
+    except AmbiguousLibraryRequestAttachmentError as exc:
+        h._json({
+            "error": "ambiguous_library_request_identity",
+            "album_id": album_id,
+            "request_ids": list(exc.request_ids),
+            "release_ids": [
+                identity.release_id for identity in exc.identities
+            ],
+        }, status=409)
+        return
     if not detail:
         h._error("Not found", 404)
         return

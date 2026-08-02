@@ -263,6 +263,84 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(data["source"], "discogs")
         self.assertEqual(data["mb_albumid"], "12856590")
 
+    def test_beets_album_detail_dual_tags_follow_exact_discogs_request(self):
+        self.db.delete_request(42)
+        detail = self._album()
+        detail["discogs_albumid"] = "12856590"
+        detail["tracks"] = [self._track()]
+        self.beets_db.set_album_detail(7, detail)
+        self.db.seed_request(make_request_row(
+            id=43,
+            status="wanted",
+            mb_release_id=None,
+            discogs_release_id="12856590",
+            min_bitrate=245,
+        ))
+        self.db.log_download(
+            43,
+            outcome="success",
+            beets_scenario="strong_match",
+            soulseek_username="discogs-owner",
+            actual_filetype="mp3",
+            actual_min_bitrate=245,
+        )
+
+        status, data = self._get("/api/beets/album/7")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["mb_albumid"], "12856590")
+        self.assertEqual(data["source"], "discogs")
+        self.assertEqual(data["pipeline_id"], 43)
+        self.assertEqual(data["pipeline_min_bitrate"], 245)
+        self.assertEqual(data["download_history"][0]["request_id"], 43)
+        self.assertEqual(
+            data["download_history"][0]["soulseek_username"],
+            "discogs-owner",
+        )
+
+    def test_beets_album_detail_dual_request_ambiguity_is_explicit(self):
+        detail = self._album()
+        detail["discogs_albumid"] = "12856590"
+        detail["tracks"] = [self._track()]
+        self.beets_db.set_album_detail(7, detail)
+        self.db.seed_request(make_request_row(
+            id=43,
+            status="wanted",
+            mb_release_id=None,
+            discogs_release_id="12856590",
+        ))
+
+        status, data = self._get("/api/beets/album/7")
+
+        self.assertEqual(status, 409)
+        self.assertEqual(data["error"], "ambiguous_library_request_identity")
+        self.assertEqual(data["album_id"], 7)
+        self.assertEqual(data["request_ids"], [42, 43])
+        self.assertEqual(data["release_ids"], [self.RELEASE_ID, "12856590"])
+
+    def test_beets_album_detail_duplicate_identity_is_explicit(self):
+        self.db.delete_request(42)
+        detail = self._album()
+        detail["mb_albumid"] = None
+        detail["discogs_albumid"] = "12856590"
+        detail["tracks"] = [self._track()]
+        self.beets_db.set_album_detail(7, detail)
+        for request_id in (43, 44):
+            self.db.seed_request(make_request_row(
+                id=request_id,
+                status="wanted",
+                mb_release_id=None,
+                discogs_release_id="12856590",
+            ))
+
+        status, data = self._get("/api/beets/album/7")
+
+        self.assertEqual(status, 409)
+        self.assertEqual(data["error"], "ambiguous_library_request_identity")
+        self.assertEqual(data["album_id"], 7)
+        self.assertEqual(data["request_ids"], [43, 44])
+        self.assertEqual(data["release_ids"], ["12856590", "12856590"])
+
     def test_beets_album_detail_allows_nullable_legacy_fields(self):
         detail = self._album()
         detail["added"] = None

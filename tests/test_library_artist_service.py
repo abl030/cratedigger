@@ -12,6 +12,7 @@ from lib.pipeline_db.rows import ArtistRequestRow
 from lib.release_identity import ConflictingReleaseIdentityError
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
+from web.library_album_row import AmbiguousLibraryRequestAttachmentError
 from web.library_artist_service import (
     build_library_artist_rows,
     list_library_artist_rows,
@@ -127,12 +128,12 @@ class _RecordingPipelineDB:
         self._calls.append(f"track_counts:{request_ids}")
         return {int(self._row["id"]): 10}
 
-    def get_pipeline_overlay(
+    def list_library_request_candidates(
         self,
-        mbids: list[str],
-    ) -> dict[str, dict[str, object]]:
-        self._calls.append(f"overlay:{mbids}")
-        return {}
+        release_ids: list[str],
+    ) -> list[ArtistRequestRow]:
+        self._calls.append(f"candidates:{release_ids}")
+        return [self._row] if self._row["mb_release_id"] in release_ids else []
 
 
 class _RaceAwareLibraryLookup:
@@ -182,12 +183,20 @@ class _RaceAwarePipelineDB:
         self.calls.append(f"track_counts:{request_ids}")
         return {42: 10}
 
-    def get_pipeline_overlay(
+    def list_library_request_candidates(
         self,
-        mbids: list[str],
-    ) -> dict[str, dict[str, object]]:
-        self.calls.append(f"overlay:{mbids}")
-        return {}
+        release_ids: list[str],
+    ) -> list[ArtistRequestRow]:
+        self.calls.append(f"candidates:{release_ids}")
+        request = msgspec.convert(_artist_request(
+            id=42,
+            mb_release_id=RELEASE_ID,
+            artist_name="Test Artist",
+            album_title="Test Album",
+            status="wanted",
+            processing_owner=None,
+        ), type=ArtistRequestRow)
+        return [request] if RELEASE_ID in release_ids else []
 
 
 class TestLibraryArtistService(unittest.TestCase):
@@ -295,9 +304,107 @@ class TestLibraryArtistService(unittest.TestCase):
 
         self.assertEqual(len(rows), 1)
         self.assertTrue(rows[0].in_library)
+        self.assertEqual(rows[0].to_dict()["mb_albumid"], "12856590")
+        self.assertEqual(rows[0].source, "discogs")
         self.assertEqual(rows[0].pipeline_id, 42)
         self.assertTrue(rows[0].has_captured_history)
         self.assertTrue(rows[0].pipeline_verified_lossless)
+
+    def test_dual_tagged_album_rejects_two_exact_request_attachments(self) -> None:
+        with self.assertRaisesRegex(
+            AmbiguousLibraryRequestAttachmentError,
+            "musicbrainz.*discogs",
+        ):
+            build_library_artist_rows(
+                library_albums=[_beets_album(discogs_albumid="12856590")],
+                pipeline_rows=[
+                    _artist_request(
+                        id=42,
+                        mb_release_id=RELEASE_ID,
+                        discogs_release_id=None,
+                        artist_name="Test Artist",
+                        album_title="Test Album",
+                        status="wanted",
+                    ),
+                    _artist_request(
+                        id=43,
+                        mb_release_id=None,
+                        discogs_release_id="12856590",
+                        artist_name="Test Artist",
+                        album_title="Test Album",
+                        status="wanted",
+                    ),
+                ],
+                track_counts={42: 10, 43: 10},
+                rank_fn=_rank,
+            )
+
+    def test_duplicate_same_identity_requests_are_ambiguous(self) -> None:
+        with self.assertRaises(AmbiguousLibraryRequestAttachmentError) as raised:
+            build_library_artist_rows(
+                library_albums=[_beets_album(
+                    mb_albumid=None,
+                    discogs_albumid="12856590",
+                )],
+                pipeline_rows=[
+                    _artist_request(
+                        id=request_id,
+                        mb_release_id=None,
+                        discogs_release_id="12856590",
+                        artist_name="Test Artist",
+                        album_title="Test Album",
+                        status="wanted",
+                    )
+                    for request_id in (42, 43)
+                ],
+                track_counts={42: 10, 43: 10},
+                rank_fn=_rank,
+            )
+
+        self.assertEqual(raised.exception.request_ids, (42, 43))
+
+    def test_malformed_pipeline_rows_stay_visible_but_unattached(self) -> None:
+        malformed_rows = [
+            _artist_request(
+                id=42,
+                mb_release_id="not-a-release-id",
+                discogs_release_id=None,
+                artist_name="Test Artist",
+                album_title="Malformed",
+                status="wanted",
+            ),
+            _artist_request(
+                id=43,
+                mb_release_id=RELEASE_ID,
+                discogs_release_id="12856590",
+                artist_name="Test Artist",
+                album_title="Conflicting",
+                status="wanted",
+            ),
+            _artist_request(
+                id=44,
+                mb_release_id=None,
+                discogs_release_id=None,
+                artist_name="Test Artist",
+                album_title="Identityless",
+                status="wanted",
+            ),
+        ]
+
+        rows = build_library_artist_rows(
+            library_albums=[_beets_album()],
+            pipeline_rows=malformed_rows,
+            track_counts={42: 1, 43: 1, 44: 1},
+            rank_fn=_rank,
+        )
+
+        self.assertEqual(len(rows), 4)
+        library_row = next(row for row in rows if row.in_library)
+        self.assertIsNone(library_row.pipeline_id)
+        for row in (row for row in rows if not row.in_library):
+            self.assertIsNone(row.mb_albumid)
+            self.assertEqual(row.source, "unknown")
+            self.assertIsNotNone(row.pipeline_id)
 
     def test_conflicting_numeric_beets_identity_never_renders(self) -> None:
         with self.assertRaisesRegex(
@@ -370,6 +477,7 @@ class TestLibraryArtistService(unittest.TestCase):
             [
                 f"pipeline:Test Artist:{ARTIST_ID}",
                 "track_counts:[42]",
+                f"candidates:['{RELEASE_ID}']",
             ],
         )
         self.assertEqual(lookup.calls, [f"library:Test Artist:{ARTIST_ID}"])
@@ -432,6 +540,42 @@ class TestLibraryArtistService(unittest.TestCase):
         self.assertTrue(rows[0].in_library)
         self.assertEqual(rows[0].pipeline_id, 43)
         self.assertTrue(rows[0].has_captured_history)
+
+    def test_batch_candidates_expose_drifted_duplicate_request(self) -> None:
+        fake_db = FakePipelineDB()
+        fake_db.seed_request(_artist_request(
+            id=43,
+            mb_release_id=None,
+            discogs_release_id="12856590",
+            mb_artist_id=ARTIST_ID,
+            artist_name="Test Artist",
+            album_title="Test Album",
+            status="wanted",
+        ))
+        fake_db.seed_request(_artist_request(
+            id=44,
+            mb_release_id=None,
+            discogs_release_id="12856590",
+            mb_artist_id="22222222-2222-4222-8222-222222222222",
+            artist_name="Old Request Tag",
+            album_title="Test Album",
+            status="wanted",
+        ))
+        lookup = _StubLibraryLookup([_beets_album(
+            mb_albumid=None,
+            discogs_albumid="12856590",
+        )])
+
+        with self.assertRaises(AmbiguousLibraryRequestAttachmentError) as raised:
+            list_library_artist_rows(
+                library_lookup=lookup,
+                pipeline_db=fake_db,
+                artist_name="Test Artist",
+                mb_artist_id=ARTIST_ID,
+                rank_fn=_rank,
+            )
+
+        self.assertEqual(raised.exception.request_ids, (43, 44))
 
     def test_beets_read_failure_propagates_after_pipeline_snapshot(self) -> None:
         calls: list[str] = []

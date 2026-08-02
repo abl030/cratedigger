@@ -16,7 +16,10 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Protocol
 
 from lib.release_identity import ReleaseIdentity
-from web.library_album_row import LibraryAlbumRow
+from web.library_album_row import (
+    LibraryAlbumRow,
+    select_exact_library_request_attachment,
+)
 
 if TYPE_CHECKING:
     from lib.pipeline_db.rows import ArtistRequestRow
@@ -56,10 +59,10 @@ class SupportsLibraryArtistPipelineDB(Protocol):
     def get_track_counts(self, request_ids: list[int]) -> dict[int, int]:
         ...
 
-    def get_pipeline_overlay(
+    def list_library_request_candidates(
         self,
-        mbids: list[str],
-    ) -> Mapping[str, Mapping[str, object]]:
+        release_ids: list[str],
+    ) -> list[ArtistRequestRow]:
         ...
 
 
@@ -83,17 +86,20 @@ def _library_album_sort_key(
 
 def _pipeline_rows_by_identity(
     pipeline_rows: Sequence[Mapping[str, object]],
-) -> dict[tuple[str, str], Mapping[str, object]]:
-    rows_by_identity: dict[tuple[str, str], Mapping[str, object]] = {}
+) -> dict[tuple[str, str], tuple[Mapping[str, object], ...]]:
+    mutable: dict[tuple[str, str], list[Mapping[str, object]]] = {}
     for row in pipeline_rows:
-        identity = ReleaseIdentity.from_fields(
+        identity = ReleaseIdentity.from_strict_fields(
             row.get("mb_release_id"),
             row.get("discogs_release_id"),
         )
         if identity is None:
             continue
-        rows_by_identity[identity.key] = row
-    return rows_by_identity
+        mutable.setdefault(identity.key, []).append(row)
+    return {
+        identity_key: tuple(rows)
+        for identity_key, rows in mutable.items()
+    }
 
 
 def _library_identity_keys(
@@ -102,9 +108,17 @@ def _library_identity_keys(
     """Every exact identity a non-destructive Beets row may represent."""
     return tuple(
         identity.key
-        for identity in ReleaseIdentity.all_from_observation_fields(
-            album.get("mb_albumid"), album.get("discogs_albumid"),
-        )
+        for identity in _library_identities(album)
+    )
+
+
+def _library_identities(
+    album: Mapping[str, object],
+) -> tuple[ReleaseIdentity, ...]:
+    """Every exact identity observed on a non-destructive Beets row."""
+    return ReleaseIdentity.all_from_observation_fields(
+        album.get("mb_albumid"),
+        album.get("discogs_albumid"),
     )
 
 
@@ -125,34 +139,31 @@ def build_library_artist_rows(
     pipeline_rows: Sequence[Mapping[str, object]],
     track_counts: Mapping[int, int],
     rank_fn: Callable[[str | None, int | None], str],
-    pipeline_overlays: Mapping[str, Mapping[str, object]] | None = None,
+    pipeline_candidates: Sequence[Mapping[str, object]] | None = None,
 ) -> list[LibraryAlbumRow]:
     """Merge beets + pipeline artist rows behind one typed seam."""
-    pipeline_by_identity = _pipeline_rows_by_identity(pipeline_rows)
-    for release_id, overlay in (pipeline_overlays or {}).items():
-        identity = ReleaseIdentity.from_id(release_id)
-        if identity is not None:
-            pipeline_by_identity[identity.key] = overlay
+    pipeline_by_identity = _pipeline_rows_by_identity(
+        pipeline_rows if pipeline_candidates is None else pipeline_candidates
+    )
     rows: list[LibraryAlbumRow] = []
     seen_release_ids: set[tuple[str, str]] = set()
 
     for album in library_albums:
-        identity_keys = _library_identity_keys(album)
-        pipeline_row = next(
-            (
-                pipeline_by_identity[key]
-                for key in identity_keys
-                if key in pipeline_by_identity
-            ),
-            None,
+        observation_identities = _library_identities(album)
+        attachment = select_exact_library_request_attachment(
+            observation_identities,
+            pipeline_by_identity,
         )
         row = LibraryAlbumRow.from_beets_album_with_pipeline(
             album,
-            pipeline_row=pipeline_row,
+            pipeline_row=attachment.request if attachment is not None else None,
             rank_fn=rank_fn,
+            attached_identity=(
+                attachment.identity if attachment is not None else None
+            ),
         )
         rows.append(row)
-        seen_release_ids.update(identity_keys)
+        seen_release_ids.update(identity.key for identity in observation_identities)
 
     for pipeline_row in pipeline_rows:
         request_id = _request_id(pipeline_row)
@@ -192,7 +203,6 @@ def list_library_artist_rows(
     # Keep the original pipeline-first ordering so a concurrent import
     # that lands between the two reads still collapses onto the beets row.
     library_albums = library_lookup.get_library_artist(artist_name, mb_artist_id)
-    pipeline_identity_keys = set(_pipeline_rows_by_identity(pipeline_rows))
     artist_library_identity_keys = {
         identity_key
         for album in library_albums
@@ -202,7 +212,7 @@ def list_library_artist_rows(
         identity.release_id
         for row in pipeline_rows
         if (
-            identity := ReleaseIdentity.from_fields(
+            identity := ReleaseIdentity.from_strict_fields(
                 row.get("mb_release_id"), row.get("discogs_release_id")
             )
         ) is not None
@@ -231,21 +241,20 @@ def list_library_artist_rows(
         *unidentified_library_albums,
         *library_by_album.values(),
     ]
-    displayed_release_ids = [
-        identity_key[1]
+    displayed_release_ids = list(dict.fromkeys(
+        identity.release_id
         for album in merged_library_albums
-        for identity_key in _library_identity_keys(album)
-        if identity_key not in pipeline_identity_keys
-    ]
-    pipeline_overlays: Mapping[str, Mapping[str, object]] = (
-        pipeline_db.get_pipeline_overlay(displayed_release_ids)
+        for identity in _library_identities(album)
+    ))
+    pipeline_candidates: Sequence[Mapping[str, object]] = (
+        pipeline_db.list_library_request_candidates(displayed_release_ids)
         if displayed_release_ids
-        else {}
+        else []
     )
     return build_library_artist_rows(
         library_albums=merged_library_albums,
         pipeline_rows=pipeline_rows,
         track_counts=track_counts,
         rank_fn=rank_fn,
-        pipeline_overlays=pipeline_overlays,
+        pipeline_candidates=pipeline_candidates,
     )

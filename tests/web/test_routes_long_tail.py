@@ -5,6 +5,7 @@ split from tests/test_web_server.py (#408). Shared harness in
 tests/web/_harness.py.
 """
 import os
+import sqlite3
 import sys
 import unittest
 from typing import ClassVar
@@ -18,6 +19,20 @@ from tests.fakes import FakeBeetsDB
 from tests.helpers import make_request_row
 from tests.web._harness import _assert_required_fields, _FakeDbWebServerCase
 
+MB_RELEASE_1 = "00000000-0000-0000-0000-000000000001"
+MB_RELEASE_2 = "00000000-0000-0000-0000-000000000002"
+DISCOGS_RELEASE = "12856590"
+UNAVAILABLE_ERROR = {
+    "category": "unavailable",
+    "error": "long_tail_authority_unavailable",
+    "message": "Current Beets authority is unavailable; retry later.",
+}
+CONFLICT_ERROR = {
+    "category": "conflict",
+    "error": "long_tail_authority_conflict",
+    "message": "Long-tail exact release authority is ambiguous or invalid.",
+}
+
 
 class TestLongTailRouteContracts(_FakeDbWebServerCase):
     """U1 contract for ``GET /api/pipeline/long-tail``.
@@ -26,9 +41,8 @@ class TestLongTailRouteContracts(_FakeDbWebServerCase):
     ``pipeline-cli long-tail`` wraps (CLI ⇄ API symmetry). Drives the
     real service + DB cohort query against a fresh :class:`FakePipelineDB`
     (no service mocking, per MOCKS: LEAF-SEAM ONLY). Banding's beets
-    collaborators (``check_beets_library`` / ``_beets_db`` /
-    ``compute_library_rank``) are the leaf seam — patched at
-    ``web.server`` only when a test exercises an in-library band.
+    collaborator (``_beets_db``) is the leaf seam — patched at
+    ``web.server`` only when a test exercises a particular resolved world.
     """
 
     # The frontend long-tail list renders these fields per row out of the
@@ -55,13 +69,14 @@ class TestLongTailRouteContracts(_FakeDbWebServerCase):
     def test_missing_row_bands_missing_and_imported_absent(self):
         """AE1 at the HTTP boundary: a wanted row with no beets album
         bands ``missing``; an imported request is absent from the
-        result. (No beets configured → everything Missing.)"""
+        result. The available fake Beets authority explicitly observes no
+        matching album."""
         from lib.long_tail_service import LongTailRow
         self.db.seed_request(make_request_row(
-            id=1, status="wanted", mb_release_id="rel-1",
+            id=1, status="wanted", mb_release_id=MB_RELEASE_1,
             artist_name="Vanishing", album_title="Lost"))
         self.db.seed_request(make_request_row(
-            id=2, status="imported", mb_release_id="rel-2"))
+            id=2, status="imported", mb_release_id=MB_RELEASE_2))
 
         status, data = self._get("/api/pipeline/long-tail")
 
@@ -106,7 +121,7 @@ class TestLongTailRouteContracts(_FakeDbWebServerCase):
         from lib.quality import AudioQualityMeasurement
 
         self.db.seed_request(make_request_row(
-            id=1, status="wanted", mb_release_id="rel-1",
+            id=1, status="wanted", mb_release_id=MB_RELEASE_1,
             current_spectral_grade="likely_transcode",
             current_spectral_bitrate=128))
         self._link_installed_evidence(
@@ -135,7 +150,7 @@ class TestLongTailRouteContracts(_FakeDbWebServerCase):
         from lib.quality import AudioQualityMeasurement
 
         self.db.seed_request(make_request_row(
-            id=1, status="wanted", mb_release_id="rel-1",
+            id=1, status="wanted", mb_release_id=MB_RELEASE_1,
             current_spectral_grade="likely_transcode",
             current_spectral_bitrate=128))
         self._link_installed_evidence(
@@ -165,7 +180,7 @@ class TestLongTailRouteContracts(_FakeDbWebServerCase):
         chip's colour on its own.
         """
         self.db.seed_request(make_request_row(
-            id=1, status="wanted", mb_release_id="rel-1",
+            id=1, status="wanted", mb_release_id=MB_RELEASE_1,
             current_spectral_grade="likely_transcode",
             current_spectral_bitrate=128))
 
@@ -185,21 +200,18 @@ class TestLongTailRouteContracts(_FakeDbWebServerCase):
 
     def test_transparent_band_via_beets_seam(self):
         """AE2 at the HTTP boundary: a wanted row whose beets copy
-        classifies Transparent bands ``transparent``. The beets leaf
-        seam is patched to report the release in-library with a
-        lossless detail row."""
+        classifies Transparent bands ``transparent`` from its exact resolved
+        item snapshot."""
         self.db.seed_request(make_request_row(
-            id=1, status="wanted", mb_release_id="rel-1"))
+            id=1, status="wanted", mb_release_id=MB_RELEASE_1))
 
         beets_db = FakeBeetsDB()
         # MP3 @ 256 kbps classifies TRANSPARENT in the default rank model
         # (Opus 128 / MP3 V0 are transparent; see docs/quality-ranks.md).
         beets_db.set_mbid_detail(
-            "rel-1", {"beets_format": "MP3", "beets_bitrate": 194,
-                      "beets_avg_bitrate": 256})
-        with patch("web.server.check_beets_library",
-                   return_value={"rel-1"}), \
-                patch("web.server._beets_db", return_value=beets_db):
+            MB_RELEASE_1, {"beets_format": "MP3", "beets_bitrate": 194,
+                           "beets_avg_bitrate": 256})
+        with patch("web.server._beets_db", return_value=beets_db):
             status, data = self._get("/api/pipeline/long-tail")
 
         self.assertEqual(status, 200)
@@ -209,12 +221,11 @@ class TestLongTailRouteContracts(_FakeDbWebServerCase):
         """In-library but no detail / unrankable → ``unknown``, not
         ``missing``."""
         self.db.seed_request(make_request_row(
-            id=1, status="wanted", mb_release_id="rel-1"))
+            id=1, status="wanted", mb_release_id=MB_RELEASE_1))
 
-        beets_db = FakeBeetsDB()  # no detail row seeded
-        with patch("web.server.check_beets_library",
-                   return_value={"rel-1"}), \
-                patch("web.server._beets_db", return_value=beets_db):
+        beets_db = FakeBeetsDB()
+        beets_db.set_album_exists(MB_RELEASE_1, True)
+        with patch("web.server._beets_db", return_value=beets_db):
             status, data = self._get("/api/pipeline/long-tail")
 
         self.assertEqual(status, 200)
@@ -222,7 +233,7 @@ class TestLongTailRouteContracts(_FakeDbWebServerCase):
 
     def test_in_flight_rescue_stamped(self):
         self.db.seed_request(make_request_row(
-            id=1, status="wanted", mb_release_id="rel-1"))
+            id=1, status="wanted", mb_release_id=MB_RELEASE_1))
         self.db.insert_youtube_running(
             request_id=1, browse_id="MPREb_z", audio_playlist_id=None,
             yt_url="https://music.youtube.com/playlist?list=z",
@@ -234,10 +245,10 @@ class TestLongTailRouteContracts(_FakeDbWebServerCase):
 
     def test_band_filter_narrows_result(self):
         self.db.seed_request(make_request_row(
-            id=1, status="wanted", mb_release_id="rel-1"))
+            id=1, status="wanted", mb_release_id=MB_RELEASE_1))
         self.db.seed_request(make_request_row(
-            id=2, status="wanted", mb_release_id="rel-2"))
-        # No beets → both Missing.
+            id=2, status="wanted", mb_release_id=MB_RELEASE_2))
+        # The available fake Beets authority explicitly observes both absent.
         status, data = self._get("/api/pipeline/long-tail?band=missing")
         self.assertEqual(status, 200)
         self.assertEqual(data["band"], "missing")
@@ -246,6 +257,125 @@ class TestLongTailRouteContracts(_FakeDbWebServerCase):
         status, data = self._get("/api/pipeline/long-tail?band=transparent")
         self.assertEqual(status, 200)
         self.assertEqual(data["count"], 0)
+
+    def test_beets_open_failure_for_discogs_row_never_emits_missing(self):
+        """A real missing-file shape returns an error, not Discogs Missing."""
+        self.db.seed_request(make_request_row(
+            id=1,
+            status="wanted",
+            mb_release_id=None,
+            discogs_release_id=DISCOGS_RELEASE,
+            artist_name="Not Known Missing",
+            album_title="Discogs Authority Failed",
+        ))
+
+        with patch(
+            "web.server._beets_db",
+            side_effect=FileNotFoundError("Beets DB not found"),
+        ):
+            status, data = self._get(
+                "/api/pipeline/long-tail?band=missing")
+
+        self.assertEqual(status, 503)
+        self.assertEqual(data, UNAVAILABLE_ERROR)
+        self.assertNotIn("results", data)
+
+    def test_beets_query_failure_for_discogs_row_never_emits_missing(self):
+        """A real SQLite query failure remains an authority failure."""
+        self.db.seed_request(make_request_row(
+            id=1,
+            status="wanted",
+            mb_release_id=None,
+            discogs_release_id=DISCOGS_RELEASE,
+        ))
+        failure = sqlite3.OperationalError("database is locked")
+        failure.sqlite_errorcode = sqlite3.SQLITE_BUSY
+
+        class LockedBeetsDB(FakeBeetsDB):
+            def resolve_current_releases(self, identities):
+                del identities
+                raise failure
+
+        with patch("web.server._beets_db", return_value=LockedBeetsDB()):
+            status, data = self._get(
+                "/api/pipeline/long-tail?band=missing")
+
+        self.assertEqual(status, 503)
+        self.assertEqual(data, UNAVAILABLE_ERROR)
+        self.assertNotIn("results", data)
+
+    def test_ambiguous_beets_resolution_returns_conflict_payload(self):
+        self.db.seed_request(make_request_row(
+            id=1,
+            status="wanted",
+            mb_release_id=MB_RELEASE_1,
+        ))
+        beets = FakeBeetsDB()
+        beets.set_album_ids_for_release(MB_RELEASE_1, [10, 11])
+
+        with patch("web.server._beets_db", return_value=beets):
+            status, data = self._get("/api/pipeline/long-tail")
+
+        self.assertEqual(status, 409)
+        self.assertEqual(data, CONFLICT_ERROR)
+        self.assertNotIn("results", data)
+
+    def test_invalid_request_identity_is_a_stable_conflict(self):
+        self.db.seed_request(make_request_row(
+            id=1,
+            status="wanted",
+            mb_release_id="not-a-release-id",
+            discogs_release_id=None,
+        ))
+
+        status, data = self._get("/api/pipeline/long-tail")
+
+        self.assertEqual(status, 409)
+        self.assertEqual(data, CONFLICT_ERROR)
+        self.assertNotIn("results", data)
+
+    def test_omitted_authority_result_is_a_stable_unavailable_error(self):
+        self.db.seed_request(make_request_row(
+            id=1,
+            status="wanted",
+            mb_release_id=MB_RELEASE_1,
+        ))
+
+        class OmittedAuthorityBeetsDB(FakeBeetsDB):
+            def resolve_current_releases(self, identities):
+                del identities
+                return {}
+
+        with patch(
+            "web.server._beets_db",
+            return_value=OmittedAuthorityBeetsDB(),
+        ):
+            status, data = self._get("/api/pipeline/long-tail")
+
+        self.assertEqual(status, 503)
+        self.assertEqual(data, UNAVAILABLE_ERROR)
+        self.assertNotIn("results", data)
+
+    def test_unexpected_sqlite_schema_failure_remains_generic_500(self):
+        self.db.seed_request(make_request_row(
+            id=1,
+            status="wanted",
+            mb_release_id=MB_RELEASE_1,
+        ))
+        failure = sqlite3.OperationalError("no such table: albums")
+        failure.sqlite_errorcode = sqlite3.SQLITE_ERROR
+
+        class BrokenSchemaBeetsDB(FakeBeetsDB):
+            def resolve_current_releases(self, identities):
+                del identities
+                raise failure
+
+        with patch("web.server._beets_db", return_value=BrokenSchemaBeetsDB()):
+            status, data = self._get("/api/pipeline/long-tail")
+
+        self.assertEqual(status, 500)
+        self.assertEqual(data, {"error": "Internal server error"})
+        self.assertNotIn("results", data)
 
     def test_empty_cohort_returns_200(self):
         status, data = self._get("/api/pipeline/long-tail")
@@ -257,7 +387,7 @@ class TestLongTailRouteContracts(_FakeDbWebServerCase):
         """KTD8: ``?id=`` returns just that request's authoritative band."""
         from lib.long_tail_service import LongTailRow
         self.db.seed_request(make_request_row(
-            id=42, status="wanted", mb_release_id="rel-42",
+            id=42, status="wanted", mb_release_id=MB_RELEASE_1,
             artist_name="One", album_title="Row"))
         status, data = self._get("/api/pipeline/long-tail?id=42")
         self.assertEqual(status, 200)
@@ -270,7 +400,7 @@ class TestLongTailRouteContracts(_FakeDbWebServerCase):
 
     def test_single_id_404_when_not_wanted(self):
         self.db.seed_request(make_request_row(
-            id=42, status="imported", mb_release_id="rel-42"))
+            id=42, status="imported", mb_release_id=MB_RELEASE_1))
         status, data = self._get("/api/pipeline/long-tail?id=42")
         self.assertEqual(status, 404)
         self.assertEqual(data["id"], 42)

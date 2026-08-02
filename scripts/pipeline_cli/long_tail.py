@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import msgspec
 
+from lib.long_tail_service import classify_long_tail_failure
 from scripts.pipeline_cli._format import _json_default, _truncate
 
 if TYPE_CHECKING:
@@ -35,41 +36,42 @@ class _LongTailDB(Protocol):
 def _cli_band_fn(release_ids: list[str]) -> dict[str, str]:
     """Build the long-tail band map for the CLI.
 
-    Reuses the SAME banding decision the web overlay uses
-    (``lib.banding.band_from_detail``) but sources beets membership /
-    detail from a directly-opened ``BeetsDB`` rather than the web
+    Reuses the SAME exact-resolution banding decision the web route uses,
+    but sources Beets from a directly-opened ``BeetsDB`` rather than the web
     server's module-level ``_beets`` global (which the CLI process never
-    sets). No parallel banding logic — only the beets-access seam and the
-    rank-config source differ between the two surfaces.
+    sets). No parallel membership/detail projection exists; only the
+    composition root and rank-config source differ between the two surfaces.
 
     Returns ``{release_id: band}`` (``"missing"`` / a lowercase
-    ``QualityRank`` / ``"unknown"``). Best-effort: if beets is
-    unreachable every id bands ``"missing"`` (no on-disk copy to upgrade
-    is the honest fallback).
+    ``QualityRank`` / ``"unknown"``). Beets authority/read failures
+    propagate to the CLI boundary; an unavailable library must never be
+    presented as an actionable all-Missing cohort.
     """
-    from lib.banding import band_from_detail, load_rank_config
+    from lib.banding import load_rank_config, resolve_current_release_bands
     from lib.beets_db import open_beets_db
-    from lib.release_identity import ConflictingReleaseIdentityError
 
     ids_list = [str(rid) for rid in release_ids]
     if not ids_list:
         return {}
     cfg = load_rank_config()
-    try:
-        with open_beets_db() as beets:
-            in_library = beets.check_mbids(ids_list)
-            quality = (
-                beets.check_mbids_detail(list(in_library))
-                if in_library else {}
-            )
-    except ConflictingReleaseIdentityError:
-        raise
-    except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
-        return {rid: "missing" for rid in ids_list}
-    return {
-        rid: band_from_detail(rid, in_library, quality, cfg)
-        for rid in ids_list
-    }
+    with open_beets_db() as beets:
+        return resolve_current_release_bands(beets, ids_list, cfg)
+
+
+def _render_long_tail_failure(exc: Exception, *, json_mode: bool) -> int | None:
+    """Render one expected service failure through the shared public map."""
+    failure = classify_long_tail_failure(exc)
+    if failure is None:
+        return None
+    if json_mode:
+        print(json.dumps(
+            msgspec.to_builtins(failure),
+            indent=2,
+            sort_keys=True,
+        ))
+    else:
+        print(f"{failure.error}: {failure.message}", file=sys.stderr)
+    return failure.cli_exit_code
 
 
 def cmd_long_tail(
@@ -98,11 +100,16 @@ def cmd_long_tail(
     Exit codes:
       * 0 — success (empty cohort is a valid state)
       * 2 — ``--id`` not found / not ``wanted``
+      * 4 — ambiguous, malformed, or conflicting exact authority
+      * 5 — expected Beets authority/read unavailability
 
     JSON envelope (mirrors the API):
         ``{"results": [...], "band": <str|null>, "count": <int>}``
     Single-id JSON (mirrors the API):
         ``{"result": <row>, "id": <int>}``
+    Expected-failure JSON (mirrors the API):
+        ``{"category": <conflict|unavailable>, "error": <stable-code>,
+        "message": <stable-message>}``
     """
     from lib.long_tail_service import band_one_long_tail, list_long_tail
 
@@ -111,7 +118,13 @@ def cmd_long_tail(
 
     request_id = getattr(args, "id", None)
     if request_id is not None:
-        row = band_one_long_tail(db, resolved_band_fn, int(request_id))
+        try:
+            row = band_one_long_tail(db, resolved_band_fn, int(request_id))
+        except Exception as exc:
+            exit_code = _render_long_tail_failure(exc, json_mode=json_mode)
+            if exit_code is None:
+                raise
+            return exit_code
         if row is None:
             msg = f"request {int(request_id)} not found or not wanted"
             if json_mode:
@@ -135,7 +148,13 @@ def cmd_long_tail(
     if band == "":
         band = None
 
-    result = list_long_tail(db, resolved_band_fn, band=band)
+    try:
+        result = list_long_tail(db, resolved_band_fn, band=band)
+    except Exception as exc:
+        exit_code = _render_long_tail_failure(exc, json_mode=json_mode)
+        if exit_code is None:
+            raise
+        return exit_code
 
     if json_mode:
         payload = {

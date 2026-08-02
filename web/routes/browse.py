@@ -34,6 +34,7 @@ from lib.release_identity import (
 from web import cache as _cache
 from web import discogs as discogs_api
 from web.discogs import VA_ARTIST_ID as _DISCOGS_VA_ARTIST_ID
+from web.library_album_row import AmbiguousLibraryRequestAttachmentError
 from web.library_artist_service import list_library_artist_rows
 from web.mb import VA_ARTIST_MBID as _MB_VA_ARTIST_MBID
 from web.routes._overlay import overlay_release_rows_in_place
@@ -94,13 +95,23 @@ def get_library_artist(h: RouteHandler, params: dict[str, list[str]]) -> None:
         h._error("Missing parameter 'name'")
         return
 
-    albums = list_library_artist_rows(
-        library_lookup=srv,
-        pipeline_db=srv._db(),
-        artist_name=name,
-        mb_artist_id=mbid,
-        rank_fn=srv.compute_library_rank,
-    )
+    try:
+        albums = list_library_artist_rows(
+            library_lookup=srv,
+            pipeline_db=srv._db(),
+            artist_name=name,
+            mb_artist_id=mbid,
+            rank_fn=srv.compute_library_rank,
+        )
+    except AmbiguousLibraryRequestAttachmentError as exc:
+        h._json({
+            "error": "ambiguous_library_request_identity",
+            "request_ids": list(exc.request_ids),
+            "release_ids": [
+                identity.release_id for identity in exc.identities
+            ],
+        }, status=409)
+        return
     h._json({"albums": [row.to_dict() for row in albums]})
 
 

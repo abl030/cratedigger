@@ -40,6 +40,18 @@ TEST_DSN = os.environ.get("TEST_DB_DSN")
 
 RELEASE_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 RELEASE_B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+RELEASE_C = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+DISCOGS_RELEASE = "12856590"
+UNAVAILABLE_ERROR = {
+    "category": "unavailable",
+    "error": "long_tail_authority_unavailable",
+    "message": "Current Beets authority is unavailable; retry later.",
+}
+CONFLICT_ERROR = {
+    "category": "conflict",
+    "error": "long_tail_authority_conflict",
+    "message": "Long-tail exact release authority is ambiguous or invalid.",
+}
 
 SAMPLE_MB_RELEASE = {
     "id": "44438bf9-26d9-4460-9b4f-1a1b015e37a1",
@@ -5337,19 +5349,19 @@ class TestPipelineCliLongTail(unittest.TestCase):
     @staticmethod
     def _band_fn(mapping):
         def _fn(release_ids):
-            return {rid: mapping[rid] for rid in release_ids if rid in mapping}
+            return {rid: mapping.get(rid, "missing") for rid in release_ids}
         return _fn
 
     def _seed(self) -> FakePipelineDB:
         db = FakePipelineDB()
         db.seed_request(make_request_row(
-            id=1, status="wanted", mb_release_id="rel-1",
+            id=1, status="wanted", mb_release_id=RELEASE_A,
             artist_name="Missing Artist", album_title="Gone"))
         db.seed_request(make_request_row(
-            id=2, status="wanted", mb_release_id="rel-2",
+            id=2, status="wanted", mb_release_id=RELEASE_B,
             artist_name="On Disk", album_title="Have It"))
         db.seed_request(make_request_row(
-            id=3, status="imported", mb_release_id="rel-3"))
+            id=3, status="imported", mb_release_id=RELEASE_C))
         return db
 
     def _run(self, db, *, band=None, request_id=None, json_out=False,
@@ -5364,7 +5376,7 @@ class TestPipelineCliLongTail(unittest.TestCase):
 
     def test_band_missing_filter_returns_only_missing_rows(self):
         db = self._seed()
-        band_fn = self._band_fn({"rel-2": "transparent"})  # rel-1 missing
+        band_fn = self._band_fn({RELEASE_B: "transparent"})
         rc, out, err = self._run(db, band="missing", band_fn=band_fn)
         self.assertEqual(rc, 0)
         self.assertEqual(err, "")
@@ -5373,7 +5385,7 @@ class TestPipelineCliLongTail(unittest.TestCase):
 
     def test_json_emits_typed_envelope(self):
         db = self._seed()
-        band_fn = self._band_fn({"rel-2": "transparent"})
+        band_fn = self._band_fn({RELEASE_B: "transparent"})
         rc, out, _err = self._run(db, json_out=True, band_fn=band_fn)
         self.assertEqual(rc, 0)
         payload = json.loads(out)
@@ -5391,7 +5403,7 @@ class TestPipelineCliLongTail(unittest.TestCase):
 
     def test_json_band_filter_echoed(self):
         db = self._seed()
-        band_fn = self._band_fn({"rel-1": "missing", "rel-2": "missing"})
+        band_fn = self._band_fn({RELEASE_A: "missing", RELEASE_B: "missing"})
         rc, out, _ = self._run(
             db, band="missing", json_out=True, band_fn=band_fn)
         self.assertEqual(rc, 0)
@@ -5399,31 +5411,192 @@ class TestPipelineCliLongTail(unittest.TestCase):
         self.assertEqual(payload["band"], "missing")
         self.assertEqual(payload["count"], 2)
 
-    def test_cli_band_fn_degrades_to_missing_when_beets_unavailable(self):
-        """The production band_fn (_cli_band_fn) bands every id "missing" when
-        BeetsDB raises (locked / missing DB) rather than propagating — matches
-        band_release_ids' web fallback, so a beets hiccup degrades the worklist
-        instead of erroring it."""
-        with patch("lib.beets_db.BeetsDB", side_effect=OSError("db locked")):
-            out = pipeline_cli_long_tail._cli_band_fn(["rel-1", "rel-2"])
-        self.assertEqual(out, {"rel-1": "missing", "rel-2": "missing"})
+    def test_cli_band_fn_propagates_real_beets_open_failure(self):
+        """A missing SQLite authority is not evidence of Beets absence."""
+        with tempfile.TemporaryDirectory() as root:
+            config_path = os.path.join(root, "config.ini")
+            missing_db = os.path.join(root, "missing.db")
+            with open(config_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "[Beets]\n"
+                    f"library = {missing_db}\n"
+                    f"directory = {root}\n"
+                )
+            with patch.dict(
+                os.environ,
+                {"CRATEDIGGER_RUNTIME_CONFIG": config_path},
+                clear=False,
+            ), self.assertRaisesRegex(FileNotFoundError, "Beets DB not found"):
+                pipeline_cli_long_tail._cli_band_fn([DISCOGS_RELEASE])
 
-    def test_cli_band_fn_never_degrades_identity_conflict_to_missing(self):
-        from lib.release_identity import ConflictingReleaseIdentityError
+    def test_cli_band_fn_propagates_real_beets_query_failure(self):
+        """A real SQLite query error remains distinguishable from absence."""
+        with tempfile.TemporaryDirectory() as root:
+            config_path = os.path.join(root, "config.ini")
+            empty_db = os.path.join(root, "empty.db")
+            sqlite3.connect(empty_db).close()
+            with open(config_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "[Beets]\n"
+                    f"library = {empty_db}\n"
+                    f"directory = {root}\n"
+                )
+            with patch.dict(
+                os.environ,
+                {"CRATEDIGGER_RUNTIME_CONFIG": config_path},
+                clear=False,
+            ), self.assertRaises(sqlite3.OperationalError) as raised:
+                pipeline_cli_long_tail._cli_band_fn([DISCOGS_RELEASE])
 
-        with patch(
-            "lib.beets_db.BeetsDB",
-            side_effect=ConflictingReleaseIdentityError(
-                "conflicting numeric Discogs release identities for: 12856590"
-            ),
-        ), self.assertRaisesRegex(
-            ConflictingReleaseIdentityError,
-            "12856590",
-        ):
-            pipeline_cli_long_tail._cli_band_fn([
-                "unrelated-valid",
-                "12856590",
-            ])
+        self.assertEqual(raised.exception.sqlite_errorcode, sqlite3.SQLITE_ERROR)
+
+    def test_beets_outage_maps_to_exit_five_without_actionable_rows(self):
+        """The CLI maps unavailable authority to the shared retryable error."""
+        argv = [
+            "pipeline_cli.py",
+            "--dsn",
+            "postgresql://example/test",
+            "long-tail",
+            "--band=missing",
+            "--json",
+        ]
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1,
+            status="wanted",
+            mb_release_id=None,
+            discogs_release_id=DISCOGS_RELEASE,
+            artist_name="Not Known Missing",
+            album_title="Discogs Authority Failed",
+        ))
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with tempfile.TemporaryDirectory() as root:
+            config_path = os.path.join(root, "config.ini")
+            missing_db = os.path.join(root, "missing.db")
+            with open(config_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "[Beets]\n"
+                    f"library = {missing_db}\n"
+                    f"directory = {root}\n"
+                )
+            with patch.object(sys, "argv", argv), patch.dict(
+                os.environ,
+                {"CRATEDIGGER_RUNTIME_CONFIG": config_path},
+                clear=False,
+            ), patch(
+                "scripts.pipeline_cli.cli.PipelineDB", return_value=db,
+            ), redirect_stdout(stdout), redirect_stderr(stderr), self.assertRaises(
+                SystemExit,
+            ) as raised:
+                pipeline_cli.main()
+
+        self.assertEqual(raised.exception.code, 5)
+        self.assertEqual(json.loads(stdout.getvalue()), UNAVAILABLE_ERROR)
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(db.close_calls, 1)
+
+    def test_ambiguous_beets_maps_to_exit_four_with_shared_payload(self):
+        argv = [
+            "pipeline_cli.py",
+            "--dsn",
+            "postgresql://example/test",
+            "long-tail",
+            "--json",
+        ]
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1,
+            status="wanted",
+            mb_release_id=RELEASE_A,
+        ))
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with tempfile.TemporaryDirectory() as root:
+            config_path = os.path.join(root, "config.ini")
+            beets_db = os.path.join(root, "beets.db")
+            _create_test_db(beets_db)
+            _insert_album(
+                beets_db,
+                1,
+                RELEASE_A,
+                [(256_000, "/music/one/01.mp3")],
+            )
+            _insert_album(
+                beets_db,
+                2,
+                RELEASE_A,
+                [(256_000, "/music/two/01.mp3")],
+            )
+            with open(config_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "[Beets]\n"
+                    f"library = {beets_db}\n"
+                    f"directory = {root}\n"
+                )
+            with patch.object(sys, "argv", argv), patch.dict(
+                os.environ,
+                {"CRATEDIGGER_RUNTIME_CONFIG": config_path},
+                clear=False,
+            ), patch(
+                "scripts.pipeline_cli.cli.PipelineDB", return_value=db,
+            ), redirect_stdout(stdout), redirect_stderr(stderr), self.assertRaises(
+                SystemExit,
+            ) as raised:
+                pipeline_cli.main()
+
+        self.assertEqual(raised.exception.code, 4)
+        self.assertEqual(json.loads(stdout.getvalue()), CONFLICT_ERROR)
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(db.close_calls, 1)
+
+    def test_invalid_request_identity_maps_to_exit_four(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1,
+            status="wanted",
+            mb_release_id="not-a-release-id",
+            discogs_release_id=None,
+        ))
+
+        rc, out, err = self._run(
+            db,
+            json_out=True,
+            band_fn=lambda _release_ids: {},
+        )
+
+        self.assertEqual(rc, 4)
+        self.assertEqual(json.loads(out), CONFLICT_ERROR)
+        self.assertEqual(err, "")
+
+    def test_unavailable_text_error_uses_stderr_and_exit_five(self):
+        db = self._seed()
+
+        def unavailable(_release_ids):
+            raise FileNotFoundError("Beets DB not found")
+
+        rc, out, err = self._run(db, band_fn=unavailable)
+
+        self.assertEqual(rc, 5)
+        self.assertEqual(out, "")
+        self.assertEqual(
+            err,
+            "long_tail_authority_unavailable: "
+            "Current Beets authority is unavailable; retry later.\n",
+        )
+
+    def test_unexpected_schema_failure_still_propagates(self):
+        db = self._seed()
+        failure = sqlite3.OperationalError("no such table: albums")
+        failure.sqlite_errorcode = sqlite3.SQLITE_ERROR
+
+        def broken_schema(_release_ids):
+            raise failure
+
+        with self.assertRaises(sqlite3.OperationalError) as raised:
+            self._run(db, band_fn=broken_schema)
+
+        self.assertIs(raised.exception, failure)
 
     def test_empty_cohort_exit_zero(self):
         db = FakePipelineDB()
@@ -5433,7 +5606,7 @@ class TestPipelineCliLongTail(unittest.TestCase):
 
     def test_single_id_exit_zero_with_band(self):
         db = self._seed()
-        band_fn = self._band_fn({"rel-2": "transparent"})
+        band_fn = self._band_fn({RELEASE_B: "transparent"})
         rc, out, _err = self._run(
             db, request_id=2, json_out=True, band_fn=band_fn)
         self.assertEqual(rc, 0)

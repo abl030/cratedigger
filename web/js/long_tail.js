@@ -39,13 +39,14 @@ import {
 import {
   consolePrune,
   consoleStates,
+  invalidateLongTailConsoleState,
   restoreLongTailConsoles,
 } from './long_tail_console.js';
 
 /**
  * The `Missing` band sentinel — a `wanted` request with no clean
- * beets-library album for its `mb_release_id`. Matches the lowercase
- * `band` value U1 stamps on each row.
+ * beets-library album for its exact MusicBrainz or Discogs release identity.
+ * Matches the lowercase `band` value U1 stamps on each row.
  *
  * @type {string}
  */
@@ -293,7 +294,8 @@ export function renderLongTailRow(row) {
   // Meta = the pressing-disambiguation triple: year · MB/Discogs · N tracks.
   // The mirror label is derived from the release id (UUID → MusicBrainz,
   // numeric → Discogs), not the low-signal pipeline `source` column.
-  const srcLabel = sourceLabel(row.mb_release_id);
+  const releaseId = row.mb_release_id || row.discogs_release_id;
+  const srcLabel = sourceLabel(releaseId);
   const srcChip = srcLabel
     ? `<span class="lt-meta-chip">${esc(srcLabel)}</span>` : '';
   const tc = (row.track_count != null) ? Number(row.track_count) : null;
@@ -409,6 +411,51 @@ let longTailSearchTimer = null;
 const LONG_TAIL_SEARCH_DEBOUNCE_MS = 300;
 
 /**
+ * Apply the cache transition for a failed long-tail cohort load. The failed
+ * request may mutate state only while its token is still current; a stale
+ * failure must leave a newer successful cohort and its consoles untouched.
+ *
+ * A current failure invalidates every server-derived part of the cached
+ * view (`rows`, selected `band`, and all per-row console/action state) so a
+ * later navigation back through `setPipelineView('long-tail')` sees
+ * `rows === null` and refetches. The operator's client-only search query is
+ * deliberately preserved for that retry.
+ *
+ * DOM-free lifecycle seam shared by production and the generated tests.
+ *
+ * @param {number} failedToken
+ * @param {number} currentToken
+ * @param {{rows: Array<Object>|null, band: string|null, query: string}} longTail
+ * @param {Map<number, any>} consoleStateMap
+ * @returns {boolean} Whether the failure was current and invalidation applied.
+ */
+export function applyLongTailLoadFailure(
+  failedToken,
+  currentToken,
+  longTail,
+  consoleStateMap,
+) {
+  if (failedToken !== currentToken) return false;
+  longTail.rows = null;
+  longTail.band = null;
+  invalidateLongTailConsoleState(consoleStateMap);
+  return true;
+}
+
+/**
+ * Whether a current long-tail failure may paint its error into the active view.
+ * Cache invalidation is independent of navigation, but a request that settles
+ * after the operator leaves Long Tail must never overwrite the new view.
+ *
+ * @param {boolean} failureApplied
+ * @param {string} pipelineView
+ * @returns {boolean}
+ */
+export function shouldPaintLongTailLoadFailure(failureApplied, pipelineView) {
+  return failureApplied && pipelineView === 'long-tail';
+}
+
+/**
  * Fetch the banded `wanted` cohort and render it. Stamps an in-flight
  * token so a slow response superseded by a newer load is discarded
  * before it paints.
@@ -451,8 +498,17 @@ export async function loadLongTail() {
     }
     renderLongTail();
   } catch (e) {
-    if (token !== longTailRequestToken) return;
-    if (el) {
+    const failureApplied = applyLongTailLoadFailure(
+      token,
+      longTailRequestToken,
+      state.longTail,
+      consoleStates,
+    );
+    if (!failureApplied) return;
+    if (el && shouldPaintLongTailLoadFailure(
+      failureApplied,
+      state.pipelineView,
+    )) {
       el.innerHTML = '<div class="loading">Failed to load long tail.</div>';
     }
   }
@@ -536,4 +592,6 @@ export const __test__ = {
   countOtherBandMatches,
   renderLongTailRow,
   renderLongTailBody,
+  applyLongTailLoadFailure,
+  shouldPaintLongTailLoadFailure,
 };

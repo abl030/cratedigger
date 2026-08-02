@@ -154,7 +154,11 @@ def _beets_authority_availability_category(exc: Exception) -> str | None:
         return "FileNotFoundError"
     if isinstance(exc, PermissionError):
         return "PermissionError"
-    if not isinstance(exc, sqlite3.OperationalError):
+    # SQLite maps some authority failures to broader DatabaseError subclasses:
+    # notably SQLITE_AUTH is DatabaseError rather than OperationalError.  The
+    # whitelisted primary result code is the authority boundary, not the
+    # Python subclass selected by sqlite3.
+    if not isinstance(exc, sqlite3.DatabaseError):
         return None
     raw_code = getattr(exc, "sqlite_errorcode", None)
     if not isinstance(raw_code, int):
