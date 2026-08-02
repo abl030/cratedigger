@@ -74,6 +74,11 @@ class TestRecordingProcessAlbum(unittest.TestCase):
 
 
 class TestFakePipelineDB(unittest.TestCase):
+    def test_exposes_configured_connection_identity(self) -> None:
+        db = FakePipelineDB(dsn="postgresql://contract-test")
+
+        self.assertEqual(db.dsn, "postgresql://contract-test")
+
     def test_request_creation_race_materializes_only_on_in_lock_lookup(self):
         db = FakePipelineDB()
         db.arm_request_creation_race(
