@@ -126,10 +126,11 @@ class LibraryAlbumRow(msgspec.Struct, frozen=True):
         *,
         rank_fn: Callable[[str | None, int | None], str],
     ) -> LibraryAlbumRow:
-        frontend_id = frontend_release_id(
+        identities = ReleaseIdentity.all_from_observation_fields(
             album.get("mb_albumid"),
             album.get("discogs_albumid"),
         )
+        frontend_id = identities[0].release_id if identities else None
         formats = str(album.get("formats") or "")
         min_bitrate = album.get("min_bitrate")
         avg_bitrate = album.get("avg_bitrate")
