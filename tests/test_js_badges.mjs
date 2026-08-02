@@ -22,6 +22,14 @@ function assertExcludes(haystack, needle, message) {
   }
 }
 
+function assertFalse(value, message) {
+  if (!value) passed++;
+  else {
+    failed++;
+    console.error(`  FAIL: ${message}`);
+  }
+}
+
 console.log('renderStatusBadges() uses average while retaining the min floor');
 {
   const html = renderStatusBadges({
@@ -163,6 +171,28 @@ console.log('renderStatusBadges() never combines a live mutation with stale hist
   });
   assertContains(refetched, '>captured<', 'matching refetch restores durable history');
   assertContains(refetched, '>verified<', 'matching refetch restores authoritative proof');
+  assertFalse(pipelineStore.has('status-only-reopen'),
+    'matching refetch acknowledges and expires the local lifecycle overlay');
+
+  const laterProcessing = renderStatusBadges({
+    id: 'status-only-reopen',
+    in_library: false,
+    has_captured_history: true,
+    pipeline_status: 'processing',
+    pipeline_id: 51,
+    processing_owner: {
+      job_id: 99,
+      status: 'running',
+      preview_status: 'evidence_ready',
+    },
+    pipeline_verified_lossless: true,
+  });
+  assertContains(laterProcessing, 'badge-processing',
+    'later server lifecycle remains visible after acknowledgement');
+  assertContains(laterProcessing, '>captured<',
+    'later authoritative row retains acquisition history');
+  assertContains(laterProcessing, '>verified<',
+    'later authoritative row retains proof');
   pipelineStore.clear();
 }
 
