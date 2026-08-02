@@ -24,7 +24,10 @@ from lib.beets_db import (
 )
 from lib.config import CratediggerConfig
 from lib.quality import QualityRankConfig
-from lib.release_identity import ReleaseIdentity
+from lib.release_identity import (
+    ConflictingReleaseIdentityError,
+    ReleaseIdentity,
+)
 from tests.beets_world import BeetsWorld, BeetsWorldRelease
 from tests.fakes import FakeBeetsDB
 
@@ -436,20 +439,6 @@ class TestCurrentBeetsResolverGenerated(unittest.TestCase):
                         conflicting_release_id=DISCOGS_SIBLING,
                     )
 
-            cfg = _runtime_config(world)
-            with open_beets_db(cfg) as beets:
-                result = beets.resolve_current_release(_identity(identity_source))
-                batch_present = release_id in beets.check_mbids([release_id])
-                batch_ids = beets.get_album_ids_by_mbids([release_id])
-                album_info = beets.get_album_info(
-                    release_id, QualityRankConfig.defaults(),
-                )
-                item_paths = beets.get_item_paths(release_id)
-                tracks = beets.get_tracks_by_mb_release_id(release_id)
-                minimum_bitrate = beets.get_min_bitrate(release_id)
-                average_bitrate = beets.get_avg_bitrate_kbps(release_id)
-                detail = beets.check_mbids_detail([release_id])
-
             topology_error = None
             if cardinality >= 1 and source == "discogs_conflict":
                 topology_error = "conflicting_identity"
@@ -459,6 +448,33 @@ class TestCurrentBeetsResolverGenerated(unittest.TestCase):
                 topology_error = "split_topology"
             elif cardinality == 1 and topology == "invalid":
                 topology_error = "invalid_path"
+
+            cfg = _runtime_config(world)
+            with open_beets_db(cfg) as beets:
+                result = beets.resolve_current_release(_identity(identity_source))
+                if topology_error == "conflicting_identity":
+                    with self.assertRaises(ConflictingReleaseIdentityError):
+                        beets.check_mbids([release_id])
+                    with self.assertRaises(ConflictingReleaseIdentityError):
+                        beets.get_album_ids_by_mbids([release_id])
+                    with self.assertRaises(ConflictingReleaseIdentityError):
+                        beets.check_mbids_detail([release_id])
+                    with self.assertRaises(ConflictingReleaseIdentityError):
+                        beets.get_albums_by_release_ids([release_id])
+                    batch_present = False
+                    batch_ids: dict[str, int] = {}
+                    detail: dict[str, dict[str, object]] = {}
+                else:
+                    batch_present = release_id in beets.check_mbids([release_id])
+                    batch_ids = beets.get_album_ids_by_mbids([release_id])
+                    detail = beets.check_mbids_detail([release_id])
+                album_info = beets.get_album_info(
+                    release_id, QualityRankConfig.defaults(),
+                )
+                item_paths = beets.get_item_paths(release_id)
+                tracks = beets.get_tracks_by_mb_release_id(release_id)
+                minimum_bitrate = beets.get_min_bitrate(release_id)
+                average_bitrate = beets.get_avg_bitrate_kbps(release_id)
             expected_path = None
             if cardinality == 1 and topology_error is None:
                 expected_path = snapshots[0].album_path
