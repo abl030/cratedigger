@@ -15,7 +15,7 @@
 #   services.cratedigger.discogs.apiBase = "http://localhost:8086";
 # Build the deployment-owned Beets package separately with:
 #   beetsPackage = import ../nix/beets.nix {
-#     inherit pkgs;
+#     pkgs = config.services.cratedigger.packageSet;
 #     discogsMirrorUrl = "http://localhost:8086";
 #   };
 # Then supply that package via `services.cratedigger.beets.runtime.package`,

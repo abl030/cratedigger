@@ -1,6 +1,6 @@
 ---
 name: beets-docs
-description: Look up the pinned beets documentation and implementation used by Cratedigger.
+description: Look up Beets documentation and the deployment-owned runtime boundary consumed by Cratedigger.
 ---
 
 Before doing anything, run `date` to get the current date and time.
@@ -49,12 +49,21 @@ This returns a path like `/nix/store/<hash>-source`. The docs live at `${BEETS_S
 - **Import behaviour**: search config.rst for `import`
 - **Matching/autotagger**: read `docs/guides/tagger.rst` and search config.rst for `match`
 
-### Current Beets Packaging
+### Current Beets Deployment Boundary
 
-Cratedigger owns its pinned beets build and module integration in:
+The deployment owns the Beets package, immutable effective configuration,
+catalog, library, state, secrets, and plain operator `beet`. Cratedigger
+consumes and validates those authorities; it does not render or own them.
 
-- `nix/beets.nix` for the patched beets package
-- `nix/module.nix` for service options and the rendered beets configuration
+- `nix/beets.nix` is an optional compatible package factory. A NixOS consumer
+  instantiates it with `pkgs = config.services.cratedigger.packageSet;` so its
+  Python interpreter matches the application closure.
+- `nix/module.nix` consumes the package through
+  `services.cratedigger.beets.runtime.package`, points every Beets consumer at
+  the external immutable `BEETSDIR`, and validates the supplied runtime
+  contract at application startup.
+- `docs/beets-primer.md` owns the complete authority and safe-operation
+  contract, including use of the deployment-provided plain operator `beet`.
 
 Read those first for the deployed shape before diving into upstream RST docs.
 After changes, run the relevant Cratedigger tests and use the `deploy` skill; do

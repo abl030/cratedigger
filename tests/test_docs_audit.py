@@ -53,6 +53,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DOCS_DIR = REPO_ROOT / "docs"
 MODULE_NIX = REPO_ROOT / "nix" / "module.nix"
 BEETS_CONSUMER_EXAMPLE = REPO_ROOT / "examples" / "cratedigger.nix"
+DISCOGS_MIRROR_EXAMPLE = REPO_ROOT / "examples" / "discogs-mirror.nix"
+BEETS_DOCS_SKILL = REPO_ROOT / ".claude" / "skills" / "beets-docs" / "SKILL.md"
 BEETS_PRIMER = DOCS_DIR / "beets-primer.md"
 DEBUGGING_CLI = DOCS_DIR / "debugging-cli.md"
 RETIRED_INTEGRATION_TERMS = ("mee" + "lo", "lid" + "arr")
@@ -514,6 +516,45 @@ class TestSkillInstructionCodeReferences(unittest.TestCase):
         self.assertIn(tracked, files)
         self.assertNotIn(untracked, files)
         self.assertNotIn(plugin, files)
+
+
+class TestBeetsOwnershipGuidance(unittest.TestCase):
+    """Examples and shared guidance preserve deployment-owned Beets authority."""
+
+    def test_discogs_example_uses_cratedigger_package_set(self) -> None:
+        text = DISCOGS_MIRROR_EXAMPLE.read_text(encoding="utf-8")
+        start = text.index("#   beetsPackage = import ../nix/beets.nix {")
+        end = text.index("# Then supply that package", start)
+        factory_guidance = text[start:end]
+        self.assertIn(
+            "pkgs = config.services.cratedigger.packageSet;",
+            factory_guidance,
+        )
+        self.assertNotIn(
+            "inherit pkgs;",
+            factory_guidance,
+            "ambient nixpkgs may use a different Python than packageSet",
+        )
+
+    def test_beets_docs_skill_names_deployment_owned_authority(self) -> None:
+        text = BEETS_DOCS_SKILL.read_text(encoding="utf-8")
+        for stable_anchor in (
+            "### Current Beets Deployment Boundary",
+            "`nix/beets.nix`",
+            "`services.cratedigger.beets.runtime.package`",
+            "external immutable `BEETSDIR`",
+            "plain operator `beet`",
+            "`docs/beets-primer.md`",
+        ):
+            self.assertIn(stable_anchor, text)
+        self.assertNotIn(
+            "Cratedigger owns its pinned beets build and module integration",
+            text,
+        )
+        self.assertNotIn(
+            "`nix/module.nix` for service options and the rendered beets configuration",
+            text,
+        )
 
 
 class TestBacktickedCallReferences(unittest.TestCase):

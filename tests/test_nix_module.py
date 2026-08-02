@@ -1426,6 +1426,13 @@ class TestExternalBeetsRuntimeCapability(unittest.TestCase):
               system = builtins.currentSystem;
             };
             beetsPackage = import ./nix/beets.nix { pkgs = modulePkgs; };
+            ambientPkgs = modulePkgs // {
+              python3 = modulePkgs.python311;
+              python3Packages = modulePkgs.python311Packages;
+            };
+            ambientBeetsPackage = import ./nix/beets.nix {
+              pkgs = ambientPkgs;
+            };
             runtime = {
               package = beetsPackage;
               configDir = "/etc/beets";
@@ -1535,6 +1542,13 @@ class TestExternalBeetsRuntimeCapability(unittest.TestCase):
             incompatiblePackage = failures (runtime // {
               package = beetsPackage // { pythonModule = null; };
             });
+            ambientPackageMismatch = {
+              distinct =
+                ambientBeetsPackage.pythonModule != modulePkgs.python3;
+              failures = failures (runtime // {
+                package = ambientBeetsPackage;
+              });
+            };
             invalidPaths = {
               configDir = failures (runtime // { configDir = "etc/beets"; });
               expectedLibrary = failures (runtime // {
@@ -1597,6 +1611,18 @@ class TestExternalBeetsRuntimeCapability(unittest.TestCase):
                 for message in incompatible_messages
             ),
             incompatible_messages,
+        )
+        ambient_mismatch = worlds["ambientPackageMismatch"]
+        assert isinstance(ambient_mismatch, dict)
+        self.assertIs(ambient_mismatch["distinct"], True)
+        ambient_messages = self._string_list(ambient_mismatch["failures"])
+        self.assertTrue(
+            any(
+                "package.pythonModule must match services.cratedigger.packageSet.python3"
+                in message
+                for message in ambient_messages
+            ),
+            ambient_messages,
         )
         invalid_paths = worlds["invalidPaths"]
         assert isinstance(invalid_paths, dict)
@@ -1743,6 +1769,8 @@ class TestExternalBeetsRuntimeCapability(unittest.TestCase):
         for role in ("importer", "web"):
             self.assertIn("-/srv/music", typed_units[role]["readWritePaths"], role)
             self.assertIn("-/srv/beets", typed_units[role]["readWritePaths"], role)
+        self.assertIn("-/srv/music", typed_units["main"]["bindReadOnlyPaths"])
+        self.assertIn("-/srv/beets", typed_units["main"]["bindReadOnlyPaths"])
         for role in ("main", "preview"):
             self.assertNotIn("/srv/music", typed_units[role]["readWritePaths"], role)
             self.assertNotIn("/srv/beets", typed_units[role]["readWritePaths"], role)

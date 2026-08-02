@@ -29,6 +29,7 @@ let
   externalBeetsPython = pkgs.python3.withPackages (_: [externalBeetsPackage]);
   externalLibraryRoot = "/var/lib/cratedigger-music/Beets";
   externalLibraryDb = "/var/lib/cratedigger-beets-db/beets-library.db";
+  externalLibraryDbParent = builtins.dirOf externalLibraryDb;
   externalStateFile = "/var/lib/cratedigger-beets-state/state.pickle";
   externalSecretInclude = "/run/cratedigger-test-beets/discogs.yaml";
 
@@ -376,6 +377,10 @@ pkgs.testers.nixosTest {
     beetsReadinessFixture = pkgs.writeShellScript
       "cratedigger-test-beets-readiness" ''
         set -euo pipefail
+        if test -e /run/cratedigger-test-beets-readiness-fail; then
+          echo BEETS_EXTERNAL_READINESS_FAILED >&2
+          exit 1
+        fi
         ${pkgs.coreutils}/bin/install -d \
           -o root -g beets-library -m 2775 \
           ${externalLibraryRoot} \
@@ -443,6 +448,22 @@ pkgs.testers.nixosTest {
         ''}
       '';
     beetsObserverAccessProbe = mkBeetsAccessProbe "observer" false;
+    beetsMainAccessProbe = pkgs.writeShellScript
+      "cratedigger-test-beets-access-main" ''
+        set -euo pipefail
+        ${beetsObserverAccessProbe}
+        for probe in \
+          ${externalLibraryRoot}/.cratedigger-main-write-probe \
+          ${externalLibraryDbParent}/.cratedigger-main-write-probe
+        do
+          if ${pkgs.coreutils}/bin/touch "$probe" 2>/dev/null; then
+            ${pkgs.coreutils}/bin/rm -f "$probe"
+            echo "main could write external Beets library authority: $probe" >&2
+            exit 1
+          fi
+        done
+        echo BEETS_MAIN_WRITE_DENIAL_OK
+      '';
     beetsImporterAccessProbe = mkBeetsAccessProbe "importer" true;
     metadataGateStateDir = "/var/lib/cratedigger-metadata-gate";
     metadataGateMainStartInhibitor =
@@ -948,7 +969,7 @@ pkgs.testers.nixosTest {
           ];
         };
         cratedigger.serviceConfig.ExecStartPre =
-          lib.mkAfter [beetsObserverAccessProbe];
+          lib.mkAfter [beetsMainAccessProbe];
         cratedigger-importer.serviceConfig.ExecStartPre =
           lib.mkAfter [beetsImporterAccessProbe importerSandboxProbe];
         # Preview and YouTube retain stateDir for their established workflows,
@@ -1132,6 +1153,17 @@ pkgs.testers.nixosTest {
     machine.succeed("test -f ${externalStateFile}")
     machine.succeed("test -f ${externalSecretInclude}")
     machine.succeed("test -f ${externalBeetsConfigDir}/config.yaml")
+    # The deployment identity deliberately owns write authority at the Unix
+    # permission layer. The main unit's denial probe therefore proves its
+    # service-local read-only bind mounts, not an incidental mode-bit denial.
+    machine.succeed(
+        "runuser -u cratedigger -- touch "
+        "${externalLibraryRoot}/.outside-main-sandbox; "
+        "runuser -u cratedigger -- touch "
+        "${externalLibraryDbParent}/.outside-main-sandbox; "
+        "rm ${externalLibraryRoot}/.outside-main-sandbox "
+        "${externalLibraryDbParent}/.outside-main-sandbox"
+    )
     machine.succeed(
         "systemd-tmpfiles --cat-config > /tmp/all-tmpfiles; "
         "! grep -E '^[^#]* (/var/lib/cratedigger-music/Beets|"
@@ -1362,12 +1394,12 @@ pkgs.testers.nixosTest {
         state = machine.succeed(f"systemctl show {timer} --property=LoadState --value").strip()
         assert state == "loaded", f"{timer} not restored after release: {state}"
 
-    # The timer-owned main service must survive a restart of an external
-    # readiness producer. Hold one live invocation in ExecStartPre, restart
-    # readiness, and retain exactly the same invocation rather than merely
-    # observing that a later cycle happens to run. Stop the long-running
-    # workers first: their retained Requires= edges are covered structurally,
-    # while this world isolates the main service's deliberately soft edge.
+    # The timer-owned main service must survive both a healthy restart and a
+    # failed restart of an external readiness producer. Hold one live
+    # invocation in ExecStartPre and retain exactly the same invocation rather
+    # than merely observing that a later cycle happens to run. Stop the
+    # long-running workers first so the worlds below can separately prove the
+    # main service's soft edge and their hard Requires= edges.
     machine.succeed(
         "systemctl stop cratedigger-importer.service "
         "cratedigger-import-preview-worker.service cratedigger-web.service"
@@ -1396,6 +1428,25 @@ pkgs.testers.nixosTest {
         main_invocation_before_readiness_restart,
         main_invocation_after_readiness_restart,
     )
+    machine.succeed("touch /run/cratedigger-test-beets-readiness-fail")
+    machine.fail("systemctl restart cratedigger-test-beets-readiness.service")
+    machine.wait_until_succeeds(
+        "systemctl is-failed cratedigger-test-beets-readiness.service"
+    )
+    main_invocation_after_failed_readiness_restart = machine.succeed(
+        "systemctl show cratedigger.service -p InvocationID --value"
+    ).strip()
+    assert (
+        main_invocation_after_failed_readiness_restart
+        == main_invocation_before_readiness_restart
+    ), (
+        main_invocation_before_readiness_restart,
+        main_invocation_after_failed_readiness_restart,
+    )
+    machine.succeed(
+        "systemctl show cratedigger.service -p ActiveState --value "
+        "| grep -qx activating"
+    )
     machine.succeed(
         "systemctl stop cratedigger.service; "
         "rm -r /run/systemd/system/cratedigger.service.d; "
@@ -1403,8 +1454,10 @@ pkgs.testers.nixosTest {
         "systemctl reset-failed cratedigger.service"
     )
 
-    # Starting the main service remains safe: its pre-start clears the test's
-    # deliberately stale lock. It will fail because there is no real slskd.
+    # A fresh main start has only Wants=+After= on readiness. Even though the
+    # producer remains failed, the soft dependency must let intrinsic Beets
+    # admission run. The service will later fail because there is no real
+    # slskd, which is outside this contract.
     machine.succeed("systemctl start --no-block cratedigger.service")
     machine.wait_until_succeeds("test ! -f /var/lib/cratedigger/.cratedigger.lock")
     machine.wait_until_succeeds(
@@ -1415,6 +1468,44 @@ pkgs.testers.nixosTest {
         "systemctl kill --kill-whom=all --signal=SIGKILL cratedigger.service || true"
     )
     machine.succeed("systemctl reset-failed cratedigger.service || true")
+
+    # Mutation/observer workers retain Requires=+After=. With readiness still
+    # forced to fail, each fresh start must be rejected before its intrinsic
+    # admission path executes.
+    hard_readiness_units = (
+        ("importer", "cratedigger-importer.service"),
+        ("preview", "cratedigger-import-preview-worker.service"),
+        ("web", "cratedigger-web.service"),
+    )
+    admissions_before_failed_readiness = {}
+    for role, unit in hard_readiness_units:
+        startup_log = machine.succeed(f"journalctl -b -u {unit} -o cat")
+        admissions_before_failed_readiness[unit] = startup_log.count(
+            f"Beets configuration admitted for {role}"
+        )
+        machine.fail(f"systemctl start {unit}")
+        machine.fail(f"systemctl is-active {unit}")
+        startup_log = machine.succeed(f"journalctl -b -u {unit} -o cat")
+        assert startup_log.count(
+            f"Beets configuration admitted for {role}"
+        ) == admissions_before_failed_readiness[unit], (unit, startup_log)
+    readiness_failure_log = machine.succeed(
+        "journalctl -b -u cratedigger-test-beets-readiness.service -o cat"
+    )
+    assert "BEETS_EXTERNAL_READINESS_FAILED" in readiness_failure_log, (
+        readiness_failure_log
+    )
+
+    # Once deployment restores readiness, all hard-dependent workers recover
+    # through their ordinary starts and reach intrinsic admission exactly once.
+    machine.succeed(
+        "rm /run/cratedigger-test-beets-readiness-fail; "
+        "systemctl reset-failed cratedigger-test-beets-readiness.service "
+        "cratedigger-importer.service "
+        "cratedigger-import-preview-worker.service cratedigger-web.service; "
+        "systemctl start cratedigger-test-beets-readiness.service"
+    )
+    machine.wait_for_unit("cratedigger-test-beets-readiness.service")
     machine.succeed("systemctl start cratedigger-importer.service cratedigger-import-preview-worker.service cratedigger-youtube-ingest.service cratedigger-web.service")
     for role, unit in (
         ("importer", "cratedigger-importer.service"),
@@ -1617,7 +1708,13 @@ pkgs.testers.nixosTest {
     } == {
         "-${externalBeetsConfigDir}",
         "-${externalStateFile}",
+        "-${externalLibraryRoot}",
+        "-${externalLibraryDbParent}",
     }, main_properties
+    machine.succeed(
+        "journalctl -b -u cratedigger.service -o cat "
+        "| grep -q BEETS_MAIN_WRITE_DENIAL_OK"
+    )
 
     # The importer probe ran inside the unit's sandbox. These pins prove every
     # configured authority root was writable while unrelated world-writable
@@ -4206,8 +4303,9 @@ pkgs.testers.nixosTest {
     readiness_log = machine.succeed(
         "journalctl -b -u cratedigger-test-beets-readiness.service -o cat"
     )
-    # One initial activation plus the explicit lifecycle restart above.
-    assert readiness_log.count("BEETS_EXTERNAL_READINESS_OK") == 2, readiness_log
+    # Initial activation, healthy lifecycle restart, then recovery from the
+    # deliberately failed producer world.
+    assert readiness_log.count("BEETS_EXTERNAL_READINESS_OK") == 3, readiness_log
     '';
   in ''
     exec(compile(open("${script}", encoding="utf-8").read(), "${script}", "exec"))
