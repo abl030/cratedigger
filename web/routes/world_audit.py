@@ -37,7 +37,8 @@ ROUTES: list[RouteRegistration] = [
         "GET",
         "/api/audit/world",
         get_world_audit,
-        "Read-only cross-engine invariant audit of PipelineDB, Beets, and disk.",
+        "Grouped read-only A/B/C ownership audit with completeness and "
+        "Bucket-A integrity status.",
         classified=True,
     ),
 ]

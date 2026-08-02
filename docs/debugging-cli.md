@@ -227,10 +227,34 @@ whether an earlier operation respected a proof lock, and whether an earlier
 operation widened a lossless-only search tier. Those properties remain owned
 by the stateful world model; a clean live audit does not claim to prove them.
 
-The strict audit stays strict in unattended checks: it reports every current
-violation and exits nonzero whenever any exist. The separate
-`cratedigger-world-audit-debt-gate` automation binary can classify that exact
-JSON report against an explicitly initialized, root-owned known-debt state:
+The public report groups every finding by the authority that owns it:
+
+| Bucket | Owner | Codes |
+|---|---|---|
+| A | Cratedigger integrity | `proof_lock_broken`, `lossy_tier_widened`, `denylist_without_authority`, `current_evidence_dangling`, `evidence_release_mismatch`, `evidence_capture_path_missing`, `request_identity_missing` |
+| B | Current-holdings projection health | `current_beets_missing`, `current_beets_ambiguous`, `current_beets_authority_unavailable`, `evidence_fingerprint_mismatch`, `evidence_link_without_album`, `current_evidence_missing`, `album_fingerprint_unavailable` |
+| C | Beets/library health | `album_empty`, `item_outside_album_folder`, `folder_shared`, `album_folder_missing`, `album_item_missing`, `beets_identity_missing` |
+
+Machine-readable output has `status` (`clean`, `observations_only`, or
+`integrity_failed`), `complete`, separate `counts.bucket_a|bucket_b|bucket_c`,
+and `groups.a|b|c`, each with `bucket`, `owner`, `count`, and `members`. There
+is no public flat violations list or all-findings alarm count. Clean and
+B/C-only reports exit 0 from the CLI and return HTTP 200 from the API. Any A
+finding makes the CLI exit 1 while the API still returns HTTP 200 with
+`status=integrity_failed`, preserving all B/C observations beside it.
+
+An expected inability to open or query the canonical Beets authority returns
+HTTP 200/CLI 0 with `complete=false` and the Bucket B
+`current_beets_authority_unavailable` observation. An unexpected schema,
+decoder, invariant, programming, close, or serialization defect remains a
+transport failure: CLI exit 5 or HTTP 503. Incompleteness is never evidence
+that an album is absent.
+
+The separate `cratedigger-world-audit-debt-gate` automation binary applies a
+stricter exact-known-cohort policy to a complete report. It may reject a new
+B/C observation even though `pipeline-cli audit world` itself exits 0, and it
+never lets an incomplete report converge tracked debt. It classifies the JSON
+against an explicitly initialized, root-owned known-debt state:
 
 ```bash
 pipeline-cli audit world --json |
@@ -382,3 +406,97 @@ the code is.
 
 Then follow the three render/render/diff commands in
 `.claude/rules/test-fidelity.md` § "Rule D".
+
+### Library-row badge differential
+
+Library badge changes use the same diff engine with one shared corpus of exact
+`/api/library/artist` album rows. Build the artist selector union from both
+authorities; otherwise a pipeline-only Captured/Missing row or a Beets-only
+Untracked row can silently fall outside the measurement:
+
+```bash
+ssh doc2 'export PGPASSWORD=$(sudo cat /run/secrets/cratedigger-pgpass | grep "^PGPASSWORD=" | cut -d= -f2); pipeline-cli query --json -' <<'SQL' > /tmp/library-pipeline-artists.json
+SELECT DISTINCT artist_name AS name, COALESCE(mb_artist_id, '') AS mbid
+FROM album_requests
+WHERE COALESCE(artist_name, '') <> ''
+ORDER BY name, mbid;
+SQL
+
+nix-shell --run "python3 /dev/stdin" > /tmp/library-beets-artists.json <<'PY'
+import json
+import sqlite3
+
+db = sqlite3.connect(
+    "file:/mnt/virtio/cratedigger/beets-db/beets-library.db?mode=ro",
+    uri=True,
+)
+rows = db.execute(
+    "SELECT DISTINCT albumartist, COALESCE(mb_albumartistid, '') "
+    "FROM albums WHERE COALESCE(albumartist, '') <> '' "
+    "ORDER BY albumartist, mb_albumartistid"
+).fetchall()
+print(json.dumps([{"name": name, "mbid": mbid} for name, mbid in rows]))
+PY
+```
+
+Start the read-only live-db dev server from `docs/web-dev-server.md`, including
+both `--beets-db` and `--beets-directory`. Then fetch every selector through
+the production route, deduplicate exact repeated rows caused by legacy artist
+name fallbacks, and add only the synthetic corpus identity:
+
+```bash
+nix-shell --run "python3 /dev/stdin" <<'PY'
+import json
+import urllib.parse
+import urllib.request
+
+selectors = set()
+for path in (
+    "/tmp/library-pipeline-artists.json",
+    "/tmp/library-beets-artists.json",
+):
+    for row in json.load(open(path, encoding="utf-8")):
+        selectors.add((str(row["name"]).strip(), str(row["mbid"]).strip()))
+
+albums = {}
+for name, mbid in sorted(selectors):
+    query = urllib.parse.urlencode({"name": name, "mbid": mbid})
+    with urllib.request.urlopen(
+        f"http://127.0.0.1:8096/api/library/artist?{query}", timeout=30
+    ) as response:
+        for album in json.load(response)["albums"]:
+            key = json.dumps(album, sort_keys=True, separators=(",", ":"))
+            albums[key] = album
+
+with open("/tmp/library-badge-corpus.jsonl", "w", encoding="utf-8") as out:
+    for corpus_id, key in enumerate(sorted(albums), start=1):
+        row = dict(albums[key])
+        row["_corpus_id"] = corpus_id
+        out.write(json.dumps(row, separators=(",", ":")) + "\n")
+PY
+```
+
+Render the same corpus through each tree's complete production Library row.
+The driver is safe to copy into an older base because it imports that tree's
+own `renderLibraryAlbumRow`; it does not reimplement the row-to-badge adapter:
+
+```bash
+BASE_REF=origin/feature/759-beets-ownership-cutover
+BASE_DIR=$(mktemp -d)
+git archive "$BASE_REF" | tar -x -C "$BASE_DIR"
+cp scripts/render_library_badges.mjs "$BASE_DIR/scripts/"
+
+nix-shell --run "node $BASE_DIR/scripts/render_library_badges.mjs \
+  --corpus /tmp/library-badge-corpus.jsonl \
+  --out /tmp/library-badges-base.jsonl"
+nix-shell --run "node scripts/render_library_badges.mjs \
+  --corpus /tmp/library-badge-corpus.jsonl \
+  --out /tmp/library-badges-current.jsonl"
+nix-shell --run "python3 scripts/render_differential.py diff \
+  --base /tmp/library-badges-base.jsonl \
+  --current /tmp/library-badges-current.jsonl"
+```
+
+The output field is the full `row_html`, not a hand-built badge fragment. Put
+the total and changed-row counts in the PR body. Screenshots remain separate
+visual evidence and never substitute for this complete live-row census.
