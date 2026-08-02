@@ -46,6 +46,20 @@ import { processingOwnerPresentation } from './release_action_state.js';
  */
 
 /**
+ * Compare the complete exact processing-owner projection.
+ *
+ * @param {import('./release_action_state.js').ProcessingOwnerProjection|null} left
+ * @param {import('./release_action_state.js').ProcessingOwnerProjection|null} right
+ * @returns {boolean}
+ */
+function processingOwnersEqual(left, right) {
+  if (!left || !right) return left === right;
+  return left.job_id === right.job_id
+    && left.status === right.status
+    && (left.preview_status || null) === (right.preview_status || null);
+}
+
+/**
  * Render the standardised badge HTML for one row or pressing.
  *
  * @param {BadgeItem} item
@@ -56,9 +70,14 @@ export function renderStatusBadges(item) {
   let stored = key ? pipelineStore.get(key) : null;
   if (stored
       && (item.pipeline_status || null) === stored.status
-      && (item.pipeline_id ?? null) === stored.id) {
-    // The authoritative row has acknowledged the local lifecycle mutation.
-    // Drop the overlay so later server-side transitions remain visible.
+      && (item.pipeline_id ?? null) === stored.id
+      && processingOwnersEqual(
+        item.processing_owner || null,
+        stored.processing_owner || null,
+      )) {
+    // The authoritative row has acknowledged the complete local lifecycle
+    // mutation, including the exact processing owner. Status/id alone cannot
+    // expire a newer owner projection with job-specific recovery state.
     pipelineStore.delete(key);
     stored = null;
   }

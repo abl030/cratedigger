@@ -85,7 +85,10 @@ class TestReleaseIdentity(unittest.TestCase):
                 )
 
     def test_observation_fields_keep_valid_cross_source_pair(self):
-        from lib.release_identity import ReleaseIdentity
+        from lib.release_identity import (
+            ConflictingReleaseIdentityError,
+            ReleaseIdentity,
+        )
 
         mb = ReleaseIdentity(
             source="musicbrainz",
@@ -102,10 +105,11 @@ class TestReleaseIdentity(unittest.TestCase):
             ReleaseIdentity.all_from_observation_fields("0012856590", "12856590"),
             (discogs,),
         )
-        self.assertEqual(
-            ReleaseIdentity.all_from_observation_fields("12856590", "12856591"),
-            (),
-        )
+        with self.assertRaisesRegex(
+            ConflictingReleaseIdentityError,
+            "conflicting numeric Discogs release identities",
+        ):
+            ReleaseIdentity.all_from_observation_fields("12856590", "12856591")
 
 
 if __name__ == "__main__":

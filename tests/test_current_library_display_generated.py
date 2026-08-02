@@ -17,6 +17,7 @@ from lib.current_library_display import (
     current_library_display,
     resolve_request_current_library,
 )
+from lib.release_identity import ConflictingReleaseIdentityError
 from tests.fakes import FakeBeetsDB
 from tests.helpers import make_request_row
 from web.library_album_row import LibraryAlbumRow
@@ -174,6 +175,28 @@ class TestCurrentLibraryDisplayGenerated(unittest.TestCase):
 
 
 class TestIndependentLibraryFactsGenerated(unittest.TestCase):
+    @given(
+        primary=st.integers(min_value=1, max_value=100_000_000),
+        offset=st.integers(min_value=1, max_value=100_000_000),
+    )
+    @example(primary=12856590, offset=1)
+    def test_conflicting_numeric_beets_identity_never_renders(
+        self,
+        primary: int,
+        offset: int,
+    ) -> None:
+        album = _fact_beets_album("discogs")
+        album["mb_albumid"] = str(primary)
+        album["discogs_albumid"] = str(primary + offset)
+
+        with self.assertRaises(ConflictingReleaseIdentityError):
+            build_library_artist_rows(
+                library_albums=[album],
+                pipeline_rows=[],
+                track_counts={},
+                rank_fn=lambda _format, _bitrate: "lossless",
+            )
+
     @given(
         source=st.sampled_from(("mb", "discogs", "dual_mb", "dual_discogs")),
         shape=st.sampled_from(("held_untracked", "missing_tracked", "held_tracked")),

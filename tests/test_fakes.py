@@ -5794,6 +5794,21 @@ class TestFakeBeetsDB(unittest.TestCase):
             "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "12856590",
         ]])
 
+    def test_exact_album_projection_rejects_conflicting_numeric_identity(self) -> None:
+        beets = FakeBeetsDB()
+        beets.set_albums_by_artist("X", [{
+            "id": 7,
+            "album": "Conflicting pressing",
+            "mb_albumid": "12856590",
+            "discogs_albumid": "12856591",
+        }])
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "conflicting numeric Discogs release identities",
+        ):
+            beets.get_albums_by_release_ids(["12856590"])
+
     def test_get_tracks_by_mb_release_id_returns_seeded_or_none(self) -> None:
         # Real method returns None when locate finds no exact hit —
         # NOT an empty list (the browse route branches on that).

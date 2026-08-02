@@ -9,6 +9,7 @@ from typing import cast
 import msgspec
 
 from lib.pipeline_db.rows import ArtistRequestRow
+from lib.release_identity import ConflictingReleaseIdentityError
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 from web.library_artist_service import (
@@ -297,6 +298,21 @@ class TestLibraryArtistService(unittest.TestCase):
         self.assertEqual(rows[0].pipeline_id, 42)
         self.assertTrue(rows[0].has_captured_history)
         self.assertTrue(rows[0].pipeline_verified_lossless)
+
+    def test_conflicting_numeric_beets_identity_never_renders(self) -> None:
+        with self.assertRaisesRegex(
+            ConflictingReleaseIdentityError,
+            "12856590 != 12856591",
+        ):
+            build_library_artist_rows(
+                library_albums=[_beets_album(
+                    mb_albumid="12856590",
+                    discogs_albumid="12856591",
+                )],
+                pipeline_rows=[],
+                track_counts={},
+                rank_fn=_rank,
+            )
 
     def test_replaced_request_remains_an_exact_pipeline_history_row(self) -> None:
         rows = build_library_artist_rows(

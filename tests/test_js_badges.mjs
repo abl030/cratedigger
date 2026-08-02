@@ -161,6 +161,53 @@ console.log('renderStatusBadges() never combines a live mutation with stale hist
   assertExcludes(deleted, '>captured<', 'deleted request history is not borrowed from the stale row');
   assertExcludes(deleted, '>provisional<', 'deleted request proof is not borrowed from the stale row');
 
+  updatePipelineStatus('processing-owner-refresh', 'processing', 53, {
+    job_id: 303,
+    status: 'recovery_required',
+    preview_status: 'evidence_ready',
+  });
+  const staleOwner = renderStatusBadges({
+    id: 'processing-owner-refresh',
+    in_library: false,
+    has_captured_history: true,
+    pipeline_status: 'processing',
+    pipeline_id: 53,
+    processing_owner: {
+      job_id: 302,
+      status: 'running',
+      preview_status: 'evidence_ready',
+    },
+    pipeline_verified_lossless: true,
+  });
+  assertContains(staleOwner, '>needs recovery<',
+    'matching status/id does not expire a newer exact-owner overlay');
+  assertContains(staleOwner, 'job #303',
+    'the live overlay retains its job-specific recovery reason');
+  assertExcludes(staleOwner, '>captured<',
+    'facts from the stale owner projection remain suppressed');
+  assertFalse(!pipelineStore.has('processing-owner-refresh'),
+    'a stale processing owner cannot acknowledge the lifecycle overlay');
+
+  const matchingOwner = renderStatusBadges({
+    id: 'processing-owner-refresh',
+    in_library: false,
+    has_captured_history: true,
+    pipeline_status: 'processing',
+    pipeline_id: 53,
+    processing_owner: {
+      job_id: 303,
+      status: 'recovery_required',
+      preview_status: 'evidence_ready',
+    },
+    pipeline_verified_lossless: true,
+  });
+  assertContains(matchingOwner, '>needs recovery<',
+    'a complete matching refetch retains the authoritative owner state');
+  assertContains(matchingOwner, '>captured<',
+    'a complete matching refetch restores authoritative historical facts');
+  assertFalse(pipelineStore.has('processing-owner-refresh'),
+    'the complete owner projection acknowledges the lifecycle overlay');
+
   const refetched = renderStatusBadges({
     id: 'status-only-reopen',
     in_library: false,
