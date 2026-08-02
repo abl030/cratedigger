@@ -100,7 +100,10 @@ sufficient by itself. See PR #236 and
 `docs/solutions/runtime-errors/plex-partial-scan-silent-200.md` for the
 five-week silent-failure story behind this.
 
-### Cratedigger config (`/var/lib/cratedigger/config.ini`)
+### Cratedigger runtime config
+
+The NixOS module supplies this as an immutable store file; conventional
+deployments may choose another immutable path.
 
 ```ini
 [Beets]
@@ -129,7 +132,7 @@ The path-shape concerns are configurable; nothing is hardcoded:
 | Nothing configured | (warning logged) | Plex receives a relative path and silently no-ops |
 
 Via the Nix module, the equivalent options are
-`services.cratedigger.beets.config.directory` and
+`services.cratedigger.beets.runtime.expectedDirectory` and
 `services.cratedigger.notifiers.plex.pathMap`.
 
 ## API Access

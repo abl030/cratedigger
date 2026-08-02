@@ -616,9 +616,10 @@ For deliberate insecure operation, omit `basicAuthFile` and set only
 loopback gateway, Unix socket, header isolation, and same-origin mutation rules
 remain active.
 
-The web service opens `beets.config.library` together with
-`beets.config.directory` through the module-rendered `[Beets]` runtime
-configuration. The paired `--beets-db` and `--beets-directory` flags on
+The web service observes the externally owned catalog/root pair admitted as
+`beets.runtime.expectedLibrary` and `beets.runtime.expectedDirectory` through
+the guarded `[Beets]` runtime contract. The paired `--beets-db` and
+`--beets-directory` flags on
 `web/server.py` remain explicit development/test overrides only; the NixOS
 service passes neither.
 

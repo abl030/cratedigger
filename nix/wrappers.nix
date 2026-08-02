@@ -10,7 +10,7 @@
 #
 # Only the operator-facing CLI surfaces are bundled. The daemons
 # (cratedigger loop, importer, web, workers) are the NixOS module's job —
-# they need rendered config and systemd ordering, not `nix run`.
+# they need an admitted runtime config and service ordering, not `nix run`.
 { pkgs, beetsPackage, src ? ../., version ? "0-unstable-dirty" }:
 
 let

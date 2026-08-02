@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 # --- Secret file reader (issue #117) ---
 #
 # Secrets (slskd API key, notifier credentials) must NOT sit plaintext in the
-# rendered /var/lib/cratedigger/config.ini. Instead, the config stores a *_file path
+# deployment-supplied runtime config. Instead, it stores a *_file path
 # pointing at an out-of-band secret (sops-nix, agenix, raw file, etc.) and the
 # Python pipeline reads it on demand here. The in-process cache avoids
 # re-reading on every notifier call while still picking up rotations across
@@ -134,15 +134,14 @@ class CratediggerConfig:
     # absolutization is provided via `plex_path_map` instead.
     # See docs/solutions/runtime-errors/plex-partial-scan-silent-200.md.
     beets_directory: str = ""
-    # SQLite database paired with ``beets_directory`` by the shipped Beets
+    # SQLite database paired with ``beets_directory`` by the admitted Beets
     # config. Production readers must open both through ``open_beets_db``;
     # neither path is independently authoritative.
     beets_library_db: str = "/var/lib/cratedigger-beets-db/beets-library.db"
 
-    # Module-rendered beets runtime (tier-2 plan U5, R6). The NixOS module
-    # renders these into config.ini so every beets subprocess resolves the
-    # SAME pinned interpreter and the SAME rendered config dir
-    # (BEETSDIR) — no Home-Manager per-user profile involved anywhere.
+    # Deployment-neutral Beets runtime. The application config names the
+    # SAME supplied interpreter and external immutable config directory
+    # (BEETSDIR) for every Beets subprocess.
     # Empty string -> unset (dev shells / tests provide env fallbacks).
     beets_config_dir: str = ""
     beets_python: str = ""
@@ -155,8 +154,8 @@ class CratediggerConfig:
     beets_secret_include: str = ""
 
     # One MB value for every consumer (tier-2 plan U6 / KTD6): web/mb.py,
-    # pipeline-cli lookups, DatabaseSource track population, and the rendered
-    # beets musicbrainz.* block all derive from this origin
+    # pipeline-cli lookups and DatabaseSource track population derive from this
+    # origin; deployment-owned Beets config must select its own matching origin
     # (scheme://host[:port], no path). Public MB default = functional-but-slow
     # stranger posture.
     musicbrainz_api_base: str = "https://musicbrainz.org"

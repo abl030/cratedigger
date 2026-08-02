@@ -5,7 +5,8 @@
 { pkgs, cratediggerSrc }:
 
 let
-  cratedigger = pkgs.callPackage ../package.nix { };
+  beetsPackage = import ../beets.nix { inherit pkgs; };
+  cratedigger = pkgs.callPackage ../package.nix { inherit beetsPackage; };
   pythonEnv = cratedigger.pythonEnv;
   emptyJson = pkgs.writeText "jellyfin-empty.json" "{}";
   authJson = pkgs.writeText "jellyfin-auth.json" (builtins.toJSON {

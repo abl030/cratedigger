@@ -695,6 +695,38 @@ def check_beets_config(
     if preflight:
         return _report(role=role, authority=authority, hard=tuple(preflight))
 
+    config_dir_source = _declared_path(cfg.beets_config_dir)
+    library_source = _declared_path(cfg.beets_library_db)
+    directory_source = _declared_path(cfg.beets_directory)
+    state_source = _declared_path(cfg.beets_state_file)
+    root = Path("/")
+    for code, unsafe, message in (
+        (
+            "config_dir_root",
+            config_dir_source.resolved == root,
+            "resolved BEETSDIR must not be the filesystem root",
+        ),
+        (
+            "library_parent_root",
+            library_source.resolved.parent == root,
+            "resolved Beets library database parent must not be the filesystem root",
+        ),
+        (
+            "directory_root",
+            directory_source.resolved == root,
+            "resolved Beets library directory must not be the filesystem root",
+        ),
+        (
+            "state_root",
+            state_source.resolved == root,
+            "resolved Beets state path must not be the filesystem root",
+        ),
+    ):
+        if unsafe:
+            preflight.append(_finding(code, message))
+    if preflight:
+        return _report(role=role, authority=authority, hard=tuple(preflight))
+
     runtime_config = _declared_path(cfg.config_file_path)
     if not runtime_config.lexical.is_file():
         preflight.append(_finding(
@@ -705,7 +737,6 @@ def check_beets_config(
             "mutable_runtime_config",
             "strict runtime config is writable or replaceable by this process",
         ))
-    config_dir_source = _declared_path(cfg.beets_config_dir)
     config_dir = config_dir_source.resolved
     secret = _declared_path(cfg.beets_secret_include)
     if not config_dir_source.lexical.is_dir():
@@ -718,7 +749,6 @@ def check_beets_config(
 
     hard: list[ContractFinding] = []
     warnings: list[ContractFinding] = []
-    state_source = _declared_path(cfg.beets_state_file)
     state = state_source.resolved
     try:
         if os.path.commonpath((str(config_dir), str(state))) == str(config_dir):
@@ -728,7 +758,7 @@ def check_beets_config(
     except ValueError:
         pass
     hard.extend(_state_access_issues(state_source, role))
-    library_path = _path(authority.library)
+    library_path = library_source.resolved
     try:
         state_aliases_library = os.path.samefile(state, library_path)
     except OSError:
@@ -739,7 +769,7 @@ def check_beets_config(
             "Beets state file must not alias the library database",
         ))
     hard.extend(_library_db_access_issues(library_path))
-    if not _path(authority.directory).is_dir():
+    if not directory_source.resolved.is_dir():
         hard.append(_finding(
             "directory_not_directory",
             "Beets library root must be an existing directory",

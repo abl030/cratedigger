@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import re
 import subprocess as sp
 import sys
 import tempfile
@@ -34,14 +33,15 @@ from lib.destructive_release_service import (
     BanSourceSuccess,
     ban_source,
 )
+from tests.beets_world import extract_consumer_beets_world_config
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 
 REPO = Path(__file__).resolve().parent.parent
-MODULE_TEXT = (REPO / "nix" / "module.nix").read_text(encoding="utf-8")
-PLUGIN_MATCH = re.search(r'plugins = "([^"]+)";', MODULE_TEXT)
-assert PLUGIN_MATCH is not None
-PRODUCTION_PLUGINS = PLUGIN_MATCH.group(1)
+# The consumer deployment owns the plugin profile. The destructive harness
+# extracts that profile from its producer instead of mirroring a hand-written
+# list that could drift from the deployment world it claims to exercise.
+CONSUMER_BEETS_WORLD_CONFIG = extract_consumer_beets_world_config(REPO)
 
 MB_RELEASE = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 MB_SIBLING = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
@@ -176,8 +176,10 @@ def _profile_config(
     db_path: Path,
     config_dir: Path,
 ) -> None:
-    plugin_names = (
-        PRODUCTION_PLUGINS.split() if profile.base == "production" else []
+    plugin_names: list[str] = (
+        list(CONSUMER_BEETS_WORLD_CONFIG.deployment_plugins)
+        if profile.base == "production"
+        else []
     )
     if profile.importsource:
         plugin_names.append("importsource")
