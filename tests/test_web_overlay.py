@@ -45,10 +45,18 @@ class TestCheckPipeline(unittest.TestCase):
 
 
 class TestBeetsHelpers(unittest.TestCase):
-    def test_none_beets_degrades(self):
-        self.assertEqual(overlay.check_beets_library(None, ["m"]), set())
-        self.assertEqual(overlay.check_beets_library_detail(None, ["m"]), {})
-        self.assertEqual(overlay.get_library_artist(None, "X"), [])
+    def test_none_beets_fails_loudly_instead_of_fabricating_absence(self):
+        calls = (
+            lambda: overlay.check_beets_library(None, ["m"]),
+            lambda: overlay.check_beets_library_detail(None, ["m"]),
+            lambda: overlay.get_library_artist(None, "X"),
+        )
+        for call in calls:
+            with self.subTest(call=call), self.assertRaisesRegex(
+                overlay.BeetsProjectionUnavailable,
+                "Beets authority unavailable",
+            ):
+                call()
 
     def test_check_beets_library_coerces_ids_to_str(self):
         beets = FakeBeetsDB()

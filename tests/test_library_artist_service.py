@@ -6,7 +6,7 @@ import unittest
 from datetime import UTC, datetime
 from typing import cast
 
-from lib.pipeline_db import AlbumRequestRow
+from lib.pipeline_db.rows import ArtistRequestRow
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 from web.library_artist_service import (
@@ -46,6 +46,17 @@ def _beets_album(**overrides: object) -> dict[str, object]:
     return album
 
 
+def _artist_request(**overrides: object) -> dict[str, object]:
+    row: dict[str, object] = make_request_row()
+    row.update({
+        "has_captured_history": False,
+        "verified_lossless": False,
+        "provisional_lossless": False,
+    })
+    row.update(overrides)
+    return row
+
+
 class _StubLibraryLookup:
     def __init__(self, albums: list[dict[str, object]]) -> None:
         self._albums = albums
@@ -58,6 +69,37 @@ class _StubLibraryLookup:
     ) -> list[dict[str, object]]:
         self.calls.append((artist_name, mb_artist_id))
         return list(self._albums)
+
+
+class _FailingLibraryLookup:
+    def __init__(self, calls: list[str]) -> None:
+        self._calls = calls
+
+    def get_library_artist(
+        self,
+        artist_name: str,
+        mb_artist_id: str = "",
+    ) -> list[dict[str, object]]:
+        self._calls.append(f"library:{artist_name}:{mb_artist_id}")
+        raise OSError("synthetic Beets read failure")
+
+
+class _RecordingPipelineDB:
+    def __init__(self, calls: list[str], row: ArtistRequestRow) -> None:
+        self._calls = calls
+        self._row = row
+
+    def list_requests_by_artist(
+        self,
+        artist_name: str,
+        mb_artist_id: str = "",
+    ) -> list[ArtistRequestRow]:
+        self._calls.append(f"pipeline:{artist_name}:{mb_artist_id}")
+        return [self._row]
+
+    def get_track_counts(self, request_ids: list[int]) -> dict[int, int]:
+        self._calls.append(f"track_counts:{request_ids}")
+        return {int(self._row["id"]): 10}
 
 
 class _RaceAwareLibraryLookup:
@@ -85,10 +127,10 @@ class _RaceAwarePipelineDB:
         self,
         artist_name: str,
         mb_artist_id: str = "",
-    ) -> list[AlbumRequestRow]:
+    ) -> list[ArtistRequestRow]:
         self.calls.append(f"pipeline:{artist_name}:{mb_artist_id}")
         self._lookup.pipeline_read = True
-        return cast("list[AlbumRequestRow]", [make_request_row(
+        return cast("list[ArtistRequestRow]", [_artist_request(
             id=42,
             mb_release_id=RELEASE_ID,
             artist_name="Test Artist",
@@ -104,7 +146,7 @@ class _RaceAwarePipelineDB:
 class TestLibraryArtistService(unittest.TestCase):
     def test_list_library_artist_rows_includes_pipeline_only_request(self) -> None:
         fake_db = FakePipelineDB()
-        fake_db.seed_request(make_request_row(
+        fake_db.seed_request(_artist_request(
             id=42,
             mb_release_id=RELEASE_ID,
             mb_release_group_id=RG_ID,
@@ -141,6 +183,72 @@ class TestLibraryArtistService(unittest.TestCase):
         self.assertEqual(rows[0].pipeline_id, 42)
         self.assertFalse(rows[0].in_library)
         self.assertTrue(rows[0].upgrade_queued)
+
+    def test_pipeline_only_capture_keeps_history_proof_and_missing_presence_separate(
+        self,
+    ) -> None:
+        rows = build_library_artist_rows(
+            library_albums=[],
+            pipeline_rows=[_artist_request(
+                id=42,
+                mb_release_id=RELEASE_ID,
+                artist_name="Test Artist",
+                album_title="Captured Album",
+                status="wanted",
+                has_captured_history=True,
+                verified_lossless=True,
+                provisional_lossless=False,
+            )],
+            track_counts={42: 10},
+            rank_fn=_rank,
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertFalse(rows[0].in_library)
+        self.assertTrue(rows[0].has_captured_history)
+        self.assertTrue(rows[0].pipeline_verified_lossless)
+        self.assertFalse(rows[0].pipeline_provisional)
+        self.assertEqual(rows[0].pipeline_status, "wanted")
+        self.assertIsNone(rows[0].library_rank)
+
+    def test_beets_only_album_is_held_and_untracked_without_capture_inference(
+        self,
+    ) -> None:
+        rows = build_library_artist_rows(
+            library_albums=[_beets_album()],
+            pipeline_rows=[],
+            track_counts={},
+            rank_fn=_rank,
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0].in_library)
+        self.assertIsNone(rows[0].pipeline_id)
+        self.assertFalse(rows[0].has_captured_history)
+        self.assertFalse(rows[0].pipeline_verified_lossless)
+        self.assertFalse(rows[0].pipeline_provisional)
+
+    def test_replaced_request_remains_an_exact_pipeline_history_row(self) -> None:
+        rows = build_library_artist_rows(
+            library_albums=[],
+            pipeline_rows=[_artist_request(
+                id=77,
+                mb_release_id=RELEASE_ID,
+                artist_name="Test Artist",
+                album_title="Superseded Pressing",
+                status="replaced",
+                has_captured_history=True,
+                verified_lossless=True,
+                provisional_lossless=False,
+            )],
+            track_counts={77: 10},
+            rank_fn=_rank,
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].pipeline_status, "replaced")
+        self.assertTrue(rows[0].has_captured_history)
+        self.assertFalse(rows[0].in_library)
 
     def test_list_library_artist_rows_allows_missing_pipeline_db(self) -> None:
         lookup = _StubLibraryLookup([_beets_album()])
@@ -180,11 +288,40 @@ class TestLibraryArtistService(unittest.TestCase):
         self.assertTrue(rows[0].in_library)
         self.assertEqual(rows[0].pipeline_id, 42)
 
+    def test_beets_read_failure_propagates_after_pipeline_snapshot(self) -> None:
+        calls: list[str] = []
+        request = cast("ArtistRequestRow", _artist_request(
+            id=42,
+            mb_release_id=RELEASE_ID,
+            artist_name="Test Artist",
+            album_title="Captured Album",
+            status="wanted",
+            has_captured_history=True,
+            verified_lossless=True,
+            provisional_lossless=False,
+        ))
+        pipeline_db = _RecordingPipelineDB(calls, request)
+
+        with self.assertRaisesRegex(OSError, "Beets read failure"):
+            list_library_artist_rows(
+                library_lookup=_FailingLibraryLookup(calls),
+                pipeline_db=pipeline_db,
+                artist_name="Test Artist",
+                mb_artist_id=ARTIST_ID,
+                rank_fn=_rank,
+            )
+
+        self.assertEqual(calls, [
+            f"pipeline:Test Artist:{ARTIST_ID}",
+            "track_counts:[42]",
+            f"library:Test Artist:{ARTIST_ID}",
+        ])
+
     def test_build_library_artist_rows_rejects_non_int_request_id(self) -> None:
         with self.assertRaisesRegex(TypeError, "int id"):
             build_library_artist_rows(
                 library_albums=[],
-                pipeline_rows=[make_request_row(id="42")],
+                pipeline_rows=[_artist_request(id="42")],
                 track_counts={},
                 rank_fn=_rank,
             )
@@ -192,7 +329,7 @@ class TestLibraryArtistService(unittest.TestCase):
     def test_build_library_artist_rows_keeps_pipeline_row_without_release_identity(self) -> None:
         rows = build_library_artist_rows(
             library_albums=[],
-            pipeline_rows=[make_request_row(
+            pipeline_rows=[_artist_request(
                 id=77,
                 mb_release_id=None,
                 discogs_release_id=None,
@@ -213,7 +350,7 @@ class TestLibraryArtistService(unittest.TestCase):
     def test_build_library_artist_rows_overlays_pipeline_state_on_beets_row(self) -> None:
         rows = build_library_artist_rows(
             library_albums=[_beets_album()],
-            pipeline_rows=[make_request_row(
+            pipeline_rows=[_artist_request(
                 id=42,
                 mb_release_id=RELEASE_ID,
                 artist_name="Test Artist",
@@ -245,7 +382,7 @@ class TestLibraryArtistService(unittest.TestCase):
                 added=1773651902.0,
                 country="AU",
             )],
-            pipeline_rows=[make_request_row(
+            pipeline_rows=[_artist_request(
                 id=55,
                 mb_release_id=None,
                 discogs_release_id="12856590",
@@ -286,7 +423,7 @@ class TestLibraryArtistService(unittest.TestCase):
                 ),
             ],
             pipeline_rows=[
-                make_request_row(
+                _artist_request(
                     id=31,
                     mb_release_id="33333333-3333-3333-3333-333333333333",
                     artist_name="Test Artist",
@@ -294,7 +431,7 @@ class TestLibraryArtistService(unittest.TestCase):
                     year=1997,
                     status="wanted",
                 ),
-                make_request_row(
+                _artist_request(
                     id=32,
                     mb_release_id="44444444-4444-4444-4444-444444444444",
                     artist_name="Test Artist",
@@ -352,7 +489,7 @@ class TestLibraryArtistService(unittest.TestCase):
                 release_group_title="Later Library Album",
                 added=1773651903.0,
             )],
-            pipeline_rows=[make_request_row(
+            pipeline_rows=[_artist_request(
                 id=50,
                 mb_release_id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
                 mb_release_group_id="22222222-2222-2222-2222-222222222222",

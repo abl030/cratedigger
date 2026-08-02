@@ -10,13 +10,14 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from lib.beets_db import CurrentBeetsResolution
+from lib.beets_db import BeetsDB, CurrentBeetsResolution
 from lib.release_identity import ReleaseIdentity
 from scripts.pipeline_cli.show import cmd_show
 from tests.beets_world import BeetsWorld, BeetsWorldRelease
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_request_row
 from tests.web._harness import _FakeDbWebServerCase
+from web.library_artist_service import build_library_artist_rows
 
 REPO = Path(__file__).resolve().parent.parent
 MB_TARGET = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -256,6 +257,50 @@ class TestCurrentLibraryCliRealBeets(unittest.TestCase):
                     beets.get_tracks_by_mb_release_id_calls, [],
                     "CLI must not reread tracks outside the resolver snapshot",
                 )
+
+
+class TestLibraryFactsRealBeets(unittest.TestCase):
+    def test_sibling_retag_is_old_captured_missing_plus_new_held_untracked(
+        self,
+    ) -> None:
+        with BeetsWorld(REPO) as world:
+            world.import_release(_release(MB_SIBLING, suffix="retagged"))
+            with BeetsDB(
+                str(world.library_db),
+                library_root=str(world.library_root),
+            ) as beets:
+                library_albums = beets.get_albums_by_artist(
+                    "Boundary Archivist"
+                )
+
+            rows = build_library_artist_rows(
+                library_albums=library_albums,
+                pipeline_rows=[make_request_row(
+                    id=70,
+                    artist_name="Boundary Archivist",
+                    album_title="Old exact pressing",
+                    mb_release_id=MB_TARGET,
+                    status="wanted",
+                    has_captured_history=True,
+                    verified_lossless=True,
+                    provisional_lossless=False,
+                )],
+                track_counts={70: 2},
+                rank_fn=lambda _format, _bitrate: "lossless",
+            )
+
+        by_identity = {row.mb_albumid: row for row in rows}
+        old = by_identity[MB_TARGET]
+        self.assertFalse(old.in_library)
+        self.assertTrue(old.has_captured_history)
+        self.assertTrue(old.pipeline_verified_lossless)
+        self.assertEqual(old.pipeline_status, "wanted")
+
+        sibling = by_identity[MB_SIBLING]
+        self.assertTrue(sibling.in_library)
+        self.assertIsNone(sibling.pipeline_id)
+        self.assertFalse(sibling.has_captured_history)
+        self.assertFalse(sibling.pipeline_verified_lossless)
 
 
 class TestCurrentLibraryApiRealBeets(_FakeDbWebServerCase):

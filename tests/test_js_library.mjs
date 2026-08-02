@@ -8,6 +8,7 @@ import {
   buildDeleteConfirmHtml,
   describeBanSourceSuccess,
   describeBeetsDeletion,
+  libraryAlbumBadgeItem,
   renderLibraryAlbumRow,
   renderLibraryDetailBody,
 } from '../web/js/library.js';
@@ -52,6 +53,41 @@ function assertEqual(actual, expected, msg) {
 
 function metadataHtmlIsEscaped(html, value) {
   return !html.includes(value) && html.includes(esc(value));
+}
+
+console.log('libraryAlbumBadgeItem() maps the production row contract exactly');
+{
+  const processingOwner = {
+    job_id: 812,
+    status: 'queued',
+    preview_status: 'evidence_ready',
+  };
+  const item = libraryAlbumBadgeItem({
+    mb_albumid: '0012856590',
+    in_library: true,
+    has_captured_history: true,
+    formats: 'Opus',
+    min_bitrate: 101600,
+    avg_bitrate: 131999,
+    library_rank: 'transparent',
+    pipeline_status: 'processing',
+    processing_owner: processingOwner,
+    pipeline_verified_lossless: true,
+    pipeline_provisional: false,
+  });
+  assertEqual(JSON.stringify(item), JSON.stringify({
+    id: '12856590',
+    in_library: true,
+    has_captured_history: true,
+    library_format: 'Opus',
+    library_min_bitrate: 102,
+    library_avg_bitrate: 131,
+    library_rank: 'transparent',
+    pipeline_status: 'processing',
+    processing_owner: processingOwner,
+    pipeline_verified_lossless: true,
+    pipeline_provisional: false,
+  }), 'helper exposes the exact BadgeItem consumed by production');
 }
 
 console.log('buildDeleteConfirmHtml() escapes user-visible text and JS args');
@@ -264,10 +300,53 @@ console.log('renderLibraryAlbumRow() escapes format metadata passed to status ba
     in_library: true,
     beets_album_id: 42,
   });
-  assertContains(html, 'in library · &lt;/SPAN&gt;&lt;IMG SRC=X ONERROR=ALERT(1)&gt;',
+  assertContains(html, '>in library</span>',
+    'library presence stays separate from quality');
+  assertContains(html, '>&lt;/SPAN&gt;&lt;IMG SRC=X ONERROR=ALERT(1)&gt;</span>',
     'format-derived badge label is escaped in the real library row');
   assertExcludes(html, formats.toUpperCase(),
     'format metadata cannot inject markup through the library row');
+}
+
+console.log('renderLibraryAlbumRow() uses the shared independent fact vocabulary');
+{
+  const missing = renderLibraryAlbumRow({
+    id: 17,
+    mb_albumid: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    album: 'Captured pressing',
+    track_count: 10,
+    in_library: false,
+    has_captured_history: true,
+    pipeline_id: 17,
+    pipeline_status: 'wanted',
+    pipeline_verified_lossless: true,
+    pipeline_provisional: false,
+  });
+  assertContains(missing, '>captured<', 'Library row renders acquisition history');
+  assertContains(missing, '>missing<', 'Library row renders proven current absence');
+  assertContains(missing, '>verified<', 'Library row carries proof independently');
+  assertContains(missing, '>wanted<', 'Library row retains current lifecycle');
+
+  const untracked = renderLibraryAlbumRow({
+    id: 42,
+    mb_albumid: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+    album: 'Operator retag',
+    formats: 'FLAC',
+    avg_bitrate: 900000,
+    library_rank: 'lossless',
+    track_count: 10,
+    in_library: true,
+    has_captured_history: false,
+    beets_album_id: 42,
+    pipeline_id: null,
+    pipeline_status: null,
+    pipeline_verified_lossless: false,
+    pipeline_provisional: false,
+  });
+  assertContains(untracked, '>in library</span>', 'Library row renders current holding');
+  assertContains(untracked, '>F</span>', 'Library row renders current quality separately');
+  assertContains(untracked, '>untracked<', 'Library row renders missing exact tracking');
+  assertExcludes(untracked, 'identity drift', 'Library row does not infer a sibling relationship');
 }
 
 console.log('renderLibraryDetailBody() preserves ordinary track and pipeline metadata');

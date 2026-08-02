@@ -112,6 +112,7 @@ _PIPELINE_BADGE_PRIORITY = {
     "wanted": 2,
     "unsearchable": 3,
     "imported": 4,
+    "replaced": 5,
 }
 
 
@@ -133,6 +134,9 @@ class _PipelineHit(TypedDict):
     status: str
     id: int
     processing_owner: dict[str, object] | None
+    has_captured_history: bool
+    verified_lossless: bool
+    provisional_lossless: bool
     _prio: int
 
 
@@ -147,6 +151,9 @@ def _catalogue_payload(value: object) -> object:
         if is_str_object_dict(node):
             if "source" in node and "identity_kind" in node:
                 node.setdefault("processing_owner", None)
+                node.setdefault("has_captured_history", False)
+                node.setdefault("pipeline_verified_lossless", False)
+                node.setdefault("pipeline_provisional", False)
             for child in node.values():
                 stamp(child)
         elif is_object_list(node):
@@ -158,7 +165,7 @@ def _catalogue_payload(value: object) -> object:
 
 
 def _artist_pipeline_map(name: str, mb_artist_id: str = "") -> ArtistPipelineMap:
-    """Best non-replaced request keyed by source + identity unit + id.
+    """Best exact request, including frozen history, keyed by identity.
 
     Discogs requests persist their exact master in ``mb_release_group_id``
     and exact leaf in ``discogs_release_id``. Keeping those namespaces in the
@@ -175,14 +182,15 @@ def _artist_pipeline_map(name: str, mb_artist_id: str = "") -> ArtistPipelineMap
 
     for row in srv.list_artist_requests(name, mb_artist_id):
         status = str(row["status"])
-        if status == "replaced":
-            continue
         prio = _PIPELINE_BADGE_PRIORITY.get(status, 9)
         owner = dict(row).get("processing_owner")
         hit: _PipelineHit = {
             "status": status,
             "id": row["id"],
             "processing_owner": owner if isinstance(owner, dict) else None,
+            "has_captured_history": row["has_captured_history"],
+            "verified_lossless": bool(row["verified_lossless"]),
+            "provisional_lossless": row["provisional_lossless"],
             "_prio": prio,
         }
         release_identity = ReleaseIdentity.from_fields(
@@ -221,6 +229,9 @@ def _apply_rg_pipeline_overlay(
                 if owner is not None
                 else None
             )
+            row.has_captured_history = hit["has_captured_history"]
+            row.pipeline_verified_lossless = hit["verified_lossless"]
+            row.pipeline_provisional = hit["provisional_lossless"]
 
 
 def get_artist(h: RouteHandler, params: dict[str, list[str]], artist_id: str) -> None:
@@ -263,9 +274,9 @@ def get_artist(h: RouteHandler, params: dict[str, list[str]], artist_id: str) ->
     # is optional.
     name = params.get("name", [""])[0].strip()
     if name:
+        by_identity = _artist_pipeline_map(name, artist_id)
         lib = srv.get_library_artist(name, artist_id)
         annotate_in_library(rgs, [], lib, rank_fn=srv.compute_library_rank)
-        by_identity = _artist_pipeline_map(name, artist_id)
         _apply_rg_pipeline_overlay(rgs, by_identity)
     h._json({
         "release_groups": _catalogue_payload(rgs),
@@ -294,6 +305,9 @@ class _DisambiguatePressing(TypedDict):
     library_min_bitrate: NotRequired[int]
     library_avg_bitrate: NotRequired[int]
     library_rank: NotRequired[str]
+    has_captured_history: NotRequired[bool]
+    pipeline_verified_lossless: NotRequired[bool]
+    pipeline_provisional: NotRequired[bool]
 
 
 class _DisambiguateTrack(TypedDict):
@@ -325,6 +339,9 @@ class _DisambiguateReleaseGroup(TypedDict):
     library_min_bitrate: NotRequired[int]
     library_avg_bitrate: NotRequired[int]
     library_rank: NotRequired[str]
+    has_captured_history: NotRequired[bool]
+    pipeline_verified_lossless: NotRequired[bool]
+    pipeline_provisional: NotRequired[bool]
 
 
 class _DisambiguateSkeleton(TypedDict):
@@ -398,17 +415,17 @@ def _overlay_disambiguate(skeleton: _DisambiguateSkeleton) -> _DisambiguateSkele
     skeleton. Returns a new dict — does NOT mutate the cached value."""
     srv = _server()
     response = copy.deepcopy(skeleton)
-    b = srv._beets_db()
 
     all_mbids: list[str] = []
     for rg in response["release_groups"]:
         all_mbids.extend(rg["release_ids"])
-    in_library: set[str] = (
-        srv.check_beets_library(all_mbids) if all_mbids else set()
-    )
     in_pipeline: dict[str, dict[str, object]] = (
         srv.check_pipeline(all_mbids) if all_mbids else {}
     )
+    in_library: set[str] = (
+        srv.check_beets_library(all_mbids) if all_mbids else set()
+    )
+    b = srv._beets_db()
 
     for rg in response["release_groups"]:
         rg["library_status"] = (
@@ -419,6 +436,9 @@ def _overlay_disambiguate(skeleton: _DisambiguateSkeleton) -> _DisambiguateSkele
         rg_pip_status: str | None = None
         rg_pip_id: int | None = None
         rg_processing_owner: dict[str, object] | None = None
+        rg_has_captured_history = False
+        rg_verified_lossless = False
+        rg_provisional = False
         for rid in rg["release_ids"]:
             pip = in_pipeline.get(rid)
             if pip:
@@ -430,10 +450,16 @@ def _overlay_disambiguate(skeleton: _DisambiguateSkeleton) -> _DisambiguateSkele
                 rg_processing_owner = (
                     owner_raw if is_str_object_dict(owner_raw) else None
                 )
+                rg_has_captured_history = bool(pip["has_captured_history"])
+                rg_verified_lossless = bool(pip["verified_lossless"])
+                rg_provisional = bool(pip["provisional_lossless"])
                 break
         rg["pipeline_status"] = rg_pip_status
         rg["pipeline_id"] = rg_pip_id
         rg["processing_owner"] = rg_processing_owner
+        rg["has_captured_history"] = rg_has_captured_history
+        rg["pipeline_verified_lossless"] = rg_verified_lossless
+        rg["pipeline_provisional"] = rg_provisional
 
         lib_mbids = [p["release_id"] for p in rg["pressings"]
                      if p["release_id"] in in_library]
@@ -466,10 +492,22 @@ def _overlay_disambiguate(skeleton: _DisambiguateSkeleton) -> _DisambiguateSkele
                 p["processing_owner"] = (
                     p_owner_raw if isinstance(p_owner_raw, dict) else None
                 )
+                p["has_captured_history"] = bool(
+                    p_pip["has_captured_history"]
+                )
+                p["pipeline_verified_lossless"] = bool(
+                    p_pip["verified_lossless"]
+                )
+                p["pipeline_provisional"] = bool(
+                    p_pip["provisional_lossless"]
+                )
             else:
                 p["pipeline_status"] = None
                 p["pipeline_id"] = None
                 p["processing_owner"] = None
+                p["has_captured_history"] = False
+                p["pipeline_verified_lossless"] = False
+                p["pipeline_provisional"] = False
             pq: dict[str, object] = quality.get(rid) or {}
             if pq:
                 fmt_raw = pq.get("beets_format")
@@ -554,12 +592,21 @@ def get_release(h: RouteHandler, params: dict[str, list[str]], release_id: str) 
         return
 
     data = srv.mb_api.get_release(normalized_id)
+    req = srv.check_pipeline([normalized_id]).get(normalized_id)
     data["in_library"] = bool(srv.check_beets_library([normalized_id]))
-    req = srv._db().get_request_by_release_id(normalized_id)
     data["pipeline_status"] = req["status"] if req else None
     data["pipeline_id"] = req["id"] if req else None
     data["processing_owner"] = (
-        dict(req).get("processing_owner") if req else None
+        req.get("processing_owner") if req else None
+    )
+    data["has_captured_history"] = (
+        bool(req["has_captured_history"]) if req else False
+    )
+    data["pipeline_verified_lossless"] = (
+        bool(req["verified_lossless"]) if req else False
+    )
+    data["pipeline_provisional"] = (
+        bool(req["provisional_lossless"]) if req else False
     )
     # Include beets track info + album id + on-disk quality if in library
     b = srv._beets_db()
@@ -609,9 +656,9 @@ def get_discogs_artist(h: RouteHandler, params: dict[str, list[str]], artist_id:
     # ?name=; without it we still get the canonical name from Discogs API.
     name = params.get("name", [""])[0].strip() or artist_name
     if name:
+        by_identity = _artist_pipeline_map(name)
         lib = srv.get_library_artist(name, "")
         annotate_in_library([], catalogue, lib, rank_fn=srv.compute_library_rank)
-        by_identity = _artist_pipeline_map(name)
         _apply_rg_pipeline_overlay(catalogue, by_identity)
     works = [row for row in catalogue if row.identity_kind == "work"]
     ungrouped = [row for row in catalogue if row.identity_kind == "release"]
@@ -635,12 +682,21 @@ def get_discogs_release(h: RouteHandler, params: dict[str, list[str]], release_i
     srv = _server()
     normalized_id = normalize_release_id(release_id) or release_id.strip()
     data = discogs_api.get_release(int(normalized_id))
+    req = srv.check_pipeline([normalized_id]).get(normalized_id)
     data["in_library"] = bool(srv.check_beets_library([normalized_id]))
-    req = srv._db().get_request_by_release_id(normalized_id)
     data["pipeline_status"] = req["status"] if req else None
     data["pipeline_id"] = req["id"] if req else None
     data["processing_owner"] = (
-        dict(req).get("processing_owner") if req else None
+        req.get("processing_owner") if req else None
+    )
+    data["has_captured_history"] = (
+        bool(req["has_captured_history"]) if req else False
+    )
+    data["pipeline_verified_lossless"] = (
+        bool(req["verified_lossless"]) if req else False
+    )
+    data["pipeline_provisional"] = (
+        bool(req["provisional_lossless"]) if req else False
     )
     b = srv._beets_db()
     if data["in_library"] and b:
@@ -771,6 +827,7 @@ def _overlay_compare(
     if not name:
         return response
 
+    by_identity = _artist_pipeline_map(name, mbid)
     lib = srv.get_library_artist(name, mbid)
 
     # Reconstruct flat MB / Discogs lists that reference the row instances
@@ -786,7 +843,6 @@ def _overlay_compare(
 
     annotate_in_library(mb_groups, discogs_groups, lib,
                         rank_fn=srv.compute_library_rank)
-    by_identity = _artist_pipeline_map(name, mbid)
     _apply_rg_pipeline_overlay(mb_groups, by_identity)
     _apply_rg_pipeline_overlay(discogs_groups, by_identity)
     return response

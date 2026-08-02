@@ -32,9 +32,74 @@ from lib.pipeline_db._shared import (
 from lib.pipeline_db.rows import (
     AlbumRequestPresentationRow,
     AlbumRequestRow,
+    ArtistRequestRow,
     album_request_row,
 )
 from lib.release_identity import ReleaseIdentity, normalize_release_id
+
+_CAPTURE_AND_EVIDENCE_SELECT = """
+    (
+        request_row.status = 'imported'
+        OR EXISTS (
+            SELECT 1
+            FROM download_log capture_download
+            WHERE capture_download.request_id = request_row.id
+              AND capture_download.outcome IN (
+                  'success', 'force_import', 'manual_import'
+              )
+        )
+        OR EXISTS (
+            SELECT 1
+            FROM import_jobs capture_job
+            WHERE capture_job.request_id = request_row.id
+              AND capture_job.status = 'completed'
+              AND capture_job.job_type IN (
+                  'automation_import', 'force_import', 'manual_import',
+                  'youtube_import'
+              )
+        )
+    ) AS has_captured_history,
+    COALESCE(current_evidence.verified_lossless, FALSE)
+        AS _linked_verified_lossless,
+    (
+        COALESCE(current_evidence.v0_subject, '') = 'source'
+        AND NOT COALESCE(current_evidence.verified_lossless, FALSE)
+    ) AS provisional_lossless
+"""
+
+
+def _overlay_release_id_sets(
+    release_ids: list[str],
+) -> tuple[list[str], list[str]]:
+    """Partition exact browse identities by their authoritative column."""
+    musicbrainz_ids: set[str] = set()
+    discogs_ids: set[str] = set()
+    for raw_release_id in release_ids:
+        normalized = normalize_release_id(raw_release_id)
+        if not normalized:
+            continue
+        identity = ReleaseIdentity.from_id(normalized)
+        if identity is not None and identity.source == "discogs":
+            discogs_ids.add(identity.release_id)
+        else:
+            # Unknown synthetic IDs retain the historical MB-column fallback.
+            musicbrainz_ids.add(normalized)
+    return sorted(musicbrainz_ids), sorted(discogs_ids)
+
+
+def _overlay_row_release_id(row: Mapping[str, object]) -> str:
+    """Return the exact identity key for one matched request row."""
+    identity = ReleaseIdentity.from_fields(
+        row.get("mb_release_id"),
+        row.get("discogs_release_id"),
+    )
+    if identity is not None:
+        return identity.release_id
+    # Existing tests and manually seeded rows use non-UUID MB identifiers.
+    fallback = normalize_release_id(row.get("mb_release_id"))
+    if fallback:
+        return fallback
+    raise ValueError("pipeline overlay row has no exact release identity")
 
 
 class AcquisitionPayload(TypedDict):
@@ -60,6 +125,23 @@ class _RequestsMixin(_PipelineDBBase):
                 "processing_owner": processing_owner_payload(raw),
             },
             type=AlbumRequestPresentationRow,
+        )
+
+    @classmethod
+    def _artist_request_row(
+        cls,
+        raw: Mapping[str, object],
+    ) -> ArtistRequestRow:
+        """Validate one artist-view request and its specialized facts."""
+        row = cls._request_presentation_row(raw)
+        return msgspec.convert(
+            {
+                **row,
+                "has_captured_history": raw["has_captured_history"],
+                "verified_lossless": raw["_linked_verified_lossless"],
+                "provisional_lossless": raw["provisional_lossless"],
+            },
+            type=ArtistRequestRow,
         )
 
     def add_request(
@@ -136,8 +218,9 @@ class _RequestsMixin(_PipelineDBBase):
     def get_pipeline_overlay(
         self, mbids: list[str],
     ) -> dict[str, dict[str, Any]]:
-        """Map mb_release_id → badge-overlay info for the browse /
-        library views (#445 item 2 — formerly inline SQL in
+        """Map exact MB/Discogs release ID → browse badge-overlay info.
+
+        This is the library/browse seam from #445 item 2 (formerly inline SQL in
         ``web/overlay.py::check_pipeline``).
 
         ``verified_lossless`` / ``provisional_lossless`` derive from the
@@ -147,34 +230,42 @@ class _RequestsMixin(_PipelineDBBase):
         the badge layer renders)."""
         if not mbids:
             return {}
-        placeholders = ",".join(["%s"] * len(mbids))
+        musicbrainz_ids, discogs_ids = _overlay_release_id_sets(mbids)
+        if not musicbrainz_ids and not discogs_ids:
+            return {}
         cur = self._execute(
-            f"SELECT r.id, r.mb_release_id, r.status, "
-            f"r.active_automation_import_job_id, "
-            f"r.search_filetype_override, r.target_format, r.min_bitrate, "
-            f"COALESCE(e.verified_lossless, FALSE) AS verified_lossless, "
-            f"(COALESCE(e.v0_subject, '') = 'source' "
-            f" AND NOT COALESCE(e.verified_lossless, FALSE)) "
-            f"AS provisional_lossless, "
-            f"owner.id AS _processing_owner_job_id, "
-            f"owner.status AS _processing_owner_status, "
-            f"owner.preview_status AS _processing_owner_preview_status "
-            f"FROM album_requests r "
-            f"LEFT JOIN album_quality_evidence e "
-            f"ON e.id = r.current_evidence_id "
-            f"LEFT JOIN import_jobs owner "
-            f"ON owner.id = r.active_automation_import_job_id "
-            f"WHERE r.mb_release_id IN ({placeholders})",
-            tuple(mbids),
+            f"""
+            SELECT request_row.id, request_row.mb_release_id,
+                   request_row.discogs_release_id,
+                   request_row.status,
+                   request_row.active_automation_import_job_id,
+                   request_row.search_filetype_override,
+                   request_row.target_format, request_row.min_bitrate,
+                   {_CAPTURE_AND_EVIDENCE_SELECT},
+                   processing_owner_job.id AS _processing_owner_job_id,
+                   processing_owner_job.status AS _processing_owner_status,
+                   processing_owner_job.preview_status
+                       AS _processing_owner_preview_status
+            FROM album_requests request_row
+            LEFT JOIN album_quality_evidence current_evidence
+              ON current_evidence.id = request_row.current_evidence_id
+            LEFT JOIN import_jobs processing_owner_job
+              ON processing_owner_job.id =
+                 request_row.active_automation_import_job_id
+            WHERE request_row.mb_release_id = ANY(%s)
+               OR request_row.discogs_release_id = ANY(%s)
+            """,
+            (musicbrainz_ids, discogs_ids),
         )
         return {
-            r["mb_release_id"]: {
+            _overlay_row_release_id(r): {
                 "id": r["id"],
                 "status": r["status"],
                 "search_filetype_override": r["search_filetype_override"],
                 "target_format": r["target_format"],
                 "min_bitrate": r["min_bitrate"],
-                "verified_lossless": r["verified_lossless"],
+                "has_captured_history": r["has_captured_history"],
+                "verified_lossless": r["_linked_verified_lossless"],
                 "provisional_lossless": r["provisional_lossless"],
                 "processing_owner": processing_owner_payload(r),
             }
@@ -1628,7 +1719,7 @@ class _RequestsMixin(_PipelineDBBase):
         self,
         artist_name: str,
         mb_artist_id: str = "",
-    ) -> list[AlbumRequestRow]:
+    ) -> list[ArtistRequestRow]:
         """List request rows for one artist, including legacy name fallbacks.
 
         ``/api/library/artist`` is the SSOT view for albums already in
@@ -1643,8 +1734,11 @@ class _RequestsMixin(_PipelineDBBase):
         if mb_artist_id:
             cur = self._execute(
                 f"""
-                SELECT {REQUEST_PRESENTATION_SELECT}
+                SELECT {REQUEST_PRESENTATION_SELECT},
+                       {_CAPTURE_AND_EVIDENCE_SELECT}
                 {REQUEST_PRESENTATION_FROM}
+                LEFT JOIN album_quality_evidence current_evidence
+                  ON current_evidence.id = request_row.current_evidence_id
                 WHERE request_row.mb_artist_id = %s
                    OR (request_row.artist_name ILIKE %s ESCAPE '\\'
                        -- Hyphen-free ids (e.g. legacy numerics / Discogs ids)
@@ -1659,14 +1753,17 @@ class _RequestsMixin(_PipelineDBBase):
         else:
             cur = self._execute(
                 f"""
-                SELECT {REQUEST_PRESENTATION_SELECT}
+                SELECT {REQUEST_PRESENTATION_SELECT},
+                       {_CAPTURE_AND_EVIDENCE_SELECT}
                 {REQUEST_PRESENTATION_FROM}
+                LEFT JOIN album_quality_evidence current_evidence
+                  ON current_evidence.id = request_row.current_evidence_id
                 WHERE request_row.artist_name ILIKE %s ESCAPE '\\'
                 ORDER BY request_row.year, request_row.album_title
                 """,
                 (name_pattern,),
             )
-        return [self._request_presentation_row(r) for r in cur.fetchall()]
+        return [self._artist_request_row(r) for r in cur.fetchall()]
 
 
     # --- Retry logic ---

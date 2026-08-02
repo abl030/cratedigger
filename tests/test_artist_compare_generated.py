@@ -561,6 +561,9 @@ class TestArtistCompareGenerated(unittest.TestCase):
             "status": "wanted",
             "id": 42,
             "processing_owner": None,
+            "has_captured_history": False,
+            "verified_lossless": False,
+            "provisional_lossless": False,
             "_prio": 0,
         }
         _apply_rg_pipeline_overlay(
@@ -589,6 +592,9 @@ class TestArtistCompareGenerated(unittest.TestCase):
             "status": "wanted",
             "id": 42,
             "processing_owner": None,
+            "has_captured_history": False,
+            "verified_lossless": False,
+            "provisional_lossless": False,
             "_prio": 0,
         }
         _apply_rg_pipeline_overlay(

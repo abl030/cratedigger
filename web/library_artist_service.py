@@ -19,7 +19,7 @@ from lib.release_identity import ReleaseIdentity
 from web.library_album_row import LibraryAlbumRow
 
 if TYPE_CHECKING:
-    from lib.pipeline_db.rows import AlbumRequestRow
+    from lib.pipeline_db.rows import ArtistRequestRow
 
 
 class SupportsLibraryArtistLookup(Protocol):
@@ -44,7 +44,7 @@ class SupportsLibraryArtistPipelineDB(Protocol):
         self,
         artist_name: str,
         mb_artist_id: str = "",
-    ) -> list[AlbumRequestRow]:
+    ) -> list[ArtistRequestRow]:
         ...
 
     def get_track_counts(self, request_ids: list[int]) -> dict[int, int]:

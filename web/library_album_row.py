@@ -41,6 +41,16 @@ def _bitrate_kbps(bitrate_bps: object | None) -> int:
     return 0
 
 
+def _pipeline_fact(row: Mapping[str, object], key: str) -> bool:
+    value = row[key]
+    if isinstance(value, bool):
+        return value
+    raise TypeError(
+        f"LibraryAlbumRow pipeline fact {key!r} must be bool, "
+        f"got {type(value).__name__}"
+    )
+
+
 class LibraryAlbumRow(msgspec.Struct, frozen=True):
     """Typed wire contract for `/api/library/artist` `albums[]`.
 
@@ -85,6 +95,9 @@ class LibraryAlbumRow(msgspec.Struct, frozen=True):
     processing_owner: ProcessingOwnerProjection | None
     upgrade_queued: bool
     library_rank: str | None
+    has_captured_history: bool
+    pipeline_verified_lossless: bool
+    pipeline_provisional: bool
 
     @property
     def identity(self) -> ReleaseIdentity | None:
@@ -134,6 +147,9 @@ class LibraryAlbumRow(msgspec.Struct, frozen=True):
                 "processing_owner": None,
                 "upgrade_queued": False,
                 "library_rank": rank_fn(formats, _bitrate_kbps(avg_bitrate)),
+                "has_captured_history": False,
+                "pipeline_verified_lossless": False,
+                "pipeline_provisional": False,
             },
             type=cls,
         )
@@ -187,6 +203,15 @@ class LibraryAlbumRow(msgspec.Struct, frozen=True):
                 "processing_owner": row.get("processing_owner"),
                 "upgrade_queued": _pipeline_upgrade_queued(row),
                 "library_rank": None,
+                "has_captured_history": _pipeline_fact(
+                    row, "has_captured_history"
+                ),
+                "pipeline_verified_lossless": _pipeline_fact(
+                    row, "verified_lossless"
+                ),
+                "pipeline_provisional": _pipeline_fact(
+                    row, "provisional_lossless"
+                ),
             },
             type=cls,
         )
@@ -202,4 +227,13 @@ class LibraryAlbumRow(msgspec.Struct, frozen=True):
         row["pipeline_id"] = pipeline_row["id"]
         row["processing_owner"] = pipeline_row.get("processing_owner")
         row["upgrade_queued"] = _pipeline_upgrade_queued(pipeline_row)
+        row["has_captured_history"] = _pipeline_fact(
+            pipeline_row, "has_captured_history"
+        )
+        row["pipeline_verified_lossless"] = _pipeline_fact(
+            pipeline_row, "verified_lossless"
+        )
+        row["pipeline_provisional"] = _pipeline_fact(
+            pipeline_row, "provisional_lossless"
+        )
         return msgspec.convert(row, type=type(self))

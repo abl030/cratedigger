@@ -242,6 +242,9 @@ export function synthesizeMasterlessRow(data) {
     pipeline_status: data.pipeline_status ?? null,
     pipeline_id: data.pipeline_id ?? null,
     processing_owner: data.processing_owner ?? null,
+    has_captured_history: data.has_captured_history,
+    pipeline_verified_lossless: data.pipeline_verified_lossless,
+    pipeline_provisional: data.pipeline_provisional,
     library_format: data.library_format,
     library_min_bitrate: data.library_min_bitrate,
     library_avg_bitrate: data.library_avg_bitrate,
@@ -259,11 +262,10 @@ export function synthesizeMasterlessRow(data) {
  * pressings. The Wrens "The Meadowlands" (request 4228) is the pin: its
  * library copy is a Promotion pressing, and the old status-only split
  * buried it in the collapsed section, making the expansion contradict
- * the row header's "in library · wanted" badges.
+ * the row header's holding, quality, and wanted badges.
  *
- * ``replaced`` does not pin: it's the terminal frozen-audit status (the
- * overlay carries it through unfiltered), renders no badge, and an
- * abandoned request is not a claim on the pressing.
+ * ``replaced`` does not pin: although its frozen audit history now renders
+ * explicitly, an abandoned request is not an active claim on the pressing.
  *
  * @param {Array<Object>} rows - Pressing rows (overlay fields present).
  * @returns {{visible: Object[], hidden: Object[]}}
