@@ -484,14 +484,16 @@ class FakeBeetsDB:
         }
         for albums in self._albums_by_artist.values():
             for row in albums:
-                identity = ReleaseIdentity.from_fields(
+                identities = ReleaseIdentity.all_from_observation_fields(
                     row.get("mb_albumid"), row.get("discogs_albumid")
                 )
                 album_id = row.get("id")
-                if identity not in wanted or not isinstance(album_id, int):
+                if not isinstance(album_id, int):
                     continue
                 rows_by_album_id[album_id] = row
-                matches_by_identity[identity].add(album_id)
+                for identity in identities:
+                    if identity in wanted:
+                        matches_by_identity[identity].add(album_id)
         ambiguous = [
             identity.release_id
             for identity, album_ids in matches_by_identity.items()

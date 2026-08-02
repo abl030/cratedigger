@@ -68,13 +68,14 @@ def assert_independent_library_facts(
 
 
 def _fact_beets_album(source: str) -> dict[str, object]:
+    dual = source.startswith("dual_")
     return {
         "id": 7,
         "album": "Independent Facts",
         "artist": "Boundary Archivist",
         "year": 2001,
-        "mb_albumid": MB_ID if source == "mb" else None,
-        "discogs_albumid": DISCOGS_ID if source == "discogs" else None,
+        "mb_albumid": MB_ID if source == "mb" or dual else None,
+        "discogs_albumid": DISCOGS_ID if source == "discogs" or dual else None,
         "track_count": 2,
         "mb_releasegroupid": "11111111-1111-1111-1111-111111111111",
         "release_group_title": "Independent Facts",
@@ -174,7 +175,7 @@ class TestCurrentLibraryDisplayGenerated(unittest.TestCase):
 
 class TestIndependentLibraryFactsGenerated(unittest.TestCase):
     @given(
-        source=st.sampled_from(("mb", "discogs")),
+        source=st.sampled_from(("mb", "discogs", "dual_mb", "dual_discogs")),
         shape=st.sampled_from(("held_untracked", "missing_tracked", "held_tracked")),
         status=st.sampled_from(("wanted", "imported", "replaced")),
         captured=st.booleans(),
@@ -204,6 +205,7 @@ class TestIndependentLibraryFactsGenerated(unittest.TestCase):
     ) -> None:
         held = shape != "missing_tracked"
         tracked = shape != "held_untracked"
+        request_source = "discogs" if source.endswith("discogs") else "mb"
         verified = proof == "verified"
         provisional = proof == "provisional"
         library_albums = [_fact_beets_album(source)] if held else []
@@ -213,8 +215,10 @@ class TestIndependentLibraryFactsGenerated(unittest.TestCase):
                 id=42,
                 artist_name="Boundary Archivist",
                 album_title="Independent Facts",
-                mb_release_id=MB_ID if source == "mb" else None,
-                discogs_release_id=DISCOGS_ID if source == "discogs" else None,
+                mb_release_id=MB_ID if request_source == "mb" else None,
+                discogs_release_id=(
+                    DISCOGS_ID if request_source == "discogs" else None
+                ),
                 status=status,
                 has_captured_history=captured,
                 verified_lossless=verified,

@@ -643,8 +643,8 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         self.assertFalse(rg["pipeline_verified_lossless"])
         self.assertFalse(rg["pipeline_provisional"])
 
-    def test_artist_release_groups_pipeline_overlay_keeps_replaced_history(self):
-        """Replaced rows remain frozen, visible exact acquisition history."""
+    def test_artist_release_group_keeps_lifecycle_without_leaf_facts(self):
+        """Work rows never borrow exact acquisition facts from one pressing."""
         release_group = {
             "id": self.RG_ID, "title": "Old Album", "type": "Album",
             "source": "mb", "identity_kind": "work",
@@ -678,7 +678,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         row = data["release_groups"][0]
         self.assertEqual(row["pipeline_status"], "replaced")
         self.assertEqual(row["pipeline_id"], 77)
-        self.assertTrue(row["has_captured_history"])
+        self.assertFalse(row["has_captured_history"])
         self.assertFalse(row["pipeline_verified_lossless"])
         self.assertFalse(row["pipeline_provisional"])
 
@@ -903,6 +903,9 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         row = data["discogs_unpaired"][0]
         self.assertEqual(row["pipeline_status"], "imported")
         self.assertEqual(row["pipeline_id"], 7249)
+        self.assertFalse(row["has_captured_history"])
+        self.assertFalse(row["pipeline_verified_lossless"])
+        self.assertFalse(row["pipeline_provisional"])
 
     def test_release_group_contract(self):
         release = {
