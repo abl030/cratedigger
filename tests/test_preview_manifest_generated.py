@@ -42,11 +42,12 @@ import sys
 import tempfile
 import unittest
 from dataclasses import dataclass
+from itertools import combinations
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from hypothesis import example, given
+from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
@@ -103,9 +104,41 @@ _EXTRA_FILENAME_POOL: tuple[str, ...] = (
     "07 - Été à Paris.flac",
     "08 - ☆Star☆.mp3",
 )
-_extra_filenames_strategy = st.sets(
-    st.sampled_from(_EXTRA_FILENAME_POOL), max_size=len(_EXTRA_FILENAME_POOL),
+# This is an exact finite domain, not an entropy surface. A bounded integer
+# gives Hypothesis one canonical representation per subset; the matching fixed
+# budget also keeps the fuzz runner from repeating the same domain in eight
+# shards after every subset has already been exercised.
+_EXTRA_FILENAME_WORLD_COUNT = 1 << len(_EXTRA_FILENAME_POOL)
+_extra_filename_mask_strategy = st.integers(
+    min_value=0,
+    max_value=_EXTRA_FILENAME_WORLD_COUNT - 1,
 )
+
+
+def _extra_filenames_for_mask(mask: int) -> frozenset[str]:
+    if not 0 <= mask < _EXTRA_FILENAME_WORLD_COUNT:
+        raise ValueError(f"filename mask is outside the finite domain: {mask}")
+    return frozenset(
+        filename
+        for index, filename in enumerate(_EXTRA_FILENAME_POOL)
+        if mask & (1 << index)
+    )
+
+
+def assert_extra_filename_mask_domain(
+    mapped: tuple[frozenset[str], ...],
+) -> None:
+    """Every subset of the filename pool must have one exact mask."""
+    expected = {
+        frozenset(selected)
+        for size in range(len(_EXTRA_FILENAME_POOL) + 1)
+        for selected in combinations(_EXTRA_FILENAME_POOL, size)
+    }
+    actual = set(mapped)
+    if len(mapped) != len(expected) or actual != expected:
+        raise AssertionError(
+            "filename masks do not map one-to-one onto every manifest subset"
+        )
 
 
 # ============================================================================
@@ -467,13 +500,15 @@ class TestPreviewSidecarManifestPurityPin(unittest.TestCase):
 
 class TestPreviewManifestPurityProperty(unittest.TestCase):
     """Patrols the same composed path (``_materialize_canonical_album`` +
-    ``measure_and_persist_candidate_evidence``) over generated manifests:
-    file count, basenames with spaces/unicode, mp3/flac mix."""
+    ``measure_and_persist_candidate_evidence``) over the exact finite manifest
+    domain: file count, basenames with spaces/unicode, mp3/flac mix."""
 
-    @given(extra=_extra_filenames_strategy)
-    @example(extra=frozenset())
-    @example(extra=frozenset(_EXTRA_FILENAME_POOL))
-    def test_owned_canonical_album_stays_pure_after_preview(self, extra):
+    @settings(max_examples=_EXTRA_FILENAME_WORLD_COUNT)
+    @given(mask=_extra_filename_mask_strategy)
+    @example(mask=0)
+    @example(mask=_EXTRA_FILENAME_WORLD_COUNT - 1)
+    def test_owned_canonical_album_stays_pure_after_preview(self, mask: int):
+        extra = _extra_filenames_for_mask(mask)
         basenames = frozenset({_MANDATORY_FLAC}) | frozenset(extra)
         request_id = 8590100
         mb_release_id = "mbid-issue-859-gen"
@@ -551,6 +586,24 @@ class TestPreviewManifestCheckersTripOnViolations(unittest.TestCase):
                 canonical_dir,
                 label="known-bad",
             )
+
+    def test_filename_mask_domain_checker_trips_on_a_collapsed_world(self):
+        collapsed = tuple(
+            frozenset()
+            for _mask in range(1 << len(_EXTRA_FILENAME_POOL))
+        )
+        with self.assertRaises(AssertionError):
+            assert_extra_filename_mask_domain(collapsed)
+
+
+class TestPreviewManifestFiniteDomain(unittest.TestCase):
+    def test_every_filename_subset_has_one_exact_mask(self):
+        mapped = tuple(
+            _extra_filenames_for_mask(mask)
+            for mask in range(1 << len(_EXTRA_FILENAME_POOL))
+        )
+
+        assert_extra_filename_mask_domain(mapped)
 
 
 if __name__ == "__main__":

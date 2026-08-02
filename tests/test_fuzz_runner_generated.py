@@ -717,6 +717,44 @@ class TestFuzzCoverageCheckerKnownBad(unittest.TestCase):
 
 
 class TestFuzzDiscoverySettingsContract(unittest.TestCase):
+    def test_finite_preview_manifest_property_is_not_entropy_sharded(self) -> None:
+        environment = dict(os.environ)
+        environment.update({
+            "CRATEDIGGER_HYPOTHESIS_PROFILE": "fuzz",
+            "CRATEDIGGER_FUZZ_MAX_EXAMPLES": "20000",
+        })
+        property_id = (
+            "tests.test_preview_manifest_generated."
+            "TestPreviewManifestPurityProperty."
+            "test_owned_canonical_album_stays_pure_after_preview"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            manifests = discover_fuzz_manifests(
+                ("tests.test_preview_manifest_generated",),
+                worker_count=1,
+                environment=environment,
+                work_directory=Path(directory),
+            )
+
+        manifest = manifests[0]
+        property_manifest = next(
+            item
+            for item in manifest.hypothesis_tests
+            if item.test_id == property_id
+        )
+        self.assertEqual(property_manifest.max_examples, 128)
+        self.assertFalse(property_manifest.uses_default_settings)
+
+        targets = build_fuzz_targets(manifests, property_shards=8)
+        matching = tuple(
+            target
+            for target in targets
+            if property_id in target.expected_test_ids
+        )
+        self.assertEqual(len(matching), 1)
+        self.assertEqual(matching[0].shard_count, 1)
+        self.assertIsNone(matching[0].profile_max_examples)
+
     def test_discovery_rejects_property_with_default_deadline(self) -> None:
         """A module that omits profile registration must fail before sharding."""
         with tempfile.TemporaryDirectory() as directory:
