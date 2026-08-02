@@ -335,9 +335,9 @@ boundary.
   of under `import:` (beets reads strictly from
   `config["import"]["duplicate_keys"]["album"]`; top-level is silently
   ignored and falls back to the default `[albumartist, album]`). Not a beets
-  upstream bug. Fixed by `beets.nix` YAML relocation + startup assertion in
-  `harness/beets_harness.py::_assert_duplicate_keys_include_mb_albumid`. The
-  RPC redesign inherits the assertion trivially (run it at process start),
+  upstream bug. Fixed by `beets.nix` YAML relocation; the current startup
+  authority check is `lib/beets_config_contract.py::check_beets_config`. The
+  RPC redesign inherits that process-start contract directly,
   and the `03bfc63` defensive machinery (always-keep, pre-flight surgical
   remove, sibling `beet move`) remains valuable as defense-in-depth +
   `%aunique` correctness regardless of the RPC vs. subprocess model.

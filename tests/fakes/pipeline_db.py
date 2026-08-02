@@ -455,7 +455,8 @@ class FakePipelineDB:
         assert db.download_logs[0].outcome == "success"
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, dsn: str = "postgresql://fake") -> None:
+        self.dsn = dsn
         self._requests: dict[int, dict[str, Any]] = {}
         self._tracks: dict[int, list[dict[str, Any]]] = {}
         self.download_logs: list[DownloadLogRow] = []

@@ -47,9 +47,11 @@
         default = import ./nix/shell.nix { inherit pkgs; };
       });
 
-      packages = forAllSystems ({ pkgs, ... }: rec {
+      packages = forAllSystems ({ pkgs, ... }: let
+        beetsPackage = import ./nix/beets.nix { inherit pkgs; };
+      in rec {
         default = import ./nix/wrappers.nix {
-          inherit pkgs version;
+          inherit pkgs version beetsPackage;
           src = runtimeSrc;
         };
         cratedigger = default;
@@ -88,6 +90,35 @@
         # `nix flake check` must build the CLI bundle (U8): a stranger's
         # `nix run .#pipeline-cli` is only as green as this check.
         packageDefault = self.packages.${system}.default;
+
+        # Execute the installed configuration checker, rather than merely
+        # inspecting its wrapper source. A caller-controlled PYTHONPATH
+        # containing a shadow ``beets`` package must not affect the pinned
+        # interpreter's imports. The intentionally missing config is a fixed
+        # rejected fixture: it proves the command crosses its normal JSON
+        # error boundary after importing the real admitted Beets package.
+        checkBeetsConfigPackageBoundary = let
+          hostilePythonPath = pkgs.runCommand "cratedigger-hostile-pythonpath" { } ''
+            mkdir -p "$out/beets"
+            cat > "$out/beets/__init__.py" <<'PY'
+            raise RuntimeError("hostile inherited PYTHONPATH imported beets")
+            PY
+          '';
+        in pkgs.runCommand "cratedigger-check-beets-config-package-boundary" { } ''
+          set -euo pipefail
+          mkdir runtime
+          if PYTHONPATH="${hostilePythonPath}" \
+            ${self.packages.${system}.default}/bin/cratedigger-check-beets-config \
+              --config "$PWD/missing.ini" \
+              --runtime-dir "$PWD/runtime" \
+              --role importer > stdout.json 2> stderr.log; then
+            echo "checker unexpectedly accepted missing config" >&2
+            exit 1
+          fi
+          grep -Fx '{"ok":false,"report":null,"error":"config_load_error"}' stdout.json
+          ! grep -Fq "hostile inherited PYTHONPATH" stderr.log
+          touch "$out"
+        '';
 
         moduleVm = import ./nix/tests/module-vm.nix {
           inherit pkgs system;

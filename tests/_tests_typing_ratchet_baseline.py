@@ -57,7 +57,6 @@ TESTS_TYPING_RATCHET_BASELINE: dict[str, dict[str, int]] = {
     "tests/test_field_resolver_service.py": {"any": 8, "type_ignore": 5},
     "tests/test_force_import_gates.py": {"type_ignore": 8},
     "tests/test_grab_list.py": {"type_ignore": 4},
-    "tests/test_harness_config_guard.py": {"any": 4, "cast": 5},
     "tests/test_harness_mutation_log.py": {"any": 3},
     "tests/test_harness_serialization.py": {"any": 4},
     "tests/test_import_dispatch.py": {"type_ignore": 25},

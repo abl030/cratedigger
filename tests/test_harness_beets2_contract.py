@@ -362,6 +362,122 @@ with tempfile.TemporaryDirectory() as d:
 '''
 
 
+# Real Beets incremental-import proof for the externally provisioned absolute
+# statefile. The immutable BEETSDIR manifest must stay byte-identical while the
+# separate state file records the completed source directory.
+_EXTERNAL_STATEFILE_CONTRACT = r'''
+import hashlib
+import os
+import pickle
+import subprocess
+import sys
+from pathlib import Path
+
+from lib.beets_config_contract import check_beets_config
+from tests.fakes.beets_contract import BeetsContractWorld
+
+
+def manifest(root):
+    values = []
+    for path in sorted(Path(root).rglob("*")):
+        relative = str(path.relative_to(root))
+        if path.is_file():
+            values.append(("file", relative, hashlib.sha256(path.read_bytes()).hexdigest()))
+        else:
+            values.append(("dir", relative))
+    return values
+
+
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
+
+
+def changed_paths(before, after):
+    before_by_path = {entry[1]: entry for entry in before}
+    after_by_path = {entry[1]: entry for entry in after}
+    return {
+        path
+        for path in before_by_path.keys() | after_by_path.keys()
+        if before_by_path.get(path) != after_by_path.get(path)
+    }
+
+
+world = BeetsContractWorld(role="importer")
+try:
+    world.state_file.write_bytes(
+        pickle.dumps({"tagprogress": {}, "taghistory": set()})
+    )
+    world.unseal()
+    world._write_main_config(**{
+        "import": {
+            "autotag": True,
+            "move": True,
+            "write": True,
+            "incremental": True,
+            "incremental_skip_later": True,
+            "duplicate_keys": {
+                "album": ["mb_albumid", "discogs_albumid"],
+            },
+        },
+    })
+    world._seal("importer")
+
+    # The exact authority/config used by the real Beets run must first pass
+    # the shipped checker; this is one connected world, not a lookalike file.
+    admitted = check_beets_config(world.cfg(), role="importer")
+    assert admitted.ok, admitted.hard_failures
+
+    source = world.root / "source"
+    source.mkdir()
+    audio = source / "01 - State Proof.flac"
+    subprocess.run([
+        "ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i",
+        "sine=frequency=440:duration=0.1", "-metadata", "artist=State Artist",
+        "-metadata", "album=State Album", "-metadata", "title=State Proof",
+        "-c:a", "flac", str(audio),
+    ], check=True)
+    before_beetsdir = manifest(world.beets_dir)
+    before_runtime = digest(world.runtime_config)
+    before_secret = digest(world.secret_include)
+    before_source = manifest(source)
+    before_state = world.state_file.read_bytes()
+    before_database = digest(world.library_db)
+    before_library = manifest(world.library_root)
+    before_world = manifest(world.root)
+
+    proc = subprocess.run(
+        [
+            sys.executable, "-m", "beets", "import", "-A", "-q",
+            "--nocopy", "--nomove", "--nowrite", str(source),
+        ],
+        env={**os.environ, "BEETSDIR": admitted.authority.config_dir},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert manifest(world.beets_dir) == before_beetsdir
+    assert digest(world.runtime_config) == before_runtime
+    assert digest(world.secret_include) == before_secret
+    assert manifest(source) == before_source
+    assert manifest(world.library_root) == before_library
+    assert world.state_file.read_bytes() != before_state
+    assert world.library_db.is_file(), world.library_db
+    assert digest(world.library_db) != before_database
+    after_world = manifest(world.root)
+    assert changed_paths(before_world, after_world) == {
+        str(world.library_db.relative_to(world.root)),
+    }, changed_paths(before_world, after_world)
+    with world.state_file.open("rb") as handle:
+        state = pickle.load(handle)
+    source_bytes = os.fsencode(str(source))
+    assert any(source_bytes in paths for paths in state["taghistory"]), state
+    print("EXTERNAL_STATEFILE_OK")
+finally:
+    world.close()
+'''
+
+
 def _shipped_aunique_config() -> dict:
     """Extract the shipped beets path template + inline album_fields from
     nix/module.nix — the test patrols what production actually renders."""
@@ -379,6 +495,19 @@ def _shipped_aunique_config() -> dict:
 
 
 class TestAuniqueCollisionContract(unittest.TestCase):
+    def test_checker_literals_match_the_real_collision_qualified_contract(self):
+        from lib.beets_config_contract import (
+            SAFE_DEFAULT_PATH,
+            SAFE_PATH_DISAMBIG,
+        )
+
+        shipped = _shipped_aunique_config()
+        self.assertEqual(SAFE_DEFAULT_PATH, shipped["template"])
+        self.assertEqual(
+            SAFE_PATH_DISAMBIG,
+            shipped["album_fields"]["path_disambig"],
+        )
+
     def test_shipped_template_never_collides_same_key_siblings(self):
         import json as _json
 
@@ -402,6 +531,24 @@ class TestAuniqueCollisionContract(unittest.TestCase):
 
 
 class TestHarnessBeets2Contract(unittest.TestCase):
+    def test_real_incremental_import_uses_external_statefile_only(self):
+        proc = subprocess.run(
+            [sys.executable, "-c", _EXTERNAL_STATEFILE_CONTRACT],
+            cwd=_REPO,
+            env={**os.environ,
+                 "PYTHONPATH": _REPO + os.pathsep + os.environ.get("PYTHONPATH", "")},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(
+            proc.returncode,
+            0,
+            f"external Beets statefile contract failed\n"
+            f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}",
+        )
+        self.assertIn("EXTERNAL_STATEFILE_OK", proc.stdout)
+
     def test_real_harness_pretend_keeps_source_manifest_unchanged(self):
         """A completed pretend run leaves its source tree unchanged.
 

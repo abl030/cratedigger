@@ -35,6 +35,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MODULE_NIX = REPO_ROOT / "nix" / "module.nix"
 FLAKE_NIX = REPO_ROOT / "flake.nix"
+WRAPPERS_NIX = REPO_ROOT / "nix" / "wrappers.nix"
 MODULE_VM_NIX = REPO_ROOT / "nix" / "tests" / "module-vm.nix"
 
 
@@ -1672,6 +1673,27 @@ class TestOwnedRedisContract(unittest.TestCase):
         text = MODULE_NIX.read_text(encoding="utf-8")
         self.assertIn('--redis-host "${cfg.redis.host}"', text)
         self.assertIn("--redis-port ${toString cfg.redis.port}", text)
+
+
+class TestStandaloneCheckerPackageIdentity(unittest.TestCase):
+    def test_wrapper_requires_and_threads_the_admitted_beets_package(self) -> None:
+        wrappers = WRAPPERS_NIX.read_text(encoding="utf-8")
+        flake = FLAKE_NIX.read_text(encoding="utf-8")
+        self.assertIn("{ pkgs, beetsPackage,", wrappers)
+        self.assertNotIn("beetsPackage ?", wrappers)
+        self.assertIn("./package.nix { inherit beetsPackage; }", wrappers)
+        self.assertIn("beetsPackage = import ./nix/beets.nix", flake)
+        self.assertIn("inherit pkgs version beetsPackage;", flake)
+
+    def test_wrapper_drops_inherited_pythonpath_and_flake_executes_checker(self) -> None:
+        wrappers = WRAPPERS_NIX.read_text(encoding="utf-8")
+        flake = FLAKE_NIX.read_text(encoding="utf-8")
+        self.assertIn('export PYTHONPATH="${src}"', wrappers)
+        self.assertNotIn('PYTHONPATH="${src}\'\'${PYTHONPATH', wrappers)
+        self.assertIn("checkBeetsConfigPackageBoundary", flake)
+        self.assertIn("cratedigger-check-beets-config-package-boundary", flake)
+        self.assertIn("hostile inherited PYTHONPATH imported beets", flake)
+        self.assertIn("/bin/cratedigger-check-beets-config", flake)
 
 
 if __name__ == "__main__":

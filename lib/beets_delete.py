@@ -19,7 +19,6 @@ from typing import Any, Literal
 
 import msgspec
 
-from lib.beets_config_contract import BeetsConfigError, validate_beets_config
 from lib.release_identity import ReleaseIdentity
 
 log = logging.getLogger("cratedigger")
@@ -425,17 +424,8 @@ def execute_pinned_beets_delete(request: BeetsDeleteRequest) -> BeetsDeleteOutco
     """Delete one exact album using the active pinned Beets configuration."""
     from beets import config, library, plugins, util
 
-    config_dir = os.environ.get("BEETSDIR", "")
-    try:
-        configured_plugins = validate_beets_config(config_dir)
-    except BeetsConfigError as exc:
-        return BeetsDeleteFailed(
-            album_id=request.album_id,
-            reason="configuration_error",
-            detail=str(exc),
-            album_still_present=True,
-        )
     config.read()
+    configured_plugins = set(plugins.get_plugin_names())
     configured_db = config["library"].as_filename()
     configured_root = config["directory"].as_filename()
     if not _configuration_matches(request, configured_db, configured_root):

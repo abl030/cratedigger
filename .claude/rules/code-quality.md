@@ -487,6 +487,8 @@ Always use these instead of inventing parallel scaffolding:
 **`tests/fakes/`** — stateful fakes:
 - `FakePipelineDB` — full PipelineDB stand-in: requests, download_logs, denylist, cooldowns, status history, spectral state, attempt counters. Includes `assert_log()` helper. Has `queue_execute_results(*cursors)` + `execute_calls` recording for tests driving raw-SQL CLI paths.
 - `FakeBeetsDB` — minimal BeetsDB stand-in: `album_exists`, `get_album_info(mb_release_id, cfg)`, `get_all_album_ids_for_release`, `get_item_paths`, `get_album_path_by_id`, `close` + context-manager + per-method call recorders + seed helpers (`set_album_exists`, `set_album_info`, `set_album_ids_for_release`, `set_item_paths`, `set_album_path_by_id`). Each method also has a `_default` field for "any key returns the same value" tests. Extend the surface only when a test exercises a new BeetsDB method.
+- `BeetsContractWorld` (`tests/fakes/beets_contract.py`) — real immutable config/include/state/library authority fixture, shared by deterministic, generated, startup, harness, and web-boundary tests. Includes tree snapshots and the canonical safe path constants.
+- `tests/beets_config_startup_support.py` — shared real-entrypoint restart/admission helpers used by deterministic, generated, importer, and web startup-boundary tests.
 - `FakeSlskdAPI` — stateful slskd client: `transfers` (enqueue, get_all_downloads, cancel_download, queued snapshots), `users` (directory with per-directory results and errors), call recording.
 - `FakePipelineDBSource` — typed PipelineDBSource fake wrapping a `FakePipelineDB`. Use via `make_ctx_with_fake_db(fake_db)` rather than constructing directly.
 
