@@ -39,10 +39,12 @@ class TestOverlayReleaseRowsInPlace(unittest.TestCase):
                 patch("web.server.check_pipeline",
                       return_value={
                           "queued": {"id": 21, "status": "wanted",
+                                     "has_captured_history": False,
                                      "verified_lossless": False,
                                      "provisional_lossless": True,
                                      "processing_owner": None},
                           "both": {"id": 22, "status": "queued",
+                                   "has_captured_history": True,
                                    "verified_lossless": True,
                                    "provisional_lossless": False,
                                    "processing_owner": None},
@@ -67,9 +69,11 @@ class TestOverlayReleaseRowsInPlace(unittest.TestCase):
         self.assertEqual(by_id["queued"]["pipeline_id"], 21)
         self.assertFalse(by_id["queued"]["pipeline_verified_lossless"])
         self.assertTrue(by_id["queued"]["pipeline_provisional"])
+        self.assertFalse(by_id["queued"]["has_captured_history"])
         self.assertIsNone(by_id["queued"]["processing_owner"])
         self.assertFalse(by_id["held"]["pipeline_verified_lossless"])
         self.assertFalse(by_id["held"]["pipeline_provisional"])
+        self.assertFalse(by_id["held"]["has_captured_history"])
 
         self.assertTrue(by_id["both"]["in_library"])
         self.assertEqual(by_id["both"]["beets_album_id"], 11)
@@ -80,12 +84,14 @@ class TestOverlayReleaseRowsInPlace(unittest.TestCase):
         self.assertEqual(by_id["both"]["pipeline_id"], 22)
         self.assertTrue(by_id["both"]["pipeline_verified_lossless"])
         self.assertFalse(by_id["both"]["pipeline_provisional"])
+        self.assertTrue(by_id["both"]["has_captured_history"])
 
         self.assertFalse(by_id["neither"]["in_library"])
         self.assertIsNone(by_id["neither"]["beets_album_id"])
         self.assertIsNone(by_id["neither"]["pipeline_status"])
         self.assertIsNone(by_id["neither"]["pipeline_id"])
         self.assertIsNone(by_id["neither"]["processing_owner"])
+        self.assertFalse(by_id["neither"]["has_captured_history"])
 
         self.assertEqual(by_id["bad-quality"]["library_format"], "")
         self.assertEqual(by_id["bad-quality"]["library_min_bitrate"], 0)
@@ -106,6 +112,38 @@ class TestOverlayReleaseRowsInPlace(unittest.TestCase):
                 patch("web.server.check_pipeline", return_value={}), \
                 patch("web.server._beets_db", return_value=None), self.assertRaises(KeyError):
             overlay_release_rows_in_place([{"title": "No ID"}], [])
+
+    def test_pipeline_snapshot_precedes_beets_failure_and_rows_stay_unprojected(self):
+        calls: list[str] = []
+        rows: list[dict[str, object]] = [{"id": "captured", "title": "Album"}]
+
+        def check_pipeline(ids: list[str]) -> dict[str, dict[str, object]]:
+            calls.append(f"pipeline:{ids}")
+            return {
+                "captured": {
+                    "id": 42,
+                    "status": "wanted",
+                    "has_captured_history": True,
+                    "verified_lossless": True,
+                    "provisional_lossless": False,
+                    "processing_owner": None,
+                },
+            }
+
+        def check_beets(ids: list[str]) -> set[str]:
+            calls.append(f"beets:{ids}")
+            raise OSError("synthetic Beets read failure")
+
+        with patch("web.server.check_pipeline", side_effect=check_pipeline), \
+                patch("web.server.check_beets_library", side_effect=check_beets), \
+                self.assertRaisesRegex(OSError, "Beets read failure"):
+            overlay_release_rows_in_place(rows, ["captured"])
+
+        self.assertEqual(calls, [
+            "pipeline:['captured']",
+            "beets:['captured']",
+        ])
+        self.assertEqual(rows, [{"id": "captured", "title": "Album"}])
 
 
 class TestBandReleaseIds(unittest.TestCase):

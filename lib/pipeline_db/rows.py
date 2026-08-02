@@ -147,6 +147,18 @@ class AlbumRequestPresentationRow(AlbumRequestRow):
     processing_owner: dict[str, object] | None
 
 
+class ArtistRequestRow(AlbumRequestPresentationRow):
+    """Artist-view request row with acquisition and current-proof facts.
+
+    ``verified_lossless`` is inherited from ``AlbumRequestRow`` but this
+    view always replaces the request table's legacy value with a boolean
+    derived from the exact ``current_evidence_id`` join.
+    """
+
+    has_captured_history: bool
+    provisional_lossless: bool
+
+
 def album_request_row(raw: Mapping[str, object]) -> AlbumRequestRow:
     """Detach a psycopg2 ``RealDictRow`` into the validated row projection.
 

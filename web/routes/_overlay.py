@@ -108,8 +108,9 @@ def overlay_release_rows_in_place(
         After overlay each row carries:
         `in_library`, `beets_album_id`, `library_format`,
         `library_min_bitrate`, `library_avg_bitrate`, `library_rank`,
-        `pipeline_status`, `pipeline_id`, `pipeline_verified_lossless`,
-        `pipeline_provisional`, `processing_owner`. Library quality fields are
+        `pipeline_status`, `pipeline_id`, `has_captured_history`,
+        `pipeline_verified_lossless`, `pipeline_provisional`,
+        `processing_owner`. Library quality fields are
         only set when the
         release is in the beets library AND the beets DB returned
         details for it. The identity pair derives from the request's
@@ -126,11 +127,11 @@ def overlay_release_rows_in_place(
     from web import server as srv
 
     ids_list = list(release_ids)
-    in_library: set[str] = (
-        srv.check_beets_library(ids_list) if ids_list else set()
-    )
     in_pipeline: dict[str, dict[str, object]] = (
         srv.check_pipeline(ids_list) if ids_list else {}
+    )
+    in_library: set[str] = (
+        srv.check_beets_library(ids_list) if ids_list else set()
     )
     b = srv._beets_db()
     beets_ids: dict[str, int] = (
@@ -165,6 +166,9 @@ def overlay_release_rows_in_place(
         r["pipeline_id"] = pi["id"] if pi else None
         r["processing_owner"] = (
             pi.get("processing_owner") if pi else None
+        )
+        r["has_captured_history"] = (
+            bool(pi["has_captured_history"]) if pi else False
         )
         r["pipeline_verified_lossless"] = (
             bool(pi["verified_lossless"]) if pi else False

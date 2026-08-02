@@ -8,8 +8,9 @@ function takes its DB handle as a parameter — ``web/server.py`` is the
 composition root that binds its per-thread handles and re-exports the
 bound names for the route modules (issue #432).
 
-None-handle inputs degrade gracefully (empty overlay), matching the
-"web UI without a beets DB still works" contract.
+An absent Beets handle is a broken projection world, not evidence that the
+library is empty. Beets-facing helpers therefore raise while the independent
+pipeline overlay may still degrade when its optional handle is absent.
 """
 
 from __future__ import annotations
@@ -42,6 +43,16 @@ class OverlayBeetsDB(Protocol):
     ) -> list[dict[str, object]]: ...
 
 
+class BeetsProjectionUnavailable(RuntimeError):
+    """A Library/browse projection cannot read current Beets authority."""
+
+
+def _require_beets(beets: OverlayBeetsDB | None) -> OverlayBeetsDB:
+    if beets is None:
+        raise BeetsProjectionUnavailable("Beets authority unavailable")
+    return beets
+
+
 def serialize_row(row: Mapping[str, object]) -> dict[str, object]:
     """Serialize a presented DB row, preserving its exact owner projection."""
     result: dict[str, object] = {}
@@ -55,7 +66,7 @@ def check_beets_library(
     mbids: list[str] | list[object],
 ) -> set[str]:
     """Check which MBIDs are already in the beets library."""
-    return beets.check_mbids([str(m) for m in mbids]) if beets else set()
+    return _require_beets(beets).check_mbids([str(m) for m in mbids])
 
 
 def check_beets_library_detail(
@@ -63,7 +74,7 @@ def check_beets_library_detail(
     mbids: list[str] | list[object],
 ) -> dict[str, dict[str, object]]:
     """Check beets library with track counts and audio quality."""
-    return beets.check_mbids_detail([str(m) for m in mbids]) if beets else {}
+    return _require_beets(beets).check_mbids_detail([str(m) for m in mbids])
 
 
 def get_library_artist(
@@ -72,9 +83,9 @@ def get_library_artist(
     mb_artist_id: str = "",
 ) -> list[dict[str, object]]:
     """Get albums by an artist from the beets library."""
-    if not beets:
-        return []
-    return beets.get_albums_by_artist(artist_name, mb_artist_id)
+    return _require_beets(beets).get_albums_by_artist(
+        artist_name, mb_artist_id
+    )
 
 
 def check_pipeline(

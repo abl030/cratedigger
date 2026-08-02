@@ -18,7 +18,7 @@ import msgspec
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from lib.artist_catalogue import ArtistCatalogueRow
-from lib.pipeline_db import AlbumRequestRow
+from lib.pipeline_db.rows import ArtistRequestRow
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import handoff_automation_owner, make_request_row
 from tests.web._harness import _assert_required_fields, _FakeDbWebServerCase
@@ -42,17 +42,21 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         "secondary_types", "format_qualifiers", "provenance",
         "first_release_date", "artist_credit", "primary_artist_id",
         "is_appearance",
+        "has_captured_history", "pipeline_verified_lossless",
+        "pipeline_provisional",
     }
     LIBRARY_ALBUM_REQUIRED_FIELDS: ClassVar = set(LibraryAlbumRow.__struct_fields__)
     RELEASE_GROUP_REQUIRED_FIELDS: ClassVar = {
         "id", "title", "country", "date", "format", "track_count", "status",
         "in_library", "beets_album_id", "pipeline_status", "pipeline_id",
         "processing_owner", "pipeline_verified_lossless",
-        "pipeline_provisional",
+        "pipeline_provisional", "has_captured_history",
     }
     RELEASE_DETAIL_REQUIRED_FIELDS: ClassVar = {
         "id", "title", "tracks", "in_library", "beets_album_id",
         "pipeline_status", "pipeline_id", "processing_owner",
+        "has_captured_history", "pipeline_verified_lossless",
+        "pipeline_provisional",
     }
     RELEASE_TRACK_REQUIRED_FIELDS: ClassVar = {
         "disc_number", "track_number", "title", "length_seconds",
@@ -64,12 +68,15 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         "release_group_id", "title", "primary_type", "first_date",
         "release_ids", "pressings", "track_count", "unique_track_count",
         "covered_by", "library_status", "pipeline_status", "pipeline_id",
-        "processing_owner", "tracks",
+        "processing_owner", "has_captured_history",
+        "pipeline_verified_lossless", "pipeline_provisional", "tracks",
     }
     DISAMBIGUATE_PRESSING_REQUIRED_FIELDS: ClassVar = {
         "release_id", "title", "date", "format", "track_count", "country",
         "recording_ids", "in_library", "beets_album_id", "pipeline_status",
         "pipeline_id", "processing_owner",
+        "has_captured_history", "pipeline_verified_lossless",
+        "pipeline_provisional",
     }
     DISAMBIGUATE_TRACK_REQUIRED_FIELDS: ClassVar = {
         "recording_id", "title", "unique", "also_on",
@@ -78,6 +85,14 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
     ARTIST_ID = "664c3e0e-42d8-48c1-b209-1efca19c0325"
     RELEASE_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
     RG_ID = "11111111-1111-1111-1111-111111111111"
+
+    def setUp(self) -> None:
+        super().setUp()
+        import web.server as srv
+
+        patcher = patch.object(srv, "_beets", FakeBeetsDB())
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_artist_search_contract(self):
         with patch("web.server.mb_api") as mock_mb:
@@ -632,9 +647,12 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(rg["pipeline_status"], "wanted")
         self.assertEqual(rg["pipeline_id"], 8838)
         self.assertIsNone(rg["processing_owner"])
+        self.assertFalse(rg["has_captured_history"])
+        self.assertFalse(rg["pipeline_verified_lossless"])
+        self.assertFalse(rg["pipeline_provisional"])
 
-    def test_artist_release_groups_pipeline_overlay_skips_replaced(self):
-        """Replaced rows are frozen audit — they must not badge the rg."""
+    def test_artist_release_groups_pipeline_overlay_keeps_replaced_history(self):
+        """Replaced rows remain frozen, visible exact acquisition history."""
         release_group = {
             "id": self.RG_ID, "title": "Old Album", "type": "Album",
             "source": "mb", "identity_kind": "work",
@@ -650,7 +668,11 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             mb_artist_id=self.ARTIST_ID,
             mb_release_group_id=self.RG_ID,
             status="replaced",
+            has_captured_history=True,
+            verified_lossless=True,
+            provisional_lossless=False,
         ))
+        self.db.log_download(77, outcome="success")
         with patch("web.server.mb_api") as mock_mb, \
                 patch("web.server.get_library_artist", return_value=[]):
             mock_mb.get_artist_release_groups.return_value = _catalogue(
@@ -661,7 +683,12 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             )
 
         self.assertEqual(status, 200)
-        self.assertIsNone(data["release_groups"][0].get("pipeline_status"))
+        row = data["release_groups"][0]
+        self.assertEqual(row["pipeline_status"], "replaced")
+        self.assertEqual(row["pipeline_id"], 77)
+        self.assertTrue(row["has_captured_history"])
+        self.assertFalse(row["pipeline_verified_lossless"])
+        self.assertFalse(row["pipeline_provisional"])
 
     def test_artist_compare_ungrouped_release_pipeline_overlay(self):
         """An ungrouped release row (its id IS the release id) carries
@@ -906,7 +933,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
                 patch("web.server.check_beets_library", return_value={self.RELEASE_ID}), \
                 patch("web.server._beets_db", return_value=beets_db), \
                 patch("web.server.check_pipeline",
-                      return_value={self.RELEASE_ID: {"id": 42, "status": "wanted", "verified_lossless": False, "provisional_lossless": False}}):
+                      return_value={self.RELEASE_ID: {"id": 42, "status": "wanted", "has_captured_history": True, "verified_lossless": False, "provisional_lossless": True, "processing_owner": None}}):
             mock_mb.get_release_group_releases.return_value = {"releases": [release]}
             status, data = self._get(f"/api/release-group/{self.RG_ID}")
 
@@ -918,11 +945,16 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(data["releases"][0]["library_min_bitrate"], 194)
         self.assertEqual(data["releases"][0]["library_avg_bitrate"], 288)
         self.assertEqual(data["releases"][0]["library_rank"], "transparent")
+        self.assertTrue(data["releases"][0]["has_captured_history"])
+        self.assertFalse(data["releases"][0]["pipeline_verified_lossless"])
+        self.assertTrue(data["releases"][0]["pipeline_provisional"])
 
     def test_release_detail_contract(self):
         release = {
             "id": self.RELEASE_ID,
             "title": "Test Album",
+            "artist_name": "Test Artist",
+            "artist_id": self.ARTIST_ID,
             "tracks": [
                 {
                     "disc_number": 1,
@@ -957,6 +989,8 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(data["library_min_bitrate"], 194)
         self.assertEqual(data["library_avg_bitrate"], 288)
         self.assertEqual(data["library_rank"], "transparent")
+        self.assertEqual(data["pipeline_status"], "wanted")
+        self.assertEqual(data["pipeline_id"], 42)
         self.assertIsNone(data["processing_owner"])
 
     def test_release_detail_includes_beets_tracks_when_in_library(self):
@@ -966,6 +1000,8 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         release = {
             "id": self.RELEASE_ID,
             "title": "Test Album",
+            "artist_name": "Test Artist",
+            "artist_id": self.ARTIST_ID,
             "tracks": [{"disc_number": 1, "track_number": 1,
                         "title": "Track", "length_seconds": 180}],
         }
@@ -998,6 +1034,8 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         mock_discogs_get.return_value = {
             "id": "12856590",
             "title": "Discogs Album",
+            "artist_name": "Test Artist",
+            "artist_id": "3840",
             "tracks": [
                 {
                     "disc_number": 1,
@@ -1055,7 +1093,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
                 patch("web.server.check_beets_library", return_value={"21491"}), \
                 patch("web.server._beets_db", return_value=beets_db), \
                 patch("web.server.check_pipeline",
-                      return_value={"21491": {"id": 42, "status": "wanted", "verified_lossless": False, "provisional_lossless": False}}):
+                      return_value={"21491": {"id": 42, "status": "wanted", "has_captured_history": True, "verified_lossless": False, "provisional_lossless": False, "processing_owner": None}}):
             status, data = self._get("/api/release-group/0021491")
 
         self.assertEqual(status, 200)
@@ -1116,7 +1154,7 @@ class _FailingArtistRequestsDB(FakePipelineDB):
         self,
         artist_name: str,
         mb_artist_id: str = "",
-    ) -> list[AlbumRequestRow]:
+    ) -> list[ArtistRequestRow]:
         raise RuntimeError("downstream artist overlay unavailable")
 
 
@@ -1138,6 +1176,231 @@ class TestArtistFailureBoundary(_FakeDbWebServerCase):
         self.assertNotIn("retryable", data)
 
 
+class TestBeetsProjectionFailureBoundary(_FakeDbWebServerCase):
+    """Unavailable Beets authority is never projected as empty holdings."""
+
+    ARTIST_ID = "77777777-7777-4777-8777-777777777777"
+    RELEASE_ID = "88888888-8888-4888-8888-888888888888"
+    RG_ID = "99999999-9999-4999-8999-999999999999"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.db.seed_request(make_request_row(
+            id=90,
+            artist_name="Boundary Archivist",
+            album_title="Captured Album",
+            mb_artist_id=self.ARTIST_ID,
+            mb_release_id=self.RELEASE_ID,
+            mb_release_group_id=self.RG_ID,
+            status="wanted",
+            has_captured_history=True,
+            verified_lossless=True,
+            provisional_lossless=False,
+        ))
+
+    def _assert_failed_without_request_mutation(
+        self,
+        status: int,
+        data: dict[str, object],
+    ) -> None:
+        self.assertEqual(status, 500)
+        self.assertEqual(data, {"error": "Internal server error"})
+        request = self.db.get_request(90)
+        assert request is not None
+        self.assertEqual(request["status"], "wanted")
+
+    def test_library_artist_failure_is_logged_and_not_rendered_as_missing(self) -> None:
+        with patch(
+            "web.server.get_library_artist",
+            side_effect=OSError("synthetic Beets read failure"),
+        ), self.assertLogs("cratedigger-web", level="ERROR") as logs:
+            status, data = self._get(
+                f"/api/library/artist?name=Boundary%20Archivist&mbid={self.ARTIST_ID}"
+            )
+
+        self._assert_failed_without_request_mutation(status, data)
+        self.assertIn("GET /api/library/artist failed", "\n".join(logs.output))
+        self.assertNotIn("albums", data)
+
+    def test_mb_and_discogs_artist_catalogues_propagate_beets_failure(self) -> None:
+        mb_row = {
+            "id": self.RG_ID,
+            "title": "Captured Album",
+            "type": "Album",
+            "source": "mb",
+            "identity_kind": "work",
+            "primary_types": ["Album"],
+            "secondary_types": [],
+            "format_qualifiers": [],
+            "provenance": ["ordinary"],
+            "first_release_date": "2001",
+            "artist_credit": "Boundary Archivist",
+            "primary_artist_id": self.ARTIST_ID,
+            "is_appearance": False,
+        }
+        with self.subTest(source="mb"), \
+                patch("web.server.mb_api") as mock_mb, \
+                patch(
+                    "web.server.get_library_artist",
+                    side_effect=OSError("synthetic Beets read failure"),
+                ):
+            mock_mb.get_artist_release_groups.return_value = _catalogue([mb_row])
+            status, data = self._get(
+                f"/api/artist/{self.ARTIST_ID}?name=Boundary%20Archivist"
+            )
+            self._assert_failed_without_request_mutation(status, data)
+
+        discogs_row = dict(mb_row)
+        discogs_row.update({
+            "id": "21491",
+            "source": "discogs",
+            "primary_artist_id": "3840",
+        })
+        with self.subTest(source="discogs"), \
+                patch("web.routes.browse.discogs_api") as mock_discogs, \
+                patch(
+                    "web.server.get_library_artist",
+                    side_effect=OSError("synthetic Beets read failure"),
+                ):
+            mock_discogs.get_artist_name.return_value = "Boundary Archivist"
+            mock_discogs.get_artist_releases.return_value = _catalogue(
+                [discogs_row]
+            )
+            status, data = self._get(
+                "/api/discogs/artist/3840?name=Boundary%20Archivist"
+            )
+            self._assert_failed_without_request_mutation(status, data)
+
+    def test_compare_catalogue_propagates_beets_failure(self) -> None:
+        with patch("web.server.mb_api") as mock_mb, \
+                patch("web.routes.browse.discogs_api") as mock_discogs, \
+                patch(
+                    "web.server.get_library_artist",
+                    side_effect=OSError("synthetic Beets read failure"),
+                ):
+            mock_mb.search_artists.return_value = [{
+                "id": self.ARTIST_ID,
+                "name": "Boundary Archivist",
+            }]
+            mock_mb.get_artist_release_groups.return_value = []
+            mock_mb.get_artist_name.return_value = "Boundary Archivist"
+            mock_discogs.search_artists.return_value = []
+            mock_discogs.get_artist_releases.return_value = []
+            mock_discogs.get_artist_name.return_value = ""
+            status, data = self._get(
+                "/api/artist/compare?name=Boundary%20Archivist"
+            )
+
+        self._assert_failed_without_request_mutation(status, data)
+
+    def test_disambiguation_propagates_beets_failure(self) -> None:
+        release = {
+            "id": self.RELEASE_ID,
+            "title": "Captured Album",
+            "date": "2001-01-01",
+            "country": "AU",
+            "status": "Official",
+            "release-group": {
+                "id": self.RG_ID,
+                "title": "Captured Album",
+                "primary-type": "Album",
+                "secondary-types": [],
+            },
+            "media": [{
+                "position": 1,
+                "format": "CD",
+                "track-count": 1,
+                "tracks": [{
+                    "position": 1,
+                    "number": "1",
+                    "title": "Track",
+                    "recording": {"id": "rec-boundary", "title": "Track"},
+                }],
+            }],
+        }
+        with patch("web.server.mb_api") as mock_mb, \
+                patch(
+                    "web.server.check_beets_library",
+                    side_effect=OSError("synthetic Beets read failure"),
+                ):
+            mock_mb.get_artist_releases_with_recordings.return_value = [release]
+            mock_mb.get_artist_name.return_value = "Boundary Archivist"
+            status, data = self._get(
+                f"/api/artist/{self.ARTIST_ID}/disambiguate"
+            )
+
+        self._assert_failed_without_request_mutation(status, data)
+
+    def test_release_group_and_master_propagate_beets_failure(self) -> None:
+        row = {
+            "id": self.RELEASE_ID,
+            "title": "Captured Album",
+            "country": "AU",
+            "date": "2001",
+            "format": "CD",
+            "track_count": 1,
+            "status": "Official",
+        }
+        with self.subTest(source="mb"), \
+                patch("web.server.mb_api") as mock_mb, \
+                patch(
+                    "web.server.check_beets_library",
+                    side_effect=OSError("synthetic Beets read failure"),
+                ):
+            mock_mb.get_release_group_releases.return_value = {"releases": [row]}
+            status, data = self._get(f"/api/release-group/{self.RG_ID}")
+            self._assert_failed_without_request_mutation(status, data)
+
+        discogs_row = dict(row)
+        discogs_row["id"] = "83182"
+        with self.subTest(source="discogs"), \
+                patch("web.routes.browse.discogs_api") as mock_discogs, \
+                patch(
+                    "web.server.check_beets_library",
+                    side_effect=OSError("synthetic Beets read failure"),
+                ):
+            mock_discogs.get_master_releases.return_value = {
+                "title": "Captured Album",
+                "releases": [discogs_row],
+            }
+            status, data = self._get("/api/discogs/master/21491")
+            self._assert_failed_without_request_mutation(status, data)
+
+    def test_direct_mb_and_discogs_releases_propagate_beets_failure(self) -> None:
+        mb_release = {
+            "id": self.RELEASE_ID,
+            "title": "Captured Album",
+            "artist_name": "Boundary Archivist",
+            "artist_id": self.ARTIST_ID,
+            "tracks": [],
+        }
+        with self.subTest(source="mb"), \
+                patch("web.server.mb_api") as mock_mb, \
+                patch(
+                    "web.server.check_beets_library",
+                    side_effect=OSError("synthetic Beets read failure"),
+                ):
+            mock_mb.get_release.return_value = mb_release
+            status, data = self._get(f"/api/release/{self.RELEASE_ID}")
+            self._assert_failed_without_request_mutation(status, data)
+
+        with self.subTest(source="discogs"), \
+                patch("web.routes.browse.discogs_api") as mock_discogs, \
+                patch(
+                    "web.server.check_beets_library",
+                    side_effect=OSError("synthetic Beets read failure"),
+                ):
+            mock_discogs.get_release.return_value = {
+                "id": "83182",
+                "title": "Captured Album",
+                "artist_name": "Boundary Archivist",
+                "artist_id": "3840",
+                "tracks": [],
+            }
+            status, data = self._get("/api/discogs/release/83182")
+            self._assert_failed_without_request_mutation(status, data)
+
+
 class TestDiscogsBrowseRouteContracts(_FakeDbWebServerCase):
     """Contract tests for Discogs browse routes."""
 
@@ -1148,12 +1411,14 @@ class TestDiscogsBrowseRouteContracts(_FakeDbWebServerCase):
     DISCOGS_MASTER_RELEASE_REQUIRED_FIELDS: ClassVar = {
         "id", "title", "country", "format",
         "in_library", "beets_album_id", "pipeline_status", "pipeline_id",
-        "processing_owner",
+        "processing_owner", "has_captured_history",
+        "pipeline_verified_lossless", "pipeline_provisional",
     }
     DISCOGS_RELEASE_REQUIRED_FIELDS: ClassVar = {
         "id", "title", "artist_name", "tracks",
         "in_library", "beets_album_id", "pipeline_status", "pipeline_id",
-        "processing_owner",
+        "processing_owner", "has_captured_history",
+        "pipeline_verified_lossless", "pipeline_provisional",
     }
     DISCOGS_ARTIST_REQUIRED_FIELDS: ClassVar = {
         "artist_id", "artist_name", "release_groups", "ungrouped_releases",
@@ -1162,8 +1427,17 @@ class TestDiscogsBrowseRouteContracts(_FakeDbWebServerCase):
         "id", "title", "type", "source", "identity_kind", "primary_types",
         "secondary_types", "format_qualifiers", "provenance",
         "first_release_date", "artist_credit", "primary_artist_id",
-        "is_appearance",
+        "is_appearance", "has_captured_history",
+        "pipeline_verified_lossless", "pipeline_provisional",
     }
+
+    def setUp(self) -> None:
+        super().setUp()
+        import web.server as srv
+
+        patcher = patch.object(srv, "_beets", FakeBeetsDB())
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_discogs_routes_return_503_mirror_required_when_base_unset(self):
         """R13: no mirror configured -> a clear mirror-required 503 from the
@@ -1362,6 +1636,15 @@ class TestDiscogsBrowseRouteContracts(_FakeDbWebServerCase):
         beets_db = FakeBeetsDB()
         beets_db.set_album_ids_for_release("83182", [10])
         beets_db.set_mbid_detail("83182", {})
+        self.db.seed_request(make_request_row(
+            id=83,
+            mb_release_id=None,
+            discogs_release_id="83182",
+            artist_name="Radiohead",
+            album_title="OK Computer",
+            status="replaced",
+        ))
+        self.db.log_download(83, outcome="success")
         with patch("web.routes.browse.discogs_api") as mock_dg, \
                 patch("web.server.check_beets_library", return_value={"83182"}), \
                 patch("web.server._beets_db", return_value=beets_db):
@@ -1387,6 +1670,9 @@ class TestDiscogsBrowseRouteContracts(_FakeDbWebServerCase):
         _assert_required_fields(self, data, self.DISCOGS_RELEASE_REQUIRED_FIELDS,
                                 "discogs release detail")
         self.assertEqual(data["beets_album_id"], 10)
+        self.assertEqual(data["pipeline_status"], "replaced")
+        self.assertEqual(data["pipeline_id"], 83)
+        self.assertTrue(data["has_captured_history"])
 
 
 class TestSearchByIdResolveContract(_FakeDbWebServerCase):

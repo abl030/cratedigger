@@ -6765,6 +6765,7 @@ class TestFakeGetPipelineOverlay(unittest.TestCase):
             "id": 7, "status": "wanted",
             "search_filetype_override": "lossless",
             "target_format": None, "min_bitrate": 900,
+            "has_captured_history": False,
             "verified_lossless": False,
             "provisional_lossless": False,
             "processing_owner": None,

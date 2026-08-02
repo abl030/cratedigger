@@ -100,9 +100,20 @@ export const API = '';
 /**
  * Central pipeline status store. Maps normalized release ID to the exact
  * request projection, including the recorded processor owner when applicable.
+ * A local mutation cannot authoritatively recompute capture/proof facts, so
+ * the stored row explicitly invalidates them until the owning surface
+ * refetches. Null-status tombstones likewise prevent a deleted request from
+ * being combined with facts from the stale pre-delete row.
  * Updated by any mutation (add, remove, upgrade, delete).
  * All rendering code should check this before using stale API data.
- * @type {Map<string, {status: string|null, id: number|null, processing_owner: ProcessingOwnerProjection|null}>}
+ * @type {Map<string, {
+ *   status: string|null,
+ *   id: number|null,
+ *   processing_owner: ProcessingOwnerProjection|null,
+ *   has_captured_history: false,
+ *   pipeline_verified_lossless: false,
+ *   pipeline_provisional: false,
+ * }>}
  */
 export const pipelineStore = new Map();
 
@@ -132,15 +143,14 @@ export function updatePipelineStatus(
   const key = pipelineStoreKey(mbid);
   if (!key) return;
   // Update central store
-  if (status) {
-    pipelineStore.set(key, {
-      status,
-      id: pipelineId,
-      processing_owner: status === 'processing' ? processingOwner : null,
-    });
-  } else {
-    pipelineStore.delete(key);
-  }
+  pipelineStore.set(key, {
+    status,
+    id: status ? pipelineId : null,
+    processing_owner: status === 'processing' ? processingOwner : null,
+    has_captured_history: false,
+    pipeline_verified_lossless: false,
+    pipeline_provisional: false,
+  });
   // Any pipeline mutation (add / remove / upgrade / replace) may
   // shift which release-groups have an active row — invalidate the
   // Browse-search inverted Replace button cache so the next render

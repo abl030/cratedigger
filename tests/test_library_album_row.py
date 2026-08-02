@@ -35,6 +35,9 @@ def _valid_row_dict(**overrides: object) -> dict[str, object]:
         "processing_owner": None,
         "upgrade_queued": False,
         "library_rank": "transparent",
+        "has_captured_history": False,
+        "pipeline_verified_lossless": False,
+        "pipeline_provisional": False,
     }
     row.update(overrides)
     return row
@@ -102,6 +105,9 @@ class TestLibraryAlbumRow(unittest.TestCase):
         self.assertIsNone(row.pipeline_id)
         self.assertFalse(row.upgrade_queued)
         self.assertEqual(row.library_rank, "transparent")
+        self.assertFalse(row.has_captured_history)
+        self.assertFalse(row.pipeline_verified_lossless)
+        self.assertFalse(row.pipeline_provisional)
 
     def test_from_beets_album_with_pipeline_applies_overlay(self) -> None:
         row = LibraryAlbumRow.from_beets_album_with_pipeline(
@@ -133,6 +139,9 @@ class TestLibraryAlbumRow(unittest.TestCase):
                 },
                 "search_filetype_override": None,
                 "target_format": None,
+                "has_captured_history": True,
+                "verified_lossless": True,
+                "provisional_lossless": False,
             },
             rank_fn=lambda _fmt, _kbps: "transparent",
         )
@@ -143,6 +152,9 @@ class TestLibraryAlbumRow(unittest.TestCase):
         assert owner is not None
         self.assertEqual(owner.job_id, 9)
         self.assertFalse(row.upgrade_queued)
+        self.assertTrue(row.has_captured_history)
+        self.assertTrue(row.pipeline_verified_lossless)
+        self.assertFalse(row.pipeline_provisional)
 
     def test_from_beets_album_normalizes_discogs_frontend_id(self) -> None:
         row = LibraryAlbumRow.from_beets_album(
@@ -216,6 +228,9 @@ class TestLibraryAlbumRow(unittest.TestCase):
                 "created_at": datetime(2026, 4, 1, 3, 47, 54, tzinfo=UTC),
                 "search_filetype_override": None,
                 "target_format": None,
+                "has_captured_history": True,
+                "verified_lossless": False,
+                "provisional_lossless": True,
             },
             track_count=10,
         )
@@ -223,6 +238,9 @@ class TestLibraryAlbumRow(unittest.TestCase):
         self.assertEqual(row.mb_albumid, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
         self.assertEqual(row.source, "request")
         self.assertEqual(row.pipeline_id, 41)
+        self.assertTrue(row.has_captured_history)
+        self.assertFalse(row.pipeline_verified_lossless)
+        self.assertTrue(row.pipeline_provisional)
 
     def test_from_pipeline_request_owns_placeholder_fields(self) -> None:
         row = LibraryAlbumRow.from_pipeline_request(
@@ -242,6 +260,9 @@ class TestLibraryAlbumRow(unittest.TestCase):
                 "created_at": datetime(2026, 4, 1, 3, 47, 54, tzinfo=UTC),
                 "search_filetype_override": "flac",
                 "target_format": None,
+                "has_captured_history": True,
+                "verified_lossless": True,
+                "provisional_lossless": False,
             },
             track_count=10,
         )
@@ -256,6 +277,9 @@ class TestLibraryAlbumRow(unittest.TestCase):
         self.assertEqual(row.pipeline_id, 42)
         self.assertTrue(row.upgrade_queued)
         self.assertIsNone(row.library_rank)
+        self.assertTrue(row.has_captured_history)
+        self.assertTrue(row.pipeline_verified_lossless)
+        self.assertFalse(row.pipeline_provisional)
 
     def test_from_pipeline_request_defaults_missing_source_to_unknown(self) -> None:
         row = LibraryAlbumRow.from_pipeline_request(
@@ -275,6 +299,9 @@ class TestLibraryAlbumRow(unittest.TestCase):
                 "created_at": datetime(2026, 4, 1, 3, 47, 54, tzinfo=UTC),
                 "search_filetype_override": None,
                 "target_format": None,
+                "has_captured_history": False,
+                "verified_lossless": False,
+                "provisional_lossless": False,
             },
             track_count=10,
         )
@@ -332,6 +359,9 @@ class TestLibraryAlbumRow(unittest.TestCase):
                     "created_at": datetime(2026, 4, 1, 3, 47, 54, tzinfo=UTC),
                     "search_filetype_override": None,
                     "target_format": None,
+                    "has_captured_history": False,
+                    "verified_lossless": False,
+                    "provisional_lossless": False,
                 },
                 track_count=10,
             )
@@ -409,12 +439,18 @@ class TestLibraryAlbumRow(unittest.TestCase):
                 "status": "wanted",
                 "search_filetype_override": "flac",
                 "target_format": None,
+                "has_captured_history": False,
+                "verified_lossless": False,
+                "provisional_lossless": False,
             }
         )
 
         self.assertEqual(row.pipeline_status, "wanted")
         self.assertEqual(row.pipeline_id, 42)
         self.assertTrue(row.upgrade_queued)
+        self.assertFalse(row.has_captured_history)
+        self.assertFalse(row.pipeline_verified_lossless)
+        self.assertFalse(row.pipeline_provisional)
 
     def test_wire_boundary_rejects_wrong_field_type(self) -> None:
         with self.assertRaises(msgspec.ValidationError):

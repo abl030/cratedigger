@@ -42,6 +42,7 @@ if TYPE_CHECKING:
         SearchLogHistoryPage,
         WrongMatchCandidateRow,
     )
+    from lib.pipeline_db.rows import ArtistRequestRow
     from lib.quality import CandidateScore
 
 from lib import transitions
@@ -5952,44 +5953,49 @@ class FakePipelineDB:
         """Mirror of ``PipelineDB.get_pipeline_overlay`` — projects the
         overlay fields straight from seeded request rows (#445 item 2).
         Parity pinned by ``TestGetPipelineOverlay``."""
-        wanted = {str(m) for m in mbids}
+        musicbrainz_ids: set[str] = set()
+        discogs_ids: set[str] = set()
+        for raw_release_id in mbids:
+            normalized = normalize_release_id(raw_release_id)
+            if not normalized:
+                continue
+            identity = ReleaseIdentity.from_id(normalized)
+            if identity is not None and identity.source == "discogs":
+                discogs_ids.add(identity.release_id)
+            else:
+                musicbrainz_ids.add(normalized)
         out: dict[str, dict[str, Any]] = {}
         for r in self._requests.values():
-            raw = r.get("mb_release_id")
-            # Production's column is TEXT — compare and key by the str
-            # form (a None mbid must never stringify into a match).
-            if raw is None:
+            identity = ReleaseIdentity.from_fields(
+                r.get("mb_release_id"),
+                r.get("discogs_release_id"),
+            )
+            if identity is not None:
+                release_id = identity.release_id
+                matches = (
+                    release_id in musicbrainz_ids
+                    if identity.source == "musicbrainz"
+                    else release_id in discogs_ids
+                )
+            else:
+                release_id = normalize_release_id(r.get("mb_release_id"))
+                matches = bool(
+                    release_id and release_id in musicbrainz_ids)
+            if not matches:
                 continue
-            mbid = str(raw)
-            if mbid in wanted:
-                evidence = None
-                evidence_id = r.get("current_evidence_id")
-                if evidence_id is not None:
-                    evidence = self.load_album_quality_evidence_by_id(
-                        evidence_id)
-                verified = bool(
-                    evidence is not None
-                    and evidence.verified_lossless_proof is not None
-                )
-                provisional = bool(
-                    evidence is not None
-                    and not verified
-                    and evidence.v0_metric is not None
-                    and evidence.v0_metric.subject == "source"
-                )
-                out[mbid] = {
-                    "id": r["id"],
-                    "status": r.get("status"),
-                    "search_filetype_override":
-                        r.get("search_filetype_override"),
-                    "target_format": r.get("target_format"),
-                    "min_bitrate": r.get("min_bitrate"),
-                    "verified_lossless": verified,
-                    "provisional_lossless": provisional,
-                    "processing_owner": self._request_presentation_copy(
-                        r
-                    )["processing_owner"],
-                }
+            facts = self._capture_and_evidence_projection(r)
+            out[release_id] = {
+                "id": r["id"],
+                "status": r.get("status"),
+                "search_filetype_override":
+                    r.get("search_filetype_override"),
+                "target_format": r.get("target_format"),
+                "min_bitrate": r.get("min_bitrate"),
+                **facts,
+                "processing_owner": self._request_presentation_copy(
+                    r
+                )["processing_owner"],
+            }
         return out
 
     def get_log(self, limit: int = 50,
@@ -6210,6 +6216,48 @@ class FakePipelineDB:
             return None
         return self._evidence_by_id.get(evidence_id)
 
+    def _capture_and_evidence_projection(
+        self,
+        row: Mapping[str, object],
+    ) -> dict[str, bool]:
+        """Mirror the two specialized request SELECTs' correlated facts."""
+        request_id = row.get("id")
+        has_captured_history = row.get("status") == "imported"
+        if isinstance(request_id, int) and not isinstance(request_id, bool):
+            has_captured_history = has_captured_history or any(
+                entry.request_id == request_id
+                and entry.outcome in (
+                    "success", "force_import", "manual_import",
+                )
+                for entry in self.download_logs
+            )
+            has_captured_history = has_captured_history or any(
+                job.get("request_id") == request_id
+                and job.get("status") == "completed"
+                and job.get("job_type") in (
+                    "automation_import", "force_import", "manual_import",
+                    "youtube_import",
+                )
+                for job in self._import_jobs
+            )
+
+        evidence = self._current_evidence_for_request(row)
+        verified_lossless = bool(
+            evidence is not None
+            and evidence.verified_lossless_proof is not None
+        )
+        provisional_lossless = bool(
+            evidence is not None
+            and not verified_lossless
+            and evidence.v0_metric is not None
+            and evidence.v0_metric.subject == "source"
+        )
+        return {
+            "has_captured_history": has_captured_history,
+            "verified_lossless": verified_lossless,
+            "provisional_lossless": provisional_lossless,
+        }
+
     def _long_tail_projection(self, row: dict[str, Any]) -> dict[str, Any]:
         """Project a request row to the long-tail cohort SELECT shape.
 
@@ -6280,7 +6328,7 @@ class FakePipelineDB:
         self,
         artist_name: str,
         mb_artist_id: str = "",
-    ) -> list[AlbumRequestRow]:
+    ) -> list[ArtistRequestRow]:
         needle = artist_name.lower()
 
         def _legacy_name_match(row: dict[str, Any]) -> bool:
@@ -6300,10 +6348,16 @@ class FakePipelineDB:
         for row in self._requests.values():
             if mb_artist_id:
                 if row.get("mb_artist_id") == mb_artist_id or _legacy_name_match(row):
-                    rows.append(self._request_presentation_copy(row))
+                    projected = self._request_presentation_copy(row)
+                    projected.update(
+                        self._capture_and_evidence_projection(row))
+                    rows.append(projected)
             else:
                 if needle in str(row.get("artist_name") or "").lower():
-                    rows.append(self._request_presentation_copy(row))
+                    projected = self._request_presentation_copy(row)
+                    projected.update(
+                        self._capture_and_evidence_projection(row))
+                    rows.append(projected)
 
         def _sort_key(row: dict[str, Any]) -> tuple[bool, int, str]:
             year = row.get("year")
@@ -6312,7 +6366,7 @@ class FakePipelineDB:
             return (year is not None, year_num, title)
 
         rows.sort(key=_sort_key)
-        return cast("list[AlbumRequestRow]", rows)
+        return cast("list[ArtistRequestRow]", rows)
 
     # --- Track management ---
 
