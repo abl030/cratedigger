@@ -783,13 +783,16 @@
   beetsConfigReadOnlyPaths = missingOkExternalPath cfg.beets.runtime.configDir;
   beetsObserverReadOnlyPaths = beetsConfigReadOnlyPaths ++
     missingOkExternalPath cfg.beets.runtime.expectedStateFile;
-  beetsMutationWriteRoots = lib.unique (
+  beetsLibraryAuthorityRoots = lib.unique (
     presentExternalPath cfg.beets.runtime.expectedDirectory
     ++ optional
       (cfg.beets.runtime.expectedLibrary != null)
       (dirOf cfg.beets.runtime.expectedLibrary)
   );
-  beetsMutationWritePaths = map (path: "-${path}") beetsMutationWriteRoots;
+  beetsMainReadOnlyPaths = beetsObserverReadOnlyPaths
+    ++ map (path: "-${path}") beetsLibraryAuthorityRoots;
+  beetsMutationWritePaths =
+    map (path: "-${path}") beetsLibraryAuthorityRoots;
   webSandboxWritePaths = [
     cfg.stateDir
     cfg.processingDir
@@ -2324,7 +2327,7 @@ in {
         # pipeline's singleton lock; the application entrypoint owns Beets
         # validation and immutable configuration is never rendered here.
         ExecStartPre = lib.optional cfg.healthCheck.enable "+${slskdHealthCheck}" ++ [pipelinePreStartScript];
-        BindReadOnlyPaths = beetsObserverReadOnlyPaths;
+        BindReadOnlyPaths = beetsMainReadOnlyPaths;
         Environment = "PIPELINE_DB_DSN=${pipelineDsn}";
         ExecStart = "${cratediggerPkg}/bin/cratedigger";
         WorkingDirectory = cfg.stateDir;
