@@ -18,10 +18,14 @@
 
 import {
   __test__,
+  checkYoutube,
+  consoleStates,
   longTailDeleteRequest,
   longTailSetImported,
   longTailSetIntent,
 } from '../web/js/long_tail_console.js';
+import { loadLongTail, renderLongTailRow } from '../web/js/long_tail.js';
+import { renderPipeline, setPipelineView } from '../web/js/pipeline.js';
 import { state } from '../web/js/state.js';
 
 const {
@@ -314,6 +318,265 @@ console.log('consoleToken (resolver-settle) vs consoleIsStale (panel-paint)');
     'consoleIsStale: re-reading the CURRENT token (the resolver-settle pattern) is never stale');
 }
 
+console.log('current long-tail failure invalidates cached rows before navigation refetch');
+{
+  const oldDocument = globalThis.document;
+  const oldFetch = globalThis.fetch;
+  const oldWindow = globalThis.window;
+  const pipelineContent = { innerHTML: '' };
+  const longTailCalls = [];
+  let dashboardJsonRead;
+  const dashboardRead = new Promise(resolve => { dashboardJsonRead = resolve; });
+  let refetchJsonRead;
+  const refetchRead = new Promise(resolve => { refetchJsonRead = resolve; });
+  const cachedRow = {
+    id: 501,
+    artist_name: 'Cached Missing Artist',
+    album_title: 'Cached Action Album',
+    band: 'missing',
+    mb_release_id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+  };
+  const freshRow = {
+    id: 502,
+    artist_name: 'Fresh Artist',
+    album_title: 'Fresh Album',
+    band: 'good',
+    mb_release_id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+  };
+
+  globalThis.document = {
+    getElementById(id) {
+      return id === 'pipeline-content' ? pipelineContent : null;
+    },
+  };
+  globalThis.window = { renderPipeline };
+  globalThis.fetch = async (url) => {
+    const path = String(url);
+    if (path === '/api/pipeline/dashboard') {
+      return {
+        ok: true,
+        async json() {
+          dashboardJsonRead();
+          return {};
+        },
+      };
+    }
+    if (path !== '/api/pipeline/long-tail') {
+      throw new Error(`unexpected fetch ${path}`);
+    }
+    longTailCalls.push(path);
+    if (longTailCalls.length === 1) {
+      return { ok: true, async json() { return { results: [cachedRow] }; } };
+    }
+    if (longTailCalls.length === 2) {
+      return { ok: false, status: 503 };
+    }
+    return {
+      ok: true,
+      async json() {
+        refetchJsonRead();
+        return { results: [freshRow] };
+      },
+    };
+  };
+
+  try {
+    state.pipelineView = 'long-tail';
+    state.longTail = { rows: null, band: null, query: 'artist' };
+    consoleStates.clear();
+
+    await loadLongTail();
+    assertEqual(state.longTail.rows[0].id, cachedRow.id,
+      'successful load establishes the cached cohort');
+    assertEqual(state.longTail.band, 'missing',
+      'successful load selects the cached Missing band');
+    assert(pipelineContent.innerHTML.includes('Cached Missing Artist')
+      && pipelineContent.innerHTML.includes('window.toggleLongTailDetail(501)'),
+    'successful load paints the cached Missing row and its action control');
+    consoleOpen(consoleStates, cachedRow.id);
+    consoleCanStart(consoleStates, cachedRow.id, 'resolve');
+    consoleSetYoutubeResult(consoleStates, cachedRow.id, {
+      outcome: 'ok', youtube_releases: [{ browse_id: 'cached-action' }],
+    });
+
+    await loadLongTail();
+    assertEqual(state.longTail.rows, null,
+      'current failure invalidates the cached cohort');
+    assertEqual(state.longTail.band, null,
+      'current failure invalidates the selected cached band');
+    assertEqual(state.longTail.query, 'artist',
+      'current failure preserves the operator search query');
+    assertEqual(consoleStates.size, 0,
+      'current failure clears every cached console and action guard');
+    assert(pipelineContent.innerHTML.includes('Failed to load long tail'),
+      'current failure paints the explicit load error');
+    assert(!pipelineContent.innerHTML.includes('Cached Missing Artist')
+      && !pipelineContent.innerHTML.includes('window.toggleLongTailDetail(501)'),
+    'the error paint never retains cached Missing rows or action controls');
+
+    setPipelineView('dashboard');
+    await dashboardRead;
+    await Promise.resolve();
+    setPipelineView('long-tail');
+    await refetchRead;
+    await Promise.resolve();
+    await Promise.resolve();
+
+    assertEqual(longTailCalls.length, 3,
+      'returning to Long Tail after failure refetches instead of rendering cache');
+    assertEqual(state.longTail.rows[0].id, freshRow.id,
+      'the navigation refetch installs only the fresh cohort');
+    assert(pipelineContent.innerHTML.includes('Fresh Artist')
+      && !pipelineContent.innerHTML.includes('Cached Missing Artist'),
+    'the post-navigation paint contains the refetched row, never the failed cache');
+  } finally {
+    consoleStates.clear();
+    state.pipelineView = 'dashboard';
+    state.longTail = { rows: null, band: null, query: '' };
+    globalThis.document = oldDocument;
+    globalThis.fetch = oldFetch;
+    globalThis.window = oldWindow;
+  }
+}
+
+console.log('Discogs-only long-tail rows retain their exact source chip');
+{
+  const html = renderLongTailRow({
+    id: 503,
+    artist_name: 'Discogs Only Artist',
+    album_title: 'Discogs Only Album',
+    year: 1983,
+    band: 'missing',
+    in_flight_rescue: false,
+    track_count: 8,
+    mb_release_id: null,
+    discogs_release_id: '12856590',
+  });
+  assert(html.includes('Discogs'),
+    'a modern Discogs-only exact identity renders the Discogs chip');
+}
+
+console.log('long-tail failure settling after navigation never overwrites the new view');
+{
+  const oldDocument = globalThis.document;
+  const oldFetch = globalThis.fetch;
+  const oldWindow = globalThis.window;
+  const pipelineContent = { innerHTML: '' };
+  let resolveFailure;
+  const failureResponse = new Promise(resolve => { resolveFailure = resolve; });
+
+  globalThis.document = {
+    getElementById(id) {
+      return id === 'pipeline-content' ? pipelineContent : null;
+    },
+  };
+  globalThis.window = {};
+  globalThis.fetch = async () => failureResponse;
+
+  try {
+    state.pipelineView = 'long-tail';
+    state.longTail = {
+      rows: [{ id: 504, band: 'missing' }],
+      band: 'missing',
+      query: 'keep me',
+    };
+    const pending = loadLongTail();
+    state.pipelineView = 'dashboard';
+    pipelineContent.innerHTML = '<div>Dashboard remains active</div>';
+    resolveFailure({ ok: false, status: 503 });
+    await pending;
+
+    assertEqual(state.longTail.rows, null,
+      'the failed authority read invalidates cache even after navigation');
+    assert(pipelineContent.innerHTML.includes('Dashboard remains active'),
+      'the settled Long Tail failure does not paint over dashboard');
+    assert(!pipelineContent.innerHTML.includes('Failed to load long tail'),
+      'the inactive view receives no Long Tail error paint');
+  } finally {
+    state.pipelineView = 'dashboard';
+    state.longTail = { rows: null, band: null, query: '' };
+    globalThis.document = oldDocument;
+    globalThis.fetch = oldFetch;
+    globalThis.window = oldWindow;
+  }
+}
+
+console.log('current cohort failure fences pending console work but permits newer work');
+{
+  const oldDocument = globalThis.document;
+  const oldFetch = globalThis.fetch;
+  const oldWindow = globalThis.window;
+  const row = {
+    id: 505,
+    artist_name: 'Generation Artist',
+    album_title: 'Generation Album',
+    band: 'missing',
+    mb_release_id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+  };
+  let resolveOldYoutube;
+  const oldYoutubeResponse = new Promise(resolve => { resolveOldYoutube = resolve; });
+  let longTailCalls = 0;
+  let youtubeCalls = 0;
+
+  globalThis.document = { getElementById() { return null; } };
+  globalThis.window = {};
+  globalThis.fetch = async (url) => {
+    const path = String(url);
+    if (path === '/api/pipeline/long-tail') {
+      longTailCalls += 1;
+      if (longTailCalls === 1) return { ok: false, status: 503 };
+      return { ok: true, async json() { return { results: [row] }; } };
+    }
+    if (path === '/api/youtube-album') {
+      youtubeCalls += 1;
+      if (youtubeCalls === 1) return oldYoutubeResponse;
+      return {
+        status: 200,
+        async json() {
+          return { outcome: 'ok', youtube_releases: [{ yt_browse_id: 'fresh' }] };
+        },
+      };
+    }
+    throw new Error(`unexpected fetch ${path}`);
+  };
+
+  try {
+    state.pipelineView = 'long-tail';
+    state.longTail = { rows: [row], band: 'missing', query: '' };
+    consoleStates.clear();
+    consoleOpen(consoleStates, row.id);
+    const pendingOldResolver = checkYoutube(row.id);
+    await Promise.resolve();
+
+    await loadLongTail();
+    assertEqual(consoleStates.size, 0,
+      'the current failure clears the pending operation state');
+
+    resolveOldYoutube({
+      status: 200,
+      async json() {
+        return { outcome: 'ok', youtube_releases: [{ yt_browse_id: 'stale' }] };
+      },
+    });
+    await pendingOldResolver;
+    assertEqual(consoleStates.size, 0,
+      'the pre-failure resolver cannot recreate state after it settles');
+
+    await loadLongTail();
+    consoleOpen(consoleStates, row.id);
+    await checkYoutube(row.id);
+    assertEqual(consoleYoutubeResult(consoleStates, row.id).youtube_releases[0].yt_browse_id,
+      'fresh', 'an operation started in the new generation still settles normally');
+  } finally {
+    consoleStates.clear();
+    state.pipelineView = 'dashboard';
+    state.longTail = { rows: null, band: null, query: '' };
+    globalThis.document = oldDocument;
+    globalThis.fetch = oldFetch;
+    globalThis.window = oldWindow;
+  }
+}
+
 console.log('long-tail mutation adapters map typed processing conflicts to one row refresh');
 for (const scenario of [
   {
@@ -449,22 +712,27 @@ for (const scenario of [
 }
 
 // --- checkYoutube: no residual ConsoleState for a row with no identifier ---
-console.log('checkYoutube leaves no residual ConsoleState when mb_release_id is absent (#522)');
+console.log('checkYoutube leaves no residual ConsoleState when exact identity is absent (#522)');
 {
   const { state } = await import('../web/js/state.js');
   const { checkYoutube, consoleStates: liveConsoleStates } = await import('../web/js/long_tail_console.js');
 
-  // A worklist row with no mb_release_id (e.g. an unresolved legacy row) —
+  // A worklist row with neither exact release identity (e.g. an unresolved
+  // legacy row) —
   // checkYoutube must bail out before ever touching consoleStates, not
   // create-then-immediately-empty an entry that lingers until the next
   // consolePrune.
-  state.longTail = { rows: [{ id: 424242, mb_release_id: '' }], band: null, query: '' };
+  state.longTail = {
+    rows: [{ id: 424242, mb_release_id: '', discogs_release_id: '' }],
+    band: null,
+    query: '',
+  };
   assertEqual(liveConsoleStates.has(424242), false,
     'sanity: no ConsoleState entry exists for this id before calling checkYoutube');
 
   await checkYoutube(424242);
   assertEqual(liveConsoleStates.has(424242), false,
-    'checkYoutube must not create a ConsoleState entry for a row with no mb_release_id');
+    'checkYoutube must not create state for a row with no exact identity');
 
   // Same for an id with no cohort row at all (consoleRow returns null).
   await checkYoutube(999424242);
@@ -474,19 +742,37 @@ console.log('checkYoutube leaves no residual ConsoleState when mb_release_id is 
   state.longTail = { rows: null, band: null, query: '' };
 }
 
-console.log('checkYoutube posts the complete resolver body');
-{
+console.log('checkYoutube posts the complete exact MB/Discogs resolver body');
+for (const scenario of [
+  {
+    source: 'musicbrainz',
+    requestId: 434343,
+    mb_release_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+    discogs_release_id: null,
+    identifier: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+  },
+  {
+    source: 'discogs',
+    requestId: 434344,
+    mb_release_id: null,
+    discogs_release_id: '12856590',
+    identifier: '12856590',
+  },
+]) {
   const { state } = await import('../web/js/state.js');
   const {
     checkYoutube,
     consoleStates: liveConsoleStates,
   } = await import('../web/js/long_tail_console.js');
-  const requestId = 434343;
-  const identifier = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+  const { requestId, identifier } = scenario;
   const fetchCalls = [];
   const originalFetch = globalThis.fetch;
   state.longTail = {
-    rows: [{ id: requestId, mb_release_id: identifier }],
+    rows: [{
+      id: requestId,
+      mb_release_id: scenario.mb_release_id,
+      discogs_release_id: scenario.discogs_release_id,
+    }],
     band: null,
     query: '',
   };
@@ -510,7 +796,8 @@ console.log('checkYoutube posts the complete resolver body');
     state.longTail = { rows: null, band: null, query: '' };
   }
 
-  assertEqual(fetchCalls.length, 1, 'resolver click sends exactly one request');
+  assertEqual(fetchCalls.length, 1,
+    `${scenario.source} resolver click sends exactly one request`);
   assertEqual(fetchCalls[0].url, '/api/youtube-album',
     'resolver click targets the canonical route without query parameters');
   assertEqual(fetchCalls[0].options.method, 'POST',
@@ -520,7 +807,7 @@ console.log('checkYoutube posts the complete resolver body');
   assertEqual(fetchCalls[0].options.body, JSON.stringify({
     identifier,
     refresh: false,
-  }), 'resolver click sends identifier and refresh in the JSON body');
+  }), `${scenario.source} resolver click sends its exact identifier and refresh`);
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

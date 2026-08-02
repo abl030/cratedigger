@@ -12,6 +12,7 @@ from web.library_album_detail_service import (
     build_library_album_detail,
     load_library_album_detail,
 )
+from web.library_album_row import AmbiguousLibraryRequestAttachmentError
 
 RELEASE_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 
@@ -350,7 +351,141 @@ class TestLibraryAlbumDetailService(unittest.TestCase):
         self.assertEqual(detail.pipeline_id, 55)
         self.assertEqual(detail.download_history[0].soulseek_username, "discogs-user")
 
-    def test_load_library_album_detail_preserves_unknown_release_ids(self) -> None:
+    def test_dual_tagged_detail_keeps_exact_discogs_request_identity_and_history(
+        self,
+    ) -> None:
+        fake_db = FakePipelineDB()
+        fake_db.seed_request(make_request_row(
+            id=55,
+            mb_release_id=None,
+            discogs_release_id="12856590",
+            artist_name="Corrected Artist",
+            album_title="Corrected Discogs Pressing",
+            source="request",
+            status="wanted",
+            min_bitrate=245,
+        ))
+        fake_db.log_download(
+            55,
+            outcome="success",
+            soulseek_username="discogs-owner",
+            beets_scenario="strong_match",
+            actual_filetype="mp3",
+            actual_min_bitrate=245,
+        )
+        lookup = _StubLibraryLookup(_beets_detail(
+            mb_albumid=RELEASE_ID,
+            discogs_albumid="12856590",
+        ))
+
+        detail = load_library_album_detail(
+            library_lookup=lookup,
+            pipeline_db=fake_db,
+            album_id=7,
+        )
+
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertEqual(detail.mb_albumid, "12856590")
+        self.assertEqual(detail.source, "discogs")
+        self.assertEqual(detail.pipeline_id, 55)
+        self.assertEqual(detail.pipeline_status, "wanted")
+        self.assertEqual(detail.pipeline_min_bitrate, 245)
+        self.assertEqual(len(detail.download_history), 1)
+        self.assertEqual(detail.download_history[0].request_id, 55)
+        self.assertEqual(
+            detail.download_history[0].soulseek_username,
+            "discogs-owner",
+        )
+
+    def test_dual_tagged_detail_rejects_two_exact_request_attachments(self) -> None:
+        fake_db = FakePipelineDB()
+        fake_db.seed_request(make_request_row(
+            id=42,
+            mb_release_id=RELEASE_ID,
+            discogs_release_id=None,
+            artist_name="Test Artist",
+            album_title="Test Album",
+            status="wanted",
+        ))
+        fake_db.seed_request(make_request_row(
+            id=55,
+            mb_release_id=None,
+            discogs_release_id="12856590",
+            artist_name="Test Artist",
+            album_title="Test Album",
+            status="wanted",
+        ))
+
+        with self.assertRaisesRegex(
+            AmbiguousLibraryRequestAttachmentError,
+            "musicbrainz.*discogs",
+        ):
+            load_library_album_detail(
+                library_lookup=_StubLibraryLookup(_beets_detail(
+                    mb_albumid=RELEASE_ID,
+                    discogs_albumid="12856590",
+                )),
+                pipeline_db=fake_db,
+                album_id=7,
+            )
+
+    def test_detail_rejects_duplicate_same_identity_requests(self) -> None:
+        fake_db = FakePipelineDB()
+        for request_id in (55, 56):
+            fake_db.seed_request(make_request_row(
+                id=request_id,
+                mb_release_id=None,
+                discogs_release_id="12856590",
+                artist_name="Test Artist",
+                album_title="Test Album",
+                status="wanted",
+            ))
+
+        with self.assertRaises(AmbiguousLibraryRequestAttachmentError) as raised:
+            load_library_album_detail(
+                library_lookup=_StubLibraryLookup(_beets_detail(
+                    mb_albumid=None,
+                    discogs_albumid="12856590",
+                )),
+                pipeline_db=fake_db,
+                album_id=7,
+            )
+
+        self.assertEqual(raised.exception.request_ids, (55, 56))
+
+    def test_detail_rejects_modern_plus_legacy_discogs_requests(self) -> None:
+        fake_db = FakePipelineDB()
+        fake_db.seed_request(make_request_row(
+            id=55,
+            mb_release_id=None,
+            discogs_release_id="12856590",
+            artist_name="Test Artist",
+            album_title="Test Album",
+            status="wanted",
+        ))
+        fake_db.seed_request(make_request_row(
+            id=56,
+            mb_release_id="12856590",
+            discogs_release_id=None,
+            artist_name="Test Artist",
+            album_title="Test Album",
+            status="wanted",
+        ))
+
+        with self.assertRaises(AmbiguousLibraryRequestAttachmentError) as raised:
+            load_library_album_detail(
+                library_lookup=_StubLibraryLookup(_beets_detail(
+                    mb_albumid=None,
+                    discogs_albumid="12856590",
+                )),
+                pipeline_db=fake_db,
+                album_id=7,
+            )
+
+        self.assertEqual(raised.exception.request_ids, (55, 56))
+
+    def test_load_library_album_detail_keeps_unknown_release_untracked(self) -> None:
         fake_db = FakePipelineDB()
         fake_db.seed_request(make_request_row(
             id=77,
@@ -377,9 +512,9 @@ class TestLibraryAlbumDetailService(unittest.TestCase):
         assert detail is not None
         self.assertEqual(detail.mb_albumid, "fixture-release-1")
         self.assertEqual(detail.source, "unknown")
-        self.assertEqual(detail.pipeline_id, 77)
+        self.assertIsNone(detail.pipeline_id)
 
-    def test_load_library_album_detail_prefers_mb_albumid_for_unknown_legacy_ids(self) -> None:
+    def test_load_library_album_detail_keeps_primary_unknown_identity_untracked(self) -> None:
         fake_db = FakePipelineDB()
         fake_db.seed_request(make_request_row(
             id=90,
@@ -414,7 +549,7 @@ class TestLibraryAlbumDetailService(unittest.TestCase):
         self.assertIsNotNone(detail)
         assert detail is not None
         self.assertEqual(detail.mb_albumid, "fixture-mb-id")
-        self.assertEqual(detail.pipeline_id, 90)
+        self.assertIsNone(detail.pipeline_id)
 
     def test_load_library_album_detail_preserves_string_history_json_blobs(self) -> None:
         fake_db = FakePipelineDB()

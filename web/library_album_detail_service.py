@@ -13,13 +13,10 @@ from typing import TYPE_CHECKING, Protocol, TypeGuard
 
 import msgspec
 
-from lib.destructive_release_service import (
-    SupportsReleaseLookupDB,
-    resolve_pipeline_request,
-)
 from lib.json_narrow import is_object_list as _is_object_list
 from lib.pipeline_db._shared import ProcessingOwnerProjection
 from lib.release_identity import (
+    ReleaseIdentity,
     detect_release_source,
     frontend_release_id,
     normalize_release_id,
@@ -28,9 +25,10 @@ from web.download_history_view import (
     DownloadHistoryViewRow,
     build_download_history_rows,
 )
+from web.library_album_row import select_exact_library_request_attachment
 
 if TYPE_CHECKING:
-    from lib.pipeline_db.rows import DownloadLogWithEvidenceRow
+    from lib.pipeline_db.rows import ArtistRequestRow, DownloadLogWithEvidenceRow
 
 
 class SupportsLibraryAlbumDetailLookup(Protocol):
@@ -41,10 +39,15 @@ class SupportsLibraryAlbumDetailLookup(Protocol):
 
 
 class SupportsLibraryAlbumDetailPipelineDB(
-    SupportsReleaseLookupDB,
     Protocol,
 ):
     """Pipeline DB surface needed for library album detail overlays."""
+
+    def list_library_request_candidates(
+        self,
+        release_ids: list[str],
+    ) -> list[ArtistRequestRow]:
+        ...
 
     def get_download_history(
         self, request_id: int,
@@ -196,8 +199,26 @@ def build_library_album_detail(
     detail_row: Mapping[str, object],
     pipeline_request: Mapping[str, object] | None,
     download_history: Sequence[Mapping[str, object]],
+    attached_identity: ReleaseIdentity | None = None,
 ) -> LibraryAlbumDetail:
     """Build the owned library-detail contract from raw beets + pipeline rows."""
+    observation_identities = ReleaseIdentity.all_from_observation_fields(
+        detail_row.get("mb_albumid"),
+        detail_row.get("discogs_albumid"),
+    )
+    effective_attachment = attached_identity
+    if pipeline_request is not None and effective_attachment is None:
+        effective_attachment = ReleaseIdentity.from_strict_fields(
+            pipeline_request.get("mb_release_id"),
+            pipeline_request.get("discogs_release_id"),
+        )
+    if pipeline_request is None:
+        if effective_attachment is not None:
+            raise ValueError("library detail attachment has no pipeline request")
+    elif effective_attachment not in observation_identities:
+        raise ValueError(
+            "attached pipeline identity is not observed on Beets album"
+        )
     tracks = [
         msgspec.convert(
             {
@@ -221,9 +242,17 @@ def build_library_album_detail(
         )
         for track in _detail_track_rows(detail_row)
     ]
-    frontend_id = _detail_release_id(detail_row)
+    frontend_id = (
+        effective_attachment.release_id
+        if effective_attachment is not None
+        else _detail_release_id(detail_row)
+    )
     raw_formats = str(detail_row.get("formats") or "")
-    source = str(detail_row.get("source") or detect_release_source(frontend_id))
+    source = (
+        effective_attachment.source
+        if effective_attachment is not None
+        else str(detail_row.get("source") or detect_release_source(frontend_id))
+    )
     history_items = build_download_history_rows(download_history)
     return msgspec.convert(
         {
@@ -295,22 +324,41 @@ def load_library_album_detail(
     if detail is None:
         return None
 
-    release_id = _detail_release_id(detail)
-    pipeline_request = (
-        resolve_pipeline_request(
-            pipeline_db,
-            release_id=release_id or "",
-        )
-        if release_id
-        else None
+    observation_identities = ReleaseIdentity.all_from_observation_fields(
+        detail.get("mb_albumid"),
+        detail.get("discogs_albumid"),
     )
+    requests_by_identity: dict[
+        tuple[str, str],
+        list[Mapping[str, object]],
+    ] = {}
+    if pipeline_db is not None:
+        candidates = pipeline_db.list_library_request_candidates([
+            identity.release_id for identity in observation_identities
+        ])
+        observed_keys = {identity.key for identity in observation_identities}
+        for request in candidates:
+            request_identity = ReleaseIdentity.from_strict_fields(
+                request.get("mb_release_id"),
+                request.get("discogs_release_id"),
+            )
+            if request_identity is not None and request_identity.key in observed_keys:
+                requests_by_identity.setdefault(request_identity.key, []).append(
+                    request
+                )
+    attachment = select_exact_library_request_attachment(
+        observation_identities,
+        requests_by_identity,
+    )
+    pipeline_request = attachment.request if attachment is not None else None
     history = (
-        pipeline_db.get_download_history(int(pipeline_request["id"]))
-        if pipeline_db is not None and pipeline_request is not None
+        pipeline_db.get_download_history(attachment.request_id)
+        if pipeline_db is not None and attachment is not None
         else []
     )
     return build_library_album_detail(
         detail_row=detail,
         pipeline_request=pipeline_request,
         download_history=history,
+        attached_identity=attachment.identity if attachment is not None else None,
     )

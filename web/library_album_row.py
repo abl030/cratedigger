@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 
 import msgspec
@@ -11,7 +12,6 @@ from lib.pipeline_db._shared import ProcessingOwnerProjection
 from lib.release_identity import (
     ReleaseIdentity,
     detect_release_source,
-    frontend_release_id,
 )
 
 
@@ -60,6 +60,61 @@ def _pipeline_facts(
         _pipeline_fact(row, "verified_lossless"),
         _pipeline_fact(row, "provisional_lossless"),
     )
+
+
+@dataclass(frozen=True)
+class ExactLibraryRequestAttachment:
+    """One exact request selected for a Beets library observation."""
+
+    identity: ReleaseIdentity
+    request: Mapping[str, object]
+
+    @property
+    def request_id(self) -> int:
+        request_id = self.request.get("id")
+        if not isinstance(request_id, int):
+            raise TypeError(
+                "exact library request attachment must carry an int id, "
+                f"got {type(request_id).__name__}"
+            )
+        return request_id
+
+
+class AmbiguousLibraryRequestAttachmentError(ValueError):
+    """More than one exact request identity matches one Beets album."""
+
+    def __init__(self, matches: tuple[ExactLibraryRequestAttachment, ...]) -> None:
+        self.matches = matches
+        self.identities = tuple(match.identity for match in matches)
+        self.request_ids = tuple(match.request_id for match in matches)
+        labels = ", ".join(
+            f"{identity.source}:{identity.release_id}"
+            for identity in self.identities
+        )
+        super().__init__(f"multiple exact library request attachments: {labels}")
+
+
+def select_exact_library_request_attachment(
+    observation_identities: tuple[ReleaseIdentity, ...],
+    requests_by_identity: Mapping[
+        tuple[str, str],
+        Sequence[Mapping[str, object]],
+    ],
+) -> ExactLibraryRequestAttachment | None:
+    """Select the only exact request observed on a Beets album.
+
+    A primary Beets tag has no authority over another observed source. Zero
+    exact request matches leaves the album untracked; two matches are an
+    ambiguity and must not silently choose either request.
+    """
+    matches = tuple(
+        ExactLibraryRequestAttachment(identity=identity, request=request)
+        for identity in observation_identities
+        for request in requests_by_identity.get(identity.key, ())
+    )
+    if len(matches) > 1:
+        raise AmbiguousLibraryRequestAttachmentError(matches)
+    return matches[0] if matches else None
 
 
 class LibraryAlbumRow(msgspec.Struct, frozen=True):
@@ -173,9 +228,27 @@ class LibraryAlbumRow(msgspec.Struct, frozen=True):
         *,
         pipeline_row: Mapping[str, object] | None,
         rank_fn: Callable[[str | None, int | None], str],
+        attached_identity: ReleaseIdentity | None = None,
     ) -> LibraryAlbumRow:
-        return cls.from_beets_album(album, rank_fn=rank_fn).with_pipeline_request(
-            pipeline_row
+        row = cls.from_beets_album(album, rank_fn=rank_fn)
+        if pipeline_row is None:
+            return row
+
+        observation_identities = ReleaseIdentity.all_from_observation_fields(
+            album.get("mb_albumid"),
+            album.get("discogs_albumid"),
+        )
+        if attached_identity not in observation_identities:
+            raise ValueError(
+                "attached pipeline identity is not observed on Beets album"
+            )
+
+        overlaid = row.with_pipeline_request(pipeline_row)
+        assert attached_identity is not None
+        return msgspec.structs.replace(
+            overlaid,
+            mb_albumid=attached_identity.release_id,
+            source=attached_identity.source,
         )
 
     @classmethod
@@ -185,10 +258,11 @@ class LibraryAlbumRow(msgspec.Struct, frozen=True):
         *,
         track_count: int,
     ) -> LibraryAlbumRow:
-        release_id = frontend_release_id(
+        identity = ReleaseIdentity.from_strict_fields(
             row.get("mb_release_id"),
             row.get("discogs_release_id"),
         )
+        release_id = identity.release_id if identity is not None else None
         min_bitrate = row.get("min_bitrate")
         captured, verified, provisional = _pipeline_facts(row)
         return msgspec.convert(
@@ -208,7 +282,11 @@ class LibraryAlbumRow(msgspec.Struct, frozen=True):
                 "type": "album",
                 "label": "",
                 "country": row.get("country"),
-                "source": str(row.get("source") or "unknown"),
+                "source": (
+                    str(row.get("source") or "unknown")
+                    if identity is not None
+                    else "unknown"
+                ),
                 "in_library": False,
                 "beets_album_id": None,
                 "pipeline_status": row.get("status"),

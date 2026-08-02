@@ -17,10 +17,17 @@ from lib.current_library_display import (
     current_library_display,
     resolve_request_current_library,
 )
-from lib.release_identity import ConflictingReleaseIdentityError
-from tests.fakes import FakeBeetsDB
+from lib.release_identity import ConflictingReleaseIdentityError, ReleaseIdentity
+from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_request_row
-from web.library_album_row import LibraryAlbumRow
+from web.library_album_detail_service import (
+    LibraryAlbumDetail,
+    load_library_album_detail,
+)
+from web.library_album_row import (
+    AmbiguousLibraryRequestAttachmentError,
+    LibraryAlbumRow,
+)
 from web.library_artist_service import build_library_artist_rows
 
 MB_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -68,6 +75,41 @@ def assert_independent_library_facts(
             )
 
 
+def assert_action_identity(
+    row: LibraryAlbumRow | LibraryAlbumDetail,
+    *,
+    expected: ReleaseIdentity,
+    expected_pipeline_id: int | None,
+) -> None:
+    """Executable law: the serialized action key names the attached request."""
+    actual = row.mb_albumid
+    if actual != expected.release_id:
+        raise AssertionError(
+            "action identity drifted: "
+            f"actual={actual!r}, expected={expected.release_id!r}"
+        )
+    if row.source != expected.source:
+        raise AssertionError(
+            "action source drifted: "
+            f"actual={row.source!r}, expected={expected.source!r}"
+        )
+    if row.pipeline_id != expected_pipeline_id:
+        raise AssertionError(
+            "pipeline attachment drifted: "
+            f"actual={row.pipeline_id!r}, expected={expected_pipeline_id!r}"
+        )
+    if isinstance(row, LibraryAlbumDetail):
+        history_request_ids = {item.request_id for item in row.download_history}
+        expected_history_ids = (
+            {expected_pipeline_id} if expected_pipeline_id is not None else set()
+        )
+        if history_request_ids != expected_history_ids:
+            raise AssertionError(
+                "detail history attachment drifted: "
+                f"actual={history_request_ids!r}, expected={expected_history_ids!r}"
+            )
+
+
 def _fact_beets_album(source: str) -> dict[str, object]:
     dual = source.startswith("dual_")
     return {
@@ -88,6 +130,16 @@ def _fact_beets_album(source: str) -> dict[str, object]:
         "label": "Archive",
         "country": "AU",
     }
+
+
+class _GeneratedDetailLookup:
+    def __init__(self, album: dict[str, object]) -> None:
+        self._album = album
+
+    def get_album_detail(self, album_id: int) -> dict[str, object] | None:
+        if album_id != self._album["id"]:
+            return None
+        return dict(self._album)
 
 
 class TestCurrentLibraryDisplayGenerated(unittest.TestCase):
@@ -198,6 +250,231 @@ class TestIndependentLibraryFactsGenerated(unittest.TestCase):
             )
 
     @given(
+        mb_release_id=st.uuids().map(str),
+        discogs_release_id=st.integers(
+            min_value=1,
+            max_value=100_000_000,
+        ).map(str),
+        attachment=st.sampled_from((
+            "untracked",
+            "mb",
+            "discogs",
+            "cross_source",
+            "duplicate_discogs",
+            "modern_legacy_discogs",
+        )),
+        status=st.sampled_from(("wanted", "imported", "replaced")),
+    )
+    @example(
+        mb_release_id=MB_ID,
+        discogs_release_id=DISCOGS_ID,
+        attachment="discogs",
+        status="wanted",
+    )
+    def test_dual_tagged_action_identity_follows_exact_attachment(
+        self,
+        mb_release_id: str,
+        discogs_release_id: str,
+        attachment: str,
+        status: str,
+    ) -> None:
+        album = _fact_beets_album("dual_mb")
+        album["mb_albumid"] = mb_release_id
+        album["discogs_albumid"] = discogs_release_id
+        pipeline_rows: list[dict[str, object]] = []
+        expected = ReleaseIdentity(
+            source="musicbrainz",
+            release_id=mb_release_id,
+        )
+        expected_pipeline_id: int | None = None
+        if attachment == "mb" or attachment == "cross_source":
+            pipeline_rows.append(make_request_row(
+                id=42,
+                artist_name="Boundary Archivist",
+                album_title="Independent Facts",
+                mb_release_id=mb_release_id,
+                discogs_release_id=None,
+                status=status,
+                has_captured_history=False,
+                verified_lossless=False,
+                provisional_lossless=False,
+            ))
+            expected_pipeline_id = 42
+        if attachment in {
+            "discogs",
+            "cross_source",
+            "duplicate_discogs",
+            "modern_legacy_discogs",
+        }:
+            pipeline_rows.append(make_request_row(
+                id=43,
+                artist_name="Boundary Archivist",
+                album_title="Independent Facts",
+                mb_release_id=None,
+                discogs_release_id=discogs_release_id,
+                status=status,
+                has_captured_history=False,
+                verified_lossless=False,
+                provisional_lossless=False,
+            ))
+            expected = ReleaseIdentity(
+                source="discogs",
+                release_id=discogs_release_id,
+            )
+            expected_pipeline_id = 43
+
+        if attachment == "duplicate_discogs":
+            pipeline_rows.append(make_request_row(
+                id=44,
+                artist_name="Boundary Archivist",
+                album_title="Independent Facts",
+                mb_release_id=None,
+                discogs_release_id=discogs_release_id,
+                status=status,
+                has_captured_history=False,
+                verified_lossless=False,
+                provisional_lossless=False,
+            ))
+        elif attachment == "modern_legacy_discogs":
+            pipeline_rows.append(make_request_row(
+                id=44,
+                artist_name="Boundary Archivist",
+                album_title="Independent Facts",
+                mb_release_id=discogs_release_id,
+                discogs_release_id=None,
+                status=status,
+                has_captured_history=False,
+                verified_lossless=False,
+                provisional_lossless=False,
+            ))
+
+        pipeline_db = FakePipelineDB()
+        request_ids: list[int] = []
+        for request_row in pipeline_rows:
+            pipeline_db.seed_request(request_row)
+            request_id = request_row["id"]
+            if not isinstance(request_id, int):
+                raise TypeError("generated request id must be int")
+            request_ids.append(request_id)
+            pipeline_db.log_download(
+                request_id,
+                outcome="success",
+                soulseek_username=f"request-{request_id}",
+            )
+
+        if attachment in {
+            "cross_source",
+            "duplicate_discogs",
+            "modern_legacy_discogs",
+        }:
+            with self.assertRaises(AmbiguousLibraryRequestAttachmentError):
+                build_library_artist_rows(
+                    library_albums=[album],
+                    pipeline_rows=pipeline_rows,
+                    track_counts={request_id: 2 for request_id in request_ids},
+                    rank_fn=lambda _format, _bitrate: "lossless",
+                )
+            with self.assertRaises(AmbiguousLibraryRequestAttachmentError):
+                load_library_album_detail(
+                    library_lookup=_GeneratedDetailLookup(album),
+                    pipeline_db=pipeline_db,
+                    album_id=7,
+                )
+            return
+
+        rows = build_library_artist_rows(
+            library_albums=[album],
+            pipeline_rows=pipeline_rows,
+            track_counts=(
+                {expected_pipeline_id: 2}
+                if expected_pipeline_id is not None
+                else {}
+            ),
+            rank_fn=lambda _format, _bitrate: "lossless",
+        )
+        detail = load_library_album_detail(
+            library_lookup=_GeneratedDetailLookup(album),
+            pipeline_db=pipeline_db,
+            album_id=7,
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        assert_action_identity(
+            rows[0],
+            expected=expected,
+            expected_pipeline_id=expected_pipeline_id,
+        )
+        assert_action_identity(
+            detail,
+            expected=expected,
+            expected_pipeline_id=expected_pipeline_id,
+        )
+
+    @given(
+        invalid_shape=st.sampled_from((
+            "malformed",
+            "conflicting",
+            "identityless",
+        )),
+        status=st.sampled_from(("wanted", "imported", "replaced")),
+    )
+    @example(invalid_shape="conflicting", status="wanted")
+    def test_invalid_pipeline_identity_stays_visible_and_unattached(
+        self,
+        invalid_shape: str,
+        status: str,
+    ) -> None:
+        identity_fields: dict[str, object] = {
+            "mb_release_id": None,
+            "discogs_release_id": None,
+        }
+        if invalid_shape == "malformed":
+            identity_fields["mb_release_id"] = "not-a-release-id"
+        elif invalid_shape == "conflicting":
+            identity_fields = {
+                "mb_release_id": MB_ID,
+                "discogs_release_id": DISCOGS_ID,
+            }
+        pipeline_row = make_request_row(
+            id=42,
+            artist_name="Boundary Archivist",
+            album_title="Invalid Authority",
+            status=status,
+            has_captured_history=True,
+            verified_lossless=True,
+            provisional_lossless=False,
+            **identity_fields,
+        )
+        album = _fact_beets_album("dual_mb")
+
+        rows = build_library_artist_rows(
+            library_albums=[album],
+            pipeline_rows=[pipeline_row],
+            track_counts={42: 2},
+            rank_fn=lambda _format, _bitrate: "lossless",
+        )
+        detail_db = FakePipelineDB()
+        detail_db.seed_request(pipeline_row)
+        detail = load_library_album_detail(
+            library_lookup=_GeneratedDetailLookup(album),
+            pipeline_db=detail_db,
+            album_id=7,
+        )
+
+        self.assertEqual(len(rows), 2)
+        held = next(row for row in rows if row.in_library)
+        invalid = next(row for row in rows if not row.in_library)
+        self.assertIsNone(held.pipeline_id)
+        self.assertIsNone(invalid.mb_albumid)
+        self.assertEqual(invalid.source, "unknown")
+        self.assertEqual(invalid.pipeline_id, 42)
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertIsNone(detail.pipeline_id)
+
+    @given(
         source=st.sampled_from(("mb", "discogs", "dual_mb", "dual_discogs")),
         shape=st.sampled_from(("held_untracked", "missing_tracked", "held_tracked")),
         status=st.sampled_from(("wanted", "imported", "replaced")),
@@ -281,6 +558,121 @@ class TestIndependentLibraryFactsGenerated(unittest.TestCase):
                 verified=False,
                 provisional=False,
             )
+
+    def test_action_identity_checker_rejects_first_observation_mutant(self) -> None:
+        row = LibraryAlbumRow.from_beets_album(
+            _fact_beets_album("dual_mb"),
+            rank_fn=lambda _format, _bitrate: "lossless",
+        )
+        mutant = msgspec.structs.replace(row, pipeline_id=42)
+
+        with self.assertRaisesRegex(AssertionError, "action identity drifted"):
+            assert_action_identity(
+                mutant,
+                expected=ReleaseIdentity(
+                    source="discogs",
+                    release_id=DISCOGS_ID,
+                ),
+                expected_pipeline_id=42,
+            )
+
+    def test_action_identity_checker_rejects_detached_source_mutant(self) -> None:
+        row = LibraryAlbumRow.from_beets_album(
+            _fact_beets_album("dual_mb"),
+            rank_fn=lambda _format, _bitrate: "lossless",
+        )
+        mutant = msgspec.structs.replace(
+            row,
+            mb_albumid=DISCOGS_ID,
+            pipeline_id=42,
+        )
+
+        with self.assertRaisesRegex(AssertionError, "action source drifted"):
+            assert_action_identity(
+                mutant,
+                expected=ReleaseIdentity(
+                    source="discogs",
+                    release_id=DISCOGS_ID,
+                ),
+                expected_pipeline_id=42,
+            )
+
+    def test_action_identity_checker_rejects_detail_history_mutant(self) -> None:
+        detail = load_library_album_detail(
+            library_lookup=_GeneratedDetailLookup(_fact_beets_album("dual_mb")),
+            pipeline_db=FakePipelineDB(),
+            album_id=7,
+        )
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        mutant = msgspec.structs.replace(detail, pipeline_id=42)
+
+        with self.assertRaisesRegex(AssertionError, "detail history attachment drifted"):
+            assert_action_identity(
+                mutant,
+                expected=ReleaseIdentity(
+                    source="musicbrainz",
+                    release_id=MB_ID,
+                ),
+                expected_pipeline_id=42,
+            )
+
+    def test_cardinality_checker_rejects_first_wins_overwrite_mutant(self) -> None:
+        album = _fact_beets_album("discogs")
+        candidates = [
+            make_request_row(
+                id=request_id,
+                artist_name="Boundary Archivist",
+                album_title="Independent Facts",
+                mb_release_id=None,
+                discogs_release_id=DISCOGS_ID,
+                has_captured_history=False,
+                verified_lossless=False,
+                provisional_lossless=False,
+            )
+            for request_id in (42, 43)
+        ]
+        overwrite_mutant = {DISCOGS_ID: candidates[-1]}
+
+        with self.assertRaisesRegex(AssertionError, "candidate cardinality"):
+            actual_ids = {
+                int(row["id"]) for row in overwrite_mutant.values()
+            }
+            expected_ids = {42, 43}
+            if actual_ids != expected_ids:
+                raise AssertionError(
+                    "candidate cardinality drifted under first-wins overwrite"
+                )
+
+        with self.assertRaises(AmbiguousLibraryRequestAttachmentError):
+            build_library_artist_rows(
+                library_albums=[album],
+                pipeline_rows=candidates,
+                track_counts={42: 2, 43: 2},
+                rank_fn=lambda _format, _bitrate: "lossless",
+            )
+
+    def test_unactionable_checker_rejects_permissive_identity_mutant(self) -> None:
+        valid = LibraryAlbumRow.from_beets_album(
+            _fact_beets_album("mb"),
+            rank_fn=lambda _format, _bitrate: "lossless",
+        )
+        permissive_mutant = msgspec.structs.replace(
+            valid,
+            in_library=False,
+            beets_album_id=None,
+            pipeline_id=42,
+            source="request",
+        )
+
+        with self.assertRaisesRegex(AssertionError, "actionable identity"):
+            if (
+                permissive_mutant.mb_albumid is not None
+                or permissive_mutant.source != "unknown"
+            ):
+                raise AssertionError(
+                    "invalid pipeline row retained an actionable identity"
+                )
 
 
 if __name__ == "__main__":

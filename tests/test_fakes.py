@@ -6817,6 +6817,48 @@ class TestFakeGetPipelineOverlay(unittest.TestCase):
         self.assertEqual(db.get_pipeline_overlay([]), {})
 
 
+class TestFakeListLibraryRequestCandidates(unittest.TestCase):
+    def test_preserves_duplicate_and_legacy_discogs_cardinality(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=7,
+            mb_release_id=None,
+            discogs_release_id="12856590",
+        ))
+        db.seed_request(make_request_row(
+            id=8,
+            mb_release_id=None,
+            discogs_release_id="12856590",
+        ))
+        db.seed_request(make_request_row(
+            id=9,
+            mb_release_id="12856590",
+            discogs_release_id=None,
+        ))
+        db.seed_request(make_request_row(
+            id=10,
+            mb_release_id="not-a-release-id",
+            discogs_release_id="12856590",
+        ))
+
+        rows = db.list_library_request_candidates(["12856590"])
+
+        self.assertEqual([row["id"] for row in rows], [7, 8, 9])
+
+    def test_empty_or_malformed_ids_have_no_candidates(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=7,
+            mb_release_id="not-a-release-id",
+        ))
+
+        self.assertEqual(db.list_library_request_candidates([]), [])
+        self.assertEqual(
+            db.list_library_request_candidates(["not-a-release-id"]),
+            [],
+        )
+
+
 class TestFakeRequestUniqueMbReleaseId(unittest.TestCase):
     """The fake mirrors migrations/001's UNIQUE on album_requests.mb_release_id.
 

@@ -42,7 +42,6 @@ if TYPE_CHECKING:
         SearchLogHistoryPage,
         WrongMatchCandidateRow,
     )
-    from lib.pipeline_db.rows import ArtistRequestRow
     from lib.quality import CandidateScore
 
 from lib import transitions
@@ -133,6 +132,7 @@ from lib.pipeline_db.import_jobs import (
     AutomationRecoveryEvidenceChanged,
     _recovery_owner_matches,
 )
+from lib.pipeline_db.rows import ArtistRequestRow
 from lib.pipeline_db.terminal_outcomes import (
     ImportJobTerminalConflict,
     _terminal_edge_side_effects,
@@ -6003,6 +6003,30 @@ class FakePipelineDB:
             if existing is None or dedicated_discogs_match:
                 out[release_id] = projected
         return out
+
+    def list_library_request_candidates(
+        self,
+        release_ids: list[str],
+    ) -> list[ArtistRequestRow]:
+        """Cardinality-preserving mirror of the production library read."""
+        requested_identities = {
+            identity.key
+            for release_id in release_ids
+            if (identity := ReleaseIdentity.from_id(release_id)) is not None
+        }
+        rows: list[ArtistRequestRow] = []
+        for row in self._requests.values():
+            identity = ReleaseIdentity.from_strict_fields(
+                row.get("mb_release_id"),
+                row.get("discogs_release_id"),
+            )
+            if identity is None or identity.key not in requested_identities:
+                continue
+            projected = self._request_presentation_copy(row)
+            projected.update(self._capture_and_evidence_projection(row))
+            rows.append(msgspec.convert(projected, type=ArtistRequestRow))
+        rows.sort(key=lambda row: int(row["id"]))
+        return rows
 
     def get_log(self, limit: int = 50,
                 outcome_filter: str | None = None,

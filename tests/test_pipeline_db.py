@@ -14408,6 +14408,78 @@ class TestGetPipelineOverlay(unittest.TestCase):
 
 
 @requires_postgres
+class TestListLibraryRequestCandidates(unittest.TestCase):
+    def setUp(self):
+        self.db = make_db()
+
+    def tearDown(self):
+        self.db.close()
+
+    def _seed_cardinality_world(self, db: PipelineDB | FakePipelineDB) -> None:
+        db.add_request(
+            discogs_release_id="456789",
+            artist_name="Candidate Artist",
+            album_title="Modern one",
+            source="request",
+        )
+        db.add_request(
+            discogs_release_id="456789",
+            artist_name="Candidate Artist",
+            album_title="Modern two",
+            source="request",
+        )
+        db.add_request(
+            mb_release_id="456789",
+            artist_name="Candidate Artist",
+            album_title="Legacy",
+            source="request",
+        )
+        db.add_request(
+            mb_release_id="not-a-release-id",
+            discogs_release_id="456789",
+            artist_name="Candidate Artist",
+            album_title="Conflicting",
+            source="request",
+        )
+
+    def test_returns_every_strict_modern_and_legacy_discogs_candidate(self):
+        self._seed_cardinality_world(self.db)
+
+        rows = self.db.list_library_request_candidates(["456789"])
+
+        self.assertEqual(
+            [row["album_title"] for row in rows],
+            ["Modern one", "Modern two", "Legacy"],
+        )
+        self.assertEqual(len({row["id"] for row in rows}), 3)
+
+    def test_fake_parity_preserves_candidate_cardinality_and_projection(self):
+        fake = FakePipelineDB()
+        self._seed_cardinality_world(self.db)
+        self._seed_cardinality_world(fake)
+
+        def facts(
+            rows: Sequence[Mapping[str, object]],
+        ) -> list[tuple[object, ...]]:
+            return [
+                (
+                    row["album_title"],
+                    row["mb_release_id"],
+                    row["discogs_release_id"],
+                    row["has_captured_history"],
+                    row["verified_lossless"],
+                    row["provisional_lossless"],
+                )
+                for row in rows
+            ]
+
+        self.assertEqual(
+            facts(self.db.list_library_request_candidates(["456789"])),
+            facts(fake.list_library_request_candidates(["456789"])),
+        )
+
+
+@requires_postgres
 class TestListRequestsByArtistProjection(unittest.TestCase):
     def setUp(self):
         self.db = make_db()

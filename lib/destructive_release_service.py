@@ -46,17 +46,9 @@ from lib.pipeline_db import (
     release_id_to_lock_key,
 )
 from lib.quality import resolve_user_requeue_override
-from lib.release_identity import ReleaseIdentity, normalize_release_id
+from lib.release_identity import ReleaseIdentity
 
 log = logging.getLogger("cratedigger")
-
-
-class SupportsReleaseLookupDB(Protocol):
-    """Pipeline lookup rooted in one canonical release identity."""
-
-    def get_request_by_release_id(
-        self, release_id: object | None,
-    ) -> AlbumRequestRow | None: ...
 
 
 class SupportsDestructivePipelineDB(transitions.TransitionsDB, Protocol):
@@ -131,17 +123,6 @@ def _album_identity(row: dict[str, object]) -> ReleaseIdentity | None:
         row.get("mb_albumid"),
         row.get("discogs_albumid"),
     )
-
-
-def resolve_pipeline_request(
-    pipeline_db: SupportsReleaseLookupDB | None,
-    *,
-    release_id: str,
-) -> AlbumRequestRow | None:
-    """Resolve the pipeline overlay from a server-derived release ID."""
-    if pipeline_db is None or not normalize_release_id(release_id):
-        return None
-    return pipeline_db.get_request_by_release_id(release_id)
 
 
 @dataclass(frozen=True)

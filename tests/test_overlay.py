@@ -2,13 +2,26 @@
 
 import os
 import sys
+import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from lib.release_identity import ConflictingReleaseIdentityError
+from lib.banding import (
+    CurrentBeetsBandingAmbiguityError,
+    band_current_resolutions,
+)
+from lib.beets_db import BeetsDB, CurrentBeetsItem, CurrentBeetsUnique
+from lib.quality import QualityRankConfig
+from lib.release_identity import ConflictingReleaseIdentityError, ReleaseIdentity
+from tests.fakes import FakeBeetsDB
+from tests.test_beets_db import _create_test_db, _insert_album
 from web.routes._overlay import band_release_ids, overlay_release_rows_in_place
+
+MB_RELEASE_1 = "00000000-0000-0000-0000-000000000001"
+MB_RELEASE_2 = "00000000-0000-0000-0000-000000000002"
+MB_RELEASE_3 = "00000000-0000-0000-0000-000000000003"
 
 
 class TestOverlayReleaseRowsInPlace(unittest.TestCase):
@@ -184,44 +197,133 @@ class TestOverlayReleaseRowsInPlace(unittest.TestCase):
 
 
 class TestBandReleaseIds(unittest.TestCase):
-    def test_conflicting_identity_never_degrades_to_missing(self):
-        with patch(
-            "web.server.check_beets_library",
-            side_effect=ConflictingReleaseIdentityError(
-                "conflicting numeric Discogs release identities for: 12856590"
+    def test_unique_mixed_format_band_uses_canonical_precedence_not_item_order(
+        self,
+    ) -> None:
+        identity = ReleaseIdentity(source="musicbrainz", release_id=MB_RELEASE_1)
+        items = (
+            CurrentBeetsItem(
+                id=1,
+                path="/music/mixed/01.flac",
+                format="FLAC",
+                bitrate=1_100_000,
             ),
-        ), self.assertRaisesRegex(
-            ConflictingReleaseIdentityError,
-            "12856590",
-        ):
-            band_release_ids(["unrelated-valid", "12856590"])
+            CurrentBeetsItem(
+                id=2,
+                path="/music/mixed/02.mp3",
+                format="MP3",
+                bitrate=256_000,
+            ),
+        )
 
-    def test_degrades_to_missing_on_beets_error(self):
-        """Beets unavailable (locked / missing DB) → all-"missing" rather than
-        propagating the exception (which would 500 the worklist). Matches the
-        CLI's _cli_band_fn fallback (REL-002)."""
-        with patch("web.server.check_beets_library",
-                   side_effect=OSError("db locked")):
-            out = band_release_ids(["rel-1", "rel-2"])
-        self.assertEqual(out, {"rel-1": "missing", "rel-2": "missing"})
+        bands = []
+        for ordered_items in (items, tuple(reversed(items))):
+            current = CurrentBeetsUnique(
+                identity=identity,
+                album_id=10,
+                album_path="/music/mixed",
+                items=ordered_items,
+                selectors=(f"mb_albumid:{MB_RELEASE_1}",),
+            )
+            bands.append(band_current_resolutions(
+                {identity: current},
+                QualityRankConfig.defaults(),
+            )[MB_RELEASE_1])
 
-    def test_bands_three_way_from_membership_and_detail(self):
-        """Direct coverage of the three-way (missing / unknown / band) the
-        long-tail worklist depends on (previously only indirect via the route
-        contract test)."""
-        mock_beets = MagicMock()
-        mock_beets.check_mbids_detail.return_value = {
-            "on-disk": {"beets_format": "FLAC", "beets_bitrate": 900,
-                        "beets_avg_bitrate": 1100},
-            "no-detail": {},
-        }
-        with patch("web.server.check_beets_library",
-                   return_value={"on-disk", "no-detail"}), \
-                patch("web.server._beets_db", return_value=mock_beets):
-            out = band_release_ids(["on-disk", "no-detail", "gone"])
-        self.assertEqual(out["on-disk"], "lossless")   # FLAC 1100 → lossless
-        self.assertEqual(out["no-detail"], "unknown")  # in library, no detail
-        self.assertEqual(out["gone"], "missing")       # absent from membership
+        self.assertEqual(bands, ["transparent", "transparent"])
+
+    def test_unique_format_only_lossless_album_keeps_codec_only_rank(self) -> None:
+        identity = ReleaseIdentity(source="musicbrainz", release_id=MB_RELEASE_1)
+        current = CurrentBeetsUnique(
+            identity=identity,
+            album_id=10,
+            album_path="/music/format-only",
+            items=(CurrentBeetsItem(
+                id=1,
+                path="/music/format-only/01.flac",
+                format="FLAC",
+                bitrate=None,
+            ),),
+            selectors=(f"mb_albumid:{MB_RELEASE_1}",),
+        )
+
+        self.assertEqual(
+            band_current_resolutions(
+                {identity: current},
+                QualityRankConfig.defaults(),
+            ),
+            {MB_RELEASE_1: "lossless"},
+        )
+
+    def test_ambiguous_identity_never_degrades_to_missing(self):
+        beets = FakeBeetsDB()
+        beets.set_album_ids_for_release(MB_RELEASE_1, [10, 11])
+
+        with patch("web.server._beets_db", return_value=beets), \
+                self.assertRaises(CurrentBeetsBandingAmbiguityError) as raised:
+            band_release_ids([MB_RELEASE_1])
+
+        self.assertEqual(raised.exception.ambiguities[0].reason,
+                         "multiple_matches")
+        self.assertEqual(beets.check_mbids_calls, [])
+        self.assertEqual(beets.check_mbids_detail_calls, [])
+
+    def test_beets_error_never_degrades_to_missing(self):
+        """A failed authority read is not evidence that every release is absent."""
+        with patch("web.server._beets_db",
+                   side_effect=OSError("db locked")), self.assertRaisesRegex(
+                       OSError, "db locked"):
+            band_release_ids([MB_RELEASE_1, MB_RELEASE_2])
+
+    def test_bands_three_way_from_exact_resolution_snapshot(self):
+        """Missing, unrankable Unique, and rankable Unique stay distinct."""
+        beets = FakeBeetsDB()
+        beets.set_mbid_detail(
+            MB_RELEASE_1,
+            {"beets_format": "FLAC", "beets_bitrate": 900,
+             "beets_avg_bitrate": 1100},
+        )
+        beets.set_album_exists(MB_RELEASE_2, True)
+        with patch("web.server._beets_db", return_value=beets):
+            out = band_release_ids([
+                MB_RELEASE_1,
+                MB_RELEASE_2,
+                MB_RELEASE_3,
+            ])
+        self.assertEqual(out[MB_RELEASE_1], "lossless")
+        self.assertEqual(out[MB_RELEASE_2], "unknown")
+        self.assertEqual(out[MB_RELEASE_3], "missing")
+        self.assertEqual(beets.check_mbids_calls, [])
+        self.assertEqual(beets.check_mbids_detail_calls, [])
+
+    def test_modern_and_legacy_discogs_share_the_exact_batch_resolver(self):
+        with tempfile.TemporaryDirectory() as root:
+            db_path = os.path.join(root, "beets.db")
+            _create_test_db(db_path)
+            _insert_album(
+                db_path,
+                1,
+                "",
+                [(1_100_000, "/music/modern/01.flac")],
+                track_format="FLAC",
+                discogs_albumid=12_856_590,
+            )
+            _insert_album(
+                db_path,
+                2,
+                "5555555",
+                [(1_100_000, "/music/legacy/01.flac")],
+                track_format="FLAC",
+            )
+            with BeetsDB(db_path, library_root="/music") as beets, patch(
+                "web.server._beets_db", return_value=beets,
+            ):
+                out = band_release_ids(["12856590", "5555555"])
+
+        self.assertEqual(out, {
+            "12856590": "lossless",
+            "5555555": "lossless",
+        })
 
 
 if __name__ == "__main__":

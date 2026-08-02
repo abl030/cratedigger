@@ -7,6 +7,8 @@ from datetime import UTC, datetime
 
 import msgspec
 
+from lib.release_identity import ReleaseIdentity
+from tests.helpers import make_request_row
 from web.library_album_row import LibraryAlbumRow
 
 
@@ -143,6 +145,10 @@ class TestLibraryAlbumRow(unittest.TestCase):
                 "verified_lossless": True,
                 "provisional_lossless": False,
             },
+            attached_identity=ReleaseIdentity(
+                source="musicbrainz",
+                release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            ),
             rank_fn=lambda _fmt, _kbps: "transparent",
         )
 
@@ -155,6 +161,46 @@ class TestLibraryAlbumRow(unittest.TestCase):
         self.assertTrue(row.has_captured_history)
         self.assertTrue(row.pipeline_verified_lossless)
         self.assertFalse(row.pipeline_provisional)
+
+    def test_from_beets_album_with_pipeline_rejects_unobserved_attachment(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(ValueError, "not observed on Beets album"):
+            LibraryAlbumRow.from_beets_album_with_pipeline(
+                {
+                    "id": 7,
+                    "album": "Test Album",
+                    "artist": "Test Artist",
+                    "year": 2024,
+                    "mb_albumid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                    "discogs_albumid": "12856590",
+                    "track_count": 10,
+                    "mb_releasegroupid": None,
+                    "release_group_title": "Test Album",
+                    "added": 1773651901.0,
+                    "formats": "MP3",
+                    "min_bitrate": 320000,
+                    "avg_bitrate": 320000,
+                    "type": "album",
+                    "label": "Test Label",
+                    "country": "US",
+                },
+                pipeline_row={
+                    "id": 42,
+                    "status": "wanted",
+                    "processing_owner": None,
+                    "search_filetype_override": None,
+                    "target_format": None,
+                    "has_captured_history": False,
+                    "verified_lossless": False,
+                    "provisional_lossless": False,
+                },
+                attached_identity=ReleaseIdentity(
+                    source="discogs",
+                    release_id="12856591",
+                ),
+                rank_fn=lambda _fmt, _kbps: "transparent",
+            )
 
     def test_from_beets_album_normalizes_discogs_frontend_id(self) -> None:
         row = LibraryAlbumRow.from_beets_album(
@@ -307,6 +353,42 @@ class TestLibraryAlbumRow(unittest.TestCase):
         )
 
         self.assertEqual(row.source, "unknown")
+
+    def test_invalid_pipeline_identity_has_no_actionable_id_or_source(self) -> None:
+        for label, identity_fields in (
+            ("malformed", {
+                "mb_release_id": "not-a-release-id",
+                "discogs_release_id": None,
+            }),
+            ("conflicting", {
+                "mb_release_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "discogs_release_id": "12856590",
+            }),
+            ("identityless", {
+                "mb_release_id": None,
+                "discogs_release_id": None,
+            }),
+        ):
+            with self.subTest(label=label):
+                raw = make_request_row(
+                    id=42,
+                    artist_name="Test Artist",
+                    album_title="Wanted Album",
+                    source="request",
+                    status="wanted",
+                    **identity_fields,
+                )
+                raw.update({
+                    "has_captured_history": False,
+                    "verified_lossless": False,
+                    "provisional_lossless": False,
+                })
+
+                row = LibraryAlbumRow.from_pipeline_request(raw, track_count=0)
+
+                self.assertIsNone(row.mb_albumid)
+                self.assertEqual(row.source, "unknown")
+                self.assertEqual(row.pipeline_id, 42)
 
     def test_from_beets_album_missing_bitrate_passes_zero_to_rank_fn(self) -> None:
         seen: list[tuple[str | None, int | None]] = []

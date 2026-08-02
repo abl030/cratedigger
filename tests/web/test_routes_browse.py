@@ -310,6 +310,49 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(data["albums"][0]["pipeline_id"], 55)
         self.assertTrue(data["albums"][0]["in_library"])
 
+    def test_library_artist_duplicate_identity_is_diagnostic_conflict(self):
+        for request_id in (55, 56):
+            self.db.seed_request(make_request_row(
+                id=request_id,
+                mb_release_id=None,
+                discogs_release_id="12856590",
+                mb_artist_id=self.ARTIST_ID,
+                artist_name="Test Artist",
+                album_title="Discogs Import",
+                source="request",
+                status="wanted",
+            ))
+        beets_album = {
+            "id": 8,
+            "album": "Discogs Import",
+            "artist": "Test Artist",
+            "year": 2001,
+            "mb_albumid": None,
+            "discogs_albumid": "12856590",
+            "track_count": 10,
+            "mb_releasegroupid": None,
+            "release_group_title": "Discogs Import",
+            "added": 1773651902.0,
+            "formats": "MP3",
+            "min_bitrate": 320000,
+            "avg_bitrate": 320000,
+            "type": "album",
+            "label": "Test Label",
+            "country": "AU",
+        }
+
+        with patch("web.server.get_library_artist", return_value=[beets_album]):
+            status, data = self._get(
+                f"/api/library/artist?name=Test%20Artist&mbid={self.ARTIST_ID}"
+            )
+
+        self.assertEqual(status, 409)
+        self.assertEqual(data, {
+            "error": "ambiguous_library_request_identity",
+            "request_ids": [55, 56],
+            "release_ids": ["12856590", "12856590"],
+        })
+
     def test_library_artist_route_ignores_discogs_zero_sentinel_on_blank_row(self):
         import web.server as srv
 
