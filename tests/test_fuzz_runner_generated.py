@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import errno
+import io
 import os
 import tempfile
 import unittest
@@ -9,8 +11,9 @@ from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 
-from hypothesis import example, given
+from hypothesis import assume, example, given
 from hypothesis import strategies as st
+from psycopg2.errors import DiskFull
 
 import tests._hypothesis_profiles  # noqa: F401 - registers active profile
 from scripts.run_fuzz_tests import (
@@ -18,18 +21,25 @@ from scripts.run_fuzz_tests import (
     DISCARD_RATE_THRESHOLD,
     FuzzModuleManifest,
     FuzzPropertyManifest,
+    FuzzTarget,
     PropertyDepth,
     aggregate_property_depth,
     assert_exact_fuzz_coverage,
+    assert_fuzz_admission,
     build_fuzz_targets,
     discard_rate,
     discover_fuzz_manifests,
     format_depth_report,
     is_structurally_shallow,
+    select_fuzz_admissions,
 )
 from scripts.run_python_tests import (
+    _MIN_VALID_TEMP_HEADROOM_BYTES,
     STRATEGY_SPACE_EXHAUSTED,
     HypothesisPropertyStats,
+    RecordingTextTestResult,
+    _classify_test_infrastructure_error,
+    _find_disk_full_exception,
 )
 
 #: Reasons Hypothesis reports, exhaustion plus the ordinary budget endings.
@@ -150,6 +160,44 @@ def _assert_section_truncation(
             f"{prefix} truncation line is {actual}, expected {expected} "
             f"for {total} properties"
         )
+
+
+def fuzz_target(index: int, uses_ephemeral_postgres: bool) -> FuzzTarget:
+    """One generated scheduler target."""
+    label = f"target-{index}"
+    return FuzzTarget(
+        label=label,
+        module_name=label,
+        load_names=(label,),
+        expected_test_ids=(f"{label}.test",),
+        uses_ephemeral_postgres=uses_ephemeral_postgres,
+    )
+
+
+def wrap_exception(error: Exception, wrappers: Sequence[int]) -> Exception:
+    """Nest a capacity failure through the shapes Hypothesis may produce."""
+    wrapped = error
+    for index, wrapper in enumerate(wrappers):
+        if wrapper == 0:
+            outer = RuntimeError(f"cause-{index}")
+            outer.__cause__ = wrapped
+            wrapped = outer
+        elif wrapper == 1:
+            outer = RuntimeError(f"context-{index}")
+            outer.__context__ = wrapped
+            wrapped = outer
+        else:
+            wrapped = ExceptionGroup(
+                f"group-{index}",
+                [ValueError("noise"), wrapped],
+            )
+    return wrapped
+
+
+def assert_capacity_error_is_detected(error: BaseException) -> None:
+    """A capacity failure must survive arbitrary supported wrappers."""
+    if _find_disk_full_exception(error) is None:
+        raise AssertionError("capacity failure was not detected")
 
 
 def assert_report_names_exactly_the_shallow_properties(
@@ -276,6 +324,129 @@ class TestGeneratedFuzzTargetPlanning(unittest.TestCase):
                 sum(pin_id in target.expected_test_ids for target in targets),
                 1,
             )
+
+    @given(
+        active_pg=st.integers(min_value=0, max_value=4),
+        active_ordinary=st.integers(min_value=0, max_value=4),
+        pending=st.lists(st.booleans(), min_size=0, max_size=20),
+        worker_count=st.integers(min_value=1, max_value=12),
+        postgres_worker_count=st.integers(min_value=1, max_value=4),
+    )
+    def test_admission_is_work_conserving_with_a_separate_pg_ceiling(
+        self,
+        active_pg: int,
+        active_ordinary: int,
+        pending: list[bool],
+        worker_count: int,
+        postgres_worker_count: int,
+    ) -> None:
+        assume(active_pg <= postgres_worker_count)
+        assume(active_pg + active_ordinary <= worker_count)
+        active = tuple(
+            fuzz_target(index, True)
+            for index in range(active_pg)
+        ) + tuple(
+            fuzz_target(active_pg + index, False)
+            for index in range(active_ordinary)
+        )
+        queued = tuple(
+            fuzz_target(len(active) + index, uses_pg)
+            for index, uses_pg in enumerate(pending)
+        )
+
+        admitted = select_fuzz_admissions(
+            queued,
+            active,
+            worker_count=worker_count,
+            postgres_worker_count=postgres_worker_count,
+        )
+
+        assert_fuzz_admission(
+            queued,
+            active,
+            admitted,
+            worker_count=worker_count,
+            postgres_worker_count=postgres_worker_count,
+        )
+
+    @given(
+        postgres=st.booleans(),
+        wrappers=st.lists(
+            st.integers(min_value=0, max_value=2),
+            min_size=0,
+            max_size=6,
+        ),
+    )
+    def test_capacity_classification_survives_exception_wrappers(
+        self,
+        postgres: bool,
+        wrappers: list[int],
+    ) -> None:
+        leaf: Exception = (
+            DiskFull("could not extend file: No space left")
+            if postgres
+            else OSError(errno.ENOSPC, "No space left on device")
+        )
+
+        assert_capacity_error_is_detected(wrap_exception(leaf, wrappers))
+
+    @given(
+        available=st.integers(
+            min_value=0,
+            max_value=2 * _MIN_VALID_TEMP_HEADROOM_BYTES,
+        ),
+        message=st.text(max_size=80),
+    )
+    def test_plain_failure_is_invalid_only_below_the_headroom_floor(
+        self,
+        available: int,
+        message: str,
+    ) -> None:
+        classified = _classify_test_infrastructure_error(
+            AssertionError(message),
+            available_temp_bytes=available,
+        )
+
+        if available < _MIN_VALID_TEMP_HEADROOM_BYTES:
+            self.assertIsNotNone(classified)
+            assert classified is not None
+            self.assertEqual(classified[0], "disk_full")
+        else:
+            self.assertIsNone(classified)
+
+    @given(
+        wrappers=st.lists(
+            st.integers(min_value=0, max_value=2),
+            min_size=0,
+            max_size=6,
+        ),
+    )
+    def test_subtest_capacity_failure_uses_infrastructure_channel(
+        self,
+        wrappers: list[int],
+    ) -> None:
+        wrapped = wrap_exception(
+            OSError(errno.ENOSPC, "No space left on device"),
+            wrappers,
+        )
+
+        class CapacitySubtest(unittest.TestCase):
+            def runTest(self) -> None:
+                with self.subTest(stage="generated"):
+                    raise wrapped
+
+        result = unittest.TextTestRunner(
+            stream=io.StringIO(),
+            resultclass=RecordingTextTestResult,  # pyright: ignore[reportArgumentType]
+        ).run(CapacitySubtest())
+
+        self.assertIsInstance(result, RecordingTextTestResult)
+        assert isinstance(result, RecordingTextTestResult)
+        self.assertEqual(len(result.infrastructure_errors or ()), 1)
+        self.assertEqual(
+            (result.infrastructure_errors or [])[0].kind,
+            "disk_full",
+        )
 
 
 class TestGeneratedBurstDepthReport(unittest.TestCase):
@@ -522,6 +693,27 @@ class TestFuzzCoverageCheckerKnownBad(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "changed fuzz property budget"):
             assert_exact_fuzz_coverage((manifest,), targets)
+
+    def test_admission_checker_rejects_too_many_pg_targets(self) -> None:
+        pending = (fuzz_target(0, True), fuzz_target(1, True))
+
+        with self.assertRaisesRegex(AssertionError, "PostgreSQL"):
+            assert_fuzz_admission(
+                pending,
+                (),
+                (0, 1),
+                worker_count=2,
+                postgres_worker_count=1,
+            )
+
+    def test_capacity_checker_rejects_an_unrelated_io_error(self) -> None:
+        with self.assertRaisesRegex(
+            AssertionError,
+            "capacity failure was not detected",
+        ):
+            assert_capacity_error_is_detected(
+                OSError(errno.EIO, "input/output error")
+            )
 
 
 class TestFuzzDiscoverySettingsContract(unittest.TestCase):

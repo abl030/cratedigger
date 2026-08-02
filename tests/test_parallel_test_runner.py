@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import datetime
+import errno
+import io
 import os
 import subprocess
 import sys
@@ -31,7 +33,9 @@ from scripts.run_python_tests import (
     ChildTargetResult,
     HypothesisPropertyStats,
     HypothesisStatsRecorder,
+    RecordingTextTestResult,
     TestModule,
+    _classify_test_infrastructure_error,
     _iter_test_cases,
     assert_exact_schedule,
     assert_exact_target_coverage,
@@ -52,6 +56,50 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 RUNNER = REPO_ROOT / "scripts" / "run_python_tests.py"
 RUN_TESTS_SH = REPO_ROOT / "scripts" / "run_tests.sh"
 RUN_SUITE = REPO_ROOT / "scripts" / "run_test_suite.py"
+
+
+class TestInfrastructureFailureClassification(unittest.TestCase):
+    def test_low_headroom_invalidates_a_failure_after_enospc_was_swallowed(
+        self,
+    ) -> None:
+        classified = _classify_test_infrastructure_error(
+            AssertionError("preview manifest was incomplete"),
+            available_temp_bytes=1,
+        )
+
+        self.assertIsNotNone(classified)
+        assert classified is not None
+        self.assertEqual(classified[0], "disk_full")
+        self.assertIn("1 bytes free", classified[1])
+        self.assertIn("AssertionError", classified[1])
+
+    def test_ordinary_failure_with_headroom_stays_a_property_failure(
+        self,
+    ) -> None:
+        classified = _classify_test_infrastructure_error(
+            AssertionError("real counterexample"),
+            available_temp_bytes=1024 * 1024 * 1024,
+        )
+
+        self.assertIsNone(classified)
+
+    def test_subtest_enospc_uses_the_infrastructure_channel(self) -> None:
+        class CapacitySubtest(unittest.TestCase):
+            def runTest(self) -> None:
+                with self.subTest(stage="snapshot"):
+                    raise OSError(errno.ENOSPC, "No space left on device")
+
+        result = unittest.TextTestRunner(
+            stream=io.StringIO(),
+            resultclass=RecordingTextTestResult,  # pyright: ignore[reportArgumentType]
+        ).run(CapacitySubtest())
+
+        self.assertIsInstance(result, RecordingTextTestResult)
+        assert isinstance(result, RecordingTextTestResult)
+        self.assertEqual(len(result.infrastructure_errors or ()), 1)
+        error = (result.infrastructure_errors or [])[0]
+        self.assertEqual(error.kind, "disk_full")
+        self.assertIn("stage='snapshot'", error.test_id)
 
 
 class TestModuleDiscovery(unittest.TestCase):
@@ -798,6 +846,27 @@ class TestHypothesisStatsRecorder(unittest.TestCase):
                 stopped_because=STRATEGY_SPACE_EXHAUSTED,
             ),
         )
+
+    def test_child_result_rejects_wrong_infrastructure_error_types(self) -> None:
+        payload = msgspec.json.encode(
+            {
+                "successful": False,
+                "tests_run": 1,
+                "test_ids": ["fixture.World.test_property"],
+                "output": "failure",
+                "failed_test_ids": ["fixture.World.test_property"],
+                "infrastructure_errors": [
+                    {
+                        "test_id": "fixture.World.test_property",
+                        "kind": 53100,
+                        "detail": "disk full",
+                    }
+                ],
+            }
+        )
+
+        with self.assertRaises(msgspec.ValidationError):
+            msgspec.json.decode(payload, type=ChildTargetResult)
 
 
 class TestRunTestsWiring(unittest.TestCase):

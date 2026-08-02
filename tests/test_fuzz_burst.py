@@ -11,17 +11,21 @@ from pathlib import Path
 
 from scripts.run_fuzz_tests import (
     DEPTH_REPORT_LIMIT,
+    EPHEMERAL_POSTGRES_TARGET_LIMIT,
     FuzzModuleManifest,
     FuzzPropertyManifest,
+    FuzzTarget,
     PropertyDepth,
     aggregate_property_depth,
     assert_exact_fuzz_coverage,
+    assert_fuzz_admission,
     build_fuzz_targets,
     discard_rate,
     discover_fuzz_manifests,
     format_depth_report,
     is_structurally_shallow,
     recommended_property_shards,
+    select_fuzz_admissions,
 )
 from scripts.run_python_tests import (
     STRATEGY_SPACE_EXHAUSTED,
@@ -214,6 +218,77 @@ class TestFuzzTargetPlanning(unittest.TestCase):
             )
         )
 
+    def test_postgres_resource_flag_reaches_every_module_target(self) -> None:
+        property_id = "tests.test_pg_generated.TestWorld.test_property"
+        manifest = FuzzModuleManifest(
+            module_name="tests.test_pg_generated",
+            test_ids=(
+                property_id,
+                "tests.test_pg_generated.TestWorld.test_pin",
+            ),
+            hypothesis_tests=(self.property(property_id),),
+            uses_ephemeral_postgres=True,
+        )
+
+        targets = build_fuzz_targets((manifest,), property_shards=2)
+
+        self.assertTrue(targets)
+        self.assertTrue(
+            all(target.uses_ephemeral_postgres for target in targets)
+        )
+
+    def test_postgres_limit_bypasses_blocked_pg_targets_for_ordinary_work(
+        self,
+    ) -> None:
+        active = (
+            FuzzTarget(
+                label="active-pg",
+                module_name="active-pg",
+                load_names=("active-pg",),
+                expected_test_ids=("active-pg.test",),
+                uses_ephemeral_postgres=True,
+            ),
+        )
+        pending = (
+            FuzzTarget(
+                label="pending-pg-one",
+                module_name="pending-pg-one",
+                load_names=("pending-pg-one",),
+                expected_test_ids=("pending-pg-one.test",),
+                uses_ephemeral_postgres=True,
+            ),
+            FuzzTarget(
+                label="pending-pg-two",
+                module_name="pending-pg-two",
+                load_names=("pending-pg-two",),
+                expected_test_ids=("pending-pg-two.test",),
+                uses_ephemeral_postgres=True,
+            ),
+            FuzzTarget(
+                label="ordinary",
+                module_name="ordinary",
+                load_names=("ordinary",),
+                expected_test_ids=("ordinary.test",),
+            ),
+        )
+
+        admitted = select_fuzz_admissions(
+            pending,
+            active,
+            worker_count=3,
+            postgres_worker_count=1,
+        )
+
+        assert_fuzz_admission(
+            pending,
+            active,
+            admitted,
+            worker_count=3,
+            postgres_worker_count=1,
+        )
+        self.assertEqual(admitted, (2,))
+        self.assertEqual(EPHEMERAL_POSTGRES_TARGET_LIMIT, 2)
+
     def test_30_core_host_uses_eight_entropy_shards(self) -> None:
         self.assertEqual(recommended_property_shards(30), 8)
 
@@ -237,6 +312,25 @@ class TestFuzzTargetPlanning(unittest.TestCase):
         )
         self.assertTrue(state_machine.uses_default_settings)
         self.assertEqual(state_machine.max_examples, 150)
+
+    def test_real_pg_module_discovery_records_the_resource(self) -> None:
+        environment = {
+            **os.environ,
+            "CRATEDIGGER_HYPOTHESIS_PROFILE": "suite",
+            "PYTHONPATH": str(REPO_ROOT),
+        }
+        environment.pop("TEST_DB_DSN", None)
+        environment.pop("CRATEDIGGER_TEST_SCHEMA_READY", None)
+        with tempfile.TemporaryDirectory() as tempdir:
+            manifest = discover_fuzz_manifests(
+                ("tests.test_cleanup_journal_generated",),
+                worker_count=1,
+                environment=environment,
+                work_directory=Path(tempdir),
+            )[0]
+
+        self.assertTrue(manifest.uses_ephemeral_postgres)
+        self.assertNotIn("TEST_DB_DSN", environment)
 
 
 class TestFuzzProfileBudget(unittest.TestCase):
@@ -568,6 +662,53 @@ class TestFuzzRunnerProcess(unittest.TestCase):
             "        self.assertIsInstance(second, bool)\n",
             encoding="utf-8",
         )
+        (package / "test_capacity_generated.py").write_text(
+            "import errno\n"
+            "import os\n"
+            "import time\n"
+            "import unittest\n"
+            "from pathlib import Path\n"
+            "from types import SimpleNamespace\n"
+            "from unittest.mock import patch\n"
+            "from hypothesis import given, settings\n"
+            "from hypothesis import strategies as st\n"
+            "from psycopg2 import OperationalError\n"
+            "from psycopg2.errors import DiskFull\n"
+            "import tests._hypothesis_profiles\n\n"
+            "class CapacityWorld(unittest.TestCase):\n"
+            "    @settings(max_examples=1, database=None, deadline=None)\n"
+            "    @given(value=st.none())\n"
+            "    def test_a_capacity_failure(self, value):\n"
+            "        self.assertIsNone(value)\n"
+            "        database = Path(os.environ['HYPOTHESIS_STORAGE_DIRECTORY'])\n"
+            "        (database / 'invalid-infrastructure-marker').write_text('x')\n"
+            "        if os.environ['FUZZ_INFRA_KIND'] == 'postgres':\n"
+            "            raise DiskFull('could not extend file: No space left')\n"
+            "        if os.environ['FUZZ_INFRA_KIND'] == 'database':\n"
+            "            raise OperationalError('ephemeral database stopped')\n"
+            "        if os.environ['FUZZ_INFRA_KIND'] == 'swallowed':\n"
+            "            patch('shutil.disk_usage', "
+            "return_value=SimpleNamespace(free=1)).start()\n"
+            "            self.fail('preview swallowed ENOSPC')\n"
+            "        if os.environ['FUZZ_INFRA_KIND'] == 'subtest':\n"
+            "            with self.subTest(stage='snapshot'):\n"
+            "                raise OSError(errno.ENOSPC, "
+            "'No space left on device')\n"
+            "            return\n"
+            "        raise OSError(errno.ENOSPC, 'No space left on device')\n\n"
+            "    @settings(max_examples=1, database=None, deadline=None)\n"
+            "    @given(value=st.none())\n"
+            "    def test_b_contaminated_failure(self, value):\n"
+            "        self.assertIsNone(value)\n"
+            "        time.sleep(1)\n"
+            "        self.fail('must not become a property report')\n\n"
+            "    @settings(max_examples=1, database=None, deadline=None)\n"
+            "    @given(value=st.none())\n"
+            "    def test_z_pending_target(self, value):\n"
+            "        self.assertIsNone(value)\n"
+            "        print('pending-target-ran')\n",
+            encoding="utf-8",
+        )
         self.module = "fuzz_fixture.test_example_generated"
         self.output_dir = self.root / "failures"
         self.database = self.root / "persistent-database"
@@ -634,6 +775,63 @@ class TestFuzzRunnerProcess(unittest.TestCase):
             )
         )
         self.assertIn(str(run_directories[0]), completed.stdout)
+
+    def test_capacity_errors_abort_without_becoming_property_failures(
+        self,
+    ) -> None:
+        for kind in (
+            "filesystem",
+            "postgres",
+            "database",
+            "swallowed",
+            "subtest",
+        ):
+            with self.subTest(kind=kind):
+                env = {
+                    **os.environ,
+                    "PYTHONPATH": os.pathsep.join(
+                        (
+                            str(self.root),
+                            str(REPO_ROOT),
+                            os.environ.get("PYTHONPATH", ""),
+                        )
+                    ),
+                    "HYPOTHESIS_STORAGE_DIRECTORY": str(self.database),
+                    "FUZZ_INFRA_KIND": kind,
+                }
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        str(RUNNER),
+                        "--jobs",
+                        "2",
+                        "--profile",
+                        "suite",
+                        "fuzz_fixture.test_capacity_generated",
+                    ],
+                    cwd=REPO_ROOT,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+                self.assertEqual(completed.returncode, 1)
+                self.assertIn("INFRASTRUCTURE ABORT", completed.stdout)
+                self.assertIn("property verdict invalid", completed.stdout)
+                self.assertIn("2 completed of 3", completed.stdout)
+                self.assertIn("1 not started", completed.stdout)
+                self.assertIn(
+                    "1 unittest-failed target withheld from property reporting",
+                    completed.stdout,
+                )
+                self.assertIn("--- INFRASTRUCTURE FAIL", completed.stdout)
+                self.assertNotIn("--- FAIL ", completed.stdout)
+                self.assertNotIn("DEPTH ", completed.stdout)
+                self.assertNotIn("pending-target-ran", completed.stdout)
+                self.assertFalse(
+                    (self.database / "invalid-infrastructure-marker").exists()
+                )
 
     def test_external_property_id_runs_through_filtered_module_load(self) -> None:
         env = {
