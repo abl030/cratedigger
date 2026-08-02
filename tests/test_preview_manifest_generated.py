@@ -47,7 +47,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from hypothesis import example, given, settings
+from hypothesis import example, given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
@@ -87,6 +87,7 @@ from lib.quality import (
 )
 from lib.staged_album import StagedAlbum
 from tests.fakes import FakeBeetsDB, FakePipelineDB
+from tests.finite_domain import finite_generated_domain
 from tests.helpers import make_ctx_with_fake_db, make_grab_list_entry, make_request_row
 
 _HARNESS = "/nix/store/fake/harness/run_beets_harness.sh"
@@ -139,6 +140,13 @@ def assert_extra_filename_mask_domain(
         raise AssertionError(
             "filename masks do not map one-to-one onto every manifest subset"
         )
+
+
+def verify_extra_filename_mask_domain() -> None:
+    assert_extra_filename_mask_domain(tuple(
+        _extra_filenames_for_mask(mask)
+        for mask in range(_EXTRA_FILENAME_WORLD_COUNT)
+    ))
 
 
 # ============================================================================
@@ -503,7 +511,10 @@ class TestPreviewManifestPurityProperty(unittest.TestCase):
     ``measure_and_persist_candidate_evidence``) over the exact finite manifest
     domain: file count, basenames with spaces/unicode, mp3/flac mix."""
 
-    @settings(max_examples=_EXTRA_FILENAME_WORLD_COUNT)
+    @finite_generated_domain(
+        cardinality=_EXTRA_FILENAME_WORLD_COUNT,
+        verify=verify_extra_filename_mask_domain,
+    )
     @given(mask=_extra_filename_mask_strategy)
     @example(mask=0)
     @example(mask=_EXTRA_FILENAME_WORLD_COUNT - 1)
@@ -598,12 +609,7 @@ class TestPreviewManifestCheckersTripOnViolations(unittest.TestCase):
 
 class TestPreviewManifestFiniteDomain(unittest.TestCase):
     def test_every_filename_subset_has_one_exact_mask(self):
-        mapped = tuple(
-            _extra_filenames_for_mask(mask)
-            for mask in range(1 << len(_EXTRA_FILENAME_POOL))
-        )
-
-        assert_extra_filename_mask_domain(mapped)
+        verify_extra_filename_mask_domain()
 
 
 if __name__ == "__main__":

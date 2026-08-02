@@ -35,9 +35,14 @@ from scripts.run_python_tests import (
     ChildTargetResult,
     HypothesisPropertyStats,
     _iter_test_cases,
+    _test_method,
     assert_hypothesis_deadlines_disabled,
     resolve_hypothesis_settings,
     settings_max_examples,
+)
+from tests.finite_domain_metadata import (
+    FINITE_DOMAIN_ATTRIBUTE,
+    FiniteDomainSpec,
 )
 
 TARGET_RUNNER = REPO_ROOT / "scripts" / "run_python_tests.py"
@@ -62,6 +67,7 @@ class FuzzPropertyManifest(msgspec.Struct, frozen=True):
     test_id: str
     max_examples: int
     uses_default_settings: bool
+    finite_domain_cardinality: int | None = None
 
 
 class FuzzModuleManifest(msgspec.Struct, frozen=True):
@@ -182,6 +188,17 @@ def build_fuzz_targets(
     for manifest in ordered_manifests:
         if not manifest.test_ids:
             continue
+        for item in manifest.hypothesis_tests:
+            finite_cardinality = item.finite_domain_cardinality
+            if finite_cardinality is not None and (
+                finite_cardinality < 1
+                or item.max_examples != finite_cardinality
+            ):
+                raise ValueError(
+                    f"finite domain cardinality for {item.test_id} is "
+                    f"{finite_cardinality}, but its budget is "
+                    f"{item.max_examples}"
+                )
         hypothesis_ids = {
             item.test_id for item in manifest.hypothesis_tests
         }
@@ -212,11 +229,12 @@ def build_fuzz_targets(
                     f"invalid Hypothesis budget for {item.test_id}: "
                     f"{item.max_examples}"
                 )
-            shard_count = (
-                min(property_shards, item.max_examples)
-                if item.uses_default_settings
-                else 1
-            )
+            shard_count = 1
+            if (
+                item.finite_domain_cardinality is None
+                and item.uses_default_settings
+            ):
+                shard_count = min(property_shards, item.max_examples)
             quotient, remainder = divmod(item.max_examples, shard_count)
             budgets = tuple(
                 quotient + (1 if index < remainder else 0)
@@ -326,6 +344,18 @@ def assert_exact_fuzz_coverage(
         if len(shard_counts) != 1:
             raise ValueError(f"inconsistent fuzz shard count: {test_id}")
         shard_count = shard_counts.pop()
+        if item.finite_domain_cardinality is not None:
+            if item.max_examples != item.finite_domain_cardinality:
+                raise ValueError(
+                    f"finite domain cardinality changed: {test_id}"
+                )
+            if shard_count != 1 or len(scheduled) != 1:
+                raise ValueError(f"finite fuzz property was sharded: {test_id}")
+            if scheduled[0].profile_max_examples is not None:
+                raise ValueError(
+                    f"finite fuzz property received a profile override: {test_id}"
+                )
+            continue
         if shard_count != len(scheduled):
             raise ValueError(f"missing fuzz property shard: {test_id}")
         if {target.shard_index for target in scheduled} != set(
@@ -518,11 +548,27 @@ def _discover_module_child(module_name: str, result_path: Path) -> int:
             else configured is default_settings
         )
         configured_max_examples = settings_max_examples(configured)
+        method = _test_method(test)
+        if method is None:
+            raise RuntimeError(f"could not resolve fuzz test method: {test.id()}")
+        raw_finite_spec = getattr(method, FINITE_DOMAIN_ATTRIBUTE, None)
+        if raw_finite_spec is not None and not isinstance(
+            raw_finite_spec,
+            FiniteDomainSpec,
+        ):
+            raise TypeError(f"invalid finite-domain metadata: {test.id()}")
+        if raw_finite_spec is not None:
+            raw_finite_spec.verify()
         hypothesis_tests.append(
             FuzzPropertyManifest(
                 test_id=test.id(),
                 max_examples=configured_max_examples,
                 uses_default_settings=uses_default_settings,
+                finite_domain_cardinality=(
+                    raw_finite_spec.cardinality
+                    if raw_finite_spec is not None
+                    else None
+                ),
             )
         )
     result_path.write_bytes(

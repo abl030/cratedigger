@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import subprocess
 import unittest
 from pathlib import Path
 
@@ -11,6 +9,7 @@ from hypothesis import example, given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
+from tests.node_jsonl_worker import NodeJsonlWorker
 
 ROOT = Path(__file__).resolve().parents[1]
 ARTIST_ID = "artist-id"
@@ -18,31 +17,75 @@ PROVENANCE = ("ordinary", "promo", "unofficial")
 STRUCTURAL_TYPES = ("Album", "EP", "Single")
 
 
-def _run_artist_page(script_body: str, payload: object) -> object:
-    script = f"""
-import {{
+_ARTIST_PAGE_WORKER = """
+import {
   classifyArtistRows,
   composeCompareCatalogue,
   renderArtistSections,
-}} from './web/js/artist_page.js';
-import {{ classify as classifyType }} from './web/js/grouping.js';
-let input = '';
-for await (const chunk of process.stdin) input += chunk;
-const payload = JSON.parse(input);
-{script_body}
+} from './web/js/artist_page.js';
+import { classify as classifyType } from './web/js/grouping.js';
+
+async function handle(operation, payload) {
+  if (operation === 'partition') {
+    const sections = classifyArtistRows({
+      artistId: 'artist-id', artistName: 'Artist', releaseGroups: payload,
+      ungroupedReleases: [], libraryAlbums: [],
+    });
+    const html = renderArtistSections(sections, {
+      artistId: 'artist-id', artistName: 'Artist',
+    });
+    return {
+      inLibrary: sections.inLibrary.map(row => row._index),
+      missing: sections.missing.map(row => row._index),
+      other: sections.otherReleases.map(row => row._index),
+      html,
+    };
+  }
+  if (operation === 'pair_projection') {
+    const rows = composeCompareCatalogue(payload.compare, payload.source);
+    const sections = classifyArtistRows({
+      artistId: 'artist-id', artistName: 'Artist', releaseGroups: rows,
+      ungroupedReleases: [], libraryAlbums: [],
+    });
+    const bucket = sections.inLibrary.length ? 'inLibrary'
+      : sections.missing.length ? 'missing' : 'other';
+    return {...rows[0], _bucket: bucket, _type_section: classifyType(rows[0])};
+  }
+  if (operation === 'composition') {
+    const rows = composeCompareCatalogue(payload.compare, payload.source);
+    const sections = classifyArtistRows({
+      artistId: 'artist-id', artistName: 'Artist', releaseGroups: rows,
+      ungroupedReleases: [], libraryAlbums: [],
+    });
+    const bucket = new Map([
+      ...sections.inLibrary.map(row => [row, 'inLibrary']),
+      ...sections.missing.map(row => [row, 'missing']),
+      ...sections.otherReleases.map(row => [row, 'other']),
+    ]);
+    return rows.map(row => ({
+      key: `${row.source}:${row.identity_kind}:${row.id}`,
+      bucket: bucket.get(row),
+    }));
+  }
+  if (operation === 'rolling_collision') {
+    const sections = classifyArtistRows({
+      artistId: 'rolling', artistName: 'The Rolling Stones',
+      releaseGroups: [payload.row], ungroupedReleases: [],
+      libraryAlbums: [payload.library],
+    });
+    return renderArtistSections(sections, {
+      artistId: 'rolling', artistName: 'The Rolling Stones',
+    });
+  }
+  throw new Error(`unknown artist-page operation: ${operation}`);
+}
 """
-    proc = subprocess.run(
-        ["node", "--input-type=module", "--eval", script],
-        cwd=ROOT,
-        input=json.dumps(payload),
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-    return json.loads(proc.stdout)
 
 
-def _real_partition(rows: list[dict[str, object]]) -> dict[str, object]:
+def _real_partition(
+    worker: NodeJsonlWorker,
+    rows: list[dict[str, object]],
+) -> dict[str, object]:
     indexed = [
         {
             "id": str(index),
@@ -57,71 +100,46 @@ def _real_partition(rows: list[dict[str, object]]) -> dict[str, object]:
         }
         for index, row in enumerate(rows)
     ]
-    return _run_artist_page("""
-const sections = classifyArtistRows({
-  artistId: 'artist-id', artistName: 'Artist', releaseGroups: payload,
-  ungroupedReleases: [], libraryAlbums: [],
-});
-const html = renderArtistSections(sections, {
-  artistId: 'artist-id', artistName: 'Artist',
-});
-process.stdout.write(JSON.stringify({
-  inLibrary: sections.inLibrary.map(row => row._index),
-  missing: sections.missing.map(row => row._index),
-  other: sections.otherReleases.map(row => row._index),
-  html,
-}));
-""", indexed)  # type: ignore[return-value]
+    result = worker.request("partition", indexed)
+    if not isinstance(result, dict):
+        raise TypeError(f"partition worker returned {type(result).__name__}")
+    return result
 
 
-def _real_pair_projection(payload: dict[str, object]) -> dict[str, object]:
-    return _run_artist_page("""
-const rows = composeCompareCatalogue(payload.compare, payload.source);
-const sections = classifyArtistRows({
-  artistId: 'artist-id', artistName: 'Artist', releaseGroups: rows,
-  ungroupedReleases: [], libraryAlbums: [],
-});
-const bucket = sections.inLibrary.length ? 'inLibrary'
-  : sections.missing.length ? 'missing' : 'other';
-process.stdout.write(JSON.stringify({
-  ...rows[0], _bucket: bucket, _type_section: classifyType(rows[0]),
-}));
-""", payload)  # type: ignore[return-value]
+def _real_pair_projection(
+    worker: NodeJsonlWorker,
+    payload: dict[str, object],
+) -> dict[str, object]:
+    result = worker.request("pair_projection", payload)
+    if not isinstance(result, dict):
+        raise TypeError(f"pair worker returned {type(result).__name__}")
+    return result
 
 
-def _real_composition(payload: dict[str, object]) -> list[dict[str, str]]:
-    result = _run_artist_page("""
-const rows = composeCompareCatalogue(payload.compare, payload.source);
-const sections = classifyArtistRows({
-  artistId: 'artist-id', artistName: 'Artist', releaseGroups: rows,
-  ungroupedReleases: [], libraryAlbums: [],
-});
-const bucket = new Map([
-  ...sections.inLibrary.map(row => [row, 'inLibrary']),
-  ...sections.missing.map(row => [row, 'missing']),
-  ...sections.otherReleases.map(row => [row, 'other']),
-]);
-process.stdout.write(JSON.stringify(rows.map(row => ({
-  key: `${row.source}:${row.identity_kind}:${row.id}`,
-  bucket: bucket.get(row),
-}))));
-""", payload)
-    assert isinstance(result, list)
-    return [value for value in result if isinstance(value, dict)]
+def _real_composition(
+    worker: NodeJsonlWorker,
+    payload: dict[str, object],
+) -> list[dict[str, str]]:
+    result = worker.request("composition", payload)
+    if not isinstance(result, list) or not all(
+        isinstance(value, dict)
+        and all(
+            isinstance(key, str) and isinstance(item, str)
+            for key, item in value.items()
+        )
+        for value in result
+    ):
+        raise AssertionError("composition worker returned a malformed row list")
+    return result
 
 
-def _real_rolling_collision(payload: dict[str, object]) -> str:
-    result = _run_artist_page("""
-const sections = classifyArtistRows({
-  artistId: 'rolling', artistName: 'The Rolling Stones',
-  releaseGroups: [payload.row], ungroupedReleases: [],
-  libraryAlbums: [payload.library],
-});
-process.stdout.write(JSON.stringify(renderArtistSections(sections, {
-  artistId: 'rolling', artistName: 'The Rolling Stones',
-})));
-""", payload)
-    assert isinstance(result, str)
+def _real_rolling_collision(
+    worker: NodeJsonlWorker,
+    payload: dict[str, object],
+) -> str:
+    result = worker.request("rolling_collision", payload)
+    if not isinstance(result, str):
+        raise TypeError(f"rolling worker returned {type(result).__name__}")
     return result
 
 
@@ -314,6 +332,10 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
 
 
 class TestGeneratedSimpleArtistCatalogue(unittest.TestCase):
+    def setUp(self) -> None:
+        self.worker = NodeJsonlWorker(_ARTIST_PAGE_WORKER, cwd=ROOT)
+        self.addCleanup(self.worker.close)
+
     @given(rows=st.lists(row_strategy, max_size=16))
     @example(rows=[{
         "type": "Album", "primary_types": ["Album"],
@@ -324,7 +346,7 @@ class TestGeneratedSimpleArtistCatalogue(unittest.TestCase):
     def test_partition_is_total_and_page_vocabulary_stays_simple(
         self, rows: list[dict[str, object]],
     ) -> None:
-        actual = _real_partition(rows)
+        actual = _real_partition(self.worker, rows)
         assert_simple_partition(rows, actual)
         html = actual["html"]
         assert isinstance(html, str)
@@ -397,7 +419,7 @@ class TestGeneratedSimpleArtistCatalogue(unittest.TestCase):
             "secondary_types": discogs_secondary,
             "format_qualifiers": discogs_qualifiers,
         }
-        row = _real_pair_projection({
+        row = _real_pair_projection(self.worker, {
             "source": source,
             "compare": {
                 "both": [{"mb": mb, "discogs": discogs}],
@@ -493,7 +515,7 @@ class TestGeneratedSimpleArtistCatalogue(unittest.TestCase):
             "id": f"dg-release-{index}", "source": "discogs",
             "identity_kind": "release", "provenance": ["ordinary"],
         } for index in range(discogs_release_count)]
-        actual = _real_composition({
+        actual = _real_composition(self.worker, {
             "source": source,
             "compare": {
                 "both": pairs,
@@ -570,7 +592,7 @@ class TestGeneratedSimpleArtistCatalogue(unittest.TestCase):
         self, qualifier: str, exact_owned: bool,
     ) -> None:
         row_id = "owned-rg" if exact_owned else "collision-rg"
-        html = _real_rolling_collision({
+        html = _real_rolling_collision(self.worker, {
             "row": {
                 "id": row_id,
                 "title": "The Rolling Stones",

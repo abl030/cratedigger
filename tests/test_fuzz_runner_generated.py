@@ -744,6 +744,7 @@ class TestFuzzDiscoverySettingsContract(unittest.TestCase):
         )
         self.assertEqual(property_manifest.max_examples, 128)
         self.assertFalse(property_manifest.uses_default_settings)
+        self.assertEqual(property_manifest.finite_domain_cardinality, 128)
 
         targets = build_fuzz_targets(manifests, property_shards=8)
         matching = tuple(
@@ -754,6 +755,75 @@ class TestFuzzDiscoverySettingsContract(unittest.TestCase):
         self.assertEqual(len(matching), 1)
         self.assertEqual(matching[0].shard_count, 1)
         self.assertIsNone(matching[0].profile_max_examples)
+
+    def test_finite_metadata_prevents_sharding_even_if_default_flag_drifts(self) -> None:
+        property_id = "tests.test_generated_world.TestWorld.test_finite"
+        manifest = FuzzModuleManifest(
+            module_name="tests.test_generated_world",
+            test_ids=(property_id,),
+            hypothesis_tests=(
+                FuzzPropertyManifest(
+                    test_id=property_id,
+                    max_examples=4,
+                    uses_default_settings=True,
+                    finite_domain_cardinality=4,
+                ),
+            ),
+        )
+
+        targets = build_fuzz_targets((manifest,), property_shards=8)
+
+        self.assertEqual(len(targets), 1)
+        self.assertEqual(targets[0].shard_count, 1)
+        self.assertIsNone(targets[0].profile_max_examples)
+
+    def test_finite_metadata_rejects_a_budget_cardinality_mismatch(self) -> None:
+        property_id = "tests.test_generated_world.TestWorld.test_finite"
+        manifest = FuzzModuleManifest(
+            module_name="tests.test_generated_world",
+            test_ids=(property_id,),
+            hypothesis_tests=(
+                FuzzPropertyManifest(
+                    test_id=property_id,
+                    max_examples=3,
+                    uses_default_settings=False,
+                    finite_domain_cardinality=4,
+                ),
+            ),
+        )
+
+        with self.assertRaisesRegex(ValueError, "finite domain cardinality"):
+            build_fuzz_targets((manifest,), property_shards=8)
+
+    def test_coverage_checker_rejects_sharded_finite_metadata(self) -> None:
+        property_id = "tests.test_generated_world.TestWorld.test_finite"
+        manifest = FuzzModuleManifest(
+            module_name="tests.test_generated_world",
+            test_ids=(property_id,),
+            hypothesis_tests=(
+                FuzzPropertyManifest(
+                    test_id=property_id,
+                    max_examples=4,
+                    uses_default_settings=True,
+                    finite_domain_cardinality=4,
+                ),
+            ),
+        )
+        targets = tuple(
+            FuzzTarget(
+                label=f"{property_id}::{index}",
+                module_name=manifest.module_name,
+                load_names=(manifest.module_name,),
+                expected_test_ids=(property_id,),
+                shard_index=index,
+                shard_count=2,
+                profile_max_examples=2,
+            )
+            for index in range(2)
+        )
+
+        with self.assertRaisesRegex(ValueError, "finite fuzz property was sharded"):
+            assert_exact_fuzz_coverage((manifest,), targets)
 
     def test_discovery_rejects_property_with_default_deadline(self) -> None:
         """A module that omits profile registration must fail before sharding."""
@@ -777,6 +847,43 @@ class TestFuzzDiscoverySettingsContract(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "non-None deadline"):
                 discover_fuzz_manifests(
                     ("unprofiled_fuzz_fixture",),
+                    worker_count=1,
+                    environment=environment,
+                    work_directory=fixture_root,
+                )
+
+    def test_discovery_rejects_finite_metadata_without_executed_proof(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture_root = Path(directory)
+            fixture = fixture_root / "forged_finite_fixture.py"
+            fixture.write_text(
+                "from hypothesis import given, strategies as st\n"
+                "import unittest\n"
+                "import tests._hypothesis_profiles\n"
+                "from tests.finite_domain_metadata import (\n"
+                "    FINITE_DOMAIN_ATTRIBUTE, FiniteDomainSpec,\n"
+                ")\n\n"
+                "def proof_must_run():\n"
+                "    raise AssertionError('planted proof executed')\n\n"
+                "class TestForged(unittest.TestCase):\n"
+                "    @given(st.integers(min_value=0, max_value=0))\n"
+                "    def test_property(self, value):\n"
+                "        self.assertEqual(value, 0)\n\n"
+                "setattr(\n"
+                "    TestForged.test_property,\n"
+                "    FINITE_DOMAIN_ATTRIBUTE,\n"
+                "    FiniteDomainSpec(cardinality=1, verify=proof_must_run),\n"
+                ")\n",
+                encoding="utf-8",
+            )
+            environment = dict(os.environ)
+            old_pythonpath = environment.get("PYTHONPATH", "")
+            environment["PYTHONPATH"] = os.pathsep.join(
+                part for part in (str(fixture_root), old_pythonpath) if part
+            )
+            with self.assertRaisesRegex(RuntimeError, "planted proof executed"):
+                discover_fuzz_manifests(
+                    ("forged_finite_fixture",),
                     worker_count=1,
                     environment=environment,
                     work_directory=fixture_root,

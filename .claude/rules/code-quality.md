@@ -185,6 +185,28 @@ Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blo
   matrix in the issue/PR. Canonical run: issue #548, 2026-07-08 — 13
   mutants, incl. reverting fix `6cf26a4`, led to PR #555.
 
+### Generated-test performance is a coverage contract
+
+- Classify a generated surface as **finite** only with an independently checked
+  cardinality and canonical representation. Use
+  `tests.finite_domain.finite_generated_domain`; its proof runs during isolated
+  discovery, its exact budget is runner metadata, and the scheduler refuses to
+  multiply it into entropy shards. Keep edge `@example` pins and a known-bad
+  collapsed-domain checker. Never infer finiteness from a green `SHALLOW` report
+  or cap an arbitrary strategy because examples repeated.
+- A generated property must not launch Node once per example. Use
+  `tests.node_jsonl_worker.NodeJsonlWorker`: one strict JSON-lines child per
+  isolated Python target, with request IDs, typed frames, timeout/EOF/malformed
+  output detection, poisoned-worker failure, and target teardown. The bounded
+  AST audit in `tests/test_generated_node_worker_audit.py` rejects the historical
+  literal `subprocess.run(["node", ...])` shape.
+- Optimize from production-depth target timings, preserving the exact daily
+  budget, property count, edge pins, and target isolation. Benchmark the changed
+  target first, then run the complete burst after a material critical-path
+  improvement. Stop when the next cost is domain work rather than repeated
+  harness overhead, or when added protocol/scheduler complexity outweighs the
+  measured wall-time return. Detailed workflow: `docs/generated-testing.md`.
+
 ## Authority for exceptions and bypasses
 
 Plans translate product authority; they do not create it. Any plan KTD,
