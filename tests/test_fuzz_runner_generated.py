@@ -31,6 +31,7 @@ from scripts.run_fuzz_tests import (
     discover_fuzz_manifests,
     format_depth_report,
     is_structurally_shallow,
+    recommended_property_shards,
     select_fuzz_admissions,
 )
 from scripts.run_python_tests import (
@@ -261,6 +262,25 @@ def assert_report_names_exactly_the_discarding_properties(
 
 
 class TestGeneratedFuzzTargetPlanning(unittest.TestCase):
+    @given(
+        cpu_count=st.integers(min_value=1, max_value=256),
+        max_examples=st.integers(min_value=1, max_value=100_000),
+    )
+    def test_automatic_sharding_respects_host_and_example_capacity(
+        self,
+        cpu_count: int,
+        max_examples: int,
+    ) -> None:
+        shards = recommended_property_shards(cpu_count, max_examples)
+
+        self.assertGreaterEqual(shards, 1)
+        self.assertLessEqual(shards, min(8, max(1, (cpu_count + 3) // 4)))
+        if shards > 1:
+            self.assertGreaterEqual(max_examples // shards, 250)
+        host_limit = min(8, max(1, (cpu_count + 3) // 4))
+        if shards < host_limit:
+            self.assertLess(max_examples // (shards + 1), 250)
+
     @given(
         property_count=st.integers(min_value=0, max_value=40),
         pin_count=st.integers(min_value=0, max_value=40),

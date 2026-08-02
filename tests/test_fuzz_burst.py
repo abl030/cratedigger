@@ -24,6 +24,7 @@ from scripts.run_fuzz_tests import (
     discover_fuzz_manifests,
     format_depth_report,
     is_structurally_shallow,
+    property_profile_max_examples,
     recommended_property_shards,
     select_fuzz_admissions,
 )
@@ -289,8 +290,52 @@ class TestFuzzTargetPlanning(unittest.TestCase):
         self.assertEqual(admitted, (2,))
         self.assertEqual(EPHEMERAL_POSTGRES_TARGET_LIMIT, 2)
 
-    def test_30_core_host_uses_eight_entropy_shards(self) -> None:
-        self.assertEqual(recommended_property_shards(30), 8)
+    def test_30_core_500_example_profile_uses_two_entropy_shards(self) -> None:
+        self.assertEqual(recommended_property_shards(30, 500), 2)
+
+    def test_30_core_overnight_profile_keeps_eight_entropy_shards(self) -> None:
+        self.assertEqual(recommended_property_shards(30, 20_000), 8)
+
+    def test_discovered_profile_budget_ignores_explicit_properties(self) -> None:
+        manifest = FuzzModuleManifest(
+            module_name="tests.test_generated_world",
+            test_ids=("default", "explicit"),
+            hypothesis_tests=(
+                FuzzPropertyManifest(
+                    test_id="default",
+                    max_examples=500,
+                    uses_default_settings=True,
+                ),
+                FuzzPropertyManifest(
+                    test_id="explicit",
+                    max_examples=20_000,
+                    uses_default_settings=False,
+                ),
+            ),
+        )
+
+        self.assertEqual(property_profile_max_examples((manifest,)), 500)
+
+    def test_discovered_profile_budget_must_be_consistent(self) -> None:
+        manifest = FuzzModuleManifest(
+            module_name="tests.test_generated_world",
+            test_ids=("first", "second"),
+            hypothesis_tests=(
+                FuzzPropertyManifest(
+                    test_id="first",
+                    max_examples=500,
+                    uses_default_settings=True,
+                ),
+                FuzzPropertyManifest(
+                    test_id="second",
+                    max_examples=501,
+                    uses_default_settings=True,
+                ),
+            ),
+        )
+
+        with self.assertRaisesRegex(ValueError, "inconsistent default"):
+            property_profile_max_examples((manifest,))
 
     def test_generated_state_machine_inherits_the_profile_budget(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:

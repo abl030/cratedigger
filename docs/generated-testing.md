@@ -120,11 +120,13 @@ source scanner.
 
 1. Preserve the accepted full-depth log as baseline.
 2. Benchmark the exact changed property/module with the production profile and
-   canonical shard count. This proves the optimization before paying for the
-   whole queue.
-3. After a material critical-path change, run the complete 20,000-example burst
+   canonical shard count. The automatic count is both host- and budget-bounded:
+   each entropy child gets at least 250 examples before another process is worth
+   starting. This proves the optimization before paying for the whole queue.
+3. After a material critical-path change, run the complete relevant profile
    once and compare wall time, targets, tests, property depth, discards,
-   infrastructure failures, ENOSPC, and slow-target rankings.
+   infrastructure failures, ENOSPC, and slow-target rankings. Changes that can
+   affect the unattended path also owe the 20,000-example burst.
 4. Continue only while the next slow cohort is dominated by removable harness
    repetition or a separately proved finite domain. Domain computation,
    PostgreSQL serialization required by ownership, and real media decoding are
@@ -457,15 +459,17 @@ Two independent gates enforce this:
 `scripts/fuzz_burst.sh` discovers the exact unittest IDs and effective
 Hypothesis settings in every generated module. Ordinary deterministic pins run
 once as a batch, and fixed per-test `@settings(max_examples=...)` budgets remain
-single-run. Each property using the default fuzz profile divides its 500
-generated examples exactly across independent entropy shards. The total budget
-does not grow: on a 30-core host, eight processes receive 62 or 63 examples.
-The overnight gate raises the combined budget to 20,000, or 2,500 per shard on
-that host. The child runner loads the owning module and selects the exact
-discovered ID, so dynamically named state-machine tests can be sharded without
-repeating the module's other properties or pins. An exact-budget check rejects
-any schedule that omits a test, repeats a pin, changes a property's combined
-example count, or invents an ID.
+single-run. Each property using the default fuzz profile divides its generated
+examples exactly across independent entropy shards. The automatic fan-out is
+bounded by both host cores and the effective budget discovered from the loaded
+profile, with at least 250 examples per entropy child. The total budget does not
+grow: on a 30-core host, the ordinary 500-example profile uses two processes of
+250 examples, while the 20,000-example overnight gate keeps eight processes of
+2,500. The child runner loads the owning module and selects the exact discovered
+ID, so dynamically named state-machine tests can be sharded without repeating
+the module's other properties or pins. An exact-budget check rejects any
+schedule that omits a test, repeats a pin, changes a property's combined example
+count, or invents an ID.
 
 The queue uses every host core by default for ordinary targets. Targets whose
 module boots an ephemeral PostgreSQL cluster are capped at two concurrent
@@ -474,11 +478,20 @@ eligible ordinary work bypasses a PostgreSQL-backed target waiting for that
 resource. Any `ENOSPC`, PostgreSQL `DiskFull`, or unexpected loss of an
 ephemeral database aborts further admission and reports that the property
 verdict is invalid. Set `CRATEDIGGER_FUZZ_JOBS` to cap all concurrent
-processes or `CRATEDIGGER_FUZZ_PROPERTY_SHARDS` to override the host-scaled
+processes or `CRATEDIGGER_FUZZ_PROPERTY_SHARDS` to override the automatic
 entropy fan-out. On doc1's 30-core VM on 2026-07-23, the complete 71-module,
 769-test overnight burst at 20,000 examples completed in 607.8 seconds. The
 worst subprocess-heavy generated module completed alone in 142.7 seconds; its
 unsharded properties had still not completed after ten minutes.
+
+On the same 30-core host on 2026-08-02, a matched 500-example run on one tree
+completed 115 modules, 1,432 tests, and 433 properties in 180.1 seconds with
+the former eight-shard fan-out (3,359 targets). The budget-aware two-shard
+default completed the same inventory in 106.0 and 106.0 seconds (935 targets),
+a 41.1% wall-time reduction. These timings justify the 250-example floor on
+this host; they are measurements, not a universal performance promise. The
+same tree's automatic 20,000-example run retained eight shards and completed
+all 3,359 targets in 1,172.3 seconds.
 
 ### Per-property depth report
 

@@ -49,6 +49,7 @@ TARGET_RUNNER = REPO_ROOT / "scripts" / "run_python_tests.py"
 DEFAULT_PROFILE = "fuzz"
 DEFAULT_DURATIONS = 5
 EPHEMERAL_POSTGRES_TARGET_LIMIT = 2
+MIN_EXAMPLES_PER_ENTROPY_SHARD = 250
 _SCHEMA_READY_ENV = "CRATEDIGGER_TEST_SCHEMA_READY"
 _DISCOVERY_DSN = "postgresql:///cratedigger_fuzz_discovery_only"
 
@@ -1019,11 +1020,41 @@ def _default_jobs() -> int:
     return os.cpu_count() or 1
 
 
-def recommended_property_shards(cpu_count: int) -> int:
-    """Keep a deep fuzz tail wide without excessive process startup."""
+def property_profile_max_examples(
+    manifests: Sequence[FuzzModuleManifest],
+) -> int | None:
+    """Return the one effective default-property budget from discovery."""
+    budgets = {
+        item.max_examples
+        for manifest in manifests
+        for item in manifest.hypothesis_tests
+        if (
+            item.uses_default_settings
+            and item.finite_domain_cardinality is None
+        )
+    }
+    if len(budgets) > 1:
+        raise ValueError(
+            f"inconsistent default property budgets: {sorted(budgets)}"
+        )
+    return next(iter(budgets), None)
+
+
+def recommended_property_shards(
+    cpu_count: int,
+    profile_max_examples: int,
+) -> int:
+    """Keep enough examples in each child to repay process startup."""
     if cpu_count < 1:
         raise ValueError("cpu_count must be at least 1")
-    return min(8, max(1, (cpu_count + 3) // 4))
+    if profile_max_examples < 1:
+        raise ValueError("profile_max_examples must be at least 1")
+    host_limit = min(8, max(1, (cpu_count + 3) // 4))
+    budget_limit = max(
+        1,
+        profile_max_examples // MIN_EXAMPLES_PER_ENTROPY_SHARD,
+    )
+    return min(host_limit, budget_limit)
 
 
 def _configured_property_shards() -> int | None:
@@ -1069,18 +1100,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     persistent_output_value = os.environ.get("CRATEDIGGER_FUZZ_OUTPUT_DIR")
     property_shards = args.property_shards
-    if property_shards is None:
-        property_shards = (
-            recommended_property_shards(os.cpu_count() or 1)
-            if args.profile == DEFAULT_PROFILE
-            else 1
-        )
-    if args.profile != DEFAULT_PROFILE and property_shards != 1:
-        print(
-            "Property entropy sharding is supported only by the fuzz profile",
-            file=sys.stderr,
-        )
-        return 2
+    if args.profile != DEFAULT_PROFILE:
+        if property_shards is None:
+            property_shards = 1
+        elif property_shards != 1:
+            print(
+                "Property entropy sharding is supported only by the fuzz profile",
+                file=sys.stderr,
+            )
+            return 2
 
     with tempfile.TemporaryDirectory(prefix="cratedigger_fuzz_") as tempdir:
         active_root = Path(tempdir)
@@ -1102,6 +1130,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             environment=child_environment,
             work_directory=discovery_directory,
         )
+        if property_shards is None:
+            profile_max_examples = property_profile_max_examples(manifests)
+            property_shards = (
+                recommended_property_shards(
+                    os.cpu_count() or 1,
+                    profile_max_examples,
+                )
+                if profile_max_examples is not None
+                else 1
+            )
         targets = build_fuzz_targets(
             manifests,
             property_shards=property_shards,
