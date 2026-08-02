@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Literal, Self
 import msgspec
 
 from lib.release_identity import (
+    ConflictingReleaseIdentityError,
     ReleaseIdentity,
     detect_release_source,
     frontend_release_id,
@@ -1016,6 +1017,19 @@ class BeetsDB:
         if not identities:
             return []
         resolutions = self.resolve_current_releases(identities)
+        conflicts = [
+            result.identity.release_id
+            for result in resolutions.values()
+            if (
+                isinstance(result, CurrentBeetsAmbiguous)
+                and result.reason == "conflicting_identity"
+            )
+        ]
+        if conflicts:
+            raise ConflictingReleaseIdentityError(
+                "conflicting numeric Discogs release identities for: "
+                + ", ".join(sorted(conflicts))
+            )
         ambiguous = [
             result.identity.release_id
             for result in resolutions.values()

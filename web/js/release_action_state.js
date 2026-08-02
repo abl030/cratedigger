@@ -1,8 +1,8 @@
 // @ts-check
 
 import {
-  pipelineStore,
   pipelineStoreKey,
+  resolvePipelineLifecycle,
   updatePipelineStatus,
 } from './state.js';
 
@@ -670,11 +670,16 @@ export async function handleProcessingLockedConflict({
  */
 export function buildReleaseActionState(item) {
   const releaseId = pipelineStoreKey(item.id);
-  const stored = releaseId ? pipelineStore.get(releaseId) : null;
-  const pipelineStatus = stored ? stored.status : (item.pipeline_status || null);
-  const pipelineId = stored ? toPositiveNumber(stored.id) : toPositiveNumber(item.pipeline_id);
+  const lifecycle = resolvePipelineLifecycle(
+    releaseId,
+    item.pipeline_status,
+    item.pipeline_id,
+    item.processing_owner,
+  );
+  const pipelineStatus = lifecycle.status;
+  const pipelineId = toPositiveNumber(lifecycle.id);
   const processingOwner = processingOwnerProjection(
-    stored ? stored.processing_owner : item.processing_owner,
+    lifecycle.processing_owner,
   );
   const processingPresentation = processingOwnerPresentation(
     pipelineStatus,

@@ -161,32 +161,45 @@ console.log('renderStatusBadges() never combines a live mutation with stale hist
   assertExcludes(deleted, '>captured<', 'deleted request history is not borrowed from the stale row');
   assertExcludes(deleted, '>provisional<', 'deleted request proof is not borrowed from the stale row');
 
-  updatePipelineStatus('processing-owner-refresh', 'processing', 53, {
+  const authoritativeOwner = {
     job_id: 303,
     status: 'recovery_required',
     preview_status: 'evidence_ready',
-  });
-  const staleOwner = renderStatusBadges({
-    id: 'processing-owner-refresh',
-    in_library: false,
-    has_captured_history: true,
-    pipeline_status: 'processing',
-    pipeline_id: 53,
-    processing_owner: {
-      job_id: 302,
-      status: 'running',
-      preview_status: 'evidence_ready',
-    },
-    pipeline_verified_lossless: true,
-  });
-  assertContains(staleOwner, '>needs recovery<',
-    'matching status/id does not expire a newer exact-owner overlay');
-  assertContains(staleOwner, 'job #303',
-    'the live overlay retains its job-specific recovery reason');
-  assertExcludes(staleOwner, '>captured<',
-    'facts from the stale owner projection remain suppressed');
-  assertFalse(!pipelineStore.has('processing-owner-refresh'),
-    'a stale processing owner cannot acknowledge the lifecycle overlay');
+  };
+  /** @type {Array<[string, import('../web/js/release_action_state.js').ProcessingOwnerProjection]>} */
+  const staleOwnerAxes = [
+    ['job-id', { ...authoritativeOwner, job_id: 302 }],
+    ['status', { ...authoritativeOwner, status: 'running' }],
+    ['preview-status', { ...authoritativeOwner, preview_status: 'waiting' }],
+  ];
+  for (const [axis, staleProjection] of staleOwnerAxes) {
+    const releaseId = `processing-owner-${axis}`;
+    updatePipelineStatus(releaseId, 'processing', 53, authoritativeOwner);
+    const staleOwner = renderStatusBadges({
+      id: releaseId,
+      in_library: false,
+      has_captured_history: true,
+      pipeline_status: 'processing',
+      pipeline_id: 53,
+      processing_owner: staleProjection,
+      pipeline_verified_lossless: true,
+    });
+    assertContains(staleOwner, '>needs recovery<',
+      `${axis} mismatch does not expire a newer exact-owner overlay`);
+    assertContains(staleOwner, 'job #303',
+      `${axis} mismatch retains the live job-specific recovery reason`);
+    assertExcludes(staleOwner, '>captured<',
+      `${axis} mismatch keeps stale row facts suppressed`);
+    assertFalse(!pipelineStore.has(releaseId),
+      `${axis} mismatch cannot acknowledge the lifecycle overlay`);
+  }
+
+  updatePipelineStatus(
+    'processing-owner-refresh',
+    'processing',
+    53,
+    authoritativeOwner,
+  );
 
   const matchingOwner = renderStatusBadges({
     id: 'processing-owner-refresh',
@@ -194,11 +207,7 @@ console.log('renderStatusBadges() never combines a live mutation with stale hist
     has_captured_history: true,
     pipeline_status: 'processing',
     pipeline_id: 53,
-    processing_owner: {
-      job_id: 303,
-      status: 'recovery_required',
-      preview_status: 'evidence_ready',
-    },
+    processing_owner: authoritativeOwner,
     pipeline_verified_lossless: true,
   });
   assertContains(matchingOwner, '>needs recovery<',

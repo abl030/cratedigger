@@ -5809,6 +5809,12 @@ class TestFakeBeetsDB(unittest.TestCase):
         ):
             beets.get_albums_by_release_ids(["12856590"])
 
+        self.assertEqual(
+            beets.get_albums_by_release_ids(["99999999"]),
+            [],
+            "an unrelated conflicting row is outside the requested snapshot",
+        )
+
     def test_get_tracks_by_mb_release_id_returns_seeded_or_none(self) -> None:
         # Real method returns None when locate finds no exact hit —
         # NOT an empty list (the browse route branches on that).

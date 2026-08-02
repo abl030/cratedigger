@@ -124,6 +124,82 @@ export function pipelineStoreKey(releaseId) {
 }
 
 /**
+ * @typedef {Object} ResolvedPipelineLifecycle
+ * @property {string|null} status
+ * @property {number|null} id
+ * @property {ProcessingOwnerProjection|null} processing_owner
+ * @property {boolean} row_facts_are_current
+ */
+
+/**
+ * @param {ProcessingOwnerProjection|null} left
+ * @param {ProcessingOwnerProjection|null} right
+ * @returns {boolean}
+ */
+function processingOwnersEqual(left, right) {
+  if (!left || !right) return left === right;
+  return left.job_id === right.job_id
+    && left.status === right.status
+    && (left.preview_status || null) === (right.preview_status || null);
+}
+
+/**
+ * Resolve one row against a recent local lifecycle mutation.
+ *
+ * A row acknowledges the overlay only when status, request ID, and exact
+ * processing owner all match. Every consumer calls this before choosing
+ * actions, badges, or row-owned historical facts, so one render cannot mix
+ * lifecycle projections from opposite sides of the acknowledgement boundary.
+ *
+ * @param {string|null|undefined} releaseId
+ * @param {string|null|undefined} rowStatus
+ * @param {number|null|undefined} rowId
+ * @param {ProcessingOwnerProjection|null|undefined} rowOwner
+ * @returns {ResolvedPipelineLifecycle}
+ */
+export function resolvePipelineLifecycle(
+  releaseId,
+  rowStatus,
+  rowId,
+  rowOwner,
+) {
+  const key = pipelineStoreKey(releaseId);
+  let stored = key ? pipelineStore.get(key) : null;
+  const authoritativeStatus = rowStatus || null;
+  const authoritativeId = rowId ?? null;
+  const authoritativeOwner = authoritativeStatus === 'processing'
+    ? (rowOwner || null)
+    : null;
+  if (stored) {
+    const storedOwner = stored.status === 'processing'
+      ? stored.processing_owner
+      : null;
+    if (authoritativeStatus === stored.status
+        && authoritativeId === stored.id
+        && processingOwnersEqual(authoritativeOwner, storedOwner)) {
+      pipelineStore.delete(key);
+      stored = null;
+    }
+  }
+  if (!stored) {
+    return {
+      status: authoritativeStatus,
+      id: authoritativeId,
+      processing_owner: authoritativeOwner,
+      row_facts_are_current: true,
+    };
+  }
+  return {
+    status: stored.status,
+    id: stored.id,
+    processing_owner: stored.status === 'processing'
+      ? stored.processing_owner
+      : null,
+    row_facts_are_current: false,
+  };
+}
+
+/**
  * Update pipeline status for an MBID across all in-memory state.
  * Call after any pipeline mutation (add, remove, upgrade, delete).
  * @param {string} mbid - MB UUID or numeric Discogs release ID

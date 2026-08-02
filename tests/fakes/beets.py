@@ -484,6 +484,17 @@ class FakeBeetsDB:
         }
         for albums in self._albums_by_artist.values():
             for row in albums:
+                primary = ReleaseIdentity.from_id(row.get("mb_albumid"))
+                discogs = ReleaseIdentity.from_id(row.get("discogs_albumid"))
+                if discogs is not None and discogs.source != "discogs":
+                    discogs = None
+                candidate_identities = {
+                    identity
+                    for identity in (primary, discogs)
+                    if identity is not None
+                }
+                if candidate_identities.isdisjoint(wanted):
+                    continue
                 identities = ReleaseIdentity.all_from_observation_fields(
                     row.get("mb_albumid"), row.get("discogs_albumid")
                 )
