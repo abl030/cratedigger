@@ -1050,7 +1050,9 @@ class BeetsDB:
         projected: list[dict[str, object]] = []
         for row in rows:
             current = current_by_album_id[int(row[0])]
-            if ReleaseIdentity.from_strict_fields(row[4], row[11]) != current.identity:
+            if current.identity not in ReleaseIdentity.all_from_observation_fields(
+                row[4], row[11],
+            ):
                 raise RuntimeError(
                     "current Beets release changed during artist projection"
                 )

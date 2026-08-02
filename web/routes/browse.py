@@ -229,9 +229,10 @@ def _apply_rg_pipeline_overlay(
                 if owner is not None
                 else None
             )
-            row.has_captured_history = hit["has_captured_history"]
-            row.pipeline_verified_lossless = hit["verified_lossless"]
-            row.pipeline_provisional = hit["provisional_lossless"]
+            if row.identity_kind == "release":
+                row.has_captured_history = hit["has_captured_history"]
+                row.pipeline_verified_lossless = hit["verified_lossless"]
+                row.pipeline_provisional = hit["provisional_lossless"]
 
 
 def get_artist(h: RouteHandler, params: dict[str, list[str]], artist_id: str) -> None:

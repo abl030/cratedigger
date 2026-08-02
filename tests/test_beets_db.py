@@ -1441,6 +1441,26 @@ class TestGetAlbumsByReleaseIds(unittest.TestCase):
         self.assertEqual(rows[0]["min_bitrate"], 320000)
         self.assertEqual(rows[0]["avg_bitrate"], 320000)
 
+    def test_cross_source_album_matches_either_exact_identity(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as writer:
+            writer.execute(
+                "UPDATE albums SET discogs_albumid = ? WHERE id = 1",
+                (12856590,),
+            )
+            writer.commit()
+
+        with BeetsDB(self.db_path) as db:
+            mb_rows = db.get_albums_by_release_ids([self.RELEASE_ID])
+            discogs_rows = db.get_albums_by_release_ids(["12856590"])
+            combined_rows = db.get_albums_by_release_ids([
+                self.RELEASE_ID, "12856590",
+            ])
+
+        for rows in (mb_rows, discogs_rows, combined_rows):
+            self.assertEqual([row["id"] for row in rows], [1])
+            self.assertEqual(rows[0]["mb_albumid"], self.RELEASE_ID)
+            self.assertEqual(rows[0]["discogs_albumid"], "12856590")
+
     def test_ambiguous_exact_membership_fails_loud(self) -> None:
         _insert_album(
             self.db_path,

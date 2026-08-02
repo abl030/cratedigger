@@ -274,6 +274,30 @@ class TestLibraryArtistService(unittest.TestCase):
         self.assertFalse(rows[0].pipeline_verified_lossless)
         self.assertFalse(rows[0].pipeline_provisional)
 
+    def test_dual_tagged_album_attaches_discogs_request_once(self) -> None:
+        rows = build_library_artist_rows(
+            library_albums=[_beets_album(discogs_albumid="12856590")],
+            pipeline_rows=[_artist_request(
+                id=42,
+                mb_release_id=None,
+                discogs_release_id="12856590",
+                artist_name="Test Artist",
+                album_title="Test Album",
+                status="wanted",
+                has_captured_history=True,
+                verified_lossless=True,
+                provisional_lossless=False,
+            )],
+            track_counts={42: 10},
+            rank_fn=_rank,
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0].in_library)
+        self.assertEqual(rows[0].pipeline_id, 42)
+        self.assertTrue(rows[0].has_captured_history)
+        self.assertTrue(rows[0].pipeline_verified_lossless)
+
     def test_replaced_request_remains_an_exact_pipeline_history_row(self) -> None:
         rows = build_library_artist_rows(
             library_albums=[],

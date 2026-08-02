@@ -5775,6 +5775,25 @@ class TestFakeBeetsDB(unittest.TestCase):
         self.assertEqual(beets.get_albums_by_artist_calls,
                          [("X", "mb-1"), ("Y", "")])
 
+    def test_exact_album_projection_matches_each_cross_source_identity(self) -> None:
+        beets = FakeBeetsDB()
+        album = {
+            "id": 7,
+            "album": "Dual-tagged pressing",
+            "mb_albumid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "discogs_albumid": "12856590",
+        }
+        beets.set_albums_by_artist("X", [album])
+
+        rows = beets.get_albums_by_release_ids([
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "12856590",
+        ])
+
+        self.assertEqual(rows, [album])
+        self.assertEqual(beets.get_albums_by_release_ids_calls, [[
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "12856590",
+        ]])
+
     def test_get_tracks_by_mb_release_id_returns_seeded_or_none(self) -> None:
         # Real method returns None when locate finds no exact hit —
         # NOT an empty list (the browse route branches on that).

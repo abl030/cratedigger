@@ -109,6 +109,36 @@ class ReleaseIdentity:
             return None
         return identities[0]
 
+    @classmethod
+    def all_from_observation_fields(
+        cls,
+        release_id: object | None,
+        discogs_release_id: object | None = None,
+    ) -> tuple[ReleaseIdentity, ...]:
+        """Return every non-conflicting identity carried by a library row.
+
+        Beets may legitimately tag one physical album with both its
+        MusicBrainz UUID and Discogs release ID. Read-only projections may
+        match either exact identity, while two different numeric Discogs IDs
+        remain a conflicting authority world and match neither.
+        """
+        primary = cls.from_id(release_id)
+        discogs = cls.from_id(discogs_release_id)
+        if discogs is not None and discogs.source != "discogs":
+            discogs = None
+        if (
+            primary is not None
+            and primary.source == "discogs"
+            and discogs is not None
+            and primary != discogs
+        ):
+            return ()
+        return tuple(dict.fromkeys(
+            identity
+            for identity in (primary, discogs)
+            if identity is not None
+        ))
+
 
 def frontend_release_id(
     release_id: object | None,

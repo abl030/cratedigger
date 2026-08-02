@@ -96,6 +96,18 @@ def _pipeline_rows_by_identity(
     return rows_by_identity
 
 
+def _library_identity_keys(
+    album: Mapping[str, object],
+) -> tuple[tuple[str, str], ...]:
+    """Every exact identity a non-destructive Beets row may represent."""
+    return tuple(
+        identity.key
+        for identity in ReleaseIdentity.all_from_observation_fields(
+            album.get("mb_albumid"), album.get("discogs_albumid"),
+        )
+    )
+
+
 def _request_id(row: Mapping[str, object]) -> int:
     """Typed request-id extraction for pipeline rows."""
     raw = row["id"]
@@ -125,18 +137,22 @@ def build_library_artist_rows(
     seen_release_ids: set[tuple[str, str]] = set()
 
     for album in library_albums:
-        identity = ReleaseIdentity.from_fields(
-            album.get("mb_albumid"),
-            album.get("discogs_albumid"),
+        identity_keys = _library_identity_keys(album)
+        pipeline_row = next(
+            (
+                pipeline_by_identity[key]
+                for key in identity_keys
+                if key in pipeline_by_identity
+            ),
+            None,
         )
         row = LibraryAlbumRow.from_beets_album_with_pipeline(
             album,
-            pipeline_row=pipeline_by_identity.get(identity.key) if identity else None,
+            pipeline_row=pipeline_row,
             rank_fn=rank_fn,
         )
         rows.append(row)
-        if row.identity:
-            seen_release_ids.add(row.identity.key)
+        seen_release_ids.update(identity_keys)
 
     for pipeline_row in pipeline_rows:
         request_id = _request_id(pipeline_row)
@@ -178,13 +194,9 @@ def list_library_artist_rows(
     library_albums = library_lookup.get_library_artist(artist_name, mb_artist_id)
     pipeline_identity_keys = set(_pipeline_rows_by_identity(pipeline_rows))
     artist_library_identity_keys = {
-        identity.key
+        identity_key
         for album in library_albums
-        if (
-            identity := ReleaseIdentity.from_fields(
-                album.get("mb_albumid"), album.get("discogs_albumid")
-            )
-        ) is not None
+        for identity_key in _library_identity_keys(album)
     }
     request_release_ids = [
         identity.release_id
@@ -201,29 +213,29 @@ def list_library_artist_rows(
         if request_release_ids
         else []
     )
-    library_by_identity: dict[tuple[str, str], Mapping[str, object]] = {}
+    library_by_album: dict[tuple[str, object], Mapping[str, object]] = {}
     unidentified_library_albums: list[Mapping[str, object]] = []
     for album in [*library_albums, *exact_library_albums]:
-        identity = ReleaseIdentity.from_fields(
-            album.get("mb_albumid"), album.get("discogs_albumid")
-        )
-        if identity is None:
+        identity_keys = _library_identity_keys(album)
+        if not identity_keys:
             unidentified_library_albums.append(album)
         else:
-            library_by_identity[identity.key] = album
+            album_id = album.get("id")
+            dedupe_key: tuple[str, object] = (
+                ("id", album_id)
+                if isinstance(album_id, int)
+                else ("identity", identity_keys)
+            )
+            library_by_album[dedupe_key] = album
     merged_library_albums = [
         *unidentified_library_albums,
-        *library_by_identity.values(),
+        *library_by_album.values(),
     ]
     displayed_release_ids = [
-        identity.release_id
+        identity_key[1]
         for album in merged_library_albums
-        if (
-            identity := ReleaseIdentity.from_fields(
-                album.get("mb_albumid"), album.get("discogs_albumid")
-            )
-        ) is not None
-        and identity.key not in pipeline_identity_keys
+        for identity_key in _library_identity_keys(album)
+        if identity_key not in pipeline_identity_keys
     ]
     pipeline_overlays: Mapping[str, Mapping[str, object]] = (
         pipeline_db.get_pipeline_overlay(displayed_release_ids)

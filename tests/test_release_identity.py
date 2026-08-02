@@ -84,6 +84,29 @@ class TestReleaseIdentity(unittest.TestCase):
                     ReleaseIdentity.from_strict_fields(primary, secondary),
                 )
 
+    def test_observation_fields_keep_valid_cross_source_pair(self):
+        from lib.release_identity import ReleaseIdentity
+
+        mb = ReleaseIdentity(
+            source="musicbrainz",
+            release_id="89ad4ac3-39f7-470e-963a-56509c546377",
+        )
+        discogs = ReleaseIdentity(source="discogs", release_id="12856590")
+        self.assertEqual(
+            ReleaseIdentity.all_from_observation_fields(
+                mb.release_id, discogs.release_id,
+            ),
+            (mb, discogs),
+        )
+        self.assertEqual(
+            ReleaseIdentity.all_from_observation_fields("0012856590", "12856590"),
+            (discogs,),
+        )
+        self.assertEqual(
+            ReleaseIdentity.all_from_observation_fields("12856590", "12856591"),
+            (),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
