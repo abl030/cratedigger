@@ -996,6 +996,82 @@ class BeetsDB:
             ).fetchall()
         return [self._album_row_to_dict(r) for r in rows]
 
+    def get_albums_by_release_ids(
+        self,
+        release_ids: list[str],
+    ) -> list[dict[str, object]]:
+        """Return current album rows for exact release identities.
+
+        Artist metadata chooses page membership, but it is not release
+        authority: tags can drift independently on either side. Resolve every
+        requested identity through the canonical current-Beets seam, fail loud
+        on ambiguous exact membership, then fetch the display rows in one
+        batch. Missing identities are omitted.
+        """
+        identities = [
+            identity
+            for release_id in release_ids
+            if (identity := ReleaseIdentity.from_id(release_id)) is not None
+        ]
+        if not identities:
+            return []
+        resolutions = self.resolve_current_releases(identities)
+        ambiguous = [
+            result.identity.release_id
+            for result in resolutions.values()
+            if isinstance(result, CurrentBeetsAmbiguous)
+        ]
+        if ambiguous:
+            raise ValueError(
+                "ambiguous current Beets release projection: "
+                + ", ".join(sorted(ambiguous))
+            )
+        current_by_album_id = {
+            result.album_id: result
+            for result in resolutions.values()
+            if isinstance(result, CurrentBeetsUnique)
+        }
+        album_ids = list(current_by_album_id)
+        if not album_ids:
+            return []
+        rows = self._conn.execute(
+            "SELECT a.id, a.album, a.albumartist, a.year, a.mb_albumid, "
+            "a.albumtype, a.label, a.country, a.added, "
+            "a.mb_releasegroupid, a.release_group_title, a.discogs_albumid "
+            "FROM albums a WHERE a.id IN ("
+            "SELECT CAST(value AS INTEGER) FROM json_each(?)"
+            ") ORDER BY a.id",
+            (json.dumps(album_ids),),
+        ).fetchall()
+        if len(rows) != len(set(album_ids)):
+            raise RuntimeError(
+                "current Beets release changed during artist projection"
+            )
+        projected: list[dict[str, object]] = []
+        for row in rows:
+            current = current_by_album_id[int(row[0])]
+            if ReleaseIdentity.from_strict_fields(row[4], row[11]) != current.identity:
+                raise RuntimeError(
+                    "current Beets release changed during artist projection"
+                )
+            formats = tuple(dict.fromkeys(
+                item.format for item in current.items if item.format
+            ))
+            bitrates = tuple(
+                item.bitrate for item in current.items
+                if item.bitrate is not None and item.bitrate > 0
+            )
+            projected.append(self._album_row_to_dict((
+                *row[:8],
+                len(current.items),
+                ",".join(formats) if formats else None,
+                *row[8:11],
+                min(bitrates) if bitrates else None,
+                int(sum(bitrates) / len(bitrates)) if bitrates else None,
+                row[11],
+            )))
+        return projected
+
     def get_tracks_by_mb_release_id(self, mbid: str) -> list[dict[str, object]] | None:
         """Get all tracks for an album by release ID.
 

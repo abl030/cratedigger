@@ -133,6 +133,7 @@ console.log('renderStatusBadges() never combines a live mutation with stale hist
     in_library: false,
     has_captured_history: true,
     pipeline_status: 'imported',
+    pipeline_id: 50,
     pipeline_verified_lossless: true,
   });
   assertContains(reopened, '>wanted<', 'live lifecycle overlays the stale row');
@@ -145,11 +146,23 @@ console.log('renderStatusBadges() never combines a live mutation with stale hist
     in_library: true,
     has_captured_history: true,
     pipeline_status: 'imported',
+    pipeline_id: 52,
     pipeline_provisional: true,
   });
   assertContains(deleted, '>untracked<', 'request deletion leaves an explicit local tombstone');
   assertExcludes(deleted, '>captured<', 'deleted request history is not borrowed from the stale row');
   assertExcludes(deleted, '>provisional<', 'deleted request proof is not borrowed from the stale row');
+
+  const refetched = renderStatusBadges({
+    id: 'status-only-reopen',
+    in_library: false,
+    has_captured_history: true,
+    pipeline_status: 'wanted',
+    pipeline_id: 51,
+    pipeline_verified_lossless: true,
+  });
+  assertContains(refetched, '>captured<', 'matching refetch restores durable history');
+  assertContains(refetched, '>verified<', 'matching refetch restores authoritative proof');
   pipelineStore.clear();
 }
 

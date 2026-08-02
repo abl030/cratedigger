@@ -116,7 +116,20 @@ class TestWorldInvariantGenerated(unittest.TestCase):
             ("B", report.groups.b),
             ("C", report.groups.c),
         ):
-            self.assertTrue(all(world_violation_bucket(item.code) == bucket for item in group.members))
+            expected = tuple(sorted(
+                (
+                    item for item in violations
+                    if world_violation_bucket(item.code) == bucket
+                ),
+                key=lambda item: (
+                    item.code,
+                    item.request_id or -1,
+                    item.release_id or "",
+                    item.album_ids,
+                    item.detail,
+                ),
+            ))
+            self.assertEqual(group.members, expected)
             self.assertEqual(group.count, len(group.members))
 
     @given(release_ids=st.lists(_SEGMENT, min_size=1, max_size=8, unique=True))

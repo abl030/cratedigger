@@ -36,6 +36,12 @@ class SupportsLibraryArtistLookup(Protocol):
     ) -> list[dict[str, object]]:
         ...
 
+    def get_library_releases(
+        self,
+        release_ids: list[str],
+    ) -> list[dict[str, object]]:
+        ...
+
 
 class SupportsLibraryArtistPipelineDB(Protocol):
     """Minimal pipeline DB surface for artist-scoped library rows."""
@@ -48,6 +54,12 @@ class SupportsLibraryArtistPipelineDB(Protocol):
         ...
 
     def get_track_counts(self, request_ids: list[int]) -> dict[int, int]:
+        ...
+
+    def get_pipeline_overlay(
+        self,
+        mbids: list[str],
+    ) -> Mapping[str, Mapping[str, object]]:
         ...
 
 
@@ -101,9 +113,14 @@ def build_library_artist_rows(
     pipeline_rows: Sequence[Mapping[str, object]],
     track_counts: Mapping[int, int],
     rank_fn: Callable[[str | None, int | None], str],
+    pipeline_overlays: Mapping[str, Mapping[str, object]] | None = None,
 ) -> list[LibraryAlbumRow]:
     """Merge beets + pipeline artist rows behind one typed seam."""
     pipeline_by_identity = _pipeline_rows_by_identity(pipeline_rows)
+    for release_id, overlay in (pipeline_overlays or {}).items():
+        identity = ReleaseIdentity.from_id(release_id)
+        if identity is not None:
+            pipeline_by_identity[identity.key] = overlay
     rows: list[LibraryAlbumRow] = []
     seen_release_ids: set[tuple[str, str]] = set()
 
@@ -159,9 +176,64 @@ def list_library_artist_rows(
     # Keep the original pipeline-first ordering so a concurrent import
     # that lands between the two reads still collapses onto the beets row.
     library_albums = library_lookup.get_library_artist(artist_name, mb_artist_id)
+    pipeline_identity_keys = set(_pipeline_rows_by_identity(pipeline_rows))
+    artist_library_identity_keys = {
+        identity.key
+        for album in library_albums
+        if (
+            identity := ReleaseIdentity.from_fields(
+                album.get("mb_albumid"), album.get("discogs_albumid")
+            )
+        ) is not None
+    }
+    request_release_ids = [
+        identity.release_id
+        for row in pipeline_rows
+        if (
+            identity := ReleaseIdentity.from_fields(
+                row.get("mb_release_id"), row.get("discogs_release_id")
+            )
+        ) is not None
+        and identity.key not in artist_library_identity_keys
+    ]
+    exact_library_albums = (
+        library_lookup.get_library_releases(request_release_ids)
+        if request_release_ids
+        else []
+    )
+    library_by_identity: dict[tuple[str, str], Mapping[str, object]] = {}
+    unidentified_library_albums: list[Mapping[str, object]] = []
+    for album in [*library_albums, *exact_library_albums]:
+        identity = ReleaseIdentity.from_fields(
+            album.get("mb_albumid"), album.get("discogs_albumid")
+        )
+        if identity is None:
+            unidentified_library_albums.append(album)
+        else:
+            library_by_identity[identity.key] = album
+    merged_library_albums = [
+        *unidentified_library_albums,
+        *library_by_identity.values(),
+    ]
+    displayed_release_ids = [
+        identity.release_id
+        for album in merged_library_albums
+        if (
+            identity := ReleaseIdentity.from_fields(
+                album.get("mb_albumid"), album.get("discogs_albumid")
+            )
+        ) is not None
+        and identity.key not in pipeline_identity_keys
+    ]
+    pipeline_overlays = (
+        pipeline_db.get_pipeline_overlay(displayed_release_ids)
+        if displayed_release_ids
+        else {}
+    )
     return build_library_artist_rows(
-        library_albums=library_albums,
+        library_albums=merged_library_albums,
         pipeline_rows=pipeline_rows,
         track_counts=track_counts,
         rank_fn=rank_fn,
+        pipeline_overlays=pipeline_overlays,
     )

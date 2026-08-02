@@ -86,14 +86,6 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
     RELEASE_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
     RG_ID = "11111111-1111-1111-1111-111111111111"
 
-    def setUp(self) -> None:
-        super().setUp()
-        import web.server as srv
-
-        patcher = patch.object(srv, "_beets", FakeBeetsDB())
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
     def test_artist_search_contract(self):
         with patch("web.server.mb_api") as mock_mb:
             mock_mb.search_artists.return_value = [
@@ -516,6 +508,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             mock_mb.get_artist_release_groups.return_value = _catalogue(
                 [release_group]
             )
+            mock_mb.get_artist_name.return_value = "Test Artist"
             status, data = self._get(f"/api/artist/{self.ARTIST_ID}")
 
         self.assertEqual(status, 200)
@@ -544,6 +537,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             mock_mb.get_artist_release_groups.return_value = _catalogue(
                 [appearance]
             )
+            mock_mb.get_artist_name.return_value = "Test Artist"
             status, data = self._get(f"/api/artist/{self.ARTIST_ID}")
 
         self.assertEqual(status, 200)
@@ -584,10 +578,8 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         })
         self.assertNotIn(raw_reason, str(data))
 
-    def test_artist_release_groups_in_library_when_name_passed(self):
-        """When the frontend passes ?name=, each RG gets in_library: bool
-        based on a beets lookup. Without name, the field stays absent
-        (backwards-compatible)."""
+    def test_artist_release_groups_without_name_still_project_library(self):
+        """Server-resolved artist names never skip current authority."""
         release_group = {
             "id": self.RG_ID, "title": "Owned Album", "type": "Album",
             "source": "mb", "identity_kind": "work",
@@ -606,12 +598,12 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
             mock_mb.get_artist_release_groups.return_value = _catalogue(
                 [release_group]
             )
-            status, data = self._get(
-                f"/api/artist/{self.ARTIST_ID}?name=Test%20Artist"
-            )
+            mock_mb.get_artist_name.return_value = "Test Artist"
+            status, data = self._get(f"/api/artist/{self.ARTIST_ID}")
 
         self.assertEqual(status, 200)
         self.assertTrue(data["release_groups"][0]["in_library"])
+        mock_mb.get_artist_name.assert_called_once_with(self.ARTIST_ID)
 
     def test_artist_release_groups_pipeline_overlay_when_name_passed(self):
         """RG rows carry the request badge fields (#575): a non-replaced
@@ -1430,14 +1422,6 @@ class TestDiscogsBrowseRouteContracts(_FakeDbWebServerCase):
         "is_appearance", "has_captured_history",
         "pipeline_verified_lossless", "pipeline_provisional",
     }
-
-    def setUp(self) -> None:
-        super().setUp()
-        import web.server as srv
-
-        patcher = patch.object(srv, "_beets", FakeBeetsDB())
-        patcher.start()
-        self.addCleanup(patcher.stop)
 
     def test_discogs_routes_return_503_mirror_required_when_base_unset(self):
         """R13: no mirror configured -> a clear mirror-required 503 from the

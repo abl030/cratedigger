@@ -6,6 +6,8 @@ import unittest
 from datetime import UTC, datetime
 from typing import cast
 
+import msgspec
+
 from lib.pipeline_db.rows import ArtistRequestRow
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
@@ -58,8 +60,14 @@ def _artist_request(**overrides: object) -> dict[str, object]:
 
 
 class _StubLibraryLookup:
-    def __init__(self, albums: list[dict[str, object]]) -> None:
+    def __init__(
+        self,
+        albums: list[dict[str, object]],
+        *,
+        exact_albums: list[dict[str, object]] | None = None,
+    ) -> None:
         self._albums = albums
+        self._exact_albums = exact_albums if exact_albums is not None else albums
         self.calls: list[tuple[str, str]] = []
 
     def get_library_artist(
@@ -69,6 +77,17 @@ class _StubLibraryLookup:
     ) -> list[dict[str, object]]:
         self.calls.append((artist_name, mb_artist_id))
         return list(self._albums)
+
+    def get_library_releases(
+        self,
+        release_ids: list[str],
+    ) -> list[dict[str, object]]:
+        wanted = set(release_ids)
+        return [
+            album for album in self._exact_albums
+            if album.get("mb_albumid") in wanted
+            or album.get("discogs_albumid") in wanted
+        ]
 
 
 class _FailingLibraryLookup:
@@ -82,6 +101,12 @@ class _FailingLibraryLookup:
     ) -> list[dict[str, object]]:
         self._calls.append(f"library:{artist_name}:{mb_artist_id}")
         raise OSError("synthetic Beets read failure")
+
+    def get_library_releases(
+        self,
+        release_ids: list[str],
+    ) -> list[dict[str, object]]:
+        raise AssertionError("artist-scoped Beets read should fail first")
 
 
 class _RecordingPipelineDB:
@@ -101,6 +126,13 @@ class _RecordingPipelineDB:
         self._calls.append(f"track_counts:{request_ids}")
         return {int(self._row["id"]): 10}
 
+    def get_pipeline_overlay(
+        self,
+        mbids: list[str],
+    ) -> dict[str, dict[str, object]]:
+        self._calls.append(f"overlay:{mbids}")
+        return {}
+
 
 class _RaceAwareLibraryLookup:
     def __init__(self) -> None:
@@ -116,6 +148,13 @@ class _RaceAwareLibraryLookup:
         if not self.pipeline_read:
             return []
         return [_beets_album()]
+
+    def get_library_releases(
+        self,
+        release_ids: list[str],
+    ) -> list[dict[str, object]]:
+        self.calls.append(f"releases:{release_ids}")
+        return [_beets_album()] if RELEASE_ID in release_ids else []
 
 
 class _RaceAwarePipelineDB:
@@ -141,6 +180,13 @@ class _RaceAwarePipelineDB:
     def get_track_counts(self, request_ids: list[int]) -> dict[int, int]:
         self.calls.append(f"track_counts:{request_ids}")
         return {42: 10}
+
+    def get_pipeline_overlay(
+        self,
+        mbids: list[str],
+    ) -> dict[str, dict[str, object]]:
+        self.calls.append(f"overlay:{mbids}")
+        return {}
 
 
 class TestLibraryArtistService(unittest.TestCase):
@@ -281,25 +327,85 @@ class TestLibraryArtistService(unittest.TestCase):
 
         self.assertEqual(
             pipeline_db.calls,
-            [f"pipeline:Test Artist:{ARTIST_ID}", "track_counts:[42]"],
+            [
+                f"pipeline:Test Artist:{ARTIST_ID}",
+                "track_counts:[42]",
+            ],
         )
         self.assertEqual(lookup.calls, [f"library:Test Artist:{ARTIST_ID}"])
         self.assertEqual(len(rows), 1)
         self.assertTrue(rows[0].in_library)
         self.assertEqual(rows[0].pipeline_id, 42)
 
+    def test_exact_release_beats_drifted_beets_artist_tags(self) -> None:
+        fake_db = FakePipelineDB()
+        fake_db.seed_request(_artist_request(
+            id=42,
+            mb_release_id=RELEASE_ID,
+            mb_artist_id=ARTIST_ID,
+            artist_name="Test Artist",
+            album_title="Test Album",
+            status="wanted",
+        ))
+        lookup = _StubLibraryLookup(
+            [],
+            exact_albums=[_beets_album(artist="Drifted Beets Tag")],
+        )
+
+        rows = list_library_artist_rows(
+            library_lookup=lookup,
+            pipeline_db=fake_db,
+            artist_name="Test Artist",
+            mb_artist_id=ARTIST_ID,
+            rank_fn=_rank,
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0].in_library)
+        self.assertEqual(rows[0].pipeline_id, 42)
+        self.assertEqual(rows[0].artist, "Drifted Beets Tag")
+
+    def test_exact_release_beats_drifted_request_artist_metadata(self) -> None:
+        fake_db = FakePipelineDB()
+        fake_db.seed_request(_artist_request(
+            id=43,
+            mb_release_id=RELEASE_ID,
+            mb_artist_id="22222222-2222-4222-8222-222222222222",
+            artist_name="Old Request Tag",
+            album_title="Test Album",
+            status="wanted",
+            processing_owner=None,
+            has_captured_history=True,
+        ))
+        fake_db.log_download(43, outcome="success")
+        lookup = _StubLibraryLookup([_beets_album()])
+
+        rows = list_library_artist_rows(
+            library_lookup=lookup,
+            pipeline_db=fake_db,
+            artist_name="Test Artist",
+            mb_artist_id=ARTIST_ID,
+            rank_fn=_rank,
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0].in_library)
+        self.assertEqual(rows[0].pipeline_id, 43)
+        self.assertTrue(rows[0].has_captured_history)
+
     def test_beets_read_failure_propagates_after_pipeline_snapshot(self) -> None:
         calls: list[str] = []
-        request = cast("ArtistRequestRow", _artist_request(
+        request = msgspec.convert(_artist_request(
             id=42,
             mb_release_id=RELEASE_ID,
             artist_name="Test Artist",
             album_title="Captured Album",
             status="wanted",
+            processing_owner=None,
             has_captured_history=True,
             verified_lossless=True,
             provisional_lossless=False,
-        ))
+        ), type=ArtistRequestRow)
         pipeline_db = _RecordingPipelineDB(calls, request)
 
         with self.assertRaisesRegex(OSError, "Beets read failure"):

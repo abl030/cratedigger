@@ -36,6 +36,7 @@ import { processingOwnerPresentation } from './release_action_state.js';
  * @property {string|null|undefined} [pipeline_status]
  *   'wanted' | 'downloading' | 'processing' | 'imported' | 'unsearchable' |
  *   'replaced' | null
+ * @property {number|null|undefined} [pipeline_id]
  * @property {import('./release_action_state.js').ProcessingOwnerProjection|null} [processing_owner]
  * @property {boolean} [pipeline_verified_lossless] - The tracked install
  *   carries a verified-lossless proof (terminal quality identity).
@@ -57,15 +58,19 @@ export function renderStatusBadges(item) {
   const owner = stored
     ? stored.processing_owner
     : (item.processing_owner || null);
-  const hasCapturedHistory = stored
-    ? stored.has_captured_history
-    : item.has_captured_history === true;
-  const verifiedLossless = stored
-    ? stored.pipeline_verified_lossless
-    : item.pipeline_verified_lossless === true;
-  const provisional = stored
-    ? stored.pipeline_provisional
-    : item.pipeline_provisional === true;
+  // A local mutation owns lifecycle only. Suppress historical facts from a
+  // row whose status/id has not caught up yet, then trust them again after an
+  // authoritative refetch matches the stored lifecycle projection.
+  const itemFactsAreCurrent = !stored || (
+    (item.pipeline_status || null) === stored.status
+    && (item.pipeline_id ?? null) === stored.id
+  );
+  const hasCapturedHistory = itemFactsAreCurrent
+    && item.has_captured_history === true;
+  const verifiedLossless = itemFactsAreCurrent
+    && item.pipeline_verified_lossless === true;
+  const provisional = itemFactsAreCurrent
+    && item.pipeline_provisional === true;
   const processing = processingOwnerPresentation(pStatus, owner);
 
   let html = '';

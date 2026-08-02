@@ -5984,7 +5984,7 @@ class FakePipelineDB:
             if not matches:
                 continue
             facts = self._capture_and_evidence_projection(r)
-            out[release_id] = {
+            projected = {
                 "id": r["id"],
                 "status": r.get("status"),
                 "search_filetype_override":
@@ -5996,6 +5996,12 @@ class FakePipelineDB:
                     r
                 )["processing_owner"],
             }
+            existing = out.get(release_id)
+            dedicated_discogs_match = normalize_release_id(
+                r.get("discogs_release_id")
+            ) == release_id
+            if existing is None or dedicated_discogs_match:
+                out[release_id] = projected
         return out
 
     def get_log(self, limit: int = 50,

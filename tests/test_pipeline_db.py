@@ -50,6 +50,7 @@ from lib.pipeline_db import (
     PersistedDistance,
     PersistedTrack,
     PersistedYoutubeRow,
+    PipelineDB,
     SupersedeRaceError,
     TransferLedgerRow,
 )
@@ -14104,9 +14105,46 @@ class TestGetPipelineOverlay(unittest.TestCase):
         }
         self.assertEqual(strip_id(real), strip_id(mirrored))
 
+    def test_numeric_overlay_supports_legacy_layout_and_prefers_dedicated_column(self):
+        fake = FakePipelineDB()
+        ids_by_backend: dict[int, tuple[int, int, int]] = {}
+        for db in (self.db, fake):
+            legacy_only = db.add_request(
+                mb_release_id="456781",
+                artist_name="Legacy Discogs Artist",
+                album_title="Legacy only",
+                source="request",
+            )
+            legacy_collision = db.add_request(
+                mb_release_id="456782",
+                artist_name="Legacy Discogs Artist",
+                album_title="Legacy collision",
+                source="request",
+            )
+            dedicated = db.add_request(
+                mb_release_id=None,
+                discogs_release_id="456782",
+                artist_name="Modern Discogs Artist",
+                album_title="Dedicated column",
+                source="request",
+            )
+            ids_by_backend[id(db)] = (
+                legacy_only,
+                legacy_collision,
+                dedicated,
+            )
+
+        for db in (self.db, fake):
+            with self.subTest(backend=type(db).__name__):
+                rows = db.get_pipeline_overlay(["456781", "456782"])
+                expected = ids_by_backend[id(db)]
+                self.assertEqual(rows["456781"]["id"], expected[0])
+                self.assertNotEqual(rows["456782"]["id"], expected[1])
+                self.assertEqual(rows["456782"]["id"], expected[2])
+
     @staticmethod
     def _seed_import_job_history(
-        db: Any,
+        db: PipelineDB | FakePipelineDB,
         *,
         request_id: int,
         job_type: str,
@@ -14136,7 +14174,9 @@ class TestGetPipelineOverlay(unittest.TestCase):
             (job_type, status, request_id),
         )
 
-    def _seed_capture_history_world(self, db: Any) -> list[str]:
+    def _seed_capture_history_world(
+        self, db: PipelineDB | FakePipelineDB,
+    ) -> list[str]:
         cases = [
             ("legacy-imported", "imported", None, None, True),
             ("download-success", "wanted", "success", None, True),
@@ -14375,7 +14415,14 @@ class TestListRequestsByArtistProjection(unittest.TestCase):
     def tearDown(self):
         self.db.close()
 
-    def _link_evidence(self, db: Any, request_id: int, mbid: str, *, verified: bool) -> None:
+    def _link_evidence(
+        self,
+        db: PipelineDB | FakePipelineDB,
+        request_id: int,
+        mbid: str,
+        *,
+        verified: bool,
+    ) -> None:
         from lib.quality import AlbumQualityV0Metric, VerifiedLosslessProof
 
         evidence = make_album_quality_evidence(
@@ -14412,7 +14459,9 @@ class TestListRequestsByArtistProjection(unittest.TestCase):
         assert stored is not None and stored.id is not None
         db.set_request_current_evidence(request_id, stored.id)
 
-    def _seed_artist_projection_world(self, db: Any) -> None:
+    def _seed_artist_projection_world(
+        self, db: PipelineDB | FakePipelineDB,
+    ) -> None:
         verified_id = db.add_request(
             mb_release_id="artist-projection-verified",
             artist_name="Projection Artist",

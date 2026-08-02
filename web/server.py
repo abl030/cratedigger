@@ -377,6 +377,12 @@ def get_library_artist(
     return _overlay.get_library_artist(_beets_db(), artist_name, mb_artist_id)
 
 
+def get_library_releases(
+    release_ids: list[str],
+) -> list[dict[str, object]]:
+    return _overlay.get_library_releases(_beets_db(), release_ids)
+
+
 def check_pipeline(
     mbids: list[str] | list[object],
 ) -> dict[str, dict[str, object]]:

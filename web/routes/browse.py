@@ -238,6 +238,11 @@ def get_artist(h: RouteHandler, params: dict[str, list[str]], artist_id: str) ->
     srv = _server()
     try:
         rgs = srv.mb_api.get_artist_release_groups(artist_id)
+        name = params.get("name", [""])[0].strip()
+        if not name:
+            name = srv.mb_api.get_artist_name(artist_id).strip()
+        if not name:
+            raise ValueError("MusicBrainz artist response has no name")
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             status = 404
@@ -267,17 +272,13 @@ def get_artist(h: RouteHandler, params: dict[str, list[str]], artist_id: str) ->
             "retryable": True,
         }, status=503)
         return
-    # Row-level in-library badge: requires the artist's library albums.
-    # Frontend passes ?name= to avoid an extra MB lookup; without it the
-    # name-fallback in get_albums_by_artist won't catch Discogs-tagged
-    # rows but UUID-tagged ones still match. Backwards-compatible: name
-    # is optional.
-    name = params.get("name", [""])[0].strip()
-    if name:
-        by_identity = _artist_pipeline_map(name, artist_id)
-        lib = srv.get_library_artist(name, artist_id)
-        annotate_in_library(rgs, [], lib, rank_fn=srv.compute_library_rank)
-        _apply_rg_pipeline_overlay(rgs, by_identity)
+    # Artist metadata chooses the page; current Beets and pipeline authority
+    # always annotate it. ``?name=`` avoids one MB lookup but never changes
+    # whether overlays are projected.
+    by_identity = _artist_pipeline_map(name, artist_id)
+    lib = srv.get_library_artist(name, artist_id)
+    annotate_in_library(rgs, [], lib, rank_fn=srv.compute_library_rank)
+    _apply_rg_pipeline_overlay(rgs, by_identity)
     h._json({
         "release_groups": _catalogue_payload(rgs),
         "ungrouped_releases": [],
@@ -592,42 +593,14 @@ def get_release(h: RouteHandler, params: dict[str, list[str]], release_id: str) 
         return
 
     data = srv.mb_api.get_release(normalized_id)
-    req = srv.check_pipeline([normalized_id]).get(normalized_id)
-    data["in_library"] = bool(srv.check_beets_library([normalized_id]))
-    data["pipeline_status"] = req["status"] if req else None
-    data["pipeline_id"] = req["id"] if req else None
-    data["processing_owner"] = (
-        req.get("processing_owner") if req else None
-    )
-    data["has_captured_history"] = (
-        bool(req["has_captured_history"]) if req else False
-    )
-    data["pipeline_verified_lossless"] = (
-        bool(req["verified_lossless"]) if req else False
-    )
-    data["pipeline_provisional"] = (
-        bool(req["provisional_lossless"]) if req else False
-    )
-    # Include beets track info + album id + on-disk quality if in library
+    overlay_release_rows_in_place([data], [normalized_id])
+    # Include current Beets tracks after the shared overlay supplies presence,
+    # album id, quality, lifecycle, history, and proof.
     b = srv._beets_db()
     if data["in_library"] and b:
-        beets_ids = b.get_album_ids_by_mbids([normalized_id])
-        data["beets_album_id"] = beets_ids.get(normalized_id)
-        quality = b.check_mbids_detail([normalized_id]).get(normalized_id) or {}
-        fmt_raw = quality.get("beets_format")
-        fmt = fmt_raw if isinstance(fmt_raw, str) else ""
-        br_raw = quality.get("beets_bitrate")
-        br = br_raw if isinstance(br_raw, int) else 0
-        avg_br = current_library_bitrate(quality)
-        data["library_format"] = fmt
-        data["library_min_bitrate"] = br
-        data["library_avg_bitrate"] = avg_br
-        data["library_rank"] = srv.compute_library_rank(fmt, avg_br)
         tracks = b.get_tracks_by_mb_release_id(normalized_id)
         if tracks is not None:
             data["beets_tracks"] = tracks
-    else:
-        data["beets_album_id"] = None
     h._json(data)
 
 
@@ -682,41 +655,12 @@ def get_discogs_release(h: RouteHandler, params: dict[str, list[str]], release_i
     srv = _server()
     normalized_id = normalize_release_id(release_id) or release_id.strip()
     data = discogs_api.get_release(int(normalized_id))
-    req = srv.check_pipeline([normalized_id]).get(normalized_id)
-    data["in_library"] = bool(srv.check_beets_library([normalized_id]))
-    data["pipeline_status"] = req["status"] if req else None
-    data["pipeline_id"] = req["id"] if req else None
-    data["processing_owner"] = (
-        req.get("processing_owner") if req else None
-    )
-    data["has_captured_history"] = (
-        bool(req["has_captured_history"]) if req else False
-    )
-    data["pipeline_verified_lossless"] = (
-        bool(req["verified_lossless"]) if req else False
-    )
-    data["pipeline_provisional"] = (
-        bool(req["provisional_lossless"]) if req else False
-    )
+    overlay_release_rows_in_place([data], [normalized_id])
     b = srv._beets_db()
     if data["in_library"] and b:
-        beets_ids = b.get_album_ids_by_mbids([normalized_id])
-        data["beets_album_id"] = beets_ids.get(normalized_id)
-        quality = b.check_mbids_detail([normalized_id]).get(normalized_id) or {}
-        fmt_raw = quality.get("beets_format")
-        fmt = fmt_raw if isinstance(fmt_raw, str) else ""
-        br_raw = quality.get("beets_bitrate")
-        br = br_raw if isinstance(br_raw, int) else 0
-        avg_br = current_library_bitrate(quality)
-        data["library_format"] = fmt
-        data["library_min_bitrate"] = br
-        data["library_avg_bitrate"] = avg_br
-        data["library_rank"] = srv.compute_library_rank(fmt, avg_br)
         tracks = b.get_tracks_by_mb_release_id(normalized_id)
         if tracks is not None:
             data["beets_tracks"] = tracks
-    else:
-        data["beets_album_id"] = None
     h._json(data)
 
 

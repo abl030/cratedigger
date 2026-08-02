@@ -51,6 +51,17 @@ def _pipeline_fact(row: Mapping[str, object], key: str) -> bool:
     )
 
 
+def _pipeline_facts(
+    row: Mapping[str, object],
+) -> tuple[bool, bool, bool]:
+    """Map the three independent request facts through one typed seam."""
+    return (
+        _pipeline_fact(row, "has_captured_history"),
+        _pipeline_fact(row, "verified_lossless"),
+        _pipeline_fact(row, "provisional_lossless"),
+    )
+
+
 class LibraryAlbumRow(msgspec.Struct, frozen=True):
     """Typed wire contract for `/api/library/artist` `albums[]`.
 
@@ -178,6 +189,7 @@ class LibraryAlbumRow(msgspec.Struct, frozen=True):
             row.get("discogs_release_id"),
         )
         min_bitrate = row.get("min_bitrate")
+        captured, verified, provisional = _pipeline_facts(row)
         return msgspec.convert(
             {
                 "id": row["id"],
@@ -203,15 +215,9 @@ class LibraryAlbumRow(msgspec.Struct, frozen=True):
                 "processing_owner": row.get("processing_owner"),
                 "upgrade_queued": _pipeline_upgrade_queued(row),
                 "library_rank": None,
-                "has_captured_history": _pipeline_fact(
-                    row, "has_captured_history"
-                ),
-                "pipeline_verified_lossless": _pipeline_fact(
-                    row, "verified_lossless"
-                ),
-                "pipeline_provisional": _pipeline_fact(
-                    row, "provisional_lossless"
-                ),
+                "has_captured_history": captured,
+                "pipeline_verified_lossless": verified,
+                "pipeline_provisional": provisional,
             },
             type=cls,
         )
@@ -227,13 +233,8 @@ class LibraryAlbumRow(msgspec.Struct, frozen=True):
         row["pipeline_id"] = pipeline_row["id"]
         row["processing_owner"] = pipeline_row.get("processing_owner")
         row["upgrade_queued"] = _pipeline_upgrade_queued(pipeline_row)
-        row["has_captured_history"] = _pipeline_fact(
-            pipeline_row, "has_captured_history"
-        )
-        row["pipeline_verified_lossless"] = _pipeline_fact(
-            pipeline_row, "verified_lossless"
-        )
-        row["pipeline_provisional"] = _pipeline_fact(
-            pipeline_row, "provisional_lossless"
-        )
+        captured, verified, provisional = _pipeline_facts(pipeline_row)
+        row["has_captured_history"] = captured
+        row["pipeline_verified_lossless"] = verified
+        row["pipeline_provisional"] = provisional
         return msgspec.convert(row, type=type(self))
