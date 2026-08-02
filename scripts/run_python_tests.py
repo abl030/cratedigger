@@ -51,8 +51,14 @@ DEFAULT_DURATIONS = 15
 _FAILURE_MARKER = "=" * 70
 _SCHEMA_READY_ENV = "CRATEDIGGER_TEST_SCHEMA_READY"
 WORLD_MODEL_MODULE = "tests.world_model.state_machine"
+# Method profiling showed the dominant Nix evaluation was otherwise admitted
+# late enough to become the deterministic suite's tail.
+AUDITED_FRONTLOAD_MODULES = frozenset({"tests.test_nix_module"})
 HOTSPOT_SHARD_POLICIES = {
     "tests.test_beets_destructive_configs_generated": "method_batch",
+    "tests.test_deploy_pin_generated": "method_batch",
+    "tests.test_deploy_pin_script": "method_batch",
+    "tests.test_nix_module": "method_batch",
     "tests.test_pipeline_db": "class_batch",
 }
 HOTSPOT_CLASS_BATCHES = 8
@@ -394,7 +400,15 @@ def discover_test_modules(
         relative = path.relative_to(top).with_suffix("")
         if any(not part.isidentifier() for part in relative.parts):
             raise ValueError(f"test path is not importable as a module: {path}")
-        modules.append(TestModule(".".join(relative.parts), path, _line_weight(path)))
+        module_name = ".".join(relative.parts)
+        modules.append(
+            TestModule(
+                module_name,
+                path,
+                _line_weight(path),
+                frontload=module_name in AUDITED_FRONTLOAD_MODULES,
+            )
+        )
     return tuple(modules)
 
 
