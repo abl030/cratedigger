@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from lib.release_identity import ConflictingReleaseIdentityError
 from web.routes._overlay import band_release_ids, overlay_release_rows_in_place
 
 
@@ -144,6 +145,27 @@ class TestOverlayReleaseRowsInPlace(unittest.TestCase):
             "beets:['captured']",
         ])
         self.assertEqual(rows, [{"id": "captured", "title": "Album"}])
+
+    def test_conflicting_beets_identity_fails_loud_without_projecting_absence(self):
+        rows: list[dict[str, object]] = [{
+            "id": "12856590",
+            "title": "Conflicting pressing",
+        }]
+        with patch("web.server.check_pipeline", return_value={}), patch(
+            "web.server.check_beets_library",
+            side_effect=ConflictingReleaseIdentityError(
+                "conflicting numeric Discogs release identities for: 12856590"
+            ),
+        ), self.assertRaisesRegex(
+            ConflictingReleaseIdentityError,
+            "12856590",
+        ):
+            overlay_release_rows_in_place(rows, ["12856590"])
+
+        self.assertEqual(rows, [{
+            "id": "12856590",
+            "title": "Conflicting pressing",
+        }])
 
 
 class TestBandReleaseIds(unittest.TestCase):

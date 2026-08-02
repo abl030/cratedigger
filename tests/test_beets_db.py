@@ -1495,8 +1495,38 @@ class TestGetAlbumsByReleaseIds(unittest.TestCase):
             ):
                 db.get_albums_by_release_ids([release_id])
 
+            with self.subTest(
+                release_id=release_id,
+                projection="presence",
+            ), BeetsDB(self.db_path) as db, self.assertRaisesRegex(
+                ConflictingReleaseIdentityError,
+                release_id,
+            ):
+                db.check_mbids([release_id])
+
+            with self.subTest(
+                release_id=release_id,
+                projection="detail",
+            ), BeetsDB(self.db_path) as db, self.assertRaisesRegex(
+                ConflictingReleaseIdentityError,
+                release_id,
+            ):
+                db.check_mbids_detail([release_id])
+
+            with self.subTest(
+                release_id=release_id,
+                projection="album-id",
+            ), BeetsDB(self.db_path) as db, self.assertRaisesRegex(
+                ConflictingReleaseIdentityError,
+                release_id,
+            ):
+                db.get_album_ids_by_mbids([release_id])
+
         with BeetsDB(self.db_path) as db:
             self.assertEqual(db.get_albums_by_release_ids(["99999999"]), [])
+            self.assertEqual(db.check_mbids(["99999999"]), set())
+            self.assertEqual(db.check_mbids_detail(["99999999"]), {})
+            self.assertEqual(db.get_album_ids_by_mbids(["99999999"]), {})
 
 
 class TestFuzzyMethodsRemoved(unittest.TestCase):
