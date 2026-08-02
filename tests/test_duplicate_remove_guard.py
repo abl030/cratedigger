@@ -16,7 +16,7 @@ class TestDuplicateCandidateSerialization(unittest.TestCase):
     def test_serializes_beets_duplicate_album_shape(self):
         # beets isn't installed in the test shell; the config guard tests install
         # compatible module fakes before importing harness.beets_harness.
-        import tests.test_harness_config_guard  # noqa: F401
+        import tests.test_harness_duplicate_lookup  # noqa: F401
         from harness import beets_harness
 
         item = SimpleNamespace(path=b"/Beets/Artist/Album/01 Track.mp3")

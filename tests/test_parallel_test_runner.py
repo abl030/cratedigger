@@ -293,7 +293,7 @@ class TestModuleScheduling(unittest.TestCase):
             test_id for test_id in test_ids if ".test_common_config_" in test_id
         )
 
-        self.assertEqual(len(matrix_ids), 54)
+        self.assertEqual(len(matrix_ids), 60)
         self.assertNotIn(
             "tests.test_beets_destructive_configs_generated."
             "TestGeneratedRealBeetsConfigMatrix."
