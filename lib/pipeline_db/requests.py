@@ -268,7 +268,7 @@ class _RequestsMixin(_PipelineDBBase):
         overlays: dict[str, dict[str, object]] = {}
         for r in cur.fetchall():
             release_id = _overlay_row_release_id(r)
-            projected = {
+            projected: dict[str, object] = {
                 "id": r["id"],
                 "status": r["status"],
                 "search_filetype_override": r["search_filetype_override"],

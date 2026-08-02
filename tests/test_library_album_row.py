@@ -385,6 +385,9 @@ class TestLibraryAlbumRow(unittest.TestCase):
                     "created_at": "2026-04-01T03:47:54Z",
                     "search_filetype_override": None,
                     "target_format": None,
+                    "has_captured_history": False,
+                    "verified_lossless": False,
+                    "provisional_lossless": False,
                 },
                 track_count=10,
             )
@@ -408,6 +411,9 @@ class TestLibraryAlbumRow(unittest.TestCase):
                     "created_at": None,
                     "search_filetype_override": None,
                     "target_format": None,
+                    "has_captured_history": False,
+                    "verified_lossless": False,
+                    "provisional_lossless": False,
                 },
                 track_count=10,
             )

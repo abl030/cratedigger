@@ -40,7 +40,10 @@ class TestWorldAuditRoute(_FakeDbWebServerCase):
         self.assertEqual(beets.close_calls, 0)
 
     def test_missing_beets_is_an_incomplete_bucket_b_observation(self) -> None:
-        status, payload = self._get("/api/audit/world")
+        from web import server
+
+        with patch.object(server, "_beets_db", return_value=None):
+            status, payload = self._get("/api/audit/world")
 
         self.assertEqual(status, 200)
         self.assertEqual(payload["status"], "observations_only")

@@ -225,7 +225,7 @@ def list_library_artist_rows(
         ) is not None
         and identity.key not in pipeline_identity_keys
     ]
-    pipeline_overlays = (
+    pipeline_overlays: Mapping[str, Mapping[str, object]] = (
         pipeline_db.get_pipeline_overlay(displayed_release_ids)
         if displayed_release_ids
         else {}
