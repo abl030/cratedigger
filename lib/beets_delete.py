@@ -1,8 +1,8 @@
-"""Pinned-Beets owner for exact, retryable library deletion.
+"""Exact, retryable deletion through the admitted external Beets runtime.
 
 The web process may authorize a deletion, but it does not mutate Beets'
-SQLite database or unlink library files.  This module is executed in the
-module-rendered Beets Python/config environment and uses Beets' own models and
+SQLite database or unlink library files. This module is executed in the
+deployment-supplied Beets Python/config environment and uses Beets' own models and
 filesystem helpers.  The album row remains the retry manifest until every
 positively-owned artifact has been removed and verified absent.
 """

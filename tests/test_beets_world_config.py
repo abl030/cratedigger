@@ -1,4 +1,4 @@
-"""Pins for the shared scratch-Beets shipped-config extraction (#743)."""
+"""Pins for the shared scratch-Beets consumer-config extraction (#743/#759)."""
 
 from __future__ import annotations
 
@@ -16,18 +16,21 @@ from tests.beets_world import (
     BeetsWorld,
     BeetsWorldRelease,
     build_subprocess_beets_config,
-    extract_shipped_beets_world_config,
+    extract_consumer_beets_world_config,
 )
 
 
-class TestShippedBeetsWorldConfig(unittest.TestCase):
-    def test_extracts_load_bearing_shipped_import_contract(self) -> None:
+class TestConsumerBeetsWorldConfig(unittest.TestCase):
+    def test_extracts_load_bearing_consumer_import_contract(self) -> None:
         repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-        shipped = extract_shipped_beets_world_config(repo_root)
+        consumer = extract_consumer_beets_world_config(repo_root)
 
-        self.assertIn("%aunique{albumartist album,path_disambig}", shipped.default_path_template)
+        self.assertIn(
+            "%aunique{albumartist album,path_disambig}",
+            consumer.default_path_template,
+        )
         self.assertEqual(
-            dict(shipped.album_fields),
+            dict(consumer.album_fields),
             {
                 "path_disambig": (
                     "albumdisambig or releasegroupdisambig or catalognum "
@@ -36,16 +39,75 @@ class TestShippedBeetsWorldConfig(unittest.TestCase):
             },
         )
         self.assertEqual(
-            set(shipped.duplicate_album_keys),
+            set(consumer.duplicate_album_keys),
             {"mb_albumid", "discogs_albumid"},
         )
+        self.assertEqual(
+            consumer.deployment_plugins,
+            (
+                "musicbrainz",
+                "discogs",
+                "fetchart",
+                "embedart",
+                "lyrics",
+                "lastgenre",
+                "scrub",
+                "info",
+                "missing",
+                "duplicates",
+                "edit",
+                "fromfilename",
+                "ftintitle",
+                "the",
+                "inline",
+                "permissions",
+            ),
+        )
+
+    def test_rejects_consumer_example_without_deployment_plugins(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            example_dir = Path(root) / "examples"
+            example_dir.mkdir()
+            (example_dir / "cratedigger.nix").write_text(
+                '''
+                  import = {
+                    duplicate_keys = { album = [ "mb_albumid" "discogs_albumid" ]; };
+                  };
+                  paths.default = "$albumartist/$year - $album";
+                  album_fields.path_disambig = "label";
+                ''',
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                AssertionError,
+                "deployment plugin list not found in examples/cratedigger.nix",
+            ):
+                extract_consumer_beets_world_config(root)
+
+            (example_dir / "cratedigger.nix").write_text(
+                '''
+                  plugins = "";
+                  import = {
+                    duplicate_keys = { album = [ "mb_albumid" "discogs_albumid" ]; };
+                  };
+                  paths.default = "$albumartist/$year - $album";
+                  album_fields.path_disambig = "label";
+                ''',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                AssertionError,
+                "deployment plugin list is empty in examples/cratedigger.nix",
+            ):
+                extract_consumer_beets_world_config(root)
 
     def test_subprocess_config_is_disposable_exact_id_and_mirror_backed(self) -> None:
         repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-        shipped = extract_shipped_beets_world_config(repo_root)
+        consumer = extract_consumer_beets_world_config(repo_root)
 
         config = build_subprocess_beets_config(
-            shipped,
+            consumer,
             library_root=Path("/tmp/world/library"),
             library_db=Path("/tmp/world/library.db"),
             import_log=Path("/tmp/world/import.log"),
@@ -67,11 +129,11 @@ class TestShippedBeetsWorldConfig(unittest.TestCase):
 
     def test_subprocess_config_rejects_non_origin_mirror_urls(self) -> None:
         repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-        shipped = extract_shipped_beets_world_config(repo_root)
+        consumer = extract_consumer_beets_world_config(repo_root)
 
         with self.assertRaisesRegex(ValueError, "origin"):
             build_subprocess_beets_config(
-                shipped,
+                consumer,
                 library_root=Path("/tmp/world/library"),
                 library_db=Path("/tmp/world/library.db"),
                 import_log=Path("/tmp/world/import.log"),

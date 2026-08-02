@@ -203,7 +203,8 @@ def open_beets_db(
 ) -> "BeetsDB":
     """Open one inseparable Beets database/root pair.
 
-    Production omits explicit paths and reads the module-rendered runtime pair.
+    Production omits explicit paths and reads the guarded deployment-owned
+    runtime pair.
     Development/operator overrides must supply both values together.
     """
 

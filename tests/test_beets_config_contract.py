@@ -729,6 +729,30 @@ class TestBeetsConfigContract(unittest.TestCase):
                     role="importer",
                 )
 
+    def test_authority_symlinks_resolving_to_root_fail_before_config_load(self):
+        root_alias = self.world.root / "root-alias"
+        root_alias.symlink_to("/")
+        cfg = self.world.cfg()
+        for field, value, code in (
+            ("beets_config_dir", str(root_alias), "config_dir_root"),
+            (
+                "beets_library_db",
+                str(root_alias / "beets-library.db"),
+                "library_parent_root",
+            ),
+            ("beets_directory", str(root_alias), "directory_root"),
+            ("beets_state_file", str(root_alias), "state_root"),
+        ):
+            with self.subTest(field=field):
+                report = check_beets_config(
+                    replace(cfg, **{field: value}),
+                    role="importer",
+                )
+                self.assertIn(
+                    code,
+                    [finding.code for finding in report.hard_failures],
+                )
+
     def test_state_path_identity_must_not_be_replaceable(self):
         for case in (
             "replaceable_parent",

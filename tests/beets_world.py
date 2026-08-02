@@ -35,10 +35,11 @@ HISTORICAL_PASSENGER_PATH_TEMPLATE = (
 
 
 @dataclass(frozen=True)
-class ShippedBeetsWorldConfig:
+class ConsumerBeetsWorldConfig:
     default_path_template: str
     album_fields: tuple[tuple[str, str], ...]
     duplicate_album_keys: tuple[str, ...]
+    deployment_plugins: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -65,20 +66,22 @@ class BeetsWorldRelease:
         return f"Track {track}"
 
 
-def extract_shipped_beets_world_config(
+def extract_consumer_beets_world_config(
     repo_root: str | os.PathLike[str],
-) -> ShippedBeetsWorldConfig:
-    """Extract the path/duplicate contract from the Nix module source."""
+) -> ConsumerBeetsWorldConfig:
+    """Extract the consumer contract and deployment plugin profile from its example."""
 
-    module_path = Path(repo_root) / "nix" / "module.nix"
-    source = module_path.read_text(encoding="utf-8")
+    example_path = Path(repo_root) / "examples" / "cratedigger.nix"
+    source = example_path.read_text(encoding="utf-8")
 
     default_match = re.search(
         r'default\s*=\s*"(\$albumartist[^"]+)";',
         source,
     )
     if default_match is None:
-        raise AssertionError("paths.default template not found in nix/module.nix")
+        raise AssertionError(
+            "paths.default template not found in examples/cratedigger.nix"
+        )
 
     album_fields = tuple(sorted(re.findall(
         r'album_fields\.(\w+)\s*=\s*"([^"]+)";',
@@ -86,7 +89,8 @@ def extract_shipped_beets_world_config(
     )))
     if not any(name == "path_disambig" for name, _ in album_fields):
         raise AssertionError(
-            "album_fields.path_disambig not extracted from nix/module.nix "
+            "album_fields.path_disambig not extracted from "
+            "examples/cratedigger.nix "
             f"(got {[name for name, _ in album_fields]!r})"
         )
 
@@ -98,31 +102,47 @@ def extract_shipped_beets_world_config(
     )
     if duplicate_block is None:
         raise AssertionError(
-            "import.duplicate_keys.album not found in nix/module.nix"
+            "import.duplicate_keys.album not found in examples/cratedigger.nix"
         )
     duplicate_keys = tuple(re.findall(r'"([^"]+)"', duplicate_block.group(1)))
     if set(duplicate_keys) != {"mb_albumid", "discogs_albumid"}:
         raise AssertionError(
-            "shipped duplicate keys must be exact release identifiers; "
+            "consumer duplicate keys must be exact release identifiers; "
             f"got {duplicate_keys!r}"
         )
 
-    return ShippedBeetsWorldConfig(
+    plugin_match = re.search(
+        r'^\s*plugins\s*=\s*"([^"]*)";',
+        source,
+        flags=re.MULTILINE,
+    )
+    if plugin_match is None:
+        raise AssertionError(
+            "deployment plugin list not found in examples/cratedigger.nix"
+        )
+    deployment_plugins = tuple(plugin_match.group(1).split())
+    if not deployment_plugins:
+        raise AssertionError(
+            "deployment plugin list is empty in examples/cratedigger.nix"
+        )
+
+    return ConsumerBeetsWorldConfig(
         default_path_template=default_match.group(1),
         album_fields=album_fields,
         duplicate_album_keys=duplicate_keys,
+        deployment_plugins=deployment_plugins,
     )
 
 
 def build_subprocess_beets_config(
-    shipped: ShippedBeetsWorldConfig,
+    consumer: ConsumerBeetsWorldConfig,
     *,
     library_root: Path,
     library_db: Path,
     import_log: Path,
     mirror_url: str,
 ) -> dict[str, Any]:
-    """Render the load-bearing shipped contract for a disposable harness."""
+    """Render the example consumer contract for a disposable harness."""
 
     parsed = urlsplit(mirror_url)
     if (
@@ -159,19 +179,19 @@ def build_subprocess_beets_config(
             "log": str(import_log),
             "languages": ["en"],
             "duplicate_keys": {
-                "album": list(shipped.duplicate_album_keys),
+                "album": list(consumer.duplicate_album_keys),
                 "item": ["artist", "title"],
             },
         },
         "paths": {
-            "default": shipped.default_path_template,
+            "default": consumer.default_path_template,
             "singleton": "Non-Album/$artist/$title",
             "comp": (
                 "Compilations/$album%aunique{albumartist album,path_disambig}/"
                 "$track $title"
             ),
         },
-        "album_fields": dict(shipped.album_fields),
+        "album_fields": dict(consumer.album_fields),
         "musicbrainz": {
             "host": parsed.netloc,
             "https": parsed.scheme == "https",
@@ -213,7 +233,7 @@ class BeetsWorld:
         self.beets_config_dir = self.root / "beets-config"
         self.library_root.mkdir()
         self.incoming_root.mkdir()
-        self.shipped = extract_shipped_beets_world_config(repo_root)
+        self.consumer = extract_consumer_beets_world_config(repo_root)
         self._import_counter = 0
         try:
             self._configure_beets()
@@ -244,19 +264,19 @@ class BeetsWorld:
             "cratedigger.json",
         ])
         beets_config["import"]["duplicate_keys"]["album"].set(
-            list(self.shipped.duplicate_album_keys)
+            list(self.consumer.duplicate_album_keys)
         )
         beets_config["paths"]["default"].set(
-            self.shipped.default_path_template
+            self.consumer.default_path_template
         )
         beets_config["plugins"].set(["inline"])
-        for name, expression in self.shipped.album_fields:
+        for name, expression in self.consumer.album_fields:
             beets_config["album_fields"][name].set(expression)
         beets_plugins.load_plugins()
         getters = beets_plugins.album_field_getters()
         if "path_disambig" not in getters:
             raise RuntimeError(
-                "real Beets inline plugin did not load shipped path_disambig; "
+                "real Beets inline plugin did not load consumer path_disambig; "
                 "run the world model in a fresh interpreter"
             )
 
@@ -274,7 +294,7 @@ class BeetsWorld:
     def _configure_subprocess(self, mirror_url: str) -> None:
         self.beets_config_dir.mkdir()
         config = build_subprocess_beets_config(
-            self.shipped,
+            self.consumer,
             library_root=self.library_root,
             library_db=self.library_db,
             import_log=self.root / "beets-import.log",
@@ -903,7 +923,7 @@ __all__ = [
     "HISTORICAL_PASSENGER_PATH_TEMPLATE",
     "BeetsWorld",
     "BeetsWorldRelease",
-    "ShippedBeetsWorldConfig",
+    "ConsumerBeetsWorldConfig",
     "build_subprocess_beets_config",
-    "extract_shipped_beets_world_config",
+    "extract_consumer_beets_world_config",
 ]

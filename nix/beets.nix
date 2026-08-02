@@ -1,4 +1,4 @@
-# The one beets — cratedigger owns the beet runtime (tier-2 plan U3, R4).
+# Admitted Beets package factory for consumers using Cratedigger's package set.
 #
 # Returns the pinned nixpkgs' python beets package (python3Packages.beets),
 # which carries every built-in plugin's dependency closure — the production
@@ -6,10 +6,8 @@
 # info missing duplicates edit fromfilename ftintitle the inline) is all
 # built-ins, so no pluginOverrides are needed. Because this is the *python
 # package* (pkgs.beets is just `toPythonApplication python3Packages.beets`),
-# the same store path serves all consumers: `pythonEnv` (lib/beets_distance
-# imports the library in cratedigger-web), the dev shell, the
-# `cratedigger-beet` wrapper's `bin/beet`, and — from U5 — the harness
-# interpreter (which today still resolves the consumer's `beet`).
+# the same store path can serve the Cratedigger Python environment, checker,
+# harness, and a deployment-owned plain `beet` command.
 #
 # The two mirror patches are ported from the operator's Home Manager module
 # (~/nixosconfig/modules/home-manager/services/beets.nix) as opt-in knobs,

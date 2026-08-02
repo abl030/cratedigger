@@ -301,6 +301,43 @@ class TestGeneratedEffectiveSettings(unittest.TestCase):
     ) -> None:
         assert_app_owned_root_anchor_is_rejected(depth=depth)
 
+    @settings(max_examples=16)
+    @given(
+        authority=st.sampled_from((
+            ("beets_config_dir", "config_dir_root"),
+            ("beets_library_db", "library_parent_root"),
+            ("beets_directory", "directory_root"),
+            ("beets_state_file", "state_root"),
+        )),
+        alias_depth=st.integers(min_value=1, max_value=4),
+    )
+    @example(authority=("beets_directory", "directory_root"), alias_depth=1)
+    def test_root_alias_chains_never_expand_runtime_authority(
+        self,
+        authority: tuple[str, str],
+        alias_depth: int,
+    ) -> None:
+        world = BeetsContractWorld()
+        self.addCleanup(world.close)
+        target = Path("/")
+        for index in range(alias_depth):
+            alias = world.root / f"root-alias-{index}"
+            alias.symlink_to(target)
+            target = alias
+        field, expected_code = authority
+        value = (
+            str(target / "beets-library.db")
+            if field == "beets_library_db"
+            else str(target)
+        )
+
+        report = check_beets_config(
+            replace(world.cfg(), **{field: value}),
+            role="importer",
+        )
+
+        assert_hard_code(report.hard_failures, expected_code)
+
     @given(
         field=st.sampled_from(RUNTIME_AUTHORITIES),
         role=st.sampled_from(("main", "importer", "preview", "web")),

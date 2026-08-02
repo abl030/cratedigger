@@ -259,14 +259,14 @@ with tempfile.TemporaryDirectory(prefix="cratedigger-pretend-purity-") as root:
 '''
 
 
-# Fresh-interpreter sweep of the SHIPPED aunique config against real beets.
+# Fresh-interpreter sweep of the consumer-example aunique config against real Beets.
 # The Passenger collision class (2026-07-18): beets' %aunique picks the first
 # disambiguator field whose values are all-distinct across the same-key album
 # set, then renders each album's OWN value — an album whose value for that
 # field is EMPTY renders NO bracket and lands on the plain path, colliding
 # with the sibling's sticky plain path (old album label='ATO Records', new
 # album label='' → label is "all-distinct" → new album's bracket is empty).
-# The invariant: under the shipped template + album_fields, two same-key
+# The invariant: under the consumer template + album_fields, two same-key
 # albums with different release ids ALWAYS render distinct directories.
 _AUNIQUE_CONTRACT = r'''
 import itertools
@@ -281,13 +281,13 @@ from beets import plugins as bplugins
 from beets.library import Album, Library
 from beets.util import functemplate
 
-shipped = json.loads(os.environ["AUNIQUE_SHIPPED_CONFIG"])
-TEMPLATE = shipped["template"]
-ALBUM_FIELDS = shipped["album_fields"]
+consumer = json.loads(os.environ["AUNIQUE_CONSUMER_CONFIG"])
+TEMPLATE = consumer["template"]
+ALBUM_FIELDS = consumer["album_fields"]
 
 # The pre-2026-07-18 poisoned template — the planted known-bad the sweep
 # must detect, proving the checker catches the class.
-OLD_TEMPLATE = shipped["historical_passenger_template"]
+OLD_TEMPLATE = consumer["historical_passenger_template"]
 
 FIELD_STATES = [("", ""), ("X", ""), ("X", "X"), ("X", "Y")]
 SWEEP_FIELDS = ("albumdisambig", "releasegroupdisambig", "catalognum", "label")
@@ -423,7 +423,7 @@ try:
     world._seal("importer")
 
     # The exact authority/config used by the real Beets run must first pass
-    # the shipped checker; this is one connected world, not a lookalike file.
+    # the portable checker; this is one connected world, not a lookalike file.
     admitted = check_beets_config(world.cfg(), role="importer")
     assert admitted.ok, admitted.hard_failures
 
@@ -478,18 +478,17 @@ finally:
 '''
 
 
-def _shipped_aunique_config() -> dict:
-    """Extract the shipped beets path template + inline album_fields from
-    nix/module.nix — the test patrols what production actually renders."""
+def _consumer_aunique_config() -> dict:
+    """Extract path policy from the deployment-owned consumer example."""
     from tests.beets_world import (
         HISTORICAL_PASSENGER_PATH_TEMPLATE,
-        extract_shipped_beets_world_config,
+        extract_consumer_beets_world_config,
     )
 
-    shipped = extract_shipped_beets_world_config(_REPO)
+    consumer = extract_consumer_beets_world_config(_REPO)
     return {
-        "template": shipped.default_path_template,
-        "album_fields": dict(shipped.album_fields),
+        "template": consumer.default_path_template,
+        "album_fields": dict(consumer.album_fields),
         "historical_passenger_template": HISTORICAL_PASSENGER_PATH_TEMPLATE,
     }
 
@@ -501,14 +500,14 @@ class TestAuniqueCollisionContract(unittest.TestCase):
             SAFE_PATH_DISAMBIG,
         )
 
-        shipped = _shipped_aunique_config()
-        self.assertEqual(SAFE_DEFAULT_PATH, shipped["template"])
+        consumer = _consumer_aunique_config()
+        self.assertEqual(SAFE_DEFAULT_PATH, consumer["template"])
         self.assertEqual(
             SAFE_PATH_DISAMBIG,
-            shipped["album_fields"]["path_disambig"],
+            consumer["album_fields"]["path_disambig"],
         )
 
-    def test_shipped_template_never_collides_same_key_siblings(self):
+    def test_consumer_template_never_collides_same_key_siblings(self):
         import json as _json
 
         proc = subprocess.run(
@@ -516,7 +515,7 @@ class TestAuniqueCollisionContract(unittest.TestCase):
             cwd=_REPO,
             env={**os.environ,
                  "PYTHONPATH": _REPO + os.pathsep + os.environ.get("PYTHONPATH", ""),
-                 "AUNIQUE_SHIPPED_CONFIG": _json.dumps(_shipped_aunique_config())},
+                 "AUNIQUE_CONSUMER_CONFIG": _json.dumps(_consumer_aunique_config())},
             capture_output=True,
             text=True,
             check=False,
