@@ -1378,7 +1378,7 @@ console.log('Iron & Wine: the temporary V0 minimum never wears the FLAC label');
     existing_v0_probe_kind: 'lossless_source_v0',
     existing_v0_probe_min_bitrate: 223,
     existing_v0_probe_avg_bitrate: 232,
-    verdict: 'Suspect lossless source not better than on-disk copy; searching continues',
+    verdict: 'Unproven lossless source not better than on-disk copy; searching continues',
   });
   assertContains(detail, '171kbps avg · min 165kbps',
     'detail candidate V0 owns its minimum');

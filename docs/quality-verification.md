@@ -124,8 +124,14 @@ Policy:
   `provisional_lossless_upgrade`.
 - Candidate probe average equal, worse, or within tolerance: reject as
   `suspect_lossless_downgrade`.
-- Missing candidate probe on an unproven lossless source: reject as
-  `suspect_lossless_probe_missing`.
+- Missing candidate probe: reject as `suspect_lossless_probe_missing` when
+  the source is accused (suspect/likely_transcode) — the historical
+  fail-closed direction — or when a comparable anchor exists (no evidence
+  can challenge the recorded truth-of-source). An unaccused, unanchored,
+  probe-less candidate falls through to the measured policy's historical
+  first-import behavior; on the production path the preview grinds the
+  probe into evidence before the importer decides, so that fall-through is
+  an abnormal-evidence seam.
 
 Provisional imports are deliberately not verified lossless. They may still use
 the configured lossless-source storage target, but `verified_lossless` remains

@@ -635,15 +635,28 @@ class TestProvisionalLosslessDecision(unittest.TestCase):
                     result.decision, DECISION_SUSPECT_LOSSLESS_PROBE_MISSING)
                 self.assertTrue(result.confident_reject)
 
-    def test_missing_candidate_probe_on_unaccused_source_declines(self):
-        """Issue #990: an unaccused, evidence-less source continues to the
-        measured policy — the harness twin re-decides with the probe it
-        grinds during the real conversion, so the anchor is still defended
-        where comparable evidence exists."""
-        for grade in ("genuine", "marginal", "error", None):
+    def test_missing_candidate_probe_against_an_anchor_rejects(self):
+        """Issue #990 review finding 5: the recorded anchor is the
+        truth-of-source, and a candidate with no comparable evidence
+        cannot displace the copy it anchors — the same doctrine as the
+        lossy lock."""
+        for grade in ("genuine", "marginal"):
             with self.subTest(grade=grade):
                 result = self._decide(
                     avg=None, existing=self._probe(171), grade=grade)
+                self.assertEqual(
+                    result.decision, DECISION_SUSPECT_LOSSLESS_PROBE_MISSING)
+                self.assertTrue(result.confident_reject)
+                self.assertIn("anchor", result.reason or "")
+
+    def test_missing_candidate_probe_on_unaccused_unanchored_declines(self):
+        """Issue #990: unaccused, unanchored, and evidence-less continues
+        to the measured policy's historical first-import behavior — there
+        is no anchor to defend. (On the production path the preview grinds
+        the probe into evidence before the importer decides.)"""
+        for grade in ("genuine", "marginal", "error", None):
+            with self.subTest(grade=grade):
+                result = self._decide(avg=None, existing=None, grade=grade)
                 self.assertIsNone(result.decision)
 
 

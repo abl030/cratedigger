@@ -326,9 +326,13 @@ class ProvisionalLosslessDecisionInput(msgspec.Struct, frozen=True):
       decision runs;
     * the fail direction when the candidate carries no comparable probe:
       an ACCUSED source (suspect/likely_transcode) without evidence keeps
-      its historical fail-closed reject, while an unaccused one falls
-      through to the measured policy, where the harness twin re-decides
-      with the probe it grinds during the real conversion.
+      its historical fail-closed reject; an unaccused one is rejected
+      when a comparable anchor exists (no evidence can challenge the
+      recorded truth-of-source) and otherwise falls through to the
+      measured policy's historical first-import behavior. On the
+      production path the preview grinds the probe into the evidence row
+      before the importer decides, so the fall-through is an
+      abnormal-evidence seam.
     """
 
     candidate_probe: V0ProbeEvidence | None = None
@@ -443,10 +447,29 @@ def provisional_lossless_decision(
                 reason="suspect lossless source lacks a comparable V0 probe",
                 stage_chain=[f"stage2_provisional:{decision}"],
             )
-        # Unaccused and evidence-less: continue through the measured
-        # policy. The harness twin re-decides with the probe it grinds
-        # during the real conversion, so an anchored copy is still
-        # defended at the stage where comparable evidence exists.
+        if is_comparable_lossless_source_probe(candidate.existing_probe):
+            # The recorded anchor is the truth-of-source; a candidate with
+            # no comparable evidence cannot displace the copy it anchors,
+            # whatever the contract-vs-measured ranks would say — the same
+            # doctrine as the lossy lock above (#990 review finding 5).
+            decision = DECISION_SUSPECT_LOSSLESS_PROBE_MISSING
+            return ProvisionalLosslessDecisionResult(
+                decision=decision,
+                would_import=False,
+                confident_reject=True,
+                cleanup_eligible=True,
+                reason=(
+                    "unproven lossless source lacks a comparable V0 probe "
+                    "to challenge the recorded source anchor"
+                ),
+                stage_chain=[f"stage2_provisional:{decision}"],
+            )
+        # Unaccused, unanchored, and evidence-less: continue through the
+        # measured policy — there is no anchor to defend, and a first
+        # import is the historical behavior. On the production path the
+        # preview grinds the V0 probe into the evidence row BEFORE the
+        # importer decides, so this fall-through is an abnormal-evidence
+        # seam, not the ordinary route.
         return ProvisionalLosslessDecisionResult()
 
     candidate_probe = candidate.candidate_probe

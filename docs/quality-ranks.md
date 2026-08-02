@@ -98,8 +98,9 @@ lossless-source V0 probe average:
   `provisional_lossless_upgrade`.
 - Candidate average equal, worse, or within tolerance:
   `suspect_lossless_downgrade`.
-- Missing candidate probe on a suspect lossless source:
-  `suspect_lossless_probe_missing`.
+- Missing candidate probe on an accused source, or against a comparable
+  anchor: `suspect_lossless_probe_missing`. Unaccused and unanchored,
+  the candidate falls through to the measured policy instead.
 
 This deliberately reuses `within_rank_tolerance_kbps` so near-equal source
 probes do not churn the library, but it does not use rank bands, codec-family

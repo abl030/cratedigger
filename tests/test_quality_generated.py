@@ -3876,6 +3876,7 @@ def _lane_membership_follows_the_proof(
     spectral_grade: "str | None",
     supported_lossless_source: bool,
     candidate_probe_comparable: bool,
+    anchor_comparable: bool,
 ) -> bool:
     """Shared body of the amended V5/L5 checkers (issue #990).
 
@@ -3898,11 +3899,19 @@ def _lane_membership_follows_the_proof(
         R2  when the candidate carries a comparable probe, an unproven
             IMPORT only ever comes out of the lane — the measured compare
             granting one is exactly the equal-copy churn request 2066
-            shipped. A probe-less unaccused candidate legitimately
-            continues to the measured policy: the harness twin re-decides
-            with the probe it grinds during the real conversion;
+            shipped. A probe-less, unanchored, unaccused candidate
+            legitimately continues to the measured policy: on the
+            production path the preview grinds the probe into evidence
+            before the importer decides, so that fall-through is an
+            abnormal-evidence seam;
         R3  when both variants are lane-decided, the legs moved nothing
-            inside it.
+            inside it;
+        R4  a denial is still not a rejection: with a comparable candidate
+            probe and NO comparable anchor, a lane-decided variant must be
+            the provisional IMPORT — a confident reject there would
+            discard an album whose only fault was a withheld proof and
+            denylist its peer, the exact shape PR3's law was written to
+            forbid (#990 review finding 1).
 
       Decision record:
       https://github.com/abl030/cratedigger/issues/990#issuecomment-5158156922
@@ -3928,6 +3937,13 @@ def _lane_membership_follows_the_proof(
                 and not in_lane
             ):
                 return False  # R2
+            if (
+                candidate_probe_comparable
+                and not anchor_comparable
+                and in_lane
+                and not variant["imported"]
+            ):
+                return False  # R4
         if denied_in_lane and passing_in_lane:
             return all(  # R3
                 denied[key] == passing[key]
@@ -3996,6 +4012,12 @@ def a_denial_never_reroutes_the_provisional_lane(
         supported_lossless_source=_lossless_source_from_evidence(candidate),
         candidate_probe_comparable=is_comparable_lossless_source_probe(
             _policy_v0_probe_from_metric(candidate.v0_metric)
+        ),
+        anchor_comparable=(
+            current is not None
+            and is_comparable_lossless_source_probe(
+                _policy_v0_probe_from_metric(current.v0_metric)
+            )
         ),
     )
 
@@ -4455,6 +4477,22 @@ class TestUltrasonicProofLegCheckerSelfTests(unittest.TestCase):
             )
         )
 
+    def test_v5_checker_trips_when_an_unanchored_denial_is_rejected(self):
+        """R4's known-bad: the review's planted mutant — a denied,
+        anchor-less album confidently rejected instead of imported
+        provisionally. The amended checker must call it out."""
+        candidate, current, facts = _parity_evidence_inputs(
+            _REQUEST_2066_WORLD,
+        )
+        assert current is not None
+        unanchored_current = msgspec.structs.replace(current, v0_metric=None)
+        self.assertFalse(
+            a_denial_never_reroutes_the_provisional_lane(
+                candidate, unanchored_current, facts=facts,
+                decider=_decoy_decider_lets_a_denial_reject_an_unanchored_album,
+            )
+        )
+
     def test_v6_checker_passes_for_the_real_decider(self):
         candidate, current, facts = _parity_evidence_inputs(
             _REQUEST_2066_WORLD,
@@ -4883,6 +4921,12 @@ def a_lattice_denial_never_reroutes_the_provisional_lane(
         candidate_probe_comparable=is_comparable_lossless_source_probe(
             _policy_v0_probe_from_metric(candidate.v0_metric)
         ),
+        anchor_comparable=(
+            current is not None
+            and is_comparable_lossless_source_probe(
+                _policy_v0_probe_from_metric(current.v0_metric)
+            )
+        ),
     )
 
 
@@ -4942,6 +4986,29 @@ def an_unproven_lossless_source_never_outranks_its_anchor(
         and not r["imported"]
         and bool(r["keep_searching"])
     )
+
+
+def _decoy_decider_lets_a_denial_reject_an_unanchored_album(
+    candidate: AlbumQualityEvidence,
+    current: "AlbumQualityEvidence | None" = None,
+    *,
+    facts: "AlbumQualityEvidenceDecisionFacts | None" = None,
+) -> "dict[str, object]":
+    """The #990 review's planted mutant (finding 1): a denial on a world
+    with NO comparable anchor turned into the lane's confident reject —
+    an album whose only fault was a withheld proof discarded and its peer
+    denylisted, the shape PR3's law forbids. Used only to prove R4
+    trips."""
+    result: dict[str, object] = dict(
+        full_pipeline_decision_from_evidence(candidate, current, facts=facts)
+    )
+    if result["stage2_import"] == "provisional_lossless_upgrade":
+        result["stage2_import"] = "suspect_lossless_downgrade"
+        result["imported"] = False
+        result["denylisted"] = True
+        result["final_status"] = "wanted"
+        result["keep_searching"] = True
+    return result
 
 
 def _decoy_decider_lets_an_unproven_album_skip_the_anchor(
