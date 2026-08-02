@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from lib.beets_db import BeetsDB, open_beets_db
 from lib.config import CratediggerConfig
 from lib.quality import AudioQualityMeasurement, QualityRankConfig
+from lib.release_identity import ConflictingReleaseIdentityError
 
 
 def _create_test_db(path: str) -> None:
@@ -1475,6 +1476,27 @@ class TestGetAlbumsByReleaseIds(unittest.TestCase):
             ValueError, "ambiguous current Beets release projection"
         ):
             db.get_albums_by_release_ids([self.RELEASE_ID])
+
+    def test_conflicting_numeric_identity_fails_loud_for_either_id(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as writer:
+            writer.execute(
+                "UPDATE albums SET mb_albumid = ?, discogs_albumid = ? "
+                "WHERE id = 1",
+                ("12856590", 12856591),
+            )
+            writer.commit()
+
+        for release_id in ("12856590", "12856591"):
+            with self.subTest(release_id=release_id), BeetsDB(
+                self.db_path
+            ) as db, self.assertRaisesRegex(
+                ConflictingReleaseIdentityError,
+                release_id,
+            ):
+                db.get_albums_by_release_ids([release_id])
+
+        with BeetsDB(self.db_path) as db:
+            self.assertEqual(db.get_albums_by_release_ids(["99999999"]), [])
 
 
 class TestFuzzyMethodsRemoved(unittest.TestCase):

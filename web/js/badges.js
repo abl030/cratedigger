@@ -11,7 +11,7 @@
  * O 128) is therefore its own badge beside the current-holding badge.
  */
 
-import { pipelineStore, pipelineStoreKey } from './state.js';
+import { resolvePipelineLifecycle } from './state.js';
 import { esc, qualityLabelShort } from './util.js';
 import { qualityRankBadgeClass } from './quality_palette.js';
 import { processingOwnerPresentation } from './release_action_state.js';
@@ -46,49 +46,24 @@ import { processingOwnerPresentation } from './release_action_state.js';
  */
 
 /**
- * Compare the complete exact processing-owner projection.
- *
- * @param {import('./release_action_state.js').ProcessingOwnerProjection|null} left
- * @param {import('./release_action_state.js').ProcessingOwnerProjection|null} right
- * @returns {boolean}
- */
-function processingOwnersEqual(left, right) {
-  if (!left || !right) return left === right;
-  return left.job_id === right.job_id
-    && left.status === right.status
-    && (left.preview_status || null) === (right.preview_status || null);
-}
-
-/**
  * Render the standardised badge HTML for one row or pressing.
  *
  * @param {BadgeItem} item
  * @returns {string}
  */
 export function renderStatusBadges(item) {
-  const key = item.id ? pipelineStoreKey(item.id) : '';
-  let stored = key ? pipelineStore.get(key) : null;
-  if (stored
-      && (item.pipeline_status || null) === stored.status
-      && (item.pipeline_id ?? null) === stored.id
-      && processingOwnersEqual(
-        item.processing_owner || null,
-        stored.processing_owner || null,
-      )) {
-    // The authoritative row has acknowledged the complete local lifecycle
-    // mutation, including the exact processing owner. Status/id alone cannot
-    // expire a newer owner projection with job-specific recovery state.
-    pipelineStore.delete(key);
-    stored = null;
-  }
-  const pStatus = stored ? stored.status : (item.pipeline_status || null);
-  const owner = stored
-    ? stored.processing_owner
-    : (item.processing_owner || null);
+  const lifecycle = resolvePipelineLifecycle(
+    item.id,
+    item.pipeline_status,
+    item.pipeline_id,
+    item.processing_owner,
+  );
+  const pStatus = lifecycle.status;
+  const owner = lifecycle.processing_owner;
   // A local mutation owns lifecycle only. Suppress historical facts from a
   // row whose status/id has not caught up yet. A matching authoritative
-  // refetch clears the overlay above and restores every row-owned fact.
-  const itemFactsAreCurrent = !stored;
+  // refetch clears the shared overlay and restores every row-owned fact.
+  const itemFactsAreCurrent = lifecycle.row_facts_are_current;
   const hasCapturedHistory = itemFactsAreCurrent
     && item.has_captured_history === true;
   const verifiedLossless = itemFactsAreCurrent

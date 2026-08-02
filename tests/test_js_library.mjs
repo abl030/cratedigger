@@ -13,6 +13,7 @@ import {
   renderLibraryDetailBody,
 } from '../web/js/library.js';
 import { esc } from '../web/js/util.js';
+import { pipelineStore, updatePipelineStatus } from '../web/js/state.js';
 
 let passed = 0;
 let failed = 0;
@@ -349,6 +350,42 @@ console.log('renderLibraryAlbumRow() uses the shared independent fact vocabulary
   assertContains(untracked, '>F</span>', 'Library row renders current quality separately');
   assertContains(untracked, '>untracked<', 'Library row renders missing exact tracking');
   assertExcludes(untracked, 'identity drift', 'Library row does not infer a sibling relationship');
+}
+
+console.log('renderLibraryAlbumRow() acknowledges one complete lifecycle before actions and badges');
+{
+  pipelineStore.clear();
+  const releaseId = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
+  const owner = {
+    job_id: 303,
+    status: 'recovery_required',
+    preview_status: 'evidence_ready',
+  };
+  updatePipelineStatus(releaseId, 'processing', 53, owner);
+  const html = renderLibraryAlbumRow({
+    id: 53,
+    mb_albumid: releaseId,
+    album: 'Recovering pressing',
+    track_count: 10,
+    in_library: false,
+    has_captured_history: true,
+    pipeline_id: 53,
+    pipeline_status: 'processing',
+    processing_owner: owner,
+    pipeline_verified_lossless: true,
+    pipeline_provisional: false,
+  });
+  assertContains(html, 'data-processing-locked="true"',
+    'the toolbar consumes the acknowledged exact owner before choosing actions');
+  assertContains(html, '>needs recovery<',
+    'the toolbar and badge agree on the exact owner presentation');
+  assertContains(html, '>captured<',
+    'the same acknowledgement restores authoritative row facts');
+  assertContains(html, '>verified<',
+    'proof and lifecycle cross the acknowledgement boundary together');
+  assert(!pipelineStore.has(releaseId),
+    'the complete authoritative lifecycle expires the local overlay once');
+  pipelineStore.clear();
 }
 
 console.log('renderLibraryDetailBody() preserves ordinary track and pipeline metadata');
