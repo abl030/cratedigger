@@ -156,6 +156,31 @@ Action provenance such as reused/recomputed/backfilled/fallback outcomes is not
 stored in these evidence tables; preview/import/cleanup result surfaces own
 that audit trail.
 
+## Library derived facts (not schema)
+
+The Library and browse read seams derive independent facts; there is no
+PostgreSQL holdings projection, badge column, migration, or backfill:
+
+- Current presence comes only from a successful live Beets read for the exact
+  MusicBrainz or Discogs release identity. A sibling pressing never counts.
+- `has_captured_history` is true when the request has a durable successful
+  download outcome (`success`, `force_import`, or `manual_import`), a completed
+  successful import job (`automation_import`, `force_import`, `manual_import`,
+  or `youtube_import`), or the accepted current `status='imported'` legacy
+  fallback. Historical witnesses remain true across later status changes. The
+  status-only fallback deliberately disappears if the operator explicitly
+  reopens that legacy request, until ordinary acquisition writes a witness.
+- Current installed quality comes from the successful live Beets read.
+  Verified Lossless and provisional proof come from the request's linked
+  `current_evidence_id`; evidence never establishes current presence by itself.
+- Captured, Missing, Untracked, and Replaced are presentation facts, not
+  request statuses. A retagged sibling therefore leaves the old exact request
+  Captured plus Missing and renders the newly held exact identity Untracked.
+
+A failed Beets read is a broken read boundary: the API logs and returns an
+error without changing `album_requests` and without fabricating Missing or
+Untracked rows.
+
 ## `album_requests` — quality-tracking fields
 
 - `status TEXT` — `initializing` is a provisional, non-runnable direct-creation
