@@ -8,10 +8,11 @@ by ``CRATEDIGGER_HYPOTHESIS_PROFILE``:
   independent of local ``.hypothesis/`` state, so every ``run_tests.sh``
   run behaves identically on every machine. This is the tier used by the
   final local suite.
-* ``fuzz`` — deep randomized burst for local exploration when quality
-  policy changes. Fresh entropy per run plus the local Hypothesis example
-  database (``.hypothesis/``, gitignored), so failures found in one burst
-  replay first on the next. ``print_blob=True`` prints a
+* ``fuzz`` — randomized burst for local exploration when quality policy
+  changes. The ordinary default is 500 examples; the unattended overnight
+  gate explicitly raises it to 20,000. Fresh entropy per run plus the local
+  Hypothesis example database (``.hypothesis/``, gitignored) means failures
+  found in one burst replay first on the next. ``print_blob=True`` prints a
   ``@reproduce_failure`` blob for exact replay.
 
 Deadlines are disabled in every tier: wall-clock-per-example limits flake
@@ -28,7 +29,7 @@ import os
 from hypothesis import HealthCheck, settings
 
 _fuzz_max_examples = int(
-    os.environ.get("CRATEDIGGER_FUZZ_MAX_EXAMPLES", "20000")
+    os.environ.get("CRATEDIGGER_FUZZ_MAX_EXAMPLES", "500")
 )
 if _fuzz_max_examples < 1:
     raise ValueError("CRATEDIGGER_FUZZ_MAX_EXAMPLES must be at least 1")

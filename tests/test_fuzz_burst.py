@@ -38,7 +38,7 @@ class TestFuzzTargetPlanning(unittest.TestCase):
     def property(
         test_id: str,
         *,
-        max_examples: int = 20_000,
+        max_examples: int = 500,
         uses_default_settings: bool = True,
     ) -> FuzzPropertyManifest:
         return FuzzPropertyManifest(
@@ -237,6 +237,40 @@ class TestFuzzTargetPlanning(unittest.TestCase):
         )
         self.assertTrue(state_machine.uses_default_settings)
         self.assertEqual(state_machine.max_examples, 150)
+
+
+class TestFuzzProfileBudget(unittest.TestCase):
+    def _profile_budget(self, override: str | None) -> int:
+        env = os.environ.copy()
+        if override is None:
+            env.pop("CRATEDIGGER_FUZZ_MAX_EXAMPLES", None)
+        else:
+            env["CRATEDIGGER_FUZZ_MAX_EXAMPLES"] = override
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import tests._hypothesis_profiles; "
+                    "from hypothesis import settings; "
+                    "print(settings.get_profile('fuzz').max_examples)"
+                ),
+            ],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        return int(completed.stdout)
+
+    def test_default_fuzz_budget_is_500_examples(self) -> None:
+        self.assertEqual(self._profile_budget(None), 500)
+
+    def test_fuzz_budget_honors_the_overnight_override(self) -> None:
+        self.assertEqual(self._profile_budget("20000"), 20_000)
 
 
 def _shard(

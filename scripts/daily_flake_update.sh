@@ -15,6 +15,7 @@ world_database="$state_dir/hypothesis/world-model"
 mirror_database="$state_dir/hypothesis/mirror-world"
 fuzz_database="$state_dir/hypothesis/fuzz"
 fuzz_output_dir="$state_dir/fuzz-failures"
+overnight_fuzz_max_examples=20000
 
 mkdir -p \
     "$world_database" \
@@ -83,6 +84,7 @@ run_stage "world-model burst" \
 run_stage "generated fuzz burst" \
     env HYPOTHESIS_STORAGE_DIRECTORY="$fuzz_database" \
         CRATEDIGGER_FUZZ_OUTPUT_DIR="$fuzz_output_dir" \
+        CRATEDIGGER_FUZZ_MAX_EXAMPLES="$overnight_fuzz_max_examples" \
     nix-shell --run "bash scripts/fuzz_burst.sh"
 run_stage "mirror-harness smoke" \
     env CRATEDIGGER_WORLD_DATABASE="$mirror_database" \

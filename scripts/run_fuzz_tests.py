@@ -380,16 +380,17 @@ def is_structurally_shallow(depth: PropertyDepth) -> bool:
     """True when a property ran out of worlds long before it ran out of budget.
 
     The disclosure #888 item 1 exists for: ``@given(a=st.booleans(),
-    b=st.booleans())`` against a 20,000-example budget is exhausted in four
-    worlds, so a mutant outside those four worlds survives however deep the
-    burst runs.
+    b=st.booleans())`` is exhausted in four worlds regardless of whether the
+    burst budget is the ordinary 500 examples or the overnight 20,000, so a
+    mutant outside those four worlds survives however deep the burst runs.
 
     **Detection ceiling.** Only a space smaller than ``shard_budget_bound``
-    can be observed at all — 150 at the deterministic tier, ``budget /
-    shards`` (2,500 on a 30-core host) at the fuzz tier. A property with more
-    worlds than that never exhausts, so it is reported as deep whatever its
-    real space is, and an empty SHALLOW section means "none found below the
-    ceiling", never "no shallow properties".
+    can be observed at all — 150 at the deterministic tier, or ``budget /
+    shards`` at the fuzz tier (62 or 63 on a 30-core host by default; 2,500
+    in the overnight run). A property with more worlds than that never
+    exhausts, so it is reported as deep whatever its real space is, and an
+    empty SHALLOW section means "none found below the ceiling", never "no
+    shallow properties".
 
     Two carve-outs keep the verdict honest:
 
