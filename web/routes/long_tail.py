@@ -6,10 +6,15 @@ Split from web/routes/pipeline.py (#481 item 3). Wraps
 (CLI ⇄ API symmetry, R16).
 """
 
+import logging
+
 import msgspec
 
+from lib.long_tail_service import classify_long_tail_failure
 from web.routes._registry import RouteHandler, RouteRegistration, route
 from web.routes._server_access import _server
+
+log = logging.getLogger(__name__)
 
 
 def get_pipeline_long_tail(h: RouteHandler, params: dict[str, list[str]]) -> None:
@@ -37,6 +42,9 @@ def get_pipeline_long_tail(h: RouteHandler, params: dict[str, list[str]]) -> Non
         ``{"results": [...], "band": <str|null>, "count": <int>}``
     Response shape (single-id success):
         ``{"result": <row>, "id": <int>}``
+    Response shape (expected authority failure):
+        ``{"category": <conflict|unavailable>, "error": <stable-code>,
+        "message": <stable-message>}``
 
     Each result is a ``LongTailRow`` serialized via
     ``msgspec.to_builtins`` so ``msgspec.convert(row, type=LongTailRow)``
@@ -49,44 +57,58 @@ def get_pipeline_long_tail(h: RouteHandler, params: dict[str, list[str]]) -> Non
       * 200 — success (empty cohort is a valid state).
       * 400 — non-int ``id``.
       * 404 — ``id`` not found / not ``wanted``.
+      * 409 — ambiguous, malformed, or conflicting exact authority.
+      * 503 — expected Beets authority/read unavailability.
     """
     from lib.long_tail_service import band_one_long_tail, list_long_tail
     from web.routes._overlay import band_release_ids
 
     s = _server()
 
-    id_raw = params.get("id", [None])[0]
-    if id_raw is not None and id_raw != "":
-        try:
-            request_id = int(id_raw)
-        except (TypeError, ValueError):
-            h._error("id must be an integer")
+    try:
+        id_raw = params.get("id", [None])[0]
+        if id_raw is not None and id_raw != "":
+            try:
+                request_id = int(id_raw)
+            except (TypeError, ValueError):
+                h._error("id must be an integer")
+                return
+            row = band_one_long_tail(s._db(), band_release_ids, request_id)
+            if row is None:
+                h._json(
+                    {"error": "Not found", "id": request_id},
+                    status=404,
+                )
+                return
+            serialized = s._serialize_row(msgspec.to_builtins(row))
+            h._json({"result": serialized, "id": request_id})
             return
-        row = band_one_long_tail(s._db(), band_release_ids, request_id)
-        if row is None:
-            h._json(
-                {"error": "Not found", "id": request_id},
-                status=404,
-            )
-            return
-        serialized = s._serialize_row(msgspec.to_builtins(row))
-        h._json({"result": serialized, "id": request_id})
-        return
 
-    band = params.get("band", [None])[0]
-    if band == "":
-        band = None
+        band = params.get("band", [None])[0]
+        if band == "":
+            band = None
 
-    result = list_long_tail(s._db(), band_release_ids, band=band)
+        result = list_long_tail(s._db(), band_release_ids, band=band)
 
-    # Route the serialized rows through _serialize_row to convert any
-    # datetime / UUID columns to JSON-safe values (datetime-500 guard).
-    rows = [s._serialize_row(r) for r in msgspec.to_builtins(result.rows)]
-    h._json({
-        "results": rows,
-        "band": result.band_filter,
-        "count": len(rows),
-    })
+        # Route the serialized rows through _serialize_row to convert any
+        # datetime / UUID columns to JSON-safe values (datetime-500 guard).
+        rows = [s._serialize_row(r) for r in msgspec.to_builtins(result.rows)]
+        h._json({
+            "results": rows,
+            "band": result.band_filter,
+            "count": len(rows),
+        })
+    except Exception as exc:
+        failure = classify_long_tail_failure(exc)
+        if failure is None:
+            raise
+        log.warning(
+            "long-tail authority %s (%s)",
+            failure.category,
+            failure.error,
+            exc_info=True,
+        )
+        h._json(msgspec.to_builtins(failure), status=failure.http_status)
 
 
 ROUTES: list[RouteRegistration] = [
@@ -97,7 +119,8 @@ ROUTES: list[RouteRegistration] = [
         # ``pipeline-cli long-tail`` per CLI ⇄ API symmetry.
         "Long-tail worklist — the full wanted cohort pre-banded by "
         "on-disk quality (missing / QualityRank band / unknown) and "
-        "stamped with in_flight_rescue. Optional ?band= filter.",
+        "stamped with in_flight_rescue. Optional ?band= filter; exact "
+        "authority conflicts and unavailability fail closed.",
         classified=True,
     ),
 ]

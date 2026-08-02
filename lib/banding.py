@@ -1,19 +1,65 @@
-"""Beets-library quality banding — shared by the web overlay and the CLI.
+"""Beets-library quality banding shared by web and CLI projections.
 
 Lives in ``lib/`` (not ``web/``) so ``scripts/pipeline_cli.py`` can band the
-long-tail worklist without importing the web server. ``web/server.py::
-compute_library_rank`` and ``web/routes/_overlay.py::_band_from_detail`` both
-delegate here, so every surface (web badges, browse/label overlays, the
-long-tail list, and the CLI) shares ONE banding decision (KTD1) with no
-parallel logic — only the beets-access seam and the config source differ.
+long-tail worklist without importing the web server. Long-tail callers use one
+exact-resolution snapshot decision here; browse/label overlay callers retain
+the legacy pre-fetched detail adapter while sharing the same rank primitive.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping, Sequence
+from typing import Protocol
+
+from lib.beets_db import (
+    CurrentBeetsAmbiguous,
+    CurrentBeetsMissing,
+    CurrentBeetsResolution,
+    CurrentBeetsUnique,
+    _reduce_album_format,
+)
 from lib.quality import QualityRankConfig
+from lib.release_identity import ReleaseIdentity
 
 BAND_MISSING = "missing"
 BAND_UNKNOWN = "unknown"
+
+
+class CurrentBeetsBandingAmbiguityError(RuntimeError):
+    """One or more exact releases cannot authorize a current band."""
+
+    ambiguities: tuple[CurrentBeetsAmbiguous, ...]
+
+    def __init__(
+        self,
+        ambiguities: Sequence[CurrentBeetsAmbiguous],
+    ) -> None:
+        values = tuple(ambiguities)
+        if not values:
+            raise ValueError("banding ambiguity error needs an ambiguity")
+        self.ambiguities = values
+        detail = ", ".join(
+            f"{value.identity.release_id}:{value.reason}"
+            for value in values
+        )
+        super().__init__(f"ambiguous current Beets releases: {detail}")
+
+
+class CurrentBeetsBandingIdentityError(ValueError):
+    """A banding caller supplied a malformed release identity."""
+
+
+class CurrentBeetsBandingUnavailableError(RuntimeError):
+    """The exact resolver did not return a requested release observation."""
+
+
+class CurrentBeetsResolver(Protocol):
+    """Exact current-library batch resolver consumed by banding."""
+
+    def resolve_current_releases(
+        self,
+        identities: list[ReleaseIdentity],
+    ) -> dict[ReleaseIdentity, CurrentBeetsResolution]: ...
 
 
 def load_rank_config() -> QualityRankConfig:
@@ -52,6 +98,102 @@ def compute_library_rank(
     return quality_rank(fmt, bitrate_kbps, is_cbr=False, cfg=cfg).name.lower()
 
 
+def _band_current_unique(
+    current: CurrentBeetsUnique,
+    cfg: QualityRankConfig,
+) -> str:
+    """Rank one exact resolution from its coherent item snapshot."""
+    album_format = _reduce_album_format(
+        {item.format for item in current.items if item.format},
+        cfg,
+    )
+    bitrates = [
+        item.bitrate
+        for item in current.items
+        if item.bitrate is not None and item.bitrate > 0
+    ]
+    average_kbps = (
+        int(sum(bitrates) / len(bitrates) / 1000)
+        if bitrates else 0
+    )
+    return compute_library_rank(album_format, average_kbps, cfg)
+
+
+def band_current_resolutions(
+    resolutions: Mapping[ReleaseIdentity, CurrentBeetsResolution],
+    cfg: QualityRankConfig,
+) -> dict[str, str]:
+    """Band one coherent exact-resolution batch without cardinality loss.
+
+    Only :class:`CurrentBeetsMissing` authorizes ``missing``. Unique releases
+    derive their band from the items carried by that exact resolution. Any
+    ambiguity aborts the complete batch before a payload is constructed.
+    """
+    ambiguities = tuple(
+        resolution
+        for resolution in resolutions.values()
+        if isinstance(resolution, CurrentBeetsAmbiguous)
+    )
+    if ambiguities:
+        raise CurrentBeetsBandingAmbiguityError(ambiguities)
+
+    bands: dict[str, str] = {}
+    for identity, resolution in resolutions.items():
+        if resolution.identity != identity:
+            raise CurrentBeetsBandingUnavailableError(
+                "current Beets resolution identity mismatch: "
+                f"requested={identity.release_id}, "
+                f"observed={resolution.identity.release_id}"
+            )
+        if isinstance(resolution, CurrentBeetsMissing):
+            bands[identity.release_id] = BAND_MISSING
+        elif isinstance(resolution, CurrentBeetsUnique):
+            bands[identity.release_id] = _band_current_unique(resolution, cfg)
+    return bands
+
+
+def resolve_current_release_bands(
+    beets: CurrentBeetsResolver,
+    release_ids: Iterable[str],
+    cfg: QualityRankConfig,
+) -> dict[str, str]:
+    """Resolve one exact batch and band it through the shared decision."""
+    requested: list[tuple[str, ReleaseIdentity]] = []
+    for raw_release_id in release_ids:
+        release_id = str(raw_release_id)
+        identity = ReleaseIdentity.from_id(release_id)
+        if identity is None:
+            raise CurrentBeetsBandingIdentityError(
+                f"invalid exact release identity for banding: {release_id!r}"
+            )
+        requested.append((release_id, identity))
+    if not requested:
+        return {}
+
+    identities = list(dict.fromkeys(
+        identity for _release_id, identity in requested
+    ))
+    observed = beets.resolve_current_releases(identities)
+    omitted = [
+        identity.release_id
+        for identity in identities
+        if identity not in observed
+    ]
+    if omitted:
+        raise CurrentBeetsBandingUnavailableError(
+            "current Beets resolver omitted exact release identities: "
+            + ", ".join(omitted)
+        )
+    bands = band_current_resolutions(
+        {identity: observed[identity] for identity in identities},
+        cfg,
+    )
+    return {
+        release_id: bands[identity.release_id]
+        for release_id, identity in requested
+    }
+
+
 def current_library_bitrate(detail: dict[str, object]) -> int:
     """Return the positive-track average bitrate for current-state ranking.
 
@@ -78,9 +220,10 @@ def band_from_detail(
       ``"missing"``).
     * otherwise → the lowercase ``QualityRank`` band.
 
-    The single banding decision the web overlay and the CLI both route through
-    — header, list, and sibling panel can never diverge. Membership / detail
-    queries are the caller's responsibility (batched once); this is pure.
+    Legacy browse/label overlay consumers route through this adapter. The
+    long-tail web/CLI surfaces instead use ``resolve_current_release_bands``
+    so an ambiguous exact resolution can never disappear between membership
+    and detail projections.
     """
     if rid not in in_library:
         return BAND_MISSING

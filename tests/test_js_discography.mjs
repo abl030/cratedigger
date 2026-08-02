@@ -77,10 +77,16 @@ console.log('synthesizeMasterlessRow() — overlay fields survive the synthesis'
     pipeline_status: 'wanted',
     pipeline_id: 8838,
     processing_owner: null,
+    has_captured_history: true,
+    pipeline_verified_lossless: true,
+    pipeline_provisional: false,
   });
   assertEqual(row.pipeline_status, 'wanted', 'pipeline_status forwarded');
   assertEqual(row.pipeline_id, 8838, 'pipeline_id forwarded');
   assertEqual(row.processing_owner, null, 'non-processing owner null forwarded');
+  assertEqual(row.has_captured_history, true, 'captured history forwarded');
+  assertEqual(row.pipeline_verified_lossless, true, 'verified proof forwarded');
+  assertEqual(row.pipeline_provisional, false, 'provisional fact forwarded');
   assertEqual(row.in_library, false, 'in_library forwarded');
   assertEqual(row.beets_album_id, null, 'beets_album_id forwarded');
   assertEqual(row.id, '8317023', 'id kept');
@@ -256,6 +262,9 @@ console.log('synthesizeMasterlessRow() — in-library payload keeps quality fiel
     library_min_bitrate: 900,
     library_avg_bitrate: 1100,
     library_rank: 'lossless',
+    has_captured_history: true,
+    pipeline_verified_lossless: true,
+    pipeline_provisional: false,
   });
   assertEqual(row.in_library, true, 'in_library true forwarded');
   assertEqual(row.beets_album_id, 42, 'beets_album_id forwarded');
@@ -263,7 +272,20 @@ console.log('synthesizeMasterlessRow() — in-library payload keeps quality fiel
   assertEqual(row.library_min_bitrate, 900, 'library_min_bitrate forwarded');
   assertEqual(row.library_avg_bitrate, 1100, 'library_avg_bitrate forwarded');
   assertEqual(row.library_rank, 'lossless', 'library_rank forwarded');
+  assertEqual(row.has_captured_history, true, 'has_captured_history forwarded');
+  assertEqual(row.pipeline_verified_lossless, true, 'pipeline_verified_lossless forwarded');
+  assertEqual(row.pipeline_provisional, false, 'pipeline_provisional forwarded');
   assertEqual(row.format, '?', 'empty formats fall back to ?');
+
+  const html = renderPressingRow(row, {
+    artistName: 'Artist',
+    parentRgId: null,
+    canReplace: false,
+  });
+  assertContains(html, '>in library</span>', 'masterless row renders current holding');
+  assertContains(html, '>F</span>', 'masterless row renders quality independently');
+  assertContains(html, '>captured<', 'masterless row renders captured history');
+  assertContains(html, '>verified<', 'masterless row renders carried proof');
 }
 
 console.log('splitPressings() — owned/in-flight pressings are never hidden (The Meadowlands pin)');
@@ -271,7 +293,7 @@ console.log('splitPressings() — owned/in-flight pressings are never hidden (Th
   // Live confusion (request 4228, The Wrens "The Meadowlands"): the
   // library copy is the 2002 US Promotion pressing, which the old split
   // buried inside the collapsed Bootleg / Promo section — the expansion
-  // contradicted the row's "in library · wanted" badges.
+  // contradicted the row's holding, quality, and wanted badges.
   const rows = [
     { id: 'cef6b0f6', status: 'Promotion', in_library: true, pipeline_status: 'wanted' },
     { id: '2aa0ae0e', status: 'Bootleg', in_library: false, pipeline_status: null },
@@ -325,11 +347,10 @@ console.log('splitPressings() — partition + hoist invariants over the status/o
   }
 }
 
-console.log('splitPressings() — a replaced-only pipeline row does not pin (frozen audit, badge-less)');
+console.log('splitPressings() — a replaced-only pipeline row does not pin (visible frozen audit badge)');
 {
-  // badges.js renders no badge for 'replaced', so hoisting such a row
-  // would put an unexplained bootleg in the main list. Only in_library
-  // or an ACTIVE pipeline status pins.
+  // Replaced is visible frozen audit history, not an active ownership
+  // claim. Only in_library or an ACTIVE pipeline status pins.
   const rows = [
     { id: 'abandoned', status: 'Bootleg', in_library: false, pipeline_status: 'replaced' },
     { id: 'owned-abandoned', status: 'Promotion', in_library: true, pipeline_status: 'replaced' },
@@ -339,6 +360,13 @@ console.log('splitPressings() — a replaced-only pipeline row does not pin (fro
   assertEqual(hidden[0].id, 'abandoned', 'the replaced-only row is the hidden one');
   assertEqual(visible.length, 1, 'library ownership still pins a replaced row');
   assertEqual(visible[0].id, 'owned-abandoned', 'in_library wins over replaced');
+
+  const replacedHtml = renderPressingRow(rows[0], {
+    artistName: 'Artist',
+    parentRgId: null,
+    canReplace: false,
+  });
+  assertContains(replacedHtml, '>replaced<', 'collapsed row explains its frozen request history');
 }
 
 console.log('splitPressings() — known-bad self-check: the OLD split violates the hoist invariant');

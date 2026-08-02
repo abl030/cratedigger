@@ -28,6 +28,7 @@ from scripts.web_dev_server import (
     build_parser,
     create_server,
 )
+from tests.fakes import FakeBeetsDB
 from tests.test_web_cache import FakeRedis
 
 INSECURE_AUTH_WARNING = (
@@ -769,6 +770,7 @@ class WebDevServerLiveDbMetadataIntegrationTest(unittest.TestCase):
 
     def _start_live_server(self, config: DevConfig) -> str:
         server = create_server("127.0.0.1", 0, config)
+        self.web_server._beets = FakeBeetsDB()
         self._start(server)
         return f"http://127.0.0.1:{server.server_port}"
 

@@ -49,6 +49,31 @@ function refreshAfterBeetsDeletion(albumId) {
 }
 
 /**
+ * Map the typed /api/library/artist row to the one shared badge contract.
+ * Keeping this as a production export lets live-corpus differentials use
+ * the exact mapping rendered by the Library view.
+ *
+ * @param {Object} a - LibraryAlbumRow-shaped row from /api/library/artist
+ * @returns {Object} The exact BadgeItem passed to renderStatusBadges.
+ */
+export function libraryAlbumBadgeItem(a) {
+  return {
+    id: normalizeReleaseId(a.mb_albumid),
+    in_library: a.in_library === true,
+    has_captured_history: a.has_captured_history === true,
+    library_format: a.formats ?? null,
+    library_min_bitrate: a.min_bitrate ? Math.round(a.min_bitrate / 1000) : 0,
+    library_avg_bitrate: a.avg_bitrate ? Math.floor(a.avg_bitrate / 1000) : 0,
+    library_rank: a.library_rank ?? null,
+    pipeline_status: a.pipeline_status ?? null,
+    pipeline_id: a.pipeline_id ?? null,
+    processing_owner: a.processing_owner ?? null,
+    pipeline_verified_lossless: a.pipeline_verified_lossless === true,
+    pipeline_provisional: a.pipeline_provisional === true,
+  };
+}
+
+/**
  * One library-album (or pipeline-only request) row with its detail
  * placeholder. Feeds the unified artist page's In-flight section
  * (issue #575 PR4); in-library rows expand via toggleLibDetail,
@@ -58,8 +83,9 @@ function refreshAfterBeetsDeletion(albumId) {
  */
 export function renderLibraryAlbumRow(a) {
   const added = a.added ? new Date(a.added * 1000 + 8 * 3600000).toISOString().slice(0, 10) : '?';
-  const mbid = normalizeReleaseId(a.mb_albumid);
-  const inLibrary = a.in_library !== false;
+  const badgeItem = libraryAlbumBadgeItem(a);
+  const mbid = badgeItem.id;
+  const inLibrary = badgeItem.in_library;
   const beetsAlbumId = a.beets_album_id ?? null;
   const pipelineId = a.pipeline_id || null;
   const detailId = inLibrary
@@ -82,16 +108,7 @@ export function renderLibraryAlbumRow(a) {
   }) : null;
   const toolbar = actionState ? renderActionToolbar(actionState, { size: 'small' }) : '';
 
-  const badges = renderStatusBadges({
-    id: mbid,
-    in_library: inLibrary,
-    library_format: a.formats,
-    library_min_bitrate: a.min_bitrate ? Math.round(a.min_bitrate / 1000) : 0,
-    library_avg_bitrate: a.avg_bitrate ? Math.floor(a.avg_bitrate / 1000) : 0,
-    library_rank: a.library_rank,
-    pipeline_status: a.pipeline_status,
-    processing_owner: a.processing_owner ?? null,
-  });
+  const badges = renderStatusBadges(badgeItem);
   return `
     <div class="lib-item" onclick="${detailToggle}">
       <div class="p-top">

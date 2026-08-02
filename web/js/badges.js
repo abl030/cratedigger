@@ -5,17 +5,13 @@
  * row across the browse sub-tabs (Discography, Library, Analysis,
  * Compare) — and the per-pressing rows inside expanded views.
  *
- * Same code = same display. If a row is in library, the badge always
- * looks the same and shows the same on-disk quality summary. If it's
- * queued, the wanted badge looks the same. Etc.
- *
- * The in-library badge is "expanded" with a compact on-disk quality
- * suffix (e.g. "in library · M V2", "in library · F", "in library ·
- * O 128") when the caller passes library_format / library_avg_bitrate.
- * Falls back to plain "in library" when those fields are absent.
+ * Same code = same display. Presence, captured history, installed
+ * quality, carried proof, lifecycle, and exact request tracking remain
+ * independent facts. A compact quality label (for example M V2, F, or
+ * O 128) is therefore its own badge beside the current-holding badge.
  */
 
-import { pipelineStore, pipelineStoreKey } from './state.js';
+import { resolvePipelineLifecycle } from './state.js';
 import { esc, qualityLabelShort } from './util.js';
 import { qualityRankBadgeClass } from './quality_palette.js';
 import { processingOwnerPresentation } from './release_action_state.js';
@@ -24,6 +20,9 @@ import { processingOwnerPresentation } from './release_action_state.js';
  * @typedef {Object} BadgeItem
  * @property {string} [id] - Used to look up live mutations in pipelineStore
  * @property {boolean} [in_library]
+ * @property {boolean} [has_captured_history] - A durable successful
+ *   acquisition witness, or the admitted current imported-status legacy
+ *   fallback supplied by the backend projection.
  * @property {string|null|undefined} [library_format] - "MP3", "FLAC", etc.
  * @property {number|null|undefined} [library_min_bitrate] - kbps floor; not a rank signal
  * @property {number|null|undefined} [library_avg_bitrate] - positive-track mean kbps
@@ -35,7 +34,9 @@ import { processingOwnerPresentation } from './release_action_state.js';
  *   matters: Opus 128 is transparent, MP3 128 is poor — same bitrate,
  *   different rank).
  * @property {string|null|undefined} [pipeline_status]
- *   'wanted' | 'downloading' | 'processing' | 'imported' | 'unsearchable' | null
+ *   'wanted' | 'downloading' | 'processing' | 'imported' | 'unsearchable' |
+ *   'replaced' | null
+ * @property {number|null|undefined} [pipeline_id]
  * @property {import('./release_action_state.js').ProcessingOwnerProjection|null} [processing_owner]
  * @property {boolean} [pipeline_verified_lossless] - The tracked install
  *   carries a verified-lossless proof (terminal quality identity).
@@ -51,33 +52,54 @@ import { processingOwnerPresentation } from './release_action_state.js';
  * @returns {string}
  */
 export function renderStatusBadges(item) {
-  const key = item.id ? pipelineStoreKey(item.id) : '';
-  const stored = key ? pipelineStore.get(key) : null;
-  const pStatus = stored ? stored.status : (item.pipeline_status || null);
-  const owner = stored
-    ? stored.processing_owner
-    : (item.processing_owner || null);
+  const lifecycle = resolvePipelineLifecycle(
+    item.id,
+    item.pipeline_status,
+    item.pipeline_id,
+    item.processing_owner,
+  );
+  const pStatus = lifecycle.status;
+  const owner = lifecycle.processing_owner;
+  // A local mutation owns lifecycle only. Suppress historical facts from a
+  // row whose status/id has not caught up yet. A matching authoritative
+  // refetch clears the shared overlay and restores every row-owned fact.
+  const itemFactsAreCurrent = lifecycle.row_facts_are_current;
+  const hasCapturedHistory = itemFactsAreCurrent
+    && item.has_captured_history === true;
+  const verifiedLossless = itemFactsAreCurrent
+    && item.pipeline_verified_lossless === true;
+  const provisional = itemFactsAreCurrent
+    && item.pipeline_provisional === true;
   const processing = processingOwnerPresentation(pStatus, owner);
 
   let html = '';
   if (item.in_library) {
+    html += '<span class="badge badge-library" title="currently held in the library">in library</span>';
     const q = qualityLabelShort(
       item.library_format || '',
       item.library_avg_bitrate || 0,
     );
-    const suffix = q && q !== '?' ? ` · ${esc(q)}` : '';
-    // Rank colour overrides the default blue when the backend supplied
-    // a codec-aware tier. Falls back to badge-library blue when not.
-    const rank = (item.library_rank || '').toLowerCase();
-    const cls = rank ? qualityRankBadgeClass(rank) : 'badge-library';
-    html += `<span class="badge ${cls}">in library${suffix}</span>`;
+    if (q && q !== '?') {
+      // The quality band is an observation about the current holding,
+      // not the presence or acquisition-history badge itself.
+      const rank = (item.library_rank || '').toLowerCase();
+      const cls = rank ? qualityRankBadgeClass(rank) : 'badge-library';
+      const label = esc(q);
+      html += `<span class="badge badge-quality-outline ${cls}" title="current library quality: ${label}" aria-label="current library quality: ${label}">${label}</span>`;
+    }
+  }
+  if (hasCapturedHistory) {
+    html += '<span class="badge badge-captured" title="successfully acquired at least once">captured</span>';
+    if (!item.in_library) {
+      html += '<span class="badge badge-missing" title="captured previously; not currently held in the library">missing</span>';
+    }
   }
   // Quality identity of the tracked install (issue #711 provisional
   // surfacing): verified is terminal; provisional means an unverified
   // lossless-source conversion the pipeline is still trying to verify.
-  if (item.pipeline_verified_lossless) {
-    html += '<span class="badge badge-verified badge-rank-lossless" title="verified lossless source — search complete">verified</span>';
-  } else if (item.pipeline_provisional) {
+  if (verifiedLossless) {
+    html += '<span class="badge badge-verified badge-rank-lossless" title="tracked install carries verified lossless-source proof">verified</span>';
+  } else if (provisional) {
     html += '<span class="badge badge-provisional" title="unverified lossless-source conversion — still hunting a verified lossless copy">provisional</span>';
   }
   if (pStatus === 'wanted') html += '<span class="badge badge-wanted">wanted</span>';
@@ -85,7 +107,12 @@ export function renderStatusBadges(item) {
   if (processing) {
     html += `<span class="badge ${processing.badgeClass}" title="${esc(processing.lockReason)}">${esc(processing.label)}</span>`;
   }
-  if (pStatus === 'imported') html += '<span class="badge badge-imported">imported</span>';
   if (pStatus === 'unsearchable') html += '<span class="badge badge-unsearchable">unsearchable</span>';
+  if (pStatus === 'replaced') {
+    html += '<span class="badge badge-replaced" title="acquisition request superseded by another exact release">replaced</span>';
+  }
+  if (item.in_library && !pStatus) {
+    html += '<span class="badge badge-untracked" title="currently held; no exact pipeline request tracks this release">untracked</span>';
+  }
   return html;
 }

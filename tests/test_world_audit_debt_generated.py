@@ -10,7 +10,11 @@ from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads active profile)
 from lib.world_audit_debt import assess_world_audit_debt
-from lib.world_audit_service import WorldAuditCounts, WorldAuditReport
+from lib.world_audit_service import (
+    WorldAuditCounts,
+    WorldAuditReport,
+    build_world_audit_report,
+)
 from lib.world_invariants import WorldViolation
 
 
@@ -39,17 +43,13 @@ def _violation(request_id: int, *, changed: bool = False) -> WorldViolation:
 
 
 def _report(violations: tuple[WorldViolation, ...]) -> WorldAuditReport:
-    return WorldAuditReport(
-        status="clean" if not violations else "violations",
+    return build_world_audit_report(
         counts=WorldAuditCounts(
             active_requests=50,
             beets_albums=45,
             linked_evidence=40,
             denylist_rows=5,
-            violations=len(violations),
         ),
-        audited_invariants=("evidence_disk_coherence",),
-        temporal_invariants_not_auditable=(),
         violations=violations,
     )
 

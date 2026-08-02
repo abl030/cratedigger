@@ -65,7 +65,8 @@ from lib.config import (
     resolve_startup_config_paths,
 )
 from lib.json_narrow import is_str_object_dict as _is_str_object_dict
-from lib.pipeline_db import AlbumRequestRow, PipelineDB
+from lib.pipeline_db import PipelineDB
+from lib.pipeline_db.rows import ArtistRequestRow
 from web import cache
 from web import discogs as _discogs
 from web import mb as mb_api
@@ -376,6 +377,12 @@ def get_library_artist(
     return _overlay.get_library_artist(_beets_db(), artist_name, mb_artist_id)
 
 
+def get_library_releases(
+    release_ids: list[str],
+) -> list[dict[str, object]]:
+    return _overlay.get_library_releases(_beets_db(), release_ids)
+
+
 def check_pipeline(
     mbids: list[str] | list[object],
 ) -> dict[str, dict[str, object]]:
@@ -385,7 +392,7 @@ def check_pipeline(
 def list_artist_requests(
     artist_name: str,
     mb_artist_id: str = "",
-) -> list[AlbumRequestRow]:
+) -> list[ArtistRequestRow]:
     """One artist's request rows, for the rg-row badge overlay (#575)."""
     db = _db_or_none()
     if db is None or not artist_name:

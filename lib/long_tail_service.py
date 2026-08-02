@@ -5,9 +5,9 @@ row pre-banded by on-disk quality (``Missing`` / a ``QualityRank`` band /
 This is the read backend for the Long-Tail Triage Console (U1). It is the
 first UI consumer of the existing beets-library banding machinery —
 ``web.server.compute_library_rank`` via the beets-only banding core
-factored out of ``web.routes._overlay`` — applied to ``album_requests``
-rows keyed by ``mb_release_id`` rather than to beets release rows keyed
-by release id.
+factored out of ``web.routes._overlay`` — applied to the strict exact
+identity derived from each ``album_requests`` row's MusicBrainz and
+Discogs release fields.
 
 Service-first (KTD2): the typed ``LongTailResult`` is the contract; the
 HTTP route (``GET /api/pipeline/long-tail``) and the CLI
@@ -15,13 +15,19 @@ HTTP route (``GET /api/pipeline/long-tail``) and the CLI
 map ``outcome`` onto status / exit codes. Both surfaces wrap the SAME
 service method per CLI ⇄ API symmetry.
 
-Banding rules (KTD1, three-way):
+Banding rules (KTD1, fail-closed):
 
-* ``mb_release_id`` absent from the beets membership set → ``Missing``.
-* present in the library but no detail row / ``compute_library_rank``
-  returns ``"unknown"`` → ``Unknown`` (has audio, never ``Missing``).
-* otherwise → the lowercase ``QualityRank`` band (``transparent`` /
+* ``CurrentBeetsMissing`` for the exact identity → ``Missing``.
+* one exact current album whose coherent item snapshot cannot be ranked →
+  ``Unknown`` (has audio, never ``Missing``).
+* one exact rankable current album → the lowercase ``QualityRank`` band (``transparent`` /
   ``excellent`` / ``good`` / ``acceptable`` / ``poor``).
+* every ambiguous topology or identity result aborts the whole projection;
+  ambiguity is never presented as absence.
+
+Missing, malformed, or conflicting request identities fail closed before a
+Beets read. A valid identity omitted from the banding result also fails closed:
+only an explicit Beets membership answer may claim that a pressing is missing.
 
 The band labels are lowercase to match ``library_rank`` /
 ``badge-rank-*`` exactly so badge rendering comes for free.
@@ -33,25 +39,101 @@ migration 037's partial unique index ``one_youtube_running_per_request`` —
 never an N-query loop.
 
 The banding ``band_fn`` collaborator is injected so tests drop in a
-counting fake (the N+1 guard counts both the cohort query AND the beets
-membership + ``check_mbids_detail`` queries). Per the service-first
-pattern the service body never imports ``web.server`` — the route passes
-the concrete banding function in.
+counting fake (the N+1 guard counts the cohort query plus one coherent Beets
+resolver batch). Per the service-first pattern the service body never imports
+``web.server`` — the route passes the concrete banding function in.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 import msgspec
 
-# The ``Missing`` band sentinel — a release id absent from the beets
-# membership set has no library copy to upgrade. ``"unknown"`` (in-library
-# but unrankable) and the lowercase ``QualityRank`` names come straight
-# from ``compute_library_rank`` via the injected ``band_fn``, so they
-# aren't re-declared here.
-BAND_MISSING = "missing"
+from lib.banding import BAND_MISSING as _BAND_MISSING
+from lib.banding import (
+    CurrentBeetsBandingAmbiguityError,
+    CurrentBeetsBandingIdentityError,
+    CurrentBeetsBandingUnavailableError,
+)
+from lib.release_identity import (
+    ConflictingReleaseIdentityError,
+    ReleaseIdentity,
+)
+
+BAND_MISSING = _BAND_MISSING
+
+
+class LongTailIdentityError(ValueError):
+    """A worklist request has no single strict exact release identity."""
+
+
+class LongTailBandingUnavailableError(RuntimeError):
+    """The Beets banding authority omitted a queried exact identity."""
+
+
+class LongTailPublicError(msgspec.Struct, frozen=True):
+    """Stable public classification for an expected Long Tail failure.
+
+    The service continues to raise its typed exceptions. HTTP and CLI
+    adapters call :func:`classify_long_tail_failure` and serialize this one
+    payload, so their status/exit mappings cannot drift.
+    """
+
+    category: Literal["conflict", "unavailable"]
+    error: Literal[
+        "long_tail_authority_conflict",
+        "long_tail_authority_unavailable",
+    ]
+    message: str
+
+    @property
+    def http_status(self) -> Literal[409, 503]:
+        return 409 if self.category == "conflict" else 503
+
+    @property
+    def cli_exit_code(self) -> Literal[4, 5]:
+        return 4 if self.category == "conflict" else 5
+
+
+_LONG_TAIL_AUTHORITY_CONFLICT = LongTailPublicError(
+    category="conflict",
+    error="long_tail_authority_conflict",
+    message="Long-tail exact release authority is ambiguous or invalid.",
+)
+
+_LONG_TAIL_AUTHORITY_UNAVAILABLE = LongTailPublicError(
+    category="unavailable",
+    error="long_tail_authority_unavailable",
+    message="Current Beets authority is unavailable; retry later.",
+)
+
+
+def classify_long_tail_failure(exc: Exception) -> LongTailPublicError | None:
+    """Classify only expected public failures; leave defects unhandled.
+
+    Missing/locked Beets authority and incomplete resolver output are
+    retryable. Ambiguous current topology or malformed/conflicting exact
+    request identity is an integrity conflict. SQLite schema/programmer
+    failures and unrelated exceptions intentionally return ``None`` so the
+    route keeps its generic 500 and the CLI preserves the original exception.
+    """
+    from lib.world_audit_service import _beets_authority_availability_category
+
+    if isinstance(exc, (
+        CurrentBeetsBandingUnavailableError,
+        LongTailBandingUnavailableError,
+    )) or _beets_authority_availability_category(exc) is not None:
+        return _LONG_TAIL_AUTHORITY_UNAVAILABLE
+    if isinstance(exc, (
+        CurrentBeetsBandingAmbiguityError,
+        CurrentBeetsBandingIdentityError,
+        ConflictingReleaseIdentityError,
+        LongTailIdentityError,
+    )):
+        return _LONG_TAIL_AUTHORITY_CONFLICT
+    return None
 
 
 class LongTailRow(msgspec.Struct, frozen=True):
@@ -125,11 +207,11 @@ class LongTailResult(msgspec.Struct, frozen=True):
     band_filter: str | None
 
 
-# ``band_fn`` maps a list of release ids (``mb_release_id`` values) to a
-# ``{release_id: band}`` dict in a bounded number of queries. The route
-# wires this to the beets-only banding core in ``web.routes._overlay``;
-# tests inject a counting fake. Release ids absent from the returned dict
-# band as ``Missing``.
+# ``band_fn`` maps a list of canonical exact release ids (MB UUIDs or Discogs
+# numerics) to a complete ``{release_id: band}`` dict in a bounded number of
+# queries. The route wires this to the exact Beets resolver banding core in
+# ``web.routes._overlay``; tests inject a counting fake. Every queried id must
+# be present in the result, including ids explicitly banded ``Missing``.
 BandFn = Callable[[list[str]], dict[str, str]]
 
 
@@ -157,9 +239,8 @@ def list_long_tail(
 
     1. ``get_long_tail_cohort`` — one Postgres query for the whole
        ``wanted`` set, each row carrying ``in_flight_rescue``.
-    2. ``band_fn`` — the beets-only banding core, batched over the whole
-       ``mb_release_id`` list (membership + ``check_mbids_detail``), never
-       per row.
+    2. ``band_fn`` — the Beets exact-resolution core, batched once over the
+       whole strict exact-identity list, never per row.
 
     ``band`` optionally filters the result to a single band (backs the
     CLI's ``--band``). The UI fetches unfiltered and filters client-side.
@@ -197,17 +278,45 @@ def _band_rows(
     rows: list[dict[str, Any]],
     band_fn: BandFn,
 ) -> list[LongTailRow]:
-    """Band a cohort of request rows by ``mb_release_id`` in one batch."""
-    release_ids = [
-        str(r["mb_release_id"])
-        for r in rows
-        if r.get("mb_release_id")
-    ]
+    """Band a cohort by one strict MB-or-Discogs identity per request."""
+    identities = [_strict_request_identity(row) for row in rows]
+    release_ids = [identity.release_id for identity in identities]
     bands = band_fn(release_ids) if release_ids else {}
-    return [_band_row(r, bands) for r in rows]
+    missing_results = [
+        release_id
+        for release_id in dict.fromkeys(release_ids)
+        if release_id not in bands
+    ]
+    if missing_results:
+        raise LongTailBandingUnavailableError(
+            "Beets banding returned no result for exact release identities: "
+            + ", ".join(missing_results)
+        )
+    return [
+        _band_row(row, identity, bands)
+        for row, identity in zip(rows, identities, strict=True)
+    ]
 
 
-def _band_row(row: dict[str, Any], bands: dict[str, str]) -> LongTailRow:
+def _strict_request_identity(row: dict[str, Any]) -> ReleaseIdentity:
+    """Return one exact identity or fail before claiming Beets absence."""
+    identity = ReleaseIdentity.from_strict_fields(
+        row.get("mb_release_id"),
+        row.get("discogs_release_id"),
+    )
+    if identity is None:
+        raise LongTailIdentityError(
+            f"request {int(row['id'])} has missing, malformed, or conflicting "
+            "exact release identity fields"
+        )
+    return identity
+
+
+def _band_row(
+    row: dict[str, Any],
+    identity: ReleaseIdentity,
+    bands: dict[str, str],
+) -> LongTailRow:
     # Deferred so the service module keeps importing nothing from the web
     # layer at load time (the same shape ``lib/mbid_replace_service.py``
     # uses for ``web.mb``). The audit-only accusation rule has exactly one
@@ -217,8 +326,6 @@ def _band_row(row: dict[str, Any], bands: dict[str, str]) -> LongTailRow:
     from lib.pipeline_db._shared import CURRENT_EVIDENCE_PREFIX
     from web.classify import evidence_column_accusation_flags
 
-    rid = row.get("mb_release_id")
-    band = bands.get(str(rid), BAND_MISSING) if rid else BAND_MISSING
     flags = evidence_column_accusation_flags(
         row, prefix=CURRENT_EVIDENCE_PREFIX)
     return LongTailRow(
@@ -239,17 +346,18 @@ def _band_row(row: dict[str, Any], bands: dict[str, str]) -> LongTailRow:
         current_spectral_grade=row.get("current_spectral_grade"),
         current_spectral_bitrate=_int_or_none(
             row.get("current_spectral_bitrate")),
-        band=band,
+        band=bands[identity.release_id],
         in_flight_rescue=bool(row.get("in_flight_rescue")),
         current_spectral_accusation_admissible=flags.admissible,
         current_spectral_accusation_withheld=flags.withheld,
     )
 
 
-def _int_or_none(value: Any) -> int | None:
-    if value is None:
+def _int_or_none(value: object) -> int | None:
+    if isinstance(value, bool):
         return None
-    try:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
         return int(value)
-    except (TypeError, ValueError):
-        return None
+    return None

@@ -561,6 +561,9 @@ class TestArtistCompareGenerated(unittest.TestCase):
             "status": "wanted",
             "id": 42,
             "processing_owner": None,
+            "has_captured_history": True,
+            "verified_lossless": True,
+            "provisional_lossless": True,
             "_prio": 0,
         }
         _apply_rg_pipeline_overlay(
@@ -570,6 +573,17 @@ class TestArtistCompareGenerated(unittest.TestCase):
 
         assert_pipeline_overlay(work, expected=target_kind == "work")
         assert_pipeline_overlay(release, expected=target_kind == "release")
+        self.assertFalse(work.has_captured_history)
+        self.assertFalse(work.pipeline_verified_lossless)
+        self.assertFalse(work.pipeline_provisional)
+        self.assertEqual(
+            (
+                release.has_captured_history,
+                release.pipeline_verified_lossless,
+                release.pipeline_provisional,
+            ),
+            (True, True, True) if target_kind == "release" else (False, False, False),
+        )
 
     @given(
         target_source=st.sampled_from(("mb", "discogs")),
@@ -589,6 +603,9 @@ class TestArtistCompareGenerated(unittest.TestCase):
             "status": "wanted",
             "id": 42,
             "processing_owner": None,
+            "has_captured_history": False,
+            "verified_lossless": False,
+            "provisional_lossless": False,
             "_prio": 0,
         }
         _apply_rg_pipeline_overlay(

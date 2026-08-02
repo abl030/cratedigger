@@ -46,6 +46,9 @@ class ArtistCatalogueRow(msgspec.Struct, omit_defaults=True):
     pipeline_status: str | None = None
     pipeline_id: int | None = None
     processing_owner: ProcessingOwnerProjection | None = None
+    has_captured_history: bool = False
+    pipeline_verified_lossless: bool = False
+    pipeline_provisional: bool = False
 
 
 class ArtistCataloguePair(msgspec.Struct):

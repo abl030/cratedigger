@@ -167,7 +167,10 @@ class TestPipelineDashboardRouteContracts(_FakeDbWebServerCase):
             "pipeline dashboard drift row")
 
     def test_pipeline_dashboard_disk_coverage_null_without_beets(self):
-        status, data = self._get("/api/pipeline/dashboard")
+        from web import server
+
+        with patch.object(server, "_beets_db", return_value=None):
+            status, data = self._get("/api/pipeline/dashboard")
 
         self.assertEqual(status, 200)
         self.assertIsNone(data["disk_coverage"])

@@ -373,6 +373,12 @@ Discogs IDs are queried in both `discogs_albumid` (current layout) and numeric
 `mb_albumid` (legacy layout). No title, artist, release-group, folder, or sibling
 fallback exists. Batch presence/detail APIs expose only usable unique results;
 they never collapse two exact rows by `LIMIT 1` or dictionary overwrite.
+Library presence badges use this exact live read independently from durable
+capture history and linked proof. A failed Beets read is an API error, never
+evidence of absence and never a request transition. See
+`docs/webui-primer.md` for the independent badge vocabulary and
+`docs/debugging-cli.md` for the grouped A/B/C world-audit contract; detailed
+evidence authority remains canonical in `docs/quality-verification.md`.
 
 The deployment supplies the canonical database/root pair as both effective
 Beets configuration and `beets.runtime.expectedLibrary` /

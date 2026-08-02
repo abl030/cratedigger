@@ -77,6 +77,7 @@ class FakeBeetsDB:
         self.get_album_ids_by_mbids_calls: list[list[str]] = []
         self.get_tracks_by_mb_release_id_calls: list[str] = []
         self.get_albums_by_artist_calls: list[tuple[str, str]] = []
+        self.get_albums_by_release_ids_calls: list[list[str]] = []
         self._albums_by_artist: dict[str, list[dict[str, Any]]] = {}
         self.list_release_identities_calls: int = 0
         self._album_detail: dict[int, dict[str, Any]] = {}
@@ -465,6 +466,64 @@ class FakeBeetsDB:
     ) -> list[dict[str, Any]]:
         self.get_albums_by_artist_calls.append((name, mbid))
         return copy.deepcopy(self._albums_by_artist.get(name, []))
+
+    def get_albums_by_release_ids(
+        self,
+        release_ids: list[str],
+    ) -> list[dict[str, object]]:
+        """Exact-identity album projection independent of artist tags."""
+        self.get_albums_by_release_ids_calls.append(list(release_ids))
+        wanted = {
+            identity
+            for release_id in release_ids
+            if (identity := ReleaseIdentity.from_id(release_id)) is not None
+        }
+        rows_by_album_id: dict[int, dict[str, object]] = {}
+        matches_by_identity: dict[ReleaseIdentity, set[int]] = {
+            identity: set() for identity in wanted
+        }
+        for albums in self._albums_by_artist.values():
+            for row in albums:
+                primary = ReleaseIdentity.from_id(row.get("mb_albumid"))
+                discogs = ReleaseIdentity.from_id(row.get("discogs_albumid"))
+                if discogs is not None and discogs.source != "discogs":
+                    discogs = None
+                candidate_identities = {
+                    identity
+                    for identity in (primary, discogs)
+                    if identity is not None
+                }
+                if candidate_identities.isdisjoint(wanted):
+                    continue
+                identities = ReleaseIdentity.all_from_observation_fields(
+                    row.get("mb_albumid"), row.get("discogs_albumid")
+                )
+                album_id = row.get("id")
+                if not isinstance(album_id, int):
+                    continue
+                rows_by_album_id[album_id] = row
+                for identity in identities:
+                    if identity in wanted:
+                        matches_by_identity[identity].add(album_id)
+        ambiguous = [
+            identity.release_id
+            for identity, album_ids in matches_by_identity.items()
+            if len(album_ids) > 1
+        ]
+        if ambiguous:
+            raise ValueError(
+                "ambiguous current Beets release projection: "
+                + ", ".join(sorted(ambiguous))
+            )
+        selected_ids = {
+            album_id
+            for album_ids in matches_by_identity.values()
+            for album_id in album_ids
+        }
+        return [
+            copy.deepcopy(rows_by_album_id[album_id])
+            for album_id in sorted(selected_ids)
+        ]
 
     def list_release_identities(self) -> list[dict[str, Any]]:
         self.list_release_identities_calls += 1

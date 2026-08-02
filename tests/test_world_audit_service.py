@@ -7,9 +7,18 @@ import sqlite3
 import tempfile
 import unittest
 
-from lib.beets_db import BeetsDB, BeetsWorldAlbum
+from lib.beets_db import BeetsDB, BeetsWorldAlbum, CurrentBeetsResolution
 from lib.quality_evidence import snapshot_audio_files
-from lib.world_audit_service import audit_world
+from lib.release_identity import ReleaseIdentity
+from lib.world_audit_service import (
+    WorldAuditCounts,
+    WorldAuditReport,
+    audit_world,
+    audit_world_from_borrowed_factory,
+    audit_world_from_factory,
+    build_world_audit_report,
+)
+from lib.world_invariants import WorldViolation
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_album_quality_evidence, make_request_row
 
@@ -18,6 +27,41 @@ RELEASE_AMBIGUOUS = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 RELEASE_MISSING = "cccccccc-cccc-cccc-cccc-cccccccccccc"
 DISCOGS_MODERN = "1838462"
 DISCOGS_LEGACY = "8818"
+
+_SQLITE_AVAILABILITY_FAILURES: tuple[
+    tuple[int, type[sqlite3.DatabaseError]], ...
+] = (
+    (sqlite3.SQLITE_AUTH, sqlite3.DatabaseError),
+    (sqlite3.SQLITE_BUSY, sqlite3.OperationalError),
+    (sqlite3.SQLITE_CANTOPEN, sqlite3.OperationalError),
+    (sqlite3.SQLITE_IOERR, sqlite3.OperationalError),
+    (sqlite3.SQLITE_LOCKED, sqlite3.OperationalError),
+    (sqlite3.SQLITE_PERM, sqlite3.OperationalError),
+)
+
+
+def _sqlite_availability_failure(
+    code: int,
+    error_type: type[sqlite3.DatabaseError],
+    context: str,
+) -> sqlite3.DatabaseError:
+    failure = error_type(f"sqlite {context} authority failure {code}")
+    failure.sqlite_errorcode = code
+    return failure
+
+
+def _real_sqlite_auth_failure() -> sqlite3.DatabaseError:
+    connection = sqlite3.connect(":memory:")
+    try:
+        connection.execute("CREATE TABLE authority_probe (value INTEGER)")
+        connection.set_authorizer(lambda *_args: sqlite3.SQLITE_DENY)
+        try:
+            connection.execute("SELECT value FROM authority_probe").fetchall()
+        except sqlite3.DatabaseError as exc:
+            return exc
+        raise AssertionError("SQLite authorizer unexpectedly allowed the query")
+    finally:
+        connection.close()
 
 
 def _create_beets_db(path: str) -> None:
@@ -93,7 +137,322 @@ def _seed_linked_evidence(
     assert db.set_request_current_evidence(request_id, stored.id)
 
 
+class _ResolverFailureBeets(FakeBeetsDB):
+    def __init__(self, failure: Exception) -> None:
+        super().__init__()
+        self._failure = failure
+        self.list_world_albums_calls = 0
+        self.resolve_current_releases_calls: list[
+            tuple[ReleaseIdentity, ...]
+        ] = []
+
+    def list_world_albums(self) -> list[BeetsWorldAlbum]:
+        self.list_world_albums_calls += 1
+        return super().list_world_albums()
+
+    def resolve_current_releases(
+        self,
+        identities: list[ReleaseIdentity],
+    ) -> dict[ReleaseIdentity, CurrentBeetsResolution]:
+        self.resolve_current_releases_calls.append(tuple(identities))
+        raise self._failure
+
+
+def _pipeline_db_with_exact_request() -> FakePipelineDB:
+    db = FakePipelineDB()
+    db.seed_request(make_request_row(
+        id=1,
+        mb_release_id=RELEASE_A,
+        status="imported",
+    ))
+    return db
+
+
 class TestWorldAuditService(unittest.TestCase):
+    @staticmethod
+    def _codes(report: WorldAuditReport, bucket: str) -> list[str]:
+        group = {
+            "A": report.groups.a,
+            "B": report.groups.b,
+            "C": report.groups.c,
+        }[bucket]
+        return [member.code for member in group.members]
+
+    def test_public_status_distinguishes_clean_observations_and_integrity(self) -> None:
+        counts = WorldAuditCounts(0, 0, 0, 0)
+        clean = build_world_audit_report(counts=counts, violations=())
+        observations = build_world_audit_report(
+            counts=counts,
+            violations=(WorldViolation(code="current_beets_missing", detail="missing"),),
+        )
+        bucket_c_only = build_world_audit_report(
+            counts=counts,
+            violations=(WorldViolation(code="album_empty", detail="empty"),),
+        )
+        bucket_a_only = build_world_audit_report(
+            counts=counts,
+            violations=(WorldViolation(code="proof_lock_broken", detail="broken"),),
+        )
+        mixed = build_world_audit_report(
+            counts=counts,
+            violations=(
+                WorldViolation(code="current_beets_missing", detail="missing"),
+                WorldViolation(code="album_empty", detail="empty"),
+                WorldViolation(code="proof_lock_broken", detail="broken"),
+            ),
+        )
+
+        self.assertEqual(clean.status, "clean")
+        self.assertEqual(observations.status, "observations_only")
+        self.assertEqual(bucket_c_only.status, "observations_only")
+        self.assertEqual(bucket_a_only.status, "integrity_failed")
+        self.assertEqual(mixed.status, "integrity_failed")
+        self.assertEqual(observations.groups.b.count, 1)
+        self.assertEqual(mixed.groups.a.count, 1)
+        self.assertEqual(mixed.groups.b.count, 1)
+        self.assertEqual(mixed.groups.c.count, 1)
+
+    def test_grouping_is_deterministic_and_unknown_codes_fail_closed(self) -> None:
+        report = build_world_audit_report(
+            counts=WorldAuditCounts(0, 0, 0, 0),
+            violations=(
+                WorldViolation(code="album_empty", detail="z"),
+                WorldViolation(code="future_unclassified_code", detail="future"),
+                WorldViolation(code="current_beets_missing", detail="b"),
+                WorldViolation(code="album_empty", detail="a"),
+            ),
+        )
+
+        self.assertEqual(self._codes(report, "A"), ["future_unclassified_code"])
+        self.assertEqual(self._codes(report, "B"), ["current_beets_missing"])
+        self.assertEqual(self._codes(report, "C"), ["album_empty", "album_empty"])
+        self.assertEqual([member.detail for member in report.groups.c.members], ["a", "z"])
+
+    def test_expected_beets_availability_failures_are_incomplete_bucket_b(self) -> None:
+        sqlite_failures = [
+            _sqlite_availability_failure(code, error_type, "open")
+            for code, error_type in _SQLITE_AVAILABILITY_FAILURES
+        ]
+        for failure in (
+            FileNotFoundError("missing"),
+            PermissionError("denied"),
+            *sqlite_failures,
+        ):
+            with self.subTest(failure=type(failure).__name__):
+                def unavailable_factory(error: Exception = failure) -> FakeBeetsDB:
+                    raise error
+
+                report = audit_world_from_factory(
+                    FakePipelineDB(),
+                    unavailable_factory,
+                )
+
+                self.assertFalse(report.complete)
+                self.assertEqual(report.status, "observations_only")
+                self.assertEqual(
+                    self._codes(report, "B"),
+                    ["current_beets_authority_unavailable"],
+                )
+
+    def test_every_expected_sqlite_query_failure_is_incomplete_bucket_b(self) -> None:
+        class QueryFailureBeets(FakeBeetsDB):
+            def __init__(self, failure: sqlite3.DatabaseError) -> None:
+                super().__init__()
+                self.failure = failure
+
+            def list_world_albums(self) -> list[BeetsWorldAlbum]:
+                raise self.failure
+
+        for code, error_type in _SQLITE_AVAILABILITY_FAILURES:
+            with self.subTest(code=code):
+                failure = _sqlite_availability_failure(
+                    code,
+                    error_type,
+                    "query",
+                )
+                beets = QueryFailureBeets(failure)
+
+                report = audit_world_from_factory(
+                    FakePipelineDB(), lambda handle=beets: handle
+                )
+
+                self.assertFalse(report.complete)
+                self.assertEqual(
+                    self._codes(report, "B"),
+                    ["current_beets_authority_unavailable"],
+                )
+                self.assertEqual(beets.close_calls, 1)
+
+    def test_every_expected_sqlite_resolver_failure_is_incomplete_bucket_b(
+        self,
+    ) -> None:
+        expected_identity = ReleaseIdentity(
+            source="musicbrainz",
+            release_id=RELEASE_A,
+        )
+        for code, error_type in _SQLITE_AVAILABILITY_FAILURES:
+            for lifecycle, audit, expected_close_calls in (
+                ("owned", audit_world_from_factory, 1),
+                ("borrowed", audit_world_from_borrowed_factory, 0),
+            ):
+                with self.subTest(lifecycle=lifecycle, code=code):
+                    failure = _sqlite_availability_failure(
+                        code,
+                        error_type,
+                        "resolver",
+                    )
+                    beets = _ResolverFailureBeets(failure)
+
+                    report = audit(
+                        _pipeline_db_with_exact_request(),
+                        lambda handle=beets: handle,
+                    )
+
+                    self.assertFalse(report.complete)
+                    self.assertEqual(report.status, "observations_only")
+                    self.assertEqual(
+                        self._codes(report, "B"),
+                        ["current_beets_authority_unavailable"],
+                    )
+                    self.assertEqual(beets.list_world_albums_calls, 1)
+                    self.assertEqual(
+                        beets.resolve_current_releases_calls,
+                        [(expected_identity,)],
+                    )
+                    self.assertEqual(beets.close_calls, expected_close_calls)
+
+    def test_real_sqlite_authorizer_auth_failure_is_incomplete_bucket_b(
+        self,
+    ) -> None:
+        failure = _real_sqlite_auth_failure()
+        self.assertIs(type(failure), sqlite3.DatabaseError)
+        self.assertEqual(failure.sqlite_errorcode, sqlite3.SQLITE_AUTH)
+        beets = _ResolverFailureBeets(failure)
+
+        report = audit_world_from_factory(
+            _pipeline_db_with_exact_request(),
+            lambda: beets,
+        )
+
+        self.assertFalse(report.complete)
+        self.assertEqual(report.status, "observations_only")
+        self.assertEqual(
+            self._codes(report, "B"),
+            ["current_beets_authority_unavailable"],
+        )
+        self.assertEqual(
+            report.groups.b.members[0].detail,
+            "current Beets authority unavailable (sqlite_23)",
+        )
+        self.assertEqual(beets.close_calls, 1)
+
+    def test_unexpected_resolver_failure_remains_a_transport_error(self) -> None:
+        expected_identity = ReleaseIdentity(
+            source="musicbrainz",
+            release_id=RELEASE_A,
+        )
+        for lifecycle, audit, expected_close_calls in (
+            ("owned", audit_world_from_factory, 1),
+            ("borrowed", audit_world_from_borrowed_factory, 0),
+        ):
+            with self.subTest(lifecycle=lifecycle):
+                beets = _ResolverFailureBeets(
+                    RuntimeError("resolver programmer defect")
+                )
+
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "resolver programmer defect",
+                ):
+                    audit(
+                        _pipeline_db_with_exact_request(),
+                        lambda handle=beets: handle,
+                    )
+
+                self.assertEqual(beets.list_world_albums_calls, 1)
+                self.assertEqual(
+                    beets.resolve_current_releases_calls,
+                    [(expected_identity,)],
+                )
+                self.assertEqual(beets.close_calls, expected_close_calls)
+
+    def test_unexpected_beets_failure_remains_a_transport_error(self) -> None:
+        def broken_factory() -> FakeBeetsDB:
+            raise RuntimeError("programmer defect")
+
+        with self.assertRaisesRegex(RuntimeError, "programmer defect"):
+            audit_world_from_factory(FakePipelineDB(), broken_factory)
+
+    def test_sqlite_schema_failure_remains_a_transport_error(self) -> None:
+        schema_error = sqlite3.OperationalError("no such column: albums.bad")
+        schema_error.sqlite_errorcode = sqlite3.SQLITE_ERROR
+
+        def broken_factory() -> FakeBeetsDB:
+            raise schema_error
+
+        with self.assertRaisesRegex(sqlite3.OperationalError, "no such column"):
+            audit_world_from_factory(FakePipelineDB(), broken_factory)
+
+    def test_unexpected_query_and_close_failures_propagate(self) -> None:
+        class BrokenQueryBeets(FakeBeetsDB):
+            def list_world_albums(self) -> list[BeetsWorldAlbum]:
+                raise RuntimeError("query programmer defect")
+
+        query_beets = BrokenQueryBeets()
+        with self.assertRaisesRegex(RuntimeError, "query programmer defect"):
+            audit_world_from_factory(FakePipelineDB(), lambda: query_beets)
+        self.assertEqual(query_beets.close_calls, 1)
+
+        class BrokenCloseBeets(FakeBeetsDB):
+            def close(self) -> None:
+                super().close()
+                raise RuntimeError("close programmer defect")
+
+        close_beets = BrokenCloseBeets()
+        with self.assertRaisesRegex(RuntimeError, "close programmer defect"):
+            audit_world_from_factory(FakePipelineDB(), lambda: close_beets)
+        self.assertEqual(close_beets.close_calls, 1)
+
+    def test_pipeline_availability_failure_is_not_misattributed_to_beets(self) -> None:
+        class MissingPipelineDB(FakePipelineDB):
+            def list_non_replaced_requests(self):
+                raise FileNotFoundError("pipeline-side file")
+
+        with self.assertRaisesRegex(FileNotFoundError, "pipeline-side file"):
+            audit_world_from_borrowed_factory(
+                MissingPipelineDB(),
+                FakeBeetsDB,
+            )
+
+    def test_factory_owned_beets_handle_is_closed(self) -> None:
+        beets = FakeBeetsDB()
+
+        report = audit_world_from_factory(FakePipelineDB(), lambda: beets)
+
+        self.assertEqual(report.status, "clean")
+        self.assertEqual(beets.close_calls, 1)
+
+    def test_borrowed_beets_handle_is_not_closed_when_query_is_unavailable(self) -> None:
+        class UnavailableBeets(FakeBeetsDB):
+            def list_world_albums(self):
+                failure = sqlite3.OperationalError("database is locked")
+                failure.sqlite_errorcode = sqlite3.SQLITE_LOCKED
+                raise failure
+
+        beets = UnavailableBeets()
+
+        report = audit_world_from_borrowed_factory(
+            FakePipelineDB(),
+            lambda: beets,
+        )
+
+        self.assertFalse(report.complete)
+        self.assertEqual(
+            self._codes(report, "B"),
+            ["current_beets_authority_unavailable"],
+        )
+        self.assertEqual(beets.close_calls, 0)
+
     def test_clean_world_uses_the_shared_invariant_bank(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             album_path = os.path.join(root, "Artist", "Album")
@@ -134,7 +493,9 @@ class TestWorldAuditService(unittest.TestCase):
             report = audit_world(db, beets)
 
         self.assertEqual(report.status, "clean")
-        self.assertEqual(report.violations, ())
+        self.assertEqual(report.groups.a.members, ())
+        self.assertEqual(report.groups.b.members, ())
+        self.assertEqual(report.groups.c.members, ())
         self.assertEqual(report.counts.active_requests, 1)
         self.assertEqual(report.counts.beets_albums, 1)
         self.assertEqual(report.counts.linked_evidence, 1)
@@ -162,13 +523,20 @@ class TestWorldAuditService(unittest.TestCase):
 
         report = audit_world(db, beets)
 
-        self.assertEqual(report.status, "violations")
-        codes = {violation.code for violation in report.violations}
+        self.assertEqual(report.status, "integrity_failed")
+        codes = {
+            member.code
+            for group in (report.groups.a, report.groups.b, report.groups.c)
+            for member in group.members
+        }
         self.assertIn("beets_identity_missing", codes)
         self.assertIn("current_beets_missing", codes)
         self.assertIn("denylist_without_authority", codes)
         self.assertEqual(report.counts.denylist_rows, 1)
-        self.assertEqual(report.counts.violations, len(report.violations))
+        self.assertEqual(
+            sum(group.count for group in (report.groups.a, report.groups.b, report.groups.c)),
+            len(codes),
+        )
 
     def test_denylist_audit_includes_frozen_replaced_requests(self) -> None:
         db = FakePipelineDB()
@@ -185,7 +553,7 @@ class TestWorldAuditService(unittest.TestCase):
         self.assertEqual(report.counts.denylist_rows, 1)
         self.assertIn(
             "denylist_without_authority",
-            {violation.code for violation in report.violations},
+            set(self._codes(report, "A")),
         )
 
     def test_conflicting_request_identity_is_reported_without_resolution(self) -> None:
@@ -202,7 +570,7 @@ class TestWorldAuditService(unittest.TestCase):
 
         self.assertIn(
             "request_identity_missing",
-            {violation.code for violation in report.violations},
+            set(self._codes(report, "A")),
         )
         self.assertEqual(beets.resolve_current_release_calls, [])
 
@@ -285,13 +653,17 @@ class TestWorldAuditService(unittest.TestCase):
             with BeetsDB(db_path, library_root=library_root) as beets:
                 report = audit_world(db, beets)
 
-        codes = [violation.code for violation in report.violations]
+        codes = [
+            member.code
+            for group in (report.groups.a, report.groups.b, report.groups.c)
+            for member in group.members
+        ]
         self.assertEqual(codes, [
             "current_beets_ambiguous",
             "current_beets_missing",
         ])
         self.assertNotIn("evidence_path_mismatch", codes)
-        ambiguous = report.violations[0]
+        ambiguous = report.groups.b.members[0]
         self.assertIn("multiple_matches", ambiguous.detail)
         self.assertEqual(ambiguous.album_ids, (4, 5))
 
