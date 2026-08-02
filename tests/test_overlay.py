@@ -147,10 +147,16 @@ class TestOverlayReleaseRowsInPlace(unittest.TestCase):
         self.assertEqual(rows, [{"id": "captured", "title": "Album"}])
 
     def test_conflicting_beets_identity_fails_loud_without_projecting_absence(self):
-        rows: list[dict[str, object]] = [{
-            "id": "12856590",
-            "title": "Conflicting pressing",
-        }]
+        rows: list[dict[str, object]] = [
+            {
+                "id": "unrelated-valid",
+                "title": "Unrelated valid pressing",
+            },
+            {
+                "id": "12856590",
+                "title": "Conflicting pressing",
+            },
+        ]
         with patch("web.server.check_pipeline", return_value={}), patch(
             "web.server.check_beets_library",
             side_effect=ConflictingReleaseIdentityError(
@@ -160,15 +166,36 @@ class TestOverlayReleaseRowsInPlace(unittest.TestCase):
             ConflictingReleaseIdentityError,
             "12856590",
         ):
-            overlay_release_rows_in_place(rows, ["12856590"])
+            overlay_release_rows_in_place(
+                rows,
+                ["unrelated-valid", "12856590"],
+            )
 
-        self.assertEqual(rows, [{
-            "id": "12856590",
-            "title": "Conflicting pressing",
-        }])
+        self.assertEqual(rows, [
+            {
+                "id": "unrelated-valid",
+                "title": "Unrelated valid pressing",
+            },
+            {
+                "id": "12856590",
+                "title": "Conflicting pressing",
+            },
+        ])
 
 
 class TestBandReleaseIds(unittest.TestCase):
+    def test_conflicting_identity_never_degrades_to_missing(self):
+        with patch(
+            "web.server.check_beets_library",
+            side_effect=ConflictingReleaseIdentityError(
+                "conflicting numeric Discogs release identities for: 12856590"
+            ),
+        ), self.assertRaisesRegex(
+            ConflictingReleaseIdentityError,
+            "12856590",
+        ):
+            band_release_ids(["unrelated-valid", "12856590"])
+
     def test_degrades_to_missing_on_beets_error(self):
         """Beets unavailable (locked / missing DB) → all-"missing" rather than
         propagating the exception (which would 500 the worklist). Matches the

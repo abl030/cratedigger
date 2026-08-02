@@ -49,6 +49,7 @@ def _cli_band_fn(release_ids: list[str]) -> dict[str, str]:
     """
     from lib.banding import band_from_detail, load_rank_config
     from lib.beets_db import open_beets_db
+    from lib.release_identity import ConflictingReleaseIdentityError
 
     ids_list = [str(rid) for rid in release_ids]
     if not ids_list:
@@ -61,6 +62,8 @@ def _cli_band_fn(release_ids: list[str]) -> dict[str, str]:
                 beets.check_mbids_detail(list(in_library))
                 if in_library else {}
             )
+    except ConflictingReleaseIdentityError:
+        raise
     except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
         return {rid: "missing" for rid in ids_list}
     return {
