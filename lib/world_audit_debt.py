@@ -11,7 +11,7 @@ from pathlib import Path
 
 import msgspec
 
-from lib.world_audit_service import WorldAuditReport
+from lib.world_audit_service import WorldAuditReport, build_world_audit_report
 from lib.world_invariants import WorldViolation
 
 WORLD_AUDIT_DEBT_SCHEMA_VERSION = 1
@@ -132,14 +132,18 @@ def _validate_digest(value: str, *, field: str) -> None:
 
 
 def validate_world_audit_report(report: WorldAuditReport) -> None:
-    expected_status = "clean" if not report.violations else "violations"
-    if report.status != expected_status:
+    if not report.complete:
         raise WorldAuditDebtError(
-            "audit report status does not match its violations"
+            "incomplete audit report cannot update tracked debt"
         )
-    if report.counts.violations != len(report.violations):
+    canonical = build_world_audit_report(
+        counts=report.counts,
+        violations=report.violations,
+        complete=True,
+    )
+    if report != canonical:
         raise WorldAuditDebtError(
-            "audit report violation count does not match its members"
+            "audit report does not match canonical ownership grouping"
         )
     _sorted_members(report.violations)
 

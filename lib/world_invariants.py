@@ -6,7 +6,8 @@ import os
 import re
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Literal
 
 import msgspec
 
@@ -91,6 +92,42 @@ class WorldViolation(msgspec.Struct, frozen=True):
     request_id: int | None = None
     release_id: str | None = None
     album_ids: tuple[int, ...] = ()
+
+
+type WorldViolationBucket = Literal["A", "B", "C"]
+
+
+WORLD_VIOLATION_BUCKETS: Mapping[str, WorldViolationBucket] = MappingProxyType({
+    # A — Cratedigger integrity.
+    "proof_lock_broken": "A",
+    "lossy_tier_widened": "A",
+    "denylist_without_authority": "A",
+    "current_evidence_dangling": "A",
+    "evidence_release_mismatch": "A",
+    "evidence_capture_path_missing": "A",
+    "request_identity_missing": "A",
+    # B — current-holdings projection health.
+    "current_beets_missing": "B",
+    "current_beets_ambiguous": "B",
+    "current_beets_authority_unavailable": "B",
+    "evidence_fingerprint_mismatch": "B",
+    "evidence_link_without_album": "B",
+    "current_evidence_missing": "B",
+    "album_fingerprint_unavailable": "B",
+    # C — Beets/library health.
+    "album_empty": "C",
+    "item_outside_album_folder": "C",
+    "folder_shared": "C",
+    "album_folder_missing": "C",
+    "album_item_missing": "C",
+    "beets_identity_missing": "C",
+})
+
+
+def world_violation_bucket(code: str) -> WorldViolationBucket:
+    """Return the settled owner, failing unknown future codes closed to A."""
+
+    return WORLD_VIOLATION_BUCKETS.get(code, "A")
 
 
 def _normal_path(path: str) -> str:

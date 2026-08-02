@@ -12,11 +12,17 @@ import msgspec
 
 from lib.world_audit_debt import (
     WORLD_AUDIT_DEBT_SCHEMA_VERSION,
+    WorldAuditDebtError,
     assess_world_audit_debt,
     initialize_world_audit_debt_state,
     load_world_audit_debt_state,
+    validate_world_audit_report,
 )
-from lib.world_audit_service import WorldAuditCounts, WorldAuditReport
+from lib.world_audit_service import (
+    WorldAuditCounts,
+    WorldAuditReport,
+    build_world_audit_report,
+)
 from lib.world_invariants import (
     EvidenceDiskSnapshot,
     WorldViolation,
@@ -40,17 +46,13 @@ def _violation(
 
 
 def _report(*violations: WorldViolation) -> WorldAuditReport:
-    return WorldAuditReport(
-        status="clean" if not violations else "violations",
+    return build_world_audit_report(
         counts=WorldAuditCounts(
             active_requests=20,
             beets_albums=18,
             linked_evidence=15,
             denylist_rows=3,
-            violations=len(violations),
         ),
-        audited_invariants=("evidence_disk_coherence",),
-        temporal_invariants_not_auditable=(),
         violations=violations,
     )
 
@@ -60,6 +62,27 @@ def _encoded(report: WorldAuditReport) -> bytes:
 
 
 class TestWorldAuditDebtDecisions(unittest.TestCase):
+    def test_incomplete_report_cannot_converge_tracked_debt(self) -> None:
+        incomplete = msgspec.structs.replace(_report(), complete=False)
+
+        with self.assertRaisesRegex(WorldAuditDebtError, "incomplete"):
+            validate_world_audit_report(incomplete)
+
+    def test_misclassified_member_cannot_converge_tracked_debt(self) -> None:
+        report = _report(_violation(11))
+        member = msgspec.structs.replace(
+            report.groups.b.members[0],
+            code="proof_lock_broken",
+        )
+        bucket_b = msgspec.structs.replace(report.groups.b, members=(member,))
+        misclassified = msgspec.structs.replace(
+            report,
+            groups=msgspec.structs.replace(report.groups, b=bucket_b),
+        )
+
+        with self.assertRaisesRegex(WorldAuditDebtError, "canonical"):
+            validate_world_audit_report(misclassified)
+
     def test_initialized_state_contains_member_digests_not_raw_identity(self) -> None:
         state = initialize_world_audit_debt_state(_report(
             _violation(11),
