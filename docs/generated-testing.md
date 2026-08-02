@@ -47,6 +47,92 @@ fix (source exclusion + fail-closed coverage gate) merged with the property
 in PR #557. Full workflow rule: `.claude/rules/code-quality.md` § "Bug
 Hunting — Generated-First".
 
+## Performance and expansion rulebook
+
+Generated-test speed is subordinate to semantic coverage. The optimization
+loop is therefore **classify → prove → remove harness repetition → measure**,
+never "lower the daily budget until green". The unattended profile remains
+20,000 examples for entropy-driven properties.
+
+### Exact finite domains
+
+A property is finite only when its module can prove the complete semantic
+domain independently of Hypothesis. Do not infer finiteness from repeated
+examples, a `SHALLOW` report, or a strategy that happens to contain bounded
+primitives: projections, filters, dependent dimensions, and future expansion
+can make an apparent product count wrong.
+
+For a proved finite domain:
+
+1. Derive cardinality from the actual independent dimensions in code.
+2. Give every world one canonical representation. A bit mask over `n` optional
+   members is the canonical powerset representation (`0 .. 2**n - 1`).
+3. Write an independent verifier that enumerates the represented worlds and
+   compares them with the intended domain. Keep a known-bad self-test that
+   removes or collapses worlds and proves the verifier fails.
+4. Keep named minimum, maximum, empty, full, and historical edge `@example`
+   pins even when they duplicate generated endpoints.
+5. Decorate the property with
+   `@finite_generated_domain(cardinality=N, verify=verify_domain)`. The
+   decorator runs the proof during every isolated import, inherits all active
+   profile settings except `max_examples`, fixes the budget at exactly `N`, and
+   publishes typed discovery metadata.
+6. The fuzz scheduler validates `budget == cardinality` and schedules one
+   target regardless of the entropy-shard count. A metadata mismatch aborts
+   before admission; it never silently falls back to repeated shards.
+7. Pin discovery in `tests/test_fuzz_runner_generated.py`: cardinality, explicit
+   budget, one target, no profile override. Run the target under the production
+   profile and inspect Hypothesis statistics for exactly the intended valid
+   worlds.
+
+This is explicit automation rather than strategy inference. Future expansion
+changes the dimensions, so its verifier/cardinality test goes red and forces a
+deliberate new proof before the scheduler changes work.
+
+### Per-example external process startup
+
+If the slow target launches the same interpreter, browser, compiler, or helper
+for each Hypothesis example, first prove startup/module loading is the repeated
+cost. Preserve fresh **Python target** isolation, but reuse the helper inside
+that target when the operation itself can be request-local.
+
+JavaScript-backed properties use `tests.node_jsonl_worker.NodeJsonlWorker`:
+
+- one Node child is created in each test method's `setUp()` and registered with
+  `addCleanup()`, so ordinary unittest execution never shares mutable worker
+  state between methods;
+- each request carries a monotone ID, operation, and complete payload;
+- each response is exactly one typed JSON line with the matching ID;
+- malformed/extra output, wrong IDs, EOF, timeout, JavaScript exceptions, and
+  child loss poison the worker and fail closed with retained stderr;
+- a poisoned worker repeats its original failure so Hypothesis cannot turn a
+  harness death into inconsistent shrink noise;
+- no child survives the Python fuzz target, and no mutable request state is
+  shared by handlers.
+
+`tests/test_generated_node_worker_audit.py` enforces the bounded historical
+anti-pattern: a generated module cannot directly launch a literal `node` or
+`nodejs` subprocess. Other real subprocess properties (FFmpeg, git, pinned
+Beets) remain deliberate semantic boundaries and are not swept into a broad
+source scanner.
+
+### Measurement and stopping rule
+
+1. Preserve the accepted full-depth log as baseline.
+2. Benchmark the exact changed property/module with the production profile and
+   canonical shard count. This proves the optimization before paying for the
+   whole queue.
+3. After a material critical-path change, run the complete 20,000-example burst
+   once and compare wall time, targets, tests, property depth, discards,
+   infrastructure failures, ENOSPC, and slow-target rankings.
+4. Continue only while the next slow cohort is dominated by removable harness
+   repetition or a separately proved finite domain. Domain computation,
+   PostgreSQL serialization required by ownership, and real media decoding are
+   semantic costs, not automatic optimization targets.
+5. Stop when measured whole-run return is marginal relative to new protocol or
+   scheduler complexity. Never raise the PostgreSQL cap or global worker count
+   without private tmpfs/process-tree evidence.
+
 ## Modules
 
 | Module | Target | Properties |

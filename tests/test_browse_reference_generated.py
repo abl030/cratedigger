@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
 import string
-import subprocess
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +11,7 @@ from hypothesis import example, given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
+from tests.node_jsonl_worker import NodeJsonlWorker
 
 ROOT = Path(__file__).resolve().parents[1]
 MB_RELEASE_ID = "c1f6a2c9-bcba-4e69-96f5-233c85b2830a"
@@ -24,22 +23,20 @@ class ReferenceWorld:
     expected: dict[str, str] | None
 
 
-def _parse_with_real_javascript(pasted: str) -> object:
-    script = """
+_REFERENCE_WORKER = """
 import { parsePastedId } from './web/js/util.js';
-let input = '';
-for await (const chunk of process.stdin) input += chunk;
-process.stdout.write(JSON.stringify(parsePastedId(JSON.parse(input))));
+async function handle(operation, payload) {
+  if (operation !== 'parse') throw new Error(`unknown operation: ${operation}`);
+  return parsePastedId(payload);
+}
 """
-    result = subprocess.run(
-        ["node", "--input-type=module", "--eval", script],
-        cwd=ROOT,
-        input=json.dumps(pasted),
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-    return json.loads(result.stdout)
+
+
+def _parse_with_real_javascript(
+    worker: NodeJsonlWorker,
+    pasted: str,
+) -> object:
+    return worker.request("parse", pasted)
 
 
 @st.composite
@@ -125,6 +122,10 @@ def hostile_reference_worlds(draw: st.DrawFn) -> ReferenceWorld:
 
 
 class TestBrowseReferenceParserGenerated(unittest.TestCase):
+    def setUp(self) -> None:
+        self.worker = NodeJsonlWorker(_REFERENCE_WORKER, cwd=ROOT)
+        self.addCleanup(self.worker.close)
+
     @given(st.one_of(canonical_reference_worlds(), hostile_reference_worlds()))
     @example(ReferenceWorld(
         pasted=(
@@ -136,7 +137,10 @@ class TestBrowseReferenceParserGenerated(unittest.TestCase):
     def test_only_exact_canonical_references_produce_normalized_ids(
         self, world: ReferenceWorld,
     ) -> None:
-        self.assertEqual(_parse_with_real_javascript(world.pasted), world.expected)
+        self.assertEqual(
+            _parse_with_real_javascript(self.worker, world.pasted),
+            world.expected,
+        )
 
 
 if __name__ == "__main__":

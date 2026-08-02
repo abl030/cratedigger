@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import keyword
 import unittest
+from pathlib import Path
 
 from hypothesis import assume, example, given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401 - registers suite/fuzz tiers
+from tests.ruff_lsp_worker import RuffLspWorker
 from tests.test_unused_import_audit import (
     assert_import_liveness,
     assert_redundant_alias_baseline,
     redundant_aliases,
-    ruff_findings,
 )
+
+_RUFF_WORLD_PATHS = ("lib/importing.py", "lib/peer.py")
 
 _SCAFFOLDING_NAMES = frozenset({
     "__debug__",
@@ -68,6 +71,13 @@ def assert_name_only_whitelist_fresh(
 
 
 class TestGeneratedUnusedImportAudit(unittest.TestCase):
+    def setUp(self) -> None:
+        self.ruff = RuffLspWorker(
+            _RUFF_WORLD_PATHS,
+            cwd=Path(__file__).parents[1],
+        )
+        self.addCleanup(self.ruff.close)
+
     @given(
         names=st.lists(_IDENTIFIERS, min_size=2, max_size=5, unique=True),
         delta=st.sampled_from(("duplicate", "expansion", "stale_expected")),
@@ -117,7 +127,7 @@ class TestGeneratedUnusedImportAudit(unittest.TestCase):
             source += import_line(baseline_names[0])
         peer_source = f"{changed_name} = object()\nprint({changed_name})\n"
 
-        findings = ruff_findings({
+        findings = self.ruff.findings({
             "lib/importing.py": source,
             "lib/peer.py": peer_source,
         })
@@ -186,7 +196,7 @@ class TestGeneratedUnusedImportAudit(unittest.TestCase):
             source += f"def inspect(): return {imported_name}\n"
         peer_source = f"{imported_name} = object()\nprint({imported_name})\n"
 
-        findings = ruff_findings({
+        findings = self.ruff.findings({
             "lib/importing.py": source,
             "lib/peer.py": peer_source,
         })
@@ -200,7 +210,7 @@ class TestGeneratedUnusedImportAudit(unittest.TestCase):
     def test_checker_rejects_the_aggregate_name_fault(self) -> None:
         imported_name = "shared_name"
         peer_source = "shared_name = object()\nprint(shared_name)\n"
-        findings = ruff_findings({
+        findings = self.ruff.findings({
             "lib/importing.py": "from dependency import shared_name\n",
             "lib/peer.py": peer_source,
         })

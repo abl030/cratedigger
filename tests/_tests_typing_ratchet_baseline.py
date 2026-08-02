@@ -80,7 +80,6 @@ TESTS_TYPING_RATCHET_BASELINE: dict[str, dict[str, int]] = {
     "tests/test_measurement.py": {"any": 3, "cast": 3, "type_ignore": 6},
     "tests/test_measurement_failure.py": {"type_ignore": 1},
     "tests/test_multidisc_manifest_generated.py": {"any": 2, "cast": 2},
-    "tests/test_owned_section_expansion_generated.py": {"type_ignore": 2},
     "tests/test_peer_cache.py": {"any": 9},
     "tests/test_pin_retention_generated.py": {"type_ignore": 2},
     "tests/test_pipeline_cli.py": {"any": 62, "cast": 53},
