@@ -7,7 +7,18 @@ sops/nspawn or site-specific public-proxy assumptions. The module does own its
 loopback nginx authentication gateway; the consumer supplies the public HTTPS
 edge that forwards to it.
 
-The flake export is a wrapper that pins the module's package set to **cratedigger's own flake.lock**: the runtime python env (and beets) is built from the nixpkgs rev cratedigger's test suite ran against, not the consumer's nixpkgs. This costs a second nixpkgs evaluation on the consumer host. The escape hatch is `services.cratedigger.packageSet = pkgs;` (or any package set) — setting it forfeits the tested-closure guarantee: your beets/python may then drift from what the suite and the real-beets contract test verified, which is exactly the dev/prod skew that shipped the 2026-06-29 beets 2.12 import breakage.
+The flake export pins the module's package set to **Cratedigger's own
+flake.lock**. The application environment is built from the nixpkgs revision
+the suite ran against; the deployment-supplied Beets package must use that
+package set's `python3`. This costs a second nixpkgs evaluation on the consumer
+host. The escape hatch is `services.cratedigger.packageSet = pkgs;` (or another
+package set), which also changes the Python identity the supplied Beets package
+must use and forfeits the tested-closure guarantee.
+
+> **Held series slice:** the public module interface below is the issue #759
+> ownership inversion. A deployment using the removed `beets.package` or
+> `beets.config` interface must land its external Beets owner and new runtime
+> capability before pinning this revision. There are no compatibility aliases.
 
 `~/nixosconfig/modules/nixos/services/cratedigger.nix` is a thin homelab wrapper (~150 lines) that imports the upstream module and adds:
 - sops-nix per-key secret materialization (`cratedigger-secrets-split` oneshot — see below)
@@ -20,25 +31,25 @@ The flake export is a wrapper that pins the module's package set to **cratedigge
 | Option | Default | Purpose |
 |---|---|---|
 | `enable` | `false` | Master switch |
-| `user` / `group` | `"root"` | Service identity. Default root because slskd downloads + beets need broad fs access. See "Running non-root + filesystem permissions" below to switch. |
+| `user` / `group` | `"cratedigger"` | Dedicated non-root service identity. Configure its supplementary access to slskd, external Beets storage, and runtime secrets. Root user/group identities are rejected. |
 | `src` | `../.` | Path to cratedigger source tree. Defaults to this flake's repo root. |
 | `packageSet` | cratedigger's own locked nixpkgs (via the flake export) | Package set for the runtime closure. Override = escape hatch, forfeits the tested-closure guarantee. |
-| `beets.package.discogsMirrorUrl` | `null` | When set, build-time-patches the beets discogs plugin to hit this mirror instead of api.discogs.com. |
-| `beets.package.lrclibUrl` | `null` | When set, build-time-patches the beets lyrics plugin's LRCLIB base to this URL. |
-| `beets.package.discogsTokenFile` | `null` | `*File` secret (issue #117): materialized into `${stateDir}/beets/secrets.yaml` + `include:` in the rendered config. Null = placeholder token (plugins load cleanly; public-Discogs lookups are token-required). |
-| `beets.package.discogsOperatorGroup` | `null` | Optional group allowed to read rendered `secrets.yaml` for operator-side Beets actions. Set with `discogsTokenFile` to render `cratedigger:<group>` mode 0440; the module creates the group and joins its non-root service user. Null keeps service-only mode 0400 and removes any stale rendered secret from a prior group-readable profile. |
-| `beets.config.{directory,library}` | production values | The single shipped Beets root/SQLite pair. Both values are rendered into module-owned `config.yaml` and `[Beets]` in `config.ini`; there is no second root override. |
-| `beets.config.fetchart.{maxwidth,minwidth}` | `500` / `300` | Load-bearing: library size (embedded art × every track) and the collection's artwork-quality floor. |
-| `beets.config.musicbrainz.{host,https,ratelimit}` | derived from `musicbrainz.apiBase` | mkDefault-derived (mirror ⇒ host:port/http/ratelimit 100; public ⇒ musicbrainz.org/https/1); override to pin explicitly. |
-| `musicbrainz.apiBase` | `https://musicbrainz.org` | ONE MB origin for web/mb.py (via config.ini, read at `cratedigger-web` startup), pipeline-cli lookups, and the rendered beets musicbrainz block (KTD6). Public default is functional but ~1 req/s. |
+| `beets.runtime.package` | required | Deployment-owned compatible Beets Python package. It must use `packageSet.python3`; every Cratedigger Beets consumer resolves this exact package. |
+| `beets.runtime.configDir` | required | Absolute external immutable `BEETSDIR` containing the effective non-secret configuration. Cratedigger never renders or writes it. |
+| `beets.runtime.expectedLibrary` | required | Absolute canonical external Beets SQLite database path. Must equal Beets' resolved `library`. |
+| `beets.runtime.expectedDirectory` | required | Absolute canonical external Beets library root. Must equal Beets' resolved `directory`. |
+| `beets.runtime.expectedStateFile` | required | Absolute, externally provisioned, persistent host-local Beets state file. Importer gets exact write capability; main, preview, and web get read-only access. |
+| `beets.runtime.expectedSecretInclude` | required | Absolute designated runtime include. Its only admitted content is a non-empty `discogs.user_token` scalar. |
+| `beets.runtime.readinessUnits` | `[]` | Deployment-owned units that must complete before guarded applications start, such as storage/state/secret provisioning. Long-running workers use `After=` + `Requires=`; the timer-owned main cycle uses `After=` + `Wants=` so a readiness restart cannot kill an active cycle. |
+| `musicbrainz.apiBase` | `https://musicbrainz.org` | Cratedigger's MB origin for web, CLI, and pipeline lookups. The external Beets owner must configure its own corresponding `musicbrainz` policy. Public default is functional but ~1 req/s. |
 | `discogs.apiBase` | `null` | Discogs mirror origin. Mirror-REQUIRED: unset ⇒ Discogs browse off with a 503 mirror-required message (public api.discogs.com does not serve this API shape). |
-| `stateDir` | `/var/lib/cratedigger` | Runtime state (config.ini, lock file). |
+| `stateDir` | `/var/lib/cratedigger` | Mutable runtime state (lock, denylists, processing metadata). Application config is an immutable store file. |
 | `processingDir` | `${stateDir}/processing` | Private `0700` Cratedigger-owned root: canonical albums and their same-filesystem failure quarantine live in `albums/`, bounded preview scratch in `preview/`. Must be absolute and disjoint from slskd's download tree. |
 | `slskd.apiKeyFile` | (required) | Path to a file containing the raw slskd API key (one line). |
 | `slskd.downloadDir` | (required) | Where slskd downloads land. |
 | `slskd.hostUrl` | `http://localhost:5030` | slskd HTTP base URL. |
 | `pipelineDb.dsn` | `null` | PostgreSQL DSN. Required unless `createLocally`. |
-| `pipelineDb.createLocally` | `false` | Provision local PostgreSQL: role + database named after `cfg.user`, unix-socket peer auth (no password material anywhere), socket DSN default, migrate unit ordered after postgresql.service. doc2 keeps `false` + its nspawn DSN. |
+| `pipelineDb.createLocally` | `false` | Provision local PostgreSQL: role + database named after `cfg.user`, unix-socket peer auth (no password material anywhere), socket DSN default, migrate unit ordered after `postgresql-setup.service` has provisioned the role and database. doc2 keeps `false` + its nspawn DSN. |
 | `redis.{enable,host,port,maxmemory}` | enabled, `127.0.0.1:6379`, `2gb` | App-owned local Redis server for the pipeline peer cache and web metadata cache. Uses `allkeys-lru`. |
 | `peerCache.{ttlSeconds,speedTtlSeconds,redisConnectTimeoutMs,redisOperationTimeoutMs}` | 7d, 24h, 200ms, 100ms | Redis TTL and timeout settings rendered into `[Peer Cache]`. |
 | `beets.validation.{enable,distanceThreshold,stagingDir,trackingFile,verifiedLosslessTarget}` | sensible defaults | Beets validation config. |
@@ -52,7 +63,7 @@ The flake export is a wrapper that pins the module's package set to **cratedigge
 | `notifiers.plex.{enable,url,tokenFile,librarySectionId,pathMap}` | disabled | Plex notifier. |
 | `notifiers.jellyfin.{enable,url,tokenFile,libraryId,pathMap}` | disabled | Jellyfin notifier. Every import reports only its mapped final album path through `POST /Library/Media/Updated`; `pathMap` supplies Jellyfin's view of that path and enables the upgrade DateCreated pin. `libraryId` is only a deletion-observation fallback (issues #574/#697, `docs/jellyfin-primer.md`). |
 | `healthCheck.{enable,onFailureCommand}` | enabled, no recovery | Pre-cycle slskd healthcheck. `onFailureCommand` runs to recover (e.g. `systemctl restart slskd.service`). |
-| `releaseSettings.*` / `searchSettings.*` / `downloadSettings.*` | match config.ini defaults | Pipeline tunables. See "Search loop tunables" below for the trio that caps the slskd search window. |
+| `releaseSettings.*` / `searchSettings.*` / `downloadSettings.*` | application defaults | Pipeline tunables. See "Search loop tunables" below for the trio that caps the slskd search window. |
 | `qualityRanks.*` | mirror of `QualityRankConfig.defaults()` | See docs/quality-ranks.md § "Tuning reference (Nix options)". |
 | `timer.{enable,onBootSec,onUnitInactiveSec}` | 1s after exit | Cycle frequency. |
 | `importer.enable` | `true` | Enable both long-lived queue workers: async preview and the serial importer. Disabled queues remain non-runnable. |
@@ -73,12 +84,28 @@ Three options under `services.cratedigger.searchSettings.*` control the slskd se
 
 ## What the module does
 
-1. Builds a Python environment with dependencies (`nix/package.nix`: psycopg2, music-tag, beets, msgspec, redis, zstandard) from the pinned `packageSet`. The beets in that env is the cratedigger-owned derivation (`nix/beets.nix`) — one store path serving the python library (`lib/beets_distance.py`), the `cratedigger-beet` wrapper (which pins `BEETSDIR` at `${stateDir}/beets`), and — from U5 — the harness.
+1. Consumes `beets.runtime.package` and builds the Cratedigger Python
+   environment around that exact deployment-owned Beets package. The package,
+   operator CLI, effective config, catalog, library, state, and secrets remain
+   outside the module's ownership. `nix/beets.nix` is an optional compatible
+   package factory for consumers, not an implicit module owner.
 2. Wraps `cratedigger.py` / `pipeline_cli.py` / `migrate_db.py` / `scripts/importer.py` / `scripts/import_preview_worker.py` / `web/server.py` in shell scripts with ffmpeg, sox, mp3val, flac in PATH. The installed `pipeline-cli` wrapper fixes the five API-backed mutation commands to the permissioned web Unix socket; it exposes no production `--api-base` override. Direct commands such as `youtube-album` retain their database/mirror boundary and do not depend on `web.enable`.
-3. Renders `/var/lib/cratedigger/config.ini` from option values through the dedicated `cratedigger-config-render.service` on boot and whenever the declarative template changes. App units retain the same atomic temp-file-and-rename render as an idempotent fallback. The independent unit ensures a downstream `ExecCondition` cannot leave stale mutable config by skipping every app's `ExecStartPre`; it deliberately does not touch the pipeline singleton lock. Only the main `cratedigger.service` pre-start clears a stale pipeline lock; worker and unfindable starts are render-only.
-3b. Renders the beets `config.yaml` into `${stateDir}/beets/` (BEETSDIR) the same way. `import.duplicate_keys.album: [mb_albumid, discogs_albumid]` (the Palo Santo data-loss invariant), the plugin list, and the path templates are fixed literals — NOT options. Only `beets.config.*` (directory, library, fetchart widths, musicbrainz host/https/ratelimit) is operator-tunable. With `beets.package.discogsTokenFile` set, `secrets.yaml` is materialized next to it and included; `discogsOperatorGroup` changes it from service-only 0400 to explicit group-read 0440 for authorized CLI operators.
-4. Enables `redis-cratedigger.service` by default with bounded memory and `allkeys-lru`.
-5. Pre-start: health-check slskd → render config.ini → start `cratedigger.py`.
+3. Builds one immutable Nix-store application config containing the six
+   external Beets authority fields, then pins its path in every wrapper. There
+   is no mutable config renderer or fallback. The module does not render Beets
+   config/secrets or provision the Beets catalog, root, or state file.
+4. Adds deployment-owned `beets.runtime.readinessUnits` before each guarded
+   application, exports the external immutable `BEETSDIR`, and grants role-
+   specific state capability. Each top-level application performs the same
+   intrinsic exactly-once contract admission; no systemd-only preflight exists.
+5. Enables `redis-cratedigger.service` by default with bounded memory and
+   `allkeys-lru`, then starts the ordinary pipeline units after their existing
+   health, migration, and application-config boundaries.
+
+The complete Beets authority, hard-versus-warning validation behavior, token
+schema, mutation lanes, and trusted plain-`beet` operating boundary live in
+[`docs/beets-primer.md`](beets-primer.md). The full external NixOS composition
+is in [`examples/cratedigger.nix`](../examples/cratedigger.nix).
 
 ## Web authentication perimeter
 
@@ -328,15 +355,13 @@ signed sops transaction: restore the prior encrypted verifier, deploy it
 through the same validation/reload path, and prove the displaced credential
 is denied.
 
-## Running non-root + filesystem permissions
+## Service identity + filesystem permissions
 
-The `user`/`group` table row above defaults to root for pipeline-only
-installations, since slskd downloads and the beets library commonly live
-outside any unprivileged user's reach. Basic web mode deliberately rejects a
-root application identity so the app cannot read the nginx credential; use
-the non-root shape below (and in the worked example) when enabling it. Running
-non-root is fully supported (issue #570) and is also the right shape when other
-services (Jellyfin, Plex) need to read AND write inside the same library tree.
+The module defaults to the dedicated `cratedigger:cratedigger` system
+identity and rejects root names or resolved UID/GID 0 for every guarded
+application. Add the account to the deployment-owned groups that provide
+slskd, external Beets, and secret access; this retains permission
+configurability without granting host-root authority to the pipeline.
 
 ### Private processing boundary
 
@@ -359,17 +384,24 @@ job's audit and recovery authority.
 
 ### The `permissions` plugin + `fix_library_modes`
 
-The rendered beets config enables the built-in `permissions` plugin with `file = "0664"` and `dir = "02775"` (setgid + group-writable) — these are fixed literals in `nix/module.nix`, not module options. Its `art_set` listener (`fix_art`) fixes fetched-art mode on BOTH initial import and a manual `beet fetchart` re-fetch. This exists because beets' own `fetchart` writes art via `mkstemp` (which forces `0600` regardless of umask) and nothing else chmods it afterward — without the plugin, art lands `0600` and a media server reading it as a different user throws `UnauthorizedAccessException` (issue #570 defect 1).
+The deployment-owned Beets config must enable the built-in `permissions`
+plugin with `file = "0664"` and `dir = "02775"` (setgid + group-writable).
+Cratedigger's startup contract admits that policy before automation. The
+plugin's `art_set` listener (`fix_art`) fixes fetched-art mode on both initial
+import and a manual plain-`beet fetchart` re-fetch. This exists because Beets'
+own `fetchart` writes art via `mkstemp` (which forces `0600` regardless of
+umask) and nothing else chmods it afterward — without the plugin, art lands
+`0600` and a media server reading it as a different user throws
+`UnauthorizedAccessException` (issue #570 defect 1).
 
 `lib/permissions.py::fix_library_modes` is the post-import belt-and-suspenders pass: `LIBRARY_DIR_MODE = 0o2775`, applied recursively to the imported album/artist dirs and everything the plugin's per-item listener doesn't reach (empty/intermediate dirs beets creates along the way). `reset_umask()` sets the process umask to `0o002` (group-writable) at every pipeline entry point, since a unit's `UMask=0000` alone doesn't reliably survive the subprocess chain down to beets.
 
 **`dir = 02775` (setgid) is load-bearing, not cosmetic.** Plain `0775` strips the setgid bit, so every child album dir beets creates underneath would stop inheriting the library's group — the group-inheritance layout below silently breaks the moment this gets "simplified" to `0775`.
 
-### Switching to a non-root service user
+### Granting external authority
 
-Set `services.cratedigger.user` / `.group` to something other than `"root"`. No module edits are needed: the module already auto-declares the system user (`users.users.${cfg.user}` behind an internal `mkIf (cfg.user != "root")`), and every state-dir tmpfiles rule is keyed on `cfg.user`/`cfg.group`.
-
-A non-root cratedigger needs supplementary group membership for two things root gets for free:
+The module auto-declares the configured system user and group. A Cratedigger
+identity needs supplementary group membership for:
 
 1. **The slskd download directory's group** — the reaper (`reap_disk_orphans`) deletes/moves in-flight downloads via directory-write permission, not file ownership, so it needs write access to that directory's group (typically slskd's own service group).
 2. **The group that owns its runtime secrets** (`/run/cratedigger-secrets/*` — the raw slskd API key, notifier creds) — whichever secrets backend materializes these needs to make them group-readable by cratedigger's group, or add cratedigger's user to the group that owns them.
@@ -398,15 +430,23 @@ find /srv/music/library -type f -exec chmod 0664 {} +
 
 ### Caveat: a root-owned secret under a non-root state dir
 
-If a secret file (e.g. `beets.package.discogsTokenFile`) lives UNDER the state dir and the state dir's owner just changed from root to `cfg.user`, systemd-tmpfiles can no longer manage that file's permissions from a rule — it refuses with "unsafe path transition" (a safety check against operating through a non-root-owned parent directory). Since the non-root service's preStart reads the token with a plain `cat`, a stale root-owned `0400` token then fails EVERY unit at startup (`cat: discogs-token: Permission denied`), not just the Discogs pathway.
+If the deployment-owned designated secret include lives beneath a directory
+whose owner changes from root to `cfg.user`, systemd-tmpfiles may refuse to
+manage it with "unsafe path transition". Provision it from a root-owned runtime
+secret directory instead. The final file must be readable by the admitted
+service/operator group, and its only YAML content may be the non-empty
+`discogs.user_token` scalar.
 
-Fix with a durable one-time `chown root:<secrets-group>` + `chmod 0440` on the token file (the out-of-band-secret pattern), or manage the token via sops-nix with `owner = cfg.user` so sops-nix — not tmpfiles — sets the correct ownership from the start.
+Materialize the fixed-schema include atomically from the scalar secret as
+`root:<operator-group> 0440` in a root-owned runtime directory. Add only the
+trusted librarian and required service identity to that group; do not make the
+application user the secret owner or place the include beneath `stateDir`.
 
 ### Health check still runs as root
 
-`healthCheck`'s `ExecStartPre` (`slskdHealthCheck`) is `+`-prefixed, so it always runs as root regardless of `services.cratedigger.user` — this is what lets `onFailureCommand` (e.g. `systemctl restart slskd.service`) keep working under a non-root service user. `preStartScript` stays unprefixed, so config rendering happens as the service user.
+`healthCheck`'s `ExecStartPre` (`slskdHealthCheck`) is `+`-prefixed, so it always runs as root regardless of `services.cratedigger.user` — this is what lets `onFailureCommand` (e.g. `systemctl restart slskd.service`) keep working under a non-root service user. `preStartScript` stays unprefixed and only clears the singleton lock as the service user; application configuration is an immutable Nix-store file, not a mutable render step.
 
-### Minimal non-root snippet
+### Minimal service-identity snippet
 
 ```nix
 users.users.cratedigger = {
@@ -418,7 +458,7 @@ users.users.cratedigger = {
 services.cratedigger = {
   user = "cratedigger";
   group = "users";
-  # ... slskd / beets / web options unchanged
+  # ... slskd / beets.runtime / web options unchanged
 };
 
 systemd.tmpfiles.rules = [
@@ -430,10 +470,9 @@ See [`examples/cratedigger.nix`](../examples/cratedigger.nix) for the full worke
 
 ## Systemd units
 
-- `cratedigger-config-render.service` — oneshot, `restartIfChanged = true`, `RemainAfterExit = true`. Materializes `config.ini` and the module-owned beets configuration independently of application health gates; app units keep an idempotent pre-start render fallback. Runs as `cfg.user`/`cfg.group` and never removes `.cratedigger.lock`, so a config-only deploy cannot disturb an active timer-owned cycle.
 - `cratedigger-db-migrate.service` — oneshot, `restartIfChanged = true`, `RemainAfterExit = true`. Runs the schema migrator on every `nixos-rebuild switch`. The long-running workers (`cratedigger-web`, `cratedigger-importer`, `cratedigger-import-preview-worker`, `cratedigger-youtube-ingest`) `requires` it, so they cannot start against an un-migrated DB. `cratedigger.service` and `cratedigger-unfindable.service` deliberately do NOT — both are timer-driven with `restartIfChanged = false`, and this unit's `ExecStart` store path changes on every deploy, so a `requires` edge would propagate its every-switch restart as a SIGTERM to a mid-flight cycle; they use `wants`+`after` instead and gate on schema currency themselves at startup (`lib/migrator.py::assert_schema_current`) so a behind/missing schema still aborts them before any work runs.
 - `redis-cratedigger.service` — app-owned Redis server for peer cache and web metadata cache. `cratedigger.service` and `cratedigger-web.service` want/after it, but do not require it; runtime Redis failures degrade to cold-cache behavior.
-- `cratedigger.service` — oneshot pipeline run. `restartIfChanged = false` (the timer picks up new code on the next cycle).
+- `cratedigger.service` — oneshot pipeline run. `restartIfChanged = false` (the timer picks up new code on the next cycle). It orders after and wants external Beets readiness, but deliberately does not require it: restarting readiness must not terminate an active timer-owned cycle.
 - `cratedigger.timer` — starts the next cycle after the previous oneshot exits
   (configurable via `timer.onUnitInactiveSec`).
 - `cratedigger-importer.service` — long-running serial beets import worker. It
@@ -471,18 +510,24 @@ Every sandboxed unit has `NoNewPrivileges=yes`, `PrivateTmp=yes`,
 `ProtectSystem=strict`, `ProtectHome=yes`, and
 `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6`. `SystemCallFilter` uses
 systemd's portable `@system-service` allowlist. It intentionally includes the
-ordinary `fchownat` operation used by the renderer's explicit group-read
-secrets handoff; do not add a broad negative syscall class without re-running
-the module VM, because it can prevent config rendering before the worker starts.
+ordinary `fchownat` operations used by owned file workflows; do not add a broad
+negative syscall class without re-running
+the module VM, because it can prevent an owned file mutation after the worker starts.
 
 `ReadWritePaths` is derived from the configured authority roots and is exact:
 
 | Unit | Writable paths |
 |---|---|
-| web | `stateDir`, `processingDir`, `slskd.downloadDir`, Beets root, dedicated parent of the Beets library DB, validation staging root |
-| importer | web paths plus parent of `beets.validation.trackingFile` |
+| web | `stateDir`, `processingDir`, `slskd.downloadDir`, external Beets root/database parent for the explicit exact-delete lane, validation staging root |
+| importer | web paths plus parent of `beets.validation.trackingFile` and the exact external Beets state file |
 | import-preview-worker | `stateDir`, `processingDir`, `slskd.downloadDir` |
 | youtube-ingest | `stateDir`, `youtubeIngest.tempDir`, validation staging root |
+
+External Beets paths are emitted with systemd's `-` missing-path modifier, so
+a temporarily absent state/config/library authority reaches the intrinsic
+application admission check instead of failing during sandbox namespace setup.
+The module rejects `/` for directory capabilities and a library database whose
+parent is `/`, so no Beets mutation lane can gain a host-root write grant.
 
 An optional path (`slskd.downloadDir`, validation staging/tracking) is omitted
 when its option is `null`. `ReadWritePaths` only makes the named portion of the
@@ -493,9 +538,9 @@ reopen its target even when the upstream `ReadWritePaths` list is narrower.
 For a consumer using `TemporaryFileSystem=/mnt`, the recommended composition is
 broad shared-tree visibility through `BindReadOnlyPaths`, followed by
 `BindPaths` only for that unit's exact writable roots from the table above.
-Those writable binds must be narrow and per-unit; the default Beets DB parent is
-`${stateDir}-beets-db` (not the music root or stateDir), and explicit library overrides keep
-their parent operator-owned. Do not bind an entire shared music or data parent
+Those writable binds must be narrow and per-unit. The external Beets owner
+provisions the database parent, library root, and state file; Cratedigger does
+not create defaults for them. Do not bind an entire shared music or data parent
 writable for every worker. Verify effective denial rather
 than inferring confinement from the rendered property strings alone. The
 upstream module VM proves the generic module boundary without downstream
@@ -534,15 +579,16 @@ If you don't use sops or have one key per encrypted file, skip the splitter and 
 
 ```
 github:abl030/cratedigger
-├── packages.<system>.default          ← operator/automation CLI bundle (pipeline-cli, pipeline-migrate, world-audit debt gate) — `nix run .#pipeline-cli`
+├── packages.<system>.default          ← operator/automation CLI bundle (pipeline-cli, migrate, world-audit gate, Beets checker)
 ├── apps.<system>.pipeline-cli         ← `nix run github:abl030/cratedigger#pipeline-cli -- --help`
 ├── nixosModules.default              ← upstream NixOS module (pins packageSet to this flake's lock)
 ├── devShells.<system>.default         ← test/dev environment (same pinned nixpkgs)
 ├── checks.<system>.moduleVm           ← NixOS VM test (boots module against ephemeral postgres)
 ├── checks.<system>.jellyfinMetadataVm ← Jellyfin 10.11.11 tagged-metadata + DateCreated pin lifecycle VM
 ├── checks.<system>.packageSetPin      ← eval guard: default packageSet = own lock; override honoured
-├── checks.<system>.moduleAssertions   ← eval guard: friendly required-option messages; doc2 + stranger shapes clean
-├── checks.<system>.apiBaseDerivation  ← eval guard: beets musicbrainz block derives from musicbrainz.apiBase
+├── checks.<system>.runtimeSrcPin      ← eval guard: module uses the filtered runtime source
+├── checks.<system>.moduleAssertions   ← eval guard: external Beets capability is required and compatible
+├── checks.<system>.checkBeetsConfigPackageBoundary ← installed checker ignores hostile inherited PYTHONPATH
 ├── checks.<system>.beetsMirrorPatches ← beets mirror knobs patch/don't-patch as configured
 └── checks.<system>.packageDefault     ← the CLI bundle builds (`nix run` stays green)
 ```
@@ -557,7 +603,10 @@ nix build .#checks.x86_64-linux.moduleVm    # ~30s after first build
 nix build .#checks.x86_64-linux.jellyfinMetadataVm
 ```
 
-This catches: option surface breakage, prestart sed-substitution bugs, systemd dep graph cycles, wrapper script PYTHONPATH errors, missing python deps. It does NOT exercise slskd interaction or real downloads (those need fixture data — see the python suite). Run before any `nix/module.nix` change.
+This catches option-surface breakage, immutable runtime-capability wiring,
+systemd dependency cycles, wrapper `PYTHONPATH` errors, and missing Python
+dependencies. It does not exercise live slskd interaction or downloads. Run it
+before any `nix/module.nix` change.
 
 `jellyfinMetadataVm` boots the flake-pinned Jellyfin, invokes the production
 targeted notifier against tagged FLAC fixtures, and proves metadata population,
@@ -573,7 +622,9 @@ sudo nixos-rebuild switch --flake .#HOST
 systemctl is-active redis-cratedigger.service
 redis-cli -p 6379 CONFIG GET maxmemory-policy
 systemctl show -p After -p Wants cratedigger.service cratedigger-web.service
-grep -A8 '^\[Peer Cache\]' /var/lib/cratedigger/config.ini
+wrapper=$(systemctl show -P ExecStart cratedigger.service | sed -n 's/.*path=\([^ ;]*\).*/\1/p')
+runtime_config=$(grep -o '/nix/store/[^" ]*cratedigger-config.ini' "$wrapper")
+grep -A8 '^\[Peer Cache\]' "$runtime_config"
 sudo systemctl start cratedigger.service
 journalctl -u cratedigger.service -n 80 --no-pager | grep 'Cratedigger cycle complete'
 redis-cli -p 6379 --scan --pattern 'peer_*' | wc -l
@@ -582,8 +633,8 @@ sudo systemctl start cratedigger.timer
 
 Expected output: Redis is `active`, `maxmemory-policy` is `allkeys-lru`,
 both app units list `redis-cratedigger.service` in `After` and `Wants`, and
-`config.ini` contains `[Peer Cache]` with the rendered Redis host, port, TTL,
-and timeout values. The first cycle is allowed to be cold; later cycle
+the immutable runtime config contains `[Peer Cache]` with the selected Redis
+host, port, TTL, and timeout values. The first cycle may be cold; later cycle
 summaries should show `cache_pos_hits`, `cache_neg_hits`, and `cache_misses`
 moving while `cache_errors=0 cache_fuse_tripped=0 cache_write_errors=0`.
 

@@ -79,9 +79,9 @@ def beets_subprocess_env(
     and import_one.py). Single source of truth for how a beets subprocess
     finds its config and interpreter.
 
-    Sets ``BEETSDIR`` (beets' native config-dir override) at the
-    module-rendered config dir from ``[Beets] config_dir`` in the runtime
-    config.ini, and ``CRATEDIGGER_BEETS_PYTHON`` (the pinned interpreter the
+    Sets ``BEETSDIR`` (beets' native config-dir override) to the external
+    immutable config directory admitted by ``[Beets] config_dir`` in the runtime
+    config.ini, and ``CRATEDIGGER_BEETS_PYTHON`` (the supplied interpreter the
     harness wrapper execs) from ``[Beets] python``. Pre-set environment
     values act as the dev/test fallback when the runtime config doesn't
     carry the keys. The Home-Manager-era ``HOME=/home/<user>`` impersonation

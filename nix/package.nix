@@ -1,12 +1,10 @@
-{ pkgs, beetsPackage ? import ./beets.nix { inherit pkgs; } }:
+{ pkgs, beetsPackage }:
 
 let
-  # Production python deps. beets is cratedigger-owned (tier-2 plan U3):
-  # ``beetsPackage`` (nix/beets.nix, optionally mirror-patched by the
-  # module) is BOTH the library ``lib/beets_distance.py`` imports from
-  # cratedigger-web AND the ``bin/beet`` behind cratedigger-beet — one
-  # store path for every beets consumer (the harness joins in U5; until
-  # then it still resolves the consumer's ``beet``).
+  # Production Python deps consume an explicit deployment-selected Beets
+  # package. Keeping it in this environment makes the application, harness,
+  # and checker resolve one admitted Python runtime without making this
+  # package factory the owner of Beets configuration or storage.
   pythonPackages = ps: [
     ps.psycopg2
     ps.defusedxml # Plex XML responses are untrusted network input
@@ -16,7 +14,7 @@ let
     ps.redis     # web UI cache (graceful no-op if redis server is down, but the module must be importable)
     ps.zstandard # peer cache compresses msgpack directory payloads before writing Redis bytes
     ps.numpy     # lib/aac_lattice.py — the MDCT frame-lattice detector (issue #829); scipy is deliberately NOT here, erfinv is computed from math.erf
-    beetsPackage # the one beets: autotag.distance library + bin/beet (nix/beets.nix)
+    beetsPackage # admitted Beets: autotag.distance library + bin/beet
     ps.ytmusicapi # YouTube Music album resolver — anonymous `YTMusic()` for search + get_album
   ];
 in {

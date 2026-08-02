@@ -52,6 +52,9 @@ from tests._docs_reference_audit import (
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DOCS_DIR = REPO_ROOT / "docs"
 MODULE_NIX = REPO_ROOT / "nix" / "module.nix"
+BEETS_CONSUMER_EXAMPLE = REPO_ROOT / "examples" / "cratedigger.nix"
+DISCOGS_MIRROR_EXAMPLE = REPO_ROOT / "examples" / "discogs-mirror.nix"
+BEETS_DOCS_SKILL = REPO_ROOT / ".claude" / "skills" / "beets-docs" / "SKILL.md"
 BEETS_PRIMER = DOCS_DIR / "beets-primer.md"
 DEBUGGING_CLI = DOCS_DIR / "debugging-cli.md"
 RETIRED_INTEGRATION_TERMS = ("mee" + "lo", "lid" + "arr")
@@ -515,6 +518,45 @@ class TestSkillInstructionCodeReferences(unittest.TestCase):
         self.assertNotIn(plugin, files)
 
 
+class TestBeetsOwnershipGuidance(unittest.TestCase):
+    """Examples and shared guidance preserve deployment-owned Beets authority."""
+
+    def test_discogs_example_uses_cratedigger_package_set(self) -> None:
+        text = DISCOGS_MIRROR_EXAMPLE.read_text(encoding="utf-8")
+        start = text.index("#   beetsPackage = import ../nix/beets.nix {")
+        end = text.index("# Then supply that package", start)
+        factory_guidance = text[start:end]
+        self.assertIn(
+            "pkgs = config.services.cratedigger.packageSet;",
+            factory_guidance,
+        )
+        self.assertNotIn(
+            "inherit pkgs;",
+            factory_guidance,
+            "ambient nixpkgs may use a different Python than packageSet",
+        )
+
+    def test_beets_docs_skill_names_deployment_owned_authority(self) -> None:
+        text = BEETS_DOCS_SKILL.read_text(encoding="utf-8")
+        for stable_anchor in (
+            "### Current Beets Deployment Boundary",
+            "`nix/beets.nix`",
+            "`services.cratedigger.beets.runtime.package`",
+            "external immutable `BEETSDIR`",
+            "plain operator `beet`",
+            "`docs/beets-primer.md`",
+        ):
+            self.assertIn(stable_anchor, text)
+        self.assertNotIn(
+            "Cratedigger owns its pinned beets build and module integration",
+            text,
+        )
+        self.assertNotIn(
+            "`nix/module.nix` for service options and the rendered beets configuration",
+            text,
+        )
+
+
 class TestBacktickedCallReferences(unittest.TestCase):
     """Project-shaped calls in lib docstrings must exist."""
 
@@ -567,12 +609,14 @@ _PLUGINS_LINE_RE = re.compile(r'plugins\s*=\s*"([^"]+)"')
 _PLUGIN_TABLE_ROW_RE = re.compile(r"^\|\s*`([a-zA-Z_]+)`\s*\|", re.MULTILINE)
 
 
-def _module_beets_plugins(module_nix_text: str) -> list[str]:
+def _consumer_beets_plugins(consumer_nix_text: str) -> list[str]:
     """Return the ordered plugin tokens from the `plugins = "..."` line."""
-    m = _PLUGINS_LINE_RE.search(module_nix_text)
+    m = _PLUGINS_LINE_RE.search(consumer_nix_text)
     if m is None:
         raise AssertionError(
-            'could not find beets `plugins = "..."` line in nix/module.nix')
+            'could not find beets `plugins = "..."` line in '
+            'examples/cratedigger.nix'
+        )
     return m.group(1).split()
 
 
@@ -591,28 +635,32 @@ def _missing_plugin_docs(plugins: list[str], documented: set[str]) -> list[str]:
 
 
 class TestBeetsPluginDocCoverage(unittest.TestCase):
-    """Every beets plugin the module loads needs a row in the doc table.
+    """Every Beets plugin in the consumer example needs a doc-table row.
 
-    Regression: nix/module.nix's `plugins` string gained `edit` and
+    Regression: the old module-owned `plugins` string gained `edit` and
     `inline` (issue #570) with no matching doc row — this check would
     have failed CI on that PR.
     """
 
-    def test_every_module_plugin_has_a_doc_table_row(self) -> None:
-        plugins = _module_beets_plugins(MODULE_NIX.read_text(encoding="utf-8"))
+    def test_every_consumer_plugin_has_a_doc_table_row(self) -> None:
+        plugins = _consumer_beets_plugins(
+            BEETS_CONSUMER_EXAMPLE.read_text(encoding="utf-8")
+        )
         documented = _documented_beets_plugins(
             BEETS_PRIMER.read_text(encoding="utf-8"))
         missing = _missing_plugin_docs(plugins, documented)
         self.assertEqual(
             missing, [],
-            f"nix/module.nix loads beets plugin(s) {missing} with no row "
+            f"examples/cratedigger.nix loads beets plugin(s) {missing} with no row "
             f"in docs/beets-primer.md's 'Active Plugins' table. Add one "
             f"describing what the plugin does.",
         )
 
     def test_scan_is_not_vacuous(self) -> None:
         """Guard against a doc heading rename silently emptying the scan."""
-        plugins = _module_beets_plugins(MODULE_NIX.read_text(encoding="utf-8"))
+        plugins = _consumer_beets_plugins(
+            BEETS_CONSUMER_EXAMPLE.read_text(encoding="utf-8")
+        )
         documented = _documented_beets_plugins(
             BEETS_PRIMER.read_text(encoding="utf-8"))
         self.assertGreaterEqual(len(plugins), 10)

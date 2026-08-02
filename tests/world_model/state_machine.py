@@ -267,7 +267,7 @@ class TestPinnedLifecycleWorld(unittest.TestCase):
                 }
             finally:
                 beets_config["paths"]["default"].set(
-                    world.beets.shipped.default_path_template
+                    world.beets.consumer.default_path_template
                 )
 
             self.assertIn(
