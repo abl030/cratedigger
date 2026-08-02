@@ -19,6 +19,8 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable
 
+from lib.release_identity import ConflictingReleaseIdentityError
+
 log = logging.getLogger(__name__)
 
 
@@ -80,6 +82,8 @@ def band_release_ids(release_ids: Iterable[str]) -> dict[str, str]:
         quality: dict[str, dict[str, object]] = (
             b.check_mbids_detail(list(in_library)) if in_library and b else {}
         )
+    except ConflictingReleaseIdentityError:
+        raise
     except Exception:
         # Beets unavailable (locked / missing DB) — degrade to all-"missing"
         # rather than 500-ing the whole worklist (matches the CLI's

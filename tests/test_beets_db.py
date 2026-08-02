@@ -9,6 +9,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from collections.abc import Callable
 from contextlib import closing
 from dataclasses import replace
 from unittest.mock import patch
@@ -1485,6 +1486,14 @@ class TestGetAlbumsByReleaseIds(unittest.TestCase):
                 ("12856590", 12856591),
             )
             writer.commit()
+        _insert_album(
+            self.db_path,
+            2,
+            self.RELEASE_ID,
+            [(320000, "/m/valid/01.mp3")],
+            album="Unrelated valid pressing",
+            albumartist="Other Artist",
+        )
 
         for release_id in ("12856590", "12856591"):
             with self.subTest(release_id=release_id), BeetsDB(
@@ -1521,6 +1530,30 @@ class TestGetAlbumsByReleaseIds(unittest.TestCase):
                 release_id,
             ):
                 db.get_album_ids_by_mbids([release_id])
+
+            operations: dict[
+                str,
+                Callable[[BeetsDB, list[str]], object],
+            ] = {
+                "albums": BeetsDB.get_albums_by_release_ids,
+                "presence": BeetsDB.check_mbids,
+                "detail": BeetsDB.check_mbids_detail,
+                "album-id": BeetsDB.get_album_ids_by_mbids,
+            }
+            for ids in (
+                [self.RELEASE_ID, release_id],
+                [release_id, self.RELEASE_ID],
+            ):
+                for projection, operation in operations.items():
+                    with self.subTest(
+                        release_id=release_id,
+                        projection=f"mixed-{projection}",
+                        ids=ids,
+                    ), BeetsDB(self.db_path) as db, self.assertRaisesRegex(
+                        ConflictingReleaseIdentityError,
+                        release_id,
+                    ):
+                        operation(db, ids)
 
         with BeetsDB(self.db_path) as db:
             self.assertEqual(db.get_albums_by_release_ids(["99999999"]), [])

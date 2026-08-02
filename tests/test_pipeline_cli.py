@@ -5408,6 +5408,23 @@ class TestPipelineCliLongTail(unittest.TestCase):
             out = pipeline_cli_long_tail._cli_band_fn(["rel-1", "rel-2"])
         self.assertEqual(out, {"rel-1": "missing", "rel-2": "missing"})
 
+    def test_cli_band_fn_never_degrades_identity_conflict_to_missing(self):
+        from lib.release_identity import ConflictingReleaseIdentityError
+
+        with patch(
+            "lib.beets_db.BeetsDB",
+            side_effect=ConflictingReleaseIdentityError(
+                "conflicting numeric Discogs release identities for: 12856590"
+            ),
+        ), self.assertRaisesRegex(
+            ConflictingReleaseIdentityError,
+            "12856590",
+        ):
+            pipeline_cli_long_tail._cli_band_fn([
+                "unrelated-valid",
+                "12856590",
+            ])
+
     def test_empty_cohort_exit_zero(self):
         db = FakePipelineDB()
         rc, out, _err = self._run(db, band_fn=self._band_fn({}))
