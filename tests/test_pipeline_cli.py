@@ -6072,6 +6072,34 @@ class TestWorldAuditCLI(unittest.TestCase):
             {row["code"] for row in payload["groups"]["b"]["members"]},
         )
 
+    def test_expected_beets_unavailability_is_incomplete_bucket_b(self) -> None:
+        import scripts.pipeline_cli.audit as audit_cli
+
+        failure = sqlite3.OperationalError("database is locked")
+        failure.sqlite_errorcode = sqlite3.SQLITE_BUSY
+        output = io.StringIO()
+        with (
+            patch.object(audit_cli, "_open_beets", side_effect=failure),
+            redirect_stdout(output),
+        ):
+            rc = pipeline_cli.cmd_audit_world(
+                FakePipelineDB(),
+                argparse.Namespace(
+                    beets_db="unused.db",
+                    beets_directory="/unused/library",
+                    json=True,
+                ),
+            )
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(rc, 0)
+        self.assertEqual(payload["status"], "observations_only")
+        self.assertFalse(payload["complete"])
+        self.assertEqual(
+            [row["code"] for row in payload["groups"]["b"]["members"]],
+            ["current_beets_authority_unavailable"],
+        )
+
     def test_integrity_bucket_a_returns_one(self) -> None:
         import scripts.pipeline_cli.audit as audit_cli
 
