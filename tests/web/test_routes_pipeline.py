@@ -2179,7 +2179,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         )
         self.assertEqual(detail["execution_liveness"]["status"], "dead")
         self.assertEqual(detail["completion"]["status"], "absent")
-        self.assertEqual(detail["exact_library"]["status"], "unavailable")
+        self.assertEqual(detail["exact_library"]["status"], "missing")
         self.assertEqual(detail["cleanup_journal"]["status"], "missing")
 
     def test_automation_recovery_detail_not_found_is_typed(self):

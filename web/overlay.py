@@ -42,6 +42,10 @@ class OverlayBeetsDB(Protocol):
         self, name: str, mbid: str = "",
     ) -> list[dict[str, object]]: ...
 
+    def get_albums_by_release_ids(
+        self, release_ids: list[str],
+    ) -> list[dict[str, object]]: ...
+
 
 class BeetsProjectionUnavailable(RuntimeError):
     """A Library/browse projection cannot read current Beets authority."""
@@ -86,6 +90,14 @@ def get_library_artist(
     return _require_beets(beets).get_albums_by_artist(
         artist_name, mb_artist_id
     )
+
+
+def get_library_releases(
+    beets: OverlayBeetsDB | None,
+    release_ids: list[str],
+) -> list[dict[str, object]]:
+    """Get current Beets rows by exact release identity."""
+    return _require_beets(beets).get_albums_by_release_ids(release_ids)
 
 
 def check_pipeline(

@@ -10,7 +10,6 @@
  */
 
 import fs from 'node:fs';
-import { pathToFileURL } from 'node:url';
 
 import { renderLibraryAlbumRow } from '../web/js/library.js';
 
@@ -90,6 +89,6 @@ export function main(argv) {
 }
 
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (import.meta.main) {
   process.exitCode = main(process.argv.slice(2));
 }

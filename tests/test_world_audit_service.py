@@ -162,12 +162,22 @@ class TestWorldAuditService(unittest.TestCase):
         self.assertEqual([member.detail for member in report.groups.c.members], ["a", "z"])
 
     def test_expected_beets_availability_failures_are_incomplete_bucket_b(self) -> None:
-        sqlite_locked = sqlite3.OperationalError("database is locked")
-        sqlite_locked.sqlite_errorcode = sqlite3.SQLITE_BUSY
+        sqlite_failures: list[sqlite3.OperationalError] = []
+        for code in (
+            sqlite3.SQLITE_AUTH,
+            sqlite3.SQLITE_BUSY,
+            sqlite3.SQLITE_CANTOPEN,
+            sqlite3.SQLITE_IOERR,
+            sqlite3.SQLITE_LOCKED,
+            sqlite3.SQLITE_PERM,
+        ):
+            failure = sqlite3.OperationalError(f"sqlite authority failure {code}")
+            failure.sqlite_errorcode = code
+            sqlite_failures.append(failure)
         for failure in (
             FileNotFoundError("missing"),
             PermissionError("denied"),
-            sqlite_locked,
+            *sqlite_failures,
         ):
             with self.subTest(failure=type(failure).__name__):
                 def unavailable_factory(error: Exception = failure) -> FakeBeetsDB:
@@ -185,6 +195,41 @@ class TestWorldAuditService(unittest.TestCase):
                     ["current_beets_authority_unavailable"],
                 )
 
+    def test_every_expected_sqlite_query_failure_is_incomplete_bucket_b(self) -> None:
+        class QueryFailureBeets(FakeBeetsDB):
+            def __init__(self, failure: sqlite3.OperationalError) -> None:
+                super().__init__()
+                self.failure = failure
+
+            def list_world_albums(self) -> list[BeetsWorldAlbum]:
+                raise self.failure
+
+        for code in (
+            sqlite3.SQLITE_AUTH,
+            sqlite3.SQLITE_BUSY,
+            sqlite3.SQLITE_CANTOPEN,
+            sqlite3.SQLITE_IOERR,
+            sqlite3.SQLITE_LOCKED,
+            sqlite3.SQLITE_PERM,
+        ):
+            with self.subTest(code=code):
+                failure = sqlite3.OperationalError(
+                    f"sqlite query authority failure {code}"
+                )
+                failure.sqlite_errorcode = code
+                beets = QueryFailureBeets(failure)
+
+                report = audit_world_from_factory(
+                    FakePipelineDB(), lambda handle=beets: handle
+                )
+
+                self.assertFalse(report.complete)
+                self.assertEqual(
+                    self._codes(report, "B"),
+                    ["current_beets_authority_unavailable"],
+                )
+                self.assertEqual(beets.close_calls, 1)
+
     def test_unexpected_beets_failure_remains_a_transport_error(self) -> None:
         def broken_factory() -> FakeBeetsDB:
             raise RuntimeError("programmer defect")
@@ -201,6 +246,26 @@ class TestWorldAuditService(unittest.TestCase):
 
         with self.assertRaisesRegex(sqlite3.OperationalError, "no such column"):
             audit_world_from_factory(FakePipelineDB(), broken_factory)
+
+    def test_unexpected_query_and_close_failures_propagate(self) -> None:
+        class BrokenQueryBeets(FakeBeetsDB):
+            def list_world_albums(self) -> list[BeetsWorldAlbum]:
+                raise RuntimeError("query programmer defect")
+
+        query_beets = BrokenQueryBeets()
+        with self.assertRaisesRegex(RuntimeError, "query programmer defect"):
+            audit_world_from_factory(FakePipelineDB(), lambda: query_beets)
+        self.assertEqual(query_beets.close_calls, 1)
+
+        class BrokenCloseBeets(FakeBeetsDB):
+            def close(self) -> None:
+                super().close()
+                raise RuntimeError("close programmer defect")
+
+        close_beets = BrokenCloseBeets()
+        with self.assertRaisesRegex(RuntimeError, "close programmer defect"):
+            audit_world_from_factory(FakePipelineDB(), lambda: close_beets)
+        self.assertEqual(close_beets.close_calls, 1)
 
     def test_pipeline_availability_failure_is_not_misattributed_to_beets(self) -> None:
         class MissingPipelineDB(FakePipelineDB):

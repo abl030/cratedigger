@@ -35,7 +35,11 @@ from lib.pipeline_db.rows import (
     ArtistRequestRow,
     album_request_row,
 )
-from lib.release_identity import ReleaseIdentity, normalize_release_id
+from lib.release_identity import (
+    ReleaseIdentity,
+    frontend_release_id,
+    normalize_release_id,
+)
 
 _CAPTURE_AND_EVIDENCE_SELECT = """
     (
@@ -81,6 +85,10 @@ def _overlay_release_id_sets(
         identity = ReleaseIdentity.from_id(normalized)
         if identity is not None and identity.source == "discogs":
             discogs_ids.add(identity.release_id)
+            # Legacy Discogs requests predate the dedicated column and store
+            # the numeric exact identity in mb_release_id. Query both, with
+            # the row projector below preferring a dedicated-column match.
+            musicbrainz_ids.add(identity.release_id)
         else:
             # Unknown synthetic IDs retain the historical MB-column fallback.
             musicbrainz_ids.add(normalized)
@@ -89,12 +97,12 @@ def _overlay_release_id_sets(
 
 def _overlay_row_release_id(row: Mapping[str, object]) -> str:
     """Return the exact identity key for one matched request row."""
-    identity = ReleaseIdentity.from_fields(
+    release_id = frontend_release_id(
         row.get("mb_release_id"),
         row.get("discogs_release_id"),
     )
-    if identity is not None:
-        return identity.release_id
+    if release_id:
+        return release_id
     # Existing tests and manually seeded rows use non-UUID MB identifiers.
     fallback = normalize_release_id(row.get("mb_release_id"))
     if fallback:
@@ -257,8 +265,10 @@ class _RequestsMixin(_PipelineDBBase):
             """,
             (musicbrainz_ids, discogs_ids),
         )
-        return {
-            _overlay_row_release_id(r): {
+        overlays: dict[str, dict[str, object]] = {}
+        for r in cur.fetchall():
+            release_id = _overlay_row_release_id(r)
+            projected = {
                 "id": r["id"],
                 "status": r["status"],
                 "search_filetype_override": r["search_filetype_override"],
@@ -269,8 +279,13 @@ class _RequestsMixin(_PipelineDBBase):
                 "provisional_lossless": r["provisional_lossless"],
                 "processing_owner": processing_owner_payload(r),
             }
-            for r in cur.fetchall()
-        }
+            existing = overlays.get(release_id)
+            dedicated_discogs_match = normalize_release_id(
+                r["discogs_release_id"]
+            ) == release_id
+            if existing is None or dedicated_discogs_match:
+                overlays[release_id] = projected
+        return overlays
 
     def get_request_by_mb_release_id(self, mb_release_id: str) -> AlbumRequestRow | None:
         cur = self._execute(

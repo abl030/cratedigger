@@ -219,7 +219,10 @@ operation.
   - Linked evidence adds **Verified Lossless** when the acquired source proof
     is terminal, or `provisional` for an unverified lossless-source conversion
     still hunting a verified copy. Retags, path changes, fingerprint drift,
-    and deletion do not erase carried proof or Captured history. There is no
+    and disappearance or deletion of the library holding do not erase carried
+    proof or Captured history while the request survives. Deleting the pipeline
+    request removes that request-owned projection and its cascaded witnesses.
+    There is no
     identity-drift, sibling-inference, or “Holding unknown” badge: a sibling
     retag truthfully renders the old request Captured plus Missing and the new
     exact held identity Untracked.

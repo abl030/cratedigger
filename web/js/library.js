@@ -66,6 +66,7 @@ export function libraryAlbumBadgeItem(a) {
     library_avg_bitrate: a.avg_bitrate ? Math.floor(a.avg_bitrate / 1000) : 0,
     library_rank: a.library_rank ?? null,
     pipeline_status: a.pipeline_status ?? null,
+    pipeline_id: a.pipeline_id ?? null,
     processing_owner: a.processing_owner ?? null,
     pipeline_verified_lossless: a.pipeline_verified_lossless === true,
     pipeline_provisional: a.pipeline_provisional === true,

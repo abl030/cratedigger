@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import closing
 from typing import TYPE_CHECKING, Any, Literal, Never, Protocol, runtime_checkable
 
 import msgspec
@@ -58,13 +59,6 @@ class WorldAuditCounts(msgspec.Struct, frozen=True):
     bucket_a: int = 0
     bucket_b: int = 0
     bucket_c: int = 0
-
-    @property
-    def violations(self) -> int:
-        """Internal aggregate for non-public generic consumers."""
-
-        return self.bucket_a + self.bucket_b + self.bucket_c
-
 
 class WorldAuditGroup(msgspec.Struct, frozen=True):
     bucket: Literal["A", "B", "C"]
@@ -130,10 +124,13 @@ class WorldAuditBeetsDB(Protocol):
         identities: list[ReleaseIdentity],
     ) -> dict[ReleaseIdentity, CurrentBeetsResolution]: ...
 
+
+
+class OwnedWorldAuditBeetsDB(WorldAuditBeetsDB, Protocol):
     def close(self) -> None: ...
 
 
-type WorldAuditBeetsFactory = Callable[[], WorldAuditBeetsDB]
+type WorldAuditBeetsFactory = Callable[[], OwnedWorldAuditBeetsDB]
 
 
 class _BeetsQueryUnavailable(Exception):
@@ -195,10 +192,6 @@ class _AvailabilityMediatedBeetsDB:
             return self._beets.resolve_current_releases(identities)
         except Exception as exc:  # noqa: BLE001 - closed classifier re-raises
             _translate_beets_query_failure(exc)
-
-    def close(self) -> None:
-        self._beets.close()
-
 
 def _current_evidence_id(row: Mapping[str, Any]) -> int | None:
     raw = row.get("current_evidence_id")
@@ -454,7 +447,7 @@ def audit_world(
 
 def _open_beets_authority(
     beets_factory: WorldAuditBeetsFactory,
-) -> WorldAuditBeetsDB | BeetsAuthorityUnavailable:
+) -> OwnedWorldAuditBeetsDB | BeetsAuthorityUnavailable:
     try:
         return beets_factory()
     except Exception as exc:
@@ -494,10 +487,8 @@ def audit_world_from_factory(
     opened = _open_beets_authority(beets_factory)
     if isinstance(opened, BeetsAuthorityUnavailable):
         return _unavailable_beets_report(opened.category)
-    try:
+    with closing(opened):
         result = _audit_world_with_mediated_beets(pipeline_db, opened)
-    finally:
-        opened.close()
     if isinstance(result, WorldAuditReport):
         return result
     return _unavailable_beets_report(result.category)

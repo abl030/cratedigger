@@ -1412,6 +1412,51 @@ class TestGetAlbumsByArtist(unittest.TestCase):
         self.assertEqual(len(results), 0)
 
 
+class TestGetAlbumsByReleaseIds(unittest.TestCase):
+    """Exact membership is independent of mutable artist tags."""
+
+    RELEASE_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.tmpdir, "test.db")
+        _create_test_db(self.db_path)
+        _insert_album(
+            self.db_path,
+            1,
+            self.RELEASE_ID,
+            [(320000, "/m/drifted/01.mp3")],
+            album="Exact Album",
+            albumartist="Drifted Artist Tag",
+        )
+
+    def test_exact_lookup_ignores_artist_metadata(self) -> None:
+        with BeetsDB(self.db_path) as db:
+            rows = db.get_albums_by_release_ids([self.RELEASE_ID])
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], 1)
+        self.assertEqual(rows[0]["artist"], "Drifted Artist Tag")
+        self.assertEqual(rows[0]["track_count"], 1)
+        self.assertEqual(rows[0]["min_bitrate"], 320000)
+        self.assertEqual(rows[0]["avg_bitrate"], 320000)
+
+    def test_ambiguous_exact_membership_fails_loud(self) -> None:
+        _insert_album(
+            self.db_path,
+            2,
+            self.RELEASE_ID,
+            [(320000, "/m/duplicate/01.mp3")],
+            album="Duplicate Exact Album",
+            albumartist="Another Tag",
+        )
+
+        with BeetsDB(self.db_path) as db, self.assertRaisesRegex(
+            ValueError, "ambiguous current Beets release projection"
+        ):
+            db.get_albums_by_release_ids([self.RELEASE_ID])
+
+
 class TestFuzzyMethodsRemoved(unittest.TestCase):
     """Issue #123: ``find_by_artist_album`` / ``_fuzzy_album_id`` deleted.
 
