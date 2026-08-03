@@ -129,11 +129,6 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "(issue #835, issue #829 PR4 and the source-semantic proof gate "
         "shifted this line only)"
     ),
-    ("lib/pipeline_db/convergence.py", 124, "cdf454e8a2036784"): (
-        "convergence derivation interpolates only an optional fixed request-id "
-        "predicate into a read-only SELECT; ids remain one array parameter and "
-        "the query never mutates album_requests"
-    ),
     ("lib/pipeline_db/import_jobs.py", 560, "ecf3d1844c67f653"): (
         "optional job filter is a fixed literal WHERE clause"
     ),
@@ -148,10 +143,11 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "(issue #784: add_denylist/get_denylisted_users annotated above, "
         "shifting this line; no SQL change)"
     ),
-    ("lib/pipeline_db/misc.py", 580, "9969c9c9d3fdfa75"): (
+    ("lib/pipeline_db/misc.py", 580, "07ec7dc8e19f1ee0"): (
         "triage joins and predicates are selected from closed service enums "
-        "(issue #978 adds the converged request-id array predicate; all values "
-        "remain parameters and album_requests is still only read)"
+        "(issue #978 uses a fixed request-local LATERAL convergence function "
+        "for the converged cohort; all values remain parameters and "
+        "album_requests is still only read)"
     ),
     ("lib/pipeline_db/requests.py", 202, "b84b3af3ecbbf089"): (
         "INSERT columns derive from the fixed AddRequestInput schema "
@@ -221,7 +217,7 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "and every value remains a direct placeholder; an attached processing "
         "owner makes the compare-and-set a zero-write conflict"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 1119, "ebb50341a8d836f6"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 1128, "ebb50341a8d836f6"): (
         "processing-terminal metadata keys use the validated request-field "
         "vocabulary while exact request and owner predicates retain authority; "
         "the static owner-clearing status CAS remains the final request write "
@@ -238,9 +234,10 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
 # beside the implementation they review; movement or SQL-shape drift fails the
 # ratchet just like the dynamic-SQL exceptions above.
 _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, int, str], str] = {
-    ("lib/pipeline_db/convergence.py", 184, "797a0bf9a3f20972"): (
-        "explicit operator stop locks the request, rederives the exact current "
-        "signal, then CASes wanted to the reversible unsearchable state"
+    ("lib/pipeline_db/convergence.py", 63, "e4baa57a0501a017"): (
+        "explicit operator stop atomically compares the complete opaque "
+        "request-local signal token while CASing wanted to the reversible "
+        "unsearchable state in one PostgreSQL snapshot"
     ),
     ("lib/pipeline_db/import_jobs.py", 485, "71e0271f65123747"): (
         "atomic download-to-processing handoff CASes the immutable download "
@@ -258,7 +255,7 @@ _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, int, str], str] = {
     ("lib/pipeline_db/terminal_outcomes.py", 456, "9b11fb540dfe44e3"): (
         "atomic terminal typed transition CASes the source status selected by the DAG"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 1146, "6674811fa5453c86"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 1155, "6674811fa5453c86"): (
         "automation terminalization performs the final exact processing-owner "
         "CAS and clears the owner in the same static request write "
         "(review #2: retry counters are now policy-derived placeholders read "

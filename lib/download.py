@@ -141,7 +141,11 @@ class DownloadDB(transitions.TransitionsDB, Protocol):
     ) -> int | None: ...
 
     def set_download_log_candidate_evidence(
-        self, download_log_id: int, evidence_id: int | None,
+        self,
+        download_log_id: int,
+        evidence_id: int | None,
+        *,
+        direct_attribution: bool = False,
     ) -> None: ...
 
 MAX_FILE_RETRIES = 5

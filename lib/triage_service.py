@@ -363,7 +363,6 @@ class _PipelineDB(Protocol):
         filter_spec: ParsedTriageFilter,
         page_size: int,
         after_request_id: int | None,
-        converged_request_ids: list[int] | None = None,
     ) -> list[dict[str, Any]]: ...
 
     def get_field_resolutions_for_requests(
@@ -371,7 +370,7 @@ class _PipelineDB(Protocol):
     ) -> dict[int, list[dict[str, Any]]]: ...
 
     def get_convergence_signals(
-        self, request_ids: list[int] | None = None,
+        self, request_ids: list[int],
     ) -> dict[int, ConvergenceSignal]: ...
 
     def get_search_summaries_for_requests(
@@ -444,16 +443,11 @@ def list_triage(
     keyset pagination is stable across calls.
     """
     parsed = parse_filter(filter_spec)
-    convergence = (
-        pdb.get_convergence_signals(None)
-        if parsed.kind == _FILTER_CONVERGED else {}
-    )
     rows = pdb.list_triage_page(
         filter_spec=parsed,
         page_size=int(page_size),
         after_request_id=(int(after_request_id)
                           if after_request_id is not None else None),
-        converged_request_ids=(list(convergence) if convergence else None),
     )
     if not rows:
         return []
@@ -464,8 +458,7 @@ def list_triage(
     log_rows = pdb.get_recent_search_log_for_requests(
         request_ids, per_request_limit=DEFAULT_RECENT_SEARCH_LOG_LIMIT,
     )
-    if parsed.kind != _FILTER_CONVERGED:
-        convergence = pdb.get_convergence_signals(request_ids)
+    convergence = pdb.get_convergence_signals(request_ids)
 
     out: list[TriageResult] = []
     for r in rows:

@@ -74,7 +74,11 @@ class QualityEvidenceDB(Protocol):
     ) -> bool: ...
 
     def set_download_log_candidate_evidence(
-        self, download_log_id: int, evidence_id: int | None,
+        self,
+        download_log_id: int,
+        evidence_id: int | None,
+        *,
+        direct_attribution: bool = False,
     ) -> None: ...
 
     def set_request_current_evidence(
@@ -871,7 +875,8 @@ def persist_candidate_evidence_from_import_result(
                 db.set_import_job_candidate_evidence(import_job_id, persisted.id)
             if download_log_id is not None:
                 db.set_download_log_candidate_evidence(
-                    download_log_id, persisted.id
+                    download_log_id, persisted.id,
+                    direct_attribution=True,
                 )
     return result
 
@@ -919,7 +924,8 @@ def persist_candidate_evidence_from_measurement(
                 db.set_import_job_candidate_evidence(import_job_id, persisted.id)
             if download_log_id is not None:
                 db.set_download_log_candidate_evidence(
-                    download_log_id, persisted.id
+                    download_log_id, persisted.id,
+                    direct_attribution=True,
                 )
     return result
 

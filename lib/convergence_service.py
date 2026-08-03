@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import Literal, Protocol
 
 import msgspec
+import psycopg2
 
 CLIFF_BIN_HZ = 500
 MIN_DISTINCT_PEERS = 5
@@ -25,9 +26,11 @@ class ConvergenceObservation(msgspec.Struct, frozen=True):
     log_id: int
     peer: str
     snapshot_fingerprint: str
+    codec: str
     cliff_hz: int | None
     observed_at: datetime
     eligible: bool
+    direct_attribution: bool = True
 
 
 class ConvergenceSignal(msgspec.Struct, frozen=True):
@@ -37,14 +40,20 @@ class ConvergenceSignal(msgspec.Struct, frozen=True):
     observation_count: int
     distinct_peer_count: int
     distinct_candidate_snapshot_count: int
+    distinct_codec_count: int
     cliff_hz: int
+    raw_cliff_min_hz: int
+    raw_cliff_max_hz: int
+    cliff_spread_hz: int
     latest_qualifying_log_id: int
     first_observed_at: datetime
     latest_observed_at: datetime
+    signal_token: str
 
 
 StopConvergenceOutcome = Literal[
     "stopped", "not_found", "wrong_state", "stale", "not_converged",
+    "unavailable",
 ]
 
 
@@ -60,6 +69,15 @@ def _cliff_bin(cliff_hz: int) -> int:
     return ((cliff_hz + CLIFF_BIN_HZ // 2) // CLIFF_BIN_HZ) * CLIFF_BIN_HZ
 
 
+def atomic_peer_usernames(peer_set: str) -> frozenset[str]:
+    """Split the canonical comma-joined contributing-peer representation."""
+    return frozenset(
+        username
+        for raw in peer_set.split(",")
+        if (username := raw.strip().lower())
+    )
+
+
 def derive_convergence_signal(
     request_id: int,
     observations: Iterable[ConvergenceObservation],
@@ -71,7 +89,10 @@ def derive_convergence_signal(
     upward break and a different 500 Hz bin resets the current run.
     """
     eligible = sorted(
-        (row for row in observations if row.eligible),
+        (
+            row for row in observations
+            if row.eligible and row.direct_attribution
+        ),
         key=lambda row: (row.observed_at, row.log_id),
         reverse=True,
     )
@@ -83,9 +104,14 @@ def derive_convergence_signal(
         if row.cliff_hz is None or _cliff_bin(row.cliff_hz) != current_bin:
             break
         run.append(row)
-    peers = {row.peer for row in run}
+    peers = set().union(*(atomic_peer_usernames(row.peer) for row in run))
     if len(peers) < MIN_DISTINCT_PEERS:
         return None
+    raw_cliffs = [
+        row.cliff_hz for row in run if row.cliff_hz is not None
+    ]
+    raw_cliff_min_hz = min(raw_cliffs)
+    raw_cliff_max_hz = max(raw_cliffs)
     return ConvergenceSignal(
         request_id=int(request_id),
         observation_count=len(run),
@@ -93,10 +119,17 @@ def derive_convergence_signal(
         distinct_candidate_snapshot_count=len({
             row.snapshot_fingerprint for row in run
         }),
+        distinct_codec_count=len({
+            row.codec.strip().lower() or "unknown" for row in run
+        }),
         cliff_hz=current_bin,
+        raw_cliff_min_hz=raw_cliff_min_hz,
+        raw_cliff_max_hz=raw_cliff_max_hz,
+        cliff_spread_hz=raw_cliff_max_hz - raw_cliff_min_hz,
         latest_qualifying_log_id=run[0].log_id,
         first_observed_at=run[-1].observed_at,
         latest_observed_at=run[0].observed_at,
+        signal_token="reference-only",
     )
 
 
@@ -105,8 +138,7 @@ class SupportsConvergenceStop(Protocol):
         self,
         request_id: int,
         *,
-        latest_qualifying_log_id: int,
-        cliff_hz: int,
+        signal_token: str,
     ) -> StopConvergedSearchResult: ...
 
 
@@ -120,11 +152,14 @@ class ConvergenceStopService:
         self,
         request_id: int,
         *,
-        latest_qualifying_log_id: int,
-        cliff_hz: int,
+        signal_token: str,
     ) -> StopConvergedSearchResult:
-        return self._db.stop_search_for_convergence(
-            int(request_id),
-            latest_qualifying_log_id=int(latest_qualifying_log_id),
-            cliff_hz=int(cliff_hz),
-        )
+        try:
+            return self._db.stop_search_for_convergence(
+                int(request_id),
+                signal_token=str(signal_token),
+            )
+        except (psycopg2.OperationalError, psycopg2.InterfaceError):
+            return StopConvergedSearchResult(
+                outcome="unavailable", request_id=int(request_id),
+            )

@@ -69,7 +69,7 @@ class SupportsLibraryArtistPipelineDB(Protocol):
         ...
 
     def get_convergence_signals(
-        self, request_ids: list[int] | None = None,
+        self, request_ids: list[int],
     ) -> dict[int, ConvergenceSignal]: ...
 
 

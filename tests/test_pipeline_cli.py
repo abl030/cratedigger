@@ -5072,13 +5072,12 @@ class TestPipelineCliTriage(unittest.TestCase):
         return rc, stdout.getvalue(), stderr.getvalue()
 
     def _run_stop(
-        self, db, rid, *, latest_log_id=99, cliff_hz=15_000,
+        self, db, rid, *, signal_token="a" * 64,
         json_out=False,
     ):
         args = argparse.Namespace(
             id=rid,
-            latest_log_id=latest_log_id,
-            cliff_hz=cliff_hz,
+            signal_token=signal_token,
             confirm="STOP",
             json=json_out,
         )
@@ -5099,21 +5098,26 @@ class TestPipelineCliTriage(unittest.TestCase):
             observation_count=7,
             distinct_peer_count=6,
             distinct_candidate_snapshot_count=5,
+            distinct_codec_count=2,
             cliff_hz=15_000,
+            raw_cliff_min_hz=14_900,
+            raw_cliff_max_hz=15_100,
+            cliff_spread_hz=200,
             latest_qualifying_log_id=99,
             first_observed_at=now,
             latest_observed_at=now,
+            signal_token="a" * 64,
         )
 
         rc, shown, err = self._run_show(db, 41)
         self.assertEqual((rc, err), (0, ""))
         self.assertIn("6", shown)
-        self.assertIn("--latest-log-id 99", shown)
+        self.assertIn("--signal-token " + "a" * 64, shown)
         rc, listed, err = self._run_list(db, filter_spec="converged")
         self.assertEqual((rc, err), (0, ""))
         self.assertIn("converged 15kHz/6 peers", listed)
 
-        rc, _out, err = self._run_stop(db, 41, latest_log_id=98)
+        rc, _out, err = self._run_stop(db, 41, signal_token="b" * 64)
         self.assertEqual(rc, 4)
         self.assertIn("stale", err)
         rc, out, err = self._run_stop(db, 41, json_out=True)
@@ -5129,6 +5133,20 @@ class TestPipelineCliTriage(unittest.TestCase):
         rc, _out, err = self._run_stop(db, 42)
         self.assertEqual(rc, 3)
         self.assertIn("not_converged", err)
+
+    def test_convergence_stop_database_outage_returns_exit_5(self):
+        import psycopg2
+
+        class UnavailableDB(FakePipelineDB):
+            def stop_search_for_convergence(
+                self, request_id: int, *, signal_token: str,
+            ) -> Any:
+                del request_id, signal_token
+                raise psycopg2.OperationalError("database unavailable")
+
+        rc, _out, err = self._run_stop(UnavailableDB(), 41)
+        self.assertEqual(rc, 5)
+        self.assertIn("unavailable", err)
 
     def test_quarantine_json_matches_typed_service_shape(self):
         from lib.quarantine_triage_service import QuarantineTriageResult

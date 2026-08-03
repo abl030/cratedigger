@@ -3006,6 +3006,7 @@ class FakePipelineDB:
             self.set_download_log_candidate_evidence(
                 download_log_id,
                 self.get_import_job_candidate_evidence_id(command.import_job_id),
+                direct_attribution=True,
             )
             boundary("download_log")
             for transition in command.post_audit_transitions:
@@ -3502,6 +3503,7 @@ class FakePipelineDB:
             self.set_download_log_candidate_evidence(
                 download_log_id,
                 self.get_import_job_candidate_evidence_id(command.import_job_id),
+                direct_attribution=True,
             )
             boundary("download_log")
             cooled: set[str] = set()
@@ -4502,7 +4504,6 @@ class FakePipelineDB:
         filter_spec: Any,
         page_size: int,
         after_request_id: int | None,
-        converged_request_ids: list[int] | None = None,
     ) -> list[dict[str, Any]]:
         """In-memory mirror of ``PipelineDB.list_triage_page``."""
         self.query_counts["list_triage_page"] = (
@@ -4542,10 +4543,7 @@ class FakePipelineDB:
                         and summary["total_searches"] > 0
                         and summary["found_count"] == 0)
             if kind == "converged":
-                return bool(
-                    converged_request_ids
-                    and int(row["id"]) in converged_request_ids
-                )
+                return int(row["id"]) in self.convergence_signals
             if kind == "all":
                 return True
             raise ValueError(f"unsupported triage filter kind: {kind!r}")
@@ -4572,13 +4570,11 @@ class FakePipelineDB:
         return [{k: r.get(k) for k in projection_keys} for r in rows]
 
     def get_convergence_signals(
-        self, request_ids: list[int] | None = None,
+        self, request_ids: list[int],
     ) -> dict[int, ConvergenceSignal]:
         self.query_counts["get_convergence_signals"] = (
             self.query_counts.get("get_convergence_signals", 0) + 1
         )
-        if request_ids is None:
-            return dict(self.convergence_signals)
         wanted = {int(request_id) for request_id in request_ids}
         return {
             request_id: signal
@@ -4590,8 +4586,7 @@ class FakePipelineDB:
         self,
         request_id: int,
         *,
-        latest_qualifying_log_id: int,
-        cliff_hz: int,
+        signal_token: str,
     ) -> StopConvergedSearchResult:
         from lib.convergence_service import StopConvergedSearchResult
 
@@ -4611,10 +4606,7 @@ class FakePipelineDB:
                 outcome="not_converged", request_id=rid,
                 observed_status=status,
             )
-        if (
-            signal.latest_qualifying_log_id != latest_qualifying_log_id
-            or signal.cliff_hz != cliff_hz
-        ):
+        if signal.signal_token != signal_token:
             return StopConvergedSearchResult(
                 outcome="stale", request_id=rid, signal=signal,
                 observed_status=status,
@@ -5151,10 +5143,15 @@ class FakePipelineDB:
         self,
         download_log_id: int,
         evidence_id: int | None,
+        *,
+        direct_attribution: bool = False,
     ) -> None:
         for row in self.download_logs:
             if row.id == download_log_id:
                 row.candidate_evidence_id = evidence_id
+                row.candidate_evidence_direct = bool(
+                    direct_attribution and evidence_id is not None
+                )
                 return
 
     def set_request_current_evidence(

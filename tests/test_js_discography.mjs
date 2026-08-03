@@ -125,7 +125,7 @@ console.log('synthesizeMasterlessRow() — exact processing owner survives synth
   assertExcludes(html, 'window.disambRemove', 'processing pressing cannot remove request');
 }
 
-console.log('Convergence signal — exact pressing badge and detail action');
+console.log('Convergence signal — exact pressing badge without duplicate detail action');
 {
   const convergence = {
     request_id: 1240,
@@ -134,6 +134,11 @@ console.log('Convergence signal — exact pressing badge and detail action');
     observation_count: 17,
     distinct_peer_count: 17,
     distinct_candidate_snapshot_count: 14,
+    distinct_codec_count: 3,
+    raw_cliff_min_hz: 14780,
+    raw_cliff_max_hz: 15220,
+    cliff_spread_hz: 440,
+    signal_token: 'a'.repeat(64),
   };
   const row = {
     id: 'exact-release',
@@ -159,9 +164,10 @@ console.log('Convergence signal — exact pressing badge and detail action');
 
   const target = { innerHTML: '' };
   renderReleaseDetail(target, row.id, { ...row, tracks: [] });
-  assertContains(target.innerHTML, 'Search appears converged', 'release detail explains the observation');
-  assertContains(target.innerHTML, 'window.stopConvergedSearch({request_id:1240,latest_qualifying_log_id:39278,cliff_hz:15000})',
-    'release detail action carries the exact signal identity');
+  assertExcludes(target.innerHTML, 'Search appears converged',
+    'Browse release detail does not duplicate the Library/Recents prompt');
+  assertExcludes(target.innerHTML, 'window.stopConvergedSearch',
+    'Browse release detail has no second stop action');
 }
 
 console.log('addRelease() — processing exists response exposes exact owner recovery');

@@ -247,8 +247,9 @@ class StopConvergedSearchRequest(BaseModel):
     """Exact signal identity plus an explicit reversible STOP confirmation."""
 
     confirm: Literal["STOP"]
-    latest_qualifying_log_id: int = Field(gt=0)
-    cliff_hz: int = Field(ge=0)
+    signal_token: str = Field(
+        min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$",
+    )
 
 
 def post_stop_converged_search(
@@ -262,8 +263,7 @@ def post_stop_converged_search(
         return
     result = ConvergenceStopService(_server()._db()).stop(
         int(req_id_str),
-        latest_qualifying_log_id=payload.latest_qualifying_log_id,
-        cliff_hz=payload.cliff_hz,
+        signal_token=payload.signal_token,
     )
     response = msgspec.to_builtins(result)
     if result.outcome == "stopped":
@@ -272,6 +272,8 @@ def post_stop_converged_search(
         h._json(response, status=404)
     elif result.outcome in {"wrong_state", "stale"}:
         h._json(response, status=409)
+    elif result.outcome == "unavailable":
+        h._json(response, status=503)
     else:
         h._json(response, status=422)
 

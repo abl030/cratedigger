@@ -37,8 +37,13 @@ class TestOverlayReleaseRowsInPlace(unittest.TestCase):
             observation_count=6,
             distinct_peer_count=5,
             distinct_candidate_snapshot_count=4,
+            distinct_codec_count=2,
+            raw_cliff_min_hz=14_900,
+            raw_cliff_max_hz=15_100,
+            cliff_spread_hz=200,
             first_observed_at=datetime(2026, 8, 1, tzinfo=UTC),
             latest_observed_at=datetime(2026, 8, 2, tzinfo=UTC),
+            signal_token="a" * 64,
         )
         rows: list[dict[str, object]] = [{"id": "queued"}]
         calls: list[list[int]] = []

@@ -707,7 +707,8 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                 v0_probe_avg_bitrate, v0_probe_median_bitrate,
                 existing_v0_probe_kind, existing_v0_probe_min_bitrate,
                 existing_v0_probe_avg_bitrate, existing_v0_probe_median_bitrate,
-                source, source_download_log_id, candidate_evidence_id
+                source, source_download_log_id, candidate_evidence_id,
+                candidate_evidence_direct
             ) SELECT
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
@@ -722,7 +723,13 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                 ),
                 CASE WHEN EXISTS (SELECT 1 FROM origin) THEN %s::bigint END,
                 (SELECT candidate_evidence_id FROM import_jobs
-                 WHERE id = %s AND request_id = %s)
+                 WHERE id = %s AND request_id = %s),
+                EXISTS (
+                    SELECT 1 FROM import_jobs
+                    WHERE id = %s
+                      AND request_id = %s
+                      AND candidate_evidence_id IS NOT NULL
+                )
             RETURNING id, (SELECT EXISTS (SELECT 1 FROM origin)) AS origin_exists
             """,
             (
@@ -766,6 +773,8 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                 import_job_id,
                 request_id,
                 audit.source_download_log_id,
+                import_job_id,
+                request_id,
                 import_job_id,
                 request_id,
             ),

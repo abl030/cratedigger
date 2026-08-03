@@ -137,7 +137,7 @@ class _RecordingPipelineDB:
         return [self._row] if self._row["mb_release_id"] in release_ids else []
 
     def get_convergence_signals(
-        self, request_ids: list[int] | None = None,
+        self, request_ids: list[int],
     ) -> dict[int, ConvergenceSignal]:
         self._calls.append(f"convergence:{request_ids}")
         return {}
@@ -206,7 +206,7 @@ class _RaceAwarePipelineDB:
         return [request] if RELEASE_ID in release_ids else []
 
     def get_convergence_signals(
-        self, request_ids: list[int] | None = None,
+        self, request_ids: list[int],
     ) -> dict[int, ConvergenceSignal]:
         self.calls.append(f"convergence:{request_ids}")
         return {}

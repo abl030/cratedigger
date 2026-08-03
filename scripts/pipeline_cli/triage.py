@@ -55,7 +55,6 @@ class _TriagePipelineDB(Protocol):
         filter_spec: ParsedTriageFilter,
         page_size: int,
         after_request_id: int | None,
-        converged_request_ids: list[int] | None = None,
     ) -> list[dict[str, Any]]: ...
 
     def get_field_resolutions_for_requests(
@@ -74,11 +73,11 @@ class _TriagePipelineDB(Protocol):
     ) -> dict[int, list[dict[str, Any]]]: ...
 
     def get_convergence_signals(
-        self, request_ids: list[int] | None = None,
+        self, request_ids: list[int],
     ) -> dict[int, ConvergenceSignal]: ...
 
     def stop_search_for_convergence(
-        self, request_id: int, *, latest_qualifying_log_id: int, cliff_hz: int,
+        self, request_id: int, *, signal_token: str,
     ) -> StopConvergedSearchResult: ...
 
 
@@ -170,9 +169,18 @@ def cmd_triage_show(db: _TriagePipelineDB, args: argparse.Namespace) -> int:
             f"{signal.distinct_candidate_snapshot_count}"
         )
         print(
+            "    distinct codecs:           "
+            f"{signal.distinct_codec_count}"
+        )
+        print(
+            "    raw cliff range:            "
+            f"{signal.raw_cliff_min_hz / 1000:g}-"
+            f"{signal.raw_cliff_max_hz / 1000:g} kHz "
+            f"({signal.cliff_spread_hz} Hz spread)"
+        )
+        print(
             "    stop command:               pipeline-cli triage stop "
-            f"{meta.id} --latest-log-id {signal.latest_qualifying_log_id} "
-            f"--cliff-hz {signal.cliff_hz} --confirm STOP"
+            f"{meta.id} --signal-token {signal.signal_token} --confirm STOP"
         )
 
     # Unfindable cohort state.
@@ -260,14 +268,13 @@ def cmd_triage_stop(db: _TriagePipelineDB, args: argparse.Namespace) -> int:
     """Explicitly stop a still-current converged request.
 
     Exit mapping mirrors HTTP: success 0, missing 2, not converged 3,
-    wrong state or stale signal identity 4.
+    wrong state or stale signal identity 4, database unavailable 5.
     """
     from lib.convergence_service import ConvergenceStopService
 
     result = ConvergenceStopService(db).stop(
         int(args.id),
-        latest_qualifying_log_id=int(args.latest_log_id),
-        cliff_hz=int(args.cliff_hz),
+        signal_token=str(args.signal_token),
     )
     if bool(getattr(args, "json", False)):
         print(json.dumps(
@@ -290,6 +297,7 @@ def cmd_triage_stop(db: _TriagePipelineDB, args: argparse.Namespace) -> int:
         "not_converged": 3,
         "wrong_state": 4,
         "stale": 4,
+        "unavailable": 5,
     }[result.outcome]
 
 
@@ -564,12 +572,8 @@ def add_triage_subparser(
     )
     p_tr_stop.add_argument("id", type=int, help="Request ID")
     p_tr_stop.add_argument(
-        "--latest-log-id", type=int, required=True,
-        help="latest_qualifying_log_id from triage show/list",
-    )
-    p_tr_stop.add_argument(
-        "--cliff-hz", type=int, required=True,
-        help="500 Hz-binned cliff_hz from triage show/list",
+        "--signal-token", required=True,
+        help="opaque signal_token from triage show --json",
     )
     p_tr_stop.add_argument(
         "--confirm", choices=["STOP"], required=True,

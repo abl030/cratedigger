@@ -11,7 +11,7 @@ import { invalidateBrowseArtist } from './browse.js';
 import { applyAnalysisToExpansion } from './analysis.js';
 import { renderLabelLinks } from './labels.js';
 import { renderSearchPlanButton } from './search_plan.js';
-import { convergenceBadge, renderConvergencePrompt } from './convergence.js';
+import { convergenceBadge } from './convergence.js';
 import { loadActiveRgs, hasActiveRg, invalidateActiveRgs } from './active_rgs.js';
 import {
   renderReleaseRow, renderBeetsTrackRow, renderExpectedTrackRow, toggleExpand,
@@ -617,8 +617,6 @@ export async function addRelease(mbid, btn) {
  */
 export function renderReleaseDetail(targetEl, releaseId, data, opts = {}) {
   let html = '';
-
-  html += renderConvergencePrompt(data.convergence, data.pipeline_status);
 
   // Use beets tracks if owned (has bitrate info), otherwise MB tracks
   const hasBeets = data.beets_tracks && data.beets_tracks.length > 0;

@@ -462,7 +462,6 @@ class _MiscMixin(_PipelineDBBase):
         filter_spec: "ParsedTriageFilter",
         page_size: int,
         after_request_id: int | None,
-        converged_request_ids: list[int] | None = None,
     ) -> list[dict[str, Any]]:
         """One cohort page of ``album_requests`` rows for the triage view.
 
@@ -556,10 +555,11 @@ class _MiscMixin(_PipelineDBBase):
             where_clauses.append("rss.total_searches > 0")
             where_clauses.append("rss.found_count = 0")
         elif kind == "converged":
-            if not converged_request_ids:
-                return []
-            where_clauses.append("ar.id = ANY(%s)")
-            params.append(converged_request_ids)
+            joins.append(
+                "JOIN LATERAL "
+                "derive_request_convergence_signal(ar.id) convergence "
+                "ON TRUE"
+            )
         elif kind == "all":
             pass  # No predicate.
         else:  # pragma: no cover — parser is the gate

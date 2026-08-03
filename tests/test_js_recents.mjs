@@ -97,6 +97,39 @@ console.log('renderRecentsCounts() stays focused on history filters');
   assertExcludes(html, 'match/hr', 'match rates are not rendered in count cards');
 }
 
+console.log('renderRecentsItems() carries the detailed convergence action once');
+{
+  const html = renderRecentsFixture([{
+    id: 10,
+    request_id: 41,
+    request_status: 'wanted',
+    created_at: '2026-08-03T12:00:00+00:00',
+    album_title: 'Provisional Album',
+    artist_name: 'Artist',
+    badge: 'Rejected',
+    badge_class: 'badge-warn',
+    border_color: '#805f20',
+    summary: 'FLAC · peer',
+    convergence: {
+      request_id: 41,
+      observation_count: 7,
+      distinct_peer_count: 6,
+      distinct_candidate_snapshot_count: 5,
+      distinct_codec_count: 2,
+      cliff_hz: 15000,
+      raw_cliff_min_hz: 14900,
+      raw_cliff_max_hz: 15100,
+      cliff_spread_hz: 200,
+      latest_qualifying_log_id: 99,
+      signal_token: 'a'.repeat(64),
+    },
+  }]);
+  assertEqual((html.match(/class="convergence-prompt"/g) || []).length, 1,
+    'Recents renders one detailed convergence prompt');
+  assertContains(html, '&quot;recents&quot;',
+    'Recents action carries its refresh origin');
+}
+
 console.log('recentsLogUrl() requests enough history for triage labels');
 {
   state.recentsFilter = 'all';

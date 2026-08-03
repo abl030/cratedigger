@@ -358,10 +358,15 @@ class TestTriageRouteContracts(_FakeDbWebServerCase):
             observation_count=7,
             distinct_peer_count=6,
             distinct_candidate_snapshot_count=5,
+            distinct_codec_count=2,
             cliff_hz=15_000,
+            raw_cliff_min_hz=14_900,
+            raw_cliff_max_hz=15_100,
+            cliff_spread_hz=200,
             latest_qualifying_log_id=99,
             first_observed_at=now,
             latest_observed_at=now,
+            signal_token="a" * 64,
         )
 
         status, cohort = self._get("/api/triage/list?filter=converged")
@@ -371,16 +376,14 @@ class TestTriageRouteContracts(_FakeDbWebServerCase):
 
         status, stale = self._post(
             "/api/triage/41/stop-converged-search",
-            {"confirm": "STOP", "latest_qualifying_log_id": 98,
-             "cliff_hz": 15_000},
+            {"confirm": "STOP", "signal_token": "b" * 64},
         )
         self.assertEqual(status, 409)
         self.assertEqual(stale["outcome"], "stale")
 
         status, stopped = self._post(
             "/api/triage/41/stop-converged-search",
-            {"confirm": "STOP", "latest_qualifying_log_id": 99,
-             "cliff_hz": 15_000},
+            {"confirm": "STOP", "signal_token": "a" * 64},
         )
         self.assertEqual(status, 200)
         self.assertEqual(stopped["outcome"], "stopped")
@@ -388,16 +391,14 @@ class TestTriageRouteContracts(_FakeDbWebServerCase):
 
         status, conflict = self._post(
             "/api/triage/41/stop-converged-search",
-            {"confirm": "STOP", "latest_qualifying_log_id": 99,
-             "cliff_hz": 15_000},
+            {"confirm": "STOP", "signal_token": "a" * 64},
         )
         self.assertEqual(status, 409)
         self.assertEqual(conflict["outcome"], "wrong_state")
 
         status, missing = self._post(
             "/api/triage/999/stop-converged-search",
-            {"confirm": "STOP", "latest_qualifying_log_id": 99,
-             "cliff_hz": 15_000},
+            {"confirm": "STOP", "signal_token": "a" * 64},
         )
         self.assertEqual(status, 404)
         self.assertEqual(missing["outcome"], "not_found")
@@ -405,19 +406,32 @@ class TestTriageRouteContracts(_FakeDbWebServerCase):
         self.db.seed_request(make_request_row(id=42, status="wanted"))
         status, not_converged = self._post(
             "/api/triage/42/stop-converged-search",
-            {"confirm": "STOP", "latest_qualifying_log_id": 99,
-             "cliff_hz": 15_000},
+            {"confirm": "STOP", "signal_token": "a" * 64},
         )
         self.assertEqual(status, 422)
         self.assertEqual(not_converged["outcome"], "not_converged")
 
         status, invalid = self._post(
             "/api/triage/41/stop-converged-search",
-            {"confirm": "ACCEPT", "latest_qualifying_log_id": 99,
-             "cliff_hz": 15_000},
+            {"confirm": "ACCEPT", "signal_token": "a" * 64},
         )
         self.assertEqual(status, 400)
         self.assertIn("confirm", invalid["error"])
+
+    def test_convergence_stop_database_outage_returns_503(self):
+        import psycopg2
+
+        with patch.object(
+            self.db,
+            "stop_search_for_convergence",
+            side_effect=psycopg2.OperationalError("database unavailable"),
+        ):
+            status, data = self._post(
+                "/api/triage/41/stop-converged-search",
+                {"confirm": "STOP", "signal_token": "a" * 64},
+            )
+        self.assertEqual(status, 503)
+        self.assertEqual(data["outcome"], "unavailable")
 
 
 if __name__ == "__main__":

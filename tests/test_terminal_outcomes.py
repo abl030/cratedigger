@@ -1715,6 +1715,12 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
             db.get_download_log_candidate_evidence_id(result.download_log_id),
             persisted.id,
         )
+        row = db._execute(
+            "SELECT candidate_evidence_direct FROM download_log WHERE id = %s",
+            (result.download_log_id,),
+        ).fetchone()
+        assert row is not None
+        self.assertTrue(row["candidate_evidence_direct"])
 
     def test_import_terminal_audit_copies_job_candidate_evidence(self):
         db, request_id, job_id = _seed_running_import()
@@ -1753,6 +1759,12 @@ class TestTerminalOutcomeAtomicity(unittest.TestCase):
             db.get_download_log_candidate_evidence_id(result.download_log_id),
             persisted.id,
         )
+        row = db._execute(
+            "SELECT candidate_evidence_direct FROM download_log WHERE id = %s",
+            (result.download_log_id,),
+        ).fetchone()
+        assert row is not None
+        self.assertTrue(row["candidate_evidence_direct"])
 
     def test_preview_failure_preserves_current_operator_status(self):
         db, request_id, job_id = _seed_running_preview()

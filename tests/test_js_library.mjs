@@ -263,6 +263,50 @@ console.log('renderLibraryAlbumRow() preserves ordinary metadata presentation');
   assertContains(html, '<span>Album</span>', 'ordinary release type remains visible');
 }
 
+console.log('Converged Library release has one detailed stop prompt');
+{
+  const convergence = {
+    request_id: 1712,
+    observation_count: 7,
+    distinct_peer_count: 6,
+    distinct_candidate_snapshot_count: 5,
+    distinct_codec_count: 2,
+    cliff_hz: 15000,
+    raw_cliff_min_hz: 14900,
+    raw_cliff_max_hz: 15100,
+    cliff_spread_hz: 200,
+    latest_qualifying_log_id: 99,
+    signal_token: 'a'.repeat(64),
+  };
+  const row = renderLibraryAlbumRow({
+    id: 42,
+    album: 'Provisional Album',
+    track_count: 10,
+    in_library: true,
+    beets_album_id: 42,
+    pipeline_id: 1712,
+    pipeline_status: 'wanted',
+    convergence,
+  });
+  assertContains(row, 'search converged', 'compact Library row keeps signal badge');
+  assertExcludes(row, 'convergence-prompt', 'compact Library row has no duplicate prompt');
+  assertExcludes(row, 'Stop searching', 'compact Library row has no stop action');
+
+  const detail = libraryDetail('release-id', 'wanted', { convergence });
+  assert((detail.match(/class="convergence-prompt"/g) || []).length === 1,
+    'expanded Library detail has exactly one convergence prompt');
+  assert((detail.match(/>Stop searching<\/button>/g) || []).length === 1,
+    'expanded Library detail has exactly one stop action');
+  assertExcludes(detail, '>Accept</button>',
+    'convergence stop is not presented beside irreversible-looking Accept');
+  assertExcludes(detail, '>Status:</span>',
+    'generic lifecycle status controls are suppressed beside convergence stop');
+  assertExcludes(detail, '>Min bitrate:</span>',
+    'quality override controls are suppressed beside convergence stop');
+  assertExcludes(detail, '>Intent:</span>',
+    'intent controls are suppressed beside convergence stop');
+}
+
 console.log('renderLibraryAlbumRow() escapes controlled metadata at the live HTML sink');
 {
   const knownBad = '<span><script>alert(1)</script></span>';

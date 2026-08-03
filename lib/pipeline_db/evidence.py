@@ -831,10 +831,24 @@ class _EvidenceMixin(_PipelineDBBase):
         self,
         download_log_id: int,
         evidence_id: int | None,
+        *,
+        direct_attribution: bool = False,
     ) -> None:
+        """Address evidence and positively mark only an exact producer link.
+
+        Historical/render-only cross-walk callers use the default false.
+        Callers may pass true only while holding the exact attempt/evidence
+        relationship; a missing evidence id always clears the positive bit.
+        """
         self._execute(
-            "UPDATE download_log SET candidate_evidence_id = %s WHERE id = %s",
-            (evidence_id, int(download_log_id)),
+            "UPDATE download_log "
+            "SET candidate_evidence_id = %s, candidate_evidence_direct = %s "
+            "WHERE id = %s",
+            (
+                evidence_id,
+                bool(direct_attribution and evidence_id is not None),
+                int(download_log_id),
+            ),
         )
         self.conn.commit()
 

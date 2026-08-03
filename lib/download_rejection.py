@@ -78,7 +78,11 @@ def _run_post_rejection_wrong_match_cleanup(
         if import_job_id is not None:
             evidence_id = db.get_import_job_candidate_evidence_id(import_job_id)
             if evidence_id is not None:
-                db.set_download_log_candidate_evidence(download_log_id, evidence_id)
+                db.set_download_log_candidate_evidence(
+                    download_log_id,
+                    evidence_id,
+                    direct_attribution=True,
+                )
         result = cleanup_wrong_match(
             db,
             download_log_id,

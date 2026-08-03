@@ -116,7 +116,7 @@ export function renderRecentsItems(items, matchRates = null) {
       // with no measurements (download-phase failures).
       const evidence = renderEvidenceStrip(item);
       const convergencePrompt = renderConvergencePrompt(
-        item.convergence, item.request_status,
+        item.convergence, item.request_status, 'recents',
       );
 
       return `
