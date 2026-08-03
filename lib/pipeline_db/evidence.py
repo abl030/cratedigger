@@ -1,6 +1,8 @@
 """album_quality_evidence content-addressed keying + FK setters."""
+
 import json
-from typing import Any
+from collections.abc import Mapping, Sequence
+from datetime import datetime
 
 import msgspec
 
@@ -15,13 +17,130 @@ from lib.quality import (
     AudioQualityMeasurement,
     AudioValidationReport,
     CodecFamily,
+    EvidenceProvenance,
+    EvidenceSubject,
     VerifiedLosslessProof,
 )
 
 
+class PersistedEvidenceFileRow(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    """The exact file projection consumed by the production evidence decoder."""
+
+    relative_path: str
+    size_bytes: int
+    mtime_ns: int
+    extension: str
+    container: str
+    codec: str | None
+    decode_ok: bool
+
+
+class PersistedAlbumQualityEvidenceRow(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True
+):
+    """The strict PostgreSQL projection consumed by evidence decoding.
+
+    This is the one shared contract for production reads and corpus export.
+    Cursor adapters reject missing and extra columns before conversion.
+    """
+
+    id: int
+    mb_release_id: str
+    snapshot_fingerprint: str
+    source_path: str
+    measured_at: datetime
+    min_bitrate_kbps: int | None
+    avg_bitrate_kbps: int | None
+    median_bitrate_kbps: int | None
+    format: str | None
+    is_cbr: bool
+    spectral_grade: str | None
+    spectral_bitrate_kbps: int | None
+    spectral_subject: EvidenceSubject | None
+    spectral_provenance: EvidenceProvenance | None
+    was_converted_from: str | None
+    cliff_hz: int | None
+    codec_family: CodecFamily | None
+    ultrasonic_deficit_db: float | None
+    spectral_measurement_version: int | None
+    codec: str | None
+    container: str | None
+    storage_format: str | None
+    target_format: str | None
+    target_is_cbr: bool | None
+    lineage_version: int
+    v0_min_bitrate_kbps: int | None
+    v0_avg_bitrate_kbps: int | None
+    v0_median_bitrate_kbps: int | None
+    v0_subject: EvidenceSubject | None
+    v0_provenance: EvidenceProvenance | None
+    on_disk_v0_research_attempted: bool
+    current_enrichment_required: bool
+    verified_lossless: bool
+    verified_lossless_provenance: EvidenceProvenance | None
+    verified_lossless_source: str | None
+    verified_lossless_classifier: str | None
+    verified_lossless_detail: str | None
+    audio_validation: AudioValidationReport
+    audio_corrupt: bool
+    audio_error: str | None
+    folder_layout: str
+    audio_file_count: int
+    filetype_band: str
+    matched_bad_audio_hash_id: int | None
+    matched_bad_audio_hash_path: str | None
+    aac_lattice_tracks: list[AacLatticeTrackScore] | None
+    aac_lattice_modal_offset: int | None
+    aac_lattice_modal_count: int | None
+    aac_lattice_scored_tracks: int | None
+    aac_lattice_max_z: float | None
+
+
+EVIDENCE_PROJECTION_COLUMNS: tuple[str, ...] = (
+    PersistedAlbumQualityEvidenceRow.__struct_fields__
+)
+EVIDENCE_FILE_PROJECTION_COLUMNS: tuple[str, ...] = (
+    PersistedEvidenceFileRow.__struct_fields__
+)
+
+
+def _strict_pg_row[
+    PersistedRow: (PersistedAlbumQualityEvidenceRow, PersistedEvidenceFileRow)
+](
+    value: Mapping[str, object],
+    typ: type[PersistedRow],
+) -> PersistedRow:
+    """Reject projection drift and return its exact typed row."""
+    fields = set(typ.__struct_fields__)
+    if set(value) != fields:
+        raise msgspec.ValidationError(
+            f"projection columns drifted: missing={sorted(fields - set(value))}, "
+            f"extra={sorted(set(value) - fields)}"
+        )
+    return msgspec.convert(value, type=typ)
+
+
+def _typed_evidence_rows_from_pg(
+    row: Mapping[str, object],
+    file_rows: Sequence[Mapping[str, object]],
+) -> tuple[PersistedAlbumQualityEvidenceRow, list[PersistedEvidenceFileRow]]:
+    """Decode the exact PostgreSQL projection before evidence semantics.
+
+    This is shared by the two live load paths and the corpus replayer's
+    static boundary. Every caller receives canonical Structs; semantic code
+    below never receives a cursor dict or a JSONB builtin tree.
+    """
+    return (
+        _strict_pg_row(row, PersistedAlbumQualityEvidenceRow),
+        [
+            _strict_pg_row(file_row, PersistedEvidenceFileRow)
+            for file_row in file_rows
+        ],
+    )
+
+
 class _EvidenceMixin(_PipelineDBBase):
     """album_quality_evidence content-addressed keying + FK setters."""
-
 
     # --- active album-quality evidence --------------------------------------
 
@@ -50,12 +169,13 @@ class _EvidenceMixin(_PipelineDBBase):
         ).decode()
         aac_lattice_tracks_json = (
             msgspec.json.encode(lattice.tracks).decode()
-            if lattice is not None else None
+            if lattice is not None
+            else None
         )
-        preserve_existing_audio_validation = (
-            evidence.audio_validation.outcome
-            in {"legacy_unrecorded", "skipped"}
-        )
+        preserve_existing_audio_validation = evidence.audio_validation.outcome in {
+            "legacy_unrecorded",
+            "skipped",
+        }
         file_rows = [
             {
                 "ordinal": ordinal,
@@ -517,7 +637,6 @@ class _EvidenceMixin(_PipelineDBBase):
             ),
         )
 
-
     def load_album_quality_evidence_by_id(
         self,
         evidence_id: int | None,
@@ -526,7 +645,9 @@ class _EvidenceMixin(_PipelineDBBase):
         if evidence_id is None:
             return None
         cur = self._execute(
-            "SELECT * FROM album_quality_evidence WHERE id = %s",
+            "SELECT "
+            + ", ".join(EVIDENCE_PROJECTION_COLUMNS)
+            + " FROM album_quality_evidence WHERE id = %s",
             (int(evidence_id),),
         )
         row = cur.fetchone()
@@ -542,9 +663,14 @@ class _EvidenceMixin(_PipelineDBBase):
             """,
             (int(row["id"]),),
         )
-        file_rows = [dict(r) for r in files_cur.fetchall()]
-        return self._album_quality_evidence_from_row(dict(row), file_rows)
-
+        persisted, persisted_files = _typed_evidence_rows_from_pg(
+            row,
+            files_cur.fetchall(),
+        )
+        return self._album_quality_evidence_from_persisted_rows(
+            persisted,
+            persisted_files,
+        )
 
     def find_album_quality_evidence(
         self,
@@ -555,7 +681,10 @@ class _EvidenceMixin(_PipelineDBBase):
         """Find evidence by its content-addressed key."""
         cur = self._execute(
             """
-            SELECT * FROM album_quality_evidence
+            SELECT """
+            + ", ".join(EVIDENCE_PROJECTION_COLUMNS)
+            + """
+            FROM album_quality_evidence
             WHERE mb_release_id = %s AND snapshot_fingerprint = %s
             """,
             (mb_release_id, snapshot_fingerprint),
@@ -573,9 +702,14 @@ class _EvidenceMixin(_PipelineDBBase):
             """,
             (int(row["id"]),),
         )
-        file_rows = [dict(r) for r in files_cur.fetchall()]
-        return self._album_quality_evidence_from_row(dict(row), file_rows)
-
+        persisted, persisted_files = _typed_evidence_rows_from_pg(
+            row,
+            files_cur.fetchall(),
+        )
+        return self._album_quality_evidence_from_persisted_rows(
+            persisted,
+            persisted_files,
+        )
 
     def claim_current_v0_research_attempt(
         self,
@@ -618,7 +752,6 @@ class _EvidenceMixin(_PipelineDBBase):
         claimed = cur.fetchone() is not None
         self.conn.commit()
         return claimed
-
 
     def persist_current_spectral_measurement(
         self,
@@ -683,7 +816,6 @@ class _EvidenceMixin(_PipelineDBBase):
         self.conn.commit()
         return persisted
 
-
     def persist_current_v0_research_metric(
         self,
         *,
@@ -735,7 +867,6 @@ class _EvidenceMixin(_PipelineDBBase):
         self.conn.commit()
         return persisted
 
-
     def release_current_v0_research_attempt(
         self,
         *,
@@ -768,7 +899,6 @@ class _EvidenceMixin(_PipelineDBBase):
         released = cur.fetchone() is not None
         self.conn.commit()
         return released
-
 
     def set_import_job_candidate_evidence(
         self,
@@ -826,7 +956,6 @@ class _EvidenceMixin(_PipelineDBBase):
         self.conn.commit()
         return persisted
 
-
     def set_download_log_candidate_evidence(
         self,
         download_log_id: int,
@@ -837,7 +966,6 @@ class _EvidenceMixin(_PipelineDBBase):
             (evidence_id, int(download_log_id)),
         )
         self.conn.commit()
-
 
     def set_request_current_evidence(
         self,
@@ -860,7 +988,6 @@ class _EvidenceMixin(_PipelineDBBase):
         self.conn.commit()
         return cur.rowcount > 0
 
-
     def get_import_job_candidate_evidence_id(
         self,
         import_job_id: int,
@@ -874,7 +1001,6 @@ class _EvidenceMixin(_PipelineDBBase):
             return None
         return int(row["candidate_evidence_id"])
 
-
     def get_download_log_candidate_evidence_id(
         self,
         download_log_id: int,
@@ -887,7 +1013,6 @@ class _EvidenceMixin(_PipelineDBBase):
         if row is None or row["candidate_evidence_id"] is None:
             return None
         return int(row["candidate_evidence_id"])
-
 
     def get_latest_download_log_candidate_evidence_id(
         self,
@@ -903,17 +1028,19 @@ class _EvidenceMixin(_PipelineDBBase):
         #813). Production dispatch never needs this: it always already
         knows the exact ``download_log_id``/``import_job_id`` in flight.
         """
-        cur = self._execute("""
+        cur = self._execute(
+            """
             SELECT candidate_evidence_id
             FROM download_log
             WHERE request_id = %s
               AND candidate_evidence_id IS NOT NULL
             ORDER BY id DESC
             LIMIT 1
-        """, (int(request_id),))
+        """,
+            (int(request_id),),
+        )
         row = cur.fetchone()
         return int(row["candidate_evidence_id"]) if row else None
-
 
     def get_request_current_evidence_id(
         self,
@@ -928,121 +1055,124 @@ class _EvidenceMixin(_PipelineDBBase):
             return None
         return int(row["current_evidence_id"])
 
-
     @staticmethod
     def _album_quality_evidence_from_row(
-        row: dict[str, Any],
-        file_rows: list[dict[str, Any]],
+        row: Mapping[str, object],
+        file_rows: Sequence[Mapping[str, object]],
     ) -> AlbumQualityEvidence:
-        """Decode one ``album_quality_evidence`` read into its Struct.
+        """Decode raw cursor-shaped evidence for corpus replay compatibility.
 
-        Static because it touches no connection state, and that is
-        load-bearing rather than tidiness: ``scripts/decision_differential.py``
-        re-decides an exported corpus through THIS function so a policy
-        differential measures the shape production reads, not a bespoke
-        decoder's idea of it.
+        Production loads call :meth:`_album_quality_evidence_from_persisted_rows`
+        after this same strict raw-PG adapter. This static spelling remains the
+        corpus replayer's entrypoint, so replay and production share the exact
+        decoder without a second semantic mapper.
         """
+        persisted, persisted_files = _typed_evidence_rows_from_pg(
+            row,
+            file_rows,
+        )
+        return _EvidenceMixin._album_quality_evidence_from_persisted_rows(
+            persisted,
+            persisted_files,
+        )
+
+    @staticmethod
+    def _album_quality_evidence_from_persisted_rows(
+        persisted: PersistedAlbumQualityEvidenceRow,
+        persisted_files: Sequence[PersistedEvidenceFileRow],
+    ) -> AlbumQualityEvidence:
+        """Build semantic evidence from the already-strict persisted rows."""
         v0_metric = None
         if (
-            row.get("v0_min_bitrate_kbps") is not None
-            or row.get("v0_avg_bitrate_kbps") is not None
-            or row.get("v0_median_bitrate_kbps") is not None
-            or row.get("v0_subject") is not None
+            persisted.v0_min_bitrate_kbps is not None
+            or persisted.v0_avg_bitrate_kbps is not None
+            or persisted.v0_median_bitrate_kbps is not None
+            or persisted.v0_subject is not None
         ):
+            assert persisted.v0_subject is not None
+            assert persisted.v0_provenance is not None
             v0_metric = AlbumQualityV0Metric(
-                subject=row["v0_subject"],
-                provenance=row["v0_provenance"],
-                min_bitrate_kbps=row.get("v0_min_bitrate_kbps"),
-                avg_bitrate_kbps=row.get("v0_avg_bitrate_kbps"),
-                median_bitrate_kbps=row.get("v0_median_bitrate_kbps"),
+                subject=persisted.v0_subject,
+                provenance=persisted.v0_provenance,
+                min_bitrate_kbps=persisted.v0_min_bitrate_kbps,
+                avg_bitrate_kbps=persisted.v0_avg_bitrate_kbps,
+                median_bitrate_kbps=persisted.v0_median_bitrate_kbps,
             )
         aac_lattice = None
-        if row.get("aac_lattice_tracks") is not None:
-            # The one wire-decode site for the lattice capture: the JSONB
-            # array validates into its Struct here, and every consumer
-            # downstream works with the typed rows.
+        if persisted.aac_lattice_tracks is not None:
+            if persisted.aac_lattice_scored_tracks is None:
+                raise msgspec.ValidationError(
+                    "aac lattice tracks require scored_tracks",
+                )
             aac_lattice = AacLatticeCapture(
-                tracks=msgspec.convert(
-                    row["aac_lattice_tracks"],
-                    type=list[AacLatticeTrackScore],
-                ),
-                modal_offset=row.get("aac_lattice_modal_offset"),
-                modal_count=row.get("aac_lattice_modal_count"),
-                scored_tracks=int(row.get("aac_lattice_scored_tracks") or 0),
-                max_z=row.get("aac_lattice_max_z"),
+                tracks=persisted.aac_lattice_tracks,
+                modal_offset=persisted.aac_lattice_modal_offset,
+                modal_count=persisted.aac_lattice_modal_count,
+                scored_tracks=persisted.aac_lattice_scored_tracks,
+                max_z=persisted.aac_lattice_max_z,
             )
         proof = None
-        if row.get("verified_lossless"):
+        if persisted.verified_lossless:
+            assert persisted.verified_lossless_provenance is not None
+            assert persisted.verified_lossless_source is not None
+            assert persisted.verified_lossless_classifier is not None
             proof = VerifiedLosslessProof(
-                provenance=row["verified_lossless_provenance"],
-                source=row["verified_lossless_source"],
-                classifier=row["verified_lossless_classifier"],
-                detail=row.get("verified_lossless_detail"),
+                provenance=persisted.verified_lossless_provenance,
+                source=persisted.verified_lossless_source,
+                classifier=persisted.verified_lossless_classifier,
+                detail=persisted.verified_lossless_detail,
             )
         return AlbumQualityEvidence(
-            mb_release_id=row["mb_release_id"],
-            snapshot_fingerprint=row["snapshot_fingerprint"],
-            source_path=row.get("source_path") or "",
-            id=int(row["id"]) if row.get("id") is not None else None,
+            mb_release_id=persisted.mb_release_id,
+            snapshot_fingerprint=persisted.snapshot_fingerprint,
+            source_path=persisted.source_path,
+            id=persisted.id,
             measurement=AudioQualityMeasurement(
-                min_bitrate_kbps=row.get("min_bitrate_kbps"),
-                avg_bitrate_kbps=row.get("avg_bitrate_kbps"),
-                median_bitrate_kbps=row.get("median_bitrate_kbps"),
-                format=row.get("format"),
-                is_cbr=bool(row.get("is_cbr")),
-                spectral_grade=row.get("spectral_grade"),
-                spectral_bitrate_kbps=row.get("spectral_bitrate_kbps"),
-                spectral_subject=row.get("spectral_subject"),
-                spectral_provenance=row.get("spectral_provenance"),
-                was_converted_from=row.get("was_converted_from"),
-                cliff_hz=row.get("cliff_hz"),
-                codec_family=row.get("codec_family"),
-                ultrasonic_deficit_db=row.get("ultrasonic_deficit_db"),
-                spectral_measurement_version=row.get(
-                    "spectral_measurement_version"
-                ),
+                min_bitrate_kbps=persisted.min_bitrate_kbps,
+                avg_bitrate_kbps=persisted.avg_bitrate_kbps,
+                median_bitrate_kbps=persisted.median_bitrate_kbps,
+                format=persisted.format,
+                is_cbr=persisted.is_cbr,
+                spectral_grade=persisted.spectral_grade,
+                spectral_bitrate_kbps=persisted.spectral_bitrate_kbps,
+                spectral_subject=persisted.spectral_subject,
+                spectral_provenance=persisted.spectral_provenance,
+                was_converted_from=persisted.was_converted_from,
+                cliff_hz=persisted.cliff_hz,
+                codec_family=persisted.codec_family,
+                ultrasonic_deficit_db=persisted.ultrasonic_deficit_db,
+                spectral_measurement_version=persisted.spectral_measurement_version,
             ),
-            measured_at=row["measured_at"],
+            measured_at=persisted.measured_at,
             files=[
                 AlbumQualityEvidenceFile(
-                    relative_path=file["relative_path"],
-                    size_bytes=int(file["size_bytes"]),
-                    mtime_ns=int(file["mtime_ns"]),
-                    extension=file["extension"],
-                    container=file["container"],
-                    codec=file.get("codec"),
-                    decode_ok=bool(file["decode_ok"]) if "decode_ok" in file else True,
+                    relative_path=file.relative_path,
+                    size_bytes=file.size_bytes,
+                    mtime_ns=file.mtime_ns,
+                    extension=file.extension,
+                    container=file.container,
+                    codec=file.codec,
+                    decode_ok=file.decode_ok,
                 )
-                for file in file_rows
+                for file in persisted_files
             ],
-            codec=row.get("codec"),
-            container=row.get("container"),
-            storage_format=row.get("storage_format"),
-            target_format=row.get("target_format"),
-            target_is_cbr=row.get("target_is_cbr"),
-            lineage_version=int(row.get("lineage_version") or 1),
+            codec=persisted.codec,
+            container=persisted.container,
+            storage_format=persisted.storage_format,
+            target_format=persisted.target_format,
+            target_is_cbr=persisted.target_is_cbr,
+            lineage_version=persisted.lineage_version,
             v0_metric=v0_metric,
-            on_disk_v0_research_attempted=bool(
-                row.get("on_disk_v0_research_attempted", False)
-            ),
-            current_enrichment_required=bool(
-                row["current_enrichment_required"]
-            ),
+            on_disk_v0_research_attempted=persisted.on_disk_v0_research_attempted,
+            current_enrichment_required=persisted.current_enrichment_required,
             verified_lossless_proof=proof,
-            audio_validation=msgspec.convert(
-                row["audio_validation"],
-                type=AudioValidationReport,
-            ),
-            audio_corrupt=bool(row.get("audio_corrupt", False)),
-            audio_error=row.get("audio_error"),
-            folder_layout=row.get("folder_layout") or "flat",
-            audio_file_count=int(row.get("audio_file_count") or 0),
-            filetype_band=row.get("filetype_band") or "",
-            matched_bad_audio_hash_id=(
-                int(row["matched_bad_audio_hash_id"])
-                if row.get("matched_bad_audio_hash_id") is not None
-                else None
-            ),
-            matched_bad_audio_hash_path=row.get("matched_bad_audio_hash_path"),
+            audio_validation=persisted.audio_validation,
+            audio_corrupt=persisted.audio_corrupt,
+            audio_error=persisted.audio_error,
+            folder_layout=persisted.folder_layout,
+            audio_file_count=persisted.audio_file_count,
+            filetype_band=persisted.filetype_band,
+            matched_bad_audio_hash_id=persisted.matched_bad_audio_hash_id,
+            matched_bad_audio_hash_path=persisted.matched_bad_audio_hash_path,
             aac_lattice=aac_lattice,
         )

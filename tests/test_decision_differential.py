@@ -23,6 +23,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import subprocess
 import sys
 import unittest
 from contextlib import redirect_stdout
@@ -334,18 +335,17 @@ class TestConfiguredTargetIsAnActionTimeFact(unittest.TestCase):
         ).fields
         self.assertEqual(decided["target_final_format"], "opus 128")
 
-    def test_the_cli_threads_the_target_through(self):
+    def test_decide_threads_the_target_through(self):
         with TemporaryDirectory() as d:
             corpus = Path(d) / "corpus.jsonl"
             out = Path(d) / "decided.jsonl"
             corpus.write_text(
                 json.dumps(_corpus_row()) + "\n", encoding="utf-8")
             self.assertEqual(
-                main([
-                    "decide", "--corpus", str(corpus), "--out", str(out),
-                    "--verified-lossless-target", "opus 128",
-                ]),
-                0,
+                decide_corpus(
+                    str(corpus), str(out), verified_lossless_target="opus 128"
+                ),
+                1,
             )
             decided = json.loads(out.read_text(encoding="utf-8").strip())
             self.assertEqual(
@@ -737,12 +737,8 @@ class TestCli(unittest.TestCase):
             ])
             base_out = root / "base-decided.jsonl"
             current_out = root / "current-decided.jsonl"
-            self.assertEqual(
-                main(["decide", "--corpus", str(base_corpus),
-                      "--out", str(base_out)]), 0)
-            self.assertEqual(
-                main(["decide", "--corpus", str(current_corpus),
-                      "--out", str(current_out)]), 0)
+            self.assertEqual(decide_corpus(str(base_corpus), str(base_out)), 1)
+            self.assertEqual(decide_corpus(str(current_corpus), str(current_out)), 1)
 
             buffer = io.StringIO()
             with redirect_stdout(buffer):
@@ -776,13 +772,59 @@ class TestCli(unittest.TestCase):
                 len(out.read_text(encoding="utf-8").strip().splitlines()), 3,
             )
 
-    def test_a_bad_corpus_exits_nonzero_without_a_traceback(self):
+    def test_decide_requires_a_verified_coverage_path(self):
         with TemporaryDirectory() as tmp:
             corpus = Path(tmp) / "corpus.jsonl"
             corpus.write_text("not json\n", encoding="utf-8")
-            self.assertEqual(
-                main(["decide", "--corpus", str(corpus)]), 1,
+            with self.assertRaises(SystemExit) as raised:
+                main(["decide", "--corpus", str(corpus)])
+            self.assertEqual(raised.exception.code, 2)
+
+    def test_coverage_conflict_debt_is_stable_across_hash_seeds(self):
+        """A set-backed conflicting mismatch must not perturb coverage bytes."""
+        child = '''
+import hashlib
+
+import msgspec
+
+from scripts.decision_differential import (
+    _CoverageObservedEvidence,
+    _CoverageSourceLink,
+    recompute_decision_corpus_coverage,
+)
+
+links = [
+    _CoverageSourceLink(
+        source="download_log", source_id=1, evidence_id=1, request_id=10,
+        request_exists=True, request_mb_release_id="release-z", current_evidence_id=2,
+        authority_reason=None,
+    ),
+    _CoverageSourceLink(
+        source="import_jobs", source_id=1, evidence_id=1, request_id=11,
+        request_exists=True, request_mb_release_id="release-a", current_evidence_id=3,
+        authority_reason=None,
+    ),
+]
+observed = [
+    _CoverageObservedEvidence(1, "candidate", "candidate", "candidate", "one"),
+    _CoverageObservedEvidence(2, "current-two", "current-two", "current-two", "two"),
+    _CoverageObservedEvidence(3, "current-three", "current-three", "current-three", "three"),
+]
+coverage = recompute_decision_corpus_coverage(links, observed, [], b"")
+print(hashlib.sha256(msgspec.json.encode(coverage)).hexdigest())
+'''
+        hashes: list[str] = []
+        for seed in ("1", "5"):
+            completed = subprocess.run(
+                [sys.executable, "-c", child],
+                check=True,
+                capture_output=True,
+                cwd=Path(__file__).parents[1],
+                env={**os.environ, "PYTHONHASHSEED": seed},
+                text=True,
             )
+            hashes.append(completed.stdout.strip())
+        self.assertEqual(hashes[0], hashes[1])
 
 
 if __name__ == "__main__":

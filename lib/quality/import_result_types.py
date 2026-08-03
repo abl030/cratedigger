@@ -450,6 +450,14 @@ class ImportResult(msgspec.Struct):
             sm = _legacy_json_dict(projected.get("source_measurement"))
             legacy_verified = bool(sm.pop("verified_lossless", False))
             projected["source_measurement"] = sm
+        for field_name in ("current_measurement", "materialized_measurement"):
+            raw_measurement = projected.get(field_name)
+            if not isinstance(raw_measurement, dict):
+                continue
+            measurement = _legacy_json_dict(projected.get(field_name))
+            # v2 put this source-only fact on every measurement object.
+            measurement.pop("verified_lossless", None)
+            projected[field_name] = measurement
         if legacy_verified:
             conversion = projected.get("conversion")
             original_filetype = (

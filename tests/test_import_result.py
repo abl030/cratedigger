@@ -32,6 +32,7 @@ from lib.quality import (
     VerifiedLosslessProof,
     parse_import_result,
 )
+from scripts.pipeline_cli.show import _render_import_result
 
 
 class TestImportResultConstruction(unittest.TestCase):
@@ -978,6 +979,40 @@ class TestImportResultProductionFixtures(unittest.TestCase):
         # Legacy projections are read-only and cannot spoof a new v4 row.
         with self.assertRaisesRegex(ValueError, "reserved for the v1/v2/v3 reader"):
             r.to_json()
+
+    def test_live_v2_materialized_measurement_verified_lossless_projects(self):
+        """The exact live v2 cohort keeps structured history under strict v4 reads."""
+        for download_log_id in (36934, 36944, 36945, 36948, 36951, 36955):
+            with self.subTest(download_log_id=download_log_id):
+                result = ImportResult.from_dict({
+                    "version": 2, "decision": "import", "conversion": {},
+                    "new_measurement": None, "existing_measurement": None,
+                    "materialized_measurement": {
+                        "min_bitrate_kbps": 128, "avg_bitrate_kbps": 128,
+                        "median_bitrate_kbps": 128, "format": "OPUS",
+                        "is_cbr": False, "spectral_grade": None,
+                        "spectral_bitrate_kbps": None, "verified_lossless": False,
+                        "was_converted_from": "flac",
+                    },
+                })
+                assert result.materialized_measurement is not None
+                self.assertEqual(result.materialized_measurement.format, "OPUS")
+                self.assertEqual(result.legacy_projection_version, 2)
+
+    def test_live_v2_materialized_measurement_reaches_cli_history(self):
+        """``pipeline-cli show`` still renders the restored historical output."""
+        lines = _render_import_result({
+            "version": 2, "decision": "import", "conversion": {},
+            "new_measurement": None, "existing_measurement": None,
+            "materialized_measurement": {
+                "min_bitrate_kbps": 128, "avg_bitrate_kbps": 128,
+                "median_bitrate_kbps": 128, "format": "OPUS",
+                "is_cbr": False, "spectral_grade": None,
+                "spectral_bitrate_kbps": None, "verified_lossless": False,
+                "was_converted_from": "flac",
+            },
+        })
+        self.assertIn("      materialized: 128kbps, from flac", lines)
 
     def test_production_v2_with_moved_siblings_roundtrip(self):
         """v2 row with populated moved_siblings. Same row schema, but the

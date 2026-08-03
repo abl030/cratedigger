@@ -42,7 +42,9 @@ AudioToolDiagnosticCategory = Literal[
 ]
 
 
-class AudioToolDiagnostic(msgspec.Struct, frozen=True):
+class AudioToolDiagnostic(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True
+):
     """One bounded abnormal result from an audio tool or filesystem seam."""
 
     relative_path: str
@@ -54,7 +56,9 @@ class AudioToolDiagnostic(msgspec.Struct, frozen=True):
     stderr_truncated: bool = False
 
 
-class AudioValidationReport(msgspec.Struct, frozen=True):
+class AudioValidationReport(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True
+):
     """Canonical persisted audit for one album-level validation attempt."""
 
     policy_id: str = AUDIO_VALIDATION_POLICY_ID

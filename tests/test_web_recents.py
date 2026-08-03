@@ -1486,6 +1486,25 @@ class TestExceptionVerdicts(unittest.TestCase):
 
 class TestDownloadedLabel(unittest.TestCase):
 
+    def test_live_v2_materialized_measurement_stays_in_recents(self):
+        """The live v2 cohort's legacy source flag cannot erase its output."""
+        result = classify_log_entry(_entry(
+            outcome="force_import",
+            import_result={
+                "version": 2, "decision": "import", "conversion": {},
+                "new_measurement": None, "existing_measurement": None,
+                "materialized_measurement": {
+                    "min_bitrate_kbps": 128, "avg_bitrate_kbps": 128,
+                    "median_bitrate_kbps": 128, "format": "OPUS",
+                    "is_cbr": False, "spectral_grade": None,
+                    "spectral_bitrate_kbps": None, "verified_lossless": False,
+                    "was_converted_from": "flac",
+                },
+            },
+        ))
+        self.assertEqual(result.materialized_format, "OPUS")
+        self.assertEqual(result.materialized_avg_bitrate, 128)
+
     def test_gas_materialized_output_stays_separate_from_v0_proxy(self):
         """The source, target contract, and output codec/bitrates are three
         separate facts; no Opus label may sit beside the MP3 V0 proxy 191k.
