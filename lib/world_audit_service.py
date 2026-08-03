@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import closing
 from typing import TYPE_CHECKING, Any, Literal, Never, Protocol, runtime_checkable
@@ -17,6 +16,7 @@ from lib.beets_db import (
     CurrentBeetsAmbiguous,
     CurrentBeetsResolution,
     CurrentBeetsUnique,
+    beets_authority_availability_category,
 )
 from lib.quality import AlbumQualityEvidence
 from lib.quality_evidence import snapshot_audio_files, snapshot_fingerprint
@@ -139,38 +139,8 @@ class _BeetsQueryUnavailable(Exception):
         self.category = category
 
 
-_SQLITE_AUTHORITY_AVAILABILITY_CODES = frozenset({
-    sqlite3.SQLITE_AUTH,
-    sqlite3.SQLITE_BUSY,
-    sqlite3.SQLITE_CANTOPEN,
-    sqlite3.SQLITE_IOERR,
-    sqlite3.SQLITE_LOCKED,
-    sqlite3.SQLITE_PERM,
-})
-
-
-def _beets_authority_availability_category(exc: Exception) -> str | None:
-    if isinstance(exc, FileNotFoundError):
-        return "FileNotFoundError"
-    if isinstance(exc, PermissionError):
-        return "PermissionError"
-    # SQLite maps some authority failures to broader DatabaseError subclasses:
-    # notably SQLITE_AUTH is DatabaseError rather than OperationalError.  The
-    # whitelisted primary result code is the authority boundary, not the
-    # Python subclass selected by sqlite3.
-    if not isinstance(exc, sqlite3.DatabaseError):
-        return None
-    raw_code = getattr(exc, "sqlite_errorcode", None)
-    if not isinstance(raw_code, int):
-        return None
-    primary_code = raw_code & 0xFF
-    if primary_code not in _SQLITE_AUTHORITY_AVAILABILITY_CODES:
-        return None
-    return f"sqlite_{primary_code}"
-
-
 def _translate_beets_query_failure(exc: Exception) -> Never:
-    category = _beets_authority_availability_category(exc)
+    category = beets_authority_availability_category(exc)
     if category is None:
         raise exc
     raise _BeetsQueryUnavailable(category) from exc
@@ -455,7 +425,7 @@ def _open_beets_authority(
     try:
         return beets_factory()
     except Exception as exc:
-        category = _beets_authority_availability_category(exc)
+        category = beets_authority_availability_category(exc)
         if category is None:
             raise
         return BeetsAuthorityUnavailable(category=category)

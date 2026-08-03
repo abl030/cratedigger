@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import unittest
 
 import msgspec
@@ -10,6 +11,7 @@ from hypothesis import example, given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
+from lib.beets_db import CurrentBeetsResolution
 from lib.current_library_display import (
     CurrentLibraryDisplay,
     CurrentLibraryUnavailableDisplay,
@@ -20,6 +22,7 @@ from lib.current_library_display import (
 from lib.release_identity import ConflictingReleaseIdentityError, ReleaseIdentity
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_request_row
+from tests.web._harness import _FakeDbWebServerCase
 from web.library_album_detail_service import (
     LibraryAlbumDetail,
     load_library_album_detail,
@@ -32,6 +35,9 @@ from web.library_artist_service import build_library_artist_rows
 
 MB_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 DISCOGS_ID = "12856590"
+AUTHORITY_ERROR = {
+    "error": "Current Beets authority is unavailable; retry later.",
+}
 
 
 def assert_display_authority(
@@ -48,6 +54,35 @@ def assert_display_authority(
     actual_path = getattr(display, "path", None)
     if actual_path != expected_path:
         raise AssertionError("display path did not come from fresh Beets authority")
+
+
+def assert_failed_beets_read_has_no_display(
+    status: int,
+    payload: dict[str, object],
+    *,
+    expected_status: int,
+) -> None:
+    """Executable law: a failed authority read cannot manufacture a row."""
+
+    if status != expected_status:
+        raise AssertionError(
+            f"Beets read failure returned {status}, expected {expected_status}"
+        )
+    if "current_library" in payload or "beets_tracks" in payload:
+        raise AssertionError("Beets read failure manufactured library state")
+
+
+class _GeneratedFailingResolver(FakeBeetsDB):
+    def __init__(self, exc: Exception) -> None:
+        super().__init__()
+        self._exc = exc
+
+    def resolve_current_release(
+        self,
+        identity: ReleaseIdentity,
+    ) -> CurrentBeetsResolution:
+        self.resolve_current_release_calls.append(identity)
+        raise self._exc
 
 
 def assert_independent_library_facts(
@@ -224,6 +259,80 @@ class TestCurrentLibraryDisplayGenerated(unittest.TestCase):
                 expected_state="unique",
                 expected_path="/library/current",
             )
+
+    def test_failed_read_checker_rejects_fabricated_unavailable_mutant(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(AssertionError, "returned 200"):
+            assert_failed_beets_read_has_no_display(
+                200,
+                {
+                    "current_library": {
+                        "state": "unavailable",
+                        "reason": "beets_unavailable",
+                    },
+                },
+                expected_status=503,
+            )
+
+
+class TestCurrentLibraryFailureRouteGenerated(_FakeDbWebServerCase):
+    @given(
+        failure_kind=st.sampled_from((
+            "oserror",
+            "sqlite_busy",
+            "sqlite_locked",
+            "resolver_defect",
+        )),
+    )
+    @example(failure_kind="oserror")
+    def test_failed_beets_reads_never_emit_current_library_state(
+        self,
+        failure_kind: str,
+    ) -> None:
+        import web.server as srv
+
+        if failure_kind == "oserror":
+            exc: Exception = OSError("generated authority read failure")
+            expected_status = 503
+        elif failure_kind == "resolver_defect":
+            exc = RuntimeError("generated resolver defect")
+            expected_status = 500
+        else:
+            code = (
+                sqlite3.SQLITE_BUSY
+                if failure_kind == "sqlite_busy"
+                else sqlite3.SQLITE_LOCKED
+            )
+            exc = sqlite3.OperationalError("generated SQLite availability failure")
+            exc.sqlite_errorcode = code
+            expected_status = 503
+
+        self.db.seed_request(make_request_row(
+            id=90,
+            status="imported",
+            mb_release_id=MB_ID,
+        ))
+        prior_beets = srv._beets
+        failing_beets = _GeneratedFailingResolver(exc)
+        srv._beets = failing_beets
+        try:
+            with self.assertLogs(level="ERROR"):
+                status, payload = self._get("/api/pipeline/90")
+        finally:
+            srv._beets = prior_beets
+
+        assert_failed_beets_read_has_no_display(
+            status,
+            payload,
+            expected_status=expected_status,
+        )
+        if expected_status == 503:
+            self.assertEqual(payload, AUTHORITY_ERROR)
+        else:
+            self.assertEqual(payload, {"error": "Internal server error"})
+        self.assertEqual(self.db.request(90)["status"], "imported")
+        self.assertEqual(len(failing_beets.resolve_current_release_calls), 1)
 
 
 class TestIndependentLibraryFactsGenerated(unittest.TestCase):

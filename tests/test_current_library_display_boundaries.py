@@ -67,6 +67,15 @@ class _FailingResolverBeets(FakeBeetsDB):
         raise OSError("synthetic Beets read failure")
 
 
+class _DefectiveResolverBeets(FakeBeetsDB):
+    def resolve_current_release(
+        self,
+        identity: ReleaseIdentity,
+    ) -> CurrentBeetsResolution:
+        self.resolve_current_release_calls.append(identity)
+        raise RuntimeError("synthetic resolver defect")
+
+
 def _fail_open_beets(
     *,
     path: str | None,
@@ -379,7 +388,7 @@ class TestCurrentLibraryApiRealBeets(_FakeDbWebServerCase):
         self.assertEqual(len(ambiguous["current_library"]["album_ids"]), 2)
         self.assertNotIn("beets_tracks", ambiguous)
 
-    def test_api_open_and_resolver_failures_are_typed_unavailable(self) -> None:
+    def test_api_open_and_resolver_failures_return_503_without_a_row(self) -> None:
         import web.server as srv
 
         self.db.seed_request(_request(40, MB_TARGET))
@@ -389,34 +398,50 @@ class TestCurrentLibraryApiRealBeets(_FakeDbWebServerCase):
             srv.beets_db_path = invalid_database_path
             srv.beets_library_root = invalid_database_path
             try:
-                status, open_failure = self._get("/api/pipeline/40")
+                with self.assertLogs("web.routes.pipeline", level="ERROR"):
+                    status, open_failure = self._get("/api/pipeline/40")
             finally:
                 srv._beets, srv.beets_db_path, srv.beets_library_root = prior
 
-        self.assertEqual(status, 200)
-        self.assertEqual(open_failure["current_library"], {
-            "state": "unavailable",
-            "reason": "beets_unavailable",
-            "manual_review": True,
+        self.assertEqual(status, 503)
+        self.assertEqual(open_failure, {
+            "error": "Current Beets authority is unavailable; retry later.",
         })
-        self.assertNotIn("beets_tracks", open_failure)
 
         prior_beets = srv._beets
         failing_beets = _FailingResolverBeets()
         srv._beets = failing_beets
         try:
-            status, read_failure = self._get("/api/pipeline/40")
+            with self.assertLogs("web.routes.pipeline", level="ERROR"):
+                status, read_failure = self._get("/api/pipeline/40")
         finally:
             srv._beets = prior_beets
 
-        self.assertEqual(status, 200)
-        self.assertEqual(read_failure["current_library"], {
-            "state": "unavailable",
-            "reason": "beets_unavailable",
-            "manual_review": True,
+        self.assertEqual(status, 503)
+        self.assertEqual(read_failure, {
+            "error": "Current Beets authority is unavailable; retry later.",
         })
-        self.assertNotIn("beets_tracks", read_failure)
         self.assertEqual(len(failing_beets.resolve_current_release_calls), 1)
+        self.assertEqual(self.db.request(40)["status"], "imported")
+
+    def test_api_resolver_defects_remain_internal_errors(self) -> None:
+        import web.server as srv
+
+        self.db.seed_request(_request(41, MB_TARGET))
+        prior_beets = srv._beets
+        defective_beets = _DefectiveResolverBeets()
+        srv._beets = defective_beets
+        try:
+            with self.assertLogs("cratedigger-web", level="ERROR"):
+                status, failure = self._get("/api/pipeline/41")
+        finally:
+            srv._beets = prior_beets
+
+        self.assertEqual(status, 500)
+        self.assertEqual(failure, {"error": "Internal server error"})
+        self.assertNotIn("current_library", failure)
+        self.assertEqual(len(defective_beets.resolve_current_release_calls), 1)
+        self.assertEqual(self.db.request(41)["status"], "imported")
 
     def test_api_projects_one_snapshot_for_every_request_layout(self) -> None:
         import web.server as srv

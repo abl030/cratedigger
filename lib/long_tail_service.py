@@ -57,6 +57,7 @@ from lib.banding import (
     CurrentBeetsBandingIdentityError,
     CurrentBeetsBandingUnavailableError,
 )
+from lib.beets_db import beets_authority_availability_category
 from lib.release_identity import (
     ConflictingReleaseIdentityError,
     ReleaseIdentity,
@@ -119,12 +120,10 @@ def classify_long_tail_failure(exc: Exception) -> LongTailPublicError | None:
     failures and unrelated exceptions intentionally return ``None`` so the
     route keeps its generic 500 and the CLI preserves the original exception.
     """
-    from lib.world_audit_service import _beets_authority_availability_category
-
     if isinstance(exc, (
         CurrentBeetsBandingUnavailableError,
         LongTailBandingUnavailableError,
-    )) or _beets_authority_availability_category(exc) is not None:
+    )) or beets_authority_availability_category(exc) is not None:
         return _LONG_TAIL_AUTHORITY_UNAVAILABLE
     if isinstance(exc, (
         CurrentBeetsBandingAmbiguityError,
