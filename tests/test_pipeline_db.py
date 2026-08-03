@@ -61,6 +61,7 @@ from lib.quality import (
     AudioQualityMeasurement,
     AudioToolDiagnostic,
     AudioValidationReport,
+    CdRipBitVerification,
     legacy_unrecorded_audio_validation_report,
 )
 from tests.fakes import FakePipelineDB
@@ -14727,6 +14728,7 @@ class TestListRequestsByArtistProjection(unittest.TestCase):
         mbid: str,
         *,
         verified: bool,
+        cd_rip: CdRipBitVerification | None = None,
     ) -> None:
         from lib.quality import AlbumQualityV0Metric, VerifiedLosslessProof
 
@@ -14748,13 +14750,15 @@ class TestListRequestsByArtistProjection(unittest.TestCase):
                 )
             ),
             verified_lossless_proof=(
-                VerifiedLosslessProof(
+                cd_rip.verified_lossless_proof()
+                if cd_rip is not None else VerifiedLosslessProof(
                     provenance="carried",
                     source="flac",
                     classifier="spectral_verified_lossless",
                 )
                 if verified else None
             ),
+            cd_rip_verification=cd_rip,
         )
         db.upsert_album_quality_evidence(evidence)
         stored = db.find_album_quality_evidence(
@@ -14820,6 +14824,47 @@ class TestListRequestsByArtistProjection(unittest.TestCase):
         self.assertFalse(by_title["Evidence only"]["has_captured_history"])
         self.assertTrue(by_title["Evidence only"]["verified_lossless"])
         self.assertFalse(by_title["Evidence only"]["provisional_lossless"])
+
+    def test_projects_cd_proof_from_exact_current_evidence_join(self) -> None:
+        from lib.quality import CdTocIdentity, CtdbWholeDiscMatch
+
+        request_id = self.db.add_request(
+            mb_release_id="artist-projection-cd-proof",
+            artist_name="Projection Artist",
+            album_title="Exact CD proof",
+            source="request",
+            status="imported",
+        )
+        cd_rip = CdRipBitVerification(
+            provenance="carried",
+            toc=CdTocIdentity([0], 470, "ar-id", "mb-disc-id"),
+            ctdb=CtdbWholeDiscMatch(
+                provider="ctdb",
+                url="https://db.cue.tools/lookup2.php",
+                entry_id="ctdb-6",
+                confidence=6,
+                crc32=0x12345678,
+                stride_samples=5880,
+                response_toc_sectors=[0, 470],
+                response_toc_shift_sectors=0,
+                response_sha256="a" * 64,
+            ),
+        )
+        self._link_evidence(
+            self.db,
+            request_id,
+            "artist-projection-cd-proof",
+            verified=True,
+            cd_rip=cd_rip,
+        )
+
+        rows = self.db.list_requests_by_artist("Projection Artist")
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["cd_rip_verification"], cd_rip)
+        projected = rows[0]["cd_rip_verification"]
+        assert projected is not None and projected.ctdb is not None
+        self.assertEqual(projected.ctdb.confidence, 6)
 
     def test_artist_projection_fake_parity(self):
         fake = FakePipelineDB()

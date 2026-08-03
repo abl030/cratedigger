@@ -8,6 +8,7 @@ import {
   renderEvidenceStrip as renderEvidenceFixture,
   __test__,
 } from '../web/js/history.js';
+import { validCtdbProof } from './fixtures/cd_rip_proof.mjs';
 import { readFileSync } from 'node:fs';
 const {
   formatV0Probe, formatSpectral, spectralChip, spectralGradeIsAdmissible,
@@ -1865,6 +1866,31 @@ console.log('renderDownloadHistoryItem() names the proof generation');
     'the proof-generation row renders');
   assertContains(html, 'proved by cliff/grade + ultrasonic legs',
     'the generation label renders verbatim');
+}
+
+console.log('renderDownloadHistoryItem() explains a skipped spectral pass with CD proof');
+{
+  const html = renderDownloadHistoryFixture({
+    outcome: 'success',
+    soulseek_username: 'testuser',
+    created_at: '2026-08-01T02:10:00+00:00',
+    verdict: 'Imported',
+    spectral_attempted: false,
+    existing_spectral_grade: 'genuine',
+    existing_spectral_bitrate: 210,
+    verified_lossless_generation: 'exact CD rip bit match',
+    cd_rip_verification: validCtdbProof(),
+  });
+  assertContains(html, 'CD bit-verified · CTDB confidence 24',
+    'the provider-attributable positive proof is visible');
+  assertContains(html, '<span class="r-ev-tag">IN</span> not needed — CD bit match',
+    'the candidate spectral side explains why measurement did not run');
+  assertContains(html, '<span class="r-ev-tag">HAVE</span>',
+    'the existing side remains present');
+  assertContains(html, 'genuine',
+    'the existing spectral measurement is unchanged');
+  assertExcludes(html, '<span class="r-ev-tag">IN</span> unmeasured',
+    'the CD-proved candidate is not called unmeasured');
 }
 
 console.log('renderDownloadHistoryItem() surfaces the stage-2 counterfactual');

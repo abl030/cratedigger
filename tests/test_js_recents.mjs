@@ -5,6 +5,7 @@
 
 import { __test__ } from '../web/js/recents.js';
 import { state } from '../web/js/state.js';
+import { validCtdbProof } from './fixtures/cd_rip_proof.mjs';
 
 const { renderRecentsItems: renderRecentsFixture } = __test__;
 
@@ -128,6 +129,38 @@ console.log('renderRecentsItems() carries the detailed convergence action once')
     'Recents renders one detailed convergence prompt');
   assertContains(html, '&quot;recents&quot;',
     'Recents action carries its refresh origin');
+}
+
+console.log('renderRecentsItems() shows attributable positive CD proof');
+{
+  const html = renderRecentsFixture([{
+    id: 39293,
+    request_id: 421,
+    created_at: '2026-08-03T12:00:00+00:00',
+    album_title: 'Jamaica Soul Shake Vol.1',
+    artist_name: 'Sound Dimension',
+    badge: 'Imported',
+    badge_class: 'badge-new',
+    border_color: '#1a4a2a',
+    summary: 'FLAC · exact CD rip bit match',
+    cd_rip_verification: validCtdbProof(),
+  }]);
+  assertContains(html, 'CD bit-verified · CTDB confidence 24',
+    'the collapsed Recents row names the positive provider proof');
+
+  const absent = renderRecentsFixture([{
+    id: 39294,
+    request_id: 422,
+    created_at: '2026-08-03T12:01:00+00:00',
+    album_title: 'Ordinary row',
+    artist_name: 'Artist',
+    badge: 'Imported',
+    badge_class: 'badge-new',
+    border_color: '#1a4a2a',
+    summary: 'MP3 320',
+  }]);
+  assertExcludes(absent, 'CD bit-verified',
+    'absence creates no failed or negative verification label');
 }
 
 console.log('recentsLogUrl() requests enough history for triage labels');

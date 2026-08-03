@@ -6076,7 +6076,9 @@ class FakePipelineDB:
                     r.get("search_filetype_override"),
                 "target_format": r.get("target_format"),
                 "min_bitrate": r.get("min_bitrate"),
-                **facts,
+                "has_captured_history": facts["has_captured_history"],
+                "verified_lossless": facts["verified_lossless"],
+                "provisional_lossless": facts["provisional_lossless"],
                 "processing_owner": self._request_presentation_copy(
                     r
                 )["processing_owner"],
@@ -6341,7 +6343,7 @@ class FakePipelineDB:
     def _capture_and_evidence_projection(
         self,
         row: Mapping[str, object],
-    ) -> dict[str, bool]:
+    ) -> dict[str, object]:
         """Mirror the two specialized request SELECTs' correlated facts."""
         request_id = row.get("id")
         has_captured_history = row.get("status") == "imported"
@@ -6378,6 +6380,9 @@ class FakePipelineDB:
             "has_captured_history": has_captured_history,
             "verified_lossless": verified_lossless,
             "provisional_lossless": provisional_lossless,
+            "cd_rip_verification": (
+                evidence.cd_rip_verification if evidence is not None else None
+            ),
         }
 
     def _long_tail_projection(self, row: dict[str, Any]) -> dict[str, Any]:

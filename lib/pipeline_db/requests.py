@@ -65,6 +65,8 @@ _CAPTURE_AND_EVIDENCE_SELECT = """
     ) AS has_captured_history,
     COALESCE(current_evidence.verified_lossless, FALSE)
         AS _linked_verified_lossless,
+    current_evidence.cd_rip_verification
+        AS _linked_cd_rip_verification,
     (
         COALESCE(current_evidence.v0_subject, '') = 'source'
         AND NOT COALESCE(current_evidence.verified_lossless, FALSE)
@@ -142,15 +144,25 @@ class _RequestsMixin(_PipelineDBBase):
     ) -> ArtistRequestRow:
         """Validate one artist-view request and its specialized facts."""
         row = cls._request_presentation_row(raw)
-        return msgspec.convert(
+        projected = msgspec.convert(
             {
                 **row,
                 "has_captured_history": raw["has_captured_history"],
                 "verified_lossless": raw["_linked_verified_lossless"],
                 "provisional_lossless": raw["provisional_lossless"],
+                "cd_rip_verification": raw[
+                    "_linked_cd_rip_verification"
+                ],
             },
             type=ArtistRequestRow,
         )
+        cd_rip = projected["cd_rip_verification"]
+        if cd_rip is not None and (errors := cd_rip.validation_errors()):
+            raise ValueError(
+                "linked current CD-rip verification is invalid: "
+                + "; ".join(errors)
+            )
+        return projected
 
     def add_request(
         self,
