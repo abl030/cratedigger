@@ -11,6 +11,7 @@ import { invalidateBrowseArtist } from './browse.js';
 import { applyAnalysisToExpansion } from './analysis.js';
 import { renderLabelLinks } from './labels.js';
 import { renderSearchPlanButton } from './search_plan.js';
+import { convergenceBadge } from './convergence.js';
 import { loadActiveRgs, hasActiveRg, invalidateActiveRgs } from './active_rgs.js';
 import {
   renderReleaseRow, renderBeetsTrackRow, renderExpectedTrackRow, toggleExpand,
@@ -245,6 +246,7 @@ export function synthesizeMasterlessRow(data) {
     has_captured_history: data.has_captured_history,
     pipeline_verified_lossless: data.pipeline_verified_lossless,
     pipeline_provisional: data.pipeline_provisional,
+    convergence: data.convergence ?? null,
     library_format: data.library_format,
     library_min_bitrate: data.library_min_bitrate,
     library_avg_bitrate: data.library_avg_bitrate,
@@ -379,7 +381,7 @@ export function renderPressingRow(rel, ctx) {
   return renderReleaseRow({
     dataReleaseId: rel.id,
     onclick: `event.stopPropagation(); window.toggleReleaseDetail(${jsArg(rel.id)})`,
-    titleHtml: `${esc(rel.title)}${statusChipHtml(rel.status)}${badges}`,
+    titleHtml: `${esc(rel.title)}${statusChipHtml(rel.status)}${badges}${convergenceBadge(rel.convergence)}`,
     metaLines: [`${esc(rel.country || '?')} ${esc(rel.date || '?')} - ${esc(rel.format)} - ${esc(rel.track_count)}t - ${esc(rel.status || '?')}`],
     actionsHtml: `${toolbar}${replaceBtn}${spBtn}`,
     detail: { id: `reldet-${rel.id}` },

@@ -33,7 +33,14 @@ def _allowed_fields_by_surface() -> dict[str, set[str]]:
     return {
         "pipeline_log": (
             typed_fields
-            | {"in_beets", "beets_format", "beets_bitrate", "beets_avg_bitrate"}
+            | {
+                "in_beets",
+                "beets_format",
+                "beets_bitrate",
+                "beets_avg_bitrate",
+                # Appended by the pipeline-log route after classification.
+                "convergence",
+            }
         ),
         "download_history": history_fields,
     }

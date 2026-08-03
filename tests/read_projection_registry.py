@@ -620,6 +620,9 @@ ALLOWLIST: dict[str, str] = {
     "find_album_quality_evidence":
         "typed AlbumQualityEvidence Struct return — validated at the "
         "msgspec boundary",
+    "get_convergence_signals":
+        "dict[int, ConvergenceSignal] — typed msgspec Struct values; the "
+        "raw aggregate projection is converted before crossing the boundary",
     # --- Scalar returns ---
     "get_cooled_down_users":
         "list[str] usernames — scalar, no row projection",

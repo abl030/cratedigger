@@ -18,6 +18,9 @@ import { renderDownloadHistoryItem } from './history.js';
 import {
   renderBeetsTrackRow, renderDetailRow, renderExternalLinkRow, toggleExpand,
 } from './render_primitives.js';
+import {
+  convergenceBadge, renderConvergencePrompt,
+} from './convergence.js';
 
 
 function refreshAfterBeetsDeletion(albumId) {
@@ -113,7 +116,7 @@ export function renderLibraryAlbumRow(a) {
     <div class="lib-item" onclick="${detailToggle}">
       <div class="p-top">
         <div>
-          <div class="p-title">${esc(a.album)}${badges}</div>
+          <div class="p-title">${esc(a.album)}${badges}${convergenceBadge(a.convergence)}</div>
         </div>
         <div style="display:flex;align-items:center;gap:6px;">
           ${toolbar}
@@ -182,6 +185,9 @@ export function renderLibraryDetailBody(data, id) {
     const releaseId = normalizeReleaseId(data.mb_albumid);
     const releaseArg = jsArg(releaseId);
     let html = '';
+    html += renderConvergencePrompt(
+      data.convergence, data.pipeline_status, 'library-detail',
+    );
     if (data.path) {
       html += renderDetailRow('Path', esc(data.path), { valueStyle: 'font-size:0.85em;word-break:break-all;' });
     }
@@ -207,11 +213,15 @@ export function renderLibraryDetailBody(data, id) {
     // Pipeline controls (status + quality override)
     if (releaseId && data.pipeline_id) {
       const pStatus = data.pipeline_status || '';
+      const convergenceStopActive = Boolean(
+        data.convergence && pStatus === 'wanted',
+      );
       const processing = processingOwnerPresentation(
         pStatus,
         data.processing_owner ?? null,
       );
-      html += `<div class="p-actions" style="margin-top:10px;">
+      if (!convergenceStopActive) {
+        html += `<div class="p-actions" style="margin-top:10px;">
         <span class="p-detail-label" style="line-height:28px;">Status:</span>
         ${renderLibraryStatusButtons(
           releaseArg,
@@ -219,39 +229,40 @@ export function renderLibraryDetailBody(data, id) {
           data.processing_owner ?? null,
           data.pipeline_id,
         )}
-      </div>`;
-      const currentIntent = overrideToIntent(data.target_format);
-      if (processing) {
-        html += `<div class="p-actions" style="margin-top:6px;">
-          <span class="p-detail-label" style="line-height:28px;">Min bitrate:</span>
-          ${renderProcessingLockedControl(processing, data.pipeline_id, {
-            className: 'p-btn',
-            label: 'Set',
-            descriptionSuffix: 'library-quality',
-          })}
         </div>`;
-        html += `<div class="p-actions" style="margin-top:6px;">
-          <span class="p-detail-label" style="line-height:28px;">Intent:</span>
-          ${renderProcessingLockedControl(processing, data.pipeline_id, {
-            className: 'p-btn',
-            label: currentIntent === 'lossless' ? 'Lossless' : 'Default',
-            descriptionSuffix: 'library-intent',
-          })}
-        </div>`;
-      } else {
-        html += `<div class="p-actions" style="margin-top:6px;">
-          <span class="p-detail-label" style="line-height:28px;">Min bitrate:</span>
-          <input type="number" id="lib-minbr-${id}" value="" placeholder="${data.pipeline_min_bitrate || ''}" style="width:60px;padding:2px 6px;background:#222;color:#eee;border:1px solid #444;border-radius:4px;font-size:0.8em;" onclick="event.stopPropagation()">
-          <button class="p-btn" data-pipeline-request-id="${data.pipeline_id}" onclick="event.stopPropagation(); var v=document.getElementById('lib-minbr-${id}').value; if(v) window.setLibQuality(${releaseArg}, null, parseInt(v))">Set</button>
-          <button class="p-btn" data-pipeline-request-id="${data.pipeline_id}" onclick="event.stopPropagation(); window.setLibQuality(${releaseArg}, 'imported', null)">Accept</button>
-        </div>`;
-        html += `<div class="p-actions" style="margin-top:6px;">
-          <span class="p-detail-label" style="line-height:28px;">Intent:</span>
-          <select id="lib-intent-${id}" data-pipeline-request-id="${data.pipeline_id}" style="padding:2px 6px;background:#222;color:#eee;border:1px solid #444;border-radius:4px;font-size:0.8em;" onclick="event.stopPropagation()" onchange="event.stopPropagation(); window.setIntent(${data.pipeline_id}, this.value)">
-            <option value="default"${currentIntent === 'default' ? ' selected' : ''}>Default</option>
-            <option value="lossless"${currentIntent === 'lossless' ? ' selected' : ''}>Lossless</option>
-          </select>
-        </div>`;
+        const currentIntent = overrideToIntent(data.target_format);
+        if (processing) {
+          html += `<div class="p-actions" style="margin-top:6px;">
+            <span class="p-detail-label" style="line-height:28px;">Min bitrate:</span>
+            ${renderProcessingLockedControl(processing, data.pipeline_id, {
+              className: 'p-btn',
+              label: 'Set',
+              descriptionSuffix: 'library-quality',
+            })}
+          </div>`;
+          html += `<div class="p-actions" style="margin-top:6px;">
+            <span class="p-detail-label" style="line-height:28px;">Intent:</span>
+            ${renderProcessingLockedControl(processing, data.pipeline_id, {
+              className: 'p-btn',
+              label: currentIntent === 'lossless' ? 'Lossless' : 'Default',
+              descriptionSuffix: 'library-intent',
+            })}
+          </div>`;
+        } else {
+          html += `<div class="p-actions" style="margin-top:6px;">
+            <span class="p-detail-label" style="line-height:28px;">Min bitrate:</span>
+            <input type="number" id="lib-minbr-${id}" value="" placeholder="${data.pipeline_min_bitrate || ''}" style="width:60px;padding:2px 6px;background:#222;color:#eee;border:1px solid #444;border-radius:4px;font-size:0.8em;" onclick="event.stopPropagation()">
+            <button class="p-btn" data-pipeline-request-id="${data.pipeline_id}" onclick="event.stopPropagation(); var v=document.getElementById('lib-minbr-${id}').value; if(v) window.setLibQuality(${releaseArg}, null, parseInt(v))">Set</button>
+            <button class="p-btn" data-pipeline-request-id="${data.pipeline_id}" onclick="event.stopPropagation(); window.setLibQuality(${releaseArg}, 'imported', null)">Accept</button>
+          </div>`;
+          html += `<div class="p-actions" style="margin-top:6px;">
+            <span class="p-detail-label" style="line-height:28px;">Intent:</span>
+            <select id="lib-intent-${id}" data-pipeline-request-id="${data.pipeline_id}" style="padding:2px 6px;background:#222;color:#eee;border:1px solid #444;border-radius:4px;font-size:0.8em;" onclick="event.stopPropagation()" onchange="event.stopPropagation(); window.setIntent(${data.pipeline_id}, this.value)">
+              <option value="default"${currentIntent === 'default' ? ' selected' : ''}>Default</option>
+              <option value="lossless"${currentIntent === 'lossless' ? ' selected' : ''}>Lossless</option>
+            </select>
+          </div>`;
+        }
       }
     }
     const actionState = buildReleaseActionState({

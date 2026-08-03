@@ -8,6 +8,7 @@ import {
   catalogueDomId,
   releaseGroupRequestPath,
   renderPressingRow,
+  renderReleaseDetail,
   renderRgRow,
   synthesizeMasterlessRow,
   splitPressings,
@@ -122,6 +123,51 @@ console.log('synthesizeMasterlessRow() — exact processing owner survives synth
   assertContains(html, 'previewing', 'pressing action consumes canonical owner label');
   assertContains(html, '/api/import-jobs/8839/recovery', 'pressing links exact owner recovery detail');
   assertExcludes(html, 'window.disambRemove', 'processing pressing cannot remove request');
+}
+
+console.log('Convergence signal — exact pressing badge without duplicate detail action');
+{
+  const convergence = {
+    request_id: 1240,
+    latest_qualifying_log_id: 39278,
+    cliff_hz: 15000,
+    observation_count: 17,
+    distinct_peer_count: 17,
+    distinct_candidate_snapshot_count: 14,
+    distinct_codec_count: 3,
+    raw_cliff_min_hz: 14780,
+    raw_cliff_max_hz: 15220,
+    cliff_spread_hz: 440,
+    signal_token: 'a'.repeat(64),
+  };
+  const row = {
+    id: 'exact-release',
+    title: 'The Creek Drank the Cradle',
+    status: 'Official',
+    in_library: true,
+    beets_album_id: 11582,
+    pipeline_status: 'wanted',
+    pipeline_id: 1240,
+    pipeline_provisional: true,
+    country: 'US',
+    date: '2002-09-24',
+    format: 'CD',
+    track_count: 11,
+    convergence,
+  };
+  const pressingHtml = renderPressingRow(row, {
+    artistName: 'Iron & Wine',
+    parentRgId: 'release-group',
+    canReplace: true,
+  });
+  assertContains(pressingHtml, 'search converged', 'exact pressing carries the distinct badge');
+
+  const target = { innerHTML: '' };
+  renderReleaseDetail(target, row.id, { ...row, tracks: [] });
+  assertExcludes(target.innerHTML, 'Search appears converged',
+    'Browse release detail does not duplicate the Library/Recents prompt');
+  assertExcludes(target.innerHTML, 'window.stopConvergedSearch',
+    'Browse release detail has no second stop action');
 }
 
 console.log('addRelease() — processing exists response exposes exact owner recovery');

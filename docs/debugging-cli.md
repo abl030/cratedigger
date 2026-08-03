@@ -186,7 +186,20 @@ inside socket authorization, never credentials.
 - `pipeline-cli status` — Show request counts by lifecycle status.
 - `pipeline-cli triage list` — List a named triage cohort.
 - `pipeline-cli triage quarantine` — Read-only unreferenced immediate quarantine-folder scan.
-- `pipeline-cli triage show` — Compose per-request unfindable, field, and search forensics.
+- `pipeline-cli triage show` — Compose per-request unfindable, field, search,
+  and provisional-lossless convergence forensics. A converged row prints the
+  distinct peer/snapshot/codec counts, raw cliff range and spread, and opaque
+  signal token needed by the stop command while status is `wanted`. An
+  `unsearchable` signal prints the canonical `pipeline-cli set ID wanted`
+  resume command instead of an unusable stop command.
+- `pipeline-cli triage stop` — Explicitly stop a still-wanted request after
+  reviewing its current
+  convergence signal. One PostgreSQL snapshot rederives and compares the full
+  token before changing the request to reversible `unsearchable`; it never
+  accepts or proves the holding. Database unavailability exits 5 without a
+  mutation, including failure while constructing the database connection.
+  Malformed tokens fail at argparse before any database connection.
+  Usage: `pipeline-cli triage stop ID --signal-token TOKEN --confirm STOP`.
 - `pipeline-cli wrong-match-delete` — Delete one visible Wrong Matches source folder.
 - `pipeline-cli wrong-match-converge` — Converge one Wrong Matches request through its canonical web route.
 - `pipeline-cli wrong-match-delete-group` — Delete visible Wrong Matches folders for one request.

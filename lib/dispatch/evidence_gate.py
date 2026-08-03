@@ -162,6 +162,7 @@ def _download_info_from_candidate_evidence(
     candidate: AlbumQualityEvidence,
     *,
     username: str | None,
+    contributor_usernames: tuple[str, ...] = (),
 ) -> DownloadInfo:
     """Build force-import audit info without remeasuring the candidate."""
 
@@ -173,6 +174,7 @@ def _download_info_from_candidate_evidence(
     )
     return DownloadInfo(
         username=username,
+        contributor_usernames=contributor_usernames,
         filetype=(
             candidate.storage_format
             or measurement.format

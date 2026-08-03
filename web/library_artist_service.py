@@ -15,6 +15,9 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Protocol
 
+import msgspec
+
+from lib.convergence_service import ConvergenceSignal
 from lib.release_identity import ReleaseIdentity
 from web.library_album_row import (
     LibraryAlbumRow,
@@ -64,6 +67,10 @@ class SupportsLibraryArtistPipelineDB(Protocol):
         release_ids: list[str],
     ) -> list[ArtistRequestRow]:
         ...
+
+    def get_convergence_signals(
+        self, request_ids: list[int],
+    ) -> dict[int, ConvergenceSignal]: ...
 
 
 def _library_album_sort_key(
@@ -140,6 +147,7 @@ def build_library_artist_rows(
     track_counts: Mapping[int, int],
     rank_fn: Callable[[str | None, int | None], str],
     pipeline_candidates: Sequence[Mapping[str, object]] | None = None,
+    convergence_signals: Mapping[int, ConvergenceSignal] | None = None,
 ) -> list[LibraryAlbumRow]:
     """Merge beets + pipeline artist rows behind one typed seam."""
     pipeline_by_identity = _pipeline_rows_by_identity(
@@ -175,6 +183,15 @@ def build_library_artist_rows(
             continue
         rows.append(row)
 
+    if convergence_signals:
+        rows = [
+            msgspec.structs.replace(
+                row,
+                convergence=convergence_signals.get(row.pipeline_id),
+            )
+            if row.pipeline_id is not None else row
+            for row in rows
+        ]
     rows.sort(key=_library_album_sort_key)
     return rows
 
@@ -251,10 +268,17 @@ def list_library_artist_rows(
         if displayed_release_ids
         else []
     )
+    displayed_request_ids = list(dict.fromkeys(
+        _request_id(row) for row in [*pipeline_rows, *pipeline_candidates]
+    ))
+    convergence_signals = pipeline_db.get_convergence_signals(
+        displayed_request_ids
+    ) if displayed_request_ids else {}
     return build_library_artist_rows(
         library_albums=merged_library_albums,
         pipeline_rows=pipeline_rows,
         track_counts=track_counts,
         rank_fn=rank_fn,
         pipeline_candidates=pipeline_candidates,
+        convergence_signals=convergence_signals,
     )

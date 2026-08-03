@@ -1063,7 +1063,11 @@ def _cleanup_committed_wrong_match_rejection(
     try:
         evidence_id = db.get_import_job_candidate_evidence_id(job.id)
         if evidence_id is not None:
-            db.set_download_log_candidate_evidence(download_log_id, evidence_id)
+            db.set_download_log_candidate_evidence(
+                download_log_id,
+                evidence_id,
+                direct_attribution=True,
+            )
         if archival_quarantine:
             # The source is now protected archival evidence, whether
             # quarantine moved it or failed closed at the original path.

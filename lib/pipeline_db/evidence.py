@@ -6,6 +6,7 @@ from datetime import datetime
 
 import msgspec
 
+from lib.convergence_service import normalize_contributor_usernames
 from lib.import_execution import ExecutionLeaseSnapshot
 from lib.pipeline_db._core import _PipelineDBBase
 from lib.quality import (
@@ -1015,10 +1016,37 @@ class _EvidenceMixin(_PipelineDBBase):
         self,
         download_log_id: int,
         evidence_id: int | None,
+        *,
+        direct_attribution: bool = False,
+        contributor_usernames: Sequence[str] | None = None,
     ) -> None:
+        """Address evidence and positively mark only an exact producer link.
+
+        Historical/render-only cross-walk callers use the default false.
+        Callers may pass true only while holding the exact attempt/evidence
+        relationship. The row must also have a structured contributor set;
+        a missing evidence id or contributor identity clears the positive bit.
+        """
+        normalized_contributors = list(normalize_contributor_usernames(
+            contributor_usernames or (),
+        )) or None
         self._execute(
-            "UPDATE download_log SET candidate_evidence_id = %s WHERE id = %s",
-            (evidence_id, int(download_log_id)),
+            "UPDATE download_log "
+            "SET candidate_evidence_id = %s, "
+            "candidate_contributor_usernames = COALESCE("
+            "%s::TEXT[], candidate_contributor_usernames), "
+            "candidate_evidence_direct = ("
+            "%s AND %s IS NOT NULL AND COALESCE(CARDINALITY(COALESCE("
+            "%s::TEXT[], candidate_contributor_usernames)), 0) > 0) "
+            "WHERE id = %s",
+            (
+                evidence_id,
+                normalized_contributors,
+                bool(direct_attribution),
+                evidence_id,
+                normalized_contributors,
+                int(download_log_id),
+            ),
         )
         self.conn.commit()
 

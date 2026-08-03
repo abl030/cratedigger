@@ -122,6 +122,50 @@ Key fields:
   verified-lossless. SQL derives the convenience boolean from proof presence,
   and a CHECK requires the boolean and complete proof tuple to agree.
 
+### Derived provisional-lossless convergence
+
+Migration 071 adds the request-local
+`derive_request_convergence_signal(request_id)` SQL function, its partial
+candidate index, and `download_log.candidate_evidence_direct`. The boolean is
+true only when a terminal producer positively linked the evidence measured for
+that exact attempt. Migration-021 sibling cross-walks stay false unless the
+historical job/log pair is uniquely attributable by request, evidence, and its
+transaction-stable terminal timestamp. The companion
+`candidate_contributor_usernames TEXT[]` stores normalized structured
+Soulseek identities. New rows receive it from the real download-file set;
+historical display strings containing commas are ambiguous and remain
+ineligible rather than being split. Ambiguous history fails closed.
+
+The function derives an operator signal from evidence and download history; it
+persists no signal, policy flag, counter, or cadence state. A signal exists
+only while the request's linked current evidence
+is canonical provisional lossless (`v0_subject='source'`, unverified) and the
+newest consecutive eligible Soulseek run has at least five qualifying candidate
+observations and at least five distinct atomic peer usernames in one
+nearest-500 Hz raw-cliff band. Contributor arrays are unnested as structured
+identities; presentation strings are never parsed. Eligible observations require positive
+direct attribution, an exact-release `strong_match` at distance <= 0.15, and
+unverified lossless-codec, source-subject, measurement-v2 evidence. Ineligible
+legacy cross-walks, world errors, non-exact matches, and high-distance rows are
+ignored. An eligible NULL/no-cliff row or a different cliff band is an upward
+break that resets the current run. The signal carries distinct codec and
+snapshot counts plus the raw minimum, maximum, and spread; sharing a rounded
+band is never described as identical raw cliffs.
+
+This is constancy, not proof. It never changes search cadence automatically.
+The explicit stop action sends the signal's opaque SHA-256 token. One static
+PostgreSQL statement rederives and compares every visible fact and qualifying
+attempt identity, plus the exact linked current-evidence identity, in one MVCC
+snapshot while changing only
+`wanted -> unsearchable`. A committed evidence/log writer before that snapshot
+changes the token and loses the CAS. If a current-evidence writer holds the
+request row while stop waits, the final `UPDATE` also compares the derived
+current-evidence ID against the newer target-row version, so the stop loses the
+CAS instead of updating stale authority. A non-conflicting later writer
+linearizes after the operator decision. This is PostgreSQL atomicity only, not a
+cross-system claim. Evidence remains provisional and untouched; the ordinary
+Resume transition reopens searching.
+
 Every v4 spectral or V0 fact answers the same two questions: `subject` says
 which bytes it describes (`installed` or `source`), and `provenance` says how
 it reached this row (`measured` or `carried`). `installed` + `carried` is
@@ -276,6 +320,14 @@ Untracked rows.
 - `v0_probe_min_bitrate INTEGER`, `v0_probe_avg_bitrate INTEGER`, `v0_probe_median_bitrate INTEGER` — min/avg/median track bitrates for this attempt's probe.
 - `existing_v0_probe_kind TEXT` — lineage of the comparable probe state used before this attempt, when present.
 - `existing_v0_probe_min_bitrate INTEGER`, `existing_v0_probe_avg_bitrate INTEGER`, `existing_v0_probe_median_bitrate INTEGER` — point-in-time baseline probe values used for history rendering and audit.
+- `candidate_evidence_direct BOOLEAN NOT NULL DEFAULT FALSE` — positive
+  attribution that `candidate_evidence_id` describes this exact attempt's
+  bytes. Historical sibling cross-walks remain addressable for rendering but
+  are excluded from convergence.
+- `candidate_contributor_usernames TEXT[]` — normalized structured Soulseek
+  identities captured from the attempt's real file manifest. Commas and other
+  punctuation remain part of one array element. Ambiguous historical
+  comma-joined presentation text is left NULL and excluded.
 - `outcome TEXT` — CHECK-constrained vocabulary: `success`, `rejected`, `failed`, `timeout`, `force_import`, historical `manual_import`, `curator_ban`, `measurement_failed`, `user_offline`, `have_analysis_error`, `youtube_running`, `youtube_success`, `youtube_failed`. New manual imports cannot be submitted; the value remains readable for existing audit rows. `measurement_failed` is a candidate-preview environment failure; `have_analysis_error` is a failed fresh analysis of the installed HAVE. Automation returns to `wanted`; operator jobs preserve their current lifecycle state. Neither failure mints a quality verdict, denylist entry, or narrowing decision.
 - A failed force-import or YouTube-import execution writes one linked
   `outcome='failed'` row (`source_download_log_id` points to the action's

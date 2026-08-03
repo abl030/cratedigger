@@ -37,7 +37,7 @@ class TestLabelRouteContracts(_WebServerCase):
         "id", "title", "artist_name", "date", "format", "primary_type",
         "sub_label_name", "in_library", "beets_album_id",
         "pipeline_status", "pipeline_id",
-        "pipeline_verified_lossless", "pipeline_provisional",
+        "pipeline_verified_lossless", "pipeline_provisional", "convergence",
     }
     LABEL_DETAIL_RESPONSE_REQUIRED_FIELDS: ClassVar = {
         "label", "releases", "sub_labels", "pagination", "include_sublabels",

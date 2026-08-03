@@ -5,6 +5,7 @@ import { toggleDetail } from './pipeline.js';
 import { renderEvidenceStrip } from './history.js';
 import { renderSearchPlanButton } from './search_plan.js';
 import { processingOwnerPresentation } from './release_action_state.js';
+import { renderConvergencePrompt } from './convergence.js';
 
 const RECENTS_HISTORY_LIMIT = 500;
 
@@ -114,6 +115,9 @@ export function renderRecentsItems(items, matchRates = null) {
       // the detail grid shows, compressed to one line. Empty for rows
       // with no measurements (download-phase failures).
       const evidence = renderEvidenceStrip(item);
+      const convergencePrompt = renderConvergencePrompt(
+        item.convergence, item.request_status, 'recents',
+      );
 
       return `
         <div class="r-item" style="border-left-color:${borderColor}" onclick="window.toggleDetail('dl-${item.id}', ${item.request_id})">
@@ -130,6 +134,7 @@ export function renderRecentsItems(items, matchRates = null) {
             ${triageLabel}
             <span class="r-summary" title="${esc(summary)}">${esc(summary)}</span>
           </div>
+          ${convergencePrompt}
         </div>
         <div class="p-detail" id="dl-${item.id}"></div>
       `;

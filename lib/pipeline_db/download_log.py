@@ -1,4 +1,5 @@
 """download_log audit rows and wrong-match bookkeeping."""
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, ClassVar, Literal, TypedDict, get_args
 
@@ -7,6 +8,7 @@ import psycopg2
 import psycopg2.extras
 
 from lib.beets_db import exact_release_identity_matches
+from lib.convergence_service import normalize_contributor_usernames
 from lib.dispatch.types import PostCommitQuarantineAudit
 from lib.pipeline_db._shared import (
     CANDIDATE_EVIDENCE_PREFIX,
@@ -372,6 +374,7 @@ class _DownloadLogMixin(_PipelineDBBase):
 
     def log_download(self, request_id: int,
                      soulseek_username: str | None = None,
+                     contributor_usernames: Sequence[str] | None = None,
                      filetype: str | None = None,
                      download_path: str | None = None,
                      beets_distance: float | None | ValidationProjectionUnset = (
@@ -422,9 +425,13 @@ class _DownloadLogMixin(_PipelineDBBase):
             beets_distance=beets_distance,
             beets_scenario=beets_scenario,
         )
+        normalized_contributors = list(normalize_contributor_usernames(
+            contributor_usernames or (),
+        )) or None
         cur = self._execute("""
             INSERT INTO download_log (
-                request_id, soulseek_username, filetype, download_path,
+                request_id, soulseek_username, candidate_contributor_usernames,
+                filetype, download_path,
                 beets_distance, beets_scenario, beets_detail, valid,
                 outcome, staged_path, error_message,
                 bitrate, sample_rate, bit_depth, is_vbr,
@@ -439,12 +446,13 @@ class _DownloadLogMixin(_PipelineDBBase):
                 existing_v0_probe_kind, existing_v0_probe_min_bitrate,
                 existing_v0_probe_avg_bitrate, existing_v0_probe_median_bitrate,
                 transfer_detail, source_download_log_id
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                       %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                       %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """, (
-            request_id, soulseek_username, filetype, download_path,
+            request_id, soulseek_username, normalized_contributors,
+            filetype, download_path,
             beets_distance_value, beets_scenario_value, beets_detail, valid,
             outcome, staged_path, error_message,
             bitrate, sample_rate, bit_depth, is_vbr,

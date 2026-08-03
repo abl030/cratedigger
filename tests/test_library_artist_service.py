@@ -8,6 +8,7 @@ from typing import cast
 
 import msgspec
 
+from lib.convergence_service import ConvergenceSignal
 from lib.pipeline_db.rows import ArtistRequestRow
 from lib.release_identity import ConflictingReleaseIdentityError
 from tests.fakes import FakePipelineDB
@@ -135,6 +136,12 @@ class _RecordingPipelineDB:
         self._calls.append(f"candidates:{release_ids}")
         return [self._row] if self._row["mb_release_id"] in release_ids else []
 
+    def get_convergence_signals(
+        self, request_ids: list[int],
+    ) -> dict[int, ConvergenceSignal]:
+        self._calls.append(f"convergence:{request_ids}")
+        return {}
+
 
 class _RaceAwareLibraryLookup:
     def __init__(self) -> None:
@@ -197,6 +204,12 @@ class _RaceAwarePipelineDB:
             processing_owner=None,
         ), type=ArtistRequestRow)
         return [request] if RELEASE_ID in release_ids else []
+
+    def get_convergence_signals(
+        self, request_ids: list[int],
+    ) -> dict[int, ConvergenceSignal]:
+        self.calls.append(f"convergence:{request_ids}")
+        return {}
 
 
 class TestLibraryArtistService(unittest.TestCase):
@@ -478,6 +491,7 @@ class TestLibraryArtistService(unittest.TestCase):
                 f"pipeline:Test Artist:{ARTIST_ID}",
                 "track_counts:[42]",
                 f"candidates:['{RELEASE_ID}']",
+                "convergence:[42]",
             ],
         )
         self.assertEqual(lookup.calls, [f"library:Test Artist:{ARTIST_ID}"])

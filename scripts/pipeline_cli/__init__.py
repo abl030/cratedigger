@@ -110,6 +110,7 @@ from scripts.pipeline_cli.triage import (
     cmd_triage_list,
     cmd_triage_quarantine,
     cmd_triage_show,
+    cmd_triage_stop,
 )
 from scripts.pipeline_cli.wrong_match import (
     cmd_wrong_match_delete,
@@ -160,6 +161,7 @@ __all__ = [
     "cmd_triage_list",
     "cmd_triage_quarantine",
     "cmd_triage_show",
+    "cmd_triage_stop",
     "cmd_upgrade",
     "cmd_wrong_match_converge",
     "cmd_wrong_match_delete",

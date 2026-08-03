@@ -591,6 +591,7 @@ class DownloadInfo:
     """
     # Soulseek source
     username: str | None = None
+    contributor_usernames: tuple[str, ...] = ()
     filetype: str | None = None
     bitrate: int | None = None           # bps (e.g. 320000)
     sample_rate: int | None = None

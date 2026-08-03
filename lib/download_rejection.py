@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 from lib.dispatch import (
@@ -63,6 +64,7 @@ def _run_post_rejection_wrong_match_cleanup(
     *,
     scenario: str | None,
     import_job_id: int | None = None,
+    contributor_usernames: Iterable[str] = (),
     cancellation_token: CancellationToken | None = None,
 ) -> Any:
     """Evaluate newly-created Wrong Matches rows through importer cleanup."""
@@ -78,7 +80,12 @@ def _run_post_rejection_wrong_match_cleanup(
         if import_job_id is not None:
             evidence_id = db.get_import_job_candidate_evidence_id(import_job_id)
             if evidence_id is not None:
-                db.set_download_log_candidate_evidence(download_log_id, evidence_id)
+                db.set_download_log_candidate_evidence(
+                    download_log_id,
+                    evidence_id,
+                    direct_attribution=True,
+                    contributor_usernames=tuple(contributor_usernames),
+                )
         result = cleanup_wrong_match(
             db,
             download_log_id,
@@ -286,6 +293,7 @@ def _handle_rejected_result(
             persisted,
             scenario=bv_result.scenario,
             import_job_id=import_job_id,
+            contributor_usernames=usernames,
             cancellation_token=cancellation_token,
         )
     logger.warning(
