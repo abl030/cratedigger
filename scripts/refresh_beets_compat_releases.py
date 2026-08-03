@@ -160,13 +160,37 @@ def _run_json(*argv: str) -> object:
 
 
 def _github_releases() -> list[GithubRelease]:
-    raw = _run_json("gh", "api", "repos/beetbox/beets/releases?per_page=100")
-    if not isinstance(raw, list):
-        raise ValueError("GitHub releases response is not a list")
-    return [GithubRelease(
-        tag_name=str(item["tag_name"]), published_at=item.get("published_at"),
-        draft=bool(item["draft"]), prerelease=bool(item["prerelease"]),
-    ) for item in raw if isinstance(item, dict)]
+    raw = _run_json(
+        "gh", "api", "--paginate", "--slurp",
+        "repos/beetbox/beets/releases?per_page=100",
+    )
+    return flatten_release_pages(raw)
+
+
+def flatten_release_pages(raw: object) -> list[GithubRelease]:
+    """Decode the paginated/slurped GitHub release payload without truncation."""
+    if not isinstance(raw, list) or any(not isinstance(page, list) for page in raw):
+        raise ValueError("GitHub paginated releases response is not a list of pages")
+    releases: list[GithubRelease] = []
+    for page in raw:
+        for item in page:
+            if not isinstance(item, dict):
+                raise ValueError("GitHub release page contains a non-object record")
+            tag = item.get("tag_name")
+            published = item.get("published_at")
+            draft = item.get("draft")
+            prerelease = item.get("prerelease")
+            if not isinstance(tag, str) or not (
+                isinstance(published, str) or published is None
+            ) or not isinstance(draft, bool) or not isinstance(prerelease, bool):
+                raise ValueError("GitHub release record has an invalid shape")
+            releases.append(GithubRelease(
+                tag_name=tag,
+                published_at=published,
+                draft=draft,
+                prerelease=prerelease,
+            ))
+    return releases
 
 
 def _resolve_revision(tag: str) -> str:

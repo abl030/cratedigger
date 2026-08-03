@@ -425,7 +425,12 @@ def execute_pinned_beets_delete(request: BeetsDeleteRequest) -> BeetsDeleteOutco
     from beets import config, library, plugins, util
 
     config.read()
-    configured_plugins = set(plugins.get_plugin_names())
+    if hasattr(plugins, "get_plugin_names"):
+        configured_plugins = set(plugins.get_plugin_names())
+    else:
+        # Beets 2.1 predates plugins.get_plugin_names(). Its configured
+        # plugin list remains the authoritative profile for the exact child.
+        configured_plugins = set(config["plugins"].as_str_seq())
     configured_db = config["library"].as_filename()
     configured_root = config["directory"].as_filename()
     if not _configuration_matches(request, configured_db, configured_root):

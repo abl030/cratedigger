@@ -31,8 +31,8 @@ in production.
 from __future__ import annotations
 
 import os
-import subprocess
 import sys
+import subprocess
 import unittest
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -40,6 +40,8 @@ _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 # Runs in a fresh interpreter with the real beets on the path (no mocks).
 _CONTRACT = r'''
 import os
+import subprocess
+import sys
 import tempfile
 
 import harness.beets_harness as h
@@ -149,14 +151,22 @@ else:
     assert mb_info.album_id == "11111111-2222-3333-4444-555555555555"
 print("DISCOGS_NEUTRALIZE_OK")
 
-# --- Bad-rip derived-sidecar cleanup contract. ``beet remove -d`` delegates
-# to Album.remove(delete=True), which prunes a directory only when every
-# remaining file matches the exact clutter list. Our sidecar is derived state;
-# an unknown sentinel must still block pruning.
+# --- Exact delete uses Cratedigger's pinned-child operation, never Beets'
+# selector/remove shortcut. Its owned sidecar must go, while an unknown
+# operator sentinel must remain.
 from beets import config
 
 def cleanup_world(*, foreign_file):
     with tempfile.TemporaryDirectory() as d:
+        beets_dir = os.path.join(d, "beets")
+        os.makedirs(beets_dir)
+        with open(os.path.join(beets_dir, "config.yaml"), "w", encoding="utf-8") as handle:
+            handle.write(
+                "library: %s\ndirectory: %s\nplugins: []\n"
+                "clutter: [cratedigger.json]\n"
+                "importsource:\n  suggest_removal: false\n"
+                % (os.path.join(d, "lib.db"), d)
+            )
         album_dir = os.path.join(d, "The Rolling Stones", "1964 - Album")
         os.makedirs(album_dir)
         audio_path = os.path.join(album_dir, "01.flac")
@@ -174,15 +184,36 @@ def cleanup_world(*, foreign_file):
         item = library.Item(
             title="Track", artist="Artist", album="Album",
             albumartist="Artist", path=audio_path,
+            mb_albumid="11111111-2222-3333-4444-555555555555",
         )
         album = lib.add_album([item])
-        config["clutter"].set(["cratedigger.json"])
-        album.remove(delete=True)
+        assert album.id is not None
+        child = """
+from lib.beets_delete import BeetsDeleteCompleted, BeetsDeleteRequest, execute_pinned_beets_delete
+outcome = execute_pinned_beets_delete(BeetsDeleteRequest(
+    album_id=%d,
+    expected_release_id=%r,
+    library_db_path=%r,
+    library_root=%r,
+))
+assert isinstance(outcome, BeetsDeleteCompleted), outcome
+""" % (
+            album.id,
+            "11111111-2222-3333-4444-555555555555",
+            os.path.join(d, "lib.db"),
+            d,
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", child],
+            env={**os.environ, "BEETSDIR": beets_dir},
+            text=True, capture_output=True, check=False,
+        )
+        assert proc.returncode == 0, proc.stderr
 
         assert not os.path.exists(audio_path), audio_path
+        assert not os.path.exists(sidecar_path), sidecar_path
         if foreign_file:
             assert os.path.isdir(album_dir), album_dir
-            assert os.path.isfile(sidecar_path), sidecar_path
             assert os.path.isfile(sentinel_path), sentinel_path
         else:
             # Older Beets removes the owned media but leaves an empty parent;
@@ -248,7 +279,34 @@ with tempfile.TemporaryDirectory(prefix="cratedigger-pretend-purity-") as root:
         handle.write("""library: %s\ndirectory: %s\nplugins: scrub\nimport:\n  copy: no\n  write: yes\n  move: yes\n  incremental: no\n  duplicate_keys:\n    album: [mb_albumid, discogs_albumid]\n    item: [artist, title]\n""" % (os.path.join(library, "library.db"), library))
 
     before = recursive_manifest(source)
-    env = {**os.environ, "BEETSDIR": beetsdir}
+    # The real wrapper must reach its normal candidate/choose path without
+    # depending on the public MusicBrainz service. sitecustomize is limited
+    # to this subprocess: it supplies one structurally valid provider result,
+    # leaving Beets' importer, distance calculation, and protocol intact.
+    shim = os.path.join(root, "shim")
+    os.makedirs(shim)
+    with open(os.path.join(shim, "sitecustomize.py"), "w", encoding="utf-8") as handle:
+        handle.write("""\\
+from beets.autotag import mb
+from beets.autotag.hooks import AlbumInfo, TrackInfo
+
+def match_album(artist, album, tracks, extra_tags):
+    return [AlbumInfo(
+        album="Purity Album", artist="Purity Artist",
+        album_id="11111111-2222-3333-4444-555555555555",
+        tracks=[TrackInfo(
+            title="Source", artist="Purity Artist",
+            track_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", index=1,
+        )],
+    )]
+
+mb.match_album = match_album
+""")
+    env = {
+        **os.environ,
+        "BEETSDIR": beetsdir,
+        "PYTHONPATH": shim + os.pathsep + os.environ.get("PYTHONPATH", ""),
+    }
     proc = subprocess.Popen(
         [os.environ.get("BASH", "bash"), os.environ["HARNESS_WRAPPER"], "--pretend", "--noincremental", source],
         stdin=subprocess.PIPE,
@@ -311,6 +369,7 @@ import json
 import os
 import sys
 import tempfile
+import subprocess
 
 import beets
 from beets import config as bconfig

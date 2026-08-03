@@ -67,8 +67,12 @@ with state_path.with_suffix(".lock").open("a+", encoding="utf-8") as lock:
                 )
             save()
             raise SystemExit(0)
-        if args == ["flake", "check", "--print-build-logs"]:
-            stage = "flake-check"
+        if args == [
+            "build",
+            ".#checks.x86_64-linux.beetsStableCandidate",
+            "--print-build-logs",
+        ]:
+            stage = "stable-candidate"
         elif args == [
             "build",
             ".#checks.x86_64-linux.beetsTipBuild",

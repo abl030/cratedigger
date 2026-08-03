@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import importlib
+import importlib.util
 import os
 import pkgutil
 import sqlite3
@@ -486,15 +487,24 @@ def _effective_config(config_dir: Path) -> Generator[IncludeLazyConfig]:
 
 
 def _available_plugins() -> frozenset[str]:
-    """Enumerate only the admitted Beets package's plugin directory."""
+    """Enumerate capabilities from the admitted Beets package only.
+
+    Beets 2.1 ships MusicBrainz support as ``beets.autotag.mb`` rather than a
+    ``beetsplug.musicbrainz`` module.  Treat that built-in provider as the
+    same declared capability so the compatibility matrix validates the real
+    release configuration instead of rejecting an implementation detail.
+    """
     beets_module = importlib.import_module("beets")
     module_file = getattr(beets_module, "__file__", "") or ""
     if not module_file:
         return frozenset()
     plugin_dir = Path(module_file).resolve().parent.parent / "beetsplug"
-    return frozenset(
+    plugins = {
         module.name for module in pkgutil.iter_modules((str(plugin_dir),))
-    )
+    }
+    if importlib.util.find_spec("beets.autotag.mb") is not None:
+        plugins.add("musicbrainz")
+    return frozenset(plugins)
 
 
 def _active_plugin_names(active: IncludeLazyConfig) -> tuple[str, ...]:

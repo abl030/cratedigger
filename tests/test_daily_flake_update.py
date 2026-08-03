@@ -26,7 +26,7 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
         self.assertIn(["nix", "flake", "update", "nixpkgs"], state["events"])
         self.assertEqual(
             state["stages"],
-            ["pyright", "suite", "flake-check", "world", "fuzz", "mirror"],
+            ["pyright", "suite", "stable-candidate", "world", "fuzz", "mirror"],
         )
         self.assertEqual(state["commit_count"], 1)
         self.assertEqual(state["push_count"], 1)
@@ -51,7 +51,7 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertEqual(
             state["stages"],
-            ["pyright", "suite", "flake-check", "world", "fuzz", "mirror"],
+            ["pyright", "suite", "stable-candidate", "world", "fuzz", "mirror"],
         )
         self.assertEqual(state["commit_count"], 0)
         self.assertEqual(state["push_count"], 0)
@@ -142,6 +142,19 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertIsNone(self.fake.state["clone_path"])
         self.assertIn("CRATEDIGGER_MIRROR_URL", proc.stderr)
+
+    def test_red_tip_canary_cannot_block_green_nixpkgs_candidate(self) -> None:
+        # The fake recognises tip-contract as a fault only if a runner invokes
+        # that named canary check. The stable updater deliberately does not.
+        self.fake.update_state(fault="tip-contract")
+
+        proc = self.fake.run(SCRIPT)
+        state = self.fake.state
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("stable-candidate", state["stages"])
+        self.assertNotIn("tip-contract", state["stages"])
+        self.assertEqual(state["commit_count"], 1)
 
 
 if __name__ == "__main__":

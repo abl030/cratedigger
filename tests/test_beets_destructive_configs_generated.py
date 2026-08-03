@@ -284,6 +284,8 @@ def _seed(
     lib = library.Library(str(db_path), str(root))
     target = lib.add_album(target_items)
     sibling = lib.add_album([library.Item(**sibling_fields)])
+    if target.id is None or sibling.id is None:
+        raise AssertionError("persisted Beets album is missing its database id")
     target_id = int(target.id)
     sibling_id = int(sibling.id)
     lib._close()

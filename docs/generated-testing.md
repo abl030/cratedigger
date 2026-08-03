@@ -17,12 +17,16 @@ accepts only a complete exact stable or shrinking approved cohort.
 `scripts/daily_flake_update.sh` is the Nixpkgs-reference unattended entry
 point. It checks out current `main`, advances only the `nixpkgs` node in
 `flake.lock`,
-and runs whole-repository Pyright, the deterministic suite, `nix flake check`,
-the default lifecycle hammer, the 20,000-example fuzz burst, and the
-mirror-harness smoke. Independent test stages all run so one notification
-contains the whole day's result. A completely green candidate commits and
-pushes only `flake.lock`; a red candidate pushes nothing. Scheduling, state
-paths, and notification belong to the downstream nixosconfig service.
+and runs whole-repository Pyright, the deterministic suite, the
+`beetsStableCandidate` aggregate (every non-tip flake check plus the complete
+reviewed Beets-release matrix), the default lifecycle hammer, the
+20,000-example fuzz burst, and the mirror-harness smoke. The moving tip build,
+contract, and full-repository Pyright canary are deliberately excluded from
+this stable candidate and run only in the independent tip job. Independent
+test stages all run so one notification contains the whole day's result. A
+completely green candidate commits and pushes only `flake.lock`; a red
+candidate pushes nothing. Scheduling, state paths, and notification belong to
+the downstream nixosconfig service.
 
 `scripts/daily_beets_tip_update.sh` is a separate serialized checks-only
 canary. It advances only `beets-tip`, then requires the tip build, disposable

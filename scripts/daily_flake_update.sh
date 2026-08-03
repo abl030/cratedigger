@@ -80,8 +80,8 @@ run_stage "whole-repository Pyright" \
     nix-shell --run "pyright --threads 4"
 run_stage "deterministic full suite" \
     nix-shell --run "bash scripts/run_tests.sh"
-run_stage "Nix flake checks" \
-    nix flake check --print-build-logs
+run_stage "stable Nix and Beets-release checks" \
+    nix build .#checks.x86_64-linux.beetsStableCandidate --print-build-logs
 run_stage "world-model burst" \
     env CRATEDIGGER_WORLD_DATABASE="$world_database" \
     nix-shell --run "bash scripts/world_model_burst.sh"

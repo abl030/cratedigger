@@ -102,6 +102,48 @@
         contract = name: beets: let
           cratedigger = import ./nix/package.nix { inherit pkgs; beetsPackage = beets; };
           python = pkgs.python3.withPackages (ps: cratedigger.pythonPackages ps);
+          authority = pkgs.runCommand "cratedigger-${name}-matrix-authority" { } ''
+            mkdir -p "$out/beets" "$out/secrets"
+            cat > "$out/runtime.ini" <<EOF
+[Beets]
+config_dir = $out/beets
+library = /build/cratedigger-matrix/library.db
+directory = /build/cratedigger-matrix/library
+state_file = $out/state.pickle
+python = ${python}/bin/python
+secret_include = $out/secrets/discogs.yaml
+[MusicBrainz]
+api_base = https://musicbrainz.org
+EOF
+            cat > "$out/beets/config.yaml" <<'EOF'
+library: /build/cratedigger-matrix/library.db
+directory: /build/cratedigger-matrix/library
+statefile: __AUTHORITY__/state.pickle
+include: [__AUTHORITY__/secrets/discogs.yaml]
+plugins: [musicbrainz, permissions, inline]
+import:
+  autotag: true
+  move: true
+  write: true
+  duplicate_keys:
+    album: [mb_albumid, discogs_albumid]
+paths:
+  default: $albumartist/$year - $album%aunique{albumartist album,path_disambig}/$track $title
+  comp: Compilations/$album%aunique{albumartist album,path_disambig}/$track $title
+  singleton: Non-Album/$artist/$title
+album_fields:
+  path_disambig: albumdisambig or releasegroupdisambig or catalognum or label or str(year)
+permissions:
+  file: "0664"
+  dir: "02775"
+musicbrainz:
+  host: musicbrainz.org
+  https: true
+EOF
+            sed -i "s|__AUTHORITY__|$out|g" "$out/beets/config.yaml"
+            : > "$out/state.pickle"
+            printf '%s\n' 'discogs:' '  user_token: matrix-token' > "$out/secrets/discogs.yaml"
+          '';
         in pkgs.runCommand "cratedigger-${name}-contract" {
           nativeBuildInputs = [ python pkgs.ffmpeg ];
         } ''
@@ -111,9 +153,18 @@
           unset BEETSDIR TEST_DB_DSN CRATEDIGGER_RUNTIME_CONFIG
           export PYTHONPATH=${self}
           export CRATEDIGGER_BEETS_PYTHON=${python}/bin/python
+          mkdir -p /build/cratedigger-matrix/library /build/cratedigger-matrix/runtime
+          ${python}/bin/python -c \
+            'from beets.library import Library; lib = Library("/build/cratedigger-matrix/library.db", "/build/cratedigger-matrix/library"); lib._close()'
+          ${python}/bin/python ${self}/scripts/check_beets_config.py \
+            --config ${authority}/runtime.ini \
+            --runtime-dir /build/cratedigger-matrix/runtime \
+            --role web > "$TMPDIR/admission.json"
+          grep -F '"ok":true' "$TMPDIR/admission.json"
           ${python}/bin/python -m unittest \
             tests.test_harness_beets2_contract.TestHarnessBeets2Contract.test_help_stays_on_normal_stdout_and_protocol_is_private \
             tests.test_harness_beets2_contract.TestHarnessBeets2Contract.test_real_beets_import_library_and_duplicate_action \
+            tests.test_harness_beets2_contract.TestHarnessBeets2Contract.test_real_harness_pretend_keeps_source_manifest_unchanged \
             > "$TMPDIR/contract.stdout" 2> "$TMPDIR/contract.stderr" || {
               cat "$TMPDIR/contract.stdout" >&2
               cat "$TMPDIR/contract.stderr" >&2
@@ -131,7 +182,7 @@
           name = "beets-release-${builtins.replaceStrings [ "." ] [ "_" ] entry.version}-contract";
           value = contract "beets-release-${entry.version}" (compatPackage entry);
         }) manifest);
-      in ({
+      in (rec {
         # Boots a NixOS VM with the upstream module enabled against an
         # ephemeral postgres + a stubbed slskd. Verifies: migrator runs,
         # the immutable runtime config is wired correctly, and the web responds.
@@ -139,19 +190,27 @@
         # `nix flake check` must build the CLI bundle (U8): a stranger's
         # `nix run .#pipeline-cli` is only as green as this check.
         packageDefault = self.packages.${system}.default;
-
         beetsTipBuild = tipPackage;
         beetsTipContract = contract "beets-tip" tipPackage;
         beetsTipPyright = let
           cratedigger = import ./nix/package.nix { inherit pkgs; beetsPackage = tipPackage; };
-          python = pkgs.python3.withPackages (ps: cratedigger.pythonPackages ps);
-        in pkgs.runCommand "cratedigger-beets-tip-pyright" { nativeBuildInputs = [ python pkgs.pyright ]; } ''
+          python = pkgs.python3.withPackages (ps: cratedigger.pythonPackages ps ++ [
+            ps.coverage
+            ps.hypothesis
+            ps.tree-sitter
+            ps.tree-sitter-javascript
+            ps.vulture
+          ]);
+          source = pkgs.runCommand "cratedigger-beets-tip-pyright-source" { } ''
+            cp -R ${self}/. "$out"
+            chmod -R u+w "$out"
+            ln -s ${python} "$out/.pyright-venv"
+          '';
+        in pkgs.runCommand "cratedigger-beets-tip-pyright" { nativeBuildInputs = [ pkgs.pyright ]; } ''
           export HOME="$TMPDIR/home"
           mkdir -p "$HOME"
-          export PYTHONPATH=${self}
-          ${pkgs.pyright}/bin/pyright --threads 4 \
-            ${self}/harness/beets_compat.py \
-            ${self}/harness/beets_harness.py
+          cd ${source}
+          ${pkgs.pyright}/bin/pyright --threads 4
           touch "$out"
         '';
 
@@ -339,6 +398,23 @@
           test -x ${patchedEnv}/bin/beet
           touch $out
         '';
+
+        # The daily Nixpkgs candidate is green only when every ordinary
+        # flake check and every reviewed Beets release contract is green.
+        # Tip is intentionally separate: a moving upstream canary must
+        # alert without blocking a stable lock update.
+        beetsStableCandidate = pkgs.runCommand "cratedigger-stable-candidate" {
+          nativeBuildInputs = [
+            packageDefault
+            checkBeetsConfigPackageBoundary
+            moduleVm
+            jellyfinMetadataVm
+            runtimeSrcPin
+            packageSetPin
+            moduleAssertions
+            beetsMirrorPatches
+          ] ++ builtins.attrValues releaseChecks;
+        } "touch $out";
       } // releaseChecks));
     };
 }

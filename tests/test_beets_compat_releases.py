@@ -41,6 +41,14 @@ class TestBeetsCompatReleaseManifest(unittest.TestCase):
                 release("v2.13.1", "2026-08-02T00:00:00Z"),
             ], as_of=self.as_of)
 
+    def test_paginated_release_fetch_preserves_record_101(self) -> None:
+        page_one = [release(f"v2.1.{index}", "2026-01-01T00:00:00Z")
+                    for index in range(100)]
+        page_two = [release("v2.13.1", "2026-08-01T00:00:00Z")]
+        flattened = refresh.flatten_release_pages([page_one, page_two])
+        self.assertEqual(len(flattened), 101)
+        self.assertEqual(flattened[-1]["tag_name"], "v2.13.1")
+
     def test_renderer_and_validator_reject_known_bad_manifest(self) -> None:
         entries = refresh.resolve_entries(
             [release("v2.12.0", "2025-01-01T00:00:00Z"), release("v2.13.1", "2026-07-29T10:47:07Z")],
