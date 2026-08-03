@@ -508,36 +508,42 @@ visual evidence and never substitute for this complete live-row census.
 `scripts/decision_differential.py` is the decision-level counterpart to the
 render differential. Its corpus is an evidence graph, not a sidecar pairing
 file: each candidate row carries the exact nullable
-`album_requests.current_evidence_id` and each non-null reference resolves to
-the complete current-evidence row in the same export. `is_candidate` tells the
-replay which rows to decide; current-only rows provide the paired evidence but
-are not themselves candidates. A null `current_evidence_id` is the ordinary
-no-HAVE case.
+`album_requests.current_evidence_id` **and** its request's exact
+`mb_release_id`. Each non-null reference resolves to the complete
+current-evidence row in the same export; both evidence rows must match the
+request release exactly. `is_candidate` tells the replay which rows to decide;
+current-only rows provide the paired evidence but are not themselves
+candidates. A null `current_evidence_id` is the ordinary no-HAVE case.
 
 The exact read-only export is below. `candidate_pairs` deliberately uses
 `DISTINCT`, not an arbitrary `DISTINCT ON`: if the same content-addressed
 candidate has conflicting request-current pairings, it produces duplicate
 evidence IDs and the replay fails closed instead of selecting one pairing.
 Every evidence row is `e.*`; the `files` JSON contains every field production's
-evidence decoder reads.
+evidence decoder reads. The replay additionally validates the full JSON wire
+shape before it calls that production decoder, so do not omit nullable columns
+or replace booleans/numbers with strings.
 
 ```bash
 ssh doc2 'export PGPASSWORD=$(sudo cat /run/secrets/cratedigger-pgpass | grep "^PGPASSWORD=" | cut -d= -f2); pipeline-cli query --json -' <<'SQL' > /tmp/decision-corpus.json
 WITH candidate_pairs AS MATERIALIZED (
     SELECT DISTINCT
            job.candidate_evidence_id AS evidence_id,
-           request.current_evidence_id
+           request.current_evidence_id,
+           request.mb_release_id AS request_mb_release_id
     FROM import_jobs AS job
     JOIN album_requests AS request ON request.id = job.request_id
     WHERE job.candidate_evidence_id IS NOT NULL
 ),
 corpus_members AS MATERIALIZED (
-    SELECT evidence_id, current_evidence_id, TRUE AS is_candidate
+    SELECT evidence_id, current_evidence_id, request_mb_release_id,
+           TRUE AS is_candidate
     FROM candidate_pairs
     UNION ALL
     SELECT DISTINCT
            candidate.current_evidence_id AS evidence_id,
            NULL::bigint AS current_evidence_id,
+           NULL::text AS request_mb_release_id,
            FALSE AS is_candidate
     FROM candidate_pairs AS candidate
     WHERE candidate.current_evidence_id IS NOT NULL
@@ -550,6 +556,7 @@ corpus_members AS MATERIALIZED (
 SELECT evidence.*,
        member.is_candidate,
        member.current_evidence_id,
+       member.request_mb_release_id,
        COALESCE(
            jsonb_agg(
                jsonb_build_object(
@@ -569,7 +576,8 @@ FROM corpus_members AS member
 JOIN album_quality_evidence AS evidence ON evidence.id = member.evidence_id
 LEFT JOIN album_quality_evidence_files AS file
     ON file.evidence_id = evidence.id
-GROUP BY evidence.id, member.is_candidate, member.current_evidence_id
+GROUP BY evidence.id, member.is_candidate, member.current_evidence_id,
+         member.request_mb_release_id
 ORDER BY evidence.id;
 SQL
 
@@ -590,9 +598,9 @@ For a corpus too large for one `pipeline-cli query --json` response, partition
 **`candidate_pairs`** by `job.candidate_evidence_id` (for example, add
 `AND job.candidate_evidence_id > 0 AND job.candidate_evidence_id <= 4000` to
 that CTE) and retain the `corpus_members` CTE unchanged in every batch. Each
-batch then carries every current row its candidates reference. Run `decide`
-against each complete batch on both trees, then concatenate the **decided
-outputs** before `diff`; candidate-ID ranges are disjoint, while a current row
-may legitimately be needed by more than one batch. Do not concatenate raw
-batch corpora: doing so duplicates that current evidence ID and the replay
-correctly fails closed.
+batch then carries every candidate's request-release fence and every current
+row its candidates reference. Run `decide` against each complete batch on both
+trees, then concatenate the **decided outputs** before `diff`; candidate-ID
+ranges are disjoint, while a current row may legitimately be needed by more
+than one batch. Do not concatenate raw batch corpora: doing so duplicates that
+current evidence ID and the replay correctly fails closed.

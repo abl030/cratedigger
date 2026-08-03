@@ -15,8 +15,9 @@ Two modes, same two-tree runbook as Rule D:
 
 * ``decide`` reads a corpus JSONL containing complete candidate and current
   ``album_quality_evidence`` rows (with their snapshot files under ``files``).
-  A candidate's nullable ``current_evidence_id`` is the request-owned pairing
-  authority; the referenced current row must be present in that same corpus.
+  A candidate's nullable ``current_evidence_id`` and request ``mb_release_id``
+  are the request-owned pairing authority; the referenced current row must be
+  present in that same corpus and both evidence rows must match that release.
   It runs ``full_pipeline_decision_from_evidence`` for every candidate and
   writes one decided JSONL row per candidate.
 * ``diff`` compares two decided JSONL files field by field.
@@ -62,14 +63,16 @@ body which fields had no base value.
   proof-gate change shows its real blast radius.
 
 **Native current-side pairing.** The corpus carries each candidate's exact
-``album_requests.current_evidence_id`` beside the candidate evidence row and
-the complete referenced evidence row elsewhere in the same corpus. The replay
-builds an ID index after loading the complete corpus, then resolves that
-foreign key exactly as production does. It fails closed on missing/malformed
-pairing columns, duplicate evidence IDs, and dangling references; a null
-``current_evidence_id`` means the candidate has no installed album. This
-matters because a fresh request cannot reach branches that compare against a
-HAVE, including the provisional-lossless lane's confident rejects.
+``album_requests.current_evidence_id`` and request ``mb_release_id`` beside
+the candidate evidence row, and the complete referenced evidence row elsewhere
+in the same corpus. The replay validates the complete JSON wire shape, builds
+an ID index after loading it, then resolves that foreign key exactly as
+production does. It fails closed on missing/malformed pairing or evidence
+columns, duplicate evidence IDs, dangling references, and either evidence row
+belonging to a sibling pressing; a null ``current_evidence_id`` means the
+candidate has no installed album. This matters because a fresh request cannot
+reach branches that compare against a HAVE, including the provisional-lossless
+lane's confident rejects.
 
 The current side's OWN proof is never stripped: ``--counterfactual`` removes
 only the candidate proof, because installed proof is real evidence and the
@@ -140,18 +143,24 @@ if REPO_ROOT not in sys.path:
 
 import msgspec
 
-from lib.json_narrow import is_object_list, is_str_object_dict
 from lib.pipeline_db.evidence import _EvidenceMixin
 from lib.quality import (
     AacLatticeProofLeg,
     AlbumQualityEvidence,
     AlbumQualityEvidenceDecisionFacts,
+    CodecFamily,
+    EvidenceProvenance,
+    EvidenceSubject,
     UltrasonicProofLeg,
     aac_lattice_proof_leg,
     full_pipeline_decision_from_evidence,
     is_preserved_source_spectral,
     mint_verified_lossless_proof,
     ultrasonic_proof_leg,
+)
+from lib.quality.audio_validation import (
+    AudioToolDiagnosticCategory,
+    AudioValidationOutcome,
 )
 from lib.quality.pipeline import evidence_spectral_context
 from scripts.render_differential import (
@@ -225,17 +234,26 @@ def _evidence_from_corpus_row(
     ``_overlay_evidence_onto_download_log_row``.
     """
     payload = dict(row)
-    raw_files = payload.pop("files", None)
+    try:
+        # ``_album_quality_evidence_from_row`` deliberately accepts values
+        # from psycopg2's already-typed result rows.  A JSONL corpus is a
+        # separate wire boundary: validate every column it consumes before
+        # handing the row to that production mapper, rather than allowing its
+        # legacy ``bool()``/``int()`` coercions to decide a different world.
+        msgspec.convert(payload, type=DecisionCorpusEvidenceWire)
+    except msgspec.ValidationError as exc:
+        raise RenderDifferentialError(
+            f"corpus row {payload.get('id')!r} has an invalid evidence wire "
+            f"shape: {exc}") from exc
+    raw_files = payload.pop("files")
+    # The strict Struct conversion above establishes these assertions; spelling
+    # them keeps the raw Mapping passed to production type-safe without
+    # introducing a second semantic evidence mapper.
+    assert isinstance(raw_files, list)
     file_rows: list[dict[str, object]] = []
-    if raw_files is not None:
-        if not is_object_list(raw_files):
-            raise RenderDifferentialError(
-                "corpus row 'files' must be a list of objects")
-        for entry in raw_files:
-            if not is_str_object_dict(entry):
-                raise RenderDifferentialError(
-                    "corpus row 'files' must be a list of objects")
-            file_rows.append(dict(entry))
+    for raw_file in raw_files:
+        assert isinstance(raw_file, dict)
+        file_rows.append(dict(raw_file))
     measured_at = payload.get("measured_at")
     if isinstance(measured_at, str):
         # PG hands psycopg2 a datetime; a JSONL export hands us its ISO
@@ -440,8 +458,118 @@ CORPUS_REQUIRED_COLUMNS: frozenset[str] = frozenset({
     "id",
     "is_candidate",
     "current_evidence_id",
+    "request_mb_release_id",
     "files",
 })
+
+
+class DecisionCorpusEvidenceFileWire(msgspec.Struct, frozen=True):
+    """Exact JSON shape of one exported evidence-file row."""
+
+    relative_path: str
+    size_bytes: int
+    mtime_ns: int
+    extension: str
+    container: str
+    codec: str | None
+    decode_ok: bool
+
+
+class DecisionCorpusAudioDiagnosticWire(msgspec.Struct, frozen=True):
+    """Exact JSON shape of a persisted audio-validation diagnostic."""
+
+    relative_path: str
+    category: AudioToolDiagnosticCategory
+    return_code: int | None
+    stderr_excerpt: str
+    stderr_bytes: int
+    stderr_sha256: str
+    stderr_truncated: bool
+
+
+class DecisionCorpusAudioValidationWire(msgspec.Struct, frozen=True):
+    """Exact JSON shape consumed by production's audio-report decoder."""
+
+    policy_id: str
+    tool: str
+    tool_version: str
+    outcome: AudioValidationOutcome
+    files_checked: int
+    files_failed: int
+    diagnostics: list[DecisionCorpusAudioDiagnosticWire]
+    omitted_diagnostics: int
+
+
+class DecisionCorpusAacLatticeTrackWire(msgspec.Struct, frozen=True):
+    """Exact JSON shape of one persisted AAC-lattice track capture."""
+
+    filename: str
+    offset: int | None
+    z: float | None
+    proba: float | None
+    error: str | None
+
+
+class DecisionCorpusEvidenceWire(msgspec.Struct, frozen=True):
+    """Exact JSON shape consumed by production's evidence row decoder.
+
+    This is intentionally a wire schema only.  It validates the complete
+    export before the sole semantic mapper,
+    ``PipelineDB._album_quality_evidence_from_row``, reconstructs the typed
+    evidence object production itself uses.
+    """
+
+    id: int
+    mb_release_id: str
+    snapshot_fingerprint: str
+    source_path: str
+    measured_at: str
+    min_bitrate_kbps: int | None
+    avg_bitrate_kbps: int | None
+    median_bitrate_kbps: int | None
+    format: str | None
+    is_cbr: bool
+    spectral_grade: str | None
+    spectral_bitrate_kbps: int | None
+    spectral_subject: EvidenceSubject | None
+    spectral_provenance: EvidenceProvenance | None
+    was_converted_from: str | None
+    cliff_hz: int | None
+    codec_family: CodecFamily | None
+    ultrasonic_deficit_db: float | None
+    spectral_measurement_version: int | None
+    codec: str | None
+    container: str | None
+    storage_format: str | None
+    target_format: str | None
+    target_is_cbr: bool | None
+    lineage_version: int
+    v0_min_bitrate_kbps: int | None
+    v0_avg_bitrate_kbps: int | None
+    v0_median_bitrate_kbps: int | None
+    v0_subject: EvidenceSubject | None
+    v0_provenance: EvidenceProvenance | None
+    on_disk_v0_research_attempted: bool
+    current_enrichment_required: bool
+    verified_lossless: bool
+    verified_lossless_provenance: EvidenceProvenance | None
+    verified_lossless_source: str | None
+    verified_lossless_classifier: str | None
+    verified_lossless_detail: str | None
+    audio_validation: DecisionCorpusAudioValidationWire
+    audio_corrupt: bool
+    audio_error: str | None
+    folder_layout: str | None
+    audio_file_count: int | None
+    filetype_band: str | None
+    matched_bad_audio_hash_id: int | None
+    matched_bad_audio_hash_path: str | None
+    aac_lattice_tracks: list[DecisionCorpusAacLatticeTrackWire] | None
+    aac_lattice_modal_offset: int | None
+    aac_lattice_modal_count: int | None
+    aac_lattice_scored_tracks: int | None
+    aac_lattice_max_z: float | None
+    files: list[DecisionCorpusEvidenceFileWire]
 
 
 class DecisionCorpusEvidence(msgspec.Struct, frozen=True):
@@ -450,6 +578,7 @@ class DecisionCorpusEvidence(msgspec.Struct, frozen=True):
     evidence_id: int
     is_candidate: bool
     current_evidence_id: int | None
+    request_mb_release_id: str | None
     row: dict[str, object]
 
 
@@ -476,15 +605,37 @@ def _corpus_evidence(row: Mapping[str, object]) -> DecisionCorpusEvidence:
     if current_evidence_id is not None and not _is_exact_int(current_evidence_id):
         raise RenderDifferentialError(
             "corpus row 'current_evidence_id' must be an integer or null")
+    request_mb_release_id = row["request_mb_release_id"]
+    if request_mb_release_id is not None and not isinstance(
+        request_mb_release_id, str,
+    ):
+        raise RenderDifferentialError(
+            "corpus row 'request_mb_release_id' must be a string or null")
     if not is_candidate and current_evidence_id is not None:
         raise RenderDifferentialError(
             "current-only corpus row has a current_evidence_id")
+    if is_candidate and request_mb_release_id is None:
+        raise RenderDifferentialError(
+            "candidate corpus row has no request_mb_release_id")
+    if not is_candidate and request_mb_release_id is not None:
+        raise RenderDifferentialError(
+            "current-only corpus row has a request_mb_release_id")
     return DecisionCorpusEvidence(
         evidence_id=evidence_id,
         is_candidate=is_candidate,
         current_evidence_id=current_evidence_id,
+        request_mb_release_id=request_mb_release_id,
         row=dict(row),
     )
+
+
+def _entry_release_id(entry: DecisionCorpusEvidence) -> str:
+    release_id = entry.row.get("mb_release_id")
+    if not isinstance(release_id, str):
+        raise RenderDifferentialError(
+            f"corpus evidence {entry.evidence_id} has no string "
+            "mb_release_id")
+    return release_id
 
 
 def resolve_native_current_pairs(
@@ -508,6 +659,17 @@ def resolve_native_current_pairs(
     for entry in entries:
         if not entry.is_candidate:
             continue
+        request_release_id = entry.request_mb_release_id
+        if request_release_id is None:
+            raise RenderDifferentialError(
+                f"candidate evidence {entry.evidence_id} has no "
+                "request_mb_release_id")
+        candidate_release_id = _entry_release_id(entry)
+        if candidate_release_id != request_release_id:
+            raise RenderDifferentialError(
+                f"candidate evidence {entry.evidence_id} release "
+                f"{candidate_release_id!r} does not match request "
+                f"release {request_release_id!r}")
         current_id = entry.current_evidence_id
         if current_id is None:
             pairs.append((entry, None))
@@ -518,6 +680,12 @@ def resolve_native_current_pairs(
                 "candidate evidence "
                 f"{entry.evidence_id} has dangling current_evidence_id "
                 f"{current_id}")
+        current_release_id = _entry_release_id(current)
+        if current_release_id != request_release_id:
+            raise RenderDifferentialError(
+                f"candidate evidence {entry.evidence_id} current evidence "
+                f"{current.evidence_id} release {current_release_id!r} "
+                f"does not match request release {request_release_id!r}")
         pairs.append((entry, current))
     return pairs
 

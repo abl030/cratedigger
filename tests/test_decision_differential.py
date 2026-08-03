@@ -100,7 +100,16 @@ def _corpus_row(**overrides: object) -> dict[str, object]:
         "verified_lossless_source": None,
         "verified_lossless_classifier": None,
         "verified_lossless_detail": None,
-        "audio_validation": {"outcome": "legacy_unrecorded"},
+        "audio_validation": {
+            "policy_id": "pre-audio-integrity-v2",
+            "tool": "legacy",
+            "tool_version": "",
+            "outcome": "legacy_unrecorded",
+            "files_checked": 0,
+            "files_failed": 0,
+            "diagnostics": [],
+            "omitted_diagnostics": 0,
+        },
         "audio_corrupt": False,
         "audio_error": None,
         "folder_layout": "flat",
@@ -108,10 +117,16 @@ def _corpus_row(**overrides: object) -> dict[str, object]:
         "filetype_band": "flac",
         "matched_bad_audio_hash_id": None,
         "matched_bad_audio_hash_path": None,
+        "aac_lattice_tracks": None,
+        "aac_lattice_modal_offset": None,
+        "aac_lattice_modal_count": None,
+        "aac_lattice_scored_tracks": None,
+        "aac_lattice_max_z": None,
         # The native replay resolves a candidate's installed side from this
         # request projection, not from a parallel hand-authored pairing file.
         "is_candidate": True,
         "current_evidence_id": None,
+        "request_mb_release_id": "mbid-decision-differential",
         "files": [{
             "relative_path": "01.flac",
             "size_bytes": 1,
@@ -386,7 +401,7 @@ class TestNativeCurrentSidePairing(unittest.TestCase):
     """
 
     def _installed_row(self, **overrides: object) -> dict[str, object]:
-        return _corpus_row(
+        row = _corpus_row(
             id=99,
             source_path="/Beets/installed",
             min_bitrate_kbps=128, avg_bitrate_kbps=128,
@@ -399,13 +414,16 @@ class TestNativeCurrentSidePairing(unittest.TestCase):
             filetype_band="mp3", target_format=None, target_is_cbr=None,
             v0_min_bitrate_kbps=219, v0_avg_bitrate_kbps=240,
             v0_median_bitrate_kbps=240, v0_subject="source",
+            is_candidate=False,
+            request_mb_release_id=None,
             files=[{
                 "relative_path": "01.mp3", "size_bytes": 1, "mtime_ns": 1,
                 "extension": "mp3", "container": "mp3", "codec": "mp3",
                 "decode_ok": True,
             }],
-            **overrides,
         )
+        row.update(overrides)
+        return row
 
     def _candidate_row(self, **overrides: object) -> dict[str, object]:
         """The Bill Hicks rescue shape: suspect grade, strong probe."""
@@ -425,7 +443,7 @@ class TestNativeCurrentSidePairing(unittest.TestCase):
         current_first: bool = False,
     ) -> None:
         candidate = candidate or self._candidate_row(current_evidence_id=99)
-        current = current or self._installed_row(is_candidate=False)
+        current = current or self._installed_row()
         rows = [candidate, current]
         if current_first:
             rows.reverse()
@@ -502,6 +520,103 @@ class TestNativeCurrentSidePairing(unittest.TestCase):
                     json.dumps(malformed) + "\n", encoding="utf-8")
                 with self.assertRaises(RenderDifferentialError):
                     read_decision_corpus(str(corpus))
+
+    def test_missing_or_coerced_evidence_columns_fail_before_deciding(self):
+        """JSON's loose primitives cannot reach production's permissive casts."""
+        malformed_rows: list[tuple[str, dict[str, object]]] = []
+        missing = self._candidate_row()
+        del missing["audio_validation"]
+        malformed_rows.append(("missing audio_validation", missing))
+        for field, value in (
+            ("is_cbr", "false"),
+            ("verified_lossless", "false"),
+            ("min_bitrate_kbps", "900"),
+            ("current_enrichment_required", "false"),
+        ):
+            malformed = self._candidate_row()
+            malformed[field] = value
+            malformed_rows.append((field, malformed))
+        malformed_audio = self._candidate_row()
+        audio_validation = malformed_audio["audio_validation"]
+        assert isinstance(audio_validation, dict)
+        malformed_audio["audio_validation"] = {
+            **audio_validation,
+            "files_checked": "0",
+        }
+        malformed_rows.append(("coerced audio validation count", malformed_audio))
+
+        for name, malformed in malformed_rows:
+            with self.subTest(name=name), TemporaryDirectory() as tmp:
+                corpus = Path(tmp) / "corpus.jsonl"
+                corpus.write_text(
+                    json.dumps(malformed) + "\n", encoding="utf-8")
+                with self.assertRaisesRegex(
+                    RenderDifferentialError, "invalid evidence wire shape",
+                ):
+                    read_decision_corpus(str(corpus))
+
+    def test_missing_or_coerced_file_columns_fail_before_deciding(self):
+        for field, value in (
+            ("size_bytes", "1"),
+            ("decode_ok", "false"),
+            ("codec", 128),
+        ):
+            with self.subTest(field=field), TemporaryDirectory() as tmp:
+                corpus = Path(tmp) / "corpus.jsonl"
+                malformed = self._candidate_row()
+                files = malformed["files"]
+                assert isinstance(files, list)
+                first = files[0]
+                assert isinstance(first, dict)
+                first[field] = value
+                corpus.write_text(
+                    json.dumps(malformed) + "\n", encoding="utf-8")
+                with self.assertRaisesRegex(
+                    RenderDifferentialError, "invalid evidence wire shape",
+                ):
+                    read_decision_corpus(str(corpus))
+        with TemporaryDirectory() as tmp:
+            corpus = Path(tmp) / "corpus.jsonl"
+            malformed = self._candidate_row()
+            files = malformed["files"]
+            assert isinstance(files, list)
+            first = files[0]
+            assert isinstance(first, dict)
+            del first["decode_ok"]
+            corpus.write_text(
+                json.dumps(malformed) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(
+                RenderDifferentialError, "invalid evidence wire shape",
+            ):
+                read_decision_corpus(str(corpus))
+
+    def test_candidate_evidence_must_match_its_request_release(self):
+        with TemporaryDirectory() as tmp:
+            corpus = Path(tmp) / "corpus.jsonl"
+            candidate = self._candidate_row(
+                mb_release_id="sibling-pressing",
+                current_evidence_id=None,
+            )
+            corpus.write_text(json.dumps(candidate) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(
+                RenderDifferentialError, "does not match request release",
+            ):
+                read_decision_corpus(str(corpus))
+
+    def test_current_evidence_must_match_the_candidate_request_release(self):
+        with TemporaryDirectory() as tmp:
+            corpus = Path(tmp) / "corpus.jsonl"
+            self._write_native_corpus(
+                corpus,
+                current=self._installed_row(
+                    mb_release_id="sibling-pressing",
+                ),
+            )
+            with self.assertRaisesRegex(
+                RenderDifferentialError,
+                "current evidence .* does not match request release",
+            ):
+                read_decision_corpus(str(corpus))
 
     def test_duplicate_evidence_ids_fail_closed(self):
         with TemporaryDirectory() as tmp:
