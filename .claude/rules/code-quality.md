@@ -221,6 +221,61 @@ Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blo
   harness overhead, or when added protocol/scheduler complexity outweighs the
   measured wall-time return. Detailed workflow: `docs/generated-testing.md`.
 
+## Test execution, evidence, and hooks
+
+Choose validation timing and depth during development using engineering
+judgment based on the change, current evidence, and concrete risk. Focused
+tests, whole-tree Pyright, the complete deterministic suite, and relevant
+surface-specific checks are all available whenever they add useful feedback:
+
+```bash
+nix-shell --run "python3 -m unittest tests.test_X -v"  # focused iteration
+nix-shell --run "pyright --threads 4"                   # whole repository
+nix-shell --run "bash scripts/run_tests.sh"             # complete suite
+```
+
+Always use `nix-shell --run` for Python (`.claude/rules/nix-shell.md`). Direct
+Nix-shell runs are ordinary development feedback; fix their failures in the
+current convergence loop. They do not mint final receipts. A green complete
+suite does not replace generated, live-boundary, browser, corpus, VM, or other
+specialized evidence required by the change. Before the first branch push, use
+the `check` skill for one final receipt-backed whole-tree confirmation once the
+reviewed tree is committed and clean; it owns the receipt and unchanged-tree
+no-replay rules.
+
+`run_tests.sh` exhausts JavaScript, production-strict Pyright, Ruff, Vulture,
+and the complete Python scheduler before returning one aggregate status. Its
+terminal output is a compact complete failure index; the printed private-tmpfs
+bundle contains `summary.json`, `summary.md`, and every complete phase log.
+
+**Generated (property-based) tests** (`tests/test_*_generated.py`, Hypothesis)
+run deterministically in the suite. After changing quality policy, run the
+randomized fuzz burst: `nix-shell --run "bash scripts/fuzz_burst.sh"` (one
+process per generated module, parallelised to the host's cores — Hypothesis is
+single-threaded, so never run the burst serially). Failures shrink to minimal
+worlds — promote them to named `@example` pins or album-test-set scenarios,
+never JSON artifacts. New features start by writing their invariants down, and
+every invariant ships as a pair — deterministic pin + generated property — in
+the same PR, with known-bad self-tests. When in doubt that the harness
+constrains anything, qualify it by fault injection. See
+`docs/generated-testing.md`.
+
+### Skipped tests are an anti-pattern
+
+**A test either runs or it doesn't exist.** `tests/test_skip_audit.py` rejects
+known unittest skip markers without an allowlist; the same policy forbids
+environment gates. Supply dependencies through Nix, construct synthetic
+fixtures, use fakes, or remove the test.
+
+### Hooks
+
+- Pre-commit (`ln -sf ../../scripts/pre-commit .git/hooks/pre-commit`): threaded
+  Pyright on staged `.py` and syntax checks on staged JavaScript.
+- There is no pre-push hook and CI does not run the suite. The agent owns the
+  local validation and final pre-push confirmation described above.
+- Repository releases are not tagged. The deployed Git commit, signed
+  nixosconfig pin, and live verification evidence identify the running state.
+
 ## Authority for exceptions and bypasses
 
 Plans translate product authority; they do not create it. Any plan KTD,
