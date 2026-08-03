@@ -2,6 +2,7 @@
 title: Beets Tip Canary and Rolling Release Compatibility - Plan
 type: feat
 date: 2026-08-03
+revised: 2026-08-03
 issue: 992
 artifact_readiness: implementation-ready
 execution: code
@@ -12,7 +13,8 @@ execution: code
 ## Goal Capsule
 
 - **Objective:** Close [#992](https://github.com/abl030/cratedigger/issues/992) by detecting upstream Beets drift before release while maintaining the Cratedigger-owned boundary across every final Beets release from the previous 730 days.
-- **Production authority:** The admitted Nixpkgs input remains the only source of the production Beets package. The exported NixOS module and ordinary development shell must not resolve the tip input or a historical release package.
+- **Production authority:** The deployment and librarian own the production Beets package, exact interpreter, immutable effective configuration, state, catalog, library, secrets, and plain operator `beet`. Cratedigger consumes the externally supplied runtime capability and validates it; the exported module must never select tip or a historical package on the deployment's behalf.
+- **Repository reference authority:** The locked Nixpkgs input supplies Cratedigger's standalone default package, development shell, and full-suite reference Beets. Fleet may deliberately make Cratedigger's Nixpkgs input follow the downstream pin, but the deployment still instantiates and owns the runtime package.
 - **Canary authority:** One non-flake `beets-tip` input locks upstream `beetbox/beets` `master` for checks only. Automation may advance that one lock node after its focused runtime and whole-repository typing gates pass.
 - **Release authority:** A committed manifest records immutable revisions and NAR hashes for final upstream releases selected by a deterministic 730-day-window refresher. Pure Nix evaluation consumes the manifest without network or wall-clock access.
 - **Compatibility boundary:** Only behavior Cratedigger owns and executes is promised: harness protocol, import session hooks, configured library construction, exact duplicate handling, provider-ID normalization, distance/candidate data, pretend source purity, and exact-album deletion against disposable authority.
@@ -26,21 +28,22 @@ execution: code
 
 ### Problem
 
-The existing daily gate advances the entire flake lock. Consequently Cratedigger first sees a Beets incompatibility when Nixpkgs admits the relevant Beets release. Beets 2.13 made three different late-breaking changes that the current stable-only contract cannot expose ahead of that point:
+The existing daily gate advances the entire flake lock. Consequently Cratedigger first sees a Beets incompatibility when Nixpkgs admits the relevant Beets release. The #759 integration, merged as PR #995 after this plan's first commit, also inverted the runtime boundary: Cratedigger now consumes a deployment-owned package/interpreter/configuration capability instead of owning production Beets. The compatibility matrix therefore qualifies packages for that consumed boundary; it does not regain package authority. Beets 2.13 made three different late-breaking changes that the current stable-only contract cannot expose ahead of that point:
 
 1. upstream changed its Python build backend from Poetry to Hatchling;
 2. Beets startup or migration output can reach stdout and corrupt the harness's newline-delimited JSON protocol; and
 3. Beets' album IDs became `int | None` in type information, exposing fixtures that assume an ID always exists.
 
-Cratedigger needs advance warning without weakening the production pin, taking ownership of external plugins, or pretending historical versions are safe against the live library.
+Cratedigger needs advance warning without changing the deployment-owned runtime, taking ownership of external plugins, or pretending historical versions are safe against the live library.
 
 ### Supported Cohorts
 
-The compatibility surface has three cohorts with different meanings:
+The compatibility surface has four cohorts with different meanings:
 
 | Cohort | Source | Qualification | Meaning |
 |---|---|---|---|
-| Production | `pkgs.python3Packages.beets` from locked Nixpkgs | full suite, Pyright, flake checks, deploy proof | the only Beets package production may run |
+| Deployment runtime | package/interpreter/configuration capability supplied by nixosconfig | startup checker, harness/delete paths, deploy proof | the only Beets package production actually runs; owned outside Cratedigger |
+| Repository reference | `pkgs.python3Packages.beets` from Cratedigger's locked Nixpkgs | full suite, Pyright, flake checks | standalone admitted reference used by this repo's package and development shell |
 | Tip | locked non-flake `beets-tip` input | build, focused real boundary, whole-repository Pyright | advance warning only; never automatically promoted |
 | Releases | immutable entries in the generated 730-day manifest | build plus focused real boundary per release | supported Cratedigger interface history; never live downgrade proof |
 
@@ -52,9 +55,9 @@ The checked-in list is a reproducible snapshot. The refresher, not flake evaluat
 
 #### Isolation and production safety
 
-- R1. The production package, exported module, package set, wrappers, and default development shell must continue to resolve Beets exclusively from the locked Nixpkgs input.
-- R2. Upstream tip must be a locked non-flake input consumed only by named checks and canary tooling.
-- R3. Every tip and historical check must create its own temporary `BEETSDIR`, SQLite catalog, import source, and library root. Ambient `BEETSDIR`, live database paths, and live library roots must be scrubbed and rejected.
+- R1. The exported module must continue to require `services.cratedigger.beets.runtime.package` and its matching interpreter/configuration capability from the deployment. It must not default, select, or promote a tip or historical package.
+- R2. The repository's standalone package and default development shell continue to use the locked Nixpkgs Beets reference, while upstream tip is a locked non-flake input consumed only by named checks and canary tooling.
+- R3. Every tip and historical check must create its own temporary immutable `BEETSDIR`, token-only secret include, writable external state file, SQLite catalog, import source, and library root. Ambient `BEETSDIR`, live database paths, live state, and live library roots must be scrubbed and rejected.
 - R4. A passing disposable check makes no claim that a live catalog can be upgraded or downgraded safely.
 
 #### Compatibility adapters
@@ -75,9 +78,9 @@ The checked-in list is a reproducible snapshot. The refresher, not flake evaluat
 
 #### Matrix and automation
 
-- R15. Every manifest release builds with the admitted Python/dependency set and only the plugin closure required to exercise the Cratedigger boundary. Build backend selection is explicit for the upstream packaging era.
+- R15. Every manifest release builds with the repository package set's Python interpreter and dependencies, matching the module's same-`pythonModule` runtime assertion, and only the plugin closure required to exercise the Cratedigger boundary. Build backend selection is explicit for the upstream packaging era.
 - R16. The matrix runs one focused real-Beets contract per release in independently schedulable Nix checks. It does not multiply the complete Cratedigger suite by the release count.
-- R17. Tip runs the same focused runtime contract plus whole-repository Pyright in a tip-backed test environment.
+- R17. Tip runs the same focused startup-admission, harness, and exact-delete runtime contract plus whole-repository Pyright in a tip-backed test environment.
 - R18. The existing Nixpkgs candidate runner updates only `nixpkgs`; a separate tip runner updates only `beets-tip`. Both serialize repository mutation through one state-directory lock.
 - R19. A red tip candidate is reported but never blocks, rewrites, or rolls back a green Nixpkgs candidate. A candidate commit may contain only the lockfile and must name the input it advanced.
 - R20. The release refresher selects non-draft, non-prerelease GitHub releases whose publication timestamps fall inside `[as_of - 730 days, as_of]`, resolves each tag to an immutable revision and NAR hash, sorts deterministically, and supports an explicit fixed `--as-of` date.
@@ -85,7 +88,7 @@ The checked-in list is a reproducible snapshot. The refresher, not flake evaluat
 
 #### Documentation and operations
 
-- R22. Documentation distinguishes production support, tip canary coverage, release-boundary coverage, and live-catalog safety.
+- R22. Documentation distinguishes deployment-owned production authority, the repository's Nixpkgs reference, tip canary coverage, release-boundary coverage, and live-catalog safety.
 - R23. Documentation explicitly excludes LRCLIB and unrelated plugin feature parity.
 - R24. Downstream scheduling runs the Nixpkgs and tip candidates at separate times or services while sharing the serialization state. A failed canary reaches the existing negative-alert path.
 
@@ -129,7 +132,7 @@ beets-tip = {
 };
 ```
 
-Thread `beets-tip` only into `checks`. Do not pass it to `packages`, `devShells`, `apps`, or `nixosModules.default`. Add an evaluation guard that compares the production Beets source/version against the Nixpkgs package and proves it differs from the canary source identity when tip is ahead.
+Thread `beets-tip` only into `checks`. Do not pass it to `packages`, `devShells`, `apps`, or `nixosModules.default`. Add evaluation guards proving the exported module still requires an external `beets.runtime.package`, has no tip-derived default, and that the repository's standalone package/development shell use the Nixpkgs reference rather than the canary source.
 
 Introduce a small checks-only package builder, expected at `nix/beets-compat-package.nix`, which takes:
 
@@ -138,7 +141,7 @@ Introduce a small checks-only package builder, expected at `nix/beets-compat-pac
 - the declared build backend era; and
 - the bounded plugin set needed by Cratedigger's boundary.
 
-The builder reuses the admitted Nixpkgs Beets dependency recipe and overrides source/backend intentionally. It disables the all-plugin closure and enables only Cratedigger-relevant built-ins so the 19-way check does not pull unrelated scientific/audio-analysis dependencies. It must not patch plugin behavior. Upstream package tests are not the compatibility oracle; the dedicated Cratedigger boundary contract is.
+The builder reuses the repository package set's Beets dependency recipe and overrides source/backend intentionally. Every result remains a Python package belonging to that same package set so it can satisfy the module's merged runtime assertion. It disables the all-plugin closure and enables only Cratedigger-relevant built-ins so the 19-way check does not pull unrelated scientific/audio-analysis dependencies. It must not patch plugin behavior. Upstream package tests are not the compatibility oracle; the dedicated Cratedigger boundary contract is.
 
 `nix/beets-compat-releases.json` is generated data with one entry per release:
 
@@ -184,6 +187,7 @@ This mirrors the already-shipped exact-delete JSON child boundary in `harness/de
 
 Refactor `tests/test_harness_beets2_contract.py` so its assertions describe capabilities rather than Beets 2.12 specifically. Keep the real fresh-interpreter and real wrapper paths. The reusable focused entry point must cover:
 
+- the merged portable startup checker against one deployment-shaped disposable capability: immutable config, token-only include, external state file, exact interpreter, catalog, and library root;
 - import/load and capability report;
 - configured Library construction and destination rendering;
 - duplicate remove/skip/default behavior for the active API era;
@@ -224,9 +228,9 @@ The release manifest refresh remains a deliberate reviewed source change rather 
 
 ### 7. Documentation and downstream composition
 
-Update `docs/beets-primer.md`, `docs/generated-testing.md`, and the relevant deployment rule text to describe the three cohorts and their different guarantees. Amend wording that says every flake update changes all inputs; production updates remain `nixpkgs`-specific. State the LRCLIB exclusion without ambiguity.
+Update `docs/beets-primer.md`, `docs/generated-testing.md`, and the relevant deployment rule text to describe the four cohorts and their different guarantees. Amend wording that says every flake update changes all inputs: the repository's standalone Nixpkgs reference and the checks-only tip move independently, while fleet's downstream Nixpkgs pin and externally instantiated runtime remain deployment authority. State the LRCLIB exclusion without ambiguity.
 
-After the Cratedigger PR merges, update the downstream doc1 scheduler in `nixosconfig` so the tip runner is a separate oneshot/timer (staggered from the long Nixpkgs job), shares the state directory/serialization lock and GitHub credentials, and uses the existing negative-alert pattern. This downstream composition is deployment plumbing: it does not change which Beets package production runs.
+After the Cratedigger PR merges, update the downstream doc1 scheduler in `nixosconfig` so the tip runner is a separate oneshot/timer (staggered from the long Nixpkgs job), shares the state directory/serialization lock and GitHub credentials, and uses the existing negative-alert pattern. This downstream composition is deployment plumbing: it neither supplies nor changes `services.cratedigger.beets.runtime.package`.
 
 ---
 
@@ -235,8 +239,8 @@ After the Cratedigger PR merges, update the downstream doc1 scheduler in `nixosc
 ### U1 — Pin tip and generate the release manifest
 
 - **Files:** `flake.nix`, `flake.lock`, `nix/beets-compat-releases.json`, `nix/beets-compat-package.nix`, focused Nix tests.
-- **Work:** Add the checks-only input, package builder, current 19-release immutable manifest, named build/runtime checks, and production-source isolation assertion.
-- **Proof:** Pure eval succeeds offline; all names enumerate; production outputs do not depend on `beets-tip`; v2.1.0 and tip packages build before expanding the full matrix.
+- **Work:** Add the checks-only input, package builder, current 19-release immutable manifest, named build/runtime checks, and deployment-package-neutrality/standalone-source isolation assertions.
+- **Proof:** Pure eval succeeds offline; all names enumerate; the module still requires an external runtime package; standalone outputs do not depend on `beets-tip`; v2.1.0 and tip packages build before expanding the full matrix.
 
 ### U2 — Add capability adapters with red/green era pins
 
@@ -253,7 +257,7 @@ After the Cratedigger PR merges, update the downstream doc1 scheduler in `nixosc
 ### U4 — Generalize the real boundary contract and typing proof
 
 - **Files:** `tests/test_harness_beets2_contract.py` (rename only if it improves the contract), affected fixture tests, Nix check wiring.
-- **Work:** Remove 2.12-only assertions, exercise the active capability era, add exact delete/distance/protocol cases, and fail loudly on optional IDs.
+- **Work:** Preserve the newly merged deployment-capability/statefile contract, remove 2.12-only API assertions, exercise the active capability era, add exact delete/distance/protocol cases, and fail loudly on optional IDs.
 - **Proof:** Stable full test discovery remains green; tip Pyright catches the historical optional-ID mutant; the focused contract passes v2.1.0, v2.3.1, v2.4.0, v2.11.0, v2.12.0, v2.13.1, then the complete manifest.
 
 ### U5 — Add deterministic manifest refresh
@@ -272,7 +276,7 @@ After the Cratedigger PR merges, update the downstream doc1 scheduler in `nixosc
 
 - **Files:** `docs/beets-primer.md`, `docs/generated-testing.md`, `.claude/rules/deploy.md`, downstream `nixosconfig` scheduler after merge.
 - **Work:** Document the support contract and operator refresh flow; obtain Sol review; run the receipt-backed clean-tree gate; merge; pin and deploy; add the staggered downstream canary timer.
-- **Proof:** Exact reviewed commit is active on doc2, production `beet --version` remains the admitted Nixpkgs version, tip source is absent from the production closure, the new timer is enabled, one canary invocation has a fresh successful InvocationID, and a natural Cratedigger successor cycle runs the merged harness revision.
+- **Proof:** Exact reviewed commit is active on doc2, production `beet --version` remains the deployment-supplied matrix-covered version, tip source is absent from the production closure, the new timer is enabled, one canary invocation has a fresh successful InvocationID, and a natural Cratedigger successor cycle runs the merged harness revision.
 
 ---
 
@@ -294,7 +298,7 @@ After the Cratedigger PR merges, update the downstream doc1 scheduler in `nixosc
 
 - Trace every `beets.importer` import and every `Library(...)` construction to ensure compatibility logic is not duplicated outside the adapter.
 - Trace every harness stdout write, including raw child/third-party fd behavior, to ensure the protocol stream has one owner.
-- Inspect the flake dependency graph to prove production packages/modules do not close over `beets-tip` or release sources.
+- Inspect the flake dependency graph to prove the exported module does not select a runtime package and the standalone packages/shell do not close over `beets-tip` or release sources.
 - Inspect update scripts and their fakes to prove exact lock-input isolation and serialization.
 - Confirm no test path can resolve `/mnt/virtio`, `/var/lib/cratedigger`, an ambient `BEETSDIR`, or the live catalog.
 
@@ -317,7 +321,7 @@ No branch push occurs until:
 3. Merge using GitHub **Create a merge commit**.
 4. Use the repository deploy workflow to create and push the signed `nixosconfig` Cratedigger pin and deploy through the locked fleet trigger.
 5. Add/enable the staggered doc1 Beets-tip canary service/timer in the signed downstream configuration and deploy it.
-6. Verify on doc2 that the exact merged Cratedigger source is active, production resolves the admitted Nixpkgs Beets package, migrations/readiness are green, and one natural successor pipeline cycle completes.
+6. Verify on doc2 that the exact merged Cratedigger source is active, the deployment-owned Beets runtime package/interpreter/configuration remains the nixosconfig-supplied capability and its version is inside the supported matrix, startup admission/readiness is green, and one natural successor pipeline cycle completes.
 7. Verify on doc1 that the tip timer is enabled and one manually triggered or naturally due canary invocation succeeds without changing the production Beets version.
 8. Comment on #992 with PR, receipt, signed pin, fleet anchor, exact active source, production Beets version, canary InvocationID, and successor-cycle evidence.
 9. Close #992 deliberately, fast-forward the shared checkout while preserving `.claude/memory/`, and remove the clean task worktree.
@@ -352,11 +356,11 @@ No branch push occurs until:
 - The plan exists as the branch's first dedicated commit.
 - All 19 current release entries are immutable, reproducible, and green on the focused real boundary.
 - Locked tip is green for build, focused runtime behavior, and whole-repository Pyright.
-- Production evaluation cannot resolve tip or historical packages.
+- The exported module remains deployment-package-neutral, while standalone package/shell evaluation cannot resolve tip or historical packages.
 - The known Beets 2.13 backend, stdout, and optional-ID regressions are pinned and green.
 - Nixpkgs and tip updaters are independently mutable, serialized, fail-closed, and covered by executable fakes.
 - Release refresh is deterministic and tested without network or wall-clock access in the pure core.
 - LRCLIB and non-owned plugin behavior are explicitly outside the promise.
 - Terra implementation and independent Sol review have converged with no unresolved material findings.
 - The same clean committed HEAD has a receipt-backed final gate before first push.
-- The PR is merged with a merge commit, the signed downstream pin is deployed, production remains on admitted Beets, the canary timer is live, a successor Cratedigger cycle succeeds, and #992 is closed with exact evidence.
+- The PR is merged with a merge commit, the signed downstream pin is deployed, production remains on its deployment-owned matrix-covered Beets capability, the canary timer is live, a successor Cratedigger cycle succeeds, and #992 is closed with exact evidence.
