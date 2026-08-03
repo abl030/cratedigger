@@ -849,6 +849,13 @@ export function youtubeRescueTargets(result) {
  */
 function renderYoutubeBody(result, id) {
   const cls = youtubeSectionState(result);
+  const row = consoleRow(id);
+  const identifier = row && (row.mb_release_id || row.discogs_release_id);
+  if (identifier) {
+    return `<div class="lt-yt">${renderYoutubeRescueControl(
+      `long-tail-${id}`, id, identifier, result,
+      { check: `window.checkYoutube(${id})`, pick: 'window.pickYoutubeRescue' })}</div>`;
+  }
   const checkLabel = (cls.state === 'resolver_failed') ? 'Retry' : (cls.state === 'resolved_empty') ? 'Re-check' : 'Check YouTube';
   const input = `<input id="yt-watch-long-tail-${id}" placeholder="https://music.youtube.com/watch?v=…" aria-label="YouTube Music watch URL">`;
   const checkBtn = `<button class="lt-yt-check" type="button" onclick="event.stopPropagation(); window.checkYoutube(${id})">${checkLabel}</button>`;
@@ -1424,7 +1431,7 @@ export async function checkYoutube(id) {
     const r = await fetch(`${API}/api/youtube-album`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ identifier, refresh: false, ...(document.getElementById(`yt-watch-long-tail-${id}`)?.value.trim() ? { watch_url: document.getElementById(`yt-watch-long-tail-${id}`).value.trim() } : {}) }),
+      body: JSON.stringify({ identifier, refresh: false, ...((typeof document !== 'undefined' && document.getElementById(`yt-watch-long-tail-${id}`)?.value.trim()) ? { watch_url: document.getElementById(`yt-watch-long-tail-${id}`).value.trim() } : {}) }),
     });
     // 404/503 still carry a typed body; the classifier maps any non-`ok`
     // outcome to `resolver_failed`, so we read the body regardless of

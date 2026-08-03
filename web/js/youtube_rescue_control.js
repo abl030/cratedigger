@@ -1,13 +1,21 @@
 /* The one bounded check / watch-url / choose / confirm rescue control (#1003). */
 import { API, toast } from './state.js';
-import { esc, jsArg } from './util.js';
+import { esc, jsArg, youtubeSectionState } from './util.js';
 
-export function renderYoutubeRescueControl(key, requestId, identifier) {
+export function renderYoutubeRescueControl(key, requestId, identifier, result = null, handlers = {}) {
   if (!Number.isInteger(Number(requestId)) || !identifier) return '';
+  const state = youtubeSectionState(result);
+  const check = handlers.check || `window.checkYoutubeRescue(${jsArg(key)}, ${Number(requestId)}, ${jsArg(String(identifier))})`;
+  const pick = handlers.pick || `window.pickYoutubeRescue`;
+  const label = state.state === 'resolver_failed' ? 'Retry' : state.state === 'resolved_empty' ? 'Re-check' : 'Check YouTube';
+  const choices = state.state === 'resolved_with_matrix'
+    ? (result.youtube_releases || []).map((release) => `<button class="p-btn" type="button" onclick="${pick}(${Number(requestId)}, ${jsArg(release.yt_browse_id)})">Rescue from ${esc(release.yt_browse_id)}</button>`).join('')
+    : state.state === 'resolver_failed' || state.state === 'resolved_empty'
+      ? `<span>${esc(state.message)}</span>` : '';
   return `<div class="yt-rescue-control" id="yt-rescue-${esc(key)}">
-    <button class="p-btn" type="button" onclick="window.checkYoutubeRescue(${jsArg(key)}, ${Number(requestId)}, ${jsArg(String(identifier))})">Check YouTube</button>
+    <button class="p-btn" type="button" onclick="${check}">${label}</button>
     <input id="yt-watch-${esc(key)}" placeholder="https://music.youtube.com/watch?v=…" aria-label="YouTube Music watch URL">
-    <div class="yt-rescue-result"></div>
+    <div class="yt-rescue-result">${choices}</div>
   </div>`;
 }
 
