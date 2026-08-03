@@ -31,6 +31,10 @@ import msgspec
 
 if TYPE_CHECKING:
     from cratedigger import TrackRecord
+    from lib.convergence_service import (
+        ConvergenceSignal,
+        StopConvergedSearchResult,
+    )
     from lib.dispatch.types import PostCommitQuarantineAudit
     from lib.pipeline_db import (
         AlbumRequestRow,
@@ -599,7 +603,7 @@ class FakePipelineDB:
         # (extra headroom for the per-request compose path's request
         # fetch).
         self.query_counts: dict[str, int] = {}
-        self.convergence_signals: dict[int, Any] = {}
+        self.convergence_signals: dict[int, ConvergenceSignal] = {}
         # Migration 034 — youtube_album_mappings. Keyed by
         # (release_group_identifier, source); each value is the full
         # matrix the resolver scored for that pair. Refresh always
@@ -4569,7 +4573,7 @@ class FakePipelineDB:
 
     def get_convergence_signals(
         self, request_ids: list[int] | None = None,
-    ) -> dict[int, Any]:
+    ) -> dict[int, ConvergenceSignal]:
         self.query_counts["get_convergence_signals"] = (
             self.query_counts.get("get_convergence_signals", 0) + 1
         )
@@ -4588,7 +4592,7 @@ class FakePipelineDB:
         *,
         latest_qualifying_log_id: int,
         cliff_hz: int,
-    ) -> Any:
+    ) -> StopConvergedSearchResult:
         from lib.convergence_service import StopConvergedSearchResult
 
         rid = int(request_id)

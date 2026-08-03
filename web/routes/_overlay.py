@@ -16,9 +16,13 @@ contract in `web/routes/browse.py`).
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from typing import TYPE_CHECKING
 
 import msgspec
+
+if TYPE_CHECKING:
+    from lib.convergence_service import ConvergenceSignal
 
 
 def _pipeline_request_id(row: dict[str, object]) -> int:
@@ -91,6 +95,10 @@ def band_release_ids(release_ids: Iterable[str]) -> dict[str, str]:
 def overlay_release_rows_in_place(
     rows: list[dict[str, object]],
     release_ids: Iterable[str],
+    *,
+    convergence_fn: Callable[
+        [list[int]], dict[int, ConvergenceSignal]
+    ] | None = None,
 ) -> None:
     """Annotate each release row with library + pipeline state in place.
 
@@ -125,7 +133,8 @@ def overlay_release_rows_in_place(
         srv.check_pipeline(ids_list) if ids_list else {}
     )
     request_ids = [_pipeline_request_id(row) for row in in_pipeline.values()]
-    convergence = srv.get_convergence_signals(request_ids)
+    get_convergence = convergence_fn or srv.get_convergence_signals
+    convergence = get_convergence(request_ids)
     in_library: set[str] = (
         srv.check_beets_library(ids_list) if ids_list else set()
     )

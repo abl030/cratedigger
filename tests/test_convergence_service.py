@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from hypothesis import given
 from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401 - registers suite/fuzz
 from lib.convergence_service import (
     ConvergenceObservation,
     ConvergenceSignal,

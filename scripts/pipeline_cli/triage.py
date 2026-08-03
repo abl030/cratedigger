@@ -33,6 +33,10 @@ from lib.triage_service import VALID_FILTER_FORMS as _TRIAGE_VALID_FILTER_FORMS_
 from scripts.pipeline_cli._format import _format_dt, _json_default, _truncate
 
 if TYPE_CHECKING:
+    from lib.convergence_service import (
+        ConvergenceSignal,
+        StopConvergedSearchResult,
+    )
     from lib.pipeline_db.rows import AlbumRequestRow, WrongMatchCandidateRow
     from lib.triage_service import ParsedTriageFilter
 
@@ -69,11 +73,13 @@ class _TriagePipelineDB(Protocol):
         per_request_limit: int,
     ) -> dict[int, list[dict[str, Any]]]: ...
 
-    def get_convergence_signals(self, request_ids: list[int] | None = None) -> dict[int, Any]: ...
+    def get_convergence_signals(
+        self, request_ids: list[int] | None = None,
+    ) -> dict[int, ConvergenceSignal]: ...
 
     def stop_search_for_convergence(
         self, request_id: int, *, latest_qualifying_log_id: int, cliff_hz: int,
-    ) -> Any: ...
+    ) -> StopConvergedSearchResult: ...
 
 
 class _QuarantineWrongMatchesDB(Protocol):

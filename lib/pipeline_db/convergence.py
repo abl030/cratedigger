@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import Any
+from collections.abc import Mapping, Sequence
+from typing import Protocol
 
+import msgspec
 import psycopg2.extras
 
 from lib.convergence_service import (
@@ -84,25 +85,22 @@ WITH eligible_downloads AS MATERIALIZED (
 """
 
 
-def _signal_from_row(row: dict[str, Any]) -> ConvergenceSignal:
-    return ConvergenceSignal(
-        request_id=int(row["request_id"]),
-        observation_count=int(row["observation_count"]),
-        distinct_peer_count=int(row["distinct_peer_count"]),
-        distinct_candidate_snapshot_count=int(
-            row["distinct_candidate_snapshot_count"]
-        ),
-        cliff_hz=int(row["cliff_hz"]),
-        latest_qualifying_log_id=int(row["latest_qualifying_log_id"]),
-        first_observed_at=row["first_observed_at"],
-        latest_observed_at=row["latest_observed_at"],
-    )
+class _ConvergenceCursor(Protocol):
+    """RealDictCursor surface used by convergence reads and the stop CAS."""
+
+    def execute(self, query: str, vars: object = ...) -> object: ...
+    def fetchone(self) -> Mapping[str, object] | None: ...
+    def fetchall(self) -> list[Mapping[str, object]]: ...
+
+
+def _signal_from_row(row: Mapping[str, object]) -> ConvergenceSignal:
+    return msgspec.convert(row, type=ConvergenceSignal)
 
 
 class _ConvergenceMixin(_PipelineDBBase):
     def _get_convergence_signals_with_cursor(
         self,
-        cur: Any,
+        cur: _ConvergenceCursor,
         request_ids: Sequence[int] | None,
     ) -> dict[int, ConvergenceSignal]:
         request_filter = ""
@@ -124,10 +122,8 @@ WHERE current_evidence.v0_subject = 'source'
 ORDER BY signals.request_id
 """
         cur.execute(sql, params)
-        return {
-            int(row["request_id"]): _signal_from_row(row)
-            for row in cur.fetchall()
-        }
+        signals = (_signal_from_row(row) for row in cur.fetchall())
+        return {signal.request_id: signal for signal in signals}
 
     def get_convergence_signals(
         self, request_ids: Sequence[int] | None = None,

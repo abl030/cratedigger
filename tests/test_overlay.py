@@ -41,6 +41,12 @@ class TestOverlayReleaseRowsInPlace(unittest.TestCase):
             latest_observed_at=datetime(2026, 8, 2, tzinfo=UTC),
         )
         rows: list[dict[str, object]] = [{"id": "queued"}]
+        calls: list[list[int]] = []
+
+        def get_signals(request_ids: list[int]) -> dict[int, ConvergenceSignal]:
+            calls.append(request_ids)
+            return {21: signal}
+
         with patch("web.server.check_beets_library", return_value=set()), \
                 patch("web.server.check_pipeline", return_value={
                     "queued": {
@@ -51,16 +57,13 @@ class TestOverlayReleaseRowsInPlace(unittest.TestCase):
                         "provisional_lossless": True,
                         "processing_owner": None,
                     },
-                }), patch("web.server._beets_db", return_value=None), \
-                patch(
-                    "web.server.get_convergence_signals",
-                    return_value={21: signal},
-                    create=True,
-                ) as get_signals:
-            overlay_release_rows_in_place(rows, ["queued"])
+                }), patch("web.server._beets_db", return_value=None):
+            overlay_release_rows_in_place(
+                rows, ["queued"], convergence_fn=get_signals,
+            )
 
         self.assertEqual(rows[0]["convergence"], msgspec.to_builtins(signal))
-        get_signals.assert_called_once_with([21])
+        self.assertEqual(calls, [[21]])
 
     def test_populates_library_and_pipeline_state(self):
         rows: list[dict[str, object]] = [

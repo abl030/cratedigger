@@ -5075,7 +5075,7 @@ class TestPipelineCliTriage(unittest.TestCase):
         self, db, rid, *, latest_log_id=99, cliff_hz=15_000,
         json_out=False,
     ):
-        args = SimpleNamespace(
+        args = argparse.Namespace(
             id=rid,
             latest_log_id=latest_log_id,
             cliff_hz=cliff_hz,
@@ -5085,7 +5085,7 @@ class TestPipelineCliTriage(unittest.TestCase):
         stdout = io.StringIO()
         stderr = io.StringIO()
         with redirect_stdout(stdout), redirect_stderr(stderr):
-            rc = pipeline_cli.cmd_triage_stop(db, cast(Any, args))
+            rc = pipeline_cli.cmd_triage_stop(db, args)
         return rc, stdout.getvalue(), stderr.getvalue()
 
     def test_convergence_filter_show_and_stop_share_signal_identity(self):
