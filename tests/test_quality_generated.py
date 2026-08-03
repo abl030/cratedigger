@@ -105,9 +105,9 @@ from lib.quality import (
 from lib.quality.decisions import DECISION_VERIFIED_LOSSLESS_LOCKED
 from lib.quality.filetypes import has_mixed_lossless_and_lossy
 from lib.quality.pipeline import (
-    evidence_spectral_context,
     _lossless_source_from_evidence,
     _policy_v0_probe_from_metric,
+    evidence_spectral_context,
 )
 from lib.spectral_check import (
     _SOX_NATIVE_EXTS,
