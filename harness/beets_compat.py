@@ -7,9 +7,10 @@ outside it decides an upstream era from a version string.
 from __future__ import annotations
 
 import importlib
+from collections.abc import Callable
 from dataclasses import dataclass
 from types import ModuleType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, TypeGuard
 
 from beets import library
 
@@ -19,6 +20,14 @@ if TYPE_CHECKING:
 
 class BeetsCapabilityError(RuntimeError):
     """The loaded Beets does not expose one complete supported capability set."""
+
+
+class _ConfigValue(Protocol):
+    def as_filename(self) -> str: ...
+
+
+class _BeetsConfig(Protocol):
+    def __getitem__(self, key: str) -> _ConfigValue: ...
 
 
 def _required_module(name: str) -> ModuleType:
@@ -126,10 +135,10 @@ def _load_capabilities() -> BeetsCapabilities:
 CAPABILITIES = _load_capabilities()
 
 
-def configured_library(config: object) -> library.Library:
+def configured_library(config: _BeetsConfig) -> library.Library:
     """Open a library preserving the active Beets era's configured paths."""
     ui = _required_module("beets.ui")
-    item = getattr(config, "__getitem__")
+    item = config.__getitem__
     library_path = item("library").as_filename()
     directory = item("directory").as_filename()
     if CAPABILITIES.library_era == "modern":
@@ -137,16 +146,17 @@ def configured_library(config: object) -> library.Library:
         if not getattr(result, "path_formats", None) or getattr(result, "replacements", None) is None:
             raise BeetsCapabilityError("modern Library did not derive configured paths/replacements")
         return result
-    path_formats = getattr(ui, "get_path_formats")(item("paths"))
-    replacements = getattr(ui, "get_replacements")()
-    return getattr(library, "Library")(library_path, directory, path_formats, replacements)
+    get_path_formats = _module_callable(ui, "get_path_formats")
+    get_replacements = _module_callable(ui, "get_replacements")
+    constructor = _legacy_library_constructor()
+    return constructor(library_path, directory, get_path_formats(item("paths")), get_replacements())
 
 
 def duplicate_outcome(decision: str, task: object) -> DuplicateAction | None:
     """Apply Cratedigger's ``remove|skip`` decision to the active hook era."""
     remove = decision == "remove"
     if CAPABILITIES.duplicate_era == "legacy":
-        setattr(task, "should_remove_duplicates", remove)
+        vars(task)["should_remove_duplicates"] = remove
         return None
     if CAPABILITIES.duplicate_action is None:
         raise BeetsCapabilityError("modern duplicate hook has no DuplicateAction enum")
@@ -159,3 +169,24 @@ def capability_report() -> dict[str, str]:
         "library_era": CAPABILITIES.library_era,
         "era": CAPABILITIES.era,
     }
+
+
+def _module_callable(module: ModuleType, name: str) -> Callable[..., object]:
+    candidate = getattr(module, name)
+    if not callable(candidate):
+        raise BeetsCapabilityError(f"Beets module callable {name!r} is unavailable")
+    return candidate
+
+
+def _legacy_library_constructor() -> Callable[[str, str, object, object], library.Library]:
+    name = "Library"
+    candidate = getattr(library, name)
+    if not _is_legacy_library_constructor(candidate):
+        raise BeetsCapabilityError("legacy Beets Library constructor is unavailable")
+    return candidate
+
+
+def _is_legacy_library_constructor(
+    candidate: object,
+) -> TypeGuard[Callable[[str, str, object, object], library.Library]]:
+    return callable(candidate)

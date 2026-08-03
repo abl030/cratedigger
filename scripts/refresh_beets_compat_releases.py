@@ -13,31 +13,38 @@ import datetime as dt
 import json
 import re
 import subprocess
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import NotRequired, TypedDict
 
+import msgspec
 
 WINDOW_DAYS = 730
 MANIFEST_PATH = Path(__file__).resolve().parent.parent / "nix" / "beets-compat-releases.json"
 _SRI_SHA256 = re.compile(r"sha256-[A-Za-z0-9+/]{43}=")
 
 
-class GithubRelease(TypedDict):
+class GithubRelease(msgspec.Struct, forbid_unknown_fields=True):
     tag_name: str
     published_at: str | None
     draft: bool
     prerelease: bool
 
 
-class ManifestEntry(TypedDict):
+class ManifestEntry(msgspec.Struct, forbid_unknown_fields=True):
     version: str
     tag: str
     publishedAt: str
     rev: str
     narHash: str
     buildBackend: str
-    source: NotRequired[str]
+
+
+class GithubCommit(msgspec.Struct, forbid_unknown_fields=True):
+    sha: str
+
+
+class NixPrefetch(msgspec.Struct, forbid_unknown_fields=True):
+    hash: str
 
 
 def parse_utc_timestamp(value: str) -> dt.datetime:
@@ -45,10 +52,10 @@ def parse_utc_timestamp(value: str) -> dt.datetime:
     if not value.endswith("Z"):
         raise ValueError(f"timestamp must be UTC Zulu time: {value!r}")
     try:
-        parsed = dt.datetime.fromisoformat(value[:-1] + "+00:00")
+        parsed = dt.datetime.fromisoformat(value)
     except ValueError as exc:
         raise ValueError(f"invalid timestamp: {value!r}") from exc
-    if parsed.tzinfo != dt.timezone.utc:
+    if parsed.tzinfo != dt.UTC:
         raise ValueError(f"timestamp must resolve to UTC: {value!r}")
     return parsed
 
@@ -68,9 +75,9 @@ def select_final_releases(
     selected: list[GithubRelease] = []
     seen_tags: set[str] = set()
     for release in releases:
-        tag = release["tag_name"]
-        published_at = release["published_at"]
-        if release["draft"] or release["prerelease"] or published_at is None:
+        tag = release.tag_name
+        published_at = release.published_at
+        if release.draft or release.prerelease or published_at is None:
             continue
         published = parse_utc_timestamp(published_at).date()
         if not start <= published <= as_of:
@@ -79,7 +86,7 @@ def select_final_releases(
             raise ValueError(f"duplicate qualifying release tag: {tag}")
         seen_tags.add(tag)
         selected.append(release)
-    return sorted(selected, key=lambda item: (item["published_at"] or "", item["tag_name"]))
+    return sorted(selected, key=lambda item: (item.published_at or "", item.tag_name))
 
 
 def build_backend_for(tag: str) -> str:
@@ -93,30 +100,33 @@ def build_backend_for(tag: str) -> str:
 
 
 def render_manifest(entries: Iterable[ManifestEntry]) -> str:
-    ordered = sorted(entries, key=lambda item: (item["publishedAt"], item["tag"]))
-    rendered = [json.dumps(entry, sort_keys=True, separators=(",", ":")) for entry in ordered]
+    ordered = sorted(entries, key=lambda item: (item.publishedAt, item.tag))
+    rendered = [
+        json.dumps(msgspec.to_builtins(entry), sort_keys=True, separators=(",", ":"))
+        for entry in ordered
+    ]
     return "[\n" + ",\n".join(f"  {entry}" for entry in rendered) + "\n]\n"
 
 
-def validate_manifest(entries: Iterable[Mapping[str, object]]) -> None:
+def decode_manifest(raw: bytes | str) -> list[ManifestEntry]:
+    """Decode the checked-in manifest through its exact wire schema."""
+    try:
+        return msgspec.json.decode(raw, type=list[ManifestEntry], strict=True)
+    except msgspec.DecodeError as exc:
+        raise TypeError(f"manifest is not a valid compatibility wire payload: {exc}") from exc
+
+
+def validate_manifest(entries: Iterable[ManifestEntry]) -> None:
     """Fail closed on a manifest that is not immutable generated data."""
     prior_key: tuple[str, str] | None = None
     seen_tags: set[str] = set()
     for entry in entries:
-        required = {"version", "tag", "publishedAt", "rev", "narHash", "buildBackend"}
-        if set(entry) != required:
-            raise ValueError(f"manifest entry fields must be exactly {sorted(required)!r}: {entry!r}")
-        tag = entry["tag"]
-        version = entry["version"]
-        published_at = entry["publishedAt"]
-        rev = entry["rev"]
-        nar_hash = entry["narHash"]
-        backend = entry["buildBackend"]
-        if not all(isinstance(value, str) for value in (tag, version, published_at, rev, nar_hash, backend)):
-            raise ValueError(f"manifest values must all be strings: {entry!r}")
-        assert isinstance(tag, str) and isinstance(version, str)
-        assert isinstance(published_at, str) and isinstance(rev, str)
-        assert isinstance(nar_hash, str) and isinstance(backend, str)
+        tag = entry.tag
+        version = entry.version
+        published_at = entry.publishedAt
+        rev = entry.rev
+        nar_hash = entry.narHash
+        backend = entry.buildBackend
         if tag != f"v{version}" or build_backend_for(tag) != backend:
             raise ValueError(f"manifest tag/version/backend disagree: {entry!r}")
         parse_utc_timestamp(published_at)
@@ -137,26 +147,22 @@ def resolve_entries(
 ) -> list[ManifestEntry]:
     entries: list[ManifestEntry] = []
     for release in select_final_releases(releases, as_of=as_of):
-        tag = release["tag_name"]
-        published_at = release["published_at"]
+        tag = release.tag_name
+        published_at = release.published_at
         assert published_at is not None
         rev = resolve_revision(tag)
-        entry: ManifestEntry = {
-            "version": tag.removeprefix("v"),
-            "tag": tag,
-            "publishedAt": published_at,
-            "rev": rev,
-            "narHash": prefetch(rev),
-            "buildBackend": build_backend_for(tag),
-        }
+        entry = ManifestEntry(
+            version=tag.removeprefix("v"), tag=tag, publishedAt=published_at,
+            rev=rev, narHash=prefetch(rev), buildBackend=build_backend_for(tag),
+        )
         entries.append(entry)
     validate_manifest(entries)
     return entries
 
 
-def _run_json(*argv: str) -> object:
+def _run_json(*argv: str) -> str:
     result = subprocess.run(argv, check=True, capture_output=True, text=True)
-    return json.loads(result.stdout)
+    return result.stdout
 
 
 def _github_releases() -> list[GithubRelease]:
@@ -164,47 +170,35 @@ def _github_releases() -> list[GithubRelease]:
         "gh", "api", "--paginate", "--slurp",
         "repos/beetbox/beets/releases?per_page=100",
     )
-    return flatten_release_pages(raw)
+    try:
+        return flatten_release_pages(msgspec.json.decode(raw, type=list[list[GithubRelease]]))
+    except msgspec.DecodeError as exc:
+        raise TypeError(f"GitHub paginated releases response has an invalid shape: {exc}") from exc
 
 
-def flatten_release_pages(raw: object) -> list[GithubRelease]:
+def flatten_release_pages(pages: list[list[GithubRelease]]) -> list[GithubRelease]:
     """Decode the paginated/slurped GitHub release payload without truncation."""
-    if not isinstance(raw, list) or any(not isinstance(page, list) for page in raw):
-        raise ValueError("GitHub paginated releases response is not a list of pages")
-    releases: list[GithubRelease] = []
-    for page in raw:
-        for item in page:
-            if not isinstance(item, dict):
-                raise ValueError("GitHub release page contains a non-object record")
-            tag = item.get("tag_name")
-            published = item.get("published_at")
-            draft = item.get("draft")
-            prerelease = item.get("prerelease")
-            if not isinstance(tag, str) or not (
-                isinstance(published, str) or published is None
-            ) or not isinstance(draft, bool) or not isinstance(prerelease, bool):
-                raise ValueError("GitHub release record has an invalid shape")
-            releases.append(GithubRelease(
-                tag_name=tag,
-                published_at=published,
-                draft=draft,
-                prerelease=prerelease,
-            ))
-    return releases
+    return [release for page in pages for release in page]
 
 
 def _resolve_revision(tag: str) -> str:
-    raw = _run_json("gh", "api", f"repos/beetbox/beets/commits/{tag}")
-    if not isinstance(raw, dict) or not isinstance(raw.get("sha"), str):
-        raise ValueError(f"GitHub did not resolve immutable revision for {tag}")
-    return raw["sha"]
+    try:
+        return msgspec.json.decode(
+            _run_json("gh", "api", f"repos/beetbox/beets/commits/{tag}"),
+            type=GithubCommit,
+        ).sha
+    except msgspec.DecodeError as exc:
+        raise TypeError(f"GitHub did not resolve immutable revision for {tag}: {exc}") from exc
 
 
 def _prefetch(rev: str) -> str:
-    raw = _run_json("nix", "flake", "prefetch", "--json", f"github:beetbox/beets/{rev}")
-    if not isinstance(raw, dict) or not isinstance(raw.get("hash"), str):
-        raise ValueError(f"nix prefetch did not return a hash for {rev}")
-    return raw["hash"]
+    try:
+        return msgspec.json.decode(
+            _run_json("nix", "flake", "prefetch", "--json", f"github:beetbox/beets/{rev}"),
+            type=NixPrefetch,
+        ).hash
+    except msgspec.DecodeError as exc:
+        raise TypeError(f"nix prefetch did not return a hash for {rev}: {exc}") from exc
 
 
 def main() -> None:
@@ -214,7 +208,7 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="print instead of writing the manifest")
     parser.add_argument("--output", type=Path, default=MANIFEST_PATH)
     args = parser.parse_args()
-    as_of = parse_as_of(args.as_of) if args.as_of else dt.datetime.now(dt.timezone.utc).date()
+    as_of = parse_as_of(args.as_of) if args.as_of else dt.datetime.now(dt.UTC).date()
     rendered = render_manifest(resolve_entries(
         _github_releases(), as_of=as_of,
         resolve_revision=_resolve_revision, prefetch=_prefetch,

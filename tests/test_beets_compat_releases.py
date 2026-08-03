@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import datetime as dt
 import importlib.util
-import json
 import unittest
 from pathlib import Path
-
+from typing import Protocol
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "refresh_beets_compat_releases.py"
@@ -17,8 +16,19 @@ refresh = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(refresh)
 
 
-def release(tag: str, published_at: str, *, draft: bool = False, prerelease: bool = False) -> dict[str, object]:
-    return {"tag_name": tag, "published_at": published_at, "draft": draft, "prerelease": prerelease}
+class GithubRelease(Protocol):
+    tag_name: str
+    published_at: str | None
+    draft: bool
+    prerelease: bool
+
+
+def release(
+    tag: str, published_at: str, *, draft: bool = False, prerelease: bool = False,
+) -> GithubRelease:
+    return refresh.GithubRelease(
+        tag_name=tag, published_at=published_at, draft=draft, prerelease=prerelease,
+    )
 
 
 class TestBeetsCompatReleaseManifest(unittest.TestCase):
@@ -32,7 +42,7 @@ class TestBeetsCompatReleaseManifest(unittest.TestCase):
             release("v2.14.0rc1", "2026-08-02T00:00:00Z", prerelease=True),
             release("v2.14.0", "2026-08-02T00:00:00Z", draft=True),
         ], as_of=self.as_of)
-        self.assertEqual([entry["tag_name"] for entry in selected], ["v2.13.0", "v2.13.1"])
+        self.assertEqual([entry.tag_name for entry in selected], ["v2.13.0", "v2.13.1"])
 
     def test_duplicate_qualifying_tag_fails_loudly(self) -> None:
         with self.assertRaisesRegex(ValueError, "duplicate qualifying"):
@@ -47,7 +57,7 @@ class TestBeetsCompatReleaseManifest(unittest.TestCase):
         page_two = [release("v2.13.1", "2026-08-01T00:00:00Z")]
         flattened = refresh.flatten_release_pages([page_one, page_two])
         self.assertEqual(len(flattened), 101)
-        self.assertEqual(flattened[-1]["tag_name"], "v2.13.1")
+        self.assertEqual(flattened[-1].tag_name, "v2.13.1")
 
     def test_renderer_and_validator_reject_known_bad_manifest(self) -> None:
         entries = refresh.resolve_entries(
@@ -57,18 +67,24 @@ class TestBeetsCompatReleaseManifest(unittest.TestCase):
             prefetch=lambda _rev: "sha256-" + "A" * 43 + "=",
         )
         rendered = refresh.render_manifest(entries)
-        self.assertEqual(rendered, refresh.render_manifest(json.loads(rendered)))
-        bad = [dict(entry) for entry in entries]
-        bad[0]["tag"] = "v2.14.0rc1"
+        self.assertEqual(rendered, refresh.render_manifest(refresh.decode_manifest(rendered)))
+        bad = [
+            refresh.ManifestEntry(
+                version=entry.version, tag="v2.14.0rc1" if index == 0 else entry.tag,
+                publishedAt=entry.publishedAt, rev=entry.rev, narHash=entry.narHash,
+                buildBackend=entry.buildBackend,
+            )
+            for index, entry in enumerate(entries)
+        ]
         with self.assertRaisesRegex(ValueError, "disagree"):
             refresh.validate_manifest(bad)
 
     def test_committed_manifest_is_canonical_snapshot(self) -> None:
         manifest = REPO_ROOT / "nix" / "beets-compat-releases.json"
-        entries = json.loads(manifest.read_text(encoding="utf-8"))
+        entries = refresh.decode_manifest(manifest.read_text(encoding="utf-8"))
         refresh.validate_manifest(entries)
         self.assertEqual(manifest.read_text(encoding="utf-8"), refresh.render_manifest(entries))
-        self.assertEqual([entry["tag"] for entry in entries], [
+        self.assertEqual([entry.tag for entry in entries], [
             "v2.1.0", "v2.2.0", "v2.3.0", "v2.3.1", "v2.4.0", "v2.5.0", "v2.5.1",
             "v2.6.0", "v2.6.1", "v2.6.2", "v2.7.0", "v2.7.1", "v2.8.0", "v2.9.0",
             "v2.10.0", "v2.11.0", "v2.12.0", "v2.13.0", "v2.13.1",

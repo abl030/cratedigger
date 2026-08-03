@@ -33,9 +33,11 @@ class TestBeetsCompatibilityImports(TestCase):
                 raise ModuleNotFoundError(name=name)
             return modules[name]
 
-        with patch.object(beets_compat.importlib, "import_module", side_effect=import_module):
-            with self.assertRaisesRegex(beets_compat.BeetsCapabilityError, "partial"):
-                beets_compat._load_capabilities()
+        with (
+            patch.object(beets_compat.importlib, "import_module", side_effect=import_module),
+            self.assertRaisesRegex(beets_compat.BeetsCapabilityError, "partial"),
+        ):
+            beets_compat._load_capabilities()
 
     def test_nested_optional_import_error_preserves_its_cause(self) -> None:
         nested = ModuleNotFoundError("dependency vanished")
@@ -46,9 +48,11 @@ class TestBeetsCompatibilityImports(TestCase):
                 raise nested
             return _module(name)
 
-        with patch.object(beets_compat.importlib, "import_module", side_effect=import_module):
-            with self.assertRaises(beets_compat.BeetsCapabilityError) as caught:
-                beets_compat._load_capabilities()
+        with (
+            patch.object(beets_compat.importlib, "import_module", side_effect=import_module),
+            self.assertRaises(beets_compat.BeetsCapabilityError) as caught,
+        ):
+            beets_compat._load_capabilities()
         self.assertIs(caught.exception.__cause__, nested)
 
     def test_exact_optional_pathbytes_absence_uses_bytes(self) -> None:
@@ -65,7 +69,7 @@ class TestBeetsCompatibilityImports(TestCase):
             capabilities = beets_compat._load_capabilities()
         self.assertIs(capabilities.path_bytes, bytes)
 
-    def test_missing_modern_duplicate_actions_fails_loudly(self) -> None:
+    def test_missing_modern_duplicate_actions_preserves_legacy_capability(self) -> None:
         original = beets_compat.importlib.import_module
 
         def import_module(name: str) -> ModuleType:
@@ -73,11 +77,11 @@ class TestBeetsCompatibilityImports(TestCase):
                 raise ModuleNotFoundError(name=name)
             return original(name)
 
-        with patch.object(beets_compat.importlib, "import_module", side_effect=import_module):
-            with self.assertRaisesRegex(
-                beets_compat.BeetsCapabilityError, "duplicate hook"
-            ):
-                beets_compat._load_capabilities()
+        with (
+            patch.object(beets_compat.importlib, "import_module", side_effect=import_module),
+        ):
+            capabilities = beets_compat._load_capabilities()
+        self.assertEqual(capabilities.duplicate_era, "legacy")
 
 
 if __name__ == "__main__":

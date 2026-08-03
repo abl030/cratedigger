@@ -43,16 +43,14 @@ _beets_mocks = {
 }
 for name, mock in _beets_mocks.items():
     sys.modules.setdefault(name, mock)
-setattr(sys.modules["beets.ui"], "get_path_formats", None)
-setattr(sys.modules["beets.ui"], "get_replacements", None)
+vars(sys.modules["beets.ui"])["get_path_formats"] = None
+vars(sys.modules["beets.ui"])["get_replacements"] = None
 
 # ImportSession needs to be a class so subclassing works.
-setattr(  # noqa: B010 - populate a synthetic runtime module
-    sys.modules["beets.importer.session"],
-    "ImportSession",
-    type("ImportSession", (object,), {"resolve_duplicate": lambda *_args: None}),
+vars(sys.modules["beets.importer.session"])["ImportSession"] = type(
+    "ImportSession", (object,), {"resolve_duplicate": lambda *_args: None},
 )
-setattr(sys.modules["beets.importer.tasks"], "ImportTask", type("ImportTask", (object,), {}))
+vars(sys.modules["beets.importer.tasks"])["ImportTask"] = type("ImportTask", (object,), {})
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from harness import beets_harness

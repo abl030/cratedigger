@@ -33,8 +33,8 @@ canary. It advances only `beets-tip`, then requires the tip build, disposable
 boundary contract, and tip-backed Pyright before making a lock-only candidate
 commit. It never supplies the deployment-owned Beets runtime. The historical
 matrix consumes the reviewed manifest; use
-`scripts/refresh_beets_compat_releases.py --as-of YYYY-MM-DD --check` for a
-fixed-clock operator refresh check.
+[`scripts/refresh_beets_compat_releases.py`](../scripts/refresh_beets_compat_releases.py)
+with `--as-of YYYY-MM-DD --check` for a fixed-clock operator refresh check.
 
 Each matrix member admits the deployment-shaped active Beets plugin profile,
 loads that profile for the exact-delete boundary, and runs an incremental

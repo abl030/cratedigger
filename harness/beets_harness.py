@@ -22,11 +22,12 @@ import os
 import sys
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, TextIO
+from typing import TYPE_CHECKING, TextIO, TypeGuard
 
 from beets import config, library, plugins
 from beets.autotag import AlbumInfo, AlbumMatch, TrackInfo, TrackMatch
 from beets.dbcore import Query
+
 try:
     from harness import beets_compat
 except ModuleNotFoundError:  # direct wrapper execution puts harness/ first
@@ -393,11 +394,9 @@ def _find_duplicates_with_mapped_release_ids(
         # Beets 2.1 predates Album.duplicates_query; its own ImportTask used
         # this equivalent query builder. Keep the real-library lookup active
         # rather than treating a historical API gap as "no duplicates".
-        legacy_all_fields_query: Callable[[dict[str, object]], Query] = getattr(  # noqa: B009 - legacy-only API
-            library.Album, "all_fields_query",
-        )
+        legacy_all_fields_query = _legacy_all_fields_query(library.Album)
         dup_query = legacy_all_fields_query(
-            {key: tmp_album.get(key) for key in keys},
+            {key: tmp_album[key] for key in keys},
         )
 
     # Same exclusion as upstream beets: a task re-importing exactly the same
@@ -409,6 +408,21 @@ def _find_duplicates_with_mapped_release_ids(
         if not (album_paths <= task_paths):
             duplicates.append(album)
     return duplicates
+
+
+def _legacy_all_fields_query(model: object) -> Callable[[dict[str, object]], Query]:
+    """Expose Beets 2.1's inherited query classmethod through a typed seam."""
+    method_name = "all_fields_query"
+    candidate = getattr(model, method_name)
+    if not _is_legacy_query_builder(candidate):
+        raise RuntimeError("legacy Album has no callable all_fields_query")
+    return candidate
+
+
+def _is_legacy_query_builder(
+    candidate: object,
+) -> TypeGuard[Callable[[dict[str, object]], Query]]:
+    return callable(candidate)
 
 
 def _install_release_id_duplicate_lookup() -> None:
