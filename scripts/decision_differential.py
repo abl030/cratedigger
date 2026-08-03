@@ -13,10 +13,13 @@ a second copy of that engine would be a parallel code path.
 
 Two modes, same two-tree runbook as Rule D:
 
-* ``decide`` reads a corpus JSONL (one ``album_quality_evidence`` row
-  object per line, with its snapshot files under ``files``), runs
-  ``full_pipeline_decision_from_evidence`` over each, and writes one
-  decided JSONL row per corpus row.
+* ``decide`` reads a corpus JSONL containing complete candidate and current
+  ``album_quality_evidence`` rows (with their snapshot files under ``files``).
+  A candidate's nullable ``current_evidence_id`` and request ``mb_release_id``
+  are the request-owned pairing authority; the referenced current row must be
+  present in that same corpus and both evidence rows must match that release.
+  It runs ``full_pipeline_decision_from_evidence`` for every candidate and
+  writes one decided JSONL row per candidate.
 * ``diff`` compares two decided JSONL files field by field.
 
     git archive <base-ref> | tar -x -C /tmp/dd-base
@@ -59,16 +62,23 @@ body which fields had no base value.
   exact album arrived now, would it be promoted? This is the arm where a
   proof-gate change shows its real blast radius.
 
-**Pairing a current side.** ``decide --pair-with`` takes a JSONL of
-``{"id": <candidate evidence id>, "current": {<evidence row>}}`` and
-decides each candidate against the installed album's own evidence, the way
-production does (``lib/dispatch/core.py`` passes the request's current
-evidence row beside the candidate). Without it every row is decided as a
-fresh request with nothing installed — which cannot reach any branch that
-compares against a HAVE, including the provisional-lossless lane's
-confident rejects. A proof-gate differential run without a current side
-will under-report; the current side's OWN proof is never stripped, because
-an installed proof is real evidence and is the acquisition ceiling.
+**Native current-side pairing.** The corpus carries each candidate's exact
+``album_requests.current_evidence_id`` and request ``mb_release_id`` beside
+the candidate evidence row, and the complete referenced evidence row elsewhere
+in the same corpus. The replay validates the complete JSON wire shape, builds
+an ID index after loading it, then resolves that foreign key exactly as
+production does. It fails closed on missing/malformed pairing or evidence
+columns, duplicate evidence IDs, dangling references, and either evidence row
+belonging to a sibling pressing; a null ``current_evidence_id`` means the
+candidate has no installed album. This matters because a fresh request cannot
+reach branches that compare against a HAVE, including the provisional-lossless
+lane's confident rejects.
+
+The current side's OWN proof is never stripped: ``--counterfactual`` removes
+only the candidate proof, because installed proof is real evidence and the
+acquisition ceiling. Corpus order is irrelevant, but the complete corpus must
+be assembled before either tree runs the replay so a current row emitted in a
+different export batch remains resolvable.
 
 **Action-time facts are not on the row.** ``target_format`` falls back to
 the candidate's own persisted column, but ``verified_lossless_target`` —
@@ -125,6 +135,7 @@ import contextlib
 import os
 import sys
 from collections.abc import Iterator, Mapping, Sequence
+from typing import TypeGuard
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
@@ -138,12 +149,19 @@ from lib.quality import (
     AacLatticeProofLeg,
     AlbumQualityEvidence,
     AlbumQualityEvidenceDecisionFacts,
+    CodecFamily,
+    EvidenceProvenance,
+    EvidenceSubject,
     UltrasonicProofLeg,
     aac_lattice_proof_leg,
     full_pipeline_decision_from_evidence,
     is_preserved_source_spectral,
     mint_verified_lossless_proof,
     ultrasonic_proof_leg,
+)
+from lib.quality.audio_validation import (
+    AudioToolDiagnosticCategory,
+    AudioValidationOutcome,
 )
 from lib.quality.pipeline import evidence_spectral_context
 from scripts.render_differential import (
@@ -217,17 +235,26 @@ def _evidence_from_corpus_row(
     ``_overlay_evidence_onto_download_log_row``.
     """
     payload = dict(row)
-    raw_files = payload.pop("files", None)
+    try:
+        # ``_album_quality_evidence_from_row`` deliberately accepts values
+        # from psycopg2's already-typed result rows.  A JSONL corpus is a
+        # separate wire boundary: validate every column it consumes before
+        # handing the row to that production mapper, rather than allowing its
+        # legacy ``bool()``/``int()`` coercions to decide a different world.
+        msgspec.convert(payload, type=DecisionCorpusEvidenceWire)
+    except msgspec.ValidationError as exc:
+        raise RenderDifferentialError(
+            f"corpus row {payload.get('id')!r} has an invalid evidence wire "
+            f"shape: {exc}") from exc
+    raw_files = payload.pop("files")
+    # The strict Struct conversion above establishes these assertions; spelling
+    # them keeps the raw Mapping passed to production type-safe without
+    # introducing a second semantic evidence mapper.
+    assert is_object_list(raw_files)
     file_rows: list[dict[str, object]] = []
-    if raw_files is not None:
-        if not is_object_list(raw_files):
-            raise RenderDifferentialError(
-                "corpus row 'files' must be a list of objects")
-        for entry in raw_files:
-            if not is_str_object_dict(entry):
-                raise RenderDifferentialError(
-                    "corpus row 'files' must be a list of objects")
-            file_rows.append(dict(entry))
+    for raw_file in raw_files:
+        assert is_str_object_dict(raw_file)
+        file_rows.append(dict(raw_file))
     measured_at = payload.get("measured_at")
     if isinstance(measured_at, str):
         # PG hands psycopg2 a datetime; a JSONL export hands us its ISO
@@ -428,51 +455,278 @@ def _corpus_rows(path: str) -> Iterator[dict[str, object]]:
                     f"{exc}") from exc
 
 
-def read_current_pairs(path: str) -> dict[int, dict[str, object]]:
-    """Load ``{"id": <candidate id>, "current": {<evidence row>}}`` lines.
+CORPUS_REQUIRED_COLUMNS: frozenset[str] = frozenset({
+    "id",
+    "is_candidate",
+    "current_evidence_id",
+    "request_mb_release_id",
+    "files",
+})
 
-    Held in memory on purpose: the pairing side is one row per INSTALLED
-    album for the candidates being measured, and the join has to be random
-    access. The candidate corpus itself still streams.
+
+class DecisionCorpusEvidenceFileWire(msgspec.Struct, frozen=True):
+    """Exact JSON shape of one exported evidence-file row."""
+
+    relative_path: str
+    size_bytes: int
+    mtime_ns: int
+    extension: str
+    container: str
+    codec: str | None
+    decode_ok: bool
+
+
+class DecisionCorpusAudioDiagnosticWire(msgspec.Struct, frozen=True):
+    """Exact JSON shape of a persisted audio-validation diagnostic."""
+
+    relative_path: str
+    category: AudioToolDiagnosticCategory
+    return_code: int | None
+    stderr_excerpt: str
+    stderr_bytes: int
+    stderr_sha256: str
+    stderr_truncated: bool
+
+
+class DecisionCorpusAudioValidationWire(msgspec.Struct, frozen=True):
+    """Exact JSON shape consumed by production's audio-report decoder."""
+
+    policy_id: str
+    tool: str
+    tool_version: str
+    outcome: AudioValidationOutcome
+    files_checked: int
+    files_failed: int
+    diagnostics: list[DecisionCorpusAudioDiagnosticWire]
+    omitted_diagnostics: int
+
+
+class DecisionCorpusAacLatticeTrackWire(msgspec.Struct, frozen=True):
+    """Exact JSON shape of one persisted AAC-lattice track capture."""
+
+    filename: str
+    offset: int | None
+    z: float | None
+    proba: float | None
+    error: str | None
+
+
+class DecisionCorpusEvidenceWire(msgspec.Struct, frozen=True):
+    """Exact JSON shape consumed by production's evidence row decoder.
+
+    This is intentionally a wire schema only.  It validates the complete
+    export before the sole semantic mapper,
+    ``PipelineDB._album_quality_evidence_from_row``, reconstructs the typed
+    evidence object production itself uses.
     """
-    pairs: dict[int, dict[str, object]] = {}
-    for row in _corpus_rows(path):
-        pair_id = row.get("id")
-        if not isinstance(pair_id, int) or isinstance(pair_id, bool):
+
+    id: int
+    mb_release_id: str
+    snapshot_fingerprint: str
+    source_path: str
+    measured_at: str
+    min_bitrate_kbps: int | None
+    avg_bitrate_kbps: int | None
+    median_bitrate_kbps: int | None
+    format: str | None
+    is_cbr: bool
+    spectral_grade: str | None
+    spectral_bitrate_kbps: int | None
+    spectral_subject: EvidenceSubject | None
+    spectral_provenance: EvidenceProvenance | None
+    was_converted_from: str | None
+    cliff_hz: int | None
+    codec_family: CodecFamily | None
+    ultrasonic_deficit_db: float | None
+    spectral_measurement_version: int | None
+    codec: str | None
+    container: str | None
+    storage_format: str | None
+    target_format: str | None
+    target_is_cbr: bool | None
+    lineage_version: int
+    v0_min_bitrate_kbps: int | None
+    v0_avg_bitrate_kbps: int | None
+    v0_median_bitrate_kbps: int | None
+    v0_subject: EvidenceSubject | None
+    v0_provenance: EvidenceProvenance | None
+    on_disk_v0_research_attempted: bool
+    current_enrichment_required: bool
+    verified_lossless: bool
+    verified_lossless_provenance: EvidenceProvenance | None
+    verified_lossless_source: str | None
+    verified_lossless_classifier: str | None
+    verified_lossless_detail: str | None
+    audio_validation: DecisionCorpusAudioValidationWire
+    audio_corrupt: bool
+    audio_error: str | None
+    folder_layout: str
+    audio_file_count: int
+    filetype_band: str
+    matched_bad_audio_hash_id: int | None
+    matched_bad_audio_hash_path: str | None
+    aac_lattice_tracks: list[DecisionCorpusAacLatticeTrackWire] | None
+    aac_lattice_modal_offset: int | None
+    aac_lattice_modal_count: int | None
+    aac_lattice_scored_tracks: int | None
+    aac_lattice_max_z: float | None
+    files: list[DecisionCorpusEvidenceFileWire]
+
+
+class DecisionCorpusEvidence(msgspec.Struct, frozen=True):
+    """One complete evidence row plus its corpus-level pairing metadata."""
+
+    evidence_id: int
+    is_candidate: bool
+    current_evidence_id: int | None
+    request_mb_release_id: str | None
+    row: dict[str, object]
+
+
+def _is_exact_int(value: object) -> TypeGuard[int]:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _corpus_evidence(row: Mapping[str, object]) -> DecisionCorpusEvidence:
+    """Validate the native pairing columns that the SQL export must emit."""
+    missing = CORPUS_REQUIRED_COLUMNS - set(row)
+    if missing:
+        raise RenderDifferentialError(
+            "corpus row is missing required columns: "
+            f"{sorted(missing)}")
+    evidence_id = row["id"]
+    if not _is_exact_int(evidence_id):
+        raise RenderDifferentialError(
+            f"corpus row has no integer id: {evidence_id!r}")
+    is_candidate = row["is_candidate"]
+    if not isinstance(is_candidate, bool):
+        raise RenderDifferentialError(
+            "corpus row 'is_candidate' must be a boolean")
+    current_evidence_id = row["current_evidence_id"]
+    if current_evidence_id is not None and not _is_exact_int(current_evidence_id):
+        raise RenderDifferentialError(
+            "corpus row 'current_evidence_id' must be an integer or null")
+    request_mb_release_id = row["request_mb_release_id"]
+    if request_mb_release_id is not None and not isinstance(
+        request_mb_release_id, str,
+    ):
+        raise RenderDifferentialError(
+            "corpus row 'request_mb_release_id' must be a string or null")
+    if not is_candidate and current_evidence_id is not None:
+        raise RenderDifferentialError(
+            "current-only corpus row has a current_evidence_id")
+    if is_candidate and request_mb_release_id is None:
+        raise RenderDifferentialError(
+            "candidate corpus row has no request_mb_release_id")
+    if not is_candidate and request_mb_release_id is not None:
+        raise RenderDifferentialError(
+            "current-only corpus row has a request_mb_release_id")
+    return DecisionCorpusEvidence(
+        evidence_id=evidence_id,
+        is_candidate=is_candidate,
+        current_evidence_id=current_evidence_id,
+        request_mb_release_id=request_mb_release_id,
+        row=dict(row),
+    )
+
+
+def _entry_release_id(entry: DecisionCorpusEvidence) -> str:
+    release_id = entry.row.get("mb_release_id")
+    if not isinstance(release_id, str):
+        raise RenderDifferentialError(
+            f"corpus evidence {entry.evidence_id} has no string "
+            "mb_release_id")
+    return release_id
+
+
+def resolve_native_current_pairs(
+    entries: Sequence[DecisionCorpusEvidence],
+) -> list[tuple[DecisionCorpusEvidence, DecisionCorpusEvidence | None]]:
+    """Resolve candidate FKs after the complete corpus is available.
+
+    This is deliberately an ID lookup rather than a parallel sidecar mapping:
+    ``album_requests.current_evidence_id`` is production's one pairing
+    authority. The resolver's output follows the candidate records' input
+    order, but each current reference is order-independent.
+    """
+    by_id: dict[int, DecisionCorpusEvidence] = {}
+    for entry in entries:
+        if entry.evidence_id in by_id:
             raise RenderDifferentialError(
-                f"pairing row has no integer id: {pair_id!r}")
-        current = row.get("current")
-        if not is_str_object_dict(current):
+                f"corpus has duplicate evidence id {entry.evidence_id}")
+        by_id[entry.evidence_id] = entry
+
+    pairs: list[tuple[DecisionCorpusEvidence, DecisionCorpusEvidence | None]] = []
+    for entry in entries:
+        if not entry.is_candidate:
+            continue
+        request_release_id = entry.request_mb_release_id
+        if request_release_id is None:
             raise RenderDifferentialError(
-                f"pairing row {pair_id} has no 'current' evidence object")
-        pairs[pair_id] = dict(current)
+                f"candidate evidence {entry.evidence_id} has no "
+                "request_mb_release_id")
+        candidate_release_id = _entry_release_id(entry)
+        if candidate_release_id != request_release_id:
+            raise RenderDifferentialError(
+                f"candidate evidence {entry.evidence_id} release "
+                f"{candidate_release_id!r} does not match request "
+                f"release {request_release_id!r}")
+        current_id = entry.current_evidence_id
+        if current_id is None:
+            pairs.append((entry, None))
+            continue
+        current = by_id.get(current_id)
+        if current is None:
+            raise RenderDifferentialError(
+                "candidate evidence "
+                f"{entry.evidence_id} has dangling current_evidence_id "
+                f"{current_id}")
+        current_release_id = _entry_release_id(current)
+        if current_release_id != request_release_id:
+            raise RenderDifferentialError(
+                f"candidate evidence {entry.evidence_id} current evidence "
+                f"{current.evidence_id} release {current_release_id!r} "
+                f"does not match request release {request_release_id!r}")
+        pairs.append((entry, current))
     return pairs
+
+
+def read_decision_corpus(path: str) -> list[DecisionCorpusEvidence]:
+    """Load and validate the complete native-pairing corpus.
+
+    Both candidate and current rows pass through production's evidence decoder
+    before any decision is emitted. That rejects a malformed current row even
+    if it appears before its candidate in one batch or is not reached until a
+    later one.
+    """
+    entries = [_corpus_evidence(row) for row in _corpus_rows(path)]
+    for entry in entries:
+        _evidence_from_corpus_row(entry.row)
+    resolve_native_current_pairs(entries)
+    return entries
 
 
 def decide_corpus(
     corpus_path: str,
     out_path: str | None,
     *,
-    pairs_path: str | None = None,
     counterfactual: bool = False,
     verified_lossless_target: str | None = None,
 ) -> int:
-    """Decide every corpus row, streaming so a large corpus stays bounded."""
+    """Decide every candidate after resolving the complete native corpus."""
     count = 0
-    pairs = read_current_pairs(pairs_path) if pairs_path is not None else {}
+    pairs = resolve_native_current_pairs(read_decision_corpus(corpus_path))
     output = (
         contextlib.nullcontext(sys.stdout)
         if out_path is None
         else open(out_path, "w", encoding="utf-8")  # noqa: SIM115 - managed below
     )
     with output as handle:
-        for row in _corpus_rows(corpus_path):
-            row_id = row.get("id")
-            current = (
-                pairs.get(row_id) if isinstance(row_id, int) else None
-            )
+        for candidate, current in pairs:
             decided = decide_row(
-                row, current=current, counterfactual=counterfactual,
+                candidate.row,
+                current=current.row if current is not None else None,
+                counterfactual=counterfactual,
                 verified_lossless_target=verified_lossless_target,
             )
             handle.write(msgspec.json.encode(decided).decode())
@@ -506,11 +760,6 @@ def _build_parser() -> argparse.ArgumentParser:
     decide.add_argument(
         "--out", default=None,
         help="Decided JSONL output path (default: stdout)")
-    decide.add_argument(
-        "--pair-with", default=None, dest="pair_with",
-        help=("JSONL of {\"id\": <candidate evidence id>, \"current\": "
-              "{<evidence row>}} pairing each candidate against the "
-              "installed album, the way production decides"))
     decide.add_argument(
         "--verified-lossless-target", default=None,
         dest="verified_lossless_target",
@@ -547,7 +796,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.mode == "decide":
             count = decide_corpus(
                 args.corpus, args.out,
-                pairs_path=args.pair_with,
                 counterfactual=args.counterfactual,
                 verified_lossless_target=args.verified_lossless_target,
             )
