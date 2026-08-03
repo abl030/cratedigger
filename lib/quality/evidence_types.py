@@ -49,7 +49,9 @@ CODEC_FAMILY_OTHER: CodecFamily = "other"
 # Audio quality measurement — ground truth from ffprobe + spectral
 # ---------------------------------------------------------------------------
 
-class AudioQualityMeasurement(msgspec.Struct, frozen=True):
+class AudioQualityMeasurement(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True
+):
     """What we actually measured about a set of audio files.
 
     Ground truth from ffprobe and spectral analysis. Used by decision functions
@@ -188,7 +190,9 @@ class AudioQualityMeasurement(msgspec.Struct, frozen=True):
         return errors
 
 
-class TargetQualityContract(msgspec.Struct, frozen=True):
+class TargetQualityContract(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True
+):
     """Configured quality of a projected/materialized target.
 
     A contract is policy, not a measurement.  Its explicit label drives rank
@@ -248,7 +252,9 @@ class TargetQualityContract(msgspec.Struct, frozen=True):
 _NONCOMPARABLE_NEUTRAL_V0_PROBE_KIND = "neutral_v0_research"
 
 
-class AlbumQualityEvidenceFile(msgspec.Struct, frozen=True):
+class AlbumQualityEvidenceFile(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True
+):
     """One active file-snapshot row used to guard evidence freshness."""
 
     relative_path: str
@@ -279,7 +285,9 @@ class AlbumQualityEvidenceFile(msgspec.Struct, frozen=True):
         return errors
 
 
-class AlbumQualityV0Metric(msgspec.Struct, frozen=True):
+class AlbumQualityV0Metric(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True
+):
     """Neutral V0 probe metric plus subject and provenance.
 
     This deliberately does not carry the old policy-shaped probe ``kind``.
@@ -319,7 +327,9 @@ class AlbumQualityV0Metric(msgspec.Struct, frozen=True):
         return errors
 
 
-class AacLatticeTrackScore(msgspec.Struct, frozen=True):
+class AacLatticeTrackScore(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True
+):
     """One track's AAC MDCT-frame-lattice measurement, or why it has none.
 
     Wire-boundary type: the rows of the
@@ -363,7 +373,9 @@ class AacLatticeTrackScore(msgspec.Struct, frozen=True):
         return errors
 
 
-class AacLatticeCapture(msgspec.Struct, frozen=True):
+class AacLatticeCapture(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True
+):
     """One album's AAC-lattice measurement: per-track rows plus the album
     statistics the offset-concentration rule reads.
 
@@ -454,7 +466,9 @@ class AacLatticeCapture(msgspec.Struct, frozen=True):
         return errors
 
 
-class VerifiedLosslessProof(msgspec.Struct, frozen=True):
+class VerifiedLosslessProof(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True
+):
     """Provenance for a true verified-lossless classification."""
 
     provenance: EvidenceProvenance
@@ -516,7 +530,9 @@ def evidence_is_source_semantic(lineage_version: object) -> bool:
     return lineage_version in SOURCE_SEMANTIC_LINEAGE_VERSIONS
 
 
-class AlbumQualityEvidence(msgspec.Struct, frozen=True):
+class AlbumQualityEvidence(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True
+):
     """Active neutral album-quality evidence for candidates and current files.
 
     The evidence wraps ``AudioQualityMeasurement`` instead of duplicating its
@@ -746,7 +762,9 @@ class AlbumQualityEvidence(msgspec.Struct, frozen=True):
         return reasons
 
 
-class V0ProbeEvidence(msgspec.Struct, frozen=True):
+class V0ProbeEvidence(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True
+):
     """MP3 V0 probe metrics used as source-lineage evidence.
 
     ``kind`` is intentionally explicit because not every V0 probe is eligible
@@ -771,7 +789,9 @@ def is_comparable_lossless_source_probe(
     )
 
 
-class QualityComparisonBasis(msgspec.Struct, frozen=True):
+class QualityComparisonBasis(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True
+):
     """The comparison ``compare_quality()`` actually performed — persisted so
     the UI renders the decision's own story instead of re-deriving one.
 

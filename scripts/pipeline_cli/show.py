@@ -108,6 +108,10 @@ def _render_import_result(ir_raw: object) -> list[str]:
         if spectral.get("grade"):
             lines.append(f"      spectral:  {spectral['grade']}")
 
+    materialized_m = ir.get("materialized_measurement")
+    if materialized_m:
+        lines.append(f"      materialized: {_fmt_measurement(materialized_m)}")
+
     if ir.get("error"):
         lines.append(f"      error:     {ir['error']}")
 

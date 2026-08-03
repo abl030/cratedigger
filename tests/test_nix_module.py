@@ -109,6 +109,26 @@ class TestPipelineCliWrapperContract(unittest.TestCase):
         self.assertLess(wrapper.index(trusted_path), wrapper.index(safe_exec))
 
 
+class TestDecisionDifferentialWrapperContract(unittest.TestCase):
+    """The read-only differential always runs deployed source and Python."""
+
+    def test_wrapper_uses_the_module_source_and_safe_python(self) -> None:
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        start = text.index('writeShellScriptBin "decision-differential"')
+        end = text.index('writeShellScriptBin "cratedigger-importer"', start)
+        wrapper = text[start:end]
+        self.assertIn(
+            'unset PYTHONPATH PYTHONHOME PYTHONSTARTUP', wrapper,
+        )
+        self.assertIn('export PYTHONNOUSERSITE=1', wrapper)
+        self.assertIn(
+            'exec ${pythonEnv}/bin/python -I ${src}/scripts/decision_differential.py "$@"',
+            wrapper,
+        )
+        self.assertNotIn('PYTHONPATH:+', wrapper)
+        self.assertIn("decisionDifferential", text[text.index("environment.systemPackages"):])
+
+
 class TestDefaultHeadlessComposition(unittest.TestCase):
     """The exported module keeps the direct CLI usable without the web."""
 
@@ -171,6 +191,7 @@ class TestDefaultHeadlessComposition(unittest.TestCase):
         composition = json.loads(result.stdout)
         self.assertFalse(composition["webEnabled"])
         self.assertIn("pipeline-cli", composition["systemPackages"])
+        self.assertIn("decision-differential", composition["systemPackages"])
         self.assertFalse(composition["hasWebService"])
         self.assertEqual(composition["cratediggerSockets"], [])
 
