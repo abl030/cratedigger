@@ -9,7 +9,7 @@ ok(JSON.stringify(youtubeResolverPayload(identifier, 'https://music.youtube.com/
 
 const failedHtml = renderYoutubeRescueControl('release-1', 1, identifier, { outcome: 'transient', error_message: 'mirror down' });
 ok(failedHtml.includes('mirror down'), 'resolver failures remain visible');
-const matrixHtml = renderYoutubeRescueControl('release-1', 1, identifier, { outcome: 'ok', youtube_releases: [{ yt_browse_id: 'MPREb_kb5fohQCJ6d', year: 2026, track_count: 1, distances: [{ mbid: identifier, distance: 0 }] }] });
+const matrixHtml = renderYoutubeRescueControl('release-1', 1, identifier, { outcome: 'ok', youtube_releases: [{ yt_browse_id: 'MPREb_kb5fohQCJ6d', year: 2026, track_count: 1, distances: [{ mbid: identifier, outcome: 'ok', distance: 0, total_mb_tracks: 1 }] }] });
 ok(matrixHtml.includes('window.pickYoutubeRescue(1,'), 'matrix choice remains confirm-routed');
 ok(!matrixHtml.includes('"window.checkYoutubeRescue("release-1"'), 'inline handler quoting remains safe');
 ok(matrixHtml.includes('event.stopPropagation()'), 'all inline control interactions stop parent propagation');
@@ -60,7 +60,7 @@ let confirms = false; globalThis.window = { confirm: () => confirms };
 const requests = []; let releaseSubmit;
 globalThis.fetch = (url, options) => {
   requests.push({ url, options });
-  if (url.endsWith('youtube-album')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ outcome: 'ok', youtube_releases: [{ yt_browse_id: button.dataset.browseId }] }) });
+  if (url.endsWith('youtube-album')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ outcome: 'ok', youtube_releases: [{ yt_browse_id: button.dataset.browseId, distances: [{ mbid: identifier, outcome: 'ok', distance: 0, total_mb_tracks: 1 }] }] }) });
   return new Promise((resolve) => { releaseSubmit = resolve; });
 };
 await checkYoutubeRescue('release-submit', 1, identifier);
