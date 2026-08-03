@@ -13,12 +13,12 @@ export function renderYoutubeRescueControl(key, requestId, identifier, result = 
   const pick = handlers.pick || `window.pickYoutubeRescue`;
   const label = state.state === 'resolver_failed' ? 'Retry' : state.state === 'resolved_empty' ? 'Re-check' : 'Check YouTube';
   const choices = state.state === 'resolved_with_matrix'
-    ? (result.youtube_releases || []).map((release) => `<button class="p-btn" type="button" onclick="${pick}(${Number(requestId)}, ${jsArg(release.yt_browse_id)})">Rescue from ${esc(release.yt_browse_id)}</button>`).join('')
+    ? (result.youtube_releases || []).map((release) => `<button class="p-btn" type="button" onclick="event.stopPropagation(); ${pick}(${Number(requestId)}, ${jsArg(release.yt_browse_id)})">Rescue from ${esc(release.yt_browse_id)}</button>`).join('')
     : state.state === 'resolver_failed' || state.state === 'resolved_empty'
       ? `<span>${esc(state.message)}</span>` : '';
   return `<div class="yt-rescue-control" id="yt-rescue-${esc(key)}">
-    <button class="p-btn" type="button" onclick="${check}">${label}</button>
-    <input id="yt-watch-${esc(key)}" placeholder="https://music.youtube.com/watch?v=…" aria-label="YouTube Music watch URL">
+    <button class="p-btn" type="button" onclick="event.stopPropagation(); ${check}">${label}</button>
+    <input id="yt-watch-${esc(key)}" onclick="event.stopPropagation()" placeholder="https://music.youtube.com/watch?v=…" aria-label="YouTube Music watch URL">
     <div class="yt-rescue-result">${choices}</div>
   </div>`;
 }
@@ -40,7 +40,8 @@ export async function checkYoutubeRescue(key, requestId, identifier) {
       return;
     }
     resultHost.innerHTML = (result.youtube_releases || []).map((release) => `<button class="p-btn" type="button" data-browse-id="${esc(release.yt_browse_id)}">Rescue from ${esc(release.yt_browse_id)}</button>`).join('') || '<span>No YouTube album found.</span>';
-    resultHost.querySelectorAll('[data-browse-id]').forEach((button) => button.addEventListener('click', async () => {
+    resultHost.querySelectorAll('[data-browse-id]').forEach((button) => button.addEventListener('click', async (event) => {
+      event.stopPropagation();
       if (host.dataset.submitting === 'true' || !window.confirm('Queue this YouTube Music rescue?')) return;
       host.dataset.submitting = 'true';
       try {
