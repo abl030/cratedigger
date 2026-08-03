@@ -190,9 +190,11 @@ nix-shell --run "pyright --threads 4"                   # whole repository
 nix-shell --run "bash scripts/run_tests.sh"             # complete suite
 ```
 
-These checks are available throughout development. The repository's agent
-instructions own validation timing and the final receipt-backed pre-push
-confirmation; CI does not enforce this local workflow.
+These checks are available throughout development. `run_tests.sh` is the one
+canonical complete suite, including both whole-repository and production-strict
+Pyright. `run_final_gate.sh` runs that exact suite on a clean commit and adds a
+receipt; it does not select different checks. CI does not enforce this local
+workflow.
 
 The dev shell resolves the same pinned nixpkgs as the default module package
 set, and `tests/test_harness_beets2_contract.py` runs real Beets so runtime drift

@@ -181,11 +181,13 @@ nix-shell --run "pyright --threads 4"                   # whole repository
 nix-shell --run "bash scripts/run_tests.sh"             # complete suite
 ```
 
-Direct runs are development feedback; before the first branch push, use the
-`check` skill on the reviewed, clean, committed tree for the receipt-backed
-whole-tree confirmation. The complete operational contract — suite bundle,
-specialized evidence, generated/fuzz testing, no-skips policy, and hooks — is
-in `.claude/rules/code-quality.md` § "Test execution, evidence, and hooks".
+Direct runs are development feedback; before independent-review handoff, use
+the `check` skill on the converged, clean, committed tree for the one
+receipt-backed canonical-suite confirmation. Reuse that receipt before push if
+the reviewed commit remains unchanged. The complete operational contract —
+suite bundle, specialized evidence, generated/fuzz testing, no-skips policy,
+and hooks — is in `.claude/rules/code-quality.md` § "Test execution, evidence,
+and hooks".
 
 ## Shared AI surfaces
 
@@ -218,7 +220,7 @@ across client-local memory stores.
 ### Shared skills
 
 `deploy` (full deploy sequence) · `debug-download` (live audit trail) · `check`
-(pyright + suite) · `beets-docs` (pinned upstream reference) ·
+(receipt-backed canonical suite) · `beets-docs` (pinned upstream reference) ·
 `orchestrate-issue` (isolated multi-PR implementation/review/deploy loop)
 
 ### Shared rule loading

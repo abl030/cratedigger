@@ -29,7 +29,7 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
         self.assertIn(["nix", "flake", "update", "nixpkgs"], state["events"])
         self.assertEqual(
             state["stages"],
-            ["pyright", "suite", "stable-candidate", "world", "fuzz", "mirror"],
+            ["suite", "stable-candidate", "world", "fuzz", "mirror"],
         )
         self.assertEqual(state["commit_count"], 1)
         self.assertEqual(state["push_count"], 1)
@@ -63,7 +63,7 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertEqual(
             state["stages"],
-            ["pyright", "suite", "stable-candidate", "world", "fuzz", "mirror"],
+            ["suite", "stable-candidate", "world", "fuzz", "mirror"],
         )
         self.assertEqual(state["commit_count"], 0)
         self.assertEqual(state["push_count"], 0)
@@ -78,7 +78,7 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
         state = self.fake.state
 
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(len(state["stages"]), 6)
+        self.assertEqual(len(state["stages"]), 5)
         self.assertEqual(state["commit_count"], 0)
         self.assertEqual(state["push_count"], 0)
         self.assertIn("flake.lock already current", proc.stdout)
@@ -169,11 +169,11 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
         self.assertEqual(state["commit_count"], 1)
 
     def test_shared_flock_serializes_nixpkgs_and_tip_processes(self) -> None:
-        self.fake.update_state(hold_stage="pyright", hold_seconds=0.4)
+        self.fake.update_state(hold_stage="suite", hold_seconds=0.4)
         with ThreadPoolExecutor(max_workers=2) as executor:
             daily = executor.submit(self.fake.run, SCRIPT)
             deadline = time.monotonic() + 3
-            while "pyright" not in self.fake.state["stage_started"]:
+            while "suite" not in self.fake.state["stage_started"]:
                 self.assertLess(time.monotonic(), deadline, "daily runner never reached gate")
                 time.sleep(0.02)
             tip = executor.submit(self.fake.run, TIP_SCRIPT)

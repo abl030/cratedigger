@@ -19,6 +19,7 @@ from scripts.run_test_suite import (
     CheckFailureMarker,
     CheckSummary,
     PhaseSpec,
+    _default_phases,
     dirty_state_fingerprint,
     run_suite,
 )
@@ -65,6 +66,35 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
         self.bundles.append(result.bundle)
         return result, stream.getvalue()
 
+    def test_default_suite_owns_both_complementary_pyright_contracts(self) -> None:
+        pyright_phases = tuple(
+            phase for phase in _default_phases() if phase.parser == "pyright"
+        )
+
+        self.assertEqual(
+            tuple(phase.name for phase in pyright_phases),
+            ("pyright", "pyright-production-strict"),
+        )
+        self.assertEqual(
+            pyright_phases[0].command,
+            ("pyright", "--threads", "4"),
+        )
+        self.assertEqual(
+            pyright_phases[0].rerun_command,
+            "pyright --threads 4",
+        )
+        self.assertEqual(
+            pyright_phases[1].command,
+            (
+                "pyright", "-p", "pyrightconfig.production.json",
+                "--threads", "4",
+            ),
+        )
+        self.assertEqual(
+            pyright_phases[1].rerun_command,
+            "pyright -p pyrightconfig.production.json --threads 4",
+        )
+
     def test_one_invocation_indexes_simultaneous_failures_from_every_phase(
         self,
     ) -> None:
@@ -95,13 +125,13 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
                 "js-unit",
             ),
             PhaseSpec(
-                "pyright-production",
+                "pyright",
                 _python_command(
                     "lib/typed.py:7:4 - error: Argument is unknown "
                     "(reportUnknownArgumentType)",
                     1,
                 ),
-                "pyright -p pyrightconfig.production.json --threads 4",
+                "pyright --threads 4",
                 "pyright",
             ),
             PhaseSpec(

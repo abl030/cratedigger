@@ -71,11 +71,12 @@ Call the full pipeline.
 
 # PYRIGHT CLEAN ALWAYS
 
-`nix-shell --run "pyright --threads 4"` checks the whole repository and must
-have zero errors. Focused file checks provide narrower feedback but never narrow
-that whole-repository contract. `scripts/run_tests.sh` separately enforces
-production strict mode through `pyrightconfig.production.json`. Never accept a
-"pre-existing" error or narrow either contract.
+`scripts/run_tests.sh` owns both complementary typing contracts and they must
+have zero errors: whole-repository Pyright through `pyrightconfig.json`, plus
+production strict mode through `pyrightconfig.production.json`. Direct
+`nix-shell --run "pyright --threads 4"` and focused file checks provide faster
+development feedback but never replace or narrow the canonical suite. Never
+accept a "pre-existing" error in either contract.
 
 - Use typed dataclasses (not dicts) for structured data crossing module boundaries
 - **No dual-interface types.** Never add `__getitem__`, `.get()`, or `isinstance(x, dict)` dispatch to a dataclass. If a function receives both dicts and dataclasses, that is a type error — fix the callers, not the receiver. Temporary bridges become permanent bugs.
@@ -241,15 +242,19 @@ Always use `nix-shell --run` for Python (`.claude/rules/nix-shell.md`). Direct
 Nix-shell runs are ordinary development feedback; fix their failures in the
 current convergence loop. They do not mint final receipts. A green complete
 suite does not replace generated, live-boundary, browser, corpus, VM, or other
-specialized evidence required by the change. Before the first branch push, use
-the `check` skill for one final receipt-backed whole-tree confirmation once the
-reviewed tree is committed and clean; it owns the receipt and unchanged-tree
-no-replay rules.
+specialized evidence required by the change. Before independent-review handoff,
+use the `check` skill for one receipt-backed whole-tree confirmation once the
+converged tree is committed and clean; it owns the receipt and unchanged-tree
+no-replay rules. If review changes nothing, that same receipt is the final
+pre-push confirmation.
 
-`run_tests.sh` exhausts JavaScript, production-strict Pyright, Ruff, Vulture,
-and the complete Python scheduler before returning one aggregate status. Its
-terminal output is a compact complete failure index; the printed private-tmpfs
-bundle contains `summary.json`, `summary.md`, and every complete phase log.
+`run_tests.sh` exhausts JavaScript, whole-repository Pyright,
+production-strict Pyright, Ruff, Vulture, and the complete Python scheduler
+before returning one aggregate status. `run_final_gate.sh` can only execute
+that exact suite; it adds clean-commit receipt semantics, not another selection
+of checks. The suite's terminal output is a compact complete failure index; the
+printed private-tmpfs bundle contains `summary.json`, `summary.md`, and every
+complete phase log.
 
 **Generated (property-based) tests** (`tests/test_*_generated.py`, Hypothesis)
 run deterministically in the suite. After changing quality policy, run the

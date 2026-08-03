@@ -333,7 +333,13 @@ def _default_phases() -> tuple[PhaseSpec, ...]:
             "js-unit",
         ),
         PhaseSpec(
-            "pyright-production",
+            "pyright",
+            ("pyright", "--threads", "4"),
+            "pyright --threads 4",
+            "pyright",
+        ),
+        PhaseSpec(
+            "pyright-production-strict",
             ("pyright", "-p", "pyrightconfig.production.json", "--threads", "4"),
             "pyright -p pyrightconfig.production.json --threads 4",
             "pyright",

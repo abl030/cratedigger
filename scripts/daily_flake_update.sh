@@ -76,8 +76,6 @@ run_stage() {
     stage_statuses+=("$status")
 }
 
-run_stage "whole-repository Pyright" \
-    nix-shell --run "pyright --threads 4"
 run_stage "deterministic full suite" \
     nix-shell --run "bash scripts/run_tests.sh"
 run_stage "stable Nix and Beets-release checks" \

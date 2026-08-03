@@ -1,46 +1,42 @@
 ---
 name: check
-description: Run Cratedigger's receipt-backed final pre-push threaded type check and full test suite on a clean committed tree.
+description: Run Cratedigger's one canonical receipt-backed full suite on a clean committed tree before review handoff or first push.
 ---
 
-# Final Pre-push Quality Check
+# Canonical Quality Check
 
-This skill wraps the single receipt-backed confirmation before the first push.
-The underlying whole-tree checks may also be run directly through Nix-shell
-whenever they are useful during development; direct runs provide feedback but
-do not mint final receipts or satisfy this confirmation.
+This skill wraps the single receipt-backed canonical suite. The underlying
+checks may also be run directly through Nix-shell whenever they are useful
+during development; direct runs provide feedback but do not mint final receipts
+or satisfy this confirmation.
 
-Invoke this skill after the tree is reviewed, committed, and clean, immediately
-before its first branch push. Both checks must confirm the same committed HEAD.
+Invoke this skill after the implementer has self-reviewed and committed the
+converged tree, before handing that exact commit to independent review. If
+review changes nothing, the same receipt is the final pre-push confirmation. If
+anything changes, commit the correction and run this skill again before another
+review handoff.
 
 ## Steps
 
-1. Run pyright on the full repository:
+1. Run the canonical suite:
 ```bash
-scripts/run_final_gate.sh pyright
+scripts/run_final_gate.sh
 ```
 
-Must be **0 errors**. Do not proceed if there are new errors
-(psycopg2/slskd_api "could not be resolved" warnings are OK — they're C
-extensions).
+The command must exit zero and report `PASSED`. It runs whole-repository
+Pyright, production-strict Pyright, JavaScript syntax and unit tests, Ruff,
+Vulture, and the complete Python scheduler. Every independent phase still runs
+after an earlier failure, and the command prints the private failure-bundle path
+before returning its aggregate status. Investigate every indexed failure; do
+not carry a chat-era "known issue" exemption forward without current repository
+evidence.
 
-2. Run the receipt-backed full test suite:
-```bash
-scripts/run_final_gate.sh tests
-```
-
-The command must exit zero and report `PASSED`. It still runs every independent
-phase after an earlier failure and prints the private failure-bundle path before
-returning its aggregate status. Investigate every indexed failure; do not carry
-a chat-era "known issue" exemption forward without current repository evidence.
-
-3. The helper prints a mode-0700 receipt path under the private runtime tmpfs before
-launching each unchanged underlying command (`nix-shell --run "pyright --threads 4"`
-or `nix-shell --run "bash scripts/run_tests.sh"`). It saves complete output in
-`output.log`, then atomically writes `terminal` only after the command exits.
-For the tests gate, the receipt also records the validated private suite-bundle
-path in `bundle`; that directory contains the typed summaries and complete
-per-phase logs.
+2. The helper prints a mode-0700 receipt path under the private runtime tmpfs
+before launching the one canonical underlying command
+(`nix-shell --run "bash scripts/run_tests.sh"`). It saves complete output in
+`output.log`, records the validated private suite-bundle path in `bundle`, then
+atomically writes `terminal` only after the command exits. The bundle contains
+the typed summaries and complete per-phase logs.
 
 If the client detaches, recover the exact invocation from the same committed clean
 worktree:
@@ -59,8 +55,8 @@ gate. The receipt rechecks its HEAD and clean state immediately before terminal
 publication, but it is not a snapshot or protection against a concurrent writer
 that changes and perfectly restores that worktree.
 
-4. If both commands pass, push the branch once. If either fails, return the
-problem to ordinary convergence. Any pre-push tree change requires a new clean
-committed HEAD, review in proportion to the correction's risk, and a new pair
-of passing receipts. Do not rerun either passing receipt for an unchanged tree
-after push or merge.
+3. If the command passes and independent review leaves the commit unchanged,
+push the branch once. If it fails, return the problem to the implementer for
+ordinary convergence. Any tree change requires a new clean committed HEAD, a
+new passing receipt, and review in proportion to the correction's risk. Do not
+rerun a passing receipt for an unchanged tree after review, push, or merge.

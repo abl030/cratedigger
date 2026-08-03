@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run one final validation gate with a runtime-tmpfs receipt, or inspect one.
+# Run the canonical full suite with a runtime-tmpfs receipt, or inspect one.
 set -uo pipefail
 
 die() {
@@ -63,6 +63,10 @@ current_tree_matches() {
     [[ "$current_root" == "$repo_root" && "$current_head" == "$head" && -z "$dirty" ]]
 }
 
+canonical_command() {
+    printf '%s\n' 'bash scripts/run_tests.sh'
+}
+
 status_receipt() {
     local receipt=$1 runtime parent terminal helper_pid helper_ticks gate_pid gate_ticks
     runtime=$(runtime_dir)
@@ -72,14 +76,14 @@ status_receipt() {
     [[ "$parent" == "$runtime" ]] || die "receipt is not directly beneath the private runtime directory: $receipt"
     [[ $(stat -c '%a' "$receipt") == 700 ]] || die "receipt is not mode 0700: $receipt"
     assert_current_tree_matches "$receipt"
-    [[ -f "$receipt/output.log" ]] || die "receipt is missing output.log: $receipt"
-    [[ -f "$receipt/command" && -f "$receipt/label" ]] || die "receipt metadata is incomplete: $receipt"
-    [[ $(receipt_field "$receipt" command) == "$(gate_command "$(receipt_field "$receipt" label)")" ]] \
-        || die "receipt command is not canonical for its gate label: $receipt"
-    if [[ $(receipt_field "$receipt" label) == tests && -f "$receipt/terminal" ]]; then
+    [[ -f "$receipt/output.log" && -f "$receipt/command" ]] \
+        || die "receipt metadata is incomplete: $receipt"
+    [[ $(receipt_field "$receipt" command) == "$(canonical_command)" ]] \
+        || die "receipt command is not canonical: $receipt"
+    if [[ -f "$receipt/terminal" ]]; then
         terminal=$(<"$receipt/terminal")
         if [[ "$terminal" == "pass 0" && ! -f "$receipt/bundle" ]]; then
-            die "passing tests receipt is missing its suite bundle path: $receipt"
+            die "passing receipt is missing its suite bundle path: $receipt"
         fi
     fi
 
@@ -104,15 +108,6 @@ status_receipt() {
     else
         printf 'incomplete\n'
     fi
-}
-
-gate_command() {
-    local label=$1
-    case "$label" in
-        pyright) printf '%s\n' 'pyright --threads 4' ;;
-        tests) printf '%s\n' 'bash scripts/run_tests.sh' ;;
-        *) die "gate must be pyright or tests" ;;
-    esac
 }
 
 record_suite_bundle() {
@@ -146,10 +141,10 @@ record_suite_bundle() {
 }
 
 run_gate() {
-    local label=$1 runtime receipt command status helper_ticks gate_pid gate_ticks terminal_tmp
+    local runtime receipt command status helper_ticks gate_pid gate_ticks terminal_tmp
     local -a gate_argv
     runtime=$(runtime_dir)
-    command=$(gate_command "$label")
+    command=$(canonical_command)
     gate_argv=(nix-shell --run "$command")
     receipt=$(mktemp -d "$runtime/cratedigger-final-gate.XXXXXXXX") \
         || die "cannot create final-gate receipt beneath $runtime"
@@ -160,7 +155,6 @@ run_gate() {
         || die "final gate requires a committed clean tree"
     git rev-parse HEAD >"$receipt/head"
     printf 'true\n' >"$receipt/clean"
-    printf '%s\n' "$label" >"$receipt/label"
     printf '%s\n' "$command" >"$receipt/command"
     printf '%s\n' "$$" >"$receipt/helper_pid"
     helper_ticks=$(proc_start_ticks "$$") || die "cannot record helper process identity"
@@ -182,18 +176,18 @@ run_gate() {
         status=$?
     fi
     if (( status >= 128 )); then
-        printf 'final gate %s: incomplete (signal-shaped exit %s)\n' "$label" "$status" >&2
+        printf 'final gate: incomplete (signal-shaped exit %s)\n' "$status" >&2
         return "$status"
     fi
-    if [[ "$label" == tests ]] && ! record_suite_bundle "$receipt" "$receipt/output.log"; then
+    if ! record_suite_bundle "$receipt" "$receipt/output.log"; then
         if [[ "$status" == 0 ]]; then
-            printf 'final gate tests: incomplete (passing suite published no valid bundle)\n' >&2
+            printf 'final gate: incomplete (passing suite published no valid bundle)\n' >&2
             return 2
         fi
-        printf 'final gate tests: bundle unavailable for failed suite\n' >&2
+        printf 'final gate: bundle unavailable for failed suite\n' >&2
     fi
     if ! current_tree_matches "$receipt"; then
-        printf 'final gate %s: incomplete (tree changed before terminal receipt)\n' "$label" >&2
+        printf 'final gate: incomplete (tree changed before terminal receipt)\n' >&2
         return 2
     fi
     if [[ "$status" == 0 ]]; then
@@ -205,21 +199,21 @@ run_gate() {
     mv "$terminal_tmp" "$receipt/terminal"
     trap - HUP INT TERM
     if [[ "$status" == 0 ]]; then
-        printf 'final gate %s: pass (exit 0)\n' "$label"
+        printf 'final gate: pass (exit 0)\n'
     else
-        printf 'final gate %s: fail (exit %s)\n' "$label" "$status"
+        printf 'final gate: fail (exit %s)\n' "$status"
     fi
     return "$status"
 }
 
 case ${1:-} in
-    pyright|tests)
-        [[ $# == 1 ]] || die "usage: $0 {pyright|tests|status RECEIPT}"
-        run_gate "$1"
-        ;;
     status)
-        [[ $# == 2 ]] || die "usage: $0 {pyright|tests|status RECEIPT}"
+        [[ $# == 2 ]] || die "usage: $0 [status RECEIPT]"
         status_receipt "$2"
         ;;
-    *) die "usage: $0 {pyright|tests|status RECEIPT}" ;;
+    "")
+        [[ $# == 0 ]] || die "usage: $0 [status RECEIPT]"
+        run_gate
+        ;;
+    *) die "usage: $0 [status RECEIPT]" ;;
 esac

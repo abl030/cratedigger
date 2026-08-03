@@ -85,9 +85,9 @@ class FinalGateReceiptTestCase(unittest.TestCase):
             "FAKE_NIX_SHELL_BUNDLE": str(self.bundle),
         }
 
-    def _launch(self, label: str = "pyright", mode: str = "exit", exit_code: int = 0) -> subprocess.Popen[str]:
+    def _launch(self, mode: str = "exit", exit_code: int = 0) -> subprocess.Popen[str]:
         process = subprocess.Popen(
-            [str(HELPER), label], cwd=self.repo.name, text=True,
+            [str(HELPER)], cwd=self.repo.name, text=True,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self._env(mode, exit_code),
             start_new_session=True,
         )
@@ -125,14 +125,14 @@ class FinalGateReceiptTestCase(unittest.TestCase):
         self.assertTrue(path.exists(), "helper did not record a gate PID")
         return int(path.read_text())
 
-    def test_success_runs_only_the_canonical_pyright_command_and_preserves_output(self) -> None:
+    def test_success_runs_only_the_canonical_suite_and_preserves_output(self) -> None:
         process = self._launch()
         receipt = self._receipt_from(process)
         stdout, stderr = process.communicate(timeout=10)
 
         self.assertEqual(process.returncode, 0, stderr)
-        self.assertIn("final gate pyright: pass (exit 0)", stdout)
-        self.assertEqual(self.record.read_text(), "--run\npyright --threads 4\n")
+        self.assertIn("final gate: pass (exit 0)", stdout)
+        self.assertEqual(self.record.read_text(), "--run\nbash scripts/run_tests.sh\n")
         self.assertEqual(self._status(receipt), "pass")
         self.assertEqual((receipt / "terminal").read_text(), "pass 0\n")
         self.assertIn("gate output", (receipt / "output.log").read_text())
@@ -140,8 +140,9 @@ class FinalGateReceiptTestCase(unittest.TestCase):
         self.assertEqual((receipt / "repo_root").read_text().strip(), self.repo.name)
         self.assertEqual((receipt / "head").read_text().strip(), self._git("rev-parse", "HEAD").stdout.strip())
         self.assertEqual((receipt / "clean").read_text(), "true\n")
-        self.assertEqual((receipt / "label").read_text(), "pyright\n")
-        self.assertEqual((receipt / "command").read_text(), "pyright --threads 4\n")
+        self.assertFalse((receipt / "label").exists())
+        self.assertEqual((receipt / "command").read_text(), "bash scripts/run_tests.sh\n")
+        self.assertEqual((receipt / "bundle").read_text().strip(), str(self.bundle))
         self.assertEqual((receipt.stat().st_mode & 0o777), 0o700)
 
     def test_nonzero_exit_is_preserved_not_masked(self) -> None:
@@ -153,19 +154,8 @@ class FinalGateReceiptTestCase(unittest.TestCase):
         self.assertEqual(self._status(receipt), "fail")
         self.assertEqual((receipt / "terminal").read_text(), "fail 23\n")
 
-    def test_tests_gate_runs_only_the_canonical_test_command(self) -> None:
-        process = self._launch(label="tests")
-        receipt = self._receipt_from(process)
-        _stdout, stderr = process.communicate(timeout=10)
-
-        self.assertEqual(process.returncode, 0, stderr)
-        self.assertEqual(self.record.read_text(), "--run\nbash scripts/run_tests.sh\n")
-        self.assertEqual((receipt / "command").read_text(), "bash scripts/run_tests.sh\n")
-        self.assertEqual((receipt / "bundle").read_text().strip(), str(self.bundle))
-        self.assertEqual(self._status(receipt), "pass")
-
-    def test_passing_tests_receipt_without_bundle_path_is_rejected(self) -> None:
-        process = self._launch(label="tests")
+    def test_passing_receipt_without_bundle_path_is_rejected(self) -> None:
+        process = self._launch()
         receipt = self._receipt_from(process)
         process.communicate(timeout=10)
         (receipt / "bundle").unlink()
@@ -261,7 +251,7 @@ class FinalGateReceiptTestCase(unittest.TestCase):
         self.assertEqual(process.returncode, 2, stderr)
         self.assertFalse((receipt / "terminal").exists())
 
-    def test_status_rejects_substituted_command_for_a_known_label(self) -> None:
+    def test_status_rejects_substituted_command(self) -> None:
         process = self._launch()
         receipt = self._receipt_from(process)
         process.communicate(timeout=10)
@@ -274,3 +264,14 @@ class FinalGateReceiptTestCase(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("not canonical", result.stderr)
+
+    def test_alternate_gate_labels_are_rejected(self) -> None:
+        for label in ("pyright", "tests", "alternate"):
+            with self.subTest(label=label):
+                result = subprocess.run(
+                    [str(HELPER), label], cwd=self.repo.name,
+                    text=True, capture_output=True, check=False,
+                )
+
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("usage", result.stderr)

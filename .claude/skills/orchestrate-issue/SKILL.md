@@ -38,6 +38,14 @@ Batch implementation failures, validation failures, and review findings. Apply
 surface-specific contract, and fix related problems together. Treat failures
 from direct whole-tree runs as ordinary convergence feedback.
 
+Focused tests are appropriate while implementation is changing. Before a
+delegated implementer returns a converged candidate, it must self-review,
+commit the tree, and invoke the `check` skill itself. Do not accept a handoff
+until the one canonical complete suite is green. The handoff must name the
+exact tested commit and receipt/bundle so independent review examines that same
+tree. The implementer owns every suite failure before handoff; do not defer the
+first complete run to the orchestrator or reviewer.
+
 Review the meaningful converged tree as a whole. Review again when corrections
 materially change behavior or risk.
 
@@ -50,6 +58,13 @@ invariants, migration/runtime compatibility, and missing tests. Require ranked
 findings with exact evidence, or an explicit no-findings result with residual
 risks.
 
+The reviewer may run targeted probes and counterexamples, but it does not
+repeat the identical deterministic suite when the exact reviewed commit already
+has a valid receipt. Any correction invalidates the prior receipt: return it to
+implementation, commit the corrected tree, run the complete suite again, then
+review the new exact commit in proportion to the correction's behavior and
+risk.
+
 Triage every finding yourself. Fix valid findings in one convergence pass and
 commission a fresh independent review when the corrections materially change
 behavior or risk. Record a concrete rationale for rejected findings. A green
@@ -58,8 +73,9 @@ If an independent subagent cannot be started, stop before push and surface the
 blocker; do not silently downgrade to self-review.
 
 Integrate current `main` at sensible boundaries rather than continuously
-chasing it. When the change is ready for its first push, invoke the `check`
-skill; it owns the final clean committed-tree receipt mechanics.
+chasing it. Before first push, require a passing `check` receipt for the exact
+reviewed commit. Reuse the implementer's receipt when review and integration
+left that commit unchanged; do not replay it as release ceremony.
 
 Review should challenge the issue contract and real production path, not just
 confirm that tests are green. Stop when the issue is covered, required checks

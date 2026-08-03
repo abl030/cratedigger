@@ -24,7 +24,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PHASE_NAMES = (
     "js-syntax",
     "js-unit",
-    "pyright-production",
+    "pyright",
+    "pyright-production-strict",
     "ruff",
     "vulture",
     "python",

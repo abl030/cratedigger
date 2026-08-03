@@ -107,9 +107,7 @@ with state_path.with_suffix(".lock").open("a+", encoding="utf-8") as lock:
         if args[:1] != ["--run"] or len(args) != 2:
             fail(f"unexpected nix-shell argv: {args!r}")
         shell_command = args[1]
-        if shell_command == "pyright --threads 4":
-            stage = "pyright"
-        elif shell_command == "bash scripts/run_tests.sh":
+        if shell_command == "bash scripts/run_tests.sh":
             stage = "suite"
         elif shell_command == "bash scripts/fuzz_burst.sh":
             stage = "fuzz"

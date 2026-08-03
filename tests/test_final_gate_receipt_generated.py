@@ -20,7 +20,7 @@ def assert_receipt_contract(
     *, command: str, exit_code: int, terminal: str | None,
     helper_live: bool, gate_live: bool, tree_matches: bool,
 ) -> str:
-    if command != "pyright --threads 4":
+    if command != "bash scripts/run_tests.sh":
         raise AssertionError("receipt command is not canonical")
     if terminal is not None:
         if exit_code >= 128:
@@ -38,8 +38,8 @@ class TestFinalGateReceiptGenerated(unittest.TestCase):
     def test_invariant_checker_trips_on_known_bad_receipts(self) -> None:
         bad_cases: tuple[tuple[str, int, str, bool, bool, bool], ...] = (
             ("echo substituted", 0, "pass 0", False, False, True),
-            ("pyright --threads 4", 143, "fail 143", False, False, True),
-            ("pyright --threads 4", 0, "pass 0", False, False, False),
+            ("bash scripts/run_tests.sh", 143, "fail 143", False, False, True),
+            ("bash scripts/run_tests.sh", 0, "pass 0", False, False, False),
         )
         for command, exit_code, terminal, helper_live, gate_live, tree_matches in bad_cases:
             with self.subTest(command=command, exit_code=exit_code), self.assertRaises(AssertionError):
@@ -48,19 +48,19 @@ class TestFinalGateReceiptGenerated(unittest.TestCase):
                     helper_live=helper_live, gate_live=gate_live, tree_matches=tree_matches,
                 )
         self.assertEqual(assert_receipt_contract(
-            command="pyright --threads 4", exit_code=0, terminal=None,
+            command="bash scripts/run_tests.sh", exit_code=0, terminal=None,
             helper_live=False, gate_live=False, tree_matches=True,
         ), "incomplete")
         self.assertNotEqual(
             assert_receipt_contract(
-                command="pyright --threads 4", exit_code=0, terminal=None,
+                command="bash scripts/run_tests.sh", exit_code=0, terminal=None,
                 helper_live=False, gate_live=False, tree_matches=True,
             ), "pass",
             "missing terminal must never be green",
         )
         self.assertNotEqual(
             assert_receipt_contract(
-                command="pyright --threads 4", exit_code=0, terminal=None,
+                command="bash scripts/run_tests.sh", exit_code=0, terminal=None,
                 helper_live=False, gate_live=True, tree_matches=True,
             ),
             "exact-active",
@@ -86,6 +86,12 @@ class TestFinalGateReceiptGenerated(unittest.TestCase):
             Path(repo, "README").write_text("receipt fixture\n")
             subprocess.run(["git", "add", "README"], cwd=repo, check=True)
             subprocess.run(["git", "commit", "-qm", "fixture"], cwd=repo, check=True)
+            bundle = Path(tempfile.mkdtemp(
+                prefix="cratedigger-checks.final-gate-generated.", dir=runtime,
+            ))
+            bundle.chmod(0o700)
+            bundle.joinpath("summary.json").write_text("{}\n", encoding="utf-8")
+            self.addCleanup(shutil.rmtree, bundle, True)
             env = os.environ | {
                 "XDG_RUNTIME_DIR": str(runtime),
                 "PATH": f"{fake_bin}:{os.environ['PATH']}",
@@ -93,9 +99,10 @@ class TestFinalGateReceiptGenerated(unittest.TestCase):
                 "FAKE_NIX_SHELL_MODE": "exit",
                 "FAKE_NIX_SHELL_EXIT": str(exit_code),
                 "FAKE_NIX_SHELL_REPO": repo,
+                "FAKE_NIX_SHELL_BUNDLE": str(bundle),
             }
             result = subprocess.run(
-                [str(HELPER), "pyright"], cwd=repo, text=True, capture_output=True, env=env,
+                [str(HELPER)], cwd=repo, text=True, capture_output=True, env=env,
                 check=False,
             )
             receipt = Path(result.stdout.splitlines()[0].removeprefix("receipt: "))
@@ -103,7 +110,7 @@ class TestFinalGateReceiptGenerated(unittest.TestCase):
 
             terminal = (receipt / "terminal").read_text().strip()
             self.assertEqual(result.returncode, exit_code, result.stderr)
-            self.assertEqual(record.read_text(), "--run\npyright --threads 4\n")
+            self.assertEqual(record.read_text(), "--run\nbash scripts/run_tests.sh\n")
             self.assertEqual(
                 assert_receipt_contract(
                     command=(receipt / "command").read_text().strip(), exit_code=exit_code,
