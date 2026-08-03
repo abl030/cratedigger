@@ -186,7 +186,13 @@ inside socket authorization, never credentials.
 - `pipeline-cli status` — Show request counts by lifecycle status.
 - `pipeline-cli triage list` — List a named triage cohort.
 - `pipeline-cli triage quarantine` — Read-only unreferenced immediate quarantine-folder scan.
-- `pipeline-cli triage show` — Compose per-request unfindable, field, and search forensics.
+- `pipeline-cli triage show` — Compose per-request unfindable, field, search,
+  and provisional-lossless convergence forensics. A converged row prints the
+  exact signal identity needed by the stop command.
+- `pipeline-cli triage stop ID --latest-log-id LOG --cliff-hz HZ --confirm STOP`
+  — Explicitly stop a still-wanted request after reviewing its current
+  convergence signal. The command locks and rederives before changing the
+  request to reversible `unsearchable`; it never accepts or proves the holding.
 - `pipeline-cli wrong-match-delete` — Delete one visible Wrong Matches source folder.
 - `pipeline-cli wrong-match-converge` — Converge one Wrong Matches request through its canonical web route.
 - `pipeline-cli wrong-match-delete-group` — Delete visible Wrong Matches folders for one request.

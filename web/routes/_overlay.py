@@ -18,6 +18,15 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+import msgspec
+
+
+def _pipeline_request_id(row: dict[str, object]) -> int:
+    value = row["id"]
+    if not isinstance(value, int):
+        raise TypeError("pipeline overlay request id must be an integer")
+    return value
+
 
 def _band_from_detail(
     rid: str,
@@ -95,7 +104,7 @@ def overlay_release_rows_in_place(
         `library_min_bitrate`, `library_avg_bitrate`, `library_rank`,
         `pipeline_status`, `pipeline_id`, `has_captured_history`,
         `pipeline_verified_lossless`, `pipeline_provisional`,
-        `processing_owner`. Library quality fields are
+        `processing_owner`, `convergence`. Library quality fields are
         only set when the
         release is in the beets library AND the beets DB returned
         details for it. The identity pair derives from the request's
@@ -115,6 +124,8 @@ def overlay_release_rows_in_place(
     in_pipeline: dict[str, dict[str, object]] = (
         srv.check_pipeline(ids_list) if ids_list else {}
     )
+    request_ids = [_pipeline_request_id(row) for row in in_pipeline.values()]
+    convergence = srv.get_convergence_signals(request_ids)
     in_library: set[str] = (
         srv.check_beets_library(ids_list) if ids_list else set()
     )
@@ -148,7 +159,8 @@ def overlay_release_rows_in_place(
             r["library_rank"] = _band_from_detail(rid, in_library, quality)
         pi = in_pipeline.get(rid)
         r["pipeline_status"] = pi["status"] if pi else None
-        r["pipeline_id"] = pi["id"] if pi else None
+        pipeline_id = _pipeline_request_id(pi) if pi else None
+        r["pipeline_id"] = pipeline_id
         r["processing_owner"] = (
             pi.get("processing_owner") if pi else None
         )
@@ -160,4 +172,10 @@ def overlay_release_rows_in_place(
         )
         r["pipeline_provisional"] = (
             bool(pi["provisional_lossless"]) if pi else False
+        )
+        signal = (
+            convergence.get(pipeline_id) if pipeline_id is not None else None
+        )
+        r["convergence"] = (
+            msgspec.to_builtins(signal) if signal is not None else None
         )

@@ -10,7 +10,10 @@ the unrelated "wrong-match triage" console in web/routes/imports.py
 ``lib.triage_service`` surface (``/api/triage/*``).
 """
 
+from typing import Literal
+
 import msgspec
+from pydantic import BaseModel, Field
 
 # Page-size bounds for ``GET /api/triage/list`` — re-exports of the
 # single-source-of-truth constants on ``lib.triage_service`` so the CLI
@@ -59,6 +62,7 @@ from lib.triage_service import (
 from lib.triage_service import (
     VALID_FILTER_FORMS as _TRIAGE_VALID_FILTER_FORMS_API,
 )
+from web.routes._pydantic import parse_body
 from web.routes._registry import RouteHandler, RouteRegistration, pattern_route, route
 from web.routes._server_access import _server
 
@@ -239,7 +243,48 @@ def get_triage_list(
     h._json(payload)
 
 
+class StopConvergedSearchRequest(BaseModel):
+    """Exact signal identity plus an explicit reversible STOP confirmation."""
+
+    confirm: Literal["STOP"]
+    latest_qualifying_log_id: int = Field(gt=0)
+    cliff_hz: int = Field(ge=0)
+
+
+def post_stop_converged_search(
+    h: RouteHandler, body: dict[str, object], req_id_str: str,
+) -> None:
+    """Stop searching only if the locked, freshly-derived signal matches."""
+    from lib.convergence_service import ConvergenceStopService
+
+    payload = parse_body(h, body, StopConvergedSearchRequest)
+    if payload is None:
+        return
+    result = ConvergenceStopService(_server()._db()).stop(
+        int(req_id_str),
+        latest_qualifying_log_id=payload.latest_qualifying_log_id,
+        cliff_hz=payload.cliff_hz,
+    )
+    response = msgspec.to_builtins(result)
+    if result.outcome == "stopped":
+        h._json(response)
+    elif result.outcome == "not_found":
+        h._json(response, status=404)
+    elif result.outcome in {"wrong_state", "stale"}:
+        h._json(response, status=409)
+    else:
+        h._json(response, status=422)
+
+
 ROUTES: list[RouteRegistration] = [
+    pattern_route(
+        "POST", r"^/api/triage/(\d+)/stop-converged-search$",
+        post_stop_converged_search,
+        "Explicitly stop searching for a provisional lossless request only "
+        "when its locked, freshly-derived convergence signal matches the "
+        "client-visible signal identity; reversible through normal resume.",
+        classified=True,
+    ),
     route(
         "GET", "/api/triage/quarantine", get_triage_quarantine,
         "Read-only quarantine lifecycle view — unreferenced immediate "

@@ -18,6 +18,9 @@ import { renderDownloadHistoryItem } from './history.js';
 import {
   renderBeetsTrackRow, renderDetailRow, renderExternalLinkRow, toggleExpand,
 } from './render_primitives.js';
+import {
+  convergenceBadge, renderConvergencePrompt,
+} from './convergence.js';
 
 
 function refreshAfterBeetsDeletion(albumId) {
@@ -113,7 +116,7 @@ export function renderLibraryAlbumRow(a) {
     <div class="lib-item" onclick="${detailToggle}">
       <div class="p-top">
         <div>
-          <div class="p-title">${esc(a.album)}${badges}</div>
+          <div class="p-title">${esc(a.album)}${badges}${convergenceBadge(a.convergence)}</div>
         </div>
         <div style="display:flex;align-items:center;gap:6px;">
           ${toolbar}
@@ -126,6 +129,7 @@ export function renderLibraryAlbumRow(a) {
         ${a.type ? `<span>${esc(a.type)}</span>` : ''}
         <span>added ${added}</span>
       </div>
+      ${renderConvergencePrompt(a.convergence, a.pipeline_status)}
     </div>
     <div class="lib-detail" id="${detailId}"></div>
   `;
@@ -182,6 +186,7 @@ export function renderLibraryDetailBody(data, id) {
     const releaseId = normalizeReleaseId(data.mb_albumid);
     const releaseArg = jsArg(releaseId);
     let html = '';
+    html += renderConvergencePrompt(data.convergence, data.pipeline_status);
     if (data.path) {
       html += renderDetailRow('Path', esc(data.path), { valueStyle: 'font-size:0.85em;word-break:break-all;' });
     }

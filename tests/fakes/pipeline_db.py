@@ -599,6 +599,7 @@ class FakePipelineDB:
         # (extra headroom for the per-request compose path's request
         # fetch).
         self.query_counts: dict[str, int] = {}
+        self.convergence_signals: dict[int, Any] = {}
         # Migration 034 — youtube_album_mappings. Keyed by
         # (release_group_identifier, source); each value is the full
         # matrix the resolver scored for that pair. Refresh always
@@ -4497,6 +4498,7 @@ class FakePipelineDB:
         filter_spec: Any,
         page_size: int,
         after_request_id: int | None,
+        converged_request_ids: list[int] | None = None,
     ) -> list[dict[str, Any]]:
         """In-memory mirror of ``PipelineDB.list_triage_page``."""
         self.query_counts["list_triage_page"] = (
@@ -4535,6 +4537,11 @@ class FakePipelineDB:
                 return (summary is not None
                         and summary["total_searches"] > 0
                         and summary["found_count"] == 0)
+            if kind == "converged":
+                return bool(
+                    converged_request_ids
+                    and int(row["id"]) in converged_request_ids
+                )
             if kind == "all":
                 return True
             raise ValueError(f"unsupported triage filter kind: {kind!r}")
@@ -4559,6 +4566,61 @@ class FakePipelineDB:
             "prior_unfindable_category",
         )
         return [{k: r.get(k) for k in projection_keys} for r in rows]
+
+    def get_convergence_signals(
+        self, request_ids: list[int] | None = None,
+    ) -> dict[int, Any]:
+        self.query_counts["get_convergence_signals"] = (
+            self.query_counts.get("get_convergence_signals", 0) + 1
+        )
+        if request_ids is None:
+            return dict(self.convergence_signals)
+        wanted = {int(request_id) for request_id in request_ids}
+        return {
+            request_id: signal
+            for request_id, signal in self.convergence_signals.items()
+            if request_id in wanted
+        }
+
+    def stop_search_for_convergence(
+        self,
+        request_id: int,
+        *,
+        latest_qualifying_log_id: int,
+        cliff_hz: int,
+    ) -> Any:
+        from lib.convergence_service import StopConvergedSearchResult
+
+        rid = int(request_id)
+        row = self._requests.get(rid)
+        if row is None:
+            return StopConvergedSearchResult(outcome="not_found", request_id=rid)
+        status = str(row["status"])
+        if status != "wanted":
+            return StopConvergedSearchResult(
+                outcome="wrong_state", request_id=rid,
+                observed_status=status,
+            )
+        signal = self.convergence_signals.get(rid)
+        if signal is None:
+            return StopConvergedSearchResult(
+                outcome="not_converged", request_id=rid,
+                observed_status=status,
+            )
+        if (
+            signal.latest_qualifying_log_id != latest_qualifying_log_id
+            or signal.cliff_hz != cliff_hz
+        ):
+            return StopConvergedSearchResult(
+                outcome="stale", request_id=rid, signal=signal,
+                observed_status=status,
+            )
+        row["status"] = "unsearchable"
+        row["active_download_state"] = None
+        return StopConvergedSearchResult(
+            outcome="stopped", request_id=rid, signal=signal,
+            observed_status="unsearchable",
+        )
 
     def get_field_resolutions_for_requests(
         self,

@@ -121,6 +121,25 @@ Key fields:
   verified-lossless. SQL derives the convenience boolean from proof presence,
   and a CHECK requires the boolean and complete proof tuple to agree.
 
+### Derived provisional-lossless convergence (not schema)
+
+`lib/pipeline_db/convergence.py` derives an operator signal from existing
+evidence and download history; it persists no flag, counter, migration, or
+cadence state. A signal exists only while the request's linked current evidence
+is canonical provisional lossless (`v0_subject='source'`, unverified) and the
+newest consecutive eligible Soulseek observations have at least five distinct
+peers in one nearest-500 Hz raw-cliff bin. Eligible observations are exact
+release `strong_match` rows at distance <= 0.15 with unverified lossless-codec,
+source-subject, measurement-v2 evidence. Ineligible legacy, world-error,
+non-exact, and high-distance rows are ignored. An eligible NULL/no-cliff row or
+a different cliff bin is an upward break that resets the current run.
+
+This is constancy, not proof. It never changes search cadence automatically.
+The explicit stop action locks the request, rederives the signal, rejects a
+stale `(latest_qualifying_log_id, cliff_hz)` identity, and atomically changes
+only `wanted -> unsearchable`. Evidence remains provisional and untouched;
+the ordinary Resume transition reopens searching.
+
 Every v4 spectral or V0 fact answers the same two questions: `subject` says
 which bytes it describes (`installed` or `source`), and `provenance` says how
 it reached this row (`measured` or `carried`). `installed` + `carried` is

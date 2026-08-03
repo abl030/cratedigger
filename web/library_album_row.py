@@ -8,6 +8,7 @@ from datetime import datetime
 
 import msgspec
 
+from lib.convergence_service import ConvergenceSignal
 from lib.pipeline_db._shared import ProcessingOwnerProjection
 from lib.release_identity import (
     ReleaseIdentity,
@@ -164,6 +165,7 @@ class LibraryAlbumRow(msgspec.Struct, frozen=True):
     has_captured_history: bool
     pipeline_verified_lossless: bool
     pipeline_provisional: bool
+    convergence: ConvergenceSignal | None = None
 
     @property
     def identity(self) -> ReleaseIdentity | None:

@@ -8,6 +8,7 @@ import {
   catalogueDomId,
   releaseGroupRequestPath,
   renderPressingRow,
+  renderReleaseDetail,
   renderRgRow,
   synthesizeMasterlessRow,
   splitPressings,
@@ -122,6 +123,45 @@ console.log('synthesizeMasterlessRow() — exact processing owner survives synth
   assertContains(html, 'previewing', 'pressing action consumes canonical owner label');
   assertContains(html, '/api/import-jobs/8839/recovery', 'pressing links exact owner recovery detail');
   assertExcludes(html, 'window.disambRemove', 'processing pressing cannot remove request');
+}
+
+console.log('Convergence signal — exact pressing badge and detail action');
+{
+  const convergence = {
+    request_id: 1240,
+    latest_qualifying_log_id: 39278,
+    cliff_hz: 15000,
+    observation_count: 17,
+    distinct_peer_count: 17,
+    distinct_candidate_snapshot_count: 14,
+  };
+  const row = {
+    id: 'exact-release',
+    title: 'The Creek Drank the Cradle',
+    status: 'Official',
+    in_library: true,
+    beets_album_id: 11582,
+    pipeline_status: 'wanted',
+    pipeline_id: 1240,
+    pipeline_provisional: true,
+    country: 'US',
+    date: '2002-09-24',
+    format: 'CD',
+    track_count: 11,
+    convergence,
+  };
+  const pressingHtml = renderPressingRow(row, {
+    artistName: 'Iron & Wine',
+    parentRgId: 'release-group',
+    canReplace: true,
+  });
+  assertContains(pressingHtml, 'search converged', 'exact pressing carries the distinct badge');
+
+  const target = { innerHTML: '' };
+  renderReleaseDetail(target, row.id, { ...row, tracks: [] });
+  assertContains(target.innerHTML, 'Search appears converged', 'release detail explains the observation');
+  assertContains(target.innerHTML, 'window.stopConvergedSearch({request_id:1240,latest_qualifying_log_id:39278,cliff_hz:15000})',
+    'release detail action carries the exact signal identity');
 }
 
 console.log('addRelease() — processing exists response exposes exact owner recovery');

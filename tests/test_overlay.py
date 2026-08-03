@@ -4,7 +4,10 @@ import os
 import sys
 import tempfile
 import unittest
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
+
+import msgspec
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -13,6 +16,7 @@ from lib.banding import (
     band_current_resolutions,
 )
 from lib.beets_db import BeetsDB, CurrentBeetsItem, CurrentBeetsUnique
+from lib.convergence_service import ConvergenceSignal
 from lib.quality import QualityRankConfig
 from lib.release_identity import ConflictingReleaseIdentityError, ReleaseIdentity
 from tests.fakes import FakeBeetsDB
@@ -25,6 +29,39 @@ MB_RELEASE_3 = "00000000-0000-0000-0000-000000000003"
 
 
 class TestOverlayReleaseRowsInPlace(unittest.TestCase):
+    def test_projects_request_convergence_on_the_exact_release_row(self):
+        signal = ConvergenceSignal(
+            request_id=21,
+            latest_qualifying_log_id=101,
+            cliff_hz=15_000,
+            observation_count=6,
+            distinct_peer_count=5,
+            distinct_candidate_snapshot_count=4,
+            first_observed_at=datetime(2026, 8, 1, tzinfo=UTC),
+            latest_observed_at=datetime(2026, 8, 2, tzinfo=UTC),
+        )
+        rows: list[dict[str, object]] = [{"id": "queued"}]
+        with patch("web.server.check_beets_library", return_value=set()), \
+                patch("web.server.check_pipeline", return_value={
+                    "queued": {
+                        "id": 21,
+                        "status": "wanted",
+                        "has_captured_history": True,
+                        "verified_lossless": False,
+                        "provisional_lossless": True,
+                        "processing_owner": None,
+                    },
+                }), patch("web.server._beets_db", return_value=None), \
+                patch(
+                    "web.server.get_convergence_signals",
+                    return_value={21: signal},
+                    create=True,
+                ) as get_signals:
+            overlay_release_rows_in_place(rows, ["queued"])
+
+        self.assertEqual(rows[0]["convergence"], msgspec.to_builtins(signal))
+        get_signals.assert_called_once_with([21])
+
     def test_populates_library_and_pipeline_state(self):
         rows: list[dict[str, object]] = [
             {"id": "held", "title": "Held Release"},

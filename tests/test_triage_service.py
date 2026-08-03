@@ -8,7 +8,7 @@ Covers the three deliverables of the service:
 * ``compose_triage_for_request`` — single-request payload composed
   from ``album_requests`` + the three side domains.
 * ``list_triage`` — cohort listing with N+1 mitigation. The contract
-  is "4 queries (+ 1 headroom for future growth)" — the guard runs
+  is "5 queries (+ 1 headroom for future growth)" — the guard runs
   against ``FakePipelineDB`` which records per-method call counts.
 """
 
@@ -469,11 +469,11 @@ class TestListTriage(unittest.TestCase):
 
 
 class TestListTriageN1Guard(unittest.TestCase):
-    """The cohort path emits 4 queries (+ 1 headroom for future growth)
+    """The cohort path emits 5 queries (+ 1 headroom for future growth)
     regardless of page size.
 
     Asserted by counting calls on ``FakePipelineDB.query_counts``. The
-    list path is bounded to four entries (page + three bulk getters);
+    list path is bounded to five entries (page + four bulk getters);
     the +1 headroom covers any single optional lookup the service
     might add later.
     """
@@ -500,14 +500,14 @@ class TestListTriageN1Guard(unittest.TestCase):
 
         results = list_triage("all", db, page_size=50)
         self.assertEqual(len(results), 50)
-        # Four bulk methods + a +1 headroom: page + field_resolutions +
-        # search_summaries + recent_search_log.
+        # Five bulk methods + a +1 headroom: page + field_resolutions +
+        # search_summaries + recent_search_log + convergence.
         total_queries = sum(db.query_counts.values())
         self.assertLessEqual(
-            total_queries, 5,
+            total_queries, 6,
             f"list_triage emitted {total_queries} DB queries "
             f"(breakdown: {db.query_counts}); contract is "
-            "4 queries (+ 1 headroom for future growth)",
+            "5 queries (+ 1 headroom for future growth)",
         )
         # Belt-and-braces — each bulk method must fire exactly once.
         self.assertEqual(db.query_counts.get("list_triage_page"), 1)
@@ -519,6 +519,9 @@ class TestListTriageN1Guard(unittest.TestCase):
         )
         self.assertEqual(
             db.query_counts.get("get_recent_search_log_for_requests"), 1,
+        )
+        self.assertEqual(
+            db.query_counts.get("get_convergence_signals"), 1,
         )
 
 

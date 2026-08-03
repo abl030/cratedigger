@@ -44,6 +44,7 @@ class TestTriageRouteContracts(_FakeDbWebServerCase):
     # field rename can't silently break the JS without flipping a test.
     SHOW_REQUIRED_FIELDS: ClassVar = {
         "request_meta", "unfindable", "field_quality", "search_forensics",
+        "convergence",
     }
 
     # ``request_meta`` fields the frontend depends on for the "Artist –
@@ -296,11 +297,12 @@ class TestTriageRouteContracts(_FakeDbWebServerCase):
         self.assertIn("error", data)
         self.assertIn("valid_filters", data)
         self.assertIsInstance(data["valid_filters"], list)
-        # The four canonical scalar forms must be advertised.
+        # Canonical scalar forms, including the derived cohort, are advertised.
         self.assertIn("all", data["valid_filters"])
         self.assertIn("unfindable", data["valid_filters"])
         self.assertIn("data_quality", data["valid_filters"])
         self.assertIn("search_not_converting", data["valid_filters"])
+        self.assertIn("converged", data["valid_filters"])
 
     def test_list_limit_caps_results_and_emits_next_after_cursor(self):
         """When the page is exactly ``limit`` long the response carries
@@ -345,6 +347,77 @@ class TestTriageRouteContracts(_FakeDbWebServerCase):
             "/api/triage/list?filter=all&after=not-an-int")
         self.assertEqual(status, 400)
         self.assertIn("error", data)
+
+    def test_convergence_filter_and_stop_action_status_mapping(self):
+        from lib.convergence_service import ConvergenceSignal
+
+        now = datetime(2026, 8, 3, tzinfo=UTC)
+        self.db.seed_request(make_request_row(id=41, status="wanted"))
+        self.db.convergence_signals[41] = ConvergenceSignal(
+            request_id=41,
+            observation_count=7,
+            distinct_peer_count=6,
+            distinct_candidate_snapshot_count=5,
+            cliff_hz=15_000,
+            latest_qualifying_log_id=99,
+            first_observed_at=now,
+            latest_observed_at=now,
+        )
+
+        status, cohort = self._get("/api/triage/list?filter=converged")
+        self.assertEqual(status, 200)
+        self.assertEqual([row["request_meta"]["id"] for row in cohort["results"]], [41])
+        self.assertEqual(cohort["results"][0]["convergence"]["cliff_hz"], 15_000)
+
+        status, stale = self._post(
+            "/api/triage/41/stop-converged-search",
+            {"confirm": "STOP", "latest_qualifying_log_id": 98,
+             "cliff_hz": 15_000},
+        )
+        self.assertEqual(status, 409)
+        self.assertEqual(stale["outcome"], "stale")
+
+        status, stopped = self._post(
+            "/api/triage/41/stop-converged-search",
+            {"confirm": "STOP", "latest_qualifying_log_id": 99,
+             "cliff_hz": 15_000},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(stopped["outcome"], "stopped")
+        self.assertEqual(self.db.request(41)["status"], "unsearchable")
+
+        status, conflict = self._post(
+            "/api/triage/41/stop-converged-search",
+            {"confirm": "STOP", "latest_qualifying_log_id": 99,
+             "cliff_hz": 15_000},
+        )
+        self.assertEqual(status, 409)
+        self.assertEqual(conflict["outcome"], "wrong_state")
+
+        status, missing = self._post(
+            "/api/triage/999/stop-converged-search",
+            {"confirm": "STOP", "latest_qualifying_log_id": 99,
+             "cliff_hz": 15_000},
+        )
+        self.assertEqual(status, 404)
+        self.assertEqual(missing["outcome"], "not_found")
+
+        self.db.seed_request(make_request_row(id=42, status="wanted"))
+        status, not_converged = self._post(
+            "/api/triage/42/stop-converged-search",
+            {"confirm": "STOP", "latest_qualifying_log_id": 99,
+             "cliff_hz": 15_000},
+        )
+        self.assertEqual(status, 422)
+        self.assertEqual(not_converged["outcome"], "not_converged")
+
+        status, invalid = self._post(
+            "/api/triage/41/stop-converged-search",
+            {"confirm": "ACCEPT", "latest_qualifying_log_id": 99,
+             "cliff_hz": 15_000},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("confirm", invalid["error"])
 
 
 if __name__ == "__main__":

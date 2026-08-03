@@ -65,6 +65,23 @@ def _pipeline_log_limit(params: dict[str, list[str]]) -> int:
     return max(1, min(limit, MAX_PIPELINE_LOG_LIMIT))
 
 
+def _attach_convergence_prompts(
+    items: list[dict[str, object]],
+    signals: Mapping[int, object],
+) -> None:
+    """Attach one prompt to the newest visible row for each request."""
+    prompted_requests: set[int] = set()
+    for item in items:
+        request_id = item.get("request_id")
+        if not isinstance(request_id, int):
+            continue
+        rid = request_id
+        signal = signals.get(rid)
+        if signal is not None and rid not in prompted_requests:
+            item["convergence"] = msgspec.to_builtins(signal)
+            prompted_requests.add(rid)
+
+
 # ── GET handlers ─────────────────────────────────────────────────
 
 
@@ -86,6 +103,15 @@ def get_pipeline_log(h: RouteHandler, params: dict[str, list[str]]) -> None:
         entries,
         linked_successor_rows=linked_rows,
     )
+    request_ids: list[int] = []
+    seen_request_ids: set[int] = set()
+    for item in result:
+        request_id = item.get("request_id")
+        if isinstance(request_id, int) and request_id not in seen_request_ids:
+            request_ids.append(request_id)
+            seen_request_ids.add(request_id)
+    signals = _server()._db().get_convergence_signals(request_ids)
+    _attach_convergence_prompts(result, signals)
     for item in result:
         mbid = item.get("mb_release_id")
         bi = beets_info.get(mbid) if isinstance(mbid, str) else None

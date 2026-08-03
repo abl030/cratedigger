@@ -5071,6 +5071,65 @@ class TestPipelineCliTriage(unittest.TestCase):
             rc = pipeline_cli.cmd_triage_quarantine(db, cast(Any, args))
         return rc, stdout.getvalue(), stderr.getvalue()
 
+    def _run_stop(
+        self, db, rid, *, latest_log_id=99, cliff_hz=15_000,
+        json_out=False,
+    ):
+        args = SimpleNamespace(
+            id=rid,
+            latest_log_id=latest_log_id,
+            cliff_hz=cliff_hz,
+            confirm="STOP",
+            json=json_out,
+        )
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            rc = pipeline_cli.cmd_triage_stop(db, cast(Any, args))
+        return rc, stdout.getvalue(), stderr.getvalue()
+
+    def test_convergence_filter_show_and_stop_share_signal_identity(self):
+        from lib.convergence_service import ConvergenceSignal
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=41, status="wanted"))
+        now = datetime(2026, 8, 3, tzinfo=UTC)
+        db.convergence_signals[41] = ConvergenceSignal(
+            request_id=41,
+            observation_count=7,
+            distinct_peer_count=6,
+            distinct_candidate_snapshot_count=5,
+            cliff_hz=15_000,
+            latest_qualifying_log_id=99,
+            first_observed_at=now,
+            latest_observed_at=now,
+        )
+
+        rc, shown, err = self._run_show(db, 41)
+        self.assertEqual((rc, err), (0, ""))
+        self.assertIn("6", shown)
+        self.assertIn("--latest-log-id 99", shown)
+        rc, listed, err = self._run_list(db, filter_spec="converged")
+        self.assertEqual((rc, err), (0, ""))
+        self.assertIn("converged 15kHz/6 peers", listed)
+
+        rc, _out, err = self._run_stop(db, 41, latest_log_id=98)
+        self.assertEqual(rc, 4)
+        self.assertIn("stale", err)
+        rc, out, err = self._run_stop(db, 41, json_out=True)
+        self.assertEqual((rc, err), (0, ""))
+        self.assertEqual(json.loads(out)["outcome"], "stopped")
+        self.assertEqual(db.request(41)["status"], "unsearchable")
+
+        rc, _out, err = self._run_stop(db, 999)
+        self.assertEqual(rc, 2)
+        self.assertIn("not_found", err)
+
+        db.seed_request(make_request_row(id=42, status="wanted"))
+        rc, _out, err = self._run_stop(db, 42)
+        self.assertEqual(rc, 3)
+        self.assertIn("not_converged", err)
+
     def test_quarantine_json_matches_typed_service_shape(self):
         from lib.quarantine_triage_service import QuarantineTriageResult
 

@@ -53,6 +53,7 @@ from scripts.pipeline_cli.triage import (
     cmd_triage_list,
     cmd_triage_quarantine,
     cmd_triage_show,
+    cmd_triage_stop,
 )
 from scripts.pipeline_cli.wrong_match import (
     cmd_wrong_match_delete,
@@ -159,6 +160,7 @@ def main(*, api_socket: str | None = None):
         "show": cmd_triage_show,
         "list": cmd_triage_list,
         "quarantine": cmd_triage_quarantine,
+        "stop": cmd_triage_stop,
     }
     audit_commands = {
         "world": cmd_audit_world,

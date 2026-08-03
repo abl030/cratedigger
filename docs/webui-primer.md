@@ -104,6 +104,8 @@ operation.
 | `/api/import-jobs/<id>` | GET | Poll a single import queue job |
 | `/api/import-jobs/<id>/recovery` | GET | Inspect read-only exact-owner recovery evidence, liveness, and cleanup progress for any import job; historical `recovery_required` rows remain readable |
 | `/api/library/artist?name=...` | GET | Exact live Beets albums plus independent acquisition-history, evidence, and request facts; a failed Beets read is an HTTP error, never an empty Library |
+| `/api/triage/list?filter=converged` | GET | Derived provisional-lossless convergence cohort with raw-cliff, observation, distinct-peer, and snapshot counts |
+| `/api/triage/<id>/stop-converged-search` | POST | Explicit reversible search stop, guarded by `confirm: "STOP"` and the current signal identity |
 | `/api/audit/world` | GET | Grouped read-only A/B/C ownership report with completeness and Bucket-A integrity status; unexpected defects return HTTP 503 |
 | `/api/discogs/search?q=...` | GET | Search Discogs mirror (artist or release mode via `type=` param) |
 | `/api/discogs/artist/<id>` | GET | Artist's normalized catalogue identities, including exact masterless releases (via mirror `/masters/all` + `/appearances`) |
@@ -111,6 +113,14 @@ operation.
 | `/api/discogs/release/<id>` | GET | Full Discogs release details with tracks |
 
 ## Frontend Features
+
+- **Convergence prompt (#978)** — Recents renders one prominent prompt on the
+  newest visible history row for each signalled request; older attempts do not
+  repeat it. Library carries a distinct `search converged` badge and the same
+  detail/action contract. Copy calls the holding provisional—not proof—and the
+  action is **Stop searching**, never Accept. After the action, the request is
+  `unsearchable`, the provisional evidence remains unchanged, and the existing
+  Resume control reopens the forever cadence.
 
 - **Source toggle** — a labelled **Source** MB / Discogs switch in the browse tab
   header. Both sources contribute to one semantic catalogue. For an associated

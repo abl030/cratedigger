@@ -15,9 +15,10 @@ result for one request_id; ``list_triage`` returns a paged cohort under
 an operator filter spec.
 
 The cohort path is N+1-bounded: regardless of page size, ``list_triage``
-emits **4 DB queries (+ 1 headroom for future growth)** — the page +
+emits **5 DB queries (+ 1 headroom for future growth)** — the page +
 bulk field-resolutions + bulk search-summaries + bulk recent search_log
-rows. The N+1 guard test in ``tests/test_triage_service.py`` asserts
+rows + bulk convergence derivation. The N+1 guard test in
+``tests/test_triage_service.py`` asserts
 the bound holds at page_size=50.
 
 This module deliberately lives upstream of the CLI / HTTP wrappers.
@@ -37,6 +38,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import msgspec
 
+from lib.convergence_service import ConvergenceSignal
 from lib.field_resolver_service import (
     FIELD_CATALOG_NUMBER,
     FIELD_RELEASE_GROUP_ID,
@@ -66,6 +68,7 @@ _FILTER_ALL = "all"
 _FILTER_UNFINDABLE = "unfindable"
 _FILTER_DATA_QUALITY = "data_quality"
 _FILTER_SEARCH_NOT_CONVERTING = "search_not_converting"
+_FILTER_CONVERGED = "converged"
 
 # Sourced from ``lib.unfindable_detection_service`` — the daily detection
 # service owns the vocabulary; this parser is downstream. Adding a new
@@ -101,6 +104,7 @@ VALID_FILTER_FORMS: tuple[str, ...] = (
     f"{_FILTER_DATA_QUALITY}:status=<status>",
     f"{_FILTER_DATA_QUALITY}:reason=<code>",
     _FILTER_SEARCH_NOT_CONVERTING,
+    _FILTER_CONVERGED,
 )
 
 
@@ -210,6 +214,9 @@ def parse_filter(spec: str) -> ParsedTriageFilter:
 
     if raw == _FILTER_SEARCH_NOT_CONVERTING:
         return ParsedTriageFilter(kind=_FILTER_SEARCH_NOT_CONVERTING, raw=raw)
+
+    if raw == _FILTER_CONVERGED:
+        return ParsedTriageFilter(kind=_FILTER_CONVERGED, raw=raw)
 
     raise InvalidFilterError(f"unknown filter spec {spec!r}")
 
@@ -321,6 +328,7 @@ class TriageResult(msgspec.Struct, frozen=True):
     unfindable: UnfindableState | None
     field_quality: list[FieldResolutionState]
     search_forensics: SearchForensicsSummary
+    convergence: ConvergenceSignal | None = None
 
 
 # --- Service entrypoint ---------------------------------------------------
@@ -355,11 +363,16 @@ class _PipelineDB(Protocol):
         filter_spec: ParsedTriageFilter,
         page_size: int,
         after_request_id: int | None,
+        converged_request_ids: list[int] | None = None,
     ) -> list[dict[str, Any]]: ...
 
     def get_field_resolutions_for_requests(
         self, request_ids: list[int],
     ) -> dict[int, list[dict[str, Any]]]: ...
+
+    def get_convergence_signals(
+        self, request_ids: list[int] | None = None,
+    ) -> dict[int, ConvergenceSignal]: ...
 
     def get_search_summaries_for_requests(
         self, request_ids: list[int],
@@ -395,11 +408,13 @@ def compose_triage_for_request(
         [int(request_id)],
         per_request_limit=DEFAULT_RECENT_SEARCH_LOG_LIMIT,
     )
+    convergence = pdb.get_convergence_signals([int(request_id)])
     return _compose_one(
         row,
         field_rows.get(int(request_id), []),
         summary_rows.get(int(request_id)),
         log_rows.get(int(request_id), []),
+        convergence.get(int(request_id)),
     )
 
 
@@ -412,7 +427,7 @@ def list_triage(
 ) -> list[TriageResult]:
     """List one page of triage results matching ``filter_spec``.
 
-    N+1-bounded: regardless of ``page_size``, the call emits 4 DB
+    N+1-bounded: regardless of ``page_size``, the call emits 5 DB
     queries (+ 1 headroom for future growth):
 
     1. ``list_triage_page`` — the cohort page filtered + keyset-paged.
@@ -422,16 +437,23 @@ def list_triage(
        ``request_search_summary``.
     4. ``get_recent_search_log_for_requests`` — one bulk window-function
        slice of the last N rows per request.
+    5. ``get_convergence_signals`` — one bulk signal derivation over the
+       page's exact request ids.
 
     The result list preserves the page's ``id`` ASC ordering so
     keyset pagination is stable across calls.
     """
     parsed = parse_filter(filter_spec)
+    convergence = (
+        pdb.get_convergence_signals(None)
+        if parsed.kind == _FILTER_CONVERGED else {}
+    )
     rows = pdb.list_triage_page(
         filter_spec=parsed,
         page_size=int(page_size),
         after_request_id=(int(after_request_id)
                           if after_request_id is not None else None),
+        converged_request_ids=(list(convergence) if convergence else None),
     )
     if not rows:
         return []
@@ -442,6 +464,8 @@ def list_triage(
     log_rows = pdb.get_recent_search_log_for_requests(
         request_ids, per_request_limit=DEFAULT_RECENT_SEARCH_LOG_LIMIT,
     )
+    if parsed.kind != _FILTER_CONVERGED:
+        convergence = pdb.get_convergence_signals(request_ids)
 
     out: list[TriageResult] = []
     for r in rows:
@@ -451,6 +475,7 @@ def list_triage(
             field_rows.get(rid, []),
             summary_rows.get(rid),
             log_rows.get(rid, []),
+            convergence.get(rid),
         ))
     return out
 
@@ -463,6 +488,7 @@ def _compose_one(
     field_rows: Iterable[dict[str, Any]],
     summary_row: dict[str, Any] | None,
     log_rows: Iterable[dict[str, Any]],
+    convergence: ConvergenceSignal | None,
 ) -> TriageResult:
     request_meta = _request_meta(request_row)
     unfindable = _unfindable_state(request_row)
@@ -473,6 +499,7 @@ def _compose_one(
         unfindable=unfindable,
         field_quality=field_quality,
         search_forensics=search_forensics,
+        convergence=convergence,
     )
 
 

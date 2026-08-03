@@ -51,6 +51,7 @@ class _TriagePipelineDB(Protocol):
         filter_spec: ParsedTriageFilter,
         page_size: int,
         after_request_id: int | None,
+        converged_request_ids: list[int] | None = None,
     ) -> list[dict[str, Any]]: ...
 
     def get_field_resolutions_for_requests(
@@ -67,6 +68,12 @@ class _TriagePipelineDB(Protocol):
         *,
         per_request_limit: int,
     ) -> dict[int, list[dict[str, Any]]]: ...
+
+    def get_convergence_signals(self, request_ids: list[int] | None = None) -> dict[int, Any]: ...
+
+    def stop_search_for_convergence(
+        self, request_id: int, *, latest_qualifying_log_id: int, cliff_hz: int,
+    ) -> Any: ...
 
 
 class _QuarantineWrongMatchesDB(Protocol):
@@ -93,6 +100,7 @@ _TRIAGE_VALID_FILTER_FORMS = (
     ("data_quality:reason=<reason_code>  (e.g. http_400, http_410, "
     "http_422)"),
     "search_not_converting",
+    "converged",
 )
 
 
@@ -144,6 +152,22 @@ def cmd_triage_show(db: _TriagePipelineDB, args: argparse.Namespace) -> int:
         print(f"  Failure class:     {meta.failure_class}")
     if meta.search_filetype_override:
         print(f"  Search filetype:   {meta.search_filetype_override}")
+
+    if result.convergence is not None:
+        signal = result.convergence
+        print("  Convergence:")
+        print(f"    cliff:                     {signal.cliff_hz / 1000:g} kHz")
+        print(f"    observations:              {signal.observation_count}")
+        print(f"    distinct peers:            {signal.distinct_peer_count}")
+        print(
+            "    distinct snapshots:        "
+            f"{signal.distinct_candidate_snapshot_count}"
+        )
+        print(
+            "    stop command:               pipeline-cli triage stop "
+            f"{meta.id} --latest-log-id {signal.latest_qualifying_log_id} "
+            f"--cliff-hz {signal.cliff_hz} --confirm STOP"
+        )
 
     # Unfindable cohort state.
     if result.unfindable is None:
@@ -224,6 +248,43 @@ def cmd_triage_show(db: _TriagePipelineDB, args: argparse.Namespace) -> int:
             )
 
     return 0
+
+
+def cmd_triage_stop(db: _TriagePipelineDB, args: argparse.Namespace) -> int:
+    """Explicitly stop a still-current converged request.
+
+    Exit mapping mirrors HTTP: success 0, missing 2, not converged 3,
+    wrong state or stale signal identity 4.
+    """
+    from lib.convergence_service import ConvergenceStopService
+
+    result = ConvergenceStopService(db).stop(
+        int(args.id),
+        latest_qualifying_log_id=int(args.latest_log_id),
+        cliff_hz=int(args.cliff_hz),
+    )
+    if bool(getattr(args, "json", False)):
+        print(json.dumps(
+            msgspec.to_builtins(result), indent=2, sort_keys=True,
+            default=_json_default,
+        ))
+    elif result.outcome == "stopped":
+        print(
+            f"  Stopped searching request {result.request_id}; the holding "
+            "remains provisional and unproven."
+        )
+    else:
+        print(
+            f"  Could not stop request {result.request_id}: {result.outcome}",
+            file=sys.stderr,
+        )
+    return {
+        "stopped": 0,
+        "not_found": 2,
+        "not_converged": 3,
+        "wrong_state": 4,
+        "stale": 4,
+    }[result.outcome]
 
 
 def cmd_triage_list(db: _TriagePipelineDB, args: argparse.Namespace) -> int:
@@ -351,7 +412,12 @@ def cmd_triage_list(db: _TriagePipelineDB, args: argparse.Namespace) -> int:
     for r in results:
         meta = r.request_meta
         category_or_failure = (
-            (r.unfindable.category if r.unfindable is not None else None)
+            (
+                f"converged {r.convergence.cliff_hz / 1000:g}kHz/"
+                f"{r.convergence.distinct_peer_count} peers"
+                if r.convergence is not None else None
+            )
+            or (r.unfindable.category if r.unfindable is not None else None)
             or meta.failure_class
             or "-"
         )
@@ -486,4 +552,22 @@ def add_triage_subparser(
         "--json", action="store_true",
         help="Print structured JSON instead of text",
     )
+    p_tr_stop = tr_sub.add_parser(
+        "stop",
+        help="Stop searching after reviewing a current convergence signal",
+    )
+    p_tr_stop.add_argument("id", type=int, help="Request ID")
+    p_tr_stop.add_argument(
+        "--latest-log-id", type=int, required=True,
+        help="latest_qualifying_log_id from triage show/list",
+    )
+    p_tr_stop.add_argument(
+        "--cliff-hz", type=int, required=True,
+        help="500 Hz-binned cliff_hz from triage show/list",
+    )
+    p_tr_stop.add_argument(
+        "--confirm", choices=["STOP"], required=True,
+        help="Explicitly confirm the reversible search stop",
+    )
+    p_tr_stop.add_argument("--json", action="store_true")
     return p_triage_op
