@@ -2472,10 +2472,8 @@ class TestCmdQuality(unittest.TestCase):
         self.assertIn("Verified-lossless output: flac", output)
         self.assertIn("Genuine FLAC → flac (high bitrate):", output)
 
-    def test_suspect_flac_preview_scenarios_carry_explicit_source_probes(self):
-        """The operator matrix stays aligned with the simulator fixtures."""
-        from lib.quality import full_pipeline_decision
-
+    def test_suspect_flac_preview_scenarios_stay_provisional(self):
+        """The real CLI displays both source-probe scenarios as provisional."""
         request_row = make_request_row(
             id=81,
             status="imported",
@@ -2486,32 +2484,23 @@ class TestCmdQuality(unittest.TestCase):
             verified_lossless=False,
             final_format="MP3",
         )
-        with patch(
-            "lib.quality.full_pipeline_decision",
-            wraps=full_pipeline_decision,
-        ) as decide:
-            self._run_quality(request_row, runtime_target="opus 128")
+        output = self._run_quality(request_row, runtime_target="opus 128")
 
-        probes = {
-            call.kwargs["post_conversion_min_bitrate"]: (
-                call.kwargs.get("candidate_v0_probe_avg"),
-                call.kwargs.get("candidate_v0_probe_min"),
-                call.kwargs.get("candidate_v0_probe_kind"),
-            )
-            for call in decide.call_args_list
-            if (
-                call.kwargs.get("is_flac")
-                and call.kwargs.get("spectral_grade") == "suspect"
-                and call.kwargs.get("converted_count") == 12
-            )
-        }
-        self.assertEqual(
-            probes,
-            {
-                190: (190, 190, "lossless_source_v0"),
-                245: (229, 199, "lossless_source_v0"),
-            },
-        )
+        lines = output.splitlines()
+        for scenario in (
+            "Suspect FLAC (transcode, 190kbps)",
+            "Suspect FLAC (transcode, 245kbps)",
+        ):
+            with self.subTest(scenario=scenario):
+                index = lines.index(f"    {scenario}:")
+                self.assertIn(
+                    "IMPORT, denylist, keep searching (final: wanted)",
+                    lines[index + 1],
+                )
+                self.assertIn(
+                    "stage2_import=provisional_lossless_upgrade",
+                    lines[index + 2],
+                )
 
     def test_quality_bare_mp3_cbr_genuine_below_transparent_needs_upgrade(self):
         """Live request 4135: genuine CBR 256 stays on full tiers."""

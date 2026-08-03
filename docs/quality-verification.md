@@ -1093,9 +1093,10 @@ On the lossless-source branches the counterfactual reached through the
 evidence entrypoint follows the proof, like the decision itself (issue
 #990): an unproven candidate's counterfactual is the provisional lane,
 a proof-bearing one's is the measured comparison. Stage 1's carve-out
-(`provisional_source_candidate and has_provisional_probe_input`) spares
-every lossless-source candidate that has probe evidence, so the only ones
-that short-circuit are the ones with none.
+(`provisional_source_candidate and has_provisional_probe_input`) requires a
+comparable source probe: explicit `lossless_source_v0` kind plus a source
+average. Absent, minimum-only, unlabeled, and non-source probe facts do not
+qualify, so they never spare a candidate from the Stage-1 short-circuit.
 
 `pipeline-cli quality <id>` prints an `if stage 1 had deferred:` line under
 the chain, and the values-mode preview API returns the whole decision dict.

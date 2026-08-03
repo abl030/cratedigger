@@ -4036,6 +4036,162 @@ def post_conversion_minimum_never_invents_comparable_v0_evidence(
     return len(routing) == 1
 
 
+@dataclass(frozen=True)
+class FlatV0KindProbe:
+    """One direct flat-simulator source-V0 boundary case."""
+
+    name: str
+    kind: str | None
+    avg_bitrate_kbps: int | None
+    min_bitrate_kbps: int | None
+
+
+_FLAT_V0_KIND_PROBES = (
+    FlatV0KindProbe("omitted kind, full metrics", None, 241, 219),
+    FlatV0KindProbe(
+        "non-source kind, full metrics", "native_lossy_research_v0", 241, 219,
+    ),
+    FlatV0KindProbe("source kind, full metrics", "lossless_source_v0", 241, 219),
+    FlatV0KindProbe("source kind, average only", "lossless_source_v0", 241, None),
+    FlatV0KindProbe("source kind, minimum only", "lossless_source_v0", None, 219),
+)
+
+
+def _flat_v0_kind_stage1_decision(
+    kind: str | None,
+    avg_bitrate_kbps: int | None,
+    min_bitrate_kbps: int | None,
+) -> dict[str, object]:
+    """Drive the flat Stage-1 carve-out with a real comparable pair."""
+    return full_pipeline_decision(
+        is_flac=False,
+        supported_lossless_source=True,
+        min_bitrate=128,
+        avg_bitrate=128,
+        is_cbr=True,
+        new_format="MP3",
+        spectral_grade="likely_transcode",
+        spectral_bitrate=128,
+        existing_min_bitrate=192,
+        existing_avg_bitrate=192,
+        existing_format="MP3",
+        existing_is_cbr=True,
+        existing_spectral_grade="likely_transcode",
+        existing_spectral_bitrate=192,
+        candidate_v0_probe_kind=kind,
+        candidate_v0_probe_avg=avg_bitrate_kbps,
+        candidate_v0_probe_min=min_bitrate_kbps,
+    )
+
+
+def _flat_v0_kind_source_decision(
+    kind: str | None,
+    avg_bitrate_kbps: int | None,
+    min_bitrate_kbps: int | None,
+    post_conversion_min_bitrate: int,
+) -> dict[str, object]:
+    """Drive the real lossless-source route without constructing evidence."""
+    return full_pipeline_decision(
+        is_flac=True,
+        min_bitrate=354,
+        is_cbr=False,
+        spectral_grade="suspect",
+        converted_count=12,
+        post_conversion_min_bitrate=post_conversion_min_bitrate,
+        post_conversion_is_cbr=False,
+        verified_lossless_target="opus 128",
+        candidate_v0_probe_kind=kind,
+        candidate_v0_probe_avg=avg_bitrate_kbps,
+        candidate_v0_probe_min=min_bitrate_kbps,
+    )
+
+
+FlatV0KindDecider = Callable[
+    [str | None, int | None, int | None, int], dict[str, object],
+]
+
+
+def flat_v0_kind_boundary_holds(
+    probe: FlatV0KindProbe,
+    *,
+    post_conversion_mins: tuple[int, ...],
+    decider: FlatV0KindDecider = _flat_v0_kind_source_decision,
+) -> bool:
+    """Only explicit source-kind V0 facts may route the flat simulator."""
+    source_comparable = (
+        probe.kind == "lossless_source_v0"
+        and probe.avg_bitrate_kbps is not None
+    )
+    stage1 = _flat_v0_kind_stage1_decision(
+        probe.kind,
+        probe.avg_bitrate_kbps,
+        probe.min_bitrate_kbps,
+    )
+    if stage1["stage1_spectral"] != "reject":
+        return False
+    if source_comparable:
+        if (
+            stage1["stage2_import"] != "downgrade"
+            or stage1["stage2_import_if_stage1_deferred"] is not None
+        ):
+            return False
+    elif (
+        stage1["stage2_import"] is not None
+        or stage1["stage2_import_if_stage1_deferred"] != "downgrade"
+    ):
+        return False
+
+    source_routing = {
+        (
+            result["stage1_spectral"],
+            result["stage2_import"],
+            result["stage2_import_if_stage1_deferred"],
+            result["verified_lossless"],
+            result["imported"],
+        )
+        for result in (
+            decider(
+                probe.kind,
+                probe.avg_bitrate_kbps,
+                probe.min_bitrate_kbps,
+                post_conversion_min,
+            )
+            for post_conversion_min in post_conversion_mins
+        )
+    }
+    if len(source_routing) != 1:
+        return False
+    ((_, stage2, _, verified, imported),) = source_routing
+    if not source_comparable:
+        return (
+            stage2 == "suspect_lossless_probe_missing"
+            and verified is False
+            and imported is False
+        )
+    if probe.min_bitrate_kbps is None:
+        return (
+            stage2 == "provisional_lossless_upgrade"
+            and verified is False
+            and imported is True
+        )
+    return stage2 == "import" and verified is True and imported is True
+
+
+def _decoy_flat_v0_kind_defaults_to_source(
+    kind: str | None,
+    avg_bitrate_kbps: int | None,
+    min_bitrate_kbps: int | None,
+    post_conversion_min_bitrate: int,
+) -> dict[str, object]:
+    """Known-bad flat boundary: an omitted kind regains source authority."""
+    return _flat_v0_kind_source_decision(
+        kind or "lossless_source_v0",
+        avg_bitrate_kbps,
+        min_bitrate_kbps,
+        post_conversion_min_bitrate,
+    )
+
+
 def _decoy_decider_invents_v0_evidence_from_post_conversion_minimum(
     candidate: AlbumQualityEvidence,
     current: "AlbumQualityEvidence | None" = None,
@@ -4450,6 +4606,58 @@ class TestUltrasonicProofLegProperties(unittest.TestCase):
         self.assertTrue(
             an_unproven_lossless_source_never_outranks_its_anchor(
                 candidate, current, facts=facts,
+            )
+        )
+
+
+class TestFlatV0KindBoundary(unittest.TestCase):
+    """Direct pins and Hypothesis patrol for #993's flat kind boundary."""
+
+    def test_explicit_source_kind_owns_flat_v0_routing(self):
+        for probe in _FLAT_V0_KIND_PROBES:
+            with self.subTest(probe=probe.name):
+                self.assertTrue(
+                    flat_v0_kind_boundary_holds(
+                        probe,
+                        post_conversion_mins=(199, 200),
+                    )
+                )
+
+    @given(
+        probe=st.sampled_from(_FLAT_V0_KIND_PROBES),
+        post_conversion_mins=st.lists(
+            st.integers(min_value=1, max_value=400), min_size=2, max_size=6,
+        ),
+    )
+    @example(
+        probe=_FLAT_V0_KIND_PROBES[0], post_conversion_mins=[199, 200],
+    )
+    @example(
+        probe=_FLAT_V0_KIND_PROBES[3], post_conversion_mins=[199, 200],
+    )
+    @example(
+        probe=_FLAT_V0_KIND_PROBES[4], post_conversion_mins=[199, 200],
+    )
+    def test_generated_flat_v0_kind_boundary(
+        self, probe, post_conversion_mins,
+    ):
+        self.assertTrue(
+            flat_v0_kind_boundary_holds(
+                probe,
+                post_conversion_mins=tuple(post_conversion_mins),
+            )
+        )
+
+
+class TestFlatV0KindBoundarySelfTests(unittest.TestCase):
+    """Known-bad qualification for the direct flat simulator patrol."""
+
+    def test_checker_trips_when_omitted_kind_defaults_to_source(self):
+        self.assertFalse(
+            flat_v0_kind_boundary_holds(
+                _FLAT_V0_KIND_PROBES[0],
+                post_conversion_mins=(199, 200),
+                decider=_decoy_flat_v0_kind_defaults_to_source,
             )
         )
 
