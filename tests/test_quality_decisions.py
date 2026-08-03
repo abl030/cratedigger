@@ -1957,6 +1957,7 @@ class TestFullPipelineContract(unittest.TestCase):
             converted_count=10,
             post_conversion_min_bitrate=228,
             candidate_v0_probe_avg=228,
+            candidate_v0_probe_kind="lossless_source_v0",
             existing_v0_probe_avg=171,
             verified_lossless_target="opus 128",
         )
@@ -1982,6 +1983,7 @@ class TestFullPipelineContract(unittest.TestCase):
             converted_count=10,
             post_conversion_min_bitrate=193,
             candidate_v0_probe_avg=256,
+            candidate_v0_probe_kind="lossless_source_v0",
             existing_v0_probe_avg=248,
         )
         self.assertEqual(
@@ -1991,13 +1993,16 @@ class TestFullPipelineContract(unittest.TestCase):
         self.assertTrue(r["keep_searching"])
         self.assertEqual(r["final_status"], "wanted")
 
-    def test_provisional_lossless_uses_converted_v0_when_spectral_would_reject(self):
+    def test_provisional_lossless_uses_explicit_v0_when_spectral_would_reject(self):
         r = full_pipeline_decision(
             is_flac=True, min_bitrate=0, is_cbr=False,
             spectral_grade="likely_transcode", spectral_bitrate=128,
             existing_spectral_bitrate=160,
             converted_count=10,
             post_conversion_min_bitrate=228,
+            candidate_v0_probe_avg=228,
+            candidate_v0_probe_min=228,
+            candidate_v0_probe_kind="lossless_source_v0",
             existing_v0_probe_avg=171,
         )
         # Issue #829 Phase 5 PR2b: a lossless container's cliff is the
@@ -2005,7 +2010,7 @@ class TestFullPipelineContract(unittest.TestCase):
         # classes to compare and withholds ("import_no_exist"). The
         # load-bearing reject was never Stage 1's here — a suspect lossless
         # source with no comparable probe is confidently rejected by the
-        # provisional lane, and one WITH a probe (this world) is the
+        # provisional lane, and one WITH an explicit probe (this world) is the
         # provisional upgrade below, exactly as before.
         self.assertEqual(r["stage1_spectral"], "import_no_exist")
         self.assertEqual(
@@ -2020,6 +2025,7 @@ class TestFullPipelineContract(unittest.TestCase):
             converted_count=10,
             post_conversion_min_bitrate=175,
             candidate_v0_probe_avg=175,
+            candidate_v0_probe_kind="lossless_source_v0",
             existing_v0_probe_avg=171,
         )
         self.assertEqual(
@@ -2044,6 +2050,7 @@ class TestFullPipelineContract(unittest.TestCase):
             converted_count=1,
             post_conversion_min_bitrate=214,
             candidate_v0_probe_avg=214,
+            candidate_v0_probe_kind="lossless_source_v0",
             existing_min_bitrate=320,
             existing_avg_bitrate=320,
             existing_format="MP3",
@@ -2081,6 +2088,7 @@ class TestFullPipelineContract(unittest.TestCase):
             post_conversion_min_bitrate=237,
             candidate_v0_probe_avg=276,
             candidate_v0_probe_min=237,
+            candidate_v0_probe_kind="lossless_source_v0",
             existing_min_bitrate=None,
             existing_v0_probe_avg=None,
             verified_lossless_target="opus 128",
@@ -2116,6 +2124,7 @@ class TestFullPipelineContract(unittest.TestCase):
             converted_count=11,
             post_conversion_min_bitrate=165,
             candidate_v0_probe_avg=171,
+            candidate_v0_probe_kind="lossless_source_v0",
             existing_v0_probe_avg=228,
             existing_min_bitrate=220,
             existing_avg_bitrate=228,

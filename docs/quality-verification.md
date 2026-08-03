@@ -494,6 +494,15 @@ current-side pairing is mandatory corpus input, not an optional switch:
 current proof stays intact because installed evidence is the real acquisition
 ceiling, not a synthetic fresh-arrival fact.
 
+A **routing** change — lane membership, an entry condition, or a bypass —
+owes **both** the as-persisted and `--counterfactual` arms. The
+counterfactual measures a fresh arrival, but the as-persisted arm exposes
+cohorts that only exist because of stored state (such as historical proofs or
+incomplete evidence) and that fresh-world tests do not construct. When the
+routing can compare a candidate with a HAVE, the mandatory native
+current-side pairing supplies it; this differential consumes that pairing and
+does not reimplement it.
+
 ## AAC frame-lattice leg (issue #829 AAC-lattice leg)
 
 The fourth proof leg. PR-A measured and persisted the capture; PR-B reads
@@ -1084,9 +1093,10 @@ On the lossless-source branches the counterfactual reached through the
 evidence entrypoint follows the proof, like the decision itself (issue
 #990): an unproven candidate's counterfactual is the provisional lane,
 a proof-bearing one's is the measured comparison. Stage 1's carve-out
-(`provisional_source_candidate and has_provisional_probe_input`) spares
-every lossless-source candidate that has probe evidence, so the only ones
-that short-circuit are the ones with none.
+(`provisional_source_candidate and has_provisional_probe_input`) requires a
+comparable source probe: explicit `lossless_source_v0` kind plus a source
+average. Absent, minimum-only, unlabeled, and non-source probe facts do not
+qualify, so they never spare a candidate from the Stage-1 short-circuit.
 
 `pipeline-cli quality <id>` prints an `if stage 1 had deferred:` line under
 the chain, and the values-mode preview API returns the whole decision dict.

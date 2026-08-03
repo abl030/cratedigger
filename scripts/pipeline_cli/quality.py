@@ -506,12 +506,18 @@ def cmd_quality(db: PipelineDB, args: argparse.Namespace) -> None:
             "is_flac": True, "min_bitrate": 190, "is_cbr": False,
             "spectral_grade": "suspect", "converted_count": 12,
             "post_conversion_min_bitrate": 190,
-            "post_conversion_is_cbr": False}),
+            "post_conversion_is_cbr": False,
+            "candidate_v0_probe_avg": 190,
+            "candidate_v0_probe_min": 190,
+            "candidate_v0_probe_kind": "lossless_source_v0"}),
         ("Suspect FLAC (transcode, 245kbps)", {
             "is_flac": True, "min_bitrate": 245, "is_cbr": False,
             "spectral_grade": "suspect", "converted_count": 12,
             "post_conversion_min_bitrate": 245,
-            "post_conversion_is_cbr": False}),
+            "post_conversion_is_cbr": False,
+            "candidate_v0_probe_avg": 229,
+            "candidate_v0_probe_min": 199,
+            "candidate_v0_probe_kind": "lossless_source_v0"}),
         # Bill Hicks 1990 "Dangerous" shape: spoken-word lossless that
         # spectral_check false-positives as suspect (high HF deficit
         # against music-tuned thresholds), but the lossless_source_v0

@@ -490,6 +490,7 @@ class TestImportPreviewValues(unittest.TestCase):
                 post_conversion_is_cbr=False,
                 converted_count=12,
                 candidate_v0_probe_avg=228,
+                candidate_v0_probe_kind="lossless_source_v0",
                 existing_v0_probe_avg=171,
                 verified_lossless_target="opus 128",
             )
@@ -516,6 +517,7 @@ class TestImportPreviewValues(unittest.TestCase):
                 converted_count=12,
                 candidate_v0_probe_avg=276,
                 candidate_v0_probe_min=237,
+                candidate_v0_probe_kind="lossless_source_v0",
                 verified_lossless_target="opus 128",
             )
         )
@@ -539,6 +541,9 @@ class TestImportPreviewValues(unittest.TestCase):
                 post_conversion_min_bitrate=228,
                 post_conversion_is_cbr=False,
                 converted_count=12,
+                candidate_v0_probe_avg=228,
+                candidate_v0_probe_min=228,
+                candidate_v0_probe_kind="lossless_source_v0",
                 existing_v0_probe_avg=171,
             )
         )
@@ -567,6 +572,7 @@ class TestImportPreviewValues(unittest.TestCase):
                 post_conversion_is_cbr=False,
                 converted_count=12,
                 candidate_v0_probe_avg=175,
+                candidate_v0_probe_kind="lossless_source_v0",
                 existing_v0_probe_avg=171,
             )
         )

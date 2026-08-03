@@ -98,6 +98,7 @@ class DownloadScenario:
     avg_bitrate: int | None = None
     candidate_v0_probe_avg: int | None = None
     candidate_v0_probe_min: int | None = None
+    candidate_v0_probe_kind: str | None = None
     # Independent exact-release HAVE audit from this attempted import.  This
     # is intentionally not derived from the candidate's spectral fields.
     have_spectral_attempted: bool = False
@@ -120,6 +121,7 @@ class DownloadScenario:
             "new_format": self.new_format,
             "candidate_v0_probe_avg": self.candidate_v0_probe_avg,
             "candidate_v0_probe_min": self.candidate_v0_probe_min,
+            "candidate_v0_probe_kind": self.candidate_v0_probe_kind,
         }
 
 
@@ -218,11 +220,20 @@ DOWNLOAD_SCENARIOS = [
     DownloadScenario("flac_suspect_190", True, 190, False,
                      spectral_grade="suspect", converted_count=12,
                      post_conversion_min_bitrate=190,
-                     post_conversion_is_cbr=False),
+                     post_conversion_is_cbr=False,
+                     candidate_v0_probe_avg=190,
+                     candidate_v0_probe_min=190,
+                     candidate_v0_probe_kind="lossless_source_v0"),
     DownloadScenario("flac_suspect_245", True, 245, False,
                      spectral_grade="suspect", converted_count=12,
                      post_conversion_min_bitrate=245,
-                     post_conversion_is_cbr=False),
+                     post_conversion_is_cbr=False,
+                     # Deliberately below the V0 trust override: this is
+                     # explicit, comparable source evidence for the
+                     # provisional lane, not a replacement proof.
+                     candidate_v0_probe_avg=229,
+                     candidate_v0_probe_min=199,
+                     candidate_v0_probe_kind="lossless_source_v0"),
     # Sundowner - Four One Five Two (2026-05-13): spectral likely_transcode
     # at ~160kbps, but source-lineage V0 avg/min proves a genuine lossless
     # source and must bypass the provisional keep-searching lane.
@@ -230,7 +241,8 @@ DOWNLOAD_SCENARIOS = [
                      spectral_grade="likely_transcode", spectral_bitrate=160,
                      converted_count=12, post_conversion_min_bitrate=237,
                      post_conversion_is_cbr=False,
-                     candidate_v0_probe_avg=276, candidate_v0_probe_min=237),
+                     candidate_v0_probe_avg=276, candidate_v0_probe_min=237,
+                     candidate_v0_probe_kind="lossless_source_v0"),
     # FLAC kept on disk (no conversion) — raw FLAC bitrate
     DownloadScenario("flac_genuine_raw", True, 900, False,
                      spectral_grade="genuine",
@@ -239,7 +251,8 @@ DOWNLOAD_SCENARIOS = [
     DownloadScenario("flac_likely_transcode_raw_high_v0", True, 900, False,
                      spectral_grade="likely_transcode", spectral_bitrate=160,
                      converted_count=0, post_conversion_min_bitrate=None,
-                     candidate_v0_probe_avg=276, candidate_v0_probe_min=237),
+                     candidate_v0_probe_avg=276, candidate_v0_probe_min=237,
+                     candidate_v0_probe_kind="lossless_source_v0"),
     # MP3 VBR (avg_bitrate drives the preimport spectral gate — issue #93)
     DownloadScenario("mp3_v0_240", False, 240, False,
                      is_vbr=True, avg_bitrate=245, new_format="MP3"),
@@ -726,6 +739,7 @@ class TestNamedRegressions(unittest.TestCase):
             post_conversion_min_bitrate=141,
             candidate_v0_probe_min=141,
             candidate_v0_probe_avg=240,
+            candidate_v0_probe_kind="lossless_source_v0",
             existing_min_bitrate=None,
             existing_avg_bitrate=None,
             existing_format=None,
@@ -742,6 +756,7 @@ class TestNamedRegressions(unittest.TestCase):
             post_conversion_min_bitrate=141,
             candidate_v0_probe_min=141,
             candidate_v0_probe_avg=240,
+            candidate_v0_probe_kind="lossless_source_v0",
             existing_min_bitrate=116,
             existing_avg_bitrate=131,
             existing_format="Opus",

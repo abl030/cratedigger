@@ -2472,6 +2472,36 @@ class TestCmdQuality(unittest.TestCase):
         self.assertIn("Verified-lossless output: flac", output)
         self.assertIn("Genuine FLAC → flac (high bitrate):", output)
 
+    def test_suspect_flac_preview_scenarios_stay_provisional(self):
+        """The real CLI displays both source-probe scenarios as provisional."""
+        request_row = make_request_row(
+            id=81,
+            status="imported",
+            mb_release_id="mbid-quality-suspect-fixtures",
+            artist_name="Artist",
+            album_title="Album",
+            min_bitrate=320,
+            verified_lossless=False,
+            final_format="MP3",
+        )
+        output = self._run_quality(request_row, runtime_target="opus 128")
+
+        lines = output.splitlines()
+        for scenario in (
+            "Suspect FLAC (transcode, 190kbps)",
+            "Suspect FLAC (transcode, 245kbps)",
+        ):
+            with self.subTest(scenario=scenario):
+                index = lines.index(f"    {scenario}:")
+                self.assertIn(
+                    "IMPORT, denylist, keep searching (final: wanted)",
+                    lines[index + 1],
+                )
+                self.assertIn(
+                    "stage2_import=provisional_lossless_upgrade",
+                    lines[index + 2],
+                )
+
     def test_quality_bare_mp3_cbr_genuine_below_transparent_needs_upgrade(self):
         """Live request 4135: genuine CBR 256 stays on full tiers."""
         from lib.beets_db import AlbumInfo

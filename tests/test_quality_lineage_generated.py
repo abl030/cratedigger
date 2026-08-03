@@ -1355,6 +1355,7 @@ class TestQualityLineagePins(unittest.TestCase):
             verified_lossless_target="opus 128",
             candidate_v0_probe_min=220,
             candidate_v0_probe_avg=240,
+            candidate_v0_probe_kind="lossless_source_v0",
         )
 
         self.assertEqual(decision["stage2_import"], "downgrade")
@@ -1658,7 +1659,7 @@ class TestQualityLineageGenerated(unittest.TestCase):
         existing=123,
         existing_is_cbr=False,
     )
-    def test_full_pipeline_preserves_legacy_projection_mode(
+    def test_full_pipeline_uses_projection_only_in_postimport_gate(
         self,
         projected_bitrates: list[int],
         existing: int,
@@ -1678,25 +1679,18 @@ class TestQualityLineageGenerated(unittest.TestCase):
             post_conversion_is_cbr=projected_is_cbr,
             converted_count=len(projected_bitrates),
         )
-        legacy = measured_import_decision(
-            MeasuredImportDecisionInput(
-                AudioQualityMeasurement(
-                    min_bitrate_kbps=projected_min,
-                    avg_bitrate_kbps=projected_min,
-                    format="MP3",
-                    is_cbr=projected_is_cbr,
-                ),
-                AudioQualityMeasurement(
-                    min_bitrate_kbps=existing,
-                    avg_bitrate_kbps=existing,
-                    format="MP3",
-                    is_cbr=existing_is_cbr,
-                ),
-                True,
-            ),
-            cfg=QualityRankConfig.defaults(),
+        # #993: the projected target can decide only the downstream quality
+        # gate. It is not source V0 evidence for the Stage-2 comparator.
+        projection = AudioQualityMeasurement(
+            min_bitrate_kbps=projected_min,
+            avg_bitrate_kbps=projected_min,
+            format="MP3",
+            is_cbr=False,
         )
-        self.assertEqual(result["stage2_import"], legacy.decision)
+        self.assertEqual(
+            result["stage3_quality_gate"],
+            quality_gate_decision(projection, cfg=QualityRankConfig.defaults()),
+        )
 
     @given(
         source_min=st.integers(min_value=1, max_value=5000),
