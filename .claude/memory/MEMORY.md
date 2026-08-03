@@ -77,3 +77,6 @@
 - [Subagent worktree absolute paths](feedback_subagent_worktree_absolute_paths.md) — isolation:"worktree" does not stop absolute-path writes into the shared checkout; brief it explicitly and verify after
 - [Convergence signal + evidence recapture](project_convergence_signal_and_evidence_recapture.md) — inter-candidate cliff constancy = "network converged" (search-stop, not proof); denylist-release recapture; beets-rejected candidates DO carry full evidence
 - [Worktree switch kills live subagent](feedback_worktree_switch_kills_live_subagent.md) — EnterWorktree mid-run revokes another worktree's write guard; the agent then shell-writes around it and can leave a planted mutant behind
+- [#829 Phase 5 PR2 shipped](project_829_phase5_pr2_shipped.md) — codec-blind spectral fix live; PR3 next (read plan §1.5); borrowed corpus rows 8916-8935 to remove after the Apple measurement
+- [#829 research round closed](project_829_research_round_closed.md) — 2026-07-31: 4 threads concluded; Derrien offset rule = proof-grade Apple leg; provenance fixed (25/38 verified); PR3 SHIPPED live (PR #966); next Derrien leg pair
+- [Metadata gate / discogs import outage](project_metadata_gate_discogs_import.md) — gate-held 502 pattern, release procedure, discogs LXC deploy gap (fix 84e1c2ba pending deploy)

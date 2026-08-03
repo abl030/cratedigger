@@ -31,3 +31,12 @@ explicit `git diff origin/main -- lib/` check caught it before commit.
 
 Related: [[feedback-subagent-worktree-absolute-paths]],
 [[feedback-reviewer-git-reset-hazard]], [[feedback-review-loop-at-orchestrator]].
+
+**2026-07-31 wrinkle:** an agent RESUMED from transcript cannot re-point its
+write guard with EnterWorktree(path=...) — the call reports success but the
+guard stays on the session's current worktree, and the agent is correctly
+blocked. Recovery that works: the orchestrator itself EnterWorktree(path=<target
+worktree>) (only when no live subagents), then launches a FRESH agent, which
+inherits the correctly-pointed session guard. The blocked agent refusing to
+shell-write around the guard is the right behavior — reward it, never ask an
+agent to bypass.
