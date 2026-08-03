@@ -37,8 +37,10 @@ import msgspec
 from lib.quality import (
     VERIFIED_LOSSLESS_CLASSIFIER,
     VERIFIED_LOSSLESS_CLASSIFIER_V3,
+    AlbumQualityEvidenceFile,
     full_pipeline_decision_from_evidence,
 )
+from lib.quality_evidence import snapshot_fingerprint
 from scripts.decision_differential import (
     DECISION_ERROR_FIELD,
     DECISION_KEYS,
@@ -138,6 +140,18 @@ def _corpus_row(**overrides: object) -> dict[str, object]:
         }],
     }
     row.update(overrides)
+    if "snapshot_fingerprint" not in overrides:
+        raw_files = row["files"]
+        if isinstance(raw_files, list):
+            try:
+                files = msgspec.convert(
+                    raw_files,
+                    type=list[AlbumQualityEvidenceFile],
+                )
+            except msgspec.ValidationError:
+                pass
+            else:
+                row["snapshot_fingerprint"] = snapshot_fingerprint(files)
     return row
 
 
@@ -548,6 +562,23 @@ class TestNativeCurrentSidePairing(unittest.TestCase):
         for name, malformed in malformed_rows:
             with self.subTest(name=name), TemporaryDirectory() as tmp:
                 corpus = Path(tmp) / "corpus.jsonl"
+                corpus.write_text(
+                    json.dumps(malformed) + "\n", encoding="utf-8")
+                with self.assertRaisesRegex(
+                    RenderDifferentialError, "invalid evidence wire shape",
+                ):
+                    read_decision_corpus(str(corpus))
+
+    def test_db_non_null_evidence_columns_reject_json_null(self):
+        for field in (
+            "folder_layout",
+            "audio_file_count",
+            "filetype_band",
+        ):
+            with self.subTest(field=field), TemporaryDirectory() as tmp:
+                corpus = Path(tmp) / "corpus.jsonl"
+                malformed = self._candidate_row()
+                malformed[field] = None
                 corpus.write_text(
                     json.dumps(malformed) + "\n", encoding="utf-8")
                 with self.assertRaisesRegex(

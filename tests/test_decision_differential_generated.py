@@ -16,10 +16,13 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal
 
+import msgspec
 from hypothesis import given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
+from lib.quality import AlbumQualityEvidenceFile
+from lib.quality_evidence import snapshot_fingerprint
 from scripts.decision_differential import (
     RenderDifferentialError,
     decide_corpus,
@@ -48,6 +51,7 @@ CorpusMutation = Literal[
     "wrong_top_level",
     "wrong_file_primitive",
     "wrong_evidence_primitive",
+    "null_db_not_null_evidence",
 ]
 _CORPUS_MUTATIONS: tuple[CorpusMutation, ...] = (
     "duplicate_id",
@@ -56,6 +60,7 @@ _CORPUS_MUTATIONS: tuple[CorpusMutation, ...] = (
     "wrong_top_level",
     "wrong_file_primitive",
     "wrong_evidence_primitive",
+    "null_db_not_null_evidence",
 )
 
 
@@ -106,12 +111,44 @@ def _profiled_evidence_row(
             _RELEASE_ID if is_candidate else None
         ),
         files=[{
-            "relative_path": "01.mp3", "size_bytes": 1, "mtime_ns": 1,
+            "relative_path": f"{evidence_id:02d}.mp3",
+            "size_bytes": evidence_id,
+            "mtime_ns": evidence_id,
             "extension": "mp3", "container": "mp3", "codec": "mp3",
             "decode_ok": True,
         }],
         **proof,
     )
+
+
+def _snapshot_fingerprint_from_row(row: dict[str, object]) -> str:
+    """Recompute the production content address from a corpus wire row."""
+    files = msgspec.convert(
+        row["files"],
+        type=list[AlbumQualityEvidenceFile],
+    )
+    return snapshot_fingerprint(files)
+
+
+def assert_generated_evidence_addresses(
+    rows: tuple[dict[str, object], ...],
+) -> None:
+    """Generated rows must be valid distinct content-addressed evidence."""
+    addresses: set[tuple[str, str]] = set()
+    for row in rows:
+        release_id = row["mb_release_id"]
+        fingerprint = row["snapshot_fingerprint"]
+        if not isinstance(release_id, str) or not isinstance(fingerprint, str):
+            raise TypeError("generated evidence has no content address")
+        if fingerprint != _snapshot_fingerprint_from_row(row):
+            raise AssertionError(
+                f"generated evidence {row['id']!r} fingerprint does not match "
+                "its manifest")
+        address = (release_id, fingerprint)
+        if address in addresses:
+            raise AssertionError(
+                f"generated evidence has duplicate content address {address!r}")
+        addresses.add(address)
 
 
 @st.composite
@@ -265,6 +302,10 @@ def _mutated_corpus_rows(
         report = candidate["audio_validation"]
         assert isinstance(report, dict)
         report["files_checked"] = "0"
+    elif mutation == "null_db_not_null_evidence":
+        candidate["folder_layout"] = None
+        candidate["audio_file_count"] = None
+        candidate["filetype_band"] = None
     else:  # pragma: no cover - Literal and the complete tuple above guard this.
         raise AssertionError(f"unknown corpus mutation: {mutation}")
     return tuple(mutated)
@@ -296,6 +337,7 @@ class TestNativeCurrentPairingGenerated(unittest.TestCase):
         self,
         world: NativePairingWorld,
     ) -> None:
+        assert_generated_evidence_addresses(world.rows)
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             for counterfactual in (False, True):
@@ -464,6 +506,25 @@ class TestNativeCurrentPairingGenerated(unittest.TestCase):
                     corpus,
                     root / "valid-decided.jsonl",
                 )
+
+    def test_content_address_checker_trips_on_a_duplicate_manifest(self):
+        """Known-bad qualification for generated content-address fidelity."""
+        first = _profiled_evidence_row(
+            1,
+            profile="low",
+            is_candidate=True,
+            current_evidence_id=None,
+        )
+        duplicate = _profiled_evidence_row(
+            2,
+            profile="proof",
+            is_candidate=False,
+            current_evidence_id=None,
+        )
+        duplicate["files"] = deepcopy(first["files"])
+        duplicate["snapshot_fingerprint"] = first["snapshot_fingerprint"]
+        with self.assertRaises(AssertionError):
+            assert_generated_evidence_addresses((first, duplicate))
 
 
 if __name__ == "__main__":

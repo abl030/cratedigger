@@ -559,9 +559,9 @@ class DecisionCorpusEvidenceWire(msgspec.Struct, frozen=True):
     audio_validation: DecisionCorpusAudioValidationWire
     audio_corrupt: bool
     audio_error: str | None
-    folder_layout: str | None
-    audio_file_count: int | None
-    filetype_band: str | None
+    folder_layout: str
+    audio_file_count: int
+    filetype_band: str
     matched_bad_audio_hash_id: int | None
     matched_bad_audio_hash_path: str | None
     aac_lattice_tracks: list[DecisionCorpusAacLatticeTrackWire] | None
