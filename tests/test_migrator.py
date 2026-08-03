@@ -5364,6 +5364,82 @@ class TestLosslessLineageSpectralSubjectMigration(unittest.TestCase):
 
 
 @requires_postgres
+class TestDurableConversionLineageMigration(unittest.TestCase):
+    """Migration 073 separates output lineage from spectral observation."""
+
+    _CONSTRAINT = "album_quality_evidence_lossless_lineage_spectral_subject"
+
+    def _copy_through(self, target: str, version: int) -> None:
+        for migration in discover_migrations(DEFAULT_MIGRATIONS_DIR):
+            if migration.version <= version:
+                shutil.copy2(migration.path, target)
+
+    @staticmethod
+    def _insert_installed_conversion(cur, *, mbid: str) -> None:
+        cur.execute(
+            """
+            INSERT INTO album_quality_evidence (
+                mb_release_id, snapshot_fingerprint, source_path,
+                measured_at, lineage_version, spectral_grade,
+                spectral_subject, spectral_provenance, was_converted_from,
+                audio_validation
+            ) VALUES (
+                %s, %s, '/evidence', NOW(), 4, 'genuine', 'installed',
+                'measured', 'flac',
+                '{"policy_id":"pre-audio-integrity-v2",'
+                '"tool":"legacy","tool_version":"",'
+                '"outcome":"legacy_unrecorded","files_checked":0,'
+                '"files_failed":0,"diagnostics":[],'
+                '"omitted_diagnostics":0}'::jsonb
+            )
+            """,
+            (mbid, f"fp-{mbid}"),
+        )
+
+    def test_drops_old_subject_lineage_check_without_erasing_lineage(self):
+        name = "cratedigger_test_durable_lineage_073"
+        dsn = _create_fresh_database(name)
+        try:
+            with tempfile.TemporaryDirectory() as migrations_dir:
+                self._copy_through(migrations_dir, 72)
+                apply_migrations(dsn, migrations_dir)
+                conn = psycopg2.connect(dsn)
+                conn.autocommit = True
+                try:
+                    with (
+                        conn.cursor() as cur,
+                        self.assertRaises(psycopg2.errors.CheckViolation),
+                    ):
+                        self._insert_installed_conversion(
+                            cur, mbid="before-073",
+                        )
+                finally:
+                    conn.close()
+
+                self._copy_through(migrations_dir, 73)
+                applied = apply_migrations(dsn, migrations_dir)
+                self.assertEqual([migration.version for migration in applied], [73])
+                conn = psycopg2.connect(dsn)
+                conn.autocommit = True
+                try:
+                    with conn.cursor() as cur:
+                        self._insert_installed_conversion(
+                            cur, mbid="after-073",
+                        )
+                        cur.execute(
+                            "SELECT 1 FROM pg_constraint "
+                            "WHERE conrelid = 'album_quality_evidence'::regclass "
+                            "AND conname = %s",
+                            (self._CONSTRAINT,),
+                        )
+                        self.assertIsNone(cur.fetchone())
+                finally:
+                    conn.close()
+        finally:
+            _drop_database(name)
+
+
+@requires_postgres
 class TestCurrentEvidenceEnrichmentGateMigration(unittest.TestCase):
     """Migration 058 makes the changed-snapshot retry gate durable."""
 

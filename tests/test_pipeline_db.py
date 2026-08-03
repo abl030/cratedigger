@@ -7334,6 +7334,81 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         assert loaded is not None
         self.assertTrue(loaded.current_enrichment_required)
 
+    def test_fresh_installed_spectral_keeps_conversion_lineage_in_both_orders(
+        self,
+    ):
+        """Real PostgreSQL mirrors the stale-writer preservation contract."""
+        for writer_order in (("fresh", "stale"), ("stale", "fresh")):
+            with self.subTest(writer_order=writer_order):
+                mbid = f"durable-lineage-{'-'.join(writer_order)}"
+                request_id = self.db.add_request(
+                    mb_release_id=mbid,
+                    artist_name="Evidence Artist",
+                    album_title="Durable lineage",
+                    source="request",
+                )
+                evidence = self._seed(
+                    mb_release_id=mbid,
+                    files=[AlbumQualityEvidenceFile(
+                        relative_path="01.m4a",
+                        size_bytes=1,
+                        mtime_ns=1,
+                        extension="m4a",
+                        container="m4a",
+                        codec="m4a",
+                    )],
+                    measurement=AudioQualityMeasurement(
+                        min_bitrate_kbps=900,
+                        avg_bitrate_kbps=920,
+                        median_bitrate_kbps=910,
+                        format="ALAC",
+                        was_converted_from="flac",
+                    ),
+                    codec="m4a",
+                    container="m4a",
+                    storage_format="ALAC",
+                )
+                self.db.upsert_album_quality_evidence(evidence)
+                stored = self.db.find_album_quality_evidence(
+                    mb_release_id=mbid,
+                    snapshot_fingerprint=evidence.snapshot_fingerprint,
+                )
+                assert stored is not None and stored.id is not None
+                self.assertTrue(self.db.set_request_current_evidence(
+                    request_id, stored.id,
+                ))
+                stale = msgspec.structs.replace(
+                    evidence,
+                    measurement=msgspec.structs.replace(
+                        evidence.measurement,
+                        was_converted_from=None,
+                    ),
+                )
+                for writer in writer_order:
+                    if writer == "fresh":
+                        self.assertTrue(
+                            self.db.persist_current_spectral_measurement(
+                                request_id=request_id,
+                                expected_evidence_id=stored.id,
+                                expected_snapshot_fingerprint=(
+                                    evidence.snapshot_fingerprint
+                                ),
+                                grade="genuine",
+                                bitrate_kbps=900,
+                            )
+                        )
+                    else:
+                        self.db.upsert_album_quality_evidence(stale)
+
+                loaded = self.db.find_album_quality_evidence(
+                    mb_release_id=mbid,
+                    snapshot_fingerprint=evidence.snapshot_fingerprint,
+                )
+                assert loaded is not None
+                self.assertEqual(loaded.measurement.was_converted_from, "flac")
+                self.assertEqual(loaded.measurement.spectral_subject, "installed")
+                self.assertEqual(loaded.measurement.spectral_grade, "genuine")
+
     def test_v0_research_claim_is_atomic_across_connections(self):
         from lib.pipeline_db import PipelineDB
 
@@ -7503,7 +7578,7 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         self.assertEqual(reloaded.measurement.ultrasonic_deficit_db, 30.0)
         self.assertEqual(reloaded.measurement.spectral_measurement_version, 2)
 
-    def test_current_spectral_write_rejects_lossless_lineage(self):
+    def test_current_spectral_write_accepts_source_v0_provenance(self):
         from lib.quality import AlbumQualityV0Metric
 
         evidence = self._seed(
@@ -7533,20 +7608,15 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
             self.req_id, stored.id,
         ))
 
-        with self.assertRaises(psycopg2.errors.CheckViolation) as raised:
-            self.db.persist_current_spectral_measurement(
-                request_id=self.req_id,
-                expected_evidence_id=stored.id,
-                expected_snapshot_fingerprint=stored.snapshot_fingerprint,
-                grade="genuine",
-                bitrate_kbps=None,
-            )
-        self.assertEqual(
-            raised.exception.diag.constraint_name,
-            "album_quality_evidence_lossless_lineage_spectral_subject",
-        )
+        self.assertTrue(self.db.persist_current_spectral_measurement(
+            request_id=self.req_id,
+            expected_evidence_id=stored.id,
+            expected_snapshot_fingerprint=stored.snapshot_fingerprint,
+            grade="genuine",
+            bitrate_kbps=None,
+        ))
 
-    def test_fake_current_spectral_write_rejects_lossless_lineage(self):
+    def test_fake_current_spectral_write_accepts_source_v0_provenance(self):
         from lib.quality import AlbumQualityV0Metric
 
         db = FakePipelineDB()
@@ -7576,20 +7646,15 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         assert stored is not None and stored.id is not None
         self.assertTrue(db.set_request_current_evidence(request_id, stored.id))
 
-        with self.assertRaises(psycopg2.errors.CheckViolation) as raised:
-            db.persist_current_spectral_measurement(
-                request_id=request_id,
-                expected_evidence_id=stored.id,
-                expected_snapshot_fingerprint=stored.snapshot_fingerprint,
-                grade="genuine",
-                bitrate_kbps=None,
-            )
-        self.assertIn(
-            "album_quality_evidence_lossless_lineage_spectral_subject",
-            str(raised.exception),
-        )
+        self.assertTrue(db.persist_current_spectral_measurement(
+            request_id=request_id,
+            expected_evidence_id=stored.id,
+            expected_snapshot_fingerprint=stored.snapshot_fingerprint,
+            grade="genuine",
+            bitrate_kbps=None,
+        ))
 
-    def test_current_source_v0_write_constraint_matches_fake(self):
+    def test_current_source_v0_write_matches_fake(self):
         from lib.quality import AlbumQualityV0Metric
 
         evidence = self._seed(
@@ -7624,94 +7689,89 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
                     request_id, stored.id,
                 ))
 
-                with self.assertRaises(psycopg2.errors.CheckViolation) as raised:
-                    db.persist_current_v0_research_metric(
-                        request_id=request_id,
-                        expected_evidence_id=stored.id,
-                        expected_snapshot_fingerprint=(
-                            stored.snapshot_fingerprint
-                        ),
-                        metric=AlbumQualityV0Metric(
-                            avg_bitrate_kbps=225,
-                            subject="source",
-                            provenance="measured",
-                        ),
-                    )
-                self.assertIn(
-                    "album_quality_evidence_lossless_lineage_spectral_subject",
-                    str(raised.exception),
-                )
+                self.assertTrue(db.persist_current_v0_research_metric(
+                    request_id=request_id,
+                    expected_evidence_id=stored.id,
+                    expected_snapshot_fingerprint=stored.snapshot_fingerprint,
+                    metric=AlbumQualityV0Metric(
+                        avg_bitrate_kbps=225,
+                        subject="source",
+                        provenance="measured",
+                    ),
+                ))
 
-    def test_upsert_new_lossless_lineage_clears_installed_spectral(self):
+    def test_stale_provenance_upsert_preserves_fresh_installed_spectral(self):
         from lib.quality import AlbumQualityV0Metric, VerifiedLosslessProof
 
-        for anchor in (
-            "source_v0", "proof", "flac", "FLAC", "alac", "wav",
-        ):
-            with self.subTest(anchor=anchor):
-                mbid = f"merge-lossless-{anchor}"
-                existing = self._seed(
-                    mb_release_id=mbid,
-                    measurement=AudioQualityMeasurement(
-                        min_bitrate_kbps=128,
-                        avg_bitrate_kbps=128,
-                        median_bitrate_kbps=128,
-                        format="Opus",
-                        spectral_grade="genuine",
-                        spectral_subject="installed",
-                        spectral_provenance="measured",
-                    ),
-                    codec="opus",
-                    container="opus",
-                    storage_format="Opus",
-                )
-                self.db.upsert_album_quality_evidence(existing)
-                incoming = msgspec.structs.replace(
-                    existing,
-                    measurement=msgspec.structs.replace(
-                        existing.measurement,
-                        spectral_grade=None,
-                        spectral_bitrate_kbps=None,
-                        spectral_subject=None,
-                        spectral_provenance=None,
-                        spectral_measurement_version=None,
-                        was_converted_from=(
-                            anchor
-                            if anchor.lower() in ("flac", "alac", "wav")
+        for anchor in ("source_v0", "proof"):
+            for order in (("fresh", "stale"), ("stale", "fresh")):
+                with self.subTest(anchor=anchor, order=order):
+                    mbid = f"merge-lossless-{anchor}-{order[0]}"
+                    existing = self._seed(
+                        mb_release_id=mbid,
+                        measurement=AudioQualityMeasurement(
+                            min_bitrate_kbps=128,
+                            avg_bitrate_kbps=128,
+                            median_bitrate_kbps=128,
+                            format="Opus",
+                            spectral_grade="genuine",
+                            spectral_subject="installed",
+                            spectral_provenance="measured",
+                        ),
+                        codec="opus",
+                        container="opus",
+                        storage_format="Opus",
+                    )
+                    stale = msgspec.structs.replace(
+                        existing,
+                        measurement=msgspec.structs.replace(
+                            existing.measurement,
+                            spectral_grade=None,
+                            spectral_bitrate_kbps=None,
+                            spectral_subject=None,
+                            spectral_provenance=None,
+                            spectral_measurement_version=None,
+                            was_converted_from=None,
+                        ),
+                        v0_metric=(
+                            AlbumQualityV0Metric(
+                                avg_bitrate_kbps=225,
+                                subject="source",
+                                provenance="carried",
+                            )
+                            if anchor == "source_v0"
                             else None
                         ),
-                    ),
-                    v0_metric=(
-                        AlbumQualityV0Metric(
-                            avg_bitrate_kbps=225,
-                            subject="source",
-                            provenance="carried",
-                        )
-                        if anchor == "source_v0"
-                        else None
-                    ),
-                    verified_lossless_proof=(
-                        VerifiedLosslessProof(
-                            provenance="carried",
-                            source="flac",
-                            classifier="spectral_verified_lossless",
-                        )
-                        if anchor == "proof"
-                        else None
-                    ),
-                )
+                        verified_lossless_proof=(
+                            VerifiedLosslessProof(
+                                provenance="carried",
+                                source="flac",
+                                classifier="spectral_verified_lossless",
+                            )
+                            if anchor == "proof"
+                            else None
+                        ),
+                    )
 
-                self.db.upsert_album_quality_evidence(incoming)
+                    for writer in order:
+                        self.db.upsert_album_quality_evidence(
+                            existing if writer == "fresh" else stale,
+                        )
 
-                loaded = self.db.find_album_quality_evidence(
-                    mb_release_id=mbid,
-                    snapshot_fingerprint=existing.snapshot_fingerprint,
-                )
-                assert loaded is not None
-                self.assertIsNone(loaded.measurement.spectral_grade)
-                self.assertIsNone(loaded.measurement.spectral_bitrate_kbps)
-                self.assertIsNone(loaded.measurement.spectral_subject)
-                self.assertIsNone(loaded.measurement.spectral_provenance)
+                    loaded = self.db.find_album_quality_evidence(
+                        mb_release_id=mbid,
+                        snapshot_fingerprint=existing.snapshot_fingerprint,
+                    )
+                    assert loaded is not None
+                    self.assertEqual(
+                        loaded.measurement.spectral_grade, "genuine"
+                    )
+                    self.assertEqual(
+                        loaded.measurement.spectral_subject, "installed"
+                    )
+                    self.assertEqual(
+                        loaded.measurement.spectral_provenance, "measured"
+                    )
 
     def test_v0_research_attempt_marker_is_monotonic_on_upsert(self):
         evidence = self._seed(

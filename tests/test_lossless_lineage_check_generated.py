@@ -1,4 +1,4 @@
-"""Generated PostgreSQL invariant for lossless-lineage spectral subjects."""
+"""Generated PostgreSQL invariant for durable conversion lineage."""
 
 from __future__ import annotations
 
@@ -14,16 +14,14 @@ from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
 from lib.quality import (
+    AlbumQualityEvidenceFile,
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
     VerifiedLosslessProof,
 )
 from tests.fakes import FakePipelineDB
-from tests.helpers import make_album_quality_evidence
+from tests.helpers import make_album_quality_evidence, make_request_row
 from tests.test_pipeline_db import TEST_DSN, requires_postgres
-
-CONSTRAINT = "album_quality_evidence_lossless_lineage_spectral_subject"
-LOSSLESS_CONVERSION_SOURCES = frozenset({"flac", "alac", "wav"})
 
 
 @dataclass(frozen=True)
@@ -33,23 +31,6 @@ class EvidenceLineageWorld:
     v0_subject: str | None
     verified_lossless: bool
     was_converted_from: str | None
-
-    @property
-    def has_lossless_lineage(self) -> bool:
-        converted = (self.was_converted_from or "").lower()
-        return (
-            self.v0_subject == "source"
-            or self.verified_lossless
-            or converted in LOSSLESS_CONVERSION_SOURCES
-        )
-
-    @property
-    def must_be_rejected(self) -> bool:
-        return (
-            self.lineage_version >= 4
-            and self.spectral_subject == "installed"
-            and self.has_lossless_lineage
-        )
 
 
 @st.composite
@@ -70,37 +51,35 @@ def assert_database_matches_lineage_oracle(
     world: EvidenceLineageWorld,
     error: Exception | None,
 ) -> None:
-    """The DB rejects exactly installed spectral on v4 lossless lineage."""
-    if world.must_be_rejected:
-        if not isinstance(error, psycopg2.errors.CheckViolation):
-            raise AssertionError(
-                f"invalid lossless-lineage world was accepted: {world!r}"
-            )
-        if error.diag.constraint_name != CONSTRAINT:
-            raise AssertionError(
-                f"wrong constraint rejected {world!r}: "
-                f"{error.diag.constraint_name!r}"
-            )
-        return
+    """Migration 073 permits independent output and spectral facts.
+
+    R19's exact manifest predicate, rather than a database-only codec rule,
+    decides whether a source observation may be reused.
+    """
     if error is not None:
         raise AssertionError(
-            f"valid evidence world was rejected: {world!r}: {error!r}"
+            f"durable-lineage world was rejected: {world!r}: {error!r}"
         )
 
 
 def assert_lossless_merge_converged(
     *,
     existing_subject: str | None,
+    incoming_preserves_source: bool,
     spectral_grade: str | None,
     spectral_subject: str | None,
 ) -> None:
-    """New lineage clears installed spectral but preserves source facts."""
-    if existing_subject == "source":
-        if spectral_grade != "genuine" or spectral_subject != "source":
-            raise AssertionError("source-subject spectral fact was not preserved")
+    """Only an exact derivative can replace a same-address spectral tuple."""
+    if incoming_preserves_source:
+        if spectral_grade != "likely_transcode" or spectral_subject != "source":
+            raise AssertionError("preserved-source derivative was not retained")
         return
-    if spectral_grade is not None or spectral_subject is not None:
-        raise AssertionError("installed spectral survived new lossless lineage")
+    if existing_subject is None:
+        if spectral_grade is not None or spectral_subject is not None:
+            raise AssertionError("stale provenance invented spectral evidence")
+        return
+    if spectral_grade != "genuine" or spectral_subject != existing_subject:
+        raise AssertionError("stale provenance erased existing spectral evidence")
 
 
 def _run_fake_lossless_merge(
@@ -131,10 +110,14 @@ def _run_fake_lossless_merge(
         existing,
         measurement=msgspec.structs.replace(
             existing.measurement,
-            spectral_grade=None,
+            spectral_grade=(
+                "likely_transcode" if anchor == "conversion" else None
+            ),
             spectral_bitrate_kbps=None,
-            spectral_subject=None,
-            spectral_provenance=None,
+            spectral_subject=("source" if anchor == "conversion" else None),
+            spectral_provenance=(
+                "carried" if anchor == "conversion" else None
+            ),
             spectral_measurement_version=None,
             was_converted_from=(converted_from if anchor == "conversion" else None),
         ),
@@ -285,29 +268,95 @@ class TestGeneratedLosslessLineageMerge(unittest.TestCase):
         )
         assert_lossless_merge_converged(
             existing_subject=existing_subject,
+            incoming_preserves_source=anchor == "conversion",
             spectral_grade=grade,
             spectral_subject=subject,
         )
 
+    @given(
+        writer_order=st.sampled_from((("fresh", "stale"), ("stale", "fresh"))),
+        converted_from=st.sampled_from(("flac", "FLAC", "alac", "wav")),
+    )
+    @example(writer_order=("fresh", "stale"), converted_from="flac")
+    @example(writer_order=("stale", "fresh"), converted_from="alac")
+    def test_stale_writer_never_erases_durable_conversion_lineage(
+        self,
+        writer_order: tuple[str, str],
+        converted_from: str,
+    ) -> None:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, mb_release_id="durable-lineage"))
+        evidence = make_album_quality_evidence(
+            mb_release_id="durable-lineage",
+            files=[AlbumQualityEvidenceFile(
+                relative_path="01.m4a",
+                size_bytes=1,
+                mtime_ns=1,
+                extension="m4a",
+                container="m4a",
+                codec="m4a",
+            )],
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=900,
+                avg_bitrate_kbps=920,
+                median_bitrate_kbps=910,
+                format="ALAC",
+                was_converted_from=converted_from,
+            ),
+            codec="m4a",
+            container="m4a",
+            storage_format="ALAC",
+        )
+        db.upsert_album_quality_evidence(evidence)
+        stored = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        assert db.set_request_current_evidence(42, stored.id)
+        stale = msgspec.structs.replace(
+            evidence,
+            measurement=msgspec.structs.replace(
+                evidence.measurement,
+                was_converted_from=None,
+            ),
+        )
+        for writer in writer_order:
+            if writer == "fresh":
+                self.assertTrue(db.persist_current_spectral_measurement(
+                    request_id=42,
+                    expected_evidence_id=stored.id,
+                    expected_snapshot_fingerprint=evidence.snapshot_fingerprint,
+                    grade="genuine",
+                    bitrate_kbps=900,
+                ))
+            else:
+                db.upsert_album_quality_evidence(stale)
+
+        loaded = db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert loaded is not None
+        self.assertEqual(loaded.measurement.was_converted_from, converted_from)
+        self.assertEqual(loaded.measurement.spectral_subject, "installed")
+        self.assertEqual(loaded.measurement.spectral_grade, "genuine")
+
 
 class TestLosslessLineageCheckCheckerTripsOnViolation(unittest.TestCase):
-    def test_checker_rejects_accepted_installed_source_anchor(self) -> None:
-        world = EvidenceLineageWorld(4, "installed", "source", False, None)
-        with self.assertRaises(AssertionError):
-            assert_database_matches_lineage_oracle(world, None)
-
-    def test_checker_rejects_denied_native_installed_fact(self) -> None:
-        world = EvidenceLineageWorld(4, "installed", None, False, "m4a")
+    def test_checker_rejects_any_constraint_error(self) -> None:
+        world = EvidenceLineageWorld(4, "installed", None, False, "flac")
         error = psycopg2.errors.CheckViolation("known-bad rejection")
         with self.assertRaises(AssertionError):
             assert_database_matches_lineage_oracle(world, error)
 
-    def test_merge_checker_rejects_preserved_installed_spectral(self) -> None:
+    def test_merge_checker_rejects_erased_installed_spectral(self) -> None:
         with self.assertRaises(AssertionError):
             assert_lossless_merge_converged(
                 existing_subject="installed",
-                spectral_grade="genuine",
-                spectral_subject="installed",
+                incoming_preserves_source=False,
+                spectral_grade=None,
+                spectral_subject=None,
             )
 
 

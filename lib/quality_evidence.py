@@ -147,12 +147,12 @@ class EvidenceBuildResult:
 def spectral_measurement_generation_is_current(
     measurement: AudioQualityMeasurement | SpectralAnalysisDetail,
 ) -> bool:
-    """Whether a spectral fact was produced by this running analyzer.
+    """Whether a spectral fact has this running analyzer's generation.
 
-    Spectral grades are interpretations, not generation-independent facts.
-    An exact version match is therefore required: legacy ``NULL`` rows and
-    rows written by an unknown future analyzer are both observation-only and
-    must be measured again before current policy may reuse them.
+    This is a pure freshness check, not a policy-authorization decision.
+    ``current_spectral_evidence_policy_usable`` additionally requires a
+    recognized grade and admits the narrow preserved-source exception for
+    bytes that the installed derivative cannot regenerate.
     """
 
     # Keep the producer as the authority for its generation stamp without
@@ -168,32 +168,89 @@ def spectral_measurement_generation_is_current(
 def current_evidence_preserves_source_spectral(
     evidence: AlbumQualityEvidence,
 ) -> bool:
-    """Whether installed bytes cannot regenerate the row's source spectral.
+    """Whether the installed bytes are an irreplaceable lossy derivative.
 
-    Lossless-derived library files are a different spectral subject from the
-    acquisition bytes. Their source-side grade may be carried for audit, but
-    an old measurement generation cannot be recreated by scanning the lossy
-    installed derivative without violating R19.
+    A source V0 anchor or lossless proof describes provenance, not whether the
+    current library bytes can be measured again.  The cross-generation source
+    exception is only sound when a recorded lossless source was converted into
+    one known lossy installed codec.  The file extension is not enough here:
+    an ``.m4a`` container can hold native ALAC as well as AAC.  Native
+    lossless, mixed, and unresolved files remain remeasurable and must retain
+    generation strictness.
     """
 
     converted_from = (evidence.measurement.was_converted_from or "").lower()
-    if converted_from in LOSSLESS_CODECS:
-        return True
-    if evidence.verified_lossless_proof is not None:
-        return True
-    metric = evidence.v0_metric
-    return metric is not None and metric.subject == EVIDENCE_SUBJECT_SOURCE
+    if (
+        converted_from not in LOSSLESS_CODECS
+        or evidence.measurement.spectral_subject != EVIDENCE_SUBJECT_SOURCE
+        or not evidence.files
+        or any(not file.container or not file.codec for file in evidence.files)
+    ):
+        return False
+    containers = {
+        file.container.lower()
+        for file in evidence.files
+        if file.container and file.codec
+    }
+    # ``storage_format`` and the measurement are codec facts; snapshot
+    # containers are not (notably, .m4a can be AAC or ALAC). New v4 evidence
+    # keeps the two labels equal. Treat missing, conflicting, or container-only
+    # labels as unresolved rather than preserving an old source grade.
+    formats = {
+        label.strip().lower()
+        for label in (evidence.storage_format, evidence.measurement.format)
+        if label is not None and label.strip()
+    }
+    return (
+        len(containers) == 1
+        and containers <= _LOSSY_CONTAINERS
+        and len(formats) == 1
+        and formats <= _LOSSY_CODECS
+    )
+
+
+_POLICY_USABLE_SPECTRAL_GRADES = frozenset({
+    "genuine",
+    "marginal",
+    "suspect",
+    "likely_transcode",
+})
+
+
+def current_spectral_evidence_policy_usable(
+    evidence: AlbumQualityEvidence,
+) -> bool:
+    """Whether a current-evidence spectral grade can reach policy.
+
+    Current analyzer generation is normally required because the current
+    bytes can be measured again.  R19's carried source subject is the narrow
+    exception: its lossless source no longer exists, so a recognized grade is
+    still policy evidence across a legacy, old, or future generation.  The
+    stored subject and generation remain historical facts; this predicate
+    only decides whether the tuple may be consumed.
+    """
+
+    measurement = evidence.measurement
+    return (
+        measurement.spectral_grade in _POLICY_USABLE_SPECTRAL_GRADES
+        and (
+            spectral_measurement_generation_is_current(measurement)
+            or (
+                measurement.spectral_subject == EVIDENCE_SUBJECT_SOURCE
+                and current_evidence_preserves_source_spectral(evidence)
+            )
+        )
+    )
 
 
 def current_evidence_for_policy(
     evidence: AlbumQualityEvidence,
 ) -> AlbumQualityEvidence:
-    """Withhold an unregenerable old source grade from current policy.
+    """Withhold spectral tuples that current policy cannot consume.
 
-    The stored tuple remains durable audit history. Only this policy
-    projection drops it; all other current evidence facts remain usable.
-    Installed-subject and ordinary source-subject rows are not projected this
-    way because their exact current bytes can and must be measured again.
+    The stored tuple remains durable audit history.  An irreplaceable carried
+    source grade remains policy-usable across generations; ordinary installed
+    evidence still requires the running analyzer generation.
     """
 
     measurement = evidence.measurement
@@ -203,9 +260,7 @@ def current_evidence_for_policy(
     )
     if (
         not has_spectral
-        or spectral_measurement_generation_is_current(measurement)
-        or measurement.spectral_subject != EVIDENCE_SUBJECT_SOURCE
-        or not current_evidence_preserves_source_spectral(evidence)
+        or current_spectral_evidence_policy_usable(evidence)
     ):
         return evidence
     return msgspec.structs.replace(
@@ -240,10 +295,7 @@ def current_evidence_rebuild_reasons(
             or measurement.spectral_bitrate_kbps is not None
         )
         and not spectral_measurement_generation_is_current(measurement)
-        and not (
-            measurement.spectral_subject == EVIDENCE_SUBJECT_SOURCE
-            and current_evidence_preserves_source_spectral(evidence)
-        )
+        and not current_spectral_evidence_policy_usable(evidence)
     ):
         reasons.append(
             "spectral measurement generation is not current"
@@ -253,6 +305,11 @@ def current_evidence_rebuild_reasons(
 
 _LOSSLESS_CONTAINERS = {"flac", "alac", "wav", "aiff", "ape"}
 _LOSSY_CONTAINERS = {"mp3", "aac", "m4a", "ogg", "opus", "wma"}
+# ``m4a`` is deliberately absent: it names an ambiguous container, not a
+# lossy codec. ALAC's normal on-disk extension is .m4a. Beets normalizes its
+# ``OGG`` format label to the codec name ``vorbis`` in current-library
+# evidence, so that canonical codec must remain admitted here too.
+_LOSSY_CODECS = (_LOSSY_CONTAINERS - {"m4a"}) | {"vorbis"}
 
 
 def derive_folder_layout(files: list[AlbumQualityEvidenceFile]) -> str:

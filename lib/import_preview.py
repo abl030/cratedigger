@@ -102,6 +102,7 @@ from lib.quality_evidence import (
     current_evidence_for_policy,
     current_evidence_preserves_source_spectral,
     current_evidence_rebuild_reasons,
+    current_spectral_evidence_policy_usable,
     evidence_from_measurement,
     load_or_backfill_current_evidence,
     neutral_v0_metric_from_probe,
@@ -811,10 +812,10 @@ def persist_exact_current_spectral_from_attempt(
             "stale",
             "current evidence changed before HAVE spectral persistence",
         )
-    # R19 belt-and-braces: a lossless-sourced row keeps its source spectral
-    # (or stays empty until it is carried in) — an attempt-time scan of the
-    # installed derivative must never be persisted as its grade, whatever
-    # the caller's preserve flag said.
+    # R19 belt-and-braces: only the exact known-lossy derivative keeps its
+    # source spectral (or stays empty until it is carried in) — an
+    # attempt-time scan of that installed derivative must never be persisted
+    # as its grade, whatever the caller's preserve flag said.
     if preserve_existing_source_spectral(refreshed):
         return EvidenceBuildResult(
             refreshed,
@@ -1166,10 +1167,12 @@ def plan_current_evidence_enrichment(
 ) -> EnrichmentPlan:
     """Pure decision: measure exactly the missing HAVE pieces.
 
-    A spectral tuple is complete only under the running analyzer generation;
-    old grades are audit history, not reusable policy inputs. A V0 metric or
-    the attempted marker means the research probe already ran. Complete rows
-    therefore cost nothing to re-plan.
+    Generation freshness is distinct from policy usability: ordinary current
+    bytes need the running generation, while a preserved source subject is
+    intentionally never regenerated from its lossy installed derivative.
+    The policy projection separately withholds error, blank, and unknown
+    grades. A V0 metric or the attempted marker means the research probe
+    already ran. Complete rows therefore cost nothing to re-plan.
     """
     measurement = evidence.measurement
     preserve_source = current_evidence_preserves_source_spectral(evidence)
@@ -1198,21 +1201,12 @@ def current_spectral_evidence_reusable(
 
     The enrichment planner records whether analysis already ran, so an
     attempted-but-failed ``"error"`` grade is intentionally complete for that
-    once-only bookkeeping. Preview reuse has a stricter contract: its
-    generation must exactly match the running analyzer and its grade must be
-    one the decision model understands. Legacy and unknown future generations
-    are audit-only and must never replace a fresh HAVE scan.
+    once-only bookkeeping.  Reuse delegates to the one policy-usability rule:
+    ordinary installed evidence needs this analyzer generation, while a
+    recognized, irreplaceable carried source grade is reused without scanning
+    the installed lossy derivative.
     """
-    grade = evidence.measurement.spectral_grade
-    return (
-        spectral_measurement_generation_is_current(evidence.measurement)
-        and grade in {
-            "genuine",
-            "marginal",
-            "suspect",
-            "likely_transcode",
-        }
-    )
+    return current_spectral_evidence_policy_usable(evidence)
 
 
 def prepare_current_evidence_for_failure(
@@ -1581,14 +1575,12 @@ def preserve_existing_source_spectral(
 ) -> bool:
     """Whether HAVE must retain lossless-source pre-conversion evidence.
 
-    R19: a lossless-sourced installed copy wears its SOURCE's spectral;
-    scanning the installed derivative can rewrite a transcode-like source
-    as apparently genuine (fullband codecs like Opus always scan clean).
-    Any row-local acquisition fact proves lossless lineage: a lossless
-    ``was_converted_from``, verified-lossless proof, or a source-subject
-    V0 anchor (the provisional lane's marker — enrichment-born rows carry
-    no ``was_converted_from``, which is how the #711 deploy-night rows
-    were minted ``genuine/installed``).
+    R19: a recorded lossless conversion into a known lossy installed codec
+    wears its SOURCE's spectral; scanning that derivative can rewrite a
+    transcode-like source as apparently genuine (fullband codecs like Opus
+    always scan clean). Source V0/proof records are provenance only. The
+    predicate fails closed for native lossless, mixed, or unresolved files —
+    in particular, an .m4a container is not evidence of AAC over ALAC.
     """
     return (
         current_evidence is not None
