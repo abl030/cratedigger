@@ -2,8 +2,9 @@
 
 /**
  * @typedef {Object} CdRipProofPresentation
- * @property {'ctdb'|'accuraterip'} provider
- * @property {number} confidence
+ * @property {'ctdb'|'accuraterip'|'ctdb+accuraterip'} provider
+ * @property {number|null} confidence - Provider confidence for a single
+ *   provider; null when the two provider-specific confidence scales coexist.
  * @property {string} text
  */
 
@@ -109,24 +110,42 @@ export function cdRipProofPresentation(raw) {
   }
   const hasCtdb = raw.ctdb !== null && raw.ctdb !== undefined;
   const hasAccurateRip = raw.accuraterip !== null && raw.accuraterip !== undefined;
-  if (hasCtdb === hasAccurateRip) return null;
-  if (hasCtdb && !validCtdb(raw.ctdb, offsets, raw.toc.leadout_sector)) return null;
-  if (hasAccurateRip && !validAccurateRip(raw.accuraterip, offsets.length)) return null;
+  if (!hasCtdb && !hasAccurateRip) return null;
 
-  if (hasCtdb && isObject(raw.ctdb) && isInteger(raw.ctdb.confidence)) {
+  let ctdbConfidence = null;
+  if (hasCtdb) {
+    if (!validCtdb(raw.ctdb, offsets, raw.toc.leadout_sector)
+        || !isObject(raw.ctdb) || !isInteger(raw.ctdb.confidence)) return null;
+    ctdbConfidence = raw.ctdb.confidence;
+  }
+
+  let accurateRipConfidence = null;
+  if (hasAccurateRip) {
+    if (!validAccurateRip(raw.accuraterip, offsets.length)
+        || !isObject(raw.accuraterip)
+        || !Array.isArray(raw.accuraterip.track_confidences)) return null;
+    accurateRipConfidence = Math.min(...raw.accuraterip.track_confidences);
+  }
+
+  if (ctdbConfidence !== null && accurateRipConfidence !== null) {
     return {
-      provider: 'ctdb',
-      confidence: raw.ctdb.confidence,
-      text: `CD bit-verified · CTDB confidence ${raw.ctdb.confidence}`,
+      provider: 'ctdb+accuraterip',
+      confidence: null,
+      text: `CD bit-verified · CTDB confidence ${ctdbConfidence} + AccurateRip min confidence ${accurateRipConfidence}`,
     };
   }
-  if (hasAccurateRip && isObject(raw.accuraterip)
-      && Array.isArray(raw.accuraterip.track_confidences)) {
-    const confidence = Math.min(...raw.accuraterip.track_confidences);
+  if (ctdbConfidence !== null) {
+    return {
+      provider: 'ctdb',
+      confidence: ctdbConfidence,
+      text: `CD bit-verified · CTDB confidence ${ctdbConfidence}`,
+    };
+  }
+  if (accurateRipConfidence !== null) {
     return {
       provider: 'accuraterip',
-      confidence,
-      text: `CD bit-verified · AccurateRip min confidence ${confidence}`,
+      confidence: accurateRipConfidence,
+      text: `CD bit-verified · AccurateRip min confidence ${accurateRipConfidence}`,
     };
   }
   return null;

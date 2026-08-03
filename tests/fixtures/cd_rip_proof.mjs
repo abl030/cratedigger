@@ -20,3 +20,7 @@ export function validCtdbProof(confidence = 24) {
 export function validAccurateRipProof() {
   return cloneFixture('accuraterip_min_1');
 }
+
+export function validDualProviderProof() {
+  return cloneFixture('ctdb_11_accuraterip_min_3');
+}

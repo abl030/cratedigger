@@ -8,7 +8,7 @@ import {
   renderEvidenceStrip as renderEvidenceFixture,
   __test__,
 } from '../web/js/history.js';
-import { validCtdbProof } from './fixtures/cd_rip_proof.mjs';
+import { validDualProviderProof } from './fixtures/cd_rip_proof.mjs';
 import { readFileSync } from 'node:fs';
 const {
   formatV0Probe, formatSpectral, spectralChip, spectralGradeIsAdmissible,
@@ -1879,10 +1879,13 @@ console.log('renderDownloadHistoryItem() explains a skipped spectral pass with C
     existing_spectral_grade: 'genuine',
     existing_spectral_bitrate: 210,
     verified_lossless_generation: 'exact CD rip bit match',
-    cd_rip_verification: validCtdbProof(),
+    cd_rip_verification: validDualProviderProof(),
   });
-  assertContains(html, 'CD bit-verified · CTDB confidence 24',
-    'the provider-attributable positive proof is visible');
+  assertContains(
+    html,
+    'CD bit-verified · CTDB confidence 11 + AccurateRip min confidence 3',
+    'both provider-attributable positive confidences are visible',
+  );
   assertContains(html, '<span class="r-ev-tag">IN</span> not needed — CD bit match',
     'the candidate spectral side explains why measurement did not run');
   assertContains(html, '<span class="r-ev-tag">HAVE</span>',

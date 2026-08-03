@@ -14,7 +14,10 @@ import {
 } from '../web/js/library.js';
 import { esc } from '../web/js/util.js';
 import { pipelineStore, updatePipelineStatus } from '../web/js/state.js';
-import { validCtdbProof } from './fixtures/cd_rip_proof.mjs';
+import {
+  validCtdbProof,
+  validDualProviderProof,
+} from './fixtures/cd_rip_proof.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -404,7 +407,7 @@ console.log('renderLibraryAlbumRow() renders only exact positive CD proof');
   const positive = renderLibraryAlbumRow({
     id: 421,
     mb_albumid: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
-    album: 'Exact CTDB pressing',
+    album: 'Exact dual-provider pressing',
     track_count: 10,
     in_library: true,
     beets_album_id: 6039,
@@ -413,10 +416,13 @@ console.log('renderLibraryAlbumRow() renders only exact positive CD proof');
     pipeline_status: 'imported',
     pipeline_verified_lossless: true,
     pipeline_provisional: false,
-    cd_rip_verification: validCtdbProof(6),
+    cd_rip_verification: validDualProviderProof(),
   });
-  assertContains(positive, 'CD bit-verified · CTDB confidence 6',
-    'the exact attached proof replaces the generic verified chip');
+  assertContains(
+    positive,
+    'CD bit-verified · CTDB confidence 11 + AccurateRip min confidence 3',
+    'the exact attached proof retains both providers in the verified chip',
+  );
   assertExcludes(positive, '>verified<',
     'the detailed proof does not duplicate the generic chip');
 

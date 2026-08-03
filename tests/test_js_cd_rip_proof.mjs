@@ -4,6 +4,7 @@ import { cdRipProofPresentation } from '../web/js/cd_rip_proof.js';
 import {
   validAccurateRipProof,
   validCtdbProof,
+  validDualProviderProof,
 } from './fixtures/cd_rip_proof.mjs';
 
 let passed = 0;
@@ -52,7 +53,7 @@ console.log('cdRipProofPresentation() is positive-only and fail-closed');
     'a non-positive track confidence cannot mint a proof label');
 }
 
-console.log('cdRipProofPresentation() rejects generated known-bad wire mutations');
+console.log('cdRipProofPresentation() rejects deterministic known-bad wire mutations');
 {
   const topLevelMutations = [
     ['algorithm', (proof) => { proof.algorithm = 'cd-rip-bit-verifier-v0'; }],
@@ -98,10 +99,12 @@ console.log('cdRipProofPresentation() rejects generated known-bad wire mutations
       `${name} mutation cannot mint a label`);
   }
 
-  const ambiguous = validCtdbProof();
-  ambiguous.accuraterip = validAccurateRipProof().accuraterip;
-  assertEqual(cdRipProofPresentation(ambiguous), null,
-    'two positive providers are ambiguous to the compact one-provider label');
+  const dualProvider = validDualProviderProof();
+  assertEqual(
+    cdRipProofPresentation(dualProvider)?.text,
+    'CD bit-verified · CTDB confidence 11 + AccurateRip min confidence 3',
+    'two complete positive providers retain both conservative confidences',
+  );
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

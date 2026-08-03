@@ -59,11 +59,50 @@ def _accuraterip_proof() -> CdRipBitVerification:
     )
 
 
+def _dual_provider_proof() -> CdRipBitVerification:
+    offsets = [0, 200, 450, 725]
+    leadout = 1195
+    return CdRipBitVerification(
+        toc=CdTocIdentity(
+            track_offsets_sectors=offsets,
+            leadout_sector=leadout,
+            accuraterip_id="000001d6-000003ac-02000604",
+            musicbrainz_disc_id="exact-dual-provider-disc-id",
+        ),
+        accuraterip=AccurateRipBitMatch(
+            provider="accuraterip",
+            url="https://www.accuraterip.com/dual-provider.bin",
+            checksum_version="arv1",
+            read_offset_samples=-6,
+            track_confidences=[7, 3, 5, 9],
+            track_checksums=[
+                0x21111111,
+                0x21111112,
+                0x21111113,
+                0x21111114,
+            ],
+            response_sha256="c" * 64,
+        ),
+        ctdb=CtdbWholeDiscMatch(
+            provider="ctdb",
+            url="https://db.cue.tools/lookup2.php?dual=1",
+            entry_id="ctdb-entry-dual",
+            confidence=11,
+            crc32=0x23456789,
+            stride_samples=5880,
+            response_toc_sectors=[*offsets, leadout],
+            response_toc_shift_sectors=0,
+            response_sha256="d" * 64,
+        ),
+    )
+
+
 def fixture_payload() -> dict[str, object]:
     proofs = {
         "ctdb_6": _ctdb_proof(6),
         "ctdb_24": _ctdb_proof(24),
         "accuraterip_min_1": _accuraterip_proof(),
+        "ctdb_11_accuraterip_min_3": _dual_provider_proof(),
     }
     for name, proof in proofs.items():
         if errors := proof.validation_errors():

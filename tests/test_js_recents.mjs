@@ -5,7 +5,7 @@
 
 import { __test__ } from '../web/js/recents.js';
 import { state } from '../web/js/state.js';
-import { validCtdbProof } from './fixtures/cd_rip_proof.mjs';
+import { validDualProviderProof } from './fixtures/cd_rip_proof.mjs';
 
 const { renderRecentsItems: renderRecentsFixture } = __test__;
 
@@ -143,10 +143,13 @@ console.log('renderRecentsItems() shows attributable positive CD proof');
     badge_class: 'badge-new',
     border_color: '#1a4a2a',
     summary: 'FLAC · exact CD rip bit match',
-    cd_rip_verification: validCtdbProof(),
+    cd_rip_verification: validDualProviderProof(),
   }]);
-  assertContains(html, 'CD bit-verified · CTDB confidence 24',
-    'the collapsed Recents row names the positive provider proof');
+  assertContains(
+    html,
+    'CD bit-verified · CTDB confidence 11 + AccurateRip min confidence 3',
+    'the collapsed Recents row retains both positive provider confidences',
+  );
 
   const absent = renderRecentsFixture([{
     id: 39294,

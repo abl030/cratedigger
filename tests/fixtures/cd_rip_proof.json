@@ -59,6 +59,58 @@
       ]
     }
   },
+  "ctdb_11_accuraterip_min_3": {
+    "accuraterip": {
+      "checksum_version": "arv1",
+      "provider": "accuraterip",
+      "read_offset_samples": -6,
+      "response_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "track_checksums": [
+        554766609,
+        554766610,
+        554766611,
+        554766612
+      ],
+      "track_confidences": [
+        7,
+        3,
+        5,
+        9
+      ],
+      "url": "https://www.accuraterip.com/dual-provider.bin"
+    },
+    "algorithm": "cd-rip-bit-verifier-v1",
+    "ctdb": {
+      "confidence": 11,
+      "crc32": 591751049,
+      "entry_id": "ctdb-entry-dual",
+      "provider": "ctdb",
+      "response_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "response_toc_sectors": [
+        0,
+        200,
+        450,
+        725,
+        1195
+      ],
+      "response_toc_shift_sectors": 0,
+      "stride_samples": 5880,
+      "url": "https://db.cue.tools/lookup2.php?dual=1"
+    },
+    "provenance": "measured",
+    "source_format": "flac",
+    "toc": {
+      "accuraterip_id": "000001d6-000003ac-02000604",
+      "leadout_sector": 1195,
+      "musicbrainz_disc_id": "exact-dual-provider-disc-id",
+      "track_offsets_sectors": [
+        0,
+        200,
+        450,
+        725
+      ]
+    }
+  },
   "ctdb_24": {
     "accuraterip": null,
     "algorithm": "cd-rip-bit-verifier-v1",
