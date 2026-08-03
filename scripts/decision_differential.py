@@ -143,6 +143,7 @@ if REPO_ROOT not in sys.path:
 
 import msgspec
 
+from lib.json_narrow import is_object_list, is_str_object_dict
 from lib.pipeline_db.evidence import _EvidenceMixin
 from lib.quality import (
     AacLatticeProofLeg,
@@ -249,10 +250,10 @@ def _evidence_from_corpus_row(
     # The strict Struct conversion above establishes these assertions; spelling
     # them keeps the raw Mapping passed to production type-safe without
     # introducing a second semantic evidence mapper.
-    assert isinstance(raw_files, list)
+    assert is_object_list(raw_files)
     file_rows: list[dict[str, object]] = []
     for raw_file in raw_files:
-        assert isinstance(raw_file, dict)
+        assert is_str_object_dict(raw_file)
         file_rows.append(dict(raw_file))
     measured_at = payload.get("measured_at")
     if isinstance(measured_at, str):
