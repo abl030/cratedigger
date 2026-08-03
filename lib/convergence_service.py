@@ -104,7 +104,11 @@ def derive_convergence_signal(
         if row.cliff_hz is None or _cliff_bin(row.cliff_hz) != current_bin:
             break
         run.append(row)
-    peers = set().union(*(atomic_peer_usernames(row.peer) for row in run))
+    peers: set[str] = {
+        username
+        for row in run
+        for username in atomic_peer_usernames(row.peer)
+    }
     if len(peers) < MIN_DISTINCT_PEERS:
         return None
     raw_cliffs = [

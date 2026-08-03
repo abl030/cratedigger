@@ -20,7 +20,7 @@ sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 if TYPE_CHECKING:
     from lib.pipeline_db import DownloadLogWithEvidenceRow
@@ -5140,7 +5140,7 @@ class TestPipelineCliTriage(unittest.TestCase):
         class UnavailableDB(FakePipelineDB):
             def stop_search_for_convergence(
                 self, request_id: int, *, signal_token: str,
-            ) -> Any:
+            ) -> NoReturn:
                 del request_id, signal_token
                 raise psycopg2.OperationalError("database unavailable")
 

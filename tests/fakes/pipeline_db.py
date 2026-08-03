@@ -7304,6 +7304,7 @@ class FakePipelineDB:
             "transfer_detail": entry.transfer_detail,
             "created_at": entry.created_at,
             "candidate_evidence_id": entry.candidate_evidence_id,
+            "candidate_evidence_direct": entry.candidate_evidence_direct,
             "source_download_log_id": entry.source_download_log_id,
             "original_beets_distance": next(
                 (
