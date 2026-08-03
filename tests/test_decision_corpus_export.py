@@ -548,6 +548,17 @@ class TestDecisionCorpusExport(unittest.TestCase):
                 "role": lambda data: data["outputs"]["corpus"]["written_candidate_ids"].clear(),
                 "address": lambda data: data["outputs"]["corpus"]["content_addresses"][0].__setitem__("files_sha256", "0" * 64),
                 "source_arm": lambda data: data["source_links"][0].__setitem__("source", "download_log"),
+                "unknown_source": lambda data: (
+                    data["source_links"][0].__setitem__("source", "unknown"),
+                    data.__setitem__(
+                        "source_link_counts",
+                        {"download_log": 0, "import_jobs": 0},
+                    ),
+                    data.__setitem__(
+                        "source_distinct_candidate_id_counts",
+                        {"download_log": 0, "import_jobs": 0},
+                    ),
+                ),
                 "observed": lambda data: data["observed_evidence"][0].__setitem__("mb_release_id", "wrong"),
                 "unknown": lambda data: data.__setitem__("unexpected", True),
             }

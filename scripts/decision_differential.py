@@ -148,7 +148,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TypeGuard
+from typing import Literal, TypeGuard
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
@@ -852,10 +852,13 @@ class _DecisionCorpusSnapshotRow(msgspec.Struct, frozen=True):
     snapshot: str
 
 
+DecisionCorpusSource = Literal["download_log", "import_jobs"]
+
+
 class _DecisionCorpusSourceLink(msgspec.Struct, frozen=True):
     """One exact candidate-evidence foreign-key reference from PostgreSQL."""
 
-    source: str
+    source: DecisionCorpusSource
     source_id: int
     evidence_id: int
     request_id: int | None
@@ -867,7 +870,7 @@ class _DecisionCorpusSourceLink(msgspec.Struct, frozen=True):
 class _CoverageSourceLink(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     """The complete, canonical source-arm ledger committed to coverage."""
 
-    source: str
+    source: DecisionCorpusSource
     source_id: int
     evidence_id: int
     request_id: int | None
