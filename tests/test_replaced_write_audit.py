@@ -89,16 +89,16 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "default raw-query seam runs in the transaction-enforced read-only "
         "scope on the live connection"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 160, "5fa18d2c1737583f"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 161, "5fa18d2c1737583f"): (
         "terminal metadata keys use the existing validated request-field "
         "vocabulary (issue #784: `dumps=lambda value: msgspec.json.encode("
         "value).decode()` replaced with the shared `_msgspec_json_dumps` "
         "helper from `_shared.py` — same encoder, same output, no SQL change)"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 375, "cd644e51f3670265"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 376, "cd644e51f3670265"): (
         "terminal attempt kind is restricted to the fixed retry-counter vocabulary"
     ),
-    ("lib/pipeline_db/download_log.py", 333, "cba0d6d56f1878ac"): (
+    ("lib/pipeline_db/download_log.py", 335, "cba0d6d56f1878ac"): (
         "get_log's three outcome variants were three verbatim copies of one "
         "SELECT; issue #829 Phase 5 PR4 collapsed them to a single template "
         "whose two slots are the shared candidate-evidence column block and "
@@ -106,7 +106,7 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "only read-only exact-release identity projections; no slot takes "
         "caller input or mutates album_requests"
     ),
-    ("lib/pipeline_db/download_log.py", 806, "6eec03e4d024acdb"): (
+    ("lib/pipeline_db/download_log.py", 814, "6eec03e4d024acdb"): (
         "validation key is selected from a closed server-owned vocabulary "
         "(#867 intentionally added terminal/evidence projection and moved final "
         "classification after same-path DISTINCT). Issue #829 PR4/N3 CHANGED "
@@ -115,17 +115,17 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "plus a LEFT JOIN on the request's own current_evidence_id — no "
         "caller input reaches the SQL and album_requests is still only read"
     ),
-    ("lib/pipeline_db/download_log.py", 871, "e0154e89026dc8ef"): (
+    ("lib/pipeline_db/download_log.py", 879, "e0154e89026dc8ef"): (
         "validation key is selected from a closed server-owned vocabulary "
         "(issue #835, issue #829 PR4 and the source-semantic proof gate "
         "shifted this line only)"
     ),
-    ("lib/pipeline_db/download_log.py", 889, "13517e08e7db52f3"): (
+    ("lib/pipeline_db/download_log.py", 897, "13517e08e7db52f3"): (
         "validation key is closed vocabulary and IN list is value placeholders "
         "(issue #835, issue #829 PR4 and the source-semantic proof gate "
         "shifted this line only)"
     ),
-    ("lib/pipeline_db/download_log.py", 906, "d87a36ba1d1768e7"): (
+    ("lib/pipeline_db/download_log.py", 914, "d87a36ba1d1768e7"): (
         "JSON path key is selected from a closed server-owned vocabulary "
         "(issue #835, issue #829 PR4 and the source-semantic proof gate "
         "shifted this line only)"
@@ -218,7 +218,7 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "and every value remains a direct placeholder; an attached processing "
         "owner makes the compare-and-set a zero-write conflict"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 1128, "ebb50341a8d836f6"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 1141, "ebb50341a8d836f6"): (
         "processing-terminal metadata keys use the validated request-field "
         "vocabulary while exact request and owner predicates retain authority; "
         "the static owner-clearing status CAS remains the final request write "
@@ -235,28 +235,29 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
 # beside the implementation they review; movement or SQL-shape drift fails the
 # ratchet just like the dynamic-SQL exceptions above.
 _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, int, str], str] = {
-    ("lib/pipeline_db/convergence.py", 63, "e4baa57a0501a017"): (
+    ("lib/pipeline_db/convergence.py", 68, "0b7d6e3ed7b568c1"): (
         "explicit operator stop atomically compares the complete opaque "
-        "request-local signal token while CASing wanted to the reversible "
-        "unsearchable state in one PostgreSQL snapshot"
+        "request-local signal token and rechecks current-evidence authority "
+        "against the target row version after any lock wait while CASing "
+        "wanted to the reversible unsearchable state"
     ),
     ("lib/pipeline_db/import_jobs.py", 485, "71e0271f65123747"): (
         "atomic download-to-processing handoff CASes the immutable download "
         "witness while installing the exact automation owner"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 202, "56802c71d0fd3622"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 203, "56802c71d0fd3622"): (
         "atomic terminal transition mirrors typed wanted CAS inside one transaction"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 261, "249bfbdab2b02ac4"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 262, "249bfbdab2b02ac4"): (
         "atomic preview recovery accepts only downloading as its exact source"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 416, "4f0561c784e817e9"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 417, "4f0561c784e817e9"): (
         "atomic terminal import CASes status with rescue audit in the same transaction"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 456, "9b11fb540dfe44e3"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 457, "9b11fb540dfe44e3"): (
         "atomic terminal typed transition CASes the source status selected by the DAG"
     ),
-    ("lib/pipeline_db/terminal_outcomes.py", 1155, "6674811fa5453c86"): (
+    ("lib/pipeline_db/terminal_outcomes.py", 1168, "6674811fa5453c86"): (
         "automation terminalization performs the final exact processing-owner "
         "CAS and clears the owner in the same static request write "
         "(review #2: retry counters are now policy-derived placeholders read "
