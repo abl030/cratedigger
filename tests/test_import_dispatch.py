@@ -3343,10 +3343,22 @@ class TestDispatchRankConfigArgv(unittest.TestCase):
                     format="FLAC",
                     spectral_grade="genuine",
                     spectral_bitrate_kbps=None,
+                    spectral_subject="source",
+                    spectral_provenance="measured",
                 ),
                 "codec": "flac",
                 "container": "flac",
                 "storage_format": "FLAC",
+                # Production-shaped: the preview grinds a source V0 probe
+                # into every lossless-source evidence row before the
+                # importer decides (issue #990 — a probe-less candidate
+                # cannot displace an anchored copy and would reject
+                # before the subprocess this seam test exists to observe).
+                "v0_metric": AlbumQualityV0Metric(
+                    subject="source",
+                    min_bitrate_kbps=238,
+                    avg_bitrate_kbps=250,
+                ),
             },
         )
         assert candidate_result.evidence is not None

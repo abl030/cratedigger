@@ -434,7 +434,13 @@ class TestMeasuredImportDecision(unittest.TestCase):
 
 
 class TestProvisionalLosslessDecision(unittest.TestCase):
-    """Suspect lossless-source V0 probe grind-up policy."""
+    """Unproven lossless-source V0 probe grind-up policy.
+
+    Entry is proof-keyed (issue #990): the lane owns every supported
+    lossless source whose verified-lossless proof will NOT be minted,
+    whatever its spectral grade. A verified candidate continues through
+    the measured policy.
+    """
 
     def _probe(
         self,
@@ -453,7 +459,8 @@ class TestProvisionalLosslessDecision(unittest.TestCase):
         *,
         avg: int | None = 250,
         existing: V0ProbeEvidence | None = None,
-        grade: str = "suspect",
+        verified: bool = False,
+        grade: str | None = "suspect",
         supported: bool = True,
         kind: str = "lossless_source_v0",
         tolerance: int = 5,
@@ -463,6 +470,7 @@ class TestProvisionalLosslessDecision(unittest.TestCase):
             ProvisionalLosslessDecisionInput(
                 candidate_probe=self._probe(avg, kind=kind) if avg is not None else None,
                 existing_probe=existing,
+                will_be_verified=verified,
                 spectral_grade=grade,
                 supported_lossless_source=supported,
             ),
@@ -499,27 +507,35 @@ class TestProvisionalLosslessDecision(unittest.TestCase):
                               tolerance=5)
         self.assertEqual(result.decision, DECISION_PROVISIONAL_LOSSLESS_UPGRADE)
 
-    def test_genuine_and_marginal_continue_existing_policy(self):
-        for grade in ("genuine", "marginal"):
+    def test_verified_candidate_continues_existing_policy(self):
+        """A candidate whose proof WILL be minted never enters the lane —
+        it is compared on what it measures, with the proof behind it."""
+        for grade in ("genuine", "marginal", "suspect", "likely_transcode"):
             with self.subTest(grade=grade):
                 result = self._decide(avg=250, existing=self._probe(171),
-                                      grade=grade)
+                                      verified=True, grade=grade)
                 self.assertIsNone(result.decision)
                 self.assertFalse(result.would_import)
 
-    def test_only_shared_transcode_grades_enter_provisional_policy(self):
-        """The provisional branch consumes the canonical grade set."""
-        from lib.quality import SPECTRAL_TRANSCODE_GRADES
-
-        for grade in SPECTRAL_TRANSCODE_GRADES:
-            with self.subTest(grade=grade):
+    def test_entry_is_proof_keyed_among_measured_grades(self):
+        """Issue #990: the lane owns every UNPROVEN supported lossless
+        source whose spectral was actually measured — genuine and suspect
+        alike. A verified candidate continues through the measured policy,
+        as does a world spectral never measured (production surfaces those
+        as ``measurement_failed`` before any decision)."""
+        for grade in ("genuine", "marginal", "suspect", "likely_transcode"):
+            with self.subTest(grade=grade, verified=False):
                 self.assertEqual(
-                    self._decide(grade=grade).decision,
+                    self._decide(verified=False, grade=grade).decision,
                     DECISION_PROVISIONAL_LOSSLESS_UPGRADE,
                 )
-        for grade in ("genuine", "marginal", "error", "unknown"):
+            with self.subTest(grade=grade, verified=True):
+                self.assertIsNone(
+                    self._decide(verified=True, grade=grade).decision)
+        for grade in ("error", None):
             with self.subTest(grade=grade):
-                self.assertIsNone(self._decide(grade=grade).decision)
+                self.assertIsNone(
+                    self._decide(verified=False, grade=grade).decision)
 
     def test_lossy_candidate_locks_when_existing_has_lossless_source_probe(self):
         # Message to Bears EP1 shape: existing on-disk is a transcoded opus
@@ -533,14 +549,14 @@ class TestProvisionalLosslessDecision(unittest.TestCase):
         self.assertTrue(result.cleanup_eligible)
         self.assertIn("240kbps", result.reason or "")
 
-    def test_lossy_candidate_locks_regardless_of_spectral_grade(self):
+    def test_lossy_candidate_locks_regardless_of_verification(self):
         # The lock is structural — a lossy candidate cannot be ground to V0
-        # to compare against the recorded probe regardless of how clean its
-        # own spectral looks. Grade is informational here, not load-bearing.
-        for grade in ("genuine", "marginal", "suspect", "likely_transcode"):
-            with self.subTest(grade=grade):
+        # to compare against the recorded probe. The lock branch runs before
+        # the proof gate, so it holds whatever the caller certified.
+        for verified in (False, True):
+            with self.subTest(verified=verified):
                 result = self._decide(avg=320, existing=self._probe(240),
-                                      supported=False, grade=grade)
+                                      supported=False, verified=verified)
                 self.assertEqual(result.decision, DECISION_LOSSLESS_SOURCE_LOCKED)
 
     def test_lossy_candidate_passes_when_no_existing_probe(self):
@@ -554,11 +570,11 @@ class TestProvisionalLosslessDecision(unittest.TestCase):
         # must not trigger any provisional decision branch — neither upgrade
         # nor suspect_lossless_probe_missing — regardless of which side
         # carries the research kind.
-        for grade in ("suspect", "likely_transcode", "genuine"):
-            with self.subTest(side="candidate", grade=grade):
+        for verified in (False, True):
+            with self.subTest(side="candidate", verified=verified):
                 result = self._decide(
                     avg=200, existing=self._probe(171),
-                    grade=grade, supported=True,
+                    verified=verified, supported=True,
                     kind="native_lossy_research_v0")
                 self.assertNotEqual(
                     result.decision, DECISION_PROVISIONAL_LOSSLESS_UPGRADE)
@@ -568,7 +584,7 @@ class TestProvisionalLosslessDecision(unittest.TestCase):
                 kind="native_lossy_research_v0",
                 min_bitrate_kbps=160, avg_bitrate_kbps=171,
                 median_bitrate_kbps=175),
-            grade="suspect", supported=True)
+            supported=True)
         # Existing-side research probe → treated as if no comparable existing
         # probe exists, so suspect_lossless_probe_missing path applies.
         self.assertNotEqual(
@@ -580,7 +596,7 @@ class TestProvisionalLosslessDecision(unittest.TestCase):
         # override via the normal V0 grind-up comparison — never short-
         # circuit to lossless_source_locked. Guards against future refactors
         # that move the lock above the supported_lossless_source check.
-        result = self._decide(avg=320, supported=True, grade="suspect",
+        result = self._decide(avg=320, supported=True,
                               existing=self._probe(240))
         self.assertNotEqual(result.decision, DECISION_LOSSLESS_SOURCE_LOCKED)
 
@@ -606,10 +622,42 @@ class TestProvisionalLosslessDecision(unittest.TestCase):
             "no existing comparable lossless-source V0 probe",
         )
 
-    def test_missing_candidate_probe_rejects_distinctly(self):
-        result = self._decide(avg=None, existing=self._probe(171))
-        self.assertEqual(result.decision, DECISION_SUSPECT_LOSSLESS_PROBE_MISSING)
-        self.assertTrue(result.confident_reject)
+    def test_missing_candidate_probe_on_accused_source_rejects_distinctly(self):
+        """The historical fail-closed direction: an ACCUSED source without
+        comparable evidence cannot be trusted."""
+        from lib.quality import SPECTRAL_TRANSCODE_GRADES
+
+        for grade in SPECTRAL_TRANSCODE_GRADES:
+            with self.subTest(grade=grade):
+                result = self._decide(
+                    avg=None, existing=self._probe(171), grade=grade)
+                self.assertEqual(
+                    result.decision, DECISION_SUSPECT_LOSSLESS_PROBE_MISSING)
+                self.assertTrue(result.confident_reject)
+
+    def test_missing_candidate_probe_against_an_anchor_rejects(self):
+        """Issue #990 review finding 5: the recorded anchor is the
+        truth-of-source, and a candidate with no comparable evidence
+        cannot displace the copy it anchors — the same doctrine as the
+        lossy lock."""
+        for grade in ("genuine", "marginal"):
+            with self.subTest(grade=grade):
+                result = self._decide(
+                    avg=None, existing=self._probe(171), grade=grade)
+                self.assertEqual(
+                    result.decision, DECISION_SUSPECT_LOSSLESS_PROBE_MISSING)
+                self.assertTrue(result.confident_reject)
+                self.assertIn("anchor", result.reason or "")
+
+    def test_missing_candidate_probe_on_unaccused_unanchored_declines(self):
+        """Issue #990: unaccused, unanchored, and evidence-less continues
+        to the measured policy's historical first-import behavior — there
+        is no anchor to defend. (On the production path the preview grinds
+        the probe into evidence before the importer decides.)"""
+        for grade in ("genuine", "marginal", "error", None):
+            with self.subTest(grade=grade):
+                result = self._decide(avg=None, existing=None, grade=grade)
+                self.assertIsNone(result.decision)
 
 
 # ============================================================================

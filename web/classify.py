@@ -1979,8 +1979,13 @@ def _verified_lossless_locked_verdict() -> str:
 
 def _provisional_verdict(entry: LogEntry, *, imported: bool) -> str:
     if not imported:
+        # Grade-neutral on purpose (issue #990): since lane entry keys on
+        # proof absence, this decision also fires for genuine-graded,
+        # proof-denied sources — "Suspect" would contradict the spectral
+        # card beside it. Reworded under a Rule D live-corpus render
+        # differential (historical suspect rows move with it, accurately).
         return (
-            "Suspect lossless source not better than on-disk copy; "
+            "Unproven lossless source not better than on-disk copy; "
             "searching continues"
         )
     candidate_avg, existing_avg, final_format = _probe_values(entry)

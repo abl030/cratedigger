@@ -770,7 +770,7 @@ class TestClassifyBadge(unittest.TestCase):
         self.assertEqual(result.badge_class, "badge-rejected")
         self.assertEqual(
             result.verdict,
-            "Suspect lossless source not better than on-disk copy; "
+            "Unproven lossless source not better than on-disk copy; "
             "searching continues",
         )
 

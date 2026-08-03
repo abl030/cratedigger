@@ -308,10 +308,36 @@ class MeasuredImportDecisionResult(msgspec.Struct, frozen=True):
 
 
 class ProvisionalLosslessDecisionInput(msgspec.Struct, frozen=True):
-    """Pure input for suspect lossless-source provisional grind-up."""
+    """Pure input for the unproven lossless-source provisional lane.
+
+    ``will_be_verified`` is the caller's ``determine_verified_lossless``
+    answer for this candidate — proof legs included — and it keys lane
+    ENTRY: grade decides accusations, proof decides terminality, and
+    using the grade as an entry proxy is what let a genuine-graded,
+    proof-denied FLAC bypass the anchor and re-import equal copies
+    forever (issue #990, request 2066).
+
+    ``spectral_grade`` retains two narrow roles, neither of which is an
+    entry proxy for the proof:
+
+    * a source spectral analysis never MEASURED (grade ``None``/
+      ``error``) keeps its historical measured routing — production
+      surfaces those worlds as ``measurement_failed`` before any
+      decision runs;
+    * the fail direction when the candidate carries no comparable probe:
+      an ACCUSED source (suspect/likely_transcode) without evidence keeps
+      its historical fail-closed reject; an unaccused one is rejected
+      when a comparable anchor exists (no evidence can challenge the
+      recorded truth-of-source) and otherwise falls through to the
+      measured policy's historical first-import behavior. On the
+      production path the preview grinds the probe into the evidence row
+      before the importer decides, so the fall-through is an
+      abnormal-evidence seam.
+    """
 
     candidate_probe: V0ProbeEvidence | None = None
     existing_probe: V0ProbeEvidence | None = None
+    will_be_verified: bool = False
     spectral_grade: str | None = None
     supported_lossless_source: bool = False
 
@@ -327,18 +353,40 @@ class ProvisionalLosslessDecisionResult(msgspec.Struct, frozen=True):
     stage_chain: list[str] = []
 
 
+#: The grades a source spectral analysis actually MEASURED. The lane owns
+#: unproven sources among these; ``None``/``error`` worlds never reach a
+#: decision in production (``measurement_failed``) and keep their
+#: historical measured routing in the simulator.
+_PROVISIONAL_LANE_MEASURED_GRADES: frozenset[str] = frozenset({
+    "genuine", "marginal", "suspect", "likely_transcode",
+})
+
+
 def provisional_lossless_decision(
     candidate: ProvisionalLosslessDecisionInput,
     *,
     cfg: QualityRankConfig | None = None,
 ) -> ProvisionalLosslessDecisionResult:
-    """Compare suspect lossless-source V0 probes inside the provisional lane.
+    """Compare unproven lossless-source V0 probes inside the provisional lane.
 
     Returns ``decision=None`` for candidates that should continue through the
-    existing import policy (native lossy, clean lossless, or unsupported
-    sources). For suspect supported lossless sources, V0 probe avg bitrate is
-    the v1 comparison signal and ``within_rank_tolerance_kbps`` is the only
-    tolerance knob.
+    existing import policy (native lossy without a lock anchor, or a
+    candidate whose verified-lossless proof WILL be minted). For every other
+    supported lossless source — suspect-graded, genuine-graded-but-denied,
+    unmeasured — V0 probe avg bitrate is the comparison signal and
+    ``within_rank_tolerance_kbps`` is the only tolerance knob.
+
+    Entry is keyed on PROOF ABSENCE (``will_be_verified``), never on the
+    spectral grade: "provisional" means unproven, and an unproven source
+    must beat the recorded truth-of-source anchor to displace the copy it
+    would replace. Grade-keyed entry let a genuine-graded FLAC whose proof
+    the ultrasonic leg denied re-import equal transcode-lineage copies
+    forever (request 2066, 95 downloads). Callers that certify via the
+    V0-avg trust override bypass this lane BEFORE calling — a denial never
+    suppresses that bypass (V5's surviving core).
+    Authority: "HENCE PROVISIONAL LOSSLESS SOURCE" — the lane owns the
+    unproven cohort;
+    https://github.com/abl030/cratedigger/issues/990#issuecomment-5158156922
 
     When ``supported_lossless_source`` is False (lossy candidate) AND
     ``existing_probe`` is a comparable lossless-source probe, the function
@@ -377,19 +425,54 @@ def provisional_lossless_decision(
             )
         return ProvisionalLosslessDecisionResult()
 
-    if candidate.spectral_grade not in SPECTRAL_TRANSCODE_GRADES:
+    if candidate.will_be_verified:
+        return ProvisionalLosslessDecisionResult()
+
+    if candidate.spectral_grade not in _PROVISIONAL_LANE_MEASURED_GRADES:
+        # Spectral never ran (None) or errored: production surfaces those
+        # as ``measurement_failed`` before any decision, and simulator /
+        # legacy worlds keep their historical measured routing (missing
+        # analysis reads as a transcode there). The lane owns unproven
+        # MEASURED sources only.
         return ProvisionalLosslessDecisionResult()
 
     if not is_comparable_lossless_source_probe(candidate.candidate_probe):
-        decision = DECISION_SUSPECT_LOSSLESS_PROBE_MISSING
-        return ProvisionalLosslessDecisionResult(
-            decision=decision,
-            would_import=False,
-            confident_reject=True,
-            cleanup_eligible=True,
-            reason="suspect lossless source lacks a comparable V0 probe",
-            stage_chain=[f"stage2_provisional:{decision}"],
-        )
+        if candidate.spectral_grade in SPECTRAL_TRANSCODE_GRADES:
+            decision = DECISION_SUSPECT_LOSSLESS_PROBE_MISSING
+            return ProvisionalLosslessDecisionResult(
+                decision=decision,
+                would_import=False,
+                confident_reject=True,
+                cleanup_eligible=True,
+                reason="suspect lossless source lacks a comparable V0 probe",
+                stage_chain=[f"stage2_provisional:{decision}"],
+            )
+        if is_comparable_lossless_source_probe(candidate.existing_probe):
+            # The recorded anchor is the truth-of-source; a candidate with
+            # no comparable evidence cannot displace the copy it anchors,
+            # whatever the contract-vs-measured ranks would say — the same
+            # doctrine as the lossy lock above (#990 review finding 5).
+            decision = DECISION_SUSPECT_LOSSLESS_PROBE_MISSING
+            return ProvisionalLosslessDecisionResult(
+                decision=decision,
+                would_import=False,
+                confident_reject=True,
+                cleanup_eligible=True,
+                reason=(
+                    "unproven lossless source lacks a comparable V0 probe "
+                    "to challenge the recorded source anchor"
+                ),
+                stage_chain=[f"stage2_provisional:{decision}"],
+            )
+        # Unaccused, unanchored, and evidence-less: continue through the
+        # measured policy — there is no anchor to defend. That includes an
+        # existing UNANCHORED copy, which the measured compare may still
+        # displace; self-limiting, because the import records the anchor
+        # and every later probe-carrying candidate takes the lane. On the
+        # production path the preview grinds the V0 probe into the
+        # evidence row BEFORE the importer decides, so this fall-through
+        # is an abnormal-evidence seam, not the ordinary route.
+        return ProvisionalLosslessDecisionResult()
 
     candidate_probe = candidate.candidate_probe
     assert candidate_probe is not None

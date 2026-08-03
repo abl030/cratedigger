@@ -77,10 +77,17 @@ Primary key is the rank. Within the same rank:
 
 ## Provisional lossless-source comparison
 
-Suspect lossless-container sources use a separate evidence lane from generic
+Unproven lossless-container sources use a separate evidence lane from generic
 rank comparison. When FLAC, ALAC, WAV, or ALAC-in-M4A reaches V0 probing but
-spectral analysis grades it `suspect` or `likely_transcode`, the candidate is
-not treated as verified lossless and does not rely on final stored-format rank.
+its verified-lossless proof will NOT be minted — a `suspect`/
+`likely_transcode` grade, a proof-leg denial on an otherwise genuine grade, or
+any other `determine_verified_lossless` refusal — the candidate is not treated
+as verified lossless and does not rely on final stored-format rank. Entry is
+keyed on proof absence, never the grade alone (issue #990): a genuine-graded
+source whose proof the ultrasonic leg denies is exactly as unproven as a
+suspect one, and skipping the anchor for it let equal transcode-lineage copies
+re-import forever (request 2066). The V0-avg trust override still bypasses
+this lane before it is consulted.
 
 Instead, `provisional_lossless_decision()` compares the candidate
 `lossless_source_v0` probe average against the request's current comparable
@@ -91,8 +98,9 @@ lossless-source V0 probe average:
   `provisional_lossless_upgrade`.
 - Candidate average equal, worse, or within tolerance:
   `suspect_lossless_downgrade`.
-- Missing candidate probe on a suspect lossless source:
-  `suspect_lossless_probe_missing`.
+- Missing candidate probe on an accused source, or against a comparable
+  anchor: `suspect_lossless_probe_missing`. Unaccused and unanchored,
+  the candidate falls through to the measured policy instead.
 
 This deliberately reuses `within_rank_tolerance_kbps` so near-equal source
 probes do not churn the library, but it does not use rank bands, codec-family

@@ -105,10 +105,15 @@ native MP3 downloads (e.g. 320kbps that was upsampled from 128kbps).
 ### Provisional lossless-source probes
 
 When a supported lossless-container download (FLAC, ALAC, WAV, or ALAC-in-M4A)
-is spectrally `suspect` or `likely_transcode`, the importer no longer has to
+will NOT be verified lossless — spectrally `suspect`/`likely_transcode`, or
+affirmatively graded but denied by a proof leg, or otherwise refused by
+`determine_verified_lossless` — the importer no longer has to
 discard the source outright. It records the MP3 V0 probe produced from that
 source as `lossless_source_v0` attempt evidence and compares the probe average
 against the current linked evidence row's V0 metric with `subject='source'`.
+Lane entry is keyed on that proof absence, never the spectral grade alone
+(issue #990): "provisional" means unproven, and an unproven source must beat
+the recorded anchor to displace the copy it would replace.
 
 Policy:
 
@@ -119,8 +124,16 @@ Policy:
   `provisional_lossless_upgrade`.
 - Candidate probe average equal, worse, or within tolerance: reject as
   `suspect_lossless_downgrade`.
-- Missing candidate probe on a suspect lossless source: reject as
-  `suspect_lossless_probe_missing`.
+- Missing candidate probe: reject as `suspect_lossless_probe_missing` when
+  the source is accused (suspect/likely_transcode) — the historical
+  fail-closed direction — or when a comparable anchor exists (no evidence
+  can challenge the recorded truth-of-source). An unaccused, unanchored,
+  probe-less candidate falls through to the measured policy — including
+  over an existing unanchored copy, which that compare may displace;
+  self-limiting, since the import records the anchor and every later
+  probe-carrying candidate takes the lane. On the production path the
+  preview grinds the probe into evidence before the importer decides, so
+  the fall-through is an abnormal-evidence seam.
 
 Provisional imports are deliberately not verified lossless. They may still use
 the configured lossless-source storage target, but `verified_lossless` remains
@@ -271,9 +284,11 @@ the old thresholds produced.
 ### Verification and explicit non-verification lanes
 
 1. **Lossless-container downloads**: Run spectral check pre-conversion. Genuine
-   or marginal sources continue through the verified-lossless path. Suspect or
-   likely-transcode sources still produce a V0 source probe, but they use the
-   provisional lossless-source comparison lane instead of becoming verified.
+   or marginal sources whose proof legs do not object continue through the
+   verified-lossless path. Every unproven source — suspect/likely-transcode
+   graded, or affirmatively graded but proof-denied — still produces a V0
+   source probe and uses the provisional lossless-source comparison lane
+   instead of becoming verified (issue #990).
 2. **MP3 downloads (especially CBR 320)**: Run spectral check post-download. Cliff + high deficit = upsampled garbage.
 3. **High-band native VBR MP3**: The named policy may deliberately skip
    spectral analysis. This is an explicit non-verification lane: bitrate can
@@ -555,23 +570,29 @@ the whole library sits — the capture is gated to the promotion-plausible
 cohort and no row measured before it shipped has one — and a withheld leg
 leaves the entire decision bit-identical.
 
-**The leg's authority is the proof, never the lane.** A denial withholds
-the verified-lossless proof and nothing else. It never re-routes the
-provisional-lossless lane — whose decisions are confident rejects that
-denylist the offering peer — and it introduces no denylist class of its
+**The leg's authority is the proof; it reaches the lane only through the
+proof.** A denial withholds the verified-lossless proof, and — because
+provisional-lane entry is keyed on proof absence (issue #990) — the now-
+unproven album is owned by the anchor lane like every other unproven
+lossless source. What a denial must never do is suppress the V0-avg trust
+override's lane bypass: a probe-certified album is compared on its
+measured quality whatever the legs say (PR3's surviving core, and the
+decoy its self-test plants). The leg introduces no denylist class of its
 own: every denylist a denied album attracts is the pre-existing
-post-import policy any unproved album attracts.
+provisional-lane policy any unproven album attracts.
 
-What a denial *does* cost is the proof's comparison privilege, and that
-is not a leg verdict. An album with no proof is compared on what it
-measures, so against a better installed copy it can lose that comparison
-and not be imported — in the MEASURED lane, with a comparison basis the
-operator can read, exactly as any unproved album can. That residual is
-byte-identical to the ultrasonic leg's and is pinned as such
+What a denial *does* cost, concretely, is the proof's privileges: the
+terminal `imported` status, and the measured lane's contract-ranked
+comparison. An unproven album faces the recorded `lossless_source_v0`
+anchor instead — import only by beating it past the rank tolerance —
+which is exactly what stops an equal transcode-lineage copy from
+re-importing over the copy it equals (request 2066, 95 downloads). Both
+laws are pinned
 (`tests/test_quality_classification.py::TestAacLatticeProofGate`,
-`tests/test_quality_generated.py::TestAacLatticeProofLegProperties`);
-the lane boundary is the one PR3 shipped a blocking defect on, and this
-leg is pinned against it from birth.
+`::TestProvisionalAnchorOwnsTheUnprovenCohort`,
+`tests/test_quality_generated.py::_lane_membership_follows_the_proof` and
+its self-tests); the amendment's decision record is
+https://github.com/abl030/cratedigger/issues/990#issuecomment-5158156922.
 
 **Where the leg is evaluated.** Both decision twins build it once per call
 from the candidate's persisted capture. The dry-run harness — which is
@@ -1050,8 +1071,9 @@ reached a comparison (the provisional lane, the lossless-source lock),
 which is a real outcome rather than a failure.
 
 On the lossless-source branches the counterfactual reached through the
-evidence entrypoint is *always* the provisional lane, and that is a
-property of the decider rather than of the tests: Stage 1's carve-out
+evidence entrypoint follows the proof, like the decision itself (issue
+#990): an unproven candidate's counterfactual is the provisional lane,
+a proof-bearing one's is the measured comparison. Stage 1's carve-out
 (`provisional_source_candidate and has_provisional_probe_input`) spares
 every lossless-source candidate that has probe evidence, so the only ones
 that short-circuit are the ones with none.

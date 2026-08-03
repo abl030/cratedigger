@@ -2492,6 +2492,7 @@ def main():
             ProvisionalLosslessDecisionInput(
                 candidate_probe=r.v0_probe,
                 existing_probe=r.existing_v0_probe,
+                will_be_verified=will_be_verified_lossless,
                 spectral_grade=spectral_grade,
                 supported_lossless_source=supported_lossless_source,
             ),
