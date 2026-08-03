@@ -515,17 +515,12 @@ request release exactly. `is_candidate` tells the replay which rows to decide;
 current-only rows provide the paired evidence but are not themselves
 candidates. A null `current_evidence_id` is the ordinary no-HAVE case.
 
-Export through the executable developer tool; it owns the SQL projection and
-is the only supported corpus-export path. Run it on doc2 so the DSN stays in
-the deployed runtime boundary:
+Export through the deployment-owned `decision-differential` wrapper; it owns
+the SQL projection and pins the deployed source plus Python environment. Run
+it on doc2 so the DSN stays in the deployed runtime boundary:
 
 ```bash
-# Run from the exact checked-out Cratedigger revision on doc2.
-export PGPASSWORD="$(sudo cat /run/secrets/cratedigger-pgpass | grep '^PGPASSWORD=' | cut -d= -f2)"
-nix-shell --run "python3 scripts/decision_differential.py export \
-  --dsn postgresql://cratedigger@10.20.0.11:5432/cratedigger \
-  --corpus /tmp/decision-corpus.jsonl \
-  --coverage /tmp/decision-corpus-coverage.json"
+ssh doc2 'export PGPASSWORD=$(sudo cat /run/secrets/cratedigger-pgpass | grep "^PGPASSWORD=" | cut -d= -f2); decision-differential export --dsn postgresql://cratedigger@10.20.0.11:5432/cratedigger --corpus /tmp/decision-corpus.jsonl --coverage /tmp/decision-corpus-coverage.json'
 ```
 
 The exporter opens one repeatable-read, read-only PostgreSQL snapshot. It

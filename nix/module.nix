@@ -858,6 +858,13 @@
       --migrations-dir "${src}/migrations" "$@"
   '';
 
+  decisionDifferential = pkgs.writeShellScriptBin "decision-differential" ''
+    # Read-only developer instrumentation.  Pin both interpreter and source
+    # to this deployed module generation; never depend on an operator checkout.
+    export PYTHONPATH="${src}''${PYTHONPATH:+:$PYTHONPATH}"
+    exec ${pythonEnv}/bin/python -P ${src}/scripts/decision_differential.py "$@"
+  '';
+
   importerPkg = pkgs.writeShellScriptBin "cratedigger-importer" ''
     export PATH="${runtimePath}:$PATH"
     ${beetsRuntimeEnvironment}
@@ -2086,7 +2093,7 @@ in {
       }
     ];
 
-    environment.systemPackages = [pipelineCli pipelineMigrate importerPkg previewWorkerPkg youtubeIngestWorkerPkg checkBeetsConfigPkg pkgs.postgresql];
+    environment.systemPackages = [pipelineCli pipelineMigrate decisionDifferential importerPkg previewWorkerPkg youtubeIngestWorkerPkg checkBeetsConfigPkg pkgs.postgresql];
     environment.etc."cratedigger/web-gateway-policy" = mkIf cfg.web.enable {
       text = webGatewayPolicyText;
       mode = "0444";
