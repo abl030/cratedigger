@@ -10,11 +10,11 @@
 #
 # Only the operator-facing CLI surfaces are bundled. The daemons
 # (cratedigger loop, importer, web, workers) are the NixOS module's job —
-# they need rendered config and systemd ordering, not `nix run`.
-{ pkgs, src ? ../., version ? "0-unstable-dirty" }:
+# they need an admitted runtime config and service ordering, not `nix run`.
+{ pkgs, beetsPackage, src ? ../., version ? "0-unstable-dirty" }:
 
 let
-  cratedigger = pkgs.callPackage ./package.nix { };
+  cratedigger = pkgs.callPackage ./package.nix { inherit beetsPackage; };
   pythonEnv = cratedigger.pythonEnv;
 
   runtimePath = pkgs.lib.makeBinPath [
@@ -27,7 +27,7 @@ let
 
   mkCliTool = name: script: pkgs.writeShellScriptBin name ''
     export PATH="${runtimePath}:$PATH"
-    export PYTHONPATH="${src}''${PYTHONPATH:+:$PYTHONPATH}"
+    export PYTHONPATH="${src}"
     exec ${pythonEnv}/bin/python ${src}/${script} "$@"
   '';
 in
@@ -44,6 +44,9 @@ pkgs.symlinkJoin {
     (mkCliTool
       "cratedigger-world-audit-debt-gate"
       "scripts/world_audit_debt_gate.py")
+    (mkCliTool
+      "cratedigger-check-beets-config"
+      "scripts/check_beets_config.py")
   ];
   meta = {
     description = "Cratedigger operator and audit automation CLI tools";

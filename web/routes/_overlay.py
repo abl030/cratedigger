@@ -16,10 +16,7 @@ contract in `web/routes/browse.py`).
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Iterable
-
-log = logging.getLogger(__name__)
 
 
 def _band_from_detail(
@@ -30,11 +27,9 @@ def _band_from_detail(
     """Three-way band for one release id given already-fetched membership
     + ``check_mbids_detail`` output (KTD1).
 
-    The single banding decision both ``band_release_ids`` and
-    ``overlay_release_rows_in_place`` route through — header, list, and
-    sibling panel can never diverge because they share this function. The
-    membership / detail queries are the caller's responsibility (batched
-    once); this is pure given them.
+    Legacy browse/label row overlays route through this pure adapter over
+    their already-fetched membership and detail projections. Long-tail
+    banding uses the exact-resolution snapshot path below.
     """
     from lib.banding import band_from_detail
     from web import overlay
@@ -48,50 +43,40 @@ def _band_from_detail(
 def band_release_ids(release_ids: Iterable[str]) -> dict[str, str]:
     """Map each release id to its beets-library quality band.
 
-    The beets-only banding core, factored out of
-    ``overlay_release_rows_in_place`` so the long-tail worklist (U1) and
-    the overlay both band through one function — header and list always
-    agree. Three-way (KTD1):
+    The long-tail web adapter over the shared exact-resolution decision.
+    Three-way (KTD1):
 
-    * release id absent from the beets membership set → ``"missing"``.
-    * present but no detail row / ``compute_library_rank`` returns
-      ``"unknown"`` → ``"unknown"`` (has audio, never ``"missing"``).
-    * otherwise → the lowercase ``QualityRank`` band.
+    * ``CurrentBeetsMissing`` → ``"missing"``.
+    * a unique unrankable item snapshot → ``"unknown"``.
+    * a unique rankable item snapshot → the lowercase ``QualityRank`` band.
+    * any ambiguous exact resolution → a shared typed exception and no map.
 
-    Bounded query fan-out: one membership query (``check_beets_library``)
-    + one ``check_mbids_detail`` batch over the in-library subset — never
-    per row. Skips the overlay's ``check_pipeline`` query: the long-tail
-    cohort row already carries the pipeline columns, and the band depends
-    only on the on-disk copy.
+    Bounded query fan-out: one ``resolve_current_releases`` batch over the
+    complete cohort, never a membership projection followed by a detail
+    projection. Skips ``check_pipeline`` because the cohort rows already
+    carry their pipeline columns.
 
-    Returns a dict keyed by the release id string. Ids that are
-    ``"missing"`` ARE present in the dict (banded ``"missing"``) so a
-    caller can distinguish "banded missing" from "not asked about" — but
-    the long-tail service treats both the same (absent → ``Missing``).
+    Returns a complete dict keyed by the release id string. Ids that are
+    explicitly absent from Beets ARE present with the ``"missing"`` band;
+    omitting a requested identity is an authority failure, never an implicit
+    claim that the pressing is missing.
     """
+    from lib.banding import (
+        CurrentBeetsBandingUnavailableError,
+        resolve_current_release_bands,
+    )
+    from web import overlay
     from web import server as srv
 
     ids_list = [str(rid) for rid in release_ids]
     if not ids_list:
         return {}
-    try:
-        in_library = srv.check_beets_library(ids_list)
-        b = srv._beets_db()
-        quality: dict[str, dict[str, object]] = (
-            b.check_mbids_detail(list(in_library)) if in_library and b else {}
+    b = srv._beets_db()
+    if b is None:
+        raise CurrentBeetsBandingUnavailableError(
+            "current Beets authority is unavailable"
         )
-    except Exception:
-        # Beets unavailable (locked / missing DB) — degrade to all-"missing"
-        # rather than 500-ing the whole worklist (matches the CLI's
-        # _cli_band_fn fallback). "No clean copy to upgrade" is the honest
-        # default; the long-tail view still renders.
-        log.warning(
-            "band_release_ids: beets unavailable, banding all-missing",
-            exc_info=True,
-        )
-        return {rid: "missing" for rid in ids_list}
-
-    return {rid: _band_from_detail(rid, in_library, quality) for rid in ids_list}
+    return resolve_current_release_bands(b, ids_list, overlay._rank_cfg())
 
 
 def overlay_release_rows_in_place(
@@ -108,8 +93,9 @@ def overlay_release_rows_in_place(
         After overlay each row carries:
         `in_library`, `beets_album_id`, `library_format`,
         `library_min_bitrate`, `library_avg_bitrate`, `library_rank`,
-        `pipeline_status`, `pipeline_id`, `pipeline_verified_lossless`,
-        `pipeline_provisional`, `processing_owner`. Library quality fields are
+        `pipeline_status`, `pipeline_id`, `has_captured_history`,
+        `pipeline_verified_lossless`, `pipeline_provisional`,
+        `processing_owner`. Library quality fields are
         only set when the
         release is in the beets library AND the beets DB returned
         details for it. The identity pair derives from the request's
@@ -126,11 +112,11 @@ def overlay_release_rows_in_place(
     from web import server as srv
 
     ids_list = list(release_ids)
-    in_library: set[str] = (
-        srv.check_beets_library(ids_list) if ids_list else set()
-    )
     in_pipeline: dict[str, dict[str, object]] = (
         srv.check_pipeline(ids_list) if ids_list else {}
+    )
+    in_library: set[str] = (
+        srv.check_beets_library(ids_list) if ids_list else set()
     )
     b = srv._beets_db()
     beets_ids: dict[str, int] = (
@@ -165,6 +151,9 @@ def overlay_release_rows_in_place(
         r["pipeline_id"] = pi["id"] if pi else None
         r["processing_owner"] = (
             pi.get("processing_owner") if pi else None
+        )
+        r["has_captured_history"] = (
+            bool(pi["has_captured_history"]) if pi else False
         )
         r["pipeline_verified_lossless"] = (
             bool(pi["verified_lossless"]) if pi else False

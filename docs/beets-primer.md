@@ -1,10 +1,13 @@
 # Beets Primer for Cratedigger
 
-This document describes how beets is set up, configured, and used in the music pipeline. It's written for the Cratedigger fork's Claude context — if you're modifying anything that touches beets imports, validation, or the harness, read this first.
+This document defines the Beets ownership and runtime contract Cratedigger
+consumes. Read it before changing imports, validation, the harness, library
+operations, or deployment wiring.
 
 ## What is Beets?
 
-Beets is the canonical source of truth for the tagged music library at `/Beets`. It handles:
+Beets is the canonical source of truth for the currently installed tagged
+music library. It handles:
 
 - **Matching** — identifying which MusicBrainz (or Discogs) release an album is
 - **Tagging** — writing corrected metadata (artist, album, track names, year, genre, etc.) into file tags
@@ -13,14 +16,79 @@ Beets is the canonical source of truth for the tagged music library at `/Beets`.
 - **Lyrics** — fetching synced lyrics from a local LRCLIB mirror
 - **Library DB** — SQLite database tracking every album and track
 
-When Cratedigger downloads an album and it passes validation, beets is what actually imports it into the library.
+When Cratedigger acquires and validates an album, Beets performs the actual
+catalog, tagging, and filesystem import.
 
-## Version & Installation
+## Ownership boundary
 
-- **Owned by cratedigger** (tier-2 packaging): the beets package, plugin closure, config, binary and library are all provisioned by cratedigger's own NixOS module from cratedigger's own flake.lock. There is no Home Manager beets anymore.
-- **Package**: `nix/beets.nix` — the pinned `python3Packages.beets` with the full built-in plugin closure. Mirror patches (Discogs mirror, local LRCLIB) are opt-in module knobs (`services.cratedigger.beets.package.discogsMirrorUrl` / `beets.package.lrclibUrl`), applied via `substituteInPlace` with `--replace-fail` as the drift alarm.
-- **Binary**: `cratedigger-beet` on the system PATH — the canonical manual-ops beet for the library cratedigger manages. It pins `BEETSDIR` at the module-rendered config, so operator invocations and pipeline subprocesses always read the SAME config.
-- **One store path everywhere**: the python library (`lib/beets_distance.py` in cratedigger-web), the dev shell, the harness interpreter, and `cratedigger-beet` all reference the same beets derivation. The real-beets contract test (`tests/test_harness_beets2_contract.py`) runs against exactly the beets production runs.
+The deployment and its librarian own Beets: the package and plugin closure,
+effective configuration, canonical SQLite catalog, library files, current
+release identities, paths, tags, persistent state, secret delivery, and
+operator maintenance. Cratedigger owns exact requested-release identity, the
+acquisition lifecycle and history, and durable capture proof. An out-of-band
+retag, move, byte change, or deletion changes the current Beets world; it does
+not rewrite which pressing Cratedigger sought or erase a witnessed capture.
+Cratedigger never projects holdings into its PostgreSQL database, correlates a
+sibling pressing, or treats a nearby release as the requested release.
+
+Cratedigger has exactly two Beets mutation lanes:
+
+1. The serial importer worker drives the JSON harness for admitted imports and
+   same-release duplicate replacement.
+2. An explicitly operator-authorized library deletion resolves one exact Beets
+   album primary key and drives the exact-album delete child.
+
+Every other Cratedigger Beets access is observational. Deployment-owned plain
+`beet` remains a powerful trusted-librarian command outside Cratedigger's
+serialization. Startup admission neither locks Beets against concurrent
+operator mutation nor authorizes unrelated operator commands. Do not run
+operator mutations while automation is active; quiesce the importer first and
+re-run the checker afterward when the effective contract may have changed.
+
+## Portable runtime contract
+
+The NixOS module consumes the same deployment-neutral capability another
+packager, container, or conventional service can supply:
+
+- one compatible Beets Python package and its exact interpreter;
+- one immutable, non-secret `BEETSDIR` containing the effective configuration;
+- the canonical SQLite database and canonical library root;
+- a distinct absolute, persistent, host-local Beets state file writable by
+  the importer and librarian but read-only to the main, preview, and web roles;
+- one designated mutable secret include containing exactly a non-empty
+  `discogs.user_token` scalar and no other key; and
+- deployment-owned readiness edges that complete storage, state, and secret
+  provisioning before guarded applications start.
+
+The deployment must keep the database, root, state file, interpreter, config
+directory, and secret-include path consistent across Beets, Cratedigger's
+six-field `[Beets]` runtime section, the harness, checker, and operator
+environment. The config directory stays immutable to every application
+identity. The state file must not live beneath it or share catalog storage; a
+common host path is `/var/lib/beets/state.pickle`. The secret include is a
+fixed-schema credential channel, never a mutable configuration overlay. Encode
+a hostile-looking token as a scalar value rather than interpolating YAML, and
+restart every guarded application after config or token rotation; there is no
+live reload.
+
+Each top-level application performs intrinsic exactly-once startup admission in
+a fresh Beets configuration context. Hard failures include a missing or
+incompatible runtime, mismatched database/root/state/interpreter, mutable
+non-secret config, invalid state capability, unsafe import/path policy, or a
+missing, multiple, wrong, or non-token-only designated secret include. Approved
+MusicBrainz endpoint drift is warning-only. The checker rejects only named
+harness conflicts: active `convert.auto` or `convert.auto_keep` is unsafe, while
+intentional metadata/artwork hooks such as `fetchart`, `embedart`, `scrub`,
+`lyrics`, and `lastgenre` remain supported. The standalone
+`cratedigger-check-beets-config` runs the same contract for deployment and
+operator checks, but systemd alone is not the enforcement boundary.
+
+On NixOS, the consumer supplies this capability through
+`services.cratedigger.beets.runtime.{package,configDir,expectedLibrary,expectedDirectory,expectedStateFile,expectedSecretInclude,readinessUnits}`.
+Cratedigger may offer `nix/beets.nix` as a compatible package factory, but the
+deployment instantiates and owns it, its config, state, secrets, storage, and
+plain `beet`. See [`docs/nixos-module.md`](nixos-module.md) and
+[`examples/cratedigger.nix`](../examples/cratedigger.nix).
 
 ### IMPORTANT: `musicbrainz` is a Plugin
 
@@ -28,20 +96,23 @@ In modern beets (2.x), `musicbrainz` is a **plugin** that must be explicitly lis
 
 ## Configuration
 
-**Rendered config**: `/var/lib/cratedigger/beets/config.yaml` (BEETSDIR; rendered by the module's preStart — do NOT edit, it is overwritten on every service start)
-**Secrets**: `/var/lib/cratedigger/beets/secrets.yaml` (service-only 0400, or explicit operator-group 0440 via `services.cratedigger.beets.package.discogsOperatorGroup`; materialized from `discogsTokenFile` and included via beets `include:`; removed when the token option returns to null)
+Beets configuration is deployment-owned. Keep non-secret configuration in an
+immutable directory (a Nix store directory in the NixOS composition), keep the
+token-only include at its declared runtime path, and provision the host-local
+state file separately. Change and deploy the owning configuration, restart the
+guarded applications, then run `cratedigger-check-beets-config` and plain
+`beet config` under the trusted operator environment. Never hand-edit the
+effective config or secret include in place.
 
-To change the config:
-1. Tunables (`beets.config.{directory,library}`, fetchart widths, `musicbrainz.*` via `musicbrainz.apiBase`) are module options — set them in the nixosconfig wrapper. Everything else (path templates, `duplicate_keys`, the plugin list) is a fixed literal in cratedigger's `nix/module.nix` `beetsSettings` — change it there, in this repo, with the U12-style rendered-config diff in mind.
-2. Deploy via the normal flake flow (`.claude/rules/deploy.md`).
-3. Verify: `ssh doc2 'cat /var/lib/cratedigger/beets/config.yaml'` after the next service start.
-
-### Current Config (Key Settings)
+### Required production config shape (key settings)
 
 ```yaml
 # Library
 directory: /mnt/virtio/Music/Beets
 library: /mnt/virtio/cratedigger/beets-db/beets-library.db
+statefile: /var/lib/beets/state.pickle
+include:
+  - /run/secrets/beets-discogs.yaml  # exactly discogs.user_token
 
 # Import behavior
 import:
@@ -214,13 +285,13 @@ The harness (`harness/beets_harness.py`) is a custom `ImportSession` subclass th
 ./harness/run_beets_harness.sh [options] /path/to/album
 ```
 
-The wrapper execs `$CRATEDIGGER_BEETS_PYTHON` (the pinned beets env's
-interpreter) on `beets_harness.py`. In production that env var — and
-`BEETSDIR` — come from `lib/util.py::beets_subprocess_env()`, which reads
-the module-rendered `[Beets]` keys in config.ini; in the dev shell the
-shellHook exports it. A missing interpreter is an actionable error — there
-is no Home-Manager fallback (tier-2 R6; the old `.beet-wrapped` scraping
-is gone). Dispatch also passes its snapshotted Beets DB/root/config-dir/Python
+The wrapper execs `$CRATEDIGGER_BEETS_PYTHON` (the admitted external Beets
+environment's interpreter) on `beets_harness.py`. In production that variable
+and `BEETSDIR` come from `lib/util.py::beets_subprocess_env()`, which reads the
+deployment-owned six-field `[Beets]` runtime contract; in the dev shell the
+shell hook exports the test environment. A missing interpreter is an
+actionable error with no per-user config fallback. Dispatch also passes its
+snapshotted Beets DB/root/config-dir/Python
 authority explicitly to `import_one.py`: the child opens the DB/root pair
 directly for preflight and postflight, while its nested harness resolves the
 same library through `BEETSDIR` and that config directory's `config.yaml`.
@@ -302,9 +373,17 @@ Discogs IDs are queried in both `discogs_albumid` (current layout) and numeric
 `mb_albumid` (legacy layout). No title, artist, release-group, folder, or sibling
 fallback exists. Batch presence/detail APIs expose only usable unique results;
 they never collapse two exact rows by `LIMIT 1` or dictionary overwrite.
+Library presence badges use this exact live read independently from durable
+capture history and linked proof. A failed Beets read is an API error, never
+evidence of absence and never a request transition. See
+`docs/webui-primer.md` for the independent badge vocabulary and
+`docs/debugging-cli.md` for the grouped A/B/C world-audit contract; detailed
+evidence authority remains canonical in `docs/quality-verification.md`.
 
-The NixOS module renders `beets.config.library` and
-`beets.config.directory` into the runtime `[Beets]` section as one pair.
+The deployment supplies the canonical database/root pair as both effective
+Beets configuration and `beets.runtime.expectedLibrary` /
+`beets.runtime.expectedDirectory`; the module records those values in the
+guarded `[Beets]` runtime section.
 `open_beets_db()` and the zero-argument `BeetsDB()` constructor both open that
 runtime pair. Passing paths directly to `BeetsDB(...)` or web `--beets-db` is
 for explicit development/test injection.
@@ -436,9 +515,13 @@ The pipeline uses 0.15 as the threshold for auto-staging redownloads and 0.50 as
 - **Artist/album name differences** — proportional to edit distance
 - **Missing tracks** — `extra_tracks > 0` means MB has more tracks than local files
 
-## Common Beets Commands
+## Trusted operator Beets commands
 
-These run on doc2 where beets is installed (colocated with cratedigger).
+These are deployment-owned plain `beet` commands. Run them with the same
+immutable `BEETSDIR`, interpreter, database, root, state file, and secret
+authority admitted for Cratedigger. Quiesce the serial importer first, target
+one exact album primary key, inspect the selection before mutation, and run the
+standalone checker again before resuming automation.
 
 ```bash
 # Search library
@@ -457,21 +540,28 @@ beet stats                                   # Track/album/artist counts
 beet bad "Artist" "Album"                    # Check for corrupt files (needs badfiles plugin)
 beet duplicates                              # Find duplicate albums
 
-# Modify (CAREFUL — changes library)
-beet move "Artist" "Album"                   # Rename files to match current path template
-beet write "Artist" "Album"                  # Write DB metadata back to file tags
-beet update "Artist" "Album"                 # Read file tags into DB (opposite of write)
-beet remove -a "Artist" "Album"              # Remove from DB only (files stay on disk)
+# Modify one already-inspected exact album (CAREFUL — changes library)
+beet modify -a -M -W 'id:123' field=value     # DB-only edit; defer move/write
+beet write 'album_id:123'                     # Write admitted DB metadata to tags
+beet move -p -a 'id:123'                      # Preview a path move first
+beet move -a 'id:123'                         # Apply only after reviewing the preview
+beet remove -a 'id:123'                       # Catalog-only removal; files stay on disk
 ```
+
+`beet move` and path-affecting configuration can rename library trees and mint
+new Plex/Jellyfin identities. Never run a collection-wide move as routine
+maintenance. Review one exact album, ensure notifier/rescan consequences are
+understood, and keep it outside a Cratedigger deployment or cutover. Concurrent
+plain-`beet` mutation is not locked against the importer.
 
 ### Dangerous Commands — NEVER Use Without Approval
 
 ```bash
 beet remove -d ...     # -d DELETES FILES FROM DISK. If those files came from a
                        # niche source that can't be re-acquired, they're gone forever.
-                       # To re-tag, use: beet import --search-id <new-mbid> <path>
 
-beet import -A ...     # Imports "as-is" with no MB match. Everything needs proper matching.
+beet import ...        # Raw imports bypass exact-request inspection and the JSON harness.
+beet import -A ...     # "As-is" imports are especially forbidden.
 
 printf 'a\n' | beet import ...  # Blindly accepts ANY match without inspection.
                                 # Use the harness instead — it lets you verify MBID and distance.
@@ -479,17 +569,17 @@ printf 'a\n' | beet import ...  # Blindly accepts ANY match without inspection.
 
 Cratedigger's explicit Bad Rip, Replace, and library-delete actions are the
 narrow exceptions: they resolve one current exact album primary key and route
-destructive removal through the pinned exact-delete child in
+destructive removal through the admitted-runtime exact-delete child in
 `lib/beets_delete.py`. Selector-based `beet remove -d` is retired. The
-rendered Beets `clutter` list includes the exact derived filename
+effective Beets `clutter` list includes the exact derived filename
 `cratedigger.json`, allowing Beets to prune a directory whose managed audio
 and sidecar are all gone. Any file that does not match the configured clutter
 patterns prevents pruning and remains untouched.
 
 Library delete (`POST /api/beets/delete` / `pipeline-cli library-delete`) is a
-separate exact-album-PK operation owned by the same pinned Beets runtime. It
+separate exact-album-PK operation using the same admitted Beets runtime. It
 does not write Beets SQLite directly and does not use stock `beet remove -d`:
-pinned Beets 2.x removes metadata before its filesystem loop. Instead,
+the admitted Beets 2.x removes metadata before its filesystem loop. Instead,
 `harness/delete_album.py` keeps the album row as the retry manifest while Beets
 removes and verifies exact item paths, exact art, `cratedigger.json`, and
 configured clutter. Paths are confined to `directory:` with realpath/symlink
@@ -512,7 +602,7 @@ importer worker. That larger architecture is outside this endpoint hardening.
 
 This endpoint is the existing destructive Web/CLI surface being hardened; it
 does not create a second general Beets-mutating entry point. Confirmed success
-still requires the pinned child result plus a fresh exact album-and-item
+still requires the child result plus a fresh exact album-and-item
 metadata postcondition. Optional pipeline purge remains last, and
 Plex/Jellyfin notification still waits until the destructive locks are
 released.
@@ -604,21 +694,31 @@ curl -s "http://192.168.1.35:5200/ws/2/release-group/RGID?inc=releases&fmt=json"
 
 **Newly seeded releases**: If you seed a release on upstream musicbrainz.org, it won't appear in the local mirror until the next daily replication. Use `--upstream` flag on the harness to query upstream directly for fresh seeds.
 
-## Reimporting / Re-tagging
+## Retagging, moving, and catalog-only removal
 
-To change an album's match (e.g., wrong edition, want a different MB release):
+These are librarian decisions, not acquisition-history rewrites. Stop the
+importer, resolve and inspect the exact Beets album primary key, back up the
+catalog, and use the plain-`beet` exact-ID forms above. A release-identity retag
+may make the old requested pressing render as Captured plus Missing and the new
+held identity as Untracked; that is truthful. Do not merge the pressings in
+Cratedigger or change the old request's durable proof.
+
+For a release-identity retag, use the admitted JSON harness—not raw
+`beet import`—so the operator selects the exact candidate ID and inspects the
+match. With the importer stopped and the exact album path verified:
 
 ```bash
-# DON'T do this:
-beet remove -d ...          # Deletes files!
-beet remove ... && reimport # Loses files if reimport fails
-
-# DO this — re-tag in place:
-printf '{"action": "apply", "candidate_id": "NEW-MBID"}\n{"action": "merge"}\n' | \
-  ./harness/run_beets_harness.sh --search-id "NEW-MBID" --noincremental "/mnt/virtio/Music/Beets/Artist/Year - Album"
+printf '{"action":"apply","candidate_id":"NEW-MBID"}\n{"action":"merge"}\n' | \
+  ./harness/run_beets_harness.sh \
+    --search-id "NEW-MBID" --noincremental "/exact/current/album/path"
 ```
 
-The reimport detects that files are already in the library directory and updates the DB entry in place. With `move: true`, files get renamed if the new metadata changes the path template.
+For a known metadata-field edit, use exact-ID `beet modify -a -M -W` so the
+initial edit neither moves files nor writes tags; write only after inspection.
+Preview any resulting path change with
+`beet move -p -a 'id:<pk>'` before applying the exact move. For a catalog-only
+removal, use `beet remove -a 'id:<pk>'`; never add `-d`. Resume automation only
+after the harness/operator command has exited and the standalone checker passes.
 
 ## Audio Health & Validation
 
@@ -666,22 +766,26 @@ Currently NOT enabled. The `check_on_import` option triggers interactive prompts
 
 ## Deploying Beets Config Changes
 
-Beets config is module-rendered from THIS repo. The cycle is the normal
-cratedigger deploy (`.claude/rules/deploy.md` / the `/deploy` command):
-change `nix/module.nix` (fixed literals) or the wrapper's option values
-(tunables), push, flake-bump nixosconfig, `fleet-update` on doc2.
+Beets config belongs to the deployment, not this module. Change the owning
+immutable config and fixed-schema token delivery, keep all six runtime fields
+aligned, restart the guarded Cratedigger applications after config or token
+rotation, and run the standalone checker before releasing automation. In the
+homelab this is a signed nixosconfig change followed by the normal fleet
+deployment; a conventional service or container owes the equivalent atomic
+config replacement, readiness, restart, and checker evidence.
 
 ```bash
 # Verify after deploy
-ssh doc2 'cat /var/lib/cratedigger/beets/config.yaml'   # rendered config
-ssh doc2 'cratedigger-beet config >/dev/null && echo OK' # loads cleanly
-ssh doc2 'cratedigger-beet version'                      # pinned beets + all 15 plugins
+ssh doc2 'cratedigger-check-beets-config --role importer'
+ssh doc2 'beet config >/dev/null && echo OK'             # same operator BEETSDIR
+ssh doc2 'beet version'                                  # deployment-owned package
 ```
 
-**IMPORTANT**: Never edit the rendered `config.yaml` directly — the next
-service start overwrites it (atomic mv in preStart). The moduleVm check
-asserts the load-bearing invariants (duplicate_keys nesting, plugin list)
-on every `nix flake check`.
+Never edit the effective config or token include in place. Replace and deploy
+them through their owner so restart triggers and readiness edges run. The
+module VM asserts that the external configuration is immutable, the runtime
+contract is admitted intrinsically at application startup, and importer-only
+state write capability remains separate from config storage.
 
 ## Troubleshooting
 

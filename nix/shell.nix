@@ -18,7 +18,8 @@
   ) {} }:
 
 let
-  cratedigger = import ./package.nix { inherit pkgs; };
+  beetsPackage = import ./beets.nix { inherit pkgs; };
+  cratedigger = import ./package.nix { inherit pkgs beetsPackage; };
   ruff = import ./ruff.nix { inherit pkgs; };
 
   # Dev env: production deps + dev-only tooling. ``ps.beets`` was
@@ -88,8 +89,8 @@ pkgs.mkShell {
       || ln -sfn ${pkgs.path} "$PWD/.nixpkgs-src"
 
     # The harness wrapper (harness/run_beets_harness.sh) execs this
-    # interpreter. In production the NixOS module renders [Beets] python
-    # into config.ini and beets_subprocess_env() exports it; in the dev
+    # interpreter. In production the guarded [Beets] runtime contract names
+    # the deployment-supplied interpreter and beets_subprocess_env() exports it; in the dev
     # shell the test env's python IS the pinned beets env, so export it
     # directly. No Home Manager fallback exists (tier-2 plan R6).
     export CRATEDIGGER_BEETS_PYTHON="${testPythonEnv}/bin/python3"

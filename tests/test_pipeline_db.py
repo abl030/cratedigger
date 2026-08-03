@@ -50,6 +50,7 @@ from lib.pipeline_db import (
     PersistedDistance,
     PersistedTrack,
     PersistedYoutubeRow,
+    PipelineDB,
     SupersedeRaceError,
     TransferLedgerRow,
 )
@@ -14064,6 +14065,237 @@ class TestGetPipelineOverlay(unittest.TestCase):
         self.assertIsNone(row["target_format"])
         self.assertEqual(row["min_bitrate"], 900)
 
+    def test_matches_and_keys_exact_mb_and_discogs_release_identities(self):
+        fake = FakePipelineDB()
+        mbid = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        discogs_id = "456789"
+        request_ids: dict[int, tuple[int, int]] = {}
+        for db in (self.db, fake):
+            mb_request_id = db.add_request(
+                mb_release_id=mbid,
+                artist_name="Identity Artist",
+                album_title="MusicBrainz pressing",
+                source="request",
+            )
+            discogs_request_id = db.add_request(
+                mb_release_id=None,
+                discogs_release_id=discogs_id,
+                artist_name="Identity Artist",
+                album_title="Discogs pressing",
+                source="request",
+            )
+            request_ids[id(db)] = (mb_request_id, discogs_request_id)
+
+        requested = [mbid, discogs_id, discogs_id]
+        real = self.db.get_pipeline_overlay(requested)
+        mirrored = fake.get_pipeline_overlay(requested)
+
+        self.assertEqual(set(real), {mbid, discogs_id})
+        self.assertEqual(set(mirrored), {mbid, discogs_id})
+        self.assertEqual(real[mbid]["id"], request_ids[id(self.db)][0])
+        self.assertEqual(real[discogs_id]["id"], request_ids[id(self.db)][1])
+        self.assertEqual(mirrored[mbid]["id"], request_ids[id(fake)][0])
+        self.assertEqual(mirrored[discogs_id]["id"], request_ids[id(fake)][1])
+
+        strip_id = lambda rows: {
+            release_id: {
+                key: value for key, value in row.items() if key != "id"
+            }
+            for release_id, row in rows.items()
+        }
+        self.assertEqual(strip_id(real), strip_id(mirrored))
+
+    def test_numeric_overlay_supports_legacy_layout_and_prefers_dedicated_column(self):
+        fake = FakePipelineDB()
+        ids_by_backend: dict[int, tuple[int, int, int]] = {}
+        for db in (self.db, fake):
+            legacy_only = db.add_request(
+                mb_release_id="456781",
+                artist_name="Legacy Discogs Artist",
+                album_title="Legacy only",
+                source="request",
+            )
+            legacy_collision = db.add_request(
+                mb_release_id="456782",
+                artist_name="Legacy Discogs Artist",
+                album_title="Legacy collision",
+                source="request",
+            )
+            dedicated = db.add_request(
+                mb_release_id=None,
+                discogs_release_id="456782",
+                artist_name="Modern Discogs Artist",
+                album_title="Dedicated column",
+                source="request",
+            )
+            ids_by_backend[id(db)] = (
+                legacy_only,
+                legacy_collision,
+                dedicated,
+            )
+
+        for db in (self.db, fake):
+            with self.subTest(backend=type(db).__name__):
+                rows = db.get_pipeline_overlay(["456781", "456782"])
+                expected = ids_by_backend[id(db)]
+                self.assertEqual(rows["456781"]["id"], expected[0])
+                self.assertNotEqual(rows["456782"]["id"], expected[1])
+                self.assertEqual(rows["456782"]["id"], expected[2])
+
+    @staticmethod
+    def _seed_import_job_history(
+        db: PipelineDB | FakePipelineDB,
+        *,
+        request_id: int,
+        job_type: str,
+        status: str,
+    ) -> None:
+        if isinstance(db, FakePipelineDB):
+            job = db._append_import_job(
+                "automation_import",
+                request_id=request_id,
+                dedupe_key=None,
+                payload={},
+                message=None,
+            )
+            row = next(
+                candidate
+                for candidate in db._import_jobs
+                if candidate["id"] == job.id
+            )
+            row["job_type"] = job_type
+            row["status"] = status
+            return
+        db._execute(
+            """
+            INSERT INTO import_jobs (job_type, status, request_id, payload)
+            VALUES (%s, %s, %s, '{}'::jsonb)
+            """,
+            (job_type, status, request_id),
+        )
+
+    def _seed_capture_history_world(
+        self, db: PipelineDB | FakePipelineDB,
+    ) -> list[str]:
+        cases = [
+            ("legacy-imported", "imported", None, None, True),
+            ("download-success", "wanted", "success", None, True),
+            ("download-force", "wanted", "force_import", None, True),
+            ("download-manual", "wanted", "manual_import", None, True),
+            ("job-automation", "wanted", None, ("automation_import", "completed"), True),
+            ("job-force", "wanted", None, ("force_import", "completed"), True),
+            ("job-manual", "wanted", None, ("manual_import", "completed"), True),
+            ("job-youtube", "wanted", None, ("youtube_import", "completed"), True),
+            ("no-witness", "wanted", None, None, False),
+            ("download-rejected", "wanted", "rejected", None, False),
+            ("download-youtube", "wanted", "youtube_success", None, False),
+            ("job-failed", "wanted", None, ("force_import", "failed"), False),
+            ("job-queued", "wanted", None, ("youtube_import", "queued"), False),
+        ]
+        mbids: list[str] = []
+        for suffix, status, download_outcome, job, _expected in cases:
+            mbid = f"capture-{suffix}"
+            request_id = db.add_request(
+                mb_release_id=mbid,
+                artist_name="Capture Matrix Artist",
+                album_title=suffix,
+                source="request",
+                status=status,
+            )
+            if download_outcome is not None:
+                db.log_download(request_id, outcome=download_outcome)
+            if job is not None:
+                self._seed_import_job_history(
+                    db,
+                    request_id=request_id,
+                    job_type=job[0],
+                    status=job[1],
+                )
+            mbids.append(mbid)
+        return mbids
+
+    def test_capture_history_witness_truth_table(self):
+        mbids = self._seed_capture_history_world(self.db)
+
+        overlay = self.db.get_pipeline_overlay(mbids)
+
+        expected = {
+            "capture-legacy-imported": True,
+            "capture-download-success": True,
+            "capture-download-force": True,
+            "capture-download-manual": True,
+            "capture-job-automation": True,
+            "capture-job-force": True,
+            "capture-job-manual": True,
+            "capture-job-youtube": True,
+            "capture-no-witness": False,
+            "capture-download-rejected": False,
+            "capture-download-youtube": False,
+            "capture-job-failed": False,
+            "capture-job-queued": False,
+        }
+        self.assertEqual(
+            {mbid: row["has_captured_history"] for mbid, row in overlay.items()},
+            expected,
+        )
+
+    def test_status_only_fallback_expires_on_reopen_but_witness_survives(self):
+        fallback_id = self.db.add_request(
+            mb_release_id="capture-reopen-fallback",
+            artist_name="Capture Reopen Artist",
+            album_title="Status only",
+            source="request",
+            status="imported",
+        )
+        witnessed_id = self.db.add_request(
+            mb_release_id="capture-reopen-witnessed",
+            artist_name="Capture Reopen Artist",
+            album_title="Witnessed",
+            source="request",
+            status="imported",
+        )
+        self.db.log_download(witnessed_id, outcome="success")
+
+        before = self.db.get_pipeline_overlay([
+            "capture-reopen-fallback", "capture-reopen-witnessed",
+        ])
+        self.assertTrue(before["capture-reopen-fallback"]["has_captured_history"])
+        self.assertTrue(before["capture-reopen-witnessed"]["has_captured_history"])
+
+        self.assertTrue(self.db.update_status(
+            fallback_id, "wanted", expected_status="imported"))
+        self.assertTrue(self.db.update_status(
+            witnessed_id, "wanted", expected_status="imported"))
+        after = self.db.get_pipeline_overlay([
+            "capture-reopen-fallback", "capture-reopen-witnessed",
+        ])
+
+        self.assertFalse(after["capture-reopen-fallback"]["has_captured_history"])
+        self.assertTrue(after["capture-reopen-witnessed"]["has_captured_history"])
+
+    def test_capture_and_evidence_fake_parity_on_identical_state(self):
+        fake = FakePipelineDB()
+        real_mbids = self._seed_capture_history_world(self.db)
+        fake_mbids = self._seed_capture_history_world(fake)
+        self.assertEqual(real_mbids, fake_mbids)
+
+        def facts(
+            rows: Mapping[str, Mapping[str, object]],
+        ) -> dict[str, tuple[object, object, object]]:
+            return {
+                mbid: (
+                    row["has_captured_history"],
+                    row["verified_lossless"],
+                    row["provisional_lossless"],
+                )
+                for mbid, row in rows.items()
+            }
+
+        self.assertEqual(
+            facts(self.db.get_pipeline_overlay(real_mbids)),
+            facts(fake.get_pipeline_overlay(fake_mbids)),
+        )
+
     def _seed_identity_state(self, db) -> None:
         """Seed one verified, one provisional, one plain request."""
         from lib.quality import AlbumQualityV0Metric, VerifiedLosslessProof
@@ -14173,6 +14405,210 @@ class TestGetPipelineOverlay(unittest.TestCase):
             "FakePipelineDB's overlay mirror drifted from the real SQL — "
             "fix the fake (tests/fakes.py), never the production SQL, "
             "unless the SQL change is the point of your PR.")
+
+
+@requires_postgres
+class TestListLibraryRequestCandidates(unittest.TestCase):
+    def setUp(self):
+        self.db = make_db()
+
+    def tearDown(self):
+        self.db.close()
+
+    def _seed_cardinality_world(self, db: PipelineDB | FakePipelineDB) -> None:
+        db.add_request(
+            discogs_release_id="456789",
+            artist_name="Candidate Artist",
+            album_title="Modern one",
+            source="request",
+        )
+        db.add_request(
+            discogs_release_id="456789",
+            artist_name="Candidate Artist",
+            album_title="Modern two",
+            source="request",
+        )
+        db.add_request(
+            mb_release_id="456789",
+            artist_name="Candidate Artist",
+            album_title="Legacy",
+            source="request",
+        )
+        db.add_request(
+            mb_release_id="not-a-release-id",
+            discogs_release_id="456789",
+            artist_name="Candidate Artist",
+            album_title="Conflicting",
+            source="request",
+        )
+
+    def test_returns_every_strict_modern_and_legacy_discogs_candidate(self):
+        self._seed_cardinality_world(self.db)
+
+        rows = self.db.list_library_request_candidates(["456789"])
+
+        self.assertEqual(
+            [row["album_title"] for row in rows],
+            ["Modern one", "Modern two", "Legacy"],
+        )
+        self.assertEqual(len({row["id"] for row in rows}), 3)
+
+    def test_fake_parity_preserves_candidate_cardinality_and_projection(self):
+        fake = FakePipelineDB()
+        self._seed_cardinality_world(self.db)
+        self._seed_cardinality_world(fake)
+
+        def facts(
+            rows: Sequence[Mapping[str, object]],
+        ) -> list[tuple[object, ...]]:
+            return [
+                (
+                    row["album_title"],
+                    row["mb_release_id"],
+                    row["discogs_release_id"],
+                    row["has_captured_history"],
+                    row["verified_lossless"],
+                    row["provisional_lossless"],
+                )
+                for row in rows
+            ]
+
+        self.assertEqual(
+            facts(self.db.list_library_request_candidates(["456789"])),
+            facts(fake.list_library_request_candidates(["456789"])),
+        )
+
+
+@requires_postgres
+class TestListRequestsByArtistProjection(unittest.TestCase):
+    def setUp(self):
+        self.db = make_db()
+
+    def tearDown(self):
+        self.db.close()
+
+    def _link_evidence(
+        self,
+        db: PipelineDB | FakePipelineDB,
+        request_id: int,
+        mbid: str,
+        *,
+        verified: bool,
+    ) -> None:
+        from lib.quality import AlbumQualityV0Metric, VerifiedLosslessProof
+
+        evidence = make_album_quality_evidence(
+            mb_release_id=mbid,
+            source_path=f"/library/{mbid}",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=245,
+                avg_bitrate_kbps=256,
+                median_bitrate_kbps=252,
+                format="MP3",
+            ),
+            v0_metric=(
+                None if verified else AlbumQualityV0Metric(
+                    subject="source",
+                    provenance="carried",
+                    avg_bitrate_kbps=251,
+                    min_bitrate_kbps=228,
+                )
+            ),
+            verified_lossless_proof=(
+                VerifiedLosslessProof(
+                    provenance="carried",
+                    source="flac",
+                    classifier="spectral_verified_lossless",
+                )
+                if verified else None
+            ),
+        )
+        db.upsert_album_quality_evidence(evidence)
+        stored = db.find_album_quality_evidence(
+            mb_release_id=mbid,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        db.set_request_current_evidence(request_id, stored.id)
+
+    def _seed_artist_projection_world(
+        self, db: PipelineDB | FakePipelineDB,
+    ) -> None:
+        verified_id = db.add_request(
+            mb_release_id="artist-projection-verified",
+            artist_name="Projection Artist",
+            album_title="Verified",
+            source="request",
+            status="wanted",
+        )
+        db.log_download(verified_id, outcome="success")
+        self._link_evidence(
+            db, verified_id, "artist-projection-verified", verified=True)
+
+        provisional_id = db.add_request(
+            discogs_release_id="456789",
+            artist_name="Projection Artist",
+            album_title="Provisional",
+            source="request",
+            status="imported",
+        )
+        self._link_evidence(
+            db, provisional_id, "456789", verified=False)
+
+        evidence_only_id = db.add_request(
+            mb_release_id="artist-projection-evidence-only",
+            artist_name="Projection Artist",
+            album_title="Evidence only",
+            source="request",
+            status="wanted",
+        )
+        self._link_evidence(
+            db,
+            evidence_only_id,
+            "artist-projection-evidence-only",
+            verified=True,
+        )
+
+    def test_projects_capture_and_linked_evidence_without_duplicate_requests(self):
+        self._seed_artist_projection_world(self.db)
+
+        rows = self.db.list_requests_by_artist("Projection Artist")
+        by_title = {row["album_title"]: row for row in rows}
+
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(len({row["id"] for row in rows}), 3)
+        self.assertTrue(by_title["Verified"]["has_captured_history"])
+        self.assertTrue(by_title["Verified"]["verified_lossless"])
+        self.assertFalse(by_title["Verified"]["provisional_lossless"])
+        self.assertEqual(by_title["Provisional"]["discogs_release_id"], "456789")
+        self.assertTrue(by_title["Provisional"]["has_captured_history"])
+        self.assertFalse(by_title["Provisional"]["verified_lossless"])
+        self.assertTrue(by_title["Provisional"]["provisional_lossless"])
+        self.assertFalse(by_title["Evidence only"]["has_captured_history"])
+        self.assertTrue(by_title["Evidence only"]["verified_lossless"])
+        self.assertFalse(by_title["Evidence only"]["provisional_lossless"])
+
+    def test_artist_projection_fake_parity(self):
+        fake = FakePipelineDB()
+        self._seed_artist_projection_world(self.db)
+        self._seed_artist_projection_world(fake)
+
+        def facts(rows: Sequence[Mapping[str, object]]) -> dict[str, tuple[object, ...]]:
+            return {
+                str(row["album_title"]): (
+                    row["mb_release_id"],
+                    row["discogs_release_id"],
+                    row["has_captured_history"],
+                    row["verified_lossless"],
+                    row["provisional_lossless"],
+                )
+                for row in rows
+            }
+
+        self.assertEqual(
+            facts(self.db.list_requests_by_artist("Projection Artist")),
+            facts(fake.list_requests_by_artist("Projection Artist")),
+        )
 @requires_postgres
 class TestSlskdEventCursorRoundTrip(unittest.TestCase):
     """Rule A round-trip for upsert_slskd_event_cursor (issue #146)."""

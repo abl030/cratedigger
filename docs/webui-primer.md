@@ -103,7 +103,8 @@ operation.
 | `/api/import-jobs/timeline` | GET | List active queued/running/recovery-required import jobs in importer order, with server-classified display fields |
 | `/api/import-jobs/<id>` | GET | Poll a single import queue job |
 | `/api/import-jobs/<id>/recovery` | GET | Inspect read-only exact-owner recovery evidence, liveness, and cleanup progress for any import job; historical `recovery_required` rows remain readable |
-| `/api/library/artist?name=...` | GET | Albums by artist from beets library (MB vs Discogs source) |
+| `/api/library/artist?name=...` | GET | Exact live Beets albums plus independent acquisition-history, evidence, and request facts; a failed Beets read is an HTTP error, never an empty Library |
+| `/api/audit/world` | GET | Grouped read-only A/B/C ownership report with completeness and Bucket-A integrity status; unexpected defects return HTTP 503 |
 | `/api/discogs/search?q=...` | GET | Search Discogs mirror (artist or release mode via `type=` param) |
 | `/api/discogs/artist/<id>` | GET | Artist's normalized catalogue identities, including exact masterless releases (via mirror `/masters/all` + `/appearances`) |
 | `/api/discogs/master/<id>` | GET | All pressings within a Discogs master release |
@@ -136,7 +137,8 @@ operation.
   exact ID evidence only: MusicBrainz work rows match `mb_releasegroupid`,
   while an ungrouped Discogs release may match its exact release ID. Titles
   never establish ownership and a Discogs master never inherits ownership
-  from one of its child pressings. Missing = ordinary own-work
+  from one of its child pressings. The artist page's broader Missing catalogue
+  section = ordinary own-work
   release groups the beets library doesn't hold; In flight =
   requests currently `downloading` or processor-owned `processing`. `wanted`
   is ambient after the full-library
@@ -155,7 +157,9 @@ operation.
   breakdowns inside expanded release groups (MB artists only). Expanding an
   in-library pressing's detail offers a lazy **Library detail** panel (path,
   download history, status / min-bitrate / intent controls) fetched from
-  `/api/beets/album/<id>`.
+  `/api/beets/album/<id>`. That catalogue section is distinct from the
+  per-release **Missing** badge, which means one exact captured pressing is not
+  currently held.
   Cross-source pairing is conservative: normalized titles and appearance
   provenance must agree; two known provenance sets must overlap while unknown
   evidence is not treated as a conflict; known Album/EP/Single sets must
@@ -202,14 +206,28 @@ operation.
   - The artist page opens only Albums inside In library/Missing. Other releases
     and all of its musical type buckets stay collapsed even when a row is
     exactly owned or requested.
-  - Releases already in pipeline DB or beets library are badged
-  - Tracked installs carry a quality-identity chip next to the library
-    badge (`web/js/badges.js`): green `verified` when the request's
-    current evidence holds a verified-lossless proof (search complete),
-    pale-green `provisional` when the install is an unverified
-    lossless-source conversion still hunting a verified copy. Derived
-    by `PipelineDB.get_pipeline_overlay` from the linked evidence row —
-    requests without current evidence show no chip.
+  - The shared renderer presents four independent fact families. Current
+    presence comes from a successful exact-identity Beets read (`in library`
+    plus current quality). Acquisition history is **Captured** when a durable
+    successful download/import witness exists, with only the accepted current
+    `imported` legacy fallback. **Missing** means Captured but not currently
+    held. **Untracked** means currently held with no exact pipeline request.
+    **Replaced** exposes a frozen superseded request independently from all
+    three facts. Wanted, Downloading, Processing, and Unsearchable remain
+    acquisition-lifecycle badges; Captured replaces the redundant Imported
+    pill. Tracking is the independent Untracked fact.
+  - Linked evidence adds **Verified Lossless** when the acquired source proof
+    is terminal, or `provisional` for an unverified lossless-source conversion
+    still hunting a verified copy. Retags, path changes, fingerprint drift,
+    and disappearance or deletion of the library holding do not erase carried
+    proof or Captured history while the request survives. Deleting the pipeline
+    request removes that request-owned projection and its cascaded witnesses.
+    There is no
+    identity-drift, sibling-inference, or “Holding unknown” badge: a sibling
+    retag truthfully renders the old request Captured plus Missing and the new
+    exact held identity Untracked.
+  - A failed Beets read logs loudly and returns an HTTP/API error without
+    changing request state. It never fabricates Missing or Untracked badges.
   - Click release metadata to open MB release page in new tab
 - **Add button** — adds release to pipeline DB (same logic as `pipeline-cli add`)
 - **Pipeline tab** — operational Dashboard + Long Tail views. The old global
@@ -616,9 +634,10 @@ For deliberate insecure operation, omit `basicAuthFile` and set only
 loopback gateway, Unix socket, header isolation, and same-origin mutation rules
 remain active.
 
-The web service opens `beets.config.library` together with
-`beets.config.directory` through the module-rendered `[Beets]` runtime
-configuration. The paired `--beets-db` and `--beets-directory` flags on
+The web service observes the externally owned catalog/root pair admitted as
+`beets.runtime.expectedLibrary` and `beets.runtime.expectedDirectory` through
+the guarded `[Beets]` runtime contract. The paired `--beets-db` and
+`--beets-directory` flags on
 `web/server.py` remain explicit development/test overrides only; the NixOS
 service passes neither.
 

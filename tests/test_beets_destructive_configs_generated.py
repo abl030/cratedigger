@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import re
 import subprocess as sp
 import sys
 import tempfile
@@ -34,14 +33,15 @@ from lib.destructive_release_service import (
     BanSourceSuccess,
     ban_source,
 )
+from tests.beets_world import extract_consumer_beets_world_config
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 
 REPO = Path(__file__).resolve().parent.parent
-MODULE_TEXT = (REPO / "nix" / "module.nix").read_text(encoding="utf-8")
-PLUGIN_MATCH = re.search(r'plugins = "([^"]+)";', MODULE_TEXT)
-assert PLUGIN_MATCH is not None
-PRODUCTION_PLUGINS = PLUGIN_MATCH.group(1)
+# The consumer deployment owns the plugin profile. The destructive harness
+# extracts that profile from its producer instead of mirroring a hand-written
+# list that could drift from the deployment world it claims to exercise.
+CONSUMER_BEETS_WORLD_CONFIG = extract_consumer_beets_world_config(REPO)
 
 MB_RELEASE = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 MB_SIBLING = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
@@ -58,10 +58,16 @@ class ConfigProfile:
 
     @property
     def expected_failure(self) -> bool:
-        return self.secret in {"unreadable", "invalid_utf8"} or (
-            self.missing_plugin
-            and not (self.plugin_override and self.secret != "placeholder")
+        active_plugin_uses_secret = self.base == "production"
+        secret_breaks_active_plugin = (
+            active_plugin_uses_secret
+            and self.secret in {"unreadable", "invalid_utf8"}
         )
+        missing_plugin_survives_effective_merge = (
+            self.missing_plugin
+            and not (self.plugin_override and self.secret == "readable")
+        )
+        return secret_breaks_active_plugin or missing_plugin_survives_effective_merge
 
 
 PROFILES = (
@@ -70,6 +76,10 @@ PROFILES = (
     ConfigProfile("production", "readable"),
     ConfigProfile("production", "unreadable"),
     ConfigProfile("production", "invalid_utf8"),
+    # Startup owns declared-file enforcement. The child follows Beets' native
+    # behavior: an unreadable include unused by any active plugin is suppressed
+    # rather than revalidated by Cratedigger.
+    ConfigProfile("minimal", "unreadable"),
     ConfigProfile("minimal", "placeholder", importsource=True),
     ConfigProfile("minimal", "placeholder", playlist=True),
     ConfigProfile("minimal", "placeholder", missing_plugin=True),
@@ -126,19 +136,19 @@ def assert_real_beets_contract(observation: RealBeetsObservation) -> None:
 
     if observation.expected_config_failure:
         if observation.cli_failure_reason != "configuration_error":
-            raise AssertionError("invalid Beets config was not rejected by preflight")
+            raise AssertionError("ordinary Beets config/plugin failure was not surfaced")
         if not observation.cli_album_present or observation.cli_items_present == 0:
-            raise AssertionError("Ban Source config rejection mutated Beets metadata")
+            raise AssertionError("Ban Source runtime failure mutated Beets metadata")
         if observation.cli_files_present != observation.track_count:
-            raise AssertionError("Ban Source config rejection mutated library files")
+            raise AssertionError("Ban Source runtime failure mutated library files")
         if not isinstance(observation.child_outcome, BeetsDeleteFailed):
-            raise AssertionError("child config rejection was promoted to completion")
+            raise AssertionError("child runtime failure was promoted to completion")
         if observation.child_outcome.reason != "configuration_error":
-            raise AssertionError("child config rejection lost its typed reason")
+            raise AssertionError("child runtime failure lost its typed reason")
         if not observation.child_album_present or observation.child_items_present == 0:
-            raise AssertionError("child config rejection mutated Beets metadata")
+            raise AssertionError("child runtime failure mutated Beets metadata")
         if observation.child_files_present != observation.track_count:
-            raise AssertionError("child config rejection mutated library files")
+            raise AssertionError("child runtime failure mutated library files")
         return
 
     if observation.cli_failure_reason is not None:
@@ -166,8 +176,10 @@ def _profile_config(
     db_path: Path,
     config_dir: Path,
 ) -> None:
-    plugin_names = (
-        PRODUCTION_PLUGINS.split() if profile.base == "production" else []
+    plugin_names: list[str] = (
+        list(CONSUMER_BEETS_WORLD_CONFIG.deployment_plugins)
+        if profile.base == "production"
+        else []
     )
     if profile.importsource:
         plugin_names.append("importsource")
@@ -492,7 +504,7 @@ class TestGeneratedRealBeetsConfigMatrix(unittest.TestCase):
             exercise_real_beets_world(profile, track_count, source),
         )
 
-    def test_checker_rejects_stdout_prefix_and_false_completion(self) -> None:
+    def test_invariant_rejects_stdout_prefix_and_false_completion(self) -> None:
         valid_profile = ConfigProfile("minimal", "placeholder")
         valid = exercise_real_beets_world(valid_profile, 1, "mb")
         with self.assertRaisesRegex(AssertionError, "canonical outcome frame"):
@@ -500,7 +512,7 @@ class TestGeneratedRealBeetsConfigMatrix(unittest.TestCase):
                 valid,
                 child_stdout=b"plugin diagnostic\n" + valid.child_stdout,
             ))
-        with self.assertRaisesRegex(AssertionError, "config rejection was promoted"):
+        with self.assertRaisesRegex(AssertionError, "runtime failure was promoted"):
             failed = exercise_real_beets_world(
                 ConfigProfile("production", "unreadable"), 1, "mb",
             )

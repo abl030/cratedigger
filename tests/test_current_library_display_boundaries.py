@@ -10,13 +10,14 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from lib.beets_db import CurrentBeetsResolution
+from lib.beets_db import BeetsDB, CurrentBeetsResolution
 from lib.release_identity import ReleaseIdentity
 from scripts.pipeline_cli.show import cmd_show
 from tests.beets_world import BeetsWorld, BeetsWorldRelease
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_request_row
 from tests.web._harness import _FakeDbWebServerCase
+from web.library_artist_service import build_library_artist_rows
 
 REPO = Path(__file__).resolve().parent.parent
 MB_TARGET = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -64,6 +65,15 @@ class _FailingResolverBeets(FakeBeetsDB):
     ) -> CurrentBeetsResolution:
         self.resolve_current_release_calls.append(identity)
         raise OSError("synthetic Beets read failure")
+
+
+class _DefectiveResolverBeets(FakeBeetsDB):
+    def resolve_current_release(
+        self,
+        identity: ReleaseIdentity,
+    ) -> CurrentBeetsResolution:
+        self.resolve_current_release_calls.append(identity)
+        raise RuntimeError("synthetic resolver defect")
 
 
 def _fail_open_beets(
@@ -258,6 +268,50 @@ class TestCurrentLibraryCliRealBeets(unittest.TestCase):
                 )
 
 
+class TestLibraryFactsRealBeets(unittest.TestCase):
+    def test_sibling_retag_is_old_captured_missing_plus_new_held_untracked(
+        self,
+    ) -> None:
+        with BeetsWorld(REPO) as world:
+            world.import_release(_release(MB_SIBLING, suffix="retagged"))
+            with BeetsDB(
+                str(world.library_db),
+                library_root=str(world.library_root),
+            ) as beets:
+                library_albums = beets.get_albums_by_artist(
+                    "Boundary Archivist"
+                )
+
+            rows = build_library_artist_rows(
+                library_albums=library_albums,
+                pipeline_rows=[make_request_row(
+                    id=70,
+                    artist_name="Boundary Archivist",
+                    album_title="Old exact pressing",
+                    mb_release_id=MB_TARGET,
+                    status="wanted",
+                    has_captured_history=True,
+                    verified_lossless=True,
+                    provisional_lossless=False,
+                )],
+                track_counts={70: 2},
+                rank_fn=lambda _format, _bitrate: "lossless",
+            )
+
+        by_identity = {row.mb_albumid: row for row in rows}
+        old = by_identity[MB_TARGET]
+        self.assertFalse(old.in_library)
+        self.assertTrue(old.has_captured_history)
+        self.assertTrue(old.pipeline_verified_lossless)
+        self.assertEqual(old.pipeline_status, "wanted")
+
+        sibling = by_identity[MB_SIBLING]
+        self.assertTrue(sibling.in_library)
+        self.assertIsNone(sibling.pipeline_id)
+        self.assertFalse(sibling.has_captured_history)
+        self.assertFalse(sibling.pipeline_verified_lossless)
+
+
 class TestCurrentLibraryApiRealBeets(_FakeDbWebServerCase):
     def _get_detail(self, world: BeetsWorld, request_id: int) -> tuple[int, dict]:
         import web.server as srv
@@ -334,7 +388,7 @@ class TestCurrentLibraryApiRealBeets(_FakeDbWebServerCase):
         self.assertEqual(len(ambiguous["current_library"]["album_ids"]), 2)
         self.assertNotIn("beets_tracks", ambiguous)
 
-    def test_api_open_and_resolver_failures_are_typed_unavailable(self) -> None:
+    def test_api_open_and_resolver_failures_return_503_without_a_row(self) -> None:
         import web.server as srv
 
         self.db.seed_request(_request(40, MB_TARGET))
@@ -344,34 +398,50 @@ class TestCurrentLibraryApiRealBeets(_FakeDbWebServerCase):
             srv.beets_db_path = invalid_database_path
             srv.beets_library_root = invalid_database_path
             try:
-                status, open_failure = self._get("/api/pipeline/40")
+                with self.assertLogs("web.routes.pipeline", level="ERROR"):
+                    status, open_failure = self._get("/api/pipeline/40")
             finally:
                 srv._beets, srv.beets_db_path, srv.beets_library_root = prior
 
-        self.assertEqual(status, 200)
-        self.assertEqual(open_failure["current_library"], {
-            "state": "unavailable",
-            "reason": "beets_unavailable",
-            "manual_review": True,
+        self.assertEqual(status, 503)
+        self.assertEqual(open_failure, {
+            "error": "Current Beets authority is unavailable; retry later.",
         })
-        self.assertNotIn("beets_tracks", open_failure)
 
         prior_beets = srv._beets
         failing_beets = _FailingResolverBeets()
         srv._beets = failing_beets
         try:
-            status, read_failure = self._get("/api/pipeline/40")
+            with self.assertLogs("web.routes.pipeline", level="ERROR"):
+                status, read_failure = self._get("/api/pipeline/40")
         finally:
             srv._beets = prior_beets
 
-        self.assertEqual(status, 200)
-        self.assertEqual(read_failure["current_library"], {
-            "state": "unavailable",
-            "reason": "beets_unavailable",
-            "manual_review": True,
+        self.assertEqual(status, 503)
+        self.assertEqual(read_failure, {
+            "error": "Current Beets authority is unavailable; retry later.",
         })
-        self.assertNotIn("beets_tracks", read_failure)
         self.assertEqual(len(failing_beets.resolve_current_release_calls), 1)
+        self.assertEqual(self.db.request(40)["status"], "imported")
+
+    def test_api_resolver_defects_remain_internal_errors(self) -> None:
+        import web.server as srv
+
+        self.db.seed_request(_request(41, MB_TARGET))
+        prior_beets = srv._beets
+        defective_beets = _DefectiveResolverBeets()
+        srv._beets = defective_beets
+        try:
+            with self.assertLogs("cratedigger-web", level="ERROR"):
+                status, failure = self._get("/api/pipeline/41")
+        finally:
+            srv._beets = prior_beets
+
+        self.assertEqual(status, 500)
+        self.assertEqual(failure, {"error": "Internal server error"})
+        self.assertNotIn("current_library", failure)
+        self.assertEqual(len(defective_beets.resolve_current_release_calls), 1)
+        self.assertEqual(self.db.request(41)["status"], "imported")
 
     def test_api_projects_one_snapshot_for_every_request_layout(self) -> None:
         import web.server as srv

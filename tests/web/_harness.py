@@ -20,7 +20,7 @@ from urllib.request import Request, urlopen
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from tests.fakes import FakePipelineDB
+from tests.fakes import FakeBeetsDB, FakePipelineDB
 from web.request_security import (
     BROWSER_CHANNEL,
     CHANNEL_HEADER,
@@ -153,6 +153,9 @@ class _FakeDbWebServerCase(_WebServerCase):
         patcher = patch.object(srv, "db", self.db)
         patcher.start()
         self.addCleanup(patcher.stop)
+        previous_beets = srv._beets
+        srv._beets = FakeBeetsDB()
+        self.addCleanup(setattr, srv, "_beets", previous_beets)
 
 
 def _fresh_triage_runner(case: unittest.TestCase):
@@ -180,6 +183,7 @@ def _make_server():
 
     srv.db = FakePipelineDB()
     srv.beets_db_path = None  # No beets DB in tests
+    srv._beets = FakeBeetsDB()
     srv.canonical_origin = CANONICAL_ORIGIN
 
     # Mirror production: ThreadingHTTPServer + the same Handler.

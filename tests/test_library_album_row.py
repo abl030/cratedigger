@@ -7,6 +7,8 @@ from datetime import UTC, datetime
 
 import msgspec
 
+from lib.release_identity import ReleaseIdentity
+from tests.helpers import make_request_row
 from web.library_album_row import LibraryAlbumRow
 
 
@@ -35,6 +37,9 @@ def _valid_row_dict(**overrides: object) -> dict[str, object]:
         "processing_owner": None,
         "upgrade_queued": False,
         "library_rank": "transparent",
+        "has_captured_history": False,
+        "pipeline_verified_lossless": False,
+        "pipeline_provisional": False,
     }
     row.update(overrides)
     return row
@@ -102,6 +107,9 @@ class TestLibraryAlbumRow(unittest.TestCase):
         self.assertIsNone(row.pipeline_id)
         self.assertFalse(row.upgrade_queued)
         self.assertEqual(row.library_rank, "transparent")
+        self.assertFalse(row.has_captured_history)
+        self.assertFalse(row.pipeline_verified_lossless)
+        self.assertFalse(row.pipeline_provisional)
 
     def test_from_beets_album_with_pipeline_applies_overlay(self) -> None:
         row = LibraryAlbumRow.from_beets_album_with_pipeline(
@@ -133,7 +141,14 @@ class TestLibraryAlbumRow(unittest.TestCase):
                 },
                 "search_filetype_override": None,
                 "target_format": None,
+                "has_captured_history": True,
+                "verified_lossless": True,
+                "provisional_lossless": False,
             },
+            attached_identity=ReleaseIdentity(
+                source="musicbrainz",
+                release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            ),
             rank_fn=lambda _fmt, _kbps: "transparent",
         )
 
@@ -143,6 +158,49 @@ class TestLibraryAlbumRow(unittest.TestCase):
         assert owner is not None
         self.assertEqual(owner.job_id, 9)
         self.assertFalse(row.upgrade_queued)
+        self.assertTrue(row.has_captured_history)
+        self.assertTrue(row.pipeline_verified_lossless)
+        self.assertFalse(row.pipeline_provisional)
+
+    def test_from_beets_album_with_pipeline_rejects_unobserved_attachment(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(ValueError, "not observed on Beets album"):
+            LibraryAlbumRow.from_beets_album_with_pipeline(
+                {
+                    "id": 7,
+                    "album": "Test Album",
+                    "artist": "Test Artist",
+                    "year": 2024,
+                    "mb_albumid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                    "discogs_albumid": "12856590",
+                    "track_count": 10,
+                    "mb_releasegroupid": None,
+                    "release_group_title": "Test Album",
+                    "added": 1773651901.0,
+                    "formats": "MP3",
+                    "min_bitrate": 320000,
+                    "avg_bitrate": 320000,
+                    "type": "album",
+                    "label": "Test Label",
+                    "country": "US",
+                },
+                pipeline_row={
+                    "id": 42,
+                    "status": "wanted",
+                    "processing_owner": None,
+                    "search_filetype_override": None,
+                    "target_format": None,
+                    "has_captured_history": False,
+                    "verified_lossless": False,
+                    "provisional_lossless": False,
+                },
+                attached_identity=ReleaseIdentity(
+                    source="discogs",
+                    release_id="12856591",
+                ),
+                rank_fn=lambda _fmt, _kbps: "transparent",
+            )
 
     def test_from_beets_album_normalizes_discogs_frontend_id(self) -> None:
         row = LibraryAlbumRow.from_beets_album(
@@ -216,6 +274,9 @@ class TestLibraryAlbumRow(unittest.TestCase):
                 "created_at": datetime(2026, 4, 1, 3, 47, 54, tzinfo=UTC),
                 "search_filetype_override": None,
                 "target_format": None,
+                "has_captured_history": True,
+                "verified_lossless": False,
+                "provisional_lossless": True,
             },
             track_count=10,
         )
@@ -223,6 +284,9 @@ class TestLibraryAlbumRow(unittest.TestCase):
         self.assertEqual(row.mb_albumid, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
         self.assertEqual(row.source, "request")
         self.assertEqual(row.pipeline_id, 41)
+        self.assertTrue(row.has_captured_history)
+        self.assertFalse(row.pipeline_verified_lossless)
+        self.assertTrue(row.pipeline_provisional)
 
     def test_from_pipeline_request_owns_placeholder_fields(self) -> None:
         row = LibraryAlbumRow.from_pipeline_request(
@@ -242,6 +306,9 @@ class TestLibraryAlbumRow(unittest.TestCase):
                 "created_at": datetime(2026, 4, 1, 3, 47, 54, tzinfo=UTC),
                 "search_filetype_override": "flac",
                 "target_format": None,
+                "has_captured_history": True,
+                "verified_lossless": True,
+                "provisional_lossless": False,
             },
             track_count=10,
         )
@@ -256,6 +323,9 @@ class TestLibraryAlbumRow(unittest.TestCase):
         self.assertEqual(row.pipeline_id, 42)
         self.assertTrue(row.upgrade_queued)
         self.assertIsNone(row.library_rank)
+        self.assertTrue(row.has_captured_history)
+        self.assertTrue(row.pipeline_verified_lossless)
+        self.assertFalse(row.pipeline_provisional)
 
     def test_from_pipeline_request_defaults_missing_source_to_unknown(self) -> None:
         row = LibraryAlbumRow.from_pipeline_request(
@@ -275,11 +345,50 @@ class TestLibraryAlbumRow(unittest.TestCase):
                 "created_at": datetime(2026, 4, 1, 3, 47, 54, tzinfo=UTC),
                 "search_filetype_override": None,
                 "target_format": None,
+                "has_captured_history": False,
+                "verified_lossless": False,
+                "provisional_lossless": False,
             },
             track_count=10,
         )
 
         self.assertEqual(row.source, "unknown")
+
+    def test_invalid_pipeline_identity_has_no_actionable_id_or_source(self) -> None:
+        for label, identity_fields in (
+            ("malformed", {
+                "mb_release_id": "not-a-release-id",
+                "discogs_release_id": None,
+            }),
+            ("conflicting", {
+                "mb_release_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "discogs_release_id": "12856590",
+            }),
+            ("identityless", {
+                "mb_release_id": None,
+                "discogs_release_id": None,
+            }),
+        ):
+            with self.subTest(label=label):
+                raw = make_request_row(
+                    id=42,
+                    artist_name="Test Artist",
+                    album_title="Wanted Album",
+                    source="request",
+                    status="wanted",
+                    **identity_fields,
+                )
+                raw.update({
+                    "has_captured_history": False,
+                    "verified_lossless": False,
+                    "provisional_lossless": False,
+                })
+
+                row = LibraryAlbumRow.from_pipeline_request(raw, track_count=0)
+
+                self.assertIsNone(row.mb_albumid)
+                self.assertEqual(row.source, "unknown")
+                self.assertEqual(row.pipeline_id, 42)
 
     def test_from_beets_album_missing_bitrate_passes_zero_to_rank_fn(self) -> None:
         seen: list[tuple[str | None, int | None]] = []
@@ -332,6 +441,9 @@ class TestLibraryAlbumRow(unittest.TestCase):
                     "created_at": datetime(2026, 4, 1, 3, 47, 54, tzinfo=UTC),
                     "search_filetype_override": None,
                     "target_format": None,
+                    "has_captured_history": False,
+                    "verified_lossless": False,
+                    "provisional_lossless": False,
                 },
                 track_count=10,
             )
@@ -355,6 +467,9 @@ class TestLibraryAlbumRow(unittest.TestCase):
                     "created_at": "2026-04-01T03:47:54Z",
                     "search_filetype_override": None,
                     "target_format": None,
+                    "has_captured_history": False,
+                    "verified_lossless": False,
+                    "provisional_lossless": False,
                 },
                 track_count=10,
             )
@@ -378,6 +493,9 @@ class TestLibraryAlbumRow(unittest.TestCase):
                     "created_at": None,
                     "search_filetype_override": None,
                     "target_format": None,
+                    "has_captured_history": False,
+                    "verified_lossless": False,
+                    "provisional_lossless": False,
                 },
                 track_count=10,
             )
@@ -409,12 +527,18 @@ class TestLibraryAlbumRow(unittest.TestCase):
                 "status": "wanted",
                 "search_filetype_override": "flac",
                 "target_format": None,
+                "has_captured_history": False,
+                "verified_lossless": False,
+                "provisional_lossless": False,
             }
         )
 
         self.assertEqual(row.pipeline_status, "wanted")
         self.assertEqual(row.pipeline_id, 42)
         self.assertTrue(row.upgrade_queued)
+        self.assertFalse(row.has_captured_history)
+        self.assertFalse(row.pipeline_verified_lossless)
+        self.assertFalse(row.pipeline_provisional)
 
     def test_wire_boundary_rejects_wrong_field_type(self) -> None:
         with self.assertRaises(msgspec.ValidationError):

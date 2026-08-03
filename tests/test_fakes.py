@@ -74,6 +74,11 @@ class TestRecordingProcessAlbum(unittest.TestCase):
 
 
 class TestFakePipelineDB(unittest.TestCase):
+    def test_exposes_configured_connection_identity(self) -> None:
+        db = FakePipelineDB(dsn="postgresql://contract-test")
+
+        self.assertEqual(db.dsn, "postgresql://contract-test")
+
     def test_request_creation_race_materializes_only_on_in_lock_lookup(self):
         db = FakePipelineDB()
         db.arm_request_creation_race(
@@ -5770,6 +5775,46 @@ class TestFakeBeetsDB(unittest.TestCase):
         self.assertEqual(beets.get_albums_by_artist_calls,
                          [("X", "mb-1"), ("Y", "")])
 
+    def test_exact_album_projection_matches_each_cross_source_identity(self) -> None:
+        beets = FakeBeetsDB()
+        album = {
+            "id": 7,
+            "album": "Dual-tagged pressing",
+            "mb_albumid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "discogs_albumid": "12856590",
+        }
+        beets.set_albums_by_artist("X", [album])
+
+        rows = beets.get_albums_by_release_ids([
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "12856590",
+        ])
+
+        self.assertEqual(rows, [album])
+        self.assertEqual(beets.get_albums_by_release_ids_calls, [[
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "12856590",
+        ]])
+
+    def test_exact_album_projection_rejects_conflicting_numeric_identity(self) -> None:
+        beets = FakeBeetsDB()
+        beets.set_albums_by_artist("X", [{
+            "id": 7,
+            "album": "Conflicting pressing",
+            "mb_albumid": "12856590",
+            "discogs_albumid": "12856591",
+        }])
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "conflicting numeric Discogs release identities",
+        ):
+            beets.get_albums_by_release_ids(["12856590"])
+
+        self.assertEqual(
+            beets.get_albums_by_release_ids(["99999999"]),
+            [],
+            "an unrelated conflicting row is outside the requested snapshot",
+        )
+
     def test_get_tracks_by_mb_release_id_returns_seeded_or_none(self) -> None:
         # Real method returns None when locate finds no exact hit —
         # NOT an empty list (the browse route branches on that).
@@ -6760,6 +6805,7 @@ class TestFakeGetPipelineOverlay(unittest.TestCase):
             "id": 7, "status": "wanted",
             "search_filetype_override": "lossless",
             "target_format": None, "min_bitrate": 900,
+            "has_captured_history": False,
             "verified_lossless": False,
             "provisional_lossless": False,
             "processing_owner": None,
@@ -6769,6 +6815,48 @@ class TestFakeGetPipelineOverlay(unittest.TestCase):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=7, mb_release_id="mbid-1"))
         self.assertEqual(db.get_pipeline_overlay([]), {})
+
+
+class TestFakeListLibraryRequestCandidates(unittest.TestCase):
+    def test_preserves_duplicate_and_legacy_discogs_cardinality(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=7,
+            mb_release_id=None,
+            discogs_release_id="12856590",
+        ))
+        db.seed_request(make_request_row(
+            id=8,
+            mb_release_id=None,
+            discogs_release_id="12856590",
+        ))
+        db.seed_request(make_request_row(
+            id=9,
+            mb_release_id="12856590",
+            discogs_release_id=None,
+        ))
+        db.seed_request(make_request_row(
+            id=10,
+            mb_release_id="not-a-release-id",
+            discogs_release_id="12856590",
+        ))
+
+        rows = db.list_library_request_candidates(["12856590"])
+
+        self.assertEqual([row["id"] for row in rows], [7, 8, 9])
+
+    def test_empty_or_malformed_ids_have_no_candidates(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=7,
+            mb_release_id="not-a-release-id",
+        ))
+
+        self.assertEqual(db.list_library_request_candidates([]), [])
+        self.assertEqual(
+            db.list_library_request_candidates(["not-a-release-id"]),
+            [],
+        )
 
 
 class TestFakeRequestUniqueMbReleaseId(unittest.TestCase):

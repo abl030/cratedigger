@@ -158,7 +158,10 @@ userId; the first user from `/Users` is used) and posts it back with only
 (2026-07-10): genres, provider ids, premiere date all survive the round-trip;
 the POST returns 204.
 
-### Cratedigger config (`/var/lib/cratedigger/config.ini`)
+### Cratedigger runtime config
+
+The NixOS module supplies this as an immutable store file; conventional
+deployments may choose another immutable path.
 
 ```ini
 [Jellyfin]

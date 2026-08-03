@@ -47,9 +47,11 @@
         default = import ./nix/shell.nix { inherit pkgs; };
       });
 
-      packages = forAllSystems ({ pkgs, ... }: rec {
+      packages = forAllSystems ({ pkgs, ... }: let
+        beetsPackage = import ./nix/beets.nix { inherit pkgs; };
+      in rec {
         default = import ./nix/wrappers.nix {
-          inherit pkgs version;
+          inherit pkgs version beetsPackage;
           src = runtimeSrc;
         };
         cratedigger = default;
@@ -83,11 +85,40 @@
       checks = forLinux ({ pkgs, system }: {
         # Boots a NixOS VM with the upstream module enabled against an
         # ephemeral postgres + a stubbed slskd. Verifies: migrator runs,
-        # config.ini is rendered correctly, cratedigger-web responds.
+        # the immutable runtime config is wired correctly, and the web responds.
         # Consumes the wrapped export — the same thing consumers import.
         # `nix flake check` must build the CLI bundle (U8): a stranger's
         # `nix run .#pipeline-cli` is only as green as this check.
         packageDefault = self.packages.${system}.default;
+
+        # Execute the installed configuration checker, rather than merely
+        # inspecting its wrapper source. A caller-controlled PYTHONPATH
+        # containing a shadow ``beets`` package must not affect the pinned
+        # interpreter's imports. The intentionally missing config is a fixed
+        # rejected fixture: it proves the command crosses its normal JSON
+        # error boundary after importing the real admitted Beets package.
+        checkBeetsConfigPackageBoundary = let
+          hostilePythonPath = pkgs.runCommand "cratedigger-hostile-pythonpath" { } ''
+            mkdir -p "$out/beets"
+            cat > "$out/beets/__init__.py" <<'PY'
+            raise RuntimeError("hostile inherited PYTHONPATH imported beets")
+            PY
+          '';
+        in pkgs.runCommand "cratedigger-check-beets-config-package-boundary" { } ''
+          set -euo pipefail
+          mkdir runtime
+          if PYTHONPATH="${hostilePythonPath}" \
+            ${self.packages.${system}.default}/bin/cratedigger-check-beets-config \
+              --config "$PWD/missing.ini" \
+              --runtime-dir "$PWD/runtime" \
+              --role importer > stdout.json 2> stderr.log; then
+            echo "checker unexpectedly accepted missing config" >&2
+            exit 1
+          fi
+          grep -Fx '{"ok":false,"report":null,"error":"config_load_error"}' stdout.json
+          ! grep -Fq "hostile inherited PYTHONPATH" stderr.log
+          touch "$out"
+        '';
 
         moduleVm = import ./nix/tests/module-vm.nix {
           inherit pkgs system;
@@ -149,6 +180,15 @@
         # doc2 shape) and a createLocally config both eval with zero
         # failing assertions.
         moduleAssertions = let
+          beetsPackage = import ./nix/beets.nix { inherit pkgs; };
+          runtimeCapability = {
+            package = beetsPackage;
+            configDir = "/etc/beets";
+            expectedLibrary = "/srv/beets/beets-library.db";
+            expectedDirectory = "/srv/music";
+            expectedStateFile = "/var/lib/beets/state.pickle";
+            expectedSecretInclude = "/run/secrets/beets.yaml";
+          };
           evalAssertions = extra: (nixpkgs.lib.nixosSystem {
             modules = [ self.nixosModules.default {
               nixpkgs.pkgs = import nixpkgs { inherit system; };
@@ -168,6 +208,7 @@
               slskd.apiKeyFile = "/run/secrets/slskd-key";
               slskd.downloadDir = "/mnt/music/slskd";
               pipelineDb.dsn = "postgresql://cratedigger@10.20.0.11:5432/cratedigger";
+              beets.runtime = runtimeCapability;
               beets.validation = {
                 stagingDir = "/mnt/music/incoming";
                 trackingFile = "/mnt/music/incoming/tracking.jsonl";
@@ -179,6 +220,7 @@
               slskd.apiKeyFile = "/etc/slskd-key";
               slskd.downloadDir = "/srv/slskd";
               pipelineDb.createLocally = true;
+              beets.runtime = runtimeCapability;
               beets.validation = {
                 stagingDir = "/srv/incoming";
                 trackingFile = "/srv/incoming/tracking.jsonl";
@@ -189,31 +231,15 @@
           assert hasMsg "slskd.apiKeyFile";
           assert hasMsg "slskd.downloadDir";
           assert hasMsg "pipelineDb.createLocally = true";
+          assert hasMsg "beets.runtime.package";
+          assert hasMsg "beets.runtime.configDir";
+          assert hasMsg "beets.runtime.expectedLibrary";
+          assert hasMsg "beets.runtime.expectedDirectory";
+          assert hasMsg "beets.runtime.expectedStateFile";
+          assert hasMsg "beets.runtime.expectedSecretInclude";
           assert doc2Shape == [ ];
           assert strangerShape == [ ];
           pkgs.runCommand "cratedigger-module-assertions-ok" { } "touch $out";
-
-        # KTD6 derivation, asserted on rendered VALUES (not source text):
-        # the beets musicbrainz block flips host/https/ratelimit for a
-        # mirror origin vs the public default. Eval-only.
-        apiBaseDerivation = let
-          evalMb = apiBase: (nixpkgs.lib.nixosSystem {
-            modules = [ self.nixosModules.default {
-              nixpkgs.pkgs = import nixpkgs { inherit system; };
-              services.cratedigger.enable = true;
-              services.cratedigger.musicbrainz.apiBase = apiBase;
-            } ];
-          }).config.services.cratedigger.beets.config.musicbrainz;
-          mirror = evalMb "http://192.168.1.35:5200";
-          public = evalMb "https://musicbrainz.org";
-        in
-          assert mirror.host == "192.168.1.35:5200";
-          assert mirror.https == false;
-          assert mirror.ratelimit == 100;
-          assert public.host == "musicbrainz.org";
-          assert public.https == true;
-          assert public.ratelimit == 1;
-          pkgs.runCommand "cratedigger-api-base-derivation-ok" { } "touch $out";
 
         # nix/beets.nix mirror knobs: with the knobs set, the built plugin
         # files carry the mirror URLs; with them unset, stock upstream URLs.

@@ -11,6 +11,14 @@ execution: code
 
 # Tier-2 Packaging - Plan
 
+> **Superseded ownership conclusion:** This is a historical implementation
+> plan. Issue [#759](https://github.com/abl030/cratedigger/issues/759) reverses
+> its conclusion that Cratedigger owns Beets end to end. The deployment now
+> owns the Beets package, effective config, catalog, library, state, secrets,
+> and plain operator `beet`; Cratedigger consumes and validates that external
+> authority. The pinning, single-runtime, `BEETSDIR`, and path-equivalence
+> safety goals below remain historical context, not the current module API.
+
 ## Goal Capsule
 
 - **Objective:** Make cratedigger reproducible for the operator and runnable by a competent NixOS stranger: the module builds from cratedigger's own flake.lock, cratedigger owns beets end-to-end (package, config, binary, library), a real flake package output exists, and known-good revs are tagged behind a `nix flake check` push hook. Explicitly NOT a supported product — no tier 3.

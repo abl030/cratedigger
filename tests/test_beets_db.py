@@ -9,6 +9,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from collections.abc import Callable
 from contextlib import closing
 from dataclasses import replace
 from unittest.mock import patch
@@ -18,6 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from lib.beets_db import BeetsDB, open_beets_db
 from lib.config import CratediggerConfig
 from lib.quality import AudioQualityMeasurement, QualityRankConfig
+from lib.release_identity import ConflictingReleaseIdentityError
 
 
 def _create_test_db(path: str) -> None:
@@ -1410,6 +1412,154 @@ class TestGetAlbumsByArtist(unittest.TestCase):
         with BeetsDB(self.db_path) as db:
             results = db.get_albums_by_artist("Nonexistent")
         self.assertEqual(len(results), 0)
+
+
+class TestGetAlbumsByReleaseIds(unittest.TestCase):
+    """Exact membership is independent of mutable artist tags."""
+
+    RELEASE_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.tmpdir, "test.db")
+        _create_test_db(self.db_path)
+        _insert_album(
+            self.db_path,
+            1,
+            self.RELEASE_ID,
+            [(320000, "/m/drifted/01.mp3")],
+            album="Exact Album",
+            albumartist="Drifted Artist Tag",
+        )
+
+    def test_exact_lookup_ignores_artist_metadata(self) -> None:
+        with BeetsDB(self.db_path) as db:
+            rows = db.get_albums_by_release_ids([self.RELEASE_ID])
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], 1)
+        self.assertEqual(rows[0]["artist"], "Drifted Artist Tag")
+        self.assertEqual(rows[0]["track_count"], 1)
+        self.assertEqual(rows[0]["min_bitrate"], 320000)
+        self.assertEqual(rows[0]["avg_bitrate"], 320000)
+
+    def test_cross_source_album_matches_either_exact_identity(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as writer:
+            writer.execute(
+                "UPDATE albums SET discogs_albumid = ? WHERE id = 1",
+                (12856590,),
+            )
+            writer.commit()
+
+        with BeetsDB(self.db_path) as db:
+            mb_rows = db.get_albums_by_release_ids([self.RELEASE_ID])
+            discogs_rows = db.get_albums_by_release_ids(["12856590"])
+            combined_rows = db.get_albums_by_release_ids([
+                self.RELEASE_ID, "12856590",
+            ])
+
+        for rows in (mb_rows, discogs_rows, combined_rows):
+            self.assertEqual([row["id"] for row in rows], [1])
+            self.assertEqual(rows[0]["mb_albumid"], self.RELEASE_ID)
+            self.assertEqual(rows[0]["discogs_albumid"], "12856590")
+
+    def test_ambiguous_exact_membership_fails_loud(self) -> None:
+        _insert_album(
+            self.db_path,
+            2,
+            self.RELEASE_ID,
+            [(320000, "/m/duplicate/01.mp3")],
+            album="Duplicate Exact Album",
+            albumartist="Another Tag",
+        )
+
+        with BeetsDB(self.db_path) as db, self.assertRaisesRegex(
+            ValueError, "ambiguous current Beets release projection"
+        ):
+            db.get_albums_by_release_ids([self.RELEASE_ID])
+
+    def test_conflicting_numeric_identity_fails_loud_for_either_id(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as writer:
+            writer.execute(
+                "UPDATE albums SET mb_albumid = ?, discogs_albumid = ? "
+                "WHERE id = 1",
+                ("12856590", 12856591),
+            )
+            writer.commit()
+        _insert_album(
+            self.db_path,
+            2,
+            self.RELEASE_ID,
+            [(320000, "/m/valid/01.mp3")],
+            album="Unrelated valid pressing",
+            albumartist="Other Artist",
+        )
+
+        for release_id in ("12856590", "12856591"):
+            with self.subTest(release_id=release_id), BeetsDB(
+                self.db_path
+            ) as db, self.assertRaisesRegex(
+                ConflictingReleaseIdentityError,
+                release_id,
+            ):
+                db.get_albums_by_release_ids([release_id])
+
+            with self.subTest(
+                release_id=release_id,
+                projection="presence",
+            ), BeetsDB(self.db_path) as db, self.assertRaisesRegex(
+                ConflictingReleaseIdentityError,
+                release_id,
+            ):
+                db.check_mbids([release_id])
+
+            with self.subTest(
+                release_id=release_id,
+                projection="detail",
+            ), BeetsDB(self.db_path) as db, self.assertRaisesRegex(
+                ConflictingReleaseIdentityError,
+                release_id,
+            ):
+                db.check_mbids_detail([release_id])
+
+            with self.subTest(
+                release_id=release_id,
+                projection="album-id",
+            ), BeetsDB(self.db_path) as db, self.assertRaisesRegex(
+                ConflictingReleaseIdentityError,
+                release_id,
+            ):
+                db.get_album_ids_by_mbids([release_id])
+
+            operations: dict[
+                str,
+                Callable[[BeetsDB, list[str]], object],
+            ] = {
+                "albums": BeetsDB.get_albums_by_release_ids,
+                "presence": BeetsDB.check_mbids,
+                "detail": BeetsDB.check_mbids_detail,
+                "album-id": BeetsDB.get_album_ids_by_mbids,
+            }
+            for ids in (
+                [self.RELEASE_ID, release_id],
+                [release_id, self.RELEASE_ID],
+            ):
+                for projection, operation in operations.items():
+                    with self.subTest(
+                        release_id=release_id,
+                        projection=f"mixed-{projection}",
+                        ids=ids,
+                    ), BeetsDB(self.db_path) as db, self.assertRaisesRegex(
+                        ConflictingReleaseIdentityError,
+                        release_id,
+                    ):
+                        operation(db, ids)
+
+        with BeetsDB(self.db_path) as db:
+            self.assertEqual(db.get_albums_by_release_ids(["99999999"]), [])
+            self.assertEqual(db.check_mbids(["99999999"]), set())
+            self.assertEqual(db.check_mbids_detail(["99999999"]), {})
+            self.assertEqual(db.get_album_ids_by_mbids(["99999999"]), {})
 
 
 class TestFuzzyMethodsRemoved(unittest.TestCase):

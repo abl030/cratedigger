@@ -10,16 +10,17 @@ without it, and how the operator's instances are stood up.
 | Dependency | Without it | With it | Module option |
 |---|---|---|---|
 | MusicBrainz mirror | Works against public MB — functional but ~1 req/s | Production-speed matching (ratelimit 100) | `services.cratedigger.musicbrainz.apiBase` |
-| Discogs mirror | Discogs **browse is off** (clear 503); MB browse unaffected | Discogs search/artist/master/release browse + numeric-ID validation | `services.cratedigger.discogs.apiBase` + `beets.package.discogsMirrorUrl` |
-| LRCLIB instance | Lyrics fetched from public lrclib.net | Local lyrics lookups | `services.cratedigger.beets.package.lrclibUrl` |
+| Discogs mirror | Discogs **browse is off** (clear 503); MB browse unaffected | Discogs search/artist/master/release browse + numeric-ID validation | `services.cratedigger.discogs.apiBase` + deployment `nix/beets.nix` `discogsMirrorUrl` |
+| LRCLIB instance | Lyrics fetched from public lrclib.net | Local lyrics lookups | deployment `nix/beets.nix` `lrclibUrl` |
 | slskd | Nothing works — it's the Soulseek client | — | `services.slskd` exists in nixpkgs; point `slskd.hostUrl`/`apiKeyFile`/`downloadDir` at it |
 
 ## Public-MusicBrainz degraded mode (supported)
 
 The stranger default (`musicbrainz.apiBase = "https://musicbrainz.org"`)
-threads through every consumer: `web/mb.py` (browse), `pipeline-cli` lookups,
-pipeline track population, and the rendered beets
-`musicbrainz.host/https/ratelimit` (public ⇒ ratelimit 1).
+threads through Cratedigger's `web/mb.py` browse, `pipeline-cli` lookups, and
+pipeline track population. The external Beets owner must configure its own
+matching `musicbrainz.host/https/ratelimit` policy (public ⇒ ratelimit 1); the
+Cratedigger module never rewrites Beets configuration.
 
 The math to know: public MB allows ~1 request/second. A beets validation
 of one album is a handful of requests; browsing is interactive-tolerable;
@@ -42,8 +43,8 @@ podman on doc2, serving `http://192.168.1.35:5200`):
   stack's config; the mirror then stays hours-fresh.
 - Size: plan ~100GB+ for the database + search indexes.
 - Wire it up: `services.cratedigger.musicbrainz.apiBase = "http://<host>:5200"`.
-  The module derives the beets side (host:port, plain http, ratelimit 100)
-  from the same value.
+  Configure the external immutable Beets authority separately with the same
+  host:port, plain HTTP, and ratelimit 100 values.
 
 **Endgame note:** the long-term plan is `mb-api` — a sibling Rust project
 reimplementing the observed WS/2 subset (XML for musicbrainzngs/beets,
@@ -67,21 +68,21 @@ nspawn container on doc2, served at `https://discogs.ablz.au`).
 **Follow-up plan:** packaging it as a flake + generic NixOS module (the
 same pattern as this repo's tier-2 work) lives in the discogs-api repo.
 
-Wire it up: `services.cratedigger.discogs.apiBase` (browse and pipeline track
-population) and
-`services.cratedigger.beets.package.discogsMirrorUrl` (build-time patch of the
-beets discogs plugin, so *imports* also hit the mirror). The beets
-plugin additionally wants a Discogs user token via
-`beets.package.discogsTokenFile` (issue #117 `*File` pattern); tokenless installs
-get a placeholder that keeps plugin load clean — public-Discogs lookups
-are then token-required.
+Wire Cratedigger browse and pipeline track population with
+`services.cratedigger.discogs.apiBase`. To make Beets imports use the same
+mirror, the deployment instantiates `nix/beets.nix` with
+`discogsMirrorUrl = "http://<host>:8086"` and supplies that package through
+`beets.runtime.package`. The deployment-owned designated secret include must
+contain exactly a non-empty `discogs.user_token` scalar and be named by
+`beets.runtime.expectedSecretInclude`; it is not a general configuration
+overlay. Restart guarded applications after token rotation.
 
 ## LRCLIB (optional)
 
-The operator runs a local LRCLIB instance (`http://192.168.1.35:3300`).
-`services.cratedigger.beets.package.lrclibUrl = "http://<host>:3300/api"`
-build-time-patches the beets lyrics plugin at that base. Unset = public
-lrclib.net (stock behaviour).
+The operator runs a local LRCLIB instance (`http://192.168.1.35:3300`). The
+external Beets owner instantiates `nix/beets.nix` with
+`lrclibUrl = "http://<host>:3300/api"` to build-time-patch the lyrics plugin.
+Unset means public lrclib.net (stock behavior).
 
 ## slskd (required)
 

@@ -21,7 +21,10 @@ from typing import TYPE_CHECKING
 
 import msgspec
 
-from lib.beets_db import CurrentBeetsUnique
+from lib.beets_db import (
+    CurrentBeetsUnique,
+    beets_authority_availability_category,
+)
 from lib.current_library_display import (
     CurrentLibraryUnavailable,
     current_library_display,
@@ -48,6 +51,9 @@ from web.download_history_view import (
 
 DEFAULT_PIPELINE_LOG_LIMIT = 50
 MAX_PIPELINE_LOG_LIMIT = 500
+CURRENT_BEETS_UNAVAILABLE_MESSAGE = (
+    "Current Beets authority is unavailable; retry later."
+)
 
 
 def _pipeline_log_limit(params: dict[str, list[str]]) -> int:
@@ -325,11 +331,28 @@ def get_pipeline_detail(h: RouteHandler, params: dict[str, list[str]], req_id_st
     try:
         b = s._beets_db()
         current = resolve_request_current_library(req, b)
-    except Exception:
+    except Exception as exc:
+        category = beets_authority_availability_category(exc)
+        if category is None and not isinstance(exc, OSError):
+            raise
         logger.exception(
-            "current Beets display unavailable for request %s", req_id,
+            "current Beets authority unavailable for request %s (%s)",
+            req_id,
+            category or type(exc).__name__,
         )
-        current = CurrentLibraryUnavailable("beets_unavailable")
+        h._error(CURRENT_BEETS_UNAVAILABLE_MESSAGE, 503)
+        return
+    if (
+        isinstance(current, CurrentLibraryUnavailable)
+        and current.reason == "beets_unavailable"
+    ):
+        logger.error(
+            "current Beets authority unavailable for request %s "
+            "(no admitted database)",
+            req_id,
+        )
+        h._error(CURRENT_BEETS_UNAVAILABLE_MESSAGE, 503)
+        return
     result: dict[str, object] = {
         "request": request_payload,
         "tracks": tracks,
@@ -546,7 +569,8 @@ ROUTES: list[RouteRegistration] = [
     pattern_route(
         "GET", r"^/api/pipeline/(\d+)$", get_pipeline_detail,
         "Full pipeline request detail — tracks, download history, last "
-        "search, beets tracks if present.",
+        "search, and fresh exact Beets state; unavailable Beets authority "
+        "returns 503 without a fabricated library row.",
         classified=True,
     ),
     pattern_route(

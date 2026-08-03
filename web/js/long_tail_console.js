@@ -209,6 +209,45 @@ import {
 export const consoleStates = new Map();
 
 /**
+ * Cohort-authority generation for asynchronous console work. A failed current
+ * long-tail load advances it before clearing the console map. Work captured
+ * against an older generation may finish at the network boundary, but may not
+ * recreate cache entries, clear newer guards, or paint a newly-opened console.
+ *
+ * @type {number}
+ */
+let consoleLifecycleGeneration = 0;
+
+/** @returns {number} Current cohort-authority generation. */
+export function longTailConsoleGeneration() {
+  return consoleLifecycleGeneration;
+}
+
+/**
+ * Whether work stamped at start still belongs to the current cohort world.
+ *
+ * @param {number} generation
+ * @returns {boolean}
+ */
+export function isLongTailConsoleGenerationCurrent(generation) {
+  return generation === consoleLifecycleGeneration;
+}
+
+/**
+ * Invalidate every console/action state after a current cohort load fails.
+ * Advancing the generation before clearing makes already-running promises
+ * stale even if the same request id is present and reopened after a retry.
+ *
+ * @param {Map<number, ConsoleState>} map
+ * @returns {number} The new current generation.
+ */
+export function invalidateLongTailConsoleState(map) {
+  consoleLifecycleGeneration += 1;
+  consolePrune(map, () => false);
+  return consoleLifecycleGeneration;
+}
+
+/**
  * Get (creating if absent) the console-state entry for `id`. Every mutator
  * below routes through this so a row's first touch — whichever action
  * fires first — always finds a well-formed entry. Pure.
@@ -404,6 +443,26 @@ export function consoleYoutubeResult(map, id) {
  */
 export function consoleSetYoutubeResult(map, id, result) {
   ensureConsoleState(map, id).youtubeResult = result;
+}
+
+/**
+ * Cache a resolver result only when its originating cohort world is current.
+ *
+ * @param {Map<number, ConsoleState>} map
+ * @param {number} id
+ * @param {Object|null} result
+ * @param {number} generation
+ * @returns {boolean} Whether the result was accepted.
+ */
+export function consoleSetYoutubeResultForGeneration(
+  map,
+  id,
+  result,
+  generation,
+) {
+  if (!isLongTailConsoleGenerationCurrent(generation)) return false;
+  consoleSetYoutubeResult(map, id, result);
+  return true;
 }
 
 /**
@@ -1004,11 +1063,13 @@ function renderActionsBar(row) {
  * @param {number} id     album_requests.id
  * @param {string} name   Panel slug.
  * @param {number} token  The token captured when the console opened.
+ * @param {number} generation  Cohort generation captured with the token.
  * @param {string} html   New body HTML.
  * @returns {void}
  */
-function patchPanel(id, name, token, html) {
+function patchPanel(id, name, token, generation, html) {
   if (typeof document === 'undefined') return;
+  if (!isLongTailConsoleGenerationCurrent(generation)) return;
   if (consoleIsStale(consoleStates, id, token)) return;  // stale console — discard.
   const panel = document.getElementById(`lt-panel-${name}-${id}`);
   if (!panel) return;
@@ -1022,16 +1083,17 @@ function patchPanel(id, name, token, html) {
  *
  * @param {number} id
  * @param {number} token
+ * @param {number} generation
  * @returns {Promise<void>}
  */
-async function loadUnfindablePanel(id, token) {
+async function loadUnfindablePanel(id, token, generation) {
   try {
     const r = await fetch(`${API}/api/triage/${id}`);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
-    patchPanel(id, 'unfindable', token, renderUnfindableBody(data));
+    patchPanel(id, 'unfindable', token, generation, renderUnfindableBody(data));
   } catch (_e) {
-    patchPanel(id, 'unfindable', token, renderPanelError('triage'));
+    patchPanel(id, 'unfindable', token, generation, renderPanelError('triage'));
   }
 }
 
@@ -1043,19 +1105,22 @@ async function loadUnfindablePanel(id, token) {
  *
  * @param {number} id
  * @param {number} token
+ * @param {number} generation
  * @param {boolean} inFlightFlag  The worklist row's `in_flight_rescue`.
  * @returns {Promise<void>}
  */
-async function loadPipelinePanels(id, token, inFlightFlag) {
+async function loadPipelinePanels(id, token, generation, inFlightFlag) {
   try {
     const r = await fetch(`${API}/api/pipeline/${id}`);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
-    patchPanel(id, 'peers', token, renderPeersBody(data.last_search, id));
-    patchPanel(id, 'rescues', token, renderRescuesBody(data.history, inFlightFlag));
+    patchPanel(id, 'peers', token, generation, renderPeersBody(data.last_search, id));
+    patchPanel(id, 'rescues', token, generation,
+      renderRescuesBody(data.history, inFlightFlag));
   } catch (_e) {
-    patchPanel(id, 'peers', token, renderPanelError('peers'));
-    patchPanel(id, 'rescues', token, renderPanelError('rescue history'));
+    patchPanel(id, 'peers', token, generation, renderPanelError('peers'));
+    patchPanel(id, 'rescues', token, generation,
+      renderPanelError('rescue history'));
   }
 }
 
@@ -1073,13 +1138,14 @@ async function loadPipelinePanels(id, token, inFlightFlag) {
  *
  * @param {number} id
  * @param {number} token
+ * @param {number} generation
  * @param {string|null} rgId  The request's `mb_release_group_id` (MB
  *   release-group UUID or Discogs numeric master id), or null.
  * @returns {Promise<void>}
  */
-async function loadSiblingsPanel(id, token, rgId) {
+async function loadSiblingsPanel(id, token, generation, rgId) {
   if (!rgId) {
-    patchPanel(id, 'siblings', token,
+    patchPanel(id, 'siblings', token, generation,
       '<div class="lt-panel-empty">No release group — sibling pressings unavailable for this request.</div>');
     return;
   }
@@ -1087,9 +1153,10 @@ async function loadSiblingsPanel(id, token, rgId) {
     const r = await fetch(`${API}/api/release-group/${encodeURIComponent(rgId)}`);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
-    patchPanel(id, 'siblings', token, renderSiblingsBody(data));
+    patchPanel(id, 'siblings', token, generation, renderSiblingsBody(data));
   } catch (_e) {
-    patchPanel(id, 'siblings', token, renderPanelError('sibling pressings'));
+    patchPanel(id, 'siblings', token, generation,
+      renderPanelError('sibling pressings'));
   }
 }
 
@@ -1152,6 +1219,7 @@ export function toggleLongTailDetail(id) {
  */
 function openConsole(id, el) {
   const token = consoleOpen(consoleStates, id);
+  const generation = longTailConsoleGeneration();
   const row = consoleRow(id) || { id };
   el.innerHTML = renderConsoleShell(row, consoleYoutubeResult(consoleStates, id));
   el.classList.add('open');
@@ -1161,9 +1229,9 @@ function openConsole(id, el) {
   // patches its own error affordance). The YouTube panel is already in its
   // never_run state from the shell (no fetch in U4). Siblings reads the rg
   // straight off the cohort row (#398 — `_LONG_TAIL_SELECT` projects it).
-  loadUnfindablePanel(id, token);
-  loadPipelinePanels(id, token, inFlightFlag);
-  loadSiblingsPanel(id, token, row.mb_release_group_id || null);
+  loadUnfindablePanel(id, token, generation);
+  loadPipelinePanels(id, token, generation, inFlightFlag);
+  loadSiblingsPanel(id, token, generation, row.mb_release_group_id || null);
 }
 
 /**
@@ -1305,16 +1373,18 @@ let rescueConfirmOpen = false;
  *
  * @param {number} id
  * @param {number} token  The console token captured when the resolve fired.
+ * @param {number} generation  Cohort generation captured when it fired.
  * @param {{outcome?: string, youtube_releases?: Array<Object>|null, from_cache?: boolean, error_message?: string|null}|null} result
  * @returns {void}
  */
-function patchYoutubePanel(id, token, result) {
-  patchPanel(id, 'youtube', token, renderYoutubeBody(result, id));
+function patchYoutubePanel(id, token, generation, result) {
+  patchPanel(id, 'youtube', token, generation, renderYoutubeBody(result, id));
 }
 
 /**
  * "Check YouTube" handler (U5) — replaces U4's placeholder toast. Runs the
- * slow, side-effectful resolver POST for the row's `mb_release_id`, then
+ * slow, side-effectful resolver POST for the row's exact MB or Discogs release
+ * identifier, then
  * re-renders the YouTube panel with the fresh classification.
  *
  * Guards:
@@ -1332,12 +1402,12 @@ function patchYoutubePanel(id, token, result) {
  * collapsed console's hidden DOM may be touched; harmless, since reopening
  * re-renders the shell (from the cache).
  *
- * The resolver identifier is the request's `mb_release_id` (an MB release
- * MBID or a Discogs release id) — the same id the resolver's
- * `identifier` body field takes. A row without one cannot be resolved; the
+ * The resolver identifier is the request's `mb_release_id` or modern
+ * `discogs_release_id` — the same exact id the resolver's `identifier` body
+ * field takes. A row without either cannot be resolved; the
  * panel shows that explicitly rather than firing a doomed fetch. That
  * check runs BEFORE the double-fire guard, and deliberately never touches
- * `consoleStates` — a row lacking `mb_release_id` must not leave behind a
+ * `consoleStates` — a row lacking both exact identity fields must not leave behind a
  * residual, empty `ConsoleState` entry (open: false, no in-flight guards,
  * no cached result) that would otherwise sit in the map doing nothing
  * until the next `consolePrune`.
@@ -1346,13 +1416,17 @@ function patchYoutubePanel(id, token, result) {
  * @returns {Promise<void>}
  */
 export async function checkYoutube(id) {
+  const generation = longTailConsoleGeneration();
   const row = consoleRow(id);
-  const identifier = row && row.mb_release_id ? String(row.mb_release_id) : '';
+  const identifier = row
+    ? String(row.mb_release_id || row.discogs_release_id || '')
+    : '';
   if (!identifier) {
     // Paint (if a console happens to be mounted) against whatever token
     // the row currently has — 0 for an id `consoleStates` has never seen —
     // without ever creating a map entry for it.
-    patchYoutubePanel(id, consoleToken(consoleStates, id), /** @type {any} */ (
+    patchYoutubePanel(id, consoleToken(consoleStates, id), generation,
+      /** @type {any} */ (
       { outcome: 'transient', error_message: 'No release identifier on this request.' }));
     return;
   }
@@ -1379,13 +1453,19 @@ export async function checkYoutube(id) {
     } catch (_e) {
       result = { outcome: 'transient', error_message: `HTTP ${r.status}` };
     }
-    consoleSetYoutubeResult(consoleStates, id, result);
-    patchYoutubePanel(id, currentToken(), result);
+    if (!consoleSetYoutubeResultForGeneration(
+      consoleStates, id, result, generation,
+    )) return;
+    patchYoutubePanel(id, currentToken(), generation, result);
   } catch (_e) {
-    patchYoutubePanel(id, currentToken(), /** @type {any} */ (
-      { outcome: 'transient', error_message: 'Could not reach the resolver. Retry.' }));
+    if (isLongTailConsoleGenerationCurrent(generation)) {
+      patchYoutubePanel(id, currentToken(), generation, /** @type {any} */ (
+        { outcome: 'transient', error_message: 'Could not reach the resolver. Retry.' }));
+    }
   } finally {
-    consoleSettle(consoleStates, id, 'resolve');
+    if (isLongTailConsoleGenerationCurrent(generation)) {
+      consoleSettle(consoleStates, id, 'resolve');
+    }
   }
 }
 
@@ -1497,12 +1577,14 @@ function confirmRescue(id, browseId, row) {
  */
 export async function pickYoutubeRescue(id, browseId) {
   if (rescueConfirmOpen) return;  // one confirm overlay at a time (shared host).
+  const generation = longTailConsoleGeneration();
   rescueConfirmOpen = true;
   try {
     const row = consoleRow(id);
     const ok = await confirmRescue(id, browseId, row);
     if (!ok) return;
-    await submitYoutubeRescue(id, browseId);
+    if (!isLongTailConsoleGenerationCurrent(generation)) return;
+    await submitYoutubeRescue(id, browseId, generation);
   } finally {
     rescueConfirmOpen = false;
   }
@@ -1518,9 +1600,11 @@ export async function pickYoutubeRescue(id, browseId) {
  *
  * @param {number} id
  * @param {string} browseId
+ * @param {number} generation
  * @returns {Promise<void>}
  */
-async function submitYoutubeRescue(id, browseId) {
+async function submitYoutubeRescue(id, browseId, generation) {
+  if (!isLongTailConsoleGenerationCurrent(generation)) return;
   if (!consoleCanStart(consoleStates, id, 'submit')) return;  // double-fire guard.
   try {
     let result;
@@ -1534,6 +1618,7 @@ async function submitYoutubeRescue(id, browseId) {
     } catch (_e) {
       result = { outcome: 'transient', error_message: 'Submit failed — retry.' };
     }
+    if (!isLongTailConsoleGenerationCurrent(generation)) return;
     const copy = rescueOutcomeCopy(result);
     if (typeof toast === 'function') {
       toast(`${copy.title}: ${copy.detail}`, copy.tone === 'error');
@@ -1544,7 +1629,9 @@ async function submitYoutubeRescue(id, browseId) {
     // away the operator's scroll position. The "rescue running" badge
     // reconciles on the next manual Refresh.
   } finally {
-    consoleSettle(consoleStates, id, 'submit');
+    if (isLongTailConsoleGenerationCurrent(generation)) {
+      consoleSettle(consoleStates, id, 'submit');
+    }
   }
 }
 
@@ -1567,12 +1654,15 @@ async function submitYoutubeRescue(id, browseId) {
  * open in `consoleStates` against the fresh DOM (#398).
  *
  * @param {number} id
+ * @param {number} generation
  * @returns {Promise<void>}
  */
-async function refetchLongTailRow(id) {
+async function refetchLongTailRow(id, generation) {
+  if (!isLongTailConsoleGenerationCurrent(generation)) return;
   let data;
   try {
     const r = await fetch(`${API}/api/pipeline/long-tail?id=${encodeURIComponent(String(id))}`);
+    if (!isLongTailConsoleGenerationCurrent(generation)) return;
     if (r.status === 404) {
       removeRowFromCohort(id);
       renderLongTail();
@@ -1580,6 +1670,7 @@ async function refetchLongTailRow(id) {
     }
     if (!r.ok) return;
     data = await r.json();
+    if (!isLongTailConsoleGenerationCurrent(generation)) return;
   } catch (_e) {
     return;  // non-fatal — local in-flight mark stands; Refresh reconciles.
   }
@@ -1753,6 +1844,7 @@ export function buildAcceptSiblingOptions(row) {
  * @returns {Promise<void>}
  */
 export async function longTailAcceptSibling(id) {
+  const generation = longTailConsoleGeneration();
   const row = consoleRow(id);
   if (!row) return;
   if (!canAcceptSibling(row, row.mb_release_group_id || null)) {
@@ -1764,6 +1856,7 @@ export async function longTailAcceptSibling(id) {
     return;
   }
   const result = await openReplacePicker(buildAcceptSiblingOptions(row));
+  if (!isLongTailConsoleGenerationCurrent(generation)) return;
   if (!result || result.outcome !== 'confirmed') return;  // cancelled.
   const resp = result.response || { status: 0, body: {} };
   const status = resp.status;
@@ -1823,6 +1916,7 @@ function closeConsole(id) {
  * @returns {Promise<void>}
  */
 export async function longTailSetIntent(id, control = null) {
+  const generation = longTailConsoleGeneration();
   const row = consoleRow(id);
   if (!row) return;
   if (!consoleCanStart(consoleStates, id, 'intent')) return;  // double-fire guard.
@@ -1836,16 +1930,23 @@ export async function longTailSetIntent(id, control = null) {
         body: JSON.stringify({ id, intent }),
       });
       data = await r.json();
+      if (!isLongTailConsoleGenerationCurrent(generation)) return;
       if (await handleProcessingLockedConflict({
         httpStatus: r.status,
         payload: data,
         control,
-        refetch: refetchLongTailProcessingRow,
+        refetch: (requestId, refreshGeneration) => (
+          refetchLongTailProcessingRow(
+            requestId, refreshGeneration, generation,
+          )
+        ),
       })) {
         return;
       }
+      if (!isLongTailConsoleGenerationCurrent(generation)) return;
     } catch (_e) {
-      if (typeof toast === 'function') toast('Failed to set intent', true);
+      if (isLongTailConsoleGenerationCurrent(generation)
+          && typeof toast === 'function') toast('Failed to set intent', true);
       return;
     }
     if (!data || data.status !== 'ok') {
@@ -1859,9 +1960,11 @@ export async function longTailSetIntent(id, control = null) {
     }
     // Single-row refetch-and-patch (KTD8) — the badge reflects the new intent
     // off the authoritative refetched row.
-    await refetchLongTailRow(id);
+    await refetchLongTailRow(id, generation);
   } finally {
-    consoleSettle(consoleStates, id, 'intent');
+    if (isLongTailConsoleGenerationCurrent(generation)) {
+      consoleSettle(consoleStates, id, 'intent');
+    }
   }
 }
 
@@ -1878,6 +1981,7 @@ export async function longTailSetIntent(id, control = null) {
  * @returns {Promise<void>}
  */
 export async function longTailSetImported(id, control = null) {
+  const generation = longTailConsoleGeneration();
   if (!consoleCanStart(consoleStates, id, 'import')) return;  // double-fire guard.
   try {
     let data;
@@ -1888,16 +1992,23 @@ export async function longTailSetImported(id, control = null) {
         body: JSON.stringify({ id, status: 'imported' }),
       });
       data = await r.json();
+      if (!isLongTailConsoleGenerationCurrent(generation)) return;
       if (await handleProcessingLockedConflict({
         httpStatus: r.status,
         payload: data,
         control,
-        refetch: refetchLongTailProcessingRow,
+        refetch: (requestId, refreshGeneration) => (
+          refetchLongTailProcessingRow(
+            requestId, refreshGeneration, generation,
+          )
+        ),
       })) {
         return;
       }
+      if (!isLongTailConsoleGenerationCurrent(generation)) return;
     } catch (_e) {
-      if (typeof toast === 'function') toast('Failed to set imported', true);
+      if (isLongTailConsoleGenerationCurrent(generation)
+          && typeof toast === 'function') toast('Failed to set imported', true);
       return;
     }
     if (!data || data.status !== 'ok') {
@@ -1910,7 +2021,9 @@ export async function longTailSetImported(id, control = null) {
     removeRowFromCohort(id);
     removeRowElement(id);
   } finally {
-    consoleSettle(consoleStates, id, 'import');
+    if (isLongTailConsoleGenerationCurrent(generation)) {
+      consoleSettle(consoleStates, id, 'import');
+    }
   }
 }
 
@@ -1931,6 +2044,7 @@ export async function longTailDeleteRequest(id, control = null) {
       && !confirm(`Delete request #${id}? This removes the wanted request entirely.`)) {
     return;
   }
+  const generation = longTailConsoleGeneration();
   if (!consoleCanStart(consoleStates, id, 'delete')) return;  // double-fire guard.
   try {
     let status = 0;
@@ -1943,16 +2057,23 @@ export async function longTailDeleteRequest(id, control = null) {
       });
       status = r.status;
       data = await r.json();
+      if (!isLongTailConsoleGenerationCurrent(generation)) return;
       if (await handleProcessingLockedConflict({
         httpStatus: status,
         payload: data,
         control,
-        refetch: refetchLongTailProcessingRow,
+        refetch: (requestId, refreshGeneration) => (
+          refetchLongTailProcessingRow(
+            requestId, refreshGeneration, generation,
+          )
+        ),
       })) {
         return;
       }
+      if (!isLongTailConsoleGenerationCurrent(generation)) return;
     } catch (_e) {
-      if (typeof toast === 'function') toast('Failed to delete request', true);
+      if (isLongTailConsoleGenerationCurrent(generation)
+          && typeof toast === 'function') toast('Failed to delete request', true);
       return;
     }
     if (status === 200 && data && data.status === 'ok') {
@@ -1972,7 +2093,9 @@ export async function longTailDeleteRequest(id, control = null) {
       toast((data && data.error) || `Delete failed (HTTP ${status})`, true);
     }
   } finally {
-    consoleSettle(consoleStates, id, 'delete');
+    if (isLongTailConsoleGenerationCurrent(generation)) {
+      consoleSettle(consoleStates, id, 'delete');
+    }
   }
 }
 
@@ -1984,14 +2107,21 @@ export async function longTailDeleteRequest(id, control = null) {
  *
  * @param {number} requestId
  * @param {number} refreshGeneration
+ * @param {number} generation
  * @returns {Promise<{requestId: number, releaseId: string, status: string, owner: Object|null}|null>}
  */
-async function refetchLongTailProcessingRow(requestId, refreshGeneration) {
+async function refetchLongTailProcessingRow(
+  requestId,
+  refreshGeneration,
+  generation,
+) {
+  if (!isLongTailConsoleGenerationCurrent(generation)) return null;
   const projection = await refetchProcessingRequest(
     requestId,
     '',
     refreshGeneration,
   );
+  if (!isLongTailConsoleGenerationCurrent(generation)) return null;
   if (!projection) return null;
   if (projection.status !== 'wanted') {
     removeRowFromCohort(requestId);
@@ -2031,7 +2161,11 @@ export const __test__ = {
   consoleIsOpen,
   consoleYoutubeResult,
   consoleSetYoutubeResult,
+  consoleSetYoutubeResultForGeneration,
   consoleOpenIds,
+  longTailConsoleGeneration,
+  isLongTailConsoleGenerationCurrent,
+  invalidateLongTailConsoleState,
   // U6 — secondary action pure helpers.
   canAcceptSibling,
   acceptDisabledReason,

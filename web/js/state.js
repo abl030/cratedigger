@@ -99,10 +99,18 @@ export const API = '';
 
 /**
  * Central pipeline status store. Maps normalized release ID to the exact
- * request projection, including the recorded processor owner when applicable.
+ * request lifecycle projection, including the recorded processor owner when
+ * applicable. Capture/proof facts remain owned by API rows: a local mutation
+ * suppresses a stale row only until a refetch catches up to this lifecycle.
+ * Null-status tombstones likewise prevent a deleted request from being
+ * combined with facts from the stale pre-delete row.
  * Updated by any mutation (add, remove, upgrade, delete).
  * All rendering code should check this before using stale API data.
- * @type {Map<string, {status: string|null, id: number|null, processing_owner: ProcessingOwnerProjection|null}>}
+ * @type {Map<string, {
+ *   status: string|null,
+ *   id: number|null,
+ *   processing_owner: ProcessingOwnerProjection|null,
+ * }>}
  */
 export const pipelineStore = new Map();
 
@@ -113,6 +121,82 @@ export const pipelineStore = new Map();
  */
 export function pipelineStoreKey(releaseId) {
   return normalizeReleaseId(releaseId);
+}
+
+/**
+ * @typedef {Object} ResolvedPipelineLifecycle
+ * @property {string|null} status
+ * @property {number|null} id
+ * @property {ProcessingOwnerProjection|null} processing_owner
+ * @property {boolean} row_facts_are_current
+ */
+
+/**
+ * @param {ProcessingOwnerProjection|null} left
+ * @param {ProcessingOwnerProjection|null} right
+ * @returns {boolean}
+ */
+function processingOwnersEqual(left, right) {
+  if (!left || !right) return left === right;
+  return left.job_id === right.job_id
+    && left.status === right.status
+    && (left.preview_status || null) === (right.preview_status || null);
+}
+
+/**
+ * Resolve one row against a recent local lifecycle mutation.
+ *
+ * A row acknowledges the overlay only when status, request ID, and exact
+ * processing owner all match. Every consumer calls this before choosing
+ * actions, badges, or row-owned historical facts, so one render cannot mix
+ * lifecycle projections from opposite sides of the acknowledgement boundary.
+ *
+ * @param {string|null|undefined} releaseId
+ * @param {string|null|undefined} rowStatus
+ * @param {number|null|undefined} rowId
+ * @param {ProcessingOwnerProjection|null|undefined} rowOwner
+ * @returns {ResolvedPipelineLifecycle}
+ */
+export function resolvePipelineLifecycle(
+  releaseId,
+  rowStatus,
+  rowId,
+  rowOwner,
+) {
+  const key = pipelineStoreKey(releaseId);
+  let stored = key ? pipelineStore.get(key) : null;
+  const authoritativeStatus = rowStatus || null;
+  const authoritativeId = rowId ?? null;
+  const authoritativeOwner = authoritativeStatus === 'processing'
+    ? (rowOwner || null)
+    : null;
+  if (stored) {
+    const storedOwner = stored.status === 'processing'
+      ? stored.processing_owner
+      : null;
+    if (authoritativeStatus === stored.status
+        && authoritativeId === stored.id
+        && processingOwnersEqual(authoritativeOwner, storedOwner)) {
+      pipelineStore.delete(key);
+      stored = null;
+    }
+  }
+  if (!stored) {
+    return {
+      status: authoritativeStatus,
+      id: authoritativeId,
+      processing_owner: authoritativeOwner,
+      row_facts_are_current: true,
+    };
+  }
+  return {
+    status: stored.status,
+    id: stored.id,
+    processing_owner: stored.status === 'processing'
+      ? stored.processing_owner
+      : null,
+    row_facts_are_current: false,
+  };
 }
 
 /**
@@ -132,15 +216,11 @@ export function updatePipelineStatus(
   const key = pipelineStoreKey(mbid);
   if (!key) return;
   // Update central store
-  if (status) {
-    pipelineStore.set(key, {
-      status,
-      id: pipelineId,
-      processing_owner: status === 'processing' ? processingOwner : null,
-    });
-  } else {
-    pipelineStore.delete(key);
-  }
+  pipelineStore.set(key, {
+    status,
+    id: status ? pipelineId : null,
+    processing_owner: status === 'processing' ? processingOwner : null,
+  });
   // Any pipeline mutation (add / remove / upgrade / replace) may
   // shift which release-groups have an active row — invalidate the
   // Browse-search inverted Replace button cache so the next render

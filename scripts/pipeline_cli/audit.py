@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 import msgspec
 
 from lib.beets_db import BeetsDB, open_beets_db
-from lib.world_audit_service import WorldAuditReport, audit_world
+from lib.world_audit_service import WorldAuditReport, audit_world_from_factory
 
 if TYPE_CHECKING:
     from lib.world_audit_service import WorldAuditPipelineDB
@@ -33,39 +33,45 @@ def _render_text(report: WorldAuditReport) -> None:
         f"active_requests={counts.active_requests} "
         f"beets_albums={counts.beets_albums} "
         f"linked_evidence={counts.linked_evidence} "
-        f"denylist_rows={counts.denylist_rows} "
-        f"violations={counts.violations}"
+        f"denylist_rows={counts.denylist_rows}"
     )
+    print(f"complete: {'yes' if report.complete else 'no'}")
     print("audited invariants: " + ", ".join(report.audited_invariants))
     print(
         "temporal invariants not auditable from current state: "
         + ", ".join(report.temporal_invariants_not_auditable)
     )
-    for violation in report.violations:
-        print(f"{violation.code}: {violation.detail}")
+    for group in (report.groups.a, report.groups.b, report.groups.c):
+        print(
+            f"bucket {group.bucket} ({group.owner}): "
+            f"{group.count}"
+        )
+        for violation in group.members:
+            print(f"  {violation.code}: {violation.detail}")
 
 
 def cmd_audit_world(db: WorldAuditPipelineDB, args: object) -> int:
     """Run the shared world invariant bank without mutating either store."""
     typed_args = msgspec.convert(vars(args), type=_AuditWorldArgs)
     try:
-        beets = _open_beets(
-            typed_args.beets_db,
-            typed_args.beets_directory,
+        report = audit_world_from_factory(
+            db,
+            lambda: _open_beets(
+                typed_args.beets_db,
+                typed_args.beets_directory,
+            ),
         )
-    except (FileNotFoundError, ValueError) as exc:
+    except Exception as exc:  # noqa: BLE001 - transport boundary, not typed B
         print(json.dumps({
-            "error": "beets_db_unavailable",
+            "error": "world_audit_failed",
             "detail": str(exc),
         }))
         return 5
-    with beets:
-        report = audit_world(db, beets)
     if typed_args.json:
         print(json.dumps(msgspec.to_builtins(report), indent=2))
     else:
         _render_text(report)
-    return 0 if report.status == "clean" else 1
+    return 1 if report.status == "integrity_failed" else 0
 
 
 def add_audit_subparser(

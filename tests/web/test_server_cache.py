@@ -286,7 +286,13 @@ class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
         with patch("web.server.mb_api") as mock_mb, \
                 patch("web.server.check_beets_library", return_value=set()), \
                 patch("web.server.check_pipeline",
-                      return_value={self.RELEASE_ID: {"id": 42, "status": "wanted"}}):
+                      return_value={self.RELEASE_ID: {
+                          "id": 42,
+                          "status": "wanted",
+                          "has_captured_history": False,
+                          "verified_lossless": False,
+                          "provisional_lossless": False,
+                      }}):
             mock_mb.get_artist_releases_with_recordings.return_value = \
                 self._RAW_RELEASES
             mock_mb.get_artist_name.return_value = "Test Artist"
@@ -302,7 +308,13 @@ class TestAnalysisSkeletonCachedSeparately(_CachedServerCase):
         with patch("web.server.mb_api") as mock_mb, \
                 patch("web.server.check_beets_library", return_value=set()), \
                 patch("web.server.check_pipeline",
-                      return_value={self.RELEASE_ID: {"id": 42, "status": "downloading"}}):
+                      return_value={self.RELEASE_ID: {
+                          "id": 42,
+                          "status": "downloading",
+                          "has_captured_history": False,
+                          "verified_lossless": False,
+                          "provisional_lossless": False,
+                      }}):
             mock_mb.get_artist_releases_with_recordings.return_value = \
                 self._RAW_RELEASES
             mock_mb.get_artist_name.return_value = "Test Artist"
