@@ -19,7 +19,7 @@ Browser → https://music.ablz.au
                    → web/server.py (stdlib http.server, inherited AF_UNIX fd)
                      → PostgreSQL (pipeline DB, nspawn container 10.20.0.11)
                      → SQLite (beets library, /mnt/virtio/cratedigger/beets-db/beets-library.db, read-only)
-                     → MusicBrainz API (local mirror, 192.168.1.35:5200)
+                     → MusicBrainz API (dedicated mirror, 192.168.1.43:5200)
 ```
 
 - **No build step, no npm, no framework** — stdlib `http.server`, vanilla JS, single HTML file
@@ -572,7 +572,7 @@ A practical "develop anywhere" loop is:
 PIPELINE_DB_DSN=postgresql://cratedigger@127.0.0.1:15432/cratedigger \
   nix-shell --run "python3 scripts/web_dev_server.py --data live-db \
     --host 127.0.0.1 --port 8096 \
-    --mb-api http://192.168.1.35:5200/ws/2 \
+    --mb-api http://192.168.1.43:5200/ws/2 \
     --discogs-api https://discogs.ablz.au"
 
 # Required from a second backend-host shell before accepting screenshots.
@@ -712,7 +712,7 @@ print credentials in argv or logs while probing.
 
 ## MusicBrainz API Usage
 
-All queries hit the local mirror at `http://192.168.1.35:5200/ws/2`.
+All queries hit the dedicated mirror at `http://192.168.1.43:5200/ws/2`.
 
 Key endpoints used:
 - `artist?query=NAME&fmt=json` — artist search

@@ -66,7 +66,7 @@ If a design drifts toward "good enough" matches, "smart" defaults, or auto-throt
 ## Infrastructure
 
 - **doc1** (`192.168.1.29`): this repo at `/home/abl030/cratedigger`; primary dev host.
-- **doc2** (`192.168.1.35`): runs cratedigger (back-to-back timer, ~4-5 min/cycle), deployment-owned Beets, MB mirror (`:5200`), and slskd (`:5030`).
+- **doc2** (`192.168.1.35`): runs cratedigger (back-to-back timer, ~4-5 min/cycle) and deployment-owned Beets. Its dedicated dependencies are MusicBrainz + LRCLIB at `192.168.1.43`, Discogs at `192.168.1.44`, and the slskd microVM at `192.168.21.2`.
 - **Shared storage**: `/mnt/virtio` (virtiofs) — beets DB, pipeline DB data, music library reachable from both.
 - **Nix deployment**: cratedigger is a flake input (`cratedigger-src`) in `~/nixosconfig/flake.nix`; downstream wrapper at `~/nixosconfig/modules/nixos/services/cratedigger.nix` imports `nixosModules.default`. `docs/nixos-module.md`.
 

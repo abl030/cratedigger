@@ -549,8 +549,10 @@ For the abl030 homelab (this project's reference deployment):
 # On doc1 — has git push credentials for nixosconfig
 cd ~/nixosconfig
 $EDITOR hosts/doc2/configuration.nix          # tweak services.cratedigger.qualityRanks.*
-git commit -am "cratedigger: retune <what>" && git push
-ssh doc2 'sudo nixos-rebuild switch --flake github:abl030/nixosconfig#doc2 --refresh'
+git add hosts/doc2/configuration.nix
+git commit -S -m "fix(cratedigger): retune <what>"
+# Push the signed commit to the Forgejo deployment root, then:
+env -u SSH_AUTH_SOCK fleet-deploy doc2
 ```
 
 ### How to verify the new config is live

@@ -1489,7 +1489,7 @@ in {
       apiBase = mkOption {
         type = types.str;
         default = "https://musicbrainz.org";
-        example = "http://192.168.1.35:5200";
+        example = "http://mb-mirror.lan:5200";
         description = ''
           MusicBrainz API origin (scheme://host[:port], no path) — ONE value
           threaded to all consumers (tier-2 plan U6/KTD6): web/mb.py
@@ -1974,7 +1974,7 @@ in {
       }
       {
         assertion = lib.hasPrefix "http://" cfg.musicbrainz.apiBase || lib.hasPrefix "https://" cfg.musicbrainz.apiBase;
-        message = "services.cratedigger.musicbrainz.apiBase must be an origin URL (scheme://host[:port], no path), e.g. https://musicbrainz.org or http://192.168.1.35:5200.";
+        message = "services.cratedigger.musicbrainz.apiBase must be an origin URL (scheme://host[:port], no path), e.g. https://musicbrainz.org or http://mb-mirror.lan:5200.";
       }
       {
         assertion = cfg.discogs.apiBase == null || lib.hasPrefix "http://" cfg.discogs.apiBase || lib.hasPrefix "https://" cfg.discogs.apiBase;

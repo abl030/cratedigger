@@ -375,7 +375,7 @@ an explicitly supplied MusicBrainz mirror origin:
 ```bash
 nix-shell --run "scripts/world_model_burst.sh \
   --engine mirror-harness \
-  --mirror-url http://192.168.1.35:5200 \
+  --mirror-url http://192.168.1.43:5200 \
   --examples 2 --steps 5"
 ```
 

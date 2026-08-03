@@ -15,12 +15,18 @@ host. The escape hatch is `services.cratedigger.packageSet = pkgs;` (or another
 package set), which also changes the Python identity the supplied Beets package
 must use and forfeits the tested-closure guarantee.
 
-> **Held series slice:** the public module interface below is the issue #759
-> ownership inversion. A deployment using the removed `beets.package` or
-> `beets.config` interface must land its external Beets owner and new runtime
-> capability before pinning this revision. There are no compatibility aliases.
+> **Breaking interface:** the public module consumes an externally owned Beets
+> runtime. A deployment using the removed `beets.package` or `beets.config`
+> interface must supply the new runtime capability in the same change. There
+> are no compatibility aliases.
 
-`~/nixosconfig/modules/nixos/services/cratedigger.nix` is a thin homelab wrapper (~150 lines) that imports the upstream module and adds:
+The homelab deployment composes this upstream module with two downstream
+modules. `~/nixosconfig/modules/nixos/services/beets.nix` owns the system Beets
+package, config, state, secret include, storage readiness, and plain operator
+command. `~/nixosconfig/modules/nixos/services/cratedigger.nix` imports the
+upstream module and adds:
+
+- the exact runtime capability exported by the sibling Beets owner
 - sops-nix per-key secret materialization (`cratedigger-secrets-split` oneshot — see below)
 - the nspawn PostgreSQL container for the pipeline DB
 - the `homelab.localProxy.hosts` entry for `music.ablz.au`

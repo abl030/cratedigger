@@ -26,7 +26,7 @@ Canonical remote-dev flow from any machine with SSH access:
    PIPELINE_DB_DSN=postgresql://cratedigger@127.0.0.1:15432/cratedigger \
      nix-shell --run "python3 scripts/web_dev_server.py --data live-db \
        --host 127.0.0.1 --port 8096 \
-       --mb-api http://192.168.1.35:5200/ws/2 \
+       --mb-api http://192.168.1.43:5200/ws/2 \
        --discogs-api https://discogs.ablz.au"
    ```
    Before inspecting cross-source UI pixels, require its real route to pass:

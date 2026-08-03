@@ -1,5 +1,11 @@
 # Search-Plan Iteration 2 — Deploy Runbook
 
+> **Historical rollout record (completed 2026-05-26).** Preserve the commands
+> below as evidence of the original PR-by-PR deployment; do not execute them as
+> the current fleet procedure. New deployments use the repository `deploy`
+> skill: GitHub Cratedigger merge, signed Forgejo nixosconfig pin, then doc1's
+> locked-sibling `fleet-deploy doc2` path with exact-source verification.
+
 Operator runbook for the search-plan iteration 2 PR series (issue
 [#369](https://github.com/abl030/cratedigger/issues/369)). One section
 per PR. PR1 has a non-trivial deploy procedure (controlled window for a
