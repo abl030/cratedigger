@@ -42,6 +42,7 @@ const {
   consoleSetYoutubeResult,
   consoleOpenIds,
   renderSpectralFragment,
+  renderYoutubeBody,
 } = __test__;
 
 let passed = 0;

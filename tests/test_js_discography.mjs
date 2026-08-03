@@ -14,9 +14,19 @@ import {
   splitPressings,
   statusChipHtml,
 } from '../web/js/discography.js';
+import { renderYoutubeRescueControl } from '../web/js/youtube_rescue_control.js';
 
 let passed = 0;
 let failed = 0;
+
+console.log('shared YouTube rescue control');
+{
+  const html = renderYoutubeRescueControl('release-7', 7, '129bebd8-a7b9-4099-b0bc-545b704e7a95');
+  assertContains(html, 'yt-rescue-release-7', 'release detail uses a surface-keyed control id');
+  assertContains(html, 'window.checkYoutubeRescue(', 'inline handler uses the shared generic entry point');
+  assertExcludes(html, '"window.checkYoutubeRescue("release-7"', 'inline handler does not break its HTML attribute quoting');
+  assertContains(html, 'music.youtube.com/watch?v=', 'control carries canonical watch input');
+}
 
 function assertEqual(actual, expected, msg) {
   if (actual === expected) {

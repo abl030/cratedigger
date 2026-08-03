@@ -12,6 +12,7 @@ import { loadRecents, setRecentsFilter, setRecentsSub, renderRecentsItems } from
 import { loadPipeline, loadPipelineDashboard, setPipelineView, renderPipeline, toggleCoverageMatchGraph, toggleDetail, deleteRequest, updateStatus } from './pipeline.js';
 import { loadLongTail, setLongTailBand, onLongTailSearchInput } from './long_tail.js';
 import { toggleLongTailDetail, toggleLongTailPeers, checkYoutube, pickYoutubeRescue, longTailAcceptSibling, longTailSetIntent, longTailSetImported, longTailDeleteRequest } from './long_tail_console.js';
+import { checkYoutubeRescue } from './youtube_rescue_control.js';
 import { toggleLibDetail, toggleReleaseLibDetail, banSource, setLibQuality, upgradeAlbum, setIntent, confirmDeleteBeets, executeBeetsDeletion } from './library.js';
 import { disambRemove } from './analysis.js';
 import { loadWrongMatches, toggleWrongMatchGroup, toggleWrongMatchEntry, reloadWrongMatchExplorer, maybeLoadWrongMatchExplorer, refreshWrongMatches, forceImportWrongMatch, deleteWrongMatch, deleteWrongMatchGroup, bulkTriageWrongMatches, convergeWrongMatches, setWrongMatchConvergeThreshold, toggleWrongMatchesReplacedFilter } from './wrong-matches.js';
@@ -243,6 +244,7 @@ Object.assign(window, {
   // panel in `never_run` until the operator clicks).
   checkYoutube,
   pickYoutubeRescue,
+  checkYoutubeRescue,
   // Long-tail secondary actions (U6), all wired to EXISTING endpoints:
   // set-imported (accept on-disk quality → POST /api/pipeline/update),
   // accept-a-sibling-pressing (the Replace operator action, MB-only per

@@ -11,6 +11,7 @@ import { invalidateBrowseArtist } from './browse.js';
 import { applyAnalysisToExpansion } from './analysis.js';
 import { renderLabelLinks } from './labels.js';
 import { renderSearchPlanButton } from './search_plan.js';
+import { renderYoutubeRescueControl } from './youtube_rescue_control.js';
 import { convergenceBadge } from './convergence.js';
 import { loadActiveRgs, hasActiveRg, invalidateActiveRgs } from './active_rgs.js';
 import {
@@ -662,6 +663,9 @@ export function renderReleaseDetail(targetEl, releaseId, data, opts = {}) {
     stopPropagation: true,
     hideDisabled: true,
   });
+  if (['wanted', 'unsearchable'].includes(data.pipeline_status) && data.pipeline_id) {
+    html += renderYoutubeRescueControl(`release-${data.pipeline_id}`, data.pipeline_id, releaseId, null);
+  }
   html += '</div>';
 
   // Deep library detail (path, download history, status / min-bitrate /
