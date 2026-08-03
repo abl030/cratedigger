@@ -23,6 +23,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import subprocess
 import sys
 import unittest
 from contextlib import redirect_stdout
@@ -778,6 +779,52 @@ class TestCli(unittest.TestCase):
             with self.assertRaises(SystemExit) as raised:
                 main(["decide", "--corpus", str(corpus)])
             self.assertEqual(raised.exception.code, 2)
+
+    def test_coverage_conflict_debt_is_stable_across_hash_seeds(self):
+        """A set-backed conflicting mismatch must not perturb coverage bytes."""
+        child = '''
+import hashlib
+
+import msgspec
+
+from scripts.decision_differential import (
+    _CoverageObservedEvidence,
+    _CoverageSourceLink,
+    recompute_decision_corpus_coverage,
+)
+
+links = [
+    _CoverageSourceLink(
+        source="download_log", source_id=1, evidence_id=1, request_id=10,
+        request_exists=True, request_mb_release_id="release-z", current_evidence_id=2,
+        authority_reason=None,
+    ),
+    _CoverageSourceLink(
+        source="import_jobs", source_id=1, evidence_id=1, request_id=11,
+        request_exists=True, request_mb_release_id="release-a", current_evidence_id=3,
+        authority_reason=None,
+    ),
+]
+observed = [
+    _CoverageObservedEvidence(1, "candidate", "candidate", "candidate", "one"),
+    _CoverageObservedEvidence(2, "current-two", "current-two", "current-two", "two"),
+    _CoverageObservedEvidence(3, "current-three", "current-three", "current-three", "three"),
+]
+coverage = recompute_decision_corpus_coverage(links, observed, [], b"")
+print(hashlib.sha256(msgspec.json.encode(coverage)).hexdigest())
+'''
+        hashes: list[str] = []
+        for seed in ("1", "5"):
+            completed = subprocess.run(
+                [sys.executable, "-c", child],
+                check=True,
+                capture_output=True,
+                cwd=Path(__file__).parents[1],
+                env={**os.environ, "PYTHONHASHSEED": seed},
+                text=True,
+            )
+            hashes.append(completed.stdout.strip())
+        self.assertEqual(hashes[0], hashes[1])
 
 
 if __name__ == "__main__":

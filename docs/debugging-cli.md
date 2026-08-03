@@ -547,6 +547,10 @@ it rejects stale, substituted, or malformed corpus/coverage pairs:
 nix-shell --run "python3 scripts/decision_differential.py verify \
   --corpus /tmp/decision-corpus.jsonl \
   --coverage /tmp/decision-corpus-coverage.json"
+nix-shell --run "python3 scripts/decision_differential.py decide \
+  --corpus /tmp/decision-corpus.jsonl \
+  --coverage /tmp/decision-corpus-coverage.json \
+  --out /tmp/decision-current.jsonl"
 ```
 
 The corpus and coverage bytes are

@@ -11,7 +11,10 @@ The two are deliberately the same shape and share one diff engine
 — "on the rows that actually exist, what does this change?" — and because
 a second copy of that engine would be a parallel code path.
 
-Two modes, same two-tree runbook as Rule D:
+Four modes, with ``decide``/``diff`` sharing Rule D's two-tree runbook:
+
+* ``export`` reads the live source graph into a corpus plus its coverage
+  manifest. ``verify`` recomputes that manifest before either tree trusts it.
 
 * ``decide`` reads a corpus JSONL containing complete candidate and current
   ``album_quality_evidence`` rows (with their snapshot files under ``files``).
@@ -25,9 +28,11 @@ Two modes, same two-tree runbook as Rule D:
     git archive <base-ref> | tar -x -C /tmp/dd-base
     cp scripts/decision_differential.py /tmp/dd-base/scripts/   # if newer
     nix-shell --run "python3 /tmp/dd-base/scripts/decision_differential.py \\
-      decide --corpus /tmp/evidence.jsonl --out /tmp/base.jsonl"
+      decide --corpus /tmp/evidence.jsonl --coverage /tmp/evidence-coverage.json \\
+      --out /tmp/base.jsonl"
     nix-shell --run "python3 scripts/decision_differential.py \\
-      decide --corpus /tmp/evidence.jsonl --out /tmp/current.jsonl"
+      decide --corpus /tmp/evidence.jsonl --coverage /tmp/evidence-coverage.json \\
+      --out /tmp/current.jsonl"
     nix-shell --run "python3 scripts/decision_differential.py diff \\
       --base /tmp/base.jsonl --current /tmp/current.jsonl"
 
@@ -1441,6 +1446,14 @@ def duplicate_content_addresses(
     return sorted(key for key, count in counts.items() if count > 1)
 
 
+def _association_order_key(
+    association: tuple[int | None, str],
+) -> tuple[bool, int, str]:
+    """Order nullable-current associations independently of hash seed."""
+    current_id, release_id = association
+    return (current_id is not None, current_id or -1, release_id)
+
+
 def recompute_decision_corpus_coverage(
     source_links: Sequence[_CoverageSourceLink],
     observed_evidence: Sequence[_CoverageObservedEvidence],
@@ -1497,10 +1510,7 @@ def recompute_decision_corpus_coverage(
                     current_evidence_id=current_id,
                     request_mb_release_id=release_id,
                 )
-                for current_id, release_id in sorted(
-                    values,
-                    key=lambda item: (item[0] is not None, item[0] or -1, item[1]),
-                )
+                for current_id, release_id in sorted(values, key=_association_order_key)
             ],
         )
         for evidence_id, values in sorted(associations.items())
@@ -1508,7 +1518,7 @@ def recompute_decision_corpus_coverage(
     ]
     conflict_ids = {item.evidence_id for item in conflicts}
     candidate_associations = {
-        evidence_id: next(iter(values))
+        evidence_id: next(iter(sorted(values, key=_association_order_key)))
         for evidence_id, values in associations.items()
         if evidence_id not in conflict_ids
     }
@@ -1547,9 +1557,9 @@ def recompute_decision_corpus_coverage(
     candidate_mismatches: list[_CoverageCandidateMismatch] = []
     current_mismatches: list[_CoverageCurrentMismatch] = []
     invalid: set[tuple[int, int | None, str]] = set()
-    for evidence_id, values in associations.items():
+    for evidence_id, values in sorted(associations.items()):
         candidate = evidence_rows.get(evidence_id)
-        for current_id, release_id in values:
+        for current_id, release_id in sorted(values, key=_association_order_key):
             association = (evidence_id, current_id, release_id)
             if candidate is None or evidence_id in content_mismatch_ids:
                 invalid.add(association)
@@ -1809,7 +1819,7 @@ def export_decision_corpus(
             # associations for the same candidate are named conflict debt,
             # never selected with DISTINCT ON or quietly treated as one.
             candidate_associations = {
-                evidence_id: next(iter(values))
+                evidence_id: next(iter(sorted(values, key=_association_order_key)))
                 for evidence_id, values in associations.items()
                 if evidence_id not in conflict_ids
             }
@@ -1858,9 +1868,11 @@ def export_decision_corpus(
             # licence to conceal a release/content mismatch on one of its
             # source links.
             invalid_associations: set[tuple[int, int | None, str]] = set()
-            for evidence_id, association_values in associations.items():
+            for evidence_id, association_values in sorted(associations.items()):
                 candidate = evidence_rows.get(evidence_id)
-                for current_id, release_id in association_values:
+                for current_id, release_id in sorted(
+                    association_values, key=_association_order_key
+                ):
                     association = (evidence_id, current_id, release_id)
                     if candidate is None or evidence_id in content_mismatch_ids:
                         invalid_associations.add(association)
