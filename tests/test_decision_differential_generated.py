@@ -53,6 +53,7 @@ CorpusMutation = Literal[
     "wrong_evidence_primitive",
     "null_db_not_null_evidence",
 ]
+CorpusMutationRole = Literal["candidate", "referenced_current"]
 _CORPUS_MUTATIONS: tuple[CorpusMutation, ...] = (
     "duplicate_id",
     "dangling_current",
@@ -61,6 +62,9 @@ _CORPUS_MUTATIONS: tuple[CorpusMutation, ...] = (
     "wrong_file_primitive",
     "wrong_evidence_primitive",
     "null_db_not_null_evidence",
+)
+_CORPUS_MUTATION_ROLES: tuple[CorpusMutationRole, ...] = (
+    "candidate", "referenced_current",
 )
 
 
@@ -153,21 +157,31 @@ def assert_generated_evidence_addresses(
 
 @st.composite
 def native_pairing_worlds(draw) -> NativePairingWorld:
-    """Valid complete corpus rows with an arbitrary current-FK graph."""
+    """Valid graph with a current-only row referenced by a candidate."""
     evidence_ids = draw(st.lists(
         st.integers(min_value=1, max_value=100),
         min_size=len(_CURRENT_PROFILES),
         max_size=len(_CURRENT_PROFILES),
         unique=True,
     ))
-    candidate_ids = set(draw(st.lists(
+    candidate_ids = draw(st.lists(
         st.sampled_from(evidence_ids),
         min_size=1,
-        max_size=len(evidence_ids),
+        max_size=len(evidence_ids) - 1,
         unique=True,
-    )))
+    ))
+    candidate_id_set = set(candidate_ids)
+    current_only_ids = [
+        evidence_id for evidence_id in evidence_ids
+        if evidence_id not in candidate_id_set
+    ]
+    paired_candidate_id = draw(st.sampled_from(candidate_ids))
     current_by_candidate = {
-        evidence_id: draw(st.sampled_from([None, *evidence_ids]))
+        evidence_id: (
+            draw(st.sampled_from(current_only_ids))
+            if evidence_id == paired_candidate_id
+            else draw(st.sampled_from([None, *evidence_ids]))
+        )
         for evidence_id in candidate_ids
     }
     profile_by_evidence_id: dict[int, CurrentEvidenceProfile] = {
@@ -178,7 +192,7 @@ def native_pairing_worlds(draw) -> NativePairingWorld:
         _profiled_evidence_row(
             evidence_id,
             profile=profile_by_evidence_id[evidence_id],
-            is_candidate=evidence_id in candidate_ids,
+            is_candidate=evidence_id in candidate_id_set,
             current_evidence_id=current_by_candidate.get(evidence_id),
         )
         for evidence_id in evidence_ids
@@ -275,37 +289,52 @@ def _decide_world(
 def _mutated_corpus_rows(
     rows: tuple[dict[str, object], ...],
     mutation: CorpusMutation,
+    *,
+    role: CorpusMutationRole,
 ) -> tuple[dict[str, object], ...]:
     """Plant one bounded JSONL failure without changing the valid source world."""
     mutated = [deepcopy(row) for row in rows]
-    candidate = next(row for row in mutated if row["is_candidate"] is True)
+    if role == "candidate":
+        target = next(row for row in mutated if row["is_candidate"] is True)
+    else:
+        referenced_ids = {
+            current_id
+            for row in mutated
+            if row["is_candidate"] is True
+            for current_id in (row["current_evidence_id"],)
+            if isinstance(current_id, int)
+        }
+        target = next(
+            row for row in mutated
+            if row["is_candidate"] is False and row["id"] in referenced_ids
+        )
     if mutation == "duplicate_id":
-        mutated.append(deepcopy(mutated[0]))
+        mutated.append(deepcopy(target))
     elif mutation == "dangling_current":
         ids: list[int] = []
         for row in mutated:
             evidence_id = row["id"]
             assert isinstance(evidence_id, int)
             ids.append(evidence_id)
-        candidate["current_evidence_id"] = max(ids) + 1
+        target["current_evidence_id"] = max(ids) + 1
     elif mutation == "missing_required":
-        del candidate["request_mb_release_id"]
+        del target["request_mb_release_id"]
     elif mutation == "wrong_top_level":
-        candidate["is_candidate"] = "true"
+        target["is_candidate"] = "true"
     elif mutation == "wrong_file_primitive":
-        files = candidate["files"]
+        files = target["files"]
         assert isinstance(files, list)
         file = files[0]
         assert isinstance(file, dict)
         file["size_bytes"] = "1"
     elif mutation == "wrong_evidence_primitive":
-        report = candidate["audio_validation"]
+        report = target["audio_validation"]
         assert isinstance(report, dict)
         report["files_checked"] = "0"
     elif mutation == "null_db_not_null_evidence":
-        candidate["folder_layout"] = None
-        candidate["audio_file_count"] = None
-        candidate["filetype_band"] = None
+        target["folder_layout"] = None
+        target["audio_file_count"] = None
+        target["filetype_band"] = None
     else:  # pragma: no cover - Literal and the complete tuple above guard this.
         raise AssertionError(f"unknown corpus mutation: {mutation}")
     return tuple(mutated)
@@ -367,19 +396,25 @@ class TestNativeCurrentPairingGenerated(unittest.TestCase):
         world: NativePairingWorld,
     ) -> None:
         """Every bounded malformed-wire class reaches both outer adapters."""
+        assert_generated_evidence_addresses(world.rows)
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            for mutation in _CORPUS_MUTATIONS:
-                corpus = root / f"{mutation}.jsonl"
-                output = root / f"{mutation}-decided.jsonl"
-                _write_corpus(
-                    corpus,
-                    _mutated_corpus_rows(world.rows, mutation),
-                )
-                try:
-                    assert_corpus_rejected_by_outer_adapters(corpus, output)
-                except AssertionError as exc:
-                    raise AssertionError(f"{mutation}: {exc}") from exc
+            for role in _CORPUS_MUTATION_ROLES:
+                for mutation in _CORPUS_MUTATIONS:
+                    corpus = root / f"{role}-{mutation}.jsonl"
+                    output = root / f"{role}-{mutation}-decided.jsonl"
+                    _write_corpus(
+                        corpus,
+                        _mutated_corpus_rows(
+                            world.rows,
+                            mutation,
+                            role=role,
+                        ),
+                    )
+                    try:
+                        assert_corpus_rejected_by_outer_adapters(corpus, output)
+                    except AssertionError as exc:
+                        raise AssertionError(f"{role} {mutation}: {exc}") from exc
 
     @given(
         request_release=st.text(min_size=1, max_size=12),
@@ -491,12 +526,20 @@ class TestNativeCurrentPairingGenerated(unittest.TestCase):
 
     def test_mutation_checker_trips_on_an_accepted_corpus(self):
         """Known-bad qualification for the two-adapter mutation checker."""
-        rows = (_profiled_evidence_row(
+        candidate = _profiled_evidence_row(
             1,
             profile="low",
             is_candidate=True,
+            current_evidence_id=2,
+        )
+        current = _profiled_evidence_row(
+            2,
+            profile="proof",
+            is_candidate=False,
             current_evidence_id=None,
-        ),)
+        )
+        rows = (candidate, current)
+        assert_generated_evidence_addresses(rows)
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             corpus = root / "valid.jsonl"
@@ -506,6 +549,22 @@ class TestNativeCurrentPairingGenerated(unittest.TestCase):
                     corpus,
                     root / "valid-decided.jsonl",
                 )
+            malformed = _mutated_corpus_rows(
+                rows,
+                "null_db_not_null_evidence",
+                role="referenced_current",
+            )
+            malformed_candidate = next(
+                row for row in malformed if row["is_candidate"] is True)
+            self.assertEqual(
+                malformed_candidate["folder_layout"],
+                candidate["folder_layout"],
+            )
+            _write_corpus(corpus, malformed)
+            assert_corpus_rejected_by_outer_adapters(
+                corpus,
+                root / "current-null-decided.jsonl",
+            )
 
     def test_content_address_checker_trips_on_a_duplicate_manifest(self):
         """Known-bad qualification for generated content-address fidelity."""
