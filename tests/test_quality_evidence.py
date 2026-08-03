@@ -35,6 +35,8 @@ from lib.quality import (
 from lib.quality_evidence import (
     audio_snapshot_matches,
     backfill_current_evidence_from_album_info,
+    current_evidence_preserves_source_spectral,
+    current_spectral_evidence_policy_usable,
     evidence_from_album_info,
     evidence_from_import_result,
     evidence_from_measurement,
@@ -450,6 +452,65 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
         self.assertIsNone(result.evidence)
         db.upsert_album_quality_evidence.assert_not_called()
         db.set_request_current_evidence.assert_not_called()
+
+    def test_propagated_ogg_vorbis_preserves_source_spectral_evidence(self):
+        """Beets exposes OGG output as ``vorbis``, not the file extension."""
+        vorbis_root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, vorbis_root, ignore_errors=True)
+        for name in ("01.ogg", "02.ogg"):
+            with open(os.path.join(vorbis_root, name), "wb") as handle:
+                handle.write(name.encode())
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, mb_release_id="mb-vorbis"))
+        candidate = make_album_quality_evidence(
+            mb_release_id="mb-vorbis",
+            files=[AlbumQualityEvidenceFile(
+                relative_path="01.flac",
+                size_bytes=1,
+                mtime_ns=1,
+                extension="flac",
+                container="flac",
+                codec="flac",
+            )],
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=850,
+                avg_bitrate_kbps=900,
+                median_bitrate_kbps=880,
+                format="FLAC",
+                spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=232,
+                spectral_subject="source",
+                spectral_provenance="measured",
+            ),
+            codec="flac",
+            container="flac",
+            storage_format="FLAC",
+        )
+
+        result = propagate_candidate_evidence_to_current(
+            db,
+            request_id=42,
+            candidate_evidence=candidate,
+            album_info=AlbumInfo(
+                album_id=1,
+                track_count=2,
+                min_bitrate_kbps=128,
+                avg_bitrate_kbps=130,
+                median_bitrate_kbps=129,
+                is_cbr=False,
+                album_path=vorbis_root,
+                format="vorbis",
+            ),
+        )
+
+        self.assertEqual(result.status, "ready")
+        assert result.evidence is not None
+        evidence = result.evidence
+        self.assertEqual(evidence.measurement.was_converted_from, "flac")
+        self.assertEqual(evidence.storage_format, "vorbis")
+        self.assertTrue(current_evidence_preserves_source_spectral(evidence))
+        self.assertTrue(current_spectral_evidence_policy_usable(evidence))
 
     def test_current_backfill_cannot_relink_replaced_request(self):
         db = FakePipelineDB()

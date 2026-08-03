@@ -77,12 +77,13 @@ Key fields:
   PR3's proof-leg statistic; not read by any decision yet.
   `spectral_measurement_version` is `2` for rows measured by the PR1+
   `lib/spectral_check.py` code; NULL marks a legacy generation. A grade is
-  reusable only when this value exactly matches the running analyzer. Exact
-  candidate and installed snapshots are remeasured on their next preview;
-  old source-subject facts from a lossless original remain stored as audit
-  history but are withheld from policy because the installed derivative
-  cannot regenerate that source observation (R19). This is on-touch
-  convergence, not a committed backfill.
+  reusable only when this value exactly matches the running analyzer, except
+  for a recognised source-subject grade whose lossless source is provably
+  preserved rather than regenerable. Exact candidate and ordinary installed
+  snapshots are remeasured on their next preview; an old source-subject fact
+  from a lossless original remains policy-usable with its original generation
+  because scanning the installed derivative would describe different bytes
+  (R19). This is on-touch convergence, not a committed backfill.
 - `audio_validation JSONB NOT NULL` — the bounded typed report from the
   audio-only strict FFmpeg policy. New reports are `passed`,
   `audio_corrupt`, or `skipped`; the migration uses `legacy_failure` for
@@ -183,13 +184,15 @@ research/unknown values → `installed`); `v0_source_provenance` becomes
 (`import_result` → `measured`, `legacy_request_seed` → `carried`); and the
 redundant `v0_proof_provenance` column is dropped.
 
-Migration 057 makes the R19 lossless-lineage boundary a validated v4 CHECK.
-A row whose `spectral_subject` is `installed` cannot also carry any lossless
-lineage signal: a source-subject V0 metric, verified-lossless proof, or
-`was_converted_from` in `flac` / `alac` / `wav` (case-insensitive). Native
-installed spectral remains valid, as does source-subject spectral on a
-lossless-derived installed copy. The CHECK is version-gated so historical
-v1/v3 rows can rebuild on touch instead of blocking migration.
+Migration 072 briefly narrowed R19 with a v4 database CHECK. Migration 073
+retires it: `was_converted_from` is durable output lineage and can coexist
+with a fresh `installed` spectral measurement. A HAVE scan changes the
+spectral subject, not the fact that FLAC became ALAC, Opus, or Vorbis.
+Source-subject V0 and verified-lossless proof remain provenance rather than a
+database claim that current bytes are irrecoverable. The application preserves
+old source-subject spectral only when the exact manifest also proves a known
+lossy installed codec; it fails closed for native lossless, mixed, or
+unresolved media, including ALAC's normal `.m4a` container.
 
 ## `album_quality_evidence_files` — snapshot guard rows
 

@@ -24,6 +24,7 @@ from lib.quality import (
     VerifiedLosslessProof,
     cd_rip_proof_pair_validation_errors,
 )
+from lib.quality_evidence import current_evidence_preserves_source_spectral
 
 
 class PersistedEvidenceFileRow(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -206,6 +207,12 @@ class _EvidenceMixin(_PipelineDBBase):
             "legacy_unrecorded",
             "skipped",
         }
+        # Keep the PostgreSQL same-address merge aligned with the policy's
+        # single, manifest-aware R19 predicate. Provenance alone (V0/proof)
+        # must never erase a fresh installed-subject measurement.
+        incoming_preserves_source_spectral = (
+            current_evidence_preserves_source_spectral(evidence)
+        )
         file_rows = [
             {
                 "ordinal": ordinal,
@@ -295,9 +302,10 @@ class _EvidenceMixin(_PipelineDBBase):
                     -- pair valid (genuine legitimately has no bitrate); an
                     -- empty or bitrate-only v4 stale writer preserves the
                     -- whole stored pair so it cannot erase an attempt-time
-                    -- scan. When the incoming row establishes lossless
-                    -- lineage, however, an installed-subject stored tuple is
-                    -- stale by definition and is cleared atomically. A
+                    -- scan. When the incoming row is the exact, irreplaceable
+                    -- lossy derivative described by the R19 predicate,
+                    -- however, an installed-subject stored tuple is stale by
+                    -- definition and is cleared atomically. A
                     -- legacy row is replaced wholesale during its v4 rebuild,
                     -- including when the new fact is absent.
                     spectral_grade = CASE WHEN
@@ -305,14 +313,7 @@ class _EvidenceMixin(_PipelineDBBase):
                         EXCLUDED.spectral_grade IS NOT NULL OR
                         (
                             album_quality_evidence.spectral_subject =
-                                'installed' AND
-                            (
-                                EXCLUDED.v0_subject = 'source' OR
-                                EXCLUDED.verified_lossless IS TRUE OR
-                                LOWER(COALESCE(
-                                    EXCLUDED.was_converted_from, ''))
-                                    IN ('flac', 'alac', 'wav')
-                            )
+                                'installed' AND %s::boolean
                         )
                         THEN EXCLUDED.spectral_grade
                         ELSE album_quality_evidence.spectral_grade END,
@@ -321,14 +322,7 @@ class _EvidenceMixin(_PipelineDBBase):
                         EXCLUDED.spectral_grade IS NOT NULL OR
                         (
                             album_quality_evidence.spectral_subject =
-                                'installed' AND
-                            (
-                                EXCLUDED.v0_subject = 'source' OR
-                                EXCLUDED.verified_lossless IS TRUE OR
-                                LOWER(COALESCE(
-                                    EXCLUDED.was_converted_from, ''))
-                                    IN ('flac', 'alac', 'wav')
-                            )
+                                'installed' AND %s::boolean
                         )
                         THEN EXCLUDED.spectral_bitrate_kbps
                         ELSE album_quality_evidence.spectral_bitrate_kbps END,
@@ -337,14 +331,7 @@ class _EvidenceMixin(_PipelineDBBase):
                         EXCLUDED.spectral_grade IS NOT NULL OR
                         (
                             album_quality_evidence.spectral_subject =
-                                'installed' AND
-                            (
-                                EXCLUDED.v0_subject = 'source' OR
-                                EXCLUDED.verified_lossless IS TRUE OR
-                                LOWER(COALESCE(
-                                    EXCLUDED.was_converted_from, ''))
-                                    IN ('flac', 'alac', 'wav')
-                            )
+                                'installed' AND %s::boolean
                         )
                         THEN EXCLUDED.spectral_subject
                         ELSE album_quality_evidence.spectral_subject END,
@@ -353,14 +340,7 @@ class _EvidenceMixin(_PipelineDBBase):
                         EXCLUDED.spectral_grade IS NOT NULL OR
                         (
                             album_quality_evidence.spectral_subject =
-                                'installed' AND
-                            (
-                                EXCLUDED.v0_subject = 'source' OR
-                                EXCLUDED.verified_lossless IS TRUE OR
-                                LOWER(COALESCE(
-                                    EXCLUDED.was_converted_from, ''))
-                                    IN ('flac', 'alac', 'wav')
-                            )
+                                'installed' AND %s::boolean
                         )
                         THEN EXCLUDED.spectral_provenance
                         ELSE album_quality_evidence.spectral_provenance END,
@@ -374,14 +354,7 @@ class _EvidenceMixin(_PipelineDBBase):
                         EXCLUDED.spectral_grade IS NOT NULL OR
                         (
                             album_quality_evidence.spectral_subject =
-                                'installed' AND
-                            (
-                                EXCLUDED.v0_subject = 'source' OR
-                                EXCLUDED.verified_lossless IS TRUE OR
-                                LOWER(COALESCE(
-                                    EXCLUDED.was_converted_from, ''))
-                                    IN ('flac', 'alac', 'wav')
-                            )
+                                'installed' AND %s::boolean
                         )
                         THEN EXCLUDED.cliff_hz
                         ELSE album_quality_evidence.cliff_hz END,
@@ -390,14 +363,7 @@ class _EvidenceMixin(_PipelineDBBase):
                         EXCLUDED.spectral_grade IS NOT NULL OR
                         (
                             album_quality_evidence.spectral_subject =
-                                'installed' AND
-                            (
-                                EXCLUDED.v0_subject = 'source' OR
-                                EXCLUDED.verified_lossless IS TRUE OR
-                                LOWER(COALESCE(
-                                    EXCLUDED.was_converted_from, ''))
-                                    IN ('flac', 'alac', 'wav')
-                            )
+                                'installed' AND %s::boolean
                         )
                         THEN EXCLUDED.codec_family
                         ELSE album_quality_evidence.codec_family END,
@@ -406,14 +372,7 @@ class _EvidenceMixin(_PipelineDBBase):
                         EXCLUDED.spectral_grade IS NOT NULL OR
                         (
                             album_quality_evidence.spectral_subject =
-                                'installed' AND
-                            (
-                                EXCLUDED.v0_subject = 'source' OR
-                                EXCLUDED.verified_lossless IS TRUE OR
-                                LOWER(COALESCE(
-                                    EXCLUDED.was_converted_from, ''))
-                                    IN ('flac', 'alac', 'wav')
-                            )
+                                'installed' AND %s::boolean
                         )
                         THEN EXCLUDED.ultrasonic_deficit_db
                         ELSE album_quality_evidence.ultrasonic_deficit_db END,
@@ -422,14 +381,7 @@ class _EvidenceMixin(_PipelineDBBase):
                         EXCLUDED.spectral_grade IS NOT NULL OR
                         (
                             album_quality_evidence.spectral_subject =
-                                'installed' AND
-                            (
-                                EXCLUDED.v0_subject = 'source' OR
-                                EXCLUDED.verified_lossless IS TRUE OR
-                                LOWER(COALESCE(
-                                    EXCLUDED.was_converted_from, ''))
-                                    IN ('flac', 'alac', 'wav')
-                            )
+                                'installed' AND %s::boolean
                         )
                         THEN EXCLUDED.spectral_measurement_version
                         ELSE album_quality_evidence.spectral_measurement_version
@@ -441,7 +393,14 @@ class _EvidenceMixin(_PipelineDBBase):
                         THEN album_quality_evidence.verified_lossless
                         ELSE EXCLUDED.verified_lossless
                     END,
-                    was_converted_from = EXCLUDED.was_converted_from,
+                    -- This is durable output lineage, independent from the
+                    -- current spectral observation. A stale same-snapshot
+                    -- writer without it must not erase FLAC -> ALAC/Opus/
+                    -- Vorbis provenance after a fresh installed scan.
+                    was_converted_from = COALESCE(
+                        EXCLUDED.was_converted_from,
+                        album_quality_evidence.was_converted_from
+                    ),
                     -- V0 is one atomic fact, not six independently mergeable
                     -- columns. A valid incoming metric has a lineage and at
                     -- least one bitrate; replace the whole tuple in that case.
@@ -691,6 +650,14 @@ class _EvidenceMixin(_PipelineDBBase):
                 lattice.modal_count if lattice is not None else None,
                 lattice.scored_tracks if lattice is not None else None,
                 lattice.max_z if lattice is not None else None,
+                incoming_preserves_source_spectral,
+                incoming_preserves_source_spectral,
+                incoming_preserves_source_spectral,
+                incoming_preserves_source_spectral,
+                incoming_preserves_source_spectral,
+                incoming_preserves_source_spectral,
+                incoming_preserves_source_spectral,
+                incoming_preserves_source_spectral,
                 preserve_existing_audio_validation,
                 json.dumps(file_rows),
             ),
@@ -829,8 +796,10 @@ class _EvidenceMixin(_PipelineDBBase):
         re-persists ``grade``/``bitrate`` as ``installed``/``measured`` over ANY
         disagreeing persisted value on the still-current row — the old
         fill-only-if-NULL guard let a stale legacy grade survive a fresh scan.
-        The lossless-lineage R19 CHECK still fires against the hardcoded
-        ``installed`` subject, so a source-lineage row is never written here.
+        ``was_converted_from`` is durable output lineage, not the spectral
+        subject. A fresh installed measurement therefore leaves it intact;
+        R19's reuse predicate independently permits carried source spectral
+        facts only for an exact known-lossy derivative.
 
         The four measured capture facts (issue #829 phase 5) are one atomic
         fact with ``grade`` — every writer of ``spectral_grade`` carries them

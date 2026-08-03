@@ -23,6 +23,7 @@ from lib.import_evidence import (
 )
 from lib.quality import (
     AlbumQualityEvidence,
+    AlbumQualityEvidenceFile,
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
     QualityRankConfig,
@@ -231,6 +232,49 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
         self.assertEqual(result.provenance.current_status, "loaded")
         self.assertEqual(result.provenance.snapshot_guard, "matched")
 
+    def test_current_generation_error_is_projected_out_at_action_time(self):
+        """Freshness alone never makes an analyser error policy evidence."""
+
+        invalid = make_album_quality_evidence(
+            preserve_spectral_measurement_version=True,
+            mb_release_id="release-1",
+            source_path=self.root,
+            files=snapshot_audio_files(self.root),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=320,
+                avg_bitrate_kbps=320,
+                median_bitrate_kbps=320,
+                format="MP3",
+                is_cbr=True,
+                spectral_grade="error",
+                spectral_subject="installed",
+                spectral_provenance="measured",
+                spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
+            ),
+        )
+        self.db.upsert_album_quality_evidence(invalid)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=invalid.mb_release_id,
+            snapshot_fingerprint=invalid.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.db.set_request_current_evidence(42, stored.id)
+
+        result = ensure_current_evidence_for_action(
+            self.db,
+            request_id=42,
+            mb_release_id="release-1",
+            current_release=self._current_release(),
+        )
+
+        self.assertTrue(result.available)
+        assert result.evidence is not None
+        self.assertIsNone(result.evidence.measurement.spectral_grade)
+        self.assertIsNone(result.evidence.measurement.spectral_subject)
+        historical = self.db.load_album_quality_evidence_by_id(stored.id)
+        assert historical is not None
+        self.assertEqual(historical.measurement.spectral_grade, "error")
+
     def test_old_spectral_generation_cannot_authorize_an_action(self):
         legacy = make_album_quality_evidence(
             preserve_spectral_measurement_version=True,
@@ -276,12 +320,19 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
             result.provenance.fallback_reason or "",
         )
 
-    def test_old_lossless_source_generation_is_audit_only_at_action_time(self):
+    def test_old_lossless_source_generation_is_policy_usable_at_action_time(self):
+        opus_root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, opus_root, ignore_errors=True)
+        opus_path = os.path.join(opus_root, "01 - Track.opus")
+        with open(opus_path, "wb") as handle:
+            handle.write(b"opus")
+        identity = release_identity_for_lookup("release-1")
+        assert identity is not None
         legacy = make_album_quality_evidence(
             preserve_spectral_measurement_version=True,
             mb_release_id="release-1",
-            source_path=self.root,
-            files=snapshot_audio_files(self.root),
+            source_path=opus_root,
+            files=snapshot_audio_files(opus_root),
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=128,
                 avg_bitrate_kbps=128,
@@ -292,11 +343,19 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
                 spectral_subject="source",
                 spectral_provenance="carried",
                 spectral_measurement_version=None,
+                was_converted_from="flac",
             ),
             verified_lossless_proof=VerifiedLosslessProof(
                 provenance="carried",
                 source="flac",
                 classifier="spectral_verified_lossless",
+            ),
+            v0_metric=AlbumQualityV0Metric(
+                min_bitrate_kbps=223,
+                avg_bitrate_kbps=232,
+                median_bitrate_kbps=228,
+                subject="source",
+                provenance="carried",
             ),
             codec="opus",
             container="opus",
@@ -314,18 +373,92 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
             self.db,
             request_id=42,
             mb_release_id="release-1",
-            current_release=self._current_release(),
+            current_release=CurrentBeetsUnique(
+                identity=identity,
+                album_id=1,
+                album_path=opus_root,
+                items=(CurrentBeetsItem(
+                    id=1,
+                    path=opus_path,
+                    format="Opus",
+                    bitrate=128_000,
+                ),),
+                selectors=("mb_albumid:release-1",),
+            ),
         )
 
         self.assertTrue(result.available)
         assert result.evidence is not None
-        self.assertIsNone(result.evidence.measurement.spectral_grade)
+        self.assertEqual(result.evidence.measurement.spectral_grade, "suspect")
         self.assertIsNone(
             result.evidence.measurement.spectral_measurement_version,
         )
         historical = self.db.load_album_quality_evidence_by_id(stored.id)
         assert historical is not None
         self.assertEqual(historical.measurement.spectral_grade, "suspect")
+
+    def test_native_lossless_source_history_stays_generation_strict(self):
+        """Source anchors do not make readable native lossless irreplaceable."""
+
+        from lib.quality_evidence import (
+            current_evidence_for_policy,
+            current_evidence_preserves_source_spectral,
+            current_spectral_evidence_policy_usable,
+        )
+
+        for extension, storage_format in (
+            ("flac", "FLAC"),
+            # ALAC normally lives in an .m4a container. The snapshot cannot
+            # infer its codec from that extension, so the format fact must
+            # keep this native copy remeasurable.
+            ("m4a", "ALAC"),
+            ("wav", "WAV"),
+        ):
+            with self.subTest(extension=extension, storage_format=storage_format):
+                evidence = make_album_quality_evidence(
+                    preserve_spectral_measurement_version=True,
+                    mb_release_id="release-1",
+                    source_path=self.root,
+                    files=[AlbumQualityEvidenceFile(
+                        relative_path=f"01.{extension}",
+                        size_bytes=1,
+                        mtime_ns=1,
+                        extension=extension,
+                        container=extension,
+                        codec=extension,
+                    )],
+                    measurement=AudioQualityMeasurement(
+                        min_bitrate_kbps=700,
+                        avg_bitrate_kbps=750,
+                        median_bitrate_kbps=725,
+                        format=storage_format,
+                        spectral_grade="likely_transcode",
+                        spectral_bitrate_kbps=96,
+                        spectral_subject="source",
+                        spectral_provenance="carried",
+                        spectral_measurement_version=None,
+                        was_converted_from="flac",
+                    ),
+                    v0_metric=AlbumQualityV0Metric(
+                        min_bitrate_kbps=165,
+                        avg_bitrate_kbps=171,
+                        median_bitrate_kbps=168,
+                        subject="source",
+                        provenance="carried",
+                    ),
+                    verified_lossless_proof=VerifiedLosslessProof(
+                        provenance="carried",
+                        source="flac",
+                        classifier="spectral_verified_lossless",
+                    ),
+                    codec=extension,
+                    container=extension,
+                    storage_format=storage_format,
+                )
+                self.assertFalse(current_evidence_preserves_source_spectral(evidence))
+                self.assertFalse(current_spectral_evidence_policy_usable(evidence))
+                projected = current_evidence_for_policy(evidence)
+                self.assertIsNone(projected.measurement.spectral_grade)
 
     def test_matching_candidate_capture_path_remains_historical(self):
         evidence = make_album_quality_evidence(

@@ -168,6 +168,54 @@ class TestSpectralAuditMerge(unittest.TestCase):
 
         self.assertFalse(current_spectral_evidence_reusable(evidence))
 
+    def test_preserved_source_legacy_have_is_reused_without_relabeling(self):
+        """R19 source evidence is usable although its analyzer is legacy."""
+
+        evidence = make_album_quality_evidence(
+            preserve_spectral_measurement_version=True,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=123,
+                avg_bitrate_kbps=123,
+                median_bitrate_kbps=123,
+                format="Opus",
+                spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=232,
+                spectral_subject="source",
+                spectral_provenance="carried",
+                spectral_measurement_version=None,
+                was_converted_from="flac",
+            ),
+            codec="opus",
+            container="opus",
+            storage_format="Opus",
+        )
+
+        self.assertTrue(current_spectral_evidence_reusable(evidence))
+        self.assertIsNone(evidence.measurement.spectral_measurement_version)
+
+    def test_preserved_source_error_grade_is_not_reused(self):
+        """R19 does not make an analyzer error a policy grade."""
+
+        evidence = make_album_quality_evidence(
+            preserve_spectral_measurement_version=True,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=123,
+                avg_bitrate_kbps=123,
+                median_bitrate_kbps=123,
+                format="Opus",
+                spectral_grade="error",
+                spectral_subject="source",
+                spectral_provenance="carried",
+                spectral_measurement_version=None,
+                was_converted_from="flac",
+            ),
+            codec="opus",
+            container="opus",
+            storage_format="Opus",
+        )
+
+        self.assertFalse(current_spectral_evidence_reusable(evidence))
+
     def test_lossless_candidate_requires_a_successful_usable_grade(self):
         cases = (
             ("absent", None),
@@ -196,15 +244,29 @@ class TestSpectralAuditMerge(unittest.TestCase):
     def test_wav_conversion_preserves_source_spectral(self):
         """WAV→Opus is a lossless-source derivative, just like FLAC→Opus."""
         from lib.import_preview import preserve_existing_source_spectral
+        from lib.quality import (
+            EVIDENCE_SUBJECT_SOURCE,
+            AlbumQualityEvidenceFile,
+        )
 
         evidence = make_album_quality_evidence(
             mb_release_id="wav-derived",
+            files=[AlbumQualityEvidenceFile(
+                relative_path="01.opus",
+                size_bytes=1,
+                mtime_ns=1,
+                extension="opus",
+                container="opus",
+                codec="opus",
+            )],
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=128,
                 avg_bitrate_kbps=128,
                 median_bitrate_kbps=128,
                 format="Opus",
                 spectral_grade="genuine",
+                spectral_subject=EVIDENCE_SUBJECT_SOURCE,
+                spectral_provenance="carried",
                 was_converted_from="wav",
             ),
             codec="opus",
@@ -214,12 +276,44 @@ class TestSpectralAuditMerge(unittest.TestCase):
 
         self.assertTrue(preserve_existing_source_spectral(evidence))
 
-    def test_source_anchor_alone_preserves_source_spectral(self):
-        """R19: an enrichment-born provisional row (no was_converted_from)
-        is still lossless-sourced — its source-subject anchor proves it.
-        The 2026-07-17 deploy-night rows were minted genuine/installed
-        because this predicate could not see anchor-only lineage.
-        """
+    def test_native_alac_m4a_remeasures_instead_of_preserving_source(self):
+        """An .m4a snapshot needs its ALAC codec fact, not its extension."""
+        from lib.import_preview import preserve_existing_source_spectral
+        from lib.quality import EVIDENCE_SUBJECT_SOURCE, AlbumQualityEvidenceFile
+
+        evidence = make_album_quality_evidence(
+            preserve_spectral_measurement_version=True,
+            mb_release_id="native-alac-m4a",
+            files=[AlbumQualityEvidenceFile(
+                relative_path="01.m4a",
+                size_bytes=1,
+                mtime_ns=1,
+                extension="m4a",
+                container="m4a",
+                codec="m4a",
+            )],
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=700,
+                avg_bitrate_kbps=750,
+                median_bitrate_kbps=725,
+                format="ALAC",
+                spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=96,
+                spectral_subject=EVIDENCE_SUBJECT_SOURCE,
+                spectral_provenance="carried",
+                spectral_measurement_version=None,
+                was_converted_from="flac",
+            ),
+            codec="m4a",
+            container="m4a",
+            storage_format="ALAC",
+        )
+
+        self.assertFalse(preserve_existing_source_spectral(evidence))
+        self.assertFalse(current_spectral_evidence_reusable(evidence))
+
+    def test_source_anchor_alone_does_not_preserve_source_spectral(self):
+        """An anchor identifies provenance, not an irreplaceable derivative."""
         from lib.import_preview import preserve_existing_source_spectral
         from lib.quality import EVIDENCE_SUBJECT_SOURCE, AlbumQualityV0Metric
 
@@ -242,10 +336,10 @@ class TestSpectralAuditMerge(unittest.TestCase):
             container="opus",
             storage_format="Opus",
         )
-        self.assertTrue(preserve_existing_source_spectral(evidence))
+        self.assertFalse(preserve_existing_source_spectral(evidence))
 
-    def test_proof_alone_preserves_source_spectral(self):
-        """R19: verified-lossless proof is lossless lineage by definition."""
+    def test_proof_alone_does_not_preserve_source_spectral(self):
+        """A proof alone does not prove the installed bytes are derivative."""
         from lib.import_preview import preserve_existing_source_spectral
         from lib.quality import VerifiedLosslessProof
 
@@ -266,7 +360,7 @@ class TestSpectralAuditMerge(unittest.TestCase):
             container="opus",
             storage_format="Opus",
         )
-        self.assertTrue(preserve_existing_source_spectral(evidence))
+        self.assertFalse(preserve_existing_source_spectral(evidence))
 
     def test_native_row_without_lineage_is_not_preserved(self):
         """A native copy with no lossless lineage is scanned normally."""
@@ -926,7 +1020,7 @@ class TestImportPreviewPath(unittest.TestCase):
                     preloaded_evidence=stored,
                 )
 
-            self.assertEqual(result.status, "ready")
+            self.assertEqual(result.status, "ready", result.reason)
             current = result.evidence
             assert current is not None
             self.assertEqual(current.source_path, source)
@@ -1154,6 +1248,7 @@ class TestImportPreviewPath(unittest.TestCase):
                     spectral_bitrate_kbps=140,
                     spectral_subject=EVIDENCE_SUBJECT_SOURCE,
                     spectral_provenance="carried",
+                    was_converted_from="flac",
                 ),
                 v0_metric=AlbumQualityV0Metric(
                     min_bitrate_kbps=187,
@@ -1200,11 +1295,7 @@ class TestImportPreviewPath(unittest.TestCase):
             shutil.rmtree(source, ignore_errors=True)
 
     def test_attempt_scan_never_persists_onto_lossless_sourced_row(self):
-        """R19 guard: a lossless-sourced row (source anchor, empty spectral)
-        must refuse the installed-derivative scan — the source grade
-        governs; the slot stays empty until it is carried in. Reproduces
-        the 2026-07-17 deploy-night minting exactly.
-        """
+        """A source anchor alone leaves the readable installed bytes scannable."""
         from lib.quality import EVIDENCE_SUBJECT_SOURCE, AlbumQualityV0Metric
 
         db = self._db()
@@ -1256,11 +1347,11 @@ class TestImportPreviewPath(unittest.TestCase):
                 measured_existing_path=source,
             )
 
-            self.assertEqual(result.status, "skipped")
+            self.assertEqual(result.status, "ready", result.reason)
             refreshed = db.load_album_quality_evidence_by_id(stored.id)
             assert refreshed is not None
-            self.assertIsNone(refreshed.measurement.spectral_grade)
-            self.assertIsNone(refreshed.measurement.spectral_subject)
+            self.assertEqual(refreshed.measurement.spectral_grade, "genuine")
+            self.assertEqual(refreshed.measurement.spectral_subject, "installed")
         finally:
             import shutil
             shutil.rmtree(source, ignore_errors=True)

@@ -1303,10 +1303,12 @@ rows carry `lineage_version=4`: spectral and V0 facts add `subject`
 verified-lossless lives only in its proof object. Migration 055 maps old field
 names best-effort; current-evidence loaders treat v1/v3 rows as rebuild-required
 rather than guessing v4 meaning. Preview reuses a decision-usable spectral fact
-only after exact-release and snapshot authorization and an exact match between
-its `spectral_measurement_version` and the running analyzer generation;
-missing, old-generation, unusable, or changed HAVE evidence is remeasured. The
-import action independently
+only after exact-release and snapshot authorization. Candidate evidence and
+ordinary installed-subject HAVE need an exact match between
+`spectral_measurement_version` and the running analyzer generation; a
+recognised preserved source-subject grade remains usable across NULL, old, or
+future generations because its source cannot be remeasured. Missing, unusable,
+or changed remeasurable HAVE evidence is remeasured. The import action independently
 reauthorizes the exact installed Beets album before deciding. A same-snapshot
 repair preserves its original `measured_at` and atomic neutral facts so
 historical Recents cards remain pre-attempt evidence.
@@ -1428,12 +1430,13 @@ subset.
 
 The same rule governs every evidence rebuild: proof and source-subject facts
 carry physically with provenance `carried`; installed-subject facts are
-remeasured and can only have provenance `measured`. Carried spectral facts
-still pass the analyzer-generation gate before policy can read them. An old
-source generation remains audit history but is projected without its spectral
-tuple: scanning the installed derivative would describe different bytes and
-violate R19. Proof is conceptually a source acquisition fact, so it needs only
-its provenance marker.
+remeasured and can only have provenance `measured`. A recognised carried source
+spectral grade remains policy-usable across analyzer generations while retaining
+its original generation marker: scanning the installed derivative would describe
+different bytes and violate R19. Candidate and remeasurable installed-subject
+facts still pass the exact analyzer-generation gate before policy can read them.
+Proof is conceptually a source acquisition fact, so it needs only its provenance
+marker.
 
 **A changed installed snapshot is linked before neutral enrichment, but it is
 not immediately action authority.** The new content-addressed row must exist
