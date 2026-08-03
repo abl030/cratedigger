@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import datetime as dt
 import importlib.util
+import json
 import unittest
 from pathlib import Path
 from typing import Protocol
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "refresh_beets_compat_releases.py"
@@ -59,6 +61,82 @@ class TestBeetsCompatReleaseManifest(unittest.TestCase):
         self.assertEqual(len(flattened), 101)
         self.assertEqual(flattened[-1].tag_name, "v2.13.1")
 
+    def test_external_json_adapters_accept_realistic_unrelated_fields(self) -> None:
+        release_payload = [[{
+            "url": "https://api.github.com/repos/beetbox/beets/releases/1",
+            "assets_url": "https://api.github.com/repos/beetbox/beets/releases/1/assets",
+            "upload_url": "https://uploads.github.com/repos/beetbox/beets/releases/1/assets{?name,label}",
+            "html_url": "https://github.com/beetbox/beets/releases/tag/v2.13.1",
+            "id": 1,
+            "author": {"login": "beetsbot"},
+            "node_id": "RE_kwDOExample",
+            "tag_name": "v2.13.1",
+            "target_commitish": "master",
+            "name": "2.13.1",
+            "draft": False,
+            "prerelease": False,
+            "created_at": "2026-08-01T00:00:00Z",
+            "published_at": "2026-08-01T00:00:00Z",
+            "assets": [],
+            "tarball_url": "https://api.github.com/tarball/v2.13.1",
+            "zipball_url": "https://api.github.com/zipball/v2.13.1",
+            "body": "release notes",
+            "reactions": {"total_count": 0},
+        }]]
+        commit_payload = {
+            "sha": "a" * 40,
+            "node_id": "C_kwDOExample",
+            "commit": {"message": "release"},
+            "url": "https://api.github.com/repos/beetbox/beets/commits/example",
+            "html_url": "https://github.com/beetbox/beets/commit/example",
+            "comments_url": "https://api.github.com/comments/example",
+            "author": {"login": "beetsbot"},
+            "committer": {"login": "beetsbot"},
+            "parents": [],
+            "stats": {"total": 1},
+            "files": [],
+        }
+        prefetch_payload = {
+            "hash": "sha256-" + "A" * 43 + "=",
+            "locked": {"lastModified": 0},
+            "original": {"type": "github"},
+            "storePath": "/nix/store/example-source",
+        }
+        with patch.object(refresh, "_run_json", side_effect=[
+            json.dumps(release_payload), json.dumps(commit_payload), json.dumps(prefetch_payload),
+        ]):
+            releases = refresh._github_releases()
+            revision = refresh._resolve_revision("v2.13.1")
+            nar_hash = refresh._prefetch(revision)
+        self.assertEqual([entry.tag_name for entry in releases], ["v2.13.1"])
+        self.assertEqual(revision, "a" * 40)
+        self.assertEqual(nar_hash, prefetch_payload["hash"])
+
+    def test_external_json_adapters_reject_missing_or_wrong_required_fields(self) -> None:
+        cases = (
+            (
+                "releases missing tag",
+                "[[{\"draft\": false, \"prerelease\": false, \"published_at\": null}]]",
+                refresh._github_releases,
+            ),
+            (
+                "releases wrong draft",
+                "[[{\"tag_name\": \"v2.13.1\", \"draft\": \"false\", \"prerelease\": false, \"published_at\": null}]]",
+                refresh._github_releases,
+            ),
+            ("commit missing sha", "{}", lambda: refresh._resolve_revision("v2.13.1")),
+            ("commit wrong sha", '{"sha": 1}', lambda: refresh._resolve_revision("v2.13.1")),
+            ("prefetch missing hash", "{}", lambda: refresh._prefetch("a" * 40)),
+            ("prefetch wrong hash", '{"hash": 1}', lambda: refresh._prefetch("a" * 40)),
+        )
+        for label, payload, call in cases:
+            with (
+                self.subTest(adapter=label),
+                patch.object(refresh, "_run_json", return_value=payload),
+                self.assertRaises(TypeError),
+            ):
+                call()
+
     def test_renderer_and_validator_reject_known_bad_manifest(self) -> None:
         entries = refresh.resolve_entries(
             [release("v2.12.0", "2025-01-01T00:00:00Z"), release("v2.13.1", "2026-07-29T10:47:07Z")],
@@ -78,6 +156,8 @@ class TestBeetsCompatReleaseManifest(unittest.TestCase):
         ]
         with self.assertRaisesRegex(ValueError, "disagree"):
             refresh.validate_manifest(bad)
+        with self.assertRaises(TypeError):
+            refresh.decode_manifest(rendered.replace("{", '{"unexpected":true,', 1))
 
     def test_committed_manifest_is_canonical_snapshot(self) -> None:
         manifest = REPO_ROOT / "nix" / "beets-compat-releases.json"

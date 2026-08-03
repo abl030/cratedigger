@@ -33,6 +33,8 @@ from itertools import product
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from tests.harness_test_support import isolated_beets_harness
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 _beets_mocks = {
@@ -49,17 +51,16 @@ _beets_mocks = {
     "beets.dbcore": MagicMock(),
     "beets.util": MagicMock(),
 }
-for name, mock in _beets_mocks.items():
-    sys.modules.setdefault(name, mock)
-vars(sys.modules["beets.ui"])["get_path_formats"] = None
-vars(sys.modules["beets.ui"])["get_replacements"] = None
+_beets_mocks["beets.ui"].get_path_formats = None
+_beets_mocks["beets.ui"].get_replacements = None
 
-vars(sys.modules["beets.importer.session"])["ImportSession"] = type(
+_beets_mocks["beets.importer.session"].ImportSession = type(
     "ImportSession", (object,), {"resolve_duplicate": lambda *_args: None},
 )
-vars(sys.modules["beets.importer.tasks"])["ImportTask"] = type("ImportTask", (object,), {})
+_beets_mocks["beets.importer.tasks"].ImportTask = type("ImportTask", (object,), {})
 
-from harness import beets_harness
+with isolated_beets_harness(_beets_mocks) as beets_harness:
+    pass
 from tests.test_harness_discogs_neutralize import (
     discogs_provider_ids_neutralized,
 )

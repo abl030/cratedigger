@@ -23,7 +23,7 @@ MANIFEST_PATH = Path(__file__).resolve().parent.parent / "nix" / "beets-compat-r
 _SRI_SHA256 = re.compile(r"sha256-[A-Za-z0-9+/]{43}=")
 
 
-class GithubRelease(msgspec.Struct, forbid_unknown_fields=True):
+class GithubRelease(msgspec.Struct):
     tag_name: str
     published_at: str | None
     draft: bool
@@ -39,11 +39,11 @@ class ManifestEntry(msgspec.Struct, forbid_unknown_fields=True):
     buildBackend: str
 
 
-class GithubCommit(msgspec.Struct, forbid_unknown_fields=True):
+class GithubCommit(msgspec.Struct):
     sha: str
 
 
-class NixPrefetch(msgspec.Struct, forbid_unknown_fields=True):
+class NixPrefetch(msgspec.Struct):
     hash: str
 
 

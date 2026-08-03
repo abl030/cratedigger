@@ -69,7 +69,7 @@ class TestBeetsCompatibilityImports(TestCase):
             capabilities = beets_compat._load_capabilities()
         self.assertIs(capabilities.path_bytes, bytes)
 
-    def test_missing_modern_duplicate_actions_preserves_legacy_capability(self) -> None:
+    def test_missing_modern_duplicate_actions_fails_loudly(self) -> None:
         original = beets_compat.importlib.import_module
 
         def import_module(name: str) -> ModuleType:
@@ -79,9 +79,9 @@ class TestBeetsCompatibilityImports(TestCase):
 
         with (
             patch.object(beets_compat.importlib, "import_module", side_effect=import_module),
+            self.assertRaisesRegex(beets_compat.BeetsCapabilityError, "DuplicateAction"),
         ):
-            capabilities = beets_compat._load_capabilities()
-        self.assertEqual(capabilities.duplicate_era, "legacy")
+            beets_compat._load_capabilities()
 
 
 if __name__ == "__main__":
