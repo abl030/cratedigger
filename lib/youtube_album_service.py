@@ -591,6 +591,7 @@ def resolve_youtube_album(
     yt_failure: tuple[str, str] | None = None
     seed_browse_id: str | None = None
     yt_album_responses: dict[str, dict[str, Any]] = {}
+    manual_playlist = False
     deadline_message: str | None = None
     attempted_non_seed_siblings = 0
     retry_exhausted_non_seed_siblings = 0
@@ -609,6 +610,7 @@ def resolve_youtube_album(
         if watch_url is not None:
             seed_browse_id, manual_album = _manual_url_album(
                 yt_client, watch_url, seed_release)
+            manual_playlist = manual_album is not None
             seed_album = manual_album or _cached_get_album(
                 yt_client, cache, seed_browse_id, refresh=True)
             yt_album_responses[seed_browse_id] = seed_album
@@ -780,7 +782,11 @@ def resolve_youtube_album(
     persistable_rows: list[PersistedYoutubeRow] = []
 
     for browse_id, album_resp in yt_album_responses.items():
-        if _deadline_breached():
+        # A manual playlist fetch is explicitly requested and already complete
+        # by this point.  Do not turn that successful fetch into an empty
+        # ``ok`` matrix merely because pagination consumed the soft discovery
+        # deadline; doing so would replace valid cached evidence with [].
+        if not manual_playlist and _deadline_breached():
             if deadline_message is None:
                 deadline_message = (
                     f"deadline exceeded after "
@@ -797,7 +803,7 @@ def resolve_youtube_album(
         distances = _score_against_siblings(
             synth_items, sibling_ids, distance_rg_id, distance_fn, pdb,
             mb_get_release if source_label == "mb" else discogs_get_release,
-            deadline_breached=_deadline_breached,
+            deadline_breached=(None if manual_playlist else _deadline_breached),
         )
         yt_url = _compose_url(browse_id, album_resp.get("audioPlaylistId"))
         year = _parse_year(album_resp.get("year"))

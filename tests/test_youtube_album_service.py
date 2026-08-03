@@ -169,7 +169,8 @@ class TestNarrowDiscoveryAdmissions(unittest.TestCase):
     """Issue #1003: song and operator-watch discovery enter the normal matrix."""
 
     def _resolve(self, yt: FakeYTMusic, *, watch_url: str | None = None,
-                 identifier: str = MB_REL_A, pdb: FakePipelineDB | None = None):
+                 identifier: str = MB_REL_A, pdb: FakePipelineDB | None = None,
+                 deadline_seconds: int = 60):
         return resolve_youtube_album(
             identifier, pdb=pdb or FakePipelineDB(),
             mb_get_release=lambda value: _ok_mb_release(mbid=value),
@@ -178,6 +179,7 @@ class TestNarrowDiscoveryAdmissions(unittest.TestCase):
             discogs_get_master_releases=_discogs_master_404,
             yt_client=yt, distance_fn=_canned_distance(distance=0.0),
             sleep_fn=_noop_sleep, watch_url=watch_url,
+            deadline_seconds=deadline_seconds,
         )
 
     def test_song_album_browse_id_is_scored_when_album_search_misses(self):
@@ -376,6 +378,37 @@ class TestNarrowDiscoveryAdmissions(unittest.TestCase):
         self.assertFalse(result.from_cache)
         self.assertFalse(result.youtube_releases)
         self.assertEqual(pdb.get_youtube_album_mapping(MB_RG, "mb"), old)
+
+    def test_completed_manual_playlist_is_scored_after_soft_deadline(self):
+        pdb = FakePipelineDB()
+        pdb.seed_youtube_album_mapping(MB_RG, "mb", [{
+            "yt_browse_id": "MPREb_old", "yt_audio_playlist_id": None,
+            "yt_url": "https://music.youtube.com/browse/MPREb_old",
+            "yt_year": 2000, "yt_track_count": 1, "album_title": "Old",
+            "album_artist": "Old", "yt_tracks": [], "distances": [],
+        }])
+        yt = FakeYTMusic()
+        yt.set_playlist("PL_slow", {
+            "tracks": [
+                {"videoId": "video-1", "title": "Dr. Octagon - Intro",
+                 "duration_seconds": 60},
+                {"videoId": "video-2", "title": "Dr. Octagon - 3000",
+                 "duration_seconds": 180},
+            ],
+        })
+
+        result = self._resolve(
+            yt, pdb=pdb, deadline_seconds=-1,
+            watch_url="https://www.youtube.com/playlist?list=PL_slow")
+
+        self.assertEqual(result.outcome, "ok", result.error_message)
+        self.assertEqual([row.yt_browse_id for row in result.youtube_releases],
+                         ["PL_slow"])
+        self.assertEqual(len(result.youtube_releases[0].distances), 1)
+        stored = pdb.get_youtube_album_mapping(MB_RG, "mb")
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        self.assertEqual([row["yt_browse_id"] for row in stored], ["PL_slow"])
 
 
 def _canned_distance(

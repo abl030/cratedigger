@@ -79,6 +79,7 @@ def _resolve(url: str, playlist_id: str) -> tuple[
         discogs_get_master_releases=_discogs_404,
         yt_client=yt, distance_fn=_distance,
         sleep_fn=lambda _seconds: None, watch_url=url,
+        deadline_seconds=-1,
     )
     return result, yt, pdb
 
