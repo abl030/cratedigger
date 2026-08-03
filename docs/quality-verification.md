@@ -478,11 +478,19 @@ zero from a run without them is not evidence:
 - `--counterfactual` drops each candidate's persisted proof first. A row
   that already holds a proof never runs the promotion the gate governs,
   so the as-persisted arm's honest answer for a proof-gate change is zero.
-- `--pair-with` supplies the installed album's evidence per candidate
-  (`{"id": <candidate id>, "current": {<evidence row>}}`), the way
-  production decides. Unpaired, every row is a fresh request with nothing
+- The native corpus pairing carries each candidate request's nullable
+  `current_evidence_id` and the exact referenced evidence row. It resolves
+  that production FK after the whole corpus loads; a missing, malformed, or
+  dangling reference (or duplicate evidence ID) fails closed. Null means no
+  installed album. Unpaired, every row is a fresh request with nothing
   installed, and no branch that compares against a HAVE — including the
-  provisional lane's confident rejects — is reachable at all.
+  provisional lane's confident rejects — is reachable at all. The exact
+  export and batching procedure are in `docs/debugging-cli.md` §
+  "Live-corpus decision differential".
+
+`--counterfactual` strips only the candidate's persisted proof. The paired
+current proof stays intact because installed evidence is the real acquisition
+ceiling, not a synthetic fresh-arrival fact.
 
 ## AAC frame-lattice leg (issue #829 AAC-lattice leg)
 

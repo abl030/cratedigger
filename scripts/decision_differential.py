@@ -13,10 +13,12 @@ a second copy of that engine would be a parallel code path.
 
 Two modes, same two-tree runbook as Rule D:
 
-* ``decide`` reads a corpus JSONL (one ``album_quality_evidence`` row
-  object per line, with its snapshot files under ``files``), runs
-  ``full_pipeline_decision_from_evidence`` over each, and writes one
-  decided JSONL row per corpus row.
+* ``decide`` reads a corpus JSONL containing complete candidate and current
+  ``album_quality_evidence`` rows (with their snapshot files under ``files``).
+  A candidate's nullable ``current_evidence_id`` is the request-owned pairing
+  authority; the referenced current row must be present in that same corpus.
+  It runs ``full_pipeline_decision_from_evidence`` for every candidate and
+  writes one decided JSONL row per candidate.
 * ``diff`` compares two decided JSONL files field by field.
 
     git archive <base-ref> | tar -x -C /tmp/dd-base
@@ -59,16 +61,21 @@ body which fields had no base value.
   exact album arrived now, would it be promoted? This is the arm where a
   proof-gate change shows its real blast radius.
 
-**Pairing a current side.** ``decide --pair-with`` takes a JSONL of
-``{"id": <candidate evidence id>, "current": {<evidence row>}}`` and
-decides each candidate against the installed album's own evidence, the way
-production does (``lib/dispatch/core.py`` passes the request's current
-evidence row beside the candidate). Without it every row is decided as a
-fresh request with nothing installed — which cannot reach any branch that
-compares against a HAVE, including the provisional-lossless lane's
-confident rejects. A proof-gate differential run without a current side
-will under-report; the current side's OWN proof is never stripped, because
-an installed proof is real evidence and is the acquisition ceiling.
+**Native current-side pairing.** The corpus carries each candidate's exact
+``album_requests.current_evidence_id`` beside the candidate evidence row and
+the complete referenced evidence row elsewhere in the same corpus. The replay
+builds an ID index after loading the complete corpus, then resolves that
+foreign key exactly as production does. It fails closed on missing/malformed
+pairing columns, duplicate evidence IDs, and dangling references; a null
+``current_evidence_id`` means the candidate has no installed album. This
+matters because a fresh request cannot reach branches that compare against a
+HAVE, including the provisional-lossless lane's confident rejects.
+
+The current side's OWN proof is never stripped: ``--counterfactual`` removes
+only the candidate proof, because installed proof is real evidence and the
+acquisition ceiling. Corpus order is irrelevant, but the complete corpus must
+be assembled before either tree runs the replay so a current row emitted in a
+different export batch remains resolvable.
 
 **Action-time facts are not on the row.** ``target_format`` falls back to
 the candidate's own persisted column, but ``verified_lossless_target`` —
@@ -125,6 +132,7 @@ import contextlib
 import os
 import sys
 from collections.abc import Iterator, Mapping, Sequence
+from typing import TypeGuard
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
@@ -428,51 +436,128 @@ def _corpus_rows(path: str) -> Iterator[dict[str, object]]:
                     f"{exc}") from exc
 
 
-def read_current_pairs(path: str) -> dict[int, dict[str, object]]:
-    """Load ``{"id": <candidate id>, "current": {<evidence row>}}`` lines.
+CORPUS_REQUIRED_COLUMNS: frozenset[str] = frozenset({
+    "id",
+    "is_candidate",
+    "current_evidence_id",
+    "files",
+})
 
-    Held in memory on purpose: the pairing side is one row per INSTALLED
-    album for the candidates being measured, and the join has to be random
-    access. The candidate corpus itself still streams.
+
+class DecisionCorpusEvidence(msgspec.Struct, frozen=True):
+    """One complete evidence row plus its corpus-level pairing metadata."""
+
+    evidence_id: int
+    is_candidate: bool
+    current_evidence_id: int | None
+    row: dict[str, object]
+
+
+def _is_exact_int(value: object) -> TypeGuard[int]:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _corpus_evidence(row: Mapping[str, object]) -> DecisionCorpusEvidence:
+    """Validate the native pairing columns that the SQL export must emit."""
+    missing = CORPUS_REQUIRED_COLUMNS - set(row)
+    if missing:
+        raise RenderDifferentialError(
+            "corpus row is missing required columns: "
+            f"{sorted(missing)}")
+    evidence_id = row["id"]
+    if not _is_exact_int(evidence_id):
+        raise RenderDifferentialError(
+            f"corpus row has no integer id: {evidence_id!r}")
+    is_candidate = row["is_candidate"]
+    if not isinstance(is_candidate, bool):
+        raise RenderDifferentialError(
+            "corpus row 'is_candidate' must be a boolean")
+    current_evidence_id = row["current_evidence_id"]
+    if current_evidence_id is not None and not _is_exact_int(current_evidence_id):
+        raise RenderDifferentialError(
+            "corpus row 'current_evidence_id' must be an integer or null")
+    if not is_candidate and current_evidence_id is not None:
+        raise RenderDifferentialError(
+            "current-only corpus row has a current_evidence_id")
+    return DecisionCorpusEvidence(
+        evidence_id=evidence_id,
+        is_candidate=is_candidate,
+        current_evidence_id=current_evidence_id,
+        row=dict(row),
+    )
+
+
+def resolve_native_current_pairs(
+    entries: Sequence[DecisionCorpusEvidence],
+) -> list[tuple[DecisionCorpusEvidence, DecisionCorpusEvidence | None]]:
+    """Resolve candidate FKs after the complete corpus is available.
+
+    This is deliberately an ID lookup rather than a parallel sidecar mapping:
+    ``album_requests.current_evidence_id`` is production's one pairing
+    authority. The resolver's output follows the candidate records' input
+    order, but each current reference is order-independent.
     """
-    pairs: dict[int, dict[str, object]] = {}
-    for row in _corpus_rows(path):
-        pair_id = row.get("id")
-        if not isinstance(pair_id, int) or isinstance(pair_id, bool):
+    by_id: dict[int, DecisionCorpusEvidence] = {}
+    for entry in entries:
+        if entry.evidence_id in by_id:
             raise RenderDifferentialError(
-                f"pairing row has no integer id: {pair_id!r}")
-        current = row.get("current")
-        if not is_str_object_dict(current):
+                f"corpus has duplicate evidence id {entry.evidence_id}")
+        by_id[entry.evidence_id] = entry
+
+    pairs: list[tuple[DecisionCorpusEvidence, DecisionCorpusEvidence | None]] = []
+    for entry in entries:
+        if not entry.is_candidate:
+            continue
+        current_id = entry.current_evidence_id
+        if current_id is None:
+            pairs.append((entry, None))
+            continue
+        current = by_id.get(current_id)
+        if current is None:
             raise RenderDifferentialError(
-                f"pairing row {pair_id} has no 'current' evidence object")
-        pairs[pair_id] = dict(current)
+                "candidate evidence "
+                f"{entry.evidence_id} has dangling current_evidence_id "
+                f"{current_id}")
+        pairs.append((entry, current))
     return pairs
+
+
+def read_decision_corpus(path: str) -> list[DecisionCorpusEvidence]:
+    """Load and validate the complete native-pairing corpus.
+
+    Both candidate and current rows pass through production's evidence decoder
+    before any decision is emitted. That rejects a malformed current row even
+    if it appears before its candidate in one batch or is not reached until a
+    later one.
+    """
+    entries = [_corpus_evidence(row) for row in _corpus_rows(path)]
+    for entry in entries:
+        _evidence_from_corpus_row(entry.row)
+    resolve_native_current_pairs(entries)
+    return entries
 
 
 def decide_corpus(
     corpus_path: str,
     out_path: str | None,
     *,
-    pairs_path: str | None = None,
     counterfactual: bool = False,
     verified_lossless_target: str | None = None,
 ) -> int:
-    """Decide every corpus row, streaming so a large corpus stays bounded."""
+    """Decide every candidate after resolving the complete native corpus."""
     count = 0
-    pairs = read_current_pairs(pairs_path) if pairs_path is not None else {}
+    pairs = resolve_native_current_pairs(read_decision_corpus(corpus_path))
     output = (
         contextlib.nullcontext(sys.stdout)
         if out_path is None
         else open(out_path, "w", encoding="utf-8")  # noqa: SIM115 - managed below
     )
     with output as handle:
-        for row in _corpus_rows(corpus_path):
-            row_id = row.get("id")
-            current = (
-                pairs.get(row_id) if isinstance(row_id, int) else None
-            )
+        for candidate, current in pairs:
             decided = decide_row(
-                row, current=current, counterfactual=counterfactual,
+                candidate.row,
+                current=current.row if current is not None else None,
+                counterfactual=counterfactual,
                 verified_lossless_target=verified_lossless_target,
             )
             handle.write(msgspec.json.encode(decided).decode())
@@ -506,11 +591,6 @@ def _build_parser() -> argparse.ArgumentParser:
     decide.add_argument(
         "--out", default=None,
         help="Decided JSONL output path (default: stdout)")
-    decide.add_argument(
-        "--pair-with", default=None, dest="pair_with",
-        help=("JSONL of {\"id\": <candidate evidence id>, \"current\": "
-              "{<evidence row>}} pairing each candidate against the "
-              "installed album, the way production decides"))
     decide.add_argument(
         "--verified-lossless-target", default=None,
         dest="verified_lossless_target",
@@ -547,7 +627,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.mode == "decide":
             count = decide_corpus(
                 args.corpus, args.out,
-                pairs_path=args.pair_with,
                 counterfactual=args.counterfactual,
                 verified_lossless_target=args.verified_lossless_target,
             )

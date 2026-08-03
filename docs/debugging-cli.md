@@ -503,3 +503,96 @@ nix-shell --run "python3 scripts/render_differential.py diff \
 The output field is the full `row_html`, not a hand-built badge fragment. Put
 the total and changed-row counts in the PR body. Screenshots remain separate
 visual evidence and never substitute for this complete live-row census.
+## Live-corpus decision differential
+
+`scripts/decision_differential.py` is the decision-level counterpart to the
+render differential. Its corpus is an evidence graph, not a sidecar pairing
+file: each candidate row carries the exact nullable
+`album_requests.current_evidence_id` and each non-null reference resolves to
+the complete current-evidence row in the same export. `is_candidate` tells the
+replay which rows to decide; current-only rows provide the paired evidence but
+are not themselves candidates. A null `current_evidence_id` is the ordinary
+no-HAVE case.
+
+The exact read-only export is below. `candidate_pairs` deliberately uses
+`DISTINCT`, not an arbitrary `DISTINCT ON`: if the same content-addressed
+candidate has conflicting request-current pairings, it produces duplicate
+evidence IDs and the replay fails closed instead of selecting one pairing.
+Every evidence row is `e.*`; the `files` JSON contains every field production's
+evidence decoder reads.
+
+```bash
+ssh doc2 'export PGPASSWORD=$(sudo cat /run/secrets/cratedigger-pgpass | grep "^PGPASSWORD=" | cut -d= -f2); pipeline-cli query --json -' <<'SQL' > /tmp/decision-corpus.json
+WITH candidate_pairs AS MATERIALIZED (
+    SELECT DISTINCT
+           job.candidate_evidence_id AS evidence_id,
+           request.current_evidence_id
+    FROM import_jobs AS job
+    JOIN album_requests AS request ON request.id = job.request_id
+    WHERE job.candidate_evidence_id IS NOT NULL
+),
+corpus_members AS MATERIALIZED (
+    SELECT evidence_id, current_evidence_id, TRUE AS is_candidate
+    FROM candidate_pairs
+    UNION ALL
+    SELECT DISTINCT
+           candidate.current_evidence_id AS evidence_id,
+           NULL::bigint AS current_evidence_id,
+           FALSE AS is_candidate
+    FROM candidate_pairs AS candidate
+    WHERE candidate.current_evidence_id IS NOT NULL
+      AND NOT EXISTS (
+          SELECT 1
+          FROM candidate_pairs AS candidate_row
+          WHERE candidate_row.evidence_id = candidate.current_evidence_id
+      )
+)
+SELECT evidence.*,
+       member.is_candidate,
+       member.current_evidence_id,
+       COALESCE(
+           jsonb_agg(
+               jsonb_build_object(
+                   'relative_path', file.relative_path,
+                   'size_bytes', file.size_bytes,
+                   'mtime_ns', file.mtime_ns,
+                   'extension', file.extension,
+                   'container', file.container,
+                   'codec', file.codec,
+                   'decode_ok', file.decode_ok
+               )
+               ORDER BY file.ordinal
+           ) FILTER (WHERE file.evidence_id IS NOT NULL),
+           '[]'::jsonb
+       ) AS files
+FROM corpus_members AS member
+JOIN album_quality_evidence AS evidence ON evidence.id = member.evidence_id
+LEFT JOIN album_quality_evidence_files AS file
+    ON file.evidence_id = evidence.id
+GROUP BY evidence.id, member.is_candidate, member.current_evidence_id
+ORDER BY evidence.id;
+SQL
+
+nix-shell --run "python3 -c '
+import json
+with open(\"/tmp/decision-corpus.json\") as source, open(\"/tmp/decision-corpus.jsonl\", \"w\") as target:
+    for row in json.load(source):
+        target.write(json.dumps(row, separators=(\",\", \":\")) + \"\\n\")
+'"
+```
+
+Run both trees with the same complete `decision-corpus.jsonl`; the replay
+resolves IDs before emitting a result, so the row order does not matter. Use
+`--counterfactual` when measuring a proof-promotion change: it strips only the
+candidate proof and retains the paired current proof.
+
+For a corpus too large for one `pipeline-cli query --json` response, partition
+**`candidate_pairs`** by `job.candidate_evidence_id` (for example, add
+`AND job.candidate_evidence_id > 0 AND job.candidate_evidence_id <= 4000` to
+that CTE) and retain the `corpus_members` CTE unchanged in every batch. Each
+batch then carries every current row its candidates reference. Run `decide`
+against each complete batch on both trees, then concatenate the **decided
+outputs** before `diff`; candidate-ID ranges are disjoint, while a current row
+may legitimately be needed by more than one batch. Do not concatenate raw
+batch corpora: doing so duplicates that current evidence ID and the replay
+correctly fails closed.

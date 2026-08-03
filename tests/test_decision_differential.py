@@ -48,7 +48,8 @@ from scripts.decision_differential import (
     decide_row,
     leg_for_evidence,
     main,
-    read_current_pairs,
+    read_decision_corpus,
+    resolve_native_current_pairs,
     without_persisted_proof,
 )
 from tests.helpers import PROVISIONAL_LANE_DECISIONS
@@ -107,6 +108,10 @@ def _corpus_row(**overrides: object) -> dict[str, object]:
         "filetype_band": "flac",
         "matched_bad_audio_hash_id": None,
         "matched_bad_audio_hash_path": None,
+        # The native replay resolves a candidate's installed side from this
+        # request projection, not from a parallel hand-authored pairing file.
+        "is_candidate": True,
+        "current_evidence_id": None,
         "files": [{
             "relative_path": "01.flac",
             "size_bytes": 1,
@@ -371,13 +376,13 @@ class TestCounterfactualArm(unittest.TestCase):
         self.assertTrue(fresh.fields["imported"])
 
 
-class TestCurrentSidePairing(unittest.TestCase):
-    """Without a HAVE, no branch that compares against one can be reached.
+class TestNativeCurrentSidePairing(unittest.TestCase):
+    """The corpus owns current-side pairing through the request FK.
 
     The provisional-lossless lane's confident rejects need an installed
-    album carrying a comparable ``lossless_source_v0`` probe; a corpus
-    decided with no current side reports zero for every one of them, which
-    is how a differential can miss the branch that matters most.
+    album carrying a comparable ``lossless_source_v0`` probe. The complete
+    exported corpus contains that exact evidence row, and the candidate
+    points to it with ``album_requests.current_evidence_id``.
     """
 
     def _installed_row(self, **overrides: object) -> dict[str, object]:
@@ -402,62 +407,124 @@ class TestCurrentSidePairing(unittest.TestCase):
             **overrides,
         )
 
-    def _candidate_row(self) -> dict[str, object]:
+    def _candidate_row(self, **overrides: object) -> dict[str, object]:
         """The Bill Hicks rescue shape: suspect grade, strong probe."""
         return _corpus_row(
             id=7, spectral_grade="suspect", ultrasonic_deficit_db=65.16,
             v0_min_bitrate_kbps=219, v0_avg_bitrate_kbps=241,
             v0_median_bitrate_kbps=241,
+            **overrides,
+        )
+
+    def _write_native_corpus(
+        self,
+        path: Path,
+        *,
+        candidate: dict[str, object] | None = None,
+        current: dict[str, object] | None = None,
+        current_first: bool = False,
+    ) -> None:
+        candidate = candidate or self._candidate_row(current_evidence_id=99)
+        current = current or self._installed_row(is_candidate=False)
+        rows = [candidate, current]
+        if current_first:
+            rows.reverse()
+        path.write_text(
+            "".join(json.dumps(row) + "\n" for row in rows),
+            encoding="utf-8",
         )
 
     def test_the_current_side_reaches_the_comparison(self):
         alone = decide_row(self._candidate_row(), counterfactual=True)
-        paired = decide_row(
-            self._candidate_row(), current=self._installed_row(),
-            counterfactual=True,
-        )
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            corpus = root / "corpus.jsonl"
+            self._write_native_corpus(corpus, current_first=True)
+            out = root / "decided.jsonl"
+            self.assertEqual(
+                decide_corpus(
+                    str(corpus), str(out), counterfactual=True,
+                ),
+                1,
+            )
+            paired = msgspec.json.decode(
+                out.read_text(encoding="utf-8").strip(), type=dict,
+            )
         # Decided as a fresh request, the candidate has nothing to lose to
         # and nothing to be locked by: the whole HAVE-comparing half of the
         # decider is unreachable, which is what makes an unpaired
         # differential under-report.
         self.assertEqual(alone.fields["stage1_spectral"], "import_no_exist")
         self.assertTrue(alone.fields["imported"])
-        self.assertTrue(paired.fields["imported"])
+        self.assertTrue(paired["fields"]["imported"])
         # A denial must not re-route the paired album into the
         # provisional-lossless lane, whose confident rejects need exactly
         # this installed probe to fire.
         self.assertNotIn(
-            paired.fields["stage2_import"], PROVISIONAL_LANE_DECISIONS,
+            paired["fields"]["stage2_import"], PROVISIONAL_LANE_DECISIONS,
         )
 
-    def test_pairs_are_joined_by_candidate_id(self):
+    def test_current_rows_are_resolved_by_id_regardless_of_corpus_order(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             corpus = root / "corpus.jsonl"
-            pairs = root / "pairs.jsonl"
-            corpus.write_text(
-                json.dumps(self._candidate_row()) + "\n", encoding="utf-8")
-            pairs.write_text(
-                json.dumps({"id": 7, "current": self._installed_row()}) + "\n",
-                encoding="utf-8")
-            out = root / "decided.jsonl"
-            self.assertEqual(
-                main(["decide", "--corpus", str(corpus),
-                      "--pair-with", str(pairs), "--counterfactual",
-                      "--out", str(out)]), 0)
-            decided = msgspec.json.decode(
-                out.read_text(encoding="utf-8").strip(), type=dict)
-            self.assertEqual(decided["id"], 7)
-            self.assertFalse(decided["fields"]["verified_lossless"])
-            self.assertTrue(decided["fields"]["imported"])
+            self._write_native_corpus(corpus, current_first=True)
+            resolved = resolve_native_current_pairs(
+                read_decision_corpus(str(corpus)),
+            )
+            self.assertEqual(len(resolved), 1)
+            candidate, current = resolved[0]
+            self.assertEqual(candidate.evidence_id, 7)
+            self.assertIsNotNone(current)
+            assert current is not None
+            self.assertEqual(current.evidence_id, 99)
 
-    def test_a_pairing_row_without_a_current_object_fails_closed(self):
+    def test_missing_native_pairing_columns_fail_closed(self):
         with TemporaryDirectory() as tmp:
-            pairs = Path(tmp) / "pairs.jsonl"
-            pairs.write_text(
-                json.dumps({"id": 7}) + "\n", encoding="utf-8")
+            corpus = Path(tmp) / "corpus.jsonl"
+            malformed = self._candidate_row()
+            del malformed["current_evidence_id"]
+            corpus.write_text(json.dumps(malformed) + "\n", encoding="utf-8")
             with self.assertRaises(RenderDifferentialError):
-                read_current_pairs(str(pairs))
+                read_decision_corpus(str(corpus))
+
+    def test_malformed_native_pairing_columns_fail_closed(self):
+        for field, value in (
+            ("current_evidence_id", "99"),
+            ("is_candidate", "true"),
+            ("files", {}),
+        ):
+            with self.subTest(field=field), TemporaryDirectory() as tmp:
+                corpus = Path(tmp) / "corpus.jsonl"
+                malformed = self._candidate_row()
+                malformed[field] = value
+                corpus.write_text(
+                    json.dumps(malformed) + "\n", encoding="utf-8")
+                with self.assertRaises(RenderDifferentialError):
+                    read_decision_corpus(str(corpus))
+
+    def test_duplicate_evidence_ids_fail_closed(self):
+        with TemporaryDirectory() as tmp:
+            corpus = Path(tmp) / "corpus.jsonl"
+            first = self._candidate_row(current_evidence_id=None)
+            duplicate = self._installed_row(is_candidate=False)
+            duplicate["id"] = 7
+            corpus.write_text(
+                json.dumps(first) + "\n" + json.dumps(duplicate) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(RenderDifferentialError, "duplicate"):
+                read_decision_corpus(str(corpus))
+
+    def test_dangling_current_evidence_id_fails_closed(self):
+        with TemporaryDirectory() as tmp:
+            corpus = Path(tmp) / "corpus.jsonl"
+            corpus.write_text(
+                json.dumps(self._candidate_row(current_evidence_id=404)) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(RenderDifferentialError, "dangling"):
+                read_decision_corpus(str(corpus))
 
     def test_an_unpaired_candidate_is_still_decided(self):
         """A corpus row with no installed album is the ordinary fresh
@@ -465,15 +532,38 @@ class TestCurrentSidePairing(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             corpus = root / "corpus.jsonl"
-            pairs = root / "pairs.jsonl"
             corpus.write_text(
                 json.dumps(self._candidate_row()) + "\n", encoding="utf-8")
-            pairs.write_text(
-                json.dumps({"id": 4242, "current": self._installed_row()})
-                + "\n", encoding="utf-8")
             out = root / "decided.jsonl"
             self.assertEqual(
-                decide_corpus(str(corpus), str(out), pairs_path=str(pairs)), 1)
+                decide_corpus(str(corpus), str(out)), 1)
+
+    def test_counterfactual_keeps_the_paired_current_proof(self):
+        """Only candidate proof is synthetic; installed proof is a real ceiling."""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            corpus = root / "corpus.jsonl"
+            current = self._installed_row(
+                is_candidate=False,
+                verified_lossless=True,
+                verified_lossless_provenance="measured",
+                verified_lossless_source="flac",
+                verified_lossless_classifier=VERIFIED_LOSSLESS_CLASSIFIER,
+                verified_lossless_detail="genuine",
+            )
+            self._write_native_corpus(corpus, current=current)
+            out = root / "decided.jsonl"
+            self.assertEqual(
+                decide_corpus(str(corpus), str(out), counterfactual=True), 1,
+            )
+            decided = msgspec.json.decode(
+                out.read_text(encoding="utf-8").strip(), type=dict,
+            )
+            self.assertEqual(
+                decided["fields"]["stage2_import"],
+                "verified_lossless_locked",
+            )
+            self.assertFalse(decided["fields"]["imported"])
 
 
 class TestCli(unittest.TestCase):
