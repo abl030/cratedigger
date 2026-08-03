@@ -65,6 +65,7 @@ from lib.quality import (
     ValidationResult,
 )
 from lib.quality_evidence import snapshot_audio_files
+from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
 from lib.staged_album import StagedAlbum
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import (
@@ -5569,6 +5570,9 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                     attempted=True,
                     grade="suspect" if path == existing else "genuine",
                     bitrate_kbps=128 if path == existing else None,
+                    spectral_measurement_version=(
+                        SPECTRAL_MEASUREMENT_VERSION
+                    ),
                 )
 
             with patch(
@@ -5667,6 +5671,9 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                     attempted=True,
                     grade="suspect" if path == existing else "genuine",
                     bitrate_kbps=128 if path == existing else None,
+                    spectral_measurement_version=(
+                        SPECTRAL_MEASUREMENT_VERSION
+                    ),
                 )
 
             with patch(

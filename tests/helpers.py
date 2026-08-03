@@ -270,6 +270,7 @@ def make_album_quality_evidence(
     lineage_version: int = 4,
     on_disk_v0_research_attempted: bool = False,
     current_enrichment_required: bool = False,
+    preserve_spectral_measurement_version: bool = False,
     audio_corrupt: bool = False,
     audio_error: str | None = None,
     audio_validation: AudioValidationReport | None = None,
@@ -313,6 +314,21 @@ def make_album_quality_evidence(
             measurement,
             spectral_subject=EVIDENCE_SUBJECT_INSTALLED,
             spectral_provenance=EVIDENCE_PROVENANCE_MEASURED,
+        )
+    if (
+        lineage_version == 4
+        and measurement.spectral_grade is not None
+        and measurement.spectral_measurement_version is None
+        and not preserve_spectral_measurement_version
+    ):
+        from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
+
+        # This helper builds active production-shaped evidence by default.
+        # Tests of legacy generations must opt in explicitly so an accidental
+        # unstamped fixture cannot masquerade as reusable current evidence.
+        measurement = msgspec.structs.replace(
+            measurement,
+            spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
         )
     if audio_validation is None and audio_corrupt:
         audio_validation = make_audio_corrupt_validation_report(

@@ -46,7 +46,7 @@ from lib.quality import (
     ValidationResult,
     legacy_unrecorded_audio_validation_report,
 )
-from lib.spectral_check import AlbumResult
+from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION, AlbumResult
 from lib.staged_album import StagedAlbum
 from tests.fakes import (
     FakeBeetsDB,
@@ -5631,9 +5631,21 @@ class TestPreviewFrontGateSlice(unittest.TestCase):
             }
             audit = SpectralDetail(
                 candidate=SpectralAnalysisDetail(
-                    attempted=True, grade="genuine", bitrate_kbps=None),
+                    attempted=True,
+                    grade="genuine",
+                    bitrate_kbps=None,
+                    spectral_measurement_version=(
+                        SPECTRAL_MEASUREMENT_VERSION
+                    ),
+                ),
                 existing=SpectralAnalysisDetail(
-                    attempted=True, grade="genuine", bitrate_kbps=None),
+                    attempted=True,
+                    grade="genuine",
+                    bitrate_kbps=None,
+                    spectral_measurement_version=(
+                        SPECTRAL_MEASUREMENT_VERSION
+                    ),
+                ),
             )
 
             def _sentinel_preview(*args, **kwargs):
@@ -6609,6 +6621,11 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
                 ),
                 spectral_provenance=(
                     "measured" if spectral_grade is not None else None
+                ),
+                spectral_measurement_version=(
+                    SPECTRAL_MEASUREMENT_VERSION
+                    if spectral_grade is not None
+                    else None
                 ),
             ),
             measured_at=datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC),
@@ -7981,6 +7998,9 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                     estimated_bitrate_kbps=None,
                     suspect_pct=0.0,
                     tracks=[],
+                    spectral_measurement_version=(
+                        SPECTRAL_MEASUREMENT_VERSION
+                    ),
                 )
 
             def run_import(**kwargs: Any) -> ImportOneRun:
@@ -8002,6 +8022,9 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                         spectral_bitrate_kbps=audit.candidate.bitrate_kbps,
                         spectral_subject="source",
                         spectral_provenance="measured",
+                        spectral_measurement_version=(
+                            audit.candidate.spectral_measurement_version
+                        ),
                     ),
                     spectral=audit,
                 )
@@ -8105,6 +8128,9 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                     estimated_bitrate_kbps=None,
                     suspect_pct=0.0,
                     tracks=[],
+                    spectral_measurement_version=(
+                        SPECTRAL_MEASUREMENT_VERSION
+                    ),
                 )
 
             # qaac/CoreAudio's lattice, on every track: the shape the
@@ -8146,6 +8172,9 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                             spectral_grade="genuine",
                             spectral_subject="source",
                             spectral_provenance="measured",
+                            spectral_measurement_version=(
+                                SPECTRAL_MEASUREMENT_VERSION
+                            ),
                         ),
                     ),
                 )
@@ -8356,6 +8385,9 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                     spectral_bitrate_kbps=96,
                     spectral_subject="source",
                     spectral_provenance="measured",
+                    spectral_measurement_version=(
+                        SPECTRAL_MEASUREMENT_VERSION
+                    ),
                 ),
             )
 
@@ -8487,6 +8519,9 @@ class TestPreviewWorkerNeverDecidesSlice(unittest.TestCase):
                     spectral_bitrate_kbps=256,
                     spectral_subject="source",
                     spectral_provenance="measured",
+                    spectral_measurement_version=(
+                        SPECTRAL_MEASUREMENT_VERSION
+                    ),
                 ),
             )
 
@@ -8688,6 +8723,7 @@ class TestWrongMatchCleanupFKChainAvoidsRemeasurement(unittest.TestCase):
                 spectral_grade="genuine",
                 spectral_subject="source",
                 spectral_provenance="measured",
+                spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
             ),
             measured_at=datetime(2026, 5, 1, tzinfo=UTC),
             files=files,
@@ -8960,6 +8996,7 @@ class TestWrongMatchTriageRejectsSameSourceDuplicate(unittest.TestCase):
             spectral_bitrate_kbps=128,
             spectral_subject="source",
             spectral_provenance="measured",
+            spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
         )
         return AlbumQualityEvidence(
             mb_release_id=mb_release_id,

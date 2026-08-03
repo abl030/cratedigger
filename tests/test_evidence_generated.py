@@ -59,6 +59,7 @@ from lib.quality_evidence import (
     snapshot_audio_files,
     snapshot_fingerprint,
 )
+from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import (
     claim_next_import_preview_job,
@@ -304,6 +305,11 @@ class TestGeneratedEvidenceLifecycle(unittest.TestCase):
                         if spectral_subject == "installed"
                         else None
                     ),
+                    spectral_measurement_version=(
+                        SPECTRAL_MEASUREMENT_VERSION
+                        if spectral_subject is not None
+                        else None
+                    ),
                 ),
                 v0_metric=(
                     AlbumQualityV0Metric(
@@ -496,6 +502,11 @@ def _run_blank_path_world(
                     if world.spectral_grade is not None
                     and (world.was_converted_from or "").lower()
                     in {"flac", "alac", "wav"}
+                    else None
+                ),
+                spectral_measurement_version=(
+                    SPECTRAL_MEASUREMENT_VERSION
+                    if world.spectral_grade is not None
                     else None
                 ),
             ),

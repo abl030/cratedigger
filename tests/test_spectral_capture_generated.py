@@ -148,6 +148,7 @@ def _round_trip_through_fake_db(world: CaptureFieldsWorld) -> AudioQualityMeasur
     cliff_hz, codec_family, ultrasonic_deficit_db, version = world
     db = FakePipelineDB()
     evidence = make_album_quality_evidence(
+        preserve_spectral_measurement_version=True,
         mb_release_id=f"generated-capture-{uuid.uuid4()}",
         measurement=AudioQualityMeasurement(
             min_bitrate_kbps=192,
@@ -344,11 +345,13 @@ def _decoy_decider_reads_current_capture_fields(
         current is not None
         and current.measurement.spectral_measurement_version is not None
     ):
-        result["final_status"] = "CORRUPTED_BY_CURRENT_MEASUREMENT_VERSION"
+        result["current_measurement_version"] = (
+            current.measurement.spectral_measurement_version
+        )
     return result
 
 
-_DEFAULT_MUTATION: CaptureFieldsWorld = (17000, "mp3", 61.0, 2)
+_DEFAULT_MUTATION: CaptureFieldsWorld = (17000, "mp3", 61.0, 3)
 
 
 class TestDecisionIgnoresCaptureFieldsCheckerSelfTest(unittest.TestCase):

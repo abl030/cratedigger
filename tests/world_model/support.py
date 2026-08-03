@@ -84,6 +84,7 @@ from lib.quality_evidence import (
 )
 from lib.release_identity import ReleaseIdentity
 from lib.search_plan_service import SearchPlanService
+from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
 from lib.transitions import (
     RequestTransition,
     finalize_request,
@@ -617,6 +618,7 @@ class LifecycleWorld:
                 attempted=True,
                 grade="genuine",
                 bitrate_kbps=96,
+                spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
             ),
             probe_fn=lambda _path: V0ProbeEvidence(
                 kind=V0_PROBE_ON_DISK_RESEARCH,
@@ -691,6 +693,7 @@ class LifecycleWorld:
                 attempted=True,
                 grade=fresh_grade,
                 bitrate_kbps=fresh_bitrate,
+                spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
             ),
             measured_existing_path=album.album_path,
         )
@@ -845,6 +848,7 @@ class LifecycleWorld:
             return SpectralAnalysisDetail(
                 attempted=True,
                 grade=spectral_grade,
+                spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
             )
 
         def full_preview(_db: Any, _job: Any) -> ImportPreviewResult:

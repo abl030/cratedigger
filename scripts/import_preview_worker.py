@@ -1143,6 +1143,14 @@ def process_claimed_preview_job(
                     persisted_existing = spectral_detail_from_persisted_source(
                         current_evidence.measurement.spectral_grade,
                         current_evidence.measurement.spectral_bitrate_kbps,
+                        cliff_hz=current_evidence.measurement.cliff_hz,
+                        codec_family=current_evidence.measurement.codec_family,
+                        ultrasonic_deficit_db=(
+                            current_evidence.measurement.ultrasonic_deficit_db
+                        ),
+                        spectral_measurement_version=(
+                            current_evidence.measurement.spectral_measurement_version
+                        ),
                     )
                     reuse_have_evidence = (
                         current_spectral_evidence_reusable(
@@ -1200,6 +1208,14 @@ def process_claimed_preview_job(
             candidate_detail=spectral_detail_from_persisted_source(
                 front_gate_result.evidence.measurement.spectral_grade,
                 front_gate_result.evidence.measurement.spectral_bitrate_kbps,
+                cliff_hz=front_gate_result.evidence.measurement.cliff_hz,
+                codec_family=front_gate_result.evidence.measurement.codec_family,
+                ultrasonic_deficit_db=(
+                    front_gate_result.evidence.measurement.ultrasonic_deficit_db
+                ),
+                spectral_measurement_version=(
+                    front_gate_result.evidence.measurement.spectral_measurement_version
+                ),
             ),
             existing_detail=(
                 persisted_existing if reuse_have_evidence else None

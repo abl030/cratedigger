@@ -52,6 +52,7 @@ from lib.quality_evidence import (
     evidence_from_measurement,
     snapshot_audio_files,
 )
+from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
 from lib.wrong_match_cleanup_service import (
     OUTCOME_KEPT_UNCERTAIN,
     _cleanup_audit_payload,
@@ -160,15 +161,18 @@ def assert_exact_current_spectral_persisted(
 
 
 def assert_enrichment_plan_never_remeasures(evidence, plan) -> None:
-    """Independent checker: enrichment only measures what is missing."""
+    """Independent checker: current-generation evidence is never remeasured."""
+
+    from lib.quality_evidence import spectral_measurement_generation_is_current
 
     measurement = evidence.measurement
-    if plan.spectral and (
-        measurement.spectral_grade is not None
-        or measurement.spectral_bitrate_kbps is not None
+    if (
+        plan.spectral
+        and measurement.spectral_grade is not None
+        and spectral_measurement_generation_is_current(measurement)
     ):
         raise AssertionError(
-            "enrichment plan re-measures spectral evidence that already exists"
+            "enrichment plan re-measures current-generation spectral evidence"
         )
     if plan.v0 and (
         evidence.v0_metric is not None
@@ -367,7 +371,7 @@ class TestQualityLineagePins(unittest.TestCase):
         assert_enrichment_plan_never_remeasures(evidence, plan)
         self.assertEqual(
             plan.spectral,
-            grade is None and spectral_bitrate is None,
+            grade is None,
         )
         self.assertEqual(plan.v0, not v0_present and not v0_attempted)
 
@@ -433,6 +437,9 @@ class TestQualityLineagePins(unittest.TestCase):
                             attempted=True,
                             grade="genuine",
                             bitrate_kbps=96,
+                            spectral_measurement_version=(
+                                SPECTRAL_MEASUREMENT_VERSION
+                            ),
                         ),
                         probe_fn=lambda _path: None,
                     )
@@ -534,6 +541,9 @@ class TestQualityLineagePins(unittest.TestCase):
                         attempted=True,
                         grade="genuine",
                         bitrate_kbps=96,
+                        spectral_measurement_version=(
+                            SPECTRAL_MEASUREMENT_VERSION
+                        ),
                     ),
                     probe_fn=lambda _path: None,
                 )
@@ -1398,6 +1408,9 @@ class TestQualityLineageGenerated(unittest.TestCase):
                     attempted=True,
                     grade=grade,
                     bitrate_kbps=bitrate,
+                    spectral_measurement_version=(
+                        SPECTRAL_MEASUREMENT_VERSION
+                    ),
                 ),
                 measured_existing_path=source,
             )
@@ -1474,6 +1487,9 @@ class TestQualityLineageGenerated(unittest.TestCase):
                     attempted=True,
                     grade=fresh_grade,
                     bitrate_kbps=fresh_bitrate,
+                    spectral_measurement_version=(
+                        SPECTRAL_MEASUREMENT_VERSION
+                    ),
                 ),
                 measured_existing_path=source,
             )

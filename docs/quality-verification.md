@@ -1126,8 +1126,10 @@ rows carry `lineage_version=4`: spectral and V0 facts add `subject`
 verified-lossless lives only in its proof object. Migration 055 maps old field
 names best-effort; current-evidence loaders treat v1/v3 rows as rebuild-required
 rather than guessing v4 meaning. Preview reuses a decision-usable spectral fact
-only after exact-release and snapshot authorization; missing, unusable, or
-changed HAVE evidence is remeasured. The import action independently
+only after exact-release and snapshot authorization and an exact match between
+its `spectral_measurement_version` and the running analyzer generation;
+missing, old-generation, unusable, or changed HAVE evidence is remeasured. The
+import action independently
 reauthorizes the exact installed Beets album before deciding. A same-snapshot
 repair preserves its original `measured_at` and atomic neutral facts so
 historical Recents cards remain pre-attempt evidence.
@@ -1246,9 +1248,13 @@ operator one-shots must reference this canonical set rather than restating a
 subset.
 
 The same rule governs every evidence rebuild: proof and source-subject facts
-carry unconditionally with provenance `carried`; installed-subject facts are
-remeasured and can only have provenance `measured`. Proof is conceptually a
-source acquisition fact, so it needs only its provenance marker.
+carry physically with provenance `carried`; installed-subject facts are
+remeasured and can only have provenance `measured`. Carried spectral facts
+still pass the analyzer-generation gate before policy can read them. An old
+source generation remains audit history but is projected without its spectral
+tuple: scanning the installed derivative would describe different bytes and
+violate R19. Proof is conceptually a source acquisition fact, so it needs only
+its provenance marker.
 
 **A changed installed snapshot is linked before neutral enrichment, but it is
 not immediately action authority.** The new content-addressed row must exist
@@ -1365,7 +1371,8 @@ spectral fact is written:
   fill-only-if-NULL policy, which silently discarded a fresh genuine/160 audit
   and let the frozen 128 landmine keep deciding. Missing, incomplete, or
   changed evidence is measured on the next preview; complete matching evidence
-  with a decision-usable grade is reused. Guards preserved: a
+  with a decision-usable grade from the running analyzer generation is reused.
+  Guards preserved: a
   FAILED fresh audit never clears a persisted grade (fail-soft `incomplete`),
   and an R19 lossless-sourced row keeps its source spectral — an installed-
   derivative scan is never persisted as its grade (`preserve_existing_source_spectral`
