@@ -13,10 +13,13 @@ import unittest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from lib.youtube_ingest_service import YoutubeIngestService
 from tests.fakes import FakePipelineDB
 from tests.test_youtube_ingest_service import (
-    BROWSE, MB_RG, _make_service, _seed_resolver_row, _seed_wanted_request,
+    BROWSE,
+    MB_RG,
+    _make_service,
+    _seed_resolver_row,
+    _seed_wanted_request,
 )
 
 
