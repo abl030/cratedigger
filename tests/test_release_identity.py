@@ -111,6 +111,35 @@ class TestReleaseIdentity(unittest.TestCase):
         ):
             ReleaseIdentity.all_from_observation_fields("12856590", "12856591")
 
+    def test_exact_request_evidence_identity_match_fails_closed(self):
+        from lib.release_identity import exact_request_evidence_identity_matches
+
+        mbid = "89ad4ac3-39f7-470e-963a-56509c546377"
+        cases = (
+            ("musicbrainz exact", mbid.upper(), None, mbid, True),
+            ("musicbrainz mismatch", mbid, None, "12856590", False),
+            ("modern discogs exact", None, "0012856590", "12856590", True),
+            ("modern discogs mismatch", None, "12856590", "12856591", False),
+            ("legacy discogs exact", "0012856590", None, "12856590", True),
+            ("duplicated discogs exact", "0012856590", "12856590", "12856590", True),
+            ("conflicting discogs fields", "12856590", "12856591", "12856590", False),
+            ("cross-source fields", mbid, "12856590", mbid, False),
+            ("synthetic audit exact", "synthetic-release", None, "synthetic-release", True),
+            ("synthetic audit mismatch", "synthetic-release", None, "other-release", False),
+            ("synthetic with discogs field", "synthetic-release", "12856590", "12856590", False),
+            ("empty request", None, None, None, False),
+        )
+        for description, request_id, discogs_id, evidence_id, expected in cases:
+            with self.subTest(description=description):
+                self.assertEqual(
+                    exact_request_evidence_identity_matches(
+                        request_id,
+                        discogs_id,
+                        evidence_id,
+                    ),
+                    expected,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

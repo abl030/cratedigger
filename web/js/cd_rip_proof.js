@@ -109,7 +109,7 @@ export function cdRipProofPresentation(raw) {
   }
   const hasCtdb = raw.ctdb !== null && raw.ctdb !== undefined;
   const hasAccurateRip = raw.accuraterip !== null && raw.accuraterip !== undefined;
-  if (!hasCtdb && !hasAccurateRip) return null;
+  if (hasCtdb === hasAccurateRip) return null;
   if (hasCtdb && !validCtdb(raw.ctdb, offsets, raw.toc.leadout_sector)) return null;
   if (hasAccurateRip && !validAccurateRip(raw.accuraterip, offsets.length)) return null;
 

@@ -157,6 +157,7 @@ from lib.quality import (
 )
 from lib.release_identity import (
     ReleaseIdentity,
+    exact_request_evidence_identity_matches,
     normalize_release_id,
 )
 from lib.search_scheduler import (
@@ -6366,6 +6367,15 @@ class FakePipelineDB:
             )
 
         evidence = self._current_evidence_for_request(row)
+        if (
+            evidence is not None
+            and not exact_request_evidence_identity_matches(
+                row.get("mb_release_id"),
+                row.get("discogs_release_id"),
+                evidence.mb_release_id,
+            )
+        ):
+            evidence = None
         verified_lossless = bool(
             evidence is not None
             and evidence.verified_lossless_proof is not None
