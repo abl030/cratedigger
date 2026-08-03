@@ -97,7 +97,9 @@ class TestForceImportService(unittest.TestCase):
         db.download_logs[log_id - 1].validation_result = {
             "scenario": "high_distance", "failed_path": path,
             "soulseek_username": soulseek_username,
-            "source_dirs": source_dirs or ["peer\\Artist\\Album"],
+            "source_dirs": (
+                ["peer\\Artist\\Album"] if source_dirs is None else source_dirs
+            ),
         }
 
     def _assert_queued(
@@ -143,6 +145,29 @@ class TestForceImportService(unittest.TestCase):
             failed_path=album,
             source_username="peer",
             source_dirs=["peer\\Artist\\Album"],
+        )
+
+    def test_youtube_wrong_match_under_staging_enqueues(self) -> None:
+        db, cfg, staging, log_id = self._world()
+        album = os.path.join(
+            staging,
+            "auto-import",
+            "wrong_matches",
+            "Loon_Lake-Low_Res-playlist-request-111-log-39310",
+        )
+        os.makedirs(album)
+        db.download_logs[log_id - 1].soulseek_username = None
+        self._set_path(db, log_id, album, source_dirs=[])
+
+        result = enqueue_force_import(db, cfg, log_id)
+
+        self._assert_queued(
+            db, result,
+            download_log_id=log_id,
+            request_id=867,
+            failed_path=album,
+            source_username=None,
+            source_dirs=[],
         )
 
     def test_missing_download_log_returns_exact_outcome_without_job(self) -> None:

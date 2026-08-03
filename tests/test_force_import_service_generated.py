@@ -15,12 +15,11 @@ from tests.helpers import make_request_row
 
 # Stated here rather than imported from lib.fs_authority: an oracle derived
 # from the production table cannot detect that table widening. The three
-# configured quarantine roots carry DELIBERATELY ASYMMETRIC marker sets —
-# staging authorizes ``failed_imports`` only, because a wrong-match rejection
-# is never staged there.
+# configured quarantine roots all authorize the two exact quarantine markers.
+# This includes YouTube rejects under staging/auto-import/wrong_matches.
 MARKERS_BY_ROOT: dict[str, frozenset[str]] = {
     "slskd": frozenset({"failed_imports", "wrong_matches"}),
-    "staging": frozenset({"failed_imports"}),
+    "staging": frozenset({"failed_imports", "wrong_matches"}),
     "processing": frozenset({"failed_imports", "wrong_matches"}),
 }
 
@@ -39,9 +38,8 @@ def assert_force_import_authority_invariant(
 
 class TestForceImportAuthorityGenerated(unittest.TestCase):
     def test_only_existing_configured_quarantine_sources_enqueue(self) -> None:
-        # Exhaustive finite authority table. It includes the decisive staging
-        # asymmetry, ordinary staging authorization, and component-lookalike
-        # worlds that were previously pinned with @example.
+        # Exhaustive finite authority table. It includes both staging
+        # quarantine markers and component-lookalike worlds.
         worlds = product(
             sorted(MARKERS_BY_ROOT),
             _MARKERS,
