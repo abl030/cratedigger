@@ -9,6 +9,8 @@ ok(JSON.stringify(youtubeResolverPayload(identifier, 'https://music.youtube.com/
 
 const failedHtml = renderYoutubeRescueControl('release-1', 1, identifier, { outcome: 'transient', error_message: 'mirror down' });
 ok(failedHtml.includes('mirror down'), 'resolver failures remain visible');
+ok(failedHtml.includes('Paste a YouTube video or playlist URL, then click Check URL.'), 'control explains how a pasted URL is submitted');
+ok(failedHtml.includes('Search YouTube') && failedHtml.includes('Check URL'), 'search and manual URL actions are explicit separate buttons');
 const matrixHtml = renderYoutubeRescueControl('release-1', 1, identifier, { outcome: 'ok', youtube_releases: [{ yt_browse_id: 'MPREb_kb5fohQCJ6d', year: 2026, track_count: 1, distances: [{ mbid: identifier, outcome: 'ok', distance: 0, total_mb_tracks: 1 }] }] });
 ok(matrixHtml.includes('window.pickYoutubeRescue(1,'), 'matrix choice remains confirm-routed');
 ok(!matrixHtml.includes('"window.checkYoutubeRescue("release-1"'), 'inline handler quoting remains safe');
@@ -28,14 +30,29 @@ function fakeHost(watchUrl = '') {
 const host = fakeHost('https://music.youtube.com/watch?v=dGYXkhMAvLk');
 globalThis.document = { getElementById: () => host };
 let calls = 0;
-globalThis.fetch = async (_url, options) => { calls++; return { ok: true, status: 200, json: async () => ({ outcome: 'ok', youtube_releases: [] }) }; };
+const resolverBodies = [];
+globalThis.fetch = async (_url, options) => { calls++; resolverBodies.push(options.body); return { ok: true, status: 200, json: async () => ({ outcome: 'ok', youtube_releases: [] }) }; };
 await Promise.all([checkYoutubeRescue('release-1', 1, identifier), checkYoutubeRescue('release-1', 1, identifier)]);
 ok(calls === 1, 'same-instance busy guard suppresses double resolver fire');
+ok(resolverBodies[0] === JSON.stringify({ identifier }), 'Search YouTube ignores a populated manual URL field');
 ok(host.result.innerHTML.includes('No YouTube album found'), 'successful result replaces result region');
-await checkYoutubeRescue('release-1', 1, identifier);
+await checkYoutubeRescue('release-1', 1, identifier, true);
 ok(calls === 2 && !host.result.innerHTML.includes('No YouTube album foundNo YouTube album found'), 'repeated resolver check replaces rather than appends');
+ok(resolverBodies[1] === JSON.stringify({ identifier, watch_url: 'https://music.youtube.com/watch?v=dGYXkhMAvLk' }), 'Check URL submits the pasted URL');
 delete globalThis.document;
 delete globalThis.fetch;
+
+const blankHost = fakeHost('');
+globalThis.document = { getElementById: () => blankHost };
+globalThis.fetch = async () => { throw new Error('blank Check URL must not fetch'); };
+await checkYoutubeRescue('release-blank', 1, identifier, true);
+ok(blankHost.result.innerHTML.includes('Paste a YouTube video or playlist URL first.'), 'blank Check URL gets visible corrective feedback');
+delete globalThis.document; delete globalThis.fetch;
+
+const playlistHtml = renderYoutubeRescueControl('release-playlist', 1, identifier, { outcome: 'ok', youtube_releases: [{ yt_browse_id: 'PLC0playlist', yt_url: 'https://music.youtube.com/playlist?list=PLC0playlist', distances: [{ mbid: identifier, outcome: 'ok', distance: 0, total_mb_tracks: 10 }] }] });
+ok(playlistHtml.includes('href="https://music.youtube.com/playlist?list=PLC0playlist"'), 'playlist candidate links to its validated playlist URL');
+const unsafeLinkHtml = renderYoutubeRescueControl('release-unsafe', 1, identifier, { outcome: 'ok', youtube_releases: [{ yt_browse_id: 'MPREb_safe', yt_url: 'javascript:alert(1)', distances: [{ mbid: identifier, outcome: 'ok', distance: 0, total_mb_tracks: 1 }] }] });
+ok(unsafeLinkHtml.includes('href="https://music.youtube.com/browse/MPREb_safe"') && !unsafeLinkHtml.includes('href="javascript:'), 'untrusted candidate URL falls back to the safe browse-id URL');
 
 const networkHost = fakeHost();
 globalThis.document = { getElementById: () => networkHost };

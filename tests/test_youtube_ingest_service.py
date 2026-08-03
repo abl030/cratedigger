@@ -59,6 +59,7 @@ def _seed_resolver_row(
     yt_audio_playlist_id: str | None = PLAYLIST,
     distances_for_mbid: str = MB_REL,
     total_mb_tracks: int | None = EXPECTED_TRACKS,
+    video_ids: list[str] | None = None,
     extra_rows: list[dict[str, Any]] | None = None,
 ) -> None:
     """Pre-seed ``youtube_album_mappings`` with one matching row."""
@@ -72,7 +73,8 @@ def _seed_resolver_row(
         "album_title": "Test Album",
         "album_artist": "Test Artist",
         "yt_tracks": [
-            {"title": f"Track {i + 1}", "video_id": f"vid-{i + 1}"}
+            {"title": f"Track {i + 1}", "video_id": (
+                video_ids[i] if video_ids is not None else f"vid-{i + 1}")}
             for i in range(total_mb_tracks or EXPECTED_TRACKS)
         ],
         "distances": [
@@ -236,6 +238,33 @@ class TestSubmitHappyPath(unittest.TestCase):
             metadata["per_track_video_ids"],
             [f"vid-{i + 1}" for i in range(EXPECTED_TRACKS)],
         )
+
+    def test_manual_playlist_submit_uses_persisted_playlist_identity_only(self) -> None:
+        playlist_id = "PLC0OzcZTO0Ju-Co8Ws-IbWp6mJPwjhdL1"
+        normalized_url = (
+            f"https://music.youtube.com/playlist?list={playlist_id}")
+        video_ids = [
+            "t10tVYLuY5s", "otSopfh5aPY", "GHdoJw79Dqw", "LQj7syTEFqQ",
+            "NlWCwz4NpI8", "teb8DBTZ0_A", "8lGstW75LRw", "9472M_DW3Gc",
+            "Fa7GuaiY5l4", "V-f345M-vQY",
+        ]
+        pdb = FakePipelineDB()
+        _seed_wanted_request(pdb)
+        _seed_resolver_row(
+            pdb, browse_id=playlist_id, yt_url=normalized_url,
+            yt_audio_playlist_id=playlist_id, video_ids=video_ids)
+
+        result = _make_service(pdb).submit(42, playlist_id)
+
+        self.assertEqual(result.outcome, "accepted")
+        metadata = pdb.download_logs[0].youtube_metadata
+        self.assertIsNotNone(metadata)
+        assert metadata is not None
+        self.assertEqual(metadata["browse_id"], playlist_id)
+        self.assertEqual(metadata["audio_playlist_id"], playlist_id)
+        self.assertEqual(metadata["yt_url"], normalized_url)
+        self.assertEqual(metadata["expected_track_count"], 10)
+        self.assertEqual(metadata["per_track_video_ids"], video_ids)
 
     def test_exact_distance_must_be_one_successful_finite_entry(self) -> None:
         for override in (

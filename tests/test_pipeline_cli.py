@@ -5016,7 +5016,7 @@ class TestCmdYoutubeAlbum(unittest.TestCase):
         )
 
     def test_watch_url_is_forwarded_to_shared_resolver(self):
-        url = "https://music.youtube.com/watch?v=dGYXkhMAvLk"
+        url = "https://www.youtube.com/watch?v=video&list=playlist"
         _rc, _out, resolve = self._run(outcome="ok", watch_url=url)
         self.assertEqual(resolve.call_args.kwargs["watch_url"], url)
 

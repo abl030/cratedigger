@@ -350,8 +350,9 @@ def add_youtube_subparsers(
     )
     p_ya.add_argument(
         "--watch-url",
-        help="Canonical https://music.youtube.com/watch?v=<video-id>; "
-             "resolves that video to an album and replaces this full matrix.",
+        help="Public HTTPS YouTube video or playlist URL. A list parameter "
+             "selects the complete ordered playlist; otherwise the video is "
+             "resolved to its album. Replaces this full matrix.",
     )
     p_ya.add_argument(
         "--json", action="store_true",

@@ -30,12 +30,12 @@
  *      (#501 item 1) — a Discogs row with a resolved master gets real
  *      sibling pressings here too, not a doomed MB lookup).
  *   5. YouTube matrix  ← the four-state shell. Defaults to `never_run`
- *      with a "Check YouTube" button (U5 wires the actual resolver call —
+ *      with separate Search YouTube and Check URL actions (U5 wires the resolver —
  *      U4 must NOT auto-call the slow, side-effectful resolver POST).
  *
  * U5: the two-step YouTube rescue flow.
  *
- *   1. "Check YouTube" (`checkYoutube`) — replaces U4's placeholder. Calls
+ *   1. Search YouTube / Check URL (`checkYoutube`) — calls
  *      the SLOW, SIDE-EFFECTFUL resolver POST
  *      (`POST /api/youtube-album {identifier, refresh}`), disables the
  *      button + shows in-progress, GUARDS double-fire
@@ -837,8 +837,8 @@ export function youtubeRescueTargets(result) {
  * (`window.pickYoutubeRescue(id, browse_id)`). `resolved_empty` HIDES the
  * rescue affordance and shows "not on YouTube Music — re-check"
  * (R9 / R10 — nothing to pick). `never_run` / `resolver_failed` render the
- * "Check YouTube" / retry button wired to `window.checkYoutube(id)` (U5's
- * real resolver handler, replacing U4's placeholder). The console must NOT
+ * explicit search and manual-URL buttons wired to `window.checkYoutube`
+ * (U5's real resolver handler). The console must NOT
  * auto-call the slow, side-effectful resolver POST — the panel opens in
  * `never_run` until the operator clicks.
  *
@@ -854,7 +854,11 @@ function renderYoutubeBody(result, id) {
   if (identifier) {
     return `<div class="lt-yt">${renderYoutubeRescueControl(
       `long-tail-${id}`, id, identifier, result,
-      { check: `window.checkYoutube(${id})`, pick: 'window.pickYoutubeRescue' })}</div>`;
+      {
+        search: `window.checkYoutube(${id}, false)`,
+        checkUrl: `window.checkYoutube(${id}, true)`,
+        pick: 'window.pickYoutubeRescue',
+      })}</div>`;
   }
   const checkLabel = (cls.state === 'resolver_failed') ? 'Retry' : (cls.state === 'resolved_empty') ? 'Re-check' : 'Check YouTube';
   const input = `<input id="yt-watch-long-tail-${id}" placeholder="https://music.youtube.com/watch?v=…" aria-label="YouTube Music watch URL">`;
@@ -1313,7 +1317,7 @@ export function rescueOutcomeCopy(result) {
     case 'no_resolver_mapping':
       return {
         title: 'No resolver mapping',
-        detail: 'No cached YouTube mapping for this release — re-run Check YouTube first.',
+        detail: 'No cached YouTube mapping for this release — run Search YouTube or Check URL first.',
         tone: 'error',
       };
     case 'track_count_precheck_failed':
@@ -1372,15 +1376,15 @@ function patchYoutubePanel(id, token, generation, result) {
 }
 
 /**
- * "Check YouTube" handler (U5) — replaces U4's placeholder toast. Runs the
- * slow, side-effectful resolver POST for the row's exact MB or Discogs release
+ * Search YouTube / Check URL handler (U5/#1016). Runs the slow,
+ * side-effectful resolver POST for the row's exact MB or Discogs release
  * identifier, then
  * re-renders the YouTube panel with the fresh classification.
  *
  * Guards:
  *   * Double-fire — `consoleCanStart(consoleStates, id, 'resolve')`; a
  *     second click while outstanding returns immediately.
- *   * Disabled button — the live "Check YouTube" / "Retry" button is
+ *   * Disabled button — the live resolver action is
  *     disabled + relabelled while outstanding so the operator sees progress
  *     and can't re-click it.
  *
@@ -1403,9 +1407,10 @@ function patchYoutubePanel(id, token, generation, result) {
  * until the next `consolePrune`.
  *
  * @param {number} id  album_requests.id
+ * @param {boolean} [useUrl=false]  True only for the explicit Check URL action.
  * @returns {Promise<void>}
  */
-export async function checkYoutube(id) {
+export async function checkYoutube(id, useUrl = false) {
   const generation = longTailConsoleGeneration();
   const row = consoleRow(id);
   const identifier = row
@@ -1420,6 +1425,17 @@ export async function checkYoutube(id) {
       { outcome: 'transient', error_message: 'No release identifier on this request.' }));
     return;
   }
+  const manualUrl = useUrl && typeof document !== 'undefined'
+    ? (document.getElementById(`yt-watch-long-tail-${id}`)?.value.trim() || '')
+    : '';
+  if (useUrl && !manualUrl) {
+    patchYoutubePanel(id, consoleToken(consoleStates, id), generation,
+      /** @type {any} */ ({
+        outcome: 'transient',
+        error_message: 'Paste a YouTube video or playlist URL first.',
+      }));
+    return;
+  }
   if (!consoleCanStart(consoleStates, id, 'resolve')) return;  // double-fire guard.
   // Paint against the row's CURRENT token, re-read at paint time (the
   // resolver-settle semantic — see consoleToken's docstring): the youtube
@@ -1431,7 +1447,11 @@ export async function checkYoutube(id) {
     const r = await fetch(`${API}/api/youtube-album`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ identifier, refresh: false, ...((typeof document !== 'undefined' && document.getElementById(`yt-watch-long-tail-${id}`)?.value.trim()) ? { watch_url: document.getElementById(`yt-watch-long-tail-${id}`).value.trim() } : {}) }),
+      body: JSON.stringify({
+        identifier,
+        refresh: false,
+        ...(manualUrl ? { watch_url: manualUrl } : {}),
+      }),
     });
     // 404/503 still carry a typed body; the classifier maps any non-`ok`
     // outcome to `resolver_failed`, so we read the body regardless of

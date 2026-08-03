@@ -25,7 +25,9 @@ console.log('shared YouTube rescue control');
   assertContains(html, 'yt-rescue-release-7', 'release detail uses a surface-keyed control id');
   assertContains(html, 'window.checkYoutubeRescue(', 'inline handler uses the shared generic entry point');
   assertExcludes(html, '"window.checkYoutubeRescue("release-7"', 'inline handler does not break its HTML attribute quoting');
-  assertContains(html, 'music.youtube.com/watch?v=', 'control carries canonical watch input');
+  assertContains(html, 'Search YouTube', 'control carries an explicit discovery action');
+  assertContains(html, 'Check URL', 'control carries an explicit manual URL action');
+  assertContains(html, 'video or playlist URL', 'control explains the admitted URL shape');
 }
 
 function assertEqual(actual, expected, msg) {

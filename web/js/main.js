@@ -235,8 +235,8 @@ Object.assign(window, {
   // handlers in `release_actions.js` can call into the picker.
   openReplacePicker: openReplacePickerAndHandle,
   toggleWrongMatchesReplacedFilter,
-  // Long-tail YouTube rescue (U5) — the two-step flow. `checkYoutube` runs
-  // the slow, side-effectful resolver POST (double-fire-guarded, stale-result
+  // Long-tail YouTube rescue (U5) — the two-step flow. Search YouTube and
+  // Check URL both run the slow resolver POST (double-fire-guarded, stale-result
   // stamped) and re-renders the YouTube panel with pickable rescue targets;
   // `pickYoutubeRescue` opens the confirm overlay for a chosen target and
   // submits the rescue, mapping every ingest outcome to specific console
