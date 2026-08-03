@@ -38,7 +38,10 @@ import msgspec
 from lib.quality import (
     VERIFIED_LOSSLESS_CLASSIFIER,
     VERIFIED_LOSSLESS_CLASSIFIER_V3,
+    AccurateRipBitMatch,
     AlbumQualityEvidenceFile,
+    CdRipBitVerification,
+    CdTocIdentity,
     full_pipeline_decision_from_evidence,
 )
 from lib.quality_evidence import snapshot_fingerprint
@@ -103,6 +106,7 @@ def _corpus_row(**overrides: object) -> dict[str, object]:
         "verified_lossless_source": None,
         "verified_lossless_classifier": None,
         "verified_lossless_detail": None,
+        "cd_rip_verification": None,
         "audio_validation": {
             "policy_id": "pre-audio-integrity-v2",
             "tool": "legacy",
@@ -156,6 +160,35 @@ def _corpus_row(**overrides: object) -> dict[str, object]:
     return row
 
 
+def _cd_proof_corpus_row() -> dict[str, object]:
+    cd_rip = CdRipBitVerification(
+        toc=CdTocIdentity(
+            track_offsets_sectors=[0],
+            leadout_sector=470,
+            accuraterip_id="000001d6-000003ac-02000601",
+            musicbrainz_disc_id="decision-corpus-disc",
+        ),
+        accuraterip=AccurateRipBitMatch(
+            provider="accuraterip",
+            url="https://www.accuraterip.com/decision-corpus.bin",
+            checksum_version="arv2",
+            read_offset_samples=0,
+            track_confidences=[42],
+            track_checksums=[0x12345678],
+            response_sha256="a" * 64,
+        ),
+    )
+    proof = cd_rip.verified_lossless_proof()
+    return _corpus_row(
+        verified_lossless=True,
+        verified_lossless_provenance=proof.provenance,
+        verified_lossless_source=proof.source,
+        verified_lossless_classifier=proof.classifier,
+        verified_lossless_detail=proof.detail,
+        cd_rip_verification=msgspec.to_builtins(cd_rip),
+    )
+
+
 class TestDecideRow(unittest.TestCase):
     """One corpus row through the real decider."""
 
@@ -173,6 +206,32 @@ class TestDecideRow(unittest.TestCase):
                        "comparison_basis_if_stage1_deferred"):
                 continue
             self.assertEqual(decided.fields[key], value, key)
+
+    def test_cd_proof_round_trips_through_the_exact_corpus_wire(self):
+        from scripts.decision_differential import _evidence_from_corpus_row
+
+        evidence = _evidence_from_corpus_row(_cd_proof_corpus_row())
+
+        self.assertIsNotNone(evidence.cd_rip_verification)
+        self.assertIsNotNone(evidence.verified_lossless_proof)
+        assert evidence.cd_rip_verification is not None
+        self.assertEqual(
+            evidence.cd_rip_verification.toc.musicbrainz_disc_id,
+            "decision-corpus-disc",
+        )
+
+    def test_cd_proof_wire_rejects_unknown_nested_fields(self):
+        from scripts.decision_differential import _evidence_from_corpus_row
+
+        row = _cd_proof_corpus_row()
+        cd_rip = row["cd_rip_verification"]
+        assert isinstance(cd_rip, dict)
+        toc = cd_rip["toc"]
+        assert isinstance(toc, dict)
+        toc["unexpected"] = True
+
+        with self.assertRaises(RenderDifferentialError):
+            _evidence_from_corpus_row(row)
 
     def test_every_decision_key_is_watched(self):
         """The watched set is DERIVED from the decider's own output. A new

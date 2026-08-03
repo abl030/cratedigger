@@ -604,6 +604,60 @@ class DecisionCorpusAacLatticeTrackWire(
     error: str | None
 
 
+class DecisionCorpusCdTocWire(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True
+):
+    """Exact JSON shape of the submitted CD table of contents."""
+
+    track_offsets_sectors: list[int]
+    leadout_sector: int
+    accuraterip_id: str
+    musicbrainz_disc_id: str
+
+
+class DecisionCorpusAccurateRipWire(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True
+):
+    """Exact JSON shape of one positive AccurateRip match."""
+
+    provider: Literal["accuraterip"]
+    url: str
+    checksum_version: Literal["arv1", "arv2"]
+    read_offset_samples: int
+    track_confidences: list[int]
+    track_checksums: list[int]
+    response_sha256: str
+
+
+class DecisionCorpusCtdbWire(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True
+):
+    """Exact JSON shape of one positive CTDB whole-disc match."""
+
+    provider: Literal["ctdb"]
+    url: str
+    entry_id: str
+    confidence: int
+    crc32: int
+    stride_samples: int
+    response_toc_sectors: list[int]
+    response_toc_shift_sectors: int
+    response_sha256: str
+
+
+class DecisionCorpusCdRipVerificationWire(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True
+):
+    """Exact JSON shape of positive CD-rip source proof."""
+
+    algorithm: Literal["cd-rip-bit-verifier-v1"]
+    provenance: EvidenceProvenance
+    source_format: Literal["flac", "alac"]
+    toc: DecisionCorpusCdTocWire
+    accuraterip: DecisionCorpusAccurateRipWire | None
+    ctdb: DecisionCorpusCtdbWire | None
+
+
 class DecisionCorpusEvidenceWire(
     msgspec.Struct, frozen=True, forbid_unknown_fields=True
 ):
@@ -652,6 +706,7 @@ class DecisionCorpusEvidenceWire(
     verified_lossless_source: str | None
     verified_lossless_classifier: str | None
     verified_lossless_detail: str | None
+    cd_rip_verification: DecisionCorpusCdRipVerificationWire | None
     audio_validation: DecisionCorpusAudioValidationWire
     audio_corrupt: bool
     audio_error: str | None
@@ -1125,6 +1180,7 @@ _EVIDENCE_SCHEMA_TYPES: dict[str, tuple[str, bool]] = {
     "verified_lossless_source": ("text", True),
     "verified_lossless_classifier": ("text", True),
     "verified_lossless_detail": ("text", True),
+    "cd_rip_verification": ("jsonb", True),
     "matched_bad_audio_hash_id": ("bigint", True),
     "matched_bad_audio_hash_path": ("text", True),
     "target_is_cbr": ("boolean", True),
