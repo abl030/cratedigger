@@ -569,7 +569,7 @@ class TestSubmitTrackCountPrecheckFailed(unittest.TestCase):
         self.assertEqual(result.outcome, "track_count_precheck_failed")
         self.assertIsNotNone(result.detail)
         assert result.detail is not None
-        self.assertIn("no stored tracklist", result.detail)
+        self.assertIn("no admissible exact evidence", result.detail)
 
     def test_discogs_stored_count_mismatch_rejects(self) -> None:
         pdb = FakePipelineDB()

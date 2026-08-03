@@ -1123,6 +1123,12 @@ class YoutubeIngestService:
         if source == "discogs":
             distance_count = self._distance_total_tracks(
                 mapping_row, target_release_id)
+            if distance_count is None:
+                raise _TrackCountPrecheckFailure(
+                    f"resolver mapping for browse_id="
+                    f"{mapping_row.get('yt_browse_id')!r} has no admissible "
+                    f"exact evidence for release_id={target_release_id!r}"
+                )
             try:
                 stored_count = self._stored_track_count(request_id)
             except Exception as exc:
@@ -1130,13 +1136,6 @@ class YoutubeIngestService:
                     f"DB error reading stored tracklist for request "
                     f"{request_id}: {exc}"
                 ) from exc
-            if stored_count is None and distance_count is None:
-                raise _TrackCountPrecheckFailure(
-                    f"Discogs request {request_id} has no stored tracklist "
-                    f"and resolver mapping browse_id="
-                    f"{mapping_row.get('yt_browse_id')!r} has no exact "
-                    f"total track count for release_id={target_release_id!r}"
-                )
             if (
                 stored_count is not None
                 and distance_count is not None

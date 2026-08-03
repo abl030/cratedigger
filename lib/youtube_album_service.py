@@ -741,7 +741,7 @@ def resolve_youtube_album(
 
     if yt_failure is not None:
         failure_outcome, failure_msg = yt_failure
-        if cached_rows:
+        if watch_url is None and cached_rows:
             # Cache fallback: outcome stays ok, but flag the upstream failure.
             return _final(
                 outcome="ok",

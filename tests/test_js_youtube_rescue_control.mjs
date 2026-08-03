@@ -14,6 +14,8 @@ ok(matrixHtml.includes('window.pickYoutubeRescue(1,'), 'matrix choice remains co
 ok(!matrixHtml.includes('"window.checkYoutubeRescue("release-1"'), 'inline handler quoting remains safe');
 ok(matrixHtml.includes('event.stopPropagation()'), 'all inline control interactions stop parent propagation');
 ok(matrixHtml.includes('https://music.youtube.com/browse/MPREb_kb5fohQCJ6d') && matrixHtml.includes('2026 · 1t · exact dist 0.000'), 'choices retain exact pressing evidence');
+const duplicateHtml = renderYoutubeRescueControl('release-dup', 1, identifier, { outcome: 'ok', youtube_releases: [{ yt_browse_id: 'MPREb_dup', distances: [{ mbid: identifier, outcome: 'ok', distance: 0, total_mb_tracks: 1 }, { mbid: identifier, outcome: 'ok', distance: 0, total_mb_tracks: 1 }] }] });
+ok(duplicateHtml.includes('disabled') && duplicateHtml.includes('Exact evidence required'), 'duplicate exact evidence disables rescue');
 
 function fakeHost(watchUrl = '') {
   const buttons = [];
