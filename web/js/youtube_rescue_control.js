@@ -2,6 +2,10 @@
 import { API, toast } from './state.js';
 import { esc, jsArg, youtubeSectionState } from './util.js';
 
+export function youtubeResolverPayload(identifier, watchUrl) {
+  return { identifier, ...(watchUrl ? { watch_url: watchUrl } : {}) };
+}
+
 export function renderYoutubeRescueControl(key, requestId, identifier, result = null, handlers = {}) {
   if (!Number.isInteger(Number(requestId)) || !identifier) return '';
   const state = youtubeSectionState(result);
@@ -28,7 +32,7 @@ export async function checkYoutubeRescue(key, requestId, identifier) {
   const resultHost = host.querySelector('.yt-rescue-result');
   const watchUrl = host.querySelector('input')?.value.trim();
   try {
-    const r = await fetch(`${API}/api/youtube-album`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ identifier, ...(watchUrl ? { watch_url: watchUrl } : {}) }) });
+    const r = await fetch(`${API}/api/youtube-album`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(youtubeResolverPayload(identifier, watchUrl)) });
     const result = await r.json().catch(() => ({ error_message: `HTTP ${r.status}` }));
     if (host.dataset.generation !== generation || !resultHost) return;
     if (!r.ok || result.outcome !== 'ok') {
