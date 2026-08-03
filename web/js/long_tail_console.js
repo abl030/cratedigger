@@ -850,32 +850,13 @@ export function youtubeRescueTargets(result) {
 function renderYoutubeBody(result, id) {
   const row = consoleRow(id);
   const manualControl = renderYoutubeRescueControl(
-    id, row && (row.mb_release_id || row.discogs_release_id));
+    `long-tail-${id}`, id, row && (row.mb_release_id || row.discogs_release_id));
+  if (manualControl) return `<div class="lt-yt">${manualControl}</div>`;
   const cls = youtubeSectionState(result);
-  const checkLabel = (cls.state === 'resolver_failed') ? 'Retry'
-    : (cls.state === 'resolved_empty') ? 'Re-check'
-    : 'Check YouTube';
-  const checkBtn = `<button class="lt-yt-check" type="button" onclick="event.stopPropagation(); window.checkYoutube(${id})">${checkLabel}</button>`;
-  if (cls.state === 'never_run') {
-    return `<div class="lt-yt lt-yt-never-run">
-      <div class="lt-yt-prompt">Resolve this release against YouTube Music.</div>
-      ${checkBtn}${manualControl}
-    </div>`;
-  }
-  if (cls.state === 'resolver_failed') {
-    return `<div class="lt-yt lt-yt-failed">
-      <div class="lt-yt-msg">${esc(cls.message)}</div>
-      ${checkBtn}${manualControl}
-    </div>`;
-  }
-  if (cls.state === 'resolved_empty') {
-    // Not on YouTube Music — HIDE the rescue affordance (nothing to pick),
-    // offer only a re-check.
-    return `<div class="lt-yt lt-yt-empty">
-      <div class="lt-yt-msg">${esc(cls.message)}</div>
-      ${checkBtn}${manualControl}
-    </div>`;
-  }
+  const checkBtn = `<button class="lt-yt-check" type="button" onclick="event.stopPropagation(); window.checkYoutube(${id})">Check YouTube</button>`;
+  if (cls.state === 'never_run') return `<div class="lt-yt">${checkBtn}</div>`;
+  if (cls.state === 'resolver_failed') return `<div class="lt-yt">${esc(cls.message)} ${checkBtn.replace('Check YouTube', 'Retry')}</div>`;
+  if (cls.state === 'resolved_empty') return `<div class="lt-yt">${esc(cls.message)} ${checkBtn.replace('Check YouTube', 'Re-check')}</div>`;
   // resolved_with_matrix — each release is a pickable rescue target (U5).
   const staleFlag = cls.stale
     ? `<div class="lt-yt-stale">${esc(cls.message)}</div>`

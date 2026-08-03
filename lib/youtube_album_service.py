@@ -613,8 +613,11 @@ def resolve_youtube_album(
         else:
             search_results = _cached_search(
                 yt_client, cache, query, "albums", 10, refresh=refresh)
-            song_results = _cached_search(
-                yt_client, cache, query, "songs", 10, refresh=refresh)
+            try:
+                song_results = _cached_search(
+                    yt_client, cache, query, "songs", 10, refresh=refresh)
+            except (YTMusicError, requests.RequestException, KeyError, IndexError):
+                song_results = []
             seed_browse_id = _pick_yt_seed(search_results, seed_release)
             song_browse_ids = _song_album_browse_ids(song_results)
             if seed_browse_id is None and not song_browse_ids:
@@ -628,11 +631,17 @@ def resolve_youtube_album(
                 seed_album = _cached_get_album(
                     yt_client, cache, seed_browse_id, refresh=refresh)
                 yt_album_responses[seed_browse_id] = seed_album
-            for song_browse_id in song_browse_ids:
-                if song_browse_id in yt_album_responses:
-                    continue
-                yt_album_responses[song_browse_id] = _cached_get_album(
-                    yt_client, cache, song_browse_id, refresh=refresh)
+            song_browse_id = next(
+                (value for value in song_browse_ids if value not in yt_album_responses),
+                None)
+            if song_browse_id is not None and not _deadline_breached():
+                try:
+                    yt_album_responses[song_browse_id] = _cached_get_album(
+                        yt_client, cache, song_browse_id, refresh=refresh)
+                except (YTMusicError, requests.RequestException, KeyError, IndexError):
+                    # Song search augments an already valid album discovery;
+                    # it must not discard that result when its optional leg fails.
+                    pass
             if seed_browse_id is None:
                 seed_browse_id = song_browse_ids[0]
                 seed_album = yt_album_responses[seed_browse_id]
@@ -1219,9 +1228,10 @@ def _watch_url_album_browse_id(yt_client: Any, watch_url: str) -> str:
         raise ValueError("watch_url must be canonical https://music.youtube.com/watch?v=<video-id>")
     response = yt_client.get_watch_playlist(videoId=match.group(1))
     tracks = _json_list(_json_dict(response).get("tracks"))
-    if not tracks:
-        raise KeyError("watch response has no track")
-    album_id = _json_dict(_json_dict(tracks[0]).get("album")).get("id")
+    track = next((candidate for candidate in tracks if _json_dict(candidate).get("videoId") == match.group(1)), None)
+    if track is None:
+        raise KeyError("watch response has no matching video")
+    album_id = _json_dict(_json_dict(track).get("album")).get("id")
     if not isinstance(album_id, str) or not album_id:
         raise KeyError("watch response has no album browse id")
     return album_id

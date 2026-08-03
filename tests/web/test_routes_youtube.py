@@ -263,6 +263,14 @@ class TestYoutubeRouteContracts(_FakeDbWebServerCase):
             "distances[0] entry",
         )
 
+    def test_watch_url_is_forwarded_to_shared_resolver(self):
+        url = "https://music.youtube.com/watch?v=dGYXkhMAvLk"
+        with self._patch_service(self._ok_result()) as resolve:
+            status, _data = self._post("/api/youtube-album", {
+                "identifier": self.UUID_A, "watch_url": url})
+        self.assertEqual(status, 200)
+        self.assertEqual(resolve.call_args.kwargs["watch_url"], url)
+
     def test_ok_from_cache_with_error_message_still_200(self):
         """AE6: cache fallback path — service returns ``ok`` with
         ``from_cache=True`` and a non-empty ``error_message`` (the YT

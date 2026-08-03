@@ -1247,7 +1247,7 @@ class YoutubeIngestService:
             return None
         entry = matches[0]
         distance = entry.get("distance")
-        if not isinstance(distance, (int, float)) or not math.isfinite(distance):
+        if isinstance(distance, bool) or not isinstance(distance, (int, float)) or not math.isfinite(distance):
             return None
         if entry.get("outcome") != "ok":
             return None

@@ -664,7 +664,7 @@ export function renderReleaseDetail(targetEl, releaseId, data, opts = {}) {
     hideDisabled: true,
   });
   if (['wanted', 'unsearchable'].includes(data.pipeline_status) && data.pipeline_id) {
-    html += renderYoutubeRescueControl(data.pipeline_id, releaseId);
+    html += renderYoutubeRescueControl(`release-${data.pipeline_id}`, data.pipeline_id, releaseId);
   }
   html += '</div>';
 

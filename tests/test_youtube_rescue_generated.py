@@ -19,7 +19,7 @@ from lib.youtube_ingest_service import YoutubeIngestService
 class TestExactRescueEvidenceGenerated(unittest.TestCase):
     @given(
         outcome=st.sampled_from(["ok", "distance_failed"]),
-        distance=st.sampled_from([0.0, 0.15, float("nan"), float("inf")]),
+        distance=st.sampled_from([0.0, 0.15, float("nan"), float("inf"), True]),
         tracks=st.sampled_from([None, 0, 1, 13]),
         duplicate=st.booleans(),
     )
@@ -31,7 +31,7 @@ class TestExactRescueEvidenceGenerated(unittest.TestCase):
         row = {"distances": [entry] * (2 if duplicate else 1)}
         accepted = YoutubeIngestService._distance_entry(row, "exact")
         expected = (
-            not duplicate and outcome == "ok" and math.isfinite(distance)
+            not duplicate and outcome == "ok" and not isinstance(distance, bool) and math.isfinite(distance)
             and isinstance(tracks, int) and tracks > 0
         )
         self.assertEqual(accepted is not None, expected)

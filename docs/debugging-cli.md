@@ -206,7 +206,7 @@ inside socket authorization, never credentials.
 - `pipeline-cli wrong-match-triage` — Converge the full Wrong Matches queue using persisted evidence.
 - `pipeline-cli youtube-album` — Resolve a release to the YouTube Music album
   matrix directly through the shared resolver service; accepts
-  `<identifier> [--refresh] [--json]`, with human-readable output by default
+  `<identifier> [--refresh] [--watch-url https://music.youtube.com/watch?v=...] [--json]`, with human-readable output by default
   and the full result available as JSON. It uses the configured database and
   mirrors and remains available when `web.enable = false`; it does not use the
   optional web Unix socket or fall back to an HTTP adapter when that socket is
@@ -216,6 +216,9 @@ inside socket authorization, never credentials.
   configured mirror first because release IDs and master IDs share the integer
   namespace; after the mirror establishes the master, the normal post-widen
   durable-cache read may return `ok` with `from_cache = true`.
+  `--watch-url` accepts only that canonical watch form, resolves the exact
+  video to its album browse ID, and replaces the complete persisted matrix;
+  the raw URL never reaches rescue or yt-dlp.
 
   Exhausting the configured HTTP status retries raises the public typed
   `requests.exceptions.RetryError` boundary. The resolver classifies that as

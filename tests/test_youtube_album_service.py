@@ -157,9 +157,9 @@ class TestNarrowDiscoveryAdmissions(unittest.TestCase):
     """Issue #1003: song and operator-watch discovery enter the normal matrix."""
 
     def _resolve(self, yt: FakeYTMusic, *, watch_url: str | None = None,
-                 identifier: str = MB_REL_A):
+                 identifier: str = MB_REL_A, pdb: FakePipelineDB | None = None):
         return resolve_youtube_album(
-            identifier, pdb=FakePipelineDB(),
+            identifier, pdb=pdb or FakePipelineDB(),
             mb_get_release=lambda value: _ok_mb_release(mbid=value),
             mb_get_release_group_releases=lambda _rg: _ok_mb_rg_releases((identifier, 2024)),
             discogs_get_release=lambda _value: None,
@@ -183,14 +183,23 @@ class TestNarrowDiscoveryAdmissions(unittest.TestCase):
 
     def test_canonical_watch_url_resolves_and_replaces_matrix(self):
         yt = FakeYTMusic()
-        yt.set_watch_playlist("dGYXkhMAvLk", {"tracks": [{"album": {"id": "MPREb_kb5fohQCJ6d"}}]})
+        yt.set_watch_playlist("dGYXkhMAvLk", {"tracks": [
+            {"videoId": "other", "album": {"id": "MPREb_wrong"}},
+            {"videoId": "dGYXkhMAvLk", "album": {"id": "MPREb_kb5fohQCJ6d"}},
+        ]})
         yt.set_album("MPREb_kb5fohQCJ6d", FakeYTMusic.make_album_fixture(
             "OLAK-dice", "Reality", [{"name": "DICE"}], "2024", _yt_tracks(["Reality"])))
-        result = self._resolve(yt, identifier=DICE_REALITY,
+        pdb = FakePipelineDB()
+        result = self._resolve(yt, identifier=DICE_REALITY, pdb=pdb,
                                watch_url="https://music.youtube.com/watch?v=dGYXkhMAvLk")
         self.assertEqual(result.outcome, "ok")
         self.assertEqual([r.yt_browse_id for r in result.youtube_releases], ["MPREb_kb5fohQCJ6d"])
         self.assertEqual(yt.get_watch_playlist_calls, [{"videoId": "dGYXkhMAvLk"}])
+        stored = pdb.get_youtube_album_mapping(MB_RG, "mb")
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        self.assertEqual(stored[0]["yt_browse_id"], "MPREb_kb5fohQCJ6d")
+        self.assertEqual(stored[0]["distances"][0]["mbid"], DICE_REALITY)
 
 
 def _canned_distance(
