@@ -8,6 +8,7 @@ import {
   spectralGradeLabel,
   spectralWithheldPresentation,
 } from './quality_palette.js';
+import { cdRipProofPresentation } from './cd_rip_proof.js';
 
 /**
  * Render a single V0 probe value with its provenance suffix.
@@ -518,6 +519,7 @@ export function renderDownloadHistoryItem(h) {
   const outcome = h.outcome || '?';
   const user = h.soulseek_username || '?';
   const date = awstDateTime(h.created_at || '');
+  const cdRipProof = cdRipProofPresentation(h.cd_rip_verification);
 
   let status;
   if (h.badge && h.badge_class) {
@@ -582,13 +584,16 @@ export function renderDownloadHistoryItem(h) {
   }
 
   if (h.spectral_grade || h.existing_spectral_grade || h.existing_spectral_bitrate
-      || h.spectral_error || h.existing_spectral_error) {
+      || h.spectral_error || h.existing_spectral_error
+      || (cdRipProof && h.spectral_attempted === false)) {
     const candidate = h.spectral_error
       ? `<span class="${qualityToneClass('poor')}" title="${esc(h.spectral_error)}">analysis failed</span>`
       : h.spectral_grade
       ? spectralChip(
         h.spectral_grade, h.spectral_bitrate,
         h.spectral_accusation_admissible, h.spectral_accusation_withheld)
+      : cdRipProof && h.spectral_attempted === false
+        ? 'not needed — CD bit match'
       : 'unmeasured';
     const existing = h.existing_spectral_error
       ? `<span class="${qualityToneClass('poor')}" title="${esc(h.existing_spectral_error)}">analysis failed</span>`
@@ -625,7 +630,12 @@ export function renderDownloadHistoryItem(h) {
   // Which model minted the verified-lossless proof this row carries. The
   // stamp meant two different things across the library until it was
   // rendered (Phase 5 plan, PR3 hard constraint 3).
-  if (h.verified_lossless_generation) {
+  if (cdRipProof) {
+    rows.push([
+      'CD proof',
+      `<span class="${qualityToneClass('lossless')}">${esc(cdRipProof.text)}</span>`,
+    ]);
+  } else if (h.verified_lossless_generation) {
     rows.push([
       'Verified lossless',
       `<span class="${qualityToneClass('lossless')}" title="No evidence of `

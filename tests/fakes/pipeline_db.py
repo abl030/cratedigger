@@ -158,6 +158,7 @@ from lib.quality import (
 from lib.quality_evidence import current_evidence_preserves_source_spectral
 from lib.release_identity import (
     ReleaseIdentity,
+    exact_request_evidence_identity_matches,
     normalize_release_id,
 )
 from lib.search_scheduler import (
@@ -6063,7 +6064,9 @@ class FakePipelineDB:
                     r.get("search_filetype_override"),
                 "target_format": r.get("target_format"),
                 "min_bitrate": r.get("min_bitrate"),
-                **facts,
+                "has_captured_history": facts["has_captured_history"],
+                "verified_lossless": facts["verified_lossless"],
+                "provisional_lossless": facts["provisional_lossless"],
                 "processing_owner": self._request_presentation_copy(
                     r
                 )["processing_owner"],
@@ -6328,7 +6331,7 @@ class FakePipelineDB:
     def _capture_and_evidence_projection(
         self,
         row: Mapping[str, object],
-    ) -> dict[str, bool]:
+    ) -> dict[str, object]:
         """Mirror the two specialized request SELECTs' correlated facts."""
         request_id = row.get("id")
         has_captured_history = row.get("status") == "imported"
@@ -6351,6 +6354,15 @@ class FakePipelineDB:
             )
 
         evidence = self._current_evidence_for_request(row)
+        if (
+            evidence is not None
+            and not exact_request_evidence_identity_matches(
+                row.get("mb_release_id"),
+                row.get("discogs_release_id"),
+                evidence.mb_release_id,
+            )
+        ):
+            evidence = None
         verified_lossless = bool(
             evidence is not None
             and evidence.verified_lossless_proof is not None
@@ -6365,6 +6377,9 @@ class FakePipelineDB:
             "has_captured_history": has_captured_history,
             "verified_lossless": verified_lossless,
             "provisional_lossless": provisional_lossless,
+            "cd_rip_verification": (
+                evidence.cd_rip_verification if evidence is not None else None
+            ),
         }
 
     def _long_tail_projection(self, row: dict[str, Any]) -> dict[str, Any]:

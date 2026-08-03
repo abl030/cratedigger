@@ -6,6 +6,7 @@ import { renderEvidenceStrip } from './history.js';
 import { renderSearchPlanButton } from './search_plan.js';
 import { processingOwnerPresentation } from './release_action_state.js';
 import { renderConvergencePrompt } from './convergence.js';
+import { cdRipProofPresentation } from './cd_rip_proof.js';
 
 const RECENTS_HISTORY_LIMIT = 500;
 
@@ -105,6 +106,10 @@ export function renderRecentsItems(items, matchRates = null) {
         : '';
       const badgeDetail = triageDetail || (isHaveAnalysisError ? item.analysis_error : '');
       const badgeTitle = badgeDetail ? ` title="${esc(badgeDetail)}"` : '';
+      const cdRipProof = cdRipProofPresentation(item.cd_rip_verification);
+      const cdRipProofBadge = cdRipProof
+        ? `<span class="badge badge-verified badge-rank-lossless badge-cd-proof" title="exact CD-rip provider match">${esc(cdRipProof.text)}</span>`
+        : '';
 
       // Search-plan inspector button — Recents rows always render the
       // button. Use the request_id (the album_requests.id) since the
@@ -123,7 +128,7 @@ export function renderRecentsItems(items, matchRates = null) {
         <div class="r-item" style="border-left-color:${borderColor}" onclick="window.toggleDetail('dl-${item.id}', ${item.request_id})">
           <div class="p-top">
             <div>
-              <div class="p-title">${esc(item.album_title)} <span class="badge ${badgeClass}"${badgeTitle}>${badge}</span>${disambigChip}${badExtChip}</div>
+              <div class="p-title">${esc(item.album_title)} <span class="badge ${badgeClass}"${badgeTitle}>${badge}</span>${cdRipProofBadge}${disambigChip}${badExtChip}</div>
               <div class="p-artist">${esc(item.artist_name)}</div>
             </div>
             <div class="p-row-actions">${spBtn}<span style="font-size:0.75em;color:#666;">${time}</span></div>

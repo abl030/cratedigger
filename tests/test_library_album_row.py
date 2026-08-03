@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 
 import msgspec
 
+from lib.quality import CdRipBitVerification, CdTocIdentity, CtdbWholeDiscMatch
 from lib.release_identity import ReleaseIdentity
 from tests.helpers import make_request_row
 from web.library_album_row import LibraryAlbumRow
@@ -40,12 +41,35 @@ def _valid_row_dict(**overrides: object) -> dict[str, object]:
         "has_captured_history": False,
         "pipeline_verified_lossless": False,
         "pipeline_provisional": False,
+        "cd_rip_verification": None,
     }
     row.update(overrides)
     return row
 
 
 class TestLibraryAlbumRow(unittest.TestCase):
+    @staticmethod
+    def _ctdb_proof() -> CdRipBitVerification:
+        return CdRipBitVerification(
+            toc=CdTocIdentity(
+                track_offsets_sectors=[0],
+                leadout_sector=470,
+                accuraterip_id="000001d6-000003ac-02000601",
+                musicbrainz_disc_id="exact-disc-id",
+            ),
+            ctdb=CtdbWholeDiscMatch(
+                provider="ctdb",
+                url="https://db.cue.tools/lookup2.php",
+                entry_id="ctdb-entry-24",
+                confidence=24,
+                crc32=0x12345678,
+                stride_samples=5880,
+                response_toc_sectors=[0, 470],
+                response_toc_shift_sectors=0,
+                response_sha256="a" * 64,
+            ),
+        )
+
     def test_request_6039_rank_uses_average_and_preserves_floor(self) -> None:
         seen: list[tuple[str | None, int | None]] = []
 
@@ -112,6 +136,7 @@ class TestLibraryAlbumRow(unittest.TestCase):
         self.assertFalse(row.pipeline_provisional)
 
     def test_from_beets_album_with_pipeline_applies_overlay(self) -> None:
+        cd_rip = self._ctdb_proof()
         row = LibraryAlbumRow.from_beets_album_with_pipeline(
             {
                 "id": 7,
@@ -144,6 +169,7 @@ class TestLibraryAlbumRow(unittest.TestCase):
                 "has_captured_history": True,
                 "verified_lossless": True,
                 "provisional_lossless": False,
+                "cd_rip_verification": cd_rip,
             },
             attached_identity=ReleaseIdentity(
                 source="musicbrainz",
@@ -161,6 +187,56 @@ class TestLibraryAlbumRow(unittest.TestCase):
         self.assertTrue(row.has_captured_history)
         self.assertTrue(row.pipeline_verified_lossless)
         self.assertFalse(row.pipeline_provisional)
+        self.assertEqual(row.cd_rip_verification, cd_rip)
+        self.assertEqual(
+            row.to_dict()["cd_rip_verification"],
+            msgspec.to_builtins(cd_rip),
+        )
+
+    def test_pipeline_overlay_rejects_untyped_or_invalid_cd_proof(self) -> None:
+        album = {
+            "id": 7,
+            "album": "Test Album",
+            "artist": "Test Artist",
+            "year": 2024,
+            "mb_albumid": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "discogs_albumid": None,
+            "track_count": 10,
+            "added": 1773651901.0,
+            "formats": "FLAC",
+            "min_bitrate": 800000,
+            "avg_bitrate": 850000,
+        }
+        pipeline = {
+            "id": 42,
+            "status": "imported",
+            "has_captured_history": True,
+            "verified_lossless": True,
+            "provisional_lossless": False,
+            "cd_rip_verification": {"ctdb": {"confidence": 24}},
+        }
+        with self.assertRaisesRegex(TypeError, "CdRipBitVerification"):
+            LibraryAlbumRow.from_beets_album_with_pipeline(
+                album,
+                pipeline_row=pipeline,
+                attached_identity=ReleaseIdentity(
+                    source="musicbrainz",
+                    release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                ),
+                rank_fn=lambda _fmt, _kbps: "lossless",
+            )
+
+        pipeline["cd_rip_verification"] = CdRipBitVerification()
+        with self.assertRaisesRegex(ValueError, "positive provider match"):
+            LibraryAlbumRow.from_beets_album_with_pipeline(
+                album,
+                pipeline_row=pipeline,
+                attached_identity=ReleaseIdentity(
+                    source="musicbrainz",
+                    release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                ),
+                rank_fn=lambda _fmt, _kbps: "lossless",
+            )
 
     def test_from_beets_album_with_pipeline_rejects_unobserved_attachment(
         self,

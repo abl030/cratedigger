@@ -14,6 +14,10 @@ import {
 } from '../web/js/library.js';
 import { esc } from '../web/js/util.js';
 import { pipelineStore, updatePipelineStatus } from '../web/js/state.js';
+import {
+  validCtdbProof,
+  validDualProviderProof,
+} from './fixtures/cd_rip_proof.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -76,6 +80,7 @@ console.log('libraryAlbumBadgeItem() maps the production row contract exactly');
     processing_owner: processingOwner,
     pipeline_verified_lossless: true,
     pipeline_provisional: false,
+    cd_rip_verification: validCtdbProof(),
   });
   assertEqual(JSON.stringify(item), JSON.stringify({
     id: '12856590',
@@ -90,6 +95,7 @@ console.log('libraryAlbumBadgeItem() maps the production row contract exactly');
     processing_owner: processingOwner,
     pipeline_verified_lossless: true,
     pipeline_provisional: false,
+    cd_rip_verification: validCtdbProof(),
   }), 'helper exposes the exact BadgeItem consumed by production');
 }
 
@@ -394,6 +400,47 @@ console.log('renderLibraryAlbumRow() uses the shared independent fact vocabulary
   assertContains(untracked, '>F</span>', 'Library row renders current quality separately');
   assertContains(untracked, '>untracked<', 'Library row renders missing exact tracking');
   assertExcludes(untracked, 'identity drift', 'Library row does not infer a sibling relationship');
+}
+
+console.log('renderLibraryAlbumRow() renders only exact positive CD proof');
+{
+  const positive = renderLibraryAlbumRow({
+    id: 421,
+    mb_albumid: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    album: 'Exact dual-provider pressing',
+    track_count: 10,
+    in_library: true,
+    beets_album_id: 6039,
+    has_captured_history: true,
+    pipeline_id: 421,
+    pipeline_status: 'imported',
+    pipeline_verified_lossless: true,
+    pipeline_provisional: false,
+    cd_rip_verification: validDualProviderProof(),
+  });
+  assertContains(
+    positive,
+    'CD bit-verified · CTDB confidence 11 + AccurateRip min confidence 3',
+    'the exact attached proof retains both providers in the verified chip',
+  );
+  assertExcludes(positive, '>verified<',
+    'the detailed proof does not duplicate the generic chip');
+
+  const malformed = renderLibraryAlbumRow({
+    id: 421,
+    mb_albumid: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    album: 'Malformed proof',
+    track_count: 10,
+    in_library: true,
+    beets_album_id: 6039,
+    pipeline_id: 421,
+    pipeline_status: 'imported',
+    pipeline_verified_lossless: true,
+    pipeline_provisional: false,
+    cd_rip_verification: { ctdb: { confidence: 24 } },
+  });
+  assertExcludes(malformed, 'CD bit-verified',
+    'partial proof data cannot mint the detailed badge');
 }
 
 console.log('renderLibraryAlbumRow() acknowledges one complete lifecycle before actions and badges');

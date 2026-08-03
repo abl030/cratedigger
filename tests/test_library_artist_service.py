@@ -10,6 +10,7 @@ import msgspec
 
 from lib.convergence_service import ConvergenceSignal
 from lib.pipeline_db.rows import ArtistRequestRow
+from lib.quality import CdRipBitVerification, CdTocIdentity, CtdbWholeDiscMatch
 from lib.release_identity import ConflictingReleaseIdentityError
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
@@ -57,9 +58,27 @@ def _artist_request(**overrides: object) -> dict[str, object]:
         "has_captured_history": False,
         "verified_lossless": False,
         "provisional_lossless": False,
+        "cd_rip_verification": None,
     })
     row.update(overrides)
     return row
+
+
+def _ctdb_proof(confidence: int) -> CdRipBitVerification:
+    return CdRipBitVerification(
+        toc=CdTocIdentity([0], 470, "ar-id", "mb-disc-id"),
+        ctdb=CtdbWholeDiscMatch(
+            provider="ctdb",
+            url="https://db.cue.tools/lookup2.php",
+            entry_id=f"ctdb-{confidence}",
+            confidence=confidence,
+            crc32=0x12345678,
+            stride_samples=5880,
+            response_toc_sectors=[0, 470],
+            response_toc_shift_sectors=0,
+            response_sha256="a" * 64,
+        ),
+    )
 
 
 class _StubLibraryLookup:
@@ -322,6 +341,42 @@ class TestLibraryArtistService(unittest.TestCase):
         self.assertEqual(rows[0].pipeline_id, 42)
         self.assertTrue(rows[0].has_captured_history)
         self.assertTrue(rows[0].pipeline_verified_lossless)
+
+    def test_cd_proof_attaches_only_from_the_exact_selected_request(self) -> None:
+        exact_proof = _ctdb_proof(6)
+        foreign_proof = _ctdb_proof(99)
+        rows = build_library_artist_rows(
+            library_albums=[_beets_album()],
+            pipeline_rows=[
+                _artist_request(
+                    id=421,
+                    mb_release_id=RELEASE_ID,
+                    artist_name="Test Artist",
+                    album_title="Exact pressing",
+                    status="imported",
+                    has_captured_history=True,
+                    verified_lossless=True,
+                    cd_rip_verification=exact_proof,
+                ),
+                _artist_request(
+                    id=422,
+                    mb_release_id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                    artist_name="Test Artist",
+                    album_title="Foreign pressing",
+                    status="imported",
+                    has_captured_history=True,
+                    verified_lossless=True,
+                    cd_rip_verification=foreign_proof,
+                ),
+            ],
+            track_counts={421: 10, 422: 10},
+            rank_fn=_rank,
+        )
+
+        library_row = next(row for row in rows if row.in_library)
+        self.assertEqual(library_row.pipeline_id, 421)
+        self.assertEqual(library_row.cd_rip_verification, exact_proof)
+        self.assertNotEqual(library_row.cd_rip_verification, foreign_proof)
 
     def test_dual_tagged_album_rejects_two_exact_request_attachments(self) -> None:
         with self.assertRaisesRegex(

@@ -156,9 +156,9 @@ class LogEntry:
     # basis verdict itself) it is the complete set of facts the phrase may
     # be keyed on.
     verified_lossless_classifier: str | None = None
-    # Positive-only structured source proof. The frontend deliberately has no
-    # renderer for this first delivery, but API/agent consumers receive the
-    # complete provider audit instead of a lossy boolean projection.
+    # Positive-only structured source proof. API/agent consumers retain the
+    # complete provider audit; the frontend derives only an attributable
+    # compact positive label and renders nothing when this fact is absent.
     cd_rip_verification: dict[str, object] | None = None
 
     # album_requests columns (from JOIN — empty for history-only queries)
