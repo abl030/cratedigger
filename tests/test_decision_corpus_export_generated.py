@@ -19,14 +19,14 @@ from scripts.decision_differential import (
     _FILE_SCHEMA_TYPES,
     _SOURCE_SCHEMA_TYPES,
     RenderDifferentialError,
+    _CoverageAddress,
     _decision_corpus_evidence_columns,
     _decision_corpus_evidence_file_columns,
     _evidence_from_corpus_row,
-    _CoverageAddress,
     assert_decision_corpus_schema,
     assert_export_output_exact,
-    export_decision_corpus,
     duplicate_content_addresses,
+    export_decision_corpus,
     verify_decision_corpus_pair,
 )
 from tests.helpers import make_album_quality_evidence

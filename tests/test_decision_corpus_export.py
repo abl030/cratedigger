@@ -30,7 +30,6 @@ from scripts.decision_differential import (
     verify_decision_corpus_pair,
 )
 from tests.helpers import make_album_quality_evidence
-from tests.test_decision_differential import _corpus_row
 from tests.test_pipeline_db import TEST_DSN, make_db, requires_postgres
 
 

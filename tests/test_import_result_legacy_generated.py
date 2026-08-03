@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import unittest
 
-from hypothesis import given, strategies as st
+from hypothesis import given
+from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401
 from lib.quality import ImportResult
 
 
@@ -32,4 +34,3 @@ class TestLegacyV2MaterializedMeasurementGenerated(unittest.TestCase):
         assert result.materialized_measurement is not None
         self.assertEqual(result.materialized_measurement.avg_bitrate_kbps, bitrate)
         self.assertEqual(result.materialized_measurement.format, fmt)
-

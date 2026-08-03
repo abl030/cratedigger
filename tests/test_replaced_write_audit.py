@@ -97,7 +97,7 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "default raw-query seam runs in the transaction-enforced read-only "
         "scope on the live connection"
     ),
-    ("scripts/decision_differential.py", 1258, "5abeff87a6b11e33"): (
+    ("scripts/decision_differential.py", 1259, "5abeff87a6b11e33"): (
         "read-only differential export selects the shared fixed evidence "
         "projection and groups only that projection; IDs remain placeholders"
     ),
