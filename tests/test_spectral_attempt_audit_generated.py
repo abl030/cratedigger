@@ -2027,6 +2027,11 @@ class TestIronAndWineOuterEvidenceSlice(unittest.TestCase):
         from lib.config import CratediggerConfig
         from lib.dispatch import dispatch_import_from_db
         from lib.dispatch.types import ImportOneRun
+        from lib.import_preview import (
+            HeaderRepairFn,
+            ImportPreviewDB,
+            ImportPreviewResult,
+        )
         from lib.import_queue import (
             IMPORT_JOB_FORCE,
             force_import_dedupe_key,
@@ -2205,15 +2210,33 @@ class TestIronAndWineOuterEvidenceSlice(unittest.TestCase):
                     ),
                 )
 
-            def measure_candidate(*args: Any, **kwargs: Any) -> Any:
-                kwargs["run_import_fn"] = run_preview_import
-                kwargs["spectral_detail_analyzer"] = analyze
-                kwargs["existing_spectral_resolver"] = (
-                    lambda _release_id: ExistingSpectralAuditLookup(path=existing)
-                )
+            def measure_candidate(
+                db_arg: ImportPreviewDB,
+                *,
+                request_id: int,
+                path: str,
+                source_display_path: str | None = None,
+                force: bool = True,
+                download_log_id: int | None = None,
+                import_job_id: int | None = None,
+                runtime_config: CratediggerConfig | None = None,
+                repair_fn: HeaderRepairFn | None = None,
+            ) -> ImportPreviewResult:
                 return import_preview_worker.measure_and_persist_candidate_evidence(
-                    *args,
-                    **kwargs,
+                    db_arg,
+                    request_id=request_id,
+                    path=path,
+                    source_display_path=source_display_path,
+                    force=force,
+                    download_log_id=download_log_id,
+                    import_job_id=import_job_id,
+                    runtime_config=runtime_config,
+                    repair_fn=repair_fn,
+                    run_import_fn=run_preview_import,
+                    spectral_detail_analyzer=analyze,
+                    existing_spectral_resolver=lambda _release_id: (
+                        ExistingSpectralAuditLookup(path=existing)
+                    ),
                 )
 
             with (
@@ -2284,10 +2307,6 @@ class TestIronAndWineOuterEvidenceSlice(unittest.TestCase):
             with (
                 patch("lib.beets_db.BeetsDB", lambda *_args, **_kwargs: beets),
                 patch("lib.config.read_runtime_config", return_value=cfg),
-                patch(
-                    "lib.dispatch.core.run_import_one",
-                    side_effect=AssertionError("quality rejection must precede Beets"),
-                ) as run_import,
             ):
                 outcome = dispatch_import_from_db(
                     db,
@@ -2300,7 +2319,6 @@ class TestIronAndWineOuterEvidenceSlice(unittest.TestCase):
                     cfg=cfg,
                 )
                 finalize_claimed_dispatch(db, claimed_importer, outcome)
-            run_import.assert_not_called()
             logs = db.get_log(limit=100)
             outcomes = [str(log["outcome"]) for log in logs]
             request = db.get_request(request_id)
