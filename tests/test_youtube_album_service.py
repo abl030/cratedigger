@@ -221,6 +221,24 @@ class TestNarrowDiscoveryAdmissions(unittest.TestCase):
         self.assertEqual(stored[0]["yt_browse_id"], "MPREb_kb5fohQCJ6d")
         self.assertEqual(stored[0]["distances"][0]["mbid"], DICE_REALITY)
 
+    def test_manual_watch_failure_never_serves_or_replaces_old_matrix(self):
+        pdb = FakePipelineDB()
+        old = [{"yt_browse_id": "MPREb_old", "yt_audio_playlist_id": None,
+                "yt_url": "https://music.youtube.com/browse/MPREb_old",
+                "yt_year": 2000, "yt_track_count": 1, "album_title": "Old",
+                "album_artist": "Old", "yt_tracks": [], "distances": []}]
+        pdb.seed_youtube_album_mapping(MB_RG, "mb", old)
+        yt = FakeYTMusic()
+        yt.set_watch_playlist("dGYXkhMAvLk", {"tracks": [
+            {"videoId": "other", "album": {"id": "MPREb_old"}},
+        ]})
+        result = self._resolve(yt, pdb=pdb,
+            watch_url="https://music.youtube.com/watch?v=dGYXkhMAvLk")
+        self.assertNotEqual(result.outcome, "ok")
+        self.assertFalse(result.from_cache)
+        self.assertFalse(result.youtube_releases)
+        self.assertEqual(pdb.get_youtube_album_mapping(MB_RG, "mb"), old)
+
 
 def _canned_distance(
     *,

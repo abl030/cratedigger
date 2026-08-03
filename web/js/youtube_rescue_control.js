@@ -9,8 +9,8 @@ export function youtubeResolverPayload(identifier, watchUrl) {
 function renderCandidateChoices(result, identifier, requestId, pick) {
   return (result.youtube_releases || []).map((release) => {
     const distances = Array.isArray(release.distances) ? release.distances : [];
-    const exactMatches = distances.filter((distance) => distance.mbid === identifier && distance.outcome === 'ok' && typeof distance.distance === 'number' && Number.isFinite(distance.distance) && Number.isInteger(distance.total_mb_tracks) && distance.total_mb_tracks > 0);
-    const exact = exactMatches.length === 1 ? exactMatches[0] : null;
+    const exactEntries = distances.filter((distance) => distance.mbid === identifier);
+    const exact = exactEntries.length === 1 && exactEntries[0].outcome === 'ok' && typeof exactEntries[0].distance === 'number' && Number.isFinite(exactEntries[0].distance) && Number.isInteger(exactEntries[0].total_mb_tracks) && exactEntries[0].total_mb_tracks > 0 ? exactEntries[0] : null;
     const finite = distances.filter((distance) => Number.isFinite(distance.distance));
     const best = finite.length ? Math.min(...finite.map((distance) => distance.distance)) : null;
     const distanceLabel = exact ? `exact dist ${exact.distance.toFixed(3)}` : best != null ? `best sibling dist ${best.toFixed(3)}` : 'no distance';
