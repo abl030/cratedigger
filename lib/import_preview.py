@@ -1167,10 +1167,12 @@ def plan_current_evidence_enrichment(
 ) -> EnrichmentPlan:
     """Pure decision: measure exactly the missing HAVE pieces.
 
-    A spectral tuple is complete only under the running analyzer generation;
-    old grades are audit history, not reusable policy inputs. A V0 metric or
-    the attempted marker means the research probe already ran. Complete rows
-    therefore cost nothing to re-plan.
+    Generation freshness is distinct from policy usability: ordinary current
+    bytes need the running generation, while a preserved source subject is
+    intentionally never regenerated from its lossy installed derivative.
+    The policy projection separately withholds error, blank, and unknown
+    grades. A V0 metric or the attempted marker means the research probe
+    already ran. Complete rows therefore cost nothing to re-plan.
     """
     measurement = evidence.measurement
     preserve_source = current_evidence_preserves_source_spectral(evidence)

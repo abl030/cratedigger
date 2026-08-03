@@ -231,6 +231,49 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
         self.assertEqual(result.provenance.current_status, "loaded")
         self.assertEqual(result.provenance.snapshot_guard, "matched")
 
+    def test_current_generation_error_is_projected_out_at_action_time(self):
+        """Freshness alone never makes an analyser error policy evidence."""
+
+        invalid = make_album_quality_evidence(
+            preserve_spectral_measurement_version=True,
+            mb_release_id="release-1",
+            source_path=self.root,
+            files=snapshot_audio_files(self.root),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=320,
+                avg_bitrate_kbps=320,
+                median_bitrate_kbps=320,
+                format="MP3",
+                is_cbr=True,
+                spectral_grade="error",
+                spectral_subject="installed",
+                spectral_provenance="measured",
+                spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
+            ),
+        )
+        self.db.upsert_album_quality_evidence(invalid)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=invalid.mb_release_id,
+            snapshot_fingerprint=invalid.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.db.set_request_current_evidence(42, stored.id)
+
+        result = ensure_current_evidence_for_action(
+            self.db,
+            request_id=42,
+            mb_release_id="release-1",
+            current_release=self._current_release(),
+        )
+
+        self.assertTrue(result.available)
+        assert result.evidence is not None
+        self.assertIsNone(result.evidence.measurement.spectral_grade)
+        self.assertIsNone(result.evidence.measurement.spectral_subject)
+        historical = self.db.load_album_quality_evidence_by_id(stored.id)
+        assert historical is not None
+        self.assertEqual(historical.measurement.spectral_grade, "error")
+
     def test_old_spectral_generation_cannot_authorize_an_action(self):
         legacy = make_album_quality_evidence(
             preserve_spectral_measurement_version=True,

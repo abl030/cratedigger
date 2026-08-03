@@ -147,12 +147,12 @@ class EvidenceBuildResult:
 def spectral_measurement_generation_is_current(
     measurement: AudioQualityMeasurement | SpectralAnalysisDetail,
 ) -> bool:
-    """Whether a spectral fact was produced by this running analyzer.
+    """Whether a spectral fact has this running analyzer's generation.
 
-    Spectral grades are interpretations, not generation-independent facts.
-    An exact version match is therefore required: legacy ``NULL`` rows and
-    rows written by an unknown future analyzer are both observation-only and
-    must be measured again before current policy may reuse them.
+    This is a pure freshness check, not a policy-authorization decision.
+    ``current_spectral_evidence_policy_usable`` additionally requires a
+    recognized grade and admits the narrow preserved-source exception for
+    bytes that the installed derivative cannot regenerate.
     """
 
     # Keep the producer as the authority for its generation stamp without
@@ -236,7 +236,6 @@ def current_evidence_for_policy(
     )
     if (
         not has_spectral
-        or spectral_measurement_generation_is_current(measurement)
         or current_spectral_evidence_policy_usable(evidence)
     ):
         return evidence
