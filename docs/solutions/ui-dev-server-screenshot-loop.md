@@ -72,6 +72,12 @@ For artist-comparison work, run the HTTP precondition against the exact artist
 used for the screenshots before every acceptance round. A plausible MB-only
 page is not evidence that the Discogs half of the route ran.
 
+When JavaScript maps a primitive field to visible text, colour, an icon,
+visibility, or an accusation, this loop supplies the screenshot leg of Rule D
+in `.claude/rules/test-fidelity.md`: capture changed cases and must-still-work
+controls from the live DB, and record that evidence with Rule D's per-surface
+visible-state tally in the PR body.
+
 ## Gotchas (each cost a debugging detour once)
 
 - **Screenshot save roots**: the playwright MCP only writes inside its

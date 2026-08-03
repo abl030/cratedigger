@@ -154,6 +154,20 @@ Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blo
   a single-point mutant immediately proved was the load-bearing half).
   Subagent implementation briefs state the pair requirement verbatim and
   never offer a deterministic-only alternative.
+- **"Agree by construction" stops at the outermost real adapter, never at a
+  shared library function.** A cross-surface parity invariant owes its
+  deterministic pin and generated property through the actual boundary each
+  surface consumes: SQL row aliases and a projection, a formatter, or the
+  JavaScript-facing payload, as applicable. It also owes a known-bad adapter
+  mutant. V4 in `tests/test_verdict_tiers_generated.py` is the pattern:
+  `proof_verdict_from_evidence` and `proof_verdict_from_facts` agree, then
+  `web.classify.proof_gate_projection` receives the aliases the browser's
+  render path really gets. PR #973 proved why: reading a lineage-gated overlay
+  key instead of its evidence alias disagreed on 26,503 live rows while the
+  common library functions remained in lockstep. Do not stop the property at
+  the common function and call that parity, and do not answer this requirement
+  with a semantic source scanner; the real adapter-driving pin, property, and
+  mutant are the evidence.
 - **A decision-consequence pin must assert the decided outcome, not a proxy
   field.** If a pin claims "this world changes what the pipeline decides,"
   it must drive the real decider and assert the *decided outcome*

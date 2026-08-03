@@ -248,6 +248,20 @@ rather than a surprise in production.
 rounds; each render is one command; the diff is instant. Writing the
 harness was the expensive part and it is already written.
 
+**Primitive fields that JavaScript turns into semantics are also operator-facing
+output.** Rule D applies when a boolean, enum, number, or nullable primitive is
+consumed by JavaScript to choose visible text, colour, icon, visibility, or an
+accusation. A Python render-differential zero for such a field does **not**
+cover the JavaScript mapping: the renderer can report its primitive unchanged
+while the browser changes what it says or shows.
+
+For each affected surface, the PR body must therefore include a live-corpus
+tally of the resulting visible states (or old-to-new visible states when they
+change), not merely the primitive values. It must also include live-db
+screenshots of changed cases and must-still-work controls. Use the existing
+recipe in `docs/solutions/ui-dev-server-screenshot-loop.md`; it is the visual
+evidence leg of Rule D, not a second differential runbook.
+
 ## Executable coverage and its boundary
 
 Rule A coverage is enforced by `tests/test_pipeline_db_write_audit.py` plus
