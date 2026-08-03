@@ -848,15 +848,13 @@ export function youtubeRescueTargets(result) {
  * @returns {string}
  */
 function renderYoutubeBody(result, id) {
-  const row = consoleRow(id);
-  const manualControl = renderYoutubeRescueControl(
-    `long-tail-${id}`, id, row && (row.mb_release_id || row.discogs_release_id));
-  if (manualControl) return `<div class="lt-yt">${manualControl}</div>`;
   const cls = youtubeSectionState(result);
-  const checkBtn = `<button class="lt-yt-check" type="button" onclick="event.stopPropagation(); window.checkYoutube(${id})">Check YouTube</button>`;
-  if (cls.state === 'never_run') return `<div class="lt-yt">${checkBtn}</div>`;
-  if (cls.state === 'resolver_failed') return `<div class="lt-yt">${esc(cls.message)} ${checkBtn.replace('Check YouTube', 'Retry')}</div>`;
-  if (cls.state === 'resolved_empty') return `<div class="lt-yt">${esc(cls.message)} ${checkBtn.replace('Check YouTube', 'Re-check')}</div>`;
+  const checkLabel = (cls.state === 'resolver_failed') ? 'Retry' : (cls.state === 'resolved_empty') ? 'Re-check' : 'Check YouTube';
+  const input = `<input id="yt-watch-long-tail-${id}" placeholder="https://music.youtube.com/watch?v=…" aria-label="YouTube Music watch URL">`;
+  const checkBtn = `<button class="lt-yt-check" type="button" onclick="event.stopPropagation(); window.checkYoutube(${id})">${checkLabel}</button>`;
+  if (cls.state === 'never_run') return `<div class="lt-yt lt-yt-never-run"><div class="lt-yt-prompt">Resolve this release against YouTube Music.</div>${input}${checkBtn}</div>`;
+  if (cls.state === 'resolver_failed') return `<div class="lt-yt lt-yt-failed"><div class="lt-yt-msg">${esc(cls.message)}</div>${input}${checkBtn}</div>`;
+  if (cls.state === 'resolved_empty') return `<div class="lt-yt lt-yt-empty"><div class="lt-yt-msg">${esc(cls.message)}</div>${input}${checkBtn}</div>`;
   // resolved_with_matrix — each release is a pickable rescue target (U5).
   const staleFlag = cls.stale
     ? `<div class="lt-yt-stale">${esc(cls.message)}</div>`
@@ -884,7 +882,7 @@ function renderYoutubeBody(result, id) {
   return `<div class="lt-yt lt-yt-matrix">
     ${staleFlag}
     <div class="lt-yt-rows">${rows}</div>
-    ${checkBtn}${manualControl}
+    ${input}${checkBtn}
   </div>`;
 }
 
@@ -1426,7 +1424,7 @@ export async function checkYoutube(id) {
     const r = await fetch(`${API}/api/youtube-album`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ identifier, refresh: false }),
+      body: JSON.stringify({ identifier, refresh: false, ...(document.getElementById(`yt-watch-long-tail-${id}`)?.value.trim() ? { watch_url: document.getElementById(`yt-watch-long-tail-${id}`).value.trim() } : {}) }),
     });
     // 404/503 still carry a typed body; the classifier maps any non-`ok`
     // outcome to `resolver_failed`, so we read the body regardless of
