@@ -577,7 +577,7 @@ def open_configured_quarantine_directory(
         ),
         (
             getattr(cfg, "beets_staging_dir"),  # noqa: B009 - structural config boundary
-            frozenset({"failed_imports"}),
+            frozenset({"failed_imports", "wrong_matches"}),
         ),
         (
             processing_albums_dir(

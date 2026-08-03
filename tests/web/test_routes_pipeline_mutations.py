@@ -1218,7 +1218,12 @@ class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
             staging = os.path.join(root, "Incoming")
             slskd = os.path.join(root, "slskd")
             processing = os.path.join(root, "processing")
-            album = os.path.join(staging, "failed_imports", "Test")
+            album = os.path.join(
+                staging,
+                "auto-import",
+                "wrong_matches",
+                "Loon_Lake-Low_Res-playlist-request-111-log-39310",
+            )
             os.makedirs(album)
             os.makedirs(slskd)
             os.makedirs(processing)
