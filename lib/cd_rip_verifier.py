@@ -39,7 +39,7 @@ from multiprocessing.connection import Connection
 from multiprocessing.connection import wait as wait_for_connections
 from multiprocessing.process import BaseProcess
 from pathlib import Path
-from typing import IO, BinaryIO, Literal
+from typing import IO, BinaryIO, Literal, Protocol
 
 import msgspec
 import numpy as np
@@ -134,6 +134,14 @@ class _FfprobePayload(msgspec.Struct, frozen=True):
 
 
 ProviderFetch = Callable[[str, Path, float], bytes | None]
+
+
+class _HttpsFetch(Protocol):
+    def __call__(self, url: str, *, deadline: float) -> bytes | None: ...
+
+
+class _DeadlineSleep(Protocol):
+    def __call__(self, delay: float, *, deadline: float) -> None: ...
 
 
 def _check_deadline(deadline: float | None) -> None:
@@ -1056,6 +1064,9 @@ def fetch_positive(
     url: str,
     cache_dir: Path,
     deadline: float | None = None,
+    *,
+    https_fetch: _HttpsFetch = _fetch_https_no_redirect,
+    deadline_sleep: _DeadlineSleep = _deadline_sleep,
 ) -> bytes | None:
     """Read a verified-positive cache entry or fetch an uncommitted payload.
 
@@ -1098,10 +1109,10 @@ def fetch_positive(
                 POLITENESS_SECONDS,
                 max(0.0, POLITENESS_SECONDS - (time.time() - last_fetch)),
             )
-            _deadline_sleep(delay, deadline=deadline)
+            deadline_sleep(delay, deadline=deadline)
             stamp_path.write_text(str(time.time()), encoding="ascii")
             _check_deadline(deadline)
-            return _fetch_https_no_redirect(url, deadline=deadline)
+            return https_fetch(url, deadline=deadline)
         finally:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 

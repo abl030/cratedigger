@@ -106,6 +106,28 @@ EVIDENCE_FILE_PROJECTION_COLUMNS: tuple[str, ...] = (
     PersistedEvidenceFileRow.__struct_fields__
 )
 
+# Keep the read SQL visible to structural mutation audits. The strict
+# PersistedAlbumQualityEvidenceRow conversion below fails closed if this
+# literal projection ever drifts from the typed contract above.
+_EVIDENCE_PROJECTION_SQL = (
+    "id, mb_release_id, snapshot_fingerprint, source_path, measured_at, "
+    "min_bitrate_kbps, avg_bitrate_kbps, median_bitrate_kbps, format, is_cbr, "
+    "spectral_grade, spectral_bitrate_kbps, spectral_subject, "
+    "spectral_provenance, was_converted_from, cliff_hz, codec_family, "
+    "ultrasonic_deficit_db, spectral_measurement_version, codec, container, "
+    "storage_format, target_format, target_is_cbr, lineage_version, "
+    "v0_min_bitrate_kbps, v0_avg_bitrate_kbps, v0_median_bitrate_kbps, "
+    "v0_subject, v0_provenance, on_disk_v0_research_attempted, "
+    "current_enrichment_required, verified_lossless, "
+    "verified_lossless_provenance, verified_lossless_source, "
+    "verified_lossless_classifier, verified_lossless_detail, "
+    "cd_rip_verification, audio_validation, audio_corrupt, audio_error, "
+    "folder_layout, audio_file_count, filetype_band, "
+    "matched_bad_audio_hash_id, matched_bad_audio_hash_path, "
+    "aac_lattice_tracks, aac_lattice_modal_offset, aac_lattice_modal_count, "
+    "aac_lattice_scored_tracks, aac_lattice_max_z"
+)
+
 
 def _strict_pg_row[
     PersistedRow: (PersistedAlbumQualityEvidenceRow, PersistedEvidenceFileRow)
@@ -682,7 +704,7 @@ class _EvidenceMixin(_PipelineDBBase):
             return None
         cur = self._execute(
             "SELECT "
-            + ", ".join(EVIDENCE_PROJECTION_COLUMNS)
+            + _EVIDENCE_PROJECTION_SQL
             + " FROM album_quality_evidence WHERE id = %s",
             (int(evidence_id),),
         )
@@ -716,13 +738,10 @@ class _EvidenceMixin(_PipelineDBBase):
     ) -> AlbumQualityEvidence | None:
         """Find evidence by its content-addressed key."""
         cur = self._execute(
-            """
-            SELECT """
-            + ", ".join(EVIDENCE_PROJECTION_COLUMNS)
-            + """
-            FROM album_quality_evidence
-            WHERE mb_release_id = %s AND snapshot_fingerprint = %s
-            """,
+            "SELECT "
+            + _EVIDENCE_PROJECTION_SQL
+            + " FROM album_quality_evidence "
+            "WHERE mb_release_id = %s AND snapshot_fingerprint = %s",
             (mb_release_id, snapshot_fingerprint),
         )
         row = cur.fetchone()

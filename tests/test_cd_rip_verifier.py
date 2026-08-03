@@ -147,6 +147,23 @@ def _wedged_provider_fetch(_url: str, _cache: Path, _deadline: float) -> None:
     time.sleep(60)
 
 
+class _NoPayloadHttpsFetch:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, float]] = []
+
+    def __call__(self, url: str, *, deadline: float) -> None:
+        self.calls.append((url, deadline))
+
+
+class _RecordingDeadlineSleep:
+    def __init__(self) -> None:
+        self.delays: list[float] = []
+
+    def __call__(self, delay: float, *, deadline: float) -> None:
+        del deadline
+        self.delays.append(delay)
+
+
 class AccurateRipVerifierTest(unittest.TestCase):
     def setUp(self) -> None:
         # Long enough for the first/last five-sector exclusions and frame 450.
@@ -653,21 +670,18 @@ class CdShapeAndProviderBoundaryTest(unittest.TestCase):
             cache_path = _cache_path(cache, url)
             with cache_path.open("wb") as oversized:
                 oversized.truncate(MAX_PROVIDER_BYTES + 1)
-            with (
-                patch.object(
-                    Path,
-                    "read_bytes",
-                    side_effect=AssertionError("unbounded cache read"),
-                ),
-                patch(
-                    "lib.cd_rip_verifier._fetch_https_no_redirect",
-                    return_value=None,
-                ) as fetch,
+            fetch = _NoPayloadHttpsFetch()
+            with patch.object(
+                Path,
+                "read_bytes",
+                side_effect=AssertionError("unbounded cache read"),
             ):
-                self.assertIsNone(fetch_positive(url, cache))
+                self.assertIsNone(
+                    fetch_positive(url, cache, https_fetch=fetch)
+                )
 
             self.assertFalse(cache_path.exists())
-            fetch.assert_called_once()
+            self.assertEqual(len(fetch.calls), 1)
 
     def test_oversized_fetch_stamp_is_stale_without_unbounded_read(self) -> None:
         url = "https://example.test/oversized-stamp"
@@ -676,21 +690,21 @@ class CdShapeAndProviderBoundaryTest(unittest.TestCase):
             stamp_path = cache / ".last-fetch"
             with stamp_path.open("wb") as oversized:
                 oversized.truncate(MAX_FETCH_STAMP_BYTES + 1)
-            with (
-                patch.object(
-                    Path,
-                    "read_text",
-                    side_effect=AssertionError("unbounded stamp read"),
-                ),
-                patch("lib.cd_rip_verifier._deadline_sleep") as sleep,
-                patch(
-                    "lib.cd_rip_verifier._fetch_https_no_redirect",
-                    return_value=None,
-                ),
+            fetch = _NoPayloadHttpsFetch()
+            sleep = _RecordingDeadlineSleep()
+            with patch.object(
+                Path,
+                "read_text",
+                side_effect=AssertionError("unbounded stamp read"),
             ):
-                self.assertIsNone(fetch_positive(url, cache))
+                self.assertIsNone(fetch_positive(
+                    url,
+                    cache,
+                    https_fetch=fetch,
+                    deadline_sleep=sleep,
+                ))
 
-            self.assertEqual(sleep.call_args.args[0], 0.0)
+            self.assertEqual(sleep.delays, [0.0])
             self.assertLessEqual(stamp_path.stat().st_size, MAX_FETCH_STAMP_BYTES)
 
     def test_contended_cache_lock_obeys_the_verifier_deadline(self) -> None:

@@ -1114,6 +1114,28 @@ class DecisionCorpusCoverage(msgspec.Struct, frozen=True, forbid_unknown_fields=
 # Do not replace this projection with ``e.*``.  The JSONL wire and the real
 # evidence mapper consume this exact surface; an add/drop/rename/type/nullability
 # change must break the export until its projection and Struct move together.
+_DECISION_CORPUS_EVIDENCE_SQL = (
+    "e.id, e.mb_release_id, e.snapshot_fingerprint, e.source_path, "
+    "e.measured_at, e.min_bitrate_kbps, e.avg_bitrate_kbps, "
+    "e.median_bitrate_kbps, e.format, e.is_cbr, e.spectral_grade, "
+    "e.spectral_bitrate_kbps, e.spectral_subject, e.spectral_provenance, "
+    "e.was_converted_from, e.cliff_hz, e.codec_family, "
+    "e.ultrasonic_deficit_db, e.spectral_measurement_version, e.codec, "
+    "e.container, e.storage_format, e.target_format, e.target_is_cbr, "
+    "e.lineage_version, e.v0_min_bitrate_kbps, e.v0_avg_bitrate_kbps, "
+    "e.v0_median_bitrate_kbps, e.v0_subject, e.v0_provenance, "
+    "e.on_disk_v0_research_attempted, e.current_enrichment_required, "
+    "e.verified_lossless, e.verified_lossless_provenance, "
+    "e.verified_lossless_source, e.verified_lossless_classifier, "
+    "e.verified_lossless_detail, e.cd_rip_verification, "
+    "e.audio_validation, e.audio_corrupt, e.audio_error, e.folder_layout, "
+    "e.audio_file_count, e.filetype_band, e.matched_bad_audio_hash_id, "
+    "e.matched_bad_audio_hash_path, e.aac_lattice_tracks, "
+    "e.aac_lattice_modal_offset, e.aac_lattice_modal_count, "
+    "e.aac_lattice_scored_tracks, e.aac_lattice_max_z"
+)
+
+
 def _decision_corpus_evidence_columns() -> tuple[str, ...]:
     """Shared production decoder projection; corpus adds JSON-aggregated files."""
     columns, _file_columns, _persisted_row, _evidence_mixin = _export_evidence_contract()
@@ -1352,9 +1374,7 @@ def _db_evidence_rows(
     """Read explicit evidence/file projections and validate the export wire."""
     assert isinstance(cursor, psycopg2.extensions.cursor)
     rows: dict[int, dict[str, object]] = {}
-    column_sql = ", ".join(
-        f"e.{column}" for column in _decision_corpus_evidence_columns()
-    )
+    column_sql = _DECISION_CORPUS_EVIDENCE_SQL
     for start in range(0, len(evidence_ids), batch_size):
         batch = list(evidence_ids[start : start + batch_size])
         if not batch:
