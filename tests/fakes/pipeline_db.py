@@ -31,6 +31,10 @@ import msgspec
 
 if TYPE_CHECKING:
     from cratedigger import TrackRecord
+    from lib.convergence_service import (
+        ConvergenceSignal,
+        StopConvergedSearchResult,
+    )
     from lib.dispatch.types import PostCommitQuarantineAudit
     from lib.pipeline_db import (
         AlbumRequestRow,
@@ -600,6 +604,7 @@ class FakePipelineDB:
         # (extra headroom for the per-request compose path's request
         # fetch).
         self.query_counts: dict[str, int] = {}
+        self.convergence_signals: dict[int, ConvergenceSignal] = {}
         # Migration 034 — youtube_album_mappings. Keyed by
         # (release_group_identifier, source); each value is the full
         # matrix the resolver scored for that pair. Refresh always
@@ -3002,6 +3007,7 @@ class FakePipelineDB:
             self.set_download_log_candidate_evidence(
                 download_log_id,
                 self.get_import_job_candidate_evidence_id(command.import_job_id),
+                direct_attribution=True,
             )
             boundary("download_log")
             for transition in command.post_audit_transitions:
@@ -3336,6 +3342,10 @@ class FakePipelineDB:
             else "slskd"
         )
         kwargs = audit.as_log_kwargs()
+        if not audit.contributor_usernames and source is not None:
+            kwargs["contributor_usernames"] = (
+                source.candidate_contributor_usernames or ()
+            )
         if audit.source_download_log_id is not None and source is None:
             kwargs["source_download_log_id"] = None
             kwargs["error_message"] = unlinked_source_provenance_message(
@@ -3498,6 +3508,7 @@ class FakePipelineDB:
             self.set_download_log_candidate_evidence(
                 download_log_id,
                 self.get_import_job_candidate_evidence_id(command.import_job_id),
+                direct_attribution=True,
             )
             boundary("download_log")
             cooled: set[str] = set()
@@ -4030,6 +4041,7 @@ class FakePipelineDB:
 
     def log_download(self, request_id: int,
                      soulseek_username: str | None = None,
+                     contributor_usernames: Sequence[str] | None = None,
                      filetype: str | None = None,
                      download_path: str | None = None,
                      beets_distance: float | None | ValidationProjectionUnset = (
@@ -4101,7 +4113,12 @@ class FakePipelineDB:
             beets_distance=beets_distance,
             beets_scenario=beets_scenario,
         )
+        from lib.convergence_service import normalize_contributor_usernames
+
         new_log_id = self._mint_download_log_id()
+        normalized_contributors = list(normalize_contributor_usernames(
+            contributor_usernames or (),
+        )) or None
         auxiliary: dict[str, Any] = {
             "download_path": download_path,
             "valid": valid,
@@ -4143,6 +4160,7 @@ class FakePipelineDB:
             import_result=import_result,
             transfer_detail=transfer_detail,
             id=new_log_id,
+            candidate_contributor_usernames=normalized_contributors,
             source_download_log_id=source_download_log_id,
             extra=auxiliary,
         ))
@@ -4536,6 +4554,8 @@ class FakePipelineDB:
                 return (summary is not None
                         and summary["total_searches"] > 0
                         and summary["found_count"] == 0)
+            if kind == "converged":
+                return int(row["id"]) in self.convergence_signals
             if kind == "all":
                 return True
             raise ValueError(f"unsupported triage filter kind: {kind!r}")
@@ -4560,6 +4580,55 @@ class FakePipelineDB:
             "prior_unfindable_category",
         )
         return [{k: r.get(k) for k in projection_keys} for r in rows]
+
+    def get_convergence_signals(
+        self, request_ids: list[int],
+    ) -> dict[int, ConvergenceSignal]:
+        self.query_counts["get_convergence_signals"] = (
+            self.query_counts.get("get_convergence_signals", 0) + 1
+        )
+        wanted = {int(request_id) for request_id in request_ids}
+        return {
+            request_id: signal
+            for request_id, signal in self.convergence_signals.items()
+            if request_id in wanted
+        }
+
+    def stop_search_for_convergence(
+        self,
+        request_id: int,
+        *,
+        signal_token: str,
+    ) -> StopConvergedSearchResult:
+        from lib.convergence_service import StopConvergedSearchResult
+
+        rid = int(request_id)
+        row = self._requests.get(rid)
+        if row is None:
+            return StopConvergedSearchResult(outcome="not_found", request_id=rid)
+        status = str(row["status"])
+        if status != "wanted":
+            return StopConvergedSearchResult(
+                outcome="wrong_state", request_id=rid,
+                observed_status=status,
+            )
+        signal = self.convergence_signals.get(rid)
+        if signal is None:
+            return StopConvergedSearchResult(
+                outcome="not_converged", request_id=rid,
+                observed_status=status,
+            )
+        if signal.signal_token != signal_token:
+            return StopConvergedSearchResult(
+                outcome="stale", request_id=rid, signal=signal,
+                observed_status=status,
+            )
+        row["status"] = "unsearchable"
+        row["active_download_state"] = None
+        return StopConvergedSearchResult(
+            outcome="stopped", request_id=rid, signal=signal,
+            observed_status="unsearchable",
+        )
 
     def get_field_resolutions_for_requests(
         self,
@@ -5086,10 +5155,25 @@ class FakePipelineDB:
         self,
         download_log_id: int,
         evidence_id: int | None,
+        *,
+        direct_attribution: bool = False,
+        contributor_usernames: Sequence[str] | None = None,
     ) -> None:
+        from lib.convergence_service import normalize_contributor_usernames
+
         for row in self.download_logs:
             if row.id == download_log_id:
                 row.candidate_evidence_id = evidence_id
+                normalized = list(normalize_contributor_usernames(
+                    contributor_usernames or (),
+                )) or None
+                if normalized is not None:
+                    row.candidate_contributor_usernames = normalized
+                row.candidate_evidence_direct = bool(
+                    direct_attribution
+                    and evidence_id is not None
+                    and row.candidate_contributor_usernames
+                )
                 return
 
     def set_request_current_evidence(
@@ -7249,6 +7333,12 @@ class FakePipelineDB:
             "transfer_detail": entry.transfer_detail,
             "created_at": entry.created_at,
             "candidate_evidence_id": entry.candidate_evidence_id,
+            "candidate_evidence_direct": entry.candidate_evidence_direct,
+            "candidate_contributor_usernames": (
+                list(entry.candidate_contributor_usernames)
+                if entry.candidate_contributor_usernames is not None
+                else None
+            ),
             "source_download_log_id": entry.source_download_log_id,
             "original_beets_distance": next(
                 (

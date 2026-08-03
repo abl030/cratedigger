@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Protocol, TypeGuard
 
 import msgspec
 
+from lib.convergence_service import ConvergenceSignal
 from lib.json_narrow import is_object_list as _is_object_list
 from lib.pipeline_db._shared import ProcessingOwnerProjection
 from lib.release_identity import (
@@ -53,6 +54,10 @@ class SupportsLibraryAlbumDetailPipelineDB(
         self, request_id: int,
     ) -> list[DownloadLogWithEvidenceRow]:
         ...
+
+    def get_convergence_signals(
+        self, request_ids: list[int],
+    ) -> dict[int, ConvergenceSignal]: ...
 
 
 def _timestamp(value: object | None) -> float | str | None:
@@ -172,6 +177,7 @@ class LibraryAlbumDetail(msgspec.Struct, frozen=True):
     target_format: str | None
     upgrade_queued: bool
     download_history: list[DownloadHistoryViewRow]
+    convergence: ConvergenceSignal | None = None
 
     def to_dict(self) -> dict[str, object]:
         return msgspec.to_builtins(self)
@@ -200,6 +206,7 @@ def build_library_album_detail(
     pipeline_request: Mapping[str, object] | None,
     download_history: Sequence[Mapping[str, object]],
     attached_identity: ReleaseIdentity | None = None,
+    convergence: ConvergenceSignal | None = None,
 ) -> LibraryAlbumDetail:
     """Build the owned library-detail contract from raw beets + pipeline rows."""
     observation_identities = ReleaseIdentity.all_from_observation_fields(
@@ -308,6 +315,7 @@ def build_library_album_detail(
                 )
             ),
             "download_history": history_items,
+            "convergence": convergence,
         },
         type=LibraryAlbumDetail,
     )
@@ -356,9 +364,17 @@ def load_library_album_detail(
         if pipeline_db is not None and attachment is not None
         else []
     )
+    convergence = (
+        pipeline_db.get_convergence_signals([attachment.request_id]).get(
+            attachment.request_id
+        )
+        if pipeline_db is not None and attachment is not None
+        else None
+    )
     return build_library_album_detail(
         detail_row=detail,
         pipeline_request=pipeline_request,
         download_history=history,
         attached_identity=attachment.identity if attachment is not None else None,
+        convergence=convergence,
     )

@@ -64,6 +64,7 @@ from lib.beets_startup import BeetsStartupError, enforce_beets_startup
 from lib.config import (
     resolve_startup_config_paths,
 )
+from lib.convergence_service import ConvergenceSignal
 from lib.json_narrow import is_str_object_dict as _is_str_object_dict
 from lib.pipeline_db import PipelineDB
 from lib.pipeline_db.rows import ArtistRequestRow
@@ -387,6 +388,16 @@ def check_pipeline(
     mbids: list[str] | list[object],
 ) -> dict[str, dict[str, object]]:
     return _overlay.check_pipeline(_db_or_none(), mbids)
+
+
+def get_convergence_signals(
+    request_ids: list[int],
+) -> dict[int, ConvergenceSignal]:
+    """Batch the observational signal for browse release overlays."""
+    db_handle = _db_or_none()
+    if db_handle is None or not request_ids:
+        return {}
+    return db_handle.get_convergence_signals(request_ids)
 
 
 def list_artist_requests(

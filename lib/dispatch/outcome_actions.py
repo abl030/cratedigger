@@ -322,6 +322,7 @@ def _do_mark_done(
         attempt_result.finalize_into(dl_info)
     audit = TerminalDownloadAudit(
         soulseek_username=dl_info.username,
+        contributor_usernames=dl_info.contributor_usernames,
         filetype=dl_info.filetype,
         beets_detail=detail,
         outcome=outcome_label,
@@ -368,6 +369,7 @@ def _do_mark_done(
         request_id=request_id,
         outcome=audit.outcome,
         soulseek_username=audit.soulseek_username,
+        contributor_usernames=audit.contributor_usernames,
         filetype=audit.filetype,
         download_path=audit.download_path,
         beets_distance=audit.beets_distance,
@@ -548,6 +550,7 @@ def _record_rejection_and_maybe_requeue(
         attempt_result.finalize_into(dl_info)
     log_download_kwargs: dict[str, Any] = {
         "soulseek_username": dl_info.username,
+        "contributor_usernames": dl_info.contributor_usernames,
         "filetype": dl_info.filetype,
         "beets_detail": detail,
         "outcome": outcome_label,
@@ -716,6 +719,7 @@ def _record_have_analysis_error(
     )
     audit = TerminalDownloadAudit(
         soulseek_username=dl_info.username,
+        contributor_usernames=dl_info.contributor_usernames,
         filetype=dl_info.filetype,
         download_path=installed_path,
         beets_scenario="have_analysis_error",

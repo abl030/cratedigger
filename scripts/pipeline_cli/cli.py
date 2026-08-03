@@ -9,6 +9,8 @@ dispatch dicts are the "shared registry" argparse-construction and
 
 import sys
 
+import psycopg2
+
 from lib.pipeline_db import PipelineDB
 from scripts.pipeline_cli.album_requests import (
     cmd_add,
@@ -49,10 +51,12 @@ from scripts.pipeline_cli.search_plan import (
 )
 from scripts.pipeline_cli.show import cmd_show
 from scripts.pipeline_cli.triage import (
+    _convergence_stop_unavailable,
     _quarantine_scan_unavailable,
     cmd_triage_list,
     cmd_triage_quarantine,
     cmd_triage_show,
+    cmd_triage_stop,
 )
 from scripts.pipeline_cli.wrong_match import (
     cmd_wrong_match_delete,
@@ -80,6 +84,10 @@ def main(*, api_socket: str | None = None):
     is_quarantine = (
         args.command == "triage"
         and getattr(args, "triage_command", None) == "quarantine"
+    )
+    is_convergence_stop = (
+        args.command == "triage"
+        and getattr(args, "triage_command", None) == "stop"
     )
 
     # ``routes`` is the only subcommand that doesn't require a DB
@@ -112,13 +120,17 @@ def main(*, api_socket: str | None = None):
 
     try:
         db = PipelineDB(args.dsn)
-    except Exception:
+    except Exception as exc:
         if is_quarantine:
             rc = _quarantine_scan_unavailable(
                 args,
                 "Could not open pipeline database for quarantine scan",
             )
             sys.exit(rc)
+        if is_convergence_stop and isinstance(
+            exc, (psycopg2.OperationalError, psycopg2.InterfaceError),
+        ):
+            sys.exit(_convergence_stop_unavailable(args))
         raise
 
     commands = {
@@ -159,6 +171,7 @@ def main(*, api_socket: str | None = None):
         "show": cmd_triage_show,
         "list": cmd_triage_list,
         "quarantine": cmd_triage_quarantine,
+        "stop": cmd_triage_stop,
     }
     audit_commands = {
         "world": cmd_audit_world,

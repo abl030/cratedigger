@@ -23,6 +23,7 @@ import { toggleSection } from './render_primitives.js';
 import { handleProcessingLockedConflict } from './release_action_state.js';
 import { suppressProcessingAction } from './release_actions.js';
 import { toast } from './state.js';
+import { stopConvergedSearch } from './convergence.js';
 
 /**
  * Replace-picker wrapper that surfaces success / failure toasts and
@@ -256,4 +257,5 @@ Object.assign(window, {
   longTailDeleteRequest,
   suppressProcessingAction,
   toast,
+  stopConvergedSearch,
 });

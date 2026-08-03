@@ -172,7 +172,7 @@ def album_request_row(raw: Mapping[str, object]) -> AlbumRequestRow:
 
 
 class DownloadLogRow(TypedDict):
-    """One ``SELECT * FROM download_log`` row (42 columns as of schema 054).
+    """One ``SELECT * FROM download_log`` row (44 columns as of schema 071).
 
     ``download_log`` doubles as the slskd audit trail AND the YouTube
     rescue queue (``source`` discriminates, migration 037), so only
@@ -220,6 +220,8 @@ class DownloadLogRow(TypedDict):
     existing_v0_probe_avg_bitrate: int | None
     existing_v0_probe_median_bitrate: int | None
     candidate_evidence_id: int | None
+    candidate_evidence_direct: bool
+    candidate_contributor_usernames: list[str] | None
     source: str
     youtube_metadata: dict[str, object] | None
     # Migration 043 (issue #564 C7) — despite the ``jsonb`` column type,

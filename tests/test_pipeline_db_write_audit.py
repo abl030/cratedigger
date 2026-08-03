@@ -100,7 +100,7 @@ ALLOWLIST: dict[str, str] = {
     "update_status":
         "single-column status update",
     "set_download_log_candidate_evidence":
-        "single FK column update",
+        "candidate FK plus positive direct-attribution bit update",
     "set_import_job_candidate_evidence":
         "single FK column update",
     "set_request_current_evidence":

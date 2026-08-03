@@ -554,6 +554,12 @@ class _MiscMixin(_PipelineDBBase):
             )
             where_clauses.append("rss.total_searches > 0")
             where_clauses.append("rss.found_count = 0")
+        elif kind == "converged":
+            joins.append(
+                "JOIN LATERAL "
+                "derive_request_convergence_signal(ar.id) convergence "
+                "ON TRUE"
+            )
         elif kind == "all":
             pass  # No predicate.
         else:  # pragma: no cover — parser is the gate

@@ -20,7 +20,7 @@ sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 if TYPE_CHECKING:
     from lib.pipeline_db import DownloadLogWithEvidenceRow
@@ -1339,6 +1339,76 @@ class TestCmdWrongMatchDeleteGroup(unittest.TestCase):
 
 
 class TestMainExitCodes(unittest.TestCase):
+    def test_convergence_stop_constructor_outage_maps_to_exit_five(self):
+        import psycopg2
+
+        import web.mb
+
+        argv = [
+            "pipeline_cli.py",
+            "--dsn",
+            "postgresql://example/test",
+            "triage",
+            "stop",
+            "41",
+            "--signal-token",
+            "a" * 64,
+            "--confirm",
+            "STOP",
+            "--json",
+        ]
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        old_mb_base = web.mb.MB_API_BASE
+        self.addCleanup(setattr, web.mb, "MB_API_BASE", old_mb_base)
+        with tempfile.TemporaryDirectory() as root:
+            config_path = os.path.join(root, "config.ini")
+            with open(config_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "[MusicBrainz]\n"
+                    "api_base = http://constructor-outage.test:5200\n"
+                )
+            with patch.object(sys, "argv", argv), patch.dict(
+                os.environ,
+                {"CRATEDIGGER_RUNTIME_CONFIG": config_path},
+                clear=False,
+            ), patch(
+                "scripts.pipeline_cli.cli.PipelineDB",
+                side_effect=psycopg2.OperationalError("database unavailable"),
+            ), redirect_stdout(stdout), redirect_stderr(stderr), self.assertRaises(
+                SystemExit,
+            ) as raised:
+                pipeline_cli.main()
+
+        self.assertEqual(raised.exception.code, 5)
+        self.assertEqual(stderr.getvalue(), "")
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["outcome"], "unavailable")
+        self.assertEqual(payload["request_id"], 41)
+
+    def test_malformed_convergence_token_fails_before_db_construction(self):
+        argv = [
+            "pipeline_cli.py",
+            "--dsn",
+            "postgresql://example/test",
+            "triage",
+            "stop",
+            "41",
+            "--signal-token",
+            "NOT-HEX",
+            "--confirm",
+            "STOP",
+        ]
+        with patch.object(sys, "argv", argv), patch(
+            "scripts.pipeline_cli.cli.PipelineDB",
+        ) as constructor, redirect_stderr(io.StringIO()), self.assertRaises(
+            SystemExit,
+        ) as raised:
+            pipeline_cli.main()
+
+        self.assertEqual(raised.exception.code, 2)
+        constructor.assert_not_called()
+
     def test_non_quarantine_main_still_configures_mirror_api_bases(self):
         import web.mb
 
@@ -5266,6 +5336,88 @@ class TestPipelineCliTriage(unittest.TestCase):
         ), redirect_stdout(stdout), redirect_stderr(stderr):
             rc = pipeline_cli.cmd_triage_quarantine(db, cast(Any, args))
         return rc, stdout.getvalue(), stderr.getvalue()
+
+    def _run_stop(
+        self, db, rid, *, signal_token="a" * 64,
+        json_out=False,
+    ):
+        args = argparse.Namespace(
+            id=rid,
+            signal_token=signal_token,
+            confirm="STOP",
+            json=json_out,
+        )
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            rc = pipeline_cli.cmd_triage_stop(db, args)
+        return rc, stdout.getvalue(), stderr.getvalue()
+
+    def test_convergence_filter_show_and_stop_share_signal_identity(self):
+        from lib.convergence_service import ConvergenceSignal
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=41, status="wanted"))
+        now = datetime(2026, 8, 3, tzinfo=UTC)
+        db.convergence_signals[41] = ConvergenceSignal(
+            request_id=41,
+            observation_count=7,
+            distinct_peer_count=6,
+            distinct_candidate_snapshot_count=5,
+            distinct_codec_count=2,
+            cliff_hz=15_000,
+            raw_cliff_min_hz=14_900,
+            raw_cliff_max_hz=15_100,
+            cliff_spread_hz=200,
+            latest_qualifying_log_id=99,
+            first_observed_at=now,
+            latest_observed_at=now,
+            signal_token="a" * 64,
+        )
+
+        rc, shown, err = self._run_show(db, 41)
+        self.assertEqual((rc, err), (0, ""))
+        self.assertIn("6", shown)
+        self.assertIn("--signal-token " + "a" * 64, shown)
+        rc, listed, err = self._run_list(db, filter_spec="converged")
+        self.assertEqual((rc, err), (0, ""))
+        self.assertIn("converged 15kHz/6 peers", listed)
+
+        rc, _out, err = self._run_stop(db, 41, signal_token="b" * 64)
+        self.assertEqual(rc, 4)
+        self.assertIn("stale", err)
+        rc, out, err = self._run_stop(db, 41, json_out=True)
+        self.assertEqual((rc, err), (0, ""))
+        self.assertEqual(json.loads(out)["outcome"], "stopped")
+        self.assertEqual(db.request(41)["status"], "unsearchable")
+
+        rc, stopped_show, err = self._run_show(db, 41)
+        self.assertEqual((rc, err), (0, ""))
+        self.assertNotIn("pipeline-cli triage stop", stopped_show)
+        self.assertIn("pipeline-cli set 41 wanted", stopped_show)
+
+        rc, _out, err = self._run_stop(db, 999)
+        self.assertEqual(rc, 2)
+        self.assertIn("not_found", err)
+
+        db.seed_request(make_request_row(id=42, status="wanted"))
+        rc, _out, err = self._run_stop(db, 42)
+        self.assertEqual(rc, 3)
+        self.assertIn("not_converged", err)
+
+    def test_convergence_stop_database_outage_returns_exit_5(self):
+        import psycopg2
+
+        class UnavailableDB(FakePipelineDB):
+            def stop_search_for_convergence(
+                self, request_id: int, *, signal_token: str,
+            ) -> NoReturn:
+                del request_id, signal_token
+                raise psycopg2.OperationalError("database unavailable")
+
+        rc, _out, err = self._run_stop(UnavailableDB(), 41)
+        self.assertEqual(rc, 5)
+        self.assertIn("unavailable", err)
 
     def test_quarantine_json_matches_typed_service_shape(self):
         from lib.quarantine_triage_service import QuarantineTriageResult

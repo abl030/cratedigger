@@ -104,6 +104,8 @@ operation.
 | `/api/import-jobs/<id>` | GET | Poll a single import queue job |
 | `/api/import-jobs/<id>/recovery` | GET | Inspect read-only exact-owner recovery evidence, liveness, and cleanup progress for any import job; historical `recovery_required` rows remain readable |
 | `/api/library/artist?name=...` | GET | Exact live Beets albums plus independent acquisition-history, evidence, and request facts; a failed Beets read is an HTTP error, never an empty Library |
+| `/api/triage/list?filter=converged` | GET | Request-locally paged provisional-lossless convergence cohort with atomic-peer, snapshot, codec, raw-cliff range/spread, and rounded-band facts |
+| `/api/triage/<id>/stop-converged-search` | POST | Explicit reversible search stop, guarded by `confirm: "STOP"` and the current opaque signal token |
 | `/api/audit/world` | GET | Grouped read-only A/B/C ownership report with completeness and Bucket-A integrity status; unexpected defects return HTTP 503 |
 | `/api/discogs/search?q=...` | GET | Search Discogs mirror (artist or release mode via `type=` param) |
 | `/api/discogs/artist/<id>` | GET | Artist's normalized catalogue identities, including exact masterless releases (via mirror `/masters/all` + `/appearances`) |
@@ -111,6 +113,21 @@ operation.
 | `/api/discogs/release/<id>` | GET | Full Discogs release details with tracks |
 
 ## Frontend Features
+
+- **Convergence prompt (#978)** — Recents renders one prominent prompt on the
+  newest visible history row for each signalled request; older attempts do not
+  repeat it. A compact Library or exact-pressing row carries only the distinct
+  `search converged` badge; the expanded Library detail owns the one full
+  prompt/action and suppresses generic status, quality, and intent controls
+  beside it. Copy shows codec diversity and the raw cliff range/spread, names
+  the rounded value as a shared band, and calls the holding provisional—not
+  proof. The inter-candidate threshold requires at least five qualifying
+  observations from at least five distinct structured peer identities. The
+  action is **Stop searching**, never Accept. While submitting it is
+  single-flight; stale responses remove and refresh the originating surface,
+  while network/server failures restore the action. After success the request
+  is `unsearchable`, provisional evidence remains unchanged, and Resume reopens
+  the forever cadence.
 
 - **Source toggle** — a labelled **Source** MB / Discogs switch in the browse tab
   header. Both sources contribute to one semantic catalogue. For an associated

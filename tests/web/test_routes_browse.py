@@ -50,13 +50,13 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         "id", "title", "country", "date", "format", "track_count", "status",
         "in_library", "beets_album_id", "pipeline_status", "pipeline_id",
         "processing_owner", "pipeline_verified_lossless",
-        "pipeline_provisional", "has_captured_history",
+        "pipeline_provisional", "has_captured_history", "convergence",
     }
     RELEASE_DETAIL_REQUIRED_FIELDS: ClassVar = {
         "id", "title", "tracks", "in_library", "beets_album_id",
         "pipeline_status", "pipeline_id", "processing_owner",
         "has_captured_history", "pipeline_verified_lossless",
-        "pipeline_provisional",
+        "pipeline_provisional", "convergence",
     }
     RELEASE_TRACK_REQUIRED_FIELDS: ClassVar = {
         "disc_number", "track_number", "title", "length_seconds",
@@ -1450,13 +1450,13 @@ class TestDiscogsBrowseRouteContracts(_FakeDbWebServerCase):
         "id", "title", "country", "format",
         "in_library", "beets_album_id", "pipeline_status", "pipeline_id",
         "processing_owner", "has_captured_history",
-        "pipeline_verified_lossless", "pipeline_provisional",
+        "pipeline_verified_lossless", "pipeline_provisional", "convergence",
     }
     DISCOGS_RELEASE_REQUIRED_FIELDS: ClassVar = {
         "id", "title", "artist_name", "tracks",
         "in_library", "beets_album_id", "pipeline_status", "pipeline_id",
         "processing_owner", "has_captured_history",
-        "pipeline_verified_lossless", "pipeline_provisional",
+        "pipeline_verified_lossless", "pipeline_provisional", "convergence",
     }
     DISCOGS_ARTIST_REQUIRED_FIELDS: ClassVar = {
         "artist_id", "artist_name", "release_groups", "ungrouped_releases",

@@ -185,6 +185,7 @@ def _build_download_info(album_data: GrabListEntry) -> DownloadInfo:
 
     return DownloadInfo(
         username=", ".join(sorted(usernames)) if usernames else None,
+        contributor_usernames=tuple(sorted(usernames)),
         filetype=", ".join(sorted(filetypes)) if filetypes else None,
         bitrate=min(bitrates) if bitrates else None,
         sample_rate=max(sample_rates) if sample_rates else None,

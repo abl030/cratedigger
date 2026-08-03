@@ -1,6 +1,7 @@
 """The composed PipelineDB class."""
 from lib.pipeline_db._core import _CoreMixin
 from lib.pipeline_db.cleanup_journal import _CleanupJournalMixin
+from lib.pipeline_db.convergence import _ConvergenceMixin
 from lib.pipeline_db.dashboard import _DashboardMixin
 from lib.pipeline_db.download_log import _DownloadLogMixin
 from lib.pipeline_db.evidence import _EvidenceMixin
@@ -20,6 +21,7 @@ class PipelineDB(
     _CoreMixin,
     _ImportJobsMixin,
     _CleanupJournalMixin,
+    _ConvergenceMixin,
     _RequestsMixin,
     _EvidenceMixin,
     _DownloadLogMixin,
