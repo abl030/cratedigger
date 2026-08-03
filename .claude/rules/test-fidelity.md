@@ -145,19 +145,19 @@ and `tests/test_classify_producer_audit.py`.
 **Side effect:** when the audit fails it names the literal and the producer
 that cannot emit it, which is the whole diagnosis.
 
-## Rule D — Changed operator-facing derived text owes a live-corpus differential
+## Rule D — Changed derived operator-facing presentation owes live-corpus evidence
 
-**A PR that changes derived operator-facing text — a verdict, a summary, a
-badge, any string a renderer computes from persisted rows — must measure
-the change against the real corpus before it ships: the old renderer and
-the new one, over every live row, reporting changed-row counts BY CHANGED
-FIELD. Put the numbers in the PR body.**
+**A PR that changes derived operator-facing presentation or output — a verdict,
+summary, badge, renderer-computed string, or primitive JavaScript turns into a
+visible state — must measure the change against the real corpus before it
+ships: the old renderer and the new one, over every live row, reporting
+changed-row counts BY CHANGED FIELD. Put the numbers in the PR body.**
 
 Rules A–C keep a test from describing a world production never produces.
 Rule D answers the question no test can: on the rows that actually exist,
-what does this change? A copy PR makes a claim about a live population,
-and the only instrument that settles it is the real renderer over real
-rows.
+what does this change? A presentation PR makes a claim about a live
+population, and the only instrument that settles it is the real renderer over
+real rows.
 
 **Forbidden anti-pattern:**
 
@@ -235,18 +235,32 @@ one in `verdict` + `summary`, with `badge` / `badge_class` /
 `border_color` / `downloaded_label` byte-identical. Half that evidence is
 in the four zeros — which is exactly why a zero has to be earned.
 
-**What this catches:** copy keyed on a scenario no producer emits reports
-0 changed rows — a fluent sentence nothing can reach, which is exactly the
-`no_candidates` defect #885 found. Copy whose blast radius was
+**What this catches:** presentation keyed on a scenario no producer emits
+reports 0 changed rows — a fluent sentence nothing can reach, which is exactly
+the `no_candidates` defect #885 found. Presentation whose blast radius was
 mis-reasoned reports a row count that contradicts the PR description. A
-one-line fallback change made alongside it moves rows the PR never
-mentioned — #885's `_humanize_token` unification moved 123 rows on top of
-the 50 under discussion, and the differential is what made that visible
-rather than a surprise in production.
+one-line fallback change made alongside it moves rows the PR never mentioned —
+#885's `_humanize_token` unification moved 123 rows on top of the 50 under
+discussion, and the differential is what made that visible rather than a
+surprise in production.
 
 **Cost, honestly:** the corpus export takes minutes and is reusable across
 rounds; each render is one command; the diff is instant. Writing the
 harness was the expensive part and it is already written.
+
+**Primitive fields that JavaScript turns into semantics are also operator-facing
+output.** Rule D applies when a boolean, enum, number, or nullable primitive is
+consumed by JavaScript to choose visible text, colour, icon, visibility, or an
+accusation. A Python render-differential zero for such a field does **not**
+cover the JavaScript mapping: the renderer can report its primitive unchanged
+while the browser changes what it says or shows.
+
+For each affected surface, the PR body must therefore include a live-corpus
+tally of the resulting visible states (or old-to-new visible states when they
+change), not merely the primitive values. It must also include live-db
+screenshots of changed cases and must-still-work controls. Use the existing
+recipe in `docs/solutions/ui-dev-server-screenshot-loop.md`; it is the visual
+evidence leg of Rule D, not a second differential runbook.
 
 ## Executable coverage and its boundary
 
@@ -256,7 +270,7 @@ contracts in `tests/test_pipeline_db_column_contract.py`. Rule B's narrow
 adapter-fake pattern is guarded by `tests/test_mirror_contracts.py` and
 `tests/test_lambda_audit.py`. Rule C's producer audits name an unproducible
 literal; Rule D remains a PR-time live-corpus procedure because no test can
-decide which derived text is operator-facing.
+decide which derived operator-facing presentation or output matters.
 
 These gates enforce their declared shapes, not every semantic equivalent. The
 rules above retain the judgement the executable checks cannot supply.

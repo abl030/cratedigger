@@ -171,9 +171,8 @@ Schema lives in `migrations/NNN_name.sql`; the migrate oneshot runs them on ever
 ## Running tests
 
 Choose validation timing and depth during development using engineering
-judgment based on the change, current evidence, and concrete risk. Focused
-tests, whole-tree Pyright, the complete deterministic suite, and relevant
-surface-specific checks are all available whenever they add useful feedback:
+judgment based on the change, current evidence, and concrete risk. Always use
+`nix-shell --run` for Python:
 
 ```bash
 nix-shell --run "python3 -m unittest tests.test_X -v"  # focused iteration
@@ -181,39 +180,11 @@ nix-shell --run "pyright --threads 4"                   # whole repository
 nix-shell --run "bash scripts/run_tests.sh"             # complete suite
 ```
 
-Direct Nix-shell runs are ordinary development feedback; fix their failures in
-the current convergence loop. They do not mint final receipts. A green complete
-suite does not replace generated, live-boundary, browser, corpus, VM, or other
-specialized evidence required by the change. Before the first branch push, use
-the `check` skill for one final receipt-backed whole-tree confirmation once the
-reviewed tree is committed and clean; it owns the receipt and unchanged-tree
-no-replay rules.
-
-**Always use `nix-shell --run` for Python** (`.claude/rules/nix-shell.md`).
-`run_tests.sh` exhausts JavaScript, production-strict Pyright, Ruff, Vulture,
-and the complete Python scheduler before returning one aggregate status. Its
-terminal output is a compact complete failure index; the printed private-tmpfs
-bundle contains `summary.json`, `summary.md`, and every complete phase log.
-`.claude/rules/code-quality.md` owns the testing conventions that those gates
-cannot infer.
-
-**Generated (property-based) tests** (`tests/test_*_generated.py`, Hypothesis) run deterministically in the suite; after changing quality policy, run the randomized fuzz burst: `nix-shell --run "bash scripts/fuzz_burst.sh"` (one process per generated module, parallelised to the host's cores — Hypothesis is single-threaded, so never run the burst serially). Failures shrink to minimal worlds — promote them to named `@example` pins or album-test-set scenarios, never JSON artifacts. **New features start by writing their invariants down, and every invariant ships as a PAIR — deterministic pin + generated property — in the same PR, with known-bad self-tests** (`.claude/rules/code-quality.md` § Red/Green TDD). When in doubt that the harness constrains anything, qualify it by fault injection. `docs/generated-testing.md`.
-
-### Skipped tests are an anti-pattern
-
-**A test either runs or it doesn't exist.** `tests/test_skip_audit.py` rejects
-known unittest skip markers without an allowlist; the same policy forbids
-environment gates. Supply dependencies through Nix, construct synthetic
-fixtures, use fakes, or remove the test.
-
-### Hooks
-
-- Pre-commit (`ln -sf ../../scripts/pre-commit .git/hooks/pre-commit`): threaded
-  Pyright on staged `.py` and syntax checks on staged JavaScript.
-- There is no pre-push hook and CI does not run the suite. The agent owns the
-  local validation and final pre-push confirmation described above.
-- Repository releases are not tagged. The deployed Git commit, signed
-  nixosconfig pin, and live verification evidence identify the running state.
+Direct runs are development feedback; before the first branch push, use the
+`check` skill on the reviewed, clean, committed tree for the receipt-backed
+whole-tree confirmation. The complete operational contract — suite bundle,
+specialized evidence, generated/fuzz testing, no-skips policy, and hooks — is
+in `.claude/rules/code-quality.md` § "Test execution, evidence, and hooks".
 
 ## Shared AI surfaces
 
