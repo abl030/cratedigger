@@ -514,6 +514,7 @@ class TestLiveBugReproductions(unittest.TestCase):
             post_conversion_min_bitrate=198,
             candidate_v0_probe_avg=211,
             candidate_v0_probe_min=198,
+            candidate_v0_probe_kind="lossless_source_v0",
             existing_min_bitrate=320,
             existing_avg_bitrate=320,
             existing_format="MP3",
@@ -570,6 +571,7 @@ class TestLiveBugReproductions(unittest.TestCase):
             post_conversion_min_bitrate=184,
             candidate_v0_probe_avg=215,
             candidate_v0_probe_min=184,
+            candidate_v0_probe_kind="lossless_source_v0",
             # Existing-side facts mirror what the library row will look like
             # post-U5: the previous transcoded FLAC → Opus import propagated
             # source spectral + V0 onto the library evidence row, so triage
@@ -581,6 +583,7 @@ class TestLiveBugReproductions(unittest.TestCase):
             existing_spectral_grade="likely_transcode",
             existing_spectral_bitrate=128,
             existing_v0_probe_avg=215,
+            existing_v0_probe_kind="lossless_source_v0",
         )
 
         # Provisional-lossless gate: same-source comparable evidence on both
@@ -1583,6 +1586,7 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
             post_conversion_min_bitrate=184,
             candidate_v0_probe_avg=215,
             candidate_v0_probe_min=184,
+            candidate_v0_probe_kind="lossless_source_v0",
             existing_min_bitrate=100,
             existing_avg_bitrate=119,
             existing_format="Opus",
@@ -1590,6 +1594,7 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
             existing_spectral_grade="likely_transcode",
             existing_spectral_bitrate=128,
             existing_v0_probe_avg=215,
+            existing_v0_probe_kind="lossless_source_v0",
         )
         self.assertEqual(
             r["stage2_import"], sim["stage2_import"],
@@ -2424,6 +2429,111 @@ class TestProvisionalAnchorOwnsTheUnprovenCohort(unittest.TestCase):
                 r["stage2_import"], "suspect_lossless_probe_missing", where)
             self.assertFalse(r["imported"], where)
             self.assertTrue(r["denylisted"], where)
+
+    def test_partial_source_probe_never_borrows_the_target_minimum(self):
+        """A source avg without a source min stays provisional at every target.
+
+        The 241kbps source average is comparable in the provisional lane, but
+        it is not strong enough for the V0 trust override without an explicitly
+        measured source minimum. A 199→200kbps target projection must not
+        complete that missing source fact and route the album into measured
+        comparison.
+        """
+        from lib.quality import (
+            AlbumQualityEvidenceDecisionFacts,
+            full_pipeline_decision_from_evidence,
+        )
+
+        candidate = build_parity_candidate_evidence(
+            is_flac=True, min_bitrate=354, is_cbr=False,
+            spectral_grade="suspect",
+            candidate_v0_probe_avg=241,
+            candidate_v0_probe_min=None,
+        )
+        for post_conversion_min in (199, 200):
+            evidence = full_pipeline_decision_from_evidence(
+                candidate,
+                None,
+                facts=AlbumQualityEvidenceDecisionFacts(
+                    converted_count=12,
+                    post_conversion_min_bitrate=post_conversion_min,
+                    verified_lossless_target="opus 128",
+                ),
+            )
+            simulator = full_pipeline_decision(
+                is_flac=True, min_bitrate=354, is_cbr=False,
+                spectral_grade="suspect", converted_count=12,
+                post_conversion_min_bitrate=post_conversion_min,
+                post_conversion_is_cbr=False,
+                candidate_v0_probe_avg=241,
+                candidate_v0_probe_min=None,
+                candidate_v0_probe_kind="lossless_source_v0",
+                verified_lossless_target="opus 128",
+            )
+            for result, where in (
+                (evidence, "evidence twin"),
+                (simulator, "simulator twin"),
+            ):
+                self.assertEqual(
+                    result["stage2_import"],
+                    "provisional_lossless_upgrade",
+                    f"{where}, target min {post_conversion_min}",
+                )
+                self.assertTrue(result["imported"], where)
+                self.assertFalse(result["verified_lossless"], where)
+
+    def test_non_source_probe_kind_never_becomes_source_evidence(self):
+        """Target bitrate cannot make research V0 metrics policy-comparable."""
+        import msgspec
+
+        from lib.quality import (
+            EVIDENCE_SUBJECT_INSTALLED,
+            AlbumQualityEvidenceDecisionFacts,
+            AlbumQualityV0Metric,
+            full_pipeline_decision_from_evidence,
+        )
+
+        candidate = msgspec.structs.replace(
+            build_parity_candidate_evidence(
+                is_flac=True, min_bitrate=354, is_cbr=False,
+                spectral_grade="suspect",
+            ),
+            v0_metric=AlbumQualityV0Metric(
+                subject=EVIDENCE_SUBJECT_INSTALLED,
+                avg_bitrate_kbps=241,
+                min_bitrate_kbps=None,
+            ),
+        )
+        for post_conversion_min in (199, 200):
+            evidence = full_pipeline_decision_from_evidence(
+                candidate,
+                None,
+                facts=AlbumQualityEvidenceDecisionFacts(
+                    converted_count=12,
+                    post_conversion_min_bitrate=post_conversion_min,
+                    verified_lossless_target="opus 128",
+                ),
+            )
+            simulator = full_pipeline_decision(
+                is_flac=True, min_bitrate=354, is_cbr=False,
+                spectral_grade="suspect", converted_count=12,
+                post_conversion_min_bitrate=post_conversion_min,
+                post_conversion_is_cbr=False,
+                candidate_v0_probe_avg=241,
+                candidate_v0_probe_min=None,
+                candidate_v0_probe_kind="native_lossy_research_v0",
+                verified_lossless_target="opus 128",
+            )
+            for result, where in (
+                (evidence, "evidence twin"),
+                (simulator, "simulator twin"),
+            ):
+                self.assertEqual(
+                    result["stage2_import"],
+                    "suspect_lossless_probe_missing",
+                    f"{where}, target min {post_conversion_min}",
+                )
+                self.assertFalse(result["imported"], where)
 
     def test_a_candidate_carrying_a_proof_is_never_owned_by_the_lane(self):
         """Existing stamps remain proofs under the old model (issue #829's

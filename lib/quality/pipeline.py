@@ -51,6 +51,7 @@ from lib.quality.evidence_types import (
     QualityComparisonBasis,
     TargetQualityContract,
     V0ProbeEvidence,
+    is_comparable_lossless_source_probe,
 )
 from lib.quality.filetypes import has_mixed_lossless_and_lossy
 from lib.quality.gates import (
@@ -124,6 +125,8 @@ def full_pipeline_decision(
     cfg: QualityRankConfig | None = None,
     *,
     post_conversion_is_cbr: bool | None = None,
+    # Candidate V0 policy evidence is source-only and must name its kind.
+    # Omitted/non-source kinds are deliberately noncomparable.
     candidate_v0_probe_avg: int | None = None,
     candidate_v0_probe_min: int | None = None,
     existing_v0_probe_avg: int | None = None,
@@ -376,13 +379,25 @@ def full_pipeline_decision(
     provisional_source_candidate = bool(
         is_flac if supported_lossless_source is None else supported_lossless_source
     )
-    has_provisional_probe_input = (
+    # Source V0 evidence is a separate measurement from the post-conversion
+    # target projection. Keep every source field exactly as supplied: filling
+    # an absent source min with the target floor can falsely certify the V0
+    # override, while treating a target floor as an avg can falsely admit the
+    # Stage-1 carve-out. The caller must explicitly name a source kind;
+    # unlabeled and explicit non-source probes stay noncomparable.
+    candidate_source_probe = V0ProbeEvidence(
+        kind=(
+            candidate_v0_probe_kind
+            or _NONCOMPARABLE_NEUTRAL_V0_PROBE_KIND
+        ),
+        avg_bitrate_kbps=candidate_v0_probe_avg,
+        min_bitrate_kbps=candidate_v0_probe_min,
+    ) if (
         candidate_v0_probe_avg is not None
-        or (
-            is_flac
-            and target_format not in ("flac", "lossless")
-            and post_conversion_min_bitrate is not None
-        )
+        or candidate_v0_probe_min is not None
+    ) else None
+    has_provisional_probe_input = is_comparable_lossless_source_probe(
+        candidate_source_probe,
     )
     # Stage 1 compares two spectral CLASSES. Both must be decision-grade in
     # their own codec's terms, and the pair must be comparable at all — a
@@ -500,16 +515,10 @@ def full_pipeline_decision(
             # FLAC kept on disk (no conversion).
             stage2_new_format = new_format or "flac"
             result["target_final_format"] = stage2_new_format
-            candidate_probe_min = candidate_v0_probe_min
-            candidate_probe_full = V0ProbeEvidence(
-                kind=candidate_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
-                avg_bitrate_kbps=candidate_v0_probe_avg,
-                min_bitrate_kbps=candidate_probe_min,
-            ) if candidate_v0_probe_avg is not None else None
             will_be_verified = determine_verified_lossless(
                 target_format, spectral_grade,
                 converted_count=0, is_transcode=False,
-                v0_probe=candidate_probe_full,
+                v0_probe=candidate_source_probe,
                 ultrasonic_leg=candidate_ultrasonic_leg,
                 aac_lattice_leg=candidate_aac_lattice_leg)
             # Both proof legs' authority is the PROOF, and their veto
@@ -529,7 +538,7 @@ def full_pipeline_decision(
             # leg inherits the boundary from birth.
             v0_verified_override = (
                 spectral_grade in SPECTRAL_TRANSCODE_GRADES
-                and v0_probe_overrides_spectral(candidate_probe_full)
+                and v0_probe_overrides_spectral(candidate_source_probe)
             )
             # avg/median stay None — only the min crosses this interface. A
             # fabricated avg=min makes _selected_bitrate_with_source label a min
@@ -565,11 +574,7 @@ def full_pipeline_decision(
             else:
                 provisional = provisional_lossless_decision(
                     ProvisionalLosslessDecisionInput(
-                        candidate_probe=V0ProbeEvidence(
-                            kind=candidate_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
-                            avg_bitrate_kbps=candidate_v0_probe_avg,
-                            min_bitrate_kbps=candidate_probe_min,
-                        ) if candidate_v0_probe_avg is not None else None,
+                        candidate_probe=candidate_source_probe,
                         existing_probe=V0ProbeEvidence(
                             kind=existing_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
                             avg_bitrate_kbps=existing_v0_probe_avg,
@@ -635,24 +640,11 @@ def full_pipeline_decision(
             # FLAC path: convert first, then decide
             is_transcode = transcode_detection(
                 converted_count, spectral_grade=spectral_grade)
-            candidate_probe_min = (
-                candidate_v0_probe_min
-                if candidate_v0_probe_min is not None
-                else post_conversion_min_bitrate
-            )
-            candidate_probe_full = V0ProbeEvidence(
-                kind=candidate_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
-                avg_bitrate_kbps=candidate_v0_probe_avg,
-                min_bitrate_kbps=candidate_probe_min,
-            ) if (
-                candidate_v0_probe_avg is not None
-                or candidate_probe_min is not None
-            ) else None
             will_be_verified = determine_verified_lossless(
                 target_format, spectral_grade,
                 converted_count=converted_count,
                 is_transcode=is_transcode,
-                v0_probe=candidate_probe_full,
+                v0_probe=candidate_source_probe,
                 ultrasonic_leg=candidate_ultrasonic_leg,
                 aac_lattice_leg=candidate_aac_lattice_leg)
             # Same boundary as the flac-keep branch above: each leg's
@@ -662,7 +654,7 @@ def full_pipeline_decision(
             # either leg would turn a withheld proof into a rejection plus
             # a peer denylist for the provisional cohort.
             v0_verified_override = (
-                is_transcode and v0_probe_overrides_spectral(candidate_probe_full)
+                is_transcode and v0_probe_overrides_spectral(candidate_source_probe)
             )
             policy_is_transcode = is_transcode and not v0_verified_override
             # The configured target, unconditionally: this branch IS the
@@ -725,15 +717,7 @@ def full_pipeline_decision(
             else:
                 provisional = provisional_lossless_decision(
                     ProvisionalLosslessDecisionInput(
-                        # The provisional lane compares SOURCE V0 evidence.
-                        # A post-conversion minimum describes the configured
-                        # TARGET projection, so it can never supply this
-                        # candidate average or stand in for an absent probe.
-                        candidate_probe=V0ProbeEvidence(
-                            kind=candidate_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
-                            avg_bitrate_kbps=candidate_v0_probe_avg,
-                            min_bitrate_kbps=candidate_probe_min,
-                        ) if candidate_v0_probe_avg is not None else None,
+                        candidate_probe=candidate_source_probe,
                         existing_probe=V0ProbeEvidence(
                             kind=existing_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
                             avg_bitrate_kbps=existing_v0_probe_avg,
@@ -783,18 +767,7 @@ def full_pipeline_decision(
                     existing_m,
                     policy_is_transcode,
                     target_contract,
-                    (
-                        V0ProbeEvidence(
-                            kind=(
-                                candidate_v0_probe_kind
-                                or V0_PROBE_LOSSLESS_SOURCE
-                            ),
-                            min_bitrate_kbps=candidate_probe_min,
-                        )
-                        if converted_count > 0
-                        or post_conversion_min_bitrate is not None
-                        else None
-                    ),
+                    candidate_source_probe,
                     will_be_verified,
                     source_spectral=candidate_spectral,
                     current_spectral=existing_spectral,
