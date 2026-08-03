@@ -494,6 +494,15 @@ current-side pairing is mandatory corpus input, not an optional switch:
 current proof stays intact because installed evidence is the real acquisition
 ceiling, not a synthetic fresh-arrival fact.
 
+A **routing** change — lane membership, an entry condition, or a bypass —
+owes **both** the as-persisted and `--counterfactual` arms. The
+counterfactual measures a fresh arrival, but the as-persisted arm exposes
+cohorts that only exist because of stored state (such as historical proofs or
+incomplete evidence) and that fresh-world tests do not construct. When the
+routing can compare a candidate with a HAVE, the mandatory native
+current-side pairing supplies it; this differential consumes that pairing and
+does not reimplement it.
+
 ## AAC frame-lattice leg (issue #829 AAC-lattice leg)
 
 The fourth proof leg. PR-A measured and persisted the capture; PR-B reads

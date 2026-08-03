@@ -80,6 +80,14 @@ acquisition ceiling. Corpus order is irrelevant, but the complete corpus must
 be assembled before either tree runs the replay so a current row emitted in a
 different export batch remains resolvable.
 
+**Routing changes owe both arms.** A lane-membership, entry-condition, or
+bypass change is not measured by a fresh-world run alone: run ``decide`` as
+persisted AND ``decide --counterfactual``. The former finds cohorts created
+by durable state (historical proofs or incomplete evidence) that fresh-world
+tests do not construct; the latter measures a new arrival. A route that
+compares a candidate with a HAVE must consume the mandatory native current
+side described above, rather than reconstructing a parallel pairing.
+
 **Action-time facts are not on the row.** ``target_format`` falls back to
 the candidate's own persisted column, but ``verified_lossless_target`` —
 the operator's configured stored format for lossless sources — is

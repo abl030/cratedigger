@@ -539,6 +539,8 @@ class TestImportPreviewValues(unittest.TestCase):
                 post_conversion_min_bitrate=228,
                 post_conversion_is_cbr=False,
                 converted_count=12,
+                candidate_v0_probe_avg=228,
+                candidate_v0_probe_min=228,
                 existing_v0_probe_avg=171,
             )
         )

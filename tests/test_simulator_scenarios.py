@@ -218,11 +218,18 @@ DOWNLOAD_SCENARIOS = [
     DownloadScenario("flac_suspect_190", True, 190, False,
                      spectral_grade="suspect", converted_count=12,
                      post_conversion_min_bitrate=190,
-                     post_conversion_is_cbr=False),
+                     post_conversion_is_cbr=False,
+                     candidate_v0_probe_avg=190,
+                     candidate_v0_probe_min=190),
     DownloadScenario("flac_suspect_245", True, 245, False,
                      spectral_grade="suspect", converted_count=12,
                      post_conversion_min_bitrate=245,
-                     post_conversion_is_cbr=False),
+                     post_conversion_is_cbr=False,
+                     # Deliberately below the V0 trust override: this is
+                     # explicit, comparable source evidence for the
+                     # provisional lane, not a replacement proof.
+                     candidate_v0_probe_avg=229,
+                     candidate_v0_probe_min=199),
     # Sundowner - Four One Five Two (2026-05-13): spectral likely_transcode
     # at ~160kbps, but source-lineage V0 avg/min proves a genuine lossless
     # source and must bypass the provisional keep-searching lane.

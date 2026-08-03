@@ -720,21 +720,20 @@ def full_pipeline_decision(
             # because a denial withheld it). ``None`` here still means
             # "nothing configured", which the harness reads as V0.
             result["target_final_format"] = verified_lossless_target
-            provisional_probe_avg = (
-                candidate_v0_probe_avg
-                if candidate_v0_probe_avg is not None
-                else post_conversion_min_bitrate
-            )
             if v0_verified_override:
                 provisional = ProvisionalLosslessDecisionResult()
             else:
                 provisional = provisional_lossless_decision(
                     ProvisionalLosslessDecisionInput(
+                        # The provisional lane compares SOURCE V0 evidence.
+                        # A post-conversion minimum describes the configured
+                        # TARGET projection, so it can never supply this
+                        # candidate average or stand in for an absent probe.
                         candidate_probe=V0ProbeEvidence(
                             kind=candidate_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
-                            avg_bitrate_kbps=provisional_probe_avg,
+                            avg_bitrate_kbps=candidate_v0_probe_avg,
                             min_bitrate_kbps=candidate_probe_min,
-                        ) if provisional_probe_avg is not None else None,
+                        ) if candidate_v0_probe_avg is not None else None,
                         existing_probe=V0ProbeEvidence(
                             kind=existing_v0_probe_kind or V0_PROBE_LOSSLESS_SOURCE,
                             avg_bitrate_kbps=existing_v0_probe_avg,

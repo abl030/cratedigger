@@ -429,15 +429,16 @@ class TestLiveBugReproductions(unittest.TestCase):
         self.assertEqual(r["comparison_basis"]["existing_format"], "aac")
         self.assertTrue(r["keep_searching"])
 
-    def test_taboo_vi_fake_flac_192_accepted(self):
-        """Fake FLAC (192k source) converted to V0 at 224kbps is provisional.
+    def test_taboo_vi_fake_flac_192_requires_an_explicit_v0_probe(self):
+        """A fake FLAC cannot turn its target projection into source evidence.
 
         Request 257, 2026-03-28. amyslskduser uploaded FLAC that was actually
         a 192k transcode. Spectral said likely_transcode but estimated_bitrate
         was None (HF deficit, not cliff). V0 conversion produced 224kbps which
         is above the 210 threshold, so import_one.py didn't flag as transcode.
-        The provisional lossless-source lane now records the V0 source probe,
-        imports it as unverified evidence, and keeps searching.
+        The conversion's 224 kbps minimum is target-projection evidence, not
+        a ``lossless_source_v0`` source probe. Without an explicit probe, the
+        accused candidate fails closed as probe-missing and keeps searching.
 
         Original root causes:
         1. import_one.py transcode threshold (210) too low for 192k fakes
@@ -458,12 +459,13 @@ class TestLiveBugReproductions(unittest.TestCase):
         )
         self.assertFalse(r["verified_lossless"],
                          "Fake FLAC should never get verified_lossless")
-        self.assertEqual(r["stage2_import"], "provisional_lossless_upgrade")
+        self.assertEqual(r["stage2_import"], "suspect_lossless_probe_missing")
+        self.assertFalse(r["imported"])
         self.assertTrue(r["keep_searching"])
         self.assertTrue(r["denylisted"])
 
-    def test_taboo_vi_with_spectral_bitrate(self):
-        """Same scenario but if spectral_bitrate had been captured."""
+    def test_taboo_vi_with_spectral_bitrate_still_requires_an_explicit_v0_probe(self):
+        """A spectral estimate cannot make a target minimum into a probe."""
         r = full_pipeline_decision(
             is_flac=True,
             min_bitrate=0,
@@ -475,10 +477,9 @@ class TestLiveBugReproductions(unittest.TestCase):
             post_conversion_min_bitrate=224,
             converted_count=10,
         )
-        # The provisional source-probe decision runs before the generic quality
-        # gate, even when spectral_bitrate is available.
-        self.assertEqual(r["stage2_import"], "provisional_lossless_upgrade")
+        self.assertEqual(r["stage2_import"], "suspect_lossless_probe_missing")
         self.assertIsNone(r["stage3_quality_gate"])
+        self.assertFalse(r["imported"])
         self.assertTrue(r["keep_searching"])
         self.assertTrue(r["denylisted"])
 
@@ -1402,8 +1403,8 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
         self.assertFalse(r["imported"])
         self.assertTrue(r["keep_searching"])
 
-    def test_taboo_vi_fake_flac_192_via_evidence(self):
-        """Parity twin of Taboo VI's no-cliff fake-FLAC reproduction."""
+    def test_taboo_vi_fake_flac_192_requires_explicit_probe_via_evidence(self):
+        """Parity twin: the production decider rejects the false probe."""
         from lib.quality import (
             AlbumQualityEvidenceDecisionFacts,
             full_pipeline_decision_from_evidence,
@@ -1427,13 +1428,13 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
         )
 
         self.assertFalse(r["verified_lossless"])
-        self.assertEqual(r["stage2_import"], "provisional_lossless_upgrade")
-        self.assertTrue(r["imported"])
+        self.assertEqual(r["stage2_import"], "suspect_lossless_probe_missing")
+        self.assertFalse(r["imported"])
         self.assertTrue(r["denylisted"])
         self.assertTrue(r["keep_searching"])
 
-    def test_taboo_vi_with_spectral_bitrate_via_evidence(self):
-        """Parity twin of Taboo VI's captured-spectral reproduction."""
+    def test_taboo_vi_with_spectral_bitrate_requires_explicit_probe_via_evidence(self):
+        """A captured spectral estimate leaves the source-probe rule intact."""
         from lib.quality import (
             AlbumQualityEvidenceDecisionFacts,
             full_pipeline_decision_from_evidence,
@@ -1456,9 +1457,9 @@ class TestLiveBugReproductionsThroughEvidencePipeline(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(r["stage2_import"], "provisional_lossless_upgrade")
+        self.assertEqual(r["stage2_import"], "suspect_lossless_probe_missing")
         self.assertIsNone(r["stage3_quality_gate"])
-        self.assertTrue(r["imported"])
+        self.assertFalse(r["imported"])
         self.assertTrue(r["denylisted"])
         self.assertTrue(r["keep_searching"])
 
@@ -2404,6 +2405,25 @@ class TestProvisionalAnchorOwnsTheUnprovenCohort(unittest.TestCase):
             self.assertTrue(r["imported"], where)
             self.assertEqual(r["final_status"], "wanted", where)
             self.assertTrue(r["keep_searching"], where)
+
+    def test_probe_less_converting_candidate_cannot_fabricate_anchor_evidence(self):
+        """An explicit candidate V0 probe is the only comparable source fact.
+
+        The configured target's post-conversion minimum describes the output
+        projection, not a ``lossless_source_v0`` average. With the recorded
+        current anchor present, an otherwise unproven candidate that carries
+        no explicit probe must therefore reject as probe-missing, rather than
+        compare a fabricated average against the anchor.
+        """
+        for r, where in self._both_twins(
+            ultrasonic_deficit_db=self.DENIED_DEFICIT_DB,
+            candidate_v0_probe_avg=None,
+            candidate_v0_probe_min=None,
+        ):
+            self.assertEqual(
+                r["stage2_import"], "suspect_lossless_probe_missing", where)
+            self.assertFalse(r["imported"], where)
+            self.assertTrue(r["denylisted"], where)
 
     def test_a_candidate_carrying_a_proof_is_never_owned_by_the_lane(self):
         """Existing stamps remain proofs under the old model (issue #829's

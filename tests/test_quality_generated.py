@@ -3031,6 +3031,14 @@ _REQUEST_2066_WORLD = ParityWorld(
     v0_avg=175, v0_min=148,
     target_format=None, verified_lossless_target="opus 128",
 )
+#: The #993 R4 world: a proof-denied, affirming-grade lossless source with
+#: an explicit candidate V0 probe and no comparable current anchor. It must
+#: import through the provisional lane; a measured reject would be a routing
+#: bypass, not a comparison the candidate's source evidence authorizes.
+_UNANCHORED_PROVISIONAL_IMPORT_WORLD = replace(
+    _REQUEST_2066_WORLD,
+    current_v0_avg=None,
+)
 _PARTS_AND_LABOR_VORBIS_WORLD = ParityWorld(
     current_min=128, current_avg=128, current_format="MP3",
     current_is_cbr=True, current_grade=None,
@@ -3907,11 +3915,13 @@ def _lane_membership_follows_the_proof(
         R3  when both variants are lane-decided, the legs moved nothing
             inside it;
         R4  a denial is still not a rejection: with a comparable candidate
-            probe and NO comparable anchor, a lane-decided variant must be
-            the provisional IMPORT — a confident reject there would
-            discard an album whose only fault was a withheld proof and
-            denylist its peer, the exact shape PR3's law was written to
-            forbid (#990 review finding 1).
+            probe and NO comparable anchor, the proof-denied, still
+            unproven variant's every reached Stage-2 outcome must be the
+            provisional IMPORT. This is a routing law, not merely a
+            lane-internal one: a measured reject that bypasses the lane
+            would discard an album whose only fault was a withheld proof
+            and denylist its peer, the exact shape PR3's law was written
+            to forbid (#990 review finding 1).
 
       Decision record:
       https://github.com/abl030/cratedigger/issues/990#issuecomment-5158156922
@@ -3937,13 +3947,16 @@ def _lane_membership_follows_the_proof(
                 and not in_lane
             ):
                 return False  # R2
-            if (
-                candidate_probe_comparable
-                and not anchor_comparable
-                and in_lane
-                and not variant["imported"]
-            ):
-                return False  # R4
+        if (
+            candidate_probe_comparable
+            and not anchor_comparable
+            and not denied["verified_lossless"]
+            and (
+                denied["stage2_import"] != "provisional_lossless_upgrade"
+                or not denied["imported"]
+            )
+        ):
+            return False  # R4
         if denied_in_lane and passing_in_lane:
             return all(  # R3
                 denied[key] == passing[key]
@@ -3957,6 +3970,81 @@ def _lane_membership_follows_the_proof(
     return all(
         denied[key] == passing[key]
         for key in _PROVISIONAL_LANE_DECIDED_KEYS
+    )
+
+
+def post_conversion_minimum_never_invents_comparable_v0_evidence(
+    candidate: AlbumQualityEvidence,
+    current: "AlbumQualityEvidence | None",
+    *,
+    facts: AlbumQualityEvidenceDecisionFacts,
+    post_conversion_mins: tuple[int, ...],
+    decider: "Callable[..., dict[str, object]]" = (
+        full_pipeline_decision_from_evidence
+    ),
+) -> bool:
+    """Target-projection minima never become candidate V0 source evidence.
+
+    This is the #993 probe-less, anchored conversion cohort. A comparable
+    current ``lossless_source_v0`` probe is an acquisition ceiling, while a
+    candidate with no explicit comparable average cannot challenge it. Varying
+    the target projection's post-conversion minimum must therefore leave every
+    outer-decider outcome at ``suspect_lossless_probe_missing``.
+    """
+    candidate_probe = _policy_v0_probe_from_metric(candidate.v0_metric)
+    current_probe = (
+        _policy_v0_probe_from_metric(current.v0_metric)
+        if current is not None else None
+    )
+    if not _lossless_source_from_evidence(candidate):
+        return True
+    if is_comparable_lossless_source_probe(candidate_probe):
+        return True
+    if not is_comparable_lossless_source_probe(current_probe):
+        return True
+    return all(
+        (
+            result["stage2_import"] == "suspect_lossless_probe_missing"
+            and not result["imported"]
+            and bool(result["denylisted"])
+        )
+        for result in (
+            decider(
+                candidate,
+                current,
+                facts=msgspec.structs.replace(
+                    facts,
+                    post_conversion_min_bitrate=post_conversion_min,
+                ),
+            )
+            for post_conversion_min in post_conversion_mins
+        )
+    )
+
+
+def _decoy_decider_invents_v0_evidence_from_post_conversion_minimum(
+    candidate: AlbumQualityEvidence,
+    current: "AlbumQualityEvidence | None" = None,
+    *,
+    facts: "AlbumQualityEvidenceDecisionFacts | None" = None,
+) -> "dict[str, object]":
+    """Known-bad #993 shape: target output becomes a source V0 probe."""
+    if facts is None or facts.post_conversion_min_bitrate is None:
+        return full_pipeline_decision_from_evidence(candidate, current, facts=facts)
+    synthetic_average = facts.post_conversion_min_bitrate
+    fabricated_candidate = msgspec.structs.replace(
+        candidate,
+        v0_metric=AlbumQualityV0Metric(
+            subject=EVIDENCE_SUBJECT_SOURCE,
+            min_bitrate_kbps=synthetic_average,
+            avg_bitrate_kbps=synthetic_average,
+            median_bitrate_kbps=synthetic_average,
+        ),
+    )
+    return full_pipeline_decision_from_evidence(
+        fabricated_candidate,
+        current,
+        facts=facts,
     )
 
 
@@ -4268,11 +4356,34 @@ class TestUltrasonicProofLegProperties(unittest.TestCase):
     @given(world=parity_worlds())
     @example(world=_DENIAL_PROVISIONAL_COHORT_WORLD)
     @example(world=_REQUEST_2066_WORLD)
+    @example(world=_UNANCHORED_PROVISIONAL_IMPORT_WORLD)
     def test_v5_a_denial_never_reroutes_the_provisional_lane(self, world):
         candidate, current, facts = _parity_evidence_inputs(world)
         self.assertTrue(
             a_denial_never_reroutes_the_provisional_lane(
                 candidate, current, facts=facts,
+            )
+        )
+
+    @given(post_conversion_mins=st.lists(
+        st.integers(min_value=1, max_value=400), min_size=2, max_size=6,
+    ))
+    @example(post_conversion_mins=[93, 128, 320])
+    def test_v5_post_conversion_minimum_never_invents_v0_evidence(
+        self, post_conversion_mins,
+    ):
+        candidate, current, facts = _parity_evidence_inputs(
+            replace(_REQUEST_2066_WORLD, v0_avg=None, v0_min=None),
+        )
+        candidate = _with_adjudicable_ultrasonic(
+            candidate, _DENYING_DEFICIT_DB,
+        )
+        self.assertTrue(
+            post_conversion_minimum_never_invents_comparable_v0_evidence(
+                candidate,
+                current,
+                facts=facts,
+                post_conversion_mins=tuple(post_conversion_mins),
             )
         )
 
@@ -4490,6 +4601,40 @@ class TestUltrasonicProofLegCheckerSelfTests(unittest.TestCase):
             a_denial_never_reroutes_the_provisional_lane(
                 candidate, unanchored_current, facts=facts,
                 decider=_decoy_decider_lets_a_denial_reject_an_unanchored_album,
+            )
+        )
+
+    def test_v5_checker_trips_when_an_unanchored_denial_bypasses_to_measured_reject(self):
+        """R4's routing mutant must not escape by leaving the lane first."""
+        candidate, current, facts = _parity_evidence_inputs(
+            _UNANCHORED_PROVISIONAL_IMPORT_WORLD,
+        )
+        self.assertFalse(
+            a_denial_never_reroutes_the_provisional_lane(
+                candidate,
+                current,
+                facts=facts,
+                decider=_decoy_decider_bypasses_unanchored_lane_to_measured_reject,
+            )
+        )
+
+    def test_v5_probe_checker_trips_when_target_minimum_fabricates_v0_evidence(self):
+        """The outer evidence decider must reject a fabricated source probe."""
+        candidate, current, facts = _parity_evidence_inputs(
+            replace(_REQUEST_2066_WORLD, v0_avg=None, v0_min=None),
+        )
+        candidate = _with_adjudicable_ultrasonic(
+            candidate, _DENYING_DEFICIT_DB,
+        )
+        self.assertFalse(
+            post_conversion_minimum_never_invents_comparable_v0_evidence(
+                candidate,
+                current,
+                facts=facts,
+                post_conversion_mins=(93, 128, 320),
+                decider=(
+                    _decoy_decider_invents_v0_evidence_from_post_conversion_minimum
+                ),
             )
         )
 
@@ -5011,6 +5156,43 @@ def _decoy_decider_lets_a_denial_reject_an_unanchored_album(
     return result
 
 
+def _decoy_decider_bypasses_unanchored_lane_to_measured_reject(
+    candidate: AlbumQualityEvidence,
+    current: "AlbumQualityEvidence | None" = None,
+    *,
+    facts: "AlbumQualityEvidenceDecisionFacts | None" = None,
+) -> "dict[str, object]":
+    """Known-bad #993 router: escape the lane into a measured reject.
+
+    R4 used to inspect only outcomes that were already in the provisional
+    lane. This mutant takes its required import, re-labels it as a measured
+    downgrade, and proves the checker guards routing rather than only lane
+    internals.
+    """
+    result: dict[str, object] = dict(
+        full_pipeline_decision_from_evidence(candidate, current, facts=facts)
+    )
+    current_probe = (
+        _policy_v0_probe_from_metric(current.v0_metric)
+        if current is not None else None
+    )
+    if (
+        candidate.measurement.spectral_grade in ("genuine", "marginal")
+        and not is_comparable_lossless_source_probe(current_probe)
+        and result["stage2_import"] == "provisional_lossless_upgrade"
+    ):
+        result["stage2_import"] = "downgrade"
+        result["imported"] = False
+        result["denylisted"] = True
+        result["final_status"] = "wanted"
+        result["keep_searching"] = True
+        result["comparison_basis"] = {
+            "verdict": "worse",
+            "branch": "synthetic_measured_bypass",
+        }
+    return result
+
+
 def _decoy_decider_lets_an_unproven_album_skip_the_anchor(
     candidate: AlbumQualityEvidence,
     current: "AlbumQualityEvidence | None" = None,
@@ -5438,6 +5620,7 @@ class TestAacLatticeProofLegProperties(unittest.TestCase):
 
     @given(world=parity_worlds())
     @example(world=_DENIAL_PROVISIONAL_COHORT_WORLD)
+    @example(world=_UNANCHORED_PROVISIONAL_IMPORT_WORLD)
     def test_l5_a_denial_never_reroutes_the_provisional_lane(self, world):
         candidate, current, facts = _parity_evidence_inputs(world)
         self.assertTrue(
@@ -5655,6 +5838,20 @@ class TestAacLatticeProofLegCheckerSelfTests(unittest.TestCase):
             a_lattice_denial_never_reroutes_the_provisional_lane(
                 candidate, current, facts=facts,
                 decider=_decoy_decider_lets_a_lattice_denial_reject_the_album,
+            )
+        )
+
+    def test_l5_checker_trips_when_an_unanchored_denial_bypasses_to_measured_reject(self):
+        """L5 inherits R4's routing rule, including the bypass direction."""
+        candidate, current, facts = _parity_evidence_inputs(
+            _UNANCHORED_PROVISIONAL_IMPORT_WORLD,
+        )
+        self.assertFalse(
+            a_lattice_denial_never_reroutes_the_provisional_lane(
+                candidate,
+                current,
+                facts=facts,
+                decider=_decoy_decider_bypasses_unanchored_lane_to_measured_reject,
             )
         )
 
