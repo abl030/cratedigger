@@ -515,105 +515,49 @@ request release exactly. `is_candidate` tells the replay which rows to decide;
 current-only rows provide the paired evidence but are not themselves
 candidates. A null `current_evidence_id` is the ordinary no-HAVE case.
 
-The exact read-only export is below. It takes candidate/request links from both
-`import_jobs` and `download_log`: either table can be the sole durable address
-of a candidate evidence row. `candidate_pairs` deliberately uses `DISTINCT`,
-not an arbitrary `DISTINCT ON`: identical `(evidence_id, current_evidence_id,
-request_mb_release_id)` rows collapse, while conflicting request associations
-remain duplicate evidence IDs and the replay fails closed instead of selecting
-one pairing. The `LEFT JOIN` preserves a link with missing request authority as
-null JSON fields, which the replay rejects rather than silently omitting it.
-Every evidence row is `e.*`; the `files` JSON contains every field production's
-evidence decoder reads. The replay additionally validates the full JSON wire
-shape before it calls that production decoder, so do not omit nullable columns
-or replace booleans/numbers with strings.
+Export through the executable developer tool; it owns the SQL projection and
+is the only supported corpus-export path. Run it on doc2 so the DSN stays in
+the deployed runtime boundary:
 
 ```bash
-ssh doc2 'export PGPASSWORD=$(sudo cat /run/secrets/cratedigger-pgpass | grep "^PGPASSWORD=" | cut -d= -f2); pipeline-cli query --json -' <<'SQL' > /tmp/decision-corpus.json
-WITH candidate_links AS MATERIALIZED (
-    SELECT job.candidate_evidence_id AS evidence_id, job.request_id
-    FROM import_jobs AS job
-    WHERE job.candidate_evidence_id IS NOT NULL
-    UNION ALL
-    SELECT log.candidate_evidence_id AS evidence_id, log.request_id
-    FROM download_log AS log
-    WHERE log.candidate_evidence_id IS NOT NULL
-),
-candidate_pairs AS MATERIALIZED (
-    SELECT DISTINCT
-           link.evidence_id,
-           request.current_evidence_id,
-           request.mb_release_id AS request_mb_release_id
-    FROM candidate_links AS link
-    LEFT JOIN album_requests AS request ON request.id = link.request_id
-),
-corpus_members AS MATERIALIZED (
-    SELECT evidence_id, current_evidence_id, request_mb_release_id,
-           TRUE AS is_candidate
-    FROM candidate_pairs
-    UNION ALL
-    SELECT DISTINCT
-           candidate.current_evidence_id AS evidence_id,
-           NULL::bigint AS current_evidence_id,
-           NULL::text AS request_mb_release_id,
-           FALSE AS is_candidate
-    FROM candidate_pairs AS candidate
-    WHERE candidate.current_evidence_id IS NOT NULL
-      AND NOT EXISTS (
-          SELECT 1
-          FROM candidate_pairs AS candidate_row
-          WHERE candidate_row.evidence_id = candidate.current_evidence_id
-      )
-)
-SELECT evidence.*,
-       member.is_candidate,
-       member.current_evidence_id,
-       member.request_mb_release_id,
-       COALESCE(
-           jsonb_agg(
-               jsonb_build_object(
-                   'relative_path', file.relative_path,
-                   'size_bytes', file.size_bytes,
-                   'mtime_ns', file.mtime_ns,
-                   'extension', file.extension,
-                   'container', file.container,
-                   'codec', file.codec,
-                   'decode_ok', file.decode_ok
-               )
-               ORDER BY file.ordinal
-           ) FILTER (WHERE file.evidence_id IS NOT NULL),
-           '[]'::jsonb
-       ) AS files
-FROM corpus_members AS member
-JOIN album_quality_evidence AS evidence ON evidence.id = member.evidence_id
-LEFT JOIN album_quality_evidence_files AS file
-    ON file.evidence_id = evidence.id
-GROUP BY evidence.id, member.is_candidate, member.current_evidence_id,
-         member.request_mb_release_id
-ORDER BY evidence.id;
-SQL
-
-nix-shell --run "python3 -c '
-import json
-with open(\"/tmp/decision-corpus.json\") as source, open(\"/tmp/decision-corpus.jsonl\", \"w\") as target:
-    for row in json.load(source):
-        target.write(json.dumps(row, separators=(\",\", \":\")) + \"\\n\")
-'"
+# Run from the exact checked-out Cratedigger revision on doc2.
+export PGPASSWORD="$(sudo cat /run/secrets/cratedigger-pgpass | grep '^PGPASSWORD=' | cut -d= -f2)"
+nix-shell --run "python3 scripts/decision_differential.py export \
+  --dsn postgresql://cratedigger@10.20.0.11:5432/cratedigger \
+  --corpus /tmp/decision-corpus.jsonl \
+  --coverage /tmp/decision-corpus-coverage.json"
 ```
 
-Run both trees with the same complete `decision-corpus.jsonl`; the replay
+The exporter opens one repeatable-read, read-only PostgreSQL snapshot. It
+replaces each output atomically and independently: `corpus.jsonl` has one complete typed evidence
+row per exported ID, and `coverage.json` records source-link counts, collapsed
+identical associations, conflicts, authorityless links/IDs, paired/unpaired
+valid candidates, referenced current IDs, every debt class, and the
+expected-vs-written ID/content checks. Coverage binds the corpus SHA-256.
+Before each base and current `decide`, run the mandatory executable pair check;
+it rejects stale, substituted, or malformed corpus/coverage pairs:
+
+```bash
+nix-shell --run "python3 scripts/decision_differential.py verify \
+  --corpus /tmp/decision-corpus.jsonl \
+  --coverage /tmp/decision-corpus-coverage.json"
+```
+
+The corpus and coverage bytes are
+deterministic for the same snapshot regardless of internal batch size.
+
+Exit status `0` means the complete source graph was authoritative. Exit status
+`2` means the files were still written but coverage found historical debt (a
+conflict, missing/dangling evidence, mismatched release, or authorityless
+source link). Treat that as non-green evidence; do not hand-edit the corpus or
+substitute a sibling pressing. Valid authoritative candidates remain exported
+alongside the complete named debt so a differential can proceed on that cohort.
+
+Run `verify` above, then both trees with the same complete `decision-corpus.jsonl`; the replay
 resolves IDs before emitting a result, so the row order does not matter. Use
 `--counterfactual` when measuring a proof-promotion change: it strips only the
 candidate proof and retains the paired current proof.
 
-For a corpus too large for one `pipeline-cli query --json` response, partition
-**`candidate_links`** by evidence ID. Add the same bounded range to *both*
-source arms (for example, `AND job.candidate_evidence_id > 0 AND
-job.candidate_evidence_id <= 4000`, and the corresponding two predicates on
-`log.candidate_evidence_id`) and retain the later CTEs unchanged in every
-batch. Each batch then carries every candidate's request-release fence and
-every current row its candidates reference. Run `decide` against each complete
-batch on both trees, then concatenate the **decided outputs** before `diff`;
-candidate-ID ranges are disjoint, while a current row may legitimately be
-needed by more than one batch. Do not concatenate raw batch corpora: doing so
-duplicates that current evidence ID and the replay correctly fails closed.
+For a large corpus, pass `export --batch-size N`. Batching changes only the
+internal explicit-evidence fetches; it does not partition source links or alter
+the single-snapshot graph, so raw corpus IDs are neither duplicated nor lost.

@@ -140,9 +140,14 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import os
 import sys
+import tempfile
 from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 from typing import TypeGuard
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -150,13 +155,21 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 import msgspec
+import psycopg2
+import psycopg2.extras
 
 from lib.json_narrow import is_object_list, is_str_object_dict
-from lib.pipeline_db.evidence import _EvidenceMixin
+from lib.pipeline_db.evidence import (
+    EVIDENCE_FILE_PROJECTION_COLUMNS,
+    EVIDENCE_PROJECTION_COLUMNS,
+    PersistedAlbumQualityEvidenceRow,
+    _EvidenceMixin,
+)
 from lib.quality import (
     AacLatticeProofLeg,
     AlbumQualityEvidence,
     AlbumQualityEvidenceDecisionFacts,
+    AlbumQualityEvidenceFile,
     CodecFamily,
     EvidenceProvenance,
     EvidenceSubject,
@@ -172,6 +185,7 @@ from lib.quality.audio_validation import (
     AudioValidationOutcome,
 )
 from lib.quality.pipeline import evidence_spectral_context
+from lib.quality_evidence import snapshot_fingerprint
 from scripts.render_differential import (
     DEFAULT_SAMPLES_PER_FIELD,
     RenderDifferentialError,
@@ -186,10 +200,12 @@ from scripts.render_differential import (
 #: payload whose own differential is ``render_differential``'s job. They
 #: are excluded by NAME rather than by type so adding a decision key can
 #: never silently fall out of the watched set.
-_AUDIT_ONLY_DECISION_KEYS: frozenset[str] = frozenset({
-    "stage2_import_if_stage1_deferred",
-    "comparison_basis_if_stage1_deferred",
-})
+_AUDIT_ONLY_DECISION_KEYS: frozenset[str] = frozenset(
+    {
+        "stage2_import_if_stage1_deferred",
+        "comparison_basis_if_stage1_deferred",
+    }
+)
 
 #: Facts the decision dict does not carry but a proof-gate change moves.
 #: ``verified_lossless_classifier`` is minted beside the decision, and the
@@ -221,10 +237,13 @@ def _decision_keys() -> tuple[str, ...]:
     from lib.quality import full_pipeline_decision
 
     shape = full_pipeline_decision(
-        is_flac=False, min_bitrate=192, is_cbr=True,
+        is_flac=False,
+        min_bitrate=192,
+        is_cbr=True,
     )
     return tuple(
-        key for key in sorted(shape)
+        key
+        for key in sorted(shape)
         if key not in _AUDIT_ONLY_DECISION_KEYS and key != "comparison_basis"
     )
 
@@ -243,17 +262,32 @@ def _evidence_from_corpus_row(
     ``_overlay_evidence_onto_download_log_row``.
     """
     payload = dict(row)
+    # Corpus pairing is an outer grammar, not evidence state.  Remove its
+    # explicitly allowed keys before the exact evidence wire conversion so a
+    # foreign top-level key cannot be silently discarded.
+    for pairing_key in (
+        "is_candidate",
+        "current_evidence_id",
+        "request_mb_release_id",
+    ):
+        payload.pop(pairing_key, None)
     try:
         # ``_album_quality_evidence_from_row`` deliberately accepts values
         # from psycopg2's already-typed result rows.  A JSONL corpus is a
         # separate wire boundary: validate every column it consumes before
         # handing the row to that production mapper, rather than allowing its
         # legacy ``bool()``/``int()`` coercions to decide a different world.
-        msgspec.convert(payload, type=DecisionCorpusEvidenceWire)
+        wire = msgspec.convert(payload, type=DecisionCorpusEvidenceWire)
     except msgspec.ValidationError as exc:
         raise RenderDifferentialError(
             f"corpus row {payload.get('id')!r} has an invalid evidence wire "
-            f"shape: {exc}") from exc
+            f"shape: {exc}"
+        ) from exc
+    # Conversion is the boundary, not a validate-and-ignore side quest.  The
+    # production mapper receives exactly the typed contract's builtins so a
+    # nullable/type/schema drift cannot be normalized away by its legacy
+    # ``bool``/``int`` conveniences.
+    payload = msgspec.to_builtins(wire)
     raw_files = payload.pop("files")
     # The strict Struct conversion above establishes these assertions; spelling
     # them keeps the raw Mapping passed to production type-safe without
@@ -271,12 +305,14 @@ def _evidence_from_corpus_row(
         payload["measured_at"] = _parse_timestamp(measured_at)
     try:
         return _EvidenceMixin._album_quality_evidence_from_row(
-            payload, file_rows,
+            payload,
+            file_rows,
         )
     except (KeyError, TypeError, ValueError, msgspec.ValidationError) as exc:
         raise RenderDifferentialError(
             f"corpus row {payload.get('id')!r} is not an "
-            f"album_quality_evidence row: {exc}") from exc
+            f"album_quality_evidence row: {exc}"
+        ) from exc
 
 
 def _parse_timestamp(raw: str) -> object:
@@ -286,7 +322,8 @@ def _parse_timestamp(raw: str) -> object:
         return datetime.fromisoformat(raw)
     except ValueError as exc:
         raise RenderDifferentialError(
-            f"measured_at is not an ISO timestamp: {raw!r}") from exc
+            f"measured_at is not an ISO timestamp: {raw!r}"
+        ) from exc
 
 
 def leg_for_evidence(evidence: AlbumQualityEvidence) -> UltrasonicProofLeg:
@@ -302,7 +339,8 @@ def leg_for_evidence(evidence: AlbumQualityEvidence) -> UltrasonicProofLeg:
         spectral_measurement_version=context.spectral_measurement_version,
         decode_path=context.spectral_decode_path,
         preserved_source_spectral=is_preserved_source_spectral(
-            context.spectral_subject, context.was_converted_from,
+            context.spectral_subject,
+            context.was_converted_from,
         ),
     )
 
@@ -374,8 +412,7 @@ def decide_row(
     """
     row_id = row.get("id")
     if not isinstance(row_id, int) or isinstance(row_id, bool):
-        raise RenderDifferentialError(
-            f"corpus row has no integer id: {row_id!r}")
+        raise RenderDifferentialError(f"corpus row has no integer id: {row_id!r}")
     evidence = _evidence_from_corpus_row(
         without_persisted_proof(row) if counterfactual else row,
     )
@@ -388,7 +425,9 @@ def decide_row(
     )
     try:
         decision = full_pipeline_decision_from_evidence(
-            evidence, current_evidence, facts=facts,
+            evidence,
+            current_evidence,
+            facts=facts,
         )
     except ValueError as exc:
         # A row the decider refuses is a real outcome and is compared as
@@ -409,7 +448,8 @@ def decide_row(
             raise RenderDifferentialError(
                 "the evidence decider emitted keys the flat twin does not: "
                 f"{sorted(unknown)} — the dict-shape contract has drifted "
-                "and this differential would silently not compare them")
+                "and this differential would silently not compare them"
+            )
     for key in DECISION_KEYS:
         value = decision.get(key)
         fields[key] = value if _is_json_scalar(value) else repr(value)
@@ -423,15 +463,17 @@ def decide_row(
         ultrasonic_leg=leg,
         aac_lattice_leg=lattice_leg,
     )
-    fields.update({
-        "verified_lossless_classifier": (
-            proof.classifier if proof is not None else None
-        ),
-        "ultrasonic_leg_outcome": leg.outcome,
-        "ultrasonic_leg_reason": leg.reason,
-        "aac_lattice_leg_outcome": lattice_leg.outcome,
-        "aac_lattice_leg_reason": lattice_leg.reason,
-    })
+    fields.update(
+        {
+            "verified_lossless_classifier": (
+                proof.classifier if proof is not None else None
+            ),
+            "ultrasonic_leg_outcome": leg.outcome,
+            "ultrasonic_leg_reason": leg.reason,
+            "aac_lattice_leg_outcome": lattice_leg.outcome,
+            "aac_lattice_leg_reason": lattice_leg.reason,
+        }
+    )
     # The emitted field set is checked against the declared contract on
     # every row rather than trusted: a proof fact added above without
     # joining ``PROOF_FIELDS`` would be compared by the diff engine but
@@ -442,7 +484,8 @@ def decide_row(
         raise RenderDifferentialError(
             "decided row field set does not match the declared contract: "
             f"extra {sorted(set(fields) - expected)}, "
-            f"missing {sorted(expected - set(fields))}")
+            f"missing {sorted(expected - set(fields))}"
+        )
     return RenderedRow(id=row_id, fields=fields)
 
 
@@ -459,20 +502,24 @@ def _corpus_rows(path: str) -> Iterator[dict[str, object]]:
                 yield msgspec.json.decode(line, type=dict[str, object])
             except (msgspec.DecodeError, msgspec.ValidationError) as exc:
                 raise RenderDifferentialError(
-                    f"{path}:{line_number}: corpus line is not a JSON object: "
-                    f"{exc}") from exc
+                    f"{path}:{line_number}: corpus line is not a JSON object: {exc}"
+                ) from exc
 
 
-CORPUS_REQUIRED_COLUMNS: frozenset[str] = frozenset({
-    "id",
-    "is_candidate",
-    "current_evidence_id",
-    "request_mb_release_id",
-    "files",
-})
+CORPUS_REQUIRED_COLUMNS: frozenset[str] = frozenset(
+    {
+        "id",
+        "is_candidate",
+        "current_evidence_id",
+        "request_mb_release_id",
+        "files",
+    }
+)
 
 
-class DecisionCorpusEvidenceFileWire(msgspec.Struct, frozen=True):
+class DecisionCorpusEvidenceFileWire(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True
+):
     """Exact JSON shape of one exported evidence-file row."""
 
     relative_path: str
@@ -484,7 +531,9 @@ class DecisionCorpusEvidenceFileWire(msgspec.Struct, frozen=True):
     decode_ok: bool
 
 
-class DecisionCorpusAudioDiagnosticWire(msgspec.Struct, frozen=True):
+class DecisionCorpusAudioDiagnosticWire(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True
+):
     """Exact JSON shape of a persisted audio-validation diagnostic."""
 
     relative_path: str
@@ -496,7 +545,9 @@ class DecisionCorpusAudioDiagnosticWire(msgspec.Struct, frozen=True):
     stderr_truncated: bool
 
 
-class DecisionCorpusAudioValidationWire(msgspec.Struct, frozen=True):
+class DecisionCorpusAudioValidationWire(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True
+):
     """Exact JSON shape consumed by production's audio-report decoder."""
 
     policy_id: str
@@ -509,7 +560,9 @@ class DecisionCorpusAudioValidationWire(msgspec.Struct, frozen=True):
     omitted_diagnostics: int
 
 
-class DecisionCorpusAacLatticeTrackWire(msgspec.Struct, frozen=True):
+class DecisionCorpusAacLatticeTrackWire(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True
+):
     """Exact JSON shape of one persisted AAC-lattice track capture."""
 
     filename: str
@@ -519,7 +572,9 @@ class DecisionCorpusAacLatticeTrackWire(msgspec.Struct, frozen=True):
     error: str | None
 
 
-class DecisionCorpusEvidenceWire(msgspec.Struct, frozen=True):
+class DecisionCorpusEvidenceWire(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True
+):
     """Exact JSON shape consumed by production's evidence row decoder.
 
     This is intentionally a wire schema only.  It validates the complete
@@ -581,7 +636,7 @@ class DecisionCorpusEvidenceWire(msgspec.Struct, frozen=True):
     files: list[DecisionCorpusEvidenceFileWire]
 
 
-class DecisionCorpusEvidence(msgspec.Struct, frozen=True):
+class DecisionCorpusEvidence(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     """One complete evidence row plus its corpus-level pairing metadata."""
 
     evidence_id: int
@@ -600,35 +655,39 @@ def _corpus_evidence(row: Mapping[str, object]) -> DecisionCorpusEvidence:
     missing = CORPUS_REQUIRED_COLUMNS - set(row)
     if missing:
         raise RenderDifferentialError(
-            "corpus row is missing required columns: "
-            f"{sorted(missing)}")
+            f"corpus row is missing required columns: {sorted(missing)}"
+        )
     evidence_id = row["id"]
     if not _is_exact_int(evidence_id):
-        raise RenderDifferentialError(
-            f"corpus row has no integer id: {evidence_id!r}")
+        raise RenderDifferentialError(f"corpus row has no integer id: {evidence_id!r}")
     is_candidate = row["is_candidate"]
     if not isinstance(is_candidate, bool):
-        raise RenderDifferentialError(
-            "corpus row 'is_candidate' must be a boolean")
+        raise RenderDifferentialError("corpus row 'is_candidate' must be a boolean")
     current_evidence_id = row["current_evidence_id"]
     if current_evidence_id is not None and not _is_exact_int(current_evidence_id):
         raise RenderDifferentialError(
-            "corpus row 'current_evidence_id' must be an integer or null")
+            "corpus row 'current_evidence_id' must be an integer or null"
+        )
     request_mb_release_id = row["request_mb_release_id"]
     if request_mb_release_id is not None and not isinstance(
-        request_mb_release_id, str,
+        request_mb_release_id,
+        str,
     ):
         raise RenderDifferentialError(
-            "corpus row 'request_mb_release_id' must be a string or null")
+            "corpus row 'request_mb_release_id' must be a string or null"
+        )
     if not is_candidate and current_evidence_id is not None:
         raise RenderDifferentialError(
-            "current-only corpus row has a current_evidence_id")
+            "current-only corpus row has a current_evidence_id"
+        )
     if is_candidate and request_mb_release_id is None:
         raise RenderDifferentialError(
-            "candidate corpus row has no request_mb_release_id")
+            "candidate corpus row has no request_mb_release_id"
+        )
     if not is_candidate and request_mb_release_id is not None:
         raise RenderDifferentialError(
-            "current-only corpus row has a request_mb_release_id")
+            "current-only corpus row has a request_mb_release_id"
+        )
     return DecisionCorpusEvidence(
         evidence_id=evidence_id,
         is_candidate=is_candidate,
@@ -642,8 +701,8 @@ def _entry_release_id(entry: DecisionCorpusEvidence) -> str:
     release_id = entry.row.get("mb_release_id")
     if not isinstance(release_id, str):
         raise RenderDifferentialError(
-            f"corpus evidence {entry.evidence_id} has no string "
-            "mb_release_id")
+            f"corpus evidence {entry.evidence_id} has no string mb_release_id"
+        )
     return release_id
 
 
@@ -661,7 +720,8 @@ def resolve_native_current_pairs(
     for entry in entries:
         if entry.evidence_id in by_id:
             raise RenderDifferentialError(
-                f"corpus has duplicate evidence id {entry.evidence_id}")
+                f"corpus has duplicate evidence id {entry.evidence_id}"
+            )
         by_id[entry.evidence_id] = entry
 
     pairs: list[tuple[DecisionCorpusEvidence, DecisionCorpusEvidence | None]] = []
@@ -671,14 +731,15 @@ def resolve_native_current_pairs(
         request_release_id = entry.request_mb_release_id
         if request_release_id is None:
             raise RenderDifferentialError(
-                f"candidate evidence {entry.evidence_id} has no "
-                "request_mb_release_id")
+                f"candidate evidence {entry.evidence_id} has no request_mb_release_id"
+            )
         candidate_release_id = _entry_release_id(entry)
         if candidate_release_id != request_release_id:
             raise RenderDifferentialError(
                 f"candidate evidence {entry.evidence_id} release "
                 f"{candidate_release_id!r} does not match request "
-                f"release {request_release_id!r}")
+                f"release {request_release_id!r}"
+            )
         current_id = entry.current_evidence_id
         if current_id is None:
             pairs.append((entry, None))
@@ -688,13 +749,15 @@ def resolve_native_current_pairs(
             raise RenderDifferentialError(
                 "candidate evidence "
                 f"{entry.evidence_id} has dangling current_evidence_id "
-                f"{current_id}")
+                f"{current_id}"
+            )
         current_release_id = _entry_release_id(current)
         if current_release_id != request_release_id:
             raise RenderDifferentialError(
                 f"candidate evidence {entry.evidence_id} current evidence "
                 f"{current.evidence_id} release {current_release_id!r} "
-                f"does not match request release {request_release_id!r}")
+                f"does not match request release {request_release_id!r}"
+            )
         pairs.append((entry, current))
     return pairs
 
@@ -743,10 +806,867 @@ def decide_corpus(
     return count
 
 
+@dataclass(frozen=True)
+class DecisionCorpusExportResult:
+    """Outcome of one read-only decision-corpus export."""
+
+    green: bool
+    debt_count: int
+
+
+class _DecisionCorpusSourceLink(msgspec.Struct, frozen=True):
+    """One exact candidate-evidence foreign-key reference from PostgreSQL."""
+
+    source: str
+    source_id: int
+    evidence_id: int
+    request_id: int | None
+    request_exists: bool
+    request_mb_release_id: str | None
+    current_evidence_id: int | None
+
+
+# Do not replace this projection with ``e.*``.  The JSONL wire and the real
+# evidence mapper consume this exact surface; an add/drop/rename/type/nullability
+# change must break the export until its projection and Struct move together.
+_DECISION_CORPUS_EVIDENCE_COLUMNS: tuple[str, ...] = EVIDENCE_PROJECTION_COLUMNS
+"""Shared production decoder projection; corpus adds JSON-aggregated files."""
+"""The explicit SQL below deliberately derives from this contract."""
+
+
+def _db_source_links(cursor: object) -> list[_DecisionCorpusSourceLink]:
+    """Read both durable source arms under the export's one PG snapshot."""
+    assert isinstance(cursor, psycopg2.extensions.cursor)
+    cursor.execute("""
+        WITH links AS (
+            SELECT 'import_jobs'::text AS source, job.id AS source_id,
+                   job.candidate_evidence_id AS evidence_id, job.request_id
+            FROM import_jobs AS job
+            WHERE job.candidate_evidence_id IS NOT NULL
+            UNION ALL
+            SELECT 'download_log'::text AS source, log.id AS source_id,
+                   log.candidate_evidence_id AS evidence_id, log.request_id
+            FROM download_log AS log
+            WHERE log.candidate_evidence_id IS NOT NULL
+        )
+        SELECT links.source, links.source_id, links.evidence_id,
+               links.request_id, request.id IS NOT NULL AS request_exists,
+               request.mb_release_id AS request_mb_release_id,
+               request.current_evidence_id
+        FROM links
+        LEFT JOIN album_requests AS request ON request.id = links.request_id
+        ORDER BY links.source, links.source_id
+    """)
+    links: list[_DecisionCorpusSourceLink] = []
+    for raw in cursor.fetchall():
+        try:
+            links.append(
+                msgspec.convert(
+                    dict(raw),
+                    type=_DecisionCorpusSourceLink,
+                )
+            )
+        except msgspec.ValidationError as exc:
+            raise RenderDifferentialError(
+                f"decision-corpus source-link projection drift: {exc}"
+            ) from exc
+    return links
+
+
+_EVIDENCE_SCHEMA_TYPES: dict[str, tuple[str, bool]] = {
+    "id": ("bigint", False),
+    "mb_release_id": ("text", False),
+    "snapshot_fingerprint": ("text", False),
+    "source_path": ("text", False),
+    "measured_at": ("timestamp with time zone", False),
+    "is_cbr": ("boolean", False),
+    "lineage_version": ("smallint", False),
+    "on_disk_v0_research_attempted": ("boolean", False),
+    "current_enrichment_required": ("boolean", False),
+    "verified_lossless": ("boolean", False),
+    "audio_validation": ("jsonb", False),
+    "audio_corrupt": ("boolean", False),
+    "folder_layout": ("text", False),
+    "audio_file_count": ("integer", False),
+    "filetype_band": ("text", False),
+    "codec": ("text", True),
+    "container": ("text", True),
+    "storage_format": ("text", True),
+    "target_format": ("text", True),
+    "min_bitrate_kbps": ("integer", True),
+    "avg_bitrate_kbps": ("integer", True),
+    "median_bitrate_kbps": ("integer", True),
+    "format": ("text", True),
+    "spectral_grade": ("text", True),
+    "spectral_bitrate_kbps": ("integer", True),
+    "was_converted_from": ("text", True),
+    "v0_min_bitrate_kbps": ("integer", True),
+    "v0_avg_bitrate_kbps": ("integer", True),
+    "v0_median_bitrate_kbps": ("integer", True),
+    "v0_subject": ("text", True),
+    "v0_provenance": ("text", True),
+    "verified_lossless_provenance": ("text", True),
+    "verified_lossless_source": ("text", True),
+    "verified_lossless_classifier": ("text", True),
+    "verified_lossless_detail": ("text", True),
+    "matched_bad_audio_hash_id": ("bigint", True),
+    "matched_bad_audio_hash_path": ("text", True),
+    "target_is_cbr": ("boolean", True),
+    "spectral_subject": ("text", True),
+    "spectral_provenance": ("text", True),
+    "audio_error": ("text", True),
+    "cliff_hz": ("integer", True),
+    "codec_family": ("text", True),
+    "ultrasonic_deficit_db": ("double precision", True),
+    "spectral_measurement_version": ("smallint", True),
+    "aac_lattice_tracks": ("jsonb", True),
+    "aac_lattice_modal_offset": ("integer", True),
+    "aac_lattice_modal_count": ("integer", True),
+    "aac_lattice_scored_tracks": ("integer", True),
+    "aac_lattice_max_z": ("double precision", True),
+}
+_FILE_SCHEMA_TYPES: dict[str, tuple[str, bool]] = {
+    # Join/filter/order dependencies are part of the authoritative export
+    # contract just as much as decoded file payload fields are.
+    "evidence_id": ("bigint", False),
+    "ordinal": ("integer", False),
+    "relative_path": ("text", False),
+    "size_bytes": ("bigint", False),
+    "mtime_ns": ("bigint", False),
+    "extension": ("text", False),
+    "container": ("text", False),
+    "codec": ("text", True),
+    "decode_ok": ("boolean", False),
+}
+
+_SOURCE_SCHEMA_TYPES: dict[str, dict[str, tuple[str, bool]]] = {
+    "import_jobs": {
+        "id": ("integer", False),
+        "candidate_evidence_id": ("bigint", True),
+        "request_id": ("integer", True),
+    },
+    "download_log": {
+        "id": ("integer", False),
+        "candidate_evidence_id": ("bigint", True),
+        "request_id": ("integer", False),
+    },
+    "album_requests": {
+        "id": ("integer", False),
+        "mb_release_id": ("text", True),
+        "current_evidence_id": ("bigint", True),
+    },
+}
+
+
+def assert_decision_corpus_schema(
+    descriptions: Mapping[str, Mapping[str, tuple[str, bool]]],
+) -> None:
+    """Fail closed when a consumed PG column's name/type/nullability drifts."""
+    for table, columns, overrides in (
+        ("album_quality_evidence", EVIDENCE_PROJECTION_COLUMNS, _EVIDENCE_SCHEMA_TYPES),
+        (
+            "album_quality_evidence_files",
+            (*EVIDENCE_FILE_PROJECTION_COLUMNS, "evidence_id", "ordinal"),
+            _FILE_SCHEMA_TYPES,
+        ),
+        *(
+            (table, tuple(contract), contract)
+            for table, contract in _SOURCE_SCHEMA_TYPES.items()
+        ),
+    ):
+        if set(columns) != set(overrides):
+            raise RenderDifferentialError(
+                f"{table} schema contract keys differ from consumed projection"
+            )
+        observed = descriptions.get(table, {})
+        for column in columns:
+            actual = observed.get(column)
+            if actual is None:
+                raise RenderDifferentialError(
+                    f"{table}.{column} is missing from schema"
+                )
+            expected = overrides.get(column)
+            if expected is not None and actual != expected:
+                raise RenderDifferentialError(
+                    f"{table}.{column} schema drift: expected {expected}, got {actual}"
+                )
+
+
+def _assert_live_decision_corpus_schema(cursor: object) -> None:
+    assert isinstance(cursor, psycopg2.extensions.cursor)
+    cursor.execute("""
+        SELECT table_name, column_name, data_type, is_nullable
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name IN (
+              'album_quality_evidence', 'album_quality_evidence_files',
+              'import_jobs', 'download_log', 'album_requests'
+          )
+    """)
+    descriptions: dict[str, dict[str, tuple[str, bool]]] = {}
+    assert cursor.description is not None
+    names = [description.name for description in cursor.description]
+    for raw in cursor.fetchall():
+        row = (
+            dict(raw)
+            if isinstance(raw, Mapping)
+            else dict(zip(names, raw, strict=True))
+        )
+        table, column = row["table_name"], row["column_name"]
+        data_type, nullable = row["data_type"], row["is_nullable"]
+        assert isinstance(table, str) and isinstance(column, str)
+        assert isinstance(data_type, str) and isinstance(nullable, str)
+        descriptions.setdefault(table, {})[column] = (data_type, nullable == "YES")
+    assert_decision_corpus_schema(descriptions)
+
+
+def _db_evidence_rows(
+    cursor: object,
+    evidence_ids: Sequence[int],
+    batch_size: int,
+) -> dict[int, dict[str, object]]:
+    """Read explicit evidence/file projections and validate the export wire."""
+    assert isinstance(cursor, psycopg2.extensions.cursor)
+    rows: dict[int, dict[str, object]] = {}
+    column_sql = ", ".join(
+        f"e.{column}" for column in _DECISION_CORPUS_EVIDENCE_COLUMNS
+    )
+    for start in range(0, len(evidence_ids), batch_size):
+        batch = list(evidence_ids[start : start + batch_size])
+        if not batch:
+            continue
+        cursor.execute(
+            f"""
+            SELECT {column_sql},
+                   COALESCE(
+                       jsonb_agg(jsonb_build_object(
+                           'relative_path', file.relative_path,
+                           'size_bytes', file.size_bytes,
+                           'mtime_ns', file.mtime_ns,
+                           'extension', file.extension,
+                           'container', file.container,
+                           'codec', file.codec,
+                           'decode_ok', file.decode_ok
+                       ) ORDER BY file.ordinal)
+                       FILTER (WHERE file.evidence_id IS NOT NULL),
+                       '[]'::jsonb
+                   ) AS files
+            FROM album_quality_evidence AS e
+            LEFT JOIN album_quality_evidence_files AS file ON file.evidence_id = e.id
+            WHERE e.id = ANY(%s)
+            GROUP BY {column_sql}
+            ORDER BY e.id
+        """,
+            (batch,),
+        )
+        for raw in cursor.fetchall():
+            payload = dict(raw)
+            measured_at = payload.get("measured_at")
+            if not isinstance(measured_at, datetime):
+                raise RenderDifferentialError(
+                    "decision-corpus evidence projection has non-timestamp "
+                    f"measured_at for evidence {payload.get('id')!r}"
+                )
+            payload["measured_at"] = measured_at.isoformat()
+            try:
+                # The exporter first validates the exact production PG row
+                # contract; JSONL conversion below only serializes that same
+                # contract for replay.
+                files = payload.pop("files")
+                pg_row = msgspec.convert(
+                    payload,
+                    type=PersistedAlbumQualityEvidenceRow,
+                )
+                payload = msgspec.to_builtins(pg_row)
+                payload["measured_at"] = measured_at.isoformat()
+                payload["files"] = files
+                wire = msgspec.convert(payload, type=DecisionCorpusEvidenceWire)
+            except msgspec.ValidationError as exc:
+                raise RenderDifferentialError(
+                    "decision-corpus evidence projection/wire drift for "
+                    f"evidence {payload.get('id')!r}: {exc}"
+                ) from exc
+            normalized: dict[str, object] = msgspec.to_builtins(wire)
+            evidence_id = normalized["id"]
+            assert _is_exact_int(evidence_id)
+            rows[evidence_id] = normalized
+    return rows
+
+
+def _atomic_write(path: Path, content: bytes) -> None:
+    """Publish one complete deterministic artifact, never a partial file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="wb",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        delete=False,
+    ) as handle:
+        tmp_path = Path(handle.name)
+        handle.write(content)
+        handle.flush()
+        os.fsync(handle.fileno())
+    try:
+        os.replace(tmp_path, path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def _address(row: Mapping[str, object]) -> dict[str, object]:
+    """The evidence content address included in coverage's exactness proof."""
+    return {
+        "id": row["id"],
+        "mb_release_id": row["mb_release_id"],
+        "snapshot_fingerprint": row["snapshot_fingerprint"],
+        "files_sha256": hashlib.sha256(
+            msgspec.json.encode(row["files"]),
+        ).hexdigest(),
+    }
+
+
+def _export_debt_count(coverage: Mapping[str, object]) -> int:
+    """Count every non-empty debt list without silently reclassifying it."""
+    debt_fields = (
+        "authorityless_source_links",
+        "authorityless_candidate_ids",
+        "association_conflicts",
+        "missing_candidate_evidence_ids",
+        "candidate_release_mismatches",
+        "missing_current_evidence_ids",
+        "current_release_mismatches",
+        "content_address_mismatches",
+        "file_content_conflicts",
+        "written_content_address_conflicts",
+    )
+    total = 0
+    for field in debt_fields:
+        value = coverage[field]
+        if not isinstance(value, list):
+            raise RenderDifferentialError(
+                f"decision-corpus coverage field {field!r} is not a list"
+            )
+        total += len(value)
+    return total
+
+
+def assert_export_output_exact(
+    rows: Sequence[Mapping[str, object]],
+    expected_associations: Sequence[tuple[int, int | None, str]],
+    expected_referenced_current_ids: Sequence[int],
+) -> None:
+    """Fail closed on omissions, role changes, or substituted pairings."""
+    ids = [row["id"] for row in rows]
+    if any(not _is_exact_int(value) for value in ids):
+        raise RenderDifferentialError("corpus output has a non-integer evidence id")
+    if len(ids) != len(set(ids)):
+        raise RenderDifferentialError("corpus output duplicates an evidence id")
+    entries = [_corpus_evidence(row) for row in rows]
+    written_associations = [
+        (entry.evidence_id, entry.current_evidence_id, entry.request_mb_release_id)
+        for entry in entries
+        if entry.is_candidate
+    ]
+    expected_associations = list(expected_associations)
+    if written_associations != expected_associations:
+        raise RenderDifferentialError(
+            "corpus candidate association triples differ from expected: "
+            f"{written_associations!r} != {expected_associations!r}"
+        )
+    written_referenced_current_ids = sorted(
+        {
+            current_id
+            for _candidate_id, current_id, _release in written_associations
+            if current_id is not None
+        }
+    )
+    if written_referenced_current_ids != list(expected_referenced_current_ids):
+        raise RenderDifferentialError(
+            "corpus referenced current IDs differ from expected: "
+            f"{written_referenced_current_ids!r} != "
+            f"{list(expected_referenced_current_ids)!r}"
+        )
+    expected_ids = sorted(
+        {candidate_id for candidate_id, _current_id, _release in expected_associations}
+        | set(expected_referenced_current_ids)
+    )
+    written_ids = [entry.evidence_id for entry in entries]
+    if sorted(written_ids) != expected_ids:
+        raise RenderDifferentialError(
+            f"corpus evidence IDs {sorted(written_ids)!r} != expected {expected_ids!r}"
+        )
+    expected_current_only = sorted(
+        set(expected_referenced_current_ids)
+        - {
+            candidate_id
+            for candidate_id, _current_id, _release in expected_associations
+        }
+    )
+    written_current_only = [
+        entry.evidence_id for entry in entries if not entry.is_candidate
+    ]
+    if written_current_only != expected_current_only:
+        raise RenderDifferentialError(
+            f"corpus current-only IDs {written_current_only!r} != expected "
+            f"{expected_current_only!r}"
+        )
+
+
+def export_decision_corpus(
+    dsn: str | None,
+    corpus_path: str | Path,
+    coverage_path: str | Path,
+    *,
+    batch_size: int = 1000,
+) -> DecisionCorpusExportResult:
+    """Export the complete authoritative decision corpus from PostgreSQL.
+
+    This is deliberately developer tooling, not a ``pipeline-cli`` mutation or
+    operator command.  It opens precisely one repeatable-read, read-only
+    snapshot; batching changes transport, never membership or ordering.
+    Historical debt is reported in coverage and returns non-green, while every
+    independently valid candidate still appears in the corpus.
+    """
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    corpus_file, coverage_file = Path(corpus_path), Path(coverage_path)
+    if corpus_file.resolve() == coverage_file.resolve():
+        raise RenderDifferentialError(
+            "corpus and coverage destinations resolve to the same path"
+        )
+    connection = psycopg2.connect(dsn, cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        connection.set_session(
+            readonly=True,
+            autocommit=False,
+            isolation_level="REPEATABLE READ",
+        )
+        with connection.cursor() as cursor:
+            _assert_live_decision_corpus_schema(cursor)
+            links = _db_source_links(cursor)
+            source_link_counts = {
+                source: sum(link.source == source for link in links)
+                for source in ("download_log", "import_jobs")
+            }
+            source_distinct_candidate_id_counts = {
+                source: len(
+                    {link.evidence_id for link in links if link.source == source}
+                )
+                for source in ("download_log", "import_jobs")
+            }
+            authorityless = [
+                {
+                    "source": link.source,
+                    "source_id": link.source_id,
+                    "evidence_id": link.evidence_id,
+                    "request_id": link.request_id,
+                    "reason": (
+                        "null_request_id"
+                        if link.request_id is None
+                        else "missing_request"
+                        if not link.request_exists
+                        else "request_missing_release_authority"
+                    ),
+                }
+                for link in links
+                if link.request_mb_release_id is None
+            ]
+            authorityless_ids = sorted({item["evidence_id"] for item in authorityless})
+            authoritative = [
+                link for link in links if link.request_mb_release_id is not None
+            ]
+            associations: dict[int, set[tuple[int | None, str]]] = {}
+            for link in authoritative:
+                assert link.request_mb_release_id is not None
+                associations.setdefault(link.evidence_id, set()).add(
+                    (
+                        link.current_evidence_id,
+                        link.request_mb_release_id,
+                    )
+                )
+            conflicts = [
+                {
+                    "evidence_id": evidence_id,
+                    "associations": [
+                        {
+                            "current_evidence_id": current_id,
+                            "request_mb_release_id": release_id,
+                        }
+                        for current_id, release_id in sorted(
+                            values,
+                            key=lambda value: (
+                                value[0] is not None,
+                                value[0] if value[0] is not None else -1,
+                                value[1],
+                            ),
+                        )
+                    ],
+                }
+                for evidence_id, values in sorted(associations.items())
+                if len(values) > 1
+            ]
+            conflict_ids = {item["evidence_id"] for item in conflicts}
+            # Collapse identical source associations only.  Two distinct
+            # associations for the same candidate are named conflict debt,
+            # never selected with DISTINCT ON or quietly treated as one.
+            collapsed = len(authoritative) - sum(
+                len(values) for values in associations.values()
+            )
+            candidate_associations = {
+                evidence_id: next(iter(values))
+                for evidence_id, values in associations.items()
+                if evidence_id not in conflict_ids
+            }
+            referenced_current_ids = sorted(
+                {
+                    current_id
+                    for association_values in associations.values()
+                    for current_id, _release in association_values
+                    if current_id is not None
+                }
+            )
+            # Account every candidate ID before choosing the valid replay
+            # cohort; conflicts are debt, not permission to skip existence or
+            # content-address validation.
+            all_candidate_ids = {link.evidence_id for link in links}
+            required_ids = sorted(all_candidate_ids | set(referenced_current_ids))
+            evidence_rows = _db_evidence_rows(cursor, required_ids, batch_size)
+            missing_candidates = sorted(all_candidate_ids - set(evidence_rows))
+            missing_currents = sorted(set(referenced_current_ids) - set(evidence_rows))
+            content_mismatches: list[dict[str, object]] = []
+            content_groups: dict[tuple[str, str], list[int]] = {}
+            for evidence_id, evidence in evidence_rows.items():
+                try:
+                    files = msgspec.convert(
+                        evidence["files"],
+                        type=list[AlbumQualityEvidenceFile],
+                    )
+                except msgspec.ValidationError as exc:
+                    raise RenderDifferentialError(
+                        "decision-corpus file projection/wire drift for "
+                        f"evidence {evidence_id}: {exc}"
+                    ) from exc
+                actual_fingerprint = snapshot_fingerprint(files)
+                stored_fingerprint = evidence["snapshot_fingerprint"]
+                assert isinstance(stored_fingerprint, str)
+                assert isinstance(evidence["mb_release_id"], str)
+                content_groups.setdefault(
+                    (
+                        evidence["mb_release_id"],
+                        actual_fingerprint,
+                    ),
+                    [],
+                ).append(evidence_id)
+                if stored_fingerprint != actual_fingerprint:
+                    content_mismatches.append(
+                        {
+                            "evidence_id": evidence_id,
+                            "stored_snapshot_fingerprint": stored_fingerprint,
+                            "files_snapshot_fingerprint": actual_fingerprint,
+                        }
+                    )
+            content_mismatch_ids = {item["evidence_id"] for item in content_mismatches}
+            file_content_conflicts = [
+                {
+                    "mb_release_id": release_id,
+                    "snapshot_fingerprint": fingerprint,
+                    "evidence_ids": evidence_ids,
+                }
+                for (release_id, fingerprint), evidence_ids in sorted(
+                    content_groups.items()
+                )
+                if len(evidence_ids) > 1
+            ]
+            candidate_mismatches: list[dict[str, object]] = []
+            current_mismatches: list[dict[str, object]] = []
+            # Inspect every authoritative association before conflicts remove
+            # any candidate from replay eligibility.  A conflict is never a
+            # licence to conceal a release/content mismatch on one of its
+            # source links.
+            invalid_associations: set[tuple[int, int | None, str]] = set()
+            for evidence_id, association_values in associations.items():
+                candidate = evidence_rows.get(evidence_id)
+                for current_id, release_id in association_values:
+                    association = (evidence_id, current_id, release_id)
+                    if candidate is None or evidence_id in content_mismatch_ids:
+                        invalid_associations.add(association)
+                        continue
+                    if candidate["mb_release_id"] != release_id:
+                        candidate_mismatches.append(
+                            {
+                                "evidence_id": evidence_id,
+                                "evidence_mb_release_id": candidate["mb_release_id"],
+                                "request_mb_release_id": release_id,
+                            }
+                        )
+                        invalid_associations.add(association)
+                    if current_id is not None:
+                        current = evidence_rows.get(current_id)
+                        if current is None or current_id in content_mismatch_ids:
+                            invalid_associations.add(association)
+                            continue
+                        if current["mb_release_id"] != release_id:
+                            current_mismatches.append(
+                                {
+                                    "candidate_evidence_id": evidence_id,
+                                    "current_evidence_id": current_id,
+                                    "current_mb_release_id": current["mb_release_id"],
+                                    "request_mb_release_id": release_id,
+                                }
+                            )
+                            invalid_associations.add(association)
+            valid_candidates: dict[int, tuple[int | None, str]] = {}
+            for evidence_id, (current_id, release_id) in candidate_associations.items():
+                if (evidence_id, current_id, release_id) in invalid_associations:
+                    continue
+                valid_candidates[evidence_id] = (current_id, release_id)
+            valid_current_ids = {
+                current_id
+                for current_id, _release in valid_candidates.values()
+                if current_id is not None
+            }
+            corpus_ids = sorted(set(valid_candidates) | valid_current_ids)
+            corpus_rows: list[dict[str, object]] = []
+            for evidence_id in corpus_ids:
+                row = dict(evidence_rows[evidence_id])
+                if evidence_id in valid_candidates:
+                    current_id, release_id = valid_candidates[evidence_id]
+                    row.update(
+                        {
+                            "is_candidate": True,
+                            "current_evidence_id": current_id,
+                            "request_mb_release_id": release_id,
+                        }
+                    )
+                else:
+                    row.update(
+                        {
+                            "is_candidate": False,
+                            "current_evidence_id": None,
+                            "request_mb_release_id": None,
+                        }
+                    )
+                # One shared strict contract, then production's only semantic
+                # decoder.  Do not validate one dict and feed another.
+                _evidence_from_corpus_row(row)
+                corpus_rows.append(row)
+            addresses = [_address(row) for row in corpus_rows]
+            address_keys = [
+                (address["mb_release_id"], address["snapshot_fingerprint"])
+                for address in addresses
+            ]
+            address_conflicts = sorted(
+                {key for key in address_keys if address_keys.count(key) > 1}
+            )
+            expected_associations = [
+                (candidate_id, current_id, release_id)
+                for candidate_id, (current_id, release_id) in sorted(
+                    valid_candidates.items()
+                )
+            ]
+            expected_candidate_ids = [item[0] for item in expected_associations]
+            expected_current_only_ids = sorted(
+                valid_current_ids - set(valid_candidates)
+            )
+            dual_role_ids = sorted(valid_current_ids & set(valid_candidates))
+            written_candidate_ids = [
+                row["id"] for row in corpus_rows if row["is_candidate"]
+            ]
+            expected_evidence_ids = corpus_ids
+            written_evidence_ids = [row["id"] for row in corpus_rows]
+            coverage: dict[str, object] = {
+                "schema_version": 1,
+                "total_source_links": len(links),
+                "source_link_counts": source_link_counts,
+                "source_distinct_candidate_id_counts": source_distinct_candidate_id_counts,
+                "total_distinct_candidate_ids": len(
+                    {link.evidence_id for link in links}
+                ),
+                "identical_associations_collapsed": collapsed,
+                "authorityless_source_links": authorityless,
+                "authorityless_candidate_ids": authorityless_ids,
+                "association_conflicts": conflicts,
+                "missing_candidate_evidence_ids": missing_candidates,
+                "candidate_release_mismatches": candidate_mismatches,
+                "missing_current_evidence_ids": missing_currents,
+                "current_release_mismatches": current_mismatches,
+                "referenced_current_ids": referenced_current_ids,
+                "valid_candidates": {
+                    "paired": sum(
+                        current is not None for current, _ in valid_candidates.values()
+                    ),
+                    "unpaired": sum(
+                        current is None for current, _ in valid_candidates.values()
+                    ),
+                },
+                "content_address_mismatches": content_mismatches,
+                "file_content_conflicts": file_content_conflicts,
+                "written_content_address_conflicts": [
+                    {"mb_release_id": release, "snapshot_fingerprint": fingerprint}
+                    for release, fingerprint in address_conflicts
+                ],
+                "outputs": {
+                    "corpus": {
+                        "expected_candidate_ids": expected_candidate_ids,
+                        "written_candidate_ids": written_candidate_ids,
+                        "expected_associations": [
+                            {
+                                "candidate_evidence_id": candidate_id,
+                                "current_evidence_id": current_id,
+                                "request_mb_release_id": release_id,
+                            }
+                            for candidate_id, current_id, release_id in expected_associations
+                        ],
+                        "written_associations": [
+                            {
+                                "candidate_evidence_id": row["id"],
+                                "current_evidence_id": row["current_evidence_id"],
+                                "request_mb_release_id": row["request_mb_release_id"],
+                            }
+                            for row in corpus_rows
+                            if row["is_candidate"] is True
+                        ],
+                        "expected_referenced_current_ids": sorted(valid_current_ids),
+                        "written_referenced_current_ids": sorted(valid_current_ids),
+                        "expected_current_only_ids": expected_current_only_ids,
+                        "written_current_only_ids": [
+                            row["id"]
+                            for row in corpus_rows
+                            if row["is_candidate"] is False
+                        ],
+                        "dual_role_ids": dual_role_ids,
+                        "expected_evidence_ids": expected_evidence_ids,
+                        "written_evidence_ids": written_evidence_ids,
+                        "exact_match": (
+                            expected_candidate_ids == written_candidate_ids
+                            and expected_evidence_ids == written_evidence_ids
+                            and len(written_evidence_ids)
+                            == len(set(written_evidence_ids))
+                        ),
+                        "content_addresses": addresses,
+                    },
+                },
+            }
+            debt_count = _export_debt_count(coverage)
+            coverage["green"] = debt_count == 0
+            coverage["debt_count"] = debt_count
+            corpus_bytes = b"".join(
+                msgspec.json.encode(row) + b"\n" for row in corpus_rows
+            )
+            assert_export_output_exact(
+                corpus_rows,
+                expected_associations,
+                sorted(valid_current_ids),
+            )
+            corpus_sha256 = hashlib.sha256(corpus_bytes).hexdigest()
+            outputs = coverage["outputs"]
+            assert isinstance(outputs, dict)
+            corpus_output = outputs["corpus"]
+            assert isinstance(corpus_output, dict)
+            corpus_output["sha256"] = corpus_sha256
+            # The manifest binds to corpus bytes. Each artifact is atomically
+            # replaced independently; consumers reject a stale pair by digest.
+            coverage_bytes = msgspec.json.encode(coverage) + b"\n"
+        connection.rollback()  # read-only snapshot: never retain an idle txn.
+    finally:
+        connection.close()
+    _atomic_write(corpus_file, corpus_bytes)
+    _atomic_write(coverage_file, coverage_bytes)
+    return DecisionCorpusExportResult(green=debt_count == 0, debt_count=debt_count)
+
+
+def _association_triples_from_manifest(
+    raw: object,
+) -> list[tuple[int, int | None, str]]:
+    if not isinstance(raw, list):
+        raise RenderDifferentialError("coverage expected_associations is not a list")
+    triples: list[tuple[int, int | None, str]] = []
+    for item in raw:
+        if not is_str_object_dict(item):
+            raise RenderDifferentialError("coverage association is not an object")
+        candidate_id = item.get("candidate_evidence_id")
+        current_id = item.get("current_evidence_id")
+        release_id = item.get("request_mb_release_id")
+        if (
+            not _is_exact_int(candidate_id)
+            or (current_id is not None and not _is_exact_int(current_id))
+            or not isinstance(release_id, str)
+        ):
+            raise RenderDifferentialError("coverage association has invalid fields")
+        triples.append((candidate_id, current_id, release_id))
+    return triples
+
+
+def verify_decision_corpus_pair(
+    corpus_path: str | Path,
+    coverage_path: str | Path,
+) -> None:
+    """Verify the mandatory corpus/coverage pairing before either render."""
+    corpus_file, coverage_file = Path(corpus_path), Path(coverage_path)
+    if corpus_file.resolve() == coverage_file.resolve():
+        raise RenderDifferentialError("corpus and coverage resolve to the same path")
+    corpus_bytes = corpus_file.read_bytes()
+    try:
+        coverage = msgspec.json.decode(
+            coverage_file.read_bytes(), type=dict[str, object]
+        )
+    except (msgspec.DecodeError, msgspec.ValidationError) as exc:
+        raise RenderDifferentialError(f"coverage is not a JSON object: {exc}") from exc
+    outputs = coverage.get("outputs")
+    if not is_str_object_dict(outputs):
+        raise RenderDifferentialError("coverage has no corpus output manifest")
+    manifest_raw = outputs.get("corpus")
+    if not is_str_object_dict(manifest_raw):
+        raise RenderDifferentialError("coverage has no corpus output manifest")
+    manifest = manifest_raw
+    if manifest.get("sha256") != hashlib.sha256(corpus_bytes).hexdigest():
+        raise RenderDifferentialError(
+            "coverage corpus SHA-256 does not match corpus bytes"
+        )
+    rows = list(_corpus_rows(str(corpus_file)))
+    for row in rows:
+        _evidence_from_corpus_row(row)
+    associations = _association_triples_from_manifest(
+        manifest.get("expected_associations")
+    )
+    written_associations = _association_triples_from_manifest(
+        manifest.get("written_associations")
+    )
+    if written_associations != associations:
+        raise RenderDifferentialError(
+            "coverage written associations do not reconcile with expected associations"
+        )
+    referenced = manifest.get("expected_referenced_current_ids")
+    if not isinstance(referenced, list) or any(
+        not _is_exact_int(value) for value in referenced
+    ):
+        raise RenderDifferentialError("coverage referenced current IDs are invalid")
+    if manifest.get("written_referenced_current_ids") != referenced:
+        raise RenderDifferentialError(
+            "coverage written referenced current IDs do not reconcile"
+        )
+    candidate_ids = {candidate_id for candidate_id, _current_id, _release in associations}
+    expected_current_only = sorted(set(referenced) - candidate_ids)
+    if manifest.get("expected_current_only_ids") != expected_current_only:
+        raise RenderDifferentialError("coverage current-only IDs do not reconcile")
+    if manifest.get("written_current_only_ids") != expected_current_only:
+        raise RenderDifferentialError("coverage written current-only IDs do not reconcile")
+    if manifest.get("dual_role_ids") != sorted(set(referenced) & candidate_ids):
+        raise RenderDifferentialError("coverage dual-role IDs do not reconcile")
+    assert_export_output_exact(rows, associations, referenced)
+
+
 def _non_negative_int(raw: str) -> int:
     value = int(raw)
     if value < 0:
         raise argparse.ArgumentTypeError("must be non-negative")
+    return value
+
+
+def _positive_int(raw: str) -> int:
+    value = _non_negative_int(raw)
+    if value == 0:
+        raise argparse.ArgumentTypeError("must be positive")
     return value
 
 
@@ -756,58 +1676,120 @@ def _build_parser() -> argparse.ArgumentParser:
         description=(
             "Re-decide a corpus of album_quality_evidence rows through the "
             "real decider, so a policy change is measured against real rows "
-            "instead of asserted."),
+            "instead of asserted."
+        ),
     )
     sub = parser.add_subparsers(dest="mode", required=True)
 
     decide = sub.add_parser(
-        "decide", help="Decide a corpus JSONL through the real decider")
+        "decide", help="Decide a corpus JSONL through the real decider"
+    )
     decide.add_argument(
-        "--corpus", required=True,
-        help="Corpus JSONL: one album_quality_evidence row object per line")
-    decide.add_argument(
-        "--out", default=None,
-        help="Decided JSONL output path (default: stdout)")
-    decide.add_argument(
-        "--verified-lossless-target", default=None,
-        dest="verified_lossless_target",
-        help=("The operator's configured stored format for lossless "
-              "sources (doc2 config.ini [Beets] verified_lossless_target, "
-              "e.g. 'opus 128'). Omitting it decides every row as if "
-              "nothing were configured, which makes target_final_format "
-              "and the gate format it feeds unmeasurable"))
-    decide.add_argument(
-        "--counterfactual", action="store_true",
-        help=("Drop each candidate's persisted verified-lossless proof "
-              "first — the fresh-mint arm, where a promotion-gate change "
-              "shows its real blast radius"))
+        "--corpus",
+        required=True,
+        help="Corpus JSONL: one album_quality_evidence row object per line",
+    )
 
-    diff = sub.add_parser(
-        "diff", help="Compare two decided JSONL files field by field")
+    verify = sub.add_parser("verify", help="Verify an exported corpus/coverage pair")
+    verify.add_argument("--corpus", required=True, help="Exported corpus JSONL")
+    verify.add_argument("--coverage", required=True, help="Matching coverage manifest")
+    decide.add_argument(
+        "--out", default=None, help="Decided JSONL output path (default: stdout)"
+    )
+    decide.add_argument(
+        "--verified-lossless-target",
+        default=None,
+        dest="verified_lossless_target",
+        help=(
+            "The operator's configured stored format for lossless "
+            "sources (doc2 config.ini [Beets] verified_lossless_target, "
+            "e.g. 'opus 128'). Omitting it decides every row as if "
+            "nothing were configured, which makes target_final_format "
+            "and the gate format it feeds unmeasurable"
+        ),
+    )
+    decide.add_argument(
+        "--counterfactual",
+        action="store_true",
+        help=(
+            "Drop each candidate's persisted verified-lossless proof "
+            "first — the fresh-mint arm, where a promotion-gate change "
+            "shows its real blast radius"
+        ),
+    )
+
+    export = sub.add_parser(
+        "export", help="Read PostgreSQL once and materialize corpus plus coverage"
+    )
+    export.add_argument(
+        "--dsn",
+        required=True,
+        help="PostgreSQL DSN for the read-only repeatable-read snapshot",
+    )
+    export.add_argument(
+        "--corpus", required=True, help="Destination corpus.jsonl (atomically replaced)"
+    )
+    export.add_argument(
+        "--coverage",
+        required=True,
+        help="Destination coverage.json (atomically replaced even with debt)",
+    )
+    export.add_argument(
+        "--batch-size",
+        type=_positive_int,
+        default=1000,
+        help="Evidence IDs per internal fetch; membership and output are invariant",
+    )
+
+    diff = sub.add_parser("diff", help="Compare two decided JSONL files field by field")
     diff.add_argument("--base", required=True, help="Base decided JSONL")
     diff.add_argument("--current", required=True, help="Current decided JSONL")
     diff.add_argument(
-        "--samples", type=_non_negative_int, default=DEFAULT_SAMPLES_PER_FIELD,
-        help="Concrete before/after pairs to show per changed field")
+        "--samples",
+        type=_non_negative_int,
+        default=DEFAULT_SAMPLES_PER_FIELD,
+        help="Concrete before/after pairs to show per changed field",
+    )
     diff.add_argument(
-        "--allow-field-drift", action="store_true",
-        help=("Compare the shared fields when the decision field set "
-              "changed, naming the unshared fields in the report"))
-    diff.add_argument(
-        "--json", action="store_true", help="Print the report as JSON")
+        "--allow-field-drift",
+        action="store_true",
+        help=(
+            "Compare the shared fields when the decision field set "
+            "changed, naming the unshared fields in the report"
+        ),
+    )
+    diff.add_argument("--json", action="store_true", help="Print the report as JSON")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
+        if args.mode == "export":
+            result = export_decision_corpus(
+                args.dsn,
+                args.corpus,
+                args.coverage,
+                batch_size=args.batch_size,
+            )
+            state = "green" if result.green else "debt"
+            print(
+                f"exported decision corpus: {state}, {result.debt_count} debt item(s)",
+                file=sys.stderr,
+            )
+            return 0 if result.green else 2
         if args.mode == "decide":
             count = decide_corpus(
-                args.corpus, args.out,
+                args.corpus,
+                args.out,
                 counterfactual=args.counterfactual,
                 verified_lossless_target=args.verified_lossless_target,
             )
             print(f"decided {count} rows", file=sys.stderr)
+            return 0
+        if args.mode == "verify":
+            verify_decision_corpus_pair(args.corpus, args.coverage)
+            print("verified decision corpus pair", file=sys.stderr)
             return 0
         report = summarize_render_diff(
             read_rendered(args.base),
