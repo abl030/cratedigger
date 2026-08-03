@@ -75,5 +75,18 @@ releaseSubmit({ ok: true, json: async () => ({ outcome: 'accepted' }) });
 await Promise.all([submitA, submitB]);
 delete globalThis.document; delete globalThis.fetch; delete globalThis.window;
 
+const rejectButton = { dataset: { browseId: 'MPREb_kb5fohQCJ6d' }, addEventListener: (_name, listener) => { rejectButton.listener = listener; } };
+const rejectHost = fakeHost(); rejectHost.result.querySelectorAll = () => [rejectButton];
+const toastNode = { style: {}, textContent: '' };
+globalThis.document = { getElementById: (id) => id === 'yt-rescue-release-reject' ? rejectHost : toastNode };
+globalThis.window = { confirm: () => true };
+globalThis.fetch = (url) => url.endsWith('youtube-album')
+  ? Promise.resolve({ ok: true, status: 200, json: async () => ({ outcome: 'ok', youtube_releases: [{ yt_browse_id: rejectButton.dataset.browseId, distances: [{ mbid: identifier, outcome: 'ok', distance: 0, total_mb_tracks: 1 }] }] }) })
+  : Promise.reject(new Error('offline'));
+await checkYoutubeRescue('release-reject', 1, identifier);
+await rejectButton.listener({ stopPropagation() {} });
+ok(toastNode.textContent.includes('network unavailable') && rejectHost.dataset.submitting === 'false', 'rescue rejection toasts visibly and clears submit guard for retry');
+delete globalThis.document; delete globalThis.fetch; delete globalThis.window;
+
 if (failed) process.exit(1);
-console.log('12 passed, 0 failed');
+console.log('13 passed, 0 failed');
