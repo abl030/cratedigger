@@ -66,8 +66,6 @@ _CAPTURE_AND_EVIDENCE_SELECT = """
     ) AS has_captured_history,
     COALESCE(current_evidence.verified_lossless, FALSE)
         AS _linked_verified_lossless,
-    current_evidence.cd_rip_verification
-        AS _linked_cd_rip_verification,
     current_evidence.mb_release_id
         AS _linked_evidence_release_id,
     (
@@ -102,19 +100,19 @@ def _overlay_release_id_sets(
 
 def _linked_current_evidence_facts(
     raw: Mapping[str, object],
-) -> tuple[bool, bool, object | None]:
+) -> tuple[bool, bool]:
     """Gate every current-evidence fact on the request's exact pressing."""
     if not exact_request_evidence_identity_matches(
         raw.get("mb_release_id"),
         raw.get("discogs_release_id"),
         raw.get("_linked_evidence_release_id"),
     ):
-        return False, False, None
+        return False, False
     verified = raw["_linked_verified_lossless"]
     provisional = raw["provisional_lossless"]
     if not isinstance(verified, bool) or not isinstance(provisional, bool):
         raise TypeError("linked current-evidence scalar facts must be bool")
-    return verified, provisional, raw["_linked_cd_rip_verification"]
+    return verified, provisional
 
 
 def _overlay_row_release_id(row: Mapping[str, object]) -> str:
@@ -164,24 +162,16 @@ class _RequestsMixin(_PipelineDBBase):
     ) -> ArtistRequestRow:
         """Validate one artist-view request and its specialized facts."""
         row = cls._request_presentation_row(raw)
-        verified, provisional, cd_rip = _linked_current_evidence_facts(raw)
-        projected = msgspec.convert(
+        verified, provisional = _linked_current_evidence_facts(raw)
+        return msgspec.convert(
             {
                 **row,
                 "has_captured_history": raw["has_captured_history"],
                 "verified_lossless": verified,
                 "provisional_lossless": provisional,
-                "cd_rip_verification": cd_rip,
             },
             type=ArtistRequestRow,
         )
-        cd_rip = projected["cd_rip_verification"]
-        if cd_rip is not None and (errors := cd_rip.validation_errors()):
-            raise ValueError(
-                "linked current CD-rip verification is invalid: "
-                + "; ".join(errors)
-            )
-        return projected
 
     def add_request(
         self,
@@ -299,9 +289,7 @@ class _RequestsMixin(_PipelineDBBase):
         overlays: dict[str, dict[str, object]] = {}
         for r in cur.fetchall():
             release_id = _overlay_row_release_id(r)
-            verified, provisional, _cd_rip = (
-                _linked_current_evidence_facts(r)
-            )
+            verified, provisional = _linked_current_evidence_facts(r)
             projected: dict[str, object] = {
                 "id": r["id"],
                 "status": r["status"],

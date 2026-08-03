@@ -6381,9 +6381,6 @@ class FakePipelineDB:
             "has_captured_history": has_captured_history,
             "verified_lossless": verified_lossless,
             "provisional_lossless": provisional_lossless,
-            "cd_rip_verification": (
-                evidence.cd_rip_verification if evidence is not None else None
-            ),
         }
 
     def _long_tail_projection(self, row: dict[str, Any]) -> dict[str, Any]:

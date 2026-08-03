@@ -15,7 +15,6 @@ import { resolvePipelineLifecycle } from './state.js';
 import { esc, qualityLabelShort } from './util.js';
 import { qualityRankBadgeClass } from './quality_palette.js';
 import { processingOwnerPresentation } from './release_action_state.js';
-import { cdRipProofPresentation } from './cd_rip_proof.js';
 
 /**
  * @typedef {Object} BadgeItem
@@ -44,8 +43,6 @@ import { cdRipProofPresentation } from './cd_rip_proof.js';
  * @property {boolean} [pipeline_provisional] - The tracked install is an
  *   unverified lossless-source conversion (provisional import — the
  *   pipeline is still hunting a verified lossless copy).
- * @property {Object|null|undefined} [cd_rip_verification] - Structured proof
- *   from the exact request's exact current evidence row.
  */
 
 /**
@@ -71,9 +68,6 @@ export function renderStatusBadges(item) {
     && item.has_captured_history === true;
   const verifiedLossless = itemFactsAreCurrent
     && item.pipeline_verified_lossless === true;
-  const cdRipProof = verifiedLossless
-    ? cdRipProofPresentation(item.cd_rip_verification)
-    : null;
   const provisional = itemFactsAreCurrent
     && item.pipeline_provisional === true;
   const processing = processingOwnerPresentation(pStatus, owner);
@@ -104,11 +98,7 @@ export function renderStatusBadges(item) {
   // surfacing): verified is terminal; provisional means an unverified
   // lossless-source conversion the pipeline is still trying to verify.
   if (verifiedLossless) {
-    if (cdRipProof) {
-      html += `<span class="badge badge-verified badge-rank-lossless badge-cd-proof" title="exact CD-rip provider match">${esc(cdRipProof.text)}</span>`;
-    } else {
-      html += '<span class="badge badge-verified badge-rank-lossless" title="tracked install carries verified lossless-source proof">verified</span>';
-    }
+    html += '<span class="badge badge-verified badge-rank-lossless" title="tracked install carries verified lossless-source proof">verified</span>';
   } else if (provisional) {
     html += '<span class="badge badge-provisional" title="unverified lossless-source conversion — still hunting a verified lossless copy">provisional</span>';
   }

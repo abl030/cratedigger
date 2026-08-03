@@ -73,9 +73,6 @@ export function libraryAlbumBadgeItem(a) {
     processing_owner: a.processing_owner ?? null,
     pipeline_verified_lossless: a.pipeline_verified_lossless === true,
     pipeline_provisional: a.pipeline_provisional === true,
-    ...(a.cd_rip_verification != null
-      ? { cd_rip_verification: a.cd_rip_verification }
-      : {}),
   };
 }
 
