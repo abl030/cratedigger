@@ -444,9 +444,15 @@ EOF
         # default package, shell, app package, and the exported-module VM
         # must never retain tip or historical Beets source/package inputs.
         beetsCompatibilityTopology = let
-          forbidden = [ (toString beets-tip) (toString tipPackage) ]
-            ++ map (entry: toString (compatSource entry)) manifest
-            ++ map (entry: toString (compatPackage entry)) manifest;
+          # These are comparison values, never dependencies. `toString` on a
+          # derivation/path carries its Nix string context; interpolating that
+          # context into the builder would itself make the topology check (and
+          # therefore the stable candidate) depend on every canary package.
+          comparisonPath = value:
+            builtins.unsafeDiscardStringContext (toString value);
+          forbidden = [ (comparisonPath beets-tip) (comparisonPath tipPackage) ]
+            ++ map (entry: comparisonPath (compatSource entry)) manifest
+            ++ map (entry: comparisonPath (compatPackage entry)) manifest;
           forbiddenWords = builtins.concatStringsSep " " forbidden;
           runtimeClosure = pkgs.closureInfo {
             rootPaths = [
@@ -456,35 +462,52 @@ EOF
               moduleVm
             ];
           };
-        in pkgs.runCommand "cratedigger-beets-compatibility-topology" {
-        } ''
-          set -euo pipefail
-          for forbidden in ${forbiddenWords}; do
-            if grep -Fxq "$forbidden" ${runtimeClosure}/store-paths; then
-              echo "checks-only Beets input leaked into runtime closure: $forbidden" >&2
-              exit 1
-            fi
-          done
-          touch "$out"
-        '';
+          unchecked = pkgs.runCommand "cratedigger-beets-compatibility-topology" {
+          } ''
+            set -euo pipefail
+            for forbidden in ${forbiddenWords}; do
+              if grep -Fxq "$forbidden" ${runtimeClosure}/store-paths; then
+                echo "checks-only Beets input leaked into runtime closure: $forbidden" >&2
+                exit 1
+              fi
+            done
+            touch "$out"
+          '';
+          # `drvAttrs.buildCommand` carries the exact direct derivation
+          # context Nix will serialise into the .drv. Assert against the
+          # context-free tip drv path, so the proof cannot add the forbidden
+          # edge it is checking for.
+          tipDrv = comparisonPath tipPackage.drvPath;
+          uncheckedInputs = builtins.getContext unchecked.drvAttrs.buildCommand;
+        in assert !(builtins.hasAttr tipDrv uncheckedInputs);
+          unchecked;
 
         # The daily Nixpkgs candidate is green only when every ordinary
         # flake check and every reviewed Beets release contract is green.
         # Tip is intentionally separate: a moving upstream canary must
         # alert without blocking a stable lock update.
-        beetsStableCandidate = pkgs.runCommand "cratedigger-stable-candidate" {
-          nativeBuildInputs = [
-            packageDefault
-            checkBeetsConfigPackageBoundary
-            moduleVm
-            jellyfinMetadataVm
-            runtimeSrcPin
-            packageSetPin
-            moduleAssertions
-            beetsMirrorPatches
-            beetsCompatibilityTopology
-          ] ++ builtins.attrValues releaseChecks;
-        } "touch $out";
+        beetsStableCandidate = let
+          unchecked = pkgs.runCommand "cratedigger-stable-candidate" {
+            nativeBuildInputs = [
+              packageDefault
+              checkBeetsConfigPackageBoundary
+              moduleVm
+              jellyfinMetadataVm
+              runtimeSrcPin
+              packageSetPin
+              moduleAssertions
+              beetsMirrorPatches
+              beetsCompatibilityTopology
+            ] ++ builtins.attrValues releaseChecks;
+          } "touch $out";
+          tipDrv = builtins.unsafeDiscardStringContext tipPackage.drvPath;
+          # mkDerivation serialises this list separately from buildCommand;
+          # inspect its direct context as well, otherwise a future addition
+          # to nativeBuildInputs could evade the topology-style assertion.
+          nativeInputContext = builtins.getContext (builtins.concatStringsSep " "
+            (map toString unchecked.nativeBuildInputs));
+        in assert !(builtins.hasAttr tipDrv nativeInputContext);
+          unchecked;
       } // releaseChecks));
     };
 }

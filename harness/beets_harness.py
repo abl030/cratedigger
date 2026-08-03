@@ -20,7 +20,7 @@ import json
 import logging
 import os
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, TextIO
 
@@ -387,7 +387,18 @@ def _find_duplicates_with_mapped_release_ids(
 
     tmp_album = library.Album(lib, **info)
     keys = config["import"]["duplicate_keys"]["album"].as_str_seq()
-    dup_query = tmp_album.duplicates_query(keys)
+    if hasattr(library.Album, "duplicates_query"):
+        dup_query = tmp_album.duplicates_query(keys)
+    else:
+        # Beets 2.1 predates Album.duplicates_query; its own ImportTask used
+        # this equivalent query builder. Keep the real-library lookup active
+        # rather than treating a historical API gap as "no duplicates".
+        legacy_all_fields_query: Callable[[dict[str, object]], Query] = getattr(  # noqa: B009 - legacy-only API
+            library.Album, "all_fields_query",
+        )
+        dup_query = legacy_all_fields_query(
+            {key: tmp_album.get(key) for key in keys},
+        )
 
     # Same exclusion as upstream beets: a task re-importing exactly the same
     # file paths is not a duplicate replacement.

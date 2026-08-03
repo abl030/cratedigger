@@ -68,6 +68,54 @@ assert "get_duplicate_action" in vars(h.HarnessImportSession), \
 assert "resolve_duplicate" in vars(h.HarnessImportSession), \
     "HarnessImportSession does not expose the legacy duplicate hook"
 
+# --- The release-id mapping must reach the REAL catalog lookup, not merely
+# the duplicate-action hook. Seed two persisted albums, create a real Beets
+# ImportTask/APPLY match, and call the production adapter end to end:
+# chosen_info -> AlbumInfo.copy -> temporary Album -> duplicates_query ->
+# Library.albums. The matched release must be found while its same-title
+# sibling remains excluded.
+from beets.autotag import Distance
+
+with tempfile.TemporaryDirectory(prefix="cratedigger-real-duplicates-") as d:
+    config["library"].set(os.path.join(d, "library.db"))
+    config["directory"].set(d)
+    config["import"]["duplicate_keys"]["album"].set(["mb_albumid"])
+    lib = library.Library(os.path.join(d, "library.db"), d)
+    exact_release = "11111111-2222-3333-4444-555555555555"
+    sibling_release = "66666666-7777-8888-9999-aaaaaaaaaaaa"
+
+    def seed(release_id, filename):
+        path = os.path.join(d, filename)
+        with open(path, "wb") as handle:
+            handle.write(b"audio")
+        return lib.add_album([library.Item(
+            title="Track", artist="Exact Artist", album="Exact Album",
+            albumartist="Exact Artist", path=path, mb_albumid=release_id,
+        )])
+
+    exact_album = seed(exact_release, "exact.flac")
+    sibling_album = seed(sibling_release, "sibling.flac")
+    incoming_path = os.path.join(d, "incoming.flac")
+    with open(incoming_path, "wb") as handle:
+        handle.write(b"incoming")
+    incoming_item = library.Item(
+        title="Track", artist="Exact Artist", album="Exact Album",
+        albumartist="Exact Artist", path=incoming_path,
+    )
+    incoming_track = h.TrackInfo(title="Track", artist="Exact Artist", index=1)
+    chosen = h.AlbumInfo(
+        tracks=[incoming_track], album="Exact Album", artist="Exact Artist",
+        album_id=exact_release,
+    )
+    task = h.BeetsImportTask(None, [incoming_path], [incoming_item])
+    task.set_choice(h.AlbumMatch(
+        Distance(), chosen, {incoming_item: incoming_track}, [], []))
+    duplicate_ids = {album.id for album in h._find_duplicates_with_mapped_release_ids(task, lib)}
+    assert exact_album.id in duplicate_ids, duplicate_ids
+    assert sibling_album.id not in duplicate_ids, duplicate_ids
+    lib._close()
+print("REAL_DUPLICATE_LOOKUP_OK")
+
 sess = h.HarnessImportSession.__new__(h.HarnessImportSession)
 
 class _Task:
@@ -807,6 +855,7 @@ class TestHarnessBeets2Contract(unittest.TestCase):
             f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}",
         )
         self.assertIn("LIBRARY_OK", proc.stdout)
+        self.assertIn("REAL_DUPLICATE_LOOKUP_OK", proc.stdout)
         self.assertIn("CONTRACT_OK", proc.stdout)
         self.assertIn("DISCOGS_NEUTRALIZE_OK", proc.stdout)
         self.assertIn("BAD_RIP_CLEANUP_OK", proc.stdout)
