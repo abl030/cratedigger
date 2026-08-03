@@ -32,5 +32,40 @@ ok(calls === 2 && !host.result.innerHTML.includes('No YouTube album foundNo YouT
 delete globalThis.document;
 delete globalThis.fetch;
 
+// A deferred response from an old generation must not repaint its replacement.
+const staleHost = fakeHost();
+globalThis.document = { getElementById: () => staleHost };
+let releaseDeferred;
+globalThis.fetch = () => new Promise((resolve) => { releaseDeferred = resolve; });
+const staleRun = checkYoutubeRescue('release-stale', 1, identifier);
+staleHost.dataset.generation = '99';
+releaseDeferred({ ok: true, status: 200, json: async () => ({ outcome: 'ok', youtube_releases: [] }) });
+await staleRun;
+ok(staleHost.result.innerHTML === '', 'stale detached generation cannot overwrite current result');
+
+// Button cancellation is reusable; accepted submit carries browse_id only and
+// the submitting guard admits one concurrent POST.
+const button = { dataset: { browseId: 'MPREb_kb5fohQCJ6d' }, addEventListener: (_name, listener) => { button.listener = listener; } };
+const submitHost = fakeHost(); submitHost.result.querySelectorAll = () => [button];
+globalThis.document = { getElementById: (id) => id === 'yt-rescue-release-submit' ? submitHost : { style: {}, textContent: '' } };
+let confirms = false; globalThis.window = { confirm: () => confirms };
+const requests = []; let releaseSubmit;
+globalThis.fetch = (url, options) => {
+  requests.push({ url, options });
+  if (url.endsWith('youtube-album')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ outcome: 'ok', youtube_releases: [{ yt_browse_id: button.dataset.browseId }] }) });
+  return new Promise((resolve) => { releaseSubmit = resolve; });
+};
+await checkYoutubeRescue('release-submit', 1, identifier);
+await button.listener({ stopPropagation() {} });
+ok(requests.length === 1, 'cancel keeps choice active without submit');
+confirms = true;
+const submitA = button.listener({ stopPropagation() {} });
+const submitB = button.listener({ stopPropagation() {} });
+await Promise.resolve();
+ok(requests.length === 2 && requests[1].url === '/api/pipeline/1/youtube-rescue' && requests[1].options.body === JSON.stringify({ browse_id: 'MPREb_kb5fohQCJ6d' }), 'accept submits exact browse_id once');
+releaseSubmit({ ok: true, json: async () => ({ outcome: 'accepted' }) });
+await Promise.all([submitA, submitB]);
+delete globalThis.document; delete globalThis.fetch; delete globalThis.window;
+
 if (failed) process.exit(1);
-console.log('8 passed, 0 failed');
+console.log('11 passed, 0 failed');
