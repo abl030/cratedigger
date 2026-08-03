@@ -23,6 +23,7 @@ from lib.import_evidence import (
 )
 from lib.quality import (
     AlbumQualityEvidence,
+    AlbumQualityEvidenceFile,
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
     QualityRankConfig,
@@ -320,11 +321,18 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
         )
 
     def test_old_lossless_source_generation_is_policy_usable_at_action_time(self):
+        opus_root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, opus_root, ignore_errors=True)
+        opus_path = os.path.join(opus_root, "01 - Track.opus")
+        with open(opus_path, "wb") as handle:
+            handle.write(b"opus")
+        identity = release_identity_for_lookup("release-1")
+        assert identity is not None
         legacy = make_album_quality_evidence(
             preserve_spectral_measurement_version=True,
             mb_release_id="release-1",
-            source_path=self.root,
-            files=snapshot_audio_files(self.root),
+            source_path=opus_root,
+            files=snapshot_audio_files(opus_root),
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=128,
                 avg_bitrate_kbps=128,
@@ -335,11 +343,19 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
                 spectral_subject="source",
                 spectral_provenance="carried",
                 spectral_measurement_version=None,
+                was_converted_from="flac",
             ),
             verified_lossless_proof=VerifiedLosslessProof(
                 provenance="carried",
                 source="flac",
                 classifier="spectral_verified_lossless",
+            ),
+            v0_metric=AlbumQualityV0Metric(
+                min_bitrate_kbps=223,
+                avg_bitrate_kbps=232,
+                median_bitrate_kbps=228,
+                subject="source",
+                provenance="carried",
             ),
             codec="opus",
             container="opus",
@@ -357,7 +373,18 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
             self.db,
             request_id=42,
             mb_release_id="release-1",
-            current_release=self._current_release(),
+            current_release=CurrentBeetsUnique(
+                identity=identity,
+                album_id=1,
+                album_path=opus_root,
+                items=(CurrentBeetsItem(
+                    id=1,
+                    path=opus_path,
+                    format="Opus",
+                    bitrate=128_000,
+                ),),
+                selectors=("mb_albumid:release-1",),
+            ),
         )
 
         self.assertTrue(result.available)
@@ -369,6 +396,62 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
         historical = self.db.load_album_quality_evidence_by_id(stored.id)
         assert historical is not None
         self.assertEqual(historical.measurement.spectral_grade, "suspect")
+
+    def test_native_lossless_source_history_stays_generation_strict(self):
+        """Source anchors do not make readable native lossless irreplaceable."""
+
+        from lib.quality_evidence import (
+            current_evidence_for_policy,
+            current_evidence_preserves_source_spectral,
+            current_spectral_evidence_policy_usable,
+        )
+
+        for container in ("flac", "alac", "wav"):
+            with self.subTest(container=container):
+                evidence = make_album_quality_evidence(
+                    preserve_spectral_measurement_version=True,
+                    mb_release_id="release-1",
+                    source_path=self.root,
+                    files=[AlbumQualityEvidenceFile(
+                        relative_path=f"01.{container}",
+                        size_bytes=1,
+                        mtime_ns=1,
+                        extension=container,
+                        container=container,
+                        codec=container,
+                    )],
+                    measurement=AudioQualityMeasurement(
+                        min_bitrate_kbps=700,
+                        avg_bitrate_kbps=750,
+                        median_bitrate_kbps=725,
+                        format=container.upper(),
+                        spectral_grade="likely_transcode",
+                        spectral_bitrate_kbps=96,
+                        spectral_subject="source",
+                        spectral_provenance="carried",
+                        spectral_measurement_version=None,
+                        was_converted_from="flac",
+                    ),
+                    v0_metric=AlbumQualityV0Metric(
+                        min_bitrate_kbps=165,
+                        avg_bitrate_kbps=171,
+                        median_bitrate_kbps=168,
+                        subject="source",
+                        provenance="carried",
+                    ),
+                    verified_lossless_proof=VerifiedLosslessProof(
+                        provenance="carried",
+                        source="flac",
+                        classifier="spectral_verified_lossless",
+                    ),
+                    codec=container,
+                    container=container,
+                    storage_format=container.upper(),
+                )
+                self.assertFalse(current_evidence_preserves_source_spectral(evidence))
+                self.assertFalse(current_spectral_evidence_policy_usable(evidence))
+                projected = current_evidence_for_policy(evidence)
+                self.assertIsNone(projected.measurement.spectral_grade)
 
     def test_matching_candidate_capture_path_remains_historical(self):
         evidence = make_album_quality_evidence(

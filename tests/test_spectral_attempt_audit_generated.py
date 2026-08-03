@@ -1,7 +1,6 @@
 """Generated invariant for independent two-sided spectral attempt audit."""
 
 import configparser
-import json
 import logging
 import os
 import subprocess as sp
@@ -9,7 +8,7 @@ import tempfile
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from unittest.mock import patch
 
 import msgspec
@@ -106,9 +105,12 @@ def assert_iron_and_wine_outer_policy(
     dispatch_code: str | None,
     request_status: str,
     outcomes: list[str],
-    action_copy_removed: bool,
+    canonical_source_removed: bool,
+    cleanup_receipt_recorded: bool,
+    job_terminal: bool,
+    owner_cleared: bool,
 ) -> None:
-    """Name the complete #1007 witness at the preview-to-importer boundary."""
+    """Name the complete #1007 automation witness at the importer boundary."""
 
     if analyzer_roles != ["candidate"]:
         raise AssertionError("preserved source triggered a derivative HAVE scan")
@@ -120,8 +122,14 @@ def assert_iron_and_wine_outer_policy(
         raise AssertionError("quality rejection did not return the request to wanted")
     if "have_analysis_error" in outcomes:
         raise AssertionError("policy dispatch became an analyser failure")
-    if not action_copy_removed:
-        raise AssertionError("force preview action copy was not cleaned up")
+    if not canonical_source_removed:
+        raise AssertionError("automation source was not removed by owned cleanup")
+    if not cleanup_receipt_recorded:
+        raise AssertionError("automation terminal result lacks cleanup receipt")
+    if not job_terminal:
+        raise AssertionError("automation import job was not terminal")
+    if not owner_cleared:
+        raise AssertionError("automation owner was not cleared with terminal state")
 
 
 def _run_have_boundary_through_both_adapters(
@@ -1242,7 +1250,10 @@ class TestAttemptAuditCheckerQualification(unittest.TestCase):
                 dispatch_code="have_analysis_error",
                 request_status="wanted",
                 outcomes=["have_analysis_error"],
-                action_copy_removed=True,
+                canonical_source_removed=True,
+                cleanup_receipt_recorded=True,
+                job_terminal=True,
+                owner_cleared=True,
             )
 
     def test_candidate_reuse_checker_rejects_matching_snapshot_rescan(self):
@@ -1527,6 +1538,91 @@ class TestAttemptAuditGenerated(unittest.TestCase):
                 audit.existing.spectral_measurement_version,
                 persisted_generation,
             )
+
+    @given(
+        container=st.sampled_from(("flac", "alac", "wav")),
+        persisted_generation=st.sampled_from((
+            None,
+            SPECTRAL_MEASUREMENT_VERSION - 1,
+            SPECTRAL_MEASUREMENT_VERSION,
+            SPECTRAL_MEASUREMENT_VERSION + 1,
+        )),
+    )
+    @example(container="flac", persisted_generation=None)
+    def test_native_lossless_source_anchors_remain_generation_strict(
+        self,
+        container: str,
+        persisted_generation: int | None,
+    ) -> None:
+        """Proof/V0 provenance cannot suppress a native HAVE remeasurement."""
+
+        from lib.import_preview import current_spectral_evidence_reusable
+        from lib.quality import (
+            AlbumQualityEvidenceFile,
+            AlbumQualityV0Metric,
+            AudioQualityMeasurement,
+            VerifiedLosslessProof,
+        )
+        from lib.quality_evidence import (
+            current_evidence_for_policy,
+            current_evidence_preserves_source_spectral,
+        )
+        from tests.helpers import make_album_quality_evidence
+
+        evidence = make_album_quality_evidence(
+            preserve_spectral_measurement_version=True,
+            files=[AlbumQualityEvidenceFile(
+                relative_path=f"01.{container}",
+                size_bytes=1,
+                mtime_ns=1,
+                extension=container,
+                container=container,
+                codec=container,
+            )],
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=700,
+                avg_bitrate_kbps=750,
+                median_bitrate_kbps=725,
+                format=container.upper(),
+                spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=96,
+                spectral_subject="source",
+                spectral_provenance="carried",
+                spectral_measurement_version=persisted_generation,
+                was_converted_from="flac",
+            ),
+            v0_metric=AlbumQualityV0Metric(
+                min_bitrate_kbps=165,
+                avg_bitrate_kbps=171,
+                median_bitrate_kbps=168,
+                subject="source",
+                provenance="carried",
+            ),
+            verified_lossless_proof=VerifiedLosslessProof(
+                provenance="carried",
+                source="flac",
+                classifier="spectral_verified_lossless",
+            ),
+            codec=container,
+            container=container,
+            storage_format=container.upper(),
+        )
+
+        self.assertFalse(current_evidence_preserves_source_spectral(evidence))
+        reusable = current_spectral_evidence_reusable(evidence)
+        self.assertEqual(
+            reusable,
+            persisted_generation == SPECTRAL_MEASUREMENT_VERSION,
+        )
+        projected = current_evidence_for_policy(evidence)
+        if reusable:
+            self.assertEqual(
+                projected.measurement.spectral_grade,
+                "likely_transcode",
+            )
+        else:
+            self.assertIsNone(projected.measurement.spectral_grade)
+
     @given(
         persisted_generation=st.one_of(
             st.none(), st.integers(min_value=0, max_value=5),
@@ -2020,56 +2116,62 @@ class TestAttemptAuditGenerated(unittest.TestCase):
 
 @requires_postgres
 class TestIronAndWineOuterEvidenceSlice(unittest.TestCase):
-    """#1007's live witness through preview persistence and force dispatch."""
+    """#1007's live witness through preview persistence and automation import."""
 
     def test_preserved_wrong_generation_reaches_real_dispatch_policy(self):
         from lib.beets_db import AlbumInfo
         from lib.config import CratediggerConfig
-        from lib.dispatch import dispatch_import_from_db
-        from lib.dispatch.types import ImportOneRun
+        from lib.dispatch import dispatch_import_core
+        from lib.dispatch.types import DispatchOutcome, ImportOneRun
+        from lib.download_processing import CompletionDispatched
+        from lib.download_reconstruction import reconstruct_grab_list_entry
+        from lib.import_execution import (
+            CancellationToken,
+            ExecutionLeaseSnapshot,
+            OwnerSessionIdentity,
+            ProcessIdentity,
+        )
         from lib.import_preview import (
             HeaderRepairFn,
             ImportPreviewDB,
             ImportPreviewResult,
         )
-        from lib.import_queue import (
-            IMPORT_JOB_FORCE,
-            force_import_dedupe_key,
-            force_import_payload,
-        )
+        from lib.import_queue import ImportJob
         from lib.measurement import ExistingSpectralAuditLookup
+        from lib.pipeline_db import PipelineDB
+        from lib.processing_paths import canonical_folder_for_row
         from lib.quality import (
             EVIDENCE_SUBJECT_SOURCE,
+            ActiveDownloadFileState,
+            ActiveDownloadState,
             AlbumQualityV0Metric,
             AudioQualityMeasurement,
+            DownloadInfo,
             ImportResult,
             SpectralAnalysisDetail,
             V0ProbeEvidence,
         )
         from lib.quality_evidence import snapshot_audio_files
         from scripts import import_preview_worker
+        from scripts.importer import execute_automation_import_job, process_claimed_job
         from tests.fakes import FakeBeetsDB
         from tests.helpers import (
-            finalize_claimed_dispatch,
+            handoff_automation_owner,
             make_album_quality_evidence,
+            pinned_dispatch_authority,
         )
 
         db = make_db()
         self.addCleanup(db.close)
         with tempfile.TemporaryDirectory() as root:
             staging_dir = os.path.join(root, "Incoming")
-            candidate = os.path.join(
-                staging_dir, "failed_imports", "Iron & Wine",
-            )
             existing = os.path.join(root, "Beets", "Iron & Wine")
             processing_dir = os.path.join(root, "processing")
-            os.makedirs(candidate)
             os.makedirs(existing)
             os.makedirs(os.path.join(root, "slskd"))
             os.makedirs(os.path.join(processing_dir, "albums"), mode=0o700)
             os.makedirs(os.path.join(processing_dir, "preview"), mode=0o700)
             os.chmod(processing_dir, 0o700)
-            Path(candidate, "01.flac").write_bytes(b"candidate-flac")
             for number in (1, 2, 3):
                 Path(existing, f"{number:02d}.opus").write_bytes(
                     b"installed-opus",
@@ -2090,6 +2192,25 @@ class TestIronAndWineOuterEvidenceSlice(unittest.TestCase):
                 mb_release_id=mbid,
             )
             db.set_tracks(request_id, [{"track_number": 1, "title": "Track"}])
+            state = ActiveDownloadState(
+                filetype="flac",
+                enqueued_at="2026-08-03T00:00:00+00:00",
+                files=[ActiveDownloadFileState(
+                    username="rexasaurus",
+                    filename="Iron & Wine\\The Creek Drank the Cradle\\01.flac",
+                    file_dir="Iron & Wine\\The Creek Drank the Cradle",
+                    size=len(b"candidate-flac"),
+                )],
+            )
+            request = db.get_request(request_id)
+            assert request is not None
+            candidate = canonical_folder_for_row(
+                reconstruct_grab_list_entry(request, state),
+                os.path.join(processing_dir, "albums"),
+            )
+            state = msgspec.structs.replace(state, current_path=candidate)
+            os.makedirs(candidate)
+            Path(candidate, "01.flac").write_bytes(b"candidate-flac")
             current = make_album_quality_evidence(
                 preserve_spectral_measurement_version=True,
                 mb_release_id=mbid,
@@ -2137,23 +2258,22 @@ class TestIronAndWineOuterEvidenceSlice(unittest.TestCase):
             self.assertTrue(db.set_request_current_evidence(
                 request_id, persisted_current.id,
             ))
-            download_log_id = db.log_download(
+            job = handoff_automation_owner(
+                db,
                 request_id,
-                outcome="rejected",
-                validation_result=json.dumps({"failed_path": candidate}),
+                state=state.to_json(),
+                canonical_path=candidate,
             )
-            job = db.enqueue_import_job(
-                IMPORT_JOB_FORCE,
-                request_id=request_id,
-                dedupe_key=force_import_dedupe_key(download_log_id),
-                payload=force_import_payload(
-                    download_log_id=download_log_id,
-                    failed_path=candidate,
-                    source_username="rexasaurus",
-                ),
+            preview_lease = ExecutionLeaseSnapshot(
+                host_boot_id="iron-and-wine-preview-boot",
+                invocation_id="iron-and-wine-preview",
+                systemd_unit="cratedigger-import-preview-worker.service",
+                worker=ProcessIdentity(pid=7001, start_ticks=70001),
             )
             claimed_preview = claim_next_import_preview_job(
-                db, worker_id="iron-and-wine-preview",
+                db,
+                worker_id="iron-and-wine-preview",
+                execution_lease=preview_lease,
             )
             assert claimed_preview is not None and claimed_preview.id == job.id
             beets = FakeBeetsDB()
@@ -2216,12 +2336,14 @@ class TestIronAndWineOuterEvidenceSlice(unittest.TestCase):
                 request_id: int,
                 path: str,
                 source_display_path: str | None = None,
-                force: bool = True,
+                force: bool = False,
                 download_log_id: int | None = None,
                 import_job_id: int | None = None,
                 runtime_config: CratediggerConfig | None = None,
                 repair_fn: HeaderRepairFn | None = None,
+                cancellation_token: CancellationToken | None = None,
             ) -> ImportPreviewResult:
+                del cancellation_token
                 return import_preview_worker.measure_and_persist_candidate_evidence(
                     db_arg,
                     request_id=request_id,
@@ -2230,7 +2352,7 @@ class TestIronAndWineOuterEvidenceSlice(unittest.TestCase):
                     force=force,
                     download_log_id=download_log_id,
                     import_job_id=import_job_id,
-                    runtime_config=runtime_config,
+                    runtime_config=runtime_config or cfg,
                     repair_fn=repair_fn,
                     run_import_fn=run_preview_import,
                     spectral_detail_analyzer=analyze,
@@ -2239,9 +2361,44 @@ class TestIronAndWineOuterEvidenceSlice(unittest.TestCase):
                     ),
                 )
 
+            def execute_owned_automation(
+                db_arg: PipelineDB,
+                job_arg: ImportJob,
+                *,
+                ctx: object,
+                execution_lease: ExecutionLeaseSnapshot,
+                cancellation_token: CancellationToken,
+                owner_session_identity: OwnerSessionIdentity,
+            ) -> DispatchOutcome:
+                del ctx
+                return execute_automation_import_job(
+                    db_arg,
+                    job_arg,
+                    ctx=object(),
+                    completed_processing_fn=completed_processing,
+                    execution_lease=execution_lease,
+                    cancellation_token=cancellation_token,
+                    owner_session_identity=owner_session_identity,
+                )
+
             with (
                 patch("lib.beets_db.BeetsDB", lambda *_args, **_kwargs: beets),
+                pinned_dispatch_authority(
+                    cast(Any, db),
+                    preview_lease,
+                ) as (preview_token, preview_owner_session),
             ):
+                assert preview_token is not None
+                assert preview_owner_session is not None
+                preview_authority = (
+                    import_preview_worker._automation_authority_snapshot(
+                        db,
+                        claimed_preview,
+                        preview_lease,
+                        runtime_config=cfg,
+                    )
+                )
+                assert preview_authority is not None
                 updated = import_preview_worker.process_claimed_preview_job(
                     db,
                     claimed_preview,
@@ -2250,6 +2407,10 @@ class TestIronAndWineOuterEvidenceSlice(unittest.TestCase):
                         ExistingSpectralAuditLookup(path=existing)
                     ),
                     runtime_config=cfg,
+                    execution_lease=preview_lease,
+                    automation_authority=preview_authority,
+                    cancellation_token=preview_token,
+                    owner_session_identity=preview_owner_session,
                     candidate_measurement_fn=measure_candidate,
                 )
             assert updated is not None and updated.preview_result is not None
@@ -2297,32 +2458,72 @@ class TestIronAndWineOuterEvidenceSlice(unittest.TestCase):
             self.assertIsNone(
                 preview_import.spectral.existing.spectral_measurement_version,
             )
-            action_path = updated.preview_result.get("action_path")
-            self.assertIsInstance(action_path, str)
-            assert isinstance(action_path, str)
+            importer_lease = ExecutionLeaseSnapshot(
+                host_boot_id="iron-and-wine-importer-boot",
+                invocation_id="iron-and-wine-importer",
+                systemd_unit="cratedigger-importer.service",
+                worker=ProcessIdentity(pid=7002, start_ticks=70002),
+            )
             claimed_importer = claim_next_import_job(
-                db, worker_id="iron-and-wine-importer",
+                db,
+                worker_id="iron-and-wine-importer",
+                execution_lease=importer_lease,
             )
             assert claimed_importer is not None and claimed_importer.id == job.id
+
+            def completed_processing(
+                _entry: object,
+                _state: object,
+                _ctx: object,
+                *,
+                import_job_id: int,
+                cancellation_token: CancellationToken,
+                execution_lease: ExecutionLeaseSnapshot,
+                owner_session_identity: OwnerSessionIdentity,
+                **_kwargs: object,
+            ) -> CompletionDispatched:
+                return CompletionDispatched(dispatch_import_core(
+                    path=candidate,
+                    mb_release_id=mbid,
+                    request_id=request_id,
+                    label="Iron & Wine - The Creek Drank the Cradle",
+                    beets_harness_path=cfg.beets_harness_path,
+                    db=db,
+                    dl_info=DownloadInfo(
+                        username="rexasaurus",
+                        filetype="flac",
+                    ),
+                    distance=0.05,
+                    cfg=cfg,
+                    candidate_import_job_id=import_job_id,
+                    execution_lease=execution_lease,
+                    cancellation_token=cancellation_token,
+                    owner_session_identity=owner_session_identity,
+                ))
+
             with (
                 patch("lib.beets_db.BeetsDB", lambda *_args, **_kwargs: beets),
-                patch("lib.config.read_runtime_config", return_value=cfg),
+                pinned_dispatch_authority(
+                    cast(Any, db),
+                    importer_lease,
+                ) as (importer_token, importer_owner_session),
             ):
-                outcome = dispatch_import_from_db(
+                assert importer_token is not None
+                assert importer_owner_session is not None
+                terminal_job = process_claimed_job(
                     db,
-                    request_id,
-                    action_path,
-                    source_reference_path=candidate,
-                    source_username="rexasaurus",
-                    import_job_id=claimed_importer.id,
-                    download_log_id=download_log_id,
-                    cfg=cfg,
+                    claimed_importer,
+                    execute_fn=execute_owned_automation,
+                    execution_lease=importer_lease,
+                    cancellation_token=importer_token,
+                    owner_session_identity=importer_owner_session,
                 )
-                finalize_claimed_dispatch(db, claimed_importer, outcome)
+            assert terminal_job is not None
             logs = db.get_log(limit=100)
             outcomes = [str(log["outcome"]) for log in logs]
             request = db.get_request(request_id)
             assert request is not None
+            terminal_result = terminal_job.result or {}
             assert_iron_and_wine_outer_policy(
                 analyzer_roles=analyzer_roles,
                 persisted_grade=(
@@ -2333,9 +2534,21 @@ class TestIronAndWineOuterEvidenceSlice(unittest.TestCase):
                     preview_import.spectral.existing.spectral_measurement_version
                     if preview_import.spectral.existing is not None else None
                 ),
-                dispatch_code=outcome.code,
+                dispatch_code=terminal_result.get("code"),
                 request_status=str(request["status"]),
                 outcomes=outcomes,
-                action_copy_removed=not os.path.exists(action_path),
+                canonical_source_removed=not os.path.exists(candidate),
+                cleanup_receipt_recorded=(
+                    terminal_result.get("processing_cleanup") is not None
+                ),
+                job_terminal=(
+                    terminal_job.status == "failed" and terminal_job.completed_at is not None
+                ),
+                owner_cleared=(
+                    request.get("active_automation_import_job_id") is None
+                ),
             )
-            self.assertIn("suspect_lossless_downgrade", outcome.message)
+            self.assertIn(
+                "suspect_lossless_downgrade",
+                str(terminal_job.message),
+            )

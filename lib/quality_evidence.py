@@ -168,21 +168,34 @@ def spectral_measurement_generation_is_current(
 def current_evidence_preserves_source_spectral(
     evidence: AlbumQualityEvidence,
 ) -> bool:
-    """Whether installed bytes cannot regenerate the row's source spectral.
+    """Whether the installed bytes are an irreplaceable lossy derivative.
 
-    Lossless-derived library files are a different spectral subject from the
-    acquisition bytes. Their source-side grade may be carried for audit, but
-    an old measurement generation cannot be recreated by scanning the lossy
-    installed derivative without violating R19.
+    A source V0 anchor or lossless proof describes provenance, not whether the
+    current library bytes can be measured again.  The cross-generation source
+    exception is only sound when a recorded lossless source was converted into
+    one known lossy installed container.  Native lossless, mixed, and
+    unresolved files remain remeasurable and must retain generation strictness.
     """
 
     converted_from = (evidence.measurement.was_converted_from or "").lower()
-    if converted_from in LOSSLESS_CODECS:
-        return True
-    if evidence.verified_lossless_proof is not None:
-        return True
-    metric = evidence.v0_metric
-    return metric is not None and metric.subject == EVIDENCE_SUBJECT_SOURCE
+    if (
+        converted_from not in LOSSLESS_CODECS
+        or evidence.measurement.spectral_subject != EVIDENCE_SUBJECT_SOURCE
+        or not evidence.files
+        or any(not file.container or not file.codec for file in evidence.files)
+    ):
+        return False
+    containers = {
+        file.container.lower()
+        for file in evidence.files
+        if file.container and file.codec
+    }
+    codecs = {file.codec.lower() for file in evidence.files if file.codec}
+    return (
+        len(containers) == 1
+        and containers <= _LOSSY_CONTAINERS
+        and not codecs.intersection(LOSSLESS_CODECS)
+    )
 
 
 _POLICY_USABLE_SPECTRAL_GRADES = frozenset({
