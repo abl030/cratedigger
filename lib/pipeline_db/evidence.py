@@ -1,8 +1,8 @@
 """album_quality_evidence content-addressed keying + FK setters."""
 
 import json
+from collections.abc import Mapping, Sequence
 from datetime import datetime
-from typing import Any, cast
 
 import msgspec
 
@@ -33,35 +33,6 @@ class PersistedEvidenceFileRow(msgspec.Struct, frozen=True, forbid_unknown_field
     container: str
     codec: str | None
     decode_ok: bool
-
-
-class PersistedAudioDiagnosticRow(
-    msgspec.Struct, frozen=True, forbid_unknown_fields=True
-):
-    """Exact persisted JSONB diagnostic grammar."""
-
-    relative_path: str
-    category: str
-    return_code: int | None
-    stderr_excerpt: str
-    stderr_bytes: int
-    stderr_sha256: str
-    stderr_truncated: bool
-
-
-class PersistedAudioValidationRow(
-    msgspec.Struct, frozen=True, forbid_unknown_fields=True
-):
-    """Exact persisted JSONB audio-validation grammar."""
-
-    policy_id: str
-    tool: str
-    tool_version: str
-    outcome: str
-    files_checked: int
-    files_failed: int
-    diagnostics: list[PersistedAudioDiagnosticRow]
-    omitted_diagnostics: int
 
 
 class PersistedAlbumQualityEvidenceRow(
@@ -110,7 +81,7 @@ class PersistedAlbumQualityEvidenceRow(
     verified_lossless_source: str | None
     verified_lossless_classifier: str | None
     verified_lossless_detail: str | None
-    audio_validation: PersistedAudioValidationRow
+    audio_validation: AudioValidationReport
     audio_corrupt: bool
     audio_error: str | None
     folder_layout: str
@@ -133,10 +104,12 @@ EVIDENCE_FILE_PROJECTION_COLUMNS: tuple[str, ...] = (
 )
 
 
-def _strict_pg_row(
-    value: dict[str, Any],
-    typ: type[PersistedAlbumQualityEvidenceRow] | type[PersistedEvidenceFileRow],
-) -> PersistedAlbumQualityEvidenceRow | PersistedEvidenceFileRow:
+def _strict_pg_row[
+    PersistedRow: (PersistedAlbumQualityEvidenceRow, PersistedEvidenceFileRow)
+](
+    value: Mapping[str, object],
+    typ: type[PersistedRow],
+) -> PersistedRow:
     """Reject projection drift and return its exact typed row."""
     fields = set(typ.__struct_fields__)
     if set(value) != fields:
@@ -144,8 +117,26 @@ def _strict_pg_row(
             f"projection columns drifted: missing={sorted(fields - set(value))}, "
             f"extra={sorted(set(value) - fields)}"
         )
-    typed = msgspec.convert(value, type=typ)
-    return typed
+    return msgspec.convert(value, type=typ)
+
+
+def _typed_evidence_rows_from_pg(
+    row: Mapping[str, object],
+    file_rows: Sequence[Mapping[str, object]],
+) -> tuple[PersistedAlbumQualityEvidenceRow, list[PersistedEvidenceFileRow]]:
+    """Decode the exact PostgreSQL projection before evidence semantics.
+
+    This is shared by the two live load paths and the corpus replayer's
+    static boundary. Every caller receives canonical Structs; semantic code
+    below never receives a cursor dict or a JSONB builtin tree.
+    """
+    return (
+        _strict_pg_row(row, PersistedAlbumQualityEvidenceRow),
+        [
+            _strict_pg_row(file_row, PersistedEvidenceFileRow)
+            for file_row in file_rows
+        ],
+    )
 
 
 class _EvidenceMixin(_PipelineDBBase):
@@ -672,8 +663,14 @@ class _EvidenceMixin(_PipelineDBBase):
             """,
             (int(row["id"]),),
         )
-        file_rows = [dict(r) for r in files_cur.fetchall()]
-        return self._album_quality_evidence_from_row(dict(row), file_rows)
+        persisted, persisted_files = _typed_evidence_rows_from_pg(
+            row,
+            files_cur.fetchall(),
+        )
+        return self._album_quality_evidence_from_persisted_rows(
+            persisted,
+            persisted_files,
+        )
 
     def find_album_quality_evidence(
         self,
@@ -705,8 +702,14 @@ class _EvidenceMixin(_PipelineDBBase):
             """,
             (int(row["id"]),),
         )
-        file_rows = [dict(r) for r in files_cur.fetchall()]
-        return self._album_quality_evidence_from_row(dict(row), file_rows)
+        persisted, persisted_files = _typed_evidence_rows_from_pg(
+            row,
+            files_cur.fetchall(),
+        )
+        return self._album_quality_evidence_from_persisted_rows(
+            persisted,
+            persisted_files,
+        )
 
     def claim_current_v0_research_attempt(
         self,
@@ -1054,26 +1057,31 @@ class _EvidenceMixin(_PipelineDBBase):
 
     @staticmethod
     def _album_quality_evidence_from_row(
-        row: dict[str, Any],
-        file_rows: list[dict[str, Any]],
+        row: Mapping[str, object],
+        file_rows: Sequence[Mapping[str, object]],
     ) -> AlbumQualityEvidence:
-        """Decode one ``album_quality_evidence`` read into its Struct.
+        """Decode raw cursor-shaped evidence for corpus replay compatibility.
 
-        Static because it touches no connection state, and that is
-        load-bearing rather than tidiness: ``scripts/decision_differential.py``
-        re-decides an exported corpus through THIS function so a policy
-        differential measures the shape production reads, not a bespoke
-        decoder's idea of it.
+        Production loads call :meth:`_album_quality_evidence_from_persisted_rows`
+        after this same strict raw-PG adapter. This static spelling remains the
+        corpus replayer's entrypoint, so replay and production share the exact
+        decoder without a second semantic mapper.
         """
-        persisted = _strict_pg_row(row, PersistedAlbumQualityEvidenceRow)
-        assert isinstance(persisted, PersistedAlbumQualityEvidenceRow)
-        persisted_files = [
-            cast(
-                PersistedEvidenceFileRow,
-                _strict_pg_row(file_row, PersistedEvidenceFileRow),
-            )
-            for file_row in file_rows
-        ]
+        persisted, persisted_files = _typed_evidence_rows_from_pg(
+            row,
+            file_rows,
+        )
+        return _EvidenceMixin._album_quality_evidence_from_persisted_rows(
+            persisted,
+            persisted_files,
+        )
+
+    @staticmethod
+    def _album_quality_evidence_from_persisted_rows(
+        persisted: PersistedAlbumQualityEvidenceRow,
+        persisted_files: Sequence[PersistedEvidenceFileRow],
+    ) -> AlbumQualityEvidence:
+        """Build semantic evidence from the already-strict persisted rows."""
         v0_metric = None
         if (
             persisted.v0_min_bitrate_kbps is not None
@@ -1092,17 +1100,15 @@ class _EvidenceMixin(_PipelineDBBase):
             )
         aac_lattice = None
         if persisted.aac_lattice_tracks is not None:
-            # The one wire-decode site for the lattice capture: the JSONB
-            # array validates into its Struct here, and every consumer
-            # downstream works with the typed rows.
+            if persisted.aac_lattice_scored_tracks is None:
+                raise msgspec.ValidationError(
+                    "aac lattice tracks require scored_tracks",
+                )
             aac_lattice = AacLatticeCapture(
-                tracks=msgspec.convert(
-                    persisted.aac_lattice_tracks,
-                    type=list[AacLatticeTrackScore],
-                ),
+                tracks=persisted.aac_lattice_tracks,
                 modal_offset=persisted.aac_lattice_modal_offset,
                 modal_count=persisted.aac_lattice_modal_count,
-                scored_tracks=persisted.aac_lattice_scored_tracks or 0,
+                scored_tracks=persisted.aac_lattice_scored_tracks,
                 max_z=persisted.aac_lattice_max_z,
             )
         proof = None
@@ -1160,10 +1166,7 @@ class _EvidenceMixin(_PipelineDBBase):
             on_disk_v0_research_attempted=persisted.on_disk_v0_research_attempted,
             current_enrichment_required=persisted.current_enrichment_required,
             verified_lossless_proof=proof,
-            audio_validation=msgspec.convert(
-                msgspec.to_builtins(persisted.audio_validation),
-                type=AudioValidationReport,
-            ),
+            audio_validation=persisted.audio_validation,
             audio_corrupt=persisted.audio_corrupt,
             audio_error=persisted.audio_error,
             folder_layout=persisted.folder_layout,
