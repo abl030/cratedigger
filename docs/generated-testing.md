@@ -36,6 +36,13 @@ matrix consumes the reviewed manifest; use
 `scripts/refresh_beets_compat_releases.py --as-of YYYY-MM-DD --check` for a
 fixed-clock operator refresh check.
 
+Each matrix member admits the deployment-shaped active Beets plugin profile,
+loads that profile for the exact-delete boundary, and runs an incremental
+import with a writable external state file while asserting that neither the
+immutable configuration nor the source/library tree receives state artifacts.
+An executable closure check also keeps the tip and historical Beets packages
+out of normal packages, shells, apps, and the exported-module VM closure.
+
 ## Bug hunting — the house method
 
 This is the primary bug-hunting workflow (proven on #550, where a live

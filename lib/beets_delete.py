@@ -449,7 +449,15 @@ def execute_pinned_beets_delete(request: BeetsDeleteRequest) -> BeetsDeleteOutco
     # Cratedigger library delete, so force that common plugin profile into its
     # documented non-suggesting mode for this operation.
     config["importsource"]["suggest_removal"].set(False)
-    plugins.load_plugins()
+    if hasattr(plugins, "get_plugin_names"):
+        plugins.load_plugins()
+    else:
+        # Legacy Beets accepts an explicit name sequence and otherwise loads
+        # nothing; modern Beets resolves the configured profile itself.
+        legacy_load_plugins: Callable[[set[str]], object] = getattr(  # noqa: B009 - legacy signature
+            plugins, "load_plugins",
+        )
+        legacy_load_plugins(configured_plugins)
     loaded_plugins = {plugin.name for plugin in plugins.find_plugins()}
     missing_plugins = sorted(configured_plugins - loaded_plugins)
     if missing_plugins:

@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import tempfile
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from tests.fakes.daily_flake_update import FakeDailyFlakeUpdateCommands
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "daily_flake_update.sh"
+TIP_SCRIPT = REPO_ROOT / "scripts" / "daily_beets_tip_update.sh"
 
 
 class TestDailyFlakeUpdateScript(unittest.TestCase):
@@ -36,6 +39,15 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
         self.assertIn("Refs #498", state["commit_args"])
         self.assertIn("ALL CANDIDATE GATES GREEN", proc.stdout)
         self.assertIn("pushed updated flake.lock", proc.stdout)
+        self.assertEqual(
+            state["lock_after_update"]["nodes"]["nixpkgs"]["locked"]["rev"],
+            "new-nixpkgs",
+        )
+        self.assertEqual(
+            state["lock_after_update"]["nodes"]["beets-tip"],
+            state["lock_before"]["nodes"]["beets-tip"],
+        )
+        self.assertEqual(state["lock_at_commit"], state["lock_after_update"])
 
         clone_path = Path(state["clone_path"])
         self.assertFalse(clone_path.exists())
@@ -155,6 +167,30 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
         self.assertIn("stable-candidate", state["stages"])
         self.assertNotIn("tip-contract", state["stages"])
         self.assertEqual(state["commit_count"], 1)
+
+    def test_shared_flock_serializes_nixpkgs_and_tip_processes(self) -> None:
+        self.fake.update_state(hold_stage="pyright", hold_seconds=0.4)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            daily = executor.submit(self.fake.run, SCRIPT)
+            deadline = time.monotonic() + 3
+            while "pyright" not in self.fake.state["stage_started"]:
+                self.assertLess(time.monotonic(), deadline, "daily runner never reached gate")
+                time.sleep(0.02)
+            tip = executor.submit(self.fake.run, TIP_SCRIPT)
+            daily_proc = daily.result(timeout=10)
+            tip_proc = tip.result(timeout=10)
+
+        state = self.fake.state
+        self.assertEqual(daily_proc.returncode, 0, daily_proc.stderr)
+        self.assertEqual(tip_proc.returncode, 0, tip_proc.stderr)
+        update_nixpkgs = state["events"].index(["nix", "flake", "update", "nixpkgs"])
+        daily_push = next(
+            index for index, event in enumerate(state["events"])
+            if event[:2] == ["git", "push"]
+        )
+        update_tip = state["events"].index(["nix", "flake", "update", "beets-tip"])
+        self.assertLess(update_nixpkgs, daily_push)
+        self.assertLess(daily_push, update_tip)
 
 
 if __name__ == "__main__":

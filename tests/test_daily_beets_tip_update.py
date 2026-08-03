@@ -33,6 +33,15 @@ class TestDailyBeetsTipUpdateScript(unittest.TestCase):
         self.assertEqual(state["commit_args"][-2:], ["--", "flake.lock"])
         self.assertIn("Refs #992", state["commit_args"])
         self.assertIsNone(state["stage_env"]["tip-contract"]["TEST_DB_DSN"])
+        self.assertEqual(
+            state["lock_after_update"]["nodes"]["beets-tip"]["locked"]["rev"],
+            "new-beets-tip",
+        )
+        self.assertEqual(
+            state["lock_after_update"]["nodes"]["nixpkgs"],
+            state["lock_before"]["nodes"]["nixpkgs"],
+        )
+        self.assertEqual(state["lock_at_commit"], state["lock_after_update"])
 
     def test_failed_canary_never_commits_or_pushes(self) -> None:
         self.fake.update_state(fault="tip-contract")

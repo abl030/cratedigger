@@ -13,6 +13,7 @@ import fcntl
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 state_path = Path(os.environ["DAILY_UPDATE_FAKE_STATE"])
@@ -37,8 +38,11 @@ with state_path.with_suffix(".lock").open("a+", encoding="utf-8") as lock:
             clone_path = Path(args[-1])
             clone_path.mkdir(parents=True)
             clone_path.joinpath(".git").mkdir()
-            clone_path.joinpath("flake.lock").write_text("old lock\n", encoding="utf-8")
+            clone_path.joinpath("flake.lock").write_text(
+                json.dumps(state["seed_lock"], sort_keys=True), encoding="utf-8"
+            )
             state["clone_path"] = str(clone_path)
+            state["lock_before"] = state["seed_lock"]
         elif args == ["diff", "--quiet", "--", "flake.lock"]:
             save()
             raise SystemExit(1 if state["lock_changed"] else 0)
@@ -47,6 +51,9 @@ with state_path.with_suffix(".lock").open("a+", encoding="utf-8") as lock:
                 fail("fake commit failed")
             state["commit_count"] += 1
             state["commit_args"] = args
+            state["lock_at_commit"] = json.loads(
+                Path.cwd().joinpath("flake.lock").read_text(encoding="utf-8")
+            )
         elif args[:2] == ["push", "origin"]:
             if state.get("fault") == "push":
                 fail("fake push failed")
@@ -62,9 +69,12 @@ with state_path.with_suffix(".lock").open("a+", encoding="utf-8") as lock:
             if state.get("fault") == "update":
                 fail("fake flake update failed")
             if state["lock_changed"]:
-                Path.cwd().joinpath("flake.lock").write_text(
-                    "new lock\n", encoding="utf-8"
-                )
+                target = args[2]
+                lock_path = Path.cwd().joinpath("flake.lock")
+                lock = json.loads(lock_path.read_text(encoding="utf-8"))
+                lock["nodes"][target]["locked"]["rev"] = "new-" + target
+                lock_path.write_text(json.dumps(lock, sort_keys=True), encoding="utf-8")
+                state["lock_after_update"] = lock
             save()
             raise SystemExit(0)
         if args == [
@@ -114,6 +124,10 @@ with state_path.with_suffix(".lock").open("a+", encoding="utf-8") as lock:
     else:
         fail(f"unexpected fake command: {command}")
 
+    state["stage_started"].append(stage)
+    save()
+    if state.get("hold_stage") == stage:
+        time.sleep(float(state.get("hold_seconds", 0.25)))
     state["stages"].append(stage)
     state["stage_env"][stage] = {
         "TEST_DB_DSN": os.environ.get("TEST_DB_DSN"),
@@ -172,6 +186,21 @@ class FakeDailyFlakeUpdateCommands:
                 "commit_args": [],
                 "push_count": 0,
                 "push_ref": None,
+                "seed_lock": {
+                    "nodes": {
+                        "root": {"inputs": {"nixpkgs": "nixpkgs", "beets-tip": "beets-tip"}},
+                        "nixpkgs": {"locked": {"rev": "old-nixpkgs"}},
+                        "beets-tip": {"locked": {"rev": "old-beets-tip"}},
+                    },
+                    "root": "root",
+                    "version": 7,
+                },
+                "lock_before": None,
+                "lock_after_update": None,
+                "lock_at_commit": None,
+                "stage_started": [],
+                "hold_stage": None,
+                "hold_seconds": 0.25,
             }
         )
 

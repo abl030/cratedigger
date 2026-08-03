@@ -31,8 +31,8 @@ in production.
 from __future__ import annotations
 
 import os
-import sys
 import subprocess
+import sys
 import unittest
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -43,6 +43,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import importlib.util
 
 import harness.beets_harness as h
 from beets import library
@@ -156,16 +157,33 @@ print("DISCOGS_NEUTRALIZE_OK")
 # operator sentinel must remain.
 from beets import config
 
+ACTIVE_PLUGINS = [
+    "musicbrainz", "discogs", "fetchart", "embedart", "lyrics", "lastgenre",
+    "scrub", "info", "missing", "duplicates", "edit", "fromfilename",
+    "ftintitle", "the", "inline", "permissions",
+]
+# Beets 2.1 exposes MusicBrainz as its built-in autotag provider. The test
+# keeps that capability active via musicbrainz.enabled while avoiding an
+# impossible legacy beetsplug import.
+if importlib.util.find_spec("beetsplug.musicbrainz") is None:
+    ACTIVE_PLUGINS.remove("musicbrainz")
+
 def cleanup_world(*, foreign_file):
     with tempfile.TemporaryDirectory() as d:
         beets_dir = os.path.join(d, "beets")
         os.makedirs(beets_dir)
+        secret = os.path.join(d, "discogs.yaml")
+        with open(secret, "w", encoding="utf-8") as handle:
+            handle.write("discogs:\n  user_token: matrix-token\n")
         with open(os.path.join(beets_dir, "config.yaml"), "w", encoding="utf-8") as handle:
             handle.write(
-                "library: %s\ndirectory: %s\nplugins: []\n"
+                "library: %s\ndirectory: %s\ninclude: [%s]\nplugins: [%s]\n"
                 "clutter: [cratedigger.json]\n"
                 "importsource:\n  suggest_removal: false\n"
-                % (os.path.join(d, "lib.db"), d)
+                "musicbrainz:\n  enabled: true\n"
+                "fetchart:\n  auto: false\nembedart:\n  auto: false\n"
+                "lyrics:\n  auto: false\nlastgenre:\n  auto: false\n"
+                % (os.path.join(d, "lib.db"), d, secret, ", ".join(ACTIVE_PLUGINS))
             )
         album_dir = os.path.join(d, "The Rolling Stones", "1964 - Album")
         os.makedirs(album_dir)
@@ -467,6 +485,7 @@ import os
 import pickle
 import subprocess
 import sys
+import configparser
 from pathlib import Path
 
 from lib.beets_config_contract import check_beets_config
@@ -574,6 +593,86 @@ finally:
 '''
 
 
+# The release matrix supplies this authority from an immutable store config
+# plus a writable /build state leaf. This branch drives the same named test
+# against that deployment-shaped world; the normal suite retains the stricter
+# root-owned tmpfs fixture above.
+_MATRIX_EXTERNAL_STATEFILE_CONTRACT = r'''
+import configparser
+import hashlib
+import os
+import pickle
+import subprocess
+import sys
+from pathlib import Path
+
+from lib.config import CratediggerConfig
+
+
+def manifest(root):
+    return [
+        (str(path.relative_to(root)), hashlib.sha256(path.read_bytes()).hexdigest())
+        for path in sorted(Path(root).rglob("*")) if path.is_file()
+    ]
+
+
+runtime = Path(os.environ["CRATEDIGGER_BEETS_MATRIX_RUNTIME_CONFIG"])
+parser = configparser.RawConfigParser()
+assert parser.read(runtime) == [str(runtime)]
+cfg = CratediggerConfig.from_ini(parser)
+config = Path(cfg.beets_config_dir)
+library = Path(cfg.beets_directory)
+state = Path(cfg.beets_state_file)
+database = Path(cfg.beets_library_db)
+source = Path("/build/cratedigger-matrix/incremental-source")
+source.mkdir(exist_ok=True)
+audio = source / "01 - Matrix State.flac"
+subprocess.run([
+    "ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i",
+    "sine=frequency=440:duration=0.1", "-metadata", "artist=Matrix Artist",
+    "-metadata", "album=Matrix Album", "-metadata", "title=Matrix State",
+    "-c:a", "flac", str(audio),
+], check=True)
+before_config = manifest(config)
+before_library = manifest(library)
+before_source = manifest(source)
+before_state = state.read_bytes()
+before_database = database.read_bytes()
+shim = source.parent / "matrix-shim"
+shim.mkdir(exist_ok=True)
+(shim / "sitecustomize.py").write_text("""\\
+from beets.autotag import mb
+from beets.autotag.hooks import AlbumInfo, TrackInfo
+def match_album(artist, album, tracks, extra_tags):
+    return [AlbumInfo(album="Matrix Album", artist="Matrix Artist", album_id="11111111-2222-3333-4444-555555555555", tracks=[TrackInfo(title="Matrix State", artist="Matrix Artist", track_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", index=1)])]
+mb.match_album = match_album
+""", encoding="utf-8")
+proc = subprocess.run(
+    [sys.executable, "-m", "beets", "import", "-A", "-q", "--nocopy", "--nowrite", str(source)],
+    env={
+        **os.environ,
+        "BEETSDIR": cfg.beets_config_dir,
+        "PYTHONPATH": str(shim) + os.pathsep + os.environ.get("PYTHONPATH", ""),
+    },
+    text=True,
+    capture_output=True,
+    check=False,
+)
+assert proc.returncode == 0, (proc.stdout, proc.stderr)
+assert manifest(config) == before_config
+assert manifest(library) == before_library
+assert manifest(source) == before_source, (before_source, manifest(source))
+assert state.read_bytes() != before_state
+assert database.read_bytes() != before_database
+assert not (source / ".beetsstate").exists()
+assert not (library / ".beetsstate").exists()
+with state.open("rb") as handle:
+    history = pickle.load(handle)["taghistory"]
+assert any(os.fsencode(str(source)) in paths for paths in history), history
+print("EXTERNAL_STATEFILE_OK")
+'''
+
+
 def _consumer_aunique_config() -> dict:
     """Extract path policy from the deployment-owned consumer example."""
     from tests.beets_world import (
@@ -643,8 +742,13 @@ class TestHarnessBeets2Contract(unittest.TestCase):
         self.assertIn("raw diagnostic", proc.stderr)
 
     def test_real_incremental_import_uses_external_statefile_only(self):
+        contract = (
+            _MATRIX_EXTERNAL_STATEFILE_CONTRACT
+            if "CRATEDIGGER_BEETS_MATRIX_RUNTIME_CONFIG" in os.environ
+            else _EXTERNAL_STATEFILE_CONTRACT
+        )
         proc = subprocess.run(
-            [sys.executable, "-c", _EXTERNAL_STATEFILE_CONTRACT],
+            [sys.executable, "-c", contract],
             cwd=_REPO,
             env={**os.environ,
                  "PYTHONPATH": _REPO + os.pathsep + os.environ.get("PYTHONPATH", "")},
