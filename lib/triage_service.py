@@ -107,6 +107,10 @@ VALID_FILTER_FORMS: tuple[str, ...] = (
     _FILTER_CONVERGED,
 )
 
+# Shared human-readable rendering for every discoverability surface. Keep the
+# vocabulary above machine-parseable; this value only supplies presentation.
+VALID_FILTER_FORMS_TEXT = " | ".join(VALID_FILTER_FORMS)
+
 
 class InvalidFilterError(ValueError):
     """Raised by ``parse_filter`` when the spec is garbage.

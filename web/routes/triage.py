@@ -64,6 +64,9 @@ from lib.triage_service import (
 from lib.triage_service import (
     VALID_FILTER_FORMS as _TRIAGE_VALID_FILTER_FORMS_API,
 )
+from lib.triage_service import (
+    VALID_FILTER_FORMS_TEXT as _TRIAGE_FILTER_FORMS_TEXT,
+)
 from web.routes._pydantic import parse_body
 from web.routes._registry import RouteHandler, RouteRegistration, pattern_route, route
 from web.routes._server_access import _server
@@ -302,9 +305,8 @@ ROUTES: list[RouteRegistration] = [
         # U17: /api/triage HTTP endpoints. Per-request composition and
         # cohort listing both wrap ``lib.triage_service`` (U15) — same
         # service as ``pipeline-cli triage`` (U16) per CLI ⇄ API symmetry.
-        "Cohort triage listing — filter by unfindable category, "
-        "field-quality field/status/reason, or search-not-converting "
-        "state. ``data_quality:status=<status>`` filters on the "
+        f"Cohort triage listing — filter spec: {_TRIAGE_FILTER_FORMS_TEXT}. "
+        "``data_quality:status=<status>`` filters on the "
         "resolver-status column (e.g. unresolved_4xx_client); "
         "``data_quality:reason=<code>`` filters on the reason_code "
         "column (e.g. http_400).",

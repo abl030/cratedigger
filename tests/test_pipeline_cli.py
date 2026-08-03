@@ -5269,6 +5269,24 @@ class TestPipelineCliTriage(unittest.TestCase):
     our own logic, not leaf seams. See `MOCKS: LEAF-SEAM ONLY`.
     """
 
+    def test_list_help_advertises_every_filter_form(self) -> None:
+        from scripts.pipeline_cli.routes_meta import _build_parser
+
+        parser, _, _ = _build_parser()
+        output = io.StringIO()
+        with redirect_stdout(output), self.assertRaises(SystemExit) as raised:
+            parser.parse_args(["triage", "list", "--help"])
+
+        self.assertEqual(raised.exception.code, 0)
+        normalized_help = " ".join(output.getvalue().split())
+        self.assertIn(
+            "Filter spec: all | unfindable | unfindable:<category> | "
+            "data_quality | data_quality:<field> | "
+            "data_quality:status=<status> | data_quality:reason=<code> | "
+            "search_not_converting | converged",
+            normalized_help,
+        )
+
     def _seed_healthy(self, db, rid: int) -> None:
         from tests.helpers import make_request_row
         db.seed_request(make_request_row(
