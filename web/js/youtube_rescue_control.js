@@ -32,7 +32,7 @@ export function renderYoutubeRescueControl(key, requestId, identifier, result = 
       ? `<span>${esc(state.message)}</span>` : '';
   return `<div class="yt-rescue-control" id="yt-rescue-${esc(key)}">
     <button class="p-btn" type="button" onclick="event.stopPropagation(); ${check}">${label}</button>
-    <input id="yt-watch-${esc(key)}" onclick="event.stopPropagation()" placeholder="https://music.youtube.com/watch?v=…" aria-label="YouTube Music watch URL">
+    <input class="yt-rescue-watch" type="text" id="yt-watch-${esc(key)}" onclick="event.stopPropagation()" placeholder="https://music.youtube.com/watch?v=…" aria-label="YouTube Music watch URL">
     <div class="yt-rescue-result">${choices}</div>
   </div>`;
 }
