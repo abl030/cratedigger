@@ -91,16 +91,21 @@ def assert_database_matches_lineage_oracle(
 def assert_lossless_merge_converged(
     *,
     existing_subject: str | None,
+    incoming_preserves_source: bool,
     spectral_grade: str | None,
     spectral_subject: str | None,
 ) -> None:
-    """New lineage clears installed spectral but preserves source facts."""
-    if existing_subject == "source":
-        if spectral_grade != "genuine" or spectral_subject != "source":
-            raise AssertionError("source-subject spectral fact was not preserved")
+    """Only an exact derivative can replace a same-address spectral tuple."""
+    if incoming_preserves_source:
+        if spectral_grade != "likely_transcode" or spectral_subject != "source":
+            raise AssertionError("preserved-source derivative was not retained")
         return
-    if spectral_grade is not None or spectral_subject is not None:
-        raise AssertionError("installed spectral survived new lossless lineage")
+    if existing_subject is None:
+        if spectral_grade is not None or spectral_subject is not None:
+            raise AssertionError("stale provenance invented spectral evidence")
+        return
+    if spectral_grade != "genuine" or spectral_subject != existing_subject:
+        raise AssertionError("stale provenance erased existing spectral evidence")
 
 
 def _run_fake_lossless_merge(
@@ -131,10 +136,14 @@ def _run_fake_lossless_merge(
         existing,
         measurement=msgspec.structs.replace(
             existing.measurement,
-            spectral_grade=None,
+            spectral_grade=(
+                "likely_transcode" if anchor == "conversion" else None
+            ),
             spectral_bitrate_kbps=None,
-            spectral_subject=None,
-            spectral_provenance=None,
+            spectral_subject=("source" if anchor == "conversion" else None),
+            spectral_provenance=(
+                "carried" if anchor == "conversion" else None
+            ),
             spectral_measurement_version=None,
             was_converted_from=(converted_from if anchor == "conversion" else None),
         ),
@@ -285,6 +294,7 @@ class TestGeneratedLosslessLineageMerge(unittest.TestCase):
         )
         assert_lossless_merge_converged(
             existing_subject=existing_subject,
+            incoming_preserves_source=anchor == "conversion",
             spectral_grade=grade,
             spectral_subject=subject,
         )
@@ -302,12 +312,13 @@ class TestLosslessLineageCheckCheckerTripsOnViolation(unittest.TestCase):
         with self.assertRaises(AssertionError):
             assert_database_matches_lineage_oracle(world, error)
 
-    def test_merge_checker_rejects_preserved_installed_spectral(self) -> None:
+    def test_merge_checker_rejects_erased_installed_spectral(self) -> None:
         with self.assertRaises(AssertionError):
             assert_lossless_merge_converged(
                 existing_subject="installed",
-                spectral_grade="genuine",
-                spectral_subject="installed",
+                incoming_preserves_source=False,
+                spectral_grade=None,
+                spectral_subject=None,
             )
 
 

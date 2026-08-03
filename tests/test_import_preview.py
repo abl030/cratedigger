@@ -276,6 +276,42 @@ class TestSpectralAuditMerge(unittest.TestCase):
 
         self.assertTrue(preserve_existing_source_spectral(evidence))
 
+    def test_native_alac_m4a_remeasures_instead_of_preserving_source(self):
+        """An .m4a snapshot needs its ALAC codec fact, not its extension."""
+        from lib.import_preview import preserve_existing_source_spectral
+        from lib.quality import EVIDENCE_SUBJECT_SOURCE, AlbumQualityEvidenceFile
+
+        evidence = make_album_quality_evidence(
+            preserve_spectral_measurement_version=True,
+            mb_release_id="native-alac-m4a",
+            files=[AlbumQualityEvidenceFile(
+                relative_path="01.m4a",
+                size_bytes=1,
+                mtime_ns=1,
+                extension="m4a",
+                container="m4a",
+                codec="m4a",
+            )],
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=700,
+                avg_bitrate_kbps=750,
+                median_bitrate_kbps=725,
+                format="ALAC",
+                spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=96,
+                spectral_subject=EVIDENCE_SUBJECT_SOURCE,
+                spectral_provenance="carried",
+                spectral_measurement_version=None,
+                was_converted_from="flac",
+            ),
+            codec="m4a",
+            container="m4a",
+            storage_format="ALAC",
+        )
+
+        self.assertFalse(preserve_existing_source_spectral(evidence))
+        self.assertFalse(current_spectral_evidence_reusable(evidence))
+
     def test_source_anchor_alone_does_not_preserve_source_spectral(self):
         """An anchor identifies provenance, not an irreplaceable derivative."""
         from lib.import_preview import preserve_existing_source_spectral

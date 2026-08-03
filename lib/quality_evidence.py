@@ -173,8 +173,10 @@ def current_evidence_preserves_source_spectral(
     A source V0 anchor or lossless proof describes provenance, not whether the
     current library bytes can be measured again.  The cross-generation source
     exception is only sound when a recorded lossless source was converted into
-    one known lossy installed container.  Native lossless, mixed, and
-    unresolved files remain remeasurable and must retain generation strictness.
+    one known lossy installed codec.  The file extension is not enough here:
+    an ``.m4a`` container can hold native ALAC as well as AAC.  Native
+    lossless, mixed, and unresolved files remain remeasurable and must retain
+    generation strictness.
     """
 
     converted_from = (evidence.measurement.was_converted_from or "").lower()
@@ -190,11 +192,20 @@ def current_evidence_preserves_source_spectral(
         for file in evidence.files
         if file.container and file.codec
     }
-    codecs = {file.codec.lower() for file in evidence.files if file.codec}
+    # ``storage_format`` and the measurement are codec facts; snapshot
+    # containers are not (notably, .m4a can be AAC or ALAC). New v4 evidence
+    # keeps the two labels equal. Treat missing, conflicting, or container-only
+    # labels as unresolved rather than preserving an old source grade.
+    formats = {
+        label.strip().lower()
+        for label in (evidence.storage_format, evidence.measurement.format)
+        if label is not None and label.strip()
+    }
     return (
         len(containers) == 1
         and containers <= _LOSSY_CONTAINERS
-        and not codecs.intersection(LOSSLESS_CODECS)
+        and len(formats) == 1
+        and formats <= _LOSSY_CODECS
     )
 
 
@@ -294,6 +305,9 @@ def current_evidence_rebuild_reasons(
 
 _LOSSLESS_CONTAINERS = {"flac", "alac", "wav", "aiff", "ape"}
 _LOSSY_CONTAINERS = {"mp3", "aac", "m4a", "ogg", "opus", "wma"}
+# ``m4a`` is deliberately absent: it names an ambiguous container, not a
+# lossy codec. ALAC's normal on-disk extension is .m4a.
+_LOSSY_CODECS = _LOSSY_CONTAINERS - {"m4a"}
 
 
 def derive_folder_layout(files: list[AlbumQualityEvidenceFile]) -> str:

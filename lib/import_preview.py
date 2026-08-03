@@ -812,10 +812,10 @@ def persist_exact_current_spectral_from_attempt(
             "stale",
             "current evidence changed before HAVE spectral persistence",
         )
-    # R19 belt-and-braces: a lossless-sourced row keeps its source spectral
-    # (or stays empty until it is carried in) — an attempt-time scan of the
-    # installed derivative must never be persisted as its grade, whatever
-    # the caller's preserve flag said.
+    # R19 belt-and-braces: only the exact known-lossy derivative keeps its
+    # source spectral (or stays empty until it is carried in) — an
+    # attempt-time scan of that installed derivative must never be persisted
+    # as its grade, whatever the caller's preserve flag said.
     if preserve_existing_source_spectral(refreshed):
         return EvidenceBuildResult(
             refreshed,
@@ -1575,14 +1575,12 @@ def preserve_existing_source_spectral(
 ) -> bool:
     """Whether HAVE must retain lossless-source pre-conversion evidence.
 
-    R19: a lossless-sourced installed copy wears its SOURCE's spectral;
-    scanning the installed derivative can rewrite a transcode-like source
-    as apparently genuine (fullband codecs like Opus always scan clean).
-    Any row-local acquisition fact proves lossless lineage: a lossless
-    ``was_converted_from``, verified-lossless proof, or a source-subject
-    V0 anchor (the provisional lane's marker — enrichment-born rows carry
-    no ``was_converted_from``, which is how the #711 deploy-night rows
-    were minted ``genuine/installed``).
+    R19: a recorded lossless conversion into a known lossy installed codec
+    wears its SOURCE's spectral; scanning that derivative can rewrite a
+    transcode-like source as apparently genuine (fullband codecs like Opus
+    always scan clean). Source V0/proof records are provenance only. The
+    predicate fails closed for native lossless, mixed, or unresolved files —
+    in particular, an .m4a container is not evidence of AAC over ALAC.
     """
     return (
         current_evidence is not None

@@ -1540,7 +1540,13 @@ class TestAttemptAuditGenerated(unittest.TestCase):
             )
 
     @given(
-        container=st.sampled_from(("flac", "alac", "wav")),
+        native=st.sampled_from((
+            ("flac", "FLAC"),
+            # The real ALAC case is an M4A container, not a made-up .alac
+            # extension. Its storage/measurement codec disambiguates it.
+            ("m4a", "ALAC"),
+            ("wav", "WAV"),
+        )),
         persisted_generation=st.sampled_from((
             None,
             SPECTRAL_MEASUREMENT_VERSION - 1,
@@ -1548,10 +1554,10 @@ class TestAttemptAuditGenerated(unittest.TestCase):
             SPECTRAL_MEASUREMENT_VERSION + 1,
         )),
     )
-    @example(container="flac", persisted_generation=None)
+    @example(native=("m4a", "ALAC"), persisted_generation=None)
     def test_native_lossless_source_anchors_remain_generation_strict(
         self,
-        container: str,
+        native: tuple[str, str],
         persisted_generation: int | None,
     ) -> None:
         """Proof/V0 provenance cannot suppress a native HAVE remeasurement."""
@@ -1569,21 +1575,22 @@ class TestAttemptAuditGenerated(unittest.TestCase):
         )
         from tests.helpers import make_album_quality_evidence
 
+        extension, storage_format = native
         evidence = make_album_quality_evidence(
             preserve_spectral_measurement_version=True,
             files=[AlbumQualityEvidenceFile(
-                relative_path=f"01.{container}",
+                relative_path=f"01.{extension}",
                 size_bytes=1,
                 mtime_ns=1,
-                extension=container,
-                container=container,
-                codec=container,
+                extension=extension,
+                container=extension,
+                codec=extension,
             )],
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=700,
                 avg_bitrate_kbps=750,
                 median_bitrate_kbps=725,
-                format=container.upper(),
+                format=storage_format,
                 spectral_grade="likely_transcode",
                 spectral_bitrate_kbps=96,
                 spectral_subject="source",
@@ -1603,9 +1610,9 @@ class TestAttemptAuditGenerated(unittest.TestCase):
                 source="flac",
                 classifier="spectral_verified_lossless",
             ),
-            codec=container,
-            container=container,
-            storage_format=container.upper(),
+            codec=extension,
+            container=extension,
+            storage_format=storage_format,
         )
 
         self.assertFalse(current_evidence_preserves_source_spectral(evidence))

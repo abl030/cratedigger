@@ -406,25 +406,32 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
             current_spectral_evidence_policy_usable,
         )
 
-        for container in ("flac", "alac", "wav"):
-            with self.subTest(container=container):
+        for extension, storage_format in (
+            ("flac", "FLAC"),
+            # ALAC normally lives in an .m4a container. The snapshot cannot
+            # infer its codec from that extension, so the format fact must
+            # keep this native copy remeasurable.
+            ("m4a", "ALAC"),
+            ("wav", "WAV"),
+        ):
+            with self.subTest(extension=extension, storage_format=storage_format):
                 evidence = make_album_quality_evidence(
                     preserve_spectral_measurement_version=True,
                     mb_release_id="release-1",
                     source_path=self.root,
                     files=[AlbumQualityEvidenceFile(
-                        relative_path=f"01.{container}",
+                        relative_path=f"01.{extension}",
                         size_bytes=1,
                         mtime_ns=1,
-                        extension=container,
-                        container=container,
-                        codec=container,
+                        extension=extension,
+                        container=extension,
+                        codec=extension,
                     )],
                     measurement=AudioQualityMeasurement(
                         min_bitrate_kbps=700,
                         avg_bitrate_kbps=750,
                         median_bitrate_kbps=725,
-                        format=container.upper(),
+                        format=storage_format,
                         spectral_grade="likely_transcode",
                         spectral_bitrate_kbps=96,
                         spectral_subject="source",
@@ -444,9 +451,9 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
                         source="flac",
                         classifier="spectral_verified_lossless",
                     ),
-                    codec=container,
-                    container=container,
-                    storage_format=container.upper(),
+                    codec=extension,
+                    container=extension,
+                    storage_format=storage_format,
                 )
                 self.assertFalse(current_evidence_preserves_source_spectral(evidence))
                 self.assertFalse(current_spectral_evidence_policy_usable(evidence))

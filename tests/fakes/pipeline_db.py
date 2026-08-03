@@ -155,6 +155,7 @@ from lib.quality import (
     CodecFamily,
     CooldownConfig,
 )
+from lib.quality_evidence import current_evidence_preserves_source_spectral
 from lib.release_identity import (
     ReleaseIdentity,
     normalize_release_id,
@@ -4831,21 +4832,13 @@ class FakePipelineDB:
             raise ValueError("; ".join(errors))
         key = (evidence.mb_release_id, evidence.snapshot_fingerprint)
         existing = self.album_quality_evidence.get(key)
-        incoming_lossless_lineage = (
-            (
-                evidence.v0_metric is not None
-                and evidence.v0_metric.subject == EVIDENCE_SUBJECT_SOURCE
-            )
-            or evidence.verified_lossless_proof is not None
-            or (
-                evidence.measurement.was_converted_from or ""
-            ).lower() in LOSSLESS_CODECS
+        incoming_preserves_source_spectral = (
+            current_evidence_preserves_source_spectral(evidence)
         )
         # Spectral is an atomic pair. A stale writer without a grade cannot
         # erase a successful attempt-time scan on the same audio snapshot.
-        # R19 is the exception: new lossless lineage clears a stored
-        # installed-subject tuple because those derivative bytes are not an
-        # authoritative spectral subject.
+        # R19 is the exception: only an exact, known-lossy derivative clears
+        # a stored installed-subject tuple. Provenance alone is not enough.
         #
         # This condition mirrors the real SQL's CASE guard exactly (issue
         # #829 Phase 5 PR1 review round 2, should-fix 7) — it does NOT
@@ -4861,7 +4854,7 @@ class FakePipelineDB:
             and existing.lineage_version >= 4
             and evidence.measurement.spectral_grade is None
             and not (
-                incoming_lossless_lineage
+                incoming_preserves_source_spectral
                 and existing.measurement.spectral_subject
                     == EVIDENCE_SUBJECT_INSTALLED
             )
