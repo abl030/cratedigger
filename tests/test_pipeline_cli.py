@@ -1342,6 +1342,8 @@ class TestMainExitCodes(unittest.TestCase):
     def test_convergence_stop_constructor_outage_maps_to_exit_five(self):
         import psycopg2
 
+        import web.mb
+
         argv = [
             "pipeline_cli.py",
             "--dsn",
@@ -1357,15 +1359,26 @@ class TestMainExitCodes(unittest.TestCase):
         ]
         stdout = io.StringIO()
         stderr = io.StringIO()
-        with patch.object(sys, "argv", argv), patch(
-            "web.api_bases.configure_api_bases_from_runtime_config",
-        ), patch(
-            "scripts.pipeline_cli.cli.PipelineDB",
-            side_effect=psycopg2.OperationalError("database unavailable"),
-        ), redirect_stdout(stdout), redirect_stderr(stderr), self.assertRaises(
-            SystemExit,
-        ) as raised:
-            pipeline_cli.main()
+        old_mb_base = web.mb.MB_API_BASE
+        self.addCleanup(setattr, web.mb, "MB_API_BASE", old_mb_base)
+        with tempfile.TemporaryDirectory() as root:
+            config_path = os.path.join(root, "config.ini")
+            with open(config_path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "[MusicBrainz]\n"
+                    "api_base = http://constructor-outage.test:5200\n"
+                )
+            with patch.object(sys, "argv", argv), patch.dict(
+                os.environ,
+                {"CRATEDIGGER_RUNTIME_CONFIG": config_path},
+                clear=False,
+            ), patch(
+                "scripts.pipeline_cli.cli.PipelineDB",
+                side_effect=psycopg2.OperationalError("database unavailable"),
+            ), redirect_stdout(stdout), redirect_stderr(stderr), self.assertRaises(
+                SystemExit,
+            ) as raised:
+                pipeline_cli.main()
 
         self.assertEqual(raised.exception.code, 5)
         self.assertEqual(stderr.getvalue(), "")
