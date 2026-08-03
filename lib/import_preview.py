@@ -102,6 +102,7 @@ from lib.quality_evidence import (
     current_evidence_for_policy,
     current_evidence_preserves_source_spectral,
     current_evidence_rebuild_reasons,
+    current_spectral_evidence_policy_usable,
     evidence_from_measurement,
     load_or_backfill_current_evidence,
     neutral_v0_metric_from_probe,
@@ -1198,21 +1199,12 @@ def current_spectral_evidence_reusable(
 
     The enrichment planner records whether analysis already ran, so an
     attempted-but-failed ``"error"`` grade is intentionally complete for that
-    once-only bookkeeping. Preview reuse has a stricter contract: its
-    generation must exactly match the running analyzer and its grade must be
-    one the decision model understands. Legacy and unknown future generations
-    are audit-only and must never replace a fresh HAVE scan.
+    once-only bookkeeping.  Reuse delegates to the one policy-usability rule:
+    ordinary installed evidence needs this analyzer generation, while a
+    recognized, irreplaceable carried source grade is reused without scanning
+    the installed lossy derivative.
     """
-    grade = evidence.measurement.spectral_grade
-    return (
-        spectral_measurement_generation_is_current(evidence.measurement)
-        and grade in {
-            "genuine",
-            "marginal",
-            "suspect",
-            "likely_transcode",
-        }
-    )
+    return current_spectral_evidence_policy_usable(evidence)
 
 
 def prepare_current_evidence_for_failure(

@@ -179,15 +179,48 @@ def current_evidence_preserves_source_spectral(
     return metric is not None and metric.subject == EVIDENCE_SUBJECT_SOURCE
 
 
+_POLICY_USABLE_SPECTRAL_GRADES = frozenset({
+    "genuine",
+    "marginal",
+    "suspect",
+    "likely_transcode",
+})
+
+
+def current_spectral_evidence_policy_usable(
+    evidence: AlbumQualityEvidence,
+) -> bool:
+    """Whether a current-evidence spectral grade can reach policy.
+
+    Current analyzer generation is normally required because the current
+    bytes can be measured again.  R19's carried source subject is the narrow
+    exception: its lossless source no longer exists, so a recognized grade is
+    still policy evidence across a legacy, old, or future generation.  The
+    stored subject and generation remain historical facts; this predicate
+    only decides whether the tuple may be consumed.
+    """
+
+    measurement = evidence.measurement
+    return (
+        measurement.spectral_grade in _POLICY_USABLE_SPECTRAL_GRADES
+        and (
+            spectral_measurement_generation_is_current(measurement)
+            or (
+                measurement.spectral_subject == EVIDENCE_SUBJECT_SOURCE
+                and current_evidence_preserves_source_spectral(evidence)
+            )
+        )
+    )
+
+
 def current_evidence_for_policy(
     evidence: AlbumQualityEvidence,
 ) -> AlbumQualityEvidence:
-    """Withhold an unregenerable old source grade from current policy.
+    """Withhold spectral tuples that current policy cannot consume.
 
-    The stored tuple remains durable audit history. Only this policy
-    projection drops it; all other current evidence facts remain usable.
-    Installed-subject and ordinary source-subject rows are not projected this
-    way because their exact current bytes can and must be measured again.
+    The stored tuple remains durable audit history.  An irreplaceable carried
+    source grade remains policy-usable across generations; ordinary installed
+    evidence still requires the running analyzer generation.
     """
 
     measurement = evidence.measurement
@@ -198,8 +231,7 @@ def current_evidence_for_policy(
     if (
         not has_spectral
         or spectral_measurement_generation_is_current(measurement)
-        or measurement.spectral_subject != EVIDENCE_SUBJECT_SOURCE
-        or not current_evidence_preserves_source_spectral(evidence)
+        or current_spectral_evidence_policy_usable(evidence)
     ):
         return evidence
     return msgspec.structs.replace(
@@ -234,10 +266,7 @@ def current_evidence_rebuild_reasons(
             or measurement.spectral_bitrate_kbps is not None
         )
         and not spectral_measurement_generation_is_current(measurement)
-        and not (
-            measurement.spectral_subject == EVIDENCE_SUBJECT_SOURCE
-            and current_evidence_preserves_source_spectral(evidence)
-        )
+        and not current_spectral_evidence_policy_usable(evidence)
     ):
         reasons.append(
             "spectral measurement generation is not current"

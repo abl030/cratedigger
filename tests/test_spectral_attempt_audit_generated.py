@@ -71,6 +71,7 @@ def _have_scan_boundary_holds(
 def _have_reuse_contract_holds(
     *,
     reuse_have: bool,
+    preserve_source: bool,
     have_complete: bool,
     snapshot_changed: bool,
     persisted_grade: str | None,
@@ -81,13 +82,16 @@ def _have_reuse_contract_holds(
     expected = (
         have_complete
         and not snapshot_changed
-        and persisted_generation == SPECTRAL_MEASUREMENT_VERSION
         and persisted_grade in {
             "genuine",
             "marginal",
             "suspect",
             "likely_transcode",
         }
+        and (
+            preserve_source
+            or persisted_generation == SPECTRAL_MEASUREMENT_VERSION
+        )
     )
     return reuse_have is expected
 
@@ -103,10 +107,18 @@ def _run_have_boundary_through_both_adapters(
     persisted_generation: int | None = None,
     have_complete: bool = True,
     snapshot_changed: bool = False,
+    candidate_grade: str = "genuine",
 ):
     """Drive normal measurement and reused front-gate through one boundary."""
-    from lib.beets_db import AlbumInfo
+    from lib.beets_db import (
+        AlbumInfo,
+        CurrentBeetsItem,
+        CurrentBeetsUnique,
+        release_identity_for_lookup,
+    )
     from lib.config import CratediggerConfig
+    from lib.dispatch import _load_evidence_import_gate, dispatch_import_core
+    from lib.import_evidence import ensure_current_evidence_for_action
     from lib.import_preview import (
         _authorize_current_evidence_for_preview,
         current_spectral_evidence_reusable,
@@ -126,6 +138,7 @@ def _run_have_boundary_through_both_adapters(
         EVIDENCE_SUBJECT_SOURCE,
         AlbumQualityV0Metric,
         AudioQualityMeasurement,
+        DownloadInfo,
         ImportResult,
         SpectralAnalysisDetail,
     )
@@ -133,7 +146,12 @@ def _run_have_boundary_through_both_adapters(
     from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
     from scripts.import_preview_worker import process_claimed_preview_job
     from tests.fakes import FakeBeetsDB, FakePipelineDB
-    from tests.helpers import make_album_quality_evidence, make_request_row
+    from tests.helpers import (
+        claim_next_import_job,
+        finalize_claimed_dispatch,
+        make_album_quality_evidence,
+        make_request_row,
+    )
 
     request_id = 42
     mbid = "mbid-42"
@@ -196,7 +214,7 @@ def _run_have_boundary_through_both_adapters(
             slskd_download_dir=slskd_dir,
             processing_dir=processing_dir,
         )
-        Path(candidate, "01.mp3").write_bytes(b"candidate")
+        Path(candidate, "01.flac").write_bytes(b"candidate")
         Path(existing, "01.mp3").write_bytes(b"existing")
         current_evidence = make_album_quality_evidence(
             preserve_spectral_measurement_version=True,
@@ -276,7 +294,9 @@ def _run_have_boundary_through_both_adapters(
                 calls.append(role)
                 return SpectralAnalysisDetail(
                     attempted=True,
-                    grade=scanned_grade if role == "existing" else "genuine",
+                    grade=(
+                        scanned_grade if role == "existing" else candidate_grade
+                    ),
                     bitrate_kbps=(
                         scanned_bitrate if role == "existing" else None
                     ),
@@ -300,7 +320,7 @@ def _run_have_boundary_through_both_adapters(
                 path=candidate,
                 mb_release_id=mbid,
                 label="Gespenst - The Saint",
-                download_filetype="mp3",
+                download_filetype="flac",
                 download_min_bitrate_bps=219_000,
                 download_is_vbr=False,
                 cfg=cfg,
@@ -308,7 +328,7 @@ def _run_have_boundary_through_both_adapters(
                 reuse_existing_spectral_evidence=reuse_have,
                 preserve_existing_source_spectral=preserve_source,
                 precomputed_inspection=LocalFileInspection(
-                    filetype="mp3",
+                    filetype="flac",
                     min_bitrate_bps=219_000,
                     is_vbr=False,
                 ),
@@ -340,9 +360,31 @@ def _run_have_boundary_through_both_adapters(
             raw_path=candidate,
         )
         candidate_evidence = make_album_quality_evidence(
+            preserve_spectral_measurement_version=True,
             mb_release_id=mbid,
             source_path=action_path,
             files=snapshot_audio_files(action_path),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=472,
+                avg_bitrate_kbps=506,
+                median_bitrate_kbps=500,
+                format="FLAC",
+                spectral_grade=candidate_grade,
+                spectral_bitrate_kbps=96,
+                spectral_subject="source",
+                spectral_provenance="measured",
+                spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
+            ),
+            v0_metric=AlbumQualityV0Metric(
+                min_bitrate_kbps=165,
+                avg_bitrate_kbps=171,
+                median_bitrate_kbps=168,
+                subject=EVIDENCE_SUBJECT_SOURCE,
+                provenance="measured",
+            ),
+            codec="flac",
+            container="flac",
+            storage_format="FLAC",
         )
         db.upsert_album_quality_evidence(candidate_evidence)
         stored_candidate = db.find_album_quality_evidence(
@@ -368,6 +410,60 @@ def _run_have_boundary_through_both_adapters(
         reused = ImportResult.from_dict(
             updated.preview_result["import_result"]
         ).spectral
+        identity = release_identity_for_lookup(mbid)
+        assert identity is not None
+        current_result = ensure_current_evidence_for_action(
+            db,
+            request_id=request_id,
+            mb_release_id=mbid,
+            current_release=CurrentBeetsUnique(
+                identity=identity,
+                album_id=1,
+                album_path=existing,
+                items=(CurrentBeetsItem(
+                    id=1,
+                    path=os.path.join(existing, "01.mp3"),
+                    format="MP3",
+                    bitrate=320_000,
+                ),),
+                selectors=(f"mb_albumid:{mbid}",),
+            ),
+            quality_ranks=cfg.quality_ranks,
+        )
+        dispatch_gate = _load_evidence_import_gate(
+            db,  # type: ignore[arg-type]
+            request_id=request_id,
+            mb_release_id=mbid,
+            path=action_path,
+            quality_ranks=cfg.quality_ranks,
+            candidate_import_job_id=job.id,
+            candidate_download_log_id=None,
+            attempt_existing_spectral=reused.existing,
+            attempt_have_audit_available=True,
+            current_evidence_loader=lambda *_args, **_kwargs: current_result,
+        )
+        claimed_dispatch = claim_next_import_job(db, worker_id="generated")
+        assert claimed_dispatch is not None and claimed_dispatch.id == job.id
+        dispatch_outcome = dispatch_import_core(
+            path=action_path,
+            mb_release_id=mbid,
+            request_id=request_id,
+            label="Iron & Wine - The Creek Drank the Cradle",
+            force=True,
+            beets_harness_path="/fake/harness/run_beets_harness.sh",
+            db=db,  # type: ignore[arg-type]
+            dl_info=DownloadInfo(username="generated", filetype="flac"),
+            scenario="force_import",
+            cfg=cfg,
+            requeue_on_failure=False,
+            candidate_import_job_id=claimed_dispatch.id,
+            attempt_spectral_audit=reused,
+            quality_gate_fn=lambda **_kwargs: None,
+            current_evidence_loader=lambda *_args, **_kwargs: current_result,
+        )
+        with patch("lib.config.read_runtime_config", return_value=cfg):
+            finalize_claimed_dispatch(db, claimed_dispatch, dispatch_outcome)
+        action_copy_removed = not os.path.exists(action_path)
 
     return (
         preserve_source,
@@ -376,6 +472,11 @@ def _run_have_boundary_through_both_adapters(
         reused_calls,
         measured.spectral_audit,
         reused,
+        dispatch_gate,
+        dispatch_outcome,
+        db.request(request_id)["status"],
+        [row.outcome for row in db.download_logs],
+        action_copy_removed,
     )
 
 
@@ -1145,6 +1246,7 @@ class TestAttemptAuditCheckerQualification(unittest.TestCase):
 
         self.assertFalse(_have_reuse_contract_holds(
             reuse_have=True,
+            preserve_source=False,
             have_complete=True,
             snapshot_changed=False,
             persisted_grade="error",
@@ -1154,9 +1256,22 @@ class TestAttemptAuditCheckerQualification(unittest.TestCase):
     def test_have_reuse_checker_rejects_old_generation_mutant(self):
         self.assertFalse(_have_reuse_contract_holds(
             reuse_have=True,
+            preserve_source=False,
             have_complete=True,
             snapshot_changed=False,
             persisted_grade="suspect",
+            persisted_generation=None,
+        ))
+
+    def test_have_reuse_checker_rejects_exact_generation_only_source_mutant(self):
+        """#1007 known-bad: restoring PR #996's rule drops source history."""
+
+        self.assertFalse(_have_reuse_contract_holds(
+            reuse_have=False,
+            preserve_source=True,
+            have_complete=True,
+            snapshot_changed=False,
+            persisted_grade="likely_transcode",
             persisted_generation=None,
         ))
 
@@ -1328,6 +1443,11 @@ class TestAttemptAuditGenerated(unittest.TestCase):
             reused_calls,
             normal_audit,
             reused_audit,
+            _dispatch_gate,
+            _dispatch_outcome,
+            _request_status,
+            _outcomes,
+            _action_copy_removed,
         ) = _run_have_boundary_through_both_adapters(
             converted_from=None,
             lossless_v0_lineage=False,
@@ -1359,6 +1479,11 @@ class TestAttemptAuditGenerated(unittest.TestCase):
             reused_calls,
             normal_audit,
             reused_audit,
+            _dispatch_gate,
+            _dispatch_outcome,
+            _request_status,
+            _outcomes,
+            _action_copy_removed,
         ) = _run_have_boundary_through_both_adapters(
             converted_from=None,
             lossless_v0_lineage=False,
@@ -1382,8 +1507,8 @@ class TestAttemptAuditGenerated(unittest.TestCase):
                 SPECTRAL_MEASUREMENT_VERSION,
             )
 
-    def test_old_lossless_source_generation_is_withheld_without_derivative_scan(self):
-        """R19 source history stays auditable but never becomes policy input."""
+    def test_iron_and_wine_preserved_source_generation_reaches_policy_without_derivative_scan(self):
+        """#1007: legacy source evidence is policy-usable, not an abort."""
 
         (
             preserve_source,
@@ -1392,6 +1517,11 @@ class TestAttemptAuditGenerated(unittest.TestCase):
             reused_calls,
             normal_audit,
             reused_audit,
+            dispatch_gate,
+            dispatch_outcome,
+            request_status,
+            outcomes,
+            action_copy_removed,
         ) = _run_have_boundary_through_both_adapters(
             converted_from="flac",
             lossless_v0_lineage=True,
@@ -1400,16 +1530,141 @@ class TestAttemptAuditGenerated(unittest.TestCase):
             persisted_generation=None,
             scanned_grade="genuine",
             scanned_bitrate=320,
+            candidate_grade="likely_transcode",
         )
 
         self.assertTrue(preserve_source)
-        self.assertFalse(reuse_have)
+        self.assertTrue(reuse_have)
+        self.assertEqual(normal_calls, ["candidate"])
+        self.assertEqual(reused_calls, [])
+        self.assertEqual(dispatch_gate.current_status, "loaded")
+        self.assertIsNotNone(dispatch_gate.current)
+        self.assertNotEqual(
+            dispatch_gate.current_reason,
+            "attempt did not run installed HAVE spectral analysis",
+        )
+        self.assertEqual(dispatch_outcome.code, "quality_pipeline_rejected")
+        self.assertEqual(
+            dispatch_outcome.message,
+            "Rejected by persisted quality evidence: suspect_lossless_downgrade",
+        )
+        self.assertEqual(request_status, "wanted")
+        self.assertNotIn("have_analysis_error", outcomes)
+        self.assertTrue(action_copy_removed)
+        for audit in (normal_audit, reused_audit):
+            assert audit.existing is not None
+            self.assertTrue(audit.existing.attempted)
+            self.assertEqual(audit.existing.grade, "suspect")
+            self.assertEqual(audit.existing.bitrate_kbps, 128)
+            self.assertIsNone(audit.existing.spectral_measurement_version)
+
+    @given(
+        persisted_generation=st.one_of(
+            st.none(),
+            st.integers(min_value=0, max_value=1),
+            st.integers(min_value=3, max_value=5),
+            st.just(SPECTRAL_MEASUREMENT_VERSION),
+        ),
+        persisted_grade=st.sampled_from((
+            "genuine", "marginal", "suspect", "likely_transcode",
+        )),
+    )
+    @example(persisted_generation=None, persisted_grade="likely_transcode")
+    @example(
+        persisted_generation=SPECTRAL_MEASUREMENT_VERSION + 1,
+        persisted_grade="suspect",
+    )
+    def test_preserved_source_generations_reach_preview_and_dispatch_policy(
+        self,
+        persisted_generation: int | None,
+        persisted_grade: str,
+    ):
+        """#1007 spans NULL, old/current/future at both preview adapters and gate."""
+
+        (
+            preserve_source,
+            reuse_have,
+            normal_calls,
+            reused_calls,
+            normal_audit,
+            reused_audit,
+            dispatch_gate,
+            dispatch_outcome,
+            request_status,
+            outcomes,
+            action_copy_removed,
+        ) = _run_have_boundary_through_both_adapters(
+            converted_from="flac",
+            lossless_v0_lineage=True,
+            persisted_grade=persisted_grade,
+            persisted_bitrate=232,
+            persisted_generation=persisted_generation,
+            scanned_grade="genuine",
+            scanned_bitrate=320,
+            candidate_grade="likely_transcode",
+        )
+
+        self.assertTrue(preserve_source)
+        self.assertTrue(_have_reuse_contract_holds(
+            reuse_have=reuse_have,
+            preserve_source=preserve_source,
+            have_complete=True,
+            snapshot_changed=False,
+            persisted_grade=persisted_grade,
+            persisted_generation=persisted_generation,
+        ))
+        self.assertTrue(reuse_have)
         self.assertEqual(normal_calls, ["candidate"])
         self.assertEqual(reused_calls, [])
         for audit in (normal_audit, reused_audit):
             assert audit.existing is not None
-            self.assertFalse(audit.existing.attempted)
-            self.assertIsNone(audit.existing.grade)
+            self.assertEqual(audit.existing.grade, persisted_grade)
+            self.assertEqual(
+                audit.existing.spectral_measurement_version,
+                persisted_generation,
+            )
+        self.assertEqual(dispatch_gate.current_status, "loaded")
+        self.assertEqual(dispatch_outcome.code, "quality_pipeline_rejected")
+        self.assertEqual(request_status, "wanted")
+        self.assertNotIn("have_analysis_error", outcomes)
+        self.assertTrue(action_copy_removed)
+
+    @given(
+        persisted_generation=st.one_of(
+            st.none(), st.integers(min_value=0, max_value=5),
+        ),
+        invalid_grade=st.sampled_from(("", "error")),
+    )
+    def test_preserved_source_invalid_grades_never_become_reusable(
+        self,
+        persisted_generation: int | None,
+        invalid_grade: str,
+    ):
+        """The generation exception admits recognised grades only."""
+
+        from lib.import_preview import current_spectral_evidence_reusable
+        from lib.quality import AudioQualityMeasurement
+        from tests.helpers import make_album_quality_evidence
+
+        evidence = make_album_quality_evidence(
+            preserve_spectral_measurement_version=True,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=123,
+                avg_bitrate_kbps=123,
+                median_bitrate_kbps=123,
+                format="Opus",
+                spectral_grade=invalid_grade,
+                spectral_subject="source",
+                spectral_provenance="carried",
+                spectral_measurement_version=persisted_generation,
+                was_converted_from="flac",
+            ),
+            codec="opus",
+            container="opus",
+            storage_format="Opus",
+        )
+
+        self.assertFalse(current_spectral_evidence_reusable(evidence))
 
     @given(
         have_complete=st.booleans(),
@@ -1486,6 +1741,11 @@ class TestAttemptAuditGenerated(unittest.TestCase):
             reused_calls,
             normal_audit,
             reused_audit,
+            _dispatch_gate,
+            _dispatch_outcome,
+            _request_status,
+            _outcomes,
+            _action_copy_removed,
         ) = _run_have_boundary_through_both_adapters(
             converted_from=None,
             lossless_v0_lineage=False,
@@ -1512,6 +1772,7 @@ class TestAttemptAuditGenerated(unittest.TestCase):
         self.assertFalse(preserve_source)
         self.assertTrue(_have_reuse_contract_holds(
             reuse_have=reuse_have,
+            preserve_source=preserve_source,
             have_complete=have_complete,
             snapshot_changed=snapshot_changed,
             persisted_grade=persisted_grade,
@@ -1661,6 +1922,11 @@ class TestAttemptAuditGenerated(unittest.TestCase):
             reused_calls,
             normal_audit,
             reused_audit,
+            _dispatch_gate,
+            _dispatch_outcome,
+            _request_status,
+            _outcomes,
+            _action_copy_removed,
         ) = _run_have_boundary_through_both_adapters(
             converted_from=converted_from,
             lossless_v0_lineage=lossless_v0_lineage,

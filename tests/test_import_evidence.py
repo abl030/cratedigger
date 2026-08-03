@@ -276,7 +276,7 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
             result.provenance.fallback_reason or "",
         )
 
-    def test_old_lossless_source_generation_is_audit_only_at_action_time(self):
+    def test_old_lossless_source_generation_is_policy_usable_at_action_time(self):
         legacy = make_album_quality_evidence(
             preserve_spectral_measurement_version=True,
             mb_release_id="release-1",
@@ -319,7 +319,7 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
 
         self.assertTrue(result.available)
         assert result.evidence is not None
-        self.assertIsNone(result.evidence.measurement.spectral_grade)
+        self.assertEqual(result.evidence.measurement.spectral_grade, "suspect")
         self.assertIsNone(
             result.evidence.measurement.spectral_measurement_version,
         )

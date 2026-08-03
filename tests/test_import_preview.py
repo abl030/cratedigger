@@ -168,6 +168,54 @@ class TestSpectralAuditMerge(unittest.TestCase):
 
         self.assertFalse(current_spectral_evidence_reusable(evidence))
 
+    def test_preserved_source_legacy_have_is_reused_without_relabeling(self):
+        """R19 source evidence is usable although its analyzer is legacy."""
+
+        evidence = make_album_quality_evidence(
+            preserve_spectral_measurement_version=True,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=123,
+                avg_bitrate_kbps=123,
+                median_bitrate_kbps=123,
+                format="Opus",
+                spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=232,
+                spectral_subject="source",
+                spectral_provenance="carried",
+                spectral_measurement_version=None,
+                was_converted_from="flac",
+            ),
+            codec="opus",
+            container="opus",
+            storage_format="Opus",
+        )
+
+        self.assertTrue(current_spectral_evidence_reusable(evidence))
+        self.assertIsNone(evidence.measurement.spectral_measurement_version)
+
+    def test_preserved_source_error_grade_is_not_reused(self):
+        """R19 does not make an analyzer error a policy grade."""
+
+        evidence = make_album_quality_evidence(
+            preserve_spectral_measurement_version=True,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=123,
+                avg_bitrate_kbps=123,
+                median_bitrate_kbps=123,
+                format="Opus",
+                spectral_grade="error",
+                spectral_subject="source",
+                spectral_provenance="carried",
+                spectral_measurement_version=None,
+                was_converted_from="flac",
+            ),
+            codec="opus",
+            container="opus",
+            storage_format="Opus",
+        )
+
+        self.assertFalse(current_spectral_evidence_reusable(evidence))
+
     def test_lossless_candidate_requires_a_successful_usable_grade(self):
         cases = (
             ("absent", None),
