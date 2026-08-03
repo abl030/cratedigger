@@ -20,7 +20,6 @@
 let
   beetsPackage = import ./beets.nix { inherit pkgs; };
   cratedigger = import ./package.nix { inherit pkgs beetsPackage; };
-  ruff = import ./ruff.nix { inherit pkgs; };
 
   # Dev env: production deps + dev-only tooling. ``ps.beets`` was
   # previously listed again here because the production env excluded
@@ -49,7 +48,7 @@ pkgs.mkShell {
   packages = [
     pkgs.postgresql          # initdb, pg_ctl for ephemeral test DB
     pkgs.util-linux          # flock for deploy-pin concurrency tests
-    ruff                     # exact repo-wide lint toolchain
+    pkgs.ruff                # flake-locked repo-wide lint toolchain
     testPythonEnv
     pkgs.sox                 # spectral analysis tests
     pkgs.ffmpeg              # ffprobe for bitrate measurement in quality tests

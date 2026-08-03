@@ -2,14 +2,14 @@
 
 Two complementary static checks protect the Python tree:
 
-- Ruff is pinned exactly in `nix/ruff.nix` and configured by `ruff.toml`. The
-  canonical `scripts/run_ruff.sh` gate checks production, tools, ordinary
-  tests, generated tests, and fakes with Ruff 0.16's default rules plus the
-  explicit `B905` correctness ratchet. Its source-local `F401`/`F811`
-  analysis means a name used in another module cannot hide an unused import.
-  The exact redundant-alias audit pins both `cratedigger.py` and
-  `scripts/pipeline_cli/__init__.py` to empty baselines, preventing private
-  facades from returning.
+- Ruff comes from the flake-locked nixpkgs and is configured by `ruff.toml`,
+  which requires Ruff 0.16 or newer. The canonical `scripts/run_ruff.sh` gate
+  checks production, tools, ordinary tests, generated tests, and fakes with
+  Ruff's default rules plus the explicit `B905` correctness ratchet. Its
+  source-local `F401`/`F811` analysis means a name used in another module
+  cannot hide an unused import. The exact redundant-alias audit pins both
+  `cratedigger.py` and `scripts/pipeline_cli/__init__.py` to empty baselines,
+  preventing private facades from returning.
 - Vulture keeps the aggregate production view for dead functions, classes,
   attributes, and cross-module APIs. Tests remain excluded so a test-only
   reference cannot preserve a dead production surface.
