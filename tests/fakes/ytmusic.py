@@ -27,10 +27,10 @@ class FakeYTMusic:
         self._album_results: dict[str, dict[str, Any]] = {}
         self._search_errors: dict[tuple[str, str | None], Exception] = {}
         self._album_errors: dict[str, Exception] = {}
-        self._watch_results: dict[str, dict[str, Any]] = {}
+        self._watch_results: dict[str, dict[str, object]] = {}
         self.search_calls: list[dict[str, Any]] = []
         self.get_album_calls: list[dict[str, Any]] = []
-        self.get_watch_playlist_calls: list[dict[str, Any]] = []
+        self.get_watch_playlist_calls: list[dict[str, object]] = []
 
     def set_search(
         self,
@@ -50,7 +50,11 @@ class FakeYTMusic:
         """Configure ``get_album(browseId)`` to return ``response``."""
         self._album_results[browseId] = copy.deepcopy(response)
 
-    def set_watch_playlist(self, video_id: str, response: dict[str, Any]) -> None:
+    def set_watch_playlist(
+        self,
+        video_id: str,
+        response: dict[str, object],
+    ) -> None:
         """Configure the narrow ``get_watch_playlist(videoId=...)`` response."""
         self._watch_results[video_id] = copy.deepcopy(response)
 
@@ -119,7 +123,7 @@ class FakeYTMusic:
             )
         return copy.deepcopy(self._album_results[browseId])
 
-    def get_watch_playlist(self, videoId: str) -> dict[str, Any]:
+    def get_watch_playlist(self, videoId: str) -> dict[str, object]:
         self.get_watch_playlist_calls.append({"videoId": videoId})
         return copy.deepcopy(self._watch_results.get(videoId, {}))
 

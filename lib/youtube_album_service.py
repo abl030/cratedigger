@@ -1211,7 +1211,7 @@ def _pick_yt_seed(
     return str(chosen["browseId"])
 
 
-def _song_album_browse_ids(results: list[dict[str, Any]]) -> list[str]:
+def _song_album_browse_ids(results: list[dict[str, object]]) -> list[str]:
     """Return the album browse IDs surfaced by the observed song search shape."""
     out: list[str] = []
     for result in results:
@@ -1227,7 +1227,14 @@ _CANONICAL_WATCH_URL = re.compile(
 )
 
 
-def _watch_url_album_browse_id(yt_client: Any, watch_url: str) -> str:
+class _WatchPlaylistClient(Protocol):
+    def get_watch_playlist(self, *, videoId: str) -> dict[str, object]: ...
+
+
+def _watch_url_album_browse_id(
+    yt_client: _WatchPlaylistClient,
+    watch_url: str,
+) -> str:
     """Resolve only the report's canonical watch URL to its album browse ID."""
     match = _CANONICAL_WATCH_URL.fullmatch(watch_url)
     if match is None:

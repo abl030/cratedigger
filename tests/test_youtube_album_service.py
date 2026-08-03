@@ -35,7 +35,7 @@ from lib.youtube_album_service import (
     YoutubeAlbumResolverResult,
     resolve_youtube_album,
 )
-from tests.fakes import FakePipelineDB, FakeYTMusic
+from tests.fakes import FakeDiscogsLookup, FakePipelineDB, FakeYTMusic, http_error
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -49,6 +49,11 @@ MB_REL_C = "cccccccc-cccc-cccc-cccc-cccccccccccc"
 MB_RG_MISSING = "22222222-2222-2222-2222-222222222222"
 MB_NO_RG = "33333333-3333-3333-3333-333333333333"
 DICE_REALITY = "129bebd8-a7b9-4099-b0bc-545b704e7a95"
+
+
+def _discogs_master_404(_identifier: str) -> dict[str, object]:
+    """Mirror the real Discogs master lookup's 404 contract."""
+    raise http_error(404, url="http://discogs.test/masters/missing")
 
 
 def _ok_mb_release(
@@ -162,8 +167,8 @@ class TestNarrowDiscoveryAdmissions(unittest.TestCase):
             identifier, pdb=pdb or FakePipelineDB(),
             mb_get_release=lambda value: _ok_mb_release(mbid=value),
             mb_get_release_group_releases=lambda _rg: _ok_mb_rg_releases((identifier, 2024)),
-            discogs_get_release=lambda _value: None,
-            discogs_get_master_releases=lambda _value: None,
+            discogs_get_release=FakeDiscogsLookup(),
+            discogs_get_master_releases=_discogs_master_404,
             yt_client=yt, distance_fn=_canned_distance(distance=0.0),
             sleep_fn=_noop_sleep, watch_url=watch_url,
         )
@@ -196,7 +201,8 @@ class TestNarrowDiscoveryAdmissions(unittest.TestCase):
         result = resolve_youtube_album(DICE_REALITY, pdb=FakePipelineDB(),
             mb_get_release=lookup,
             mb_get_release_group_releases=lambda _rg: _ok_mb_rg_releases((earlier, 1990), (DICE_REALITY, 2026)),
-            discogs_get_release=lambda _value: None, discogs_get_master_releases=lambda _value: None,
+            discogs_get_release=FakeDiscogsLookup(),
+            discogs_get_master_releases=_discogs_master_404,
             yt_client=yt, distance_fn=_canned_distance(distance=0.0), sleep_fn=_noop_sleep)
         self.assertEqual(yt.search_calls[0]["query"], "DICE Reality")
         self.assertEqual([r.yt_browse_id for r in result.youtube_releases], ["MPREb_kb5fohQCJ6d"])
