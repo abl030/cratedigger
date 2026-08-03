@@ -7354,6 +7354,81 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         assert loaded is not None
         self.assertTrue(loaded.current_enrichment_required)
 
+    def test_fresh_installed_spectral_keeps_conversion_lineage_in_both_orders(
+        self,
+    ):
+        """Real PostgreSQL mirrors the stale-writer preservation contract."""
+        for writer_order in (("fresh", "stale"), ("stale", "fresh")):
+            with self.subTest(writer_order=writer_order):
+                mbid = f"durable-lineage-{'-'.join(writer_order)}"
+                request_id = self.db.add_request(
+                    mb_release_id=mbid,
+                    artist_name="Evidence Artist",
+                    album_title="Durable lineage",
+                    source="request",
+                )
+                evidence = self._seed(
+                    mb_release_id=mbid,
+                    files=[AlbumQualityEvidenceFile(
+                        relative_path="01.m4a",
+                        size_bytes=1,
+                        mtime_ns=1,
+                        extension="m4a",
+                        container="m4a",
+                        codec="m4a",
+                    )],
+                    measurement=AudioQualityMeasurement(
+                        min_bitrate_kbps=900,
+                        avg_bitrate_kbps=920,
+                        median_bitrate_kbps=910,
+                        format="ALAC",
+                        was_converted_from="flac",
+                    ),
+                    codec="m4a",
+                    container="m4a",
+                    storage_format="ALAC",
+                )
+                self.db.upsert_album_quality_evidence(evidence)
+                stored = self.db.find_album_quality_evidence(
+                    mb_release_id=mbid,
+                    snapshot_fingerprint=evidence.snapshot_fingerprint,
+                )
+                assert stored is not None and stored.id is not None
+                self.assertTrue(self.db.set_request_current_evidence(
+                    request_id, stored.id,
+                ))
+                stale = msgspec.structs.replace(
+                    evidence,
+                    measurement=msgspec.structs.replace(
+                        evidence.measurement,
+                        was_converted_from=None,
+                    ),
+                )
+                for writer in writer_order:
+                    if writer == "fresh":
+                        self.assertTrue(
+                            self.db.persist_current_spectral_measurement(
+                                request_id=request_id,
+                                expected_evidence_id=stored.id,
+                                expected_snapshot_fingerprint=(
+                                    evidence.snapshot_fingerprint
+                                ),
+                                grade="genuine",
+                                bitrate_kbps=900,
+                            )
+                        )
+                    else:
+                        self.db.upsert_album_quality_evidence(stale)
+
+                loaded = self.db.find_album_quality_evidence(
+                    mb_release_id=mbid,
+                    snapshot_fingerprint=evidence.snapshot_fingerprint,
+                )
+                assert loaded is not None
+                self.assertEqual(loaded.measurement.was_converted_from, "flac")
+                self.assertEqual(loaded.measurement.spectral_subject, "installed")
+                self.assertEqual(loaded.measurement.spectral_grade, "genuine")
+
     def test_v0_research_claim_is_atomic_across_connections(self):
         from lib.pipeline_db import PipelineDB
 

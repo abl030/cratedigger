@@ -146,7 +146,6 @@ from lib.quality import (
     EVIDENCE_PROVENANCE_MEASURED,
     EVIDENCE_SUBJECT_INSTALLED,
     EVIDENCE_SUBJECT_SOURCE,
-    LOSSLESS_CODECS,
     V0_PROBE_LOSSLESS_SOURCE,
     V0_PROBE_NATIVE_LOSSY_RESEARCH,
     ActiveDownloadState,
@@ -4794,20 +4793,10 @@ class FakePipelineDB:
     def _assert_album_quality_evidence_constraints(
         evidence: AlbumQualityEvidence,
     ) -> None:
-        has_lossless_lineage = (
-            evidence.measurement.was_converted_from or ""
-        ).lower() in LOSSLESS_CODECS
-        if (
-            evidence.lineage_version >= 4
-            and evidence.measurement.spectral_subject
-                == EVIDENCE_SUBJECT_INSTALLED
-            and has_lossless_lineage
-        ):
-            import psycopg2.errors
-            raise psycopg2.errors.CheckViolation(
-                "violates check constraint "
-                '"album_quality_evidence_lossless_lineage_spectral_subject"'
-            )
+        # Migration 073 retires the old database-only subject/lineage check:
+        # conversion lineage persists across fresh installed measurements.
+        # R19 reuse is instead the exact manifest-aware application predicate.
+        del evidence
 
     def _store_album_quality_evidence(
         self,
@@ -4836,6 +4825,22 @@ class FakePipelineDB:
         incoming_preserves_source_spectral = (
             current_evidence_preserves_source_spectral(evidence)
         )
+        # Mirror SQL's COALESCE: lineage describes the installed output, so a
+        # stale same-address writer lacking it cannot erase that durable fact.
+        if (
+            existing is not None
+            and evidence.measurement.was_converted_from is None
+            and existing.measurement.was_converted_from is not None
+        ):
+            evidence = msgspec.structs.replace(
+                evidence,
+                measurement=msgspec.structs.replace(
+                    evidence.measurement,
+                    was_converted_from=(
+                        existing.measurement.was_converted_from
+                    ),
+                ),
+            )
         # Spectral is an atomic pair. A stale writer without a grade cannot
         # erase a successful attempt-time scan on the same audio snapshot.
         # R19 is the exception: only an exact, known-lossy derivative clears
@@ -5042,8 +5047,8 @@ class FakePipelineDB:
             return False
         # Fresh-audit-wins (issue #815): overwrite ANY disagreeing persisted
         # spectral with the fresh measured installed-subject audit. The old
-        # fill-only-if-NULL guard is gone; mirrors the production SQL. The R19
-        # lossless-lineage CHECK still fires in _store_album_quality_evidence.
+        # fill-only-if-NULL guard is gone; mirrors the production SQL. Output
+        # conversion lineage deliberately remains durable across this write.
         # The four capture facts (issue #829 phase 5) travel with the grade
         # as one atomic fact, mirroring the production SQL column list.
         measurement = msgspec.structs.replace(
@@ -5052,7 +5057,6 @@ class FakePipelineDB:
             spectral_bitrate_kbps=bitrate_kbps,
             spectral_subject=EVIDENCE_SUBJECT_INSTALLED,
             spectral_provenance=EVIDENCE_PROVENANCE_MEASURED,
-            was_converted_from=None,
             cliff_hz=cliff_hz,
             codec_family=codec_family,
             ultrasonic_deficit_db=ultrasonic_deficit_db,

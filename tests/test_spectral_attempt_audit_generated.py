@@ -144,6 +144,7 @@ def _run_have_boundary_through_both_adapters(
     have_complete: bool = True,
     snapshot_changed: bool = False,
     candidate_grade: str = "genuine",
+    installed: tuple[str, str] = ("mp3", "MP3"),
 ):
     """Drive normal measurement and reused front-gate through one boundary."""
     from lib.beets_db import AlbumInfo
@@ -185,11 +186,12 @@ def _run_have_boundary_through_both_adapters(
         (converted_from or "").lower() in {"flac", "alac", "wav"}
         or lossless_v0_lineage
     )
+    installed_extension, installed_format = installed
     current_measurement = AudioQualityMeasurement(
         min_bitrate_kbps=320,
         avg_bitrate_kbps=320,
         median_bitrate_kbps=320,
-        format="MP3",
+        format=installed_format,
         spectral_grade=persisted_grade if have_complete else None,
         spectral_bitrate_kbps=persisted_bitrate if have_complete else None,
         was_converted_from=converted_from,
@@ -241,7 +243,7 @@ def _run_have_boundary_through_both_adapters(
             processing_dir=processing_dir,
         )
         Path(candidate, "01.flac").write_bytes(b"candidate")
-        Path(existing, "01.mp3").write_bytes(b"existing")
+        Path(existing, f"01.{installed_extension}").write_bytes(b"existing")
         current_evidence = make_album_quality_evidence(
             preserve_spectral_measurement_version=True,
             mb_release_id=mbid,
@@ -249,9 +251,14 @@ def _run_have_boundary_through_both_adapters(
             files=snapshot_audio_files(existing),
             measurement=current_measurement,
             v0_metric=current_v0_metric,
+            codec=installed_extension,
+            container=installed_extension,
+            storage_format=installed_format,
         )
         if snapshot_changed:
-            Path(existing, "01.mp3").write_bytes(b"changed-existing")
+            Path(existing, f"01.{installed_extension}").write_bytes(
+                b"changed-existing"
+            )
         fake_beets = FakeBeetsDB()
         fake_beets.set_album_info(mbid, AlbumInfo(
             album_id=1,
@@ -261,7 +268,7 @@ def _run_have_boundary_through_both_adapters(
             median_bitrate_kbps=320,
             is_cbr=True,
             album_path=existing,
-            format="MP3",
+            format=installed_format,
         ))
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=request_id, mb_release_id=mbid))
@@ -1488,16 +1495,29 @@ class TestAttemptAuditGenerated(unittest.TestCase):
         persisted_grade=st.sampled_from((
             "genuine", "marginal", "suspect", "likely_transcode",
         )),
+        installed=st.sampled_from((
+            ("mp3", "MP3"),
+            ("opus", "Opus"),
+            ("m4a", "AAC"),
+            # Beets maps its OGG format label to this canonical codec label.
+            ("ogg", "vorbis"),
+        )),
     )
-    @example(persisted_generation=None, persisted_grade="likely_transcode")
+    @example(
+        persisted_generation=None,
+        persisted_grade="likely_transcode",
+        installed=("ogg", "vorbis"),
+    )
     @example(
         persisted_generation=SPECTRAL_MEASUREMENT_VERSION + 1,
         persisted_grade="suspect",
+        installed=("mp3", "MP3"),
     )
     def test_preserved_source_generations_reach_both_preview_adapters(
         self,
         persisted_generation: int | None,
         persisted_grade: str,
+        installed: tuple[str, str],
     ):
         """#1007 spans NULL, old/current/future at both preview adapters."""
 
@@ -1517,6 +1537,7 @@ class TestAttemptAuditGenerated(unittest.TestCase):
             scanned_grade="genuine",
             scanned_bitrate=320,
             candidate_grade="likely_transcode",
+            installed=installed,
         )
 
         self.assertTrue(preserve_source)

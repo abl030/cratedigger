@@ -184,15 +184,15 @@ research/unknown values → `installed`); `v0_source_provenance` becomes
 (`import_result` → `measured`, `legacy_request_seed` → `carried`); and the
 redundant `v0_proof_provenance` column is dropped.
 
-Migration 072 narrows the R19 v4 CHECK to a lossless
-`was_converted_from` marker (`flac` / `alac` / `wav`, case-insensitive): an
-`installed` spectral subject cannot coexist with that marker. Source-subject
-V0 and verified-lossless proof remain provenance rather than a database claim
-that current bytes are irrecoverable. The application preserves old
-source-subject spectral only when the exact manifest also proves a known lossy
-installed codec; it fails closed for native lossless, mixed, or unresolved
-media, including ALAC's normal `.m4a` container. The CHECK is version-gated so
-historical v1/v3 rows can rebuild on touch instead of blocking migration.
+Migration 072 briefly narrowed R19 with a v4 database CHECK. Migration 073
+retires it: `was_converted_from` is durable output lineage and can coexist
+with a fresh `installed` spectral measurement. A HAVE scan changes the
+spectral subject, not the fact that FLAC became ALAC, Opus, or Vorbis.
+Source-subject V0 and verified-lossless proof remain provenance rather than a
+database claim that current bytes are irrecoverable. The application preserves
+old source-subject spectral only when the exact manifest also proves a known
+lossy installed codec; it fails closed for native lossless, mixed, or
+unresolved media, including ALAC's normal `.m4a` container.
 
 ## `album_quality_evidence_files` — snapshot guard rows
 

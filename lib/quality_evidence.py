@@ -306,8 +306,10 @@ def current_evidence_rebuild_reasons(
 _LOSSLESS_CONTAINERS = {"flac", "alac", "wav", "aiff", "ape"}
 _LOSSY_CONTAINERS = {"mp3", "aac", "m4a", "ogg", "opus", "wma"}
 # ``m4a`` is deliberately absent: it names an ambiguous container, not a
-# lossy codec. ALAC's normal on-disk extension is .m4a.
-_LOSSY_CODECS = _LOSSY_CONTAINERS - {"m4a"}
+# lossy codec. ALAC's normal on-disk extension is .m4a. Beets normalizes its
+# ``OGG`` format label to the codec name ``vorbis`` in current-library
+# evidence, so that canonical codec must remain admitted here too.
+_LOSSY_CODECS = (_LOSSY_CONTAINERS - {"m4a"}) | {"vorbis"}
 
 
 def derive_folder_layout(files: list[AlbumQualityEvidenceFile]) -> str:

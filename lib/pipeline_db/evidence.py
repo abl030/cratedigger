@@ -393,7 +393,14 @@ class _EvidenceMixin(_PipelineDBBase):
                         THEN album_quality_evidence.verified_lossless
                         ELSE EXCLUDED.verified_lossless
                     END,
-                    was_converted_from = EXCLUDED.was_converted_from,
+                    -- This is durable output lineage, independent from the
+                    -- current spectral observation. A stale same-snapshot
+                    -- writer without it must not erase FLAC -> ALAC/Opus/
+                    -- Vorbis provenance after a fresh installed scan.
+                    was_converted_from = COALESCE(
+                        EXCLUDED.was_converted_from,
+                        album_quality_evidence.was_converted_from
+                    ),
                     -- V0 is one atomic fact, not six independently mergeable
                     -- columns. A valid incoming metric has a lineage and at
                     -- least one bitrate; replace the whole tuple in that case.
@@ -789,8 +796,10 @@ class _EvidenceMixin(_PipelineDBBase):
         re-persists ``grade``/``bitrate`` as ``installed``/``measured`` over ANY
         disagreeing persisted value on the still-current row — the old
         fill-only-if-NULL guard let a stale legacy grade survive a fresh scan.
-        The lossless-lineage R19 CHECK still fires against the hardcoded
-        ``installed`` subject, so a source-lineage row is never written here.
+        ``was_converted_from`` is durable output lineage, not the spectral
+        subject. A fresh installed measurement therefore leaves it intact;
+        R19's reuse predicate independently permits carried source spectral
+        facts only for an exact known-lossy derivative.
 
         The four measured capture facts (issue #829 phase 5) are one atomic
         fact with ``grade`` — every writer of ``spectral_grade`` carries them
@@ -804,7 +813,6 @@ class _EvidenceMixin(_PipelineDBBase):
                 spectral_bitrate_kbps = %s,
                 spectral_subject = 'installed',
                 spectral_provenance = 'measured',
-                was_converted_from = NULL,
                 cliff_hz = %s,
                 codec_family = %s,
                 ultrasonic_deficit_db = %s,
