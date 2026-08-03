@@ -453,7 +453,7 @@ class TestUnusedImportAudit(unittest.TestCase):
         self.assertIn('set -- .', runner)
         self.assertIn("ruff check", runner)
 
-    def test_ruff_toolchain_and_config_are_pinned_to_0_16(self) -> None:
+    def test_ruff_toolchain_comes_from_locked_nixpkgs(self) -> None:
         result = subprocess.run(
             ["ruff", "--version"],
             cwd=REPO_ROOT,
@@ -464,12 +464,15 @@ class TestUnusedImportAudit(unittest.TestCase):
         config = tomllib.loads(
             Path("ruff.toml").read_text(encoding="utf-8")
         )
-        nix_pin = Path("nix/ruff.nix").read_text(encoding="utf-8")
         shell = Path("nix/shell.nix").read_text(encoding="utf-8")
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), "ruff 0.16.0")
-        self.assertEqual(config["required-version"], "==0.16.0")
+        version = tuple(
+            int(component)
+            for component in result.stdout.removeprefix("ruff ").split(".")
+        )
+        self.assertGreaterEqual(version, (0, 16, 0))
+        self.assertEqual(config["required-version"], ">=0.16.0")
         self.assertEqual(config["target-version"], "py313")
         self.assertEqual(config["lint"]["extend-select"], ["B905"])
         self.assertNotIn("ignore", config["lint"])
@@ -477,18 +480,9 @@ class TestUnusedImportAudit(unittest.TestCase):
             config["lint"]["per-file-ignores"],
             {"tools/vulture/whitelist.py": ["B018", "F821"]},
         )
-        self.assertIn('version = "0.16.0";', nix_pin)
-        for system, target in (
-            ("x86_64-linux", "x86_64-unknown-linux-gnu"),
-            ("aarch64-linux", "aarch64-unknown-linux-gnu"),
-            ("x86_64-darwin", "x86_64-apple-darwin"),
-            ("aarch64-darwin", "aarch64-apple-darwin"),
-        ):
-            with self.subTest(system=system):
-                self.assertIn(f'"{system}" = {{', nix_pin)
-                self.assertIn(f'target = "{target}";', nix_pin)
-        self.assertIn("ruff = import ./ruff.nix", shell)
-        self.assertNotIn("pkgs.ruff", shell)
+        self.assertFalse(Path("nix/ruff.nix").exists())
+        self.assertIn("pkgs.ruff", shell)
+        self.assertNotIn("ruff = import ./ruff.nix", shell)
 
     def test_b905_requires_every_zip_intent_to_be_explicit(self) -> None:
         findings = ruff_findings({
