@@ -9,16 +9,17 @@ prior art.
 The highest quality acquisition path for the library:
 
 1. **Download lossless** (FLAC, ALAC, WAV) from Soulseek
-2. **Verify with spectral analysis** — confirm the lossless file is genuinely lossless (not a lossy transcode wrapped in a lossless container)
+2. **Verify source authenticity** — prefer an exact CD-rip database match;
+   otherwise use the spectral/AAC/V0 proof gate
 3. **Convert to VBR V0** — `ffmpeg -codec:a libmp3lame -q:a 0`
 4. **Import to beets** — the VBR V0 probe remains an auditable source fingerprint
 
 VBR bitrate is useful evidence, not verification by itself. A genuine CD rip
 converted to V0 commonly produces ~240-260kbps while a lossy transcode commonly
 lands lower, but only an explicit verified-lossless proof completes acquisition,
-and that proof lock is absolute in every import mode. The proof requires
-affirmative spectral evidence, or the narrow V0 trust override after spectral
-analysis ran and disagreed.
+and that proof lock is absolute in every import mode. The proof requires either
+an exact positive CD-rip match, affirmative spectral evidence, or the narrow V0
+trust override after spectral analysis ran and disagreed.
 
 ## Current Verification Methods
 
@@ -83,6 +84,150 @@ album only after every file succeeds with a nonempty output. Any batch failure
 removes only temporary derivatives, retains every source, records bounded
 `ConversionInfo` diagnostics, and revalidates the retained sources to
 distinguish corrupt audio from an encoder/materialization world failure.
+
+### Exact CD-rip bit verification (issue #962)
+
+`lib/cd_rip_verifier.py` admits only flat, sector-aligned 44.1 kHz,
+16-bit, stereo FLAC or ALAC albums. After the full decoded-integrity gate has
+passed, it decodes the exact source manifest to a bounded temporary PCM spool
+under the deployment-owned disk-backed
+`var_dir/cd-rip-spool/v1` directory (mode `0700`), never the host-global
+temporary directory, and asks AccurateRip and CTDB concurrently over HTTPS.
+The anonymous spool is removed on every exit. A proof is minted only
+for one of these positive worlds:
+
+- every track matches the provider checksum as all ARv1 or all ARv2 at one
+  constant read offset within ±5000 samples; or
+- the CTDB whole-disc CRC matches exactly. Track-only CTDB matches do not
+  count.
+
+The AccurateRip scan uses exact integer modulo-2^32 arithmetic. Partial,
+mixed-version, mixed-offset, malformed, timed-out, unavailable, 404, and
+non-matching responses all become `None`: they have exactly the pre-feature
+policy result and never penalize a source. ARv1 scan hits retain their exact
+per-track checksum mapping, so even 64 candidate offsets require no repeated
+whole-disc confirmation; ARv2 frame-450 discovery admits at most eight
+confirmation offsets. The complete verifier has a 300-second monotonic wall
+deadline, checked inside decode and checksum chunks. Provider responses are
+size- and whole-request-wall bounded, redirects are rejected before urllib can
+contact their target, and requests are serialized per provider for politeness.
+Each provider lane runs in its own spawn-context child with a 30-second budget
+covering cache locks, politeness, and network I/O. A lane that exceeds that
+budget is terminated, killed if necessary, and joined before the verifier
+continues, so no provider operation can strand a worker or delay service exit.
+The durable cache under `var_dir/cd-rip-cache/v1` retains positive responses
+only.
+
+The 2026-08-03 doc1 resource acceptance used two concurrent checksum workers
+and physically allocated anonymous spools. The then-current 8,473-album Beets
+snapshot's rounded p95 shape (80 minutes, 21 tracks) completed in 6.8–7.8
+seconds with 846,720,000 bytes per worker. The admitted maximum (120 minutes,
+99 tracks) with a pathological greater-than-64-offset ARv1 collision set
+completed in 12.9–13.5 seconds with 1,270,080,000 bytes per worker; the ARv1
+explosion was suppressed while the independent exact ARv2 zero-offset match
+remained admissible. The whole benchmark, including its Nix shell, peaked at
+461,204 KiB RSS with zero swaps, and every `0700` spool was empty after its
+worker exited. Reproduce that exact workload from the repository root with:
+
+```bash
+/run/current-system/sw/bin/time -v nix-shell --run "python3 - <<'PY'
+from concurrent.futures import ThreadPoolExecutor
+import os
+from pathlib import Path
+import tempfile
+import time
+
+from lib.cd_rip_verifier import _ArIndexes, verify_accuraterip_pcm
+
+
+def lengths_for(minutes: int, tracks: int) -> list[int]:
+    sectors, remainder = divmod(minutes * 60 * 75, tracks)
+    return [
+        (sectors + (track < remainder)) * 588
+        for track in range(tracks)
+    ]
+
+
+def worker(
+    root: Path,
+    label: str,
+    minutes: int,
+    tracks: int,
+    collision: bool,
+) -> str:
+    lengths = lengths_for(minutes, tracks)
+    samples = sum(lengths)
+    spool = root / label
+    spool.mkdir(mode=0o700)
+    wanted = 0 if collision else 0xDEADBEEF
+    indexes = _ArIndexes(
+        checksums=[{wanted: 1} for _ in lengths],
+        frame450=[{} for _ in lengths],
+        response_sha256="a" * 64,
+    )
+    started = time.monotonic()
+    with tempfile.TemporaryFile(dir=spool) as pcm:
+        os.posix_fallocate(pcm.fileno(), 0, samples * 4)
+        match = verify_accuraterip_pcm(
+            pcm,
+            track_lengths=lengths,
+            indexes=indexes,
+            url="https://www.accuraterip.com/benchmark.bin",
+        )
+    elapsed = time.monotonic() - started
+    outcome = (
+        "none" if match is None
+        else f"{match.checksum_version}@{match.read_offset_samples}"
+    )
+    return (
+        f"{label}: {minutes}m/{tracks} tracks, {samples * 4} bytes, "
+        f"{elapsed:.1f}s, {outcome}, remnants={list(spool.iterdir())}"
+    )
+
+
+with tempfile.TemporaryDirectory(
+    prefix="cratedigger-cd-rip-benchmark-", dir="/home/abl030"
+) as raw_root:
+    root = Path(raw_root)
+    for scenario in (
+        ("p95", 80, 21, False),
+        ("maximum-collision", 120, 99, True),
+    ):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [
+                pool.submit(
+                    worker, root, f"{scenario[0]}-{worker_id}", *scenario[1:]
+                )
+                for worker_id in range(2)
+            ]
+            for future in futures:
+                print(future.result())
+    print(f"root-mode={oct(root.stat().st_mode & 0o777)}")
+PY"
+```
+
+The structured `cd_rip_verification` evidence records algorithm version,
+source format/provenance, exact TOC plus AccurateRip and MusicBrainz disc IDs,
+provider URLs, the selected per-track AccurateRip checksum/confidence vector,
+version/offset, response SHA-256 digests, and CTDB raw response TOC, explicit
+first-sector shift, whole-disc CRC, and confidence. CTDB responses use both
+zero-based and positive-first-sector conventions. Subtracting the stored shift
+from every raw response boundary must reproduce the submitted TOC exactly;
+nonconstant differences and fuzzy sibling entries cannot mint evidence. The
+2026-08-03 read-only production controls proved both conventions. Deloris —
+*Fake Our Deaths* returned CTDB entry 406790 (confidence 6, CRC 1665363298)
+with shift zero. Pavement — *Major Leagues* returned CTDB entry 3137070
+(confidence 42, CRC 3321273903) with every raw TOC boundary exactly 32 sectors
+above the submitted boundary. Both deliberately projected no AccurateRip
+result: an exact CTDB whole-disc match already suffices, so checksum work for
+the other provider is not started and cannot erase that proof. It mints classifier
+`cd_rip_bit_verified_v1` and may
+replace spectral/AAC/V0 work only in the authenticity lane. Exact manifest and
+decode integrity, pressing identity and action-time authority, the installed
+proof lock, target-format policy, and target-quality comparison remain
+mandatory. If conversion follows, the installed evidence carries this proof
+as source provenance: it continues to describe the FLAC/ALAC source, never the
+derivative bytes.
 
 ### 1. VBR V0 source probe (implemented)
 
@@ -1269,7 +1414,9 @@ The ordinary enrichment path remeasures those facts against the installed
 snapshot when policy needs them.
 
 **The canonical acquisition-fact set is exactly:** verified-lossless proof,
-source-subject spectral, and the source-subject V0 anchor. These facts cannot be
+its paired structured CD-rip verification when the classifier is
+`cd_rip_bit_verified_v1`, source-subject spectral, and the source-subject V0
+anchor. These facts cannot be
 re-derived from converted library bytes, so they carry to the new row with
 `provenance='carried'`. Their `subject='source'` continues to say that they
 describe the upstream acquisition bytes, not the installed derivative.
@@ -1291,7 +1438,10 @@ its provenance marker.
 **A changed installed snapshot is linked before neutral enrichment, but it is
 not immediately action authority.** The new content-addressed row must exist
 first so the preview-owned spectral and V0 writers can target its exact id and
-fingerprint. Such a rebuild sets `current_enrichment_required=true`; action
+fingerprint. Structured CD evidence carries with its source format, provider
+TOC/checksum audit, and response digests unchanged while only its provenance
+becomes `carried`; it never relabels installed derivative bytes as the matched
+CD rip. Such a rebuild sets `current_enrichment_required=true`; action
 loaders keep failing closed on every unchanged retry until that exact row has
 both a spectral result and either a V0 metric or the persisted once-only V0
 attempt marker. Source-subject spectral/V0 facts may satisfy the gate because

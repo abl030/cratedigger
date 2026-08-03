@@ -51,6 +51,7 @@ from lib.quality import (
     AudioQualityMeasurement,
     AudioToolDiagnostic,
     AudioValidationReport,
+    CdRipBitVerification,
     CodecFamily,
     CodecRankBands,
     ConversionInfo,
@@ -262,6 +263,7 @@ def make_album_quality_evidence(
     measurement: AudioQualityMeasurement | None = None,
     v0_metric: AlbumQualityV0Metric | None = None,
     verified_lossless_proof: VerifiedLosslessProof | None = None,
+    cd_rip_verification: CdRipBitVerification | None = None,
     codec: str | None = "mp3",
     container: str | None = "mp3",
     storage_format: str | None = "MP3",
@@ -366,6 +368,7 @@ def make_album_quality_evidence(
         on_disk_v0_research_attempted=on_disk_v0_research_attempted,
         current_enrichment_required=current_enrichment_required,
         verified_lossless_proof=verified_lossless_proof,
+        cd_rip_verification=cd_rip_verification,
         audio_validation=(
             audio_validation
             if audio_validation is not None

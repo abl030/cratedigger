@@ -284,6 +284,7 @@ class DownloadLogWithEvidenceRow(DownloadLogRow):
     _evidence_aac_lattice_scored_tracks: int | None
     _evidence_aac_lattice_max_z: float | None
     _evidence_verified_lossless_classifier: str | None
+    _evidence_cd_rip_verification: dict[str, object] | None
     _evidence_container_extensions: list[str] | None
 
 

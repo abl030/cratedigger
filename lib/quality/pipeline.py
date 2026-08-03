@@ -607,7 +607,9 @@ def full_pipeline_decision(
                 MeasuredImportDecisionInput(
                     new_m,
                     existing_m,
-                    verified_lossless_proof=will_be_verified,
+                    verified_lossless_proof=(
+                        will_be_verified or verified_proof
+                    ),
                     source_spectral=candidate_spectral,
                     current_spectral=existing_spectral,
                 ),
@@ -768,7 +770,7 @@ def full_pipeline_decision(
                     policy_is_transcode,
                     target_contract,
                     candidate_source_probe,
-                    will_be_verified,
+                    will_be_verified or verified_proof,
                     source_spectral=candidate_spectral,
                     current_spectral=existing_spectral,
                 ),
