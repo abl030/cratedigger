@@ -10,6 +10,7 @@ import msgspec
 
 from lib.convergence_service import ConvergenceSignal
 from lib.pipeline_db._shared import ProcessingOwnerProjection
+from lib.quality import CdRipBitVerification
 from lib.release_identity import (
     ReleaseIdentity,
     detect_release_source,
@@ -61,6 +62,26 @@ def _pipeline_facts(
         _pipeline_fact(row, "verified_lossless"),
         _pipeline_fact(row, "provisional_lossless"),
     )
+
+
+def _pipeline_cd_rip_verification(
+    row: Mapping[str, object],
+) -> CdRipBitVerification | None:
+    """Accept only the typed, semantically valid current-evidence fact."""
+    value = row.get("cd_rip_verification")
+    if value is None:
+        return None
+    if not isinstance(value, CdRipBitVerification):
+        raise TypeError(
+            "LibraryAlbumRow cd_rip_verification must be "
+            f"CdRipBitVerification|None, got {type(value).__name__}"
+        )
+    if errors := value.validation_errors():
+        raise ValueError(
+            "LibraryAlbumRow cd_rip_verification is invalid: "
+            + "; ".join(errors)
+        )
+    return value
 
 
 @dataclass(frozen=True)
@@ -165,6 +186,7 @@ class LibraryAlbumRow(msgspec.Struct, frozen=True):
     has_captured_history: bool
     pipeline_verified_lossless: bool
     pipeline_provisional: bool
+    cd_rip_verification: CdRipBitVerification | None = None
     convergence: ConvergenceSignal | None = None
 
     @property
@@ -299,6 +321,7 @@ class LibraryAlbumRow(msgspec.Struct, frozen=True):
                 "has_captured_history": captured,
                 "pipeline_verified_lossless": verified,
                 "pipeline_provisional": provisional,
+                "cd_rip_verification": _pipeline_cd_rip_verification(row),
             },
             type=cls,
         )
@@ -318,4 +341,5 @@ class LibraryAlbumRow(msgspec.Struct, frozen=True):
         row["has_captured_history"] = captured
         row["pipeline_verified_lossless"] = verified
         row["pipeline_provisional"] = provisional
+        row["cd_rip_verification"] = _pipeline_cd_rip_verification(pipeline_row)
         return msgspec.convert(row, type=type(self))

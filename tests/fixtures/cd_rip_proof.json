@@ -1,0 +1,170 @@
+{
+  "accuraterip_min_1": {
+    "accuraterip": {
+      "checksum_version": "arv2",
+      "provider": "accuraterip",
+      "read_offset_samples": 664,
+      "response_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "track_checksums": [
+        286331153,
+        286331154,
+        286331155,
+        286331156,
+        286331157,
+        286331158,
+        286331159,
+        286331160,
+        286331161,
+        286331162,
+        286331163,
+        286331164
+      ],
+      "track_confidences": [
+        5,
+        4,
+        3,
+        2,
+        1,
+        6,
+        7,
+        8,
+        4,
+        3,
+        2,
+        5
+      ],
+      "url": "https://www.accuraterip.com/example.bin"
+    },
+    "algorithm": "cd-rip-bit-verifier-v1",
+    "ctdb": null,
+    "provenance": "carried",
+    "source_format": "alac",
+    "toc": {
+      "accuraterip_id": "000001d6-000003ac-0200060c",
+      "leadout_sector": 2670,
+      "musicbrainz_disc_id": "exact-disc-id-12",
+      "track_offsets_sectors": [
+        0,
+        200,
+        400,
+        600,
+        800,
+        1000,
+        1200,
+        1400,
+        1600,
+        1800,
+        2000,
+        2200
+      ]
+    }
+  },
+  "ctdb_11_accuraterip_min_3": {
+    "accuraterip": {
+      "checksum_version": "arv1",
+      "provider": "accuraterip",
+      "read_offset_samples": -6,
+      "response_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "track_checksums": [
+        554766609,
+        554766610,
+        554766611,
+        554766612
+      ],
+      "track_confidences": [
+        7,
+        3,
+        5,
+        9
+      ],
+      "url": "https://www.accuraterip.com/dual-provider.bin"
+    },
+    "algorithm": "cd-rip-bit-verifier-v1",
+    "ctdb": {
+      "confidence": 11,
+      "crc32": 591751049,
+      "entry_id": "ctdb-entry-dual",
+      "provider": "ctdb",
+      "response_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "response_toc_sectors": [
+        0,
+        200,
+        450,
+        725,
+        1195
+      ],
+      "response_toc_shift_sectors": 0,
+      "stride_samples": 5880,
+      "url": "https://db.cue.tools/lookup2.php?dual=1"
+    },
+    "provenance": "measured",
+    "source_format": "flac",
+    "toc": {
+      "accuraterip_id": "000001d6-000003ac-02000604",
+      "leadout_sector": 1195,
+      "musicbrainz_disc_id": "exact-dual-provider-disc-id",
+      "track_offsets_sectors": [
+        0,
+        200,
+        450,
+        725
+      ]
+    }
+  },
+  "ctdb_24": {
+    "accuraterip": null,
+    "algorithm": "cd-rip-bit-verifier-v1",
+    "ctdb": {
+      "confidence": 24,
+      "crc32": 305419896,
+      "entry_id": "ctdb-entry-24",
+      "provider": "ctdb",
+      "response_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "response_toc_sectors": [
+        0,
+        470
+      ],
+      "response_toc_shift_sectors": 0,
+      "stride_samples": 5880,
+      "url": "https://db.cue.tools/lookup2.php"
+    },
+    "provenance": "measured",
+    "source_format": "flac",
+    "toc": {
+      "accuraterip_id": "000001d6-000003ac-02000601",
+      "leadout_sector": 470,
+      "musicbrainz_disc_id": "exact-disc-id",
+      "track_offsets_sectors": [
+        0
+      ]
+    }
+  },
+  "ctdb_6": {
+    "accuraterip": null,
+    "algorithm": "cd-rip-bit-verifier-v1",
+    "ctdb": {
+      "confidence": 6,
+      "crc32": 305419896,
+      "entry_id": "ctdb-entry-6",
+      "provider": "ctdb",
+      "response_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "response_toc_sectors": [
+        0,
+        470
+      ],
+      "response_toc_shift_sectors": 0,
+      "stride_samples": 5880,
+      "url": "https://db.cue.tools/lookup2.php"
+    },
+    "provenance": "measured",
+    "source_format": "flac",
+    "toc": {
+      "accuraterip_id": "000001d6-000003ac-02000601",
+      "leadout_sector": 470,
+      "musicbrainz_disc_id": "exact-disc-id",
+      "track_offsets_sectors": [
+        0
+      ]
+    }
+  }
+}

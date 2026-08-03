@@ -154,3 +154,36 @@ def frontend_release_id(
     """Return the single frontend release-id field for a row, if any."""
     identity = ReleaseIdentity.from_fields(release_id, discogs_release_id)
     return identity.release_id if identity else None
+
+
+def exact_request_evidence_identity_matches(
+    request_release_id: object | None,
+    request_discogs_release_id: object | None,
+    evidence_release_id: object | None,
+) -> bool:
+    """Whether one evidence row can speak for one exact request identity.
+
+    Modern Discogs requests use ``discogs_release_id``; historical rows keep
+    the same numeric release id in ``mb_release_id`` and some transition-era
+    rows duplicate it in both. Conflicting populated request fields fail
+    closed. Synthetic nonempty MB ids remain comparable only on the legacy
+    MB-only path used by tests and manually seeded audit rows.
+    """
+    request_identity = ReleaseIdentity.from_strict_fields(
+        request_release_id,
+        request_discogs_release_id,
+    )
+    evidence_identity = ReleaseIdentity.from_id(evidence_release_id)
+    if request_identity is not None:
+        return evidence_identity == request_identity
+
+    if normalize_release_id(request_discogs_release_id):
+        return False
+    if (
+        ReleaseIdentity.from_id(request_release_id) is not None
+        or evidence_identity is not None
+    ):
+        return False
+    expected = normalize_release_id(request_release_id)
+    actual = normalize_release_id(evidence_release_id)
+    return bool(expected and actual == expected)

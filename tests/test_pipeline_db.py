@@ -58,9 +58,13 @@ from lib.pipeline_db._shared import REQUEST_METADATA_RESERVED_FIELDS
 from lib.quality import (
     ActiveDownloadState,
     AlbumQualityEvidenceFile,
+    AlbumQualityV0Metric,
     AudioQualityMeasurement,
     AudioToolDiagnostic,
     AudioValidationReport,
+    CdRipBitVerification,
+    CdTocIdentity,
+    CtdbWholeDiscMatch,
     legacy_unrecorded_audio_validation_report,
 )
 from tests.fakes import FakePipelineDB
@@ -114,6 +118,125 @@ def make_db():
         db._execute(f"TRUNCATE {table} CASCADE")
     db.conn.commit()
     return db
+
+
+def _projection_ctdb_proof(confidence: int) -> CdRipBitVerification:
+    return CdRipBitVerification(
+        provenance="carried",
+        toc=CdTocIdentity([0], 470, "ar-id", "mb-disc-id"),
+        ctdb=CtdbWholeDiscMatch(
+            provider="ctdb",
+            url="https://db.cue.tools/lookup2.php",
+            entry_id=f"ctdb-{confidence}",
+            confidence=confidence,
+            crc32=0x12345678,
+            stride_samples=5880,
+            response_toc_sectors=[0, 470],
+            response_toc_shift_sectors=0,
+            response_sha256="a" * 64,
+        ),
+    )
+
+
+def _link_projection_evidence(
+    db: PipelineDB | FakePipelineDB,
+    request_id: int,
+    evidence_release_id: str,
+    *,
+    cd_confidence: int | None = None,
+    provisional: bool = False,
+) -> None:
+    cd_rip = (
+        _projection_ctdb_proof(cd_confidence)
+        if cd_confidence is not None else None
+    )
+    evidence = make_album_quality_evidence(
+        mb_release_id=evidence_release_id,
+        source_path=f"/library/{evidence_release_id}",
+        measurement=AudioQualityMeasurement(
+            min_bitrate_kbps=245,
+            avg_bitrate_kbps=256,
+            median_bitrate_kbps=252,
+            format="MP3",
+        ),
+        v0_metric=(
+            AlbumQualityV0Metric(
+                subject="source",
+                provenance="carried",
+                avg_bitrate_kbps=251,
+                min_bitrate_kbps=228,
+            )
+            if provisional else None
+        ),
+        verified_lossless_proof=(
+            cd_rip.verified_lossless_proof() if cd_rip is not None else None
+        ),
+        cd_rip_verification=cd_rip,
+    )
+    db.upsert_album_quality_evidence(evidence)
+    stored = db.find_album_quality_evidence(
+        mb_release_id=evidence_release_id,
+        snapshot_fingerprint=evidence.snapshot_fingerprint,
+    )
+    assert stored is not None and stored.id is not None
+    assert db.set_request_current_evidence(request_id, stored.id)
+
+
+def _seed_foreign_current_evidence_world(
+    db: PipelineDB | FakePipelineDB,
+    *,
+    identity_layout: str,
+) -> list[str]:
+    """Seed exact proof plus foreign proof/provisional current links."""
+    if identity_layout == "musicbrainz":
+        request_release_ids = [
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2",
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa3",
+        ]
+        evidence_release_ids = [
+            request_release_ids[0],
+            "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2",
+            "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb3",
+        ]
+    elif identity_layout == "modern_discogs":
+        request_release_ids = ["456701", "456702", "456703"]
+        evidence_release_ids = ["456701", "456792", "456793"]
+    elif identity_layout == "legacy_discogs":
+        request_release_ids = ["456711", "456712", "456713"]
+        evidence_release_ids = ["456711", "456782", "456783"]
+    else:
+        raise ValueError(f"unknown identity layout: {identity_layout}")
+
+    titles = ("Exact proof", "Foreign proof", "Foreign provisional")
+    for index, (request_release_id, evidence_release_id) in enumerate(
+        zip(request_release_ids, evidence_release_ids, strict=True)
+    ):
+        if identity_layout == "modern_discogs":
+            request_id = db.add_request(
+                mb_release_id=None,
+                discogs_release_id=request_release_id,
+                artist_name="Foreign Evidence Artist",
+                album_title=titles[index],
+                source="request",
+                status="imported",
+            )
+        else:
+            request_id = db.add_request(
+                mb_release_id=request_release_id,
+                artist_name="Foreign Evidence Artist",
+                album_title=titles[index],
+                source="request",
+                status="imported",
+            )
+        _link_projection_evidence(
+            db,
+            request_id,
+            evidence_release_id,
+            cd_confidence=6 if index == 0 else 99 if index == 1 else None,
+            provisional=index == 2,
+        )
+    return request_release_ids
 
 
 def _unavailable_execution_lease(
@@ -14610,6 +14733,35 @@ class TestGetPipelineOverlay(unittest.TestCase):
             "real SQL — fix the fake, never the production SQL, unless "
             "the SQL change is the point of your PR.")
 
+    def test_overlay_rejects_foreign_modern_discogs_current_evidence(self):
+        fake = FakePipelineDB()
+        release_ids = _seed_foreign_current_evidence_world(
+            self.db,
+            identity_layout="modern_discogs",
+        )
+        self.assertEqual(
+            _seed_foreign_current_evidence_world(
+                fake,
+                identity_layout="modern_discogs",
+            ),
+            release_ids,
+        )
+
+        real = self.db.get_pipeline_overlay(release_ids)
+        mirrored = fake.get_pipeline_overlay(release_ids)
+
+        self.assertTrue(real[release_ids[0]]["verified_lossless"])
+        self.assertFalse(real[release_ids[0]]["provisional_lossless"])
+        self.assertFalse(real[release_ids[1]]["verified_lossless"])
+        self.assertFalse(real[release_ids[1]]["provisional_lossless"])
+        self.assertFalse(real[release_ids[2]]["verified_lossless"])
+        self.assertFalse(real[release_ids[2]]["provisional_lossless"])
+        strip_ids = lambda rows: {
+            key: {field: value for field, value in row.items() if field != "id"}
+            for key, row in rows.items()
+        }
+        self.assertEqual(strip_ids(real), strip_ids(mirrored))
+
     def test_fake_parity_on_identical_state(self):
         from tests.fakes import FakePipelineDB
 
@@ -14711,6 +14863,42 @@ class TestListLibraryRequestCandidates(unittest.TestCase):
             facts(fake.list_library_request_candidates(["456789"])),
         )
 
+    def test_candidates_reject_foreign_legacy_discogs_current_evidence(self):
+        fake = FakePipelineDB()
+        release_ids = _seed_foreign_current_evidence_world(
+            self.db,
+            identity_layout="legacy_discogs",
+        )
+        self.assertEqual(
+            _seed_foreign_current_evidence_world(
+                fake,
+                identity_layout="legacy_discogs",
+            ),
+            release_ids,
+        )
+
+        def facts(
+            db: PipelineDB | FakePipelineDB,
+        ) -> dict[str, tuple[bool | None, bool, CdRipBitVerification | None]]:
+            return {
+                str(row["album_title"]): (
+                    row["verified_lossless"],
+                    row["provisional_lossless"],
+                    row["cd_rip_verification"],
+                )
+                for row in db.list_library_request_candidates(release_ids)
+            }
+
+        real = facts(self.db)
+        mirrored = facts(fake)
+        self.assertTrue(real["Exact proof"][0])
+        exact_cd = real["Exact proof"][2]
+        assert exact_cd is not None and exact_cd.ctdb is not None
+        self.assertEqual(exact_cd.ctdb.confidence, 6)
+        self.assertEqual(real["Foreign proof"], (False, False, None))
+        self.assertEqual(real["Foreign provisional"], (False, False, None))
+        self.assertEqual(real, mirrored)
+
 
 @requires_postgres
 class TestListRequestsByArtistProjection(unittest.TestCase):
@@ -14727,6 +14915,7 @@ class TestListRequestsByArtistProjection(unittest.TestCase):
         mbid: str,
         *,
         verified: bool,
+        cd_rip: CdRipBitVerification | None = None,
     ) -> None:
         from lib.quality import AlbumQualityV0Metric, VerifiedLosslessProof
 
@@ -14748,13 +14937,15 @@ class TestListRequestsByArtistProjection(unittest.TestCase):
                 )
             ),
             verified_lossless_proof=(
-                VerifiedLosslessProof(
+                cd_rip.verified_lossless_proof()
+                if cd_rip is not None else VerifiedLosslessProof(
                     provenance="carried",
                     source="flac",
                     classifier="spectral_verified_lossless",
                 )
                 if verified else None
             ),
+            cd_rip_verification=cd_rip,
         )
         db.upsert_album_quality_evidence(evidence)
         stored = db.find_album_quality_evidence(
@@ -14821,6 +15012,47 @@ class TestListRequestsByArtistProjection(unittest.TestCase):
         self.assertTrue(by_title["Evidence only"]["verified_lossless"])
         self.assertFalse(by_title["Evidence only"]["provisional_lossless"])
 
+    def test_projects_cd_proof_from_exact_current_evidence_join(self) -> None:
+        from lib.quality import CdTocIdentity, CtdbWholeDiscMatch
+
+        request_id = self.db.add_request(
+            mb_release_id="artist-projection-cd-proof",
+            artist_name="Projection Artist",
+            album_title="Exact CD proof",
+            source="request",
+            status="imported",
+        )
+        cd_rip = CdRipBitVerification(
+            provenance="carried",
+            toc=CdTocIdentity([0], 470, "ar-id", "mb-disc-id"),
+            ctdb=CtdbWholeDiscMatch(
+                provider="ctdb",
+                url="https://db.cue.tools/lookup2.php",
+                entry_id="ctdb-6",
+                confidence=6,
+                crc32=0x12345678,
+                stride_samples=5880,
+                response_toc_sectors=[0, 470],
+                response_toc_shift_sectors=0,
+                response_sha256="a" * 64,
+            ),
+        )
+        self._link_evidence(
+            self.db,
+            request_id,
+            "artist-projection-cd-proof",
+            verified=True,
+            cd_rip=cd_rip,
+        )
+
+        rows = self.db.list_requests_by_artist("Projection Artist")
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["cd_rip_verification"], cd_rip)
+        projected = rows[0]["cd_rip_verification"]
+        assert projected is not None and projected.ctdb is not None
+        self.assertEqual(projected.ctdb.confidence, 6)
+
     def test_artist_projection_fake_parity(self):
         fake = FakePipelineDB()
         self._seed_artist_projection_world(self.db)
@@ -14842,6 +15074,42 @@ class TestListRequestsByArtistProjection(unittest.TestCase):
             facts(self.db.list_requests_by_artist("Projection Artist")),
             facts(fake.list_requests_by_artist("Projection Artist")),
         )
+
+    def test_artist_projection_rejects_foreign_mb_current_evidence(self) -> None:
+        fake = FakePipelineDB()
+        release_ids = _seed_foreign_current_evidence_world(
+            self.db,
+            identity_layout="musicbrainz",
+        )
+        self.assertEqual(
+            _seed_foreign_current_evidence_world(
+                fake,
+                identity_layout="musicbrainz",
+            ),
+            release_ids,
+        )
+
+        def facts(
+            db: PipelineDB | FakePipelineDB,
+        ) -> dict[str, tuple[bool | None, bool, CdRipBitVerification | None]]:
+            return {
+                str(row["album_title"]): (
+                    row["verified_lossless"],
+                    row["provisional_lossless"],
+                    row["cd_rip_verification"],
+                )
+                for row in db.list_requests_by_artist("Foreign Evidence Artist")
+            }
+
+        real = facts(self.db)
+        mirrored = facts(fake)
+        self.assertTrue(real["Exact proof"][0])
+        exact_cd = real["Exact proof"][2]
+        assert exact_cd is not None and exact_cd.ctdb is not None
+        self.assertEqual(exact_cd.ctdb.confidence, 6)
+        self.assertEqual(real["Foreign proof"], (False, False, None))
+        self.assertEqual(real["Foreign provisional"], (False, False, None))
+        self.assertEqual(real, mirrored)
 @requires_postgres
 class TestSlskdEventCursorRoundTrip(unittest.TestCase):
     """Rule A round-trip for upsert_slskd_event_cursor (issue #146)."""

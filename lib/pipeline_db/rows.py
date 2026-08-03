@@ -81,6 +81,8 @@ from typing import TypedDict
 
 import msgspec
 
+from lib.quality.evidence_types import CdRipBitVerification
+
 
 class AlbumRequestRow(TypedDict):
     """One ``SELECT * FROM album_requests`` row (54 columns as of schema 066)."""
@@ -157,6 +159,7 @@ class ArtistRequestRow(AlbumRequestPresentationRow):
 
     has_captured_history: bool
     provisional_lossless: bool
+    cd_rip_verification: CdRipBitVerification | None
 
 
 def album_request_row(raw: Mapping[str, object]) -> AlbumRequestRow:
