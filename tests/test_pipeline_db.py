@@ -6715,7 +6715,10 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
     def test_upsert_new_spectral_capture_fields_null_by_default(self):
         """Legacy/absent capture stays NULL — no fabricated defaults
         (issue #829 Phase 5 PR1, forward-only, no backfill)."""
-        evidence = self._seed(mb_release_id="mbid-spectral-capture-null")
+        evidence = self._seed(
+            mb_release_id="mbid-spectral-capture-null",
+            preserve_spectral_measurement_version=True,
+        )
 
         self.db.upsert_album_quality_evidence(evidence)
         loaded = self.db.find_album_quality_evidence(
@@ -7339,6 +7342,7 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
                         spectral_bitrate_kbps=None,
                         spectral_subject=None,
                         spectral_provenance=None,
+                        spectral_measurement_version=None,
                         was_converted_from=(
                             anchor
                             if anchor.lower() in ("flac", "alac", "wav")

@@ -65,8 +65,6 @@ from lib.processing_paths import (
     processing_preview_dir,
 )
 from lib.quality import (
-    EVIDENCE_SUBJECT_SOURCE,
-    LOSSLESS_CODECS,
     QUALITY_DECISION_IMPORT_STAGE_DECISIONS,
     AlbumQualityEvidence,
     AlbumQualityEvidenceFile,
@@ -101,6 +99,8 @@ from lib.quality_evidence import (
     QualityEvidenceDB,
     audio_snapshot_matches,
     audit_v0_probe_from_metric,
+    current_evidence_for_policy,
+    current_evidence_preserves_source_spectral,
     current_evidence_rebuild_reasons,
     evidence_from_measurement,
     load_or_backfill_current_evidence,
@@ -109,6 +109,7 @@ from lib.quality_evidence import (
     persist_candidate_evidence_from_measurement,
     snapshot_audio_files,
     snapshot_fingerprint,
+    spectral_measurement_generation_is_current,
 )
 from lib.util import repair_mp3_headers
 from lib.v0_probe import probe_installed_album_as_v0
@@ -760,6 +761,12 @@ def persist_exact_current_spectral_from_attempt(
             "incomplete",
             reason,
         )
+    if not spectral_measurement_generation_is_current(measured_existing):
+        return EvidenceBuildResult(
+            current_evidence,
+            "incomplete",
+            "attempt did not produce current-generation HAVE spectral evidence",
+        )
     if not measured_existing_path:
         return EvidenceBuildResult(
             current_evidence,
@@ -896,6 +903,12 @@ def load_persisted_existing_spectral(
         spectral_detail_from_persisted_source(
             measurement.spectral_grade,
             measurement.spectral_bitrate_kbps,
+            cliff_hz=measurement.cliff_hz,
+            codec_family=measurement.codec_family,
+            ultrasonic_deficit_db=measurement.ultrasonic_deficit_db,
+            spectral_measurement_version=(
+                measurement.spectral_measurement_version
+            ),
         ),
         True,
     )
@@ -1151,16 +1164,23 @@ def plan_current_evidence_enrichment(
 ) -> EnrichmentPlan:
     """Pure decision: measure exactly the missing HAVE pieces.
 
-    Mirrors the once-only guards of the persist/claim helpers: any spectral
-    field present means the scan already happened; a V0 metric or the
-    attempted marker means the research probe already ran. Complete rows
+    A spectral tuple is complete only under the running analyzer generation;
+    old grades are audit history, not reusable policy inputs. A V0 metric or
+    the attempted marker means the research probe already ran. Complete rows
     therefore cost nothing to re-plan.
     """
     measurement = evidence.measurement
+    preserve_source = current_evidence_preserves_source_spectral(evidence)
     return EnrichmentPlan(
         spectral=(
-            measurement.spectral_grade is None
-            and measurement.spectral_bitrate_kbps is None
+            not preserve_source
+            and (
+                (
+                    measurement.spectral_grade is None
+                    and measurement.spectral_bitrate_kbps is None
+                )
+                or not spectral_measurement_generation_is_current(measurement)
+            )
         ),
         v0=(
             evidence.v0_metric is None
@@ -1176,12 +1196,14 @@ def current_spectral_evidence_reusable(
 
     The enrichment planner records whether analysis already ran, so an
     attempted-but-failed ``"error"`` grade is intentionally complete for that
-    once-only bookkeeping. Preview reuse has a stricter contract: only one of
-    the grades the decision model understands may replace a fresh HAVE scan.
+    once-only bookkeeping. Preview reuse has a stricter contract: its
+    generation must exactly match the running analyzer and its grade must be
+    one the decision model understands. Legacy and unknown future generations
+    are audit-only and must never replace a fresh HAVE scan.
     """
     grade = evidence.measurement.spectral_grade
     return (
-        not plan_current_evidence_enrichment(evidence).spectral
+        spectral_measurement_generation_is_current(evidence.measurement)
         and grade in {
             "genuine",
             "marginal",
@@ -1488,7 +1510,7 @@ def _authorize_current_evidence_for_preview(
         )
 
     return EvidenceBuildResult(
-        current,
+        current_evidence_for_policy(current),
         "ready",
         current_album_path=current_album_path,
     )
@@ -1543,7 +1565,13 @@ def load_current_evidence_for_preview(
             enriched.status,
             f" ({enriched.reason})" if enriched.reason else "",
         )
-    return enriched
+        return enriched
+    return EvidenceBuildResult(
+        current_evidence_for_policy(enriched.evidence),
+        enriched.status,
+        enriched.reason,
+        current_album_path=current_album_path,
+    )
 
 
 def preserve_existing_source_spectral(
@@ -1560,19 +1588,9 @@ def preserve_existing_source_spectral(
     no ``was_converted_from``, which is how the #711 deploy-night rows
     were minted ``genuine/installed``).
     """
-    if current_evidence is None:
-        return False
-    converted_from = (
-        current_evidence.measurement.was_converted_from or ""
-    ).lower()
-    if converted_from in LOSSLESS_CODECS:
-        return True
-    if current_evidence.verified_lossless_proof is not None:
-        return True
-    v0_metric = current_evidence.v0_metric
     return (
-        v0_metric is not None
-        and v0_metric.subject == EVIDENCE_SUBJECT_SOURCE
+        current_evidence is not None
+        and current_evidence_preserves_source_spectral(current_evidence)
     )
 
 
@@ -2080,6 +2098,12 @@ def measure_and_persist_candidate_evidence(
         existing_spectral_evidence = spectral_detail_from_persisted_source(
             current_m.spectral_grade,
             current_m.spectral_bitrate_kbps,
+            cliff_hz=current_m.cliff_hz,
+            codec_family=current_m.codec_family,
+            ultrasonic_deficit_db=current_m.ultrasonic_deficit_db,
+            spectral_measurement_version=(
+                current_m.spectral_measurement_version
+            ),
         )
         reuse_have_evidence = current_spectral_evidence_reusable(
             current_evidence,
@@ -2727,6 +2751,14 @@ def preview_import_from_path(
         existing_spectral_evidence = spectral_detail_from_persisted_source(
             current_measurement.spectral_grade,
             current_measurement.spectral_bitrate_kbps,
+            cliff_hz=current_measurement.cliff_hz,
+            codec_family=current_measurement.codec_family,
+            ultrasonic_deficit_db=(
+                current_measurement.ultrasonic_deficit_db
+            ),
+            spectral_measurement_version=(
+                current_measurement.spectral_measurement_version
+            ),
         )
         reuse_have_evidence = current_spectral_evidence_reusable(
             current_evidence,

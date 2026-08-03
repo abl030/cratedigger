@@ -49,6 +49,7 @@ from lib.quality_evidence import (
     snapshot_audio_files,
     snapshot_fingerprint,
 )
+from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import (
     claim_next_import_preview_job,
@@ -112,6 +113,8 @@ def _preview_runtime_config(
 
 class TestSpectralAuditMerge(unittest.TestCase):
     def test_have_reuse_requires_a_decision_usable_grade(self):
+        from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
+
         cases = (
             ("genuine", True),
             ("marginal", True),
@@ -132,12 +135,38 @@ class TestSpectralAuditMerge(unittest.TestCase):
                         spectral_provenance=(
                             "measured" if grade is not None else None
                         ),
+                        spectral_measurement_version=(
+                            SPECTRAL_MEASUREMENT_VERSION
+                            if grade is not None
+                            else None
+                        ),
                     ),
                 )
                 self.assertEqual(
                     current_spectral_evidence_reusable(evidence),
                     expected,
                 )
+
+    def test_family_in_the_armed_forces_legacy_have_is_not_reused(self):
+        """A usable old grade cannot bypass a same-generation HAVE scan."""
+
+        evidence = make_album_quality_evidence(
+            preserve_spectral_measurement_version=True,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=320,
+                avg_bitrate_kbps=320,
+                median_bitrate_kbps=320,
+                format="MP3",
+                is_cbr=True,
+                spectral_grade="suspect",
+                spectral_bitrate_kbps=128,
+                spectral_subject="installed",
+                spectral_provenance="measured",
+                spectral_measurement_version=None,
+            ),
+        )
+
+        self.assertFalse(current_spectral_evidence_reusable(evidence))
 
     def test_lossless_candidate_requires_a_successful_usable_grade(self):
         cases = (
@@ -1003,6 +1032,9 @@ class TestImportPreviewPath(unittest.TestCase):
                     grade="genuine",
                     bitrate_kbps=96,
                     suspect_pct=52.17,
+                    spectral_measurement_version=(
+                        SPECTRAL_MEASUREMENT_VERSION
+                    ),
                 ),
                 measured_existing_path=source,
             )
@@ -1068,6 +1100,9 @@ class TestImportPreviewPath(unittest.TestCase):
                     grade="genuine",
                     bitrate_kbps=160,
                     suspect_pct=30.0,
+                    spectral_measurement_version=(
+                        SPECTRAL_MEASUREMENT_VERSION
+                    ),
                 ),
                 measured_existing_path=source,
             )
@@ -1141,6 +1176,9 @@ class TestImportPreviewPath(unittest.TestCase):
                     attempted=True,
                     grade="genuine",
                     bitrate_kbps=200,
+                    spectral_measurement_version=(
+                        SPECTRAL_MEASUREMENT_VERSION
+                    ),
                 ),
                 measured_existing_path=source,
             )
@@ -1205,6 +1243,9 @@ class TestImportPreviewPath(unittest.TestCase):
                     attempted=True,
                     grade="genuine",
                     bitrate_kbps=128,
+                    spectral_measurement_version=(
+                        SPECTRAL_MEASUREMENT_VERSION
+                    ),
                 ),
                 measured_existing_path=source,
             )
@@ -1251,6 +1292,9 @@ class TestImportPreviewPath(unittest.TestCase):
                     attempted=True,
                     grade="genuine",
                     bitrate_kbps=96,
+                    spectral_measurement_version=(
+                        SPECTRAL_MEASUREMENT_VERSION
+                    ),
                 ),
                 measured_existing_path=other,
             )
@@ -1351,6 +1395,9 @@ class TestImportPreviewPath(unittest.TestCase):
                         attempted=True,
                         grade="genuine",
                         bitrate_kbps=96,
+                        spectral_measurement_version=(
+                            SPECTRAL_MEASUREMENT_VERSION
+                        ),
                     ),
                 ),
             )
@@ -2974,6 +3021,11 @@ class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
                 format="MP3",
                 spectral_grade="genuine" if spectral_present else None,
                 spectral_bitrate_kbps=96 if spectral_present else None,
+                spectral_measurement_version=(
+                    SPECTRAL_MEASUREMENT_VERSION
+                    if spectral_present
+                    else None
+                ),
             ),
             v0_metric=None,
             on_disk_v0_research_attempted=v0_attempted,
@@ -3013,6 +3065,7 @@ class TestEnrichIncompleteCurrentEvidence(unittest.TestCase):
     def _good_scan(self) -> SpectralAnalysisDetail:
         return SpectralAnalysisDetail(
             attempted=True, grade="genuine", bitrate_kbps=96,
+            spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
         )
 
     def _enrich(self, db, analyzer, probe):

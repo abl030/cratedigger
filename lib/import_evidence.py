@@ -32,6 +32,8 @@ from lib.quality_evidence import (
     QualityEvidenceDB,
     audio_snapshot_matches,
     backfill_current_evidence_from_album_info,
+    current_evidence_for_policy,
+    current_evidence_preserves_source_spectral,
     current_evidence_rebuild_reasons,
     load_candidate_evidence_for_source,
     load_or_backfill_current_evidence,
@@ -265,7 +267,7 @@ def ensure_current_evidence_for_action(
         )
         if not errors and snapshot_matches:
             return CurrentEvidenceActionResult(
-                evidence=existing,
+                evidence=current_evidence_for_policy(existing),
                 provenance=ActionEvidenceProvenance(
                     current_status=CURRENT_STATUS_LOADED,
                     snapshot_guard=SNAPSHOT_GUARD_MATCHED,
@@ -385,7 +387,7 @@ def ensure_current_evidence_for_action(
                 )
             else:
                 return CurrentEvidenceActionResult(
-                    evidence=authoritative,
+                    evidence=current_evidence_for_policy(authoritative),
                     provenance=ActionEvidenceProvenance(
                         current_status=CURRENT_STATUS_BACKFILLED,
                         snapshot_guard=SNAPSHOT_GUARD_MATCHED,
@@ -438,6 +440,7 @@ def _current_action_missing_enrichment_reasons(
     if (
         measurement.spectral_grade is None
         and measurement.spectral_bitrate_kbps is None
+        and not current_evidence_preserves_source_spectral(evidence)
     ):
         reasons.append("exact current snapshot still needs installed spectral enrichment")
     if (

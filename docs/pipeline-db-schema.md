@@ -76,8 +76,13 @@ Key fields:
   (`ref_db(1-4kHz) - mean(20.5-22kHz slices)`, averaged across tracks) —
   PR3's proof-leg statistic; not read by any decision yet.
   `spectral_measurement_version` is `2` for rows measured by the PR1+
-  `lib/spectral_check.py` code; NULL for legacy rows (forward-only, no
-  backfill — `.claude/rules/scope.md`).
+  `lib/spectral_check.py` code; NULL marks a legacy generation. A grade is
+  reusable only when this value exactly matches the running analyzer. Exact
+  candidate and installed snapshots are remeasured on their next preview;
+  old source-subject facts from a lossless original remain stored as audit
+  history but are withheld from policy because the installed derivative
+  cannot regenerate that source observation (R19). This is on-touch
+  convergence, not a committed backfill.
 - `audio_validation JSONB NOT NULL` — the bounded typed report from the
   audio-only strict FFmpeg policy. New reports are `passed`,
   `audio_corrupt`, or `skipped`; the migration uses `legacy_failure` for

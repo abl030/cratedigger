@@ -135,6 +135,7 @@ def _run_fake_lossless_merge(
             spectral_bitrate_kbps=None,
             spectral_subject=None,
             spectral_provenance=None,
+            spectral_measurement_version=None,
             was_converted_from=(converted_from if anchor == "conversion" else None),
         ),
         v0_metric=(

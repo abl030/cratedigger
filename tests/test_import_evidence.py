@@ -26,11 +26,13 @@ from lib.quality import (
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
     QualityRankConfig,
+    VerifiedLosslessProof,
 )
 from lib.quality_evidence import (
     EvidenceBuildResult,
     snapshot_audio_files,
 )
+from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_album_quality_evidence, make_request_row
 
@@ -228,6 +230,102 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
         self.assertTrue(result.available)
         self.assertEqual(result.provenance.current_status, "loaded")
         self.assertEqual(result.provenance.snapshot_guard, "matched")
+
+    def test_old_spectral_generation_cannot_authorize_an_action(self):
+        legacy = make_album_quality_evidence(
+            preserve_spectral_measurement_version=True,
+            mb_release_id="release-1",
+            source_path=self.root,
+            files=snapshot_audio_files(self.root),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=320,
+                avg_bitrate_kbps=320,
+                median_bitrate_kbps=320,
+                format="MP3",
+                is_cbr=True,
+                spectral_grade="suspect",
+                spectral_bitrate_kbps=128,
+                spectral_subject="installed",
+                spectral_provenance="measured",
+                spectral_measurement_version=None,
+            ),
+        )
+        self.db.upsert_album_quality_evidence(legacy)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=legacy.mb_release_id,
+            snapshot_fingerprint=legacy.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.db.set_request_current_evidence(42, stored.id)
+
+        result = ensure_current_evidence_for_action(
+            self.db,
+            request_id=42,
+            mb_release_id="release-1",
+            current_release=self._current_release(),
+            backfill_builder=lambda *_args, **_kwargs: EvidenceBuildResult(
+                stored,
+                "ready",
+            ),
+        )
+
+        self.assertFalse(result.available)
+        self.assertEqual(result.provenance.current_status, "failed")
+        self.assertIn(
+            "spectral measurement generation",
+            result.provenance.fallback_reason or "",
+        )
+
+    def test_old_lossless_source_generation_is_audit_only_at_action_time(self):
+        legacy = make_album_quality_evidence(
+            preserve_spectral_measurement_version=True,
+            mb_release_id="release-1",
+            source_path=self.root,
+            files=snapshot_audio_files(self.root),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=128,
+                avg_bitrate_kbps=128,
+                median_bitrate_kbps=128,
+                format="Opus",
+                spectral_grade="suspect",
+                spectral_bitrate_kbps=128,
+                spectral_subject="source",
+                spectral_provenance="carried",
+                spectral_measurement_version=None,
+            ),
+            verified_lossless_proof=VerifiedLosslessProof(
+                provenance="carried",
+                source="flac",
+                classifier="spectral_verified_lossless",
+            ),
+            codec="opus",
+            container="opus",
+            storage_format="Opus",
+        )
+        self.db.upsert_album_quality_evidence(legacy)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=legacy.mb_release_id,
+            snapshot_fingerprint=legacy.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.db.set_request_current_evidence(42, stored.id)
+
+        result = ensure_current_evidence_for_action(
+            self.db,
+            request_id=42,
+            mb_release_id="release-1",
+            current_release=self._current_release(),
+        )
+
+        self.assertTrue(result.available)
+        assert result.evidence is not None
+        self.assertIsNone(result.evidence.measurement.spectral_grade)
+        self.assertIsNone(
+            result.evidence.measurement.spectral_measurement_version,
+        )
+        historical = self.db.load_album_quality_evidence_by_id(stored.id)
+        assert historical is not None
+        self.assertEqual(historical.measurement.spectral_grade, "suspect")
 
     def test_matching_candidate_capture_path_remains_historical(self):
         evidence = make_album_quality_evidence(
@@ -442,6 +540,7 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
             expected_snapshot_fingerprint=linked.snapshot_fingerprint,
             grade="genuine",
             bitrate_kbps=230,
+            spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
         ))
         self.assertTrue(self.db.claim_current_v0_research_attempt(
             request_id=42,

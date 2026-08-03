@@ -16,6 +16,7 @@ from lib.quality import (
     EVIDENCE_PROVENANCE_MEASURED,
     EVIDENCE_SUBJECT_INSTALLED,
     EVIDENCE_SUBJECT_SOURCE,
+    LOSSLESS_CODECS,
     V0_PROBE_LOSSLESS_SOURCE,
     V0_PROBE_NATIVE_LOSSY_RESEARCH,
     V0_PROBE_ON_DISK_RESEARCH,
@@ -25,6 +26,7 @@ from lib.quality import (
     AudioQualityMeasurement,
     EvidenceSubject,
     ImportResult,
+    SpectralAnalysisDetail,
     V0ProbeEvidence,
     VerifiedLosslessProof,
     legacy_unrecorded_audio_validation_report,
@@ -135,6 +137,86 @@ class EvidenceBuildResult:
         return self.evidence is not None
 
 
+def spectral_measurement_generation_is_current(
+    measurement: AudioQualityMeasurement | SpectralAnalysisDetail,
+) -> bool:
+    """Whether a spectral fact was produced by this running analyzer.
+
+    Spectral grades are interpretations, not generation-independent facts.
+    An exact version match is therefore required: legacy ``NULL`` rows and
+    rows written by an unknown future analyzer are both observation-only and
+    must be measured again before current policy may reuse them.
+    """
+
+    # Keep the producer as the authority for its generation stamp without
+    # making every evidence consumer import the analyzer at module load time.
+    from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
+
+    return (
+        measurement.spectral_measurement_version
+        == SPECTRAL_MEASUREMENT_VERSION
+    )
+
+
+def current_evidence_preserves_source_spectral(
+    evidence: AlbumQualityEvidence,
+) -> bool:
+    """Whether installed bytes cannot regenerate the row's source spectral.
+
+    Lossless-derived library files are a different spectral subject from the
+    acquisition bytes. Their source-side grade may be carried for audit, but
+    an old measurement generation cannot be recreated by scanning the lossy
+    installed derivative without violating R19.
+    """
+
+    converted_from = (evidence.measurement.was_converted_from or "").lower()
+    if converted_from in LOSSLESS_CODECS:
+        return True
+    if evidence.verified_lossless_proof is not None:
+        return True
+    metric = evidence.v0_metric
+    return metric is not None and metric.subject == EVIDENCE_SUBJECT_SOURCE
+
+
+def current_evidence_for_policy(
+    evidence: AlbumQualityEvidence,
+) -> AlbumQualityEvidence:
+    """Withhold an unregenerable old source grade from current policy.
+
+    The stored tuple remains durable audit history. Only this policy
+    projection drops it; all other current evidence facts remain usable.
+    Installed-subject and ordinary source-subject rows are not projected this
+    way because their exact current bytes can and must be measured again.
+    """
+
+    measurement = evidence.measurement
+    has_spectral = (
+        measurement.spectral_grade is not None
+        or measurement.spectral_bitrate_kbps is not None
+    )
+    if (
+        not has_spectral
+        or spectral_measurement_generation_is_current(measurement)
+        or measurement.spectral_subject != EVIDENCE_SUBJECT_SOURCE
+        or not current_evidence_preserves_source_spectral(evidence)
+    ):
+        return evidence
+    return msgspec.structs.replace(
+        evidence,
+        measurement=msgspec.structs.replace(
+            measurement,
+            spectral_grade=None,
+            spectral_bitrate_kbps=None,
+            spectral_subject=None,
+            spectral_provenance=None,
+            cliff_hz=None,
+            codec_family=None,
+            ultrasonic_deficit_db=None,
+            spectral_measurement_version=None,
+        ),
+    )
+
+
 def current_evidence_rebuild_reasons(
     evidence: AlbumQualityEvidence,
 ) -> list[str]:
@@ -143,6 +225,21 @@ def current_evidence_rebuild_reasons(
     if evidence.lineage_version != 4:
         reasons.append(
             f"lineage_version {evidence.lineage_version} must be rebuilt as 4"
+        )
+    measurement = evidence.measurement
+    if (
+        (
+            measurement.spectral_grade is not None
+            or measurement.spectral_bitrate_kbps is not None
+        )
+        and not spectral_measurement_generation_is_current(measurement)
+        and not (
+            measurement.spectral_subject == EVIDENCE_SUBJECT_SOURCE
+            and current_evidence_preserves_source_spectral(evidence)
+        )
+    ):
+        reasons.append(
+            "spectral measurement generation is not current"
         )
     return reasons
 
@@ -1254,6 +1351,15 @@ def load_candidate_evidence_for_source(
             "candidate source changed since evidence capture",
         )
     errors = evidence.policy_incomplete_reasons()
+    measurement = evidence.measurement
+    if (
+        (
+            measurement.spectral_grade is not None
+            or measurement.spectral_bitrate_kbps is not None
+        )
+        and not spectral_measurement_generation_is_current(measurement)
+    ):
+        errors.append("spectral measurement generation is not current")
     if errors:
         return EvidenceBuildResult(None, "incomplete", "; ".join(errors))
     return EvidenceBuildResult(evidence, "ready")

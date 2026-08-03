@@ -33,6 +33,7 @@ from lib.quality import (
     legacy_unrecorded_audio_validation_report,
 )
 from lib.quality_evidence import snapshot_audio_files, snapshot_fingerprint
+from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
 from lib.validation_envelope import decode_validation_envelope
 from lib.wrong_match_cleanup_service import (
     OUTCOME_DELETE_FAILED,
@@ -117,6 +118,7 @@ def _evidence(
             spectral_grade="genuine",
             spectral_subject="source",
             spectral_provenance="measured",
+            spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
         ),
         measured_at=datetime(2026, 5, 1, tzinfo=UTC),
         files=files,
@@ -781,6 +783,7 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
                 spectral_grade="genuine",
                 spectral_subject="source",
                 spectral_provenance="measured",
+                spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
             ),
         )
         self.db.set_download_log_candidate_evidence(
@@ -797,6 +800,7 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
                 spectral_grade="genuine",
                 spectral_subject="installed",
                 spectral_provenance="measured",
+                spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
             ),
         )
         self._set_current_evidence_helper(
@@ -839,6 +843,7 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
                 spectral_bitrate_kbps=96,
                 spectral_subject="source",
                 spectral_provenance="measured",
+                spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
             ),
             storage_format="OPUS 128",
             v0_metric=AlbumQualityV0Metric(

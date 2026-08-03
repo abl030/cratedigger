@@ -59,6 +59,7 @@ from lib.quality import (
     V0ProbeEvidence,
 )
 from lib.quality_evidence import EvidenceBuildResult, snapshot_audio_files
+from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
 from scripts import import_preview_worker
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import (
@@ -659,6 +660,9 @@ def _run_world(world: PreviewFailureWorld) -> PreviewFailureObservation:
                     attempted=True,
                     grade="suspect",
                     bitrate_kbps=96,
+                    spectral_measurement_version=(
+                        SPECTRAL_MEASUREMENT_VERSION
+                    ),
                 ),
                 probe_fn=lambda _path: V0ProbeEvidence(
                     kind="on_disk_research_v0",

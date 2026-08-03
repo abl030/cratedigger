@@ -293,8 +293,13 @@ def existing_spectral_resolver_for_config(
 def spectral_detail_from_persisted_source(
     grade: object,
     bitrate_kbps: object,
+    *,
+    cliff_hz: int | None = None,
+    codec_family: CodecFamily | None = None,
+    ultrasonic_deficit_db: float | None = None,
+    spectral_measurement_version: int | None = None,
 ) -> SpectralAnalysisDetail:
-    """Project durable pre-conversion fields into attempt-audit shape."""
+    """Project one durable spectral generation into attempt-audit shape."""
     spectral_grade = grade if isinstance(grade, str) and grade else None
     spectral_bitrate = (
         bitrate_kbps if isinstance(bitrate_kbps, int) else None
@@ -303,6 +308,10 @@ def spectral_detail_from_persisted_source(
         attempted=spectral_grade is not None or spectral_bitrate is not None,
         grade=spectral_grade,
         bitrate_kbps=spectral_bitrate,
+        cliff_hz=cliff_hz,
+        codec_family=codec_family,
+        ultrasonic_deficit_db=ultrasonic_deficit_db,
+        spectral_measurement_version=spectral_measurement_version,
     )
 
 

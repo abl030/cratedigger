@@ -16,6 +16,7 @@ from hypothesis import example, given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads active profile)
+from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
 from tests.beets_world import BeetsWorld
 from tests.helpers import claim_next_import_job, claim_next_import_preview_job
 
@@ -73,10 +74,14 @@ def _have_reuse_contract_holds(
     have_complete: bool,
     snapshot_changed: bool,
     persisted_grade: str | None,
+    persisted_generation: int | None,
 ) -> bool:
+    from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
+
     expected = (
         have_complete
         and not snapshot_changed
+        and persisted_generation == SPECTRAL_MEASUREMENT_VERSION
         and persisted_grade in {
             "genuine",
             "marginal",
@@ -95,6 +100,7 @@ def _run_have_boundary_through_both_adapters(
     persisted_bitrate: int | None,
     scanned_grade: str,
     scanned_bitrate: int | None,
+    persisted_generation: int | None = None,
     have_complete: bool = True,
     snapshot_changed: bool = False,
 ):
@@ -124,6 +130,7 @@ def _run_have_boundary_through_both_adapters(
         SpectralAnalysisDetail,
     )
     from lib.quality_evidence import snapshot_audio_files
+    from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
     from scripts.import_preview_worker import process_claimed_preview_job
     from tests.fakes import FakeBeetsDB, FakePipelineDB
     from tests.helpers import make_album_quality_evidence, make_request_row
@@ -151,6 +158,9 @@ def _run_have_boundary_through_both_adapters(
             ("carried" if carries_lossless_lineage else "measured")
             if have_complete
             else None
+        ),
+        spectral_measurement_version=(
+            persisted_generation if have_complete else None
         ),
     )
     current_v0_metric = (
@@ -189,6 +199,7 @@ def _run_have_boundary_through_both_adapters(
         Path(candidate, "01.mp3").write_bytes(b"candidate")
         Path(existing, "01.mp3").write_bytes(b"existing")
         current_evidence = make_album_quality_evidence(
+            preserve_spectral_measurement_version=True,
             mb_release_id=mbid,
             source_path=existing,
             files=snapshot_audio_files(existing),
@@ -243,6 +254,14 @@ def _run_have_boundary_through_both_adapters(
             ),
             grade=authorized_measurement.spectral_grade,
             bitrate_kbps=authorized_measurement.spectral_bitrate_kbps,
+            cliff_hz=authorized_measurement.cliff_hz,
+            codec_family=authorized_measurement.codec_family,
+            ultrasonic_deficit_db=(
+                authorized_measurement.ultrasonic_deficit_db
+            ),
+            spectral_measurement_version=(
+                authorized_measurement.spectral_measurement_version
+            ),
         )
         reuse_have = current_spectral_evidence_reusable(
             authorized_current,
@@ -260,6 +279,9 @@ def _run_have_boundary_through_both_adapters(
                     grade=scanned_grade if role == "existing" else "genuine",
                     bitrate_kbps=(
                         scanned_bitrate if role == "existing" else None
+                    ),
+                    spectral_measurement_version=(
+                        SPECTRAL_MEASUREMENT_VERSION
                     ),
                 )
             return analyze
@@ -363,6 +385,7 @@ PreviewJobMode = Literal["automation", "force"]
 def assert_candidate_snapshot_reuse(
     *,
     snapshot_changed: bool,
+    candidate_generation: int | None,
     has_have: bool,
     full_preview_calls: int,
     analyzer_roles: list[str],
@@ -373,11 +396,19 @@ def assert_candidate_snapshot_reuse(
 ) -> None:
     """Candidate work is once per snapshot; HAVE authority stays separate."""
 
-    if snapshot_changed:
+    must_remeasure = (
+        snapshot_changed
+        or candidate_generation != SPECTRAL_MEASUREMENT_VERSION
+    )
+    if must_remeasure:
         if full_preview_calls != 1:
-            raise AssertionError("changed candidate snapshot did not remeasure")
+            raise AssertionError(
+                "changed or old-generation candidate did not remeasure"
+            )
         if candidate_status == "reused":
-            raise AssertionError("changed candidate snapshot was marked reused")
+            raise AssertionError(
+                "changed or old-generation candidate was marked reused"
+            )
         return
 
     if full_preview_calls:
@@ -404,6 +435,7 @@ def _run_candidate_snapshot_reuse_world(
     *,
     job_mode: PreviewJobMode,
     snapshot_changed: bool,
+    candidate_generation: int | None,
     has_have: bool,
     candidate_grade: str,
     track_count: int,
@@ -506,6 +538,9 @@ def _run_candidate_snapshot_reuse_world(
                     spectral_grade="genuine",
                     spectral_subject="installed",
                     spectral_provenance="measured",
+                    spectral_measurement_version=(
+                        SPECTRAL_MEASUREMENT_VERSION
+                    ),
                 ),
             )
             db.upsert_album_quality_evidence(current)
@@ -552,6 +587,7 @@ def _run_candidate_snapshot_reuse_world(
                 raw_path=candidate,
             )
         candidate_evidence = make_album_quality_evidence(
+            preserve_spectral_measurement_version=True,
             mb_release_id=mbid,
             source_path=action_path,
             files=snapshot_audio_files(action_path),
@@ -563,6 +599,7 @@ def _run_candidate_snapshot_reuse_world(
                 spectral_grade=candidate_grade,
                 spectral_subject="source",
                 spectral_provenance="measured",
+                spectral_measurement_version=candidate_generation,
             ),
         )
         db.upsert_album_quality_evidence(candidate_evidence)
@@ -621,6 +658,9 @@ def _run_candidate_snapshot_reuse_world(
                 attempted=True,
                 grade="suspect" if role == "existing" else candidate_grade,
                 bitrate_kbps=128 if role == "existing" else None,
+                spectral_measurement_version=(
+                    SPECTRAL_MEASUREMENT_VERSION
+                ),
             )
 
         def full_preview(db_arg: Any, _job: Any) -> ImportPreviewResult:
@@ -638,6 +678,9 @@ def _run_candidate_snapshot_reuse_world(
                     spectral_grade=candidate_grade,
                     spectral_subject="source",
                     spectral_provenance="measured",
+                    spectral_measurement_version=(
+                        SPECTRAL_MEASUREMENT_VERSION
+                    ),
                 ),
             )
             db_arg.upsert_album_quality_evidence(fresh)
@@ -1098,17 +1141,30 @@ class TestAttemptAuditCheckerQualification(unittest.TestCase):
         ))
 
     def test_have_reuse_checker_rejects_error_grade_mutant(self):
+        from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
+
         self.assertFalse(_have_reuse_contract_holds(
             reuse_have=True,
             have_complete=True,
             snapshot_changed=False,
             persisted_grade="error",
+            persisted_generation=SPECTRAL_MEASUREMENT_VERSION,
+        ))
+
+    def test_have_reuse_checker_rejects_old_generation_mutant(self):
+        self.assertFalse(_have_reuse_contract_holds(
+            reuse_have=True,
+            have_complete=True,
+            snapshot_changed=False,
+            persisted_grade="suspect",
+            persisted_generation=None,
         ))
 
     def test_candidate_reuse_checker_rejects_matching_snapshot_rescan(self):
         with self.assertRaises(AssertionError):
             assert_candidate_snapshot_reuse(
                 snapshot_changed=False,
+                candidate_generation=SPECTRAL_MEASUREMENT_VERSION,
                 has_have=False,
                 full_preview_calls=0,
                 analyzer_roles=["candidate"],
@@ -1122,6 +1178,21 @@ class TestAttemptAuditCheckerQualification(unittest.TestCase):
         with self.assertRaises(AssertionError):
             assert_candidate_snapshot_reuse(
                 snapshot_changed=True,
+                candidate_generation=SPECTRAL_MEASUREMENT_VERSION,
+                has_have=False,
+                full_preview_calls=0,
+                analyzer_roles=[],
+                candidate_status="reused",
+                persisted_candidate_grade="genuine",
+                persisted_have_grade=None,
+                expected_candidate_grade="genuine",
+            )
+
+    def test_candidate_reuse_checker_rejects_old_generation_skip(self):
+        with self.assertRaises(AssertionError):
+            assert_candidate_snapshot_reuse(
+                snapshot_changed=False,
+                candidate_generation=None,
                 has_have=False,
                 full_preview_calls=0,
                 analyzer_roles=[],
@@ -1184,6 +1255,9 @@ class TestAttemptAuditGenerated(unittest.TestCase):
     @given(
         job_mode=st.sampled_from(("automation", "force")),
         snapshot_changed=st.booleans(),
+        candidate_generation=st.one_of(
+            st.none(), st.integers(min_value=1, max_value=4),
+        ),
         has_have=st.booleans(),
         candidate_grade=st.sampled_from((
             "genuine",
@@ -1196,6 +1270,7 @@ class TestAttemptAuditGenerated(unittest.TestCase):
     @example(
         job_mode="force",
         snapshot_changed=False,
+        candidate_generation=None,
         has_have=False,
         candidate_grade="genuine",
         track_count=12,
@@ -1203,6 +1278,7 @@ class TestAttemptAuditGenerated(unittest.TestCase):
     @example(
         job_mode="automation",
         snapshot_changed=False,
+        candidate_generation=SPECTRAL_MEASUREMENT_VERSION,
         has_have=True,
         candidate_grade="suspect",
         track_count=1,
@@ -1211,6 +1287,7 @@ class TestAttemptAuditGenerated(unittest.TestCase):
         self,
         job_mode: PreviewJobMode,
         snapshot_changed: bool,
+        candidate_generation: int | None,
         has_have: bool,
         candidate_grade: str,
         track_count: int,
@@ -1224,12 +1301,14 @@ class TestAttemptAuditGenerated(unittest.TestCase):
         ) = _run_candidate_snapshot_reuse_world(
             job_mode=job_mode,
             snapshot_changed=snapshot_changed,
+            candidate_generation=candidate_generation,
             has_have=has_have,
             candidate_grade=candidate_grade,
             track_count=track_count,
         )
         assert_candidate_snapshot_reuse(
             snapshot_changed=snapshot_changed,
+            candidate_generation=candidate_generation,
             has_have=has_have,
             full_preview_calls=full_preview_calls,
             analyzer_roles=analyzer_roles,
@@ -1240,6 +1319,8 @@ class TestAttemptAuditGenerated(unittest.TestCase):
         )
 
     def test_gespenst_mp3_reuses_exact_have_through_both_adapters(self):
+        from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
+
         (
             preserve_source,
             reuse_have,
@@ -1254,6 +1335,7 @@ class TestAttemptAuditGenerated(unittest.TestCase):
             persisted_bitrate=320,
             scanned_grade="suspect",
             scanned_bitrate=128,
+            persisted_generation=SPECTRAL_MEASUREMENT_VERSION,
         )
 
         self.assertFalse(preserve_source)
@@ -1264,6 +1346,70 @@ class TestAttemptAuditGenerated(unittest.TestCase):
             assert audit.existing is not None
             self.assertEqual(audit.existing.grade, "genuine")
             self.assertEqual(audit.existing.bitrate_kbps, 320)
+
+    def test_family_in_the_armed_forces_remeasures_legacy_have(self):
+        """Legacy suspect/128 HAVE cannot compare with a generation-2 peer."""
+
+        from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
+
+        (
+            preserve_source,
+            reuse_have,
+            normal_calls,
+            reused_calls,
+            normal_audit,
+            reused_audit,
+        ) = _run_have_boundary_through_both_adapters(
+            converted_from=None,
+            lossless_v0_lineage=False,
+            persisted_grade="suspect",
+            persisted_bitrate=128,
+            persisted_generation=None,
+            scanned_grade="suspect",
+            scanned_bitrate=128,
+        )
+
+        self.assertFalse(preserve_source)
+        self.assertFalse(reuse_have)
+        self.assertEqual(normal_calls, ["candidate", "existing"])
+        self.assertEqual(reused_calls, ["existing"])
+        for audit in (normal_audit, reused_audit):
+            assert audit.existing is not None
+            self.assertEqual(audit.existing.grade, "suspect")
+            self.assertEqual(audit.existing.bitrate_kbps, 128)
+            self.assertEqual(
+                audit.existing.spectral_measurement_version,
+                SPECTRAL_MEASUREMENT_VERSION,
+            )
+
+    def test_old_lossless_source_generation_is_withheld_without_derivative_scan(self):
+        """R19 source history stays auditable but never becomes policy input."""
+
+        (
+            preserve_source,
+            reuse_have,
+            normal_calls,
+            reused_calls,
+            normal_audit,
+            reused_audit,
+        ) = _run_have_boundary_through_both_adapters(
+            converted_from="flac",
+            lossless_v0_lineage=True,
+            persisted_grade="suspect",
+            persisted_bitrate=128,
+            persisted_generation=None,
+            scanned_grade="genuine",
+            scanned_bitrate=320,
+        )
+
+        self.assertTrue(preserve_source)
+        self.assertFalse(reuse_have)
+        self.assertEqual(normal_calls, ["candidate"])
+        self.assertEqual(reused_calls, [])
+        for audit in (normal_audit, reused_audit):
+            assert audit.existing is not None
+            self.assertFalse(audit.existing.attempted)
+            self.assertIsNone(audit.existing.grade)
 
     @given(
         have_complete=st.booleans(),
@@ -1281,6 +1427,9 @@ class TestAttemptAuditGenerated(unittest.TestCase):
         scanned_bitrate=st.one_of(
             st.none(), st.integers(min_value=32, max_value=400),
         ),
+        persisted_generation=st.one_of(
+            st.none(), st.integers(min_value=1, max_value=4),
+        ),
     )
     @example(
         have_complete=True,
@@ -1289,6 +1438,7 @@ class TestAttemptAuditGenerated(unittest.TestCase):
         persisted_bitrate=192,
         scanned_grade="suspect",
         scanned_bitrate=96,
+        persisted_generation=None,
     )
     @example(
         have_complete=False,
@@ -1297,6 +1447,7 @@ class TestAttemptAuditGenerated(unittest.TestCase):
         persisted_bitrate=192,
         scanned_grade="suspect",
         scanned_bitrate=96,
+        persisted_generation=2,
     )
     @example(
         have_complete=True,
@@ -1305,6 +1456,7 @@ class TestAttemptAuditGenerated(unittest.TestCase):
         persisted_bitrate=192,
         scanned_grade="suspect",
         scanned_bitrate=96,
+        persisted_generation=2,
     )
     @example(
         have_complete=True,
@@ -1313,6 +1465,7 @@ class TestAttemptAuditGenerated(unittest.TestCase):
         persisted_bitrate=None,
         scanned_grade="genuine",
         scanned_bitrate=192,
+        persisted_generation=2,
     )
     def test_preview_have_reuse_requires_complete_matching_snapshot(
         self,
@@ -1322,7 +1475,10 @@ class TestAttemptAuditGenerated(unittest.TestCase):
         persisted_bitrate: int | None,
         scanned_grade: str,
         scanned_bitrate: int | None,
+        persisted_generation: int | None,
     ):
+        from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
+
         (
             preserve_source,
             reuse_have,
@@ -1337,6 +1493,7 @@ class TestAttemptAuditGenerated(unittest.TestCase):
             persisted_bitrate=persisted_bitrate,
             scanned_grade=scanned_grade,
             scanned_bitrate=scanned_bitrate,
+            persisted_generation=persisted_generation,
             have_complete=have_complete,
             snapshot_changed=snapshot_changed,
         )
@@ -1344,6 +1501,7 @@ class TestAttemptAuditGenerated(unittest.TestCase):
         expected_reuse = (
             have_complete
             and not snapshot_changed
+            and persisted_generation == SPECTRAL_MEASUREMENT_VERSION
             and persisted_grade in {
                 "genuine",
                 "marginal",
@@ -1357,6 +1515,7 @@ class TestAttemptAuditGenerated(unittest.TestCase):
             have_complete=have_complete,
             snapshot_changed=snapshot_changed,
             persisted_grade=persisted_grade,
+            persisted_generation=persisted_generation,
         ))
         self.assertEqual(reuse_have, expected_reuse)
         self.assertEqual(
@@ -1509,6 +1668,7 @@ class TestAttemptAuditGenerated(unittest.TestCase):
             persisted_bitrate=persisted_bitrate,
             scanned_grade=scanned_grade,
             scanned_bitrate=scanned_bitrate,
+            persisted_generation=SPECTRAL_MEASUREMENT_VERSION,
         )
         # R19: a source-subject V0 anchor alone proves lossless lineage —
         # enrichment-born rows carry no was_converted_from, and their
