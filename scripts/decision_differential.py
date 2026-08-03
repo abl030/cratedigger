@@ -148,7 +148,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Literal, TypeGuard
+from typing import TYPE_CHECKING, Literal, TypeGuard
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
@@ -188,6 +188,9 @@ from scripts.render_differential import (
     summarize_render_diff,
 )
 
+if TYPE_CHECKING:
+    from lib.pipeline_db.evidence import _EvidenceMixin
+
 
 def _export_evidence_contract() -> tuple[tuple[str, ...], tuple[str, ...], type[object], type[object]]:
     """Load #999's DB-export-only helpers only for ``export``.
@@ -211,7 +214,7 @@ def _export_evidence_contract() -> tuple[tuple[str, ...], tuple[str, ...], type[
     )
 
 
-def _production_evidence_mixin() -> type[object]:
+def _production_evidence_mixin() -> type[_EvidenceMixin]:
     """Load the historical production mapper required by ``decide`` only."""
     from lib.pipeline_db.evidence import _EvidenceMixin
 
@@ -327,7 +330,7 @@ def _evidence_from_corpus_row(
         payload["measured_at"] = _parse_timestamp(measured_at)
     try:
         evidence_mixin = _production_evidence_mixin()
-        return evidence_mixin._album_quality_evidence_from_row(  # type: ignore[attr-defined]
+        return evidence_mixin._album_quality_evidence_from_row(
             payload,
             file_rows,
         )
@@ -1217,12 +1220,18 @@ def _assert_live_decision_corpus_schema(cursor: object) -> None:
     descriptions: dict[str, dict[str, tuple[str, bool]]] = {}
     assert cursor.description is not None
     names = [description.name for description in cursor.description]
-    for raw in cursor.fetchall():
-        row = (
-            dict(raw)
-            if isinstance(raw, Mapping)
-            else dict(zip(names, raw, strict=True))
-        )
+    for fetched in cursor.fetchall():
+        raw: object = fetched
+        if is_str_object_dict(raw):
+            row = raw
+        else:
+            try:
+                values = msgspec.convert(raw, type=tuple[object, ...])
+            except msgspec.ValidationError as exc:
+                raise RenderDifferentialError(
+                    "decision-corpus schema qualification returned an invalid row"
+                ) from exc
+            row = dict(zip(names, values, strict=True))
         table, column = row["table_name"], row["column_name"]
         data_type, nullable = row["data_type"], row["is_nullable"]
         assert isinstance(table, str) and isinstance(column, str)
@@ -1786,28 +1795,11 @@ def export_decision_corpus(
                         link.request_mb_release_id,
                     )
                 )
-            conflicts = [
-                {
-                    "evidence_id": evidence_id,
-                    "associations": [
-                        {
-                            "current_evidence_id": current_id,
-                            "request_mb_release_id": release_id,
-                        }
-                        for current_id, release_id in sorted(
-                            values,
-                            key=lambda value: (
-                                value[0] is not None,
-                                value[0] if value[0] is not None else -1,
-                                value[1],
-                            ),
-                        )
-                    ],
-                }
-                for evidence_id, values in sorted(associations.items())
+            conflict_ids = {
+                evidence_id
+                for evidence_id, values in associations.items()
                 if len(values) > 1
-            ]
-            conflict_ids = {item["evidence_id"] for item in conflicts}
+            }
             # Collapse identical source associations only.  Two distinct
             # associations for the same candidate are named conflict debt,
             # never selected with DISTINCT ON or quietly treated as one.
@@ -1950,28 +1942,6 @@ def export_decision_corpus(
     _atomic_write(corpus_file, corpus_bytes)
     _atomic_write(coverage_file, coverage_bytes)
     return DecisionCorpusExportResult(green=debt_count == 0, debt_count=debt_count)
-
-
-def _association_triples_from_manifest(
-    raw: object,
-) -> list[tuple[int, int | None, str]]:
-    if not isinstance(raw, list):
-        raise RenderDifferentialError("coverage expected_associations is not a list")
-    triples: list[tuple[int, int | None, str]] = []
-    for item in raw:
-        if not is_str_object_dict(item):
-            raise RenderDifferentialError("coverage association is not an object")
-        candidate_id = item.get("candidate_evidence_id")
-        current_id = item.get("current_evidence_id")
-        release_id = item.get("request_mb_release_id")
-        if (
-            not _is_exact_int(candidate_id)
-            or (current_id is not None and not _is_exact_int(current_id))
-            or not isinstance(release_id, str)
-        ):
-            raise RenderDifferentialError("coverage association has invalid fields")
-        triples.append((candidate_id, current_id, release_id))
-    return triples
 
 
 def verify_decision_corpus_pair(
