@@ -118,6 +118,7 @@ class YoutubeAlbumRequest(BaseModel):
 
     identifier: str
     refresh: bool = Field(default=False, strict=True)
+    watch_url: str | None = None
 
 
 def post_youtube_album(
@@ -178,6 +179,7 @@ def post_youtube_album(
             distance_fn=compute_beets_distance,
             cache=cache,
             refresh=req.refresh,
+            watch_url=req.watch_url,
         )
     finally:
         # Close the requests.Session to release its connection pool.
@@ -276,7 +278,9 @@ ROUTES: list[RouteRegistration] = [
         "release-or-group identifier, returns the typed "
         "(yt_release × mb_release) distance matrix. Body: "
         "{\"identifier\": \"<release-or-group-id>\", \"refresh\": "
-        "false}. refresh=true bypasses BOTH the durable cache "
+        "false, \"watch_url\": \"https://music.youtube.com/watch?v=...\"}. "
+        "The optional canonical watch URL replaces the complete cached matrix. "
+        "refresh=true bypasses BOTH the durable cache "
         "(youtube_album_mappings) and the in-process Redis HTTP "
         "accelerator, forcing a fresh YT Music fetch; the fresh "
         "response is then written back to both layers.",

@@ -140,6 +140,7 @@ import {
   youtubeBrowseUrl,
 } from './util.js';
 import { openReplacePicker, pressingMeta } from './replace_picker.js';
+import { renderYoutubeRescueControl } from './youtube_rescue_control.js';
 import { bandLabel, renderLongTail, loadLongTail } from './long_tail.js';
 import {
   qualityRankBadgeClass,
@@ -847,6 +848,9 @@ export function youtubeRescueTargets(result) {
  * @returns {string}
  */
 function renderYoutubeBody(result, id) {
+  const row = consoleRow(id);
+  const manualControl = renderYoutubeRescueControl(
+    id, row && (row.mb_release_id || row.discogs_release_id));
   const cls = youtubeSectionState(result);
   const checkLabel = (cls.state === 'resolver_failed') ? 'Retry'
     : (cls.state === 'resolved_empty') ? 'Re-check'
@@ -855,13 +859,13 @@ function renderYoutubeBody(result, id) {
   if (cls.state === 'never_run') {
     return `<div class="lt-yt lt-yt-never-run">
       <div class="lt-yt-prompt">Resolve this release against YouTube Music.</div>
-      ${checkBtn}
+      ${checkBtn}${manualControl}
     </div>`;
   }
   if (cls.state === 'resolver_failed') {
     return `<div class="lt-yt lt-yt-failed">
       <div class="lt-yt-msg">${esc(cls.message)}</div>
-      ${checkBtn}
+      ${checkBtn}${manualControl}
     </div>`;
   }
   if (cls.state === 'resolved_empty') {
@@ -869,7 +873,7 @@ function renderYoutubeBody(result, id) {
     // offer only a re-check.
     return `<div class="lt-yt lt-yt-empty">
       <div class="lt-yt-msg">${esc(cls.message)}</div>
-      ${checkBtn}
+      ${checkBtn}${manualControl}
     </div>`;
   }
   // resolved_with_matrix — each release is a pickable rescue target (U5).
@@ -899,7 +903,7 @@ function renderYoutubeBody(result, id) {
   return `<div class="lt-yt lt-yt-matrix">
     ${staleFlag}
     <div class="lt-yt-rows">${rows}</div>
-    ${checkBtn}
+    ${checkBtn}${manualControl}
   </div>`;
 }
 

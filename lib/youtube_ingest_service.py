@@ -34,6 +34,7 @@ deterministically.
 from __future__ import annotations
 
 import logging
+import math
 import shutil
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
@@ -1221,25 +1222,39 @@ class YoutubeIngestService:
                 return value
         return None
 
-    @staticmethod
+    @classmethod
     def _distance_entry(
+        cls,
         mapping_row: dict[str, Any],
         target_release_id: str,
     ) -> dict[str, Any] | None:
         """Look up the resolver distance entry for one release id.
 
-        Walks the row's ``distances`` array, returning the first entry
-        whose historical ``mbid`` key matches ``target_release_id``. The
-        key name is retained by the resolver for both MB and Discogs rows.
+        Rescue is admitted only from one exact successful finite distance
+        entry with usable exact track-count evidence.  This is deliberately
+        checked at the final pre-yt-dlp boundary, not inferred from a sibling
+        matrix row or a URL.
         """
         distances = _json_list(mapping_row.get("distances"))
+        matches: list[dict[str, Any]] = []
         for entry_raw in distances:
             if not _is_dict_like(entry_raw):
                 continue
             entry = _json_dict(entry_raw)
             if str(entry.get("mbid") or "") == target_release_id:
-                return entry
-        return None
+                matches.append(entry)
+        if len(matches) != 1:
+            return None
+        entry = matches[0]
+        distance = entry.get("distance")
+        if not isinstance(distance, (int, float)) or not math.isfinite(distance):
+            return None
+        if entry.get("outcome") != "ok":
+            return None
+        count = cls._positive_int(entry.get("total_mb_tracks"))
+        if count is None:
+            return None
+        return entry
 
     @classmethod
     def _distance_total_tracks(
@@ -1251,13 +1266,17 @@ class YoutubeIngestService:
         entry = cls._distance_entry(mapping_row, target_release_id)
         if entry is None:
             return None
-        tmb = entry.get("total_mb_tracks")
-        if isinstance(tmb, int):
-            return tmb
+        return cls._positive_int(entry.get("total_mb_tracks"))
+
+    @staticmethod
+    def _positive_int(value: Any) -> int | None:
+        if isinstance(value, bool):
+            return None
         try:
-            return int(tmb) if tmb is not None else None
+            parsed = int(value)
         except (TypeError, ValueError):
             return None
+        return parsed if parsed > 0 else None
 
     def _cleanup_ytdlp_run(self, run: YtdlpRunResult) -> str | None:
         """Best-effort delete the scratch paths used by one yt-dlp run."""

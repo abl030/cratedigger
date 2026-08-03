@@ -23,20 +23,24 @@ class FakeYTMusic:
     """
 
     def __init__(self) -> None:
-        self._search_results: dict[str, list[dict[str, Any]]] = {}
+        self._search_results: dict[tuple[str, str | None], list[dict[str, Any]]] = {}
         self._album_results: dict[str, dict[str, Any]] = {}
-        self._search_errors: dict[str, Exception] = {}
+        self._search_errors: dict[tuple[str, str | None], Exception] = {}
         self._album_errors: dict[str, Exception] = {}
+        self._watch_results: dict[str, dict[str, Any]] = {}
         self.search_calls: list[dict[str, Any]] = []
         self.get_album_calls: list[dict[str, Any]] = []
+        self.get_watch_playlist_calls: list[dict[str, Any]] = []
 
     def set_search(
         self,
         query: str,
         results: list[dict[str, Any]],
+        *,
+        filter: str | None = None,
     ) -> None:
         """Configure ``search(query, ...)`` to return ``results``."""
-        self._search_results[query] = copy.deepcopy(results)
+        self._search_results[(query, filter)] = copy.deepcopy(results)
 
     def set_album(
         self,
@@ -46,6 +50,10 @@ class FakeYTMusic:
         """Configure ``get_album(browseId)`` to return ``response``."""
         self._album_results[browseId] = copy.deepcopy(response)
 
+    def set_watch_playlist(self, video_id: str, response: dict[str, Any]) -> None:
+        """Configure the narrow ``get_watch_playlist(videoId=...)`` response."""
+        self._watch_results[video_id] = copy.deepcopy(response)
+
     def set_search_error(
         self,
         query: str,
@@ -54,7 +62,7 @@ class FakeYTMusic:
         """Queue a single exception to raise on the next ``search(query, ...)``
         call. One-shot: subsequent matching calls fall through to the canned
         result (or the empty default)."""
-        self._search_errors[query] = error
+        self._search_errors[(query, None)] = error
 
     def set_album_error(
         self,
@@ -84,10 +92,13 @@ class FakeYTMusic:
             "limit": limit,
             "ignore_spelling": ignore_spelling,
         })
-        queued_error = self._search_errors.pop(query, None)
+        queued_error = self._search_errors.pop((query, filter), None)
+        if queued_error is None:
+            queued_error = self._search_errors.pop((query, None), None)
         if queued_error is not None:
             raise queued_error
-        return copy.deepcopy(self._search_results.get(query, []))
+        return copy.deepcopy(self._search_results.get(
+            (query, filter), self._search_results.get((query, None), [])))
 
     def get_album(self, browseId: str) -> dict[str, Any]:
         """Mirror ``ytmusicapi.YTMusic.get_album``. Returns the canned dict
@@ -107,6 +118,10 @@ class FakeYTMusic:
                 f"Server returned HTTP 400: no album for browseId={browseId!r}"
             )
         return copy.deepcopy(self._album_results[browseId])
+
+    def get_watch_playlist(self, videoId: str) -> dict[str, Any]:
+        self.get_watch_playlist_calls.append({"videoId": videoId})
+        return copy.deepcopy(self._watch_results.get(videoId, {}))
 
     @staticmethod
     def make_album_fixture(
@@ -181,4 +196,3 @@ class FakeYTMusic:
 # seed known releases; any un-seeded id raises ``HTTPError(404)`` by
 # default. See ``.claude/rules/test-fidelity.md`` § "Rule B".
 # ---------------------------------------------------------------------------
-

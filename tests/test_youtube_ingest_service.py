@@ -237,6 +237,21 @@ class TestSubmitHappyPath(unittest.TestCase):
             [f"vid-{i + 1}" for i in range(EXPECTED_TRACKS)],
         )
 
+    def test_exact_distance_must_be_one_successful_finite_entry(self) -> None:
+        for override in (
+            {"outcome": "distance_failed", "distance": None},
+            {"outcome": "ok", "distance": float("nan")},
+            {"outcome": "ok", "distance": float("inf")},
+            {"outcome": "ok", "distance": 0.05, "total_mb_tracks": None},
+        ):
+            with self.subTest(override=override):
+                pdb = FakePipelineDB()
+                _seed_wanted_request(pdb)
+                _seed_resolver_row(pdb)
+                pdb._youtube_album_mappings[(MB_RG, "mb")][0]["distances"][0].update(override)
+                result = _make_service(pdb).submit(42, BROWSE)
+                self.assertEqual(result.outcome, "track_count_precheck_failed")
+
     def test_unsearchable_request_accepted_covers_ae9(self) -> None:
         """AE9: rescue from ``unsearchable`` is identical to wanted."""
         pdb = FakePipelineDB()

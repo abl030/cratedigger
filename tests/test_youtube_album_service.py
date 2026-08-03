@@ -48,6 +48,7 @@ MB_REL_B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 MB_REL_C = "cccccccc-cccc-cccc-cccc-cccccccccccc"
 MB_RG_MISSING = "22222222-2222-2222-2222-222222222222"
 MB_NO_RG = "33333333-3333-3333-3333-333333333333"
+DICE_REALITY = "129bebd8-a7b9-4099-b0bc-545b704e7a95"
 
 
 def _ok_mb_release(
@@ -150,6 +151,46 @@ def _yt_other_version(browse_id: str, *, year: str = "1996",
         "thumbnails": [],
         "isExplicit": False,
     }
+
+
+class TestNarrowDiscoveryAdmissions(unittest.TestCase):
+    """Issue #1003: song and operator-watch discovery enter the normal matrix."""
+
+    def _resolve(self, yt: FakeYTMusic, *, watch_url: str | None = None,
+                 identifier: str = MB_REL_A):
+        return resolve_youtube_album(
+            identifier, pdb=FakePipelineDB(),
+            mb_get_release=lambda value: _ok_mb_release(mbid=value),
+            mb_get_release_group_releases=lambda _rg: _ok_mb_rg_releases((identifier, 2024)),
+            discogs_get_release=lambda _value: None,
+            discogs_get_master_releases=lambda _value: None,
+            yt_client=yt, distance_fn=_canned_distance(distance=0.0),
+            sleep_fn=_noop_sleep, watch_url=watch_url,
+        )
+
+    def test_song_album_browse_id_is_scored_when_album_search_misses(self):
+        yt = FakeYTMusic()
+        yt.set_search("Dr. Octagon Dr. Octagonecologyst", [])
+        yt.set_search("Dr. Octagon Dr. Octagonecologyst", [{
+            "resultType": "song", "album": {"id": "MPREb_song"},
+        }], filter="songs")
+        yt.set_album("MPREb_song", FakeYTMusic.make_album_fixture(
+            "OLAK-song", "Dr. Octagonecologyst", [{"name": "Dr. Octagon"}],
+            "2024", _yt_tracks(["Intro", "3000"])))
+        result = self._resolve(yt)
+        self.assertEqual([r.yt_browse_id for r in result.youtube_releases], ["MPREb_song"])
+        self.assertEqual(yt.search_calls[0]["query"], "Dr. Octagon Dr. Octagonecologyst")
+
+    def test_canonical_watch_url_resolves_and_replaces_matrix(self):
+        yt = FakeYTMusic()
+        yt.set_watch_playlist("dGYXkhMAvLk", {"tracks": [{"album": {"id": "MPREb_kb5fohQCJ6d"}}]})
+        yt.set_album("MPREb_kb5fohQCJ6d", FakeYTMusic.make_album_fixture(
+            "OLAK-dice", "Reality", [{"name": "DICE"}], "2024", _yt_tracks(["Reality"])))
+        result = self._resolve(yt, identifier=DICE_REALITY,
+                               watch_url="https://music.youtube.com/watch?v=dGYXkhMAvLk")
+        self.assertEqual(result.outcome, "ok")
+        self.assertEqual([r.yt_browse_id for r in result.youtube_releases], ["MPREb_kb5fohQCJ6d"])
+        self.assertEqual(yt.get_watch_playlist_calls, [{"videoId": "dGYXkhMAvLk"}])
 
 
 def _canned_distance(

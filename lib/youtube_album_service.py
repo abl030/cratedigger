@@ -415,6 +415,7 @@ def resolve_youtube_album(
     jitter_range: tuple[float, float] = (
         _JITTER_MIN_SECONDS_DEFAULT, _JITTER_MAX_SECONDS_DEFAULT),
     deadline_seconds: int = 60,
+    watch_url: str | None = None,
 ) -> YoutubeAlbumResolverResult:
     """Resolve a release identifier to the YT Music distance matrix.
 
@@ -469,7 +470,7 @@ def resolve_youtube_album(
     # MBIDs are drawn from disjoint UUID space. The asymmetry is
     # documented and tested below; the cost is one extra mirror call on
     # cold-cache Discogs resolves.
-    if not refresh and source_label == "mb":
+    if watch_url is None and not refresh and source_label == "mb":
         speculative = pdb.get_youtube_album_mapping(identifier, source_label)
         if speculative is not None:
             return _final(
@@ -538,7 +539,7 @@ def resolve_youtube_album(
     # this, an empty-search release group would re-fetch YT on every
     # resolve, defeating R14.
     cached_rows = pdb.get_youtube_album_mapping(rg_id, source_label)
-    if not refresh and cached_rows is not None:
+    if watch_url is None and not refresh and cached_rows is not None:
         return _final(
             outcome="ok",
             release_group_identifier=rg_id,
@@ -580,7 +581,9 @@ def resolve_youtube_album(
             started=started,
         )
 
-    seed_release = _pick_mb_seed(fetched_siblings)
+    # A release-level request must discover from that exact pressing.  Group
+    # and master inputs retain the established deterministic representative.
+    seed_release = widen.discovery_release or _pick_mb_seed(fetched_siblings)
     query = _build_search_query(seed_release)
 
     # Step 5-8: search YT, expand siblings, fetch per-YT-album track lists.
@@ -602,23 +605,39 @@ def resolve_youtube_album(
         return (time.monotonic() - started) > float(deadline_seconds)
 
     try:
-        search_results = _cached_search(
-            yt_client, cache, query, "albums", 10, refresh=refresh)
-        seed_browse_id = _pick_yt_seed(search_results, seed_release)
-        if seed_browse_id is None:
-            # AE2: search returned empty → ok + empty matrix.
-            pdb.upsert_youtube_album_mapping(rg_id, source_label, [])
-            return _final(
-                outcome="ok",
-                release_group_identifier=rg_id,
-                source=source_label,
-                from_cache=False,
-                youtube_releases=[],
-                started=started,
-            )
-        seed_album = _cached_get_album(
-            yt_client, cache, seed_browse_id, refresh=refresh)
-        yt_album_responses[seed_browse_id] = seed_album
+        if watch_url is not None:
+            seed_browse_id = _watch_url_album_browse_id(yt_client, watch_url)
+            seed_album = _cached_get_album(
+                yt_client, cache, seed_browse_id, refresh=True)
+            yt_album_responses[seed_browse_id] = seed_album
+        else:
+            search_results = _cached_search(
+                yt_client, cache, query, "albums", 10, refresh=refresh)
+            song_results = _cached_search(
+                yt_client, cache, query, "songs", 10, refresh=refresh)
+            seed_browse_id = _pick_yt_seed(search_results, seed_release)
+            song_browse_ids = _song_album_browse_ids(song_results)
+            if seed_browse_id is None and not song_browse_ids:
+                # Both observed discovery paths found no albums.
+                pdb.upsert_youtube_album_mapping(rg_id, source_label, [])
+                return _final(
+                    outcome="ok", release_group_identifier=rg_id,
+                    source=source_label, from_cache=False,
+                    youtube_releases=[], started=started)
+            if seed_browse_id is not None:
+                seed_album = _cached_get_album(
+                    yt_client, cache, seed_browse_id, refresh=refresh)
+                yt_album_responses[seed_browse_id] = seed_album
+            for song_browse_id in song_browse_ids:
+                if song_browse_id in yt_album_responses:
+                    continue
+                yt_album_responses[song_browse_id] = _cached_get_album(
+                    yt_client, cache, song_browse_id, refresh=refresh)
+            if seed_browse_id is None:
+                seed_browse_id = song_browse_ids[0]
+                seed_album = yt_album_responses[seed_browse_id]
+            else:
+                seed_album = yt_album_responses[seed_browse_id]
         for other_raw in _json_list(seed_album.get("other_versions")):
             if _deadline_breached():
                 deadline_message = (
@@ -912,6 +931,7 @@ class _GroupResolution(msgspec.Struct, kw_only=True):
     )
     failure_outcome: str | None = None
     is_orphan: bool = False
+    discovery_release: dict[str, object] | None = None
 
 
 def _safe_leaf_lookup(
@@ -1000,6 +1020,7 @@ def _resolve_mb_group(
         return _GroupResolution(
             rg_id=rg_id,
             sibling_summaries=_json_list(group.get("releases")),
+            discovery_release=leaf,
         )
 
     # Leaf miss → treat identifier as RG MBID.
@@ -1043,6 +1064,7 @@ def _resolve_discogs_group(
         return _GroupResolution(
             rg_id=master_id,
             sibling_summaries=_json_list(group.get("releases")),
+            discovery_release=leaf,
         )
 
     group = _safe_group_lookup(discogs_get_master_releases, identifier)
@@ -1172,6 +1194,37 @@ def _pick_yt_seed(
         return None
     chosen = search_results[best_idx]
     return str(chosen["browseId"])
+
+
+def _song_album_browse_ids(results: list[dict[str, Any]]) -> list[str]:
+    """Return the album browse IDs surfaced by the observed song search shape."""
+    out: list[str] = []
+    for result in results:
+        album = _json_dict(result.get("album"))
+        browse_id = album.get("id")
+        if isinstance(browse_id, str) and browse_id and browse_id not in out:
+            out.append(browse_id)
+    return out
+
+
+_CANONICAL_WATCH_URL = re.compile(
+    r"^https://music\.youtube\.com/watch\?v=([A-Za-z0-9_-]+)$"
+)
+
+
+def _watch_url_album_browse_id(yt_client: Any, watch_url: str) -> str:
+    """Resolve only the report's canonical watch URL to its album browse ID."""
+    match = _CANONICAL_WATCH_URL.fullmatch(watch_url)
+    if match is None:
+        raise ValueError("watch_url must be canonical https://music.youtube.com/watch?v=<video-id>")
+    response = yt_client.get_watch_playlist(videoId=match.group(1))
+    tracks = _json_list(_json_dict(response).get("tracks"))
+    if not tracks:
+        raise KeyError("watch response has no track")
+    album_id = _json_dict(_json_dict(tracks[0]).get("album")).get("id")
+    if not isinstance(album_id, str) or not album_id:
+        raise KeyError("watch response has no album browse id")
+    return album_id
 
 
 def _parse_year(raw: Any) -> int | None:

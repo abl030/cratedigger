@@ -216,6 +216,7 @@ def cmd_youtube_album(db: YoutubeResolverDB, args: argparse.Namespace) -> int:
             distance_fn=compute_beets_distance,
             cache=cache,
             refresh=bool(getattr(args, "refresh", False)),
+            watch_url=getattr(args, "watch_url", None),
         )
     finally:
         # Close the requests Session even when the resolver raises so
@@ -346,6 +347,11 @@ def add_youtube_subparsers(
              "AND the in-process Redis HTTP accelerator, forcing a "
              "fresh YouTube Music fetch. The fresh response is then "
              "written back to both layers. (Default: serve from cache.)",
+    )
+    p_ya.add_argument(
+        "--watch-url",
+        help="Canonical https://music.youtube.com/watch?v=<video-id>; "
+             "resolves that video to an album and replaces this full matrix.",
     )
     p_ya.add_argument(
         "--json", action="store_true",
