@@ -1462,6 +1462,18 @@ def load_candidate_evidence_for_source(
             "missing",
             f"candidate evidence id {evidence_id} not found",
         )
+    if evidence.measurement.was_converted_from is not None:
+        # A content-addressed row can be linked by both candidate and current
+        # owners. Keep installed conversion history in storage, but never
+        # expose that output-only fact as part of a candidate source
+        # measurement.
+        evidence = msgspec.structs.replace(
+            evidence,
+            measurement=msgspec.structs.replace(
+                evidence.measurement,
+                was_converted_from=None,
+            ),
+        )
     if not audio_snapshot_matches(source_path, evidence.files):
         return EvidenceBuildResult(
             None,

@@ -7375,6 +7375,63 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         assert loaded is not None
         self.assertIsNone(loaded.measurement.was_converted_from)
 
+    def test_candidate_refresh_preserves_current_linked_conversion_lineage(self):
+        """A shared content row must retain its current-library history."""
+        mbid = "candidate-current-shared-lineage"
+        request_id = self.db.add_request(
+            mb_release_id=mbid,
+            artist_name="Evidence Artist",
+            album_title="Shared content row",
+            source="request",
+        )
+        current = self._seed(
+            mb_release_id=mbid,
+            files=[AlbumQualityEvidenceFile(
+                relative_path="01.opus",
+                size_bytes=1,
+                mtime_ns=1,
+                extension="opus",
+                container="opus",
+                codec="opus",
+            )],
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=128,
+                avg_bitrate_kbps=130,
+                median_bitrate_kbps=129,
+                format="Opus",
+                was_converted_from="flac",
+            ),
+            codec="opus",
+            container="opus",
+            storage_format="Opus",
+        )
+        self.db.upsert_album_quality_evidence(current)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=mbid,
+            snapshot_fingerprint=current.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.assertTrue(
+            self.db.set_request_current_evidence(request_id, stored.id)
+        )
+
+        candidate = msgspec.structs.replace(
+            current,
+            measurement=msgspec.structs.replace(
+                current.measurement,
+                was_converted_from=None,
+            ),
+        )
+        self.db.upsert_album_quality_evidence(candidate)
+        loaded = self.db.find_album_quality_evidence(
+            mb_release_id=mbid,
+            snapshot_fingerprint=current.snapshot_fingerprint,
+        )
+
+        assert loaded is not None
+        self.assertEqual(loaded.id, stored.id)
+        self.assertEqual(loaded.measurement.was_converted_from, "flac")
+
     def test_v0_research_claim_is_atomic_across_connections(self):
         from lib.pipeline_db import PipelineDB
 

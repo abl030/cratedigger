@@ -2059,6 +2059,7 @@ class TestQualityLineageGenerated(unittest.TestCase):
         )
 
         def emit_invalid_partial() -> None:
+            import_one._current_result = invalid
             import_one._emit_and_exit(invalid)
 
         stdout = io.StringIO()

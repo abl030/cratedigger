@@ -189,10 +189,12 @@ retires it: `was_converted_from` is durable output lineage and can coexist
 with a fresh `installed` spectral measurement. A HAVE scan changes the
 spectral subject, not the fact that FLAC became ALAC, Opus, or Vorbis.
 Current-evidence rebuilds preserve that lineage only for the same installed
-snapshot, and the current-only spectral writer leaves it untouched. The
-generic evidence upsert treats its input as exact; in particular, a fresh
+snapshot, and the current-only spectral writer leaves it untouched. A fresh
 candidate measurement with NULL lineage clears legacy candidate contamination
-at the same content address rather than inheriting a current-library fact.
+at the same content address unless the canonical row is also current-linked.
+For that shared-row case, storage retains the installed history while the
+candidate reader projects `was_converted_from=NULL` before policy or launch,
+so output lineage never becomes a source measurement.
 Source-subject V0 and verified-lossless proof remain provenance rather than a
 database claim that current bytes are irrecoverable. The application preserves
 old source-subject spectral only when the exact manifest also proves a known

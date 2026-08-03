@@ -294,11 +294,16 @@ class TestGeneratedLosslessLineageMerge(unittest.TestCase):
             spectral_subject=subject,
         )
 
-    @given(converted_from=st.sampled_from(("flac", "FLAC", "alac", "wav")))
-    @example(converted_from="flac")
-    def test_candidate_refresh_clears_legacy_conversion_lineage(
+    @given(
+        converted_from=st.sampled_from(("flac", "FLAC", "alac", "wav")),
+        current_linked=st.booleans(),
+    )
+    @example(converted_from="flac", current_linked=False)
+    @example(converted_from="alac", current_linked=True)
+    def test_candidate_refresh_respects_current_link(
         self,
         converted_from: str,
+        current_linked: bool,
     ) -> None:
         db = FakePipelineDB()
         evidence = make_album_quality_evidence(
@@ -324,6 +329,17 @@ class TestGeneratedLosslessLineageMerge(unittest.TestCase):
             target_format="opus 128",
         )
         db.upsert_album_quality_evidence(evidence)
+        if current_linked:
+            db.seed_request(make_request_row(
+                id=42,
+                mb_release_id=evidence.mb_release_id,
+            ))
+            stored = db.find_album_quality_evidence(
+                mb_release_id=evidence.mb_release_id,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert stored is not None and stored.id is not None
+            assert db.set_request_current_evidence(42, stored.id)
         db.upsert_album_quality_evidence(msgspec.structs.replace(
             evidence,
             measurement=msgspec.structs.replace(
@@ -338,7 +354,7 @@ class TestGeneratedLosslessLineageMerge(unittest.TestCase):
         )
         assert loaded is not None
         assert_conversion_lineage_matches_role(
-            role="candidate",
+            role="shared" if current_linked else "candidate",
             converted_from=converted_from,
             actual=loaded.measurement.was_converted_from,
         )
@@ -457,6 +473,14 @@ class TestLosslessLineageCheckCheckerTripsOnViolation(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "current conversion"):
             assert_conversion_lineage_matches_role(
                 role="current",
+                converted_from="flac",
+                actual=None,
+            )
+
+    def test_role_checker_rejects_erased_shared_lineage(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "shared conversion"):
+            assert_conversion_lineage_matches_role(
+                role="shared",
                 converted_from="flac",
                 actual=None,
             )

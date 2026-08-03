@@ -393,7 +393,22 @@ class _EvidenceMixin(_PipelineDBBase):
                         THEN album_quality_evidence.verified_lossless
                         ELSE EXCLUDED.verified_lossless
                     END,
-                    was_converted_from = EXCLUDED.was_converted_from,
+                    -- Candidate and current FKs may share this canonical row.
+                    -- A candidate NULL clears unowned legacy contamination,
+                    -- but cannot erase lineage while the row is installed
+                    -- current evidence. Candidate readers project the shared
+                    -- row back to source semantics before policy or launch.
+                    was_converted_from = CASE
+                        WHEN EXCLUDED.was_converted_from IS NULL
+                             AND EXISTS (
+                                 SELECT 1
+                                 FROM album_requests AS current_owner
+                                 WHERE current_owner.current_evidence_id =
+                                     album_quality_evidence.id
+                             )
+                        THEN album_quality_evidence.was_converted_from
+                        ELSE EXCLUDED.was_converted_from
+                    END,
                     -- V0 is one atomic fact, not six independently mergeable
                     -- columns. A valid incoming metric has a lineage and at
                     -- least one bitrate; replace the whole tuple in that case.

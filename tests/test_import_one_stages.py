@@ -106,6 +106,7 @@ class TestTerminalCrashAcknowledgement(unittest.TestCase):
         )
 
         def emit_invalid_partial() -> None:
+            import_one._current_result = invalid
             import_one._emit_and_exit(invalid)
 
         stdout = io.StringIO()
@@ -128,6 +129,37 @@ class TestTerminalCrashAcknowledgement(unittest.TestCase):
         self.assertEqual(parsed.decision, "crash")
         self.assertEqual(parsed.exit_code, 99)
         self.assertIn("source measurement must not carry", parsed.error or "")
+
+    def test_valid_partial_result_retains_post_mutation_audit(self):
+        """Representable Beets audit survives an unrelated outer crash."""
+        from harness import import_one
+        from lib.quality import ImportResult, parse_import_result
+
+        partial = ImportResult(
+            beets_log=["applied exact release"],
+            apply_beets_distance=0.031,
+        )
+
+        def crash_after_beets() -> None:
+            import_one._current_result = partial
+            raise RuntimeError("postflight observer failed")
+
+        stdout = io.StringIO()
+        with (
+            patch("sys.stdout", stdout),
+            patch.object(import_one, "_import_total_start", None),
+            self.assertRaises(SystemExit) as caught,
+        ):
+            import_one._run_entrypoint(main_fn=crash_after_beets)
+
+        self.assertEqual(caught.exception.code, 99)
+        parsed = parse_import_result(stdout.getvalue())
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertEqual(parsed.decision, "crash")
+        self.assertEqual(parsed.beets_log, ["applied exact release"])
+        self.assertEqual(parsed.apply_beets_distance, 0.031)
+        self.assertEqual(parsed.error, "RuntimeError: postflight observer failed")
 
 
 class TestRunImportFailureReasons(unittest.TestCase):

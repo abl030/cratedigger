@@ -129,6 +129,7 @@ HARNESS_TIMEOUT = 300
 IMPORT_TIMEOUT = 1800
 max_distance = 0.5
 DUPLICATE_REMOVE_GUARD_EXIT_CODE = 7
+_current_result: ImportResult | None = None
 _preview_temp_root: str | None = None
 _import_total_start: float | None = None
 
@@ -1749,6 +1750,9 @@ def _run_quality_evidence_authorized_import(
     assert action_file is not None
     r = ImportResult()
     r.already_in_beets = already_in_beets
+    global _current_result
+    _current_result = r
+
     try:
         payload = _load_quality_evidence_action_file(action_file)
         r.decision = _evidence_action_decision_name(payload)
@@ -2033,6 +2037,9 @@ def main():
     r = ImportResult()
     r.preview = args.dry_run
     r.existing_v0_probe = _existing_v0_probe_from_args(args)
+    global _current_result
+    _current_result = r
+
     # --- Pre-flight: already imported? ---
     stage_start = time.monotonic()
     beets = open_import_beets(
@@ -2826,16 +2833,28 @@ def main():
 
 def _run_entrypoint(*, main_fn: Callable[[], None] = main) -> None:
     """Run the importer and guarantee a fresh terminal crash acknowledgement."""
+    global _current_result
+    _current_result = None
     try:
         main_fn()
     except SystemExit:
         raise  # _emit_and_exit uses sys.exit
     except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
+        error = f"{type(exc).__name__}: {exc}"
+        result = _current_result
+        if result is not None:
+            result.exit_code = 99
+            result.decision = "crash"
+            result.error = error
+            try:
+                result.to_json()
+            except Exception:  # noqa: BLE001 - replace an unencodable partial result
+                result = None
         _emit_and_exit(
-            ImportResult(
+            result or ImportResult(
                 exit_code=99,
                 decision="crash",
-                error=f"{type(exc).__name__}: {exc}",
+                error=error,
             )
         )
 
