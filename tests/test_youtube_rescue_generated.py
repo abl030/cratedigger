@@ -14,6 +14,10 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from lib.youtube_ingest_service import YoutubeIngestService
+from tests.fakes import FakePipelineDB
+from tests.test_youtube_ingest_service import (
+    BROWSE, MB_RG, _make_service, _seed_resolver_row, _seed_wanted_request,
+)
 
 
 class TestExactRescueEvidenceGenerated(unittest.TestCase):
@@ -26,17 +30,22 @@ class TestExactRescueEvidenceGenerated(unittest.TestCase):
     def test_only_one_finite_ok_exact_distance_with_tracks_is_admitted(
         self, outcome: str, distance: float, tracks: int | None, duplicate: bool,
     ) -> None:
-        entry = {"mbid": "exact", "outcome": outcome, "distance": distance,
-                 "total_mb_tracks": tracks}
-        row = {"distances": [entry] * (2 if duplicate else 1)}
-        accepted = YoutubeIngestService._distance_entry(row, "exact")
+        pdb = FakePipelineDB()
+        _seed_wanted_request(pdb)
+        _seed_resolver_row(pdb)
+        entry = pdb._youtube_album_mappings[(MB_RG, "mb")][0]["distances"][0]
+        entry.update({"outcome": outcome, "distance": distance, "total_mb_tracks": tracks})
+        if duplicate:
+            pdb._youtube_album_mappings[(MB_RG, "mb")][0]["distances"].append(dict(entry))
+        result = _make_service(pdb, mb_count=tracks).submit(42, BROWSE)
         expected = (
             not duplicate and outcome == "ok" and not isinstance(distance, bool) and math.isfinite(distance)
             and isinstance(tracks, int) and tracks > 0
         )
-        self.assertEqual(accepted is not None, expected)
+        self.assertEqual(result.outcome == "accepted", expected)
+        self.assertEqual(any(row.outcome == "youtube_running" for row in pdb.download_logs), expected)
 
     def test_known_bad_checker_self_test_rejects_nan(self) -> None:
-        row = {"distances": [{"mbid": "exact", "outcome": "ok",
-                              "distance": float("nan"), "total_mb_tracks": 1}]}
-        self.assertIsNone(YoutubeIngestService._distance_entry(row, "exact"))
+        pdb = FakePipelineDB(); _seed_wanted_request(pdb); _seed_resolver_row(pdb)
+        pdb._youtube_album_mappings[(MB_RG, "mb")][0]["distances"][0]["distance"] = float("nan")
+        self.assertEqual(_make_service(pdb).submit(42, BROWSE).outcome, "track_count_precheck_failed")

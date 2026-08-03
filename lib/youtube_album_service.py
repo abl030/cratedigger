@@ -613,12 +613,18 @@ def resolve_youtube_album(
         else:
             search_results = _cached_search(
                 yt_client, cache, query, "albums", 10, refresh=refresh)
-            try:
+            seed_browse_id = _pick_yt_seed(search_results, seed_release)
+            if seed_browse_id is None:
+                # With no valid album path, song discovery is primary and its
+                # failure must not be cached as a false empty resolution.
                 song_results = _cached_search(
                     yt_client, cache, query, "songs", 10, refresh=refresh)
-            except (YTMusicError, requests.RequestException, KeyError, IndexError):
-                song_results = []
-            seed_browse_id = _pick_yt_seed(search_results, seed_release)
+            else:
+                try:
+                    song_results = _cached_search(
+                        yt_client, cache, query, "songs", 10, refresh=refresh)
+                except (YTMusicError, requests.RequestException, KeyError, IndexError):
+                    song_results = []
             song_browse_ids = _song_album_browse_ids(song_results)
             if seed_browse_id is None and not song_browse_ids:
                 # Both observed discovery paths found no albums.
