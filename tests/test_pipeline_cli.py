@@ -4955,13 +4955,13 @@ class TestCmdYoutubeAlbum(unittest.TestCase):
         ]
 
     def _run(self, *, outcome: Any = None, result: Any = None,
-             refresh: bool = False, json_out: bool = False,
+             refresh: bool = False, watch_url: str | None = None, json_out: bool = False,
              resolver_side_effect: Exception | None = None):
         if result is None:
             assert outcome is not None, "must pass outcome= or result="
             result = self._make_result(outcome=outcome)
         args = SimpleNamespace(
-            identifier=self.IDENT, refresh=refresh, json=json_out,
+            identifier=self.IDENT, refresh=refresh, watch_url=watch_url, json=json_out,
         )
         stdout = io.StringIO()
         # cmd_youtube_album's first arg is the PipelineDB instance; the
@@ -5014,6 +5014,11 @@ class TestCmdYoutubeAlbum(unittest.TestCase):
             pipeline_cli.OUTCOME_EXIT_CODE,
             svc.OUTCOME_EXIT_CODE,
         )
+
+    def test_watch_url_is_forwarded_to_shared_resolver(self):
+        url = "https://music.youtube.com/watch?v=dGYXkhMAvLk"
+        _rc, _out, resolve = self._run(outcome="ok", watch_url=url)
+        self.assertEqual(resolve.call_args.kwargs["watch_url"], url)
 
     def test_exit_0_on_ok_text_mode_shows_matrix(self):
         result = self._make_result(

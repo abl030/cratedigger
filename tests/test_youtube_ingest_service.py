@@ -237,6 +237,21 @@ class TestSubmitHappyPath(unittest.TestCase):
             [f"vid-{i + 1}" for i in range(EXPECTED_TRACKS)],
         )
 
+    def test_exact_distance_must_be_one_successful_finite_entry(self) -> None:
+        for override in (
+            {"outcome": "distance_failed", "distance": None},
+            {"outcome": "ok", "distance": float("nan")},
+            {"outcome": "ok", "distance": float("inf")},
+            {"outcome": "ok", "distance": 0.05, "total_mb_tracks": None},
+        ):
+            with self.subTest(override=override):
+                pdb = FakePipelineDB()
+                _seed_wanted_request(pdb)
+                _seed_resolver_row(pdb)
+                pdb._youtube_album_mappings[(MB_RG, "mb")][0]["distances"][0].update(override)
+                result = _make_service(pdb).submit(42, BROWSE)
+                self.assertEqual(result.outcome, "track_count_precheck_failed")
+
     def test_unsearchable_request_accepted_covers_ae9(self) -> None:
         """AE9: rescue from ``unsearchable`` is identical to wanted."""
         pdb = FakePipelineDB()
@@ -497,6 +512,28 @@ class TestSubmitNoResolverMapping(unittest.TestCase):
 
 
 class TestSubmitTrackCountPrecheckFailed(unittest.TestCase):
+    def test_discogs_stored_tracks_do_not_substitute_for_bad_exact_evidence(self) -> None:
+        for override, duplicate in (
+            ({"outcome": "distance_failed"}, False),
+            ({"distance": float("nan")}, False),
+            ({"distance": float("inf")}, False),
+            ({"total_mb_tracks": 0}, False),
+            ({}, True),
+        ):
+            with self.subTest(override=override, duplicate=duplicate):
+                pdb = FakePipelineDB()
+                _seed_discogs_request(request_id=77, pdb=pdb, mb_release_id=DISCOGS_REL)
+                pdb.set_tracks(77, _tracks(EXPECTED_TRACKS))
+                _seed_resolver_row(pdb, rg=DISCOGS_MASTER, source="discogs",
+                                   distances_for_mbid=DISCOGS_REL,
+                                   total_mb_tracks=EXPECTED_TRACKS)
+                entry = pdb._youtube_album_mappings[(DISCOGS_MASTER, "discogs")][0]["distances"][0]
+                entry.update(override)
+                if duplicate:
+                    pdb._youtube_album_mappings[(DISCOGS_MASTER, "discogs")][0]["distances"].append(dict(entry))
+                result = _make_service(pdb).submit(77, BROWSE)
+                self.assertEqual(result.outcome, "track_count_precheck_failed")
+                self.assertFalse(any(row.outcome == "youtube_running" for row in pdb.download_logs))
     def test_resolver_cache_drifted_from_mb(self) -> None:
         """Resolver cache total_mb_tracks=10, MB now says 11 → mismatch."""
         pdb = FakePipelineDB()
@@ -554,7 +591,7 @@ class TestSubmitTrackCountPrecheckFailed(unittest.TestCase):
         self.assertEqual(result.outcome, "track_count_precheck_failed")
         self.assertIsNotNone(result.detail)
         assert result.detail is not None
-        self.assertIn("no stored tracklist", result.detail)
+        self.assertIn("no admissible exact evidence", result.detail)
 
     def test_discogs_stored_count_mismatch_rejects(self) -> None:
         pdb = FakePipelineDB()
