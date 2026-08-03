@@ -13,6 +13,7 @@ import unittest
 from hypothesis import given
 from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401
 from tests.fakes import FakePipelineDB
 from tests.test_youtube_ingest_service import (
     BROWSE,

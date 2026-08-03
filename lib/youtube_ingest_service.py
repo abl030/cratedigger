@@ -1138,7 +1138,6 @@ class YoutubeIngestService:
                 ) from exc
             if (
                 stored_count is not None
-                and distance_count is not None
                 and int(stored_count) != int(distance_count)
             ):
                 raise _TrackCountPrecheckFailure(
@@ -1235,7 +1234,7 @@ class YoutubeIngestService:
         matrix row or a URL.
         """
         distances = _json_list(mapping_row.get("distances"))
-        matches: list[dict[str, Any]] = []
+        matches: list[dict[str, object]] = []
         for entry_raw in distances:
             if not _is_dict_like(entry_raw):
                 continue
@@ -1268,8 +1267,8 @@ class YoutubeIngestService:
         return cls._positive_int(entry.get("total_mb_tracks"))
 
     @staticmethod
-    def _positive_int(value: Any) -> int | None:
-        if isinstance(value, bool):
+    def _positive_int(value: object) -> int | None:
+        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
             return None
         try:
             parsed = int(value)
