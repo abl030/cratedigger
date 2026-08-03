@@ -472,6 +472,15 @@ changed rows by field — the decision-level sibling of
 two-tree runbook (recipe in the module docstring). A quality-policy
 change is measured on the live corpus, not reasoned about from the diff.
 
+The export reads one explicitly qualified PostgreSQL `REPEATABLE READ`,
+read-only snapshot. Its v2 coverage companion is a strict typed artifact: it
+contains the canonically sorted `source_links` ledger (both import-job and
+download-log arms) plus an observed-evidence content-address ledger for every
+required candidate/current ID. Always run `verify` before either tree decides;
+it rejects unknown manifest fields and recomputes every count, debt, role,
+association, address, digest, and green result from those ledgers and the
+corpus bytes. This is an offline artifact check, not a new database read.
+
 Only `--counterfactual` is a flag. It decides whether the run can SEE a
 promotion-gate change; a zero from a run without it is not evidence. Native
 current-side pairing is mandatory corpus input, not an optional switch:

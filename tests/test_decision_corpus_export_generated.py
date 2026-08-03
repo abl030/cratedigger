@@ -15,12 +15,12 @@ from hypothesis import strategies as st
 import tests._hypothesis_profiles  # noqa: F401
 from lib.quality import AlbumQualityEvidenceFile
 from scripts.decision_differential import (
-    _DECISION_CORPUS_EVIDENCE_COLUMNS,
     _EVIDENCE_SCHEMA_TYPES,
     _FILE_SCHEMA_TYPES,
     _SOURCE_SCHEMA_TYPES,
-    EVIDENCE_FILE_PROJECTION_COLUMNS,
     RenderDifferentialError,
+    _decision_corpus_evidence_columns,
+    _decision_corpus_evidence_file_columns,
     _evidence_from_corpus_row,
     assert_decision_corpus_schema,
     assert_export_output_exact,
@@ -60,9 +60,9 @@ class TestDecisionCorpusExportGenerated(unittest.TestCase):
             **deepcopy(_SOURCE_SCHEMA_TYPES),
         }
         columns = (
-            _DECISION_CORPUS_EVIDENCE_COLUMNS
+            _decision_corpus_evidence_columns()
             if table == "album_quality_evidence"
-            else (*EVIDENCE_FILE_PROJECTION_COLUMNS, "evidence_id", "ordinal")
+            else (*_decision_corpus_evidence_file_columns(), "evidence_id", "ordinal")
             if table == "album_quality_evidence_files"
             else tuple(_SOURCE_SCHEMA_TYPES[table])
         )
@@ -179,11 +179,27 @@ class TestDecisionCorpusExportGenerated(unittest.TestCase):
         with self.assertRaises(RenderDifferentialError):
             _evidence_from_corpus_row(row)
 
-    @given(link_count=st.integers(min_value=1, max_value=4), paired=st.booleans())
+    @given(
+        link_count=st.integers(min_value=1, max_value=4),
+        paired=st.booleans(),
+        mutation=st.sampled_from(
+            (
+                "schema_version",
+                "green",
+                "debt_count",
+                "source_arm",
+                "observed_release",
+                "role",
+                "address",
+                "nested_unknown",
+            )
+        ),
+    )
     def test_real_pg_export_is_exact_and_batch_invariant(
         self,
         link_count: int,
         paired: bool,
+        mutation: str,
     ) -> None:
         db = make_db()
         try:
@@ -271,6 +287,29 @@ class TestDecisionCorpusExportGenerated(unittest.TestCase):
                 self.assertEqual(
                     coverage["valid_candidates"]["paired" if paired else "unpaired"], 1
                 )
+                verify_decision_corpus_pair(corpus_path, coverage_path)
+                broken = deepcopy(coverage)
+                if mutation == "schema_version":
+                    broken["schema_version"] = 1
+                elif mutation == "green":
+                    broken["green"] = False
+                elif mutation == "debt_count":
+                    broken["debt_count"] = 1
+                elif mutation == "source_arm":
+                    broken["source_links"][0]["source"] = "download_log"
+                elif mutation == "observed_release":
+                    broken["observed_evidence"][0]["mb_release_id"] = "wrong"
+                elif mutation == "role":
+                    broken["outputs"]["corpus"]["written_candidate_ids"] = []
+                elif mutation == "address":
+                    broken["outputs"]["corpus"]["content_addresses"][0][
+                        "files_sha256"
+                    ] = "0" * 64
+                else:
+                    broken["source_links"][0]["unknown"] = True
+                coverage_path.write_text(json.dumps(broken) + "\n")
+                with self.assertRaises(RenderDifferentialError):
+                    verify_decision_corpus_pair(corpus_path, coverage_path)
         finally:
             db.close()
 

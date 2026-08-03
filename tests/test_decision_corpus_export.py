@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
+import sys
 import unittest
 from contextlib import redirect_stderr
 from copy import deepcopy
@@ -19,6 +22,7 @@ from scripts.decision_differential import (
     DecisionCorpusExportResult,
     RenderDifferentialError,
     _assert_live_decision_corpus_schema,
+    _DecisionCorpusSnapshot,
     assert_decision_corpus_schema,
     assert_export_output_exact,
     export_decision_corpus,
@@ -26,6 +30,7 @@ from scripts.decision_differential import (
     verify_decision_corpus_pair,
 )
 from tests.helpers import make_album_quality_evidence
+from tests.test_decision_differential import _corpus_row
 from tests.test_pipeline_db import TEST_DSN, make_db, requires_postgres
 
 
@@ -419,8 +424,13 @@ class TestDecisionCorpusExport(unittest.TestCase):
                 {
                     "evidence_id": conflicted_id,
                     "associations": [
-                        {"current_evidence_id": None, "request_mb_release_id": release},
                         {
+                            "candidate_evidence_id": conflicted_id,
+                            "current_evidence_id": None,
+                            "request_mb_release_id": release,
+                        },
+                        {
+                            "candidate_evidence_id": conflicted_id,
                             "current_evidence_id": current_id,
                             "request_mb_release_id": second_release,
                         },
@@ -465,3 +475,110 @@ class TestDecisionCorpusExport(unittest.TestCase):
             self.assertTrue(second.green)
             self.assertEqual(first_corpus.read_bytes(), second_corpus.read_bytes())
             self.assertEqual(first_coverage.read_bytes(), second_coverage.read_bytes())
+
+    def test_export_holds_one_qualified_repeatable_read_snapshot_across_later_batches(
+        self,
+    ) -> None:
+        """A concurrent writer after link collection is excluded from this export."""
+        release = "repeatable-read-export"
+        request_id = self._request(release)
+        candidate_id = self._evidence(release, 51)
+        original_path = "/tmp/decision-corpus-51"
+        job = self.db.enqueue_import_job(
+            "force_import",
+            request_id=request_id,
+            payload={"download_log_id": 1, "failed_path": original_path},
+        )
+        self.assertTrue(self.db.set_import_job_candidate_evidence(job.id, candidate_id))
+        snapshots: list[_DecisionCorpusSnapshot] = []
+
+        def mutate_after_links(snapshot: _DecisionCorpusSnapshot) -> None:
+            snapshots.append(snapshot)
+            self.assertEqual(snapshot.isolation, "repeatable read")
+            self.assertEqual(snapshot.read_only, "on")
+            self.assertTrue(snapshot.snapshot)
+            self.db._execute(
+                "UPDATE album_quality_evidence SET source_path = %s WHERE id = %s",
+                ("/tmp/concurrent-mutation", candidate_id),
+            )
+            later = self.db.enqueue_import_job(
+                "force_import",
+                request_id=request_id,
+                payload={"download_log_id": 2, "failed_path": "/tmp/later"},
+            )
+            self.assertTrue(self.db.set_import_job_candidate_evidence(later.id, candidate_id))
+            self.db.conn.commit()
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            export_decision_corpus(
+                TEST_DSN,
+                root / "corpus.jsonl",
+                root / "coverage.json",
+                batch_size=1,
+                _after_source_links=mutate_after_links,
+            )
+            coverage = json.loads((root / "coverage.json").read_text())
+            corpus = [json.loads(line) for line in (root / "corpus.jsonl").read_text().splitlines()]
+        self.assertEqual(len(snapshots), 1)
+        self.assertEqual(coverage["total_source_links"], 1)
+        self.assertEqual(corpus[0]["source_path"], original_path)
+
+    def test_verifier_rejects_every_coverage_summary_and_nested_ledger_mutant(self) -> None:
+        """The public artifact verifier recomputes every claimed summary field."""
+        release = "strict-coverage-mutants"
+        request_id = self._request(release)
+        candidate_id = self._evidence(release, 52)
+        job = self.db.enqueue_import_job(
+            "force_import",
+            request_id=request_id,
+            payload={"download_log_id": 1, "failed_path": "/tmp/candidate"},
+        )
+        self.assertTrue(self.db.set_import_job_candidate_evidence(job.id, candidate_id))
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            corpus, coverage_path = root / "corpus.jsonl", root / "coverage.json"
+            export_decision_corpus(TEST_DSN, corpus, coverage_path)
+            original = json.loads(coverage_path.read_text())
+            mutations = {
+                "schema_version": lambda data: data.__setitem__("schema_version", 1),
+                "green": lambda data: data.__setitem__("green", False),
+                "debt_count": lambda data: data.__setitem__("debt_count", 1),
+                "count": lambda data: data.__setitem__("total_source_links", 99),
+                "role": lambda data: data["outputs"]["corpus"]["written_candidate_ids"].clear(),
+                "address": lambda data: data["outputs"]["corpus"]["content_addresses"][0].__setitem__("files_sha256", "0" * 64),
+                "source_arm": lambda data: data["source_links"][0].__setitem__("source", "download_log"),
+                "observed": lambda data: data["observed_evidence"][0].__setitem__("mb_release_id", "wrong"),
+                "unknown": lambda data: data.__setitem__("unexpected", True),
+            }
+            for name, mutate in mutations.items():
+                broken = deepcopy(original)
+                mutate(broken)
+                coverage_path.write_text(json.dumps(broken) + "\n")
+                with self.subTest(name=name), self.assertRaises(RenderDifferentialError):
+                    verify_decision_corpus_pair(corpus, coverage_path)
+
+    def test_exact_base_archive_can_help_and_decide_with_the_copied_script(self) -> None:
+        """#999's export imports never prevent historical decision replay."""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive = root / "base.tar"
+            subprocess.run(
+                ["git", "archive", "--format=tar", "--output", str(archive), "3fdf2748"],
+                check=True,
+            )
+            subprocess.run(["tar", "-xf", str(archive), "-C", str(root)], check=True)
+            script = root / "scripts" / "decision_differential.py"
+            shutil.copy2(Path(__file__).parents[1] / "scripts" / script.name, script)
+            corpus = root / "corpus.jsonl"
+            corpus.write_text(json.dumps(_corpus_row()) + "\n")
+            out = root / "decided.jsonl"
+            for args in (("--help",), ("decide", "--corpus", str(corpus), "--out", str(out))):
+                completed = subprocess.run(
+                    ["nix-shell", "--run", " ".join((sys.executable, str(script), *args))],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                with self.subTest(args=args):
+                    self.assertEqual(completed.returncode, 0, completed.stderr)

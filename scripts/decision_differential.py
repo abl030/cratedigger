@@ -144,7 +144,7 @@ import hashlib
 import os
 import sys
 import tempfile
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -159,12 +159,6 @@ import psycopg2
 import psycopg2.extras
 
 from lib.json_narrow import is_object_list, is_str_object_dict
-from lib.pipeline_db.evidence import (
-    EVIDENCE_FILE_PROJECTION_COLUMNS,
-    EVIDENCE_PROJECTION_COLUMNS,
-    PersistedAlbumQualityEvidenceRow,
-    _EvidenceMixin,
-)
 from lib.quality import (
     AacLatticeProofLeg,
     AlbumQualityEvidence,
@@ -185,7 +179,6 @@ from lib.quality.audio_validation import (
     AudioValidationOutcome,
 )
 from lib.quality.pipeline import evidence_spectral_context
-from lib.quality_evidence import snapshot_fingerprint
 from scripts.render_differential import (
     DEFAULT_SAMPLES_PER_FIELD,
     RenderDifferentialError,
@@ -194,6 +187,35 @@ from scripts.render_differential import (
     read_rendered,
     summarize_render_diff,
 )
+
+
+def _export_evidence_contract() -> tuple[tuple[str, ...], tuple[str, ...], type[object], type[object]]:
+    """Load #999's DB-export-only helpers only for ``export``.
+
+    The two-tree differential copies this script into historical trees.  Those
+    trees must still be able to parse ``--help`` and replay ``decide`` using
+    their own quality library, even when they predate this export projection.
+    """
+    from lib.pipeline_db.evidence import (
+        EVIDENCE_FILE_PROJECTION_COLUMNS,
+        EVIDENCE_PROJECTION_COLUMNS,
+        PersistedAlbumQualityEvidenceRow,
+        _EvidenceMixin,
+    )
+
+    return (
+        EVIDENCE_PROJECTION_COLUMNS,
+        EVIDENCE_FILE_PROJECTION_COLUMNS,
+        PersistedAlbumQualityEvidenceRow,
+        _EvidenceMixin,
+    )
+
+
+def _production_evidence_mixin() -> type[object]:
+    """Load the historical production mapper required by ``decide`` only."""
+    from lib.pipeline_db.evidence import _EvidenceMixin
+
+    return _EvidenceMixin
 
 #: Decision-dict keys that are not decisions: the Stage-1 counterfactual
 #: is audit-only reporting, and ``comparison_basis`` is a nested display
@@ -304,7 +326,8 @@ def _evidence_from_corpus_row(
         # ride into a Struct that declares datetime.
         payload["measured_at"] = _parse_timestamp(measured_at)
     try:
-        return _EvidenceMixin._album_quality_evidence_from_row(
+        evidence_mixin = _production_evidence_mixin()
+        return evidence_mixin._album_quality_evidence_from_row(  # type: ignore[attr-defined]
             payload,
             file_rows,
         )
@@ -814,6 +837,21 @@ class DecisionCorpusExportResult:
     debt_count: int
 
 
+@dataclass(frozen=True)
+class _DecisionCorpusSnapshot:
+    """Qualified PG transaction facts exposed only to the concurrency pin."""
+
+    isolation: str
+    read_only: str
+    snapshot: str
+
+
+class _DecisionCorpusSnapshotRow(msgspec.Struct, frozen=True):
+    isolation: str
+    read_only: str
+    snapshot: str
+
+
 class _DecisionCorpusSourceLink(msgspec.Struct, frozen=True):
     """One exact candidate-evidence foreign-key reference from PostgreSQL."""
 
@@ -826,12 +864,157 @@ class _DecisionCorpusSourceLink(msgspec.Struct, frozen=True):
     current_evidence_id: int | None
 
 
+class _CoverageSourceLink(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    """The complete, canonical source-arm ledger committed to coverage."""
+
+    source: str
+    source_id: int
+    evidence_id: int
+    request_id: int | None
+    request_exists: bool
+    request_mb_release_id: str | None
+    current_evidence_id: int | None
+    authority_reason: str | None
+
+
+class _CoverageObservedEvidence(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    """Compact evidence facts sufficient to audit every required ID."""
+
+    evidence_id: int
+    mb_release_id: str
+    stored_snapshot_fingerprint: str
+    files_snapshot_fingerprint: str
+    files_sha256: str
+
+
+class _CoverageAssociation(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    candidate_evidence_id: int
+    current_evidence_id: int | None
+    request_mb_release_id: str
+
+
+class _CoverageAuthorityless(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    source: str
+    source_id: int
+    evidence_id: int
+    request_id: int | None
+    reason: str
+
+
+class _CoverageConflict(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    evidence_id: int
+    associations: list[_CoverageAssociation]
+
+
+class _CoverageCandidateMismatch(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    evidence_id: int
+    evidence_mb_release_id: str
+    request_mb_release_id: str
+
+
+class _CoverageCurrentMismatch(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    candidate_evidence_id: int
+    current_evidence_id: int
+    current_mb_release_id: str
+    request_mb_release_id: str
+
+
+class _CoverageContentMismatch(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    evidence_id: int
+    stored_snapshot_fingerprint: str
+    files_snapshot_fingerprint: str
+
+
+class _CoverageFileContentConflict(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    mb_release_id: str
+    snapshot_fingerprint: str
+    evidence_ids: list[int]
+
+
+class _CoverageAddress(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    id: int
+    mb_release_id: str
+    snapshot_fingerprint: str
+    files_sha256: str
+
+
+class _CoverageWrittenAddressConflict(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    mb_release_id: str
+    snapshot_fingerprint: str
+
+
+class _CoverageCounts(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    download_log: int
+    import_jobs: int
+
+
+class _CoverageValidCandidates(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    paired: int
+    unpaired: int
+
+
+class _CoverageCorpusOutput(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    expected_candidate_ids: list[int]
+    written_candidate_ids: list[int]
+    expected_associations: list[_CoverageAssociation]
+    written_associations: list[_CoverageAssociation]
+    expected_referenced_current_ids: list[int]
+    written_referenced_current_ids: list[int]
+    expected_current_only_ids: list[int]
+    written_current_only_ids: list[int]
+    dual_role_ids: list[int]
+    expected_evidence_ids: list[int]
+    written_evidence_ids: list[int]
+    exact_match: bool
+    content_addresses: list[_CoverageAddress]
+    sha256: str
+
+
+class _CoverageOutputs(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    corpus: _CoverageCorpusOutput
+
+
+class DecisionCorpusCoverage(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    """Strict, self-recomputing coverage artifact schema (v2)."""
+
+    schema_version: int
+    source_links: list[_CoverageSourceLink]
+    observed_evidence: list[_CoverageObservedEvidence]
+    total_source_links: int
+    source_link_counts: _CoverageCounts
+    source_distinct_candidate_id_counts: _CoverageCounts
+    total_distinct_candidate_ids: int
+    identical_associations_collapsed: int
+    authorityless_source_links: list[_CoverageAuthorityless]
+    authorityless_candidate_ids: list[int]
+    association_conflicts: list[_CoverageConflict]
+    missing_candidate_evidence_ids: list[int]
+    candidate_release_mismatches: list[_CoverageCandidateMismatch]
+    missing_current_evidence_ids: list[int]
+    current_release_mismatches: list[_CoverageCurrentMismatch]
+    referenced_current_ids: list[int]
+    valid_candidates: _CoverageValidCandidates
+    content_address_mismatches: list[_CoverageContentMismatch]
+    file_content_conflicts: list[_CoverageFileContentConflict]
+    written_content_address_conflicts: list[_CoverageWrittenAddressConflict]
+    outputs: _CoverageOutputs
+    green: bool
+    debt_count: int
+
+
 # Do not replace this projection with ``e.*``.  The JSONL wire and the real
 # evidence mapper consume this exact surface; an add/drop/rename/type/nullability
 # change must break the export until its projection and Struct move together.
-_DECISION_CORPUS_EVIDENCE_COLUMNS: tuple[str, ...] = EVIDENCE_PROJECTION_COLUMNS
-"""Shared production decoder projection; corpus adds JSON-aggregated files."""
-"""The explicit SQL below deliberately derives from this contract."""
+def _decision_corpus_evidence_columns() -> tuple[str, ...]:
+    """Shared production decoder projection; corpus adds JSON-aggregated files."""
+    columns, _file_columns, _persisted_row, _evidence_mixin = _export_evidence_contract()
+    return columns
+
+
+def _decision_corpus_evidence_file_columns() -> tuple[str, ...]:
+    """The file projection used by the export's joined JSON aggregation."""
+    _columns, file_columns, _persisted_row, _evidence_mixin = _export_evidence_contract()
+    return file_columns
 
 
 def _db_source_links(cursor: object) -> list[_DecisionCorpusSourceLink]:
@@ -871,6 +1054,27 @@ def _db_source_links(cursor: object) -> list[_DecisionCorpusSourceLink]:
                 f"decision-corpus source-link projection drift: {exc}"
             ) from exc
     return links
+
+
+def _qualify_read_snapshot(cursor: object) -> _DecisionCorpusSnapshot:
+    """Prove the collector's transaction settings before any source read."""
+    assert isinstance(cursor, psycopg2.extensions.cursor)
+    cursor.execute(
+        "SELECT current_setting('transaction_isolation') AS isolation, "
+        "current_setting('transaction_read_only') AS read_only, "
+        "txid_current_snapshot() AS snapshot"
+    )
+    raw = cursor.fetchone()
+    if not isinstance(raw, Mapping):
+        raise RenderDifferentialError("decision-corpus snapshot qualification returned no row")
+    row = msgspec.convert(dict(raw), type=_DecisionCorpusSnapshotRow)
+    if row.isolation != "repeatable read" or row.read_only != "on":
+        raise RenderDifferentialError(
+            "decision-corpus export requires a repeatable-read, read-only snapshot"
+        )
+    return _DecisionCorpusSnapshot(
+        isolation=row.isolation, read_only=row.read_only, snapshot=row.snapshot
+    )
 
 
 _EVIDENCE_SCHEMA_TYPES: dict[str, tuple[str, bool]] = {
@@ -963,10 +1167,14 @@ def assert_decision_corpus_schema(
 ) -> None:
     """Fail closed when a consumed PG column's name/type/nullability drifts."""
     for table, columns, overrides in (
-        ("album_quality_evidence", EVIDENCE_PROJECTION_COLUMNS, _EVIDENCE_SCHEMA_TYPES),
+        (
+            "album_quality_evidence",
+            _decision_corpus_evidence_columns(),
+            _EVIDENCE_SCHEMA_TYPES,
+        ),
         (
             "album_quality_evidence_files",
-            (*EVIDENCE_FILE_PROJECTION_COLUMNS, "evidence_id", "ordinal"),
+            (*_decision_corpus_evidence_file_columns(), "evidence_id", "ordinal"),
             _FILE_SCHEMA_TYPES,
         ),
         *(
@@ -1029,7 +1237,7 @@ def _db_evidence_rows(
     assert isinstance(cursor, psycopg2.extensions.cursor)
     rows: dict[int, dict[str, object]] = {}
     column_sql = ", ".join(
-        f"e.{column}" for column in _DECISION_CORPUS_EVIDENCE_COLUMNS
+        f"e.{column}" for column in _decision_corpus_evidence_columns()
     )
     for start in range(0, len(evidence_ids), batch_size):
         batch = list(evidence_ids[start : start + batch_size])
@@ -1073,9 +1281,12 @@ def _db_evidence_rows(
                 # contract; JSONL conversion below only serializes that same
                 # contract for replay.
                 files = payload.pop("files")
+                _columns, _file_columns, persisted_row_type, _evidence_mixin = (
+                    _export_evidence_contract()
+                )
                 pg_row = msgspec.convert(
                     payload,
-                    type=PersistedAlbumQualityEvidenceRow,
+                    type=persisted_row_type,
                 )
                 payload = msgspec.to_builtins(pg_row)
                 payload["measured_at"] = measured_at.isoformat()
@@ -1125,7 +1336,68 @@ def _address(row: Mapping[str, object]) -> dict[str, object]:
     }
 
 
-def _export_debt_count(coverage: Mapping[str, object]) -> int:
+def _authority_reason(link: _DecisionCorpusSourceLink) -> str | None:
+    if link.request_mb_release_id is not None:
+        return None
+    if link.request_id is None:
+        return "null_request_id"
+    if not link.request_exists:
+        return "missing_request"
+    return "request_missing_release_authority"
+
+
+def _coverage_source_links(
+    links: Sequence[_DecisionCorpusSourceLink],
+) -> list[_CoverageSourceLink]:
+    ledger = [
+        _CoverageSourceLink(
+            source=link.source,
+            source_id=link.source_id,
+            evidence_id=link.evidence_id,
+            request_id=link.request_id,
+            request_exists=link.request_exists,
+            request_mb_release_id=link.request_mb_release_id,
+            current_evidence_id=link.current_evidence_id,
+            authority_reason=_authority_reason(link),
+        )
+        for link in links
+    ]
+    if ledger != sorted(ledger, key=lambda item: (item.source, item.source_id)):
+        raise RenderDifferentialError("source-links ledger is not canonically sorted")
+    return ledger
+
+
+def _observed_evidence(row: Mapping[str, object]) -> _CoverageObservedEvidence:
+    """Record the reproducible content address for every fetched evidence ID."""
+    evidence_id = row.get("id")
+    release_id = row.get("mb_release_id")
+    stored = row.get("snapshot_fingerprint")
+    files = row.get("files")
+    if (
+        not _is_exact_int(evidence_id)
+        or not isinstance(release_id, str)
+        or not isinstance(stored, str)
+        or not isinstance(files, list)
+    ):
+        raise RenderDifferentialError("observed evidence ledger has invalid source row")
+    try:
+        file_rows = msgspec.convert(files, type=list[AlbumQualityEvidenceFile])
+    except msgspec.ValidationError as exc:
+        raise RenderDifferentialError(
+            f"decision-corpus file projection/wire drift for evidence {evidence_id}: {exc}"
+        ) from exc
+    from lib.quality_evidence import snapshot_fingerprint
+
+    return _CoverageObservedEvidence(
+        evidence_id=evidence_id,
+        mb_release_id=release_id,
+        stored_snapshot_fingerprint=stored,
+        files_snapshot_fingerprint=snapshot_fingerprint(file_rows),
+        files_sha256=hashlib.sha256(msgspec.json.encode(files)).hexdigest(),
+    )
+
+
+def _export_debt_count(coverage: DecisionCorpusCoverage) -> int:
     """Count every non-empty debt list without silently reclassifying it."""
     debt_fields = (
         "authorityless_source_links",
@@ -1141,13 +1413,260 @@ def _export_debt_count(coverage: Mapping[str, object]) -> int:
     )
     total = 0
     for field in debt_fields:
-        value = coverage[field]
-        if not isinstance(value, list):
-            raise RenderDifferentialError(
-                f"decision-corpus coverage field {field!r} is not a list"
-            )
+        value = getattr(coverage, field)
         total += len(value)
     return total
+
+
+def recompute_decision_corpus_coverage(
+    source_links: Sequence[_CoverageSourceLink],
+    observed_evidence: Sequence[_CoverageObservedEvidence],
+    corpus_rows: Sequence[Mapping[str, object]],
+    corpus_bytes: bytes,
+) -> DecisionCorpusCoverage:
+    """Derive *all* coverage values from the two ledgers and corpus.
+
+    Export and ``verify`` both call this one checker.  The artifact's human
+    readable counts and debt lists are therefore assertions, never authority:
+    changing any copied field makes this recomputation disagree.
+    """
+    links = list(source_links)
+    if links != sorted(links, key=lambda item: (item.source, item.source_id)):
+        raise RenderDifferentialError("coverage source_links are not canonically sorted")
+    evidence_rows = {item.evidence_id: item for item in observed_evidence}
+    if len(evidence_rows) != len(observed_evidence):
+        raise RenderDifferentialError("coverage observed_evidence duplicates an ID")
+    if list(observed_evidence) != sorted(observed_evidence, key=lambda item: item.evidence_id):
+        raise RenderDifferentialError("coverage observed_evidence is not canonically sorted")
+
+    source_link_counts = _CoverageCounts(
+        download_log=sum(link.source == "download_log" for link in links),
+        import_jobs=sum(link.source == "import_jobs" for link in links),
+    )
+    source_distinct_candidate_id_counts = _CoverageCounts(
+        download_log=len({link.evidence_id for link in links if link.source == "download_log"}),
+        import_jobs=len({link.evidence_id for link in links if link.source == "import_jobs"}),
+    )
+    authorityless = [
+        _CoverageAuthorityless(
+            source=link.source,
+            source_id=link.source_id,
+            evidence_id=link.evidence_id,
+            request_id=link.request_id,
+            reason=link.authority_reason,
+        )
+        for link in links
+        if link.authority_reason is not None
+    ]
+    authoritative = [link for link in links if link.authority_reason is None]
+    associations: dict[int, set[tuple[int | None, str]]] = {}
+    for link in authoritative:
+        assert link.request_mb_release_id is not None
+        associations.setdefault(link.evidence_id, set()).add(
+            (link.current_evidence_id, link.request_mb_release_id)
+        )
+    conflicts = [
+        _CoverageConflict(
+            evidence_id=evidence_id,
+            associations=[
+                _CoverageAssociation(
+                    candidate_evidence_id=evidence_id,
+                    current_evidence_id=current_id,
+                    request_mb_release_id=release_id,
+                )
+                for current_id, release_id in sorted(
+                    values,
+                    key=lambda item: (item[0] is not None, item[0] or -1, item[1]),
+                )
+            ],
+        )
+        for evidence_id, values in sorted(associations.items())
+        if len(values) > 1
+    ]
+    conflict_ids = {item.evidence_id for item in conflicts}
+    candidate_associations = {
+        evidence_id: next(iter(values))
+        for evidence_id, values in associations.items()
+        if evidence_id not in conflict_ids
+    }
+    referenced_current_ids = sorted(
+        {
+            current_id
+            for values in associations.values()
+            for current_id, _release in values
+            if current_id is not None
+        }
+    )
+    all_candidate_ids = {link.evidence_id for link in links}
+    missing_candidates = sorted(all_candidate_ids - set(evidence_rows))
+    missing_currents = sorted(set(referenced_current_ids) - set(evidence_rows))
+    mismatches = [
+        _CoverageContentMismatch(
+            evidence_id=item.evidence_id,
+            stored_snapshot_fingerprint=item.stored_snapshot_fingerprint,
+            files_snapshot_fingerprint=item.files_snapshot_fingerprint,
+        )
+        for item in observed_evidence
+        if item.stored_snapshot_fingerprint != item.files_snapshot_fingerprint
+    ]
+    content_mismatch_ids = {item.evidence_id for item in mismatches}
+    content_groups: dict[tuple[str, str], list[int]] = {}
+    for item in observed_evidence:
+        content_groups.setdefault(
+            (item.mb_release_id, item.files_snapshot_fingerprint), []
+        ).append(item.evidence_id)
+    file_content_conflicts = [
+        _CoverageFileContentConflict(
+            mb_release_id=release_id,
+            snapshot_fingerprint=fingerprint,
+            evidence_ids=evidence_ids,
+        )
+        for (release_id, fingerprint), evidence_ids in sorted(content_groups.items())
+        if len(evidence_ids) > 1
+    ]
+    candidate_mismatches: list[_CoverageCandidateMismatch] = []
+    current_mismatches: list[_CoverageCurrentMismatch] = []
+    invalid: set[tuple[int, int | None, str]] = set()
+    for evidence_id, values in associations.items():
+        candidate = evidence_rows.get(evidence_id)
+        for current_id, release_id in values:
+            association = (evidence_id, current_id, release_id)
+            if candidate is None or evidence_id in content_mismatch_ids:
+                invalid.add(association)
+                continue
+            if candidate.mb_release_id != release_id:
+                candidate_mismatches.append(
+                    _CoverageCandidateMismatch(
+                        evidence_id=evidence_id,
+                        evidence_mb_release_id=candidate.mb_release_id,
+                        request_mb_release_id=release_id,
+                    )
+                )
+                invalid.add(association)
+            if current_id is not None:
+                current = evidence_rows.get(current_id)
+                if current is None or current_id in content_mismatch_ids:
+                    invalid.add(association)
+                    continue
+                if current.mb_release_id != release_id:
+                    current_mismatches.append(
+                        _CoverageCurrentMismatch(
+                            candidate_evidence_id=evidence_id,
+                            current_evidence_id=current_id,
+                            current_mb_release_id=current.mb_release_id,
+                            request_mb_release_id=release_id,
+                        )
+                    )
+                    invalid.add(association)
+    valid_candidates = {
+        evidence_id: association
+        for evidence_id, association in candidate_associations.items()
+        if (evidence_id, association[0], association[1]) not in invalid
+    }
+    valid_current_ids = {
+        current_id for current_id, _release in valid_candidates.values()
+        if current_id is not None
+    }
+    expected_associations = [
+        _CoverageAssociation(
+            candidate_evidence_id=evidence_id,
+            current_evidence_id=current_id,
+            request_mb_release_id=release_id,
+        )
+        for evidence_id, (current_id, release_id) in sorted(valid_candidates.items())
+    ]
+    expected_candidate_ids = [item.candidate_evidence_id for item in expected_associations]
+    expected_current_only_ids = sorted(valid_current_ids - set(valid_candidates))
+    dual_role_ids = sorted(valid_current_ids & set(valid_candidates))
+    expected_evidence_ids = sorted(set(valid_candidates) | valid_current_ids)
+    assert_export_output_exact(
+        corpus_rows,
+        [
+            (item.candidate_evidence_id, item.current_evidence_id, item.request_mb_release_id)
+            for item in expected_associations
+        ],
+        sorted(valid_current_ids),
+    )
+    entries = [_corpus_evidence(row) for row in corpus_rows]
+    written_candidate_ids = [entry.evidence_id for entry in entries if entry.is_candidate]
+    written_evidence_ids = [entry.evidence_id for entry in entries]
+    written_associations = [
+        _CoverageAssociation(
+            candidate_evidence_id=entry.evidence_id,
+            current_evidence_id=entry.current_evidence_id,
+            request_mb_release_id=entry.request_mb_release_id or "",
+        )
+        for entry in entries if entry.is_candidate
+    ]
+    addresses = [
+        msgspec.convert(_address(entry.row), type=_CoverageAddress)
+        for entry in entries
+    ]
+    for address in addresses:
+        observed = evidence_rows.get(address.id)
+        if observed is None or (
+            address.mb_release_id != observed.mb_release_id
+            or address.snapshot_fingerprint != observed.stored_snapshot_fingerprint
+            or address.files_sha256 != observed.files_sha256
+        ):
+            raise RenderDifferentialError("corpus content address disagrees with observed evidence ledger")
+    address_keys = [
+        (item.mb_release_id, item.snapshot_fingerprint) for item in addresses
+    ]
+    address_conflicts = sorted({key for key in address_keys if address_keys.count(key) > 1})
+    output = _CoverageCorpusOutput(
+        expected_candidate_ids=expected_candidate_ids,
+        written_candidate_ids=written_candidate_ids,
+        expected_associations=expected_associations,
+        written_associations=written_associations,
+        expected_referenced_current_ids=sorted(valid_current_ids),
+        written_referenced_current_ids=sorted(valid_current_ids),
+        expected_current_only_ids=expected_current_only_ids,
+        written_current_only_ids=[entry.evidence_id for entry in entries if not entry.is_candidate],
+        dual_role_ids=dual_role_ids,
+        expected_evidence_ids=expected_evidence_ids,
+        written_evidence_ids=written_evidence_ids,
+        exact_match=(expected_candidate_ids == written_candidate_ids and expected_evidence_ids == written_evidence_ids),
+        content_addresses=addresses,
+        sha256=hashlib.sha256(corpus_bytes).hexdigest(),
+    )
+    coverage = DecisionCorpusCoverage(
+        schema_version=2,
+        source_links=list(source_links),
+        observed_evidence=list(observed_evidence),
+        total_source_links=len(links),
+        source_link_counts=source_link_counts,
+        source_distinct_candidate_id_counts=source_distinct_candidate_id_counts,
+        total_distinct_candidate_ids=len(all_candidate_ids),
+        identical_associations_collapsed=len(authoritative) - sum(len(values) for values in associations.values()),
+        authorityless_source_links=authorityless,
+        authorityless_candidate_ids=sorted({item.evidence_id for item in authorityless}),
+        association_conflicts=conflicts,
+        missing_candidate_evidence_ids=missing_candidates,
+        candidate_release_mismatches=candidate_mismatches,
+        missing_current_evidence_ids=missing_currents,
+        current_release_mismatches=current_mismatches,
+        referenced_current_ids=referenced_current_ids,
+        valid_candidates=_CoverageValidCandidates(
+            paired=sum(item.current_evidence_id is not None for item in expected_associations),
+            unpaired=sum(item.current_evidence_id is None for item in expected_associations),
+        ),
+        content_address_mismatches=mismatches,
+        file_content_conflicts=file_content_conflicts,
+        written_content_address_conflicts=[
+            _CoverageWrittenAddressConflict(mb_release_id=release, snapshot_fingerprint=fingerprint)
+            for release, fingerprint in address_conflicts
+        ],
+        outputs=_CoverageOutputs(corpus=output),
+        green=False,
+        debt_count=0,
+    )
+    debt_count = _export_debt_count(coverage)
+    return msgspec.structs.replace(
+        coverage,
+        green=debt_count == 0,
+        debt_count=debt_count,
+    )
 
 
 def assert_export_output_exact(
@@ -1218,6 +1737,7 @@ def export_decision_corpus(
     coverage_path: str | Path,
     *,
     batch_size: int = 1000,
+    _after_source_links: Callable[[_DecisionCorpusSnapshot], None] | None = None,
 ) -> DecisionCorpusExportResult:
     """Export the complete authoritative decision corpus from PostgreSQL.
 
@@ -1229,6 +1749,10 @@ def export_decision_corpus(
     """
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
+    # Export-only dependency: leave ``--help`` and historical ``decide``
+    # usable when this script is copied into a tree predating #999.
+    from lib.quality_evidence import snapshot_fingerprint
+
     corpus_file, coverage_file = Path(corpus_path), Path(coverage_path)
     if corpus_file.resolve() == coverage_file.resolve():
         raise RenderDifferentialError(
@@ -1243,35 +1767,10 @@ def export_decision_corpus(
         )
         with connection.cursor() as cursor:
             _assert_live_decision_corpus_schema(cursor)
+            snapshot = _qualify_read_snapshot(cursor)
             links = _db_source_links(cursor)
-            source_link_counts = {
-                source: sum(link.source == source for link in links)
-                for source in ("download_log", "import_jobs")
-            }
-            source_distinct_candidate_id_counts = {
-                source: len(
-                    {link.evidence_id for link in links if link.source == source}
-                )
-                for source in ("download_log", "import_jobs")
-            }
-            authorityless = [
-                {
-                    "source": link.source,
-                    "source_id": link.source_id,
-                    "evidence_id": link.evidence_id,
-                    "request_id": link.request_id,
-                    "reason": (
-                        "null_request_id"
-                        if link.request_id is None
-                        else "missing_request"
-                        if not link.request_exists
-                        else "request_missing_release_authority"
-                    ),
-                }
-                for link in links
-                if link.request_mb_release_id is None
-            ]
-            authorityless_ids = sorted({item["evidence_id"] for item in authorityless})
+            if _after_source_links is not None:
+                _after_source_links(snapshot)
             authoritative = [
                 link for link in links if link.request_mb_release_id is not None
             ]
@@ -1309,9 +1808,6 @@ def export_decision_corpus(
             # Collapse identical source associations only.  Two distinct
             # associations for the same candidate are named conflict debt,
             # never selected with DISTINCT ON or quietly treated as one.
-            collapsed = len(authoritative) - sum(
-                len(values) for values in associations.values()
-            )
             candidate_associations = {
                 evidence_id: next(iter(values))
                 for evidence_id, values in associations.items()
@@ -1331,10 +1827,7 @@ def export_decision_corpus(
             all_candidate_ids = {link.evidence_id for link in links}
             required_ids = sorted(all_candidate_ids | set(referenced_current_ids))
             evidence_rows = _db_evidence_rows(cursor, required_ids, batch_size)
-            missing_candidates = sorted(all_candidate_ids - set(evidence_rows))
-            missing_currents = sorted(set(referenced_current_ids) - set(evidence_rows))
             content_mismatches: list[dict[str, object]] = []
-            content_groups: dict[tuple[str, str], list[int]] = {}
             for evidence_id, evidence in evidence_rows.items():
                 try:
                     files = msgspec.convert(
@@ -1350,13 +1843,6 @@ def export_decision_corpus(
                 stored_fingerprint = evidence["snapshot_fingerprint"]
                 assert isinstance(stored_fingerprint, str)
                 assert isinstance(evidence["mb_release_id"], str)
-                content_groups.setdefault(
-                    (
-                        evidence["mb_release_id"],
-                        actual_fingerprint,
-                    ),
-                    [],
-                ).append(evidence_id)
                 if stored_fingerprint != actual_fingerprint:
                     content_mismatches.append(
                         {
@@ -1366,17 +1852,6 @@ def export_decision_corpus(
                         }
                     )
             content_mismatch_ids = {item["evidence_id"] for item in content_mismatches}
-            file_content_conflicts = [
-                {
-                    "mb_release_id": release_id,
-                    "snapshot_fingerprint": fingerprint,
-                    "evidence_ids": evidence_ids,
-                }
-                for (release_id, fingerprint), evidence_ids in sorted(
-                    content_groups.items()
-                )
-                if len(evidence_ids) > 1
-            ]
             candidate_mismatches: list[dict[str, object]] = []
             current_mismatches: list[dict[str, object]] = []
             # Inspect every authoritative association before conflicts remove
@@ -1450,120 +1925,19 @@ def export_decision_corpus(
                 # decoder.  Do not validate one dict and feed another.
                 _evidence_from_corpus_row(row)
                 corpus_rows.append(row)
-            addresses = [_address(row) for row in corpus_rows]
-            address_keys = [
-                (address["mb_release_id"], address["snapshot_fingerprint"])
-                for address in addresses
-            ]
-            address_conflicts = sorted(
-                {key for key in address_keys if address_keys.count(key) > 1}
-            )
-            expected_associations = [
-                (candidate_id, current_id, release_id)
-                for candidate_id, (current_id, release_id) in sorted(
-                    valid_candidates.items()
-                )
-            ]
-            expected_candidate_ids = [item[0] for item in expected_associations]
-            expected_current_only_ids = sorted(
-                valid_current_ids - set(valid_candidates)
-            )
-            dual_role_ids = sorted(valid_current_ids & set(valid_candidates))
-            written_candidate_ids = [
-                row["id"] for row in corpus_rows if row["is_candidate"]
-            ]
-            expected_evidence_ids = corpus_ids
-            written_evidence_ids = [row["id"] for row in corpus_rows]
-            coverage: dict[str, object] = {
-                "schema_version": 1,
-                "total_source_links": len(links),
-                "source_link_counts": source_link_counts,
-                "source_distinct_candidate_id_counts": source_distinct_candidate_id_counts,
-                "total_distinct_candidate_ids": len(
-                    {link.evidence_id for link in links}
-                ),
-                "identical_associations_collapsed": collapsed,
-                "authorityless_source_links": authorityless,
-                "authorityless_candidate_ids": authorityless_ids,
-                "association_conflicts": conflicts,
-                "missing_candidate_evidence_ids": missing_candidates,
-                "candidate_release_mismatches": candidate_mismatches,
-                "missing_current_evidence_ids": missing_currents,
-                "current_release_mismatches": current_mismatches,
-                "referenced_current_ids": referenced_current_ids,
-                "valid_candidates": {
-                    "paired": sum(
-                        current is not None for current, _ in valid_candidates.values()
-                    ),
-                    "unpaired": sum(
-                        current is None for current, _ in valid_candidates.values()
-                    ),
-                },
-                "content_address_mismatches": content_mismatches,
-                "file_content_conflicts": file_content_conflicts,
-                "written_content_address_conflicts": [
-                    {"mb_release_id": release, "snapshot_fingerprint": fingerprint}
-                    for release, fingerprint in address_conflicts
-                ],
-                "outputs": {
-                    "corpus": {
-                        "expected_candidate_ids": expected_candidate_ids,
-                        "written_candidate_ids": written_candidate_ids,
-                        "expected_associations": [
-                            {
-                                "candidate_evidence_id": candidate_id,
-                                "current_evidence_id": current_id,
-                                "request_mb_release_id": release_id,
-                            }
-                            for candidate_id, current_id, release_id in expected_associations
-                        ],
-                        "written_associations": [
-                            {
-                                "candidate_evidence_id": row["id"],
-                                "current_evidence_id": row["current_evidence_id"],
-                                "request_mb_release_id": row["request_mb_release_id"],
-                            }
-                            for row in corpus_rows
-                            if row["is_candidate"] is True
-                        ],
-                        "expected_referenced_current_ids": sorted(valid_current_ids),
-                        "written_referenced_current_ids": sorted(valid_current_ids),
-                        "expected_current_only_ids": expected_current_only_ids,
-                        "written_current_only_ids": [
-                            row["id"]
-                            for row in corpus_rows
-                            if row["is_candidate"] is False
-                        ],
-                        "dual_role_ids": dual_role_ids,
-                        "expected_evidence_ids": expected_evidence_ids,
-                        "written_evidence_ids": written_evidence_ids,
-                        "exact_match": (
-                            expected_candidate_ids == written_candidate_ids
-                            and expected_evidence_ids == written_evidence_ids
-                            and len(written_evidence_ids)
-                            == len(set(written_evidence_ids))
-                        ),
-                        "content_addresses": addresses,
-                    },
-                },
-            }
-            debt_count = _export_debt_count(coverage)
-            coverage["green"] = debt_count == 0
-            coverage["debt_count"] = debt_count
             corpus_bytes = b"".join(
                 msgspec.json.encode(row) + b"\n" for row in corpus_rows
             )
-            assert_export_output_exact(
+            coverage = recompute_decision_corpus_coverage(
+                _coverage_source_links(links),
+                sorted(
+                    (_observed_evidence(row) for row in evidence_rows.values()),
+                    key=lambda item: item.evidence_id,
+                ),
                 corpus_rows,
-                expected_associations,
-                sorted(valid_current_ids),
+                corpus_bytes,
             )
-            corpus_sha256 = hashlib.sha256(corpus_bytes).hexdigest()
-            outputs = coverage["outputs"]
-            assert isinstance(outputs, dict)
-            corpus_output = outputs["corpus"]
-            assert isinstance(corpus_output, dict)
-            corpus_output["sha256"] = corpus_sha256
+            debt_count = coverage.debt_count
             # The manifest binds to corpus bytes. Each artifact is atomically
             # replaced independently; consumers reject a stale pair by digest.
             coverage_bytes = msgspec.json.encode(coverage) + b"\n"
@@ -1608,52 +1982,27 @@ def verify_decision_corpus_pair(
     corpus_bytes = corpus_file.read_bytes()
     try:
         coverage = msgspec.json.decode(
-            coverage_file.read_bytes(), type=dict[str, object]
+            coverage_file.read_bytes(), type=DecisionCorpusCoverage
         )
     except (msgspec.DecodeError, msgspec.ValidationError) as exc:
-        raise RenderDifferentialError(f"coverage is not a JSON object: {exc}") from exc
-    outputs = coverage.get("outputs")
-    if not is_str_object_dict(outputs):
-        raise RenderDifferentialError("coverage has no corpus output manifest")
-    manifest_raw = outputs.get("corpus")
-    if not is_str_object_dict(manifest_raw):
-        raise RenderDifferentialError("coverage has no corpus output manifest")
-    manifest = manifest_raw
-    if manifest.get("sha256") != hashlib.sha256(corpus_bytes).hexdigest():
+        raise RenderDifferentialError(f"coverage violates its strict schema: {exc}") from exc
+    if coverage.schema_version != 2:
         raise RenderDifferentialError(
-            "coverage corpus SHA-256 does not match corpus bytes"
+            f"coverage schema_version must be exactly 2, got {coverage.schema_version!r}"
         )
     rows = list(_corpus_rows(str(corpus_file)))
     for row in rows:
         _evidence_from_corpus_row(row)
-    associations = _association_triples_from_manifest(
-        manifest.get("expected_associations")
+    recomputed = recompute_decision_corpus_coverage(
+        coverage.source_links,
+        coverage.observed_evidence,
+        rows,
+        corpus_bytes,
     )
-    written_associations = _association_triples_from_manifest(
-        manifest.get("written_associations")
-    )
-    if written_associations != associations:
+    if coverage != recomputed:
         raise RenderDifferentialError(
-            "coverage written associations do not reconcile with expected associations"
+            "coverage does not reconcile with its source/evidence ledgers and corpus"
         )
-    referenced = manifest.get("expected_referenced_current_ids")
-    if not isinstance(referenced, list) or any(
-        not _is_exact_int(value) for value in referenced
-    ):
-        raise RenderDifferentialError("coverage referenced current IDs are invalid")
-    if manifest.get("written_referenced_current_ids") != referenced:
-        raise RenderDifferentialError(
-            "coverage written referenced current IDs do not reconcile"
-        )
-    candidate_ids = {candidate_id for candidate_id, _current_id, _release in associations}
-    expected_current_only = sorted(set(referenced) - candidate_ids)
-    if manifest.get("expected_current_only_ids") != expected_current_only:
-        raise RenderDifferentialError("coverage current-only IDs do not reconcile")
-    if manifest.get("written_current_only_ids") != expected_current_only:
-        raise RenderDifferentialError("coverage written current-only IDs do not reconcile")
-    if manifest.get("dual_role_ids") != sorted(set(referenced) & candidate_ids):
-        raise RenderDifferentialError("coverage dual-role IDs do not reconcile")
-    assert_export_output_exact(rows, associations, referenced)
 
 
 def _non_negative_int(raw: str) -> int:
