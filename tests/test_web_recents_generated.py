@@ -407,6 +407,8 @@ def _raw_download_log_row(
     return {
         **entry.to_json_dict(),
         "verified_lossless_classifier": None,
+        "_request_mb_release_id": "generated-recents-release",
+        "_evidence_mb_release_id": "generated-recents-release",
         "_evidence_lineage_version": lineage,
         "_evidence_verified_lossless_classifier": classifier,
     }

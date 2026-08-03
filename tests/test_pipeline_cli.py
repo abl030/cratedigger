@@ -2808,6 +2808,73 @@ class TestCmdQuality(unittest.TestCase):
         self.assertNotIn("(rank=TRANSPARENT)", output)
         self.assertNotIn("(rank=EXCELLENT)", output)
 
+    def test_quality_prints_cd_rip_algorithm_offset_and_provider_confidence(self):
+        from lib.quality import (
+            AccurateRipBitMatch,
+            AudioQualityMeasurement,
+            CdRipBitVerification,
+            CdTocIdentity,
+            CtdbWholeDiscMatch,
+        )
+        from scripts.pipeline_cli.quality import _print_proof_gate_verdict
+
+        cd_rip = CdRipBitVerification(
+            toc=CdTocIdentity(
+                track_offsets_sectors=[0, 470],
+                leadout_sector=950,
+                accuraterip_id="0000058c-00000b18-02000c02",
+                musicbrainz_disc_id="exact-disc-id",
+            ),
+            accuraterip=AccurateRipBitMatch(
+                provider="accuraterip",
+                url="https://www.accuraterip.com/example.bin",
+                checksum_version="arv2",
+                read_offset_samples=108,
+                track_confidences=[38, 37],
+                track_checksums=[0x12345678, 0x90ABCDEF],
+                response_sha256="a" * 64,
+            ),
+            ctdb=CtdbWholeDiscMatch(
+                provider="ctdb",
+                url="https://db.cue.tools/example",
+                entry_id="ctdb-123",
+                confidence=8026,
+                crc32=0xA1B2C3D4,
+                stride_samples=5880,
+                response_toc_sectors=[0, 470, 950],
+                response_toc_shift_sectors=0,
+                response_sha256="b" * 64,
+            ),
+        )
+        evidence = make_album_quality_evidence(
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=800,
+                format="FLAC",
+            ),
+            codec="flac",
+            container="flac",
+            storage_format="FLAC",
+            verified_lossless_proof=cd_rip.verified_lossless_proof(),
+            cd_rip_verification=cd_rip,
+        )
+        stdout = io.StringIO()
+
+        with redirect_stdout(stdout):
+            _print_proof_gate_verdict("IN", evidence)
+
+        output = stdout.getvalue()
+        self.assertIn("proved by exact CD rip bit match", output)
+        self.assertIn("algorithm=cd-rip-bit-verifier-v1", output)
+        self.assertIn("ARV2 offset=+108", output)
+        self.assertIn("track confidences=[38,37]", output)
+        self.assertIn("track checksums=[12345678,90abcdef]", output)
+        self.assertIn(f"response-sha256={'a' * 64}", output)
+        self.assertIn("confidence=8026", output)
+        self.assertIn("whole-disc crc32=a1b2c3d4", output)
+        self.assertIn("response-toc=[0, 470, 950]", output)
+        self.assertIn("toc-shift=0", output)
+        self.assertIn(f"response-sha256={'b' * 64}", output)
+
 
 class TestCmdQualityLiveCandidateReplay(unittest.TestCase):
     """pipeline-cli quality <id>'s live-candidate replay tier (issue #813
@@ -2896,6 +2963,135 @@ class TestCmdQualityLiveCandidateReplay(unittest.TestCase):
         # production actually applies for that decision.
         self.assertIn("REJECT, denylist", output)
         self.assertIn("stage2_import=downgrade", output)
+
+    def test_poisoned_candidate_evidence_is_not_replayed_or_printed(self):
+        from lib.quality import (
+            AccurateRipBitMatch,
+            AudioQualityMeasurement,
+            CdRipBitVerification,
+            CdTocIdentity,
+        )
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=5011, mb_release_id="mbid-cli-exact", status="wanted",
+        ))
+        log_id = db.log_download(request_id=5011, outcome="rejected")
+        cd_rip = CdRipBitVerification(
+            toc=CdTocIdentity(
+                track_offsets_sectors=[0],
+                leadout_sector=470,
+                accuraterip_id="000001d6-000003ac-02000601",
+                musicbrainz_disc_id="sibling-disc-id",
+            ),
+            accuraterip=AccurateRipBitMatch(
+                provider="accuraterip",
+                url="https://www.accuraterip.com/sibling.bin",
+                checksum_version="arv1",
+                read_offset_samples=0,
+                track_confidences=[99],
+                track_checksums=[0xDEADBEEF],
+                response_sha256="c" * 64,
+            ),
+        )
+        sibling = make_album_quality_evidence(
+            mb_release_id="mbid-cli-sibling",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=800,
+                avg_bitrate_kbps=900,
+                format="FLAC",
+                spectral_grade="genuine",
+                spectral_subject="source",
+                spectral_provenance="measured",
+            ),
+            codec="flac",
+            container="flac",
+            storage_format="FLAC",
+            verified_lossless_proof=cd_rip.verified_lossless_proof(),
+            cd_rip_verification=cd_rip,
+        )
+        db.upsert_album_quality_evidence(sibling)
+        stored = db.find_album_quality_evidence(
+            mb_release_id=sibling.mb_release_id,
+            snapshot_fingerprint=sibling.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        db.set_download_log_candidate_evidence(log_id, stored.id)
+
+        output = self._run(db, 5011)
+        replay = output.split(
+            "What the last real candidate actually decided:", 1
+        )[1]
+
+        self.assertIn("exact release identity does not match", replay)
+        self.assertNotIn("measured FLAC", replay)
+        self.assertNotIn("proof gate IN", replay)
+        self.assertNotIn("CD rip IN", replay)
+        self.assertNotIn("deadbeef", replay)
+
+    def test_poisoned_current_evidence_is_excluded_from_candidate_replay(self):
+        from lib.quality import AudioQualityMeasurement
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=5012, mb_release_id="mbid-cli-current-exact", status="wanted",
+        ))
+        sibling_current = make_album_quality_evidence(
+            mb_release_id="mbid-cli-current-sibling",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=64,
+                avg_bitrate_kbps=64,
+                format="AAC",
+                spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=32,
+            ),
+            codec="aac",
+            container="m4a",
+            storage_format="AAC",
+        )
+        db.upsert_album_quality_evidence(sibling_current)
+        stored_current = db.find_album_quality_evidence(
+            mb_release_id=sibling_current.mb_release_id,
+            snapshot_fingerprint=sibling_current.snapshot_fingerprint,
+        )
+        assert stored_current is not None and stored_current.id is not None
+        db.set_request_current_evidence(5012, stored_current.id)
+
+        log_id = db.log_download(request_id=5012, outcome="success")
+        candidate = make_album_quality_evidence(
+            mb_release_id="mbid-cli-current-exact",
+            source_path="/tmp/exact-candidate-source",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=320,
+                avg_bitrate_kbps=320,
+                format="MP3",
+                is_cbr=True,
+            ),
+        )
+        db.upsert_album_quality_evidence(candidate)
+        stored_candidate = db.find_album_quality_evidence(
+            mb_release_id=candidate.mb_release_id,
+            snapshot_fingerprint=candidate.snapshot_fingerprint,
+        )
+        assert stored_candidate is not None and stored_candidate.id is not None
+        db.set_download_log_candidate_evidence(log_id, stored_candidate.id)
+
+        output = self._run(db, 5012)
+        replay = output.split(
+            "What the last real candidate actually decided:", 1
+        )[1]
+
+        self.assertIn(
+            "Quality gate:  UNAVAILABLE (linked current evidence unavailable)",
+            output,
+        )
+        self.assertNotIn("min_bitrate=64kbps", output)
+        self.assertIn(
+            f"Candidate evidence #{stored_candidate.id}", replay
+        )
+        self.assertIn("different exact release identity", replay)
+        self.assertNotIn("proof gate HAVE", replay)
+        self.assertNotIn("spectral grade 'likely_transcode'", replay)
 
     def test_a_stage1_reject_shows_what_stage2_would_have_decided(self):
         """Issue #829 Phase 5 PR2d: a Stage-1 spectral reject short-circuits

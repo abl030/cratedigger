@@ -96,6 +96,9 @@ def _download_log_row(**overrides: object) -> dict[str, object]:
         "album_title": "Beelzebub",
         "artist_name": "Kikagaku Moyo",
         "request_status": "wanted",
+        "_request_mb_release_id": "render-differential-release",
+        "_evidence_mb_release_id": "render-differential-release",
+        "_current_evidence_mb_release_id": "render-differential-release",
     }
     row.update(overrides)
     return row

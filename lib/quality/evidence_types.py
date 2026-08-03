@@ -4,6 +4,7 @@ Extracted verbatim from the monolithic ``lib/quality.py`` (issue #477).
 Pure move: every definition is AST-identical to the original.
 """
 
+import re
 from datetime import datetime
 from typing import Literal, Self
 
@@ -30,6 +31,11 @@ EVIDENCE_SUBJECT_INSTALLED: EvidenceSubject = "installed"
 EVIDENCE_SUBJECT_SOURCE: EvidenceSubject = "source"
 EVIDENCE_PROVENANCE_MEASURED: EvidenceProvenance = "measured"
 EVIDENCE_PROVENANCE_CARRIED: EvidenceProvenance = "carried"
+
+# A CD database match proves source-bit identity, not merely the absence of a
+# lossy spectral signature.  Keep its classifier distinct from every spectral
+# generation so persisted proof rows remain self-describing.
+CD_RIP_BIT_VERIFIED_CLASSIFIER = "cd_rip_bit_verified_v1"
 
 # issue #829 Phase 5 PR1 — the six measured codec families
 # ``AudioQualityMeasurement.codec_family`` is restricted to (mirrored by
@@ -490,6 +496,208 @@ class VerifiedLosslessProof(
         return errors
 
 
+class CdTocIdentity(msgspec.Struct, frozen=True):
+    """The exact CD-shaped source identity submitted to both providers."""
+
+    track_offsets_sectors: list[int]
+    leadout_sector: int
+    accuraterip_id: str
+    musicbrainz_disc_id: str
+
+    def validation_errors(self) -> list[str]:
+        errors: list[str] = []
+        if not self.track_offsets_sectors or len(self.track_offsets_sectors) > 99:
+            errors.append("CD TOC needs at least one track")
+        elif self.track_offsets_sectors[0] != 0:
+            errors.append("CD TOC first track must start at sector zero")
+        if any(
+            right <= left
+            for left, right in zip(
+                self.track_offsets_sectors,
+                self.track_offsets_sectors[1:],
+                strict=False,
+            )
+        ):
+            errors.append("CD TOC track offsets must be strictly increasing")
+        if (
+            self.track_offsets_sectors
+            and self.leadout_sector <= self.track_offsets_sectors[-1]
+        ):
+            errors.append("CD TOC leadout must follow the last track")
+        if self.leadout_sector <= 0 or self.leadout_sector >= 2**32:
+            errors.append("CD TOC leadout must fit positive uint32")
+        if any(
+            offset < 0 or offset >= 2**32
+            for offset in self.track_offsets_sectors
+        ):
+            errors.append("CD TOC offsets must fit uint32")
+        if not self.accuraterip_id or not self.musicbrainz_disc_id:
+            errors.append("CD TOC provider identities are required")
+        return errors
+
+
+class AccurateRipBitMatch(msgspec.Struct, frozen=True):
+    """All-track AccurateRip match at one exact drive read offset."""
+
+    provider: Literal["accuraterip"]
+    url: str
+    checksum_version: Literal["arv1", "arv2"]
+    read_offset_samples: int
+    track_confidences: list[int]
+    track_checksums: list[int]
+    response_sha256: str
+
+    def validation_errors(self, track_count: int) -> list[str]:
+        errors: list[str] = []
+        if self.provider != "accuraterip":
+            errors.append("AccurateRip provider tag is invalid")
+        if self.checksum_version not in ("arv1", "arv2"):
+            errors.append("AccurateRip checksum version is invalid")
+        if not self.url.startswith("https://"):
+            errors.append("AccurateRip provider URL must use HTTPS")
+        if len(self.track_confidences) != track_count:
+            errors.append("AccurateRip confidence must cover every track")
+        if any(confidence <= 0 for confidence in self.track_confidences):
+            errors.append("AccurateRip confidence must be positive")
+        if len(self.track_checksums) != track_count:
+            errors.append("AccurateRip checksum must cover every track")
+        if any(checksum < 0 or checksum > 0xFFFFFFFF
+               for checksum in self.track_checksums):
+            errors.append("AccurateRip checksums must fit uint32")
+        if not -5000 <= self.read_offset_samples <= 5000:
+            errors.append("AccurateRip read offset exceeds the admitted radius")
+        if re.fullmatch(r"[0-9a-f]{64}", self.response_sha256) is None:
+            errors.append("AccurateRip response SHA-256 must be lowercase hex")
+        return errors
+
+
+class CtdbWholeDiscMatch(msgspec.Struct, frozen=True):
+    """Exact CTDB whole-disc CRC match; track-only matches never reach here."""
+
+    provider: Literal["ctdb"]
+    url: str
+    entry_id: str
+    confidence: int
+    crc32: int
+    stride_samples: int
+    response_toc_sectors: list[int]
+    response_toc_shift_sectors: int
+    response_sha256: str
+
+    def validation_errors(self) -> list[str]:
+        errors: list[str] = []
+        if self.provider != "ctdb":
+            errors.append("CTDB provider tag is invalid")
+        if not self.url.startswith("https://"):
+            errors.append("CTDB provider URL must use HTTPS")
+        if not self.entry_id:
+            errors.append("CTDB entry id is required")
+        if self.confidence <= 0:
+            errors.append("CTDB confidence must be positive")
+        if not 0 <= self.crc32 <= 0xFFFFFFFF:
+            errors.append("CTDB CRC32 must fit uint32")
+        if self.stride_samples != 5880:
+            errors.append("CTDB stride must be 5880 samples")
+        if len(self.response_toc_sectors) < 2:
+            errors.append("CTDB response TOC must include a track and leadout")
+        if any(value < 0 or value >= 2**32
+               for value in self.response_toc_sectors):
+            errors.append("CTDB response TOC sectors must fit uint32")
+        if not 0 <= self.response_toc_shift_sectors < 2**32:
+            errors.append("CTDB response TOC shift must fit uint32")
+        if re.fullmatch(r"[0-9a-f]{64}", self.response_sha256) is None:
+            errors.append("CTDB response SHA-256 must be lowercase hex")
+        return errors
+
+
+class CdRipBitVerification(msgspec.Struct, frozen=True):
+    """Positive-only source-authenticity evidence from CD rip databases.
+
+    The evidence always describes the downloaded source.  When it is carried
+    to an installed row after conversion, ``provenance`` changes to
+    ``carried`` but ``source_format`` and the provider result still describe
+    the original source rather than the derivative bytes.
+    """
+
+    algorithm: Literal["cd-rip-bit-verifier-v1"] = "cd-rip-bit-verifier-v1"
+    provenance: EvidenceProvenance = EVIDENCE_PROVENANCE_MEASURED
+    source_format: Literal["flac", "alac"] = "flac"
+    toc: CdTocIdentity = msgspec.field(
+        default_factory=lambda: CdTocIdentity([], 0, "", "")
+    )
+    accuraterip: AccurateRipBitMatch | None = None
+    ctdb: CtdbWholeDiscMatch | None = None
+
+    def validation_errors(self) -> list[str]:
+        errors = self.toc.validation_errors()
+        if self.algorithm != "cd-rip-bit-verifier-v1":
+            errors.append("CD rip algorithm is invalid")
+        if self.source_format not in ("flac", "alac"):
+            errors.append("CD rip source format is invalid")
+        if self.provenance not in (
+            EVIDENCE_PROVENANCE_MEASURED,
+            EVIDENCE_PROVENANCE_CARRIED,
+        ):
+            errors.append("CD rip provenance must be measured or carried")
+        if self.accuraterip is None and self.ctdb is None:
+            errors.append("CD rip verification requires a positive provider match")
+        if self.accuraterip is not None:
+            errors.extend(
+                self.accuraterip.validation_errors(
+                    len(self.toc.track_offsets_sectors)
+                )
+            )
+        if self.ctdb is not None:
+            errors.extend(self.ctdb.validation_errors())
+            expected_toc = [
+                *self.toc.track_offsets_sectors,
+                self.toc.leadout_sector,
+            ]
+            normalized_toc = [
+                sector - self.ctdb.response_toc_shift_sectors
+                for sector in self.ctdb.response_toc_sectors
+            ]
+            if normalized_toc != expected_toc:
+                errors.append(
+                    "CTDB response TOC must normalize exactly to submitted TOC"
+                )
+        return errors
+
+    def verified_lossless_proof(self) -> VerifiedLosslessProof:
+        providers: list[str] = []
+        if self.accuraterip is not None:
+            providers.append(
+                f"AccurateRip {self.accuraterip.checksum_version.upper()} "
+                f"offset {self.accuraterip.read_offset_samples:+d}"
+            )
+        if self.ctdb is not None:
+            providers.append(
+                f"CTDB whole-disc confidence {self.ctdb.confidence}"
+            )
+        return VerifiedLosslessProof(
+            provenance=self.provenance,
+            source=self.source_format,
+            classifier=CD_RIP_BIT_VERIFIED_CLASSIFIER,
+            detail="; ".join(providers),
+        )
+
+
+def cd_rip_proof_pair_validation_errors(
+    cd_rip: CdRipBitVerification | None,
+    proof: VerifiedLosslessProof | None,
+) -> list[str]:
+    """Validate the structured CD fact and its exact scalar projection."""
+    if cd_rip is None:
+        if proof is not None and proof.classifier == CD_RIP_BIT_VERIFIED_CLASSIFIER:
+            return ["CD rip verified-lossless proof requires structured evidence"]
+        return []
+    errors = cd_rip.validation_errors()
+    expected = cd_rip.verified_lossless_proof()
+    if proof != expected:
+        errors.append("CD rip verification requires its exact scalar proof")
+    return errors
+
+
 #: The lineage versions whose facts describe the bytes of the attempt or
 #: album holding the row. Migration 050 marks everything older as v1
 #: precisely because its measurement may be a projected target rather than a
@@ -577,6 +785,7 @@ class AlbumQualityEvidence(
     # spectral/V0 facts either survive as source facts or are measured anew.
     current_enrichment_required: bool = False
     verified_lossless_proof: VerifiedLosslessProof | None = None
+    cd_rip_verification: CdRipBitVerification | None = None
     audio_validation: AudioValidationReport = msgspec.field(
         default_factory=legacy_unrecorded_audio_validation_report,
     )
@@ -624,6 +833,7 @@ class AlbumQualityEvidence(
             ),
             current_enrichment_required=self.current_enrichment_required,
             verified_lossless_proof=self.verified_lossless_proof,
+            cd_rip_verification=self.cd_rip_verification,
             audio_validation=self.audio_validation,
             audio_corrupt=self.audio_corrupt,
             audio_error=self.audio_error,
@@ -705,6 +915,10 @@ class AlbumQualityEvidence(
                     errors.append(
                         "storage_format must match measurement.format"
                     )
+        errors.extend(cd_rip_proof_pair_validation_errors(
+            self.cd_rip_verification,
+            self.verified_lossless_proof,
+        ))
         # Empty snapshot is a storable fact ONLY when audio_file_count=0
         # (the explicit empty-inventory signal). When a fileset is present
         # but ``files`` is empty, the evidence row is incomplete.

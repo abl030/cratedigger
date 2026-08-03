@@ -24,6 +24,7 @@ import msgspec
 from lib.beets_db import (
     CurrentBeetsUnique,
     beets_authority_availability_category,
+    exact_release_identity_matches,
 )
 from lib.current_library_display import (
     CurrentLibraryUnavailable,
@@ -315,15 +316,30 @@ def get_pipeline_detail(h: RouteHandler, params: dict[str, list[str]], req_id_st
     # it selected (issue #829 Phase 5 PR4). Each pair is derived by the
     # one shared rule from the measurement that produced ITS grade; an
     # absent pair keeps the historical accusing render.
-    have_flags = evidence_accusation_flags(
-        s._db().load_album_quality_evidence_by_id(req["current_evidence_id"])
+    current_evidence = s._db().load_album_quality_evidence_by_id(
+        req["current_evidence_id"]
     )
+    if (
+        current_evidence is not None
+        and not exact_release_identity_matches(
+            req.get("mb_release_id"),
+            current_evidence.mb_release_id,
+        )
+    ):
+        current_evidence = None
+    have_flags = evidence_accusation_flags(current_evidence)
     candidate_flags = last_download_accusation_flags(
         history_items, req["last_download_spectral_grade"]
     )
     request_payload["current_spectral_accusation_admissible"] = (
         have_flags.admissible)
     request_payload["current_spectral_accusation_withheld"] = have_flags.withheld
+    request_payload["current_cd_rip_verification"] = (
+        msgspec.to_builtins(current_evidence.cd_rip_verification)
+        if current_evidence is not None
+        and current_evidence.cd_rip_verification is not None
+        else None
+    )
     request_payload["last_download_spectral_accusation_admissible"] = (
         candidate_flags.admissible)
     request_payload["last_download_spectral_accusation_withheld"] = (

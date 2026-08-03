@@ -63,6 +63,7 @@ from lib.validation_envelope import decode_validation_envelope
 #: ``tests/test_pipeline_db_column_contract.py::TestRenderAliasMap``.
 _ROW_FIELD_ALIASES: dict[str, str] = {
     "_evidence_verified_lossless_classifier": "verified_lossless_classifier",
+    "_evidence_cd_rip_verification": "cd_rip_verification",
 }
 
 
@@ -155,6 +156,10 @@ class LogEntry:
     # basis verdict itself) it is the complete set of facts the phrase may
     # be keyed on.
     verified_lossless_classifier: str | None = None
+    # Positive-only structured source proof. The frontend deliberately has no
+    # renderer for this first delivery, but API/agent consumers receive the
+    # complete provider audit instead of a lossy boolean projection.
+    cd_rip_verification: dict[str, object] | None = None
 
     # album_requests columns (from JOIN — empty for history-only queries)
     album_title: str = ""

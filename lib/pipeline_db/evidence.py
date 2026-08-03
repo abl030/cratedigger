@@ -16,10 +16,12 @@ from lib.quality import (
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
     AudioValidationReport,
+    CdRipBitVerification,
     CodecFamily,
     EvidenceProvenance,
     EvidenceSubject,
     VerifiedLosslessProof,
+    cd_rip_proof_pair_validation_errors,
 )
 
 
@@ -81,6 +83,7 @@ class PersistedAlbumQualityEvidenceRow(
     verified_lossless_source: str | None
     verified_lossless_classifier: str | None
     verified_lossless_detail: str | None
+    cd_rip_verification: CdRipBitVerification | None
     audio_validation: AudioValidationReport
     audio_corrupt: bool
     audio_error: str | None
@@ -101,6 +104,28 @@ EVIDENCE_PROJECTION_COLUMNS: tuple[str, ...] = (
 )
 EVIDENCE_FILE_PROJECTION_COLUMNS: tuple[str, ...] = (
     PersistedEvidenceFileRow.__struct_fields__
+)
+
+# Keep the read SQL visible to structural mutation audits. The strict
+# PersistedAlbumQualityEvidenceRow conversion below fails closed if this
+# literal projection ever drifts from the typed contract above.
+_EVIDENCE_PROJECTION_SQL = (
+    "id, mb_release_id, snapshot_fingerprint, source_path, measured_at, "
+    "min_bitrate_kbps, avg_bitrate_kbps, median_bitrate_kbps, format, is_cbr, "
+    "spectral_grade, spectral_bitrate_kbps, spectral_subject, "
+    "spectral_provenance, was_converted_from, cliff_hz, codec_family, "
+    "ultrasonic_deficit_db, spectral_measurement_version, codec, container, "
+    "storage_format, target_format, target_is_cbr, lineage_version, "
+    "v0_min_bitrate_kbps, v0_avg_bitrate_kbps, v0_median_bitrate_kbps, "
+    "v0_subject, v0_provenance, on_disk_v0_research_attempted, "
+    "current_enrichment_required, verified_lossless, "
+    "verified_lossless_provenance, verified_lossless_source, "
+    "verified_lossless_classifier, verified_lossless_detail, "
+    "cd_rip_verification, audio_validation, audio_corrupt, audio_error, "
+    "folder_layout, audio_file_count, filetype_band, "
+    "matched_bad_audio_hash_id, matched_bad_audio_hash_path, "
+    "aac_lattice_tracks, aac_lattice_modal_offset, aac_lattice_modal_count, "
+    "aac_lattice_scored_tracks, aac_lattice_max_z"
 )
 
 
@@ -172,6 +197,10 @@ class _EvidenceMixin(_PipelineDBBase):
             if lattice is not None
             else None
         )
+        cd_rip_verification_json = (
+            msgspec.json.encode(evidence.cd_rip_verification).decode()
+            if evidence.cd_rip_verification is not None else None
+        )
         preserve_existing_audio_validation = evidence.audio_validation.outcome in {
             "legacy_unrecorded",
             "skipped",
@@ -212,6 +241,7 @@ class _EvidenceMixin(_PipelineDBBase):
                     verified_lossless_provenance,
                     verified_lossless_source, verified_lossless_classifier,
                     verified_lossless_detail,
+                    cd_rip_verification,
                     audio_corrupt, audio_error, audio_validation,
                     folder_layout, audio_file_count,
                     filetype_band, matched_bad_audio_hash_id,
@@ -232,6 +262,7 @@ class _EvidenceMixin(_PipelineDBBase):
                     %s, -- on-disk V0 research attempted
                     %s, -- changed-current enrichment required
                     %s, %s, %s, %s, -- verified-lossless proof
+                    %s, -- positive CD rip bit verification
                     %s, %s, %s, %s, %s, %s, %s, %s, -- preview facts
                     %s, %s, %s, %s, %s, -- AAC lattice capture (issue #829 PR-A)
                     NOW()
@@ -402,7 +433,13 @@ class _EvidenceMixin(_PipelineDBBase):
                         THEN EXCLUDED.spectral_measurement_version
                         ELSE album_quality_evidence.spectral_measurement_version
                         END,
-                    verified_lossless = EXCLUDED.verified_lossless,
+                    verified_lossless = CASE
+                        WHEN EXCLUDED.cd_rip_verification IS NULL
+                             AND album_quality_evidence.cd_rip_verification
+                                 IS NOT NULL
+                        THEN album_quality_evidence.verified_lossless
+                        ELSE EXCLUDED.verified_lossless
+                    END,
                     was_converted_from = EXCLUDED.was_converted_from,
                     -- V0 is one atomic fact, not six independently mergeable
                     -- columns. A valid incoming metric has a lineage and at
@@ -456,14 +493,34 @@ class _EvidenceMixin(_PipelineDBBase):
                     current_enrichment_required =
                         album_quality_evidence.current_enrichment_required
                         OR EXCLUDED.current_enrichment_required,
-                    verified_lossless_provenance =
-                        EXCLUDED.verified_lossless_provenance,
-                    verified_lossless_source =
-                        EXCLUDED.verified_lossless_source,
-                    verified_lossless_classifier =
-                        EXCLUDED.verified_lossless_classifier,
-                    verified_lossless_detail =
-                        EXCLUDED.verified_lossless_detail,
+                    verified_lossless_provenance = CASE
+                        WHEN EXCLUDED.cd_rip_verification IS NULL
+                             AND album_quality_evidence.cd_rip_verification
+                                 IS NOT NULL
+                        THEN album_quality_evidence.verified_lossless_provenance
+                        ELSE EXCLUDED.verified_lossless_provenance END,
+                    verified_lossless_source = CASE
+                        WHEN EXCLUDED.cd_rip_verification IS NULL
+                             AND album_quality_evidence.cd_rip_verification
+                                 IS NOT NULL
+                        THEN album_quality_evidence.verified_lossless_source
+                        ELSE EXCLUDED.verified_lossless_source END,
+                    verified_lossless_classifier = CASE
+                        WHEN EXCLUDED.cd_rip_verification IS NULL
+                             AND album_quality_evidence.cd_rip_verification
+                                 IS NOT NULL
+                        THEN album_quality_evidence.verified_lossless_classifier
+                        ELSE EXCLUDED.verified_lossless_classifier END,
+                    verified_lossless_detail = CASE
+                        WHEN EXCLUDED.cd_rip_verification IS NULL
+                             AND album_quality_evidence.cd_rip_verification
+                                 IS NOT NULL
+                        THEN album_quality_evidence.verified_lossless_detail
+                        ELSE EXCLUDED.verified_lossless_detail END,
+                    cd_rip_verification = COALESCE(
+                        EXCLUDED.cd_rip_verification,
+                        album_quality_evidence.cd_rip_verification
+                    ),
                     audio_validation = CASE
                         WHEN EXCLUDED.audio_validation->>'outcome' IN (
                             'legacy_unrecorded', 'skipped'
@@ -619,6 +676,7 @@ class _EvidenceMixin(_PipelineDBBase):
                 proof.source if proof else None,
                 proof.classifier if proof else None,
                 proof.detail if proof else None,
+                cd_rip_verification_json,
                 evidence.audio_corrupt,
                 evidence.audio_error,
                 audio_validation_json,
@@ -646,7 +704,7 @@ class _EvidenceMixin(_PipelineDBBase):
             return None
         cur = self._execute(
             "SELECT "
-            + ", ".join(EVIDENCE_PROJECTION_COLUMNS)
+            + _EVIDENCE_PROJECTION_SQL
             + " FROM album_quality_evidence WHERE id = %s",
             (int(evidence_id),),
         )
@@ -680,13 +738,10 @@ class _EvidenceMixin(_PipelineDBBase):
     ) -> AlbumQualityEvidence | None:
         """Find evidence by its content-addressed key."""
         cur = self._execute(
-            """
-            SELECT """
-            + ", ".join(EVIDENCE_PROJECTION_COLUMNS)
-            + """
-            FROM album_quality_evidence
-            WHERE mb_release_id = %s AND snapshot_fingerprint = %s
-            """,
+            "SELECT "
+            + _EVIDENCE_PROJECTION_SQL
+            + " FROM album_quality_evidence "
+            "WHERE mb_release_id = %s AND snapshot_fingerprint = %s",
             (mb_release_id, snapshot_fingerprint),
         )
         row = cur.fetchone()
@@ -1122,6 +1177,13 @@ class _EvidenceMixin(_PipelineDBBase):
                 classifier=persisted.verified_lossless_classifier,
                 detail=persisted.verified_lossless_detail,
             )
+        cd_rip_verification = persisted.cd_rip_verification
+        cd_errors = cd_rip_proof_pair_validation_errors(
+            cd_rip_verification,
+            proof,
+        )
+        if cd_errors:
+            raise ValueError("; ".join(cd_errors))
         return AlbumQualityEvidence(
             mb_release_id=persisted.mb_release_id,
             snapshot_fingerprint=persisted.snapshot_fingerprint,
@@ -1166,6 +1228,7 @@ class _EvidenceMixin(_PipelineDBBase):
             on_disk_v0_research_attempted=persisted.on_disk_v0_research_attempted,
             current_enrichment_required=persisted.current_enrichment_required,
             verified_lossless_proof=proof,
+            cd_rip_verification=cd_rip_verification,
             audio_validation=persisted.audio_validation,
             audio_corrupt=persisted.audio_corrupt,
             audio_error=persisted.audio_error,

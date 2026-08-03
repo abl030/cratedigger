@@ -607,7 +607,9 @@ def full_pipeline_decision(
                 MeasuredImportDecisionInput(
                     new_m,
                     existing_m,
-                    verified_lossless_proof=will_be_verified,
+                    verified_lossless_proof=(
+                        will_be_verified or verified_proof
+                    ),
                     source_spectral=candidate_spectral,
                     current_spectral=existing_spectral,
                 ),
@@ -674,6 +676,9 @@ def full_pipeline_decision(
                 verified_lossless_target=verified_lossless_target,
                 converted_count=converted_count,
                 is_transcode=policy_is_transcode,
+                verified_lossless_proof=(
+                    will_be_verified or verified_proof
+                ),
             )
             # avg/median stay None — the flat interface carries only the
             # post-conversion MIN for this side. See the flac-keep site above:
@@ -768,7 +773,7 @@ def full_pipeline_decision(
                     policy_is_transcode,
                     target_contract,
                     candidate_source_probe,
-                    will_be_verified,
+                    will_be_verified or verified_proof,
                     source_spectral=candidate_spectral,
                     current_spectral=existing_spectral,
                 ),

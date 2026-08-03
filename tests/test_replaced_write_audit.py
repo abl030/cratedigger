@@ -62,14 +62,6 @@ class _AlbumRequestUpdate:
 # The ratchet does not infer parameter dataflow: transition SQL must use the
 # canonical direct call grammar below.
 _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
-    ("lib/pipeline_db/evidence.py", 647, "2b7db9c1a9bcfd5f"): (
-        "evidence loads select the shared, fixed persisted-row projection; "
-        "the dynamic column list has no request mutation or caller input"
-    ),
-    ("lib/pipeline_db/evidence.py", 682, "9dcd0e6d355c48a8"): (
-        "content-addressed evidence lookup selects the same fixed shared "
-        "projection with value placeholders only"
-    ),
     ("lib/pipeline_db/_core.py", 269, "472331a54ebaf9a6"): (
         "shared execute wrapper forwards caller-owned SQL with the caller's "
         "unchanged positional or mapping parameters"
@@ -97,10 +89,6 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "default raw-query seam runs in the transaction-enforced read-only "
         "scope on the live connection"
     ),
-    ("scripts/decision_differential.py", 1264, "5abeff87a6b11e33"): (
-        "read-only differential export selects the shared fixed evidence "
-        "projection and groups only that projection; IDs remain placeholders"
-    ),
     ("lib/pipeline_db/terminal_outcomes.py", 160, "5fa18d2c1737583f"): (
         "terminal metadata keys use the existing validated request-field "
         "vocabulary (issue #784: `dumps=lambda value: msgspec.json.encode("
@@ -110,14 +98,15 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
     ("lib/pipeline_db/terminal_outcomes.py", 375, "cd644e51f3670265"): (
         "terminal attempt kind is restricted to the fixed retry-counter vocabulary"
     ),
-    ("lib/pipeline_db/download_log.py", 327, "cba0d6d56f1878ac"): (
+    ("lib/pipeline_db/download_log.py", 333, "cba0d6d56f1878ac"): (
         "get_log's three outcome variants were three verbatim copies of one "
         "SELECT; issue #829 Phase 5 PR4 collapsed them to a single template "
         "whose two slots are the shared candidate-evidence column block and "
-        "an outcome filter drawn from a closed literal map — neither reaches "
-        "album_requests, and neither takes caller input"
+        "an outcome filter drawn from a closed literal map. Issue #962 adds "
+        "only read-only exact-release identity projections; no slot takes "
+        "caller input or mutates album_requests"
     ),
-    ("lib/pipeline_db/download_log.py", 748, "6eec03e4d024acdb"): (
+    ("lib/pipeline_db/download_log.py", 806, "6eec03e4d024acdb"): (
         "validation key is selected from a closed server-owned vocabulary "
         "(#867 intentionally added terminal/evidence projection and moved final "
         "classification after same-path DISTINCT). Issue #829 PR4/N3 CHANGED "
@@ -126,17 +115,17 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "plus a LEFT JOIN on the request's own current_evidence_id — no "
         "caller input reaches the SQL and album_requests is still only read"
     ),
-    ("lib/pipeline_db/download_log.py", 813, "e0154e89026dc8ef"): (
+    ("lib/pipeline_db/download_log.py", 871, "e0154e89026dc8ef"): (
         "validation key is selected from a closed server-owned vocabulary "
         "(issue #835, issue #829 PR4 and the source-semantic proof gate "
         "shifted this line only)"
     ),
-    ("lib/pipeline_db/download_log.py", 831, "13517e08e7db52f3"): (
+    ("lib/pipeline_db/download_log.py", 889, "13517e08e7db52f3"): (
         "validation key is closed vocabulary and IN list is value placeholders "
         "(issue #835, issue #829 PR4 and the source-semantic proof gate "
         "shifted this line only)"
     ),
-    ("lib/pipeline_db/download_log.py", 848, "d87a36ba1d1768e7"): (
+    ("lib/pipeline_db/download_log.py", 906, "d87a36ba1d1768e7"): (
         "JSON path key is selected from a closed server-owned vocabulary "
         "(issue #835, issue #829 PR4 and the source-semantic proof gate "
         "shifted this line only)"

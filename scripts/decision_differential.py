@@ -56,12 +56,13 @@ body which fields had no base value.
   moves whether a promotion is GRANTED its honest result is zero.
 
   It is NOT zero for a change that moves what a proof is CALLED.
-  ``decide_row`` re-mints the proof through ``mint_verified_lossless_
-  proof`` on every row, so a classifier change — a new leg composing into
-  the name, say — lands in ``verified_lossless_classifier`` on this arm
-  too, on exactly the rows whose legs adjudicate. Read the per-field
-  table, not the headline count: "0 decision fields, N classifier rows"
-  and "0 rows" are different findings.
+  ``decide_row`` re-mints spectral proofs through ``mint_verified_lossless_
+  proof``, so a classifier change — a new leg composing into the name,
+  say — lands in ``verified_lossless_classifier`` on this arm too, on
+  exactly the rows whose legs adjudicate. Exact CD-rip proof keeps its
+  authoritative carried classifier instead of being renamed by the
+  spectral path. Read the per-field table, not the headline count: "0
+  decision fields, N classifier rows" and "0 rows" are different findings.
 * ``decide --counterfactual`` drops each candidate's persisted proof
   columns first, asking the question the gate actually decides — if this
   exact album arrived now, would it be promoted? This is the arm where a
@@ -226,6 +227,26 @@ def _production_evidence_mixin() -> type[_EvidenceMixin]:
 
     return _EvidenceMixin
 
+
+def _production_evidence_row_fields() -> frozenset[str] | None:
+    """The exact persisted-row projection understood by this tree.
+
+    ``decide`` is deliberately run from a copy of this harness inside the
+    historical tree.  The corpus still validates against the current harness
+    wire first; only the already-validated payload handed to that tree's
+    production mapper is narrowed to the columns its strict persisted row
+    declares.
+    """
+    try:
+        from lib.pipeline_db.evidence import PersistedAlbumQualityEvidenceRow
+    except ImportError:
+        # The original #999 comparison base predates the strict projection
+        # type.  Its mapper accepts and selects from a cursor-shaped mapping,
+        # so there is no declared field set to narrow against.
+        return None
+
+    return frozenset(PersistedAlbumQualityEvidenceRow.__struct_fields__)
+
 #: Decision-dict keys that are not decisions: the Stage-1 counterfactual
 #: is audit-only reporting, and ``comparison_basis`` is a nested display
 #: payload whose own differential is ``render_differential``'s job. They
@@ -239,10 +260,11 @@ _AUDIT_ONLY_DECISION_KEYS: frozenset[str] = frozenset(
 )
 
 #: Facts the decision dict does not carry but a proof-gate change moves.
-#: ``verified_lossless_classifier`` is minted beside the decision, and the
+#: ``verified_lossless_classifier`` is reported beside the decision (carried
+#: from authoritative CD proof, otherwise minted from spectral facts), and the
 #: leg's outcome/reason are the three-state fact the decision reduces to a
-#: boolean. Reporting only the boolean would show a proof-gate change as
-#: fewer moved rows than it really moved.
+#: boolean. Reporting only the boolean would show a proof-gate change as fewer
+#: moved rows than it really moved.
 PROOF_FIELDS: tuple[str, ...] = (
     "verified_lossless_classifier",
     "ultrasonic_leg_outcome",
@@ -315,7 +337,7 @@ def _evidence_from_corpus_row(
             f"shape: {exc}"
         ) from exc
     # Conversion is the boundary, not a validate-and-ignore side quest.  The
-    # production mapper receives exactly the typed contract's builtins so a
+    # production mapper receives the typed contract's builtins so a
     # nullable/type/schema drift cannot be normalized away by its legacy
     # ``bool``/``int`` conveniences.
     payload = msgspec.to_builtins(wire)
@@ -336,8 +358,18 @@ def _evidence_from_corpus_row(
         payload["measured_at"] = _parse_timestamp(measured_at)
     try:
         evidence_mixin = _production_evidence_mixin()
+        production_fields = _production_evidence_row_fields()
+        production_payload = (
+            payload
+            if production_fields is None
+            else {
+                key: value
+                for key, value in payload.items()
+                if key in production_fields
+            }
+        )
         return evidence_mixin._album_quality_evidence_from_row(
-            payload,
+            production_payload,
             file_rows,
         )
     except (KeyError, TypeError, ValueError, msgspec.ValidationError) as exc:
@@ -396,6 +428,7 @@ _PERSISTED_PROOF_COLUMNS: tuple[str, ...] = (
     "verified_lossless_source",
     "verified_lossless_classifier",
     "verified_lossless_detail",
+    "cd_rip_verification",
 )
 
 
@@ -407,7 +440,7 @@ def without_persisted_proof(row: Mapping[str, object]) -> dict[str, object]:
     the proof asks the question the gate actually answers: if this exact
     album were acquired now, would it be promoted?
 
-    Only the four proof columns and the boolean move. Nothing measured is
+    Only the proof columns and the boolean move. Nothing measured is
     touched — the counterfactual is about what the row was GRANTED, never
     about what it IS.
     """
@@ -445,9 +478,8 @@ def decide_row(
     row_id = row.get("id")
     if not isinstance(row_id, int) or isinstance(row_id, bool):
         raise RenderDifferentialError(f"corpus row has no integer id: {row_id!r}")
-    evidence = _evidence_from_corpus_row(
-        without_persisted_proof(row) if counterfactual else row,
-    )
+    candidate_row = without_persisted_proof(row) if counterfactual else row
+    evidence = _evidence_from_corpus_row(candidate_row)
     current_evidence = (
         _evidence_from_corpus_row(current) if current is not None else None
     )
@@ -487,19 +519,29 @@ def decide_row(
         fields[key] = value if _is_json_scalar(value) else repr(value)
     leg = leg_for_evidence(evidence)
     lattice_leg = lattice_leg_for_evidence(evidence)
-    proof = mint_verified_lossless_proof(
-        bool(decision.get("verified_lossless")),
-        was_converted_from=evidence.measurement.was_converted_from,
-        detected_source_format=evidence.storage_format,
-        spectral_grade=evidence.measurement.spectral_grade,
-        ultrasonic_leg=leg,
-        aac_lattice_leg=lattice_leg,
+    persisted_cd_classifier = (
+        candidate_row.get("verified_lossless_classifier")
+        if candidate_row.get("cd_rip_verification") is not None
+        else None
     )
+    if bool(decision.get("verified_lossless")) and isinstance(
+        persisted_cd_classifier,
+        str,
+    ):
+        proof_classifier = persisted_cd_classifier
+    else:
+        proof = mint_verified_lossless_proof(
+            bool(decision.get("verified_lossless")),
+            was_converted_from=evidence.measurement.was_converted_from,
+            detected_source_format=evidence.storage_format,
+            spectral_grade=evidence.measurement.spectral_grade,
+            ultrasonic_leg=leg,
+            aac_lattice_leg=lattice_leg,
+        )
+        proof_classifier = proof.classifier if proof is not None else None
     fields.update(
         {
-            "verified_lossless_classifier": (
-                proof.classifier if proof is not None else None
-            ),
+            "verified_lossless_classifier": proof_classifier,
             "ultrasonic_leg_outcome": leg.outcome,
             "ultrasonic_leg_reason": leg.reason,
             "aac_lattice_leg_outcome": lattice_leg.outcome,
@@ -604,6 +646,60 @@ class DecisionCorpusAacLatticeTrackWire(
     error: str | None
 
 
+class DecisionCorpusCdTocWire(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True
+):
+    """Exact JSON shape of the submitted CD table of contents."""
+
+    track_offsets_sectors: list[int]
+    leadout_sector: int
+    accuraterip_id: str
+    musicbrainz_disc_id: str
+
+
+class DecisionCorpusAccurateRipWire(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True
+):
+    """Exact JSON shape of one positive AccurateRip match."""
+
+    provider: Literal["accuraterip"]
+    url: str
+    checksum_version: Literal["arv1", "arv2"]
+    read_offset_samples: int
+    track_confidences: list[int]
+    track_checksums: list[int]
+    response_sha256: str
+
+
+class DecisionCorpusCtdbWire(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True
+):
+    """Exact JSON shape of one positive CTDB whole-disc match."""
+
+    provider: Literal["ctdb"]
+    url: str
+    entry_id: str
+    confidence: int
+    crc32: int
+    stride_samples: int
+    response_toc_sectors: list[int]
+    response_toc_shift_sectors: int
+    response_sha256: str
+
+
+class DecisionCorpusCdRipVerificationWire(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True
+):
+    """Exact JSON shape of positive CD-rip source proof."""
+
+    algorithm: Literal["cd-rip-bit-verifier-v1"]
+    provenance: EvidenceProvenance
+    source_format: Literal["flac", "alac"]
+    toc: DecisionCorpusCdTocWire
+    accuraterip: DecisionCorpusAccurateRipWire | None
+    ctdb: DecisionCorpusCtdbWire | None
+
+
 class DecisionCorpusEvidenceWire(
     msgspec.Struct, frozen=True, forbid_unknown_fields=True
 ):
@@ -652,6 +748,7 @@ class DecisionCorpusEvidenceWire(
     verified_lossless_source: str | None
     verified_lossless_classifier: str | None
     verified_lossless_detail: str | None
+    cd_rip_verification: DecisionCorpusCdRipVerificationWire | None
     audio_validation: DecisionCorpusAudioValidationWire
     audio_corrupt: bool
     audio_error: str | None
@@ -1017,6 +1114,28 @@ class DecisionCorpusCoverage(msgspec.Struct, frozen=True, forbid_unknown_fields=
 # Do not replace this projection with ``e.*``.  The JSONL wire and the real
 # evidence mapper consume this exact surface; an add/drop/rename/type/nullability
 # change must break the export until its projection and Struct move together.
+_DECISION_CORPUS_EVIDENCE_SQL = (
+    "e.id, e.mb_release_id, e.snapshot_fingerprint, e.source_path, "
+    "e.measured_at, e.min_bitrate_kbps, e.avg_bitrate_kbps, "
+    "e.median_bitrate_kbps, e.format, e.is_cbr, e.spectral_grade, "
+    "e.spectral_bitrate_kbps, e.spectral_subject, e.spectral_provenance, "
+    "e.was_converted_from, e.cliff_hz, e.codec_family, "
+    "e.ultrasonic_deficit_db, e.spectral_measurement_version, e.codec, "
+    "e.container, e.storage_format, e.target_format, e.target_is_cbr, "
+    "e.lineage_version, e.v0_min_bitrate_kbps, e.v0_avg_bitrate_kbps, "
+    "e.v0_median_bitrate_kbps, e.v0_subject, e.v0_provenance, "
+    "e.on_disk_v0_research_attempted, e.current_enrichment_required, "
+    "e.verified_lossless, e.verified_lossless_provenance, "
+    "e.verified_lossless_source, e.verified_lossless_classifier, "
+    "e.verified_lossless_detail, e.cd_rip_verification, "
+    "e.audio_validation, e.audio_corrupt, e.audio_error, e.folder_layout, "
+    "e.audio_file_count, e.filetype_band, e.matched_bad_audio_hash_id, "
+    "e.matched_bad_audio_hash_path, e.aac_lattice_tracks, "
+    "e.aac_lattice_modal_offset, e.aac_lattice_modal_count, "
+    "e.aac_lattice_scored_tracks, e.aac_lattice_max_z"
+)
+
+
 def _decision_corpus_evidence_columns() -> tuple[str, ...]:
     """Shared production decoder projection; corpus adds JSON-aggregated files."""
     columns, _file_columns, _persisted_row, _evidence_mixin = _export_evidence_contract()
@@ -1125,6 +1244,7 @@ _EVIDENCE_SCHEMA_TYPES: dict[str, tuple[str, bool]] = {
     "verified_lossless_source": ("text", True),
     "verified_lossless_classifier": ("text", True),
     "verified_lossless_detail": ("text", True),
+    "cd_rip_verification": ("jsonb", True),
     "matched_bad_audio_hash_id": ("bigint", True),
     "matched_bad_audio_hash_path": ("text", True),
     "target_is_cbr": ("boolean", True),
@@ -1254,9 +1374,7 @@ def _db_evidence_rows(
     """Read explicit evidence/file projections and validate the export wire."""
     assert isinstance(cursor, psycopg2.extensions.cursor)
     rows: dict[int, dict[str, object]] = {}
-    column_sql = ", ".join(
-        f"e.{column}" for column in _decision_corpus_evidence_columns()
-    )
+    column_sql = _DECISION_CORPUS_EVIDENCE_SQL
     for start in range(0, len(evidence_ids), batch_size):
         batch = list(evidence_ids[start : start + batch_size])
         if not batch:

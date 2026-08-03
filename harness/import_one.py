@@ -1563,6 +1563,14 @@ def _preview_spectral_audit(
     """Reuse the candidate grade already measured by preview."""
     if candidate is None:
         return None
+    if candidate.cd_rip_verification is not None:
+        # Exact CD database proof owns the authenticity lane. Preserve an
+        # explicit not-attempted audit instead of invoking the spectral model
+        # as a fallback; integrity/identity/target checks still run below.
+        return SpectralDetail(
+            candidate=SpectralAnalysisDetail(attempted=False),
+            existing=SpectralAnalysisDetail(attempted=False),
+        )
     measurement = candidate.measurement
     if measurement.spectral_grade is None:
         return None
@@ -2125,6 +2133,11 @@ def main():
         _preview_candidate_evidence(args.quality_evidence_action_file)
         if args.dry_run else None
     )
+    has_cd_rip_proof = (
+        preview_candidate is not None
+        and preview_candidate.cd_rip_verification is not None
+        and preview_candidate.verified_lossless_proof is not None
+    )
     r.spectral = (
         _preview_spectral_audit(preview_candidate)
         or collect_attempt_spectral_audit(work_path, None)
@@ -2260,10 +2273,14 @@ def main():
             _log(f"[CONVERT] Keeping lossless on disk (target_format={args.target_format})")
         r.final_format = "flac"
         stage_start = time.monotonic()
-        r.v0_probe = _probe_lossless_source_as_v0(work_path)
-        _log_timing("lossless_v0_probe", stage_start)
-        if r.v0_probe:
-            _log(f"  source_v0_probe_avg={r.v0_probe.avg_bitrate_kbps}kbps")
+        if not has_cd_rip_proof:
+            r.v0_probe = _probe_lossless_source_as_v0(work_path)
+            _log_timing("lossless_v0_probe", stage_start)
+            if r.v0_probe:
+                _log(
+                    "  source_v0_probe_avg="
+                    f"{r.v0_probe.avg_bitrate_kbps}kbps"
+                )
 
     # --- Quality comparison ---
     quality_is_transcode = is_transcode
@@ -2374,7 +2391,12 @@ def main():
     # populated above (lossless source path) and lets the V0-avg trust
     # override flip a spectral suspect/likely_transcode sparse-HF lossless
     # source to verified when the V0 evidence corroborates a genuine master.
-    will_be_verified_lossless = determine_verified_lossless(
+    cd_rip_proof = (
+        preview_candidate.verified_lossless_proof
+        if has_cd_rip_proof and preview_candidate is not None
+        else None
+    )
+    will_be_verified_lossless = cd_rip_proof is not None or determine_verified_lossless(
         args.target_format, spectral_grade, converted, is_transcode,
         v0_probe=r.v0_probe,
         has_lossy_passthrough=has_lossy_passthrough,
@@ -2436,6 +2458,7 @@ def main():
         verified_lossless_target=new_conv_target,
         converted_count=converted,
         is_transcode=quality_is_transcode,
+        verified_lossless_proof=will_be_verified_lossless,
         native_codec_family=native_codec_family,
     )
 
@@ -2472,7 +2495,7 @@ def main():
         existing_spectral_bitrate=existing_spectral_bitrate,
     )
     r.source_measurement = new_m
-    r.verified_lossless_proof = mint_verified_lossless_proof(
+    r.verified_lossless_proof = cd_rip_proof or mint_verified_lossless_proof(
         will_be_verified_lossless,
         was_converted_from=r.conversion.original_filetype,
         detected_source_format=source_format,

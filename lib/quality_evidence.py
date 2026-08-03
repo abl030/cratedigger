@@ -24,6 +24,7 @@ from lib.quality import (
     AlbumQualityEvidenceFile,
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
+    CdRipBitVerification,
     EvidenceSubject,
     ImportResult,
     SpectralAnalysisDetail,
@@ -590,7 +591,14 @@ def evidence_from_import_result(
     target_is_cbr = (
         target_contract.is_cbr if target_contract is not None else None
     )
-    proof = import_result.verified_lossless_proof
+    cd_rip_verification = (
+        measurement.cd_rip_verification if measurement is not None else None
+    )
+    proof = (
+        cd_rip_verification.verified_lossless_proof()
+        if cd_rip_verification is not None
+        else import_result.verified_lossless_proof
+    )
     audio_corrupt = any(not file.decode_ok for file in files)
     if measurement is not None:
         audio_corrupt = audio_corrupt or measurement.audio_corrupt
@@ -631,6 +639,7 @@ def evidence_from_import_result(
             neutral_v0_metric_from_probe(import_result.v0_probe)
         ),
         verified_lossless_proof=proof,
+        cd_rip_verification=cd_rip_verification,
         audio_validation=(
             measurement.audio_validation
             if measurement is not None
@@ -758,7 +767,11 @@ def evidence_from_measurement(
         target_is_cbr=None,
         lineage_version=4,
         v0_metric=None,
-        verified_lossless_proof=None,
+        verified_lossless_proof=(
+            measurement.cd_rip_verification.verified_lossless_proof()
+            if measurement.cd_rip_verification is not None else None
+        ),
+        cd_rip_verification=measurement.cd_rip_verification,
         audio_validation=measurement.audio_validation,
         audio_corrupt=measurement.audio_corrupt,
         audio_error=measurement.audio_error,
@@ -780,6 +793,7 @@ def evidence_from_album_info(
     mb_release_id: str,
     album_info: Any,
     verified_lossless_proof: VerifiedLosslessProof | None = None,
+    cd_rip_verification: CdRipBitVerification | None = None,
     measured_at: datetime | None = None,
 ) -> EvidenceBuildResult:
     """Build current evidence only from Beets facts and explicit proof."""
@@ -791,7 +805,20 @@ def evidence_from_album_info(
         return EvidenceBuildResult(None, "failed", str(exc))
     if not files:
         return EvidenceBuildResult(None, "empty_fileset", "no audio files found")
-    proof = verified_lossless_proof
+    carried_cd_rip = cd_rip_verification
+    if (
+        carried_cd_rip is not None
+        and carried_cd_rip.provenance == EVIDENCE_PROVENANCE_MEASURED
+    ):
+        carried_cd_rip = msgspec.structs.replace(
+            carried_cd_rip,
+            provenance=EVIDENCE_PROVENANCE_CARRIED,
+        )
+    proof = (
+        carried_cd_rip.verified_lossless_proof()
+        if carried_cd_rip is not None
+        else verified_lossless_proof
+    )
     if proof is not None and proof.provenance == EVIDENCE_PROVENANCE_MEASURED:
         proof = msgspec.structs.replace(
             proof,
@@ -817,6 +844,7 @@ def evidence_from_album_info(
         lineage_version=4,
         v0_metric=None,
         verified_lossless_proof=proof,
+        cd_rip_verification=carried_cd_rip,
         audio_corrupt=any(not file.decode_ok for file in files),
         folder_layout=derive_folder_layout(files),
         audio_file_count=len(files),
@@ -1027,6 +1055,14 @@ def propagate_candidate_evidence_to_current(
         if candidate_evidence.verified_lossless_proof is not None
         else None
     )
+    carried_cd_rip = (
+        msgspec.structs.replace(
+            candidate_evidence.cd_rip_verification,
+            provenance=EVIDENCE_PROVENANCE_CARRIED,
+        )
+        if candidate_evidence.cd_rip_verification is not None
+        else None
+    )
     measurement = AudioQualityMeasurement(
         min_bitrate_kbps=getattr(album_info, "min_bitrate_kbps", None),
         avg_bitrate_kbps=getattr(album_info, "avg_bitrate_kbps", None),
@@ -1080,6 +1116,7 @@ def propagate_candidate_evidence_to_current(
         lineage_version=4,
         v0_metric=carried_v0,
         verified_lossless_proof=carried_proof,
+        cd_rip_verification=carried_cd_rip,
         audio_corrupt=any(not file.decode_ok for file in files),
         folder_layout=derive_folder_layout(files),
         audio_file_count=len(files),
@@ -1142,6 +1179,7 @@ def backfill_current_evidence_from_album_info(
         # A poisoned/stale FK contributes no facts whatsoever, even when its
         # byte fingerprint happens to equal the requested album's snapshot.
         existing = None
+    carried_cd_rip: CdRipBitVerification | None = None
     if (
         verified_lossless_proof is None
         and preserve_existing_verified_lossless_proof
@@ -1154,10 +1192,16 @@ def backfill_current_evidence_from_album_info(
             existing.verified_lossless_proof,
             provenance=EVIDENCE_PROVENANCE_CARRIED,
         )
+        if existing.cd_rip_verification is not None:
+            carried_cd_rip = msgspec.structs.replace(
+                existing.cd_rip_verification,
+                provenance=EVIDENCE_PROVENANCE_CARRIED,
+            )
     result = evidence_from_album_info(
         mb_release_id=mb_release_id,
         album_info=album_info,
         verified_lossless_proof=verified_lossless_proof,
+        cd_rip_verification=carried_cd_rip,
     )
     if result.evidence is not None and existing is not None:
         existing_measurement = existing.measurement

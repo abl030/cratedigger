@@ -42,6 +42,7 @@ from lib.quality import (
     AacLatticeCapture,
     AudioValidationMeasurementError,
     AudioValidationReport,
+    CdRipBitVerification,
     CodecFamily,
     SpectralAnalysisDetail,
     SpectralDetail,
@@ -82,6 +83,7 @@ def measure_aac_lattice(folder: str) -> AacLatticeCapture:
 
 
 AacLatticeMeasureFn = Callable[[str], AacLatticeCapture]
+CdRipVerifyFn = Callable[[str, "CratediggerConfig"], CdRipBitVerification | None]
 
 # The promotion-plausible cohort, and the ONLY reason this expensive
 # measurement is gated at all (issue #829 AAC-lattice leg, design comment
@@ -352,6 +354,9 @@ class PreimportMeasurement(msgspec.Struct, frozen=True):
     # fire (or the measurement itself failed outright); a capture with
     # ``scored_tracks == 0`` means it ran and nothing scored.
     aac_lattice: AacLatticeCapture | None = None
+    # Positive-only exact CD bit evidence. Absence includes every provider
+    # failure/non-match and therefore has no policy effect.
+    cd_rip_verification: CdRipBitVerification | None = None
 
 
 AUDIO_EXTS = ("mp3", "flac", "alac", "m4a", "ogg", "opus", "wav", "aac")
@@ -716,6 +721,7 @@ def measure_preimport_state(
     spectral_detail_analyzer: SpectralDetailAnalyzer | None = None,
     existing_spectral_resolver: ExistingSpectralResolver | None = None,
     aac_lattice_measure_fn: AacLatticeMeasureFn | None = None,
+    cd_rip_verify_fn: CdRipVerifyFn | None = None,
 ) -> PreimportMeasurement:
     """Collect pre-import measurement facts. Returns ``PreimportMeasurement``.
 
@@ -938,6 +944,18 @@ def measure_preimport_state(
     else:
         min_bitrate_kbps = download_min_bitrate_bps
 
+    # --- Exact CD rip authenticity proof ---
+    # Integrity and bad-hash checks above remain mandatory. A positive result
+    # makes spectral/AAC/V0 authenticity work redundant, while every provider
+    # miss or failure is represented by None and falls through unchanged.
+    cd_rip_verification: CdRipBitVerification | None = None
+    if cd_rip_verify_fn is not None and lossless_candidate and folder_layout == "flat":
+        try:
+            cd_rip_verification = cd_rip_verify_fn(path, cfg)
+        except Exception:
+            logger.exception("CD RIP: verifier failed for %s", path)
+            cd_rip_verification = None
+
     # --- Spectral gate ---
     # Threshold: cfg.quality_ranks.mp3_vbr.excellent. This controls whether a
     # VBR MP3 is scanned; it is not itself transcode-decision evidence.
@@ -946,7 +964,7 @@ def measure_preimport_state(
     existing_spectral: SpectralMeasurement | None = None
     existing_min_bitrate: int | None = None
 
-    if _needs_spectral_check(
+    if cd_rip_verification is None and _needs_spectral_check(
         download_filetype, download_is_vbr,
         lossless_candidate=lossless_candidate,
         avg_bitrate_kbps=avg_bitrate_kbps,
@@ -1092,4 +1110,5 @@ def measure_preimport_state(
         is_vbr=download_is_vbr,
         spectral_audit=spectral_audit,
         aac_lattice=aac_lattice,
+        cd_rip_verification=cd_rip_verification,
     )

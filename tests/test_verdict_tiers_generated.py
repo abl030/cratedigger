@@ -553,6 +553,8 @@ def recents_states_a_proof(evidence: AlbumQualityEvidence) -> bool:
     proof = evidence.verified_lossless_proof
     row: dict[str, object] = {
         "candidate_evidence_id": 1,
+        "_request_mb_release_id": evidence.mb_release_id,
+        "_evidence_mb_release_id": evidence.mb_release_id,
         "_evidence_lineage_version": evidence.lineage_version,
         "_evidence_verified_lossless_classifier": (
             proof.classifier if proof is not None else None),

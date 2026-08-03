@@ -764,6 +764,8 @@ class TestQualityLineagePins(unittest.TestCase):
         v0_avg: int,
     ) -> None:
         row = _DownloadLogMixin._overlay_evidence_onto_download_log_row({
+            "_request_mb_release_id": "lineage-overlay-release",
+            "_evidence_mb_release_id": "lineage-overlay-release",
             "_evidence_lineage_version": 1,
             "_evidence_source_format": projected_format,
             "_evidence_source_min_bitrate": source_min,

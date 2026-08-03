@@ -137,6 +137,7 @@ class DownloadHistoryViewRow(msgspec.Struct, frozen=True):
     existing_spectral_accusation_withheld: str | None = None
     verified_lossless_classifier: str | None = None
     verified_lossless_generation: str | None = None
+    cd_rip_verification: dict[str, object] | None = None
     stage2_if_stage1_deferred: str | None = None
     stage2_if_stage1_deferred_verdict: str | None = None
     request_source: str | None = None
