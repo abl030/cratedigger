@@ -9,7 +9,7 @@ import unittest
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Literal
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import msgspec
 from hypothesis import example, given
@@ -134,6 +134,7 @@ def _run_have_boundary_through_both_adapters(
         LocalFileInspection,
         measure_preimport_state,
     )
+    from lib.pipeline_db import PipelineDB
     from lib.quality import (
         EVIDENCE_SUBJECT_SOURCE,
         AlbumQualityV0Metric,
@@ -238,6 +239,9 @@ def _run_have_boundary_through_both_adapters(
             format="MP3",
         ))
         db = FakePipelineDB()
+        # Exercise dispatch against the same fake state while presenting its
+        # production DB contract at this explicitly typed boundary.
+        dispatch_db = MagicMock(spec=PipelineDB, wraps=db)
         db.seed_request(make_request_row(id=request_id, mb_release_id=mbid))
         db.upsert_album_quality_evidence(current_evidence)
         stored_current = db.find_album_quality_evidence(
@@ -431,7 +435,7 @@ def _run_have_boundary_through_both_adapters(
             quality_ranks=cfg.quality_ranks,
         )
         dispatch_gate = _load_evidence_import_gate(
-            db,  # type: ignore[arg-type]
+            dispatch_db,
             request_id=request_id,
             mb_release_id=mbid,
             path=action_path,
@@ -451,7 +455,7 @@ def _run_have_boundary_through_both_adapters(
             label="Iron & Wine - The Creek Drank the Cradle",
             force=True,
             beets_harness_path="/fake/harness/run_beets_harness.sh",
-            db=db,  # type: ignore[arg-type]
+            db=dispatch_db,
             dl_info=DownloadInfo(username="generated", filetype="flac"),
             scenario="force_import",
             cfg=cfg,
