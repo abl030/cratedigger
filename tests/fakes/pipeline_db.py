@@ -4793,15 +4793,8 @@ class FakePipelineDB:
         evidence: AlbumQualityEvidence,
     ) -> None:
         has_lossless_lineage = (
-            (
-                evidence.v0_metric is not None
-                and evidence.v0_metric.subject == EVIDENCE_SUBJECT_SOURCE
-            )
-            or evidence.verified_lossless_proof is not None
-            or (
-                evidence.measurement.was_converted_from or ""
-            ).lower() in LOSSLESS_CODECS
-        )
+            evidence.measurement.was_converted_from or ""
+        ).lower() in LOSSLESS_CODECS
         if (
             evidence.lineage_version >= 4
             and evidence.measurement.spectral_subject
@@ -5065,6 +5058,7 @@ class FakePipelineDB:
             spectral_bitrate_kbps=bitrate_kbps,
             spectral_subject=EVIDENCE_SUBJECT_INSTALLED,
             spectral_provenance=EVIDENCE_PROVENANCE_MEASURED,
+            was_converted_from=None,
             cliff_hz=cliff_hz,
             codec_family=codec_family,
             ultrasonic_deficit_db=ultrasonic_deficit_db,

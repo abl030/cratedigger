@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal
 from unittest.mock import patch
 
 import msgspec
@@ -1924,14 +1924,12 @@ class TestAttemptAuditGenerated(unittest.TestCase):
             scanned_bitrate=scanned_bitrate,
             persisted_generation=SPECTRAL_MEASUREMENT_VERSION,
         )
-        # R19: a source-subject V0 anchor alone proves lossless lineage —
-        # enrichment-born rows carry no was_converted_from, and their
-        # installed derivative must not be scanned into a fresh grade.
+        # Source anchors describe provenance only.  The scan exemption needs
+        # both a lossless conversion record and an installed lossy derivative.
         self.assertEqual(
             preserve_existing_source,
             (
                 (converted_from or "").lower() in LOSSLESS_CODECS
-                or lossless_v0_lineage
             ),
         )
         self.assertTrue(_have_scan_boundary_holds(
@@ -2158,7 +2156,6 @@ class TestIronAndWineOuterEvidenceSlice(unittest.TestCase):
         from tests.helpers import (
             handoff_automation_owner,
             make_album_quality_evidence,
-            pinned_dispatch_authority,
         )
 
         db = make_db()
@@ -2383,13 +2380,10 @@ class TestIronAndWineOuterEvidenceSlice(unittest.TestCase):
 
             with (
                 patch("lib.beets_db.BeetsDB", lambda *_args, **_kwargs: beets),
-                pinned_dispatch_authority(
-                    cast(Any, db),
-                    preview_lease,
-                ) as (preview_token, preview_owner_session),
+                db._pin_owner_session(
+                    preview_token := CancellationToken(),
+                ) as preview_owner_session,
             ):
-                assert preview_token is not None
-                assert preview_owner_session is not None
                 preview_authority = (
                     import_preview_worker._automation_authority_snapshot(
                         db,
@@ -2503,13 +2497,10 @@ class TestIronAndWineOuterEvidenceSlice(unittest.TestCase):
 
             with (
                 patch("lib.beets_db.BeetsDB", lambda *_args, **_kwargs: beets),
-                pinned_dispatch_authority(
-                    cast(Any, db),
-                    importer_lease,
-                ) as (importer_token, importer_owner_session),
+                db._pin_owner_session(
+                    importer_token := CancellationToken(),
+                ) as importer_owner_session,
             ):
-                assert importer_token is not None
-                assert importer_owner_session is not None
                 terminal_job = process_claimed_job(
                     db,
                     claimed_importer,

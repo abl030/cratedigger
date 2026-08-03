@@ -37,11 +37,7 @@ class EvidenceLineageWorld:
     @property
     def has_lossless_lineage(self) -> bool:
         converted = (self.was_converted_from or "").lower()
-        return (
-            self.v0_subject == "source"
-            or self.verified_lossless
-            or converted in LOSSLESS_CONVERSION_SOURCES
-        )
+        return converted in LOSSLESS_CONVERSION_SOURCES
 
     @property
     def must_be_rejected(self) -> bool:
@@ -70,7 +66,11 @@ def assert_database_matches_lineage_oracle(
     world: EvidenceLineageWorld,
     error: Exception | None,
 ) -> None:
-    """The DB rejects exactly installed spectral on v4 lossless lineage."""
+    """The DB retains only the conversion-marker backstop.
+
+    Source anchors and proofs are historical provenance; the app's exact
+    manifest predicate decides whether those rows can preserve old spectral.
+    """
     if world.must_be_rejected:
         if not isinstance(error, psycopg2.errors.CheckViolation):
             raise AssertionError(
@@ -291,8 +291,8 @@ class TestGeneratedLosslessLineageMerge(unittest.TestCase):
 
 
 class TestLosslessLineageCheckCheckerTripsOnViolation(unittest.TestCase):
-    def test_checker_rejects_accepted_installed_source_anchor(self) -> None:
-        world = EvidenceLineageWorld(4, "installed", "source", False, None)
+    def test_checker_rejects_accepted_installed_conversion_marker(self) -> None:
+        world = EvidenceLineageWorld(4, "installed", None, False, "flac")
         with self.assertRaises(AssertionError):
             assert_database_matches_lineage_oracle(world, None)
 

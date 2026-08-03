@@ -7400,7 +7400,7 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         self.assertEqual(reloaded.measurement.ultrasonic_deficit_db, 30.0)
         self.assertEqual(reloaded.measurement.spectral_measurement_version, 2)
 
-    def test_current_spectral_write_rejects_lossless_lineage(self):
+    def test_current_spectral_write_accepts_source_v0_provenance(self):
         from lib.quality import AlbumQualityV0Metric
 
         evidence = self._seed(
@@ -7430,20 +7430,15 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
             self.req_id, stored.id,
         ))
 
-        with self.assertRaises(psycopg2.errors.CheckViolation) as raised:
-            self.db.persist_current_spectral_measurement(
-                request_id=self.req_id,
-                expected_evidence_id=stored.id,
-                expected_snapshot_fingerprint=stored.snapshot_fingerprint,
-                grade="genuine",
-                bitrate_kbps=None,
-            )
-        self.assertEqual(
-            raised.exception.diag.constraint_name,
-            "album_quality_evidence_lossless_lineage_spectral_subject",
-        )
+        self.assertTrue(self.db.persist_current_spectral_measurement(
+            request_id=self.req_id,
+            expected_evidence_id=stored.id,
+            expected_snapshot_fingerprint=stored.snapshot_fingerprint,
+            grade="genuine",
+            bitrate_kbps=None,
+        ))
 
-    def test_fake_current_spectral_write_rejects_lossless_lineage(self):
+    def test_fake_current_spectral_write_accepts_source_v0_provenance(self):
         from lib.quality import AlbumQualityV0Metric
 
         db = FakePipelineDB()
@@ -7473,20 +7468,15 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         assert stored is not None and stored.id is not None
         self.assertTrue(db.set_request_current_evidence(request_id, stored.id))
 
-        with self.assertRaises(psycopg2.errors.CheckViolation) as raised:
-            db.persist_current_spectral_measurement(
-                request_id=request_id,
-                expected_evidence_id=stored.id,
-                expected_snapshot_fingerprint=stored.snapshot_fingerprint,
-                grade="genuine",
-                bitrate_kbps=None,
-            )
-        self.assertIn(
-            "album_quality_evidence_lossless_lineage_spectral_subject",
-            str(raised.exception),
-        )
+        self.assertTrue(db.persist_current_spectral_measurement(
+            request_id=request_id,
+            expected_evidence_id=stored.id,
+            expected_snapshot_fingerprint=stored.snapshot_fingerprint,
+            grade="genuine",
+            bitrate_kbps=None,
+        ))
 
-    def test_current_source_v0_write_constraint_matches_fake(self):
+    def test_current_source_v0_write_matches_fake(self):
         from lib.quality import AlbumQualityV0Metric
 
         evidence = self._seed(
@@ -7521,23 +7511,16 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
                     request_id, stored.id,
                 ))
 
-                with self.assertRaises(psycopg2.errors.CheckViolation) as raised:
-                    db.persist_current_v0_research_metric(
-                        request_id=request_id,
-                        expected_evidence_id=stored.id,
-                        expected_snapshot_fingerprint=(
-                            stored.snapshot_fingerprint
-                        ),
-                        metric=AlbumQualityV0Metric(
-                            avg_bitrate_kbps=225,
-                            subject="source",
-                            provenance="measured",
-                        ),
-                    )
-                self.assertIn(
-                    "album_quality_evidence_lossless_lineage_spectral_subject",
-                    str(raised.exception),
-                )
+                self.assertTrue(db.persist_current_v0_research_metric(
+                    request_id=request_id,
+                    expected_evidence_id=stored.id,
+                    expected_snapshot_fingerprint=stored.snapshot_fingerprint,
+                    metric=AlbumQualityV0Metric(
+                        avg_bitrate_kbps=225,
+                        subject="source",
+                        provenance="measured",
+                    ),
+                ))
 
     def test_upsert_new_lossless_lineage_clears_installed_spectral(self):
         from lib.quality import AlbumQualityV0Metric, VerifiedLosslessProof

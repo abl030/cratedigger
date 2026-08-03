@@ -844,6 +844,7 @@ class _EvidenceMixin(_PipelineDBBase):
                 spectral_bitrate_kbps = %s,
                 spectral_subject = 'installed',
                 spectral_provenance = 'measured',
+                was_converted_from = NULL,
                 cliff_hz = %s,
                 codec_family = %s,
                 ultrasonic_deficit_db = %s,
