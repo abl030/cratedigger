@@ -36,6 +36,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import msgspec
 
 from lib.quality import (
+    CD_RIP_BIT_VERIFIED_CLASSIFIER,
     VERIFIED_LOSSLESS_CLASSIFIER,
     VERIFIED_LOSSLESS_CLASSIFIER_V3,
     AccurateRipBitMatch,
@@ -218,6 +219,15 @@ class TestDecideRow(unittest.TestCase):
         self.assertEqual(
             evidence.cd_rip_verification.toc.musicbrainz_disc_id,
             "decision-corpus-disc",
+        )
+
+    def test_as_persisted_cd_proof_keeps_its_authoritative_classifier(self):
+        decided = decide_row(_cd_proof_corpus_row())
+
+        self.assertTrue(decided.fields["verified_lossless"])
+        self.assertEqual(
+            decided.fields["verified_lossless_classifier"],
+            CD_RIP_BIT_VERIFIED_CLASSIFIER,
         )
 
     def test_cd_proof_wire_rejects_unknown_nested_fields(self):
@@ -449,6 +459,17 @@ class TestCounterfactualArm(unittest.TestCase):
             "verified_lossless_classifier",
             "verified_lossless_detail",
         })
+
+    def test_cd_proof_is_atomically_removed_before_counterfactual_decision(self):
+        """The nested proof cannot outlive the scalar projection it proves."""
+        row = _cd_proof_corpus_row()
+
+        counterfactual = without_persisted_proof(row)
+        decided = decide_row(row, counterfactual=True)
+
+        self.assertFalse(counterfactual["verified_lossless"])
+        self.assertIsNone(counterfactual["cd_rip_verification"])
+        self.assertIsNone(decided.fields[DECISION_ERROR_FIELD])
 
     def test_the_gate_is_invisible_as_persisted_and_visible_fresh(self):
         """The same launder row, both arms. This is the zero that has to

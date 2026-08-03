@@ -56,12 +56,13 @@ body which fields had no base value.
   moves whether a promotion is GRANTED its honest result is zero.
 
   It is NOT zero for a change that moves what a proof is CALLED.
-  ``decide_row`` re-mints the proof through ``mint_verified_lossless_
-  proof`` on every row, so a classifier change — a new leg composing into
-  the name, say — lands in ``verified_lossless_classifier`` on this arm
-  too, on exactly the rows whose legs adjudicate. Read the per-field
-  table, not the headline count: "0 decision fields, N classifier rows"
-  and "0 rows" are different findings.
+  ``decide_row`` re-mints spectral proofs through ``mint_verified_lossless_
+  proof``, so a classifier change — a new leg composing into the name,
+  say — lands in ``verified_lossless_classifier`` on this arm too, on
+  exactly the rows whose legs adjudicate. Exact CD-rip proof keeps its
+  authoritative carried classifier instead of being renamed by the
+  spectral path. Read the per-field table, not the headline count: "0
+  decision fields, N classifier rows" and "0 rows" are different findings.
 * ``decide --counterfactual`` drops each candidate's persisted proof
   columns first, asking the question the gate actually decides — if this
   exact album arrived now, would it be promoted? This is the arm where a
@@ -239,10 +240,11 @@ _AUDIT_ONLY_DECISION_KEYS: frozenset[str] = frozenset(
 )
 
 #: Facts the decision dict does not carry but a proof-gate change moves.
-#: ``verified_lossless_classifier`` is minted beside the decision, and the
+#: ``verified_lossless_classifier`` is reported beside the decision (carried
+#: from authoritative CD proof, otherwise minted from spectral facts), and the
 #: leg's outcome/reason are the three-state fact the decision reduces to a
-#: boolean. Reporting only the boolean would show a proof-gate change as
-#: fewer moved rows than it really moved.
+#: boolean. Reporting only the boolean would show a proof-gate change as fewer
+#: moved rows than it really moved.
 PROOF_FIELDS: tuple[str, ...] = (
     "verified_lossless_classifier",
     "ultrasonic_leg_outcome",
@@ -396,6 +398,7 @@ _PERSISTED_PROOF_COLUMNS: tuple[str, ...] = (
     "verified_lossless_source",
     "verified_lossless_classifier",
     "verified_lossless_detail",
+    "cd_rip_verification",
 )
 
 
@@ -407,7 +410,7 @@ def without_persisted_proof(row: Mapping[str, object]) -> dict[str, object]:
     the proof asks the question the gate actually answers: if this exact
     album were acquired now, would it be promoted?
 
-    Only the four proof columns and the boolean move. Nothing measured is
+    Only the proof columns and the boolean move. Nothing measured is
     touched — the counterfactual is about what the row was GRANTED, never
     about what it IS.
     """
@@ -487,14 +490,20 @@ def decide_row(
         fields[key] = value if _is_json_scalar(value) else repr(value)
     leg = leg_for_evidence(evidence)
     lattice_leg = lattice_leg_for_evidence(evidence)
-    proof = mint_verified_lossless_proof(
-        bool(decision.get("verified_lossless")),
-        was_converted_from=evidence.measurement.was_converted_from,
-        detected_source_format=evidence.storage_format,
-        spectral_grade=evidence.measurement.spectral_grade,
-        ultrasonic_leg=leg,
-        aac_lattice_leg=lattice_leg,
-    )
+    if (
+        bool(decision.get("verified_lossless"))
+        and evidence.cd_rip_verification is not None
+    ):
+        proof = evidence.cd_rip_verification.verified_lossless_proof()
+    else:
+        proof = mint_verified_lossless_proof(
+            bool(decision.get("verified_lossless")),
+            was_converted_from=evidence.measurement.was_converted_from,
+            detected_source_format=evidence.storage_format,
+            spectral_grade=evidence.measurement.spectral_grade,
+            ultrasonic_leg=leg,
+            aac_lattice_leg=lattice_leg,
+        )
     fields.update(
         {
             "verified_lossless_classifier": (
