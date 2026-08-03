@@ -1,5 +1,6 @@
 /** Frontend convergence prompt/action contract (#978). */
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 global.window = {};
 global.document = { querySelector() { return null; } };
@@ -30,14 +31,52 @@ assert.match(wanted, /6 peers/i);
 assert.match(wanted, /at least five qualifying observations/i);
 assert.match(wanted, /at least five distinct peers/i);
 assert.match(wanted, /3 codecs/i);
-assert.match(wanted, /raw cliffs 14\.78 kHz-15\.22 kHz \(440 Hz spread\)/i);
-assert.match(wanted, /shared 15 kHz band/i);
+assert.match(wanted, /raw cliffs 14\.8 kHz-15\.2 kHz \(440 Hz spread\)/i);
+assert.match(wanted, /shared 15\.0 kHz band/i);
 assert.match(wanted, /provisional—not proof/i);
-assert.match(wanted, />Stop searching</);
+assert.match(
+  wanted,
+  /<button class="p-btn convergence-stop"[^>]*>Stop searching<\/button>/,
+  'the convergence action remains a native button',
+);
 assert.match(wanted, /&quot;signal_token&quot;:&quot;aaaaaaaa/);
 assert.doesNotMatch(wanted, /all.*exact|identical cliff/i);
 assert.doesNotMatch(wanted, />Accept</);
 assert.match(renderConvergencePrompt(signal, 'unsearchable'), /Searching stopped/i);
+
+for (const [count, expected] of [[0, 'codecs'], [1, 'codec'], [2, 'codecs']]) {
+  const rendered = renderConvergencePrompt(
+    { ...signal, distinct_codec_count: count },
+    'wanted',
+  );
+  assert.match(
+    rendered,
+    new RegExp(`· ${count} ${expected} · raw cliffs`),
+    `${count} uses the correct codec noun`,
+  );
+}
+
+const exactBand = renderConvergencePrompt({
+  ...signal,
+  cliff_hz: 15000,
+  raw_cliff_min_hz: 15000,
+  raw_cliff_max_hz: 15000,
+  cliff_spread_hz: 0,
+}, 'wanted');
+assert.match(
+  exactBand,
+  /raw cliffs 15\.0 kHz-15\.0 kHz \(0 Hz spread\) · shared 15\.0 kHz band/i,
+  'exact raw values keep one-decimal kHz precision and the truthful spread',
+);
+
+const indexHtml = readFileSync(new URL('../web/index.html', import.meta.url), 'utf8');
+const convergenceStopRule = indexHtml.match(/\.convergence-stop\s*\{(?<rules>[^}]*)\}/);
+assert.ok(convergenceStopRule, 'the convergence action has a dedicated style rule');
+assert.match(
+  convergenceStopRule.groups.rules,
+  /min-height:\s*24px\s*;/,
+  'the convergence action has at least a 24px target height',
+);
 
 function response(status, body, { raw = null } = {}) {
   return {

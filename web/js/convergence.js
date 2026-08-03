@@ -15,7 +15,7 @@ export function convergenceBadge(signal) {
 
 /** @param {number} value */
 function formatKhz(value) {
-  return `${Number((value / 1000).toFixed(2))} kHz`;
+  return `${(value / 1000).toFixed(1)} kHz`;
 }
 
 /**
@@ -31,11 +31,12 @@ export function renderConvergencePrompt(signal, requestStatus, origin = 'unknown
   const cliffHz = Number(signal.cliff_hz);
   const rawMinHz = Number(signal.raw_cliff_min_hz);
   const rawMaxHz = Number(signal.raw_cliff_max_hz);
+  const codecCount = Number(signal.distinct_codec_count);
   const details = [
     `${Number(signal.distinct_peer_count)} peers`,
     `${Number(signal.observation_count)} observations`,
     `${Number(signal.distinct_candidate_snapshot_count)} snapshots`,
-    `${Number(signal.distinct_codec_count)} codecs`,
+    `${codecCount} ${codecCount === 1 ? 'codec' : 'codecs'}`,
     `raw cliffs ${formatKhz(rawMinHz)}-${formatKhz(rawMaxHz)} (${Number(signal.cliff_spread_hz)} Hz spread)`,
     `shared ${formatKhz(cliffHz)} band`,
   ].join(' · ');
