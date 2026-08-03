@@ -60,6 +60,7 @@ test -f "$work/coverage.json"
             completed = subprocess.run(
                 ["zsh", "-fc", _decision_export_remote_fragment()],
                 capture_output=True,
+                check=False,
                 cwd=root,
                 env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"},
                 text=True,
