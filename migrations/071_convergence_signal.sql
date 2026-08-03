@@ -1,4 +1,4 @@
--- 070_convergence_signal.sql -- direct candidate attribution and derivation
+-- 071_convergence_signal.sql -- direct candidate attribution and derivation
 --
 -- Migration 021 deliberately cross-walked legacy download_log rows to a
 -- sibling import job's evidence.  Those links are useful for historical

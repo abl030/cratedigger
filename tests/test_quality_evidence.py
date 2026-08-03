@@ -21,9 +21,12 @@ import msgspec
 from lib.beets_db import AlbumInfo
 from lib.measurement import PreimportMeasurement
 from lib.quality import (
+    AccurateRipBitMatch,
     AlbumQualityEvidenceFile,
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
+    CdRipBitVerification,
+    CdTocIdentity,
     ImportResult,
     V0ProbeEvidence,
     VerifiedLosslessProof,
@@ -393,6 +396,12 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
         self.assertNotEqual(current.measured_at, linked.measured_at)
 
     def test_post_import_identity_mismatch_mutates_nothing(self):
+        from lib.quality import (
+            AccurateRipBitMatch,
+            CdRipBitVerification,
+            CdTocIdentity,
+        )
+
         requested = "11111111-1111-1111-1111-111111111111"
         db = FakePipelineDB()
         db.seed_request(make_request_row(
@@ -404,9 +413,23 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
         original_link = db.set_request_current_evidence
         db.upsert_album_quality_evidence = MagicMock(wraps=original_upsert)
         db.set_request_current_evidence = MagicMock(wraps=original_link)
+        cd_rip = CdRipBitVerification(
+            toc=CdTocIdentity([0], 470, "ar-id", "mb-disc"),
+            accuraterip=AccurateRipBitMatch(
+                provider="accuraterip",
+                url="https://www.accuraterip.com/example.bin",
+                checksum_version="arv1",
+                read_offset_samples=0,
+                track_confidences=[8],
+                track_checksums=[0x12345678],
+                response_sha256="a" * 64,
+            ),
+        )
         candidate = make_album_quality_evidence(
             mb_release_id="22222222-2222-2222-2222-222222222222",
             files=snapshot_audio_files(self.root),
+            verified_lossless_proof=cd_rip.verified_lossless_proof(),
+            cd_rip_verification=cd_rip,
         )
 
         result = propagate_candidate_evidence_to_current(
@@ -508,6 +531,68 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
         self.assertEqual(loaded.measurement.min_bitrate_kbps, 112)
         assert loaded.verified_lossless_proof is not None
         self.assertEqual(loaded.verified_lossless_proof.provenance, "carried")
+
+    def test_lossy_backfill_carries_cd_source_evidence_without_relabelling_bytes(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, verified_lossless=False))
+        cd_rip = CdRipBitVerification(
+            provenance="carried",
+            source_format="flac",
+            toc=CdTocIdentity([0], 470, "ar-id", "mb-disc"),
+            accuraterip=AccurateRipBitMatch(
+                provider="accuraterip",
+                url="https://www.accuraterip.com/example.bin",
+                checksum_version="arv2",
+                read_offset_samples=108,
+                track_confidences=[11],
+                track_checksums=[0x12345678],
+                response_sha256="a" * 64,
+            ),
+        )
+        seeded = make_album_quality_evidence(
+            mb_release_id="mb-current-cd-rip",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=116,
+                avg_bitrate_kbps=128,
+                median_bitrate_kbps=127,
+                format="Opus",
+                was_converted_from="flac",
+            ),
+            verified_lossless_proof=cd_rip.verified_lossless_proof(),
+            cd_rip_verification=cd_rip,
+            storage_format="Opus",
+            files=snapshot_audio_files(self.root),
+        )
+        db.upsert_album_quality_evidence(seeded)
+        persisted = db.find_album_quality_evidence(
+            mb_release_id=seeded.mb_release_id,
+            snapshot_fingerprint=seeded.snapshot_fingerprint,
+        )
+        assert persisted is not None and persisted.id is not None
+        db.set_request_current_evidence(42, persisted.id)
+
+        result = backfill_current_evidence_from_album_info(
+            db,
+            request_id=42,
+            mb_release_id="mb-current-cd-rip",
+            album_info=AlbumInfo(
+                album_id=1,
+                track_count=2,
+                min_bitrate_kbps=112,
+                avg_bitrate_kbps=124,
+                median_bitrate_kbps=123,
+                is_cbr=False,
+                album_path=self.root,
+                format="Opus",
+            ),
+        )
+
+        assert result.evidence is not None
+        carried = result.evidence.cd_rip_verification
+        assert carried is not None
+        self.assertEqual(carried.provenance, "carried")
+        self.assertEqual(carried.source_format, "flac")
+        self.assertEqual(result.evidence.measurement.format, "Opus")
 
     def test_post_import_lossy_backfill_clears_existing_true_source_proof(self):
         db = FakePipelineDB()

@@ -4273,7 +4273,7 @@ class TestDownloadLog(unittest.TestCase):
             validation_result=json.dumps({"scenario": "high_distance"}),
         )
         evidence = make_album_quality_evidence(
-            mb_release_id="download-overlay-source",
+            mb_release_id="dl-uuid",
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=201,
                 avg_bitrate_kbps=259,
@@ -4325,7 +4325,7 @@ class TestDownloadLog(unittest.TestCase):
 
         log_id = self.db.log_download(self.req_id, outcome="success")
         evidence = make_album_quality_evidence(
-            mb_release_id="download-overlay-proof-gate",
+            mb_release_id="dl-uuid",
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=900,
                 avg_bitrate_kbps=950,
@@ -4412,7 +4412,7 @@ class TestDownloadLog(unittest.TestCase):
         evidence for the same album — the documented lossless-source-gated
         propagation, not another album's proof. Gating on it would delete a
         true "proved by" line from 2,241 live requests, so the attribution
-        rule is lineage and lineage only.
+        rule is exact release identity plus source-semantic lineage.
         """
         from lib.quality import (
             VERIFIED_LOSSLESS_CLASSIFIER_V4,
@@ -4422,7 +4422,7 @@ class TestDownloadLog(unittest.TestCase):
 
         log_id = self.db.log_download(self.req_id, outcome="success")
         evidence = make_album_quality_evidence(
-            mb_release_id="download-overlay-carried-proof",
+            mb_release_id="dl-uuid",
             lineage_version=4,
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=900,
@@ -4482,7 +4482,7 @@ class TestDownloadLog(unittest.TestCase):
 
         log_id = self.db.log_download(self.req_id, outcome="success")
         evidence = make_album_quality_evidence(
-            mb_release_id="download-overlay-legacy-proof",
+            mb_release_id="dl-uuid",
             lineage_version=1,
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=900,
@@ -4538,7 +4538,7 @@ class TestDownloadLog(unittest.TestCase):
 
         log_id = self.db.log_download(self.req_id, outcome="rejected")
         installed = make_album_quality_evidence(
-            mb_release_id="download-overlay-current-codec",
+            mb_release_id="dl-uuid",
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=256,
                 avg_bitrate_kbps=256,
@@ -6667,6 +6667,235 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         )
         assert loaded.v0_metric is not None
         self.assertEqual(loaded.v0_metric.avg_bitrate_kbps, 228)
+
+    def test_cd_rip_positive_evidence_round_trips_and_survives_weak_writer(self):
+        """Migration 070 JSONB uses the production decoder and is monotonic."""
+        from lib.quality import (
+            AccurateRipBitMatch,
+            CdRipBitVerification,
+            CdTocIdentity,
+            CtdbWholeDiscMatch,
+        )
+
+        cd_rip = CdRipBitVerification(
+            source_format="flac",
+            toc=CdTocIdentity(
+                track_offsets_sectors=[0, 12345],
+                leadout_sector=24567,
+                accuraterip_id="00009012-0000c0de-0a123402",
+                musicbrainz_disc_id="disc_identity",
+            ),
+            accuraterip=AccurateRipBitMatch(
+                provider="accuraterip",
+                url="https://www.accuraterip.com/example.bin",
+                checksum_version="arv2",
+                read_offset_samples=-222,
+                track_confidences=[31, 47],
+                track_checksums=[0x12345678, 0x90ABCDEF],
+                response_sha256="a" * 64,
+            ),
+            ctdb=CtdbWholeDiscMatch(
+                provider="ctdb",
+                url="https://db.cue.tools/example",
+                entry_id="ctdb-123",
+                confidence=8026,
+                crc32=0xA1B2C3D4,
+                stride_samples=5880,
+                response_toc_sectors=[32, 12377, 24599],
+                response_toc_shift_sectors=32,
+                response_sha256="b" * 64,
+            ),
+        )
+        evidence = self._seed(
+            mb_release_id="mbid-cd-rip-round-trip",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=800,
+                avg_bitrate_kbps=850,
+                median_bitrate_kbps=840,
+                format="FLAC",
+            ),
+            files=[AlbumQualityEvidenceFile(
+                relative_path="01 - Track.flac",
+                size_bytes=123456,
+                mtime_ns=1_700_000_000_000_000_000,
+                extension="flac",
+                container="flac",
+                codec="flac",
+            )],
+            codec="flac",
+            container="flac",
+            storage_format="FLAC",
+            verified_lossless_proof=cd_rip.verified_lossless_proof(),
+            cd_rip_verification=cd_rip,
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        self.db.upsert_album_quality_evidence(msgspec.structs.replace(
+            evidence,
+            verified_lossless_proof=None,
+            cd_rip_verification=None,
+        ))
+
+        loaded = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+
+        assert loaded is not None
+        self.assertEqual(loaded.cd_rip_verification, cd_rip)
+        self.assertEqual(
+            loaded.verified_lossless_proof,
+            cd_rip.verified_lossless_proof(),
+        )
+        valid = msgspec.json.decode(
+            msgspec.json.encode(cd_rip),
+            type=dict[str, object],
+        )
+        valid_ar = msgspec.json.decode(
+            msgspec.json.encode(cd_rip.accuraterip),
+            type=dict[str, object],
+        )
+        valid_ctdb = msgspec.json.decode(
+            msgspec.json.encode(cd_rip.ctdb),
+            type=dict[str, object],
+        )
+        valid_toc = msgspec.json.decode(
+            msgspec.json.encode(cd_rip.toc),
+            type=dict[str, object],
+        )
+        cases: dict[str, object] = {
+            "empty object": {},
+            "no provider": {
+                **valid,
+                "accuraterip": None,
+                "ctdb": None,
+            },
+            "missing nested field": {
+                **valid,
+                "accuraterip": {
+                    **valid_ar,
+                    "response_sha256": None,
+                },
+            },
+            "bad provider URL": {
+                **valid,
+                "accuraterip": {
+                    **valid_ar,
+                    "url": "http://www.accuraterip.com/plaintext.bin",
+                },
+            },
+            "non-positive confidence": {
+                **valid,
+                "accuraterip": {
+                    **valid_ar,
+                    "track_confidences": [31, 0],
+                },
+            },
+            "wrong track count": {
+                **valid,
+                "accuraterip": {
+                    **valid_ar,
+                    "track_checksums": [0x12345678],
+                },
+            },
+            "fractional TOC sector": {
+                **valid,
+                "toc": {
+                    **valid_toc,
+                    "track_offsets_sectors": [0, 12345.5],
+                },
+                "ctdb": {
+                    **valid_ctdb,
+                    "response_toc_sectors": [32, 12377.5, 24599],
+                },
+            },
+            "non-increasing TOC": {
+                **valid,
+                "toc": {
+                    **valid_toc,
+                    "track_offsets_sectors": [0, 0],
+                },
+                "ctdb": {
+                    **valid_ctdb,
+                    "response_toc_sectors": [32, 32, 24599],
+                },
+            },
+            "leadout before last track": {
+                **valid,
+                "toc": {
+                    **valid_toc,
+                    "leadout_sector": 12345,
+                },
+                "ctdb": {
+                    **valid_ctdb,
+                    "response_toc_sectors": [32, 12377, 12377],
+                },
+            },
+            "fractional confidence": {
+                **valid,
+                "accuraterip": {
+                    **valid_ar,
+                    "track_confidences": [31, 47.5],
+                },
+            },
+            "fractional checksum": {
+                **valid,
+                "accuraterip": {
+                    **valid_ar,
+                    "track_checksums": [0x12345678, 47.5],
+                },
+            },
+            "invalid offset": {
+                **valid,
+                "accuraterip": {
+                    **valid_ar,
+                    "read_offset_samples": 5001,
+                },
+            },
+            "CTDB mismatched response TOC": {
+                **valid,
+                "ctdb": {
+                    **valid_ctdb,
+                    "response_toc_sectors": [32, 12378, 24599],
+                },
+            },
+            "CTDB incorrect response shift": {
+                **valid,
+                "ctdb": {
+                    **valid_ctdb,
+                    "response_toc_shift_sectors": 31,
+                },
+            },
+            "CTDB non-positive confidence": {
+                **valid,
+                "ctdb": {
+                    **valid_ctdb,
+                    "confidence": 0,
+                },
+            },
+        }
+        for label, malformed in cases.items():
+            with self.subTest(label=label), self.assertRaises(
+                psycopg2.errors.CheckViolation
+            ):
+                self.db._execute(
+                    """
+                    UPDATE album_quality_evidence
+                    SET cd_rip_verification = %s::jsonb
+                    WHERE id = %s
+                    """,
+                    (json.dumps(malformed), loaded.id),
+                )
+
+        self.db._execute(
+            """
+            UPDATE album_quality_evidence
+            SET verified_lossless_detail = 'tampered scalar projection'
+            WHERE id = %s
+            """,
+            (loaded.id,),
+        )
+        with self.assertRaisesRegex(ValueError, "exact scalar proof"):
+            self.db.load_album_quality_evidence_by_id(loaded.id)
 
     def test_upsert_then_find_round_trips_every_measurement_field(self):
         """Rule A (``.claude/rules/test-fidelity.md`` — "EVERY input key",

@@ -70,6 +70,7 @@ from lib.pipeline_db.download_log import (
 from lib.pipeline_db.requests import _RequestsMixin
 from lib.quality import (
     AacLatticeCapture,
+    AlbumQualityEvidenceFile,
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
     SpectralMeasurement,
@@ -457,7 +458,7 @@ class TestDownloadLogWithEvidenceRowRuntimeContract(unittest.TestCase):
             source_download_log_id=source_id,
         )
         candidate = make_album_quality_evidence(
-            mb_release_id="evidence-row-candidate",
+            mb_release_id="evidence-row-uuid",
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=190, avg_bitrate_kbps=201,
                 median_bitrate_kbps=198, format="MP3",
@@ -592,7 +593,7 @@ class TestDownloadLogWithRequestRowRuntimeContract(unittest.TestCase):
         evidence below), a source-semantic candidate evidence, and an
         origin chain."""
         current = make_album_quality_evidence(
-            mb_release_id="request-row-current",
+            mb_release_id="request-row-uuid",
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=200, avg_bitrate_kbps=256,
                 median_bitrate_kbps=250, format="FLAC",
@@ -629,7 +630,15 @@ class TestDownloadLogWithRequestRowRuntimeContract(unittest.TestCase):
             source_download_log_id=source_id,
         )
         candidate = make_album_quality_evidence(
-            mb_release_id="request-row-candidate",
+            mb_release_id="request-row-uuid",
+            files=[AlbumQualityEvidenceFile(
+                relative_path="01 - candidate.mp3",
+                size_bytes=654321,
+                mtime_ns=1_800_000_000_000_000_000,
+                extension="mp3",
+                container="mp3",
+                codec="mp3",
+            )],
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=190, avg_bitrate_kbps=201,
                 median_bitrate_kbps=198, format="MP3",
@@ -1024,6 +1033,57 @@ class TestRenderAliasMap(unittest.TestCase):
         self.assertEqual(
             gate_inputs & set(overlaid), set(),
             "a gate input survived the overlay into the rendered row",
+        )
+
+    def test_foreign_release_identity_cannot_lend_any_candidate_alias(
+        self,
+    ) -> None:
+        poison = object()
+        row: dict[str, object] = {
+            alias: poison
+            for alias in self._aliases(_CANDIDATE_EVIDENCE_COLUMNS)
+        }
+        row.update({
+            "_request_mb_release_id": "exact-release",
+            "_evidence_mb_release_id": "sibling-release",
+            "_evidence_lineage_version": 4,
+        })
+
+        overlaid = _DownloadLogMixin._overlay_evidence_onto_download_log_row(
+            row
+        )
+
+        self.assertNotIn(
+            poison,
+            overlaid.values(),
+            "a sibling pressing lent a candidate measurement or proof alias",
+        )
+
+    def test_foreign_release_identity_cannot_lend_any_current_alias(
+        self,
+    ) -> None:
+        current_aliases = {
+            alias
+            for alias in self._aliases(_LOG_QUERY_TEMPLATE)
+            if alias.startswith("_current_evidence_")
+        }
+        poison = object()
+        row: dict[str, object] = {
+            alias: poison for alias in current_aliases
+        }
+        row.update({
+            "_request_mb_release_id": "exact-release",
+            "_current_evidence_mb_release_id": "sibling-release",
+        })
+
+        overlaid = _DownloadLogMixin._overlay_evidence_onto_download_log_row(
+            row
+        )
+
+        self.assertNotIn(
+            poison,
+            overlaid.values(),
+            "a sibling pressing lent a current measurement alias",
         )
 
     def test_the_alias_check_trips_on_a_stale_alias(self) -> None:

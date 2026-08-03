@@ -49,6 +49,7 @@ if TYPE_CHECKING:
     from lib.quality import CandidateScore
 
 from lib import transitions
+from lib.beets_db import exact_release_identity_matches
 from lib.import_execution import (
     CancellationToken,
     ExecutionLeaseSnapshot,
@@ -6151,6 +6152,13 @@ class FakePipelineDB:
                 self._evidence_by_id.get(int(current_evidence_id))
                 if current_evidence_id is not None else None
             )
+            if (
+                current_evidence is not None
+                and not exact_release_identity_matches(
+                    req.get("mb_release_id"), current_evidence.mb_release_id
+                )
+            ):
+                current_evidence = None
             current_measurement = (
                 current_evidence.measurement
                 if current_evidence is not None else None
@@ -7354,6 +7362,12 @@ class FakePipelineDB:
         # PipelineDB._overlay_evidence_onto_download_log_row.
         ev = self._evidence_by_id.get(entry.candidate_evidence_id) \
             if entry.candidate_evidence_id is not None else None
+        request = self._requests.get(entry.request_id)
+        if ev is not None and not exact_release_identity_matches(
+            request.get("mb_release_id") if request is not None else None,
+            ev.mb_release_id,
+        ):
+            ev = None
         if ev is not None:
             ev_m = ev.measurement
             ev_v0 = ev.v0_metric
@@ -7427,6 +7441,12 @@ class FakePipelineDB:
             if entry.candidate_evidence_id is not None
             else None
         )
+        request = self._requests.get(entry.request_id)
+        if evidence is not None and not exact_release_identity_matches(
+            request.get("mb_release_id") if request is not None else None,
+            evidence.mb_release_id,
+        ):
+            evidence = None
         measurement = evidence.measurement if evidence is not None else None
         lattice = evidence.aac_lattice if evidence is not None else None
         proof = (
@@ -7475,6 +7495,13 @@ class FakePipelineDB:
             ),
             "_evidence_verified_lossless_classifier": (
                 proof.classifier if proof is not None else None
+            ),
+            "_evidence_cd_rip_verification": (
+                msgspec.to_builtins(evidence.cd_rip_verification)
+                if evidence is not None
+                and evidence.lineage_version in (3, 4)
+                and evidence.cd_rip_verification is not None
+                else None
             ),
             "_evidence_container_extensions": (
                 sorted({file.extension for file in evidence.files})

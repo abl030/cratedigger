@@ -74,6 +74,7 @@ from lib.quality.decisions import (
     album_ultrasonic_proof_leg,
 )
 from lib.quality.evidence_types import (
+    CD_RIP_BIT_VERIFIED_CLASSIFIER,
     AacLatticeCapture,
     CodecFamily,
     EvidenceSubject,
@@ -374,6 +375,7 @@ def proof_tier_statement(verdict: AlbumProofVerdict) -> str:
 #:
 #: The wording states the tested class, never bit-faithfulness (§1.7).
 _CLASSIFIER_LABELS: dict[str, str] = {
+    CD_RIP_BIT_VERIFIED_CLASSIFIER: "exact CD rip bit match",
     VERIFIED_LOSSLESS_CLASSIFIER: "cliff/grade gate only",
     VERIFIED_LOSSLESS_CLASSIFIER_V3: "cliff/grade + ultrasonic legs",
     VERIFIED_LOSSLESS_CLASSIFIER_V4: (

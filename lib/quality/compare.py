@@ -84,18 +84,28 @@ def comparison_format_hint(
     verified_lossless_target: str | None = None,
     converted_count: int = 0,
     is_transcode: bool = False,
+    verified_lossless_proof: bool = False,
     native_codec_family: str | None = None,
 ) -> str | None:
     """Format hint to use for the pre-import quality comparison.
 
-    This keeps production import_one.py and the simulator on the same rules:
-    compare the quality of what would actually end up on disk, not just the
-    temporary V0 verification artifact.
+    This keeps production import_one.py and the simulator on the same rules.
+    An unproven transcode-grade source keeps the pessimistic temporary-MP3
+    projection, but a proof-bearing source compares the configured bytes that
+    would actually end up on disk.  The proof only authorizes that output
+    projection; the configured target's own quality rank still governs whether
+    it may replace the installed album.
     """
     if explicit_format is not None:
         return explicit_format
     if target_format in ("flac", "lossless"):
         return "flac"
+    if (
+        converted_count > 0
+        and verified_lossless_proof
+        and verified_lossless_target is not None
+    ):
+        return verified_lossless_target
     if converted_count > 0 and not is_transcode:
         return verified_lossless_target or "mp3 v0"
     if converted_count > 0:

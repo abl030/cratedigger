@@ -827,6 +827,29 @@ class TestConversionTarget(unittest.TestCase):
         self.assertEqual(contract.format, "flac")
         self.assertFalse(contract.is_cbr)
 
+    def test_proven_source_compares_the_configured_target_contract(self):
+        from harness.import_one import projected_target_quality_contract
+        from lib.quality.compare import comparison_format_hint
+
+        format_hint = comparison_format_hint(
+            verified_lossless_target="mp3 128",
+            converted_count=1,
+            is_transcode=True,
+            verified_lossless_proof=True,
+        )
+        contract = projected_target_quality_contract(
+            format_hint,
+            converted_count=1,
+            keep_lossless=False,
+            projected_is_cbr=False,
+        )
+
+        self.assertEqual(format_hint, "mp3 128")
+        self.assertIsNotNone(contract)
+        assert contract is not None
+        self.assertEqual(contract.format, "mp3 128")
+        self.assertTrue(contract.is_cbr)
+
     def test_lossless_source_with_target_returns_target(self):
         self.assertEqual(
             self._target(lossless_source=True, vl_target="opus 128"),
@@ -1210,6 +1233,7 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
         target_format: str | None = None,
         verified_lossless_target: str | None = None,
         verified_lossless_proof=None,
+        cd_rip_verification=None,
     ):
         from lib.quality import (
             AlbumQualityEvidence,
@@ -1262,6 +1286,7 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
                 else None
             ),
             verified_lossless_proof=verified_lossless_proof,
+            cd_rip_verification=cd_rip_verification,
         )
         decision_payload: dict[str, object] = {"stage2_import": decision}
         if imported is not None:
@@ -1461,6 +1486,11 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
 
     def test_evidence_backed_snapshot_mismatch_fails_before_run_import(self):
         from harness import import_one
+        from lib.quality import (
+            AccurateRipBitMatch,
+            CdRipBitVerification,
+            CdTocIdentity,
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             album = os.path.join(tmpdir, "album")
@@ -1469,7 +1499,23 @@ class TestQualityEvidenceAuthorizedImport(unittest.TestCase):
             with open(track, "wb") as f:
                 f.write(b"original")
             action_path = os.path.join(tmpdir, "action.json")
-            self._write_payload(self._payload_for_album(album), action_path)
+            cd_rip = CdRipBitVerification(
+                toc=CdTocIdentity([0], 470, "ar-id", "mb-disc"),
+                accuraterip=AccurateRipBitMatch(
+                    provider="accuraterip",
+                    url="https://www.accuraterip.com/example.bin",
+                    checksum_version="arv1",
+                    read_offset_samples=0,
+                    track_confidences=[8],
+                    track_checksums=[0x12345678],
+                    response_sha256="a" * 64,
+                ),
+            )
+            self._write_payload(self._payload_for_album(
+                album,
+                verified_lossless_proof=cd_rip.verified_lossless_proof(),
+                cd_rip_verification=cd_rip,
+            ), action_path)
             with open(track, "ab") as f:
                 f.write(b" changed")
 
@@ -1937,6 +1983,179 @@ class TestDryRunMintsVerifiedLosslessProof(unittest.TestCase):
         self.assertEqual(proof["source"], "flac")
         self.assertEqual(proof["classifier"], "spectral_verified_lossless")
         self.assertEqual(proof["detail"], "genuine")
+
+    def test_cd_rip_sidecar_skips_spectral_and_v0_authenticity_work(self):
+        from harness import import_one
+        from lib.evidence_action_file import (
+            remove_quality_evidence_action_file,
+            write_quality_evidence_action_file,
+        )
+        from lib.quality import (
+            AccurateRipBitMatch,
+            AlbumQualityEvidenceFile,
+            AudioQualityMeasurement,
+            CdRipBitVerification,
+            CdTocIdentity,
+            QualityEvidenceActionPayload,
+        )
+        from tests.helpers import make_album_quality_evidence
+
+        cd_rip = CdRipBitVerification(
+            toc=CdTocIdentity(
+                track_offsets_sectors=[0, 470],
+                leadout_sector=950,
+                accuraterip_id="0000058c-00000b18-02000c02",
+                musicbrainz_disc_id="exact-disc-id",
+            ),
+            accuraterip=AccurateRipBitMatch(
+                provider="accuraterip",
+                url="https://www.accuraterip.com/example.bin",
+                checksum_version="arv2",
+                read_offset_samples=108,
+                track_confidences=[38, 37],
+                track_checksums=[0x12345678, 0x90ABCDEF],
+                response_sha256="a" * 64,
+            ),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            album = os.path.join(tmpdir, "album")
+            os.makedirs(album)
+            files: list[AlbumQualityEvidenceFile] = []
+            for name in ("01 - One.flac", "02 - Two.flac"):
+                full_path = os.path.join(album, name)
+                with open(full_path, "wb") as handle:
+                    handle.write(b"not real audio")
+                stat = os.stat(full_path)
+                files.append(AlbumQualityEvidenceFile(
+                    relative_path=name,
+                    size_bytes=stat.st_size,
+                    mtime_ns=stat.st_mtime_ns,
+                    extension="flac",
+                    container="flac",
+                    codec="flac",
+                ))
+            evidence = make_album_quality_evidence(
+                mb_release_id="mbid-flac",
+                source_path=album,
+                files=files,
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=800,
+                    format="FLAC",
+                ),
+                codec="flac",
+                container="flac",
+                storage_format="FLAC",
+                verified_lossless_proof=cd_rip.verified_lossless_proof(),
+                cd_rip_verification=cd_rip,
+            )
+            action_file = write_quality_evidence_action_file(
+                QualityEvidenceActionPayload(candidate=evidence)
+            )
+            beets = FakeBeetsDB()
+            beets.set_album_exists("mbid-flac", False)
+            beets.set_album_info("mbid-flac", None)
+            stdout = io.StringIO()
+            argv = [
+                "import_one.py",
+                album,
+                "mbid-flac",
+                "--dry-run",
+                "--target-format", "flac",
+                "--verified-lossless-target", "opus 128",
+                "--quality-evidence-action-file", action_file,
+            ]
+            try:
+                with patch.object(sys, "argv", argv), \
+                     patch("sys.stdout", stdout), \
+                     patch("harness.import_one.BeetsDB", return_value=beets), \
+                     patch(
+                         "lib.measurement.collect_attempt_spectral_audit",
+                         side_effect=AssertionError("spectral must be skipped"),
+                     ), \
+                     patch(
+                         "harness.import_one._probe_lossless_source_as_v0",
+                         side_effect=AssertionError("V0 probe must be skipped"),
+                     ), \
+                     patch(
+                         "harness.import_one.convert_lossless",
+                         return_value=(2, 0, "flac", 2),
+                     ), \
+                     patch(
+                         "harness.import_one._get_folder_bitrates",
+                         return_value=[240, 251],
+                     ), \
+                     patch(
+                         "harness.import_one._get_folder_min_bitrate",
+                         return_value=240,
+                     ), \
+                     patch(
+                         "harness.import_one._detect_source_format",
+                         return_value="FLAC",
+                     ), \
+                     patch(
+                         "harness.import_one._detect_native_codec_family",
+                         return_value="flac",
+                     ), \
+                     self.assertRaises(SystemExit) as cm:
+                    import_one.main()
+            finally:
+                remove_quality_evidence_action_file(action_file)
+
+        self.assertEqual(cm.exception.code, 0)
+        result = json.loads(
+            stdout.getvalue().strip().splitlines()[-1].removeprefix(
+                "__IMPORT_RESULT__"
+            )
+        )
+        self.assertEqual(
+            result["verified_lossless_proof"]["classifier"],
+            "cd_rip_bit_verified_v1",
+        )
+        self.assertFalse(result["spectral"]["candidate"]["attempted"])
+        self.assertIsNone(result["v0_probe"])
+
+    def test_cd_proof_harness_stage_prefers_equivalent_but_rejects_worse(self):
+        """The harness adapter preserves the canonical proof/quality boundary."""
+        from harness.import_one import quality_decision_stage
+        from lib.quality import AudioQualityMeasurement
+
+        candidate = AudioQualityMeasurement(
+            min_bitrate_kbps=128,
+            avg_bitrate_kbps=128,
+            median_bitrate_kbps=128,
+            format="MP3",
+        )
+        equivalent = quality_decision_stage(
+            candidate,
+            AudioQualityMeasurement(
+                min_bitrate_kbps=128,
+                avg_bitrate_kbps=128,
+                median_bitrate_kbps=128,
+                format="MP3",
+            ),
+            is_transcode=True,
+            verified_lossless_proof=True,
+        )
+        worse = quality_decision_stage(
+            candidate,
+            AudioQualityMeasurement(
+                min_bitrate_kbps=192,
+                avg_bitrate_kbps=192,
+                median_bitrate_kbps=192,
+                format="MP3",
+            ),
+            is_transcode=True,
+            verified_lossless_proof=True,
+        )
+
+        self.assertEqual(equivalent.decision, "transcode_upgrade")
+        self.assertFalse(equivalent.is_terminal)
+        assert equivalent.comparison_basis is not None
+        self.assertTrue(equivalent.comparison_basis.verified_lossless_bypass)
+        self.assertEqual(worse.decision, "transcode_downgrade")
+        self.assertTrue(worse.is_terminal)
+        assert worse.comparison_basis is not None
+        self.assertFalse(worse.comparison_basis.verified_lossless_bypass)
 
 
 if __name__ == "__main__":

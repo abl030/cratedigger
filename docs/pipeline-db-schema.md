@@ -123,7 +123,7 @@ Key fields:
 
 ### Derived provisional-lossless convergence
 
-Migration 070 adds the request-local
+Migration 071 adds the request-local
 `derive_request_convergence_signal(request_id)` SQL function, its partial
 candidate index, and `download_log.candidate_evidence_direct`. The boolean is
 true only when a terminal producer positively linked the evidence measured for

@@ -535,7 +535,7 @@ it on doc2 so the DSN stays in the deployed runtime boundary:
 ```bash
 EXPORT_DIR=/tmp/cratedigger-decision-corpus-$(date +%Y%m%d-%H%M%S)
 mkdir -p "$EXPORT_DIR"
-ssh doc2 'export PGPASSWORD=$(sudo cat /run/secrets/cratedigger-pgpass | grep "^PGPASSWORD=" | cut -d= -f2); work=$(mktemp -d /tmp/cratedigger-decision-corpus.XXXXXX); decision-differential export --dsn postgresql://cratedigger@10.20.0.11:5432/cratedigger --corpus "$work/corpus.jsonl" --coverage "$work/coverage.json"; status=$?; printf "%s\n" "$status" > "$work/export-status"; tar -C "$work" -cf - corpus.jsonl coverage.json export-status; exit 0' | tar -C "$EXPORT_DIR" -xf -
+ssh doc2 'export PGPASSWORD=$(sudo cat /run/secrets/cratedigger-pgpass | grep "^PGPASSWORD=" | cut -d= -f2); work=$(mktemp -d /tmp/cratedigger-decision-corpus.XXXXXX); decision-differential export --dsn postgresql://cratedigger@10.20.0.11:5432/cratedigger --corpus "$work/corpus.jsonl" --coverage "$work/coverage.json"; export_rc=$?; printf "%s\n" "$export_rc" > "$work/export-status"; tar -C "$work" -cf - corpus.jsonl coverage.json export-status; exit 0' | tar -C "$EXPORT_DIR" -xf -
 test "$(cat "$EXPORT_DIR/export-status")" = 0 || test "$(cat "$EXPORT_DIR/export-status")" = 2
 nix-shell --run "python3 scripts/decision_differential.py verify --corpus $EXPORT_DIR/corpus.jsonl --coverage $EXPORT_DIR/coverage.json"
 ```

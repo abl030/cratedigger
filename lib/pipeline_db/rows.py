@@ -172,7 +172,7 @@ def album_request_row(raw: Mapping[str, object]) -> AlbumRequestRow:
 
 
 class DownloadLogRow(TypedDict):
-    """One ``SELECT * FROM download_log`` row (44 columns as of schema 070).
+    """One ``SELECT * FROM download_log`` row (44 columns as of schema 071).
 
     ``download_log`` doubles as the slskd audit trail AND the YouTube
     rescue queue (``source`` discriminates, migration 037), so only
@@ -286,6 +286,7 @@ class DownloadLogWithEvidenceRow(DownloadLogRow):
     _evidence_aac_lattice_scored_tracks: int | None
     _evidence_aac_lattice_max_z: float | None
     _evidence_verified_lossless_classifier: str | None
+    _evidence_cd_rip_verification: dict[str, object] | None
     _evidence_container_extensions: list[str] | None
 
 

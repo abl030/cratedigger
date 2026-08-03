@@ -15,7 +15,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 
 class TestConvergenceQueryShape(unittest.TestCase):
     def test_migration_derivation_is_request_local_and_partially_indexed(self) -> None:
-        sql = (_ROOT / "migrations/070_convergence_signal.sql").read_text()
+        sql = (_ROOT / "migrations/071_convergence_signal.sql").read_text()
         self.assertIn("request.id = target_request_id", sql)
         self.assertIn("dl.request_id = request.id", sql)
         self.assertIn("idx_download_log_convergence_candidates", sql)

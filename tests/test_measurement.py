@@ -770,6 +770,66 @@ class TestMeasurePreimportState(unittest.TestCase):
         self.assertEqual(m.filetype_band, "mp3, flac")
         self.assertEqual(m.min_bitrate_kbps, 320)
 
+    def test_positive_cd_rip_proof_skips_spectral_and_aac_authenticity(self):
+        from lib.config import CratediggerConfig
+        from lib.measurement import (
+            ExistingSpectralAuditLookup,
+            measure_preimport_state,
+        )
+        from lib.quality import (
+            AccurateRipBitMatch,
+            CdRipBitVerification,
+            CdTocIdentity,
+        )
+
+        cfg = CratediggerConfig(audio_check_mode="off")
+        cd_rip = CdRipBitVerification(
+            toc=CdTocIdentity([0], 470, "ar-id", "mb-disc"),
+            accuraterip=AccurateRipBitMatch(
+                provider="accuraterip",
+                url="https://www.accuraterip.com/example.bin",
+                checksum_version="arv1",
+                read_offset_samples=0,
+                track_confidences=[8],
+                track_checksums=[0x12345678],
+                response_sha256="a" * 64,
+            ),
+        )
+
+        with patch(
+            "lib.measurement._iter_audio_files",
+            return_value=[Path("/tmp/album/01.flac")],
+        ), patch(
+            "lib.measurement._needs_spectral_check"
+        ) as spectral_gate, patch(
+            "lib.measurement.inspect_local_files",
+        ) as inspect_again:
+            measured = measure_preimport_state(
+                path="/tmp/album",
+                mb_release_id="exact-release",
+                label="Exact rip",
+                download_filetype="flac",
+                download_min_bitrate_bps=800_000,
+                download_is_vbr=False,
+                cfg=cfg,
+                cd_rip_verify_fn=lambda _path, _cfg: cd_rip,
+                spectral_detail_analyzer=lambda _path: self.fail(
+                    "candidate spectral authenticity must not run"
+                ),
+                existing_spectral_resolver=lambda _release: (
+                    ExistingSpectralAuditLookup()
+                ),
+                aac_lattice_measure_fn=lambda _path: self.fail(
+                    "AAC authenticity must not run"
+                ),
+            )
+
+        self.assertEqual(measured.cd_rip_verification, cd_rip)
+        self.assertIsNone(measured.download_spectral)
+        self.assertIsNone(measured.aac_lattice)
+        spectral_gate.assert_not_called()
+        inspect_again.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

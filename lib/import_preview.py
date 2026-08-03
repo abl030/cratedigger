@@ -594,6 +594,8 @@ def _lossless_candidate_spectral_failure(
     """Return diagnostics when lossless verification lacks a usable grade."""
     if not lossless_candidate:
         return None
+    if measurement.cd_rip_verification is not None:
+        return None
     candidate = measurement.spectral_audit.candidate
     if candidate is None or not candidate.attempted:
         return "lossless candidate spectral analysis did not run"
@@ -2170,6 +2172,11 @@ def measure_and_persist_candidate_evidence(
 
         # --- Run the pure measurement helper (no decision) ---
         try:
+            # The verifier imports numpy. Keep it on this background
+            # measurement lane instead of adding that import cost to every
+            # web/API process that imports preview orchestration.
+            from lib.cd_rip_verifier import verify_cd_rip
+
             _checkpoint(cancellation_token)
             measurement = measure_preimport_state(
                 path=preview_path,
@@ -2191,6 +2198,7 @@ def measure_and_persist_candidate_evidence(
                 spectral_detail_analyzer=spectral_detail_analyzer,
                 existing_spectral_resolver=existing_spectral_resolver,
                 aac_lattice_measure_fn=aac_lattice_measure_fn,
+                cd_rip_verify_fn=verify_cd_rip,
             )
             _checkpoint(cancellation_token)
             if not reuse_have_evidence:

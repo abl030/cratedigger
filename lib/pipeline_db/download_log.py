@@ -7,6 +7,7 @@ import msgspec
 import psycopg2
 import psycopg2.extras
 
+from lib.beets_db import exact_release_identity_matches
 from lib.convergence_service import normalize_contributor_usernames
 from lib.dispatch.types import PostCommitQuarantineAudit
 from lib.pipeline_db._shared import (
@@ -109,6 +110,7 @@ class LatestDownloadSummary(TypedDict):
 #: contract.py`` pins this block against the generator instead, so the
 #: two cannot drift into projecting different subsets.
 _CANDIDATE_EVIDENCE_COLUMNS = """
+    e.mb_release_id AS _evidence_mb_release_id,
     e.format AS _evidence_source_format,
     e.min_bitrate_kbps AS _evidence_source_min_bitrate,
     e.avg_bitrate_kbps AS _evidence_source_avg_bitrate,
@@ -133,6 +135,7 @@ _CANDIDATE_EVIDENCE_COLUMNS = """
     e.aac_lattice_scored_tracks AS _evidence_aac_lattice_scored_tracks,
     e.aac_lattice_max_z AS _evidence_aac_lattice_max_z,
     e.verified_lossless_classifier AS _evidence_verified_lossless_classifier,
+    e.cd_rip_verification AS _evidence_cd_rip_verification,
     (SELECT array_agg(DISTINCT f.extension)
        FROM album_quality_evidence_files f
       WHERE f.evidence_id = e.id) AS _evidence_container_extensions,
@@ -149,7 +152,10 @@ _CANDIDATE_EVIDENCE_COLUMNS = """
 _LOG_QUERY_TEMPLATE = """
     SELECT dl.*,
            {candidate_evidence_columns}
+           ar.mb_release_id AS _request_mb_release_id,
            current_evidence.id AS _current_evidence_id,
+           current_evidence.mb_release_id
+               AS _current_evidence_mb_release_id,
            (current_evidence.measured_at <= dl.created_at)
                AS _current_evidence_is_pre_attempt,
            current_evidence.format AS _current_evidence_format,
@@ -505,7 +511,15 @@ class _DownloadLogMixin(_PipelineDBBase):
     #: partition in ``tests/test_pipeline_db_column_contract.py`` derives
     #: them from production rather than restating them.
     _EVIDENCE_LINEAGE_ALIAS: ClassVar = "_evidence_lineage_version"
-    _EVIDENCE_GATE_INPUT_ALIASES: ClassVar = (_EVIDENCE_LINEAGE_ALIAS,)
+    _EVIDENCE_IDENTITY_ALIAS: ClassVar = "_evidence_mb_release_id"
+    _REQUEST_IDENTITY_ALIAS: ClassVar = "_request_mb_release_id"
+    _CURRENT_EVIDENCE_IDENTITY_ALIAS: ClassVar = (
+        "_current_evidence_mb_release_id"
+    )
+    _EVIDENCE_GATE_INPUT_ALIASES: ClassVar = (
+        _EVIDENCE_LINEAGE_ALIAS,
+        _EVIDENCE_IDENTITY_ALIAS,
+    )
 
     #: ``(legacy download_log key, candidate-evidence alias, gated)`` — the
     #: aliases this overlay CONSUMES, folding each into the legacy column
@@ -527,9 +541,10 @@ class _DownloadLogMixin(_PipelineDBBase):
     )
 
     #: The aliases with no legacy column to fold into, so they are gated IN
-    #: PLACE by ``evidence_is_source_semantic`` — the ONE spelling of that
-    #: rule, shared with ``pipeline-cli quality`` so the two surfaces cannot
-    #: state different proofs for the same album.
+    #: PLACE by exact release identity and ``evidence_is_source_semantic``.
+    #: These are the two attribution predicates shared with
+    #: ``pipeline-cli quality`` so the surfaces cannot state different proofs
+    #: for the same album.
     #:
     #: ``candidate_evidence_id`` does not always name evidence measured from
     #: THIS attempt's bytes: migration 021 §6b cross-walked pre-content-
@@ -544,19 +559,30 @@ class _DownloadLogMixin(_PipelineDBBase):
     #: "MP3 320, verified lossless" off its FLAC sibling's snapshot.
     _EVIDENCE_ATTRIBUTABLE_PROOF_ALIASES: ClassVar = (
         "_evidence_verified_lossless_classifier",
+        "_evidence_cd_rip_verification",
     )
 
     @classmethod
     def _overlay_evidence_onto_download_log_row(
         cls, row: dict[str, object]
     ) -> dict[str, object]:
+        request_identity = row.pop(
+            cls._REQUEST_IDENTITY_ALIAS, row.get("mb_release_id")
+        )
+        evidence_identity = row.pop(cls._EVIDENCE_IDENTITY_ALIAS, None)
+        evidence_attributable = exact_release_identity_matches(
+            request_identity, evidence_identity
+        )
         # Migration 050 deliberately marks historical evidence as lineage v1:
         # its measurement format/bitrates may be a projected target rather
         # than facts about the downloaded source. Only v3 proves those fields
         # source-semantic. Spectral and V0 facts were never target projections,
         # so they remain safe to recover from either lineage.
         evidence_lineage = row.pop(cls._EVIDENCE_LINEAGE_ALIAS, None)
-        source_semantic = evidence_is_source_semantic(evidence_lineage)
+        source_semantic = (
+            evidence_attributable
+            and evidence_is_source_semantic(evidence_lineage)
+        )
         for alias in cls._EVIDENCE_ATTRIBUTABLE_PROOF_ALIASES:
             # Same stable-shape contract as the ``source_*`` keys: always
             # present, NULL when this row's evidence cannot speak for this
@@ -566,6 +592,10 @@ class _DownloadLogMixin(_PipelineDBBase):
                 row[alias] = None
         for legacy, overlay, requires_source_semantic in cls._EVIDENCE_OVERLAY_FOLD:
             evidence_value = row.pop(overlay, None)
+            if not evidence_attributable:
+                if requires_source_semantic:
+                    row.setdefault(legacy, None)
+                continue
             if requires_source_semantic:
                 # The four ``source_*`` legacy keys are NOT real
                 # ``download_log`` columns — this overlay is their SOLE
@@ -582,6 +612,26 @@ class _DownloadLogMixin(_PipelineDBBase):
                         evidence_value, evidence_value
                     )
                 row[legacy] = evidence_value
+
+        # Candidate aliases without legacy columns flow directly into the
+        # renderer. A foreign exact pressing must therefore null every one,
+        # not only proof fields: classifier, spectral, bitrate, codec, and
+        # container facts all describe the sibling evidence row's bytes.
+        if not evidence_attributable:
+            for key in row:
+                if key.startswith("_evidence_"):
+                    row[key] = None
+
+        current_identity = row.pop(
+            cls._CURRENT_EVIDENCE_IDENTITY_ALIAS, None
+        )
+        current_attributable = exact_release_identity_matches(
+            request_identity, current_identity
+        )
+        if not current_attributable:
+            for key in row:
+                if key.startswith("_current_evidence_"):
+                    row[key] = None
         return row
 
 
@@ -593,8 +643,10 @@ class _DownloadLogMixin(_PipelineDBBase):
             f"""
             SELECT dl.*,
                    {_CANDIDATE_EVIDENCE_COLUMNS}
+                   ar.mb_release_id AS _request_mb_release_id,
                    origin.beets_distance AS original_beets_distance
             FROM download_log dl
+            JOIN album_requests ar ON ar.id = dl.request_id
             LEFT JOIN album_quality_evidence e
                 ON e.id = dl.candidate_evidence_id
             LEFT JOIN download_log origin
@@ -616,8 +668,10 @@ class _DownloadLogMixin(_PipelineDBBase):
             f"""
             SELECT dl.*,
                    {_CANDIDATE_EVIDENCE_COLUMNS}
+                   ar.mb_release_id AS _request_mb_release_id,
                    origin.beets_distance AS original_beets_distance
             FROM download_log dl
+            JOIN album_requests ar ON ar.id = dl.request_id
             LEFT JOIN album_quality_evidence e
                 ON e.id = dl.candidate_evidence_id
             LEFT JOIN download_log origin
@@ -648,8 +702,10 @@ class _DownloadLogMixin(_PipelineDBBase):
             f"""
             SELECT dl.*,
                    {_CANDIDATE_EVIDENCE_COLUMNS}
+                   ar.mb_release_id AS _request_mb_release_id,
                    origin.beets_distance AS original_beets_distance
             FROM download_log dl
+            JOIN album_requests ar ON ar.id = dl.request_id
             LEFT JOIN album_quality_evidence e
                 ON e.id = dl.candidate_evidence_id
             LEFT JOIN download_log origin
@@ -692,8 +748,10 @@ class _DownloadLogMixin(_PipelineDBBase):
                 SELECT DISTINCT ON (dl.request_id)
                        dl.*,
                        {_CANDIDATE_EVIDENCE_COLUMNS}
+                       ar.mb_release_id AS _request_mb_release_id,
                        origin.beets_distance AS original_beets_distance
                 FROM download_log dl
+                JOIN album_requests ar ON ar.id = dl.request_id
                 LEFT JOIN album_quality_evidence e
                     ON e.id = dl.candidate_evidence_id
                 LEFT JOIN download_log origin

@@ -200,8 +200,8 @@ def _print_proof_gate_verdict(
     print(f"      legs {side}: ultrasonic="
           f"{verdict.ultrasonic_outcome or 'not evaluated'}, "
           f"aac-lattice={verdict.aac_lattice_outcome or 'not evaluated'}")
-    # The same attribution gate Recents applies at its read seam, through
-    # the same predicate. A legacy-lineage row is not always this album's own
+    # The same lineage attribution gate Recents applies after its exact-release
+    # identity gate. A legacy-lineage row is not always this album's own
     # snapshot — migration 021 §6b cross-walked pre-content-addressing rows
     # onto whichever content-addressed row their release already had — so an
     # ungated read attributed a sibling's proof on 4,910 live requests
@@ -217,6 +217,40 @@ def _print_proof_gate_verdict(
     )
     if generation is not None:
         print(f"      verified lossless {side}: proved by {generation}")
+        cd_rip = evidence.cd_rip_verification
+        if cd_rip is not None:
+            toc = cd_rip.toc
+            print(
+                f"      CD rip {side}: algorithm={cd_rip.algorithm}, "
+                f"source={cd_rip.source_format}/{cd_rip.provenance}, "
+                f"tracks={len(toc.track_offsets_sectors)}, "
+                f"ARID={toc.accuraterip_id}, MB disc={toc.musicbrainz_disc_id}"
+            )
+            if cd_rip.accuraterip is not None:
+                ar = cd_rip.accuraterip
+                confidences = ",".join(
+                    str(confidence) for confidence in ar.track_confidences
+                )
+                checksums = ",".join(
+                    f"{checksum:08x}" for checksum in ar.track_checksums
+                )
+                print(
+                    f"      AccurateRip {side}: {ar.checksum_version.upper()} "
+                    f"offset={ar.read_offset_samples:+d}, "
+                    f"track confidences=[{confidences}], "
+                    f"track checksums=[{checksums}], provider={ar.url}, "
+                    f"response-sha256={ar.response_sha256}"
+                )
+            if cd_rip.ctdb is not None:
+                ctdb = cd_rip.ctdb
+                print(
+                    f"      CTDB {side}: whole-disc crc32={ctdb.crc32:08x}, "
+                    f"confidence={ctdb.confidence}, entry={ctdb.entry_id}, "
+                    f"response-toc={ctdb.response_toc_sectors}, "
+                    f"toc-shift={ctdb.response_toc_shift_sectors}, "
+                    f"provider={ctdb.url}, "
+                    f"response-sha256={ctdb.response_sha256}"
+                )
     grade = evidence.measurement.spectral_grade
     if not verdict.spectral_accusation_admissible and (
         grade in SPECTRAL_TRANSCODE_GRADES
@@ -238,6 +272,7 @@ def _print_live_candidate_replay(
     db: PipelineDB,
     request_id: int,
     *,
+    expected_release_id: object | None,
     rank_cfg: QualityRankConfig,
     target_format: str | None,
     verified_lossless_target: str | None,
@@ -258,6 +293,7 @@ def _print_live_candidate_replay(
 
     Read-only: loads persisted rows, decides, prints. No writes.
     """
+    from lib.beets_db import exact_release_identity_matches
     from lib.quality import (
         AlbumQualityEvidenceDecisionFacts,
         full_pipeline_decision_from_evidence,
@@ -276,6 +312,15 @@ def _print_live_candidate_replay(
         print(f"    (candidate evidence #{candidate_evidence_id} is "
               "referenced but missing — data integrity issue)")
         return
+    if not exact_release_identity_matches(
+        expected_release_id, candidate.mb_release_id
+    ):
+        print(
+            f"    (candidate evidence #{candidate_evidence_id} is referenced "
+            "but its exact release identity does not match this request — "
+            "ignored)"
+        )
+        return
 
     current_evidence_id = db.get_request_current_evidence_id(request_id)
     current = (
@@ -283,6 +328,14 @@ def _print_live_candidate_replay(
         if current_evidence_id is not None
         else None
     )
+    if current is not None and not exact_release_identity_matches(
+        expected_release_id, current.mb_release_id
+    ):
+        print(
+            f"    (current evidence #{current_evidence_id} has a different "
+            "exact release identity — ignored for this replay)"
+        )
+        current = None
 
     facts = AlbumQualityEvidenceDecisionFacts(
         audio_check_mode=runtime_audio_check,
@@ -642,6 +695,7 @@ def cmd_quality(db: PipelineDB, args: argparse.Namespace) -> None:
 
     _print_live_candidate_replay(
         db, args.id,
+        expected_release_id=req.get("mb_release_id"),
         rank_cfg=rank_cfg,
         target_format=target_format,
         verified_lossless_target=verified_lossless_target,

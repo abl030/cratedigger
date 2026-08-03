@@ -903,7 +903,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
             },
         )
         evidence = make_album_quality_evidence(
-            mb_release_id="pipeline-log-overlay",
+            mb_release_id="test-mbid-0100",
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=201,
                 avg_bitrate_kbps=259,
@@ -944,6 +944,150 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(item["v0_probe_min_bitrate"], 201)
         self.assertEqual(item["v0_probe_avg_bitrate"], 259)
         self.assertEqual(item["v0_probe_median_bitrate"], 255)
+
+    def test_pipeline_log_withholds_poisoned_candidate_evidence(self):
+        from lib.quality import (
+            AccurateRipBitMatch,
+            AlbumQualityV0Metric,
+            AudioQualityMeasurement,
+            CdRipBitVerification,
+            CdTocIdentity,
+        )
+        from tests.helpers import make_album_quality_evidence
+
+        cd_rip = CdRipBitVerification(
+            toc=CdTocIdentity(
+                track_offsets_sectors=[0],
+                leadout_sector=470,
+                accuraterip_id="000001d6-000003ac-02000601",
+                musicbrainz_disc_id="sibling-disc-id",
+            ),
+            accuraterip=AccurateRipBitMatch(
+                provider="accuraterip",
+                url="https://www.accuraterip.com/sibling.bin",
+                checksum_version="arv1",
+                read_offset_samples=0,
+                track_confidences=[99],
+                track_checksums=[0xDEADBEEF],
+                response_sha256="c" * 64,
+            ),
+        )
+        log_id = self.db.log_download(100, outcome="rejected")
+        sibling = make_album_quality_evidence(
+            mb_release_id="pipeline-log-sibling-pressing",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=201,
+                avg_bitrate_kbps=259,
+                median_bitrate_kbps=255,
+                format="FLAC",
+                spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=96,
+                spectral_subject="source",
+                spectral_provenance="measured",
+                codec_family="lossless",
+                cliff_hz=15000,
+                ultrasonic_deficit_db=40.0,
+                spectral_measurement_version=2,
+            ),
+            v0_metric=AlbumQualityV0Metric(
+                min_bitrate_kbps=201,
+                avg_bitrate_kbps=259,
+                median_bitrate_kbps=255,
+                subject="source",
+            ),
+            codec="flac",
+            container="flac",
+            storage_format="FLAC",
+            verified_lossless_proof=cd_rip.verified_lossless_proof(),
+            cd_rip_verification=cd_rip,
+        )
+        self.db.upsert_album_quality_evidence(sibling)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=sibling.mb_release_id,
+            snapshot_fingerprint=sibling.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.db.set_download_log_candidate_evidence(log_id, stored.id)
+
+        status, data = self._get("/api/pipeline/log")
+
+        self.assertEqual(status, 200)
+        item = next(row for row in data["log"] if row["id"] == log_id)
+        for field in (
+            "source_format",
+            "source_min_bitrate",
+            "source_avg_bitrate",
+            "source_median_bitrate",
+            "spectral_grade",
+            "spectral_bitrate",
+            "v0_probe_kind",
+            "v0_probe_min_bitrate",
+            "v0_probe_avg_bitrate",
+            "v0_probe_median_bitrate",
+            "verified_lossless_classifier",
+            "verified_lossless_generation",
+            "cd_rip_verification",
+            "verdict_tier",
+            "verdict_tier_statement",
+        ):
+            self.assertIsNone(item[field], field)
+
+    def test_pipeline_log_withholds_poisoned_current_evidence(self):
+        from lib.quality import AlbumQualityV0Metric, AudioQualityMeasurement
+        from tests.helpers import make_album_quality_evidence
+
+        log_id = self.db.log_download(100, outcome="rejected")
+        sibling = make_album_quality_evidence(
+            mb_release_id="pipeline-log-current-sibling-pressing",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=64,
+                avg_bitrate_kbps=72,
+                median_bitrate_kbps=70,
+                format="AAC",
+                spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=32,
+                spectral_subject="installed",
+                spectral_provenance="measured",
+                codec_family="aac",
+                cliff_hz=12000,
+                spectral_measurement_version=2,
+            ),
+            v0_metric=AlbumQualityV0Metric(
+                min_bitrate_kbps=64,
+                avg_bitrate_kbps=72,
+                median_bitrate_kbps=70,
+                subject="installed",
+            ),
+            codec="aac",
+            container="m4a",
+            storage_format="AAC",
+        )
+        self.db.upsert_album_quality_evidence(sibling)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=sibling.mb_release_id,
+            snapshot_fingerprint=sibling.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.assertTrue(self.db.set_request_current_evidence(100, stored.id))
+
+        status, data = self._get("/api/pipeline/log")
+
+        self.assertEqual(status, 200)
+        item = next(row for row in data["log"] if row["id"] == log_id)
+        for field in (
+            "existing_format",
+            "existing_min_bitrate",
+            "existing_avg_bitrate",
+            "existing_median_bitrate",
+            "existing_spectral_grade",
+            "existing_spectral_bitrate",
+            "existing_v0_probe_kind",
+            "existing_v0_probe_min_bitrate",
+            "existing_v0_probe_avg_bitrate",
+            "existing_v0_probe_median_bitrate",
+            "existing_spectral_accusation_admissible",
+        ):
+            self.assertIsNone(item[field], field)
 
     def _seed_verdict_evidence(self, *, log_id, **evidence_kwargs):
         """Attach production-shaped candidate evidence to a download-log row."""
@@ -1105,6 +1249,61 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         # A genuine grade has no accusation to withhold, so the flag is
         # not-applicable rather than a codec verdict on the row.
         self.assertIsNone(item["spectral_accusation_admissible"])
+
+    def test_pipeline_log_projects_attributable_cd_rip_provider_audit(self):
+        from lib.quality import (
+            AccurateRipBitMatch,
+            AudioQualityMeasurement,
+            CdRipBitVerification,
+            CdTocIdentity,
+        )
+
+        cd_rip = CdRipBitVerification(
+            toc=CdTocIdentity(
+                track_offsets_sectors=[0],
+                leadout_sector=470,
+                accuraterip_id="000001d6-000003ac-02000601",
+                musicbrainz_disc_id="exact-disc-id",
+            ),
+            accuraterip=AccurateRipBitMatch(
+                provider="accuraterip",
+                url="https://www.accuraterip.com/example.bin",
+                checksum_version="arv1",
+                read_offset_samples=-78,
+                track_confidences=[9],
+                track_checksums=[0x12345678],
+                response_sha256="a" * 64,
+            ),
+        )
+        log_id = self.db.log_download(100, outcome="success")
+        item = self._seed_verdict_evidence(
+            log_id=log_id,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=800,
+                format="FLAC",
+            ),
+            codec="flac",
+            container="flac",
+            storage_format="FLAC",
+            verified_lossless_proof=cd_rip.verified_lossless_proof(),
+            cd_rip_verification=cd_rip,
+        )
+
+        self.assertEqual(
+            item["cd_rip_verification"]["accuraterip"]["read_offset_samples"],
+            -78,
+        )
+        self.assertEqual(
+            item["cd_rip_verification"]["accuraterip"]["track_checksums"],
+            [0x12345678],
+        )
+        self.assertEqual(
+            item["cd_rip_verification"]["accuraterip"]["response_sha256"],
+            "a" * 64,
+        )
+        self.assertEqual(
+            item["verified_lossless_generation"], "exact CD rip bit match"
+        )
 
     def test_disk_coverage_contract(self):
         import web.server as srv
@@ -1351,6 +1550,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
     DETAIL_ACCUSATION_REQUIRED_FIELDS: ClassVar = {
         "current_spectral_accusation_admissible",
         "current_spectral_accusation_withheld",
+        "current_cd_rip_verification",
         "last_download_spectral_accusation_admissible",
         "last_download_spectral_accusation_withheld",
     }
@@ -1396,6 +1596,157 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         assert stored is not None and stored.id is not None
         self.assertTrue(self.db.set_request_current_evidence(100, stored.id))
         return stored
+
+    def test_pipeline_detail_projects_current_cd_rip_provider_audit(self):
+        from lib.quality import (
+            AccurateRipBitMatch,
+            AudioQualityMeasurement,
+            CdRipBitVerification,
+            CdTocIdentity,
+        )
+
+        cd_rip = CdRipBitVerification(
+            toc=CdTocIdentity(
+                track_offsets_sectors=[0],
+                leadout_sector=470,
+                accuraterip_id="000001d6-000003ac-02000601",
+                musicbrainz_disc_id="exact-disc-id",
+            ),
+            accuraterip=AccurateRipBitMatch(
+                provider="accuraterip",
+                url="https://www.accuraterip.com/example.bin",
+                checksum_version="arv2",
+                read_offset_samples=108,
+                track_confidences=[42],
+                track_checksums=[0x12345678],
+                response_sha256="a" * 64,
+            ),
+        )
+        self._seed_installed_evidence(
+            AudioQualityMeasurement(min_bitrate_kbps=800, format="FLAC"),
+            codec="flac",
+            container="flac",
+            storage_format="FLAC",
+            verified_lossless_proof=cd_rip.verified_lossless_proof(),
+            cd_rip_verification=cd_rip,
+        )
+
+        status, data = self._get("/api/pipeline/100")
+
+        self.assertEqual(status, 200)
+        projected = data["request"]["current_cd_rip_verification"]
+        self.assertEqual(projected["algorithm"], "cd-rip-bit-verifier-v1")
+        self.assertEqual(
+            projected["accuraterip"]["track_confidences"], [42]
+        )
+        self.assertEqual(
+            projected["accuraterip"]["read_offset_samples"], 108
+        )
+        self.assertEqual(
+            projected["accuraterip"]["track_checksums"], [0x12345678]
+        )
+        self.assertEqual(
+            projected["accuraterip"]["response_sha256"], "a" * 64
+        )
+
+    def test_pipeline_detail_withholds_poisoned_sibling_evidence_link(self):
+        from lib.quality import (
+            AccurateRipBitMatch,
+            AudioQualityMeasurement,
+            CdRipBitVerification,
+            CdTocIdentity,
+        )
+        from tests.helpers import make_album_quality_evidence
+
+        cd_rip = CdRipBitVerification(
+            toc=CdTocIdentity(
+                track_offsets_sectors=[0],
+                leadout_sector=470,
+                accuraterip_id="000001d6-000003ac-02000601",
+                musicbrainz_disc_id="sibling-disc-id",
+            ),
+            accuraterip=AccurateRipBitMatch(
+                provider="accuraterip",
+                url="https://www.accuraterip.com/sibling.bin",
+                checksum_version="arv1",
+                read_offset_samples=0,
+                track_confidences=[99],
+                track_checksums=[0xDEADBEEF],
+                response_sha256="c" * 64,
+            ),
+        )
+        sibling = make_album_quality_evidence(
+            mb_release_id="sibling-pressing-mbid",
+            source_path="/mnt/virtio/Music/Beets/sibling",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=128,
+                format="MP3",
+                spectral_grade="likely_transcode",
+                spectral_subject="source",
+                spectral_provenance="measured",
+                codec_family="mp3",
+            ),
+            codec="mp3",
+            container="mp3",
+            storage_format="MP3",
+            verified_lossless_proof=cd_rip.verified_lossless_proof(),
+            cd_rip_verification=cd_rip,
+        )
+        self.db.upsert_album_quality_evidence(sibling)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=sibling.mb_release_id,
+            snapshot_fingerprint=sibling.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.assertTrue(self.db.set_request_current_evidence(100, stored.id))
+
+        status, data = self._get("/api/pipeline/100")
+
+        self.assertEqual(status, 200)
+        request = data["request"]
+        self.assertIsNone(request["current_cd_rip_verification"])
+        self.assertFalse(request["current_spectral_accusation_admissible"])
+        self.assertIsNone(request["current_spectral_accusation_withheld"])
+
+    def test_pipeline_detail_does_not_treat_two_empty_release_ids_as_exact(self):
+        from lib.quality import AudioQualityMeasurement
+        from tests.helpers import make_album_quality_evidence
+
+        poisoned = make_album_quality_evidence(
+            mb_release_id="temporary-valid-id",
+            source_path="/mnt/virtio/Music/Beets/invalid-identity",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=128,
+                format="MP3",
+                spectral_grade="likely_transcode",
+                spectral_subject="installed",
+                spectral_provenance="measured",
+                codec_family="mp3",
+            ),
+            codec="mp3",
+            container="mp3",
+            storage_format="MP3",
+        )
+        self.db.upsert_album_quality_evidence(poisoned)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=poisoned.mb_release_id,
+            snapshot_fingerprint=poisoned.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.db._evidence_by_id[stored.id] = msgspec.structs.replace(
+            stored,
+            mb_release_id="",
+        )
+        self.db._requests[100]["mb_release_id"] = ""
+        self.assertTrue(self.db.set_request_current_evidence(100, stored.id))
+
+        status, data = self._get("/api/pipeline/100")
+
+        self.assertEqual(status, 200)
+        request = data["request"]
+        self.assertFalse(request["current_spectral_accusation_admissible"])
+        self.assertIsNone(request["current_spectral_accusation_withheld"])
+        self.assertIsNone(request["current_cd_rip_verification"])
 
     def test_pipeline_detail_withholds_the_have_accusation_for_audit_only(self):
         """Request 6387's shape at the detail header: the INSTALLED copy is

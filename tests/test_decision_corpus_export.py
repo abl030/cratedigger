@@ -14,7 +14,14 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from lib.json_narrow import is_str_object_dict
-from lib.quality import AlbumQualityEvidenceFile
+from lib.quality import (
+    CD_RIP_BIT_VERIFIED_CLASSIFIER,
+    AccurateRipBitMatch,
+    AlbumQualityEvidenceFile,
+    AudioQualityMeasurement,
+    CdRipBitVerification,
+    CdTocIdentity,
+)
 from scripts.decision_differential import (
     _EVIDENCE_SCHEMA_TYPES,
     _FILE_SCHEMA_TYPES,
@@ -83,6 +90,59 @@ class TestDecisionCorpusExport(unittest.TestCase):
                     )
                 ],
             ).snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        return stored.id
+
+    def _cd_evidence(self, release: str, ordinal: int) -> int:
+        cd_rip = CdRipBitVerification(
+            source_format="flac",
+            toc=CdTocIdentity(
+                track_offsets_sectors=[0],
+                leadout_sector=470,
+                accuraterip_id="000001d6-000003ac-02000601",
+                musicbrainz_disc_id="base-archive-cd-disc",
+            ),
+            accuraterip=AccurateRipBitMatch(
+                provider="accuraterip",
+                url="https://www.accuraterip.com/base-archive.bin",
+                checksum_version="arv2",
+                read_offset_samples=0,
+                track_confidences=[42],
+                track_checksums=[0x12345678],
+                response_sha256="a" * 64,
+            ),
+        )
+        files = [
+            AlbumQualityEvidenceFile(
+                relative_path=f"{ordinal:02d}.flac",
+                size_bytes=ordinal,
+                mtime_ns=ordinal,
+                extension="flac",
+                container="flac",
+                codec="flac",
+            )
+        ]
+        evidence = make_album_quality_evidence(
+            mb_release_id=release,
+            source_path=f"/tmp/decision-corpus-{ordinal}",
+            files=files,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=800,
+                avg_bitrate_kbps=850,
+                median_bitrate_kbps=840,
+                format="FLAC",
+            ),
+            codec="flac",
+            container="flac",
+            storage_format="FLAC",
+            verified_lossless_proof=cd_rip.verified_lossless_proof(),
+            cd_rip_verification=cd_rip,
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=release,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
         )
         assert stored is not None and stored.id is not None
         return stored.id
@@ -624,20 +684,12 @@ class TestDecisionCorpusExport(unittest.TestCase):
                     verify_decision_corpus_pair(corpus, coverage_path)
 
     def test_exact_base_archive_can_help_and_decide_with_the_copied_script(self) -> None:
-        """#999's export imports never prevent historical decision replay."""
+        """Current CD corpus replays through pre-CD production boundaries."""
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            archive = root / "base.tar"
-            subprocess.run(
-                ["git", "archive", "--format=tar", "--output", str(archive), "3fdf2748"],
-                check=True,
-            )
-            subprocess.run(["tar", "-xf", str(archive), "-C", str(root)], check=True)
-            script = root / "scripts" / "decision_differential.py"
-            shutil.copy2(Path(__file__).parents[1] / "scripts" / script.name, script)
             release = "base-archive-decision-corpus"
             request_id = self._request(release)
-            candidate_id = self._evidence(release, 71)
+            candidate_id = self._cd_evidence(release, 71)
             job = self.db.enqueue_import_job(
                 "force_import", request_id=request_id,
                 payload={"download_log_id": 1, "failed_path": "/tmp/candidate"},
@@ -646,16 +698,75 @@ class TestDecisionCorpusExport(unittest.TestCase):
             corpus = root / "corpus.jsonl"
             coverage = root / "coverage.json"
             export_decision_corpus(TEST_DSN, corpus, coverage)
-            out = root / "decided.jsonl"
-            for args in (
-                ("--help",),
-                ("decide", "--corpus", str(corpus), "--coverage", str(coverage), "--out", str(out)),
+            for base_ref in (
+                "3fdf2748",
+                "7adc9b115a0561e04cd6b1f212de4249de566f00",
             ):
+                base_root = root / base_ref
+                base_root.mkdir()
+                archive = root / f"{base_ref}.tar"
+                subprocess.run(
+                    [
+                        "git",
+                        "archive",
+                        "--format=tar",
+                        "--output",
+                        str(archive),
+                        base_ref,
+                    ],
+                    check=True,
+                )
+                subprocess.run(
+                    ["tar", "-xf", str(archive), "-C", str(base_root)],
+                    check=True,
+                )
+                script = base_root / "scripts" / "decision_differential.py"
+                shutil.copy2(
+                    Path(__file__).parents[1] / "scripts" / script.name,
+                    script,
+                )
                 completed = subprocess.run(
-                    ["nix-shell", "--run", " ".join((sys.executable, str(script), *args))],
+                    ["nix-shell", "--run", f"{sys.executable} {script} --help"],
                     check=False,
                     capture_output=True,
                     text=True,
                 )
-                with self.subTest(args=args):
+                with self.subTest(base_ref=base_ref, command="help"):
                     self.assertEqual(completed.returncode, 0, completed.stderr)
+
+                for counterfactual in (False, True):
+                    out = root / f"decided-{base_ref}-{counterfactual}.jsonl"
+                    args = (
+                        "decide",
+                        "--corpus",
+                        str(corpus),
+                        "--coverage",
+                        str(coverage),
+                        "--out",
+                        str(out),
+                        *(("--counterfactual",) if counterfactual else ()),
+                    )
+                    completed = subprocess.run(
+                        [
+                            "nix-shell",
+                            "--run",
+                            " ".join((sys.executable, str(script), *args)),
+                        ],
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                    )
+                    with self.subTest(
+                        base_ref=base_ref,
+                        counterfactual=counterfactual,
+                    ):
+                        self.assertEqual(completed.returncode, 0, completed.stderr)
+                        decided = json.loads(out.read_text(encoding="utf-8"))
+                        self.assertIsNone(decided["fields"]["decision_error"])
+                        if not counterfactual:
+                            self.assertEqual(
+                                decided["fields"][
+                                    "verified_lossless_classifier"
+                                ],
+                                CD_RIP_BIT_VERIFIED_CLASSIFIER,
+                            )

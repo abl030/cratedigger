@@ -140,6 +140,35 @@ class TestLogEntry(unittest.TestCase):
         })
         self.assertIsNone(entry.verified_lossless_classifier)
 
+    def test_from_row_projects_structured_cd_rip_evidence(self):
+        cd_rip = {
+            "algorithm": "cd-rip-bit-verifier-v1",
+            "provenance": "measured",
+            "source_format": "flac",
+            "toc": {
+                "track_offsets_sectors": [0, 470],
+                "leadout_sector": 950,
+                "accuraterip_id": "0000058c-00000b18-02000c02",
+                "musicbrainz_disc_id": "exact-disc-id",
+            },
+            "accuraterip": {
+                "provider": "accuraterip",
+                "url": "https://www.accuraterip.com/example.bin",
+                "checksum_version": "arv2",
+                "read_offset_samples": 108,
+                "track_confidences": [38, 37],
+            },
+            "ctdb": None,
+        }
+        entry = LogEntry.from_row({
+            "id": 1,
+            "outcome": "success",
+            "_evidence_cd_rip_verification": cd_rip,
+        })
+
+        self.assertEqual(entry.cd_rip_verification, cd_rip)
+        self.assertEqual(entry.to_json_dict()["cd_rip_verification"], cd_rip)
+
     def test_from_row_resolves_the_alias_independent_of_key_order(self):
         """A colliding plain key must not decide the proof by dict order.
 
