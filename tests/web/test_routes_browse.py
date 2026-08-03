@@ -145,6 +145,7 @@ class TestBrowseRouteContracts(_FakeDbWebServerCase):
         _assert_required_fields(self, data, {"albums"}, "library artist response")
         _assert_required_fields(self, data["albums"][0], self.LIBRARY_ALBUM_REQUIRED_FIELDS,
                                 "library artist album")
+        self.assertNotIn("cd_rip_verification", data["albums"][0])
 
     def test_library_artist_route_includes_pipeline_only_requests(self):
         import web.server as srv
