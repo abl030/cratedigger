@@ -14,14 +14,16 @@ A self-hosted mirror of the Discogs music database, serving a JSON API at `https
 
 | What | Value |
 |------|-------|
-| Host | doc2 (192.168.1.35, Proxmox VM) |
+| Guest | dedicated unprivileged Proxmox CT 102 (`192.168.1.44`) |
 | API port | 8086 |
 | External URL | https://discogs.ablz.au |
-| PostgreSQL | nspawn container `discogs-db`, hostNum=6, IP 192.168.100.13:5432 |
-| DSN | `postgresql://discogs@192.168.100.13:5432/discogs` |
-| Data dir | `/mnt/mirrors/discogs` (re-downloadable, NOT backed up) |
-| Postgres data | `/mnt/mirrors/discogs/postgres` |
-| Dump files | `/mnt/mirrors/discogs/dumps` (cleaned up after each import) |
+| PostgreSQL | native `postgresql.service` inside CT 102 |
+| Import coordination | doc2 `discogs-import.service` through the metadata gate |
+
+The exact guest storage, deployment, and rollback layout is owned by
+`nixosconfig/docs/wiki/services/discogs.md` and its linked metadata-mirror
+migration runbook. Do not use the retired doc2 nspawn database as the active
+endpoint.
 
 ## API Endpoints
 
@@ -120,23 +122,22 @@ Search uses PostgreSQL GIN full-text indexes. Artist search does an EXISTS subqu
 ```
 data.discogs.com (monthly XML dumps, ~12 GB compressed)
         |
-        v  systemd timer (2nd of month, 04:00)
+        v  doc2 coordinator + metadata hold
 +-----------------------------+
-| discogs-import (oneshot)    |
+| CT 102 discogs-import       |
 | Rust: quick-xml streaming   |
 | -> binary COPY into PG     |
 | 10K batch, channel pipeline |
 +-------------+---------------+
               v
 +-----------------------------+
-| container@discogs-db        |
-| nspawn, PostgreSQL 16       |
-| hostNum=6                   |
-| 192.168.100.12 / .13       |
+| native PostgreSQL           |
+| dedicated unprivileged LXC  |
+| 192.168.1.44                |
 +-------------+---------------+
               v
 +-----------------------------+
-| discogs-api (systemd)       |
+| CT 102 discogs-api          |
 | Rust: axum HTTP server      |
 | port 8086                   |
 | discogs.ablz.au             |
@@ -172,20 +173,11 @@ docs/
 
 Module: `nixosconfig/modules/nixos/services/discogs.nix`
 
-```nix
-homelab.services.discogs = {
-  enable = true;
-  mirrorDir = "/mnt/mirrors/discogs";  # dumps + postgres data
-  apiPort = 8086;                       # default
-};
-```
-
-The module creates:
-- `containers.discogs-db` -- nspawn PG container via `mk-pg-container.nix` (hostNum=6)
-- `discogs-import.service` -- oneshot importer
-- `discogs-import.timer` -- monthly trigger (`*-*-02 04:00:00`)
-- `discogs-api.service` -- long-running API server
-- `localProxy` entry for `discogs.ablz.au` (auto ACME + Cloudflare DNS)
+The dedicated guest module owns native PostgreSQL, `discogs-api.service`, and
+`discogs-import.service`. The guest-local import timer is disabled: doc2 owns
+the monthly schedule, enters the durable `discogs-import` metadata hold, and
+invokes the guest through a restricted forced-command SSH boundary. Cratedigger
+resumes only after both Discogs and MusicBrainz representative probes pass.
 
 Flake input: `discogs-src` (non-flake, `github:abl030/discogs-api`). The Rust crate is built with `pkgs.rustPlatform.buildRustPackage`.
 
@@ -227,49 +219,45 @@ git add -A && git commit -m "description" && git push
 # Update nixosconfig flake lock to pick up the new commit
 cd ~/nixosconfig
 nix flake update discogs-src
-git add flake.lock && git commit -m "discogs: description" && git push
-
-# Deploy to doc2
-ssh doc2 'sudo nixos-rebuild switch --flake github:abl030/nixosconfig#doc2 --refresh'
+git add flake.lock
+git commit -S -m "discogs: description"
+# Push the signed commit to the Forgejo deployment root.
 ```
 
-The API service restarts automatically on deploy. The import service does NOT restart (it's a timer-triggered oneshot).
+Deploy the dedicated metadata guest from doc1 using the current procedure in
+`nixosconfig/docs/wiki/services/discogs.md` and
+`nixosconfig/docs/wiki/infrastructure/metadata-mirror-lxc-migration.md`. Do not rebuild
+doc2 from GitHub or reactivate its frozen nspawn rollback source. The API
+service restarts on guest deployment; the importer remains coordinator-driven.
 
 ### Debugging
 
 ```bash
-# Check service status
-ssh doc2 'systemctl status discogs-api.service'
-ssh doc2 'systemctl status container@discogs-db.service'
+# Probe the active guest from the Cratedigger host.
+ssh doc2 'curl -fsS http://192.168.1.44:8086/health | jq'
 
-# API logs
-ssh doc2 'journalctl -u discogs-api.service -f'
-
-# Import logs (if running)
+# Inspect the doc2-side coordinator and durable hold.
+ssh doc2 'systemctl status discogs-import.service discogs-import.timer'
+ssh doc2 'sudo cratedigger-metadata-gate status'
 ssh doc2 'journalctl -u discogs-import.service -f'
 
-# Test API directly on doc2
-ssh doc2 'curl -s http://127.0.0.1:8086/health'
-
-# Query Postgres directly
-ssh doc2 'psql -h 192.168.100.13 -U discogs -d discogs -c "SELECT count(*) FROM release"'
-
-# Restart the API
-ssh doc2 'sudo systemctl restart discogs-api.service'
-
-# Run a manual import (drops all data and re-imports)
-ssh doc2 'sudo systemctl start discogs-import'
-ssh doc2 'journalctl -u discogs-import -f'  # watch progress
+# Start a coordinated manual import without blocking SSH. This enters the
+# hold before invoking CT 102 and releases only after representative probes.
+ssh doc2 'sudo systemctl start discogs-import.service --no-block'
 ```
+
+For guest-local `discogs-api.service`, `discogs-import.service`, PostgreSQL,
+and database diagnostics, enter CT 102 through the nixosconfig metadata-guest
+runbook. Do not query or restart the frozen doc2 rollback database.
 
 ### Common issues
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| Health returns `{"status":"awaiting_import"}` | No data imported yet | Run `sudo systemctl start discogs-import` on doc2 |
-| Import fails with "unexpected end of file" | Truncated download from a previous interrupted run | Delete the corrupt file in `/mnt/mirrors/discogs/dumps/` and re-run. Downloads are now atomic (`.partial` rename) so this shouldn't recur. |
+| Health returns `{"status":"awaiting_import"}` | CT 102 has no admitted release data | Start the coordinated doc2 remote-import service and keep the metadata hold until it succeeds. |
+| Import fails with "unexpected end of file" | Truncated download from a previous interrupted run | Follow the CT 102 storage runbook, delete only the named corrupt guest dump, and re-run through the doc2 coordinator. Downloads use atomic `.partial` rename. |
 | Import fails with "no dumps found" | data.discogs.com HTML format changed | Check `curl https://data.discogs.com/` and fix `discover_latest_dump()` in `src/import.rs` |
-| API returns 500 on search | Postgres connection lost or tables missing | Check `container@discogs-db.service` is running, restart `discogs-api` |
+| API returns 500 on search | Guest PostgreSQL is unavailable or tables are missing | Check native PostgreSQL and `discogs-api.service` inside CT 102. |
 | VACUUM warnings about `pg_authid` | Non-superuser can't vacuum system catalogs | Harmless. VACUUM is scoped to owned tables in latest code. |
 
 ### Key files to edit
@@ -287,8 +275,8 @@ ssh doc2 'journalctl -u discogs-import -f'  # watch progress
 
 | Aspect | MusicBrainz | Discogs |
 |--------|-------------|---------|
-| Deployment | Podman-compose (PG + Solr + RabbitMQ) | nspawn PG + Rust API |
-| DB size | ~30 GB | ~80-120 GB |
+| Deployment | dedicated CT 100: native PG + explicit Podman app units | dedicated CT 102: native PG + Rust API |
+| DB size | ~100 GB+ including search indexes | ~80-120 GB |
 | Replication | Daily | Monthly full re-import |
 | API | Included (Perl webapp) | Custom Rust (this project) |
 | Search | Solr | Postgres FTS (GIN) |

@@ -112,7 +112,7 @@ directory: /mnt/virtio/Music/Beets
 library: /mnt/virtio/cratedigger/beets-db/beets-library.db
 statefile: /var/lib/beets/state.pickle
 include:
-  - /run/secrets/beets-discogs.yaml  # exactly discogs.user_token
+  - /run/beets/secrets.yaml  # exactly discogs.user_token
 
 # Import behavior
 import:
@@ -136,9 +136,9 @@ paths:
 # bracket, which is also never empty. Contract-tested against real beets
 # in tests/test_harness_beets2_contract.py.
 
-# MusicBrainz — local mirror on doc2
+# MusicBrainz — dedicated local mirror guest
 musicbrainz:
-  host: 192.168.1.35:5200
+  host: 192.168.1.43:5200
   https: false
   ratelimit: 100
 
@@ -672,10 +672,12 @@ if isinstance(raw, bytes):
 
 ## MusicBrainz Mirror
 
-Local mirror on doc2 (`192.168.1.35:5200`). Beets is configured to use this instead of the public MB API.
+The dedicated MusicBrainz guest serves the local mirror at
+`192.168.1.43:5200`. Beets is configured to use it instead of the public MB
+API.
 
-- **Web UI**: `http://192.168.1.35:5200`
-- **API**: `http://192.168.1.35:5200/ws/2/`
+- **Web UI**: `http://192.168.1.43:5200`
+- **API**: `http://192.168.1.43:5200/ws/2/`
 - **Replication**: Daily from upstream MetaBrainz at 03:00
 - **Rate limit**: 100 req/s (vs 1 req/s on public API)
 
@@ -683,13 +685,13 @@ Local mirror on doc2 (`192.168.1.35:5200`). Beets is configured to use this inst
 
 ```bash
 # Search for a release
-curl -s "http://192.168.1.35:5200/ws/2/release?query=artist:Artist+AND+release:Album&fmt=json"
+curl -s "http://192.168.1.43:5200/ws/2/release?query=artist:Artist+AND+release:Album&fmt=json"
 
 # Get release with tracks
-curl -s "http://192.168.1.35:5200/ws/2/release/MBID?inc=recordings+media&fmt=json"
+curl -s "http://192.168.1.43:5200/ws/2/release/MBID?inc=recordings+media&fmt=json"
 
 # Get all releases in a release group
-curl -s "http://192.168.1.35:5200/ws/2/release-group/RGID?inc=releases&fmt=json"
+curl -s "http://192.168.1.43:5200/ws/2/release-group/RGID?inc=releases&fmt=json"
 ```
 
 **Newly seeded releases**: If you seed a release on upstream musicbrainz.org, it won't appear in the local mirror until the next daily replication. Use `--upstream` flag on the harness to query upstream directly for fresh seeds.
@@ -800,8 +802,8 @@ Beets remembers every directory it's imported from. Use `--noincremental` flag o
 
 ### Harness hangs with no output
 Usually means beets is waiting for a network request (MB lookup, cover art fetch). Check that:
-- MB mirror is reachable: `curl -s http://192.168.1.35:5200/ws/2/release?query=test&fmt=json | head`
-- No firewall blocking doc2
+- MB mirror is reachable: `curl -s http://192.168.1.43:5200/ws/2/release?query=test&fmt=json | head`
+- No firewall blocking the application host from the dedicated mirror guest
 - Not stuck on chroma fingerprinting (disabled by default, but check `chroma.auto`)
 
 ### Files with special characters in paths

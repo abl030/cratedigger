@@ -9,14 +9,14 @@
 # the same store path can serve the Cratedigger Python environment, checker,
 # harness, and a deployment-owned plain `beet` command.
 #
-# The two mirror patches are ported from the operator's Home Manager module
-# (~/nixosconfig/modules/home-manager/services/beets.nix) as opt-in knobs,
-# null/off by default so a stranger gets stock plugin behaviour:
+# The two mirror patches originated in the operator's retired Home Manager
+# Beets module and remain available here as opt-in deployment knobs, null/off
+# by default so a stranger gets stock plugin behaviour:
 #   - discogsMirrorUrl: point the discogs plugin's python3-discogs-client at
 #     a Discogs mirror (e.g. https://discogs.ablz.au) instead of
 #     api.discogs.com.
 #   - lrclibUrl: point the lyrics plugin's LRCLIB base at a local instance
-#     (e.g. http://192.168.1.35:3300/api) instead of lrclib.net.
+#     (e.g. http://192.168.1.43:3300/api) instead of lrclib.net.
 # `--replace-fail` is the drift alarm: if a future `nix flake update` ships
 # a beets whose plugin source no longer contains these strings, the build
 # fails loudly instead of silently reverting to the public APIs.

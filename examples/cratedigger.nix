@@ -14,9 +14,9 @@
 # Cratedigger consumes Beets; the deployment instantiates and owns the
 # package, immutable config, catalog, library, host-local state, token-only
 # include, readiness unit, and plain operator `beet` below.
-# This is the required downstream cutover shape for issue #759's held module
-# slice. Land the external owner before advancing an older Cratedigger pin;
-# removed beets.package/beets.config options have no compatibility aliases.
+# Deployments upgrading from the removed beets.package/beets.config interface
+# must supply this external runtime capability in the same change; there are no
+# compatibility aliases.
 { config, pkgs, ... }:
 
 let

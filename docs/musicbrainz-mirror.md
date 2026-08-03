@@ -1,18 +1,19 @@
 # MusicBrainz Mirror
 
-Local mirror on doc2 at `http://192.168.1.35:5200`. Used by the web UI browse tab and by beets.
+The dedicated MusicBrainz guest serves the local mirror at
+`http://192.168.1.43:5200`. It is used by the web UI browse tab and Beets.
 
 ## Common queries
 
 ```bash
 # Search releases
-curl -s "http://192.168.1.35:5200/ws/2/release?query=artist:ARTIST+AND+release:ALBUM&fmt=json"
+curl -s "http://192.168.1.43:5200/ws/2/release?query=artist:ARTIST+AND+release:ALBUM&fmt=json"
 
 # Get release with tracks
-curl -s "http://192.168.1.35:5200/ws/2/release/MBID?inc=recordings+media&fmt=json"
+curl -s "http://192.168.1.43:5200/ws/2/release/MBID?inc=recordings+media&fmt=json"
 
 # Get release group
-curl -s "http://192.168.1.35:5200/ws/2/release-group/RGID?inc=releases&fmt=json"
+curl -s "http://192.168.1.43:5200/ws/2/release-group/RGID?inc=releases&fmt=json"
 ```
 
 ## Notes

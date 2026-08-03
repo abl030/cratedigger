@@ -83,9 +83,10 @@ Beets package to use that same Python package set.
 
 You need: **NixOS**, a slskd instance (`services.slskd` is in nixpkgs), an
 externally owned Beets runtime/library, and disk for music. PostgreSQL can be
-provisioned on the same host. The breaking #759 module slice cannot replace an
-older deployment until its downstream Beets owner supplies the runtime block;
-there are no compatibility aliases.
+provisioned on the same host. Deployments upgrading from the removed
+`beets.package` / `beets.config` interface must supply the external
+`beets.runtime.*` capability in the same change; there are no compatibility
+aliases.
 
 ```nix
 {

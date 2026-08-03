@@ -33,8 +33,8 @@ metadata lookups slow down.
 
 ## MusicBrainz mirror (the operator's setup)
 
-The operator runs the official MusicBrainz mirror stack (musicbrainz-docker,
-podman on doc2, serving `http://192.168.1.35:5200`):
+The operator runs the official MusicBrainz mirror stack in dedicated CT 100
+(`192.168.1.43`), serving `http://192.168.1.43:5200`:
 
 - Follow <https://github.com/metabrainz/musicbrainz-docker>: postgres +
   the WS/2 web service + search indexes, plus live data replication.
@@ -63,10 +63,11 @@ deliberate stance, not a gap — a translation adapter for public Discogs
 belongs to the mirror project, not cratedigger.
 
 The mirror is the `discogs-api` repo (~19M releases, Rust JSON API over
-PostgreSQL loaded from the monthly Discogs data dumps, running in an
-nspawn container on doc2, served at `https://discogs.ablz.au`).
-**Follow-up plan:** packaging it as a flake + generic NixOS module (the
-same pattern as this repo's tier-2 work) lives in the discogs-api repo.
+PostgreSQL loaded from the monthly Discogs data dumps), running in dedicated
+CT 102 (`192.168.1.44`) and served at `https://discogs.ablz.au`.
+The active NixOS ownership and coordinated import boundary are documented in
+[`docs/discogs-mirror.md`](discogs-mirror.md) and the downstream nixosconfig
+service wiki.
 
 Wire Cratedigger browse and pipeline track population with
 `services.cratedigger.discogs.apiBase`. To make Beets imports use the same
@@ -79,7 +80,8 @@ overlay. Restart guarded applications after token rotation.
 
 ## LRCLIB (optional)
 
-The operator runs a local LRCLIB instance (`http://192.168.1.35:3300`). The
+The operator runs LRCLIB beside MusicBrainz in CT 100
+(`http://192.168.1.43:3300`). The
 external Beets owner instantiates `nix/beets.nix` with
 `lrclibUrl = "http://<host>:3300/api"` to build-time-patch the lyrics plugin.
 Unset means public lrclib.net (stock behavior).
