@@ -3034,6 +3034,52 @@ class TestCmdQualityLiveCandidateReplay(unittest.TestCase):
         self.assertIn("REJECT, denylist", output)
         self.assertIn("stage2_import=downgrade", output)
 
+    def test_shared_current_candidate_projects_source_lineage(self):
+        """CLI replay must use the same source semantics as the importer."""
+        from lib.quality import AudioQualityMeasurement
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=5013,
+            mb_release_id="mbid-cli-shared",
+            status="wanted",
+        ))
+        shared = make_album_quality_evidence(
+            mb_release_id="mbid-cli-shared",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=128,
+                avg_bitrate_kbps=130,
+                median_bitrate_kbps=129,
+                format="Opus",
+                spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=128,
+                spectral_subject="source",
+                spectral_provenance="measured",
+                was_converted_from="flac",
+            ),
+            codec="opus",
+            container="opus",
+            storage_format="Opus",
+        )
+        db.upsert_album_quality_evidence(shared)
+        stored = db.find_album_quality_evidence(
+            mb_release_id=shared.mb_release_id,
+            snapshot_fingerprint=shared.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.assertTrue(db.set_request_current_evidence(5013, stored.id))
+        log_id = db.log_download(request_id=5013, outcome="rejected")
+        db.set_download_log_candidate_evidence(log_id, stored.id)
+
+        output = self._run(db, 5013)
+        replay = output.split(
+            "What the last real candidate actually decided:", 1
+        )[1]
+
+        self.assertIn("stage2_import=downgrade", replay)
+        self.assertIn("audit-only for this codec", replay)
+        self.assertNotIn("proof gate IN: tier 1", replay)
+
     def test_poisoned_candidate_evidence_is_not_replayed_or_printed(self):
         from lib.quality import (
             AccurateRipBitMatch,

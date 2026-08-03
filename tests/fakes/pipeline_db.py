@@ -7477,10 +7477,7 @@ class FakePipelineDB:
                 measurement.spectral_subject
                 if measurement is not None else None
             ),
-            "_evidence_was_converted_from": (
-                measurement.was_converted_from
-                if measurement is not None else None
-            ),
+            "_evidence_was_converted_from": None,
             "_evidence_ultrasonic_deficit_db": (
                 measurement.ultrasonic_deficit_db
                 if measurement is not None else None

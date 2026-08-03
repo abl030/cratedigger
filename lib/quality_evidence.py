@@ -243,6 +243,22 @@ def current_spectral_evidence_policy_usable(
     )
 
 
+def candidate_evidence_for_policy(
+    evidence: AlbumQualityEvidence,
+) -> AlbumQualityEvidence:
+    """Project a canonical evidence row into candidate-source semantics."""
+    measurement = evidence.measurement
+    if measurement.was_converted_from is None:
+        return evidence
+    return msgspec.structs.replace(
+        evidence,
+        measurement=msgspec.structs.replace(
+            measurement,
+            was_converted_from=None,
+        ),
+    )
+
+
 def current_evidence_for_policy(
     evidence: AlbumQualityEvidence,
 ) -> AlbumQualityEvidence:
@@ -1462,18 +1478,10 @@ def load_candidate_evidence_for_source(
             "missing",
             f"candidate evidence id {evidence_id} not found",
         )
-    if evidence.measurement.was_converted_from is not None:
-        # A content-addressed row can be linked by both candidate and current
-        # owners. Keep installed conversion history in storage, but never
-        # expose that output-only fact as part of a candidate source
-        # measurement.
-        evidence = msgspec.structs.replace(
-            evidence,
-            measurement=msgspec.structs.replace(
-                evidence.measurement,
-                was_converted_from=None,
-            ),
-        )
+    # A content-addressed row can be linked by both candidate and current
+    # owners. Keep installed conversion history in storage, but never expose
+    # that output-only fact as part of a candidate source measurement.
+    evidence = candidate_evidence_for_policy(evidence)
     if not audio_snapshot_matches(source_path, evidence.files):
         return EvidenceBuildResult(
             None,

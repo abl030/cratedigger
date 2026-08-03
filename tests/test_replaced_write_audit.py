@@ -98,15 +98,16 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
     ("lib/pipeline_db/terminal_outcomes.py", 376, "cd644e51f3670265"): (
         "terminal attempt kind is restricted to the fixed retry-counter vocabulary"
     ),
-    ("lib/pipeline_db/download_log.py", 335, "cba0d6d56f1878ac"): (
+    ("lib/pipeline_db/download_log.py", 338, "cba0d6d56f1878ac"): (
         "get_log's three outcome variants were three verbatim copies of one "
         "SELECT; issue #829 Phase 5 PR4 collapsed them to a single template "
         "whose two slots are the shared candidate-evidence column block and "
         "an outcome filter drawn from a closed literal map. Issue #962 adds "
         "only read-only exact-release identity projections; no slot takes "
-        "caller input or mutates album_requests"
+        "caller input or mutates album_requests. Issue #1022 projects a "
+        "shared row's current-only lineage to NULL on this read surface"
     ),
-    ("lib/pipeline_db/download_log.py", 814, "6eec03e4d024acdb"): (
+    ("lib/pipeline_db/download_log.py", 817, "6eec03e4d024acdb"): (
         "validation key is selected from a closed server-owned vocabulary "
         "(#867 intentionally added terminal/evidence projection and moved final "
         "classification after same-path DISTINCT). Issue #829 PR4/N3 CHANGED "
@@ -115,17 +116,17 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "plus a LEFT JOIN on the request's own current_evidence_id — no "
         "caller input reaches the SQL and album_requests is still only read"
     ),
-    ("lib/pipeline_db/download_log.py", 879, "e0154e89026dc8ef"): (
+    ("lib/pipeline_db/download_log.py", 882, "e0154e89026dc8ef"): (
         "validation key is selected from a closed server-owned vocabulary "
         "(issue #835, issue #829 PR4 and the source-semantic proof gate "
         "shifted this line only)"
     ),
-    ("lib/pipeline_db/download_log.py", 897, "13517e08e7db52f3"): (
+    ("lib/pipeline_db/download_log.py", 900, "13517e08e7db52f3"): (
         "validation key is closed vocabulary and IN list is value placeholders "
         "(issue #835, issue #829 PR4 and the source-semantic proof gate "
         "shifted this line only)"
     ),
-    ("lib/pipeline_db/download_log.py", 914, "d87a36ba1d1768e7"): (
+    ("lib/pipeline_db/download_log.py", 917, "d87a36ba1d1768e7"): (
         "JSON path key is selected from a closed server-owned vocabulary "
         "(issue #835, issue #829 PR4 and the source-semantic proof gate "
         "shifted this line only)"

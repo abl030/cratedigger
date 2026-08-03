@@ -4412,11 +4412,10 @@ class TestDownloadLog(unittest.TestCase):
         """The PR4 aliases survive real PG on every download-log reader.
 
         Issue #829 Phase 5 PR4 added one shared candidate-evidence column
-        block (``_CANDIDATE_EVIDENCE_COLUMNS``) to five queries. A column
-        that fails to reach the renderer produces a silently empty verdict,
-        which is exactly the shape ``.claude/rules/test-fidelity.md`` Rule A
-        exists to catch — so the assertion is that every declared alias
-        round-trips its seeded value, not just the obvious ones.
+        block (``_CANDIDATE_EVIDENCE_COLUMNS``) to five queries. Every
+        candidate fact round-trips except output-only conversion lineage,
+        which must project to NULL even when the canonical row is also linked
+        as current evidence.
         """
         from lib.quality import (
             VERIFIED_LOSSLESS_CLASSIFIER_V4,
@@ -4469,6 +4468,9 @@ class TestDownloadLog(unittest.TestCase):
         )
         assert stored is not None and stored.id is not None
         self.db.set_download_log_candidate_evidence(log_id, stored.id)
+        self.assertTrue(
+            self.db.set_request_current_evidence(self.req_id, stored.id)
+        )
 
         expected = {
             "_evidence_format": "FLAC",
@@ -4477,7 +4479,7 @@ class TestDownloadLog(unittest.TestCase):
             "_evidence_cliff_hz": 18250,
             "_evidence_storage_format": "FLAC",
             "_evidence_spectral_subject": "source",
-            "_evidence_was_converted_from": "flac",
+            "_evidence_was_converted_from": None,
             "_evidence_ultrasonic_deficit_db": 41.5,
             "_evidence_spectral_measurement_version": 2,
             "_evidence_aac_lattice_modal_count": 2,
@@ -4506,6 +4508,50 @@ class TestDownloadLog(unittest.TestCase):
                 sorted(row["_evidence_container_extensions"] or []),
                 sorted({file.extension for file in evidence.files}),
             )
+        reloaded = self.db.load_album_quality_evidence_by_id(stored.id)
+        assert reloaded is not None
+        self.assertEqual(reloaded.measurement.was_converted_from, "flac")
+
+    def test_shared_candidate_recents_withholds_current_only_lineage(self):
+        from web.classify import proof_gate_projection
+
+        log_id = self.db.log_download(self.req_id, outcome="rejected")
+        shared = make_album_quality_evidence(
+            mb_release_id="dl-uuid",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=128,
+                avg_bitrate_kbps=130,
+                median_bitrate_kbps=129,
+                format="Opus",
+                spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=128,
+                spectral_subject="source",
+                spectral_provenance="measured",
+                was_converted_from="flac",
+            ),
+            codec="opus",
+            container="opus",
+            storage_format="Opus",
+        )
+        self.db.upsert_album_quality_evidence(shared)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=shared.mb_release_id,
+            snapshot_fingerprint=shared.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.assertTrue(
+            self.db.set_request_current_evidence(self.req_id, stored.id)
+        )
+        self.db.set_download_log_candidate_evidence(log_id, stored.id)
+
+        row = self.db.get_download_log_entry(log_id)
+        assert row is not None
+        projection = proof_gate_projection(row)
+
+        self.assertIsNone(row["_evidence_was_converted_from"])
+        self.assertIsNone(projection.verdict_tier)
+        self.assertFalse(projection.spectral_accusation_admissible)
+        self.assertIsNotNone(projection.spectral_accusation_withheld)
 
     def test_a_carried_proof_still_reaches_the_renderer(self):
         """``carried`` is this album's OWN proof, propagated to its library row.

@@ -24,6 +24,7 @@ from lib.quality import (
 )
 from lib.quality_evidence import (
     backfill_current_evidence_from_album_info,
+    candidate_evidence_for_policy,
     snapshot_audio_files,
 )
 from tests.fakes import FakePipelineDB
@@ -357,6 +358,12 @@ class TestGeneratedLosslessLineageMerge(unittest.TestCase):
             role="shared" if current_linked else "candidate",
             converted_from=converted_from,
             actual=loaded.measurement.was_converted_from,
+        )
+        candidate = candidate_evidence_for_policy(loaded)
+        assert_conversion_lineage_matches_role(
+            role="candidate",
+            converted_from=converted_from,
+            actual=candidate.measurement.was_converted_from,
         )
 
     @given(

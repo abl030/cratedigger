@@ -95,6 +95,9 @@ class LatestDownloadSummary(TypedDict):
 #: 30,467 live rows hand the renderer ``None`` there while the decider's
 #: ``measurement.format`` is never NULL. Reusing it would let the render
 #: adapter resolve a different codec from the same evidence row.
+#: ``_evidence_was_converted_from`` is deliberately NULL: canonical evidence
+#: may be co-referenced as current, but this projection is always candidate
+#: source semantics. Recents must agree with action-time and CLI projection.
 #: ``_evidence_container_extensions`` is the snapshot's own distinct file
 #: extensions — the ultrasonic proof leg's decode-path input. Without it
 #: that leg would withhold on the render path while the decider
@@ -128,7 +131,7 @@ _CANDIDATE_EVIDENCE_COLUMNS = """
     e.storage_format AS _evidence_storage_format,
     e.filetype_band AS _evidence_filetype_band,
     e.spectral_subject AS _evidence_spectral_subject,
-    e.was_converted_from AS _evidence_was_converted_from,
+    NULL::text AS _evidence_was_converted_from,
     e.ultrasonic_deficit_db AS _evidence_ultrasonic_deficit_db,
     e.spectral_measurement_version AS _evidence_spectral_measurement_version,
     e.aac_lattice_modal_count AS _evidence_aac_lattice_modal_count,
