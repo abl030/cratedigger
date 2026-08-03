@@ -1,4 +1,4 @@
-required-version = "==0.16.0"
+required-version = ">=0.16.0"
 # Match the supported runtime declared in pyrightconfig.json; the development
 # shell may exercise a newer interpreter.
 target-version = "py313"
