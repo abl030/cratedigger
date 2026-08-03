@@ -3,9 +3,13 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    beets-tip = {
+      url = "github:beetbox/beets/master";
+      flake = false;
+    };
   };
 
-  outputs = { self, nixpkgs }:
+  outputs = { self, nixpkgs, beets-tip }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f {
@@ -82,7 +86,143 @@
         });
       };
 
-      checks = forLinux ({ pkgs, system }: {
+      checks = forLinux ({ pkgs, system }: let
+        manifest = builtins.fromJSON (builtins.readFile ./nix/beets-compat-releases.json);
+        compatSource = entry: pkgs.fetchFromGitHub {
+          owner = "beetbox";
+          repo = "beets";
+          rev = entry.rev;
+          hash = entry.narHash;
+        };
+        compatPackage = entry: import ./nix/beets-compat-package.nix {
+          inherit pkgs;
+          version = entry.version;
+          buildBackend = entry.buildBackend;
+          src = compatSource entry;
+        };
+        contract = name: beets: let
+          cratedigger = import ./nix/package.nix { inherit pkgs; beetsPackage = beets; };
+          python = pkgs.python3.withPackages (ps: cratedigger.pythonPackages ps);
+          activePlugins = if name == "beets-release-2.1.0" then
+            "discogs, fetchart, embedart, lyrics, lastgenre, scrub, info, missing, duplicates, edit, fromfilename, ftintitle, the, inline, permissions"
+          else
+            "musicbrainz, discogs, fetchart, embedart, lyrics, lastgenre, scrub, info, missing, duplicates, edit, fromfilename, ftintitle, the, inline, permissions";
+          authority = pkgs.runCommand "cratedigger-${name}-matrix-authority" { } ''
+            mkdir -p "$out/beets" "$out/secrets"
+            cat > "$out/runtime.ini" <<EOF
+[Beets]
+config_dir = $out/beets
+library = /build/cratedigger-matrix/library.db
+directory = /build/cratedigger-matrix/library
+state_file = $out/state.pickle
+python = ${python}/bin/python
+secret_include = $out/secrets/discogs.yaml
+[MusicBrainz]
+api_base = https://musicbrainz.org
+EOF
+            cat > "$out/beets/config.yaml" <<'EOF'
+library: /build/cratedigger-matrix/library.db
+directory: /build/cratedigger-matrix/library
+statefile: __AUTHORITY__/state.pickle
+include: [__AUTHORITY__/secrets/discogs.yaml]
+plugins: [${activePlugins}]
+import:
+  autotag: true
+  move: true
+  write: true
+  incremental: true
+  incremental_skip_later: true
+  duplicate_keys:
+    album: [mb_albumid, discogs_albumid]
+paths:
+  default: $albumartist/$year - $album%aunique{albumartist album,path_disambig}/$track $title
+  comp: Compilations/$album%aunique{albumartist album,path_disambig}/$track $title
+  singleton: Non-Album/$artist/$title
+album_fields:
+  path_disambig: albumdisambig or releasegroupdisambig or catalognum or label or str(year)
+permissions:
+  file: "0664"
+  dir: "02775"
+fetchart:
+  auto: false
+embedart:
+  auto: false
+lyrics:
+  auto: false
+lastgenre:
+  auto: false
+scrub:
+  auto: false
+musicbrainz:
+  enabled: true
+  host: musicbrainz.org
+  https: true
+EOF
+            sed -i "s|__AUTHORITY__|$out|g" "$out/beets/config.yaml"
+            cp -R "$out/beets" "$out/importer-beets"
+            sed -i 's|statefile: .*|statefile: /build/cratedigger-matrix/state.pickle|' \
+              "$out/importer-beets/config.yaml"
+            sed -i 's|  move: true|  move: false|; s|  write: true|  write: false|' \
+              "$out/importer-beets/config.yaml"
+            : > "$out/state.pickle"
+            printf '%s\n' 'discogs:' '  user_token: matrix-token' > "$out/secrets/discogs.yaml"
+            cat > "$out/importer-runtime.ini" <<EOF
+[Beets]
+config_dir = $out/importer-beets
+library = /build/cratedigger-matrix/library.db
+directory = /build/cratedigger-matrix/library
+state_file = /build/cratedigger-matrix/state.pickle
+python = ${python}/bin/python
+secret_include = $out/secrets/discogs.yaml
+[MusicBrainz]
+api_base = https://musicbrainz.org
+EOF
+          '';
+        in pkgs.runCommand "cratedigger-${name}-contract" {
+          nativeBuildInputs = [ python pkgs.ffmpeg ];
+        } ''
+          set -euo pipefail
+          export HOME="$TMPDIR/home"
+          mkdir -p "$HOME"
+          unset BEETSDIR TEST_DB_DSN CRATEDIGGER_RUNTIME_CONFIG
+          export PYTHONPATH=${self}
+          export CRATEDIGGER_BEETS_PYTHON=${python}/bin/python
+          mkdir -p /build/cratedigger-matrix/library /build/cratedigger-matrix/runtime
+          : > /build/cratedigger-matrix/state.pickle
+          ${python}/bin/python -c \
+            'from beets.library import Library; lib = Library("/build/cratedigger-matrix/library.db", "/build/cratedigger-matrix/library"); lib._close()'
+          ${python}/bin/python ${self}/scripts/check_beets_config.py \
+            --config ${authority}/runtime.ini \
+            --runtime-dir /build/cratedigger-matrix/runtime \
+            --role web > "$TMPDIR/admission.json"
+          grep -F '"ok":true' "$TMPDIR/admission.json"
+          CRATEDIGGER_BEETS_MATRIX_RUNTIME_CONFIG=${authority}/importer-runtime.ini \
+          ${python}/bin/python -m unittest \
+            tests.test_harness_beets2_contract.TestHarnessBeets2Contract.test_help_stays_on_normal_stdout_and_protocol_is_private \
+            tests.test_harness_beets2_contract.TestHarnessBeets2Contract.test_real_beets_import_library_and_duplicate_action \
+            tests.test_harness_beets2_contract.TestHarnessBeets2Contract.test_real_incremental_import_uses_external_statefile_only \
+            tests.test_harness_beets2_contract.TestHarnessBeets2Contract.test_real_harness_pretend_keeps_source_manifest_unchanged \
+            > "$TMPDIR/contract.stdout" 2> "$TMPDIR/contract.stderr" || {
+              cat "$TMPDIR/contract.stdout" >&2
+              cat "$TMPDIR/contract.stderr" >&2
+              exit 1
+            }
+          test -s /build/cratedigger-matrix/state.pickle
+          test ! -e /build/cratedigger-matrix/library/.beetsstate
+          test ! -e ${self}/.beetsstate
+          touch "$out"
+        '';
+        tipPackage = import ./nix/beets-compat-package.nix {
+          inherit pkgs;
+          version = "2.13.1";
+          buildBackend = "hatchling";
+          src = beets-tip;
+        };
+        releaseChecks = nixpkgs.lib.listToAttrs (map (entry: {
+          name = "beets-release-${builtins.replaceStrings [ "." ] [ "_" ] entry.version}-contract";
+          value = contract "beets-release-${entry.version}" (compatPackage entry);
+        }) manifest);
+      in (rec {
         # Boots a NixOS VM with the upstream module enabled against an
         # ephemeral postgres + a stubbed slskd. Verifies: migrator runs,
         # the immutable runtime config is wired correctly, and the web responds.
@@ -90,6 +230,29 @@
         # `nix flake check` must build the CLI bundle (U8): a stranger's
         # `nix run .#pipeline-cli` is only as green as this check.
         packageDefault = self.packages.${system}.default;
+        beetsTipBuild = tipPackage;
+        beetsTipContract = contract "beets-tip" tipPackage;
+        beetsTipPyright = let
+          cratedigger = import ./nix/package.nix { inherit pkgs; beetsPackage = tipPackage; };
+          python = pkgs.python3.withPackages (ps: cratedigger.pythonPackages ps ++ [
+            ps.coverage
+            ps.hypothesis
+            ps.tree-sitter
+            ps.tree-sitter-javascript
+            ps.vulture
+          ]);
+          source = pkgs.runCommand "cratedigger-beets-tip-pyright-source" { } ''
+            cp -R ${self}/. "$out"
+            chmod -R u+w "$out"
+            ln -s ${python} "$out/.pyright-venv"
+          '';
+        in pkgs.runCommand "cratedigger-beets-tip-pyright" { nativeBuildInputs = [ pkgs.pyright ]; } ''
+          export HOME="$TMPDIR/home"
+          mkdir -p "$HOME"
+          cd ${source}
+          ${pkgs.pyright}/bin/pyright --threads 4
+          touch "$out"
+        '';
 
         # Execute the installed configuration checker, rather than merely
         # inspecting its wrapper source. A caller-controlled PYTHONPATH
@@ -275,6 +438,76 @@
           test -x ${patchedEnv}/bin/beet
           touch $out
         '';
-      });
+
+        # Compatibility sources are checks-only inputs. Query the realised
+        # closures rather than trusting this flake's separation comments:
+        # default package, shell, app package, and the exported-module VM
+        # must never retain tip or historical Beets source/package inputs.
+        beetsCompatibilityTopology = let
+          # These are comparison values, never dependencies. `toString` on a
+          # derivation/path carries its Nix string context; interpolating that
+          # context into the builder would itself make the topology check (and
+          # therefore the stable candidate) depend on every canary package.
+          comparisonPath = value:
+            builtins.unsafeDiscardStringContext (toString value);
+          forbidden = [ (comparisonPath beets-tip) (comparisonPath tipPackage) ]
+            ++ map (entry: comparisonPath (compatSource entry)) manifest
+            ++ map (entry: comparisonPath (compatPackage entry)) manifest;
+          forbiddenWords = builtins.concatStringsSep " " forbidden;
+          runtimeClosure = pkgs.closureInfo {
+            rootPaths = [
+              packageDefault
+              self.devShells.${system}.default
+              self.apps.${system}.pipeline-cli.program
+              moduleVm
+            ];
+          };
+          unchecked = pkgs.runCommand "cratedigger-beets-compatibility-topology" {
+          } ''
+            set -euo pipefail
+            for forbidden in ${forbiddenWords}; do
+              if grep -Fxq "$forbidden" ${runtimeClosure}/store-paths; then
+                echo "checks-only Beets input leaked into runtime closure: $forbidden" >&2
+                exit 1
+              fi
+            done
+            touch "$out"
+          '';
+          # `drvAttrs.buildCommand` carries the exact direct derivation
+          # context Nix will serialise into the .drv. Assert against the
+          # context-free tip drv path, so the proof cannot add the forbidden
+          # edge it is checking for.
+          tipDrv = comparisonPath tipPackage.drvPath;
+          uncheckedInputs = builtins.getContext unchecked.drvAttrs.buildCommand;
+        in assert !(builtins.hasAttr tipDrv uncheckedInputs);
+          unchecked;
+
+        # The daily Nixpkgs candidate is green only when every ordinary
+        # flake check and every reviewed Beets release contract is green.
+        # Tip is intentionally separate: a moving upstream canary must
+        # alert without blocking a stable lock update.
+        beetsStableCandidate = let
+          unchecked = pkgs.runCommand "cratedigger-stable-candidate" {
+            nativeBuildInputs = [
+              packageDefault
+              checkBeetsConfigPackageBoundary
+              moduleVm
+              jellyfinMetadataVm
+              runtimeSrcPin
+              packageSetPin
+              moduleAssertions
+              beetsMirrorPatches
+              beetsCompatibilityTopology
+            ] ++ builtins.attrValues releaseChecks;
+          } "touch $out";
+          tipDrv = builtins.unsafeDiscardStringContext tipPackage.drvPath;
+          # mkDerivation serialises this list separately from buildCommand;
+          # inspect its direct context as well, otherwise a future addition
+          # to nativeBuildInputs could evade the topology-style assertion.
+          nativeInputContext = builtins.getContext (builtins.concatStringsSep " "
+            (map toString unchecked.nativeBuildInputs));
+        in assert !(builtins.hasAttr tipDrv nativeInputContext);
+          unchecked;
+      } // releaseChecks));
     };
 }

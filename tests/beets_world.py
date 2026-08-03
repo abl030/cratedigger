@@ -643,7 +643,10 @@ class BeetsWorld:
                 f"conflict release must resolve at least once: "
                 f"{release_id!r} -> {len(matches)}"
             )
-        album = min(matches, key=lambda candidate: int(candidate.id))
+        album_ids = [candidate.id for candidate in matches]
+        if any(album_id is None for album_id in album_ids):
+            raise AssertionError("persisted Beets album is missing its database id")
+        album = min(matches, key=lambda candidate: int(candidate.id or 0))
         album.mb_albumid = release_id
         album.discogs_albumid = int(conflicting_release_id)
         album.store()

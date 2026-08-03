@@ -10,11 +10,14 @@ from types import SimpleNamespace
 from typing import ClassVar
 from unittest.mock import MagicMock
 
+from tests.harness_test_support import isolated_beets_harness
+
 _beets_mocks = {
     "beets": MagicMock(),
     "beets.config": MagicMock(),
     "beets.library": MagicMock(),
     "beets.plugins": MagicMock(),
+    "beets.ui": MagicMock(),
     "beets.importer": MagicMock(),
     "beets.importer.actions": MagicMock(),
     "beets.importer.session": MagicMock(),
@@ -23,17 +26,17 @@ _beets_mocks = {
     "beets.dbcore": MagicMock(),
     "beets.util": MagicMock(),
 }
-for name, mock in _beets_mocks.items():
-    sys.modules.setdefault(name, mock)
+_beets_mocks["beets.ui"].get_path_formats = None
+_beets_mocks["beets.ui"].get_replacements = None
 
-setattr(  # noqa: B010 - populate a synthetic runtime module
-    sys.modules["beets.importer.session"],
-    "ImportSession",
-    type("ImportSession", (object,), {}),
+_beets_mocks["beets.importer.session"].ImportSession = type(
+    "ImportSession", (object,), {"resolve_duplicate": lambda *_args: None},
 )
+_beets_mocks["beets.importer.tasks"].ImportTask = type("ImportTask", (object,), {})
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from harness import beets_harness
+with isolated_beets_harness(_beets_mocks) as beets_harness:
+    pass
 
 
 def _make_cfg(keys: list[str]) -> dict[str, object]:
@@ -55,9 +58,7 @@ class TestDuplicateLookupMetadata(unittest.TestCase):
 
         task = SimpleNamespace(chosen_info=lambda: FakeAlbumInfo())
 
-        data = beets_harness._duplicate_lookup_metadata(
-            task,  # pyright: ignore[reportArgumentType]
-        )
+        data = beets_harness._duplicate_lookup_metadata(task)
 
         self.assertEqual(data["mb_albumid"], "mb-123")
         self.assertEqual(data["discogs_albumid"], 0)
@@ -70,9 +71,7 @@ class TestDuplicateLookupMetadata(unittest.TestCase):
             "album_id": "mb-123",
         })
 
-        data = beets_harness._duplicate_lookup_metadata(
-            task,  # pyright: ignore[reportArgumentType]
-        )
+        data = beets_harness._duplicate_lookup_metadata(task)
 
         self.assertEqual(data["mb_albumid"], "mb-123")
         self.assertEqual(data["albumartist"], "The National")
@@ -116,17 +115,15 @@ class TestDuplicateLookupMetadata(unittest.TestCase):
 
         old_config = beets_harness.config
         old_album = beets_harness.library.Album
-        beets_harness.config = _make_cfg(
-            ["mb_albumid", "discogs_albumid"],
-        )
+        vars(beets_harness)["config"] = _make_cfg(["mb_albumid", "discogs_albumid"])
         beets_harness.library.Album = FakeAlbum
         try:
             duplicates = beets_harness._find_duplicates_with_mapped_release_ids(
-                task,  # pyright: ignore[reportArgumentType]
+                task,
                 lib,
             )
         finally:
-            beets_harness.config = old_config
+            vars(beets_harness)["config"] = old_config
             beets_harness.library.Album = old_album
 
         self.assertEqual(duplicates, [duplicate])

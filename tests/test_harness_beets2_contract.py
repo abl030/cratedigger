@@ -40,25 +40,81 @@ _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 # Runs in a fresh interpreter with the real beets on the path (no mocks).
 _CONTRACT = r'''
 import os
+import subprocess
+import sys
 import tempfile
+import importlib.util
 
 import harness.beets_harness as h
 from beets import library
-from beets.importer.actions import DuplicateAction
 
-# --- Breakage #1: 2-arg Library derives path_formats + replacements from config
+# --- Configured Library keeps path/replacement policy in both API eras.
+from beets import config
 with tempfile.TemporaryDirectory() as d:
-    lib = library.Library(os.path.join(d, "lib.db"), d)
+    config["paths"].set({"default": "$albumartist/Configured/$track $title"})
+    config["replace"].set({"[ ]": "_"})
+    config["library"].set(os.path.join(d, "lib.db"))
+    config["directory"].set(d)
+    lib = h.beets_compat.configured_library(config)
     assert lib.path_formats, "Library.path_formats is empty (config not derived)"
     assert lib.replacements is not None, "Library.replacements is None"
     print("LIBRARY_OK path_formats=%d replacements=%d"
           % (len(lib.path_formats), len(lib.replacements)))
 
-# --- Breakage #2: get_duplicate_action override replaces 1.x resolve_duplicate
+# --- API eras: both hook names delegate to one structural adapter. The loaded
+# Beets decides which one it calls; retaining both does not version-switch.
 assert "get_duplicate_action" in vars(h.HarnessImportSession), \
-    "HarnessImportSession does not override get_duplicate_action"
-assert "resolve_duplicate" not in vars(h.HarnessImportSession), \
-    "stale 1.x resolve_duplicate override still defined"
+    "HarnessImportSession does not expose the modern duplicate hook"
+assert "resolve_duplicate" in vars(h.HarnessImportSession), \
+    "HarnessImportSession does not expose the legacy duplicate hook"
+
+# --- The release-id mapping must reach the REAL catalog lookup, not merely
+# the duplicate-action hook. Seed two persisted albums, create a real Beets
+# ImportTask/APPLY match, and call the production adapter end to end:
+# chosen_info -> AlbumInfo.copy -> temporary Album -> duplicates_query ->
+# Library.albums. The matched release must be found while its same-title
+# sibling remains excluded.
+from beets.autotag import Distance
+
+with tempfile.TemporaryDirectory(prefix="cratedigger-real-duplicates-") as d:
+    config["library"].set(os.path.join(d, "library.db"))
+    config["directory"].set(d)
+    config["import"]["duplicate_keys"]["album"].set(["mb_albumid"])
+    lib = library.Library(os.path.join(d, "library.db"), d)
+    exact_release = "11111111-2222-3333-4444-555555555555"
+    sibling_release = "66666666-7777-8888-9999-aaaaaaaaaaaa"
+
+    def seed(release_id, filename):
+        path = os.path.join(d, filename)
+        with open(path, "wb") as handle:
+            handle.write(b"audio")
+        return lib.add_album([library.Item(
+            title="Track", artist="Exact Artist", album="Exact Album",
+            albumartist="Exact Artist", path=path, mb_albumid=release_id,
+        )])
+
+    exact_album = seed(exact_release, "exact.flac")
+    sibling_album = seed(sibling_release, "sibling.flac")
+    incoming_path = os.path.join(d, "incoming.flac")
+    with open(incoming_path, "wb") as handle:
+        handle.write(b"incoming")
+    incoming_item = library.Item(
+        title="Track", artist="Exact Artist", album="Exact Album",
+        albumartist="Exact Artist", path=incoming_path,
+    )
+    incoming_track = h.TrackInfo(title="Track", artist="Exact Artist", index=1)
+    chosen = h.AlbumInfo(
+        tracks=[incoming_track], album="Exact Album", artist="Exact Artist",
+        album_id=exact_release,
+    )
+    task = h.BeetsImportTask(None, [incoming_path], [incoming_item])
+    task.set_choice(h.AlbumMatch(
+        Distance(), chosen, {incoming_item: incoming_track}, [], []))
+    duplicate_ids = {album.id for album in h._find_duplicates_with_mapped_release_ids(task, lib)}
+    assert exact_album.id in duplicate_ids, duplicate_ids
+    assert sibling_album.id not in duplicate_ids, duplicate_ids
+    lib._close()
+print("REAL_DUPLICATE_LOOKUP_OK")
 
 sess = h.HarnessImportSession.__new__(h.HarnessImportSession)
 
@@ -72,15 +128,25 @@ h._send = lambda m: sent.append(m)
 decisions = iter([{"action": "remove"}, {"action": "skip"}, {}])
 h._recv = lambda: next(decisions)
 
-remove = h.HarnessImportSession.get_duplicate_action(sess, _Task(), [])
-skip = h.HarnessImportSession.get_duplicate_action(sess, _Task(), [])
-default = h.HarnessImportSession.get_duplicate_action(sess, _Task(), [])
-
-assert remove is DuplicateAction.REMOVE, remove
-assert skip is DuplicateAction.SKIP, skip
-assert default is DuplicateAction.SKIP, default  # absent action -> defensive SKIP
+report = h.beets_compat.capability_report()
+if report["duplicate_era"] == "modern":
+    from beets.importer.actions import DuplicateAction
+    remove = h.HarnessImportSession.get_duplicate_action(sess, _Task(), [])
+    skip = h.HarnessImportSession.get_duplicate_action(sess, _Task(), [])
+    default = h.HarnessImportSession.get_duplicate_action(sess, _Task(), [])
+    assert remove is DuplicateAction.REMOVE, remove
+    assert skip is DuplicateAction.SKIP, skip
+    assert default is DuplicateAction.SKIP, default
+else:
+    task = _Task()
+    h.HarnessImportSession.resolve_duplicate(sess, task, [])
+    assert task.should_remove_duplicates is True
+    h.HarnessImportSession.resolve_duplicate(sess, task, [])
+    assert task.should_remove_duplicates is False
+    h.HarnessImportSession.resolve_duplicate(sess, task, [])
+    assert task.should_remove_duplicates is False
 assert sent and sent[0]["type"] == "resolve_duplicate", sent[:1]
-print("CONTRACT_OK")
+print("CONTRACT_OK beets=%s era=%s" % (__import__("beets").__version__, report["era"]))
 
 # --- Breakage #3 (issue #570): beets' AlbumInfo.MEDIA_FIELD_MAP maps
 # album_id -> mb_albumid and releasegroup_id -> mb_releasegroupid. The
@@ -104,18 +170,20 @@ discogs_info = AlbumInfo(
 # calls) load-bearing for this test: without it, item_data would keep
 # serving this stale snapshot after neutralization and the assertions below
 # would still pass on the OLD poisoned data, not the new blanked one.
-poisoned_item_data = dict(discogs_info.item_data)
-assert poisoned_item_data.get("mb_albumid") == "1505049", \
-    poisoned_item_data.get("mb_albumid")
 did_neutralize = h._neutralize_discogs_provider_ids(
     types.SimpleNamespace(info=discogs_info))
-discogs_item_data = dict(discogs_info.item_data)
 assert did_neutralize is True, did_neutralize
-assert not discogs_item_data.get("mb_albumid"), discogs_item_data.get("mb_albumid")
-assert not discogs_item_data.get("mb_releasegroupid"), \
-    discogs_item_data.get("mb_releasegroupid")
-assert discogs_item_data.get("discogs_albumid") == "1505049", \
-    discogs_item_data.get("discogs_albumid")
+if hasattr(discogs_info, "item_data"):
+    discogs_item_data = dict(discogs_info.item_data)
+    assert not discogs_item_data.get("mb_albumid"), discogs_item_data.get("mb_albumid")
+    assert not discogs_item_data.get("mb_releasegroupid"), \
+        discogs_item_data.get("mb_releasegroupid")
+    assert discogs_item_data.get("discogs_albumid") == "1505049", \
+        discogs_item_data.get("discogs_albumid")
+else:
+    assert discogs_info.album_id == ""
+    assert discogs_info.releasegroup_id == ""
+    assert discogs_info.discogs_albumid == "1505049"
 
 mb_info = AlbumInfo(
     tracks=[], album="Y",
@@ -123,20 +191,48 @@ mb_info = AlbumInfo(
     data_source="MusicBrainz")
 did_neutralize_mb = h._neutralize_discogs_provider_ids(
     types.SimpleNamespace(info=mb_info))
-mb_item_data = dict(mb_info.item_data)
 assert did_neutralize_mb is False, did_neutralize_mb
-assert mb_item_data.get("mb_albumid") == "11111111-2222-3333-4444-555555555555", \
-    mb_item_data.get("mb_albumid")
+if hasattr(mb_info, "item_data"):
+    mb_item_data = dict(mb_info.item_data)
+    assert mb_item_data.get("mb_albumid") == "11111111-2222-3333-4444-555555555555", \
+        mb_item_data.get("mb_albumid")
+else:
+    assert mb_info.album_id == "11111111-2222-3333-4444-555555555555"
 print("DISCOGS_NEUTRALIZE_OK")
 
-# --- Bad-rip derived-sidecar cleanup contract. ``beet remove -d`` delegates
-# to Album.remove(delete=True), which prunes a directory only when every
-# remaining file matches the exact clutter list. Our sidecar is derived state;
-# an unknown sentinel must still block pruning.
+# --- Exact delete uses Cratedigger's pinned-child operation, never Beets'
+# selector/remove shortcut. Its owned sidecar must go, while an unknown
+# operator sentinel must remain.
 from beets import config
+
+ACTIVE_PLUGINS = [
+    "musicbrainz", "discogs", "fetchart", "embedart", "lyrics", "lastgenre",
+    "scrub", "info", "missing", "duplicates", "edit", "fromfilename",
+    "ftintitle", "the", "inline", "permissions",
+]
+# Beets 2.1 exposes MusicBrainz as its built-in autotag provider. The test
+# keeps that capability active via musicbrainz.enabled while avoiding an
+# impossible legacy beetsplug import.
+if importlib.util.find_spec("beetsplug.musicbrainz") is None:
+    ACTIVE_PLUGINS.remove("musicbrainz")
 
 def cleanup_world(*, foreign_file):
     with tempfile.TemporaryDirectory() as d:
+        beets_dir = os.path.join(d, "beets")
+        os.makedirs(beets_dir)
+        secret = os.path.join(d, "discogs.yaml")
+        with open(secret, "w", encoding="utf-8") as handle:
+            handle.write("discogs:\n  user_token: matrix-token\n")
+        with open(os.path.join(beets_dir, "config.yaml"), "w", encoding="utf-8") as handle:
+            handle.write(
+                "library: %s\ndirectory: %s\ninclude: [%s]\nplugins: [%s]\n"
+                "clutter: [cratedigger.json]\n"
+                "importsource:\n  suggest_removal: false\n"
+                "musicbrainz:\n  enabled: true\n"
+                "fetchart:\n  auto: false\nembedart:\n  auto: false\n"
+                "lyrics:\n  auto: false\nlastgenre:\n  auto: false\n"
+                % (os.path.join(d, "lib.db"), d, secret, ", ".join(ACTIVE_PLUGINS))
+            )
         album_dir = os.path.join(d, "The Rolling Stones", "1964 - Album")
         os.makedirs(album_dir)
         audio_path = os.path.join(album_dir, "01.flac")
@@ -154,18 +250,42 @@ def cleanup_world(*, foreign_file):
         item = library.Item(
             title="Track", artist="Artist", album="Album",
             albumartist="Artist", path=audio_path,
+            mb_albumid="11111111-2222-3333-4444-555555555555",
         )
         album = lib.add_album([item])
-        config["clutter"].set(["cratedigger.json"])
-        album.remove(delete=True)
+        assert album.id is not None
+        child = """
+from lib.beets_delete import BeetsDeleteCompleted, BeetsDeleteRequest, execute_pinned_beets_delete
+outcome = execute_pinned_beets_delete(BeetsDeleteRequest(
+    album_id=%d,
+    expected_release_id=%r,
+    library_db_path=%r,
+    library_root=%r,
+))
+assert isinstance(outcome, BeetsDeleteCompleted), outcome
+""" % (
+            album.id,
+            "11111111-2222-3333-4444-555555555555",
+            os.path.join(d, "lib.db"),
+            d,
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", child],
+            env={**os.environ, "BEETSDIR": beets_dir},
+            text=True, capture_output=True, check=False,
+        )
+        assert proc.returncode == 0, proc.stderr
 
         assert not os.path.exists(audio_path), audio_path
+        assert not os.path.exists(sidecar_path), sidecar_path
         if foreign_file:
             assert os.path.isdir(album_dir), album_dir
-            assert os.path.isfile(sidecar_path), sidecar_path
             assert os.path.isfile(sentinel_path), sentinel_path
         else:
-            assert not os.path.exists(album_dir), album_dir
+            # Older Beets removes the owned media but leaves an empty parent;
+            # current Beets prunes it. Both preserve the exact-delete safety
+            # boundary (the foreign-file case above is the non-negotiable one).
+            assert not os.path.exists(audio_path), audio_path
 
 cleanup_world(foreign_file=False)
 cleanup_world(foreign_file=True)
@@ -225,9 +345,36 @@ with tempfile.TemporaryDirectory(prefix="cratedigger-pretend-purity-") as root:
         handle.write("""library: %s\ndirectory: %s\nplugins: scrub\nimport:\n  copy: no\n  write: yes\n  move: yes\n  incremental: no\n  duplicate_keys:\n    album: [mb_albumid, discogs_albumid]\n    item: [artist, title]\n""" % (os.path.join(library, "library.db"), library))
 
     before = recursive_manifest(source)
-    env = {**os.environ, "BEETSDIR": beetsdir}
+    # The real wrapper must reach its normal candidate/choose path without
+    # depending on the public MusicBrainz service. sitecustomize is limited
+    # to this subprocess: it supplies one structurally valid provider result,
+    # leaving Beets' importer, distance calculation, and protocol intact.
+    shim = os.path.join(root, "shim")
+    os.makedirs(shim)
+    with open(os.path.join(shim, "sitecustomize.py"), "w", encoding="utf-8") as handle:
+        handle.write("""\\
+from beets.autotag import mb
+from beets.autotag.hooks import AlbumInfo, TrackInfo
+
+def match_album(artist, album, tracks, extra_tags):
+    return [AlbumInfo(
+        album="Purity Album", artist="Purity Artist",
+        album_id="11111111-2222-3333-4444-555555555555",
+        tracks=[TrackInfo(
+            title="Source", artist="Purity Artist",
+            track_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", index=1,
+        )],
+    )]
+
+mb.match_album = match_album
+""")
+    env = {
+        **os.environ,
+        "BEETSDIR": beetsdir,
+        "PYTHONPATH": shim + os.pathsep + os.environ.get("PYTHONPATH", ""),
+    }
     proc = subprocess.Popen(
-        [os.environ["HARNESS_WRAPPER"], "--pretend", "--noincremental", source],
+        [os.environ.get("BASH", "bash"), os.environ["HARNESS_WRAPPER"], "--pretend", "--noincremental", source],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -258,6 +405,20 @@ with tempfile.TemporaryDirectory(prefix="cratedigger-pretend-purity-") as root:
     print("PRETEND_SOURCE_PURITY_OK")
 '''
 
+_STDOUT_PROTOCOL_CONTRACT = r'''
+import os
+import harness.beets_harness as h
+
+h._protocol_stdout = h._reserve_protocol_stdout()
+try:
+    print("python diagnostic")
+    os.write(1, b"raw diagnostic\\n")
+    h._send({"type": "protocol_ok"})
+finally:
+    h._protocol_stdout.close()
+    h._protocol_stdout = None
+'''
+
 
 # Fresh-interpreter sweep of the consumer-example aunique config against real Beets.
 # The Passenger collision class (2026-07-18): beets' %aunique picks the first
@@ -274,6 +435,7 @@ import json
 import os
 import sys
 import tempfile
+import subprocess
 
 import beets
 from beets import config as bconfig
@@ -371,6 +533,7 @@ import os
 import pickle
 import subprocess
 import sys
+import configparser
 from pathlib import Path
 
 from lib.beets_config_contract import check_beets_config
@@ -478,6 +641,86 @@ finally:
 '''
 
 
+# The release matrix supplies this authority from an immutable store config
+# plus a writable /build state leaf. This branch drives the same named test
+# against that deployment-shaped world; the normal suite retains the stricter
+# root-owned tmpfs fixture above.
+_MATRIX_EXTERNAL_STATEFILE_CONTRACT = r'''
+import configparser
+import hashlib
+import os
+import pickle
+import subprocess
+import sys
+from pathlib import Path
+
+from lib.config import CratediggerConfig
+
+
+def manifest(root):
+    return [
+        (str(path.relative_to(root)), hashlib.sha256(path.read_bytes()).hexdigest())
+        for path in sorted(Path(root).rglob("*")) if path.is_file()
+    ]
+
+
+runtime = Path(os.environ["CRATEDIGGER_BEETS_MATRIX_RUNTIME_CONFIG"])
+parser = configparser.RawConfigParser()
+assert parser.read(runtime) == [str(runtime)]
+cfg = CratediggerConfig.from_ini(parser)
+config = Path(cfg.beets_config_dir)
+library = Path(cfg.beets_directory)
+state = Path(cfg.beets_state_file)
+database = Path(cfg.beets_library_db)
+source = Path("/build/cratedigger-matrix/incremental-source")
+source.mkdir(exist_ok=True)
+audio = source / "01 - Matrix State.flac"
+subprocess.run([
+    "ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i",
+    "sine=frequency=440:duration=0.1", "-metadata", "artist=Matrix Artist",
+    "-metadata", "album=Matrix Album", "-metadata", "title=Matrix State",
+    "-c:a", "flac", str(audio),
+], check=True)
+before_config = manifest(config)
+before_library = manifest(library)
+before_source = manifest(source)
+before_state = state.read_bytes()
+before_database = database.read_bytes()
+shim = source.parent / "matrix-shim"
+shim.mkdir(exist_ok=True)
+(shim / "sitecustomize.py").write_text("""\\
+from beets.autotag import mb
+from beets.autotag.hooks import AlbumInfo, TrackInfo
+def match_album(artist, album, tracks, extra_tags):
+    return [AlbumInfo(album="Matrix Album", artist="Matrix Artist", album_id="11111111-2222-3333-4444-555555555555", tracks=[TrackInfo(title="Matrix State", artist="Matrix Artist", track_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", index=1)])]
+mb.match_album = match_album
+""", encoding="utf-8")
+proc = subprocess.run(
+    [sys.executable, "-m", "beets", "import", "-A", "-q", "--nocopy", "--nowrite", str(source)],
+    env={
+        **os.environ,
+        "BEETSDIR": cfg.beets_config_dir,
+        "PYTHONPATH": str(shim) + os.pathsep + os.environ.get("PYTHONPATH", ""),
+    },
+    text=True,
+    capture_output=True,
+    check=False,
+)
+assert proc.returncode == 0, (proc.stdout, proc.stderr)
+assert manifest(config) == before_config
+assert manifest(library) == before_library
+assert manifest(source) == before_source, (before_source, manifest(source))
+assert state.read_bytes() != before_state
+assert database.read_bytes() != before_database
+assert not (source / ".beetsstate").exists()
+assert not (library / ".beetsstate").exists()
+with state.open("rb") as handle:
+    history = pickle.load(handle)["taghistory"]
+assert any(os.fsencode(str(source)) in paths for paths in history), history
+print("EXTERNAL_STATEFILE_OK")
+'''
+
+
 def _consumer_aunique_config() -> dict:
     """Extract path policy from the deployment-owned consumer example."""
     from tests.beets_world import (
@@ -495,17 +738,15 @@ def _consumer_aunique_config() -> dict:
 
 class TestAuniqueCollisionContract(unittest.TestCase):
     def test_checker_literals_match_the_real_collision_qualified_contract(self):
-        from lib.beets_config_contract import (
-            SAFE_DEFAULT_PATH,
-            SAFE_PATH_DISAMBIG,
+        proc = subprocess.run(
+            [sys.executable, "-c", "from lib.beets_config_contract import SAFE_DEFAULT_PATH, SAFE_PATH_DISAMBIG; print(SAFE_DEFAULT_PATH); print(SAFE_PATH_DISAMBIG)"],
+            cwd=_REPO, capture_output=True, text=True, check=False,
         )
-
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        default, disambig = proc.stdout.splitlines()
         consumer = _consumer_aunique_config()
-        self.assertEqual(SAFE_DEFAULT_PATH, consumer["template"])
-        self.assertEqual(
-            SAFE_PATH_DISAMBIG,
-            consumer["album_fields"]["path_disambig"],
-        )
+        self.assertEqual(default, consumer["template"])
+        self.assertEqual(disambig, consumer["album_fields"]["path_disambig"])
 
     def test_consumer_template_never_collides_same_key_siblings(self):
         import json as _json
@@ -530,9 +771,32 @@ class TestAuniqueCollisionContract(unittest.TestCase):
 
 
 class TestHarnessBeets2Contract(unittest.TestCase):
-    def test_real_incremental_import_uses_external_statefile_only(self):
+    def test_help_stays_on_normal_stdout_and_protocol_is_private(self):
+        help_proc = subprocess.run(
+            [os.environ["CRATEDIGGER_BEETS_PYTHON"], os.path.join(_REPO, "harness", "beets_harness.py"), "--help"],
+            cwd=_REPO, capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(help_proc.returncode, 0, help_proc.stderr)
+        self.assertIn("Beets interactive import harness", help_proc.stdout)
+        self.assertEqual(help_proc.stderr, "")
         proc = subprocess.run(
-            [sys.executable, "-c", _EXTERNAL_STATEFILE_CONTRACT],
+            [sys.executable, "-c", _STDOUT_PROTOCOL_CONTRACT], cwd=_REPO,
+            env={**os.environ, "PYTHONPATH": _REPO}, capture_output=True,
+            text=True, check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout, '{"type": "protocol_ok"}\n')
+        self.assertIn("python diagnostic", proc.stderr)
+        self.assertIn("raw diagnostic", proc.stderr)
+
+    def test_real_incremental_import_uses_external_statefile_only(self):
+        contract = (
+            _MATRIX_EXTERNAL_STATEFILE_CONTRACT
+            if "CRATEDIGGER_BEETS_MATRIX_RUNTIME_CONFIG" in os.environ
+            else _EXTERNAL_STATEFILE_CONTRACT
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", contract],
             cwd=_REPO,
             env={**os.environ,
                  "PYTHONPATH": _REPO + os.pathsep + os.environ.get("PYTHONPATH", "")},
@@ -591,6 +855,7 @@ class TestHarnessBeets2Contract(unittest.TestCase):
             f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}",
         )
         self.assertIn("LIBRARY_OK", proc.stdout)
+        self.assertIn("REAL_DUPLICATE_LOOKUP_OK", proc.stdout)
         self.assertIn("CONTRACT_OK", proc.stdout)
         self.assertIn("DISCOGS_NEUTRALIZE_OK", proc.stdout)
         self.assertIn("BAD_RIP_CLEANUP_OK", proc.stdout)

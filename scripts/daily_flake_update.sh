@@ -11,6 +11,10 @@ branch="${CRATEDIGGER_UPDATE_BRANCH:-main}"
 state_dir="${CRATEDIGGER_AUTOMATION_STATE_DIR:?CRATEDIGGER_AUTOMATION_STATE_DIR is required}"
 mirror_url="${CRATEDIGGER_MIRROR_URL:?CRATEDIGGER_MIRROR_URL is required}"
 
+mkdir -p "$state_dir"
+exec 9>"$state_dir/flake-update.lock"
+flock 9
+
 world_database="$state_dir/hypothesis/world-model"
 mirror_database="$state_dir/hypothesis/mirror-world"
 fuzz_database="$state_dir/hypothesis/fuzz"
@@ -48,7 +52,7 @@ cd "$checkout"
 unset TEST_DB_DSN
 
 echo "daily unstable gate: updating flake.lock"
-if ! nix flake update; then
+if ! nix flake update nixpkgs; then
     echo "daily unstable gate: flake update failed" >&2
     exit 1
 fi
@@ -76,8 +80,8 @@ run_stage "whole-repository Pyright" \
     nix-shell --run "pyright --threads 4"
 run_stage "deterministic full suite" \
     nix-shell --run "bash scripts/run_tests.sh"
-run_stage "Nix flake checks" \
-    nix flake check --print-build-logs
+run_stage "stable Nix and Beets-release checks" \
+    nix build .#checks.x86_64-linux.beetsStableCandidate --print-build-logs
 run_stage "world-model burst" \
     env CRATEDIGGER_WORLD_DATABASE="$world_database" \
     nix-shell --run "bash scripts/world_model_burst.sh"

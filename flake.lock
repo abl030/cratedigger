@@ -1,5 +1,22 @@
 {
   "nodes": {
+    "beets-tip": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1785553066,
+        "narHash": "sha256-5RUonI2t60IKfeE9GIsxR3idLc4VeIdgSl0WxI2hpgU=",
+        "owner": "beetbox",
+        "repo": "beets",
+        "rev": "efc89702604237391a66e2a737cd272943544641",
+        "type": "github"
+      },
+      "original": {
+        "owner": "beetbox",
+        "ref": "master",
+        "repo": "beets",
+        "type": "github"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1785090369,
@@ -18,6 +35,7 @@
     },
     "root": {
       "inputs": {
+        "beets-tip": "beets-tip",
         "nixpkgs": "nixpkgs"
       }
     }

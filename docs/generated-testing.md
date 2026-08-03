@@ -14,14 +14,34 @@ accepts only a complete exact stable or shrinking approved cohort.
 
 ## Daily unstable compatibility gate
 
-`scripts/daily_flake_update.sh` is the single unattended entry point. It
-checks out current `main`, advances `flake.lock` to current nixpkgs unstable,
-and runs whole-repository Pyright, the deterministic suite, `nix flake check`,
-the default lifecycle hammer, the 20,000-example fuzz burst, and the
-mirror-harness smoke. Independent test stages all run so one notification
-contains the whole day's result. A completely green candidate commits and
-pushes only `flake.lock`; a red candidate pushes nothing. Scheduling, state
-paths, and notification belong to the downstream nixosconfig service.
+`scripts/daily_flake_update.sh` is the Nixpkgs-reference unattended entry
+point. It checks out current `main`, advances only the `nixpkgs` node in
+`flake.lock`,
+and runs whole-repository Pyright, the deterministic suite, the
+`beetsStableCandidate` aggregate (every non-tip flake check plus the complete
+reviewed Beets-release matrix), the default lifecycle hammer, the
+20,000-example fuzz burst, and the mirror-harness smoke. The moving tip build,
+contract, and full-repository Pyright canary are deliberately excluded from
+this stable candidate and run only in the independent tip job. Independent
+test stages all run so one notification contains the whole day's result. A
+completely green candidate commits and pushes only `flake.lock`; a red
+candidate pushes nothing. Scheduling, state paths, and notification belong to
+the downstream nixosconfig service.
+
+`scripts/daily_beets_tip_update.sh` is a separate serialized checks-only
+canary. It advances only `beets-tip`, then requires the tip build, disposable
+boundary contract, and tip-backed Pyright before making a lock-only candidate
+commit. It never supplies the deployment-owned Beets runtime. The historical
+matrix consumes the reviewed manifest; use
+[`scripts/refresh_beets_compat_releases.py`](../scripts/refresh_beets_compat_releases.py)
+with `--as-of YYYY-MM-DD --check` for a fixed-clock operator refresh check.
+
+Each matrix member admits the deployment-shaped active Beets plugin profile,
+loads that profile for the exact-delete boundary, and runs an incremental
+import with a writable external state file while asserting that neither the
+immutable configuration nor the source/library tree receives state artifacts.
+An executable closure check also keeps the tip and historical Beets packages
+out of normal packages, shells, apps, and the exported-module VM closure.
 
 ## Bug hunting — the house method
 

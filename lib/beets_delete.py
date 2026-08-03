@@ -425,7 +425,12 @@ def execute_pinned_beets_delete(request: BeetsDeleteRequest) -> BeetsDeleteOutco
     from beets import config, library, plugins, util
 
     config.read()
-    configured_plugins = set(plugins.get_plugin_names())
+    if hasattr(plugins, "get_plugin_names"):
+        configured_plugins = set(plugins.get_plugin_names())
+    else:
+        # Beets 2.1 predates plugins.get_plugin_names(). Its configured
+        # plugin list remains the authoritative profile for the exact child.
+        configured_plugins = set(config["plugins"].as_str_seq())
     configured_db = config["library"].as_filename()
     configured_root = config["directory"].as_filename()
     if not _configuration_matches(request, configured_db, configured_root):
@@ -444,7 +449,15 @@ def execute_pinned_beets_delete(request: BeetsDeleteRequest) -> BeetsDeleteOutco
     # Cratedigger library delete, so force that common plugin profile into its
     # documented non-suggesting mode for this operation.
     config["importsource"]["suggest_removal"].set(False)
-    plugins.load_plugins()
+    if hasattr(plugins, "get_plugin_names"):
+        plugins.load_plugins()
+    else:
+        # Legacy Beets accepts an explicit name sequence and otherwise loads
+        # nothing; modern Beets resolves the configured profile itself.
+        legacy_load_plugins: Callable[[set[str]], object] = getattr(  # noqa: B009 - legacy signature
+            plugins, "load_plugins",
+        )
+        legacy_load_plugins(configured_plugins)
     loaded_plugins = {plugin.name for plugin in plugins.find_plugins()}
     missing_plugins = sorted(configured_plugins - loaded_plugins)
     if missing_plugins:

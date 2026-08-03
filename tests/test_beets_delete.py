@@ -79,7 +79,11 @@ class TestPinnedBeetsDelete(unittest.TestCase):
         album.store()
         item["delete_item_flex"] = "item-flex"
         item.store()
-        album_id = int(album.id)
+        album_id_raw = album.id
+        self.assertIsNotNone(album_id_raw)
+        if album_id_raw is None:
+            raise AssertionError("persisted Beets album is missing its database id")
+        album_id = int(album_id_raw)
         lib._close()
         return album_id, album_dir
 

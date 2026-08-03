@@ -1,0 +1,175 @@
+"""Fixed-clock contracts for the Beets compatibility release manifest."""
+
+from __future__ import annotations
+
+import datetime as dt
+import importlib.util
+import json
+import unittest
+from pathlib import Path
+from typing import Protocol
+from unittest.mock import patch
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+SCRIPT = REPO_ROOT / "scripts" / "refresh_beets_compat_releases.py"
+SPEC = importlib.util.spec_from_file_location("beets_compat_releases", SCRIPT)
+assert SPEC is not None and SPEC.loader is not None
+refresh = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(refresh)
+
+
+class GithubRelease(Protocol):
+    tag_name: str
+    published_at: str | None
+    draft: bool
+    prerelease: bool
+
+
+def release(
+    tag: str, published_at: str, *, draft: bool = False, prerelease: bool = False,
+) -> GithubRelease:
+    return refresh.GithubRelease(
+        tag_name=tag, published_at=published_at, draft=draft, prerelease=prerelease,
+    )
+
+
+class TestBeetsCompatReleaseManifest(unittest.TestCase):
+    as_of = dt.date(2026, 8, 3)
+
+    def test_selector_is_inclusive_final_and_deterministic(self) -> None:
+        selected = refresh.select_final_releases([
+            release("v2.13.1", "2026-08-03T23:59:59Z"),
+            release("v2.13.0", "2024-08-04T00:00:00Z"),
+            release("v2.12.9", "2024-08-02T00:00:00Z"),
+            release("v2.14.0rc1", "2026-08-02T00:00:00Z", prerelease=True),
+            release("v2.14.0", "2026-08-02T00:00:00Z", draft=True),
+        ], as_of=self.as_of)
+        self.assertEqual([entry.tag_name for entry in selected], ["v2.13.0", "v2.13.1"])
+
+    def test_duplicate_qualifying_tag_fails_loudly(self) -> None:
+        with self.assertRaisesRegex(ValueError, "duplicate qualifying"):
+            refresh.select_final_releases([
+                release("v2.13.1", "2026-08-01T00:00:00Z"),
+                release("v2.13.1", "2026-08-02T00:00:00Z"),
+            ], as_of=self.as_of)
+
+    def test_paginated_release_fetch_preserves_record_101(self) -> None:
+        page_one = [release(f"v2.1.{index}", "2026-01-01T00:00:00Z")
+                    for index in range(100)]
+        page_two = [release("v2.13.1", "2026-08-01T00:00:00Z")]
+        flattened = refresh.flatten_release_pages([page_one, page_two])
+        self.assertEqual(len(flattened), 101)
+        self.assertEqual(flattened[-1].tag_name, "v2.13.1")
+
+    def test_external_json_adapters_accept_realistic_unrelated_fields(self) -> None:
+        release_payload = [[{
+            "url": "https://api.github.com/repos/beetbox/beets/releases/1",
+            "assets_url": "https://api.github.com/repos/beetbox/beets/releases/1/assets",
+            "upload_url": "https://uploads.github.com/repos/beetbox/beets/releases/1/assets{?name,label}",
+            "html_url": "https://github.com/beetbox/beets/releases/tag/v2.13.1",
+            "id": 1,
+            "author": {"login": "beetsbot"},
+            "node_id": "RE_kwDOExample",
+            "tag_name": "v2.13.1",
+            "target_commitish": "master",
+            "name": "2.13.1",
+            "draft": False,
+            "prerelease": False,
+            "created_at": "2026-08-01T00:00:00Z",
+            "published_at": "2026-08-01T00:00:00Z",
+            "assets": [],
+            "tarball_url": "https://api.github.com/tarball/v2.13.1",
+            "zipball_url": "https://api.github.com/zipball/v2.13.1",
+            "body": "release notes",
+            "reactions": {"total_count": 0},
+        }]]
+        commit_payload = {
+            "sha": "a" * 40,
+            "node_id": "C_kwDOExample",
+            "commit": {"message": "release"},
+            "url": "https://api.github.com/repos/beetbox/beets/commits/example",
+            "html_url": "https://github.com/beetbox/beets/commit/example",
+            "comments_url": "https://api.github.com/comments/example",
+            "author": {"login": "beetsbot"},
+            "committer": {"login": "beetsbot"},
+            "parents": [],
+            "stats": {"total": 1},
+            "files": [],
+        }
+        prefetch_payload = {
+            "hash": "sha256-" + "A" * 43 + "=",
+            "locked": {"lastModified": 0},
+            "original": {"type": "github"},
+            "storePath": "/nix/store/example-source",
+        }
+        with patch.object(refresh, "_run_json", side_effect=[
+            json.dumps(release_payload), json.dumps(commit_payload), json.dumps(prefetch_payload),
+        ]):
+            releases = refresh._github_releases()
+            revision = refresh._resolve_revision("v2.13.1")
+            nar_hash = refresh._prefetch(revision)
+        self.assertEqual([entry.tag_name for entry in releases], ["v2.13.1"])
+        self.assertEqual(revision, "a" * 40)
+        self.assertEqual(nar_hash, prefetch_payload["hash"])
+
+    def test_external_json_adapters_reject_missing_or_wrong_required_fields(self) -> None:
+        cases = (
+            (
+                "releases missing tag",
+                "[[{\"draft\": false, \"prerelease\": false, \"published_at\": null}]]",
+                refresh._github_releases,
+            ),
+            (
+                "releases wrong draft",
+                "[[{\"tag_name\": \"v2.13.1\", \"draft\": \"false\", \"prerelease\": false, \"published_at\": null}]]",
+                refresh._github_releases,
+            ),
+            ("commit missing sha", "{}", lambda: refresh._resolve_revision("v2.13.1")),
+            ("commit wrong sha", '{"sha": 1}', lambda: refresh._resolve_revision("v2.13.1")),
+            ("prefetch missing hash", "{}", lambda: refresh._prefetch("a" * 40)),
+            ("prefetch wrong hash", '{"hash": 1}', lambda: refresh._prefetch("a" * 40)),
+        )
+        for label, payload, call in cases:
+            with (
+                self.subTest(adapter=label),
+                patch.object(refresh, "_run_json", return_value=payload),
+                self.assertRaises(TypeError),
+            ):
+                call()
+
+    def test_renderer_and_validator_reject_known_bad_manifest(self) -> None:
+        entries = refresh.resolve_entries(
+            [release("v2.12.0", "2025-01-01T00:00:00Z"), release("v2.13.1", "2026-07-29T10:47:07Z")],
+            as_of=self.as_of,
+            resolve_revision=lambda tag: "a" * 40 if tag == "v2.12.0" else "b" * 40,
+            prefetch=lambda _rev: "sha256-" + "A" * 43 + "=",
+        )
+        rendered = refresh.render_manifest(entries)
+        self.assertEqual(rendered, refresh.render_manifest(refresh.decode_manifest(rendered)))
+        bad = [
+            refresh.ManifestEntry(
+                version=entry.version, tag="v2.14.0rc1" if index == 0 else entry.tag,
+                publishedAt=entry.publishedAt, rev=entry.rev, narHash=entry.narHash,
+                buildBackend=entry.buildBackend,
+            )
+            for index, entry in enumerate(entries)
+        ]
+        with self.assertRaisesRegex(ValueError, "disagree"):
+            refresh.validate_manifest(bad)
+        with self.assertRaises(TypeError):
+            refresh.decode_manifest(rendered.replace("{", '{"unexpected":true,', 1))
+
+    def test_committed_manifest_is_canonical_snapshot(self) -> None:
+        manifest = REPO_ROOT / "nix" / "beets-compat-releases.json"
+        entries = refresh.decode_manifest(manifest.read_text(encoding="utf-8"))
+        refresh.validate_manifest(entries)
+        self.assertEqual(manifest.read_text(encoding="utf-8"), refresh.render_manifest(entries))
+        self.assertEqual([entry.tag for entry in entries], [
+            "v2.1.0", "v2.2.0", "v2.3.0", "v2.3.1", "v2.4.0", "v2.5.0", "v2.5.1",
+            "v2.6.0", "v2.6.1", "v2.6.2", "v2.7.0", "v2.7.1", "v2.8.0", "v2.9.0",
+            "v2.10.0", "v2.11.0", "v2.12.0", "v2.13.0", "v2.13.1",
+        ])
+
+
+if __name__ == "__main__":
+    unittest.main()

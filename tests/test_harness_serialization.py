@@ -23,6 +23,8 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
+from tests.harness_test_support import isolated_beets_harness
+
 # beets 2.x IS in the dev shell, but these unit tests mock it to isolate the
 # harness's pure helpers from beets internals. The real-beets import + API
 # contract (beets 2.12 get_duplicate_action / Library) is covered by
@@ -32,6 +34,7 @@ _beets_mocks = {
     "beets.config": MagicMock(),
     "beets.library": MagicMock(),
     "beets.plugins": MagicMock(),
+    "beets.ui": MagicMock(),
     "beets.importer": MagicMock(),
     "beets.importer.actions": MagicMock(),
     "beets.importer.session": MagicMock(),
@@ -40,18 +43,18 @@ _beets_mocks = {
     "beets.dbcore": MagicMock(),
     "beets.util": MagicMock(),
 }
-for name, mock in _beets_mocks.items():
-    sys.modules.setdefault(name, mock)
+_beets_mocks["beets.ui"].get_path_formats = None
+_beets_mocks["beets.ui"].get_replacements = None
 
 # ImportSession needs to be a class so subclassing works.
-setattr(  # noqa: B010 - populate a synthetic runtime module
-    sys.modules["beets.importer.session"],
-    "ImportSession",
-    type("ImportSession", (object,), {}),
+_beets_mocks["beets.importer.session"].ImportSession = type(
+    "ImportSession", (object,), {"resolve_duplicate": lambda *_args: None},
 )
+_beets_mocks["beets.importer.tasks"].ImportTask = type("ImportTask", (object,), {})
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from harness import beets_harness
+with isolated_beets_harness(_beets_mocks) as beets_harness:
+    pass
 
 # ---------------------------------------------------------------------------
 # _serialize_album_candidate — AlbumInfo IDs (album_id, releasegroup_id)

@@ -1070,7 +1070,11 @@ class TestDestructiveAuthorityRealPostgres(unittest.TestCase):
                     artist="Artist A", title="Track", mb_albumid=RELEASE_A,
                 )
                 album = beets_lib.add_album([item])
-                album_id = int(album.id)
+                album_id_raw = album.id
+                self.assertIsNotNone(album_id_raw)
+                if album_id_raw is None:
+                    raise AssertionError("persisted Beets album is missing its database id")
+                album_id = int(album_id_raw)
                 beets_lib._close()
                 with (
                     patch.dict(os.environ, {
