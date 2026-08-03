@@ -47,7 +47,7 @@ def isolated_beets_harness(modules: Mapping[str, ModuleType]) -> Iterator[Module
             if existed:
                 setattr(parent, attribute, previous)
             else:
-                delattr(parent, attribute)
+                vars(parent).pop(attribute, None)
         if package_existed:
             for attribute in _HARNESS_MODULES:
                 vars(package).pop(attribute.rpartition(".")[2], None)

@@ -6,7 +6,8 @@ import subprocess
 import sys
 import textwrap
 import unittest
-from unittest.mock import MagicMock
+from types import ModuleType
+from unittest.mock import MagicMock, patch
 
 from tests.harness_test_support import isolated_beets_harness
 
@@ -48,6 +49,18 @@ class TestIsolatedBeetsHarness(unittest.TestCase):
             self.assertIs(compatibility.CAPABILITIES.import_task, task)
             self.assertIs(harness.HarnessImportSession.__bases__[0], session)
             self.assertIs(harness.BeetsImportTask, task)
+
+    def test_exception_restores_missing_parent_child_attribute(self) -> None:
+        parent = ModuleType("beets")
+        self.assertNotIn("config", vars(parent))
+        with patch.dict(sys.modules, {"beets": parent}):
+            with (
+                self.assertRaisesRegex(RuntimeError, "body failure"),
+                isolated_beets_harness(_mock_modules()),
+            ):
+                raise RuntimeError("body failure")
+            self.assertIs(sys.modules["beets"], parent)
+            self.assertNotIn("config", vars(parent))
 
     def test_nested_mock_state_and_exception_restore_in_fresh_process(self) -> None:
         script = textwrap.dedent("""
