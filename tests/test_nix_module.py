@@ -118,13 +118,14 @@ class TestDecisionDifferentialWrapperContract(unittest.TestCase):
         end = text.index('writeShellScriptBin "cratedigger-importer"', start)
         wrapper = text[start:end]
         self.assertIn(
-            'export PYTHONPATH="${src}\'\'${PYTHONPATH:+:$PYTHONPATH}"',
-            wrapper,
+            'unset PYTHONPATH PYTHONHOME PYTHONSTARTUP', wrapper,
         )
+        self.assertIn('export PYTHONNOUSERSITE=1', wrapper)
         self.assertIn(
-            'exec ${pythonEnv}/bin/python -P ${src}/scripts/decision_differential.py "$@"',
+            'exec ${pythonEnv}/bin/python -I ${src}/scripts/decision_differential.py "$@"',
             wrapper,
         )
+        self.assertNotIn('PYTHONPATH:+', wrapper)
         self.assertIn("decisionDifferential", text[text.index("environment.systemPackages"):])
 
 

@@ -144,6 +144,7 @@ import hashlib
 import os
 import sys
 import tempfile
+from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -1430,6 +1431,16 @@ def _export_debt_count(coverage: DecisionCorpusCoverage) -> int:
     return total
 
 
+def duplicate_content_addresses(
+    addresses: Sequence[_CoverageAddress],
+) -> list[tuple[str, str]]:
+    """Return duplicate content-address keys in one linear pass."""
+    counts = Counter(
+        (item.mb_release_id, item.snapshot_fingerprint) for item in addresses
+    )
+    return sorted(key for key, count in counts.items() if count > 1)
+
+
 def recompute_decision_corpus_coverage(
     source_links: Sequence[_CoverageSourceLink],
     observed_evidence: Sequence[_CoverageObservedEvidence],
@@ -1501,13 +1512,10 @@ def recompute_decision_corpus_coverage(
         for evidence_id, values in associations.items()
         if evidence_id not in conflict_ids
     }
+    # Every non-null source-link current ID is observed and audited, even when
+    # its candidate has no request authority and is excluded from replay.
     referenced_current_ids = sorted(
-        {
-            current_id
-            for values in associations.values()
-            for current_id, _release in values
-            if current_id is not None
-        }
+        {link.current_evidence_id for link in links if link.current_evidence_id is not None}
     )
     all_candidate_ids = {link.evidence_id for link in links}
     missing_candidates = sorted(all_candidate_ids - set(evidence_rows))
@@ -1622,10 +1630,7 @@ def recompute_decision_corpus_coverage(
             or address.files_sha256 != observed.files_sha256
         ):
             raise RenderDifferentialError("corpus content address disagrees with observed evidence ledger")
-    address_keys = [
-        (item.mb_release_id, item.snapshot_fingerprint) for item in addresses
-    ]
-    address_conflicts = sorted({key for key in address_keys if address_keys.count(key) > 1})
+    address_conflicts = duplicate_content_addresses(addresses)
     output = _CoverageCorpusOutput(
         expected_candidate_ids=expected_candidate_ids,
         written_candidate_ids=written_candidate_ids,
@@ -1810,10 +1815,9 @@ def export_decision_corpus(
             }
             referenced_current_ids = sorted(
                 {
-                    current_id
-                    for association_values in associations.values()
-                    for current_id, _release in association_values
-                    if current_id is not None
+                    link.current_evidence_id
+                    for link in links
+                    if link.current_evidence_id is not None
                 }
             )
             # Account every candidate ID before choosing the valid replay
@@ -2011,6 +2015,9 @@ def _build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Corpus JSONL: one album_quality_evidence row object per line",
     )
+    decide.add_argument(
+        "--coverage", required=True, help="Matching verified coverage manifest"
+    )
 
     verify = sub.add_parser("verify", help="Verify an exported corpus/coverage pair")
     verify.add_argument("--corpus", required=True, help="Exported corpus JSONL")
@@ -2101,6 +2108,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 0 if result.green else 2
         if args.mode == "decide":
+            verify_decision_corpus_pair(args.corpus, args.coverage)
             count = decide_corpus(
                 args.corpus,
                 args.out,

@@ -1945,6 +1945,17 @@ pkgs.testers.nixosTest {
         "'cd /tmp/cratedigger-hostile-cwd && pipeline-cli list wanted'; "
         "test ! -e /tmp/cratedigger-hostile-imported"
     )
+    # The differential wrapper accepts operator paths, but never operator
+    # Python startup code. -I plus the script-owned repository root must win.
+    machine.succeed(
+        "install -d -o cratedigger -g beets-library /tmp/cratedigger-hostile-python; "
+        "printf '%s\\n' 'from pathlib import Path' "
+        "'Path(\"/tmp/cratedigger-hostile-sitecustomize\").write_text(\"shadow\")' "
+        "> /tmp/cratedigger-hostile-python/sitecustomize.py; "
+        "runuser -u cratedigger -- sh -c "
+        "'PYTHONPATH=/tmp/cratedigger-hostile-python decision-differential --help >/dev/null'; "
+        "test ! -e /tmp/cratedigger-hostile-sitecustomize"
+    )
 
     # #663 U4 (Basic slice): the Python application owns only the inherited
     # Unix listener. Nginx owns the distinct loopback gateway, with no legacy

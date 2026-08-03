@@ -272,6 +272,38 @@ class TestDecisionCorpusExport(unittest.TestCase):
         self.assertTrue(corpus_output["exact_match"])
         self.assertIsInstance(corpus_output["sha256"], str)
 
+    def test_authorityless_request_current_is_observed_but_not_replayed(self) -> None:
+        """A missing request release authority cannot hide its HAVE evidence."""
+        request_id = self._request("authorityless-current")
+        candidate_id = self._evidence("authorityless-current", 31)
+        current_id = self._evidence("authorityless-current", 32)
+        self.assertTrue(self.db.set_request_current_evidence(request_id, current_id))
+        self.db._execute(
+            "UPDATE album_requests SET mb_release_id = NULL WHERE id = %s",
+            (request_id,),
+        )
+        job = self.db.enqueue_import_job(
+            "force_import", request_id=request_id,
+            payload={"download_log_id": 1, "failed_path": "/tmp/candidate"},
+        )
+        self.assertTrue(self.db.set_import_job_candidate_evidence(job.id, candidate_id))
+        result, corpus, coverage = self._export()
+        self.assertFalse(result.green)
+        self.assertEqual(coverage["referenced_current_ids"], [current_id])
+        self.assertEqual(coverage["missing_current_evidence_ids"], [])
+        observed = coverage["observed_evidence"]
+        assert isinstance(observed, list)
+        self.assertEqual(
+            {row["evidence_id"] for row in observed if is_str_object_dict(row)},
+            {candidate_id, current_id},
+        )
+        self.assertEqual(corpus, [])
+        outputs = coverage["outputs"]
+        assert is_str_object_dict(outputs)
+        corpus_output = outputs["corpus"]
+        assert is_str_object_dict(corpus_output)
+        self.assertEqual(corpus_output["expected_referenced_current_ids"], [])
+
     def test_verify_rejects_stale_pair_and_export_rejects_same_destination(
         self,
     ) -> None:
@@ -295,6 +327,29 @@ class TestDecisionCorpusExport(unittest.TestCase):
                 verify_decision_corpus_pair(corpus, coverage)
             with self.assertRaises(RenderDifferentialError):
                 export_decision_corpus(TEST_DSN, root / "same", root / "./same")
+
+    def test_decide_verifies_pair_before_writing(self) -> None:
+        release = "decide-coverage-gate"
+        request_id = self._request(release)
+        candidate_id = self._evidence(release, 81)
+        job = self.db.enqueue_import_job(
+            "force_import", request_id=request_id,
+            payload={"download_log_id": 1, "failed_path": "/tmp/candidate"},
+        )
+        self.assertTrue(self.db.set_import_job_candidate_evidence(job.id, candidate_id))
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            corpus, coverage, out = root / "corpus", root / "coverage", root / "out"
+            export_decision_corpus(TEST_DSN, corpus, coverage)
+            self.assertEqual(
+                main(["decide", "--corpus", str(corpus), "--coverage", str(coverage), "--out", str(out)]),
+                0,
+            )
+            corpus.write_bytes(corpus.read_bytes() + b"\n")
+            self.assertEqual(
+                main(["decide", "--corpus", str(corpus), "--coverage", str(coverage), "--out", str(out)]),
+                1,
+            )
 
     def test_cli_returns_non_green_after_writing_authority_debt_outputs(self) -> None:
         """The public executable reports debt with status 2, never a green lie."""
@@ -581,10 +636,22 @@ class TestDecisionCorpusExport(unittest.TestCase):
             subprocess.run(["tar", "-xf", str(archive), "-C", str(root)], check=True)
             script = root / "scripts" / "decision_differential.py"
             shutil.copy2(Path(__file__).parents[1] / "scripts" / script.name, script)
+            release = "base-archive-decision-corpus"
+            request_id = self._request(release)
+            candidate_id = self._evidence(release, 71)
+            job = self.db.enqueue_import_job(
+                "force_import", request_id=request_id,
+                payload={"download_log_id": 1, "failed_path": "/tmp/candidate"},
+            )
+            self.assertTrue(self.db.set_import_job_candidate_evidence(job.id, candidate_id))
             corpus = root / "corpus.jsonl"
-            corpus.write_text(json.dumps(_corpus_row()) + "\n")
+            coverage = root / "coverage.json"
+            export_decision_corpus(TEST_DSN, corpus, coverage)
             out = root / "decided.jsonl"
-            for args in (("--help",), ("decide", "--corpus", str(corpus), "--out", str(out))):
+            for args in (
+                ("--help",),
+                ("decide", "--corpus", str(corpus), "--coverage", str(coverage), "--out", str(out)),
+            ):
                 completed = subprocess.run(
                     ["nix-shell", "--run", " ".join((sys.executable, str(script), *args))],
                     check=False,

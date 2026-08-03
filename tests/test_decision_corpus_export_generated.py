@@ -22,9 +22,11 @@ from scripts.decision_differential import (
     _decision_corpus_evidence_columns,
     _decision_corpus_evidence_file_columns,
     _evidence_from_corpus_row,
+    _CoverageAddress,
     assert_decision_corpus_schema,
     assert_export_output_exact,
     export_decision_corpus,
+    duplicate_content_addresses,
     verify_decision_corpus_pair,
 )
 from tests.helpers import make_album_quality_evidence
@@ -34,6 +36,47 @@ from tests.test_pipeline_db import TEST_DSN, make_db, requires_postgres
 
 @requires_postgres
 class TestDecisionCorpusExportGenerated(unittest.TestCase):
+    @given(
+        keys=st.lists(
+            st.tuples(st.text(min_size=1, max_size=8), st.text(min_size=1, max_size=8)),
+            min_size=1, max_size=200,
+        )
+    )
+    def test_linear_address_conflicts_match_reference(self, keys) -> None:
+        addresses = [
+            _CoverageAddress(
+                id=index, mb_release_id=release,
+                snapshot_fingerprint=fingerprint, files_sha256="x",
+            )
+            for index, (release, fingerprint) in enumerate(keys)
+        ]
+        expected = sorted({key for key in keys if keys.count(key) > 1})
+        self.assertEqual(duplicate_content_addresses(addresses), expected)
+
+    def test_linear_address_conflicts_handles_a_large_unique_input(self) -> None:
+        """A large, mostly-unique ledger stays on the linear Counter path."""
+        addresses = [
+            _CoverageAddress(
+                id=index,
+                mb_release_id=f"release-{index}",
+                snapshot_fingerprint=f"fingerprint-{index}",
+                files_sha256="x",
+            )
+            for index in range(10_000)
+        ]
+        addresses.append(
+            _CoverageAddress(
+                id=10_000,
+                mb_release_id="release-7777",
+                snapshot_fingerprint="fingerprint-7777",
+                files_sha256="x",
+            )
+        )
+        self.assertEqual(
+            duplicate_content_addresses(addresses),
+            [("release-7777", "fingerprint-7777")],
+        )
+
     @given(
         table=st.sampled_from(
             (
@@ -371,10 +414,20 @@ class TestDecisionCorpusExportGenerated(unittest.TestCase):
             unpaired_request = db.add_request(
                 "Generated", unpaired_release, "request", unpaired_release
             )
+            authorityless_request_release = f"{release}-authorityless"
+            authorityless_request = db.add_request(
+                "Generated",
+                authorityless_request_release,
+                "request",
+                authorityless_request_release,
+            )
             conflict_bad_request = db.add_request(
                 "Generated", wrong_release, "request", wrong_release
             )
             self.assertTrue(db.set_request_current_evidence(paired_request, dual_id))
+            self.assertTrue(
+                db.set_request_current_evidence(authorityless_request, authorityless_id)
+            )
             self.assertTrue(
                 db.set_request_current_evidence(conflict_bad_request, wrong_current_id)
             )
@@ -405,7 +458,7 @@ class TestDecisionCorpusExportGenerated(unittest.TestCase):
                         ("import", paired_request, paired_id),
                         ("download", paired_request, paired_id),
                         ("download", unpaired_request, unpaired_id),
-                        ("import", None, authorityless_id),
+                        ("import", authorityless_request, authorityless_id),
                         ("import", paired_request, conflict_id),
                         ("download", conflict_bad_request, conflict_id),
                     ]
@@ -421,6 +474,10 @@ class TestDecisionCorpusExportGenerated(unittest.TestCase):
                 else:
                     assert request_id is not None
                     download_link(request_id, evidence_id, ordinal)
+            db._execute(
+                "UPDATE album_requests SET mb_release_id = NULL WHERE id = %s",
+                (authorityless_request,),
+            )
             db._execute(
                 "UPDATE album_quality_evidence SET snapshot_fingerprint = %s WHERE id = %s",
                 ("f" * 64, authorityless_id),
@@ -474,11 +531,17 @@ class TestDecisionCorpusExportGenerated(unittest.TestCase):
             )
             self.assertEqual(len(coverage["authorityless_source_links"]), multiplicity)
             self.assertEqual(
-                coverage["authorityless_source_links"][0]["reason"], "null_request_id"
+                coverage["authorityless_source_links"][0]["reason"],
+                "request_missing_release_authority",
             )
             self.assertEqual(coverage["valid_candidates"], {"paired": 2, "unpaired": 1})
             self.assertEqual(
-                coverage["referenced_current_ids"], [dual_id, wrong_current_id]
+                coverage["referenced_current_ids"],
+                [dual_id, authorityless_id, wrong_current_id],
+            )
+            self.assertIn(
+                authorityless_id,
+                [item["evidence_id"] for item in coverage["observed_evidence"]],
             )
             self.assertEqual(len(coverage["association_conflicts"]), 1)
             self.assertEqual(

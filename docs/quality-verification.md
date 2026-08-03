@@ -480,6 +480,9 @@ required candidate/current ID. Always run `verify` before either tree decides;
 it rejects unknown manifest fields and recomputes every count, debt, role,
 association, address, digest, and green result from those ledgers and the
 corpus bytes. This is an offline artifact check, not a new database read.
+It proves structural self-consistency and stale-pair rejection, not hostile
+rewriting authenticity: the trusted operator's repeatable-read PostgreSQL
+export and the real-PG export tests are the independent completeness authority.
 
 Only `--counterfactual` is a flag. It decides whether the run can SEE a
 promotion-gate change; a zero from a run without it is not evidence. Native

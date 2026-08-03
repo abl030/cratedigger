@@ -520,8 +520,19 @@ the SQL projection and pins the deployed source plus Python environment. Run
 it on doc2 so the DSN stays in the deployed runtime boundary:
 
 ```bash
-ssh doc2 'export PGPASSWORD=$(sudo cat /run/secrets/cratedigger-pgpass | grep "^PGPASSWORD=" | cut -d= -f2); decision-differential export --dsn postgresql://cratedigger@10.20.0.11:5432/cratedigger --corpus /tmp/decision-corpus.jsonl --coverage /tmp/decision-corpus-coverage.json'
+EXPORT_DIR=/tmp/cratedigger-decision-corpus-$(date +%Y%m%d-%H%M%S)
+mkdir -p "$EXPORT_DIR"
+ssh doc2 'export PGPASSWORD=$(sudo cat /run/secrets/cratedigger-pgpass | grep "^PGPASSWORD=" | cut -d= -f2); work=$(mktemp -d /tmp/cratedigger-decision-corpus.XXXXXX); decision-differential export --dsn postgresql://cratedigger@10.20.0.11:5432/cratedigger --corpus "$work/corpus.jsonl" --coverage "$work/coverage.json"; status=$?; printf "%s\n" "$status" > "$work/export-status"; tar -C "$work" -cf - corpus.jsonl coverage.json export-status; exit 0' | tar -C "$EXPORT_DIR" -xf -
+test "$(cat "$EXPORT_DIR/export-status")" = 0 || test "$(cat "$EXPORT_DIR/export-status")" = 2
+nix-shell --run "python3 scripts/decision_differential.py verify --corpus $EXPORT_DIR/corpus.jsonl --coverage $EXPORT_DIR/coverage.json"
 ```
+
+The remote export exit is captured before transfer: `0` is green and `2` is
+named historical debt. The local verifier runs only over the transferred pair.
+`verify` proves strict structural/self-consistency and rejects stale or
+mismatched artifacts; it is not a signature or live-authenticity mechanism.
+PostgreSQL's repeatable-read export and its real-PG tests are the independent
+completeness authority.
 
 The exporter opens one repeatable-read, read-only PostgreSQL snapshot. It
 replaces each output atomically and independently: `corpus.jsonl` has one complete typed evidence
