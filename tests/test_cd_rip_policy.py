@@ -56,7 +56,14 @@ class CdRipCanonicalPolicyTest(unittest.TestCase):
         )
         self.facts = AlbumQualityEvidenceDecisionFacts(target_format="flac")
 
-    def _current(self, *, bitrate: int, fmt: str, extension: str):
+    def _current(
+        self,
+        *,
+        bitrate: int,
+        fmt: str,
+        extension: str,
+        is_cbr: bool = False,
+    ):
         return make_album_quality_evidence(
             mb_release_id="exact-release",
             measurement=AudioQualityMeasurement(
@@ -64,6 +71,7 @@ class CdRipCanonicalPolicyTest(unittest.TestCase):
                 avg_bitrate_kbps=bitrate,
                 median_bitrate_kbps=bitrate,
                 format=fmt,
+                is_cbr=is_cbr,
             ),
             files=[AlbumQualityEvidenceFile(
                 relative_path=f"01.{extension}",
@@ -178,7 +186,12 @@ class CdRipCanonicalPolicyTest(unittest.TestCase):
         )
         result = full_pipeline_decision_from_evidence(
             candidate,
-            self._current(bitrate=128, fmt="MP3", extension="mp3"),
+            self._current(
+                bitrate=128,
+                fmt="MP3",
+                extension="mp3",
+                is_cbr=True,
+            ),
             facts=AlbumQualityEvidenceDecisionFacts(
                 verified_lossless_target="mp3 128",
                 target_format="mp3 128",
@@ -190,7 +203,12 @@ class CdRipCanonicalPolicyTest(unittest.TestCase):
 
         self.assertEqual(result["stage2_import"], "transcode_upgrade")
         self.assertTrue(result["imported"])
-        self.assertTrue(result["comparison_basis"]["verified_lossless_bypass"])
+        basis = result["comparison_basis"]
+        self.assertEqual(basis["verdict"], "equivalent")
+        self.assertEqual(basis["new_format"], "mp3 128")
+        self.assertEqual(basis["new_metric"], "contract")
+        self.assertEqual(basis["new_value_kbps"], 128)
+        self.assertTrue(basis["verified_lossless_bypass"])
 
     def test_cd_proof_cannot_bypass_worse_configured_target(self) -> None:
         candidate = msgspec.structs.replace(
@@ -212,7 +230,12 @@ class CdRipCanonicalPolicyTest(unittest.TestCase):
 
         self.assertEqual(result["stage2_import"], "transcode_downgrade")
         self.assertFalse(result["imported"])
-        self.assertFalse(result["comparison_basis"]["verified_lossless_bypass"])
+        basis = result["comparison_basis"]
+        self.assertEqual(basis["verdict"], "worse")
+        self.assertEqual(basis["new_format"], "mp3 128")
+        self.assertEqual(basis["new_metric"], "contract")
+        self.assertEqual(basis["new_value_kbps"], 128)
+        self.assertFalse(basis["verified_lossless_bypass"])
         self.assertEqual(result["final_status"], "wanted")
 
     def test_installed_verified_lossless_proof_lock_remains_absolute(self) -> None:

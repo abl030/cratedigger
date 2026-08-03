@@ -2458,6 +2458,7 @@ def main():
         verified_lossless_target=new_conv_target,
         converted_count=converted,
         is_transcode=quality_is_transcode,
+        verified_lossless_proof=will_be_verified_lossless,
         native_codec_family=native_codec_family,
     )
 

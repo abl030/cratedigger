@@ -827,6 +827,29 @@ class TestConversionTarget(unittest.TestCase):
         self.assertEqual(contract.format, "flac")
         self.assertFalse(contract.is_cbr)
 
+    def test_proven_source_compares_the_configured_target_contract(self):
+        from harness.import_one import projected_target_quality_contract
+        from lib.quality.compare import comparison_format_hint
+
+        format_hint = comparison_format_hint(
+            verified_lossless_target="mp3 128",
+            converted_count=1,
+            is_transcode=True,
+            verified_lossless_proof=True,
+        )
+        contract = projected_target_quality_contract(
+            format_hint,
+            converted_count=1,
+            keep_lossless=False,
+            projected_is_cbr=False,
+        )
+
+        self.assertEqual(format_hint, "mp3 128")
+        self.assertIsNotNone(contract)
+        assert contract is not None
+        self.assertEqual(contract.format, "mp3 128")
+        self.assertTrue(contract.is_cbr)
+
     def test_lossless_source_with_target_returns_target(self):
         self.assertEqual(
             self._target(lossless_source=True, vl_target="opus 128"),
