@@ -14,14 +14,23 @@ accepts only a complete exact stable or shrinking approved cohort.
 
 ## Daily unstable compatibility gate
 
-`scripts/daily_flake_update.sh` is the single unattended entry point. It
-checks out current `main`, advances `flake.lock` to current nixpkgs unstable,
+`scripts/daily_flake_update.sh` is the Nixpkgs-reference unattended entry
+point. It checks out current `main`, advances only the `nixpkgs` node in
+`flake.lock`,
 and runs whole-repository Pyright, the deterministic suite, `nix flake check`,
 the default lifecycle hammer, the 20,000-example fuzz burst, and the
 mirror-harness smoke. Independent test stages all run so one notification
 contains the whole day's result. A completely green candidate commits and
 pushes only `flake.lock`; a red candidate pushes nothing. Scheduling, state
 paths, and notification belong to the downstream nixosconfig service.
+
+`scripts/daily_beets_tip_update.sh` is a separate serialized checks-only
+canary. It advances only `beets-tip`, then requires the tip build, disposable
+boundary contract, and tip-backed Pyright before making a lock-only candidate
+commit. It never supplies the deployment-owned Beets runtime. The historical
+matrix consumes the reviewed manifest; use
+`scripts/refresh_beets_compat_releases.py --as-of YYYY-MM-DD --check` for a
+fixed-clock operator refresh check.
 
 ## Bug hunting — the house method
 

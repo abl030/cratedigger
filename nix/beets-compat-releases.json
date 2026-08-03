@@ -1,0 +1,21 @@
+[
+  {"buildBackend":"poetry-core","narHash":"sha256-XBNWPchIrWnS0gXDbTspxY+KjHPjkSinvYcW8xBFGAE=","publishedAt":"2024-11-22T02:07:35Z","rev":"0780bf386c5485e2b9e2ac34dfd3379d1097a2ef","tag":"v2.1.0","version":"2.1.0"},
+  {"buildBackend":"poetry-core","narHash":"sha256-jhwXRgUUQJgQ/PLwvY1UfHCJ9UC8DcdBpE/janao0RM=","publishedAt":"2024-12-02T06:58:30Z","rev":"01f1fafc888457a440a22a41320f02e9014e07c4","tag":"v2.2.0","version":"2.2.0"},
+  {"buildBackend":"poetry-core","narHash":"sha256-mH3m2O+q5Ys9DJD3ulmhViyf/VPEpHevjmNerVe327s=","publishedAt":"2025-05-07T22:36:05Z","rev":"250b0da900c095a09bedc1a0717381010c01a3c6","tag":"v2.3.0","version":"2.3.0"},
+  {"buildBackend":"poetry-core","narHash":"sha256-INxL2XDn8kwRYYcZATv/NdLmAtfQvxVDWKB1OYo8dxY=","publishedAt":"2025-05-14T09:54:42Z","rev":"d487d675b9115672c484eab8a6729b1f0fd24b68","tag":"v2.3.1","version":"2.3.1"},
+  {"buildBackend":"poetry-core","narHash":"sha256-BM4NW8iukw9+zLD2cfAETmFYNAiNPUn9cLrkVlCE+jM=","publishedAt":"2025-09-13T16:50:17Z","rev":"e837598e796dd4dcf3a388fec90fe06d58e453b2","tag":"v2.4.0","version":"2.4.0"},
+  {"buildBackend":"poetry-core","narHash":"sha256-YZvS9oB+v+48i1avQcs6ClnYz4aMqJQ2e6cBiZ4ULb0=","publishedAt":"2025-10-11T10:03:14Z","rev":"6faa4f3ddde6494f9586a35559d1c1b2795d8949","tag":"v2.5.0","version":"2.5.0"},
+  {"buildBackend":"poetry-core","narHash":"sha256-H3jcEHyK13+RHVlV4zp+8M3LZ0Jc2FdmAbLpekGozLA=","publishedAt":"2025-10-14T22:53:08Z","rev":"c1877b7cf5371f5399fbf80f5e9e64bd119b9917","tag":"v2.5.1","version":"2.5.1"},
+  {"buildBackend":"poetry-core","narHash":"sha256-9AJtwoSq0m0CAgYSy80Z9GWYjrC10RvyiSo5Hjz1zOQ=","publishedAt":"2026-02-01T14:44:22Z","rev":"680473b9e5ab3c2ee6e4083467dd7dc082688799","tag":"v2.6.0","version":"2.6.0"},
+  {"buildBackend":"poetry-core","narHash":"sha256-TJFno1Hm3swG0qNDjWcVG0YE6zoRTumKqmEyrFGDh7Q=","publishedAt":"2026-02-02T02:30:48Z","rev":"cdfb8139102220986c0cd1c470b2444d406878a1","tag":"v2.6.1","version":"2.6.1"},
+  {"buildBackend":"poetry-core","narHash":"sha256-1euYkoM66gnElCbgCgIpj1waq1QvHApUgioJTbSQJ0U=","publishedAt":"2026-02-22T16:06:32Z","rev":"13e978ca0e91d68b002257e45b06904976f82936","tag":"v2.6.2","version":"2.6.2"},
+  {"buildBackend":"poetry-core","narHash":"sha256-WqgzrppYJtoV0vmwHSwVpVlu5z+LROcsBXBIV3oAn48=","publishedAt":"2026-03-07T21:17:55Z","rev":"156870419ea9bfdb1c7d3aa2843cead801eb91f9","tag":"v2.7.0","version":"2.7.0"},
+  {"buildBackend":"poetry-core","narHash":"sha256-QG/UGOeTG/2jIcqB2PxYuqTr3hkO5SrN9YakFgT7RvM=","publishedAt":"2026-03-08T08:31:44Z","rev":"13665a5a5576455bccc289674386f9a2cf030ddc","tag":"v2.7.1","version":"2.7.1"},
+  {"buildBackend":"poetry-core","narHash":"sha256-8sYoy11eocn7UDeTuaPqOxXZLdUqkabU4DMNLBD5Xp4=","publishedAt":"2026-03-28T13:11:46Z","rev":"c3482c68f6211037295b8b162418860c46427d3f","tag":"v2.8.0","version":"2.8.0"},
+  {"buildBackend":"poetry-core","narHash":"sha256-dJhWKZwhKXyFQVO9xt2v/NSa7bSg0e78zga/t9dlTyE=","publishedAt":"2026-04-11T11:57:45Z","rev":"018dba08cd28bf38f5df79c233621bf6aca23d3e","tag":"v2.9.0","version":"2.9.0"},
+  {"buildBackend":"poetry-core","narHash":"sha256-DbZV8n+2nbILLIi7niXohcIynwza+w5LVo/jy4wmTbw=","publishedAt":"2026-04-19T19:11:34Z","rev":"5f6b2d35d186fb9f6402dfb7ec904b6c8383a6cd","tag":"v2.10.0","version":"2.10.0"},
+  {"buildBackend":"poetry-core","narHash":"sha256-fi6D0P2GtEO41VL6UKAArRedZVxw97yqDUAoilktUho=","publishedAt":"2026-05-06T10:07:09Z","rev":"26ab6b26361e8c9d77cdf04ba9cf5ca64bbbc722","tag":"v2.11.0","version":"2.11.0"},
+  {"buildBackend":"poetry-core","narHash":"sha256-u2qoZ0/qWq9YUcwbOpsqtIjX5BZ2z2wj00X59Pf+/fk=","publishedAt":"2026-06-22T14:40:31Z","rev":"c1c381d85aa4e9e6751d9daff7140e1309228260","tag":"v2.12.0","version":"2.12.0"},
+  {"buildBackend":"hatchling","narHash":"sha256-ezADHmpryyMcQA+ojPQQ74wA/LRfzN+Ygr6CknZhxBg=","publishedAt":"2026-07-27T19:09:09Z","rev":"48d44d15edb9da840098f26a2ca8c9e0faf7f898","tag":"v2.13.0","version":"2.13.0"},
+  {"buildBackend":"hatchling","narHash":"sha256-f25Uv7PRKBFUWah6pvEwwTFjxXKQfmAP2fyTNFJyWB0=","publishedAt":"2026-07-29T10:47:07Z","rev":"b7952299941543d4507ac7931edb223acd684b3d","tag":"v2.13.1","version":"2.13.1"}
+]

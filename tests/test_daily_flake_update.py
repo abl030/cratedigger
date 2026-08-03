@@ -23,6 +23,7 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
         state = self.fake.state
 
         self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn(["nix", "flake", "update", "nixpkgs"], state["events"])
         self.assertEqual(
             state["stages"],
             ["pyright", "suite", "flake-check", "world", "fuzz", "mirror"],

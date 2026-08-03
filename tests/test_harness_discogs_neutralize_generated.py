@@ -40,6 +40,7 @@ _beets_mocks = {
     "beets.config": MagicMock(),
     "beets.library": MagicMock(),
     "beets.plugins": MagicMock(),
+    "beets.ui": MagicMock(),
     "beets.importer": MagicMock(),
     "beets.importer.actions": MagicMock(),
     "beets.importer.session": MagicMock(),
@@ -50,12 +51,15 @@ _beets_mocks = {
 }
 for name, mock in _beets_mocks.items():
     sys.modules.setdefault(name, mock)
+setattr(sys.modules["beets.ui"], "get_path_formats", None)
+setattr(sys.modules["beets.ui"], "get_replacements", None)
 
 setattr(  # noqa: B010 - populate a synthetic runtime module
     sys.modules["beets.importer.session"],
     "ImportSession",
-    type("ImportSession", (object,), {}),
+    type("ImportSession", (object,), {"resolve_duplicate": lambda *_args: None}),
 )
+setattr(sys.modules["beets.importer.tasks"], "ImportTask", type("ImportTask", (object,), {}))
 
 from harness import beets_harness
 from tests.test_harness_discogs_neutralize import (

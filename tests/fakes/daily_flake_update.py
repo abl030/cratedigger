@@ -58,7 +58,7 @@ with state_path.with_suffix(".lock").open("a+", encoding="utf-8") as lock:
         raise SystemExit(0)
 
     if command == "nix":
-        if args == ["flake", "update"]:
+        if args in (["flake", "update", "nixpkgs"], ["flake", "update", "beets-tip"]):
             if state.get("fault") == "update":
                 fail("fake flake update failed")
             if state["lock_changed"]:
@@ -69,6 +69,24 @@ with state_path.with_suffix(".lock").open("a+", encoding="utf-8") as lock:
             raise SystemExit(0)
         if args == ["flake", "check", "--print-build-logs"]:
             stage = "flake-check"
+        elif args == [
+            "build",
+            ".#checks.x86_64-linux.beetsTipBuild",
+            "--print-build-logs",
+        ]:
+            stage = "tip-build"
+        elif args == [
+            "build",
+            ".#checks.x86_64-linux.beetsTipContract",
+            "--print-build-logs",
+        ]:
+            stage = "tip-contract"
+        elif args == [
+            "build",
+            ".#checks.x86_64-linux.beetsTipPyright",
+            "--print-build-logs",
+        ]:
+            stage = "tip-pyright"
         else:
             fail(f"unexpected nix argv: {args!r}")
     elif command == "nix-shell":

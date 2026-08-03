@@ -31,6 +31,18 @@ not rewrite which pressing Cratedigger sought or erase a witnessed capture.
 Cratedigger never projects holdings into its PostgreSQL database, correlates a
 sibling pressing, or treats a nearby release as the requested release.
 
+## Compatibility cohorts
+
+The locked Nixpkgs package is this repository's standalone package/dev-shell
+reference only. Deployment continues to supply the production package, exact
+interpreter, immutable `BEETSDIR`, external state, library, catalogue, secrets,
+and plain operator `beet`; Cratedigger validates that capability but never
+selects it. `beets-tip` is a checks-only advance-warning input, while the
+reviewed 730-day manifest runs disposable harness/delete contracts for each
+final release. These checks do not establish live-catalog upgrade or downgrade
+safety. LRCLIB and unrelated external plugin behaviour are deployment-owned
+configuration, outside the compatibility promise.
+
 Cratedigger has exactly two Beets mutation lanes:
 
 1. The serial importer worker drives the JSON harness for admitted imports and

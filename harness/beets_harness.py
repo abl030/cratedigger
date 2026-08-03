@@ -14,21 +14,37 @@ Must run inside beets' Python environment. Use the wrapper:
 
 from __future__ import annotations
 
+import argparse
+import importlib
 import json
 import logging
 import os
 import sys
 from collections.abc import Sequence
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TextIO
 
 from beets import config, library, plugins
 from beets.autotag import AlbumInfo, AlbumMatch, TrackInfo, TrackMatch
 from beets.dbcore import Query
-from beets.importer.actions import Action, DuplicateAction
-from beets.importer.session import ImportSession
-from beets.importer.tasks import ImportTask as BeetsImportTask
-from beets.util import PathBytes
+try:
+    from harness import beets_compat
+except ModuleNotFoundError:  # direct wrapper execution puts harness/ first
+    beets_compat = importlib.import_module("beets_compat")
+
+if TYPE_CHECKING:
+    # Current Beets imports are type-only. Runtime aliases below deliberately
+    # support its 2.1-2.3 monolithic predecessor as well.
+    from beets.importer.actions import Action, DuplicateAction
+    from beets.importer.session import ImportSession
+    from beets.importer.tasks import ImportTask as BeetsImportTask
+    from beets.util import PathBytes
+else:
+    Action = beets_compat.CAPABILITIES.action
+    DuplicateAction = beets_compat.CAPABILITIES.duplicate_action
+    ImportSession = beets_compat.CAPABILITIES.importer_session
+    BeetsImportTask = beets_compat.CAPABILITIES.import_task
+    PathBytes = beets_compat.CAPABILITIES.path_bytes
 
 if TYPE_CHECKING:
     from beets.autotag.hooks import JSONDict
@@ -401,10 +417,23 @@ def _install_release_id_duplicate_lookup() -> None:
     BeetsImportTask.find_duplicates = find_duplicates
 
 
-def _send(msg: dict[str, object]) -> None:
-    """Write a JSON message to stdout."""
-    sys.stdout.write(json.dumps(msg) + "\n")
+_protocol_stdout: TextIO | None = None
+
+
+def _reserve_protocol_stdout() -> TextIO:
+    """Reserve fd 1 for JSON before Beets can emit ordinary output."""
     sys.stdout.flush()
+    protocol_fd = os.dup(1)
+    os.dup2(2, 1)
+    return os.fdopen(protocol_fd, "w", encoding="utf-8", closefd=True)
+
+
+def _send(msg: dict[str, object]) -> None:
+    """Write one JSON protocol message to the private original stdout fd."""
+    if _protocol_stdout is None:
+        raise RuntimeError("harness protocol stdout has not been reserved")
+    _protocol_stdout.write(json.dumps(msg) + "\n")
+    _protocol_stdout.flush()
 
 
 def _recv() -> dict[str, object]:
@@ -620,6 +649,26 @@ class HarnessImportSession(ImportSession):
             })
             return Action.SKIP
 
+    def _duplicate_decision(
+        self, task: ImportTask, found_duplicates: list[library.AnyLibModel],
+    ) -> str:
+        """Ask the controller once; API-era hooks only adapt this result."""
+        duplicate_candidates = [_serialize_duplicate_album(dup) for dup in found_duplicates]
+        msg: dict[str, object] = {
+            "type": "resolve_duplicate",
+            "path": _path_str(task.paths[0]) if task.paths else "",
+            "cur_artist": task.cur_artist or "",
+            "cur_album": task.cur_album or "",
+            "duplicate_count": len(found_duplicates),
+            "duplicate_mbids": [c["mb_albumid"] for c in duplicate_candidates],
+            "duplicate_album_ids": [c["beets_album_id"] for c in duplicate_candidates],
+            "duplicate_candidates": duplicate_candidates,
+        }
+        _send(msg)
+        decision = _recv()
+        resolution = decision.get("action", "skip")
+        return resolution if isinstance(resolution, str) else "skip"
+
     def get_duplicate_action(
         self, task: ImportTask, found_duplicates: list[library.AnyLibModel]
     ) -> DuplicateAction:
@@ -651,37 +700,18 @@ class HarnessImportSession(ImportSession):
           sibling ids were being dropped because the old payload
           only carried mb_albumid).
         """
-        duplicate_candidates = [
-            _serialize_duplicate_album(dup) for dup in found_duplicates
-        ]
-        dup_mbids = [c["mb_albumid"] for c in duplicate_candidates]
-        dup_album_ids = [c["beets_album_id"] for c in duplicate_candidates]
-        msg: dict[str, object] = {
-            "type": "resolve_duplicate",
-            "path": _path_str(task.paths[0]) if task.paths else "",
-            "cur_artist": task.cur_artist or "",
-            "cur_album": task.cur_album or "",
-            "duplicate_count": len(found_duplicates),
-            "duplicate_mbids": dup_mbids,
-            "duplicate_album_ids": dup_album_ids,
-            "duplicate_candidates": duplicate_candidates,
-        }
-        _send(msg)
+        outcome = beets_compat.duplicate_outcome(
+            self._duplicate_decision(task, found_duplicates), task)
+        assert outcome is not None
+        return outcome
 
-        decision = _recv()
-        resolution = decision.get("action", "skip")
-
-        # Cratedigger's controllers (lib/beets.py::beets_validate and
-        # harness/import_one.py) only ever send "skip" (dup-guard refuse) or
-        # "remove" (dup-guard allow, beets-owned atomic replacement).
-        # "keep" / "merge" were never selected and fold into the defensive
-        # SKIP default. Returning SKIP makes ``task.skip`` true so beets never
-        # calls ``task.add`` (see ImportTask.skip / _apply_choice); returning
-        # REMOVE leaves the new album in place and removes the old duplicate
-        # rows in the manipulate_files stage.
-        if resolution == "remove":
-            return DuplicateAction.REMOVE
-        return DuplicateAction.SKIP
+    def resolve_duplicate(
+        self, task: ImportTask, found_duplicates: list[library.AnyLibModel],
+    ) -> None:
+        """Legacy Beets hook; mutation is localized in ``beets_compat``."""
+        outcome = beets_compat.duplicate_outcome(
+            self._duplicate_decision(task, found_duplicates), task)
+        assert outcome is None
 
     def should_resume(self, path: PathBytes) -> bool:
         """Ask controller whether to resume a previously interrupted import."""
@@ -698,8 +728,6 @@ class HarnessImportSession(ImportSession):
 
 
 def main() -> None:
-    import argparse
-
     # Belt-and-suspenders for the group-writable import boundary — see
     # lib/permissions.py / GH #84. The systemd unit's UMask=0000 is a
     # permissive floor; this explicit 0o002 (not 0) is what narrows newly
@@ -747,6 +775,19 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    # argparse --help exits above with ordinary stdout intact. Every normal
+    # harness path reserves fd 1 before config/plugins can write diagnostics.
+    global _protocol_stdout
+    _protocol_stdout = _reserve_protocol_stdout()
+    try:
+        _run_protocol(args)
+    finally:
+        _protocol_stdout.close()
+        _protocol_stdout = None
+
+
+def _run_protocol(args: argparse.Namespace) -> None:
+
     # Load beets configuration
     config.read()
 
@@ -776,20 +817,7 @@ def main() -> None:
     # The old approach (copy=False, move=False, write=False) still let beets
     # write to the DB and run scrub, which poisoned the source files.
 
-    # Open the beets library. beets 2.x reorganised the library API:
-    # beets.ui.get_path_formats / get_replacements were removed —
-    # get_path_formats moved to beets.util.pathformats (and now requires a
-    # config subview) and get_replacements became a Library staticmethod.
-    # Library() now derives BOTH the path formats (from config["paths"]) and
-    # the replacements (from config["replace"]) internally, so the old beets
-    # 1.x four-arg form both fails to import and raises TypeError. Passing only
-    # (library, directory) preserves the user's configured folder structure and
-    # replacements — the cached_property Library.path_formats calls
-    # get_path_formats(config["paths"]) and __init__ calls get_replacements().
-    lib = library.Library(
-        config["library"].as_filename(),
-        config["directory"].as_filename(),
-    )
+    lib = beets_compat.configured_library(config)
     plugins.send("library_opened", lib=lib)
 
     # Convert paths to bytes (beets convention)

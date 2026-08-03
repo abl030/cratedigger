@@ -3,9 +3,13 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    beets-tip = {
+      url = "github:beetbox/beets/master";
+      flake = false;
+    };
   };
 
-  outputs = { self, nixpkgs }:
+  outputs = { self, nixpkgs, beets-tip }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f {
@@ -82,7 +86,52 @@
         });
       };
 
-      checks = forLinux ({ pkgs, system }: {
+      checks = forLinux ({ pkgs, system }: let
+        manifest = builtins.fromJSON (builtins.readFile ./nix/beets-compat-releases.json);
+        compatPackage = entry: import ./nix/beets-compat-package.nix {
+          inherit pkgs;
+          version = entry.version;
+          buildBackend = entry.buildBackend;
+          src = pkgs.fetchFromGitHub {
+            owner = "beetbox";
+            repo = "beets";
+            rev = entry.rev;
+            hash = entry.narHash;
+          };
+        };
+        contract = name: beets: let
+          cratedigger = import ./nix/package.nix { inherit pkgs; beetsPackage = beets; };
+          python = pkgs.python3.withPackages (ps: cratedigger.pythonPackages ps);
+        in pkgs.runCommand "cratedigger-${name}-contract" {
+          nativeBuildInputs = [ python pkgs.ffmpeg ];
+        } ''
+          set -euo pipefail
+          export HOME="$TMPDIR/home"
+          mkdir -p "$HOME"
+          unset BEETSDIR TEST_DB_DSN CRATEDIGGER_RUNTIME_CONFIG
+          export PYTHONPATH=${self}
+          export CRATEDIGGER_BEETS_PYTHON=${python}/bin/python
+          ${python}/bin/python -m unittest \
+            tests.test_harness_beets2_contract.TestHarnessBeets2Contract.test_help_stays_on_normal_stdout_and_protocol_is_private \
+            tests.test_harness_beets2_contract.TestHarnessBeets2Contract.test_real_beets_import_library_and_duplicate_action \
+            > "$TMPDIR/contract.stdout" 2> "$TMPDIR/contract.stderr" || {
+              cat "$TMPDIR/contract.stdout" >&2
+              cat "$TMPDIR/contract.stderr" >&2
+              exit 1
+            }
+          touch "$out"
+        '';
+        tipPackage = import ./nix/beets-compat-package.nix {
+          inherit pkgs;
+          version = "2.13.1";
+          buildBackend = "hatchling";
+          src = beets-tip;
+        };
+        releaseChecks = nixpkgs.lib.listToAttrs (map (entry: {
+          name = "beets-release-${builtins.replaceStrings [ "." ] [ "_" ] entry.version}-contract";
+          value = contract "beets-release-${entry.version}" (compatPackage entry);
+        }) manifest);
+      in ({
         # Boots a NixOS VM with the upstream module enabled against an
         # ephemeral postgres + a stubbed slskd. Verifies: migrator runs,
         # the immutable runtime config is wired correctly, and the web responds.
@@ -90,6 +139,21 @@
         # `nix flake check` must build the CLI bundle (U8): a stranger's
         # `nix run .#pipeline-cli` is only as green as this check.
         packageDefault = self.packages.${system}.default;
+
+        beetsTipBuild = tipPackage;
+        beetsTipContract = contract "beets-tip" tipPackage;
+        beetsTipPyright = let
+          cratedigger = import ./nix/package.nix { inherit pkgs; beetsPackage = tipPackage; };
+          python = pkgs.python3.withPackages (ps: cratedigger.pythonPackages ps);
+        in pkgs.runCommand "cratedigger-beets-tip-pyright" { nativeBuildInputs = [ python pkgs.pyright ]; } ''
+          export HOME="$TMPDIR/home"
+          mkdir -p "$HOME"
+          export PYTHONPATH=${self}
+          ${pkgs.pyright}/bin/pyright --threads 4 \
+            ${self}/harness/beets_compat.py \
+            ${self}/harness/beets_harness.py
+          touch "$out"
+        '';
 
         # Execute the installed configuration checker, rather than merely
         # inspecting its wrapper source. A caller-controlled PYTHONPATH
@@ -275,6 +339,6 @@
           test -x ${patchedEnv}/bin/beet
           touch $out
         '';
-      });
+      } // releaseChecks));
     };
 }

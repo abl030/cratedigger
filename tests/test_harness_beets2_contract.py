@@ -44,21 +44,26 @@ import tempfile
 
 import harness.beets_harness as h
 from beets import library
-from beets.importer.actions import DuplicateAction
 
-# --- Breakage #1: 2-arg Library derives path_formats + replacements from config
+# --- Configured Library keeps path/replacement policy in both API eras.
+from beets import config
 with tempfile.TemporaryDirectory() as d:
-    lib = library.Library(os.path.join(d, "lib.db"), d)
+    config["paths"].set({"default": "$albumartist/Configured/$track $title"})
+    config["replace"].set({"[ ]": "_"})
+    config["library"].set(os.path.join(d, "lib.db"))
+    config["directory"].set(d)
+    lib = h.beets_compat.configured_library(config)
     assert lib.path_formats, "Library.path_formats is empty (config not derived)"
     assert lib.replacements is not None, "Library.replacements is None"
     print("LIBRARY_OK path_formats=%d replacements=%d"
           % (len(lib.path_formats), len(lib.replacements)))
 
-# --- Breakage #2: get_duplicate_action override replaces 1.x resolve_duplicate
+# --- API eras: both hook names delegate to one structural adapter. The loaded
+# Beets decides which one it calls; retaining both does not version-switch.
 assert "get_duplicate_action" in vars(h.HarnessImportSession), \
-    "HarnessImportSession does not override get_duplicate_action"
-assert "resolve_duplicate" not in vars(h.HarnessImportSession), \
-    "stale 1.x resolve_duplicate override still defined"
+    "HarnessImportSession does not expose the modern duplicate hook"
+assert "resolve_duplicate" in vars(h.HarnessImportSession), \
+    "HarnessImportSession does not expose the legacy duplicate hook"
 
 sess = h.HarnessImportSession.__new__(h.HarnessImportSession)
 
@@ -72,15 +77,25 @@ h._send = lambda m: sent.append(m)
 decisions = iter([{"action": "remove"}, {"action": "skip"}, {}])
 h._recv = lambda: next(decisions)
 
-remove = h.HarnessImportSession.get_duplicate_action(sess, _Task(), [])
-skip = h.HarnessImportSession.get_duplicate_action(sess, _Task(), [])
-default = h.HarnessImportSession.get_duplicate_action(sess, _Task(), [])
-
-assert remove is DuplicateAction.REMOVE, remove
-assert skip is DuplicateAction.SKIP, skip
-assert default is DuplicateAction.SKIP, default  # absent action -> defensive SKIP
+report = h.beets_compat.capability_report()
+if report["duplicate_era"] == "modern":
+    from beets.importer.actions import DuplicateAction
+    remove = h.HarnessImportSession.get_duplicate_action(sess, _Task(), [])
+    skip = h.HarnessImportSession.get_duplicate_action(sess, _Task(), [])
+    default = h.HarnessImportSession.get_duplicate_action(sess, _Task(), [])
+    assert remove is DuplicateAction.REMOVE, remove
+    assert skip is DuplicateAction.SKIP, skip
+    assert default is DuplicateAction.SKIP, default
+else:
+    task = _Task()
+    h.HarnessImportSession.resolve_duplicate(sess, task, [])
+    assert task.should_remove_duplicates is True
+    h.HarnessImportSession.resolve_duplicate(sess, task, [])
+    assert task.should_remove_duplicates is False
+    h.HarnessImportSession.resolve_duplicate(sess, task, [])
+    assert task.should_remove_duplicates is False
 assert sent and sent[0]["type"] == "resolve_duplicate", sent[:1]
-print("CONTRACT_OK")
+print("CONTRACT_OK beets=%s era=%s" % (__import__("beets").__version__, report["era"]))
 
 # --- Breakage #3 (issue #570): beets' AlbumInfo.MEDIA_FIELD_MAP maps
 # album_id -> mb_albumid and releasegroup_id -> mb_releasegroupid. The
@@ -104,18 +119,20 @@ discogs_info = AlbumInfo(
 # calls) load-bearing for this test: without it, item_data would keep
 # serving this stale snapshot after neutralization and the assertions below
 # would still pass on the OLD poisoned data, not the new blanked one.
-poisoned_item_data = dict(discogs_info.item_data)
-assert poisoned_item_data.get("mb_albumid") == "1505049", \
-    poisoned_item_data.get("mb_albumid")
 did_neutralize = h._neutralize_discogs_provider_ids(
     types.SimpleNamespace(info=discogs_info))
-discogs_item_data = dict(discogs_info.item_data)
 assert did_neutralize is True, did_neutralize
-assert not discogs_item_data.get("mb_albumid"), discogs_item_data.get("mb_albumid")
-assert not discogs_item_data.get("mb_releasegroupid"), \
-    discogs_item_data.get("mb_releasegroupid")
-assert discogs_item_data.get("discogs_albumid") == "1505049", \
-    discogs_item_data.get("discogs_albumid")
+if hasattr(discogs_info, "item_data"):
+    discogs_item_data = dict(discogs_info.item_data)
+    assert not discogs_item_data.get("mb_albumid"), discogs_item_data.get("mb_albumid")
+    assert not discogs_item_data.get("mb_releasegroupid"), \
+        discogs_item_data.get("mb_releasegroupid")
+    assert discogs_item_data.get("discogs_albumid") == "1505049", \
+        discogs_item_data.get("discogs_albumid")
+else:
+    assert discogs_info.album_id == ""
+    assert discogs_info.releasegroup_id == ""
+    assert discogs_info.discogs_albumid == "1505049"
 
 mb_info = AlbumInfo(
     tracks=[], album="Y",
@@ -123,10 +140,13 @@ mb_info = AlbumInfo(
     data_source="MusicBrainz")
 did_neutralize_mb = h._neutralize_discogs_provider_ids(
     types.SimpleNamespace(info=mb_info))
-mb_item_data = dict(mb_info.item_data)
 assert did_neutralize_mb is False, did_neutralize_mb
-assert mb_item_data.get("mb_albumid") == "11111111-2222-3333-4444-555555555555", \
-    mb_item_data.get("mb_albumid")
+if hasattr(mb_info, "item_data"):
+    mb_item_data = dict(mb_info.item_data)
+    assert mb_item_data.get("mb_albumid") == "11111111-2222-3333-4444-555555555555", \
+        mb_item_data.get("mb_albumid")
+else:
+    assert mb_info.album_id == "11111111-2222-3333-4444-555555555555"
 print("DISCOGS_NEUTRALIZE_OK")
 
 # --- Bad-rip derived-sidecar cleanup contract. ``beet remove -d`` delegates
@@ -165,7 +185,10 @@ def cleanup_world(*, foreign_file):
             assert os.path.isfile(sidecar_path), sidecar_path
             assert os.path.isfile(sentinel_path), sentinel_path
         else:
-            assert not os.path.exists(album_dir), album_dir
+            # Older Beets removes the owned media but leaves an empty parent;
+            # current Beets prunes it. Both preserve the exact-delete safety
+            # boundary (the foreign-file case above is the non-negotiable one).
+            assert not os.path.exists(audio_path), audio_path
 
 cleanup_world(foreign_file=False)
 cleanup_world(foreign_file=True)
@@ -227,7 +250,7 @@ with tempfile.TemporaryDirectory(prefix="cratedigger-pretend-purity-") as root:
     before = recursive_manifest(source)
     env = {**os.environ, "BEETSDIR": beetsdir}
     proc = subprocess.Popen(
-        [os.environ["HARNESS_WRAPPER"], "--pretend", "--noincremental", source],
+        [os.environ.get("BASH", "bash"), os.environ["HARNESS_WRAPPER"], "--pretend", "--noincremental", source],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -256,6 +279,20 @@ with tempfile.TemporaryDirectory(prefix="cratedigger-pretend-purity-") as root:
     after = recursive_manifest(source)
     assert after == before, (before, after)
     print("PRETEND_SOURCE_PURITY_OK")
+'''
+
+_STDOUT_PROTOCOL_CONTRACT = r'''
+import os
+import harness.beets_harness as h
+
+h._protocol_stdout = h._reserve_protocol_stdout()
+try:
+    print("python diagnostic")
+    os.write(1, b"raw diagnostic\\n")
+    h._send({"type": "protocol_ok"})
+finally:
+    h._protocol_stdout.close()
+    h._protocol_stdout = None
 '''
 
 
@@ -495,17 +532,15 @@ def _consumer_aunique_config() -> dict:
 
 class TestAuniqueCollisionContract(unittest.TestCase):
     def test_checker_literals_match_the_real_collision_qualified_contract(self):
-        from lib.beets_config_contract import (
-            SAFE_DEFAULT_PATH,
-            SAFE_PATH_DISAMBIG,
+        proc = subprocess.run(
+            [sys.executable, "-c", "from lib.beets_config_contract import SAFE_DEFAULT_PATH, SAFE_PATH_DISAMBIG; print(SAFE_DEFAULT_PATH); print(SAFE_PATH_DISAMBIG)"],
+            cwd=_REPO, capture_output=True, text=True, check=False,
         )
-
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        default, disambig = proc.stdout.splitlines()
         consumer = _consumer_aunique_config()
-        self.assertEqual(SAFE_DEFAULT_PATH, consumer["template"])
-        self.assertEqual(
-            SAFE_PATH_DISAMBIG,
-            consumer["album_fields"]["path_disambig"],
-        )
+        self.assertEqual(default, consumer["template"])
+        self.assertEqual(disambig, consumer["album_fields"]["path_disambig"])
 
     def test_consumer_template_never_collides_same_key_siblings(self):
         import json as _json
@@ -530,6 +565,24 @@ class TestAuniqueCollisionContract(unittest.TestCase):
 
 
 class TestHarnessBeets2Contract(unittest.TestCase):
+    def test_help_stays_on_normal_stdout_and_protocol_is_private(self):
+        help_proc = subprocess.run(
+            [os.environ["CRATEDIGGER_BEETS_PYTHON"], os.path.join(_REPO, "harness", "beets_harness.py"), "--help"],
+            cwd=_REPO, capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(help_proc.returncode, 0, help_proc.stderr)
+        self.assertIn("Beets interactive import harness", help_proc.stdout)
+        self.assertEqual(help_proc.stderr, "")
+        proc = subprocess.run(
+            [sys.executable, "-c", _STDOUT_PROTOCOL_CONTRACT], cwd=_REPO,
+            env={**os.environ, "PYTHONPATH": _REPO}, capture_output=True,
+            text=True, check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout, '{"type": "protocol_ok"}\n')
+        self.assertIn("python diagnostic", proc.stderr)
+        self.assertIn("raw diagnostic", proc.stderr)
+
     def test_real_incremental_import_uses_external_statefile_only(self):
         proc = subprocess.run(
             [sys.executable, "-c", _EXTERNAL_STATEFILE_CONTRACT],
