@@ -110,6 +110,23 @@ class TestApiIndexRouteContract(_WebServerCase):
         "method", "path", "description", "request_model",
     }
 
+    def test_triage_list_description_advertises_every_filter_form(self):
+        status, data = self._get("/api/_index")
+        self.assertEqual(status, 200)
+        triage_list = next(
+            entry
+            for entry in data
+            if entry["method"] == "GET"
+            and entry["path"] == "/api/triage/list"
+        )
+        self.assertIn(
+            "filter spec: all | unfindable | unfindable:<category> | "
+            "data_quality | data_quality:<field> | "
+            "data_quality:status=<status> | data_quality:reason=<code> | "
+            "search_not_converting | converged",
+            triage_list["description"],
+        )
+
     def test_api_index_returns_classified_routes_with_pydantic_models(self):
         status, data = self._get("/api/_index")
         self.assertEqual(status, 200)

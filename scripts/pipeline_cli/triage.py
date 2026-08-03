@@ -32,6 +32,7 @@ from lib.convergence_service import parse_signal_token
 # remember the parameterised vocab. New filter forms get added at the
 # service layer; both wrappers auto-pick them up.
 from lib.triage_service import VALID_FILTER_FORMS as _TRIAGE_VALID_FILTER_FORMS_BASE
+from lib.triage_service import VALID_FILTER_FORMS_TEXT as _TRIAGE_FILTER_FORMS_TEXT
 from scripts.pipeline_cli._format import _format_dt, _json_default, _truncate
 
 if TYPE_CHECKING:
@@ -579,9 +580,7 @@ def add_triage_subparser(
         help="Cohort listing by filter spec")
     p_tr_list.add_argument(
         "--filter", default="all",
-        help="Filter spec: all | unfindable[:<category>] | "
-             "data_quality[:<field>] | data_quality:status=<status> | "
-             "data_quality:reason=<code> | search_not_converting")
+        help=f"Filter spec: {_TRIAGE_FILTER_FORMS_TEXT}")
     p_tr_list.add_argument(
         "--limit", type=int, default=50,
         help="Page size (default 50)")
