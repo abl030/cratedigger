@@ -9,10 +9,11 @@ ok(JSON.stringify(youtubeResolverPayload(identifier, 'https://music.youtube.com/
 
 const failedHtml = renderYoutubeRescueControl('release-1', 1, identifier, { outcome: 'transient', error_message: 'mirror down' });
 ok(failedHtml.includes('mirror down'), 'resolver failures remain visible');
-const matrixHtml = renderYoutubeRescueControl('release-1', 1, identifier, { outcome: 'ok', youtube_releases: [{ yt_browse_id: 'MPREb_kb5fohQCJ6d' }] });
+const matrixHtml = renderYoutubeRescueControl('release-1', 1, identifier, { outcome: 'ok', youtube_releases: [{ yt_browse_id: 'MPREb_kb5fohQCJ6d', year: 2026, track_count: 1, distances: [{ mbid: identifier, distance: 0 }] }] });
 ok(matrixHtml.includes('window.pickYoutubeRescue(1,'), 'matrix choice remains confirm-routed');
 ok(!matrixHtml.includes('"window.checkYoutubeRescue("release-1"'), 'inline handler quoting remains safe');
 ok(matrixHtml.includes('event.stopPropagation()'), 'all inline control interactions stop parent propagation');
+ok(matrixHtml.includes('https://music.youtube.com/browse/MPREb_kb5fohQCJ6d') && matrixHtml.includes('2026 · 1t · exact dist 0.000'), 'choices retain exact pressing evidence');
 
 function fakeHost(watchUrl = '') {
   const buttons = [];
@@ -75,4 +76,4 @@ await Promise.all([submitA, submitB]);
 delete globalThis.document; delete globalThis.fetch; delete globalThis.window;
 
 if (failed) process.exit(1);
-console.log('11 passed, 0 failed');
+console.log('12 passed, 0 failed');

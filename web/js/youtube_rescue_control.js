@@ -1,6 +1,6 @@
 /* The one bounded check / watch-url / choose / confirm rescue control (#1003). */
 import { API, toast } from './state.js';
-import { esc, jsArg, youtubeSectionState } from './util.js';
+import { esc, jsArg, youtubeBrowseUrl, youtubeSectionState } from './util.js';
 
 export function youtubeResolverPayload(identifier, watchUrl) {
   return { identifier, ...(watchUrl ? { watch_url: watchUrl } : {}) };
@@ -13,7 +13,16 @@ export function renderYoutubeRescueControl(key, requestId, identifier, result = 
   const pick = handlers.pick || `window.pickYoutubeRescue`;
   const label = state.state === 'resolver_failed' ? 'Retry' : state.state === 'resolved_empty' ? 'Re-check' : 'Check YouTube';
   const choices = state.state === 'resolved_with_matrix'
-    ? (result.youtube_releases || []).map((release) => `<button class="p-btn" type="button" onclick="event.stopPropagation(); ${pick}(${Number(requestId)}, ${jsArg(release.yt_browse_id)})">Rescue from ${esc(release.yt_browse_id)}</button>`).join('')
+    ? (result.youtube_releases || []).map((release) => {
+      const distances = Array.isArray(release.distances) ? release.distances : [];
+      const exact = distances.find((distance) => distance.mbid === identifier && Number.isFinite(distance.distance));
+      const finite = distances.filter((distance) => Number.isFinite(distance.distance));
+      const best = finite.length ? Math.min(...finite.map((distance) => distance.distance)) : null;
+      const distanceLabel = exact ? `exact dist ${exact.distance.toFixed(3)}` : best != null ? `best sibling dist ${best.toFixed(3)}` : 'no distance';
+      const evidence = [release.year != null ? String(release.year) : '', release.track_count != null ? `${release.track_count}t` : '', distanceLabel].filter(Boolean).join(' · ');
+      const url = youtubeBrowseUrl(release.yt_browse_id);
+      return `<div class="yt-rescue-choice"><a href="${esc(url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">${esc(release.yt_browse_id)}</a> <span>${esc(evidence)}</span> <button class="p-btn" type="button" onclick="event.stopPropagation(); ${pick}(${Number(requestId)}, ${jsArg(release.yt_browse_id)})">Rescue from this</button></div>`;
+    }).join('')
     : state.state === 'resolver_failed' || state.state === 'resolved_empty'
       ? `<span>${esc(state.message)}</span>` : '';
   return `<div class="yt-rescue-control" id="yt-rescue-${esc(key)}">
