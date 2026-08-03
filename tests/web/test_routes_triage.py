@@ -418,6 +418,13 @@ class TestTriageRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(status, 400)
         self.assertIn("confirm", invalid["error"])
 
+        status, malformed = self._post(
+            "/api/triage/41/stop-converged-search",
+            {"confirm": "STOP", "signal_token": "A" * 64},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("signal_token", malformed["error"])
+
     def test_convergence_stop_database_outage_returns_503(self):
         import psycopg2
 

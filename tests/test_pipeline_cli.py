@@ -1339,6 +1339,63 @@ class TestCmdWrongMatchDeleteGroup(unittest.TestCase):
 
 
 class TestMainExitCodes(unittest.TestCase):
+    def test_convergence_stop_constructor_outage_maps_to_exit_five(self):
+        import psycopg2
+
+        argv = [
+            "pipeline_cli.py",
+            "--dsn",
+            "postgresql://example/test",
+            "triage",
+            "stop",
+            "41",
+            "--signal-token",
+            "a" * 64,
+            "--confirm",
+            "STOP",
+            "--json",
+        ]
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with patch.object(sys, "argv", argv), patch(
+            "web.api_bases.configure_api_bases_from_runtime_config",
+        ), patch(
+            "scripts.pipeline_cli.cli.PipelineDB",
+            side_effect=psycopg2.OperationalError("database unavailable"),
+        ), redirect_stdout(stdout), redirect_stderr(stderr), self.assertRaises(
+            SystemExit,
+        ) as raised:
+            pipeline_cli.main()
+
+        self.assertEqual(raised.exception.code, 5)
+        self.assertEqual(stderr.getvalue(), "")
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["outcome"], "unavailable")
+        self.assertEqual(payload["request_id"], 41)
+
+    def test_malformed_convergence_token_fails_before_db_construction(self):
+        argv = [
+            "pipeline_cli.py",
+            "--dsn",
+            "postgresql://example/test",
+            "triage",
+            "stop",
+            "41",
+            "--signal-token",
+            "NOT-HEX",
+            "--confirm",
+            "STOP",
+        ]
+        with patch.object(sys, "argv", argv), patch(
+            "scripts.pipeline_cli.cli.PipelineDB",
+        ) as constructor, redirect_stderr(io.StringIO()), self.assertRaises(
+            SystemExit,
+        ) as raised:
+            pipeline_cli.main()
+
+        self.assertEqual(raised.exception.code, 2)
+        constructor.assert_not_called()
+
     def test_non_quarantine_main_still_configures_mirror_api_bases(self):
         import web.mb
 
@@ -5124,6 +5181,11 @@ class TestPipelineCliTriage(unittest.TestCase):
         self.assertEqual((rc, err), (0, ""))
         self.assertEqual(json.loads(out)["outcome"], "stopped")
         self.assertEqual(db.request(41)["status"], "unsearchable")
+
+        rc, stopped_show, err = self._run_show(db, 41)
+        self.assertEqual((rc, err), (0, ""))
+        self.assertNotIn("pipeline-cli triage stop", stopped_show)
+        self.assertIn("pipeline-cli set 41 wanted", stopped_show)
 
         rc, _out, err = self._run_stop(db, 999)
         self.assertEqual(rc, 2)

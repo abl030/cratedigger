@@ -6,7 +6,8 @@ import unittest
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from hypothesis import given
+import msgspec
+from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401 - registers suite/fuzz
@@ -23,78 +24,73 @@ from lib.quality import (
     AudioQualityMeasurement,
 )
 from tests.helpers import make_album_quality_evidence
-from tests.test_pipeline_db import TEST_DSN, make_db, requires_postgres
+from tests.test_pipeline_db import make_db, requires_postgres
 
 _BASE = datetime(2026, 8, 3, tzinfo=UTC)
+_PEER_IDENTITIES = (
+    "alice",
+    "Bob",
+    "carol",
+    "dave",
+    "erin",
+    "comma,name",
+    "semi;colon",
+    "slash/name",
+    "space name",
+)
+_CLIFFS = (None, 14_760, 14_900, 15_000, 15_120, 15_240, 15_500, 16_000)
+_CODECS = ("flac", "alac", "wav", "ape")
 
 
 @dataclass(frozen=True)
 class AttemptWorld:
-    peer_set: str
+    contributor_usernames: tuple[str, ...]
     cliff_hz: int | None = 15_000
     codec: str = "flac"
     direct: bool = True
     eligible: bool = True
     time_rank: int = 0
 
+    @property
+    def display_username(self) -> str | None:
+        if not self.contributor_usernames:
+            return None
+        return ", ".join(self.contributor_usernames)
+
 
 @dataclass(frozen=True)
 class ConvergenceWorld:
     attempts: tuple[AttemptWorld, ...]
+    replace_current_evidence: bool = False
 
 
-_WORLDS = (
-    ConvergenceWorld(tuple(
-        AttemptWorld(f"peer-{index}", time_rank=index)
-        for index in range(5)
-    )),
-    ConvergenceWorld(tuple(
-        AttemptWorld("same-peer", time_rank=index)
-        for index in range(8)
-    )),
-    ConvergenceWorld((
-        AttemptWorld("alice", time_rank=1),
-        AttemptWorld("bob", time_rank=2),
-        AttemptWorld("carol", time_rank=3),
-        AttemptWorld("alice, bob", time_rank=4),
-        AttemptWorld("alice, carol", time_rank=5),
-    )),
-    ConvergenceWorld((
-        AttemptWorld("alice", time_rank=1),
-        AttemptWorld("bob", time_rank=2),
-        AttemptWorld("carol", time_rank=3),
-        AttemptWorld("dave, erin", time_rank=4),
-        AttemptWorld("alice, bob", time_rank=5),
-    )),
-    ConvergenceWorld(tuple(
-        AttemptWorld(f"crosswalk-{index}", direct=False, time_rank=index)
-        for index in range(6)
-    )),
-    ConvergenceWorld(tuple(
-        AttemptWorld(f"peer-{index}", eligible=False, time_rank=index)
-        for index in range(6)
-    )),
-    ConvergenceWorld(tuple(
-        AttemptWorld(f"peer-{index}", time_rank=index)
-        for index in range(5)
-    ) + (AttemptWorld("new-null", cliff_hz=None, time_rank=9),)),
-    ConvergenceWorld(tuple(
-        AttemptWorld(f"old-{index}", time_rank=index)
-        for index in range(6)
-    ) + tuple(
-        AttemptWorld(f"new-{index}", cliff_hz=16_000, time_rank=10 + index)
-        for index in range(4)
-    )),
-    ConvergenceWorld(tuple(
-        AttemptWorld(
-            f"peer-{index}",
-            cliff_hz=(14_760, 14_900, 15_010, 15_120, 15_240)[index],
-            codec=("flac", "alac", "flac", "wav", "flac")[index],
-            time_rank=1,
-        )
-        for index in range(5)
-    )),
-)
+@st.composite
+def attempt_worlds(draw: st.DrawFn) -> AttemptWorld:
+    return AttemptWorld(
+        contributor_usernames=tuple(draw(st.lists(
+            st.sampled_from(_PEER_IDENTITIES),
+            min_size=0,
+            max_size=5,
+            unique=True,
+        ))),
+        cliff_hz=draw(st.sampled_from(_CLIFFS)),
+        codec=draw(st.sampled_from(_CODECS)),
+        direct=draw(st.booleans()),
+        eligible=draw(st.booleans()),
+        time_rank=draw(st.integers(min_value=0, max_value=4)),
+    )
+
+
+@st.composite
+def convergence_worlds(draw: st.DrawFn) -> ConvergenceWorld:
+    return ConvergenceWorld(
+        attempts=tuple(draw(st.lists(
+            attempt_worlds(),
+            min_size=0,
+            max_size=10,
+        ))),
+        replace_current_evidence=draw(st.booleans()),
+    )
 
 
 def _signal_facts(signal: ConvergenceSignal | None) -> tuple[object, ...] | None:
@@ -127,6 +123,29 @@ def assert_sql_matches_reference(
         )
 
 
+def _new_current_evidence(*, suffix: str):
+    suffix_token = sum((index + 1) * ord(char) for index, char in enumerate(suffix))
+    return make_album_quality_evidence(
+        mb_release_id="generated-convergence-release",
+        source_path=f"/library/generated-convergence-{suffix}",
+        files=[AlbumQualityEvidenceFile(
+            relative_path="01.mp3",
+            size_bytes=50_000 + suffix_token,
+            mtime_ns=1_700_000_000_000_000_000 + suffix_token,
+            extension="mp3",
+            container="mp3",
+            codec="mp3",
+        )],
+        measurement=AudioQualityMeasurement(format="MP3"),
+        v0_metric=AlbumQualityV0Metric(
+            subject="source",
+            provenance="measured",
+            min_bitrate_kbps=220,
+            avg_bitrate_kbps=230,
+        ),
+    )
+
+
 def _seed_current_request(db: PipelineDB) -> int:
     request_id = db.add_request(
         "Generated Convergence Artist",
@@ -135,15 +154,7 @@ def _seed_current_request(db: PipelineDB) -> int:
         mb_release_id="generated-convergence-release",
         status="wanted",
     )
-    current = make_album_quality_evidence(
-        mb_release_id="generated-convergence-release",
-        source_path="/library/generated-convergence",
-        measurement=AudioQualityMeasurement(format="MP3"),
-        v0_metric=AlbumQualityV0Metric(
-            subject="source", provenance="measured",
-            min_bitrate_kbps=220, avg_bitrate_kbps=230,
-        ),
-    )
+    current = _new_current_evidence(suffix="initial")
     db.upsert_album_quality_evidence(current)
     stored = db.find_album_quality_evidence(
         mb_release_id=current.mb_release_id,
@@ -154,6 +165,23 @@ def _seed_current_request(db: PipelineDB) -> int:
     return request_id
 
 
+def _replace_current_evidence(
+    db: PipelineDB,
+    request_id: int,
+    *,
+    suffix: str,
+) -> int:
+    current = _new_current_evidence(suffix=suffix)
+    db.upsert_album_quality_evidence(current)
+    stored = db.find_album_quality_evidence(
+        mb_release_id=current.mb_release_id,
+        snapshot_fingerprint=current.snapshot_fingerprint,
+    )
+    assert stored is not None and stored.id is not None
+    assert db.set_request_current_evidence(request_id, stored.id)
+    return stored.id
+
+
 def _seed_attempt(
     db: PipelineDB,
     request_id: int,
@@ -161,7 +189,8 @@ def _seed_attempt(
 ) -> ConvergenceObservation:
     log_id = db.log_download(
         request_id,
-        soulseek_username=attempt.peer_set,
+        soulseek_username=attempt.display_username,
+        contributor_usernames=attempt.contributor_usernames,
         filetype=attempt.codec,
         beets_distance=0.05,
         beets_scenario=("strong_match" if attempt.eligible else "high_distance"),
@@ -203,7 +232,10 @@ def _seed_attempt(
     )
     assert stored is not None and stored.id is not None
     db.set_download_log_candidate_evidence(
-        log_id, stored.id, direct_attribution=attempt.direct,
+        log_id,
+        stored.id,
+        direct_attribution=attempt.direct,
+        contributor_usernames=attempt.contributor_usernames,
     )
     observed_at = _BASE + timedelta(seconds=attempt.time_rank)
     db._execute(
@@ -213,21 +245,34 @@ def _seed_attempt(
     db.conn.commit()
     return ConvergenceObservation(
         log_id=log_id,
-        peer=attempt.peer_set,
+        contributor_usernames=attempt.contributor_usernames,
         snapshot_fingerprint=evidence.snapshot_fingerprint,
         codec=attempt.codec,
         cliff_hz=attempt.cliff_hz,
         observed_at=observed_at,
         eligible=attempt.eligible,
-        direct_attribution=attempt.direct,
+        direct_attribution=(attempt.direct and bool(attempt.contributor_usernames)),
     )
+
+
+_FIVE_DIRECT = ConvergenceWorld(tuple(
+    AttemptWorld((f"peer-{index}",), time_rank=index)
+    for index in range(5)
+))
+_ONE_MOSAIC = ConvergenceWorld((AttemptWorld(
+    ("alice", "bob", "carol", "dave", "erin"),
+),))
 
 
 @requires_postgres
 class TestGeneratedConvergencePipelineDB(unittest.TestCase):
-    @given(world=st.sampled_from(_WORLDS))
+    @settings(max_examples=24, deadline=None)
+    @example(world=_FIVE_DIRECT)
+    @example(world=_ONE_MOSAIC)
+    @given(world=convergence_worlds())
     def test_sql_derivation_matches_reference_model(
-        self, world: ConvergenceWorld,
+        self,
+        world: ConvergenceWorld,
     ) -> None:
         db = make_db()
         try:
@@ -236,6 +281,8 @@ class TestGeneratedConvergencePipelineDB(unittest.TestCase):
                 _seed_attempt(db, request_id, attempt)
                 for attempt in world.attempts
             ]
+            if world.replace_current_evidence:
+                _replace_current_evidence(db, request_id, suffix="replacement")
             sql_signal = db.get_convergence_signals([request_id]).get(request_id)
             reference = derive_convergence_signal(request_id, observations)
             assert_sql_matches_reference(sql_signal, reference)
@@ -244,44 +291,86 @@ class TestGeneratedConvergencePipelineDB(unittest.TestCase):
         finally:
             db.close()
 
+    @settings(max_examples=12, deadline=None)
     @given(
-        peer_set=st.sampled_from(("late", "late, sixth", "alice, bob")),
-        cliff_hz=st.sampled_from((14_800, 15_000, 15_200)),
-        codec=st.sampled_from(("flac", "alac", "wav")),
+        mutation=st.sampled_from((
+            "late_link", "contributors", "current_evidence", "spectral",
+        )),
+        punctuation_peer=st.sampled_from(_PEER_IDENTITIES),
     )
-    def test_generated_late_link_invalidates_opaque_token(
-        self, peer_set: str, cliff_hz: int, codec: str,
+    def test_generated_mutation_invalidates_opaque_token(
+        self,
+        mutation: str,
+        punctuation_peer: str,
     ) -> None:
         db = make_db()
         try:
             request_id = _seed_current_request(db)
-            for index in range(5):
+            observations = [
                 _seed_attempt(db, request_id, AttemptWorld(
-                    f"peer-{index}", time_rank=index + 1,
+                    (f"peer-{index}",), time_rank=index + 1,
                 ))
-            late = _seed_attempt(db, request_id, AttemptWorld(
-                peer_set, cliff_hz=cliff_hz, codec=codec,
-                direct=False, time_rank=0,
-            ))
+                for index in range(5)
+            ]
             captured = db.get_convergence_signals([request_id])[request_id]
 
-            assert TEST_DSN is not None
-            writer = PipelineDB(TEST_DSN)
-            try:
-                writer._execute(
+            if mutation == "late_link":
+                late = _seed_attempt(db, request_id, AttemptWorld(
+                    (punctuation_peer,), direct=False, time_rank=0,
+                ))
+                db._execute(
                     "UPDATE download_log SET candidate_evidence_direct = TRUE "
                     "WHERE id = %s",
                     (late.log_id,),
                 )
-                writer.conn.commit()
-            finally:
-                writer.close()
+                db.conn.commit()
+                observations.append(msgspec.structs.replace(
+                    late,
+                    direct_attribution=True,
+                ))
+            elif mutation == "contributors":
+                target = observations[-1]
+                contributors = tuple(sorted({
+                    *target.contributor_usernames,
+                    punctuation_peer.lower(),
+                }))
+                db._execute(
+                    "UPDATE download_log "
+                    "SET candidate_contributor_usernames = %s "
+                    "WHERE id = %s",
+                    (list(contributors), target.log_id),
+                )
+                db.conn.commit()
+                observations[-1] = msgspec.structs.replace(
+                    target,
+                    contributor_usernames=contributors,
+                )
+            elif mutation == "current_evidence":
+                _replace_current_evidence(db, request_id, suffix=punctuation_peer)
+            else:
+                target = observations[-1]
+                db._execute(
+                    "UPDATE album_quality_evidence "
+                    "SET cliff_hz = %s, codec = %s "
+                    "WHERE id = (SELECT candidate_evidence_id "
+                    "FROM download_log WHERE id = %s)",
+                    (16_000, "wav", target.log_id),
+                )
+                db.conn.commit()
+                observations[-1] = msgspec.structs.replace(
+                    target,
+                    cliff_hz=16_000,
+                    codec="wav",
+                )
 
             changed = db.get_convergence_signals([request_id]).get(request_id)
+            reference = derive_convergence_signal(request_id, observations)
+            assert_sql_matches_reference(changed, reference)
             if changed is not None:
                 self.assertNotEqual(changed.signal_token, captured.signal_token)
             result = ConvergenceStopService(db).stop(
-                request_id, signal_token=captured.signal_token,
+                request_id,
+                signal_token=captured.signal_token,
             )
             self.assertIn(result.outcome, {"stale", "not_converged"})
             request = db.get_request(request_id)
@@ -292,24 +381,32 @@ class TestGeneratedConvergencePipelineDB(unittest.TestCase):
 
 
 class TestConvergenceDifferentialChecker(unittest.TestCase):
-    def test_known_bad_raw_string_peer_counter_is_rejected(self) -> None:
-        # Five raw provenance strings contain only three atomic usernames.
-        reference = None
+    def test_known_bad_one_mosaic_observation_is_rejected(self) -> None:
+        reference = derive_convergence_signal(1, [ConvergenceObservation(
+            log_id=1,
+            contributor_usernames=("alice", "bob", "carol", "dave", "erin"),
+            snapshot_fingerprint="snapshot",
+            codec="flac",
+            cliff_hz=15_000,
+            observed_at=_BASE,
+            eligible=True,
+        )])
         known_bad = ConvergenceSignal(
             request_id=1,
-            observation_count=5,
+            observation_count=1,
             distinct_peer_count=5,
-            distinct_candidate_snapshot_count=5,
+            distinct_candidate_snapshot_count=1,
             distinct_codec_count=1,
             cliff_hz=15_000,
             raw_cliff_min_hz=15_000,
             raw_cliff_max_hz=15_000,
             cliff_spread_hz=0,
-            latest_qualifying_log_id=5,
+            latest_qualifying_log_id=1,
             first_observed_at=_BASE,
             latest_observed_at=_BASE,
             signal_token="known-bad",
         )
+        self.assertIsNone(reference)
         with self.assertRaises(AssertionError):
             assert_sql_matches_reference(known_bad, reference)
 

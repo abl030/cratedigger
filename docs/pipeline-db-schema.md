@@ -129,16 +129,20 @@ candidate index, and `download_log.candidate_evidence_direct`. The boolean is
 true only when a terminal producer positively linked the evidence measured for
 that exact attempt. Migration-021 sibling cross-walks stay false unless the
 historical job/log pair is uniquely attributable by request, evidence, and its
-transaction-stable terminal timestamp. Ambiguous history fails closed.
+transaction-stable terminal timestamp. The companion
+`candidate_contributor_usernames TEXT[]` stores normalized structured
+Soulseek identities. New rows receive it from the real download-file set;
+historical display strings containing commas are ambiguous and remain
+ineligible rather than being split. Ambiguous history fails closed.
 
 The function derives an operator signal from evidence and download history; it
 persists no signal, policy flag, counter, or cadence state. A signal exists
 only while the request's linked current evidence
 is canonical provisional lossless (`v0_subject='source'`, unverified) and the
-newest consecutive eligible Soulseek observations have at least five distinct
-atomic peer usernames in one nearest-500 Hz raw-cliff band. A terminal row may
-record a canonical comma-joined contributor set, so distinct provenance strings
-are never treated as distinct peers. Eligible observations require positive
+newest consecutive eligible Soulseek run has at least five qualifying candidate
+observations and at least five distinct atomic peer usernames in one
+nearest-500 Hz raw-cliff band. Contributor arrays are unnested as structured
+identities; presentation strings are never parsed. Eligible observations require positive
 direct attribution, an exact-release `strong_match` at distance <= 0.15, and
 unverified lossless-codec, source-subject, measurement-v2 evidence. Ineligible
 legacy cross-walks, world errors, non-exact matches, and high-distance rows are
@@ -153,8 +157,11 @@ PostgreSQL statement rederives and compares every visible fact and qualifying
 attempt identity, plus the exact linked current-evidence identity, in one MVCC
 snapshot while changing only
 `wanted -> unsearchable`. A committed evidence/log writer before that snapshot
-changes the token and loses the CAS; an overlapping later writer linearizes
-after the operator decision. This is PostgreSQL atomicity only, not a
+changes the token and loses the CAS. If a current-evidence writer holds the
+request row while stop waits, the final `UPDATE` also compares the derived
+current-evidence ID against the newer target-row version, so the stop loses the
+CAS instead of updating stale authority. A non-conflicting later writer
+linearizes after the operator decision. This is PostgreSQL atomicity only, not a
 cross-system claim. Evidence remains provisional and untouched; the ordinary
 Resume transition reopens searching.
 
@@ -316,6 +323,10 @@ Untracked rows.
   attribution that `candidate_evidence_id` describes this exact attempt's
   bytes. Historical sibling cross-walks remain addressable for rendering but
   are excluded from convergence.
+- `candidate_contributor_usernames TEXT[]` — normalized structured Soulseek
+  identities captured from the attempt's real file manifest. Commas and other
+  punctuation remain part of one array element. Ambiguous historical
+  comma-joined presentation text is left NULL and excluded.
 - `outcome TEXT` — CHECK-constrained vocabulary: `success`, `rejected`, `failed`, `timeout`, `force_import`, historical `manual_import`, `curator_ban`, `measurement_failed`, `user_offline`, `have_analysis_error`, `youtube_running`, `youtube_success`, `youtube_failed`. New manual imports cannot be submitted; the value remains readable for existing audit rows. `measurement_failed` is a candidate-preview environment failure; `have_analysis_error` is a failed fresh analysis of the installed HAVE. Automation returns to `wanted`; operator jobs preserve their current lifecycle state. Neither failure mints a quality verdict, denylist entry, or narrowing decision.
 - A failed force-import or YouTube-import execution writes one linked
   `outcome='failed'` row (`source_download_log_id` points to the action's

@@ -12,6 +12,7 @@ import msgspec
 import psycopg2.extras
 
 from lib import transitions
+from lib.convergence_service import normalize_contributor_usernames
 from lib.import_execution import ExecutionLeaseSnapshot
 from lib.import_queue import ImportJob, validate_preview_failure_status
 from lib.json_narrow import is_str_object_dict, json_dict
@@ -685,13 +686,21 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
             beets_distance=audit.beets_distance,
             beets_scenario=audit.beets_scenario,
         )
+        contributor_usernames = list(normalize_contributor_usernames(
+            audit.contributor_usernames,
+        )) or None
         cur = self._execute(
             """
             WITH origin AS (
-                SELECT source
+                SELECT source, candidate_contributor_usernames
                 FROM download_log
                 WHERE id = %s
                   AND request_id = %s
+            ), contributor_identity AS MATERIALIZED (
+                SELECT COALESCE(
+                    %s::TEXT[],
+                    (SELECT candidate_contributor_usernames FROM origin)
+                ) AS usernames
             )
             INSERT INTO download_log (
                 request_id, soulseek_username, filetype, download_path,
@@ -708,7 +717,7 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                 existing_v0_probe_kind, existing_v0_probe_min_bitrate,
                 existing_v0_probe_avg_bitrate, existing_v0_probe_median_bitrate,
                 source, source_download_log_id, candidate_evidence_id,
-                candidate_evidence_direct
+                candidate_contributor_usernames, candidate_evidence_direct
             ) SELECT
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
@@ -724,17 +733,21 @@ class _TerminalOutcomesMixin(_PipelineDBBase):
                 CASE WHEN EXISTS (SELECT 1 FROM origin) THEN %s::bigint END,
                 (SELECT candidate_evidence_id FROM import_jobs
                  WHERE id = %s AND request_id = %s),
+                (SELECT usernames FROM contributor_identity),
                 EXISTS (
                     SELECT 1 FROM import_jobs
                     WHERE id = %s
                       AND request_id = %s
                       AND candidate_evidence_id IS NOT NULL
-                )
+                ) AND COALESCE(CARDINALITY(
+                    (SELECT usernames FROM contributor_identity)
+                ), 0) > 0
             RETURNING id, (SELECT EXISTS (SELECT 1 FROM origin)) AS origin_exists
             """,
             (
                 audit.source_download_log_id,
                 request_id,
+                contributor_usernames,
                 request_id,
                 audit.soulseek_username,
                 audit.filetype,

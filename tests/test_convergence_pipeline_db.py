@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import queue
+import threading
+import time
 import unittest
 from datetime import UTC, datetime, timedelta
 
-from lib.convergence_service import ConvergenceStopService
+import psycopg2
+
+from lib.convergence_service import ConvergenceStopService, StopConvergedSearchResult
 from lib.pipeline_db import DownloadLogOutcome, PipelineDB
 from lib.quality import (
     AlbumQualityEvidenceFile,
@@ -63,11 +68,18 @@ class TestConvergencePipelineDB(unittest.TestCase):
         measurement_version: int = 2,
         codec: str = "flac",
         direct_attribution: bool = True,
+        contributor_usernames: tuple[str, ...] | None = None,
         observed_at: datetime | None = None,
     ) -> int:
+        contributors = (
+            (peer,)
+            if contributor_usernames is None
+            else contributor_usernames
+        )
         log_id = self.db.log_download(
             self.request_id,
             soulseek_username=peer,
+            contributor_usernames=contributors,
             filetype=codec,
             beets_distance=beets_distance,
             beets_scenario=beets_scenario,
@@ -206,30 +218,55 @@ class TestConvergencePipelineDB(unittest.TestCase):
         assert final is not None
         self.assertEqual(final["status"], "wanted")
 
-    def test_crosswalk_links_and_joined_peer_sets_fail_closed(self) -> None:
+    def test_crosswalk_and_ambiguous_legacy_peer_text_fail_closed(self) -> None:
         for index, peer_set in enumerate(
             ["alice", "bob", "carol", "alice, bob", "alice, carol"],
         ):
             self._add_observation(
                 peer_set, direct_attribution=False,
+                contributor_usernames=(),
                 observed_at=datetime(2026, 8, 3, tzinfo=UTC)
                 + timedelta(seconds=index),
             )
         self.assertEqual(self.db.get_convergence_signals([self.request_id]), {})
 
-        # Even if those historical cross-walks were direct, the raw strings
-        # describe only three atomic usernames, not five independent peers.
-        self.db._execute(
-            "UPDATE download_log SET candidate_evidence_direct = TRUE "
-            "WHERE request_id = %s",
-            (self.request_id,),
+        punctuation = (
+            "comma,name", "semi;colon", "slash/name", "space name", "plain",
         )
-        self.db.conn.commit()
-        self.assertEqual(self.db.get_convergence_signals([self.request_id]), {})
-
-        self._add_observation("dave, erin")
+        for index, username in enumerate(punctuation, 10):
+            self._add_observation(
+                username,
+                contributor_usernames=(username,),
+                observed_at=datetime(2026, 8, 3, tzinfo=UTC)
+                + timedelta(seconds=index),
+            )
         signal = self.db.get_convergence_signals([self.request_id])[self.request_id]
         self.assertEqual(signal.distinct_peer_count, 5)
+
+    def test_one_five_peer_mosaic_does_not_converge(self) -> None:
+        self._add_observation(
+            "alice, bob, carol, dave, erin",
+            contributor_usernames=("alice", "bob", "carol", "dave", "erin"),
+        )
+        self.assertEqual(self.db.get_convergence_signals([self.request_id]), {})
+
+    def test_direct_attribution_requires_structured_contributors(self) -> None:
+        log_id = self._add_observation(
+            "legacy display only",
+            contributor_usernames=(),
+        )
+        row = self.db._execute(
+            "SELECT candidate_evidence_direct "
+            "FROM download_log WHERE id = %s",
+            (log_id,),
+        ).fetchone()
+        self.assertFalse(row["candidate_evidence_direct"])
+        with self.assertRaises(psycopg2.errors.CheckViolation):
+            self.db._execute(
+                "UPDATE download_log "
+                "SET candidate_evidence_direct = TRUE WHERE id = %s",
+                (log_id,),
+            )
 
     def test_token_covers_late_link_raw_spread_and_codec_diversity(self) -> None:
         base = datetime(2026, 8, 3, tzinfo=UTC)
@@ -338,6 +375,100 @@ class TestConvergencePipelineDB(unittest.TestCase):
         request = self.db.get_request(self.request_id)
         assert request is not None
         self.assertEqual(request["status"], "wanted")
+
+    def test_waiting_stop_rechecks_current_evidence_on_new_row_version(self) -> None:
+        for index in range(5):
+            self._add_observation(f"peer-{index}")
+        captured = self.db.get_convergence_signals([self.request_id])[self.request_id]
+
+        replacement = make_album_quality_evidence(
+            mb_release_id="convergence-release",
+            source_path="/library/concurrent-remeasurement",
+            files=[AlbumQualityEvidenceFile(
+                relative_path="01.mp3",
+                size_bytes=55_001,
+                mtime_ns=1_700_000_000_000_055_001,
+                extension="mp3",
+                container="mp3",
+                codec="mp3",
+            )],
+            measurement=AudioQualityMeasurement(format="MP3"),
+            v0_metric=AlbumQualityV0Metric(
+                subject="source",
+                provenance="measured",
+                min_bitrate_kbps=220,
+                avg_bitrate_kbps=230,
+            ),
+        )
+        self.db.upsert_album_quality_evidence(replacement)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=replacement.mb_release_id,
+            snapshot_fingerprint=replacement.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+
+        assert TEST_DSN is not None
+        writer = PipelineDB(TEST_DSN)
+        stopper = PipelineDB(TEST_DSN)
+        result_queue: queue.Queue[object] = queue.Queue()
+        thread: threading.Thread | None = None
+        try:
+            writer.conn.autocommit = False
+            with writer.conn.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE album_requests SET current_evidence_id = %s "
+                    "WHERE id = %s",
+                    (stored.id, self.request_id),
+                )
+            stopper_pid = int(stopper._execute(
+                "SELECT pg_backend_pid() AS pid",
+            ).fetchone()["pid"])
+
+            def stop_while_locked() -> None:
+                try:
+                    result_queue.put(ConvergenceStopService(stopper).stop(
+                        self.request_id,
+                        signal_token=captured.signal_token,
+                    ))
+                except Exception as exc:  # noqa: BLE001 - relay thread failure
+                    result_queue.put(exc)
+
+            thread = threading.Thread(target=stop_while_locked, daemon=True)
+            thread.start()
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                waiting = self.db._execute(
+                    "SELECT wait_event_type FROM pg_stat_activity "
+                    "WHERE pid = %s",
+                    (stopper_pid,),
+                ).fetchone()
+                if waiting is not None and waiting["wait_event_type"] == "Lock":
+                    break
+                time.sleep(0.01)
+            else:
+                self.fail("stop statement did not reach the request-row lock")
+
+            writer.conn.commit()
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+            outcome = result_queue.get_nowait()
+            if isinstance(outcome, Exception):
+                raise outcome
+            self.assertIsInstance(outcome, StopConvergedSearchResult)
+            assert isinstance(outcome, StopConvergedSearchResult)
+            self.assertEqual(outcome.outcome, "stale")
+            request = self.db.get_request(self.request_id)
+            assert request is not None
+            self.assertEqual(request["status"], "wanted")
+            self.assertEqual(request["current_evidence_id"], stored.id)
+        finally:
+            if not writer.conn.autocommit:
+                writer.conn.rollback()
+            if thread is not None and thread.is_alive():
+                writer.conn.rollback()
+                thread.join(timeout=5)
+            writer.close()
+            stopper.close()
 
 
 if __name__ == "__main__":

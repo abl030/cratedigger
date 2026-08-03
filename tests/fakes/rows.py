@@ -30,6 +30,7 @@ class DownloadLogRow:
     # Migration 021: addressing FK to album_quality_evidence(id).
     candidate_evidence_id: int | None = None
     candidate_evidence_direct: bool = False
+    candidate_contributor_usernames: list[str] | None = None
     # Migration 052: exact validation/download row that produced a later
     # force-import or historical manual-import audit row.
     source_download_log_id: int | None = None

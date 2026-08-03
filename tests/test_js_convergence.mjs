@@ -27,6 +27,8 @@ const signal = {
 assert.match(convergenceBadge(signal), /search converged/i);
 const wanted = renderConvergencePrompt(signal, 'wanted', 'recents');
 assert.match(wanted, /6 peers/i);
+assert.match(wanted, /at least five qualifying observations/i);
+assert.match(wanted, /at least five distinct peers/i);
 assert.match(wanted, /3 codecs/i);
 assert.match(wanted, /raw cliffs 14\.78 kHz-15\.22 kHz \(440 Hz spread\)/i);
 assert.match(wanted, /shared 15 kHz band/i);

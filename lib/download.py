@@ -120,6 +120,7 @@ class DownloadDB(transitions.TransitionsDB, Protocol):
         request_id: int,
         *,
         soulseek_username: str | None = None,
+        contributor_usernames: Sequence[str] | None = None,
         filetype: str | None = None,
         outcome: DownloadLogOutcome | None = None,
         beets_detail: str | None = None,
@@ -146,6 +147,7 @@ class DownloadDB(transitions.TransitionsDB, Protocol):
         evidence_id: int | None,
         *,
         direct_attribution: bool = False,
+        contributor_usernames: Sequence[str] | None = None,
     ) -> None: ...
 
 MAX_FILE_RETRIES = 5
@@ -458,6 +460,7 @@ def _timeout_album(
         db.log_download(
             request_id=request_id,
             soulseek_username=dl_info.username,
+            contributor_usernames=dl_info.contributor_usernames,
             filetype=dl_info.filetype,
             outcome="timeout",
             error_message=reason,
@@ -673,6 +676,7 @@ def _local_completion_terminal_outcome(
         initial_transition=transition,
         audit=TerminalDownloadAudit(
             soulseek_username=dl_info.username,
+            contributor_usernames=dl_info.contributor_usernames,
             filetype=dl_info.filetype or state.filetype,
             download_path=source_path,
             beets_detail=detail,

@@ -121,7 +121,9 @@ operation.
   prompt/action and suppresses generic status, quality, and intent controls
   beside it. Copy shows codec diversity and the raw cliff range/spread, names
   the rounded value as a shared band, and calls the holding provisional—not
-  proof. The action is **Stop searching**, never Accept. While submitting it is
+  proof. The inter-candidate threshold requires at least five qualifying
+  observations from at least five distinct structured peer identities. The
+  action is **Stop searching**, never Accept. While submitting it is
   single-flight; stale responses remove and refresh the originating surface,
   while network/server failures restore the action. After success the request
   is `unsearchable`, provisional evidence remains unchanged, and Resume reopens

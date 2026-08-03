@@ -15,7 +15,9 @@ from lib.pipeline_db._core import _PipelineDBBase
 
 
 def _signal_from_row(row: Mapping[str, object]) -> ConvergenceSignal:
-    return msgspec.convert(row, type=ConvergenceSignal)
+    public_row = dict(row)
+    public_row.pop("authority_current_evidence_id", None)
+    return msgspec.convert(public_row, type=ConvergenceSignal)
 
 
 class _ConvergenceMixin(_PipelineDBBase):
@@ -52,8 +54,11 @@ class _ConvergenceMixin(_PipelineDBBase):
         """Atomically rederive the complete signal token and stop searching.
 
         PostgreSQL gives the statement one MVCC snapshot.  A signal writer
-        committed before that snapshot changes the token and loses the CAS;
-        one committed afterwards linearizes after this operator decision.
+        committed before that snapshot changes the token and loses the CAS.
+        If an authority writer commits while this UPDATE waits for the request
+        row, PostgreSQL rechecks the current-evidence predicate against the
+        newer row version and the stop loses the CAS.  A non-conflicting writer
+        committed afterwards linearizes after this operator decision.
         There is no cross-system atomicity claim beyond PostgreSQL.
         """
         rid = int(request_id)
@@ -70,6 +75,8 @@ class _ConvergenceMixin(_PipelineDBBase):
                 WHERE request.id = %s
                   AND request.status = 'wanted'
                   AND signal.request_id = request.id
+                  AND request.current_evidence_id =
+                      signal.authority_current_evidence_id
                   AND signal.signal_token = %s
                 RETURNING signal.*
                 """,

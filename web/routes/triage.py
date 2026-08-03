@@ -15,6 +15,8 @@ from typing import Literal
 import msgspec
 from pydantic import BaseModel, Field
 
+from lib.convergence_service import SIGNAL_TOKEN_PATTERN
+
 # Page-size bounds for ``GET /api/triage/list`` — re-exports of the
 # single-source-of-truth constants on ``lib.triage_service`` so the CLI
 # and API enforce the same ranges. Mirrors the convention established by
@@ -248,7 +250,7 @@ class StopConvergedSearchRequest(BaseModel):
 
     confirm: Literal["STOP"]
     signal_token: str = Field(
-        min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$",
+        min_length=64, max_length=64, pattern=SIGNAL_TOKEN_PATTERN,
     )
 
 

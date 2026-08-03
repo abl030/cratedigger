@@ -25,6 +25,15 @@ class TestConvergenceQueryShape(unittest.TestCase):
         self.assertIn("AND source = 'slskd'", sql)
         self.assertIn("AND beets_scenario = 'strong_match'", sql)
         self.assertIn("AND beets_distance <= 0.15", sql)
+        self.assertIn("candidate_contributor_usernames TEXT[]", sql)
+        self.assertIn(
+            "COALESCE(\n                "
+            "CARDINALITY(candidate_contributor_usernames), 0",
+            sql,
+        )
+        self.assertIn("UNNEST(\n        attempt.contributor_usernames", sql)
+        self.assertNotIn("REGEXP_SPLIT_TO_TABLE", sql)
+        self.assertIn("attempt.observation_count >= 5", sql)
 
     def test_converged_triage_pages_in_sql_before_bulk_projection(self) -> None:
         db_source = inspect.getsource(_MiscMixin.list_triage_page)
@@ -39,6 +48,14 @@ class TestConvergenceQueryShape(unittest.TestCase):
         source = inspect.getsource(_ConvergenceMixin.get_convergence_signals)
         self.assertIn("UNNEST(%s::BIGINT[])", source)
         self.assertIn("derive_request_convergence_signal(request.id)", source)
+
+    def test_stop_cas_rechecks_target_row_current_evidence_after_lock_wait(self) -> None:
+        source = inspect.getsource(_ConvergenceMixin.stop_search_for_convergence)
+        self.assertIn(
+            "request.current_evidence_id =\n"
+            "                      signal.authority_current_evidence_id",
+            source,
+        )
 
 
 if __name__ == "__main__":

@@ -3341,6 +3341,10 @@ class FakePipelineDB:
             else "slskd"
         )
         kwargs = audit.as_log_kwargs()
+        if not audit.contributor_usernames and source is not None:
+            kwargs["contributor_usernames"] = (
+                source.candidate_contributor_usernames or ()
+            )
         if audit.source_download_log_id is not None and source is None:
             kwargs["source_download_log_id"] = None
             kwargs["error_message"] = unlinked_source_provenance_message(
@@ -4036,6 +4040,7 @@ class FakePipelineDB:
 
     def log_download(self, request_id: int,
                      soulseek_username: str | None = None,
+                     contributor_usernames: Sequence[str] | None = None,
                      filetype: str | None = None,
                      download_path: str | None = None,
                      beets_distance: float | None | ValidationProjectionUnset = (
@@ -4107,7 +4112,12 @@ class FakePipelineDB:
             beets_distance=beets_distance,
             beets_scenario=beets_scenario,
         )
+        from lib.convergence_service import normalize_contributor_usernames
+
         new_log_id = self._mint_download_log_id()
+        normalized_contributors = list(normalize_contributor_usernames(
+            contributor_usernames or (),
+        )) or None
         auxiliary: dict[str, Any] = {
             "download_path": download_path,
             "valid": valid,
@@ -4149,6 +4159,7 @@ class FakePipelineDB:
             import_result=import_result,
             transfer_detail=transfer_detail,
             id=new_log_id,
+            candidate_contributor_usernames=normalized_contributors,
             source_download_log_id=source_download_log_id,
             extra=auxiliary,
         ))
@@ -5145,12 +5156,22 @@ class FakePipelineDB:
         evidence_id: int | None,
         *,
         direct_attribution: bool = False,
+        contributor_usernames: Sequence[str] | None = None,
     ) -> None:
+        from lib.convergence_service import normalize_contributor_usernames
+
         for row in self.download_logs:
             if row.id == download_log_id:
                 row.candidate_evidence_id = evidence_id
+                normalized = list(normalize_contributor_usernames(
+                    contributor_usernames or (),
+                )) or None
+                if normalized is not None:
+                    row.candidate_contributor_usernames = normalized
                 row.candidate_evidence_direct = bool(
-                    direct_attribution and evidence_id is not None
+                    direct_attribution
+                    and evidence_id is not None
+                    and row.candidate_contributor_usernames
                 )
                 return
 
@@ -7305,6 +7326,11 @@ class FakePipelineDB:
             "created_at": entry.created_at,
             "candidate_evidence_id": entry.candidate_evidence_id,
             "candidate_evidence_direct": entry.candidate_evidence_direct,
+            "candidate_contributor_usernames": (
+                list(entry.candidate_contributor_usernames)
+                if entry.candidate_contributor_usernames is not None
+                else None
+            ),
             "source_download_log_id": entry.source_download_log_id,
             "original_beets_distance": next(
                 (

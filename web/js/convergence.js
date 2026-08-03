@@ -50,7 +50,7 @@ export function renderConvergencePrompt(signal, requestStatus, origin = 'unknown
       : '';
   return `<div class="convergence-prompt" onclick="event.stopPropagation()">
     <div><strong>Search appears converged.</strong> ${esc(details)}</div>
-    <div>This holding remains provisional—not proof. Stop only if you want to chill at the best repeatedly observed result.</div>
+    <div>This inter-candidate pattern has at least five qualifying observations from at least five distinct peers. The holding remains provisional—not proof; stop only if you want to chill at this repeatedly observed band.</div>
     ${action}
   </div>`;
 }

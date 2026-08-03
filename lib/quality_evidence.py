@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -79,6 +80,7 @@ class QualityEvidenceDB(Protocol):
         evidence_id: int | None,
         *,
         direct_attribution: bool = False,
+        contributor_usernames: Sequence[str] | None = None,
     ) -> None: ...
 
     def set_request_current_evidence(

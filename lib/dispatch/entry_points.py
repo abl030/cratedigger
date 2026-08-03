@@ -275,9 +275,17 @@ def _dispatch_import_from_db_locked(
             defer=_job_is_running(db, import_job_id),
         )
 
+    contributor_usernames: tuple[str, ...] = ()
+    if download_log_id is not None:
+        source_log = db.get_download_log_entry(download_log_id)
+        if source_log is not None:
+            contributor_usernames = tuple(
+                source_log["candidate_contributor_usernames"] or ()
+            )
     dl_info = _download_info_from_candidate_evidence(
         candidate_result.evidence,
         username=source_username,
+        contributor_usernames=contributor_usernames,
     )
     resolved_quality_gate_fn = (
         quality_gate_fn if quality_gate_fn is not None else _check_quality_gate_core

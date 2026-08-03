@@ -9,6 +9,7 @@ https://github.com/abl030/cratedigger/issues/829#issuecomment-5148394123
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from datetime import datetime
 from typing import Literal, Protocol
@@ -18,13 +19,16 @@ import psycopg2
 
 CLIFF_BIN_HZ = 500
 MIN_DISTINCT_PEERS = 5
+MIN_QUALIFYING_OBSERVATIONS = 5
+SIGNAL_TOKEN_PATTERN = r"^[0-9a-f]{64}$"
+_SIGNAL_TOKEN_RE = re.compile(SIGNAL_TOKEN_PATTERN)
 
 
 class ConvergenceObservation(msgspec.Struct, frozen=True):
     """One chronological candidate observation used by the reference model."""
 
     log_id: int
-    peer: str
+    contributor_usernames: tuple[str, ...]
     snapshot_fingerprint: str
     codec: str
     cliff_hz: int | None
@@ -69,13 +73,22 @@ def _cliff_bin(cliff_hz: int) -> int:
     return ((cliff_hz + CLIFF_BIN_HZ // 2) // CLIFF_BIN_HZ) * CLIFF_BIN_HZ
 
 
-def atomic_peer_usernames(peer_set: str) -> frozenset[str]:
-    """Split the canonical comma-joined contributing-peer representation."""
-    return frozenset(
+def normalize_contributor_usernames(
+    contributor_usernames: Iterable[str],
+) -> tuple[str, ...]:
+    """Normalize structured Soulseek identities without parsing display text."""
+    return tuple(sorted({
         username
-        for raw in peer_set.split(",")
+        for raw in contributor_usernames
         if (username := raw.strip().lower())
-    )
+    }))
+
+
+def parse_signal_token(value: str) -> str:
+    """Validate the opaque convergence identity at an adapter boundary."""
+    if _SIGNAL_TOKEN_RE.fullmatch(value) is None:
+        raise ValueError("signal token must be exactly 64 lowercase hex characters")
+    return value
 
 
 def derive_convergence_signal(
@@ -91,7 +104,11 @@ def derive_convergence_signal(
     eligible = sorted(
         (
             row for row in observations
-            if row.eligible and row.direct_attribution
+            if (
+                row.eligible
+                and row.direct_attribution
+                and normalize_contributor_usernames(row.contributor_usernames)
+            )
         ),
         key=lambda row: (row.observed_at, row.log_id),
         reverse=True,
@@ -107,9 +124,14 @@ def derive_convergence_signal(
     peers: set[str] = {
         username
         for row in run
-        for username in atomic_peer_usernames(row.peer)
+        for username in normalize_contributor_usernames(
+            row.contributor_usernames,
+        )
     }
-    if len(peers) < MIN_DISTINCT_PEERS:
+    if (
+        len(run) < MIN_QUALIFYING_OBSERVATIONS
+        or len(peers) < MIN_DISTINCT_PEERS
+    ):
         return None
     raw_cliffs = [
         row.cliff_hz for row in run if row.cliff_hz is not None

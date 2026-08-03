@@ -9,6 +9,8 @@ dispatch dicts are the "shared registry" argparse-construction and
 
 import sys
 
+import psycopg2
+
 from lib.pipeline_db import PipelineDB
 from scripts.pipeline_cli.album_requests import (
     cmd_add,
@@ -49,6 +51,7 @@ from scripts.pipeline_cli.search_plan import (
 )
 from scripts.pipeline_cli.show import cmd_show
 from scripts.pipeline_cli.triage import (
+    _convergence_stop_unavailable,
     _quarantine_scan_unavailable,
     cmd_triage_list,
     cmd_triage_quarantine,
@@ -82,6 +85,10 @@ def main(*, api_socket: str | None = None):
         args.command == "triage"
         and getattr(args, "triage_command", None) == "quarantine"
     )
+    is_convergence_stop = (
+        args.command == "triage"
+        and getattr(args, "triage_command", None) == "stop"
+    )
 
     # ``routes`` is the only subcommand that doesn't require a DB
     # connection — short-circuit before constructing PipelineDB so the
@@ -113,13 +120,17 @@ def main(*, api_socket: str | None = None):
 
     try:
         db = PipelineDB(args.dsn)
-    except Exception:
+    except Exception as exc:
         if is_quarantine:
             rc = _quarantine_scan_unavailable(
                 args,
                 "Could not open pipeline database for quarantine scan",
             )
             sys.exit(rc)
+        if is_convergence_stop and isinstance(
+            exc, (psycopg2.OperationalError, psycopg2.InterfaceError),
+        ):
+            sys.exit(_convergence_stop_unavailable(args))
         raise
 
     commands = {

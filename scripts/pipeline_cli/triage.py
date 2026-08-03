@@ -24,6 +24,8 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import msgspec
 
+from lib.convergence_service import parse_signal_token
+
 # The canonical machine-parseable forms come from the service-layer
 # ``VALID_FILTER_FORMS`` (single source of truth across CLI and HTTP);
 # the prose variants below are CLI-only embellishments to help operators
@@ -109,6 +111,13 @@ _TRIAGE_VALID_FILTER_FORMS = (
 )
 
 
+def _signal_token_argument(value: str) -> str:
+    try:
+        return parse_signal_token(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
 def cmd_triage_show(db: _TriagePipelineDB, args: argparse.Namespace) -> int:
     """``pipeline-cli triage show <id>`` — per-request triage composition.
 
@@ -178,10 +187,16 @@ def cmd_triage_show(db: _TriagePipelineDB, args: argparse.Namespace) -> int:
             f"{signal.raw_cliff_max_hz / 1000:g} kHz "
             f"({signal.cliff_spread_hz} Hz spread)"
         )
-        print(
-            "    stop command:               pipeline-cli triage stop "
-            f"{meta.id} --signal-token {signal.signal_token} --confirm STOP"
-        )
+        if meta.status == "wanted":
+            print(
+                "    stop command:               pipeline-cli triage stop "
+                f"{meta.id} --signal-token {signal.signal_token} --confirm STOP"
+            )
+        elif meta.status == "unsearchable":
+            print(
+                "    resume command:             pipeline-cli set "
+                f"{meta.id} wanted"
+            )
 
     # Unfindable cohort state.
     if result.unfindable is None:
@@ -264,18 +279,10 @@ def cmd_triage_show(db: _TriagePipelineDB, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_triage_stop(db: _TriagePipelineDB, args: argparse.Namespace) -> int:
-    """Explicitly stop a still-current converged request.
-
-    Exit mapping mirrors HTTP: success 0, missing 2, not converged 3,
-    wrong state or stale signal identity 4, database unavailable 5.
-    """
-    from lib.convergence_service import ConvergenceStopService
-
-    result = ConvergenceStopService(db).stop(
-        int(args.id),
-        signal_token=str(args.signal_token),
-    )
+def _render_convergence_stop_result(
+    result: StopConvergedSearchResult,
+    args: argparse.Namespace,
+) -> int:
     if bool(getattr(args, "json", False)):
         print(json.dumps(
             msgspec.to_builtins(result), indent=2, sort_keys=True,
@@ -299,6 +306,33 @@ def cmd_triage_stop(db: _TriagePipelineDB, args: argparse.Namespace) -> int:
         "stale": 4,
         "unavailable": 5,
     }[result.outcome]
+
+
+def _convergence_stop_unavailable(args: argparse.Namespace) -> int:
+    from lib.convergence_service import StopConvergedSearchResult
+
+    return _render_convergence_stop_result(
+        StopConvergedSearchResult(
+            outcome="unavailable",
+            request_id=int(args.id),
+        ),
+        args,
+    )
+
+
+def cmd_triage_stop(db: _TriagePipelineDB, args: argparse.Namespace) -> int:
+    """Explicitly stop a still-current converged request.
+
+    Exit mapping mirrors HTTP: success 0, missing 2, not converged 3,
+    wrong state or stale signal identity 4, database unavailable 5.
+    """
+    from lib.convergence_service import ConvergenceStopService
+
+    result = ConvergenceStopService(db).stop(
+        int(args.id),
+        signal_token=parse_signal_token(str(args.signal_token)),
+    )
+    return _render_convergence_stop_result(result, args)
 
 
 def cmd_triage_list(db: _TriagePipelineDB, args: argparse.Namespace) -> int:
@@ -572,7 +606,7 @@ def add_triage_subparser(
     )
     p_tr_stop.add_argument("id", type=int, help="Request ID")
     p_tr_stop.add_argument(
-        "--signal-token", required=True,
+        "--signal-token", required=True, type=_signal_token_argument,
         help="opaque signal_token from triage show --json",
     )
     p_tr_stop.add_argument(

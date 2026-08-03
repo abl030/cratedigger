@@ -6,10 +6,14 @@
 -- bytes.  Convergence admits only positively attributed terminal links.
 
 ALTER TABLE download_log
-    ADD COLUMN candidate_evidence_direct BOOLEAN NOT NULL DEFAULT FALSE;
+    ADD COLUMN candidate_evidence_direct BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN candidate_contributor_usernames TEXT[];
 
 COMMENT ON COLUMN download_log.candidate_evidence_direct IS
     'True only when the terminal writer positively linked this exact attempt to its producing import job evidence. Migration-021 sibling cross-walks remain false.';
+
+COMMENT ON COLUMN download_log.candidate_contributor_usernames IS
+    'Normalized structured Soulseek contributor identities for this exact attempt. Ambiguous legacy comma-joined display text is excluded, never split.';
 
 -- Keep the one-time attribution join bounded to already-linked rows. These
 -- small partial indexes also support later forensic checks of the positive
@@ -26,6 +30,18 @@ CREATE INDEX idx_import_jobs_candidate_evidence_attribution
     )
     WHERE candidate_evidence_id IS NOT NULL
       AND completed_at IS NOT NULL;
+
+-- The pre-070 field is presentation text, not a machine-readable peer set.
+-- Preserve only unambiguous single-value historical display text. Any comma
+-- may be a username character or a join separator, so those rows remain NULL.
+-- This under-counts history but cannot manufacture extra peers.
+UPDATE download_log
+SET candidate_contributor_usernames = ARRAY[
+    LOWER(BTRIM(soulseek_username))
+]
+WHERE source = 'slskd'
+  AND NULLIF(BTRIM(soulseek_username), '') IS NOT NULL
+  AND POSITION(',' IN soulseek_username) = 0;
 
 -- Historical terminal rows can be admitted only when transaction-stable
 -- timestamps, request identity, and candidate evidence identify one exact
@@ -44,10 +60,12 @@ WITH candidates AS (
     WHERE dl.candidate_evidence_id IS NOT NULL
       AND job.completed_at IS NOT NULL
 ), unique_candidates AS (
-    SELECT download_log_id
-    FROM candidates
-    WHERE jobs_for_log = 1
-      AND logs_for_job = 1
+    SELECT candidate.download_log_id
+    FROM candidates candidate
+    JOIN download_log dl ON dl.id = candidate.download_log_id
+    WHERE candidate.jobs_for_log = 1
+      AND candidate.logs_for_job = 1
+      AND CARDINALITY(dl.candidate_contributor_usernames) > 0
 )
 UPDATE download_log dl
 SET candidate_evidence_direct = TRUE
@@ -58,7 +76,12 @@ ALTER TABLE download_log
     ADD CONSTRAINT download_log_candidate_evidence_direct_requires_link
     CHECK (
         candidate_evidence_direct IS FALSE
-        OR candidate_evidence_id IS NOT NULL
+        OR (
+            candidate_evidence_id IS NOT NULL
+            AND COALESCE(
+                CARDINALITY(candidate_contributor_usernames), 0
+            ) > 0
+        )
     );
 
 -- Every convergence read is request-local.  The partial index excludes
@@ -68,7 +91,7 @@ ALTER TABLE download_log
 CREATE INDEX idx_download_log_convergence_candidates
     ON download_log (request_id, created_at DESC, id DESC)
     INCLUDE (
-        candidate_evidence_id, soulseek_username, filetype
+        candidate_evidence_id, candidate_contributor_usernames, filetype
     )
     WHERE candidate_evidence_direct IS TRUE
       AND source = 'slskd'
@@ -78,11 +101,13 @@ CREATE INDEX idx_download_log_convergence_candidates
 
 -- One request-local, read-only derivation is shared by list, detail, and the
 -- operator stop CAS.  It returns no row unless the current holding is the
--- canonical provisional lossless-source world and five atomic Soulseek peer
--- usernames agree within the newest consecutive 500-Hz band.
+-- canonical provisional lossless-source world and at least five qualifying
+-- candidate observations from five atomic Soulseek peers agree within the
+-- newest consecutive 500-Hz band.
 CREATE FUNCTION derive_request_convergence_signal(target_request_id BIGINT)
 RETURNS TABLE (
     request_id BIGINT,
+    authority_current_evidence_id BIGINT,
     observation_count INTEGER,
     distinct_peer_count INTEGER,
     distinct_candidate_snapshot_count INTEGER,
@@ -117,7 +142,7 @@ WITH request_authority AS MATERIALIZED (
         dl.request_id,
         request.current_evidence_id,
         dl.id AS log_id,
-        dl.soulseek_username AS peer_set,
+        dl.candidate_contributor_usernames AS contributor_usernames,
         dl.candidate_evidence_id,
         evidence.snapshot_fingerprint,
         COALESCE(
@@ -137,7 +162,7 @@ WITH request_authority AS MATERIALIZED (
      AND dl.candidate_evidence_direct IS TRUE
      AND dl.source = 'slskd'
      AND dl.outcome IN ('success', 'rejected')
-     AND NULLIF(BTRIM(dl.soulseek_username), '') IS NOT NULL
+     AND CARDINALITY(dl.candidate_contributor_usernames) > 0
      AND dl.beets_scenario = 'strong_match'
      AND dl.beets_distance <= 0.15
     JOIN album_quality_evidence evidence
@@ -188,7 +213,7 @@ WITH request_authority AS MATERIALIZED (
             JSONB_BUILD_ARRAY(
                 log_id,
                 candidate_evidence_id,
-                peer_set,
+                contributor_usernames,
                 snapshot_fingerprint,
                 codec,
                 raw_cliff_hz,
@@ -202,19 +227,20 @@ WITH request_authority AS MATERIALIZED (
     SELECT COUNT(DISTINCT LOWER(BTRIM(peer.username)))::INTEGER
         AS distinct_peer_count
     FROM current_run attempt
-    CROSS JOIN LATERAL REGEXP_SPLIT_TO_TABLE(
-        attempt.peer_set, E'\\s*,\\s*'
+    CROSS JOIN LATERAL UNNEST(
+        attempt.contributor_usernames
     ) AS peer(username)
     WHERE NULLIF(BTRIM(peer.username), '') IS NOT NULL
 ), signal_facts AS (
     SELECT attempt.*, peer.distinct_peer_count
     FROM attempt_summary attempt
     CROSS JOIN peer_summary peer
-    WHERE attempt.observation_count > 0
+    WHERE attempt.observation_count >= 5
       AND peer.distinct_peer_count >= 5
 )
 SELECT
     facts.request_id,
+    facts.current_evidence_id AS authority_current_evidence_id,
     facts.observation_count,
     facts.distinct_peer_count,
     facts.distinct_candidate_snapshot_count,

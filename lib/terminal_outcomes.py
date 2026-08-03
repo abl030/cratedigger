@@ -48,6 +48,7 @@ class TerminalDownloadAudit:
 
     outcome: DownloadLogOutcome
     soulseek_username: str | None = None
+    contributor_usernames: tuple[str, ...] = ()
     filetype: str | None = None
     download_path: str | None = None
     beets_distance: float | None | ValidationProjectionUnset = (

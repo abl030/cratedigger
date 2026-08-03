@@ -30,10 +30,11 @@ def _observation(
     eligible: bool = True,
     codec: str = "flac",
     direct_attribution: bool = True,
+    contributors: tuple[str, ...] | None = None,
 ) -> ConvergenceObservation:
     return ConvergenceObservation(
         log_id=log_id,
-        peer=peer,
+        contributor_usernames=(peer,) if contributors is None else contributors,
         snapshot_fingerprint=f"snapshot-{log_id}",
         codec=codec,
         cliff_hz=cliff_hz,
@@ -47,9 +48,13 @@ def _assert_threshold_result(
     case: unittest.TestCase,
     *,
     distinct_peers: int,
+    observation_count: int,
     signal: ConvergenceSignal | None,
 ) -> None:
-    case.assertEqual(signal is not None, distinct_peers >= 5)
+    case.assertEqual(
+        signal is not None,
+        distinct_peers >= 5 and observation_count >= 5,
+    )
 
 
 class TestConvergenceDerivation(unittest.TestCase):
@@ -70,20 +75,26 @@ class TestConvergenceDerivation(unittest.TestCase):
         self.assertEqual(signal.cliff_spread_hz, 0)
         self.assertEqual(signal.latest_qualifying_log_id, 5)
 
-    def test_comma_joined_peer_sets_count_atomic_usernames(self) -> None:
+    def test_structured_punctuation_usernames_remain_atomic(self) -> None:
         rows = [
-            _observation(1, "alice"),
-            _observation(2, "bob"),
-            _observation(3, "carol"),
-            _observation(4, "alice, bob"),
-            _observation(5, "alice, carol"),
+            _observation(1, "comma,name"),
+            _observation(2, "semi;colon"),
+            _observation(3, "slash/name"),
+            _observation(4, "space name"),
+            _observation(5, "plain"),
         ]
-        self.assertIsNone(derive_convergence_signal(41, rows))
-        rows.append(_observation(6, "dave, erin"))
         signal = derive_convergence_signal(41, rows)
         self.assertIsNotNone(signal)
         assert signal is not None
         self.assertEqual(signal.distinct_peer_count, 5)
+
+    def test_one_five_peer_mosaic_is_not_repeated_observation(self) -> None:
+        row = _observation(
+            1,
+            "display-only",
+            contributors=("alice", "bob", "carol", "dave", "erin"),
+        )
+        self.assertIsNone(derive_convergence_signal(41, [row]))
 
     def test_legacy_crosswalk_is_not_direct_attribution(self) -> None:
         rows = [
@@ -144,7 +155,10 @@ class TestConvergenceDerivation(unittest.TestCase):
             )
         signal = derive_convergence_signal(9, rows)
         _assert_threshold_result(
-            self, distinct_peers=distinct_peers, signal=signal,
+            self,
+            distinct_peers=distinct_peers,
+            observation_count=len(rows),
+            signal=signal,
         )
 
     @given(
@@ -160,13 +174,20 @@ class TestConvergenceDerivation(unittest.TestCase):
         self, peer_sets: list[list[str]],
     ) -> None:
         rows = [
-            _observation(index, ", ".join(peers))
+            _observation(
+                index,
+                "display-only",
+                contributors=tuple(peers),
+            )
             for index, peers in enumerate(peer_sets, 1)
         ]
         signal = derive_convergence_signal(9, rows)
         distinct_peers = len({peer for peers in peer_sets for peer in peers})
         _assert_threshold_result(
-            self, distinct_peers=distinct_peers, signal=signal,
+            self,
+            distinct_peers=distinct_peers,
+            observation_count=len(rows),
+            signal=signal,
         )
 
     @given(
@@ -229,7 +250,10 @@ class TestConvergenceDerivation(unittest.TestCase):
         )
         with self.assertRaises(AssertionError):
             _assert_threshold_result(
-                self, distinct_peers=1, signal=bad_signal,
+                self,
+                distinct_peers=1,
+                observation_count=20,
+                signal=bad_signal,
             )
 
 
