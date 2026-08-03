@@ -49,6 +49,13 @@ MB_REL_C = "cccccccc-cccc-cccc-cccc-cccccccccccc"
 MB_RG_MISSING = "22222222-2222-2222-2222-222222222222"
 MB_NO_RG = "33333333-3333-3333-3333-333333333333"
 DICE_REALITY = "129bebd8-a7b9-4099-b0bc-545b704e7a95"
+LOON_LAKE_LOW_RES = "ec75b88a-78b0-4a21-9b75-c3c3fb17aa6e"
+LOON_LAKE_RG = "03ace6ef-d08e-4807-993d-0392672a4c86"
+LOON_LAKE_PLAYLIST = "PLC0OzcZTO0Ju-Co8Ws-IbWp6mJPwjhdL1"
+LOON_LAKE_URL = (
+    "https://www.youtube.com/watch?v=t10tVYLuY5s"
+    f"&list={LOON_LAKE_PLAYLIST}"
+)
 
 
 def _discogs_master_404(_identifier: str) -> dict[str, object]:
@@ -162,7 +169,8 @@ class TestNarrowDiscoveryAdmissions(unittest.TestCase):
     """Issue #1003: song and operator-watch discovery enter the normal matrix."""
 
     def _resolve(self, yt: FakeYTMusic, *, watch_url: str | None = None,
-                 identifier: str = MB_REL_A, pdb: FakePipelineDB | None = None):
+                 identifier: str = MB_REL_A, pdb: FakePipelineDB | None = None,
+                 deadline_seconds: int = 60):
         return resolve_youtube_album(
             identifier, pdb=pdb or FakePipelineDB(),
             mb_get_release=lambda value: _ok_mb_release(mbid=value),
@@ -171,6 +179,7 @@ class TestNarrowDiscoveryAdmissions(unittest.TestCase):
             discogs_get_master_releases=_discogs_master_404,
             yt_client=yt, distance_fn=_canned_distance(distance=0.0),
             sleep_fn=_noop_sleep, watch_url=watch_url,
+            deadline_seconds=deadline_seconds,
         )
 
     def test_song_album_browse_id_is_scored_when_album_search_misses(self):
@@ -244,6 +253,162 @@ class TestNarrowDiscoveryAdmissions(unittest.TestCase):
         self.assertFalse(result.from_cache)
         self.assertFalse(result.youtube_releases)
         self.assertEqual(pdb.get_youtube_album_mapping(MB_RG, "mb"), old)
+
+    def test_loon_lake_watch_with_list_resolves_full_ordered_playlist(self):
+        requested_tracks = [
+            ("Maria", 115), ("Just Now", 167), ("The Dream", 165),
+            ("Dark Black Eyes", 246), ("Radiator", 159),
+            ("Girlfriend", 186), ("Blue Skies", 190), ("Surfin'", 154),
+            ("Honey Baby", 122), ("Winona Ryder", 205),
+        ]
+        playlist_tracks = [
+            ("t10tVYLuY5s", "Loon Lake - Maria", 116),
+            ("otSopfh5aPY", "Loon Lake  - Just Now (official video)", 167),
+            ("GHdoJw79Dqw", "Loon Lake - The Dream", 166),
+            ("LQj7syTEFqQ", "Loon Lake - Dark Black Eyes", 247),
+            ("NlWCwz4NpI8", "Loon Lake - Radiator", 159),
+            ("teb8DBTZ0_A", "Loon Lake - Girlfriend", 186),
+            ("8lGstW75LRw", "Loon Lake - Blue Skies", 190),
+            ("9472M_DW3Gc", "Loon Lake - Surfin' (Official Video)", 155),
+            ("Fa7GuaiY5l4", "Loon Lake - Honey Baby", 123),
+            ("V-f345M-vQY", "Loon Lake - Winona Ryder", 213),
+        ]
+        release = _ok_mb_release(
+            mbid=LOON_LAKE_LOW_RES, rg=LOON_LAKE_RG,
+            title="Low Res", artist="Loon Lake", year=2015,
+            tracks=[
+                {"disc_number": 1, "track_number": index, "title": title,
+                 "length_seconds": float(duration)}
+                for index, (title, duration) in enumerate(requested_tracks, 1)
+            ],
+        )
+        yt = FakeYTMusic()
+        yt.set_playlist(LOON_LAKE_PLAYLIST, {
+            "id": LOON_LAKE_PLAYLIST,
+            "title": "Loon Lake - Low Res",
+            "author": {"name": "weareloonlake"},
+            "year": "2020",
+            "trackCount": len(playlist_tracks),
+            "tracks": [
+                {"videoId": video_id, "title": title,
+                 "artists": [{"name": "weareloonlake"}],
+                 "duration_seconds": duration}
+                for video_id, title, duration in playlist_tracks
+            ],
+        })
+        pdb = FakePipelineDB()
+
+        result = resolve_youtube_album(
+            LOON_LAKE_LOW_RES, pdb=pdb,
+            mb_get_release=lambda _value: release,
+            mb_get_release_group_releases=lambda _rg: {
+                "releases": [{"id": LOON_LAKE_LOW_RES}],
+            },
+            discogs_get_release=FakeDiscogsLookup(),
+            discogs_get_master_releases=_discogs_master_404,
+            yt_client=yt, distance_fn=compute_beets_distance,
+            sleep_fn=_noop_sleep, watch_url=LOON_LAKE_URL,
+        )
+
+        self.assertEqual(result.outcome, "ok", result.error_message)
+        self.assertEqual(yt.get_playlist_calls, [
+            {"playlistId": LOON_LAKE_PLAYLIST, "limit": None},
+        ])
+        self.assertEqual(yt.get_watch_playlist_calls, [])
+        self.assertEqual(yt.get_album_calls, [])
+        self.assertEqual(len(result.youtube_releases), 1)
+        resolved = result.youtube_releases[0]
+        self.assertEqual(resolved.yt_browse_id, LOON_LAKE_PLAYLIST)
+        self.assertEqual(resolved.yt_audio_playlist_id, LOON_LAKE_PLAYLIST)
+        self.assertEqual(
+            resolved.yt_url,
+            f"https://music.youtube.com/playlist?list={LOON_LAKE_PLAYLIST}",
+        )
+        self.assertEqual(resolved.track_count, 10)
+        self.assertEqual([track.title for track in resolved.tracks],
+                         [title for title, _duration in requested_tracks])
+        exact = [d for d in resolved.distances if d.mbid == LOON_LAKE_LOW_RES]
+        self.assertEqual(len(exact), 1)
+        self.assertEqual(exact[0].outcome, "ok", exact[0].error_message)
+        self.assertIsNotNone(exact[0].distance)
+        assert exact[0].distance is not None
+        self.assertLess(exact[0].distance, 0.15)
+        self.assertEqual(exact[0].total_mb_tracks, 10)
+
+        stored = pdb.get_youtube_album_mapping(LOON_LAKE_RG, "mb")
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        self.assertEqual(stored[0]["yt_browse_id"], LOON_LAKE_PLAYLIST)
+        self.assertEqual(stored[0]["yt_audio_playlist_id"], LOON_LAKE_PLAYLIST)
+        self.assertEqual(
+            [track["video_id"] for track in stored[0]["yt_tracks"]],
+            [video_id for video_id, _title, _duration in playlist_tracks],
+        )
+
+    def test_music_playlist_url_is_accepted(self):
+        yt = FakeYTMusic()
+        yt.set_playlist("PL_manual", {
+            "title": "ignored presentation title",
+            "tracks": [{
+                "videoId": "video-1", "title": "Dr. Octagon - Intro",
+                "duration_seconds": 60,
+            }, {
+                "videoId": "video-2", "title": "Dr. Octagon - 3000",
+                "duration_seconds": 180,
+            }],
+        })
+        result = self._resolve(
+            yt, watch_url="https://music.youtube.com/playlist?list=PL_manual")
+        self.assertEqual(result.outcome, "ok", result.error_message)
+        self.assertEqual(result.youtube_releases[0].yt_browse_id, "PL_manual")
+
+    def test_manual_playlist_failure_never_serves_or_replaces_old_matrix(self):
+        pdb = FakePipelineDB()
+        old = [{"yt_browse_id": "MPREb_old", "yt_audio_playlist_id": None,
+                "yt_url": "https://music.youtube.com/browse/MPREb_old",
+                "yt_year": 2000, "yt_track_count": 1, "album_title": "Old",
+                "album_artist": "Old", "yt_tracks": [], "distances": []}]
+        pdb.seed_youtube_album_mapping(MB_RG, "mb", old)
+        yt = FakeYTMusic()
+        yt.set_playlist("PL_empty", {"title": "Private or empty", "tracks": []})
+        result = self._resolve(
+            yt, pdb=pdb,
+            watch_url="https://www.youtube.com/playlist?list=PL_empty")
+        self.assertEqual(result.outcome, "youtube_parse_failed")
+        self.assertFalse(result.from_cache)
+        self.assertFalse(result.youtube_releases)
+        self.assertEqual(pdb.get_youtube_album_mapping(MB_RG, "mb"), old)
+
+    def test_completed_manual_playlist_is_scored_after_soft_deadline(self):
+        pdb = FakePipelineDB()
+        pdb.seed_youtube_album_mapping(MB_RG, "mb", [{
+            "yt_browse_id": "MPREb_old", "yt_audio_playlist_id": None,
+            "yt_url": "https://music.youtube.com/browse/MPREb_old",
+            "yt_year": 2000, "yt_track_count": 1, "album_title": "Old",
+            "album_artist": "Old", "yt_tracks": [], "distances": [],
+        }])
+        yt = FakeYTMusic()
+        yt.set_playlist("PL_slow", {
+            "tracks": [
+                {"videoId": "video-1", "title": "Dr. Octagon - Intro",
+                 "duration_seconds": 60},
+                {"videoId": "video-2", "title": "Dr. Octagon - 3000",
+                 "duration_seconds": 180},
+            ],
+        })
+
+        result = self._resolve(
+            yt, pdb=pdb, deadline_seconds=-1,
+            watch_url="https://www.youtube.com/playlist?list=PL_slow")
+
+        self.assertEqual(result.outcome, "ok", result.error_message)
+        self.assertEqual([row.yt_browse_id for row in result.youtube_releases],
+                         ["PL_slow"])
+        self.assertEqual(len(result.youtube_releases[0].distances), 1)
+        stored = pdb.get_youtube_album_mapping(MB_RG, "mb")
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        self.assertEqual([row["yt_browse_id"] for row in stored], ["PL_slow"])
 
 
 def _canned_distance(

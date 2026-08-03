@@ -6,9 +6,9 @@ release-group/master-level), the resolver:
 1. Auto-widens the input to a release-group / master via leaf-then-group
    fallback against the local MB / Discogs mirrors.
 2. Enumerates the sibling releases in that group.
-3. Searches YouTube Music for the album, picks a seed YT result by
-   ``(year, trackCount)`` proximity to the lowest-year MB sibling, and
-   expands via the seed's ``other_versions[]`` array.
+3. Searches YouTube Music for the album, or admits an explicit public video /
+   playlist URL; picks a seed YT result and expands album discovery via the
+   seed's ``other_versions[]`` array.
 4. Synthesizes ``SyntheticItem`` lists per YT sibling and runs
    ``compute_beets_distance(items_override=…)`` for every
    ``(yt_sibling × mb_sibling)`` pair — N×M scoring.
@@ -37,6 +37,7 @@ import time
 import urllib.error
 from collections.abc import Callable
 from typing import Any, Protocol, runtime_checkable
+from urllib.parse import parse_qs, urlsplit
 
 import msgspec
 import requests
@@ -590,6 +591,7 @@ def resolve_youtube_album(
     yt_failure: tuple[str, str] | None = None
     seed_browse_id: str | None = None
     yt_album_responses: dict[str, dict[str, Any]] = {}
+    manual_playlist = False
     deadline_message: str | None = None
     attempted_non_seed_siblings = 0
     retry_exhausted_non_seed_siblings = 0
@@ -606,8 +608,10 @@ def resolve_youtube_album(
 
     try:
         if watch_url is not None:
-            seed_browse_id = _watch_url_album_browse_id(yt_client, watch_url)
-            seed_album = _cached_get_album(
+            seed_browse_id, manual_album = _manual_url_album(
+                yt_client, watch_url, seed_release)
+            manual_playlist = manual_album is not None
+            seed_album = manual_album or _cached_get_album(
                 yt_client, cache, seed_browse_id, refresh=True)
             yt_album_responses[seed_browse_id] = seed_album
         else:
@@ -778,7 +782,11 @@ def resolve_youtube_album(
     persistable_rows: list[PersistedYoutubeRow] = []
 
     for browse_id, album_resp in yt_album_responses.items():
-        if _deadline_breached():
+        # A manual playlist fetch is explicitly requested and already complete
+        # by this point.  Do not turn that successful fetch into an empty
+        # ``ok`` matrix merely because pagination consumed the soft discovery
+        # deadline; doing so would replace valid cached evidence with [].
+        if not manual_playlist and _deadline_breached():
             if deadline_message is None:
                 deadline_message = (
                     f"deadline exceeded after "
@@ -795,7 +803,7 @@ def resolve_youtube_album(
         distances = _score_against_siblings(
             synth_items, sibling_ids, distance_rg_id, distance_fn, pdb,
             mb_get_release if source_label == "mb" else discogs_get_release,
-            deadline_breached=_deadline_breached,
+            deadline_breached=(None if manual_playlist else _deadline_breached),
         )
         yt_url = _compose_url(browse_id, album_resp.get("audioPlaylistId"))
         year = _parse_year(album_resp.get("year"))
@@ -1222,26 +1230,131 @@ def _song_album_browse_ids(results: list[dict[str, object]]) -> list[str]:
     return out
 
 
-_CANONICAL_WATCH_URL = re.compile(
-    r"^https://music\.youtube\.com/watch\?v=([A-Za-z0-9_-]+)$"
-)
+_YOUTUBE_URL_HOSTS = frozenset({
+    "youtube.com", "www.youtube.com", "music.youtube.com",
+})
+_YOUTUBE_ID = re.compile(r"^[A-Za-z0-9_-]+$")
+_OFFICIAL_SUFFIX = re.compile(
+    r"\s*\(\s*official\s+(?:video|audio)\s*\)\s*$", re.IGNORECASE)
 
 
-class _WatchPlaylistClient(Protocol):
+class _ManualUrlClient(Protocol):
     def get_watch_playlist(self, *, videoId: str) -> dict[str, object]: ...
 
+    def get_playlist(
+        self, playlistId: str, limit: int | None = 100,
+    ) -> dict[str, object]: ...
 
-def _watch_url_album_browse_id(
-    yt_client: _WatchPlaylistClient,
-    watch_url: str,
+
+def _single_youtube_parameter(
+    query: dict[str, list[str]], name: str,
 ) -> str:
-    """Resolve only the report's canonical watch URL to its album browse ID."""
-    match = _CANONICAL_WATCH_URL.fullmatch(watch_url)
-    if match is None:
-        raise ValueError("watch_url must be canonical https://music.youtube.com/watch?v=<video-id>")
-    response = yt_client.get_watch_playlist(videoId=match.group(1))
+    values = query.get(name, [])
+    if len(values) != 1 or _YOUTUBE_ID.fullmatch(values[0]) is None:
+        raise ValueError(f"YouTube URL has an invalid {name!r} parameter")
+    return values[0]
+
+
+def _manual_url_album(
+    yt_client: _ManualUrlClient,
+    manual_url: str,
+    seed_release: dict[str, object],
+) -> tuple[str, dict[str, object] | None]:
+    """Resolve an admitted video or playlist URL.
+
+    A ``list`` parameter is authoritative even when a ``v`` parameter is
+    present.  That makes a normal YouTube share URL for a video inside a
+    playlist select the complete ordered playlist instead of silently
+    collapsing to one video.  The returned playlist response is adapted into
+    the existing album-scoring shape; direct videos retain the established
+    video-to-YT-album lookup.
+    """
+    parsed = urlsplit(manual_url.strip())
+    if parsed.scheme != "https" or parsed.hostname not in _YOUTUBE_URL_HOSTS:
+        raise ValueError("URL must use HTTPS on youtube.com or music.youtube.com")
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    if "list" in query:
+        if parsed.path not in {"/watch", "/playlist"}:
+            raise ValueError("playlist URL must use /watch or /playlist")
+        playlist_id = _single_youtube_parameter(query, "list")
+        response = yt_client.get_playlist(playlist_id, None)
+        return playlist_id, _playlist_as_album_response(
+            response, playlist_id, seed_release)
+    if parsed.path != "/watch":
+        raise ValueError("video URL must use /watch?v=<video-id>")
+    video_id = _single_youtube_parameter(query, "v")
+    return _watch_video_album_browse_id(yt_client, video_id), None
+
+
+def _playlist_track_title(raw_title: str, requested_artist: str) -> str:
+    """Remove only the observed channel-upload presentation adornments."""
+    title = raw_title.strip()
+    if requested_artist:
+        title = re.sub(
+            rf"^\s*{re.escape(requested_artist)}\s*[-–—]\s*", "", title,
+            count=1, flags=re.IGNORECASE)
+    return _OFFICIAL_SUFFIX.sub("", title).strip()
+
+
+def _playlist_as_album_response(
+    raw_response: dict[str, object],
+    playlist_id: str,
+    seed_release: dict[str, object],
+) -> dict[str, object]:
+    """Adapt one complete public playlist to the existing album shape.
+
+    Requested release metadata supplies album identity.  The playlist remains
+    authority for ordered track count, video IDs, titles, and durations; an
+    unusable entry fails the whole manual resolve instead of being dropped or
+    guessed around.
+    """
+    requested_artist = str(seed_release.get("artist_name") or "").strip()
+    requested_title = str(seed_release.get("title") or "").strip()
+    raw_tracks = _json_list(_json_dict(raw_response).get("tracks"))
+    if not raw_tracks:
+        raise KeyError("playlist response has no tracks")
+    tracks: list[dict[str, object]] = []
+    for index, raw_track in enumerate(raw_tracks, 1):
+        track = _json_dict(raw_track)
+        video_id = track.get("videoId")
+        raw_title = track.get("title")
+        duration = _safe_float(track.get("duration_seconds"), -1.0)
+        if not isinstance(video_id, str) or _YOUTUBE_ID.fullmatch(video_id) is None:
+            raise KeyError(f"playlist track {index} has no usable video id")
+        if not isinstance(raw_title, str):
+            raise KeyError(f"playlist track {index} has no usable title")
+        title = _playlist_track_title(raw_title, requested_artist)
+        if not title:
+            raise KeyError(f"playlist track {index} has an empty normalized title")
+        if duration < 0:
+            raise KeyError(f"playlist track {index} has no usable duration")
+        tracks.append({
+            "videoId": video_id,
+            "title": title,
+            "artists": [{"name": requested_artist}],
+            "album": {"name": requested_title, "id": playlist_id},
+            "duration_seconds": duration,
+            "trackNumber": index,
+        })
+    return {
+        "title": requested_title,
+        "artists": [{"name": requested_artist}],
+        "year": seed_release.get("year"),
+        "trackCount": len(tracks),
+        "audioPlaylistId": playlist_id,
+        "tracks": tracks,
+        "other_versions": [],
+    }
+
+
+def _watch_video_album_browse_id(
+    yt_client: _ManualUrlClient,
+    video_id: str,
+) -> str:
+    """Resolve one validated video ID to its YT Music album browse ID."""
+    response = yt_client.get_watch_playlist(videoId=video_id)
     tracks = _json_list(_json_dict(response).get("tracks"))
-    track = next((candidate for candidate in tracks if _json_dict(candidate).get("videoId") == match.group(1)), None)
+    track = next((candidate for candidate in tracks if _json_dict(candidate).get("videoId") == video_id), None)
     if track is None:
         raise KeyError("watch response has no matching video")
     album_id = _json_dict(_json_dict(track).get("album")).get("id")

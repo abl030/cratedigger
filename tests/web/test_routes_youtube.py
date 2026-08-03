@@ -264,7 +264,7 @@ class TestYoutubeRouteContracts(_FakeDbWebServerCase):
         )
 
     def test_watch_url_is_forwarded_to_shared_resolver(self):
-        url = "https://music.youtube.com/watch?v=dGYXkhMAvLk"
+        url = "https://www.youtube.com/watch?v=video&list=playlist"
         with self._patch_service(self._ok_result()) as resolve:
             status, _data = self._post("/api/youtube-album", {
                 "identifier": self.UUID_A, "watch_url": url})

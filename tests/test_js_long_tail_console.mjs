@@ -811,5 +811,54 @@ for (const scenario of [
   }), `${scenario.source} resolver click sends its exact identifier and refresh`);
 }
 
+console.log('long-tail Search ignores pasted URL and Check URL submits it explicitly');
+{
+  const requestId = 434345;
+  const identifier = 'aaaaaaaa-bbbb-cccc-dddd-ffffffffffff';
+  const playlistUrl = 'https://www.youtube.com/watch?v=video&list=playlist';
+  const originalDocument = globalThis.document;
+  const originalFetch = globalThis.fetch;
+  const fetchCalls = [];
+  const input = { value: playlistUrl };
+  const body = { innerHTML: '' };
+  const panel = { querySelector: () => body };
+  state.longTail = {
+    rows: [{ id: requestId, mb_release_id: identifier, discogs_release_id: null }],
+    band: null,
+    query: '',
+  };
+  consoleOpen(consoleStates, requestId);
+  globalThis.document = {
+    getElementById(id) {
+      if (id === `yt-watch-long-tail-${requestId}`) return input;
+      if (id === `lt-panel-youtube-${requestId}`) return panel;
+      return null;
+    },
+  };
+  globalThis.fetch = async (_url, options) => {
+    fetchCalls.push(options);
+    return {
+      status: 200,
+      json: async () => ({ outcome: 'ok', youtube_releases: [] }),
+    };
+  };
+  try {
+    await checkYoutube(requestId, false);
+    await checkYoutube(requestId, true);
+  } finally {
+    globalThis.document = originalDocument;
+    globalThis.fetch = originalFetch;
+    consoleStates.delete(requestId);
+    state.longTail = { rows: null, band: null, query: '' };
+  }
+  assertEqual(fetchCalls.length, 2, 'the two explicit actions each run once');
+  assertEqual(fetchCalls[0].body, JSON.stringify({
+    identifier, refresh: false,
+  }), 'Search YouTube ignores a populated URL field');
+  assertEqual(fetchCalls[1].body, JSON.stringify({
+    identifier, refresh: false, watch_url: playlistUrl,
+  }), 'Check URL captures the URL before replacing the panel with progress copy');
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

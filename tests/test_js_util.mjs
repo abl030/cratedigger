@@ -1734,10 +1734,10 @@ console.log('long_tail_console.js __test__ (U5 rescue flow)');
   const wrongState = rescueOutcomeCopy({ outcome: 'wrong_state' });
   assert(wrongState.detail.toLowerCase().includes('refresh'),
     'rescueOutcomeCopy wrong_state tells the operator to refresh');
-  // no_resolver_mapping → "re-run Check YouTube".
+  // no_resolver_mapping → explicit resolver actions.
   const noMapping = rescueOutcomeCopy({ outcome: 'no_resolver_mapping' });
-  assert(noMapping.detail.toLowerCase().includes('re-run check youtube'),
-    'rescueOutcomeCopy no_resolver_mapping tells the operator to re-run Check YouTube');
+  assert(noMapping.detail.includes('Search YouTube') && noMapping.detail.includes('Check URL'),
+    'rescueOutcomeCopy no_resolver_mapping names both explicit resolver actions');
   // track_count_precheck_failed → shows the precheck mismatch detail.
   const trackMismatch = rescueOutcomeCopy({
     outcome: 'track_count_precheck_failed', detail: 'expected 14, got 10' });

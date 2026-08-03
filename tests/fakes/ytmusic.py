@@ -8,7 +8,7 @@ from typing import Any
 
 class FakeYTMusic:
     """In-memory fake for the slice of ``ytmusicapi.YTMusic`` the YouTube
-    album resolver uses (``search`` + ``get_album``).
+    album resolver uses (``search`` + ``get_album`` + manual URL lookups).
 
     Mirrors ``FakeSlskdAPI`` in shape: pre-seed canned per-query results,
     queue one-shot exceptions to simulate upstream failures, and record
@@ -28,9 +28,11 @@ class FakeYTMusic:
         self._search_errors: dict[tuple[str, str | None], Exception] = {}
         self._album_errors: dict[str, Exception] = {}
         self._watch_results: dict[str, dict[str, object]] = {}
+        self._playlist_results: dict[str, dict[str, object]] = {}
         self.search_calls: list[dict[str, Any]] = []
         self.get_album_calls: list[dict[str, Any]] = []
         self.get_watch_playlist_calls: list[dict[str, object]] = []
+        self.get_playlist_calls: list[dict[str, object]] = []
 
     def set_search(
         self,
@@ -57,6 +59,14 @@ class FakeYTMusic:
     ) -> None:
         """Configure the narrow ``get_watch_playlist(videoId=...)`` response."""
         self._watch_results[video_id] = copy.deepcopy(response)
+
+    def set_playlist(
+        self,
+        playlist_id: str,
+        response: dict[str, object],
+    ) -> None:
+        """Configure the full ``get_playlist(playlistId, limit)`` response."""
+        self._playlist_results[playlist_id] = copy.deepcopy(response)
 
     def set_search_error(
         self,
@@ -126,6 +136,12 @@ class FakeYTMusic:
     def get_watch_playlist(self, videoId: str) -> dict[str, object]:
         self.get_watch_playlist_calls.append({"videoId": videoId})
         return copy.deepcopy(self._watch_results.get(videoId, {}))
+
+    def get_playlist(
+        self, playlistId: str, limit: int | None = 100,
+    ) -> dict[str, object]:
+        self.get_playlist_calls.append({"playlistId": playlistId, "limit": limit})
+        return copy.deepcopy(self._playlist_results.get(playlistId, {}))
 
     @staticmethod
     def make_album_fixture(
