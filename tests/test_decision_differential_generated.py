@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import json
 import unittest
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Literal
 
 from hypothesis import given
 from hypothesis import strategies as st
@@ -35,6 +37,26 @@ _PROOF_COLUMNS: dict[str, object] = {
     "verified_lossless_classifier": "spectral_verified_lossless_v3",
     "verified_lossless_detail": "genuine",
 }
+CurrentEvidenceProfile = Literal["low", "proof", "high"]
+_CURRENT_PROFILES: tuple[CurrentEvidenceProfile, ...] = (
+    "low", "proof", "high",
+)
+CorpusMutation = Literal[
+    "duplicate_id",
+    "dangling_current",
+    "missing_required",
+    "wrong_top_level",
+    "wrong_file_primitive",
+    "wrong_evidence_primitive",
+]
+_CORPUS_MUTATIONS: tuple[CorpusMutation, ...] = (
+    "duplicate_id",
+    "dangling_current",
+    "missing_required",
+    "wrong_top_level",
+    "wrong_file_primitive",
+    "wrong_evidence_primitive",
+)
 
 
 @dataclass(frozen=True)
@@ -43,13 +65,62 @@ class NativePairingWorld:
     permuted_rows: tuple[dict[str, object], ...]
 
 
+def _profiled_evidence_row(
+    evidence_id: int,
+    *,
+    profile: CurrentEvidenceProfile,
+    is_candidate: bool,
+    current_evidence_id: int | None,
+) -> dict[str, object]:
+    """One complete row whose current-side outcome differs by profile.
+
+    A rejected candidate imports over ``low``, is locked by ``proof``, and is
+    downgraded by ``high``.  Thus any resolver substitution among these valid
+    current IDs is observable at the real JSONL-to-decision boundary.
+    """
+    bitrate = {"low": 96, "proof": 128, "high": 320}[profile]
+    proof = _PROOF_COLUMNS if profile == "proof" else {}
+    return _corpus_row(
+        id=evidence_id,
+        mb_release_id=_RELEASE_ID,
+        source_path=f"/Beets/generated-{profile}-{evidence_id}",
+        min_bitrate_kbps=bitrate,
+        avg_bitrate_kbps=bitrate,
+        median_bitrate_kbps=bitrate,
+        format="MP3",
+        is_cbr=True,
+        spectral_grade=None,
+        spectral_subject=None,
+        spectral_provenance=None,
+        codec_family=None,
+        spectral_measurement_version=None,
+        codec="mp3",
+        container="mp3",
+        storage_format="mp3",
+        filetype_band="mp3",
+        target_format=None,
+        target_is_cbr=None,
+        is_candidate=is_candidate,
+        current_evidence_id=current_evidence_id,
+        request_mb_release_id=(
+            _RELEASE_ID if is_candidate else None
+        ),
+        files=[{
+            "relative_path": "01.mp3", "size_bytes": 1, "mtime_ns": 1,
+            "extension": "mp3", "container": "mp3", "codec": "mp3",
+            "decode_ok": True,
+        }],
+        **proof,
+    )
+
+
 @st.composite
 def native_pairing_worlds(draw) -> NativePairingWorld:
     """Valid complete corpus rows with an arbitrary current-FK graph."""
     evidence_ids = draw(st.lists(
         st.integers(min_value=1, max_value=100),
-        min_size=1,
-        max_size=8,
+        min_size=len(_CURRENT_PROFILES),
+        max_size=len(_CURRENT_PROFILES),
         unique=True,
     ))
     candidate_ids = set(draw(st.lists(
@@ -62,16 +133,16 @@ def native_pairing_worlds(draw) -> NativePairingWorld:
         evidence_id: draw(st.sampled_from([None, *evidence_ids]))
         for evidence_id in candidate_ids
     }
+    profile_by_evidence_id: dict[int, CurrentEvidenceProfile] = {
+        evidence_id: _CURRENT_PROFILES[offset % len(_CURRENT_PROFILES)]
+        for offset, evidence_id in enumerate(evidence_ids)
+    }
     rows = tuple(
-        _corpus_row(
-            id=evidence_id,
-            mb_release_id=_RELEASE_ID,
+        _profiled_evidence_row(
+            evidence_id,
+            profile=profile_by_evidence_id[evidence_id],
             is_candidate=evidence_id in candidate_ids,
             current_evidence_id=current_by_candidate.get(evidence_id),
-            request_mb_release_id=(
-                _RELEASE_ID if evidence_id in candidate_ids else None
-            ),
-            **_PROOF_COLUMNS,
         )
         for evidence_id in evidence_ids
     )
@@ -164,6 +235,61 @@ def _decide_world(
     return _read_decided(output)
 
 
+def _mutated_corpus_rows(
+    rows: tuple[dict[str, object], ...],
+    mutation: CorpusMutation,
+) -> tuple[dict[str, object], ...]:
+    """Plant one bounded JSONL failure without changing the valid source world."""
+    mutated = [deepcopy(row) for row in rows]
+    candidate = next(row for row in mutated if row["is_candidate"] is True)
+    if mutation == "duplicate_id":
+        mutated.append(deepcopy(mutated[0]))
+    elif mutation == "dangling_current":
+        ids: list[int] = []
+        for row in mutated:
+            evidence_id = row["id"]
+            assert isinstance(evidence_id, int)
+            ids.append(evidence_id)
+        candidate["current_evidence_id"] = max(ids) + 1
+    elif mutation == "missing_required":
+        del candidate["request_mb_release_id"]
+    elif mutation == "wrong_top_level":
+        candidate["is_candidate"] = "true"
+    elif mutation == "wrong_file_primitive":
+        files = candidate["files"]
+        assert isinstance(files, list)
+        file = files[0]
+        assert isinstance(file, dict)
+        file["size_bytes"] = "1"
+    elif mutation == "wrong_evidence_primitive":
+        report = candidate["audio_validation"]
+        assert isinstance(report, dict)
+        report["files_checked"] = "0"
+    else:  # pragma: no cover - Literal and the complete tuple above guard this.
+        raise AssertionError(f"unknown corpus mutation: {mutation}")
+    return tuple(mutated)
+
+
+def assert_corpus_rejected_by_outer_adapters(
+    corpus: Path,
+    output: Path,
+) -> None:
+    """Both public JSONL adapters must reject a malformed corpus."""
+    accepted: list[str] = []
+    for adapter, invoke in (
+        ("read_decision_corpus", lambda: read_decision_corpus(str(corpus))),
+        ("decide_corpus", lambda: decide_corpus(str(corpus), str(output))),
+    ):
+        try:
+            invoke()
+        except RenderDifferentialError:
+            continue
+        accepted.append(adapter)
+    if accepted:
+        raise AssertionError(
+            f"malformed corpus was accepted by {', '.join(accepted)}")
+
+
 class TestNativeCurrentPairingGenerated(unittest.TestCase):
     @given(world=native_pairing_worlds())
     def test_complete_json_corpus_replays_exact_current_by_fk_in_both_arms(
@@ -192,6 +318,26 @@ class TestNativeCurrentPairingGenerated(unittest.TestCase):
                     world.rows, permuted, counterfactual=counterfactual,
                 )
                 self.assertEqual(permuted, actual)
+
+    @given(world=native_pairing_worlds())
+    def test_jsonl_mutations_fail_closed_at_both_public_adapters(
+        self,
+        world: NativePairingWorld,
+    ) -> None:
+        """Every bounded malformed-wire class reaches both outer adapters."""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for mutation in _CORPUS_MUTATIONS:
+                corpus = root / f"{mutation}.jsonl"
+                output = root / f"{mutation}-decided.jsonl"
+                _write_corpus(
+                    corpus,
+                    _mutated_corpus_rows(world.rows, mutation),
+                )
+                try:
+                    assert_corpus_rejected_by_outer_adapters(corpus, output)
+                except AssertionError as exc:
+                    raise AssertionError(f"{mutation}: {exc}") from exc
 
     @given(
         request_release=st.text(min_size=1, max_size=12),
@@ -228,50 +374,60 @@ class TestNativeCurrentPairingGenerated(unittest.TestCase):
 
     def test_replay_checker_rejects_fault_injected_resolver_decoder_and_wiring(self):
         """Qualification pin: the property checker rejects its own bad worlds."""
+        import scripts.decision_differential as differential
+
         candidate = _corpus_row(
             id=1,
+            mb_release_id=_RELEASE_ID,
             current_evidence_id=2,
+            request_mb_release_id=_RELEASE_ID,
             spectral_grade="suspect",
             ultrasonic_deficit_db=65.16,
             v0_min_bitrate_kbps=219,
             v0_avg_bitrate_kbps=241,
             v0_median_bitrate_kbps=241,
         )
-        current = _corpus_row(
-            id=2,
-            source_path="/Beets/installed",
-            min_bitrate_kbps=128,
-            avg_bitrate_kbps=128,
-            median_bitrate_kbps=128,
-            format="MP3",
-            is_cbr=True,
-            spectral_grade=None,
-            spectral_subject=None,
-            spectral_provenance=None,
-            codec_family=None,
-            spectral_measurement_version=None,
-            codec="mp3",
-            container="mp3",
-            storage_format="mp3",
-            filetype_band="mp3",
-            target_format=None,
-            target_is_cbr=None,
-            v0_min_bitrate_kbps=219,
-            v0_avg_bitrate_kbps=240,
-            v0_median_bitrate_kbps=240,
-            v0_subject="source",
+        current = _profiled_evidence_row(
+            2,
+            profile="proof",
             is_candidate=False,
-            request_mb_release_id=None,
-            files=[{
-                "relative_path": "01.mp3", "size_bytes": 1, "mtime_ns": 1,
-                "extension": "mp3", "container": "mp3", "codec": "mp3",
-                "decode_ok": True,
-            }],
-            **_PROOF_COLUMNS,
+            current_evidence_id=None,
         )
-        rows = (candidate, current)
+        wrong_current = _profiled_evidence_row(
+            3,
+            profile="low",
+            is_candidate=False,
+            current_evidence_id=None,
+        )
+        rows = (candidate, current, wrong_current)
+        original_resolver = differential.resolve_native_current_pairs
+
+        def wrong_non_null_resolver(entries):
+            wrong = next(entry for entry in entries if entry.evidence_id == 3)
+            return [
+                (entry, wrong)
+                for entry in entries
+                if entry.is_candidate
+            ]
+
+        differential.resolve_native_current_pairs = wrong_non_null_resolver
+        try:
+            with TemporaryDirectory() as tmp:
+                actual = _decide_world(
+                    Path(tmp),
+                    rows,
+                    counterfactual=True,
+                    suffix="wrong-non-null-current",
+                )
+        finally:
+            differential.resolve_native_current_pairs = original_resolver
+        with self.assertRaises(AssertionError):
+            assert_native_replay_matches(
+                rows,
+                actual,
+                counterfactual=True,
+            )
         faults = {
-            "resolver": decide_row(candidate, current=None, counterfactual=True),
             "decoder": decide_row(
                 {**candidate, "source_path": ""},
                 current=current,
@@ -289,6 +445,24 @@ class TestNativeCurrentPairingGenerated(unittest.TestCase):
                     rows,
                     {1: rendered.fields},
                     counterfactual=True,
+                )
+
+    def test_mutation_checker_trips_on_an_accepted_corpus(self):
+        """Known-bad qualification for the two-adapter mutation checker."""
+        rows = (_profiled_evidence_row(
+            1,
+            profile="low",
+            is_candidate=True,
+            current_evidence_id=None,
+        ),)
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            corpus = root / "valid.jsonl"
+            _write_corpus(corpus, rows)
+            with self.assertRaises(AssertionError):
+                assert_corpus_rejected_by_outer_adapters(
+                    corpus,
+                    root / "valid-decided.jsonl",
                 )
 
 
