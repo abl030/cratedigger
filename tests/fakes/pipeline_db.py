@@ -4825,22 +4825,6 @@ class FakePipelineDB:
         incoming_preserves_source_spectral = (
             current_evidence_preserves_source_spectral(evidence)
         )
-        # Mirror SQL's COALESCE: lineage describes the installed output, so a
-        # stale same-address writer lacking it cannot erase that durable fact.
-        if (
-            existing is not None
-            and evidence.measurement.was_converted_from is None
-            and existing.measurement.was_converted_from is not None
-        ):
-            evidence = msgspec.structs.replace(
-                evidence,
-                measurement=msgspec.structs.replace(
-                    evidence.measurement,
-                    was_converted_from=(
-                        existing.measurement.was_converted_from
-                    ),
-                ),
-            )
         # Spectral is an atomic pair. A stale writer without a grade cannot
         # erase a successful attempt-time scan on the same audio snapshot.
         # R19 is the exception: only an exact, known-lossy derivative clears

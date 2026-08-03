@@ -1278,6 +1278,15 @@ def backfill_current_evidence_from_album_info(
             and existing_measurement.spectral_subject == EVIDENCE_SUBJECT_SOURCE
         )
         measurement = result.evidence.measurement
+        if same_snapshot and existing_measurement.was_converted_from is not None:
+            # Conversion lineage is a current-library fact. Preserve it only
+            # while rebuilding the same installed snapshot; the generic
+            # evidence upsert must remain exact so a fresh candidate NULL can
+            # clear legacy candidate contamination at the same address.
+            measurement = msgspec.structs.replace(
+                measurement,
+                was_converted_from=existing_measurement.was_converted_from,
+            )
         if carry_spectral:
             # issue #829 Phase 5 PR1: cliff_hz/codec_family/
             # ultrasonic_deficit_db/spectral_measurement_version are one

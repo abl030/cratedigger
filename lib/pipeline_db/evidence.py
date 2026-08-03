@@ -393,14 +393,7 @@ class _EvidenceMixin(_PipelineDBBase):
                         THEN album_quality_evidence.verified_lossless
                         ELSE EXCLUDED.verified_lossless
                     END,
-                    -- This is durable output lineage, independent from the
-                    -- current spectral observation. A stale same-snapshot
-                    -- writer without it must not erase FLAC -> ALAC/Opus/
-                    -- Vorbis provenance after a fresh installed scan.
-                    was_converted_from = COALESCE(
-                        EXCLUDED.was_converted_from,
-                        album_quality_evidence.was_converted_from
-                    ),
+                    was_converted_from = EXCLUDED.was_converted_from,
                     -- V0 is one atomic fact, not six independently mergeable
                     -- columns. A valid incoming metric has a lineage and at
                     -- least one bitrate; replace the whole tuple in that case.

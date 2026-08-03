@@ -31,7 +31,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from typing import NoReturn, TypeGuard
@@ -129,7 +129,6 @@ HARNESS_TIMEOUT = 300
 IMPORT_TIMEOUT = 1800
 max_distance = 0.5
 DUPLICATE_REMOVE_GUARD_EXIT_CODE = 7
-_current_result: ImportResult | None = None
 _preview_temp_root: str | None = None
 _import_total_start: float | None = None
 
@@ -1750,9 +1749,6 @@ def _run_quality_evidence_authorized_import(
     assert action_file is not None
     r = ImportResult()
     r.already_in_beets = already_in_beets
-    global _current_result
-    _current_result = r
-
     try:
         payload = _load_quality_evidence_action_file(action_file)
         r.decision = _evidence_action_decision_name(payload)
@@ -2034,13 +2030,9 @@ def main():
         max_distance = 999
         _log("[FORCE] Distance check disabled (max_distance=999)")
 
-    # Accumulate structured result (module-level so crash handler can preserve data)
-    global _current_result
     r = ImportResult()
     r.preview = args.dry_run
     r.existing_v0_probe = _existing_v0_probe_from_args(args)
-    _current_result = r
-
     # --- Pre-flight: already imported? ---
     stage_start = time.monotonic()
     beets = open_import_beets(
@@ -2832,19 +2824,21 @@ def main():
     _emit_and_exit(r)
 
 
-if __name__ == "__main__":
+def _run_entrypoint(*, main_fn: Callable[[], None] = main) -> None:
+    """Run the importer and guarantee a fresh terminal crash acknowledgement."""
     try:
-        main()
+        main_fn()
     except SystemExit:
         raise  # _emit_and_exit uses sys.exit
     except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
-        # Preserve intermediate data if main() had started building a result
-        if _current_result is not None:
-            r = _current_result
-            r.exit_code = 99
-            r.decision = "crash"
-            r.error = f"{type(exc).__name__}: {exc}"
-        else:
-            r = ImportResult(exit_code=99, decision="crash",
-                             error=f"{type(exc).__name__}: {exc}")
-        _emit_and_exit(r)
+        _emit_and_exit(
+            ImportResult(
+                exit_code=99,
+                decision="crash",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        )
+
+
+if __name__ == "__main__":
+    _run_entrypoint()

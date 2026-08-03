@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import os
 import string
 import tempfile
@@ -31,6 +32,7 @@ from lib.import_preview import (
 from lib.measurement import PreimportMeasurement
 from lib.pipeline_db.download_log import _DownloadLogMixin
 from lib.quality import (
+    IMPORT_RESULT_SENTINEL,
     AlbumQualityEvidenceFile,
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
@@ -45,6 +47,7 @@ from lib.quality import (
     gate_rank,
     legacy_unrecorded_audio_validation_report,
     measured_import_decision,
+    parse_import_result,
     quality_gate_decision,
 )
 from lib.quality_evidence import (
@@ -126,6 +129,20 @@ def assert_source_target_lineage(result: ImportResult) -> None:
         and len(output.format.strip().split()) != 1
     ):
         raise AssertionError("output measurement must use a bare codec label")
+
+
+def assert_terminal_crash_acknowledged(stdout: str) -> None:
+    """Exactly one typed crash acknowledgement survives result invalidity."""
+    terminal_lines = [
+        line
+        for line in stdout.splitlines()
+        if line.startswith(IMPORT_RESULT_SENTINEL)
+    ]
+    if len(terminal_lines) != 1:
+        raise AssertionError("expected exactly one terminal result")
+    parsed = parse_import_result(stdout)
+    if parsed is None or parsed.decision != "crash" or parsed.exit_code != 99:
+        raise AssertionError("terminal result was not a typed crash acknowledgement")
 
 
 def assert_research_v0_is_policy_neutral(
@@ -2025,6 +2042,36 @@ class TestQualityLineageGenerated(unittest.TestCase):
         )
         self.assertEqual(built.status, "incomplete")
 
+    @given(source_codec=_BARE_CODEC_LABELS)
+    @example(source_codec="FLAC")
+    def test_invalid_partial_result_still_emits_terminal_crash(
+        self,
+        source_codec: str,
+    ) -> None:
+        from harness import import_one
+
+        invalid = ImportResult(
+            source_measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=800,
+                format=source_codec,
+                was_converted_from=source_codec.lower(),
+            ),
+        )
+
+        def emit_invalid_partial() -> None:
+            import_one._emit_and_exit(invalid)
+
+        stdout = io.StringIO()
+        with (
+            patch("sys.stdout", stdout),
+            patch.object(import_one, "_import_total_start", None),
+            self.assertRaises(SystemExit) as caught,
+        ):
+            import_one._run_entrypoint(main_fn=emit_invalid_partial)
+
+        self.assertEqual(caught.exception.code, 99)
+        assert_terminal_crash_acknowledged(stdout.getvalue())
+
 
 class TestInvariantCheckersTripOnViolations(unittest.TestCase):
     def test_exact_current_spectral_checker_rejects_a_blank_have(self):
@@ -2087,3 +2134,7 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         )
         with self.assertRaisesRegex(AssertionError, "output lineage"):
             assert_source_target_lineage(planted_bad)
+
+    def test_terminal_checker_rejects_missing_acknowledgement(self):
+        with self.assertRaisesRegex(AssertionError, "exactly one terminal"):
+            assert_terminal_crash_acknowledged("")
