@@ -6,13 +6,13 @@ import copy
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
 
 import msgspec
 from hypothesis import given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
+from lib.json_narrow import is_object_list, is_str_object_dict
 from lib.quality import (
     AccurateRipBitMatch,
     CdRipBitVerification,
@@ -195,24 +195,26 @@ def invalid_wire_worlds(draw: st.DrawFn) -> InvalidWireWorld:
 
 
 def _wire_dict(proof: CdRipBitVerification) -> dict[str, object]:
-    wire = msgspec.to_builtins(proof)
-    if not isinstance(wire, dict):
+    wire: object = msgspec.to_builtins(proof)
+    if not is_str_object_dict(wire):
         raise TypeError("CdRipBitVerification did not serialize as an object")
-    return cast(dict[str, object], wire)
+    return wire
 
 
 def _nested_dict(parent: dict[str, object], key: str) -> dict[str, object]:
     value = parent.get(key)
-    if not isinstance(value, dict):
+    if not is_str_object_dict(value):
         raise TypeError(f"expected object at {key}")
-    return cast(dict[str, object], value)
+    return value
 
 
-def _integer_list(parent: dict[str, object], key: str) -> list[int]:
+def _integer_list(parent: dict[str, object], key: str) -> list[object]:
     value = parent.get(key)
-    if not isinstance(value, list) or not all(isinstance(item, int) for item in value):
+    if not is_object_list(value) or not all(
+        isinstance(item, int) for item in value
+    ):
         raise AssertionError(f"expected integer array at {key}")
-    return cast(list[int], value)
+    return value
 
 
 def _mutate_wire(wire: dict[str, object], mutation: str) -> None:
@@ -245,7 +247,11 @@ def _mutate_wire(wire: dict[str, object], mutation: str) -> None:
         elif mutation == "ctdb_confidence":
             ctdb["confidence"] = 0
         elif mutation == "ctdb_response_toc":
-            _integer_list(ctdb, "response_toc_sectors")[-1] += 1
+            response_toc = _integer_list(ctdb, "response_toc_sectors")
+            last_sector = response_toc[-1]
+            if not isinstance(last_sector, int):
+                raise TypeError("CTDB response TOC must contain integers")
+            response_toc[-1] = last_sector + 1
         elif mutation == "ctdb_response_shift":
             ctdb["response_toc_shift_sectors"] = -1
         elif mutation == "ctdb_sha":
