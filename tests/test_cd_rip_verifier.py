@@ -16,14 +16,18 @@ import urllib.request
 import zlib
 from itertools import pairwise
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
 from lib.cd_rip_verifier import (
     CTDB_STRIDE_SAMPLES,
+    MAX_FETCH_STAMP_BYTES,
+    MAX_PROVIDER_BYTES,
     UINT32_MASK,
     _album_shape,
     _ArIndexes,
+    _cache_path,
     _decode_to_spool,
     _NoRedirectHandler,
     _order_tracks,
@@ -641,6 +645,53 @@ class CdShapeAndProviderBoundaryTest(unittest.TestCase):
             payload = b"provider-payload"
             _store_positive(url, cache, payload)
             self.assertEqual(fetch_positive(url, cache), payload)
+
+    def test_oversized_positive_cache_is_rejected_before_bounded_read(self) -> None:
+        url = "https://example.test/oversized"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache = Path(tmpdir)
+            cache_path = _cache_path(cache, url)
+            with cache_path.open("wb") as oversized:
+                oversized.truncate(MAX_PROVIDER_BYTES + 1)
+            with (
+                patch.object(
+                    Path,
+                    "read_bytes",
+                    side_effect=AssertionError("unbounded cache read"),
+                ),
+                patch(
+                    "lib.cd_rip_verifier._fetch_https_no_redirect",
+                    return_value=None,
+                ) as fetch,
+            ):
+                self.assertIsNone(fetch_positive(url, cache))
+
+            self.assertFalse(cache_path.exists())
+            fetch.assert_called_once()
+
+    def test_oversized_fetch_stamp_is_stale_without_unbounded_read(self) -> None:
+        url = "https://example.test/oversized-stamp"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache = Path(tmpdir)
+            stamp_path = cache / ".last-fetch"
+            with stamp_path.open("wb") as oversized:
+                oversized.truncate(MAX_FETCH_STAMP_BYTES + 1)
+            with (
+                patch.object(
+                    Path,
+                    "read_text",
+                    side_effect=AssertionError("unbounded stamp read"),
+                ),
+                patch("lib.cd_rip_verifier._deadline_sleep") as sleep,
+                patch(
+                    "lib.cd_rip_verifier._fetch_https_no_redirect",
+                    return_value=None,
+                ),
+            ):
+                self.assertIsNone(fetch_positive(url, cache))
+
+            self.assertEqual(sleep.call_args.args[0], 0.0)
+            self.assertLessEqual(stamp_path.stat().st_size, MAX_FETCH_STAMP_BYTES)
 
     def test_contended_cache_lock_obeys_the_verifier_deadline(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

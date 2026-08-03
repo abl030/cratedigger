@@ -227,6 +227,26 @@ def _production_evidence_mixin() -> type[_EvidenceMixin]:
 
     return _EvidenceMixin
 
+
+def _production_evidence_row_fields() -> frozenset[str] | None:
+    """The exact persisted-row projection understood by this tree.
+
+    ``decide`` is deliberately run from a copy of this harness inside the
+    historical tree.  The corpus still validates against the current harness
+    wire first; only the already-validated payload handed to that tree's
+    production mapper is narrowed to the columns its strict persisted row
+    declares.
+    """
+    try:
+        from lib.pipeline_db.evidence import PersistedAlbumQualityEvidenceRow
+    except ImportError:
+        # The original #999 comparison base predates the strict projection
+        # type.  Its mapper accepts and selects from a cursor-shaped mapping,
+        # so there is no declared field set to narrow against.
+        return None
+
+    return frozenset(PersistedAlbumQualityEvidenceRow.__struct_fields__)
+
 #: Decision-dict keys that are not decisions: the Stage-1 counterfactual
 #: is audit-only reporting, and ``comparison_basis`` is a nested display
 #: payload whose own differential is ``render_differential``'s job. They
@@ -317,7 +337,7 @@ def _evidence_from_corpus_row(
             f"shape: {exc}"
         ) from exc
     # Conversion is the boundary, not a validate-and-ignore side quest.  The
-    # production mapper receives exactly the typed contract's builtins so a
+    # production mapper receives the typed contract's builtins so a
     # nullable/type/schema drift cannot be normalized away by its legacy
     # ``bool``/``int`` conveniences.
     payload = msgspec.to_builtins(wire)
@@ -338,8 +358,18 @@ def _evidence_from_corpus_row(
         payload["measured_at"] = _parse_timestamp(measured_at)
     try:
         evidence_mixin = _production_evidence_mixin()
+        production_fields = _production_evidence_row_fields()
+        production_payload = (
+            payload
+            if production_fields is None
+            else {
+                key: value
+                for key, value in payload.items()
+                if key in production_fields
+            }
+        )
         return evidence_mixin._album_quality_evidence_from_row(
-            payload,
+            production_payload,
             file_rows,
         )
     except (KeyError, TypeError, ValueError, msgspec.ValidationError) as exc:
@@ -448,9 +478,8 @@ def decide_row(
     row_id = row.get("id")
     if not isinstance(row_id, int) or isinstance(row_id, bool):
         raise RenderDifferentialError(f"corpus row has no integer id: {row_id!r}")
-    evidence = _evidence_from_corpus_row(
-        without_persisted_proof(row) if counterfactual else row,
-    )
+    candidate_row = without_persisted_proof(row) if counterfactual else row
+    evidence = _evidence_from_corpus_row(candidate_row)
     current_evidence = (
         _evidence_from_corpus_row(current) if current is not None else None
     )
@@ -490,11 +519,16 @@ def decide_row(
         fields[key] = value if _is_json_scalar(value) else repr(value)
     leg = leg_for_evidence(evidence)
     lattice_leg = lattice_leg_for_evidence(evidence)
-    if (
-        bool(decision.get("verified_lossless"))
-        and evidence.cd_rip_verification is not None
+    persisted_cd_classifier = (
+        candidate_row.get("verified_lossless_classifier")
+        if candidate_row.get("cd_rip_verification") is not None
+        else None
+    )
+    if bool(decision.get("verified_lossless")) and isinstance(
+        persisted_cd_classifier,
+        str,
     ):
-        proof = evidence.cd_rip_verification.verified_lossless_proof()
+        proof_classifier = persisted_cd_classifier
     else:
         proof = mint_verified_lossless_proof(
             bool(decision.get("verified_lossless")),
@@ -504,11 +538,10 @@ def decide_row(
             ultrasonic_leg=leg,
             aac_lattice_leg=lattice_leg,
         )
+        proof_classifier = proof.classifier if proof is not None else None
     fields.update(
         {
-            "verified_lossless_classifier": (
-                proof.classifier if proof is not None else None
-            ),
+            "verified_lossless_classifier": proof_classifier,
             "ultrasonic_leg_outcome": leg.outcome,
             "ultrasonic_leg_reason": leg.reason,
             "aac_lattice_leg_outcome": lattice_leg.outcome,

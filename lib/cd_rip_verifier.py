@@ -17,6 +17,7 @@ import base64
 import fcntl
 import hashlib
 import logging
+import math
 import multiprocessing
 import os
 import re
@@ -62,6 +63,7 @@ UINT32_MASK = 0xFFFFFFFF
 PCM_FRAME_BYTES = 4  # stereo signed-16 little-endian, viewed as one uint32
 CHECKSUM_CHUNK_SAMPLES = 1_000_000
 MAX_PROVIDER_BYTES = 8 * 1024 * 1024
+MAX_FETCH_STAMP_BYTES = 64
 MAX_CACHE_BYTES = 128 * 1024 * 1024
 MAX_CACHE_FILES = 512
 MAX_AR_BLOCKS = 4096
@@ -853,6 +855,48 @@ def _cache_path(cache_dir: Path, url: str) -> Path:
     return cache_dir / f"{hashlib.sha256(url.encode()).hexdigest()}.positive"
 
 
+def _discard_invalid_cache_file(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _read_bounded_cache_file(path: Path, *, max_bytes: int) -> bytes | None:
+    """Read one regular cache payload without trusting its path size.
+
+    The path stat rejects obvious oversized entries before allocation.  The
+    opened descriptor is checked again before and after a capped read so a
+    replacement or concurrent size change cannot turn that admission into an
+    unbounded read or a partial positive cache hit.
+    """
+    try:
+        path_size = path.stat().st_size
+    except OSError:
+        return None
+    if path_size <= 0 or path_size > max_bytes:
+        _discard_invalid_cache_file(path)
+        return None
+    try:
+        with path.open("rb") as cached_file:
+            opened_size = os.fstat(cached_file.fileno()).st_size
+            if opened_size != path_size or not 0 < opened_size <= max_bytes:
+                _discard_invalid_cache_file(path)
+                return None
+            payload = cached_file.read(max_bytes + 1)
+            final_size = os.fstat(cached_file.fileno()).st_size
+    except OSError:
+        return None
+    if (
+        len(payload) != opened_size
+        or final_size != opened_size
+        or len(payload) > max_bytes
+    ):
+        _discard_invalid_cache_file(path)
+        return None
+    return payload
+
+
 def _prune_cache(cache_dir: Path, *, deadline: float) -> None:
     _check_deadline(deadline)
     files = sorted(
@@ -1032,19 +1076,23 @@ def fetch_positive(
         _acquire_lock(lock, deadline=deadline)
         try:
             _check_deadline(deadline)
-            try:
-                cached = cache_path.read_bytes()
-            except FileNotFoundError:
-                cached = None
+            cached = _read_bounded_cache_file(
+                cache_path,
+                max_bytes=MAX_PROVIDER_BYTES,
+            )
             if cached is not None:
-                if 0 < len(cached) <= MAX_PROVIDER_BYTES:
-                    return cached
-                cache_path.unlink(missing_ok=True)
+                return cached
 
             stamp_path = cache_dir / ".last-fetch"
+            stamp = _read_bounded_cache_file(
+                stamp_path,
+                max_bytes=MAX_FETCH_STAMP_BYTES,
+            )
             try:
-                last_fetch = float(stamp_path.read_text(encoding="ascii"))
-            except (FileNotFoundError, ValueError, OSError):
+                last_fetch = float(stamp.decode("ascii")) if stamp else 0.0
+            except (UnicodeDecodeError, ValueError):
+                last_fetch = 0.0
+            if not math.isfinite(last_fetch) or last_fetch < 0:
                 last_fetch = 0.0
             delay = min(
                 POLITENESS_SECONDS,
