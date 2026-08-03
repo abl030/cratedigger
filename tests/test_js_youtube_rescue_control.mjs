@@ -32,6 +32,13 @@ ok(calls === 2 && !host.result.innerHTML.includes('No YouTube album foundNo YouT
 delete globalThis.document;
 delete globalThis.fetch;
 
+const networkHost = fakeHost();
+globalThis.document = { getElementById: () => networkHost };
+globalThis.fetch = async () => { throw new Error('offline'); };
+await checkYoutubeRescue('release-network', 1, identifier);
+ok(networkHost.result.innerHTML.includes('Could not reach the resolver'), 'resolver network rejection is visible');
+delete globalThis.document; delete globalThis.fetch;
+
 // A deferred response from an old generation must not repaint its replacement.
 const staleHost = fakeHost();
 globalThis.document = { getElementById: () => staleHost };

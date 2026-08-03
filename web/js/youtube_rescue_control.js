@@ -45,10 +45,18 @@ export async function checkYoutubeRescue(key, requestId, identifier) {
       if (host.dataset.submitting === 'true' || !window.confirm('Queue this YouTube Music rescue?')) return;
       host.dataset.submitting = 'true';
       try {
-        const rescue = await fetch(`${API}/api/pipeline/${requestId}/youtube-rescue`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ browse_id: button.dataset.browseId }) });
-        const payload = await rescue.json().catch(() => ({ outcome: 'transient' }));
-        toast(payload.outcome === 'accepted' ? 'YouTube rescue queued.' : (payload.detail || payload.error || 'YouTube rescue failed.'), payload.outcome !== 'accepted');
+        try {
+          const rescue = await fetch(`${API}/api/pipeline/${requestId}/youtube-rescue`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ browse_id: button.dataset.browseId }) });
+          const payload = await rescue.json().catch(() => ({ outcome: 'transient' }));
+          toast(payload.outcome === 'accepted' ? 'YouTube rescue queued.' : (payload.detail || payload.error || 'YouTube rescue failed.'), payload.outcome !== 'accepted');
+        } catch (_error) {
+          toast('YouTube rescue failed: network unavailable.', true);
+        }
       } finally { host.dataset.submitting = 'false'; }
     }));
+  } catch (_error) {
+    if (host.dataset.generation === generation && resultHost) {
+      resultHost.innerHTML = '<span>Could not reach the resolver. Retry.</span>';
+    }
   } finally { if (host.dataset.generation === generation) host.dataset.busy = 'false'; }
 }
