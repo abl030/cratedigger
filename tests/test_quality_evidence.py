@@ -13,7 +13,7 @@ import shutil
 import tempfile
 import unittest
 from collections.abc import Callable
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import MagicMock
 
 import msgspec
@@ -27,7 +27,6 @@ from lib.quality import (
     AudioQualityMeasurement,
     CdRipBitVerification,
     CdTocIdentity,
-    CodecFamily,
     ImportResult,
     SpectralAnalysisDetail,
     SpectralDetail,
@@ -216,8 +215,31 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
                     )
                 )
 
+        float_generation = CandidateEvidencePersistenceReceipt(
+            evidence_id=1,
+            snapshot_fingerprint="snapshot",
+            spectral_write_intent="replace",
+            spectral_outcome="measured",
+            spectral_grade="genuine",
+            spectral_subject="source",
+            spectral_provenance="measured",
+            spectral_measurement_version=float(  # pyright: ignore[reportArgumentType]
+                SPECTRAL_MEASUREMENT_VERSION
+            ),
+        )
+        invalid_codec = CandidateEvidencePersistenceReceipt(
+            evidence_id=1,
+            snapshot_fingerprint="snapshot",
+            spectral_write_intent="replace",
+            spectral_outcome="measured",
+            spectral_grade="genuine",
+            spectral_subject="source",
+            spectral_provenance="measured",
+            codec_family="invalid",  # pyright: ignore[reportArgumentType]
+            spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
+        )
         invalid = [
-            msgspec.structs.replace(base, evidence_id=cast(int, True)),
+            msgspec.structs.replace(base, evidence_id=True),
             msgspec.structs.replace(base, spectral_outcome="measured"),
             msgspec.structs.replace(base, spectral_outcome="failed"),
             msgspec.structs.replace(base, spectral_outcome="empty"),
@@ -233,17 +255,8 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
                 measured,
                 spectral_measurement_version=None,
             ),
-            msgspec.structs.replace(
-                measured,
-                spectral_measurement_version=cast(
-                    int,
-                    float(SPECTRAL_MEASUREMENT_VERSION),
-                ),
-            ),
-            msgspec.structs.replace(
-                measured,
-                codec_family=cast(CodecFamily, "invalid"),
-            ),
+            float_generation,
+            invalid_codec,
         ]
         for receipt in invalid:
             with self.subTest(invalid=receipt):
@@ -252,6 +265,82 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
                         receipt
                     )
                 )
+
+    def test_invalid_attempt_does_not_mutate_same_address_or_candidate_fk(
+        self,
+    ) -> None:
+        """Semantic refusal precedes canonical upsert and owner-FK writes."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, mb_release_id="release-1"))
+        download_log_id = db.log_download(request_id=42, outcome="rejected")
+        files = snapshot_audio_files(self.root)
+        canonical = make_album_quality_evidence(
+            mb_release_id="release-1",
+            source_path=self.root,
+            files=files,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=128,
+                format="MP3",
+                spectral_grade="suspect",
+                spectral_subject="source",
+                spectral_provenance="measured",
+                spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
+            ),
+        )
+        db.upsert_album_quality_evidence(canonical)
+        before = db.find_album_quality_evidence(
+            mb_release_id="release-1",
+            snapshot_fingerprint=canonical.snapshot_fingerprint,
+        )
+        assert before is not None and before.id is not None
+        db.set_download_log_candidate_evidence(download_log_id, before.id)
+        job = db.enqueue_import_job(
+            "force_import",
+            request_id=42,
+            payload={
+                "download_log_id": download_log_id,
+                "failed_path": self.root,
+            },
+        )
+        self.assertIsNone(db.get_import_job_candidate_evidence_id(job.id))
+
+        refused = persist_candidate_evidence_from_measurement(
+            db,
+            mb_release_id="release-1",
+            source_path=self.root,
+            measurement=PreimportMeasurement(
+                min_bitrate_kbps=128,
+                audio_file_count=len(files),
+                filetype_band="mp3",
+                spectral_audit=SpectralDetail(
+                    candidate=SpectralAnalysisDetail(
+                        attempted=True,
+                        grade="alien",
+                        spectral_measurement_version=(
+                            SPECTRAL_MEASUREMENT_VERSION
+                        ),
+                    )
+                ),
+            ),
+            download_log_id=download_log_id,
+            import_job_id=job.id,
+            files=files,
+        )
+
+        self.assertEqual(refused.status, "failed")
+        self.assertIn("receipt semantic", refused.reason or "")
+        after = db.find_album_quality_evidence(
+            mb_release_id="release-1",
+            snapshot_fingerprint=canonical.snapshot_fingerprint,
+        )
+        assert after is not None
+        self.assertEqual(after.id, before.id)
+        self.assertEqual(after.measurement.spectral_grade, "suspect")
+        self.assertEqual(
+            db.get_download_log_candidate_evidence_id(download_log_id),
+            before.id,
+        )
+        self.assertIsNone(db.get_import_job_candidate_evidence_id(job.id))
 
     def test_legacy_v0_subject_is_rejected_at_strict_wire_boundary(self):
         with self.assertRaises(msgspec.ValidationError):

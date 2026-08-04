@@ -11,10 +11,23 @@ from unittest.mock import patch
 
 import psycopg2
 
-from tests.ephemeral_pg import EphemeralPostgres, EphemeralPostgresError
+from lib.ephemeral_postgres import EphemeralPostgres, EphemeralPostgresError
 
 
 class TestEphemeralPostgresFailures(unittest.TestCase):
+    def test_transition_seed_refuses_before_disposable_cluster_starts(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(
+            EphemeralPostgresError,
+            "has not started",
+        ):
+            EphemeralPostgres().seed_transition_request(
+                artist_name="Artist",
+                album_title="Album",
+                mb_release_id="release-id",
+            )
+
     def test_initdb_failure_is_diagnostic_and_cleans_its_temporary_state(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
@@ -25,10 +38,10 @@ class TestEphemeralPostgresFailures(unittest.TestCase):
                 return str(failed_dir)
 
             with (
-                patch("tests.ephemeral_pg.shutil.which", return_value="/bin/tool"),
-                patch("tests.ephemeral_pg.tempfile.mkdtemp", make_tempdir),
+                patch("lib.ephemeral_postgres.shutil.which", return_value="/bin/tool"),
+                patch("lib.ephemeral_postgres.tempfile.mkdtemp", make_tempdir),
                 patch(
-                    "tests.ephemeral_pg.subprocess.run",
+                    "lib.ephemeral_postgres.subprocess.run",
                     side_effect=subprocess.CalledProcessError(
                         1,
                         ["initdb"],

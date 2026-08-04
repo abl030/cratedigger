@@ -2516,7 +2516,18 @@ def _prepare_transition_source(
     path.mkdir()
     _materialize_transition_snapshot(path, files)
     if state == "changed":
-        changed = path / "__transition_changed__.mp3"
+        expected_paths = {file.relative_path for file in files}
+        ordinal = 0
+        while True:
+            relative_path = (
+                "__transition_changed__.mp3"
+                if ordinal == 0
+                else f"__transition_changed_{ordinal}__.mp3"
+            )
+            if relative_path not in expected_paths:
+                break
+            ordinal += 1
+        changed = path / relative_path
         changed.write_bytes(b"changed")
     return path
 
@@ -2693,6 +2704,7 @@ def replay_decision_transitions(
 
     # Transition-only dependencies stay lazy so a copied historical harness
     # can continue to run decide/diff even when it predates this mode.
+    from lib.ephemeral_postgres import EphemeralPostgres
     from lib.measurement import PreimportMeasurement
     from lib.migrator import apply_migrations
     from lib.pipeline_db import PipelineDB
@@ -2712,7 +2724,6 @@ def replay_decision_transitions(
         persist_candidate_evidence_from_import_result,
         persist_candidate_evidence_from_measurement,
     )
-    from tests.ephemeral_pg import EphemeralPostgres, seed_transition_request
 
     replay_rows: list[DecisionTransitionReplay] = []
     with EphemeralPostgres() as postgres, tempfile.TemporaryDirectory(
@@ -2760,8 +2771,7 @@ def replay_decision_transitions(
                     raise RenderDifferentialError(
                         f"transition seed {role.evidence_id} did not reload"
                     )
-                request_id = seed_transition_request(
-                    db,
+                request_id = postgres.seed_transition_request(
                     artist_name="Decision transition",
                     album_title=role.matrix_class,
                     mb_release_id=release_id,

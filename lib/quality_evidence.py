@@ -1205,6 +1205,45 @@ def _candidate_evidence_with_exact_attempt_spectral(
     )
 
 
+def _candidate_persistence_receipt(
+    evidence: AlbumQualityEvidence,
+    *,
+    evidence_id: int,
+    snapshot_fingerprint: str,
+    write_intent: SpectralWriteIntent,
+    spectral_outcome: CandidateSpectralAttemptOutcome,
+    generation: int | None,
+) -> CandidateEvidencePersistenceReceipt:
+    """Build the one exact-attempt receipt shape for pre/post-write checks."""
+    measured = spectral_outcome == "measured"
+    return CandidateEvidencePersistenceReceipt(
+        evidence_id=evidence_id,
+        snapshot_fingerprint=snapshot_fingerprint,
+        spectral_write_intent=write_intent,
+        spectral_outcome=spectral_outcome,
+        spectral_grade=(
+            evidence.measurement.spectral_grade if measured else None
+        ),
+        spectral_bitrate_kbps=(
+            evidence.measurement.spectral_bitrate_kbps if measured else None
+        ),
+        spectral_subject=(
+            evidence.measurement.spectral_subject if measured else None
+        ),
+        spectral_provenance=(
+            evidence.measurement.spectral_provenance if measured else None
+        ),
+        cliff_hz=(evidence.measurement.cliff_hz if measured else None),
+        codec_family=(
+            evidence.measurement.codec_family if measured else None
+        ),
+        ultrasonic_deficit_db=(
+            evidence.measurement.ultrasonic_deficit_db if measured else None
+        ),
+        spectral_measurement_version=generation,
+    )
+
+
 def _persist_candidate_evidence_result(
     db: QualityEvidenceDB,
     result: EvidenceBuildResult,
@@ -1224,6 +1263,23 @@ def _persist_candidate_evidence_result(
         attempt,
         spectral_outcome,
     )
+    provisional_receipt = _candidate_persistence_receipt(
+        evidence,
+        evidence_id=1,
+        snapshot_fingerprint=evidence.snapshot_fingerprint,
+        write_intent=write_intent,
+        spectral_outcome=spectral_outcome,
+        generation=generation,
+    )
+    receipt_error = candidate_evidence_persistence_receipt_semantic_error(
+        provisional_receipt
+    )
+    if receipt_error is not None:
+        return EvidenceBuildResult(
+            evidence,
+            "failed",
+            f"candidate receipt semantic invalid: {receipt_error}",
+        )
     db.upsert_album_quality_evidence(
         evidence,
         spectral_write_intent=write_intent,
@@ -1237,6 +1293,23 @@ def _persist_candidate_evidence_result(
             evidence,
             "failed",
             "candidate evidence upsert did not produce a reloadable row",
+        )
+    receipt = _candidate_persistence_receipt(
+        evidence,
+        evidence_id=persisted.id,
+        snapshot_fingerprint=persisted.snapshot_fingerprint,
+        write_intent=write_intent,
+        spectral_outcome=spectral_outcome,
+        generation=generation,
+    )
+    receipt_error = candidate_evidence_persistence_receipt_semantic_error(
+        receipt
+    )
+    if receipt_error is not None:
+        return EvidenceBuildResult(
+            persisted,
+            "failed",
+            f"candidate receipt semantic invalid: {receipt_error}",
         )
     if import_job_id is not None:
         linked = db.set_import_job_candidate_evidence(
@@ -1268,57 +1341,6 @@ def _persist_candidate_evidence_result(
                 "failed",
                 "candidate evidence did not link to download log",
             )
-    receipt = CandidateEvidencePersistenceReceipt(
-        evidence_id=persisted.id,
-        snapshot_fingerprint=persisted.snapshot_fingerprint,
-        spectral_write_intent=write_intent,
-        spectral_outcome=spectral_outcome,
-        spectral_grade=(
-            evidence.measurement.spectral_grade
-            if spectral_outcome == "measured"
-            else None
-        ),
-        spectral_bitrate_kbps=(
-            evidence.measurement.spectral_bitrate_kbps
-            if spectral_outcome == "measured"
-            else None
-        ),
-        spectral_subject=(
-            evidence.measurement.spectral_subject
-            if spectral_outcome == "measured"
-            else None
-        ),
-        spectral_provenance=(
-            evidence.measurement.spectral_provenance
-            if spectral_outcome == "measured"
-            else None
-        ),
-        cliff_hz=(
-            evidence.measurement.cliff_hz
-            if spectral_outcome == "measured"
-            else None
-        ),
-        codec_family=(
-            evidence.measurement.codec_family
-            if spectral_outcome == "measured"
-            else None
-        ),
-        ultrasonic_deficit_db=(
-            evidence.measurement.ultrasonic_deficit_db
-            if spectral_outcome == "measured"
-            else None
-        ),
-        spectral_measurement_version=generation,
-    )
-    receipt_error = candidate_evidence_persistence_receipt_semantic_error(
-        receipt
-    )
-    if receipt_error is not None:
-        return EvidenceBuildResult(
-            persisted,
-            "failed",
-            f"candidate receipt semantic invalid: {receipt_error}",
-        )
     return EvidenceBuildResult(
         persisted,
         "ready",

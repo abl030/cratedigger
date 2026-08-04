@@ -55,6 +55,7 @@ from scripts.decision_differential import (
     RenderDifferentialError,
     TransitionReplayOutcome,
     _observed_source_snapshot_state,
+    _prepare_transition_source,
     _transition_replay_outcome_violation,
     decide_corpus,
     decide_row,
@@ -940,6 +941,31 @@ class TestTransitionExpectedOutcomes(unittest.TestCase):
             track.write_bytes(b"changed bytes")
             self.assertEqual(
                 _observed_source_snapshot_state(str(present), files),
+                "changed",
+            )
+
+    def test_changed_replay_marker_is_absent_from_a_legal_expected_manifest(
+        self,
+    ) -> None:
+        expected = [AlbumQualityEvidenceFile(
+            relative_path="__transition_changed__.mp3",
+            size_bytes=7,
+            mtime_ns=1,
+            extension="mp3",
+            container="mp3",
+            codec="mp3",
+        )]
+        with TemporaryDirectory() as tmp:
+            source = _prepare_transition_source(
+                Path(tmp) / "changed",
+                expected,
+                "changed",
+            )
+
+            self.assertTrue((source / "__transition_changed__.mp3").is_file())
+            self.assertTrue((source / "__transition_changed_1__.mp3").is_file())
+            self.assertEqual(
+                _observed_source_snapshot_state(str(source), expected),
                 "changed",
             )
 

@@ -501,6 +501,53 @@ class TestDecisionCorpusExport(unittest.TestCase):
         self.assertEqual(by_id[ids["missing"]].outcome, "snapshot_refused")
         self.assertTrue(report.green)
 
+    def test_transition_runs_from_filtered_runtime_without_tests(self) -> None:
+        """The deployed -I wrapper owns every transition runtime import."""
+        evidence_id = self._evidence("filtered-runtime-transition", 77)
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            corpus = root / "corpus.jsonl"
+            coverage = root / "coverage.json"
+            report = root / "transition.json"
+            export_decision_corpus(TEST_DSN, corpus, coverage)
+
+            runtime = root / "runtime"
+            runtime.mkdir()
+            repository = Path(__file__).parents[1]
+            for directory in ("lib", "web", "harness", "scripts", "migrations"):
+                shutil.copytree(
+                    repository / directory,
+                    runtime / directory,
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+                )
+            self.assertFalse((runtime / "tests").exists())
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    str(runtime / "scripts" / "decision_differential.py"),
+                    "transition",
+                    "--corpus",
+                    str(corpus),
+                    "--coverage",
+                    str(coverage),
+                    "--out",
+                    str(report),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            replay = json.loads(report.read_text(encoding="utf-8"))
+            self.assertTrue(replay["green"])
+            self.assertEqual(
+                [row["evidence_id"] for row in replay["representatives"]],
+                [evidence_id],
+            )
+
     def test_transition_sparse_snapshot_restores_exported_mtime(self) -> None:
         """Replay files retain the complete stored manifest, including mtime."""
         mtime_ns = 1_700_000_000_123_456_789

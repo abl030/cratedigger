@@ -23,7 +23,7 @@ TEST_DSN = os.environ.get("TEST_DB_DSN")
 if not TEST_DSN:
     if not shutil.which("initdb") or not shutil.which("pg_ctl"):
         raise RuntimeError("initdb/pg_ctl are required for the test database")
-    from tests.ephemeral_pg import EphemeralPostgres
+    from lib.ephemeral_postgres import EphemeralPostgres
     _pg = EphemeralPostgres()
     _pg.start()
     TEST_DSN = _pg.dsn
