@@ -3,7 +3,9 @@
 Use `scripts/web_dev_server.py` in two layers:
 
 - `--data live-db` runs local route code against a real read-only PostgreSQL
-  session and the backend host's filesystem. Pass `--mb-api` and
+  session and the backend host's filesystem. Its singleton session serializes
+  complete API GET dispatches, so concurrent browser reads remain read-only
+  and safe. Pass `--mb-api` and
   `--discogs-api` to exercise the same metadata mirrors as production;
   without `--discogs-api`, Discogs-backed and cross-source routes fail closed
   with HTTP 503.

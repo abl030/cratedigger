@@ -4,32 +4,45 @@ from __future__ import annotations
 
 import ast
 import inspect
+import os
 import threading
 import unittest
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, wait
 from typing import Any
 
-from hypothesis import given
+import psycopg2
+from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
-import tests._hypothesis_profiles  # noqa: F401 - registers suite/fuzz
+import tests._hypothesis_profiles
+import tests.conftest  # noqa: F401 - bootstraps TEST_DB_DSN
 import web.api_bases
 import web.discogs
 import web.mb
 import web.routes.browse
+import web.server
 from scripts.web_dev_server import (
     DevConfig,
     DevHandler,
     DevHTTPServer,
     configure_live_db_metadata,
 )
+from tests.fakes import FakeBeetsDB
 from tests.test_web_cache import FakeRedis
+from tests.test_web_dev_server import (
+    _get_http_outcome,
+    _wait_for_blocked_backend,
+    assert_live_db_parallel_outcomes,
+)
 from web import cache
 from web.api_bases import PUBLIC_MB_ORIGIN
 from web.routes.browse import get_artist_compare
+
+TEST_DSN = os.environ["TEST_DB_DSN"]
 
 
 def assert_metadata_wiring(config: DevConfig) -> None:
@@ -306,6 +319,117 @@ class TestBrowseResolveWarmCacheGenerated(unittest.TestCase):
             urllib.request.urlopen(url, timeout=10)
         self.assertEqual(raised.exception.code, 503)
         raised.exception.close()
+
+
+class TestLiveDbConcurrentReadsGenerated(unittest.TestCase):
+    """Generated real-HTTP patrol for the singleton read-only DB session."""
+
+    def setUp(self) -> None:
+        self.saved_server = (
+            web.server._db_dsn,
+            web.server.db,
+            web.server._try_reconnect_db,
+            web.server.beets_db_path,
+            web.server.beets_library_root,
+            web.server._beets,
+        )
+        config = DevConfig(
+            data="live-db",
+            scenario="generated",
+            prod_base_url="https://music.ablz.au",
+            dsn=TEST_DSN,
+            beets_db=None,
+            mb_api=None,
+            discogs_api=None,
+            redis_host=None,
+            redis_port=6379,
+        )
+        from scripts.web_dev_server import create_server
+
+        self.server = create_server("127.0.0.1", 0, config)
+        web.server._beets = FakeBeetsDB()
+        self.thread = threading.Thread(
+            target=self.server.serve_forever, daemon=True,
+        )
+        self.thread.start()
+        self.base = f"http://127.0.0.1:{self.server.server_port}"
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=2)
+        if (
+            web.server.db is not None
+            and web.server.db is not self.saved_server[1]
+        ):
+            web.server.db.close()
+        (
+            web.server._db_dsn,
+            web.server.db,
+            web.server._try_reconnect_db,
+            web.server.beets_db_path,
+            web.server.beets_library_root,
+            web.server._beets,
+        ) = self.saved_server
+
+    @settings(max_examples=30)
+    @example(request_count=6)
+    @given(request_count=st.integers(min_value=2, max_value=8))
+    def test_repeated_parallel_library_reads_all_complete(
+        self, request_count: int,
+    ) -> None:
+        shared = web.server.db
+        self.assertIsNotNone(shared)
+        assert shared is not None
+        backend_pid = shared.conn.get_backend_pid()
+        path = "/api/library/artist?name=Generated&mbid="
+
+        blocker = psycopg2.connect(TEST_DSN)
+        blocker.autocommit = False
+        try:
+            with blocker.cursor() as cursor:
+                cursor.execute(
+                    "LOCK TABLE album_requests IN ACCESS EXCLUSIVE MODE"
+                )
+            with ThreadPoolExecutor(max_workers=request_count) as executor:
+                first = executor.submit(_get_http_outcome, self.base, path)
+                _wait_for_blocked_backend(TEST_DSN, backend_pid)
+                rest = [
+                    executor.submit(_get_http_outcome, self.base, path)
+                    for _ in range(request_count - 1)
+                ]
+                wait(rest, timeout=0.05)
+                blocker.commit()
+                outcomes = [first.result(timeout=10)] + [
+                    future.result(timeout=10) for future in rest
+                ]
+        finally:
+            blocker.rollback()
+            blocker.close()
+
+        assert_live_db_parallel_outcomes(outcomes)
+
+
+class TestLiveDbConcurrentReadsCheckerKnownBad(unittest.TestCase):
+    def test_checker_rejects_the_historical_psycopg_failures(self) -> None:
+        with self.assertRaisesRegex(
+            AssertionError, "asynchronous query is underway",
+        ):
+            assert_live_db_parallel_outcomes([
+                (
+                    "/api/artist/example",
+                    500,
+                    {"error": (
+                        "execute cannot be used while an asynchronous query "
+                        "is underway"
+                    )},
+                ),
+                (
+                    "/api/artist/compare",
+                    500,
+                    {"error": "cursor already closed"},
+                ),
+            ])
 
 
 class TestDiscogsRouteCacheInventory(unittest.TestCase):
