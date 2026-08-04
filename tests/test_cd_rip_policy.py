@@ -201,8 +201,12 @@ class CdRipCanonicalPolicyTest(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(result["stage2_import"], "transcode_upgrade")
+        self.assertEqual(result["stage2_import"], "import")
         self.assertTrue(result["imported"])
+        self.assertEqual(result["stage3_quality_gate"], "accept")
+        self.assertEqual(result["final_status"], "imported")
+        self.assertFalse(result["keep_searching"])
+        self.assertFalse(result["denylisted"])
         basis = result["comparison_basis"]
         self.assertEqual(basis["verdict"], "equivalent")
         self.assertEqual(basis["new_format"], "mp3 128")
