@@ -618,7 +618,7 @@ two-tree runbook (recipe in the module docstring). A quality-policy
 change is measured on the live corpus, not reasoned about from the diff.
 
 The export reads one explicitly qualified PostgreSQL `REPEATABLE READ`,
-read-only snapshot. Its v3 coverage companion is a strict typed artifact: it
+read-only snapshot. Its v4 coverage companion is a strict typed artifact: it
 contains the canonically sorted `source_links` ledger (both import-job and
 download-log arms), the raw ownership ledger for all three evidence FKs, and
 an observed-evidence content-address ledger for every canonical row, including
@@ -630,6 +630,16 @@ as `present_exact`, `missing`, `changed`, or `uncheckable`, using the same
 stable manifest comparison as action admission. That observation is bound
 into the matrix class for reproducibility; it does not make `source_path`
 current location or mutation authority.
+
+Coverage derives each row's canonical address again from its persisted file
+inventory. A disagreement with the stored fingerprint is integrity debt and
+keeps that row out of replay. Rows that share one derived address are listed
+separately in `duplicate_derived_addresses` for forensic visibility; they are
+not another debt count and are not called file-content conflicts. The address
+deliberately excludes `mtime_ns` and `decode_ok`, and the exporter has no
+audio-byte witness, so duplicate inventory addresses cannot establish byte
+corruption. The canonical PostgreSQL writer independently rejects a claimed
+fingerprint that disagrees with its incoming files before writing the row.
 Always run `verify` before either tree decides; it rejects unknown manifest
 fields and recomputes every count, debt, role,
 association, address, digest, and green result from those ledgers and the

@@ -31,6 +31,7 @@ from lib.quality import (
 from lib.quality_evidence import (
     SpectralWriteIntent,
     current_evidence_preserves_source_spectral,
+    snapshot_fingerprint,
 )
 
 _PRESERVED_SOURCE_LOSSY_PAIRS_JSON = json.dumps([
@@ -201,6 +202,11 @@ class _EvidenceMixin(_PipelineDBBase):
         if spectral_write_intent not in {"merge", "replace"}:
             raise ValueError(
                 f"invalid spectral write intent: {spectral_write_intent!r}"
+            )
+        derived_fingerprint = snapshot_fingerprint(evidence.files)
+        if evidence.snapshot_fingerprint != derived_fingerprint:
+            raise ValueError(
+                "snapshot_fingerprint does not match the persisted file inventory"
             )
         errors = evidence.storage_validation_errors()
         if errors:

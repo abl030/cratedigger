@@ -9,11 +9,13 @@ from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import msgspec
 from hypothesis import given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
 from lib.quality import AlbumQualityEvidenceFile
+from lib.quality_evidence import snapshot_fingerprint
 from scripts.decision_differential import (
     _EVIDENCE_SCHEMA_TYPES,
     _FILE_SCHEMA_TYPES,
@@ -36,6 +38,143 @@ from tests.test_pipeline_db import TEST_DSN, make_db, requires_postgres
 
 @requires_postgres
 class TestDecisionCorpusExportGenerated(unittest.TestCase):
+    @given(
+        size_bytes=st.integers(min_value=1, max_value=10_000_000),
+        first_mtime_ns=st.integers(min_value=0, max_value=10_000_000),
+        mtime_delta=st.integers(min_value=1, max_value=10_000),
+    )
+    def test_real_writer_and_exporter_enforce_content_address_semantics(
+        self,
+        size_bytes: int,
+        first_mtime_ns: int,
+        mtime_delta: int,
+    ) -> None:
+        """Malformed claims fail; excluded mtime drift stays informational."""
+        db = make_db()
+        try:
+            release = "generated-content-address"
+            request_id = db.add_request(
+                "Generated",
+                release,
+                "request",
+                release,
+            )
+            first = make_album_quality_evidence(
+                mb_release_id=release,
+                source_path="/tmp/generated-first",
+                files=[
+                    AlbumQualityEvidenceFile(
+                        relative_path="01.mp3",
+                        size_bytes=size_bytes,
+                        mtime_ns=first_mtime_ns,
+                        extension="mp3",
+                        container="mp3",
+                        codec="mp3",
+                    ),
+                    AlbumQualityEvidenceFile(
+                        relative_path="02.mp3",
+                        size_bytes=size_bytes + 1,
+                        mtime_ns=first_mtime_ns + 1,
+                        extension="mp3",
+                        container="mp3",
+                        codec="mp3",
+                    ),
+                ],
+            )
+            wrong_fingerprint = snapshot_fingerprint(first.files[:-1])
+            self.assertNotEqual(wrong_fingerprint, first.snapshot_fingerprint)
+            malformed = msgspec.structs.replace(
+                first,
+                mb_release_id=f"{release}-malformed",
+                snapshot_fingerprint=wrong_fingerprint,
+            )
+            with self.assertRaises(ValueError):
+                db.upsert_album_quality_evidence(malformed)
+            self.assertIsNone(
+                db.find_album_quality_evidence(
+                    mb_release_id=malformed.mb_release_id,
+                    snapshot_fingerprint=wrong_fingerprint,
+                )
+            )
+
+            db.upsert_album_quality_evidence(first)
+            stored_first = db.find_album_quality_evidence(
+                mb_release_id=release,
+                snapshot_fingerprint=first.snapshot_fingerprint,
+            )
+            assert stored_first is not None and stored_first.id is not None
+            db._execute(
+                "UPDATE album_quality_evidence SET snapshot_fingerprint = %s "
+                "WHERE id = %s",
+                (wrong_fingerprint, stored_first.id),
+            )
+            second = make_album_quality_evidence(
+                mb_release_id=release,
+                source_path="/tmp/generated-second",
+                files=[
+                    AlbumQualityEvidenceFile(
+                        relative_path="01.mp3",
+                        size_bytes=size_bytes,
+                        mtime_ns=first_mtime_ns + mtime_delta,
+                        extension="mp3",
+                        container="mp3",
+                        codec="mp3",
+                    ),
+                    AlbumQualityEvidenceFile(
+                        relative_path="02.mp3",
+                        size_bytes=size_bytes + 1,
+                        mtime_ns=first_mtime_ns + mtime_delta + 1,
+                        extension="mp3",
+                        container="mp3",
+                        codec="mp3",
+                    ),
+                ],
+            )
+            db.upsert_album_quality_evidence(second)
+            stored_second = db.find_album_quality_evidence(
+                mb_release_id=release,
+                snapshot_fingerprint=second.snapshot_fingerprint,
+            )
+            assert stored_second is not None and stored_second.id is not None
+            job = db.enqueue_import_job(
+                "force_import",
+                request_id=request_id,
+                payload={
+                    "download_log_id": 1,
+                    "failed_path": "/tmp/generated-first",
+                },
+            )
+            self.assertTrue(
+                db.set_import_job_candidate_evidence(job.id, stored_first.id)
+            )
+            db.conn.commit()
+            with TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                result = export_decision_corpus(
+                    TEST_DSN,
+                    root / "corpus.jsonl",
+                    root / "coverage.json",
+                )
+                coverage = json.loads((root / "coverage.json").read_text())
+
+            self.assertEqual(result.debt_count, 1)
+            self.assertEqual(
+                [item["evidence_id"] for item in coverage["content_address_mismatches"]],
+                [stored_first.id],
+            )
+            self.assertEqual(
+                coverage["duplicate_derived_addresses"],
+                [
+                    {
+                        "mb_release_id": release,
+                        "snapshot_fingerprint": first.snapshot_fingerprint,
+                        "evidence_ids": [stored_first.id, stored_second.id],
+                    }
+                ],
+            )
+        finally:
+            db.close()
+
     @given(
         keys=st.lists(
             st.tuples(st.text(min_size=1, max_size=8), st.text(min_size=1, max_size=8)),
