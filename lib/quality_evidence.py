@@ -267,7 +267,10 @@ def candidate_evidence_persistence_receipt_semantic_error(
         return "replace/measured requires source spectral subject"
     if receipt.spectral_provenance != EVIDENCE_PROVENANCE_MEASURED:
         return "replace/measured requires measured spectral provenance"
-    if not spectral_measurement_generation_is_current(receipt):
+    if (
+        type(receipt.spectral_measurement_version) is not int
+        or not spectral_measurement_generation_is_current(receipt)
+    ):
         return "replace/measured requires the current analyzer generation"
     if (
         receipt.spectral_bitrate_kbps is not None

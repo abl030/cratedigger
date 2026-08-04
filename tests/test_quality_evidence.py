@@ -235,6 +235,13 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
             ),
             msgspec.structs.replace(
                 measured,
+                spectral_measurement_version=cast(
+                    int,
+                    float(SPECTRAL_MEASUREMENT_VERSION),
+                ),
+            ),
+            msgspec.structs.replace(
+                measured,
                 codec_family=cast(CodecFamily, "invalid"),
             ),
         ]
