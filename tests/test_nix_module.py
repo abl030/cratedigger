@@ -1285,6 +1285,13 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
         )
 
 
+class TestModuleVmPerformanceContract(unittest.TestCase):
+    def test_guest_reads_the_nix_store_from_a_local_image(self) -> None:
+        text = MODULE_VM_NIX.read_text(encoding="utf-8")
+        self.assertIn("virtualisation.useNixStoreImage = true;", text)
+        self.assertIn("virtualisation.writableStore = true;", text)
+
+
 class TestImporterServiceContract(unittest.TestCase):
     def test_importer_wrapper_and_service_are_defined(self) -> None:
         text = MODULE_NIX.read_text(encoding="utf-8")

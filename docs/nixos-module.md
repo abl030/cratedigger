@@ -605,9 +605,14 @@ The flake exposes separate NixOS VM checks for module wiring and the real
 Jellyfin integration contract:
 
 ```bash
-nix build .#checks.x86_64-linux.moduleVm    # ~30s after first build
+nix build .#checks.x86_64-linux.moduleVm
 nix build .#checks.x86_64-linux.jellyfinMetadataVm
 ```
+
+The module VM builds a guest-local Nix store image just in time for every run,
+with an ephemeral writable overlay for its closure queries. This avoids routing
+the test's Python- and Beets-heavy store reads through the host's 9p mount; the
+image construction time is included in the check's wall clock.
 
 This catches option-surface breakage, immutable runtime-capability wiring,
 systemd dependency cycles, wrapper `PYTHONPATH` errors, and missing Python
