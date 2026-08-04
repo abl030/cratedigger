@@ -3159,7 +3159,7 @@ def _build_parser() -> argparse.ArgumentParser:
     transition = sub.add_parser(
         "transition",
         help=(
-            "Replay one representative per v3 matrix class through a "
+            "Replay one representative per v4 matrix class through a "
             "disposable local PostgreSQL cluster"
         ),
     )

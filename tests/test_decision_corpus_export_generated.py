@@ -15,6 +15,7 @@ from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
 from lib.quality import AlbumQualityEvidenceFile
+from lib.quality_evidence import snapshot_fingerprint
 from scripts.decision_differential import (
     _EVIDENCE_SCHEMA_TYPES,
     _FILE_SCHEMA_TYPES,
@@ -69,14 +70,19 @@ class TestDecisionCorpusExportGenerated(unittest.TestCase):
                         extension="mp3",
                         container="mp3",
                         codec="mp3",
-                    )
+                    ),
+                    AlbumQualityEvidenceFile(
+                        relative_path="02.mp3",
+                        size_bytes=size_bytes + 1,
+                        mtime_ns=first_mtime_ns + 1,
+                        extension="mp3",
+                        container="mp3",
+                        codec="mp3",
+                    ),
                 ],
             )
-            wrong_fingerprint = (
-                "0" * 64
-                if first.snapshot_fingerprint != "0" * 64
-                else "1" * 64
-            )
+            wrong_fingerprint = snapshot_fingerprint(first.files[:-1])
+            self.assertNotEqual(wrong_fingerprint, first.snapshot_fingerprint)
             malformed = msgspec.structs.replace(
                 first,
                 mb_release_id=f"{release}-malformed",
@@ -113,7 +119,15 @@ class TestDecisionCorpusExportGenerated(unittest.TestCase):
                         extension="mp3",
                         container="mp3",
                         codec="mp3",
-                    )
+                    ),
+                    AlbumQualityEvidenceFile(
+                        relative_path="02.mp3",
+                        size_bytes=size_bytes + 1,
+                        mtime_ns=first_mtime_ns + mtime_delta + 1,
+                        extension="mp3",
+                        container="mp3",
+                        codec="mp3",
+                    ),
                 ],
             )
             db.upsert_album_quality_evidence(second)
