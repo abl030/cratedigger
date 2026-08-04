@@ -39,7 +39,7 @@ class TestEphemeralPostgresFailures(unittest.TestCase):
 
             with (
                 patch("lib.ephemeral_postgres.shutil.which", return_value="/bin/tool"),
-                patch("lib.ephemeral_postgres.tempfile.mkdtemp", make_tempdir),
+                patch("tempfile.mkdtemp", make_tempdir),
                 patch(
                     "lib.ephemeral_postgres.subprocess.run",
                     side_effect=subprocess.CalledProcessError(
