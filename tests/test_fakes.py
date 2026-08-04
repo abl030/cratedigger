@@ -160,6 +160,31 @@ class TestFakePipelineDB(unittest.TestCase):
             ["a.mp3", "b.mp3"],
         )
 
+    def test_album_quality_evidence_rejects_malformed_content_key(self):
+        evidence = make_album_quality_evidence(
+            mb_release_id="mb-malformed-content-key",
+        )
+        wrong_fingerprint = (
+            "0" * 64
+            if evidence.snapshot_fingerprint != "0" * 64
+            else "1" * 64
+        )
+        malformed = msgspec.structs.replace(
+            evidence,
+            snapshot_fingerprint=wrong_fingerprint,
+        )
+        db = FakePipelineDB()
+
+        with self.assertRaisesRegex(ValueError, "snapshot_fingerprint"):
+            db.upsert_album_quality_evidence(malformed)
+
+        self.assertIsNone(
+            db.find_album_quality_evidence(
+                mb_release_id=malformed.mb_release_id,
+                snapshot_fingerprint=wrong_fingerprint,
+            )
+        )
+
     def test_album_quality_evidence_stale_writer_preserves_spectral_pair(self):
         """issue #829 Phase 5 PR1 review round 2, should-fix 7: this guard
         (upsert_album_quality_evidence's spectral-preserve CASE) had no

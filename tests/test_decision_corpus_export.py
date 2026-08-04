@@ -429,7 +429,7 @@ class TestDecisionCorpusExport(unittest.TestCase):
     def test_source_snapshot_state_distinguishes_present_and_missing_candidates(
         self,
     ) -> None:
-        """v3 binds observational source state without making path authority."""
+        """v4 binds observational source state without making path authority."""
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             present = root / "present"
@@ -846,7 +846,24 @@ class TestDecisionCorpusExport(unittest.TestCase):
         )
         self.db.conn.commit()
 
-        result, corpus, coverage = self._export()
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            corpus_path = root / "corpus.jsonl"
+            coverage_path = root / "coverage.json"
+            result = export_decision_corpus(
+                TEST_DSN,
+                corpus_path,
+                coverage_path,
+            )
+            corpus = [
+                json.loads(line)
+                for line in corpus_path.read_text().splitlines()
+            ]
+            coverage = json.loads(coverage_path.read_text())
+            transition = replay_decision_transitions(
+                corpus_path,
+                coverage_path,
+            )
 
         self.assertFalse(result.green)
         self.assertEqual([row["id"] for row in corpus], [candidate_id])
@@ -855,6 +872,99 @@ class TestDecisionCorpusExport(unittest.TestCase):
         assert isinstance(mismatches, list) and mismatches
         assert is_str_object_dict(mismatches[0])
         self.assertEqual(mismatches[0]["evidence_id"], candidate_id)
+        self.assertTrue(transition.green)
+
+    def test_duplicate_derived_address_is_observed_without_false_content_debt(
+        self,
+    ) -> None:
+        """Excluded mtime drift cannot be relabelled as file-content conflict."""
+        release = "duplicate-derived-address"
+        request_id = self._request(release)
+        first = make_album_quality_evidence(
+            mb_release_id=release,
+            source_path="/tmp/duplicate-first",
+            files=[
+                AlbumQualityEvidenceFile(
+                    relative_path="01.mp3",
+                    size_bytes=35,
+                    mtime_ns=1,
+                    extension="mp3",
+                    container="mp3",
+                    codec="mp3",
+                )
+            ],
+        )
+        self.db.upsert_album_quality_evidence(first)
+        stored_first = self.db.find_album_quality_evidence(
+            mb_release_id=release,
+            snapshot_fingerprint=first.snapshot_fingerprint,
+        )
+        assert stored_first is not None and stored_first.id is not None
+        wrong_fingerprint = (
+            "0" * 64
+            if first.snapshot_fingerprint != "0" * 64
+            else "1" * 64
+        )
+        self.db._execute(
+            "UPDATE album_quality_evidence SET snapshot_fingerprint = %s "
+            "WHERE id = %s",
+            (wrong_fingerprint, stored_first.id),
+        )
+        second = make_album_quality_evidence(
+            mb_release_id=release,
+            source_path="/tmp/duplicate-second",
+            files=[
+                AlbumQualityEvidenceFile(
+                    relative_path="01.mp3",
+                    size_bytes=35,
+                    mtime_ns=2,
+                    extension="mp3",
+                    container="mp3",
+                    codec="mp3",
+                )
+            ],
+        )
+        self.db.upsert_album_quality_evidence(second)
+        stored_second = self.db.find_album_quality_evidence(
+            mb_release_id=release,
+            snapshot_fingerprint=second.snapshot_fingerprint,
+        )
+        assert stored_second is not None and stored_second.id is not None
+        job = self.db.enqueue_import_job(
+            "force_import",
+            request_id=request_id,
+            payload={"download_log_id": 1, "failed_path": "/tmp/duplicate-first"},
+        )
+        self.assertTrue(
+            self.db.set_import_job_candidate_evidence(job.id, stored_first.id)
+        )
+        self.db.conn.commit()
+
+        result, _corpus, coverage = self._export()
+
+        self.assertFalse(result.green)
+        self.assertEqual(result.debt_count, 1)
+        self.assertEqual(
+            coverage["content_address_mismatches"],
+            [
+                {
+                    "evidence_id": stored_first.id,
+                    "stored_snapshot_fingerprint": wrong_fingerprint,
+                    "files_snapshot_fingerprint": first.snapshot_fingerprint,
+                }
+            ],
+        )
+        self.assertEqual(
+            coverage["duplicate_derived_addresses"],
+            [
+                {
+                    "mb_release_id": release,
+                    "snapshot_fingerprint": first.snapshot_fingerprint,
+                    "evidence_ids": [stored_first.id, stored_second.id],
+                }
+            ],
+        )
+        self.assertNotIn("file_content_conflicts", coverage)
 
     def test_conflict_is_named_without_suppressing_another_valid_candidate(
         self,

@@ -6729,6 +6729,40 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
             **kwargs,
         )
 
+    def test_rejects_claimed_fingerprint_that_disagrees_with_its_files(self):
+        """The canonical writer rejects a malformed content-address receipt."""
+        evidence = self._seed(
+            files=[
+                AlbumQualityEvidenceFile(
+                    relative_path="01.mp3",
+                    size_bytes=123,
+                    mtime_ns=456,
+                    extension="mp3",
+                    container="mp3",
+                    codec="mp3",
+                )
+            ],
+        )
+        wrong_fingerprint = (
+            "0" * 64
+            if evidence.snapshot_fingerprint != "0" * 64
+            else "1" * 64
+        )
+        malformed = msgspec.structs.replace(
+            evidence,
+            snapshot_fingerprint=wrong_fingerprint,
+        )
+
+        with self.assertRaisesRegex(ValueError, "snapshot_fingerprint"):
+            self.db.upsert_album_quality_evidence(malformed)
+
+        self.assertIsNone(
+            self.db.find_album_quality_evidence(
+                mb_release_id=malformed.mb_release_id,
+                snapshot_fingerprint=wrong_fingerprint,
+            )
+        )
+
     def test_back_to_mono_corrupt_attempt_survives_stale_spectral_collision(self):
         """Issue #1030: persistence completion is not cache eligibility.
 

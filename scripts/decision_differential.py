@@ -24,7 +24,7 @@ Five modes, with ``decide``/``diff`` sharing Rule D's two-tree runbook:
   It runs ``full_pipeline_decision_from_evidence`` for every candidate and
   writes one decided JSONL row per candidate.
 * ``diff`` compares two decided JSONL files field by field.
-* ``transition`` replays one representative per v3 ownership/evidence matrix
+* ``transition`` replays one representative per v4 ownership/evidence matrix
   class through production persistence and decision seams in disposable PG.
 
     git archive <base-ref> | tar -x -C /tmp/dd-base
@@ -149,7 +149,7 @@ way a differential can lie:
   row that is not action-ready raises in production too; silently
   skipping it would shrink the denominator and flatter the result.
 * **Transitions run only in disposable PostgreSQL.** ``transition`` verifies
-  the v3 pair, selects one representative per observed ownership/evidence
+  the v4 pair, selects one representative per observed ownership/evidence
   matrix class, then exercises the real upsert, exact import-job FK, reload,
   cache, action-admission, and decider seams in an isolated local cluster.
   It accepts no source DSN, so a live export is input evidence, never mutation
@@ -1115,7 +1115,11 @@ class _CoverageContentMismatch(msgspec.Struct, frozen=True, forbid_unknown_field
     files_snapshot_fingerprint: str
 
 
-class _CoverageFileContentConflict(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+class _CoverageDerivedAddressDuplicate(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True
+):
+    """Rows sharing the canonical address derived from their file inventory."""
+
     mb_release_id: str
     snapshot_fingerprint: str
     evidence_ids: list[int]
@@ -1165,7 +1169,7 @@ class _CoverageOutputs(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
 
 
 class DecisionCorpusCoverage(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
-    """Strict, self-recomputing coverage artifact schema (v3)."""
+    """Strict, self-recomputing coverage artifact schema (v4)."""
 
     schema_version: int
     source_links: list[_CoverageSourceLink]
@@ -1188,7 +1192,7 @@ class DecisionCorpusCoverage(msgspec.Struct, frozen=True, forbid_unknown_fields=
     referenced_current_ids: list[int]
     valid_candidates: _CoverageValidCandidates
     content_address_mismatches: list[_CoverageContentMismatch]
-    file_content_conflicts: list[_CoverageFileContentConflict]
+    duplicate_derived_addresses: list[_CoverageDerivedAddressDuplicate]
     written_content_address_conflicts: list[_CoverageWrittenAddressConflict]
     outputs: _CoverageOutputs
     green: bool
@@ -1839,7 +1843,6 @@ def _export_debt_count(coverage: DecisionCorpusCoverage) -> int:
         "missing_current_evidence_ids",
         "current_release_mismatches",
         "content_address_mismatches",
-        "file_content_conflicts",
         "written_content_address_conflicts",
     )
     total = 0
@@ -2027,8 +2030,8 @@ def recompute_decision_corpus_coverage(
         content_groups.setdefault(
             (item.mb_release_id, item.files_snapshot_fingerprint), []
         ).append(item.evidence_id)
-    file_content_conflicts = [
-        _CoverageFileContentConflict(
+    duplicate_derived_addresses = [
+        _CoverageDerivedAddressDuplicate(
             mb_release_id=release_id,
             snapshot_fingerprint=fingerprint,
             evidence_ids=evidence_ids,
@@ -2141,7 +2144,7 @@ def recompute_decision_corpus_coverage(
         sha256=hashlib.sha256(corpus_bytes).hexdigest(),
     )
     coverage = DecisionCorpusCoverage(
-        schema_version=3,
+        schema_version=4,
         source_links=list(source_links),
         observed_evidence=list(observed_evidence),
         evidence_owner_links=list(evidence_owner_links),
@@ -2165,7 +2168,7 @@ def recompute_decision_corpus_coverage(
             unpaired=sum(item.current_evidence_id is None for item in expected_associations),
         ),
         content_address_mismatches=mismatches,
-        file_content_conflicts=file_content_conflicts,
+        duplicate_derived_addresses=duplicate_derived_addresses,
         written_content_address_conflicts=[
             _CoverageWrittenAddressConflict(mb_release_id=release, snapshot_fingerprint=fingerprint)
             for release, fingerprint in address_conflicts
@@ -2461,9 +2464,9 @@ def verify_decision_corpus_pair(
         )
     except (msgspec.DecodeError, msgspec.ValidationError) as exc:
         raise RenderDifferentialError(f"coverage violates its strict schema: {exc}") from exc
-    if coverage.schema_version != 3:
+    if coverage.schema_version != 4:
         raise RenderDifferentialError(
-            f"coverage schema_version must be exactly 3, got {coverage.schema_version!r}"
+            f"coverage schema_version must be exactly 4, got {coverage.schema_version!r}"
         )
     rows = list(_corpus_rows(str(corpus_file)))
     for row in rows:
@@ -2723,6 +2726,7 @@ def replay_decision_transitions(
         load_candidate_evidence_for_source,
         persist_candidate_evidence_from_import_result,
         persist_candidate_evidence_from_measurement,
+        snapshot_fingerprint,
     )
 
     replay_rows: list[DecisionTransitionReplay] = []
@@ -2761,6 +2765,13 @@ def replay_decision_transitions(
                     id=None,
                     mb_release_id=release_id,
                     source_path=str(action_path),
+                    # Historical address-mismatch rows are part of the
+                    # observed matrix, but the current writer correctly
+                    # refuses their malformed key. The exporter/verifier
+                    # already patrols that invariant; transition replay
+                    # canonicalizes only its disposable seed so it can test
+                    # the remaining persistence and decision seams.
+                    snapshot_fingerprint=snapshot_fingerprint(observed.files),
                 )
                 db.upsert_album_quality_evidence(seeded)
                 canonical = db.find_album_quality_evidence(
@@ -3022,7 +3033,7 @@ def replay_decision_transitions(
             db.close()
 
     report = DecisionTransitionReport(
-        schema_version=3,
+        schema_version=4,
         coverage_schema_version=coverage.schema_version,
         total_matrix_classes=len(replay_rows),
         decided=sum(row.outcome == "decided" for row in replay_rows),
@@ -3154,7 +3165,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     transition.add_argument("--corpus", required=True, help="Exported corpus JSONL")
     transition.add_argument(
-        "--coverage", required=True, help="Matching v3 coverage manifest"
+        "--coverage", required=True, help="Matching v4 coverage manifest"
     )
     transition.add_argument(
         "--out", default=None, help="Transition report JSON (default: stdout)"
