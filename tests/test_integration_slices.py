@@ -38,12 +38,15 @@ from lib.quality import (
     IMPORT_RESULT_SENTINEL,
     QUALITY_UPGRADE_TIERS,
     ActiveDownloadState,
+    AlbumQualityEvidenceDecisionFacts,
     AudioQualityMeasurement,
     ConversionInfo,
     DownloadInfo,
     ImportResult,
     PostflightInfo,
     ValidationResult,
+    VerifiedLosslessProof,
+    full_pipeline_decision_from_evidence,
     legacy_unrecorded_audio_validation_report,
 )
 from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION, AlbumResult
@@ -874,6 +877,83 @@ class TestDispatchThroughQualityGate(unittest.TestCase):
         )
         gate.assert_called_once()
         self.assertEqual(db.request(42)["status"], "imported")
+
+    def test_force_import_cd_proof_target_is_terminal_without_denylist(self):
+        """A bit-proven source stored at the configured target is done."""
+        proof = VerifiedLosslessProof(
+            provenance="measured",
+            source="flac",
+            classifier="generated",
+        )
+        candidate = make_album_quality_evidence(
+            mb_release_id="mbid-123",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=511,
+                avg_bitrate_kbps=609,
+                format="FLAC",
+            ),
+            codec="flac",
+            container="flac",
+            storage_format="FLAC",
+            target_format="mp3 128",
+            target_is_cbr=False,
+            verified_lossless_proof=proof,
+        )
+        current = make_album_quality_evidence(
+            mb_release_id="mbid-123",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=128,
+                avg_bitrate_kbps=128,
+                format="MP3",
+            ),
+            codec="mp3",
+            container="mp3",
+            storage_format="MP3",
+        )
+        decision = full_pipeline_decision_from_evidence(
+            candidate,
+            current,
+            facts=AlbumQualityEvidenceDecisionFacts(
+                verified_lossless_target="mp3 128",
+                target_format="mp3 128",
+                converted_count=8,
+                post_conversion_min_bitrate=128,
+                post_conversion_is_cbr=False,
+            ),
+        )
+        ir = make_import_result(
+            decision=str(decision["stage2_import"]),
+            new_min_bitrate=511,
+            prev_min_bitrate=128,
+            was_converted=True,
+            original_filetype="flac",
+            target_filetype="mp3",
+            verified_lossless=True,
+            final_format="mp3 128",
+        )
+        ir.verified_lossless_proof = proof
+        beets_info = AlbumInfo(
+            album_id=1,
+            track_count=8,
+            min_bitrate_kbps=128,
+            avg_bitrate_kbps=128,
+            format="MP3",
+            is_cbr=False,
+            album_path="/Beets/Test",
+        )
+
+        db = self._run_dispatch(
+            ir,
+            beets_info,
+            force=True,
+            scenario="force_import",
+        )
+
+        self.assertEqual(decision["stage2_import"], "import")
+        row = db.request(42)
+        self.assertEqual(row["status"], "imported")
+        self.assertIsNone(row["search_filetype_override"])
+        self.assertEqual(db.denylist, [])
 
     def test_import_with_unmeasured_distance_records_null(self):
         """#550 defect #4: dispatch with distance=None (the production
