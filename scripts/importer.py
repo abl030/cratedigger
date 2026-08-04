@@ -929,6 +929,7 @@ def execute_youtube_import_job(
     job: ImportJob,
     *,
     ctx: Any = None,
+    process_album_fn: ProcessAlbumFn | None = None,
 ) -> DispatchOutcome:
     """Run completed-staging processing for a YouTube-rescue import job.
 
@@ -1002,7 +1003,8 @@ def execute_youtube_import_job(
     created_ctx = ctx is None
     runtime_ctx = ctx or _build_runtime_context(db)
     try:
-        result = process_completed_album(
+        process_completed = process_album_fn or process_completed_album
+        result = process_completed(
             entry,
             runtime_ctx,
             import_job_id=job.id,

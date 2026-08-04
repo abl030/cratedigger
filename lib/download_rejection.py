@@ -257,7 +257,10 @@ def _handle_rejected_result(
     )
     _checkpoint(cancellation_token)
     log_validation_result(album_data, bv_result, ctx.cfg)
-    usernames = {file.username for file in album_data.files}
+    # The YouTube staging lane deliberately reconstructs a manifest with blank
+    # usernames: those files have no slskd peer identity.  Keep its terminal
+    # outcome peer-free while retaining every real uploader for slskd rejects.
+    usernames = {file.username for file in album_data.files if file.username}
     bv_result.denylisted_users = sorted(usernames)
     dl_info = _build_download_info(album_data)
     dl_info.validation_result = bv_result.to_json()
