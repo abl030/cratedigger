@@ -1014,6 +1014,7 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
                 avg_bitrate_kbps=128,
                 median_bitrate_kbps=127,
                 format="Opus",
+                was_converted_from="flac",
                 spectral_grade="likely_transcode",
                 spectral_subject="installed",
                 spectral_provenance="measured",
@@ -1062,6 +1063,7 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
         assert result.evidence is not None
         self.assertEqual(result.evidence.lineage_version, 4)
         m = result.evidence.measurement
+        self.assertEqual(m.was_converted_from, "flac")
         self.assertEqual(m.spectral_grade, "likely_transcode")
         self.assertEqual(m.spectral_subject, "installed")
         self.assertEqual(m.spectral_provenance, "measured")

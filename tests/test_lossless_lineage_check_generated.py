@@ -1,7 +1,9 @@
-"""Generated PostgreSQL invariant for durable conversion lineage."""
+"""Generated role-aware invariants for evidence conversion lineage."""
 
 from __future__ import annotations
 
+import os
+import tempfile
 import unittest
 from dataclasses import dataclass
 from itertools import product
@@ -13,11 +15,17 @@ from hypothesis import example, given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
+from lib.beets_db import AlbumInfo
 from lib.quality import (
     AlbumQualityEvidenceFile,
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
     VerifiedLosslessProof,
+)
+from lib.quality_evidence import (
+    backfill_current_evidence_from_album_info,
+    candidate_evidence_for_policy,
+    snapshot_audio_files,
 )
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_album_quality_evidence, make_request_row
@@ -80,6 +88,20 @@ def assert_lossless_merge_converged(
         return
     if spectral_grade != "genuine" or spectral_subject != existing_subject:
         raise AssertionError("stale provenance erased existing spectral evidence")
+
+
+def assert_conversion_lineage_matches_role(
+    *,
+    role: str,
+    converted_from: str,
+    actual: str | None,
+) -> None:
+    """Candidate source truth replaces; current output lineage carries."""
+    expected = None if role == "candidate" else converted_from
+    if actual != expected:
+        raise AssertionError(
+            f"{role} conversion lineage was {actual!r}, expected {expected!r}"
+        )
 
 
 def _run_fake_lossless_merge(
@@ -274,73 +296,160 @@ class TestGeneratedLosslessLineageMerge(unittest.TestCase):
         )
 
     @given(
-        writer_order=st.sampled_from((("fresh", "stale"), ("stale", "fresh"))),
         converted_from=st.sampled_from(("flac", "FLAC", "alac", "wav")),
+        current_linked=st.booleans(),
     )
-    @example(writer_order=("fresh", "stale"), converted_from="flac")
-    @example(writer_order=("stale", "fresh"), converted_from="alac")
-    def test_stale_writer_never_erases_durable_conversion_lineage(
+    @example(converted_from="flac", current_linked=False)
+    @example(converted_from="alac", current_linked=True)
+    def test_candidate_refresh_respects_current_link(
         self,
-        writer_order: tuple[str, str],
         converted_from: str,
+        current_linked: bool,
     ) -> None:
         db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, mb_release_id="durable-lineage"))
         evidence = make_album_quality_evidence(
-            mb_release_id="durable-lineage",
+            mb_release_id="generated-candidate-lineage",
             files=[AlbumQualityEvidenceFile(
-                relative_path="01.m4a",
+                relative_path="01.flac",
                 size_bytes=1,
                 mtime_ns=1,
-                extension="m4a",
-                container="m4a",
-                codec="m4a",
+                extension="flac",
+                container="flac",
+                codec="flac",
             )],
             measurement=AudioQualityMeasurement(
-                min_bitrate_kbps=900,
-                avg_bitrate_kbps=920,
-                median_bitrate_kbps=910,
-                format="ALAC",
+                min_bitrate_kbps=800,
+                avg_bitrate_kbps=900,
+                median_bitrate_kbps=850,
+                format="FLAC",
                 was_converted_from=converted_from,
             ),
-            codec="m4a",
-            container="m4a",
-            storage_format="ALAC",
+            codec="flac",
+            container="flac",
+            storage_format="FLAC",
+            target_format="opus 128",
         )
         db.upsert_album_quality_evidence(evidence)
-        stored = db.find_album_quality_evidence(
-            mb_release_id=evidence.mb_release_id,
-            snapshot_fingerprint=evidence.snapshot_fingerprint,
-        )
-        assert stored is not None and stored.id is not None
-        assert db.set_request_current_evidence(42, stored.id)
-        stale = msgspec.structs.replace(
+        if current_linked:
+            db.seed_request(make_request_row(
+                id=42,
+                mb_release_id=evidence.mb_release_id,
+            ))
+            stored = db.find_album_quality_evidence(
+                mb_release_id=evidence.mb_release_id,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert stored is not None and stored.id is not None
+            assert db.set_request_current_evidence(42, stored.id)
+        db.upsert_album_quality_evidence(msgspec.structs.replace(
             evidence,
             measurement=msgspec.structs.replace(
                 evidence.measurement,
                 was_converted_from=None,
             ),
-        )
-        for writer in writer_order:
-            if writer == "fresh":
-                self.assertTrue(db.persist_current_spectral_measurement(
-                    request_id=42,
-                    expected_evidence_id=stored.id,
-                    expected_snapshot_fingerprint=evidence.snapshot_fingerprint,
-                    grade="genuine",
-                    bitrate_kbps=900,
-                ))
-            else:
-                db.upsert_album_quality_evidence(stale)
+        ))
 
         loaded = db.find_album_quality_evidence(
             mb_release_id=evidence.mb_release_id,
             snapshot_fingerprint=evidence.snapshot_fingerprint,
         )
         assert loaded is not None
-        self.assertEqual(loaded.measurement.was_converted_from, converted_from)
-        self.assertEqual(loaded.measurement.spectral_subject, "installed")
-        self.assertEqual(loaded.measurement.spectral_grade, "genuine")
+        assert_conversion_lineage_matches_role(
+            role="shared" if current_linked else "candidate",
+            converted_from=converted_from,
+            actual=loaded.measurement.was_converted_from,
+        )
+        candidate = candidate_evidence_for_policy(loaded)
+        assert_conversion_lineage_matches_role(
+            role="candidate",
+            converted_from=converted_from,
+            actual=candidate.measurement.was_converted_from,
+        )
+
+    @given(
+        writer_order=st.sampled_from(
+            (("spectral", "rebuild"), ("rebuild", "spectral"))
+        ),
+        converted_from=st.sampled_from(("flac", "FLAC", "alac", "wav")),
+    )
+    @example(writer_order=("spectral", "rebuild"), converted_from="flac")
+    @example(writer_order=("rebuild", "spectral"), converted_from="alac")
+    def test_current_rebuild_preserves_conversion_lineage(
+        self,
+        writer_order: tuple[str, str],
+        converted_from: str,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            with open(os.path.join(root, "01.opus"), "wb") as handle:
+                handle.write(b"generated audio")
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=42,
+                mb_release_id="generated-current-lineage",
+            ))
+            evidence = make_album_quality_evidence(
+                mb_release_id="generated-current-lineage",
+                source_path=root,
+                files=snapshot_audio_files(root),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=128,
+                    avg_bitrate_kbps=130,
+                    median_bitrate_kbps=129,
+                    format="Opus",
+                    was_converted_from=converted_from,
+                ),
+                codec="opus",
+                container="opus",
+                storage_format="Opus",
+            )
+            db.upsert_album_quality_evidence(evidence)
+            stored = db.find_album_quality_evidence(
+                mb_release_id=evidence.mb_release_id,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert stored is not None and stored.id is not None
+            assert db.set_request_current_evidence(42, stored.id)
+            for writer in writer_order:
+                if writer == "spectral":
+                    self.assertTrue(db.persist_current_spectral_measurement(
+                        request_id=42,
+                        expected_evidence_id=stored.id,
+                        expected_snapshot_fingerprint=(
+                            evidence.snapshot_fingerprint
+                        ),
+                        grade="genuine",
+                        bitrate_kbps=128,
+                    ))
+                else:
+                    result = backfill_current_evidence_from_album_info(
+                        db,
+                        request_id=42,
+                        mb_release_id=evidence.mb_release_id,
+                        album_info=AlbumInfo(
+                            album_id=1,
+                            track_count=1,
+                            min_bitrate_kbps=128,
+                            avg_bitrate_kbps=130,
+                            median_bitrate_kbps=129,
+                            is_cbr=False,
+                            album_path=root,
+                            format="Opus",
+                        ),
+                    )
+                    self.assertEqual(result.status, "ready")
+
+            loaded = db.find_album_quality_evidence(
+                mb_release_id=evidence.mb_release_id,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert loaded is not None
+            assert_conversion_lineage_matches_role(
+                role="current",
+                converted_from=converted_from,
+                actual=loaded.measurement.was_converted_from,
+            )
+            self.assertEqual(loaded.measurement.spectral_subject, "installed")
+            self.assertEqual(loaded.measurement.spectral_grade, "genuine")
 
 
 class TestLosslessLineageCheckCheckerTripsOnViolation(unittest.TestCase):
@@ -357,6 +466,30 @@ class TestLosslessLineageCheckCheckerTripsOnViolation(unittest.TestCase):
                 incoming_preserves_source=False,
                 spectral_grade=None,
                 spectral_subject=None,
+            )
+
+    def test_role_checker_rejects_candidate_lineage_preservation(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "candidate conversion"):
+            assert_conversion_lineage_matches_role(
+                role="candidate",
+                converted_from="flac",
+                actual="flac",
+            )
+
+    def test_role_checker_rejects_erased_current_lineage(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "current conversion"):
+            assert_conversion_lineage_matches_role(
+                role="current",
+                converted_from="flac",
+                actual=None,
+            )
+
+    def test_role_checker_rejects_erased_shared_lineage(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "shared conversion"):
+            assert_conversion_lineage_matches_role(
+                role="shared",
+                converted_from="flac",
+                actual=None,
             )
 
 
