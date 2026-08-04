@@ -7,6 +7,10 @@ from datetime import datetime
 import msgspec
 
 from lib.convergence_service import normalize_contributor_usernames
+from lib.evidence_media_identity import (
+    EVIDENCE_LOSSLESS_CODECS,
+    LOSSY_CODECS_BY_CONTAINER,
+)
 from lib.import_execution import ExecutionLeaseSnapshot
 from lib.pipeline_db._core import _PipelineDBBase
 from lib.quality import (
@@ -28,6 +32,12 @@ from lib.quality_evidence import (
     SpectralWriteIntent,
     current_evidence_preserves_source_spectral,
 )
+
+_PRESERVED_SOURCE_LOSSY_PAIRS_JSON = json.dumps([
+    {"container": container, "codec": codec}
+    for container, codecs in sorted(LOSSY_CODECS_BY_CONTAINER.items())
+    for codec in sorted(codecs)
+])
 
 
 class PersistedEvidenceFileRow(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -238,7 +248,77 @@ class _EvidenceMixin(_PipelineDBBase):
         self._execute(
             """
             WITH write_policy AS MATERIALIZED (
-                SELECT %s::boolean AS replace_spectral
+                SELECT
+                    %s::boolean AS replace_spectral,
+                    %s::text[] AS lossless_source_codecs,
+                    %s::jsonb AS lossy_media_pairs
+            ),
+            preserved_current_source_spectral AS MATERIALIZED (
+                -- This is the stored-row SQL twin of
+                -- current_evidence_preserves_source_spectral. Current
+                -- ownership and a source subject are not enough: only an
+                -- irreplaceable derivative from a recorded lossless source
+                -- may retain its tuple across a candidate collision.
+                SELECT stored.id
+                FROM album_quality_evidence AS stored
+                CROSS JOIN write_policy
+                WHERE stored.mb_release_id = %s
+                  AND stored.snapshot_fingerprint = %s
+                  AND EXISTS (
+                      SELECT 1
+                      FROM album_requests AS current_owner
+                      WHERE current_owner.current_evidence_id = stored.id
+                  )
+                  AND LOWER(BTRIM(stored.was_converted_from)) = ANY(
+                      write_policy.lossless_source_codecs
+                  )
+                  AND stored.spectral_subject = 'source'
+                  AND EXISTS (
+                      SELECT 1
+                      FROM album_quality_evidence_files AS stored_file
+                      WHERE stored_file.evidence_id = stored.id
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM album_quality_evidence_files AS stored_file
+                      WHERE stored_file.evidence_id = stored.id
+                        AND (
+                            stored_file.container IS NULL OR
+                            stored_file.container = '' OR
+                            stored_file.codec IS NULL OR
+                            stored_file.codec = ''
+                        )
+                  )
+                  AND 1 = (
+                      SELECT COUNT(DISTINCT LOWER(stored_file.container))
+                      FROM album_quality_evidence_files AS stored_file
+                      WHERE stored_file.evidence_id = stored.id
+                  )
+                  AND COALESCE(
+                      NULLIF(LOWER(BTRIM(stored.storage_format)), ''),
+                      NULLIF(LOWER(BTRIM(stored.format)), '')
+                  ) IS NOT NULL
+                  AND (
+                      NULLIF(LOWER(BTRIM(stored.storage_format)), '') IS NULL OR
+                      NULLIF(LOWER(BTRIM(stored.format)), '') IS NULL OR
+                      LOWER(BTRIM(stored.storage_format)) =
+                          LOWER(BTRIM(stored.format))
+                  )
+                  AND EXISTS (
+                      SELECT 1
+                      FROM jsonb_to_recordset(
+                          write_policy.lossy_media_pairs
+                      ) AS pair(container TEXT, codec TEXT)
+                      WHERE pair.container = (
+                          SELECT MIN(LOWER(stored_file.container))
+                          FROM album_quality_evidence_files AS stored_file
+                          WHERE stored_file.evidence_id = stored.id
+                      )
+                        AND pair.codec = COALESCE(
+                            NULLIF(LOWER(BTRIM(stored.storage_format)), ''),
+                            NULLIF(LOWER(BTRIM(stored.format)), '')
+                        )
+                  )
             ),
             upserted AS (
                 INSERT INTO album_quality_evidence (
@@ -322,11 +402,10 @@ class _EvidenceMixin(_PipelineDBBase):
                     -- including when the new fact is absent.
                     spectral_grade = CASE
                     WHEN (SELECT replace_spectral FROM write_policy)
-                         AND album_quality_evidence.spectral_subject = 'source'
                          AND EXISTS (
-                             SELECT 1 FROM album_requests AS current_owner
-                             WHERE current_owner.current_evidence_id =
-                                 album_quality_evidence.id
+                             SELECT 1
+                             FROM preserved_current_source_spectral AS preserved
+                             WHERE preserved.id = album_quality_evidence.id
                          )
                     THEN album_quality_evidence.spectral_grade
                     WHEN
@@ -348,11 +427,10 @@ class _EvidenceMixin(_PipelineDBBase):
                         ELSE album_quality_evidence.spectral_grade END,
                     spectral_bitrate_kbps = CASE
                     WHEN (SELECT replace_spectral FROM write_policy)
-                         AND album_quality_evidence.spectral_subject = 'source'
                          AND EXISTS (
-                             SELECT 1 FROM album_requests AS current_owner
-                             WHERE current_owner.current_evidence_id =
-                                 album_quality_evidence.id
+                             SELECT 1
+                             FROM preserved_current_source_spectral AS preserved
+                             WHERE preserved.id = album_quality_evidence.id
                          )
                     THEN album_quality_evidence.spectral_bitrate_kbps
                     WHEN
@@ -374,11 +452,10 @@ class _EvidenceMixin(_PipelineDBBase):
                         ELSE album_quality_evidence.spectral_bitrate_kbps END,
                     spectral_subject = CASE
                     WHEN (SELECT replace_spectral FROM write_policy)
-                         AND album_quality_evidence.spectral_subject = 'source'
                          AND EXISTS (
-                             SELECT 1 FROM album_requests AS current_owner
-                             WHERE current_owner.current_evidence_id =
-                                 album_quality_evidence.id
+                             SELECT 1
+                             FROM preserved_current_source_spectral AS preserved
+                             WHERE preserved.id = album_quality_evidence.id
                          )
                     THEN album_quality_evidence.spectral_subject
                     WHEN
@@ -400,11 +477,10 @@ class _EvidenceMixin(_PipelineDBBase):
                         ELSE album_quality_evidence.spectral_subject END,
                     spectral_provenance = CASE
                     WHEN (SELECT replace_spectral FROM write_policy)
-                         AND album_quality_evidence.spectral_subject = 'source'
                          AND EXISTS (
-                             SELECT 1 FROM album_requests AS current_owner
-                             WHERE current_owner.current_evidence_id =
-                                 album_quality_evidence.id
+                             SELECT 1
+                             FROM preserved_current_source_spectral AS preserved
+                             WHERE preserved.id = album_quality_evidence.id
                          )
                     THEN album_quality_evidence.spectral_provenance
                     WHEN
@@ -431,11 +507,10 @@ class _EvidenceMixin(_PipelineDBBase):
                     -- fact, now eight columns wide instead of four.
                     cliff_hz = CASE
                     WHEN (SELECT replace_spectral FROM write_policy)
-                         AND album_quality_evidence.spectral_subject = 'source'
                          AND EXISTS (
-                             SELECT 1 FROM album_requests AS current_owner
-                             WHERE current_owner.current_evidence_id =
-                                 album_quality_evidence.id
+                             SELECT 1
+                             FROM preserved_current_source_spectral AS preserved
+                             WHERE preserved.id = album_quality_evidence.id
                          )
                     THEN album_quality_evidence.cliff_hz
                     WHEN
@@ -457,11 +532,10 @@ class _EvidenceMixin(_PipelineDBBase):
                         ELSE album_quality_evidence.cliff_hz END,
                     codec_family = CASE
                     WHEN (SELECT replace_spectral FROM write_policy)
-                         AND album_quality_evidence.spectral_subject = 'source'
                          AND EXISTS (
-                             SELECT 1 FROM album_requests AS current_owner
-                             WHERE current_owner.current_evidence_id =
-                                 album_quality_evidence.id
+                             SELECT 1
+                             FROM preserved_current_source_spectral AS preserved
+                             WHERE preserved.id = album_quality_evidence.id
                          )
                     THEN album_quality_evidence.codec_family
                     WHEN
@@ -483,11 +557,10 @@ class _EvidenceMixin(_PipelineDBBase):
                         ELSE album_quality_evidence.codec_family END,
                     ultrasonic_deficit_db = CASE
                     WHEN (SELECT replace_spectral FROM write_policy)
-                         AND album_quality_evidence.spectral_subject = 'source'
                          AND EXISTS (
-                             SELECT 1 FROM album_requests AS current_owner
-                             WHERE current_owner.current_evidence_id =
-                                 album_quality_evidence.id
+                             SELECT 1
+                             FROM preserved_current_source_spectral AS preserved
+                             WHERE preserved.id = album_quality_evidence.id
                          )
                     THEN album_quality_evidence.ultrasonic_deficit_db
                     WHEN
@@ -509,11 +582,10 @@ class _EvidenceMixin(_PipelineDBBase):
                         ELSE album_quality_evidence.ultrasonic_deficit_db END,
                     spectral_measurement_version = CASE
                     WHEN (SELECT replace_spectral FROM write_policy)
-                         AND album_quality_evidence.spectral_subject = 'source'
                          AND EXISTS (
-                             SELECT 1 FROM album_requests AS current_owner
-                             WHERE current_owner.current_evidence_id =
-                                 album_quality_evidence.id
+                             SELECT 1
+                             FROM preserved_current_source_spectral AS preserved
+                             WHERE preserved.id = album_quality_evidence.id
                          )
                     THEN album_quality_evidence.spectral_measurement_version
                     WHEN
@@ -757,6 +829,10 @@ class _EvidenceMixin(_PipelineDBBase):
             """,
             (
                 spectral_write_intent == "replace",
+                sorted(EVIDENCE_LOSSLESS_CODECS),
+                _PRESERVED_SOURCE_LOSSY_PAIRS_JSON,
+                evidence.mb_release_id,
+                evidence.snapshot_fingerprint,
                 evidence.mb_release_id,
                 evidence.snapshot_fingerprint,
                 evidence.source_path,

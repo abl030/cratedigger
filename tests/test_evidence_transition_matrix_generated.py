@@ -22,6 +22,7 @@ from lib.quality import (
     full_pipeline_decision_from_evidence,
 )
 from lib.quality_evidence import (
+    current_evidence_preserves_source_spectral,
     load_candidate_evidence_for_decision,
     load_candidate_evidence_for_source,
     persist_candidate_evidence_from_measurement,
@@ -56,7 +57,7 @@ def evidence_transition_violation(
     fresh_audit: FreshAudit,
     collision: bool,
     role: EvidenceRole,
-    lineage_shape: LineageShape,
+    preserve_current_source_spectral: bool,
     old_generation: int | None,
     canonical_grade: str | None,
     canonical_generation: int | None,
@@ -83,8 +84,19 @@ def evidence_transition_violation(
     if (
         collision
         and role in {"current", "dual"}
-        and lineage_shape == "source_carried"
         and fresh_audit == "success"
+        and not preserve_current_source_spectral
+        and (canonical_grade, canonical_generation) != (
+            "genuine",
+            SPECTRAL_MEASUREMENT_VERSION,
+        )
+    ):
+        return "current-owned remeasurable source spectral did not refresh"
+    if (
+        collision
+        and role in {"current", "dual"}
+        and fresh_audit == "success"
+        and preserve_current_source_spectral
         and (canonical_grade, canonical_generation) != (
             "suspect",
             old_generation,
@@ -264,6 +276,9 @@ class TestEvidenceTransitionMatrixGenerated(unittest.TestCase):
                 )
             if role in {"current", "dual"}:
                 assert db.set_request_current_evidence(42, stored_old.id)
+            preserve_current_source_spectral = (
+                current_evidence_preserves_source_spectral(stored_old)
+            )
 
             detail = _fresh_detail(fresh_audit)
             corrupt = early_fact == "corrupt"
@@ -336,7 +351,9 @@ class TestEvidenceTransitionMatrixGenerated(unittest.TestCase):
                 fresh_audit=fresh_audit,
                 collision=collision,
                 role=role,
-                lineage_shape=lineage_shape,
+                preserve_current_source_spectral=(
+                    preserve_current_source_spectral
+                ),
                 old_generation=_generation_value(generation),
                 canonical_grade=canonical.measurement.spectral_grade,
                 canonical_generation=(
@@ -373,7 +390,7 @@ class TestEvidenceTransitionMatrixGenerated(unittest.TestCase):
             fresh_audit="success",
             collision=True,
             role="candidate",
-            lineage_shape="source_measured",
+            preserve_current_source_spectral=False,
             old_generation=None,
             canonical_grade="suspect",
             canonical_generation=None,
@@ -389,7 +406,7 @@ class TestEvidenceTransitionMatrixGenerated(unittest.TestCase):
             fresh_audit="error",
             collision=True,
             role="candidate",
-            lineage_shape="source_measured",
+            preserve_current_source_spectral=False,
             old_generation=None,
             canonical_grade="suspect",
             canonical_generation=None,
@@ -397,3 +414,19 @@ class TestEvidenceTransitionMatrixGenerated(unittest.TestCase):
             decision_name="audio_corrupt",
         )
         self.assertIn("retained a stale spectral tuple", violation or "")
+
+    def test_known_bad_overbroad_current_source_preservation_is_qualified(self):
+        violation = evidence_transition_violation(
+            source_present=True,
+            early_fact="none",
+            fresh_audit="success",
+            collision=True,
+            role="current",
+            preserve_current_source_spectral=False,
+            old_generation=None,
+            canonical_grade="suspect",
+            canonical_generation=None,
+            decision_ready=True,
+            decision_name="import",
+        )
+        self.assertIn("remeasurable source spectral", violation or "")

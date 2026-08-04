@@ -12,6 +12,7 @@ from copy import deepcopy
 from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Literal
 
 from lib.json_narrow import is_str_object_dict
 from lib.quality import (
@@ -284,16 +285,81 @@ class TestDecisionCorpusExport(unittest.TestCase):
         self,
     ) -> None:
         """A verified live-shaped pair is observation, not write authority."""
-        release = "transition-source-is-read-only"
-        request_id = self._request(release)
-        dual_id = self._evidence(release, 45)
-        self.assertTrue(self.db.set_request_current_evidence(request_id, dual_id))
+        from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
+
+        def source_evidence(
+            release: str,
+            ordinal: int,
+            *,
+            provenance: Literal["measured", "carried"],
+            was_converted_from: str | None,
+        ) -> int:
+            files = [AlbumQualityEvidenceFile(
+                relative_path=f"{ordinal:02d}.mp3",
+                size_bytes=ordinal,
+                mtime_ns=ordinal,
+                extension="mp3",
+                container="mp3",
+                codec="mp3",
+            )]
+            evidence = make_album_quality_evidence(
+                mb_release_id=release,
+                source_path=f"/tmp/decision-transition-{ordinal}",
+                files=files,
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=128,
+                    avg_bitrate_kbps=130,
+                    median_bitrate_kbps=129,
+                    format="MP3",
+                    spectral_grade="suspect",
+                    spectral_bitrate_kbps=96,
+                    spectral_subject="source",
+                    spectral_provenance=provenance,
+                    spectral_measurement_version=None,
+                    was_converted_from=was_converted_from,
+                ),
+                preserve_spectral_measurement_version=True,
+                codec="mp3",
+                container="mp3",
+                storage_format="MP3",
+            )
+            self.db.upsert_album_quality_evidence(evidence)
+            stored = self.db.find_album_quality_evidence(
+                mb_release_id=release,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert stored is not None and stored.id is not None
+            return stored.id
+
+        dual_release = "transition-preserved-current-source"
+        dual_request_id = self._request(dual_release)
+        dual_id = source_evidence(
+            dual_release,
+            45,
+            provenance="carried",
+            was_converted_from="flac",
+        )
+        self.assertTrue(
+            self.db.set_request_current_evidence(dual_request_id, dual_id)
+        )
         job = self.db.enqueue_import_job(
             "force_import",
-            request_id=request_id,
+            request_id=dual_request_id,
             payload={"download_log_id": 45, "failed_path": "/tmp/dual"},
         )
         self.assertTrue(self.db.set_import_job_candidate_evidence(job.id, dual_id))
+
+        native_release = "transition-remeasurable-current-source"
+        native_request_id = self._request(native_release)
+        native_id = source_evidence(
+            native_release,
+            46,
+            provenance="measured",
+            was_converted_from=None,
+        )
+        self.assertTrue(
+            self.db.set_request_current_evidence(native_request_id, native_id)
+        )
         audit_id = self._evidence("transition-audit", 46)
 
         def source_counts() -> tuple[int, int, int]:
@@ -325,13 +391,25 @@ class TestDecisionCorpusExport(unittest.TestCase):
             )
 
         self.assertEqual(source_counts(), before)
-        self.assertEqual(report.total_matrix_classes, 2)
+        self.assertEqual(report.total_matrix_classes, 3)
         self.assertEqual(
-            [row.evidence_id for row in report.representatives],
-            [audit_id, dual_id],
+            {row.evidence_id for row in report.representatives},
+            {audit_id, dual_id, native_id},
         )
         self.assertTrue(
             all(row.exact_import_job_fk for row in report.representatives)
+        )
+        self.assertTrue(report.green)
+        self.assertEqual(report.transition_violations, 0)
+        by_role = {
+            row.observed_role: row for row in report.representatives
+        }
+        self.assertEqual(
+            by_role["current"].canonical_spectral_generation,
+            SPECTRAL_MEASUREMENT_VERSION,
+        )
+        self.assertIsNone(
+            by_role["dual"].canonical_spectral_generation,
         )
         self.assertEqual(
             report.decided

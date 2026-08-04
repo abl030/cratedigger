@@ -1216,6 +1216,7 @@ class DecisionTransitionReplay(msgspec.Struct, frozen=True):
     outcome: TransitionReplayOutcome
     decision: dict[str, object] | None = None
     refusal_reason: str | None = None
+    transition_violation: str | None = None
 
 
 class DecisionTransitionReport(msgspec.Struct, frozen=True):
@@ -1227,6 +1228,8 @@ class DecisionTransitionReport(msgspec.Struct, frozen=True):
     decided: int
     admission_refused: int
     producer_refused: int
+    transition_violations: int
+    green: bool
     representatives: list[DecisionTransitionReplay]
 
 
@@ -2486,6 +2489,49 @@ def _fresh_transition_candidate(
     return candidate, None, "no_spectral_attempt"
 
 
+def _transition_spectral_violation(
+    *,
+    observed: AlbumQualityEvidence,
+    attempted: AlbumQualityEvidence,
+    reloaded: AlbumQualityEvidence,
+    role: Literal["candidate", "current", "dual", "audit_only"],
+    transition_shape: Literal[
+        "fresh_current_measurement",
+        "fresh_failed_measurement",
+        "no_spectral_attempt",
+    ],
+) -> str | None:
+    """Reject over- and under-preservation of a current spectral tuple."""
+    if (
+        role not in {"current", "dual"}
+        or transition_shape != "fresh_current_measurement"
+    ):
+        return None
+
+    from lib.quality_evidence import current_evidence_preserves_source_spectral
+
+    def spectral_tuple(evidence: AlbumQualityEvidence) -> tuple[object, ...]:
+        measurement = evidence.measurement
+        return (
+            measurement.spectral_grade,
+            measurement.spectral_bitrate_kbps,
+            measurement.spectral_subject,
+            measurement.spectral_provenance,
+            measurement.cliff_hz,
+            measurement.codec_family,
+            measurement.ultrasonic_deficit_db,
+            measurement.spectral_measurement_version,
+        )
+
+    if current_evidence_preserves_source_spectral(observed):
+        if spectral_tuple(reloaded) != spectral_tuple(observed):
+            return "irreplaceable current source spectral tuple was overwritten"
+        return None
+    if spectral_tuple(reloaded) != spectral_tuple(attempted):
+        return "current-owned remeasurable source spectral tuple did not refresh"
+    return None
+
+
 def replay_decision_transitions(
     corpus_path: str | Path,
     coverage_path: str | Path,
@@ -2744,6 +2790,7 @@ def replay_decision_transitions(
                         admission_status="not_run",
                         outcome="producer_refused",
                         refusal_reason=persisted.reason,
+                        transition_violation=None,
                     ))
                     continue
                 exact_fk = (
@@ -2798,6 +2845,13 @@ def replay_decision_transitions(
                         type=dict[str, object],
                     )
                     outcome = "decided"
+                transition_violation = _transition_spectral_violation(
+                    observed=canonical,
+                    attempted=candidate,
+                    reloaded=reloaded,
+                    role=role.role,
+                    transition_shape=transition_shape,
+                )
                 replay_rows.append(DecisionTransitionReplay(
                     evidence_id=role.evidence_id,
                     matrix_class=role.matrix_class,
@@ -2815,12 +2869,13 @@ def replay_decision_transitions(
                     outcome=outcome,
                     decision=decision,
                     refusal_reason=refusal_reason,
+                    transition_violation=transition_violation,
                 ))
         finally:
             db.close()
 
     report = DecisionTransitionReport(
-        schema_version=1,
+        schema_version=2,
         coverage_schema_version=coverage.schema_version,
         total_matrix_classes=len(replay_rows),
         decided=sum(row.outcome == "decided" for row in replay_rows),
@@ -2829,6 +2884,12 @@ def replay_decision_transitions(
         ),
         producer_refused=sum(
             row.outcome == "producer_refused" for row in replay_rows
+        ),
+        transition_violations=sum(
+            row.transition_violation is not None for row in replay_rows
+        ),
+        green=not any(
+            row.transition_violation is not None for row in replay_rows
         ),
         representatives=replay_rows,
     )
@@ -3005,10 +3066,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"{report.total_matrix_classes} transition matrix class(es): "
                 f"{report.decided} decided, "
                 f"{report.admission_refused} admission-refused, "
-                f"{report.producer_refused} producer-refused",
+                f"{report.producer_refused} producer-refused, "
+                f"{report.transition_violations} transition-violations",
                 file=sys.stderr,
             )
-            return 0
+            return 0 if report.green else 2
         report = summarize_render_diff(
             read_rendered(args.base),
             read_rendered(args.current),

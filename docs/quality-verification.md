@@ -642,7 +642,11 @@ database supplies observations only; every replay write is forced into the
 throwaway cluster. Each class enters through the public measurement-only or
 import-result evidence producer, so legacy shapes that cannot satisfy today's
 producer contract are reported explicitly as `producer_refused` rather than
-being injected below construction.
+being injected below construction. A fresh successful collision must replace
+the canonical tuple for every remeasurable current/dual row; only a stored row
+that satisfies `current_evidence_preserves_source_spectral` may retain its old
+tuple. The replay reports either direction as a `transition_violation`, marks
+the report non-green, and exits nonzero.
 
 Only `--counterfactual` is a flag. It decides whether the run can SEE a
 promotion-gate change; a zero from a run without it is not evidence. Native

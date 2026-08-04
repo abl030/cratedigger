@@ -4845,8 +4845,7 @@ class FakePipelineDB:
             spectral_write_intent == "replace"
             and current_owned
             and existing is not None
-            and existing.measurement.spectral_subject
-                == EVIDENCE_SUBJECT_SOURCE
+            and current_evidence_preserves_source_spectral(existing)
         )
         if (
             existing is not None

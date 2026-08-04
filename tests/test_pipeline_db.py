@@ -6933,6 +6933,86 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         self.assertEqual(projected.measurement.spectral_bitrate_kbps, 192)
         self.assertIsNone(projected.measurement.was_converted_from)
 
+    def test_candidate_attempt_refreshes_current_owned_native_source_spectral(self):
+        """#1030: ordinary source measurements remain remeasurable."""
+        from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
+
+        release_id = "current-native-source-measured"
+        files = [AlbumQualityEvidenceFile(
+            relative_path="01.mp3",
+            size_bytes=128,
+            mtime_ns=1_700_000_000_000_000_001,
+            extension="mp3",
+            container="mp3",
+            codec="mp3",
+        )]
+        current = self._seed(
+            mb_release_id=release_id,
+            files=files,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=128,
+                avg_bitrate_kbps=130,
+                median_bitrate_kbps=129,
+                format="MP3",
+                spectral_grade="suspect",
+                spectral_bitrate_kbps=96,
+                spectral_subject="source",
+                spectral_provenance="measured",
+                spectral_measurement_version=None,
+            ),
+            preserve_spectral_measurement_version=True,
+            codec="mp3",
+            container="mp3",
+            storage_format="MP3",
+        )
+        self.db.upsert_album_quality_evidence(current)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=release_id,
+            snapshot_fingerprint=current.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.assertTrue(self.db.set_request_current_evidence(
+            self.req_id,
+            stored.id,
+        ))
+
+        fresh = msgspec.structs.replace(
+            current,
+            measurement=msgspec.structs.replace(
+                current.measurement,
+                spectral_grade="genuine",
+                spectral_bitrate_kbps=192,
+                spectral_subject="source",
+                spectral_provenance="measured",
+                spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
+            ),
+        )
+        self.db.upsert_album_quality_evidence(
+            fresh,
+            spectral_write_intent="replace",
+        )
+
+        canonical = self.db.load_album_quality_evidence_by_id(stored.id)
+        assert canonical is not None
+        self.assertEqual(
+            (
+                canonical.measurement.spectral_grade,
+                canonical.measurement.spectral_bitrate_kbps,
+                canonical.measurement.spectral_subject,
+                canonical.measurement.spectral_provenance,
+                canonical.measurement.spectral_measurement_version,
+                canonical.measurement.was_converted_from,
+            ),
+            (
+                "genuine",
+                192,
+                "source",
+                "measured",
+                SPECTRAL_MEASUREMENT_VERSION,
+                None,
+            ),
+        )
+
     def test_upsert_then_find_by_content_address_round_trips(self):
         from lib.quality import (
             AlbumQualityEvidenceFile,
