@@ -12,12 +12,17 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import msgspec
 
+from lib.evidence_media_identity import (
+    EVIDENCE_LOSSLESS_CONTAINERS,
+    EVIDENCE_LOSSY_CONTAINERS,
+    authoritative_lossy_media_pair,
+    is_lossless_evidence_codec,
+)
 from lib.quality import (
     EVIDENCE_PROVENANCE_CARRIED,
     EVIDENCE_PROVENANCE_MEASURED,
     EVIDENCE_SUBJECT_INSTALLED,
     EVIDENCE_SUBJECT_SOURCE,
-    LOSSLESS_CODECS,
     V0_PROBE_LOSSLESS_SOURCE,
     V0_PROBE_NATIVE_LOSSY_RESEARCH,
     V0_PROBE_ON_DISK_RESEARCH,
@@ -35,7 +40,7 @@ from lib.quality import (
 )
 
 if TYPE_CHECKING:
-    from lib.beets_db import CurrentBeetsUnique
+    from lib.beets_db import AlbumInfo, CurrentBeetsUnique
     from lib.import_execution import ExecutionLeaseSnapshot
     from lib.measurement import PreimportMeasurement
     from lib.pipeline_db.rows import AlbumRequestRow
@@ -181,21 +186,17 @@ def current_evidence_preserves_source_spectral(
 
     converted_from = (evidence.measurement.was_converted_from or "").lower()
     if (
-        converted_from not in LOSSLESS_CODECS
+        not is_lossless_evidence_codec(converted_from)
         or evidence.measurement.spectral_subject != EVIDENCE_SUBJECT_SOURCE
         or not evidence.files
         or any(not file.container or not file.codec for file in evidence.files)
     ):
         return False
-    containers = {
-        file.container.lower()
-        for file in evidence.files
-        if file.container and file.codec
-    }
+    containers = {file.container.lower() for file in evidence.files if file.container}
     # ``storage_format`` and the measurement are codec facts; snapshot
-    # containers are not (notably, .m4a can be AAC or ALAC). New v4 evidence
-    # keeps the two labels equal. Treat missing, conflicting, or container-only
-    # labels as unresolved rather than preserving an old source grade.
+    # containers are not (notably, .m4a can be AAC or ALAC). Treat missing or
+    # conflicting labels as unresolved rather than preserving an old source
+    # grade, then authorize their exact shared media pair.
     formats = {
         label.strip().lower()
         for label in (evidence.storage_format, evidence.measurement.format)
@@ -203,9 +204,10 @@ def current_evidence_preserves_source_spectral(
     }
     return (
         len(containers) == 1
-        and containers <= _LOSSY_CONTAINERS
         and len(formats) == 1
-        and formats <= _LOSSY_CODECS
+        and authoritative_lossy_media_pair(
+            next(iter(containers)), next(iter(formats)),
+        )
     )
 
 
@@ -319,15 +321,6 @@ def current_evidence_rebuild_reasons(
     return reasons
 
 
-_LOSSLESS_CONTAINERS = {"flac", "alac", "wav", "aiff", "ape"}
-_LOSSY_CONTAINERS = {"mp3", "aac", "m4a", "ogg", "opus", "wma"}
-# ``m4a`` is deliberately absent: it names an ambiguous container, not a
-# lossy codec. ALAC's normal on-disk extension is .m4a. Beets normalizes its
-# ``OGG`` format label to the codec name ``vorbis`` in current-library
-# evidence, so that canonical codec must remain admitted here too.
-_LOSSY_CODECS = (_LOSSY_CONTAINERS - {"m4a"}) | {"vorbis"}
-
-
 def derive_folder_layout(files: list[AlbumQualityEvidenceFile]) -> str:
     """Return 'nested' if any snapshot file lives in a subdirectory.
 
@@ -358,8 +351,8 @@ def derive_filetype_band(files: list[AlbumQualityEvidenceFile]) -> str:
         return ""
     if len(containers) == 1:
         return next(iter(containers))
-    lossless_hits = containers & _LOSSLESS_CONTAINERS
-    lossy_hits = containers & _LOSSY_CONTAINERS
+    lossless_hits = containers & EVIDENCE_LOSSLESS_CONTAINERS
+    lossy_hits = containers & EVIDENCE_LOSSY_CONTAINERS
     if lossless_hits and lossy_hits:
         return "mixed"
     if lossless_hits:
@@ -1038,7 +1031,7 @@ def propagate_candidate_evidence_to_current(
     *,
     request_id: int,
     candidate_evidence: AlbumQualityEvidence,
-    album_info: Any,
+    album_info: AlbumInfo,
     measured_at: datetime | None = None,
 ) -> EvidenceBuildResult:
     """Build new library-side evidence by propagating candidate measurement payload.
@@ -1115,9 +1108,21 @@ def propagate_candidate_evidence_to_current(
     output_source_format = (
         measured_source_format if is_transcode else None
     )
+    reduced_format = album_info.format.strip().lower()
+    album_formats = frozenset(
+        value.strip().lower()
+        for value in album_info.formats_on_disk
+        if value.strip()
+    )
+    if not album_formats and reduced_format:
+        album_formats = frozenset({reduced_format})
+    album_format_is_authoritative = (
+        len(album_formats) == 1 and reduced_format in album_formats
+    )
     carry_spectral = (
         candidate_measurement.spectral_grade is not None
         and candidate_measurement.spectral_subject == EVIDENCE_SUBJECT_SOURCE
+        and album_format_is_authoritative
     )
     carried_v0 = (
         msgspec.structs.replace(
