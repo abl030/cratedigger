@@ -86,6 +86,12 @@ acquisition ceiling. Corpus order is irrelevant, but the complete corpus must
 be assembled before either tree runs the replay so a current row emitted in a
 different export batch remains resolvable.
 
+One content-addressed row can occupy both roles. The replay projects
+``was_converted_from=NULL`` on the candidate copy before policy, matching the
+importer's source semantics, while the current copy retains its installed
+conversion lineage. Otherwise the differential can report a policy world the
+action-time importer never sees.
+
 **Routing changes owe both arms.** A lane-membership, entry-condition, or
 bypass change is not measured by a fresh-world run alone: run ``decide`` as
 persisted AND ``decide --counterfactual``. The former finds cohorts created
@@ -379,6 +385,29 @@ def _evidence_from_corpus_row(
         ) from exc
 
 
+def _candidate_evidence_from_corpus_row(
+    row: Mapping[str, object],
+) -> AlbumQualityEvidence:
+    """Decode then project one corpus row into candidate-source semantics.
+
+    This tiny adapter stays in the copied differential script so historical
+    base trees can run the current instrument even when they predate the
+    production helper. The current side deliberately continues through the
+    raw production decoder.
+    """
+    evidence = _evidence_from_corpus_row(row)
+    measurement = evidence.measurement
+    if measurement.was_converted_from is None:
+        return evidence
+    return msgspec.structs.replace(
+        evidence,
+        measurement=msgspec.structs.replace(
+            measurement,
+            was_converted_from=None,
+        ),
+    )
+
+
 def _parse_timestamp(raw: str) -> object:
     from datetime import datetime
 
@@ -479,7 +508,7 @@ def decide_row(
     if not isinstance(row_id, int) or isinstance(row_id, bool):
         raise RenderDifferentialError(f"corpus row has no integer id: {row_id!r}")
     candidate_row = without_persisted_proof(row) if counterfactual else row
-    evidence = _evidence_from_corpus_row(candidate_row)
+    evidence = _candidate_evidence_from_corpus_row(candidate_row)
     current_evidence = (
         _evidence_from_corpus_row(current) if current is not None else None
     )

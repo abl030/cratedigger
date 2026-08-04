@@ -4412,11 +4412,10 @@ class TestDownloadLog(unittest.TestCase):
         """The PR4 aliases survive real PG on every download-log reader.
 
         Issue #829 Phase 5 PR4 added one shared candidate-evidence column
-        block (``_CANDIDATE_EVIDENCE_COLUMNS``) to five queries. A column
-        that fails to reach the renderer produces a silently empty verdict,
-        which is exactly the shape ``.claude/rules/test-fidelity.md`` Rule A
-        exists to catch — so the assertion is that every declared alias
-        round-trips its seeded value, not just the obvious ones.
+        block (``_CANDIDATE_EVIDENCE_COLUMNS``) to five queries. Every
+        candidate fact round-trips except output-only conversion lineage,
+        which must project to NULL even when the canonical row is also linked
+        as current evidence.
         """
         from lib.quality import (
             VERIFIED_LOSSLESS_CLASSIFIER_V4,
@@ -4469,6 +4468,9 @@ class TestDownloadLog(unittest.TestCase):
         )
         assert stored is not None and stored.id is not None
         self.db.set_download_log_candidate_evidence(log_id, stored.id)
+        self.assertTrue(
+            self.db.set_request_current_evidence(self.req_id, stored.id)
+        )
 
         expected = {
             "_evidence_format": "FLAC",
@@ -4477,7 +4479,7 @@ class TestDownloadLog(unittest.TestCase):
             "_evidence_cliff_hz": 18250,
             "_evidence_storage_format": "FLAC",
             "_evidence_spectral_subject": "source",
-            "_evidence_was_converted_from": "flac",
+            "_evidence_was_converted_from": None,
             "_evidence_ultrasonic_deficit_db": 41.5,
             "_evidence_spectral_measurement_version": 2,
             "_evidence_aac_lattice_modal_count": 2,
@@ -4506,6 +4508,50 @@ class TestDownloadLog(unittest.TestCase):
                 sorted(row["_evidence_container_extensions"] or []),
                 sorted({file.extension for file in evidence.files}),
             )
+        reloaded = self.db.load_album_quality_evidence_by_id(stored.id)
+        assert reloaded is not None
+        self.assertEqual(reloaded.measurement.was_converted_from, "flac")
+
+    def test_shared_candidate_recents_withholds_current_only_lineage(self):
+        from web.classify import proof_gate_projection
+
+        log_id = self.db.log_download(self.req_id, outcome="rejected")
+        shared = make_album_quality_evidence(
+            mb_release_id="dl-uuid",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=128,
+                avg_bitrate_kbps=130,
+                median_bitrate_kbps=129,
+                format="Opus",
+                spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=128,
+                spectral_subject="source",
+                spectral_provenance="measured",
+                was_converted_from="flac",
+            ),
+            codec="opus",
+            container="opus",
+            storage_format="Opus",
+        )
+        self.db.upsert_album_quality_evidence(shared)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=shared.mb_release_id,
+            snapshot_fingerprint=shared.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.assertTrue(
+            self.db.set_request_current_evidence(self.req_id, stored.id)
+        )
+        self.db.set_download_log_candidate_evidence(log_id, stored.id)
+
+        row = self.db.get_download_log_entry(log_id)
+        assert row is not None
+        projection = proof_gate_projection(row)
+
+        self.assertIsNone(row["_evidence_was_converted_from"])
+        self.assertIsNone(projection.verdict_tier)
+        self.assertFalse(projection.spectral_accusation_admissible)
+        self.assertIsNotNone(projection.spectral_accusation_withheld)
 
     def test_a_carried_proof_still_reaches_the_renderer(self):
         """``carried`` is this album's OWN proof, propagated to its library row.
@@ -7334,80 +7380,103 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
         assert loaded is not None
         self.assertTrue(loaded.current_enrichment_required)
 
-    def test_fresh_installed_spectral_keeps_conversion_lineage_in_both_orders(
-        self,
-    ):
-        """Real PostgreSQL mirrors the stale-writer preservation contract."""
-        for writer_order in (("fresh", "stale"), ("stale", "fresh")):
-            with self.subTest(writer_order=writer_order):
-                mbid = f"durable-lineage-{'-'.join(writer_order)}"
-                request_id = self.db.add_request(
-                    mb_release_id=mbid,
-                    artist_name="Evidence Artist",
-                    album_title="Durable lineage",
-                    source="request",
-                )
-                evidence = self._seed(
-                    mb_release_id=mbid,
-                    files=[AlbumQualityEvidenceFile(
-                        relative_path="01.m4a",
-                        size_bytes=1,
-                        mtime_ns=1,
-                        extension="m4a",
-                        container="m4a",
-                        codec="m4a",
-                    )],
-                    measurement=AudioQualityMeasurement(
-                        min_bitrate_kbps=900,
-                        avg_bitrate_kbps=920,
-                        median_bitrate_kbps=910,
-                        format="ALAC",
-                        was_converted_from="flac",
-                    ),
-                    codec="m4a",
-                    container="m4a",
-                    storage_format="ALAC",
-                )
-                self.db.upsert_album_quality_evidence(evidence)
-                stored = self.db.find_album_quality_evidence(
-                    mb_release_id=mbid,
-                    snapshot_fingerprint=evidence.snapshot_fingerprint,
-                )
-                assert stored is not None and stored.id is not None
-                self.assertTrue(self.db.set_request_current_evidence(
-                    request_id, stored.id,
-                ))
-                stale = msgspec.structs.replace(
-                    evidence,
-                    measurement=msgspec.structs.replace(
-                        evidence.measurement,
-                        was_converted_from=None,
-                    ),
-                )
-                for writer in writer_order:
-                    if writer == "fresh":
-                        self.assertTrue(
-                            self.db.persist_current_spectral_measurement(
-                                request_id=request_id,
-                                expected_evidence_id=stored.id,
-                                expected_snapshot_fingerprint=(
-                                    evidence.snapshot_fingerprint
-                                ),
-                                grade="genuine",
-                                bitrate_kbps=900,
-                            )
-                        )
-                    else:
-                        self.db.upsert_album_quality_evidence(stale)
+    def test_fresh_candidate_clears_legacy_conversion_lineage(self):
+        """Real PostgreSQL treats a candidate NULL as deliberate source truth."""
+        evidence = self._seed(
+            mb_release_id="candidate-lineage-clear",
+            files=[AlbumQualityEvidenceFile(
+                relative_path="01.flac",
+                size_bytes=1,
+                mtime_ns=1,
+                extension="flac",
+                container="flac",
+                codec="flac",
+            )],
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=800,
+                avg_bitrate_kbps=900,
+                median_bitrate_kbps=850,
+                format="FLAC",
+                was_converted_from="flac",
+            ),
+            codec="flac",
+            container="flac",
+            storage_format="FLAC",
+            target_format="opus 128",
+        )
+        self.db.upsert_album_quality_evidence(evidence)
+        self.db.upsert_album_quality_evidence(msgspec.structs.replace(
+            evidence,
+            measurement=msgspec.structs.replace(
+                evidence.measurement,
+                was_converted_from=None,
+            ),
+        ))
 
-                loaded = self.db.find_album_quality_evidence(
-                    mb_release_id=mbid,
-                    snapshot_fingerprint=evidence.snapshot_fingerprint,
-                )
-                assert loaded is not None
-                self.assertEqual(loaded.measurement.was_converted_from, "flac")
-                self.assertEqual(loaded.measurement.spectral_subject, "installed")
-                self.assertEqual(loaded.measurement.spectral_grade, "genuine")
+        loaded = self.db.find_album_quality_evidence(
+            mb_release_id=evidence.mb_release_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+
+        assert loaded is not None
+        self.assertIsNone(loaded.measurement.was_converted_from)
+
+    def test_candidate_refresh_preserves_current_linked_conversion_lineage(self):
+        """A shared content row must retain its current-library history."""
+        mbid = "candidate-current-shared-lineage"
+        request_id = self.db.add_request(
+            mb_release_id=mbid,
+            artist_name="Evidence Artist",
+            album_title="Shared content row",
+            source="request",
+        )
+        current = self._seed(
+            mb_release_id=mbid,
+            files=[AlbumQualityEvidenceFile(
+                relative_path="01.opus",
+                size_bytes=1,
+                mtime_ns=1,
+                extension="opus",
+                container="opus",
+                codec="opus",
+            )],
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=128,
+                avg_bitrate_kbps=130,
+                median_bitrate_kbps=129,
+                format="Opus",
+                was_converted_from="flac",
+            ),
+            codec="opus",
+            container="opus",
+            storage_format="Opus",
+        )
+        self.db.upsert_album_quality_evidence(current)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=mbid,
+            snapshot_fingerprint=current.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.assertTrue(
+            self.db.set_request_current_evidence(request_id, stored.id)
+        )
+
+        candidate = msgspec.structs.replace(
+            current,
+            measurement=msgspec.structs.replace(
+                current.measurement,
+                was_converted_from=None,
+            ),
+        )
+        self.db.upsert_album_quality_evidence(candidate)
+        loaded = self.db.find_album_quality_evidence(
+            mb_release_id=mbid,
+            snapshot_fingerprint=current.snapshot_fingerprint,
+        )
+
+        assert loaded is not None
+        self.assertEqual(loaded.id, stored.id)
+        self.assertEqual(loaded.measurement.was_converted_from, "flac")
 
     def test_v0_research_claim_is_atomic_across_connections(self):
         from lib.pipeline_db import PipelineDB
@@ -9771,6 +9840,69 @@ class TestGetWrongMatches(unittest.TestCase):
                 row, prefix=CURRENT_EVIDENCE_PREFIX),
             AccusationFlags(admissible=True),
         )
+
+    def test_shared_wrong_match_projects_candidate_source_lineage(self):
+        """A current-linked canonical row cannot lend lineage to a candidate."""
+        from lib.pipeline_db._shared import (
+            CANDIDATE_EVIDENCE_PREFIX,
+            CURRENT_EVIDENCE_PREFIX,
+        )
+        from web.classify import (
+            AccusationFlags,
+            evidence_column_accusation_flags,
+        )
+
+        self._log_rejected(self.req1, "peer", "/failed/Shared")
+        log_id = self.db.get_wrong_matches()[0]["download_log_id"]
+        shared = make_album_quality_evidence(
+            mb_release_id="wm-uuid-1",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=128,
+                avg_bitrate_kbps=130,
+                median_bitrate_kbps=129,
+                format="Opus",
+                spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=128,
+                spectral_subject="source",
+                spectral_provenance="measured",
+                was_converted_from="flac",
+            ),
+            codec="opus",
+            container="opus",
+            storage_format="Opus",
+        )
+        self.db.upsert_album_quality_evidence(shared)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=shared.mb_release_id,
+            snapshot_fingerprint=shared.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.db.set_download_log_candidate_evidence(log_id, stored.id)
+        self.assertTrue(
+            self.db.set_request_current_evidence(self.req1, stored.id)
+        )
+
+        row = self.db.get_wrong_matches()[0]
+
+        self.assertIsNone(row["_evidence_was_converted_from"])
+        self.assertEqual(
+            evidence_column_accusation_flags(
+                row, prefix=CANDIDATE_EVIDENCE_PREFIX,
+            ),
+            AccusationFlags(admissible=False, withheld="audit_only_codec"),
+        )
+        self.assertEqual(
+            row["_current_evidence_was_converted_from"], "flac",
+        )
+        self.assertEqual(
+            evidence_column_accusation_flags(
+                row, prefix=CURRENT_EVIDENCE_PREFIX,
+            ),
+            AccusationFlags(admissible=True),
+        )
+        reloaded = self.db.load_album_quality_evidence_by_id(stored.id)
+        assert reloaded is not None
+        self.assertEqual(reloaded.measurement.was_converted_from, "flac")
 
     def test_terminal_audio_corrupt_retained_auto_import_is_not_wrong_match(self):
         """#867: terminal evidence outranks an earlier strong match envelope."""

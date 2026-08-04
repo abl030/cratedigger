@@ -4825,12 +4825,14 @@ class FakePipelineDB:
         incoming_preserves_source_spectral = (
             current_evidence_preserves_source_spectral(evidence)
         )
-        # Mirror SQL's COALESCE: lineage describes the installed output, so a
-        # stale same-address writer lacking it cannot erase that durable fact.
         if (
             existing is not None
             and evidence.measurement.was_converted_from is None
             and existing.measurement.was_converted_from is not None
+            and any(
+                request.get("current_evidence_id") == existing.id
+                for request in self._requests.values()
+            )
         ):
             evidence = msgspec.structs.replace(
                 evidence,
@@ -6310,8 +6312,12 @@ class FakePipelineDB:
                 measurement.spectral_subject
                 if measurement is not None else None),
             f"{prefix}was_converted_from": (
-                measurement.was_converted_from
-                if measurement is not None else None),
+                None
+                if prefix == CANDIDATE_EVIDENCE_PREFIX
+                else measurement.was_converted_from
+                if measurement is not None
+                else None
+            ),
             f"{prefix}cliff_hz": (
                 measurement.cliff_hz if measurement is not None else None),
             f"{prefix}codec_family": (
@@ -7475,10 +7481,7 @@ class FakePipelineDB:
                 measurement.spectral_subject
                 if measurement is not None else None
             ),
-            "_evidence_was_converted_from": (
-                measurement.was_converted_from
-                if measurement is not None else None
-            ),
+            "_evidence_was_converted_from": None,
             "_evidence_ultrasonic_deficit_db": (
                 measurement.ultrasonic_deficit_db
                 if measurement is not None else None
