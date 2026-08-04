@@ -1012,8 +1012,13 @@ pkgs.testers.nixosTest {
     # createLocally is set, and every app unit requires the migrate unit —
     # transitively serialising first boot behind role/database provisioning.
 
-    # Speed up the VM
+    # Python-heavy services repeatedly read their closures during this test.
+    # A guest-local store image avoids making those reads cross 9p. Keep its
+    # default tmpfs-backed writable overlay because the test queries closures
+    # with nix-store, which maintains store bookkeeping while it runs.
     virtualisation.memorySize = 2048;
+    virtualisation.useNixStoreImage = true;
+    virtualisation.writableStore = true;
   };
 
   # Keep the large Python program in its own store file. Nix otherwise places
@@ -2881,12 +2886,15 @@ pkgs.testers.nixosTest {
     machine.wait_until_succeeds(
         "systemctl is-active --quiet cratedigger-web.service"
     )
-    machine.succeed(
+    # Type=simple becomes active before its shell wrapper has exec'd the
+    # production server, so wait for the exact restored process identity.
+    machine.wait_until_succeeds(
         "pid=$(systemctl show cratedigger-web.service -p MainPID --value); "
         "! tr '\\0' '\\n' < /proc/$pid/cmdline | grep -F '${headerRecorder}'; "
         "tr '\\0' '\\n' < /proc/$pid/cmdline "
         "| grep -A1 -Fx -- '--canonical-origin' "
-        "| tail -n1 | grep -Fx 'https://music.vm.test'"
+        "| tail -n1 | grep -Fx 'https://music.vm.test'",
+        timeout=10,
     )
     _assert_basic_auth_matrix()
     machine.succeed(
