@@ -40,7 +40,7 @@ from lib.quality import (
 )
 
 if TYPE_CHECKING:
-    from lib.beets_db import CurrentBeetsUnique
+    from lib.beets_db import AlbumInfo, CurrentBeetsUnique
     from lib.import_execution import ExecutionLeaseSnapshot
     from lib.measurement import PreimportMeasurement
     from lib.pipeline_db.rows import AlbumRequestRow
@@ -1031,7 +1031,7 @@ def propagate_candidate_evidence_to_current(
     *,
     request_id: int,
     candidate_evidence: AlbumQualityEvidence,
-    album_info: Any,
+    album_info: AlbumInfo,
     measured_at: datetime | None = None,
 ) -> EvidenceBuildResult:
     """Build new library-side evidence by propagating candidate measurement payload.
@@ -1108,11 +1108,11 @@ def propagate_candidate_evidence_to_current(
     output_source_format = (
         measured_source_format if is_transcode else None
     )
-    reduced_format = str(getattr(album_info, "format", "")).strip().lower()
+    reduced_format = album_info.format.strip().lower()
     album_formats = frozenset(
-        str(value).strip().lower()
-        for value in getattr(album_info, "formats_on_disk", frozenset())
-        if str(value).strip()
+        value.strip().lower()
+        for value in album_info.formats_on_disk
+        if value.strip()
     )
     if not album_formats and reduced_format:
         album_formats = frozenset({reduced_format})
