@@ -453,6 +453,41 @@ class TestUnusedImportAudit(unittest.TestCase):
         self.assertIn('set -- .', runner)
         self.assertIn("ruff check", runner)
 
+    def test_test_only_import_ban_uses_real_ruff(self) -> None:
+        findings = ruff_findings({
+            "lib/import_shapes.py": (
+                "import tests.aliased as alias\n"
+                "import tests.direct\n\n"
+                "print(alias, tests.direct)\n\n\n"
+                "def load():\n"
+                "    from tests import nested\n\n"
+                "    return nested\n"
+            ),
+        })
+        self.assertEqual(
+            [finding["code"] for finding in findings],
+            ["TID251", "TID251", "TID251"],
+        )
+        test_control = subprocess.run(
+            [
+                "bash",
+                "scripts/run_ruff.sh",
+                "--stdin-filename",
+                "tests/test_control.py",
+                "-",
+            ],
+            cwd=REPO_ROOT,
+            input="from tests import ephemeral_pg\n\nprint(ephemeral_pg)\n",
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(
+            test_control.returncode,
+            0,
+            test_control.stdout + test_control.stderr,
+        )
+
     def test_ruff_toolchain_comes_from_locked_nixpkgs(self) -> None:
         result = subprocess.run(
             ["ruff", "--version"],
@@ -474,11 +509,27 @@ class TestUnusedImportAudit(unittest.TestCase):
         self.assertGreaterEqual(version, (0, 16, 0))
         self.assertEqual(config["required-version"], ">=0.16.0")
         self.assertEqual(config["target-version"], "py313")
-        self.assertEqual(config["lint"]["extend-select"], ["B905"])
+        self.assertEqual(
+            config["lint"]["extend-select"],
+            ["B905", "TID251"],
+        )
         self.assertNotIn("ignore", config["lint"])
         self.assertEqual(
             config["lint"]["per-file-ignores"],
-            {"tools/vulture/whitelist.py": ["B018", "F821"]},
+            {
+                "scripts/run_fuzz_tests.py": ["TID251"],
+                "scripts/run_python_tests.py": ["TID251"],
+                "tests/**": ["TID251"],
+                "tools/vulture/whitelist.py": ["B018", "F821"],
+            },
+        )
+        self.assertEqual(
+            config["lint"]["flake8-tidy-imports"]["banned-api"],
+            {
+                "tests": {
+                    "msg": "Runtime code must not import test-only modules.",
+                },
+            },
         )
         self.assertFalse(Path("nix/ruff.nix").exists())
         self.assertIn("pkgs.ruff", shell)
