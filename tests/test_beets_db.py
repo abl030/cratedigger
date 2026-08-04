@@ -855,6 +855,33 @@ class TestGetAlbumInfo(unittest.TestCase):
         assert info is not None
         self.assertEqual(info.min_bitrate_kbps, 256)
 
+    def test_unmeasured_format_only_affects_evidence_authority(self) -> None:
+        """Zero-bitrate codecs fail evidence closed without changing rank input."""
+
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "INSERT INTO albums (id, mb_albumid) VALUES (10, 'mixed-zero')",
+        )
+        conn.execute(
+            "INSERT INTO items (album_id, bitrate, path, format) "
+            "VALUES (?, ?, ?, ?)",
+            (10, 900000, b"/m/mixed-zero/01.flac", "FLAC"),
+        )
+        conn.execute(
+            "INSERT INTO items (album_id, bitrate, path, format) "
+            "VALUES (?, ?, ?, ?)",
+            (10, 0, b"/m/mixed-zero/02.wma", "Windows Media"),
+        )
+        conn.commit()
+        conn.close()
+
+        with BeetsDB(self.db_path) as db:
+            info = db.get_album_info("mixed-zero", self.cfg)
+
+        assert info is not None
+        self.assertEqual(info.format, "FLAC")
+        self.assertEqual(info.formats_on_disk, frozenset({"flac", "wma"}))
+
     def test_path_as_bytes(self) -> None:
         """Beets stores paths as bytes — should decode correctly."""
         _insert_album(self.db_path, 4, "jkl-012", [

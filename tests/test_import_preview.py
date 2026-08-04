@@ -171,8 +171,18 @@ class TestSpectralAuditMerge(unittest.TestCase):
     def test_preserved_source_legacy_have_is_reused_without_relabeling(self):
         """R19 source evidence is usable although its analyzer is legacy."""
 
+        from lib.quality import AlbumQualityEvidenceFile
+
         evidence = make_album_quality_evidence(
             preserve_spectral_measurement_version=True,
+            files=[AlbumQualityEvidenceFile(
+                relative_path="01.opus",
+                size_bytes=1,
+                mtime_ns=1,
+                extension="opus",
+                container="opus",
+                codec="opus",
+            )],
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=123,
                 avg_bitrate_kbps=123,
@@ -1243,7 +1253,7 @@ class TestImportPreviewPath(unittest.TestCase):
                     min_bitrate_kbps=129,
                     avg_bitrate_kbps=129,
                     median_bitrate_kbps=129,
-                    format="Opus",
+                    format="MP3",
                     spectral_grade="suspect",
                     spectral_bitrate_kbps=140,
                     spectral_subject=EVIDENCE_SUBJECT_SOURCE,
@@ -1257,9 +1267,9 @@ class TestImportPreviewPath(unittest.TestCase):
                     subject=EVIDENCE_SUBJECT_SOURCE,
                     provenance="carried",
                 ),
-                codec="opus",
-                container="opus",
-                storage_format="Opus",
+                codec="mp3",
+                container="mp3",
+                storage_format="MP3",
             )
             db.upsert_album_quality_evidence(evidence)
             stored = db.find_album_quality_evidence(

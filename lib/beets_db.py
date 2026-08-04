@@ -19,6 +19,10 @@ from typing import TYPE_CHECKING, Literal, Self
 
 import msgspec
 
+from lib.evidence_media_identity import (
+    canonical_beets_codec,
+    canonical_beets_format,
+)
 from lib.release_identity import (
     ConflictingReleaseIdentityError,
     ReleaseIdentity,
@@ -289,15 +293,6 @@ def validate_beets_storage_pair(
         )
 
 
-_BEETS_FORMAT_ALIASES = {
-    # Beets exposes these container/product labels, while quality policy ranks
-    # bare codec families. Keep this boundary deliberately closed: unfamiliar
-    # multiword labels must still reach evidence validation unchanged.
-    "windows media": "wma",
-    "ogg": "vorbis",
-}
-
-
 def _reduce_album_format(
     formats_on_disk: set[str],
     cfg: "QualityRankConfig",
@@ -319,11 +314,11 @@ def _reduce_album_format(
         if not observed:
             continue
         key = observed.lower()
-        alias = _BEETS_FORMAT_ALIASES.get(key)
-        if alias is None:
+        canonical = canonical_beets_format(observed)
+        if canonical == observed:
             normalized[key] = observed
         else:
-            normalized.setdefault(alias, alias)
+            normalized.setdefault(canonical, canonical)
     for preferred in cfg.mixed_format_precedence:
         if preferred in normalized:
             return normalized[preferred]
@@ -349,6 +344,10 @@ class AlbumInfo:
         so tests constructing AlbumInfo directly (e.g. integration slices)
         don't have to pass every field. Production always sets it via
         get_album_info() → _reduce_album_format().
+    formats_on_disk:
+        Every canonical codec label observed across the album's Beets items,
+        before mixed-format rank reduction. Current-evidence propagation uses
+        this aggregate only to fail closed when codec authority is mixed.
     min_bitrate_kbps / avg_bitrate_kbps / median_bitrate_kbps:
         Minimum, mean, and median per-track bitrate (kbps). The rank model's
         measurement_rank() picks between these based on
@@ -365,6 +364,7 @@ class AlbumInfo:
     avg_bitrate_kbps: int | None = None
     median_bitrate_kbps: int | None = None
     format: str = ""
+    formats_on_disk: frozenset[str] = frozenset()
 
 
 def album_info_from_current(
@@ -382,6 +382,12 @@ def album_info_from_current(
         return None
 
     numeric_bitrates = [bitrate for _item, bitrate in measured]
+    measured_formats = {
+        item.format
+        for item, _bitrate in measured
+        if item.format
+    }
+    observed_formats = {item.format for item in current.items if item.format}
     return AlbumInfo(
         album_id=current.album_id,
         track_count=len(measured),
@@ -392,13 +398,10 @@ def album_info_from_current(
         median_bitrate_kbps=int(statistics.median(numeric_bitrates) / 1000),
         is_cbr=len(set(numeric_bitrates)) == 1,
         album_path=current.album_path,
-        format=_reduce_album_format(
-            {
-                item.format
-                for item, _bitrate in measured
-                if item.format
-            },
-            cfg,
+        format=_reduce_album_format(measured_formats, cfg),
+        formats_on_disk=frozenset(
+            canonical_beets_codec(observed)
+            for observed in observed_formats
         ),
     )
 

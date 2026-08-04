@@ -51,7 +51,7 @@ TYPING_RATCHET_BASELINE: dict[str, dict[str, int]] = {
     "lib/quality/import_result_types.py": {"any": 8},
     "lib/quality/pipeline.py": {"any": 5},
     "lib/quality/ranks.py": {"any": 2},
-    "lib/quality_evidence.py": {"any": 6},
+    "lib/quality_evidence.py": {"any": 5},
     "lib/release_snapshot.py": {"any": 6},
     "lib/repair.py": {"any": 4},
     "lib/search.py": {"any": 17},
