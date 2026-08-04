@@ -31,14 +31,6 @@ WEB_ROOT = REPO_ROOT / "web"
 FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures" / "web"
 PROD_BASE_URL = "https://music.ablz.au"
 
-# `live-db` deliberately injects one read-only PipelineDB session so its
-# development boundary cannot accidentally mutate the pipeline.  Unlike the
-# production server's per-thread sessions, psycopg2 cursors on that session
-# cannot overlap.  Keep the whole dev-only request boundary exclusive,
-# including its exception mapping and reconnect, so a failed request cannot
-# replace the shared handle while another handler is still using it.
-_LIVE_DB_DISPATCH_LOCK = threading.Lock()
-
 sys.path.insert(0, str(REPO_ROOT))
 
 from web.index_document import (
@@ -542,6 +534,15 @@ class DevHandler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", cache_control)
         self.end_headers()
         self.wfile.write(body)
+
+
+# `live-db` deliberately injects one read-only PipelineDB session so its
+# development boundary cannot accidentally mutate the pipeline.  Unlike the
+# production server's per-thread sessions, psycopg2 cursors on that session
+# cannot overlap.  Keep the whole dev-only request boundary exclusive,
+# including its exception mapping and reconnect, so a failed request cannot
+# replace the shared handle while another handler is still using it.
+_LIVE_DB_DISPATCH_LOCK = threading.Lock()
 
 
 def _api_fixture_slug(path: str) -> str:
