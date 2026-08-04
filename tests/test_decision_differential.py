@@ -591,6 +591,74 @@ class TestNativeCurrentSidePairing(unittest.TestCase):
             assert current is not None
             self.assertEqual(current.evidence_id, 99)
 
+    def test_dual_role_corpus_projects_only_the_candidate_lineage(self):
+        """A shared canonical row replays the same world as action-time."""
+        from lib.quality_evidence import candidate_evidence_for_policy
+        from scripts.decision_differential import _evidence_from_corpus_row
+
+        shared = _corpus_row(
+            id=77,
+            current_evidence_id=None,
+            min_bitrate_kbps=128,
+            avg_bitrate_kbps=130,
+            median_bitrate_kbps=129,
+            format="Opus",
+            codec="opus",
+            container="opus",
+            storage_format="Opus",
+            filetype_band="opus",
+            spectral_grade="likely_transcode",
+            spectral_bitrate_kbps=128,
+            was_converted_from="flac",
+            v0_min_bitrate_kbps=None,
+            v0_avg_bitrate_kbps=None,
+            v0_median_bitrate_kbps=None,
+            v0_subject=None,
+            v0_provenance=None,
+        )
+        # Row 77 is both a candidate in its own right and the exact current
+        # evidence for candidate 88. Its one storage value must therefore be
+        # interpreted by role, not flattened into either meaning globally.
+        consumer = _corpus_row(id=88, current_evidence_id=77)
+        raw = _evidence_from_corpus_row(shared)
+        projected = candidate_evidence_for_policy(raw)
+        expected = full_pipeline_decision_from_evidence(projected)
+        unprojected = full_pipeline_decision_from_evidence(raw)
+        self.assertNotEqual(
+            expected["stage2_import"], unprojected["stage2_import"],
+        )
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            corpus = root / "corpus.jsonl"
+            corpus.write_text(
+                json.dumps(shared) + "\n" + json.dumps(consumer) + "\n",
+                encoding="utf-8",
+            )
+            out = root / "decided.jsonl"
+            self.assertEqual(decide_corpus(str(corpus), str(out)), 2)
+            decided_rows = [
+                msgspec.json.decode(line, type=dict)
+                for line in out.read_text(encoding="utf-8").splitlines()
+            ]
+            decided = next(row for row in decided_rows if row["id"] == 77)
+            resolved = resolve_native_current_pairs(
+                read_decision_corpus(str(corpus)),
+            )
+            _candidate, current = next(
+                pair for pair in resolved if pair[0].evidence_id == 88
+            )
+
+        self.assertEqual(
+            decided["fields"]["stage2_import"], expected["stage2_import"],
+        )
+        self.assertIsNone(projected.measurement.was_converted_from)
+        assert current is not None
+        current_evidence = _evidence_from_corpus_row(current.row)
+        self.assertEqual(
+            current_evidence.measurement.was_converted_from, "flac",
+        )
+
     def test_missing_native_pairing_columns_fail_closed(self):
         with TemporaryDirectory() as tmp:
             corpus = Path(tmp) / "corpus.jsonl"

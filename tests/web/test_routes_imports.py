@@ -553,6 +553,56 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         self.assertEqual(
             entry["spectral_accusation_withheld"], "audit_only_codec")
 
+    def test_shared_current_row_cannot_lend_lineage_to_candidate_chip(self):
+        """Wrong Matches renders source semantics for a shared evidence row."""
+        from lib.quality import AudioQualityMeasurement
+        from tests.helpers import make_album_quality_evidence
+
+        log_id = self._seed_wrong_match(
+            request_id=146, mb_release_id="abc-146",
+        )
+        shared = make_album_quality_evidence(
+            mb_release_id="abc-146",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=128,
+                avg_bitrate_kbps=130,
+                median_bitrate_kbps=129,
+                format="Opus",
+                spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=128,
+                spectral_subject="source",
+                spectral_provenance="measured",
+                was_converted_from="flac",
+            ),
+            codec="opus",
+            container="opus",
+            storage_format="Opus",
+        )
+        self.db.upsert_album_quality_evidence(shared)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=shared.mb_release_id,
+            snapshot_fingerprint=shared.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.db.set_download_log_candidate_evidence(log_id, stored.id)
+        self.assertTrue(
+            self.db.set_request_current_evidence(146, stored.id)
+        )
+
+        _status, data = self._get("/api/wrong-matches")
+
+        group = next(g for g in data["groups"] if g["request_id"] == 146)
+        entry = next(
+            e for e in group["entries"] if e["download_log_id"] == log_id
+        )
+        self.assertIs(entry["spectral_accusation_admissible"], False)
+        self.assertEqual(
+            entry["spectral_accusation_withheld"], "audit_only_codec",
+        )
+        reloaded = self.db.load_album_quality_evidence_by_id(stored.id)
+        assert reloaded is not None
+        self.assertEqual(reloaded.measurement.was_converted_from, "flac")
+
     def test_entry_chip_keeps_the_accusation_for_a_real_codec(self):
         """The must-still-work half at the candidate chip."""
         log_id = self._seed_wrong_match(

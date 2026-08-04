@@ -298,6 +298,7 @@ def _print_live_candidate_replay(
         AlbumQualityEvidenceDecisionFacts,
         full_pipeline_decision_from_evidence,
     )
+    from lib.quality_evidence import candidate_evidence_for_policy
 
     print("\n  What the last real candidate actually decided:")
 
@@ -321,6 +322,7 @@ def _print_live_candidate_replay(
             "ignored)"
         )
         return
+    candidate = candidate_evidence_for_policy(candidate)
 
     current_evidence_id = db.get_request_current_evidence_id(request_id)
     current = (

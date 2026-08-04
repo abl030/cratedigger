@@ -105,10 +105,17 @@ def accusation_evidence_columns(table: str, prefix: str) -> str:
 
     ``table`` is the join's SQL alias, ``prefix`` one of the two alias
     prefixes above. The fragment always ends with a trailing comma so it
-    drops into the middle of a select list.
+    drops into the middle of a select list. Candidate projections withhold
+    installed-output conversion lineage: one canonical evidence row may also
+    be current-linked, but its candidate role is always source semantics.
     """
     return "".join(
-        f"    {table}.{column} AS {prefix}{alias},\n"
+        (
+            f"    NULL::text AS {prefix}{alias},\n"
+            if prefix == CANDIDATE_EVIDENCE_PREFIX
+            and column == "was_converted_from"
+            else f"    {table}.{column} AS {prefix}{alias},\n"
+        )
         for column, alias in _ACCUSATION_EVIDENCE_ALIASES
     )
 
