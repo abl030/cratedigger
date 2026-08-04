@@ -35,8 +35,10 @@ LOSSY_CODECS_BY_CONTAINER: Mapping[str, frozenset[str]] = MappingProxyType({
     "wma": frozenset({"wma"}),
 })
 
-EVIDENCE_LOSSY_CODECS: frozenset[str] = frozenset().union(
-    *LOSSY_CODECS_BY_CONTAINER.values()
+EVIDENCE_LOSSY_CODECS: frozenset[str] = frozenset(
+    codec
+    for codecs in LOSSY_CODECS_BY_CONTAINER.values()
+    for codec in codecs
 )
 EVIDENCE_LOSSLESS_CONTAINERS = frozenset({"flac", "alac", "wav", "aiff", "ape"})
 EVIDENCE_LOSSY_CONTAINERS = frozenset(LOSSY_CODECS_BY_CONTAINER)
