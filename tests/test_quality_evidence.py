@@ -28,21 +28,28 @@ from lib.quality import (
     CdRipBitVerification,
     CdTocIdentity,
     ImportResult,
+    SpectralAnalysisDetail,
+    SpectralDetail,
     V0ProbeEvidence,
     VerifiedLosslessProof,
     full_pipeline_decision_from_evidence,
 )
 from lib.quality_evidence import (
+    CandidateEvidencePersistenceReceipt,
     audio_snapshot_matches,
     backfill_current_evidence_from_album_info,
+    candidate_evidence_from_persistence_receipt,
+    candidate_evidence_persistence_receipt_semantic_error,
     current_evidence_preserves_source_spectral,
     current_spectral_evidence_policy_usable,
     evidence_from_album_info,
     evidence_from_import_result,
     evidence_from_measurement,
+    persist_candidate_evidence_from_measurement,
     propagate_candidate_evidence_to_current,
     snapshot_audio_files,
 )
+from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
 from tests.fakes import FakePipelineDB
 from tests.helpers import (
     make_album_quality_evidence,
@@ -61,6 +68,279 @@ class TestQualityEvidenceConstruction(unittest.TestCase):
 
     def tearDown(self) -> None:
         shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_persistence_receipt_projection_rejects_forged_not_attempted_tuple(
+        self,
+    ) -> None:
+        """#1030: a typed receipt is not trusted merely because it decoded."""
+        evidence = make_album_quality_evidence(
+            source_path=self.root,
+            files=snapshot_audio_files(self.root),
+        )
+        forged = CandidateEvidencePersistenceReceipt(
+            evidence_id=1,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+            spectral_write_intent="merge",
+            spectral_outcome="not_attempted",
+            spectral_grade="genuine",
+            spectral_subject="source",
+            spectral_provenance="measured",
+            spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
+        )
+
+        with self.assertRaisesRegex(ValueError, "receipt.*semantic"):
+            candidate_evidence_from_persistence_receipt(evidence, forged)
+
+    def test_failed_and_empty_receipts_drop_analyzer_capture_passengers(self) -> None:
+        """#1030: no tuple means no generation or capture metadata either."""
+        for outcome, error in (("failed", "analyzer failed"), ("empty", None)):
+            with self.subTest(outcome=outcome):
+                db = FakePipelineDB()
+                db.seed_request(make_request_row(id=42, mb_release_id="release-1"))
+                download_log_id = db.log_download(
+                    request_id=42,
+                    outcome="rejected",
+                )
+                detail = SpectralAnalysisDetail(
+                    attempted=True,
+                    error=error,
+                    cliff_hz=15_500,
+                    codec_family="mp3",
+                    ultrasonic_deficit_db=12.0,
+                    spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
+                )
+                files = snapshot_audio_files(self.root)
+                persisted = persist_candidate_evidence_from_measurement(
+                    db,
+                    mb_release_id="release-1",
+                    source_path=self.root,
+                    measurement=PreimportMeasurement(
+                        min_bitrate_kbps=128,
+                        audio_file_count=len(files),
+                        filetype_band="mp3",
+                        spectral_audit=SpectralDetail(candidate=detail),
+                    ),
+                    download_log_id=download_log_id,
+                    files=files,
+                )
+
+                self.assertEqual(persisted.status, "ready", persisted.reason)
+                receipt = persisted.persistence_receipt
+                assert receipt is not None
+                self.assertEqual(receipt.spectral_outcome, outcome)
+                self.assertTrue(all(
+                    getattr(receipt, field) is None
+                    for field in (
+                        "spectral_grade",
+                        "spectral_bitrate_kbps",
+                        "spectral_subject",
+                        "spectral_provenance",
+                        "cliff_hz",
+                        "codec_family",
+                        "ultrasonic_deficit_db",
+                        "spectral_measurement_version",
+                    )
+                ))
+
+    def test_analyzer_error_grade_is_a_failed_attempt_without_a_tuple(self) -> None:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, mb_release_id="release-1"))
+        download_log_id = db.log_download(request_id=42, outcome="rejected")
+        files = snapshot_audio_files(self.root)
+
+        persisted = persist_candidate_evidence_from_measurement(
+            db,
+            mb_release_id="release-1",
+            source_path=self.root,
+            measurement=PreimportMeasurement(
+                min_bitrate_kbps=128,
+                audio_file_count=len(files),
+                filetype_band="mp3",
+                spectral_audit=SpectralDetail(
+                    candidate=SpectralAnalysisDetail(
+                        attempted=True,
+                        grade="error",
+                        spectral_measurement_version=(
+                            SPECTRAL_MEASUREMENT_VERSION
+                        ),
+                    )
+                ),
+            ),
+            download_log_id=download_log_id,
+            files=files,
+        )
+
+        self.assertEqual(persisted.status, "ready", persisted.reason)
+        receipt = persisted.persistence_receipt
+        assert receipt is not None
+        self.assertEqual(receipt.spectral_outcome, "failed")
+        self.assertIsNone(receipt.spectral_grade)
+        self.assertIsNone(receipt.spectral_measurement_version)
+
+    def test_persistence_receipt_semantic_state_machine_is_exact(self) -> None:
+        base = CandidateEvidencePersistenceReceipt(
+            evidence_id=1,
+            snapshot_fingerprint="snapshot",
+            spectral_write_intent="merge",
+            spectral_outcome="not_attempted",
+        )
+        measured = msgspec.structs.replace(
+            base,
+            spectral_write_intent="replace",
+            spectral_outcome="measured",
+            spectral_grade="genuine",
+            spectral_subject="source",
+            spectral_provenance="measured",
+            spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
+        )
+        valid = [
+            base,
+            measured,
+            msgspec.structs.replace(
+                base,
+                spectral_write_intent="replace",
+                spectral_outcome="failed",
+            ),
+            msgspec.structs.replace(
+                base,
+                spectral_write_intent="replace",
+                spectral_outcome="empty",
+            ),
+        ]
+        for receipt in valid:
+            with self.subTest(valid=receipt):
+                self.assertIsNone(
+                    candidate_evidence_persistence_receipt_semantic_error(
+                        receipt
+                    )
+                )
+
+        float_generation = CandidateEvidencePersistenceReceipt(
+            evidence_id=1,
+            snapshot_fingerprint="snapshot",
+            spectral_write_intent="replace",
+            spectral_outcome="measured",
+            spectral_grade="genuine",
+            spectral_subject="source",
+            spectral_provenance="measured",
+            spectral_measurement_version=float(  # pyright: ignore[reportArgumentType]
+                SPECTRAL_MEASUREMENT_VERSION
+            ),
+        )
+        invalid_codec = CandidateEvidencePersistenceReceipt(
+            evidence_id=1,
+            snapshot_fingerprint="snapshot",
+            spectral_write_intent="replace",
+            spectral_outcome="measured",
+            spectral_grade="genuine",
+            spectral_subject="source",
+            spectral_provenance="measured",
+            codec_family="invalid",  # pyright: ignore[reportArgumentType]
+            spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
+        )
+        invalid = [
+            msgspec.structs.replace(base, evidence_id=True),
+            msgspec.structs.replace(base, spectral_outcome="measured"),
+            msgspec.structs.replace(base, spectral_outcome="failed"),
+            msgspec.structs.replace(base, spectral_outcome="empty"),
+            msgspec.structs.replace(
+                base,
+                spectral_write_intent="replace",
+            ),
+            msgspec.structs.replace(base, spectral_grade="genuine"),
+            msgspec.structs.replace(measured, spectral_grade="error"),
+            msgspec.structs.replace(measured, spectral_subject="installed"),
+            msgspec.structs.replace(measured, spectral_provenance="carried"),
+            msgspec.structs.replace(
+                measured,
+                spectral_measurement_version=None,
+            ),
+            float_generation,
+            invalid_codec,
+        ]
+        for receipt in invalid:
+            with self.subTest(invalid=receipt):
+                self.assertIsNotNone(
+                    candidate_evidence_persistence_receipt_semantic_error(
+                        receipt
+                    )
+                )
+
+    def test_invalid_attempt_does_not_mutate_same_address_or_candidate_fk(
+        self,
+    ) -> None:
+        """Semantic refusal precedes canonical upsert and owner-FK writes."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, mb_release_id="release-1"))
+        download_log_id = db.log_download(request_id=42, outcome="rejected")
+        files = snapshot_audio_files(self.root)
+        canonical = make_album_quality_evidence(
+            mb_release_id="release-1",
+            source_path=self.root,
+            files=files,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=128,
+                format="MP3",
+                spectral_grade="suspect",
+                spectral_subject="source",
+                spectral_provenance="measured",
+                spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
+            ),
+        )
+        db.upsert_album_quality_evidence(canonical)
+        before = db.find_album_quality_evidence(
+            mb_release_id="release-1",
+            snapshot_fingerprint=canonical.snapshot_fingerprint,
+        )
+        assert before is not None and before.id is not None
+        db.set_download_log_candidate_evidence(download_log_id, before.id)
+        job = db.enqueue_import_job(
+            "force_import",
+            request_id=42,
+            payload={
+                "download_log_id": download_log_id,
+                "failed_path": self.root,
+            },
+        )
+        self.assertIsNone(db.get_import_job_candidate_evidence_id(job.id))
+
+        refused = persist_candidate_evidence_from_measurement(
+            db,
+            mb_release_id="release-1",
+            source_path=self.root,
+            measurement=PreimportMeasurement(
+                min_bitrate_kbps=128,
+                audio_file_count=len(files),
+                filetype_band="mp3",
+                spectral_audit=SpectralDetail(
+                    candidate=SpectralAnalysisDetail(
+                        attempted=True,
+                        grade="alien",
+                        spectral_measurement_version=(
+                            SPECTRAL_MEASUREMENT_VERSION
+                        ),
+                    )
+                ),
+            ),
+            download_log_id=download_log_id,
+            import_job_id=job.id,
+            files=files,
+        )
+
+        self.assertEqual(refused.status, "failed")
+        self.assertIn("receipt semantic", refused.reason or "")
+        after = db.find_album_quality_evidence(
+            mb_release_id="release-1",
+            snapshot_fingerprint=canonical.snapshot_fingerprint,
+        )
+        assert after is not None
+        self.assertEqual(after.id, before.id)
+        self.assertEqual(after.measurement.spectral_grade, "suspect")
+        self.assertEqual(
+            db.get_download_log_candidate_evidence_id(download_log_id),
+            before.id,
+        )
+        self.assertIsNone(db.get_import_job_candidate_evidence_id(job.id))
 
     def test_legacy_v0_subject_is_rejected_at_strict_wire_boundary(self):
         with self.assertRaises(msgspec.ValidationError):
@@ -1350,6 +1630,11 @@ class TestAudioSnapshotMatches(unittest.TestCase):
         """Sanity: an unchanged tree always matches."""
         captured = snapshot_audio_files(self.root)
         self.assertTrue(audio_snapshot_matches(self.root, captured))
+
+    def test_missing_directory_never_matches_an_empty_snapshot(self):
+        """Source presence is part of action freshness even for empty facts."""
+        missing = os.path.join(self.root, "missing")
+        self.assertFalse(audio_snapshot_matches(missing, []))
 
 
 if TYPE_CHECKING:

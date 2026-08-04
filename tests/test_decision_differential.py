@@ -30,6 +30,7 @@ from contextlib import redirect_stdout
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -45,12 +46,17 @@ from lib.quality import (
     CdTocIdentity,
     full_pipeline_decision_from_evidence,
 )
-from lib.quality_evidence import snapshot_fingerprint
+from lib.quality_evidence import snapshot_audio_files, snapshot_fingerprint
 from scripts.decision_differential import (
     DECISION_ERROR_FIELD,
     DECISION_KEYS,
     PROOF_FIELDS,
+    DecisionTransitionReplay,
     RenderDifferentialError,
+    TransitionReplayOutcome,
+    _observed_source_snapshot_state,
+    _prepare_transition_source,
+    _transition_replay_outcome_violation,
     decide_corpus,
     decide_row,
     leg_for_evidence,
@@ -860,6 +866,110 @@ class TestNativeCurrentSidePairing(unittest.TestCase):
             self.assertFalse(decided["fields"]["imported"])
 
 
+class TestTransitionExpectedOutcomes(unittest.TestCase):
+    def _replay(
+        self,
+        *,
+        outcome: TransitionReplayOutcome,
+    ) -> DecisionTransitionReplay:
+        return DecisionTransitionReplay(
+            evidence_id=1,
+            matrix_class="candidate|source=present_exact",
+            observed_role="candidate",
+            candidate_owner_count=1,
+            current_owner_count=0,
+            source_snapshot_state="present_exact",
+            transition_shape="fresh_current_measurement",
+            expected_outcome="decided",
+            persistence_status=("failed" if outcome == "producer_refused" else "ready"),
+            exact_import_job_fk=outcome != "producer_refused",
+            canonical_spectral_generation=2,
+            cache_status=("not_run" if outcome == "producer_refused" else "ready"),
+            admission_status=(
+                "not_run"
+                if outcome == "producer_refused"
+                else ("incomplete" if outcome == "admission_refused" else "ready")
+            ),
+            outcome=outcome,
+            refusal_reason="known-bad refusal",
+        )
+
+    def test_known_bad_producer_refusal_is_red(self) -> None:
+        violation = _transition_replay_outcome_violation(
+            self._replay(outcome="producer_refused")
+        )
+        self.assertIn("expected decided", violation or "")
+
+    def test_known_bad_admission_refusal_is_red(self) -> None:
+        violation = _transition_replay_outcome_violation(
+            self._replay(outcome="admission_refused")
+        )
+        self.assertIn("expected decided", violation or "")
+
+    def test_observational_source_snapshot_state_names_all_boundaries(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            present = root / "present"
+            present.mkdir()
+            track = present / "01.flac"
+            track.write_bytes(b"exact")
+            files = snapshot_audio_files(str(present))
+            missing = root / "missing"
+            uncheckable = root / "not-a-directory"
+            uncheckable.write_text("file")
+
+            self.assertEqual(
+                _observed_source_snapshot_state(str(present), files),
+                "present_exact",
+            )
+            self.assertEqual(
+                _observed_source_snapshot_state(str(missing), files),
+                "missing",
+            )
+            self.assertEqual(
+                _observed_source_snapshot_state(str(uncheckable), files),
+                "uncheckable",
+            )
+            with patch(
+                "scripts.decision_differential.os.stat",
+                side_effect=PermissionError("denied"),
+            ):
+                self.assertEqual(
+                    _observed_source_snapshot_state(str(missing), files),
+                    "uncheckable",
+                )
+            track.write_bytes(b"changed bytes")
+            self.assertEqual(
+                _observed_source_snapshot_state(str(present), files),
+                "changed",
+            )
+
+    def test_changed_replay_marker_is_absent_from_a_legal_expected_manifest(
+        self,
+    ) -> None:
+        expected = [AlbumQualityEvidenceFile(
+            relative_path="__transition_changed__.mp3",
+            size_bytes=7,
+            mtime_ns=1,
+            extension="mp3",
+            container="mp3",
+            codec="mp3",
+        )]
+        with TemporaryDirectory() as tmp:
+            source = _prepare_transition_source(
+                Path(tmp) / "changed",
+                expected,
+                "changed",
+            )
+
+            self.assertTrue((source / "__transition_changed__.mp3").is_file())
+            self.assertTrue((source / "__transition_changed_1__.mp3").is_file())
+            self.assertEqual(
+                _observed_source_snapshot_state(str(source), expected),
+                "changed",
+            )
+
+
 class TestCli(unittest.TestCase):
     """The two-tree runbook's two commands, end to end."""
 
@@ -936,10 +1046,11 @@ import hashlib
 import msgspec
 
 from scripts.decision_differential import (
-    _CoverageObservedEvidence,
     _CoverageSourceLink,
+    _observed_evidence,
     recompute_decision_corpus_coverage,
 )
+from tests.test_decision_differential import _corpus_row
 
 links = [
     _CoverageSourceLink(
@@ -953,12 +1064,27 @@ links = [
         authority_reason=None,
     ),
 ]
-observed = [
-    _CoverageObservedEvidence(1, "candidate", "candidate", "candidate", "one"),
-    _CoverageObservedEvidence(2, "current-two", "current-two", "current-two", "two"),
-    _CoverageObservedEvidence(3, "current-three", "current-three", "current-three", "three"),
+corpus_rows = [
+    _corpus_row(
+        id=1, mb_release_id="candidate", is_candidate=False,
+        current_evidence_id=None, request_mb_release_id=None,
+    ),
+    _corpus_row(
+        id=2, mb_release_id="current-two", is_candidate=False,
+        current_evidence_id=None, request_mb_release_id=None,
+    ),
+    _corpus_row(
+        id=3, mb_release_id="current-three", is_candidate=False,
+        current_evidence_id=None, request_mb_release_id=None,
+    ),
 ]
-coverage = recompute_decision_corpus_coverage(links, observed, [], b"")
+observed_rows = [_observed_evidence(row) for row in corpus_rows]
+corpus_bytes = b"".join(
+    msgspec.json.encode(row) + b"\\n" for row in corpus_rows
+)
+coverage = recompute_decision_corpus_coverage(
+    links, observed_rows, corpus_rows, corpus_bytes,
+)
 print(hashlib.sha256(msgspec.json.encode(coverage)).hexdigest())
 '''
         hashes: list[str] = []

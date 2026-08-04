@@ -1,4 +1,6 @@
-"""Disposable PostgreSQL clusters for tests, isolated on private Unix sockets."""
+"""Disposable PostgreSQL clusters isolated on private Unix sockets."""
+
+from __future__ import annotations
 
 import atexit
 import os
@@ -10,17 +12,44 @@ from pathlib import Path
 from typing import Self
 from urllib.parse import quote
 
+from lib.pipeline_db import PipelineDB
+
 
 class EphemeralPostgresError(RuntimeError):
     """A disposable cluster could not start, with its useful diagnostics."""
 
 
 class EphemeralPostgres:
+    """Own one temporary PostgreSQL cluster for replay or test isolation."""
+
     def __init__(self) -> None:
         self.tmpdir: Path | None = None
         self.dsn: str | None = None
         self._server_started = False
         self._started = False
+
+    def seed_transition_request(
+        self,
+        *,
+        artist_name: str,
+        album_title: str,
+        mb_release_id: str,
+    ) -> int:
+        """Seed request authority only in this disposable database."""
+        if self.dsn is None:
+            raise EphemeralPostgresError(
+                "disposable PostgreSQL has not started"
+            )
+        db = PipelineDB(self.dsn)
+        try:
+            return db.add_request(
+                artist_name=artist_name,
+                album_title=album_title,
+                source="request",
+                mb_release_id=mb_release_id,
+            )
+        finally:
+            db.close()
 
     @property
     def _datadir(self) -> Path:
@@ -68,10 +97,10 @@ class EphemeralPostgres:
             return
         if not shutil.which("initdb") or not shutil.which("pg_ctl"):
             raise EphemeralPostgresError(
-                "initdb/pg_ctl not found; run tests inside nix-shell"
+                "initdb/pg_ctl not found; run inside nix-shell"
             )
 
-        self.tmpdir = Path(tempfile.mkdtemp(prefix="cratedigger_test_pg_"))
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="cratedigger_ephemeral_pg_"))
         self._socket_dir.mkdir()
         user = os.getenv("USER", "root")
         try:
@@ -85,8 +114,8 @@ class EphemeralPostgres:
             )
             subprocess.run(
                 [
-                    "pg_ctl", "-D", str(self._datadir), "-l", str(self._logfile), "-o",
-                    f"-k {self._socket_dir} -c listen_addresses=''", "start",
+                    "pg_ctl", "-D", str(self._datadir), "-l", str(self._logfile),
+                    "-o", f"-k {self._socket_dir} -c listen_addresses=''", "start",
                 ],
                 capture_output=True,
                 check=True,

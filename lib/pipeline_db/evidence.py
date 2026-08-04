@@ -7,6 +7,10 @@ from datetime import datetime
 import msgspec
 
 from lib.convergence_service import normalize_contributor_usernames
+from lib.evidence_media_identity import (
+    EVIDENCE_LOSSLESS_CODECS,
+    LOSSY_CODECS_BY_CONTAINER,
+)
 from lib.import_execution import ExecutionLeaseSnapshot
 from lib.pipeline_db._core import _PipelineDBBase
 from lib.quality import (
@@ -24,7 +28,16 @@ from lib.quality import (
     VerifiedLosslessProof,
     cd_rip_proof_pair_validation_errors,
 )
-from lib.quality_evidence import current_evidence_preserves_source_spectral
+from lib.quality_evidence import (
+    SpectralWriteIntent,
+    current_evidence_preserves_source_spectral,
+)
+
+_PRESERVED_SOURCE_LOSSY_PAIRS_JSON = json.dumps([
+    {"container": container, "codec": codec}
+    for container, codecs in sorted(LOSSY_CODECS_BY_CONTAINER.items())
+    for codec in sorted(codecs)
+])
 
 
 class PersistedEvidenceFileRow(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -174,6 +187,8 @@ class _EvidenceMixin(_PipelineDBBase):
     def upsert_album_quality_evidence(
         self,
         evidence: AlbumQualityEvidence,
+        *,
+        spectral_write_intent: SpectralWriteIntent = "merge",
     ) -> None:
         """Atomically upsert evidence by ``(mb_release_id, snapshot_fingerprint)``.
 
@@ -183,6 +198,10 @@ class _EvidenceMixin(_PipelineDBBase):
         separately via the dedicated setters.
         """
         evidence = evidence.sorted_for_storage()
+        if spectral_write_intent not in {"merge", "replace"}:
+            raise ValueError(
+                f"invalid spectral write intent: {spectral_write_intent!r}"
+            )
         errors = evidence.storage_validation_errors()
         if errors:
             raise ValueError("; ".join(errors))
@@ -228,7 +247,80 @@ class _EvidenceMixin(_PipelineDBBase):
         ]
         self._execute(
             """
-            WITH upserted AS (
+            WITH write_policy AS MATERIALIZED (
+                SELECT
+                    %s::boolean AS replace_spectral,
+                    %s::text[] AS lossless_source_codecs,
+                    %s::jsonb AS lossy_media_pairs
+            ),
+            preserved_current_source_spectral AS MATERIALIZED (
+                -- This is the stored-row SQL twin of
+                -- current_evidence_preserves_source_spectral. Current
+                -- ownership and a source subject are not enough: only an
+                -- irreplaceable derivative from a recorded lossless source
+                -- may retain its tuple across a candidate collision.
+                SELECT stored.id
+                FROM album_quality_evidence AS stored
+                CROSS JOIN write_policy
+                WHERE stored.mb_release_id = %s
+                  AND stored.snapshot_fingerprint = %s
+                  AND EXISTS (
+                      SELECT 1
+                      FROM album_requests AS current_owner
+                      WHERE current_owner.current_evidence_id = stored.id
+                  )
+                  AND LOWER(BTRIM(stored.was_converted_from)) = ANY(
+                      write_policy.lossless_source_codecs
+                  )
+                  AND stored.spectral_subject = 'source'
+                  AND EXISTS (
+                      SELECT 1
+                      FROM album_quality_evidence_files AS stored_file
+                      WHERE stored_file.evidence_id = stored.id
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM album_quality_evidence_files AS stored_file
+                      WHERE stored_file.evidence_id = stored.id
+                        AND (
+                            stored_file.container IS NULL OR
+                            stored_file.container = '' OR
+                            stored_file.codec IS NULL OR
+                            stored_file.codec = ''
+                        )
+                  )
+                  AND 1 = (
+                      SELECT COUNT(DISTINCT LOWER(stored_file.container))
+                      FROM album_quality_evidence_files AS stored_file
+                      WHERE stored_file.evidence_id = stored.id
+                  )
+                  AND COALESCE(
+                      NULLIF(LOWER(BTRIM(stored.storage_format)), ''),
+                      NULLIF(LOWER(BTRIM(stored.format)), '')
+                  ) IS NOT NULL
+                  AND (
+                      NULLIF(LOWER(BTRIM(stored.storage_format)), '') IS NULL OR
+                      NULLIF(LOWER(BTRIM(stored.format)), '') IS NULL OR
+                      LOWER(BTRIM(stored.storage_format)) =
+                          LOWER(BTRIM(stored.format))
+                  )
+                  AND EXISTS (
+                      SELECT 1
+                      FROM jsonb_to_recordset(
+                          write_policy.lossy_media_pairs
+                      ) AS pair(container TEXT, codec TEXT)
+                      WHERE pair.container = (
+                          SELECT MIN(LOWER(stored_file.container))
+                          FROM album_quality_evidence_files AS stored_file
+                          WHERE stored_file.evidence_id = stored.id
+                      )
+                        AND pair.codec = COALESCE(
+                            NULLIF(LOWER(BTRIM(stored.storage_format)), ''),
+                            NULLIF(LOWER(BTRIM(stored.format)), '')
+                        )
+                  )
+            ),
+            upserted AS (
                 INSERT INTO album_quality_evidence (
                     mb_release_id, snapshot_fingerprint, source_path,
                     measured_at, codec, container,
@@ -308,36 +400,100 @@ class _EvidenceMixin(_PipelineDBBase):
                     -- definition and is cleared atomically. A
                     -- legacy row is replaced wholesale during its v4 rebuild,
                     -- including when the new fact is absent.
-                    spectral_grade = CASE WHEN
+                    spectral_grade = CASE
+                    WHEN (SELECT replace_spectral FROM write_policy)
+                         AND EXISTS (
+                             SELECT 1
+                             FROM preserved_current_source_spectral AS preserved
+                             WHERE preserved.id = album_quality_evidence.id
+                         )
+                    THEN album_quality_evidence.spectral_grade
+                    WHEN
                         album_quality_evidence.lineage_version < 4 OR
                         EXCLUDED.spectral_grade IS NOT NULL OR
+                        (
+                            (SELECT replace_spectral FROM write_policy) AND
+                            NOT EXISTS (
+                                SELECT 1 FROM album_requests AS current_owner
+                                WHERE current_owner.current_evidence_id =
+                                    album_quality_evidence.id
+                            )
+                        ) OR
                         (
                             album_quality_evidence.spectral_subject =
                                 'installed' AND %s::boolean
                         )
                         THEN EXCLUDED.spectral_grade
                         ELSE album_quality_evidence.spectral_grade END,
-                    spectral_bitrate_kbps = CASE WHEN
+                    spectral_bitrate_kbps = CASE
+                    WHEN (SELECT replace_spectral FROM write_policy)
+                         AND EXISTS (
+                             SELECT 1
+                             FROM preserved_current_source_spectral AS preserved
+                             WHERE preserved.id = album_quality_evidence.id
+                         )
+                    THEN album_quality_evidence.spectral_bitrate_kbps
+                    WHEN
                         album_quality_evidence.lineage_version < 4 OR
                         EXCLUDED.spectral_grade IS NOT NULL OR
+                        (
+                            (SELECT replace_spectral FROM write_policy) AND
+                            NOT EXISTS (
+                                SELECT 1 FROM album_requests AS current_owner
+                                WHERE current_owner.current_evidence_id =
+                                    album_quality_evidence.id
+                            )
+                        ) OR
                         (
                             album_quality_evidence.spectral_subject =
                                 'installed' AND %s::boolean
                         )
                         THEN EXCLUDED.spectral_bitrate_kbps
                         ELSE album_quality_evidence.spectral_bitrate_kbps END,
-                    spectral_subject = CASE WHEN
+                    spectral_subject = CASE
+                    WHEN (SELECT replace_spectral FROM write_policy)
+                         AND EXISTS (
+                             SELECT 1
+                             FROM preserved_current_source_spectral AS preserved
+                             WHERE preserved.id = album_quality_evidence.id
+                         )
+                    THEN album_quality_evidence.spectral_subject
+                    WHEN
                         album_quality_evidence.lineage_version < 4 OR
                         EXCLUDED.spectral_grade IS NOT NULL OR
+                        (
+                            (SELECT replace_spectral FROM write_policy) AND
+                            NOT EXISTS (
+                                SELECT 1 FROM album_requests AS current_owner
+                                WHERE current_owner.current_evidence_id =
+                                    album_quality_evidence.id
+                            )
+                        ) OR
                         (
                             album_quality_evidence.spectral_subject =
                                 'installed' AND %s::boolean
                         )
                         THEN EXCLUDED.spectral_subject
                         ELSE album_quality_evidence.spectral_subject END,
-                    spectral_provenance = CASE WHEN
+                    spectral_provenance = CASE
+                    WHEN (SELECT replace_spectral FROM write_policy)
+                         AND EXISTS (
+                             SELECT 1
+                             FROM preserved_current_source_spectral AS preserved
+                             WHERE preserved.id = album_quality_evidence.id
+                         )
+                    THEN album_quality_evidence.spectral_provenance
+                    WHEN
                         album_quality_evidence.lineage_version < 4 OR
                         EXCLUDED.spectral_grade IS NOT NULL OR
+                        (
+                            (SELECT replace_spectral FROM write_policy) AND
+                            NOT EXISTS (
+                                SELECT 1 FROM album_requests AS current_owner
+                                WHERE current_owner.current_evidence_id =
+                                    album_quality_evidence.id
+                            )
+                        ) OR
                         (
                             album_quality_evidence.spectral_subject =
                                 'installed' AND %s::boolean
@@ -349,36 +505,100 @@ class _EvidenceMixin(_PipelineDBBase):
                     -- measured in the SAME pass as spectral_grade above, so
                     -- they are gated by the exact same guard — one atomic
                     -- fact, now eight columns wide instead of four.
-                    cliff_hz = CASE WHEN
+                    cliff_hz = CASE
+                    WHEN (SELECT replace_spectral FROM write_policy)
+                         AND EXISTS (
+                             SELECT 1
+                             FROM preserved_current_source_spectral AS preserved
+                             WHERE preserved.id = album_quality_evidence.id
+                         )
+                    THEN album_quality_evidence.cliff_hz
+                    WHEN
                         album_quality_evidence.lineage_version < 4 OR
                         EXCLUDED.spectral_grade IS NOT NULL OR
+                        (
+                            (SELECT replace_spectral FROM write_policy) AND
+                            NOT EXISTS (
+                                SELECT 1 FROM album_requests AS current_owner
+                                WHERE current_owner.current_evidence_id =
+                                    album_quality_evidence.id
+                            )
+                        ) OR
                         (
                             album_quality_evidence.spectral_subject =
                                 'installed' AND %s::boolean
                         )
                         THEN EXCLUDED.cliff_hz
                         ELSE album_quality_evidence.cliff_hz END,
-                    codec_family = CASE WHEN
+                    codec_family = CASE
+                    WHEN (SELECT replace_spectral FROM write_policy)
+                         AND EXISTS (
+                             SELECT 1
+                             FROM preserved_current_source_spectral AS preserved
+                             WHERE preserved.id = album_quality_evidence.id
+                         )
+                    THEN album_quality_evidence.codec_family
+                    WHEN
                         album_quality_evidence.lineage_version < 4 OR
                         EXCLUDED.spectral_grade IS NOT NULL OR
+                        (
+                            (SELECT replace_spectral FROM write_policy) AND
+                            NOT EXISTS (
+                                SELECT 1 FROM album_requests AS current_owner
+                                WHERE current_owner.current_evidence_id =
+                                    album_quality_evidence.id
+                            )
+                        ) OR
                         (
                             album_quality_evidence.spectral_subject =
                                 'installed' AND %s::boolean
                         )
                         THEN EXCLUDED.codec_family
                         ELSE album_quality_evidence.codec_family END,
-                    ultrasonic_deficit_db = CASE WHEN
+                    ultrasonic_deficit_db = CASE
+                    WHEN (SELECT replace_spectral FROM write_policy)
+                         AND EXISTS (
+                             SELECT 1
+                             FROM preserved_current_source_spectral AS preserved
+                             WHERE preserved.id = album_quality_evidence.id
+                         )
+                    THEN album_quality_evidence.ultrasonic_deficit_db
+                    WHEN
                         album_quality_evidence.lineage_version < 4 OR
                         EXCLUDED.spectral_grade IS NOT NULL OR
+                        (
+                            (SELECT replace_spectral FROM write_policy) AND
+                            NOT EXISTS (
+                                SELECT 1 FROM album_requests AS current_owner
+                                WHERE current_owner.current_evidence_id =
+                                    album_quality_evidence.id
+                            )
+                        ) OR
                         (
                             album_quality_evidence.spectral_subject =
                                 'installed' AND %s::boolean
                         )
                         THEN EXCLUDED.ultrasonic_deficit_db
                         ELSE album_quality_evidence.ultrasonic_deficit_db END,
-                    spectral_measurement_version = CASE WHEN
+                    spectral_measurement_version = CASE
+                    WHEN (SELECT replace_spectral FROM write_policy)
+                         AND EXISTS (
+                             SELECT 1
+                             FROM preserved_current_source_spectral AS preserved
+                             WHERE preserved.id = album_quality_evidence.id
+                         )
+                    THEN album_quality_evidence.spectral_measurement_version
+                    WHEN
                         album_quality_evidence.lineage_version < 4 OR
                         EXCLUDED.spectral_grade IS NOT NULL OR
+                        (
+                            (SELECT replace_spectral FROM write_policy) AND
+                            NOT EXISTS (
+                                SELECT 1 FROM album_requests AS current_owner
+                                WHERE current_owner.current_evidence_id =
+                                    album_quality_evidence.id
+                            )
+                        ) OR
                         (
                             album_quality_evidence.spectral_subject =
                                 'installed' AND %s::boolean
@@ -608,6 +828,11 @@ class _EvidenceMixin(_PipelineDBBase):
               ON preserved_file_rows.relative_path = file_rows.relative_path
             """,
             (
+                spectral_write_intent == "replace",
+                sorted(EVIDENCE_LOSSLESS_CODECS),
+                _PRESERVED_SOURCE_LOSSY_PAIRS_JSON,
+                evidence.mb_release_id,
+                evidence.snapshot_fingerprint,
                 evidence.mb_release_id,
                 evidence.snapshot_fingerprint,
                 evidence.source_path,

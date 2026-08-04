@@ -673,6 +673,107 @@ class TestPreviewCompletionEvidenceOwnership(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_fresh_persistence_receipt_completes_without_cache_reuse_gate(self):
+        """#1030: persistence completion is not generation cache eligibility."""
+        from lib.quality_evidence import (
+            CandidateEvidencePersistenceReceipt,
+            load_candidate_evidence_for_source,
+        )
+        from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
+        from scripts.import_preview_worker import _candidate_evidence_ready_for_job
+
+        root, source, db, job = self._linked_force_job()
+        try:
+            evidence_id = db.get_import_job_candidate_evidence_id(job.id)
+            evidence = db.load_album_quality_evidence_by_id(evidence_id)
+            assert evidence is not None and evidence.id is not None
+            stale = msgspec.structs.replace(
+                evidence,
+                measurement=msgspec.structs.replace(
+                    evidence.measurement,
+                    spectral_grade="suspect",
+                    spectral_bitrate_kbps=96,
+                    spectral_subject="source",
+                    spectral_provenance="measured",
+                    spectral_measurement_version=None,
+                ),
+            )
+            db.upsert_album_quality_evidence(
+                stale,
+                spectral_write_intent="replace",
+            )
+            self.assertIsNone(
+                load_candidate_evidence_for_source(
+                    db,
+                    source_path=source,
+                    import_job_id=job.id,
+                ).evidence
+            )
+            receipt = CandidateEvidencePersistenceReceipt(
+                evidence_id=evidence.id,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+                spectral_write_intent="replace",
+                spectral_outcome="measured",
+                spectral_grade="genuine",
+                spectral_bitrate_kbps=192,
+                spectral_subject="source",
+                spectral_provenance="measured",
+                spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
+            )
+
+            ready, reason = _candidate_evidence_ready_for_job(
+                db,
+                job,
+                ImportPreviewResult(
+                    mode="path",
+                    source_path=source,
+                    verdict="evidence_ready",
+                    candidate_evidence_receipt=receipt,
+                ),
+            )
+
+            self.assertTrue(ready)
+            self.assertEqual(reason, "persisted")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_preview_completion_rejects_semantically_forged_receipt(self):
+        """#1030: preview completion validates typed receipt combinations."""
+        from lib.quality_evidence import CandidateEvidencePersistenceReceipt
+        from scripts.import_preview_worker import _candidate_evidence_ready_for_job
+
+        root, source, db, job = self._linked_force_job()
+        try:
+            evidence_id = db.get_import_job_candidate_evidence_id(job.id)
+            evidence = db.load_album_quality_evidence_by_id(evidence_id)
+            assert evidence is not None and evidence.id is not None
+            forged = CandidateEvidencePersistenceReceipt(
+                evidence_id=evidence.id,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+                spectral_write_intent="merge",
+                spectral_outcome="not_attempted",
+                spectral_grade="genuine",
+                spectral_subject="source",
+                spectral_provenance="measured",
+                spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
+            )
+
+            ready, reason = _candidate_evidence_ready_for_job(
+                db,
+                job,
+                ImportPreviewResult(
+                    mode="path",
+                    source_path=source,
+                    verdict="evidence_ready",
+                    candidate_evidence_receipt=forged,
+                ),
+            )
+
+            self.assertFalse(ready)
+            self.assertIn("receipt semantic", reason)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
 
 class TestImporterWorker(unittest.TestCase):
     def setUp(self) -> None:

@@ -317,6 +317,22 @@ def spectral_detail_from_persisted_source(
     )
 
 
+def spectral_measurement_from_attempt(
+    detail: SpectralAnalysisDetail | None,
+) -> SpectralMeasurement | None:
+    """Project a successful attempt audit into policy/persistence evidence."""
+    if detail is None or not detail.attempted or detail.grade is None:
+        return None
+    return SpectralMeasurement.from_parts(
+        detail.grade,
+        detail.bitrate_kbps,
+        cliff_hz=detail.cliff_hz,
+        codec_family=detail.codec_family,
+        ultrasonic_deficit_db=detail.ultrasonic_deficit_db,
+        spectral_measurement_version=detail.spectral_measurement_version,
+    )
+
+
 class PreimportMeasurement(msgspec.Struct, frozen=True):
     """Facts gathered by ``measure_preimport_state``. No decision fields.
 
@@ -837,6 +853,9 @@ def measure_preimport_state(
             existing_detail=reusable_existing,
         )
         existing_spectral_path = existing_lookup.path
+        download_spectral = spectral_measurement_from_attempt(
+            spectral_audit.candidate,
+        )
         return PreimportMeasurement(
             corrupt_files=corrupt_files,
             audio_validation=audio_validation,
@@ -853,6 +872,7 @@ def measure_preimport_state(
                 download_min_bitrate_bps
             ),
             is_vbr=download_is_vbr,
+            download_spectral=download_spectral,
             existing_spectral_path=existing_spectral_path,
             spectral_audit=spectral_audit,
         )
@@ -892,6 +912,9 @@ def measure_preimport_state(
                     existing_detail=reusable_existing,
                 )
                 existing_spectral_path = existing_lookup.path
+                download_spectral = spectral_measurement_from_attempt(
+                    spectral_audit.candidate,
+                )
                 return PreimportMeasurement(
                     corrupt_files=[],
                     audio_validation=audio_validation,
@@ -909,6 +932,7 @@ def measure_preimport_state(
                         download_min_bitrate_bps
                     ),
                     is_vbr=download_is_vbr,
+                    download_spectral=download_spectral,
                     existing_spectral_path=existing_spectral_path,
                     spectral_audit=spectral_audit,
                 )
@@ -984,15 +1008,7 @@ def measure_preimport_state(
         existing_spectral_path = existing_lookup.path
         candidate_audit = spectral_audit.candidate
         assert candidate_audit is not None
-        download_spectral = SpectralMeasurement.from_parts(
-            candidate_audit.grade, candidate_audit.bitrate_kbps,
-            cliff_hz=candidate_audit.cliff_hz,
-            codec_family=candidate_audit.codec_family,
-            ultrasonic_deficit_db=candidate_audit.ultrasonic_deficit_db,
-            spectral_measurement_version=(
-                candidate_audit.spectral_measurement_version
-            ),
-        )
+        download_spectral = spectral_measurement_from_attempt(candidate_audit)
         if download_spectral is not None:
             cliff_count = sum(
                 1 for track in candidate_audit.per_track

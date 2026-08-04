@@ -28,14 +28,16 @@ from lib.quality import (
     QualityRankConfig,
 )
 from lib.quality_evidence import (
+    CandidateEvidencePersistenceReceipt,
     EvidenceBuildResult,
     QualityEvidenceDB,
     audio_snapshot_matches,
     backfill_current_evidence_from_album_info,
+    candidate_evidence_persistence_receipt_semantic_error,
     current_evidence_for_policy,
     current_evidence_preserves_source_spectral,
     current_evidence_rebuild_reasons,
-    load_candidate_evidence_for_source,
+    load_candidate_evidence_for_decision,
     load_or_backfill_current_evidence,
     snapshot_audio_files,
     snapshot_fingerprint,
@@ -45,6 +47,7 @@ logger = logging.getLogger("cratedigger")
 
 
 CANDIDATE_STATUS_REUSED = "reused"
+CANDIDATE_STATUS_PERSISTED = "persisted"
 CANDIDATE_STATUS_MISSING = "missing"
 CANDIDATE_STATUS_STALE = "stale"
 CANDIDATE_STATUS_INCOMPLETE = "incomplete"
@@ -149,6 +152,33 @@ class CurrentEvidenceActionResult(msgspec.Struct, frozen=True):
         return self.evidence is not None and not self.provenance.fail_closed
 
 
+def _candidate_persistence_receipt_for_job(
+    db: QualityEvidenceDB,
+    import_job_id: int | None,
+) -> tuple[CandidateEvidencePersistenceReceipt | None, str | None]:
+    if import_job_id is None:
+        return None, None
+    job = db.get_import_job(import_job_id)
+    if job is None or job.preview_result is None:
+        return None, None
+    raw = job.preview_result.get("candidate_evidence_receipt")
+    if raw is None:
+        return None, None
+    try:
+        receipt = msgspec.convert(
+            raw,
+            type=CandidateEvidencePersistenceReceipt,
+        )
+    except (TypeError, ValueError, msgspec.ValidationError) as exc:
+        return None, f"invalid candidate persistence receipt: {exc}"
+    receipt_error = candidate_evidence_persistence_receipt_semantic_error(
+        receipt
+    )
+    if receipt_error is not None:
+        return None, f"candidate receipt semantic invalid: {receipt_error}"
+    return receipt, None
+
+
 def ensure_candidate_evidence_for_action(
     db: QualityEvidenceDB,
     *,
@@ -172,17 +202,37 @@ def ensure_candidate_evidence_for_action(
     not grow a job-type-specific relocation exception.
     """
 
-    loaded = load_candidate_evidence_for_source(
+    receipt, receipt_error = _candidate_persistence_receipt_for_job(
+        db,
+        import_job_id,
+    )
+    if receipt_error is not None:
+        return CandidateEvidenceActionResult(
+            evidence=None,
+            provenance=ActionEvidenceProvenance(
+                candidate_status=CANDIDATE_STATUS_INCOMPLETE,
+                snapshot_guard=SNAPSHOT_GUARD_NOT_CHECKED,
+                fallback_reason=receipt_error,
+                fail_closed=True,
+            ),
+        )
+
+    loaded = load_candidate_evidence_for_decision(
         db,
         source_path=source_path,
         download_log_id=download_log_id,
         import_job_id=import_job_id,
+        persistence_receipt=receipt,
     )
     if loaded.evidence is not None:
         return CandidateEvidenceActionResult(
             evidence=loaded.evidence,
             provenance=ActionEvidenceProvenance(
-                candidate_status=CANDIDATE_STATUS_REUSED,
+                candidate_status=(
+                    CANDIDATE_STATUS_PERSISTED
+                    if receipt is not None
+                    else CANDIDATE_STATUS_REUSED
+                ),
                 snapshot_guard=SNAPSHOT_GUARD_MATCHED,
             ),
         )

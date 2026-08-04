@@ -98,6 +98,8 @@ from lib.quality import (
 )
 from lib.quality_evidence import (
     EvidenceBuildResult,
+    audio_snapshot_matches,
+    candidate_evidence_persistence_receipt_semantic_error,
     load_candidate_evidence_for_source,
 )
 from lib.terminal_outcomes import AutomationTerminalAuthority
@@ -256,6 +258,25 @@ def _candidate_evidence_ready_for_job(
     if not evidence.snapshot_fingerprint:
         return False, "candidate evidence has empty snapshot fingerprint"
     action_path = result.action_path or source_path
+    receipt = result.candidate_evidence_receipt
+    if receipt is not None:
+        receipt_error = candidate_evidence_persistence_receipt_semantic_error(
+            receipt
+        )
+        if receipt_error is not None:
+            return False, f"candidate receipt semantic invalid: {receipt_error}"
+        if receipt.evidence_id != evidence_id:
+            return False, "persistence receipt does not match import job FK"
+        if receipt.snapshot_fingerprint != evidence.snapshot_fingerprint:
+            return False, "persistence receipt does not match evidence snapshot"
+        if not audio_snapshot_matches(action_path, evidence.files):
+            return False, "candidate source changed after persistence receipt"
+        return True, "persisted"
+
+    # Compatibility path for tests and old callers that synthesize a preview
+    # result directly. Production measurement results carry the explicit
+    # receipt above; cache eligibility is intentionally not their completion
+    # criterion.
     candidate = ensure_candidate_evidence_for_action(
         db,
         source_path=action_path,

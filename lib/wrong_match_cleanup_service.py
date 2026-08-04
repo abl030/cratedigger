@@ -29,9 +29,10 @@ from lib.quality import (
     narrow_override_on_lossless_source_lock,
 )
 from lib.quality_evidence import (
+    CandidateEvidencePersistenceReceipt,
     QualityEvidenceDB,
     audit_v0_probe_from_metric,
-    load_candidate_evidence_for_source,
+    load_candidate_evidence_for_decision,
 )
 from lib.util import resolve_failed_path
 from lib.validation_envelope import (
@@ -687,11 +688,14 @@ def _load_candidate_evidence(
     db: WrongMatchCleanupDB,
     download_log_id: int,
     source_path: str,
+    *,
+    persistence_receipt: CandidateEvidencePersistenceReceipt | None = None,
 ) -> _LoadedEvidence:
-    result = load_candidate_evidence_for_source(
+    result = load_candidate_evidence_for_decision(
         db,
         source_path=source_path,
         download_log_id=download_log_id,
+        persistence_receipt=persistence_receipt,
     )
     if result.evidence is not None:
         return _LoadedEvidence(result.evidence)
@@ -767,7 +771,17 @@ def _refresh_stale_candidate_evidence(
             f"evidence_refresh_failed: {detail}",
         )
 
-    reloaded = _load_candidate_evidence(db, download_log_id, source_path)
+    receipt = getattr(preview, "candidate_evidence_receipt", None)
+    reloaded = _load_candidate_evidence(
+        db,
+        download_log_id,
+        source_path,
+        persistence_receipt=(
+            receipt
+            if isinstance(receipt, CandidateEvidencePersistenceReceipt)
+            else None
+        ),
+    )
     if reloaded.evidence is None:
         return _LoadedEvidence(
             None,

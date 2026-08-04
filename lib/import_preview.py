@@ -95,6 +95,7 @@ from lib.quality import (
     quality_gate_decision,
 )
 from lib.quality_evidence import (
+    CandidateEvidencePersistenceReceipt,
     EvidenceBuildResult,
     QualityEvidenceDB,
     audio_snapshot_matches,
@@ -1670,6 +1671,7 @@ class ImportPreviewResult(msgspec.Struct):
     import_result: ImportResult | None = None
     simulation: dict[str, Any] | None = None
     failure: MeasurementFailure | None = None
+    candidate_evidence_receipt: CandidateEvidencePersistenceReceipt | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return msgspec.to_builtins(self)
@@ -1693,6 +1695,7 @@ def _preview_result(
     simulation: dict[str, Any] | None = None,
     cleanup_eligible: bool = False,
     failure: MeasurementFailure | None = None,
+    candidate_evidence_receipt: CandidateEvidencePersistenceReceipt | None = None,
 ) -> ImportPreviewResult:
     would_import = verdict == PREVIEW_VERDICT_WOULD_IMPORT
     confident_reject = verdict == PREVIEW_VERDICT_CONFIDENT_REJECT
@@ -1714,6 +1717,7 @@ def _preview_result(
         import_result=import_result,
         simulation=simulation,
         failure=failure,
+        candidate_evidence_receipt=candidate_evidence_receipt,
     )
 
 
@@ -1811,6 +1815,7 @@ def _evidence_ready_result(
     download_log_id: int | None = None,
     source_path: str | None = None,
     import_result: ImportResult | None = None,
+    candidate_evidence_receipt: CandidateEvidencePersistenceReceipt | None = None,
 ) -> ImportPreviewResult:
     """Build a ``verdict='evidence_ready'`` preview result.
 
@@ -1830,6 +1835,7 @@ def _evidence_ready_result(
         download_log_id=download_log_id,
         source_path=source_path,
         import_result=import_result,
+        candidate_evidence_receipt=candidate_evidence_receipt,
     )
 
 
@@ -2312,6 +2318,9 @@ def measure_and_persist_candidate_evidence(
                 download_log_id=download_log_id,
                 source_path=audit_path,
                 import_result=ImportResult(spectral=measurement.spectral_audit),
+                candidate_evidence_receipt=(
+                    evidence_result.persistence_receipt
+                ),
             )
 
         # --- Harness path: measurement allows continuing ---
@@ -2520,6 +2529,9 @@ def measure_and_persist_candidate_evidence(
                 download_log_id=download_log_id,
                 source_path=path,
                 import_result=run.import_result,
+                candidate_evidence_receipt=(
+                    evidence_result.persistence_receipt
+                ),
             )
         if run.import_result.decision in (
             "conversion_failed",
@@ -2616,6 +2628,7 @@ def measure_and_persist_candidate_evidence(
             download_log_id=download_log_id,
             source_path=audit_path,
             import_result=run.import_result,
+            candidate_evidence_receipt=evidence_result.persistence_receipt,
         )
     finally:
         _cleanup_preview_artifacts(

@@ -12,6 +12,7 @@ from copy import deepcopy
 from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Literal
 
 from lib.json_narrow import is_str_object_dict
 from lib.quality import (
@@ -22,6 +23,7 @@ from lib.quality import (
     CdRipBitVerification,
     CdTocIdentity,
 )
+from lib.quality_evidence import snapshot_audio_files
 from scripts.decision_differential import (
     _EVIDENCE_SCHEMA_TYPES,
     _FILE_SCHEMA_TYPES,
@@ -30,10 +32,12 @@ from scripts.decision_differential import (
     RenderDifferentialError,
     _assert_live_decision_corpus_schema,
     _DecisionCorpusSnapshot,
+    _materialize_transition_snapshot,
     assert_decision_corpus_schema,
     assert_export_output_exact,
     export_decision_corpus,
     main,
+    replay_decision_transitions,
     verify_decision_corpus_pair,
 )
 from tests.helpers import make_album_quality_evidence
@@ -211,6 +215,359 @@ class TestDecisionCorpusExport(unittest.TestCase):
         self.assertFalse(corpus[1]["is_candidate"])
         self.assertEqual(corpus[0]["current_evidence_id"], current_id)
 
+    def test_all_three_foreign_keys_classify_every_evidence_role_in_id_order(
+        self,
+    ) -> None:
+        """The O(rows + links) census names candidate/current/dual/audit rows."""
+        candidate_release = "role-candidate"
+        candidate_request = self._request(candidate_release)
+        candidate_id = self._evidence(candidate_release, 41)
+        candidate_job = self.db.enqueue_import_job(
+            "force_import",
+            request_id=candidate_request,
+            payload={"download_log_id": 41, "failed_path": "/tmp/candidate"},
+        )
+        self.assertTrue(
+            self.db.set_import_job_candidate_evidence(candidate_job.id, candidate_id)
+        )
+
+        current_release = "role-current"
+        current_request = self._request(current_release)
+        current_id = self._evidence(current_release, 42)
+        self.assertTrue(
+            self.db.set_request_current_evidence(current_request, current_id)
+        )
+
+        dual_release = "role-dual"
+        dual_request = self._request(dual_release)
+        dual_id = self._evidence(dual_release, 43)
+        self.assertTrue(self.db.set_request_current_evidence(dual_request, dual_id))
+        dual_log = self.db.log_download(request_id=dual_request, outcome="rejected")
+        self.db.set_download_log_candidate_evidence(dual_log, dual_id)
+
+        audit_id = self._evidence("role-audit", 44)
+
+        result, corpus, coverage = self._export()
+
+        self.assertTrue(result.green)
+        self.assertEqual(
+            coverage["evidence_role_counts"],
+            {"candidate": 1, "current": 1, "dual": 1, "audit_only": 1},
+        )
+        roles = coverage["evidence_roles"]
+        assert isinstance(roles, list)
+        self.assertEqual(
+            [(row["evidence_id"], row["role"]) for row in roles],
+            [
+                (candidate_id, "candidate"),
+                (current_id, "current"),
+                (dual_id, "dual"),
+                (audit_id, "audit_only"),
+            ],
+        )
+        self.assertEqual(
+            [row["id"] for row in corpus],
+            [candidate_id, current_id, dual_id, audit_id],
+        )
+        owner_links = coverage["evidence_owner_links"]
+        assert isinstance(owner_links, list)
+        self.assertEqual(
+            [
+                (row["owner_kind"], row["owner_id"])
+                for row in owner_links
+            ],
+            sorted(
+                (row["owner_kind"], row["owner_id"])
+                for row in owner_links
+            ),
+        )
+
+    def test_transition_replay_uses_disposable_pg_and_never_writes_source(
+        self,
+    ) -> None:
+        """A verified live-shaped pair is observation, not write authority."""
+        from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
+
+        live_sources = TemporaryDirectory()
+        self.addCleanup(live_sources.cleanup)
+
+        def source_evidence(
+            release: str,
+            ordinal: int,
+            *,
+            provenance: Literal["measured", "carried"],
+            was_converted_from: str | None,
+        ) -> int:
+            files = [AlbumQualityEvidenceFile(
+                relative_path=f"{ordinal:02d}.mp3",
+                size_bytes=ordinal,
+                mtime_ns=ordinal,
+                extension="mp3",
+                container="mp3",
+                codec="mp3",
+            )]
+            source = Path(live_sources.name) / str(ordinal)
+            source.mkdir()
+            _materialize_transition_snapshot(source, files)
+            evidence = make_album_quality_evidence(
+                mb_release_id=release,
+                source_path=str(source),
+                files=files,
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=128,
+                    avg_bitrate_kbps=130,
+                    median_bitrate_kbps=129,
+                    format="MP3",
+                    spectral_grade="suspect",
+                    spectral_bitrate_kbps=96,
+                    spectral_subject="source",
+                    spectral_provenance=provenance,
+                    spectral_measurement_version=None,
+                    was_converted_from=was_converted_from,
+                ),
+                preserve_spectral_measurement_version=True,
+                codec="mp3",
+                container="mp3",
+                storage_format="MP3",
+            )
+            self.db.upsert_album_quality_evidence(evidence)
+            stored = self.db.find_album_quality_evidence(
+                mb_release_id=release,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+            )
+            assert stored is not None and stored.id is not None
+            return stored.id
+
+        dual_release = "transition-preserved-current-source"
+        dual_request_id = self._request(dual_release)
+        dual_id = source_evidence(
+            dual_release,
+            45,
+            provenance="carried",
+            was_converted_from="flac",
+        )
+        self.assertTrue(
+            self.db.set_request_current_evidence(dual_request_id, dual_id)
+        )
+        job = self.db.enqueue_import_job(
+            "force_import",
+            request_id=dual_request_id,
+            payload={"download_log_id": 45, "failed_path": "/tmp/dual"},
+        )
+        self.assertTrue(self.db.set_import_job_candidate_evidence(job.id, dual_id))
+
+        native_release = "transition-remeasurable-current-source"
+        native_request_id = self._request(native_release)
+        native_id = source_evidence(
+            native_release,
+            46,
+            provenance="measured",
+            was_converted_from=None,
+        )
+        self.assertTrue(
+            self.db.set_request_current_evidence(native_request_id, native_id)
+        )
+        audit_id = self._evidence("transition-audit", 46)
+
+        def source_counts() -> tuple[int, int, int]:
+            row = self.db._execute("""
+                SELECT
+                    (SELECT COUNT(*) FROM album_quality_evidence) AS evidence,
+                    (SELECT COUNT(*) FROM import_jobs) AS jobs,
+                    (SELECT COUNT(*) FROM album_requests) AS requests
+            """).fetchone()
+            assert row is not None
+            return int(row["evidence"]), int(row["jobs"]), int(row["requests"])
+
+        before = source_counts()
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            corpus_path = root / "corpus.jsonl"
+            coverage_path = root / "coverage.json"
+            report_path = root / "transition.json"
+            result = export_decision_corpus(
+                TEST_DSN,
+                corpus_path,
+                coverage_path,
+            )
+            self.assertTrue(result.green)
+            report = replay_decision_transitions(
+                corpus_path,
+                coverage_path,
+                report_path,
+            )
+
+        self.assertEqual(source_counts(), before)
+        self.assertEqual(report.total_matrix_classes, 3)
+        self.assertEqual(
+            {row.evidence_id for row in report.representatives},
+            {audit_id, dual_id, native_id},
+        )
+        self.assertTrue(
+            all(row.exact_import_job_fk for row in report.representatives)
+        )
+        self.assertTrue(report.green)
+        self.assertEqual(report.transition_violations, 0)
+        by_role = {
+            row.observed_role: row for row in report.representatives
+        }
+        self.assertEqual(
+            by_role["current"].canonical_spectral_generation,
+            SPECTRAL_MEASUREMENT_VERSION,
+        )
+        self.assertIsNone(
+            by_role["dual"].canonical_spectral_generation,
+        )
+        self.assertEqual(
+            report.decided
+            + report.snapshot_refused
+            + report.admission_refused
+            + report.producer_refused,
+            report.total_matrix_classes,
+        )
+
+    def test_source_snapshot_state_distinguishes_present_and_missing_candidates(
+        self,
+    ) -> None:
+        """v3 binds observational source state without making path authority."""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            present = root / "present"
+            present.mkdir()
+            (present / "01.mp3").write_bytes(b"candidate")
+            missing = root / "missing"
+
+            ids: dict[str, int] = {}
+            for label, source in (("present", present), ("missing", missing)):
+                release = f"source-state-{label}"
+                request_id = self._request(release)
+                files = snapshot_audio_files(str(present))
+                evidence = make_album_quality_evidence(
+                    mb_release_id=release,
+                    source_path=str(source),
+                    files=files,
+                )
+                self.db.upsert_album_quality_evidence(evidence)
+                stored = self.db.find_album_quality_evidence(
+                    mb_release_id=release,
+                    snapshot_fingerprint=evidence.snapshot_fingerprint,
+                )
+                assert stored is not None and stored.id is not None
+                ids[label] = stored.id
+                job = self.db.enqueue_import_job(
+                    "force_import",
+                    request_id=request_id,
+                    payload={
+                        "download_log_id": stored.id,
+                        "failed_path": str(source),
+                    },
+                )
+                self.assertTrue(
+                    self.db.set_import_job_candidate_evidence(job.id, stored.id)
+                )
+
+            corpus = root / "corpus.jsonl"
+            coverage_path = root / "coverage.json"
+            report_path = root / "transition.json"
+            export_decision_corpus(TEST_DSN, corpus, coverage_path)
+            coverage = json.loads(coverage_path.read_text())
+            observed = {
+                row["evidence_id"]: row["source_snapshot_state"]
+                for row in coverage["observed_evidence"]
+            }
+            roles = {
+                row["evidence_id"]: row["matrix_class"]
+                for row in coverage["evidence_roles"]
+            }
+
+            self.assertEqual(observed[ids["present"]], "present_exact")
+            self.assertEqual(observed[ids["missing"]], "missing")
+            self.assertIn("source=present_exact", roles[ids["present"]])
+            self.assertIn("source=missing", roles[ids["missing"]])
+
+            report = replay_decision_transitions(
+                corpus,
+                coverage_path,
+                report_path,
+            )
+
+        by_id = {row.evidence_id: row for row in report.representatives}
+        self.assertEqual(by_id[ids["present"]].expected_outcome, "decided")
+        self.assertEqual(by_id[ids["present"]].outcome, "decided")
+        self.assertEqual(
+            by_id[ids["missing"]].expected_outcome,
+            "snapshot_refused",
+        )
+        self.assertEqual(by_id[ids["missing"]].outcome, "snapshot_refused")
+        self.assertTrue(report.green)
+
+    def test_transition_runs_from_filtered_runtime_without_tests(self) -> None:
+        """The deployed -I wrapper owns every transition runtime import."""
+        evidence_id = self._evidence("filtered-runtime-transition", 77)
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            corpus = root / "corpus.jsonl"
+            coverage = root / "coverage.json"
+            report = root / "transition.json"
+            export_decision_corpus(TEST_DSN, corpus, coverage)
+
+            runtime = root / "runtime"
+            runtime.mkdir()
+            repository = Path(__file__).parents[1]
+            for directory in ("lib", "web", "harness", "scripts", "migrations"):
+                shutil.copytree(
+                    repository / directory,
+                    runtime / directory,
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+                )
+            self.assertFalse((runtime / "tests").exists())
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    str(runtime / "scripts" / "decision_differential.py"),
+                    "transition",
+                    "--corpus",
+                    str(corpus),
+                    "--coverage",
+                    str(coverage),
+                    "--out",
+                    str(report),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            replay = json.loads(report.read_text(encoding="utf-8"))
+            self.assertTrue(replay["green"])
+            self.assertEqual(
+                [row["evidence_id"] for row in replay["representatives"]],
+                [evidence_id],
+            )
+
+    def test_transition_sparse_snapshot_restores_exported_mtime(self) -> None:
+        """Replay files retain the complete stored manifest, including mtime."""
+        mtime_ns = 1_700_000_000_123_456_789
+        file = AlbumQualityEvidenceFile(
+            relative_path="disc/01.flac",
+            size_bytes=4096,
+            mtime_ns=mtime_ns,
+            extension="flac",
+            container="flac",
+            codec="flac",
+        )
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _materialize_transition_snapshot(root, [file])
+            materialized = root / "disc" / "01.flac"
+            stat = materialized.stat()
+
+        self.assertEqual(stat.st_size, file.size_bytes)
+        self.assertEqual(stat.st_mtime_ns, file.mtime_ns)
+
     def test_real_migrated_schema_passes_the_production_checker(self) -> None:
         """Deterministic outer PG pin for every consumed column contract."""
         with self.db.conn.cursor() as cursor:
@@ -323,7 +680,8 @@ class TestDecisionCorpusExport(unittest.TestCase):
         assert isinstance(mismatches, list)
         assert is_str_object_dict(mismatches[0])
         self.assertEqual(mismatches[0]["evidence_id"], candidate_id)
-        self.assertEqual(corpus, [])
+        self.assertEqual([row["id"] for row in corpus], [candidate_id])
+        self.assertFalse(corpus[0]["is_candidate"])
         outputs = coverage["outputs"]
         assert is_str_object_dict(outputs)
         corpus_output = outputs["corpus"]
@@ -356,7 +714,10 @@ class TestDecisionCorpusExport(unittest.TestCase):
             {row["evidence_id"] for row in observed if is_str_object_dict(row)},
             {candidate_id, current_id},
         )
-        self.assertEqual(corpus, [])
+        self.assertEqual(
+            [row["id"] for row in corpus], [candidate_id, current_id]
+        )
+        self.assertTrue(all(not row["is_candidate"] for row in corpus))
         outputs = coverage["outputs"]
         assert is_str_object_dict(outputs)
         corpus_output = outputs["corpus"]
@@ -488,7 +849,8 @@ class TestDecisionCorpusExport(unittest.TestCase):
         result, corpus, coverage = self._export()
 
         self.assertFalse(result.green)
-        self.assertEqual(corpus, [])
+        self.assertEqual([row["id"] for row in corpus], [candidate_id])
+        self.assertFalse(corpus[0]["is_candidate"])
         mismatches = coverage["content_address_mismatches"]
         assert isinstance(mismatches, list) and mismatches
         assert is_str_object_dict(mismatches[0])
@@ -562,7 +924,14 @@ class TestDecisionCorpusExport(unittest.TestCase):
                 }
             ],
         )
-        self.assertEqual([row["id"] for row in corpus], [valid_id])
+        self.assertEqual(
+            [row["id"] for row in corpus],
+            [conflicted_id, current_id, valid_id],
+        )
+        self.assertEqual(
+            [row["is_candidate"] for row in corpus],
+            [False, False, True],
+        )
 
     def test_batch_size_and_source_order_do_not_change_bytes(self) -> None:
         """A repeatable snapshot has one deterministic JSONL/coverage form."""

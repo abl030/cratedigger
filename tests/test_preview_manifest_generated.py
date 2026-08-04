@@ -85,6 +85,7 @@ from lib.quality import (
     SpectralAnalysisDetail,
     SpectralDetail,
 )
+from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
 from lib.staged_album import StagedAlbum
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.finite_domain import finite_generated_domain
@@ -255,6 +256,7 @@ def _stub_import_one_run() -> ImportOneRun:
             ),
             spectral=SpectralDetail(candidate=SpectralAnalysisDetail(
                 attempted=True, grade="genuine", bitrate_kbps=1000,
+                spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
             )),
         ),
     )
@@ -283,6 +285,20 @@ def _run_owned_preview_action(
     lookup (both legitimate external-edge seams) are stubbed."""
     run = _stub_import_one_run()
     handoffs: list[PreviewActionFileHandoff] = []
+    if db.get_import_job(import_job_id) is None:
+        download_log_id = db.log_download(
+            request_id=request_id,
+            outcome="rejected",
+        )
+        job = db.enqueue_import_job(
+            "force_import",
+            request_id=request_id,
+            payload={
+                "download_log_id": download_log_id,
+                "failed_path": canonical_dir,
+            },
+        )
+        assert job.id == import_job_id
 
     def _capture_action_file_handoff(**kwargs: object) -> ImportOneRun:
         action_file = kwargs["quality_evidence_action_file"]
@@ -305,6 +321,7 @@ def _run_owned_preview_action(
             existing_spectral_resolver=lambda _mbid: ExistingSpectralAuditLookup(),
             spectral_detail_analyzer=lambda _path: SpectralAnalysisDetail(
                 attempted=True, grade="genuine", bitrate_kbps=1000,
+                spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
             ),
         )
     assert len(handoffs) == 1, "lossless preview must hand off one action file"

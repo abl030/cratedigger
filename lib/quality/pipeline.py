@@ -9,7 +9,7 @@ Extracted verbatim from the monolithic ``lib/quality.py`` (issue #477).
 Pure move: every definition is AST-identical to the original.
 """
 
-from typing import Any
+from typing import Any, Literal
 
 import msgspec
 
@@ -82,6 +82,42 @@ from lib.quality.verdict_tiers import AlbumProofVerdict, proof_verdict_from_fact
 #: "there was nothing to audit" are different facts and the operator is
 #: entitled to both. Deliberately outside the Stage-2 decision vocabulary.
 STAGE2_COUNTERFACTUAL_UNAVAILABLE = "unavailable"
+
+
+CandidatePreimportRejectFact = Literal[
+    "audio_corrupt",
+    "bad_audio_hash",
+    "nested_layout",
+    "empty_fileset",
+    "mixed_source",
+]
+
+
+def candidate_preimport_reject_fact(
+    candidate: AlbumQualityEvidence,
+) -> CandidatePreimportRejectFact | None:
+    """Return the first persisted fact that makes spectral policy irrelevant.
+
+    This classifies evidence shape; it does not decide an import.  The unified
+    reducer below remains the only authority that turns the fact into a
+    verdict.  Action admission also uses this classifier so a concrete early
+    fact can reach that reducer without being mistaken for a reusable spectral
+    cache entry.
+    """
+    if candidate.audio_corrupt:
+        return "audio_corrupt"
+    if candidate.matched_bad_audio_hash_id is not None:
+        return "bad_audio_hash"
+    if candidate.folder_layout == "nested":
+        return "nested_layout"
+    effective_audio_file_count = (
+        len(candidate.files) if candidate.files else candidate.audio_file_count
+    )
+    if effective_audio_file_count == 0:
+        return "empty_fileset"
+    if has_mixed_lossless_and_lossy(candidate.files):
+        return "mixed_source"
+    return None
 
 def full_pipeline_decision(
     # File properties
@@ -1607,17 +1643,18 @@ def full_pipeline_decision_from_evidence(
             "comparison_basis_if_stage1_deferred": None,
         })
 
-    if candidate.audio_corrupt:
+    preimport_fact = candidate_preimport_reject_fact(candidate)
+    if preimport_fact == "audio_corrupt":
         return _early_reject_result(
             preimport_audio="reject_corrupt",
         )
 
-    if candidate.matched_bad_audio_hash_id is not None:
+    if preimport_fact == "bad_audio_hash":
         return _early_reject_result(
             preimport_bad_hash="reject_bad_hash",
         )
 
-    if candidate.folder_layout == "nested":
+    if preimport_fact == "nested_layout":
         return _early_reject_result(
             preimport_nested="reject_nested",
         )
@@ -1626,10 +1663,7 @@ def full_pipeline_decision_from_evidence(
     # the SQL default 0 but may carry snapshot files. Only the
     # explicit-and-corroborated zero case (count=0 AND no snapshot files)
     # is the empty_fileset reject.
-    effective_audio_file_count = (
-        len(candidate.files) if candidate.files else candidate.audio_file_count
-    )
-    if effective_audio_file_count == 0:
+    if preimport_fact == "empty_fileset":
         return _early_reject_result(
             preimport_empty_fileset="reject_empty",
         )
@@ -1638,7 +1672,7 @@ def full_pipeline_decision_from_evidence(
     # Cratedigger stays release-based — a partial FLAC+MP3 source must
     # never get partially-imported and stamped verified-lossless. See
     # ``has_mixed_lossless_and_lossy`` and the Fast Times reproduction.
-    if has_mixed_lossless_and_lossy(candidate.files):
+    if preimport_fact == "mixed_source":
         return _early_reject_result(
             preimport_mixed_source="reject_mixed_source",
         )

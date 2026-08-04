@@ -513,7 +513,20 @@ class TestDecisionCorpusExportGenerated(unittest.TestCase):
                 (dual_id, dual_id, release),
                 (unpaired_id, None, unpaired_release),
             ]
-            assert_export_output_exact(corpus, associations, [dual_id])
+            all_evidence_ids = sorted({
+                paired_id,
+                dual_id,
+                authorityless_id,
+                conflict_id,
+                wrong_current_id,
+                unpaired_id,
+            })
+            assert_export_output_exact(
+                corpus,
+                associations,
+                [dual_id],
+                expected_all_evidence_ids=all_evidence_ids,
+            )
             self.assertEqual(coverage["total_source_links"], 6 * multiplicity + 1)
             self.assertEqual(
                 coverage["source_link_counts"],
@@ -566,8 +579,12 @@ class TestDecisionCorpusExportGenerated(unittest.TestCase):
                 ],
             )
             self.assertEqual(output["expected_referenced_current_ids"], [dual_id])
-            self.assertEqual(output["expected_current_only_ids"], [])
+            self.assertEqual(
+                output["expected_current_only_ids"],
+                sorted({authorityless_id, conflict_id, wrong_current_id}),
+            )
             self.assertEqual(output["dual_role_ids"], [dual_id])
+            self.assertEqual(output["expected_evidence_ids"], all_evidence_ids)
             self.assertEqual(output["sha256"], sha256(corpus_bytes).hexdigest())
         finally:
             db.close()
