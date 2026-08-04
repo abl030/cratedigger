@@ -10,12 +10,25 @@ from __future__ import annotations
 from collections.abc import Mapping
 from types import MappingProxyType
 
-# Beets' ``items.format`` is generally a codec family, except for these
-# product/container labels.  Unknown labels deliberately retain their source
-# spelling so downstream validation remains fail-closed.
-BEETS_FORMAT_ALIASES: Mapping[str, str] = MappingProxyType({
+# Beets' admitted ``items.format`` vocabulary. It is generally a codec family,
+# except for the product/container labels below. Unknown labels deliberately
+# retain their source spelling so downstream validation remains fail-closed.
+BEETS_CODEC_LABELS: Mapping[str, str] = MappingProxyType({
+    "mp3": "mp3",
+    "aac": "aac",
+    "alac": "alac",
+    "flac": "flac",
+    "opus": "opus",
+    "vorbis": "vorbis",
+    "wav": "wav",
+    "wma": "wma",
     "windows media": "wma",
     "ogg": "vorbis",
+})
+BEETS_FORMAT_ALIASES: Mapping[str, str] = MappingProxyType({
+    observed: canonical
+    for observed, canonical in BEETS_CODEC_LABELS.items()
+    if observed != canonical
 })
 
 # These are codec facts, rather than filename-extension policy.  In
@@ -48,6 +61,13 @@ def canonical_beets_format(observed: str) -> str:
     """Return Beets' evidence-facing canonical format without guessing unknowns."""
 
     return BEETS_FORMAT_ALIASES.get(observed.lower(), observed)
+
+
+def canonical_beets_codec(observed: str) -> str:
+    """Return a lowercase canonical codec for aggregate authority checks."""
+
+    normalized = observed.strip().lower()
+    return BEETS_CODEC_LABELS.get(normalized, normalized)
 
 
 def is_lossless_evidence_codec(codec: str | None) -> bool:

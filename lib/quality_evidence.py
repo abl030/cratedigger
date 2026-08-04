@@ -1108,9 +1108,21 @@ def propagate_candidate_evidence_to_current(
     output_source_format = (
         measured_source_format if is_transcode else None
     )
+    reduced_format = str(getattr(album_info, "format", "")).strip().lower()
+    album_formats = frozenset(
+        str(value).strip().lower()
+        for value in getattr(album_info, "formats_on_disk", frozenset())
+        if str(value).strip()
+    )
+    if not album_formats and reduced_format:
+        album_formats = frozenset({reduced_format})
+    album_format_is_authoritative = (
+        len(album_formats) == 1 and reduced_format in album_formats
+    )
     carry_spectral = (
         candidate_measurement.spectral_grade is not None
         and candidate_measurement.spectral_subject == EVIDENCE_SUBJECT_SOURCE
+        and album_format_is_authoritative
     )
     carried_v0 = (
         msgspec.structs.replace(

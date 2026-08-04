@@ -1328,6 +1328,11 @@ calibration registry. The preserved-source exception requires one authoritative
 pair, not separate membership checks: OGG/Vorbis and OGG/Opus are lossy, M4A/AAC
 is lossy, while M4A/ALAC and FLAC/FLAC are not. A container never guesses its
 codec; missing, conflicting, or unfamiliar pairs remain generation-strict.
+`AlbumInfo.formats_on_disk` retains the canonical aggregate from every Beets
+item alongside the existing rank-selected `format`. Source-subject spectral
+facts carry only when that aggregate names exactly one codec. Thus AAC+ALAC in
+one M4A album and Vorbis+FLAC or Vorbis+Opus in one OGG album fail closed
+without inventing per-track evidence authority or changing persisted snapshots.
 
 **Motivation (request 6039 / download_log 36608):** a genuine avg 196→288
 rank upgrade (GOOD → TRANSPARENT) rendered as "Upgrade: MP3 V2 to MP3 V2"
