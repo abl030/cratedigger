@@ -7,7 +7,9 @@ import os
 import re
 import sys
 import threading
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import redirect_stdout
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -19,6 +21,7 @@ from urllib.request import Request, urlopen
 
 sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401 — bootstraps TEST_DB_DSN for the live-db test
+import psycopg2
 
 from scripts.web_dev_server import (
     DevConfig,
@@ -34,6 +37,56 @@ from tests.test_web_cache import FakeRedis
 INSECURE_AUTH_WARNING = (
     "Authentication is disabled for this Cratedigger instance."
 )
+_CONCURRENT_ARTIST_ID = "4fa9413b-7c10-4342-8ddb-b1cd8e82f9e1"
+_CONCURRENT_ARTIST_NAME = "Synthetic Artist"
+
+
+def _get_http_outcome(
+    base: str, path: str,
+) -> tuple[str, int, dict[str, object]]:
+    """Read one real dev-server route while retaining HTTP error payloads."""
+    try:
+        with urlopen(f"{base}{path}", timeout=10) as response:
+            payload = json.loads(response.read())
+            return path, response.status, payload
+    except HTTPError as exc:
+        with exc:
+            payload = json.loads(exc.read())
+        return path, exc.code, payload
+
+
+def assert_live_db_parallel_outcomes(
+    outcomes: list[tuple[str, int, dict[str, object]]],
+) -> None:
+    """Every admitted concurrent live-db read must complete successfully."""
+    failures = [
+        (path, status, payload.get("error"))
+        for path, status, payload in outcomes
+        if status != 200
+    ]
+    if failures:
+        raise AssertionError(f"live-db concurrent reads failed: {failures!r}")
+
+
+def _wait_for_blocked_backend(dsn: str, backend_pid: int) -> None:
+    """Wait until the shared dev session is blocked on the test table lock."""
+    observer = psycopg2.connect(dsn)
+    observer.autocommit = True
+    try:
+        deadline = time.monotonic() + 5
+        with observer.cursor() as cursor:
+            while time.monotonic() < deadline:
+                cursor.execute(
+                    "SELECT wait_event_type FROM pg_stat_activity WHERE pid = %s",
+                    (backend_pid,),
+                )
+                row = cursor.fetchone()
+                if row is not None and row[0] == "Lock":
+                    return
+                time.sleep(0.01)
+    finally:
+        observer.close()
+    raise AssertionError("shared live-db session never blocked on PostgreSQL lock")
 
 
 def assert_preview_badge_in_normal_flow(body: str) -> None:
@@ -653,8 +706,9 @@ class _MetadataMirrorHandler(BaseHTTPRequestHandler):
                 payload = {"release-groups": [], "release-group-count": 0}
             elif parsed.path == "/ws/2/release":
                 payload = {"releases": [], "release-count": 0}
-            elif parsed.path == "/ws/2/artist/test-mbid":
-                payload = {"id": "test-mbid", "name": "Synthetic Artist"}
+            elif parsed.path.startswith("/ws/2/artist/"):
+                artist_id = parsed.path.rsplit("/", 1)[-1]
+                payload = {"id": artist_id, "name": _CONCURRENT_ARTIST_NAME}
             else:
                 self.send_error(404)
                 return
@@ -700,7 +754,7 @@ class WebDevServerLiveDbMetadataIntegrationTest(unittest.TestCase):
         import web.mb
         import web.server
 
-        self.dsn = os.environ.get("TEST_DB_DSN")
+        self.dsn = os.environ["TEST_DB_DSN"]
         self.web_discogs = web.discogs
         self.web_cache = web.cache
         self.web_mb = web.mb
@@ -848,6 +902,78 @@ class WebDevServerLiveDbMetadataIntegrationTest(unittest.TestCase):
             urlopen(f"{missing_base}{resolve_path}")
         self.assertEqual(resolve_raised.exception.code, 503)
 
+    def test_concurrent_artist_compare_and_library_reads_share_no_session_state(
+        self,
+    ) -> None:
+        """The exact screenshot flow stays healthy under forced DB overlap."""
+        mb = _MetadataMirrorServer("mb")
+        discogs = _MetadataMirrorServer("discogs")
+        self._start(mb)
+        self._start(discogs)
+        base = self._start_live_server(self._live_config(
+            mb_api=f"{mb.origin}/ws/2",
+            discogs_api=discogs.origin,
+        ))
+        artist_path = (
+            f"/api/artist/{_CONCURRENT_ARTIST_ID}?"
+            f"name={_CONCURRENT_ARTIST_NAME.replace(' ', '%20')}"
+        )
+        compare_path = (
+            "/api/artist/compare?name=Synthetic%20Artist&"
+            f"mbid={_CONCURRENT_ARTIST_ID}&discogs_id=60"
+        )
+        library_path = (
+            "/api/library/artist?name=Synthetic%20Artist&"
+            f"mbid={_CONCURRENT_ARTIST_ID}"
+        )
+
+        # Warm only pure metadata. The forced overlap below still drives every
+        # production route's PostgreSQL overlay through the real HTTP adapter.
+        assert_live_db_parallel_outcomes([
+            _get_http_outcome(base, artist_path),
+            _get_http_outcome(base, compare_path),
+        ])
+
+        shared = self.web_server.db
+        self.assertIsNotNone(shared)
+        assert shared is not None
+        backend_pid = shared.conn.get_backend_pid()
+        blocker = psycopg2.connect(self.dsn)
+        blocker.autocommit = False
+        try:
+            with blocker.cursor() as cursor:
+                cursor.execute(
+                    "LOCK TABLE album_requests IN ACCESS EXCLUSIVE MODE"
+                )
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                library = executor.submit(
+                    _get_http_outcome, base, library_path,
+                )
+                _wait_for_blocked_backend(self.dsn, backend_pid)
+                artist = executor.submit(_get_http_outcome, base, artist_path)
+                compare = executor.submit(_get_http_outcome, base, compare_path)
+
+                # On the historical implementation both later requests fail
+                # immediately against the blocked singleton session. A correct
+                # implementation keeps them pending at the serialization
+                # boundary until the first query can finish.
+                wait((artist, compare), timeout=0.5)
+                blocker.commit()
+                outcomes = [
+                    library.result(timeout=10),
+                    artist.result(timeout=10),
+                    compare.result(timeout=10),
+                ]
+        finally:
+            blocker.rollback()
+            blocker.close()
+
+        assert_live_db_parallel_outcomes(outcomes)
+        payloads = {path: payload for path, _status, payload in outcomes}
+        self.assertIn("albums", payloads[library_path])
+        self.assertIn("release_groups", payloads[artist_path])
+        self.assertIn("mb_artist", payloads[compare_path])
+
 
 class ConfigureLiveDbReadOnlyTest(unittest.TestCase):
     """`--data live-db` sessions must stay read-only after #427.
@@ -911,6 +1037,38 @@ class ConfigureLiveDbReadOnlyTest(unittest.TestCase):
             ws._db()._execute(
                 "INSERT INTO album_requests (artist_name, album_title, source)"
                 " VALUES ('ro', 'ro', 'request')"
+            )
+
+    def test_internal_reconnect_restores_read_only_session_default(self):
+        from scripts.web_dev_server import configure_live_db
+
+        config = DevConfig(
+            data="live-db",
+            scenario="peers",
+            prod_base_url="https://music.ablz.au",
+            dsn=self.dsn,
+            beets_db=None,
+            mb_api=None,
+            discogs_api=None,
+            redis_host=None,
+            redis_port=6379,
+        )
+        configure_live_db(config)
+        ws = self.web_server
+        configured = ws._db()
+        original_connection = configured.conn
+
+        original_connection.close()
+        row = configured._execute(
+            "SHOW default_transaction_read_only"
+        ).fetchone()
+
+        self.assertIsNot(configured.conn, original_connection)
+        self.assertEqual(row["default_transaction_read_only"], "on")
+        with self.assertRaises(psycopg2.Error):
+            configured._execute(
+                "INSERT INTO album_requests (artist_name, album_title, source)"
+                " VALUES ('reconnected-ro', 'reconnected-ro', 'request')"
             )
 
 
