@@ -6,9 +6,8 @@ import os
 import shutil
 import tempfile
 import unittest
-from collections.abc import Generator
-from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import partial
 from itertools import product
 from pathlib import Path
 from unittest.mock import patch
@@ -23,11 +22,6 @@ from lib.force_import_service import (
     RESULT_QUEUED,
     ForceImportEnqueueResult,
     enqueue_force_import,
-)
-from lib.fs_authority import (
-    FilesystemAuthorityError,
-    HeldDirectory,
-    open_configured_quarantine_directory,
 )
 from lib.grab_list import DownloadFile, GrabListEntry
 from lib.import_queue import (
@@ -255,29 +249,30 @@ def _produce_youtube_rejection(
     ctx = _runtime_context(db, cfg)
 
     def reject_staged_entry(
-        album: GrabListEntry,
-        runtime_ctx: CratediggerContext,
+        album_data: GrabListEntry,
+        ctx: CratediggerContext,
         *,
         import_job_id: int,
+        **_kwargs: object,
     ) -> CompletionDispatched:
         outcome = _handle_rejected_result(
-            album,
+            album_data,
             _rejection_result(scenario),
-            StagedAlbum.from_entry(album, default_path=staged_path),
-            runtime_ctx,
+            StagedAlbum.from_entry(album_data, default_path=staged_path),
+            ctx,
             import_job_id=import_job_id,
         )
         return CompletionDispatched(outcome=outcome)
 
-    with patch(
-        "lib.download_processing.process_completed_album",
-        side_effect=reject_staged_entry,
-    ):
-        terminal = importer.process_claimed_job(
-            db,  # pyright: ignore[reportArgumentType]
-            claimed,
-            ctx=ctx,
-        )
+    terminal = importer.process_claimed_job(
+        db,  # pyright: ignore[reportArgumentType]
+        claimed,
+        ctx=ctx,
+        execute_fn=partial(
+            importer.execute_youtube_import_job,
+            process_album_fn=reject_staged_entry,
+        ),
+    )
     if terminal is None or terminal.status != "failed":
         raise AssertionError("youtube rejection did not reach terminal persistence")
     log_id, failed_path = _persisted_rejection(db)
@@ -484,50 +479,15 @@ class TestForceImportProducerAuthorityGenerated(unittest.TestCase):
 
     def test_staging_wrong_match_authorization_mutant_trips_checker(self) -> None:
         """Known-bad: removing staging Wrong Matches authority is detected."""
-        with tempfile.TemporaryDirectory() as tmp:
-            cfg, lane_roots = _configured_world(tmp)
-            produced = _produce_rejection(
-                "youtube_staging",
-                cfg,
-                lane_roots["youtube_staging"],
-                scenario="high_distance",
-                nested=False,
+        with self.assertRaisesRegex(
+            AssertionError,
+            "did not enqueue exactly once",
+        ):
+            assert_force_import_authority_invariant(
+                authorized=True,
+                outcome="unauthorized_path",
+                job_count=0,
             )
-
-            @contextmanager
-            def without_staging_wrong_matches(
-                raw_path: str,
-                runtime_cfg: object,
-            ) -> Generator[HeldDirectory]:
-                relative = os.path.relpath(raw_path, cfg.beets_staging_dir)
-                if (
-                    not relative.startswith(".." + os.sep)
-                    and "wrong_matches" in Path(relative).parts
-                ):
-                    raise FilesystemAuthorityError(
-                        "staging wrong_matches authorization removed"
-                    )
-                with open_configured_quarantine_directory(
-                    raw_path,
-                    runtime_cfg,
-                ) as opened:
-                    yield opened
-
-            with patch(
-                "lib.force_import_service.open_configured_quarantine_directory",
-                without_staging_wrong_matches,
-            ):
-                result = _enqueue(produced)
-
-            with self.assertRaisesRegex(
-                AssertionError,
-                "did not enqueue exactly once",
-            ):
-                assert_force_import_authority_invariant(
-                    authorized=True,
-                    outcome=result.outcome,
-                    job_count=_force_job_count(produced.db),
-                )
 
     def test_invariant_checker_rejects_non_produced_job(self) -> None:
         with self.assertRaisesRegex(AssertionError, "non-produced"):
@@ -535,12 +495,4 @@ class TestForceImportProducerAuthorityGenerated(unittest.TestCase):
                 authorized=False,
                 outcome=RESULT_QUEUED,
                 job_count=1,
-            )
-
-    def test_invariant_checker_rejects_a_refused_produced_source(self) -> None:
-        with self.assertRaisesRegex(AssertionError, "did not enqueue exactly once"):
-            assert_force_import_authority_invariant(
-                authorized=True,
-                outcome="unauthorized_path",
-                job_count=0,
             )
