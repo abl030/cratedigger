@@ -194,8 +194,8 @@ candidate measurement with NULL lineage clears legacy candidate contamination
 at the same content address unless the canonical row is also current-linked.
 For that shared-row case, storage retains the installed history while every
 candidate projection uses `was_converted_from=NULL` — action-time policy,
-`pipeline-cli quality`, and Recents all see the same source semantics, so
-output lineage never becomes a source measurement.
+`pipeline-cli quality`, Recents, and Wrong Matches all see the same source
+semantics, so output lineage never becomes a source measurement.
 Source-subject V0 and verified-lossless proof remain provenance rather than a
 database claim that current bytes are irrecoverable. The application preserves
 old source-subject spectral only when the exact manifest also proves a known

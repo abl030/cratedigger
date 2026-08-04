@@ -9841,6 +9841,69 @@ class TestGetWrongMatches(unittest.TestCase):
             AccusationFlags(admissible=True),
         )
 
+    def test_shared_wrong_match_projects_candidate_source_lineage(self):
+        """A current-linked canonical row cannot lend lineage to a candidate."""
+        from lib.pipeline_db._shared import (
+            CANDIDATE_EVIDENCE_PREFIX,
+            CURRENT_EVIDENCE_PREFIX,
+        )
+        from web.classify import (
+            AccusationFlags,
+            evidence_column_accusation_flags,
+        )
+
+        self._log_rejected(self.req1, "peer", "/failed/Shared")
+        log_id = self.db.get_wrong_matches()[0]["download_log_id"]
+        shared = make_album_quality_evidence(
+            mb_release_id="wm-uuid-1",
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=128,
+                avg_bitrate_kbps=130,
+                median_bitrate_kbps=129,
+                format="Opus",
+                spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=128,
+                spectral_subject="source",
+                spectral_provenance="measured",
+                was_converted_from="flac",
+            ),
+            codec="opus",
+            container="opus",
+            storage_format="Opus",
+        )
+        self.db.upsert_album_quality_evidence(shared)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=shared.mb_release_id,
+            snapshot_fingerprint=shared.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.db.set_download_log_candidate_evidence(log_id, stored.id)
+        self.assertTrue(
+            self.db.set_request_current_evidence(self.req1, stored.id)
+        )
+
+        row = self.db.get_wrong_matches()[0]
+
+        self.assertIsNone(row["_evidence_was_converted_from"])
+        self.assertEqual(
+            evidence_column_accusation_flags(
+                row, prefix=CANDIDATE_EVIDENCE_PREFIX,
+            ),
+            AccusationFlags(admissible=False, withheld="audit_only_codec"),
+        )
+        self.assertEqual(
+            row["_current_evidence_was_converted_from"], "flac",
+        )
+        self.assertEqual(
+            evidence_column_accusation_flags(
+                row, prefix=CURRENT_EVIDENCE_PREFIX,
+            ),
+            AccusationFlags(admissible=True),
+        )
+        reloaded = self.db.load_album_quality_evidence_by_id(stored.id)
+        assert reloaded is not None
+        self.assertEqual(reloaded.measurement.was_converted_from, "flac")
+
     def test_terminal_audio_corrupt_retained_auto_import_is_not_wrong_match(self):
         """#867: terminal evidence outranks an earlier strong match envelope."""
         from lib.dispatch.types import PostCommitQuarantineAudit

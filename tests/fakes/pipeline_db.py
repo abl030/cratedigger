@@ -6312,8 +6312,12 @@ class FakePipelineDB:
                 measurement.spectral_subject
                 if measurement is not None else None),
             f"{prefix}was_converted_from": (
-                measurement.was_converted_from
-                if measurement is not None else None),
+                None
+                if prefix == CANDIDATE_EVIDENCE_PREFIX
+                else measurement.was_converted_from
+                if measurement is not None
+                else None
+            ),
             f"{prefix}cliff_hz": (
                 measurement.cliff_hz if measurement is not None else None),
             f"{prefix}codec_family": (

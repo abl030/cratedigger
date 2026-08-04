@@ -843,6 +843,26 @@ class TestAccusationEvidenceColumnsAreSpelledOnce(unittest.TestCase):
             "the two prefixes must project the same measurement",
         )
 
+    def test_generator_projects_conversion_lineage_by_evidence_role(
+        self,
+    ) -> None:
+        candidate = accusation_evidence_columns(
+            "e", CANDIDATE_EVIDENCE_PREFIX,
+        )
+        current = accusation_evidence_columns(
+            "current_evidence", CURRENT_EVIDENCE_PREFIX,
+        )
+
+        self.assertIn(
+            "NULL::text AS _evidence_was_converted_from", candidate,
+        )
+        self.assertNotIn("e.was_converted_from", candidate)
+        self.assertIn(
+            "current_evidence.was_converted_from AS "
+            "_current_evidence_was_converted_from",
+            current,
+        )
+
     def test_inline_candidate_block_matches_the_generator(self) -> None:
         self.assertLessEqual(
             self._expected("e", CANDIDATE_EVIDENCE_PREFIX),
