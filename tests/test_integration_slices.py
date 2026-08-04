@@ -6686,8 +6686,7 @@ class TestU6ImporterPreimportDecideSlice(unittest.TestCase):
             # the synthesised mb_release_id so distinct import_jobs in the
             # same test class get distinct evidence rows.
             mb_release_id=f"mbid-u6-cand-{owner_id}",
-            snapshot_fingerprint=snapshot_fingerprint(files) if files else
-                f"sha256:empty-fileset-{owner_id}",
+            snapshot_fingerprint=snapshot_fingerprint(files),
             source_path=f"/tmp/u6-cand-{owner_id}",
             measurement=AudioQualityMeasurement(
                 min_bitrate_kbps=min_bitrate_kbps,
