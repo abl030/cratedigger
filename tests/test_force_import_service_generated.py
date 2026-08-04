@@ -194,6 +194,15 @@ def _produce_download_rejection(
         StagedAlbum(current_path=source, request_id=867),
         ctx,
     )
+    if files:
+        if db.get_denylisted_users(867) != [{
+            "username": "peer",
+            "reason": "beets validation rejected",
+            "created_at": None,
+        }]:
+            raise AssertionError("slskd rejection did not persist its peer denylist")
+        if db.cooldowns_applied != ["peer"]:
+            raise AssertionError("slskd rejection did not evaluate its peer cooldown")
     log_id, failed_path = _persisted_rejection(db)
     return ProducedRejection(db, cfg, log_id, failed_path)
 
@@ -275,6 +284,10 @@ def _produce_youtube_rejection(
     )
     if terminal is None or terminal.status != "failed":
         raise AssertionError("youtube rejection did not reach terminal persistence")
+    if db.list_denylist_rows():
+        raise AssertionError("youtube rejection persisted a peer denylist")
+    if db.cooldowns_applied or db.user_cooldowns:
+        raise AssertionError("youtube rejection evaluated or persisted a cooldown")
     log_id, failed_path = _persisted_rejection(db)
     return ProducedRejection(db, cfg, log_id, failed_path)
 
