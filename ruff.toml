@@ -6,9 +6,22 @@ target-version = "py313"
 [lint]
 extend-select = [
   "B905",
+  "TID251",
 ]
 
+[lint.flake8-tidy-imports.banned-api]
+"tests".msg = "Runtime code must not import test-only modules."
+
 [lint.per-file-ignores]
+"scripts/run_fuzz_tests.py" = [
+  "TID251", # Deliberate adapter that discovers and runs tests.
+]
+"scripts/run_python_tests.py" = [
+  "TID251", # Deliberate adapter that discovers and runs tests.
+]
+"tests/**" = [
+  "TID251",
+]
 "tools/vulture/whitelist.py" = [
   "B018",
   "F821",
