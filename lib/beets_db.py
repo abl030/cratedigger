@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Literal, Self
 
 import msgspec
 
+from lib.evidence_media_identity import canonical_beets_format
 from lib.release_identity import (
     ConflictingReleaseIdentityError,
     ReleaseIdentity,
@@ -289,15 +290,6 @@ def validate_beets_storage_pair(
         )
 
 
-_BEETS_FORMAT_ALIASES = {
-    # Beets exposes these container/product labels, while quality policy ranks
-    # bare codec families. Keep this boundary deliberately closed: unfamiliar
-    # multiword labels must still reach evidence validation unchanged.
-    "windows media": "wma",
-    "ogg": "vorbis",
-}
-
-
 def _reduce_album_format(
     formats_on_disk: set[str],
     cfg: "QualityRankConfig",
@@ -319,11 +311,11 @@ def _reduce_album_format(
         if not observed:
             continue
         key = observed.lower()
-        alias = _BEETS_FORMAT_ALIASES.get(key)
-        if alias is None:
+        canonical = canonical_beets_format(observed)
+        if canonical == observed:
             normalized[key] = observed
         else:
-            normalized.setdefault(alias, alias)
+            normalized.setdefault(canonical, canonical)
     for preferred in cfg.mixed_format_precedence:
         if preferred in normalized:
             return normalized[preferred]

@@ -1320,6 +1320,15 @@ Canonical labels otherwise retain Beets's existing spelling/case. This is a
 closed alias map, not tokenization: an unfamiliar multiword label reaches the
 evidence validator unchanged and fails closed rather than being guessed.
 
+`lib/evidence_media_identity.py` owns the small vocabulary shared by this
+Beets projection and current-evidence authorization: canonical codec labels,
+snapshot container labels, native-lossless codecs, and the admitted lossy
+container/codec pairs. It is deliberately not a ranking, search, or spectral
+calibration registry. The preserved-source exception requires one authoritative
+pair, not separate membership checks: OGG/Vorbis and OGG/Opus are lossy, M4A/AAC
+is lossy, while M4A/ALAC and FLAC/FLAC are not. A container never guesses its
+codec; missing, conflicting, or unfamiliar pairs remain generation-strict.
+
 **Motivation (request 6039 / download_log 36608):** a genuine avg 196→288
 rank upgrade (GOOD → TRANSPARENT) rendered as "Upgrade: MP3 V2 to MP3 V2"
 because every UI label re-derived from min bitrate (194 on both sides).
