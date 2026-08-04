@@ -22,7 +22,6 @@ BEETS_FORMAT_ALIASES: Mapping[str, str] = MappingProxyType({
 # particular, M4A is absent because it is an ambiguous container: it may hold
 # AAC or ALAC and needs the authoritative codec label from Beets.
 EVIDENCE_LOSSLESS_CODECS = frozenset({"flac", "alac", "wav"})
-EVIDENCE_LOSSY_CODECS = frozenset({"mp3", "aac", "vorbis", "opus", "wma"})
 
 # Snapshot containers remain distinct from codecs.  The pair table is the
 # authority check for a preserved source measurement; a known lossy container
@@ -36,6 +35,9 @@ LOSSY_CODECS_BY_CONTAINER: Mapping[str, frozenset[str]] = MappingProxyType({
     "wma": frozenset({"wma"}),
 })
 
+EVIDENCE_LOSSY_CODECS: frozenset[str] = frozenset().union(
+    *LOSSY_CODECS_BY_CONTAINER.values()
+)
 EVIDENCE_LOSSLESS_CONTAINERS = frozenset({"flac", "alac", "wav", "aiff", "ape"})
 EVIDENCE_LOSSY_CONTAINERS = frozenset(LOSSY_CODECS_BY_CONTAINER)
 
@@ -65,7 +67,11 @@ def authoritative_lossy_media_pair(
     if container is None or codec is None:
         return False
     canonical_codec = codec.strip().lower()
-    return canonical_codec in LOSSY_CODECS_BY_CONTAINER.get(
+    allowed_codecs = LOSSY_CODECS_BY_CONTAINER.get(
         container.strip().lower(),
         frozenset(),
+    )
+    return (
+        canonical_codec in EVIDENCE_LOSSY_CODECS
+        and canonical_codec in allowed_codecs
     )

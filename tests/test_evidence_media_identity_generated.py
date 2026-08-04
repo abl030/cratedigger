@@ -10,6 +10,7 @@ from pathlib import Path
 from hypothesis import example, given
 from hypothesis import strategies as st
 
+import tests._hypothesis_profiles  # noqa: F401  (loads active profile)
 from lib.beets_db import BeetsDB
 from lib.evidence_media_identity import (
     authoritative_lossy_media_pair,
