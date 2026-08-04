@@ -85,6 +85,7 @@ from lib.quality import (
     SpectralAnalysisDetail,
     SpectralDetail,
 )
+from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
 from lib.staged_album import StagedAlbum
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.finite_domain import finite_generated_domain
@@ -255,6 +256,7 @@ def _stub_import_one_run() -> ImportOneRun:
             ),
             spectral=SpectralDetail(candidate=SpectralAnalysisDetail(
                 attempted=True, grade="genuine", bitrate_kbps=1000,
+                spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
             )),
         ),
     )
@@ -319,6 +321,7 @@ def _run_owned_preview_action(
             existing_spectral_resolver=lambda _mbid: ExistingSpectralAuditLookup(),
             spectral_detail_analyzer=lambda _path: SpectralAnalysisDetail(
                 attempted=True, grade="genuine", bitrate_kbps=1000,
+                spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
             ),
         )
     assert len(handoffs) == 1, "lossless preview must hand off one action file"

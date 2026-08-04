@@ -34,6 +34,7 @@ from lib.quality import (
 from lib.quality_evidence import (
     CandidateEvidencePersistenceReceipt,
     EvidenceBuildResult,
+    load_candidate_evidence_for_decision,
     snapshot_audio_files,
 )
 from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
@@ -106,6 +107,88 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
         assert persisted is not None and persisted.id is not None
         self.db.set_request_current_evidence(42, persisted.id)
         return persisted.id
+
+    def test_action_jsonb_rejects_semantically_forged_receipt(self) -> None:
+        """#1030: strict wire decoding is followed by semantic validation."""
+        from lib.import_queue import (
+            IMPORT_JOB_FORCE,
+            force_import_dedupe_key,
+            force_import_payload,
+        )
+        from tests.helpers import claim_next_import_preview_job
+
+        evidence_id = self._persist_candidate()
+        evidence = self.db.load_album_quality_evidence_by_id(evidence_id)
+        assert evidence is not None
+        job = self.db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            dedupe_key=force_import_dedupe_key(self.download_log_id),
+            payload=force_import_payload(
+                download_log_id=self.download_log_id,
+                failed_path=self.root,
+            ),
+        )
+        claimed = claim_next_import_preview_job(self.db, worker_id="preview")
+        assert claimed is not None and claimed.id == job.id
+        self.assertTrue(
+            self.db.set_import_job_candidate_evidence(job.id, evidence_id)
+        )
+        forged = CandidateEvidencePersistenceReceipt(
+            evidence_id=evidence_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+            spectral_write_intent="merge",
+            spectral_outcome="not_attempted",
+            spectral_grade="genuine",
+            spectral_subject="source",
+            spectral_provenance="measured",
+            spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
+        )
+        updated = self.db.mark_import_job_preview_importable(
+            job.id,
+            preview_result={
+                "candidate_evidence_receipt": msgspec.to_builtins(forged),
+            },
+        )
+        assert updated is not None
+
+        result = ensure_candidate_evidence_for_action(
+            self.db,
+            source_path=self.root,
+            import_job_id=job.id,
+        )
+
+        self.assertFalse(result.available)
+        self.assertIn(
+            "receipt semantic",
+            result.provenance.fallback_reason or "",
+        )
+
+    def test_decision_load_rejects_semantically_forged_typed_receipt(self) -> None:
+        evidence_id = self._persist_candidate()
+        evidence = self.db.load_album_quality_evidence_by_id(evidence_id)
+        assert evidence is not None
+        forged = CandidateEvidencePersistenceReceipt(
+            evidence_id=evidence_id,
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+            spectral_write_intent="merge",
+            spectral_outcome="not_attempted",
+            spectral_grade="genuine",
+            spectral_subject="source",
+            spectral_provenance="measured",
+            spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
+        )
+
+        loaded = load_candidate_evidence_for_decision(
+            self.db,
+            source_path=self.root,
+            download_log_id=self.download_log_id,
+            persistence_receipt=forged,
+        )
+
+        self.assertIsNone(loaded.evidence)
+        self.assertEqual(loaded.status, "incomplete")
+        self.assertIn("receipt semantic", loaded.reason or "")
 
     def test_shared_current_row_projects_source_semantics_for_candidate(self):
         current = make_album_quality_evidence(

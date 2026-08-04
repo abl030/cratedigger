@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -175,6 +176,122 @@ class CandidateEvidencePersistenceReceipt(
     spectral_measurement_version: int | None = None
 
 
+_RECEIPT_SPECTRAL_FIELDS = (
+    "spectral_grade",
+    "spectral_bitrate_kbps",
+    "spectral_subject",
+    "spectral_provenance",
+    "cliff_hz",
+    "codec_family",
+    "ultrasonic_deficit_db",
+    "spectral_measurement_version",
+)
+_RECEIPT_CODEC_FAMILIES = frozenset({
+    "mp3", "aac", "opus", "vorbis", "lossless", "other",
+})
+_POLICY_USABLE_SPECTRAL_GRADES = frozenset({
+    "genuine",
+    "marginal",
+    "suspect",
+    "likely_transcode",
+})
+
+
+def _is_nonempty_receipt_string(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _is_receipt_string(value: object) -> bool:
+    return isinstance(value, str)
+
+
+def _is_valid_receipt_spectral_grade(value: object) -> bool:
+    return isinstance(value, str) and value in _POLICY_USABLE_SPECTRAL_GRADES
+
+
+def _is_valid_receipt_codec_family(value: object) -> bool:
+    return (
+        value is None
+        or isinstance(value, str) and value in _RECEIPT_CODEC_FAMILIES
+    )
+
+
+def _is_finite_receipt_number(value: object) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(value)
+    )
+
+
+def candidate_evidence_persistence_receipt_semantic_error(
+    receipt: CandidateEvidencePersistenceReceipt,
+) -> str | None:
+    """Return why an exact-attempt receipt is semantically impossible.
+
+    Strict Struct decoding proves only field types.  This validator is the one
+    authority for the intent/outcome/tuple state machine at construction,
+    preview completion, persisted JSONB decode, projection, and decision load.
+    """
+    if type(receipt.evidence_id) is not int or receipt.evidence_id <= 0:
+        return "evidence_id must be positive"
+    if not _is_nonempty_receipt_string(receipt.snapshot_fingerprint):
+        return "snapshot_fingerprint must be non-empty"
+    if (
+        not _is_receipt_string(receipt.spectral_write_intent)
+        or not _is_receipt_string(receipt.spectral_outcome)
+    ):
+        return "spectral intent and outcome must be strings"
+    has_spectral_field = any(
+        getattr(receipt, field) is not None
+        for field in _RECEIPT_SPECTRAL_FIELDS
+    )
+    if (
+        receipt.spectral_write_intent == "merge"
+        and receipt.spectral_outcome == "not_attempted"
+    ):
+        if has_spectral_field:
+            return "merge/not_attempted must not carry spectral fields"
+        return None
+    if receipt.spectral_write_intent != "replace":
+        return "only merge/not_attempted or replace outcomes are valid"
+    if receipt.spectral_outcome in {"failed", "empty"}:
+        if has_spectral_field:
+            return f"replace/{receipt.spectral_outcome} must not carry spectral fields"
+        return None
+    if receipt.spectral_outcome != "measured":
+        return "replace requires measured, failed, or empty outcome"
+    if not _is_valid_receipt_spectral_grade(receipt.spectral_grade):
+        return "replace/measured requires a valid spectral grade"
+    if receipt.spectral_subject != EVIDENCE_SUBJECT_SOURCE:
+        return "replace/measured requires source spectral subject"
+    if receipt.spectral_provenance != EVIDENCE_PROVENANCE_MEASURED:
+        return "replace/measured requires measured spectral provenance"
+    if not spectral_measurement_generation_is_current(receipt):
+        return "replace/measured requires the current analyzer generation"
+    if (
+        receipt.spectral_bitrate_kbps is not None
+        and (
+            type(receipt.spectral_bitrate_kbps) is not int
+            or receipt.spectral_bitrate_kbps <= 0
+        )
+    ):
+        return "replace/measured spectral bitrate must be positive"
+    if (
+        receipt.cliff_hz is not None
+        and (type(receipt.cliff_hz) is not int or receipt.cliff_hz <= 0)
+    ):
+        return "replace/measured cliff must be positive"
+    if not _is_valid_receipt_codec_family(receipt.codec_family):
+        return "replace/measured codec family is invalid"
+    if (
+        receipt.ultrasonic_deficit_db is not None
+        and not _is_finite_receipt_number(receipt.ultrasonic_deficit_db)
+    ):
+        return "replace/measured ultrasonic deficit must be finite"
+    return None
+
+
 class SnapshotAudioFilesError(OSError):
     """Raised when a source fileset cannot be snapshotted completely."""
 
@@ -195,7 +312,11 @@ class EvidenceBuildResult:
 
 
 def spectral_measurement_generation_is_current(
-    measurement: AudioQualityMeasurement | SpectralAnalysisDetail,
+    measurement: (
+        AudioQualityMeasurement
+        | SpectralAnalysisDetail
+        | CandidateEvidencePersistenceReceipt
+    ),
 ) -> bool:
     """Whether a spectral fact has this running analyzer's generation.
 
@@ -256,14 +377,6 @@ def current_evidence_preserves_source_spectral(
     )
 
 
-_POLICY_USABLE_SPECTRAL_GRADES = frozenset({
-    "genuine",
-    "marginal",
-    "suspect",
-    "likely_transcode",
-})
-
-
 def current_spectral_evidence_policy_usable(
     evidence: AlbumQualityEvidence,
 ) -> bool:
@@ -316,6 +429,11 @@ def candidate_evidence_from_persistence_receipt(
     The receipt is the exact-attempt witness that lets candidate policy see
     the fresh derivative tuple without rewriting that current audit history.
     """
+    receipt_error = candidate_evidence_persistence_receipt_semantic_error(
+        receipt
+    )
+    if receipt_error is not None:
+        raise ValueError(f"receipt semantic invalid: {receipt_error}")
     candidate = candidate_evidence_for_policy(evidence)
     if receipt.spectral_write_intent != "replace":
         return candidate
@@ -561,9 +679,13 @@ def audio_snapshot_matches(
     :func:`_snapshot_match_key` for why ``mtime_ns`` is excluded.
     """
 
+    if not os.path.isdir(root):
+        return False
     try:
         current = snapshot_audio_files(root)
     except OSError:
+        return False
+    if not os.path.isdir(root):
         return False
     expected = sorted(files, key=lambda f: f.relative_path)
     return [_snapshot_match_key(f) for f in current] == [
@@ -1014,10 +1136,15 @@ def _candidate_spectral_persistence_shape(
 ]:
     """Describe this attempt's spectral write without reading cache state."""
     if attempt is not None and attempt.attempted:
-        if attempt.grade is not None:
+        if attempt.grade in _POLICY_USABLE_SPECTRAL_GRADES:
             outcome: CandidateSpectralAttemptOutcome = "measured"
-        elif attempt.error is not None:
+        elif attempt.grade == "error" or attempt.error is not None:
             outcome = "failed"
+        elif attempt.grade is not None:
+            # An unknown non-error grade is not normalized into a successful
+            # policy tuple. Leave it measured so the central receipt validator
+            # rejects the producer result closed instead of erasing bad data.
+            outcome = "measured"
         else:
             outcome = "empty"
         return (
@@ -1138,51 +1265,61 @@ def _persist_candidate_evidence_result(
                 "failed",
                 "candidate evidence did not link to download log",
             )
+    receipt = CandidateEvidencePersistenceReceipt(
+        evidence_id=persisted.id,
+        snapshot_fingerprint=persisted.snapshot_fingerprint,
+        spectral_write_intent=write_intent,
+        spectral_outcome=spectral_outcome,
+        spectral_grade=(
+            evidence.measurement.spectral_grade
+            if spectral_outcome == "measured"
+            else None
+        ),
+        spectral_bitrate_kbps=(
+            evidence.measurement.spectral_bitrate_kbps
+            if spectral_outcome == "measured"
+            else None
+        ),
+        spectral_subject=(
+            evidence.measurement.spectral_subject
+            if spectral_outcome == "measured"
+            else None
+        ),
+        spectral_provenance=(
+            evidence.measurement.spectral_provenance
+            if spectral_outcome == "measured"
+            else None
+        ),
+        cliff_hz=(
+            evidence.measurement.cliff_hz
+            if spectral_outcome == "measured"
+            else None
+        ),
+        codec_family=(
+            evidence.measurement.codec_family
+            if spectral_outcome == "measured"
+            else None
+        ),
+        ultrasonic_deficit_db=(
+            evidence.measurement.ultrasonic_deficit_db
+            if spectral_outcome == "measured"
+            else None
+        ),
+        spectral_measurement_version=generation,
+    )
+    receipt_error = candidate_evidence_persistence_receipt_semantic_error(
+        receipt
+    )
+    if receipt_error is not None:
+        return EvidenceBuildResult(
+            persisted,
+            "failed",
+            f"candidate receipt semantic invalid: {receipt_error}",
+        )
     return EvidenceBuildResult(
         persisted,
         "ready",
-        persistence_receipt=CandidateEvidencePersistenceReceipt(
-            evidence_id=persisted.id,
-            snapshot_fingerprint=persisted.snapshot_fingerprint,
-            spectral_write_intent=write_intent,
-            spectral_outcome=spectral_outcome,
-            spectral_grade=(
-                evidence.measurement.spectral_grade
-                if spectral_outcome == "measured"
-                else None
-            ),
-            spectral_bitrate_kbps=(
-                evidence.measurement.spectral_bitrate_kbps
-                if spectral_outcome == "measured"
-                else None
-            ),
-            spectral_subject=(
-                evidence.measurement.spectral_subject
-                if spectral_outcome == "measured"
-                else None
-            ),
-            spectral_provenance=(
-                evidence.measurement.spectral_provenance
-                if spectral_outcome == "measured"
-                else None
-            ),
-            cliff_hz=(
-                evidence.measurement.cliff_hz
-                if spectral_outcome == "measured"
-                else None
-            ),
-            codec_family=(
-                evidence.measurement.codec_family
-                if spectral_outcome == "measured"
-                else None
-            ),
-            ultrasonic_deficit_db=(
-                evidence.measurement.ultrasonic_deficit_db
-                if spectral_outcome == "measured"
-                else None
-            ),
-            spectral_measurement_version=generation,
-        ),
+        persistence_receipt=receipt,
     )
 
 
@@ -1739,6 +1876,15 @@ def _load_candidate_evidence_for_source(
     # that output-only fact as part of a candidate source measurement.
     evidence = candidate_evidence_for_policy(evidence)
     if persistence_receipt is not None:
+        receipt_error = candidate_evidence_persistence_receipt_semantic_error(
+            persistence_receipt
+        )
+        if receipt_error is not None:
+            return EvidenceBuildResult(
+                None,
+                "incomplete",
+                f"candidate receipt semantic invalid: {receipt_error}",
+            )
         if (
             persistence_receipt.evidence_id != evidence.id
             or persistence_receipt.snapshot_fingerprint
@@ -1749,10 +1895,13 @@ def _load_candidate_evidence_for_source(
                 "incomplete",
                 "candidate persistence receipt does not match evidence row",
             )
-        evidence = candidate_evidence_from_persistence_receipt(
-            evidence,
-            persistence_receipt,
-        )
+        try:
+            evidence = candidate_evidence_from_persistence_receipt(
+                evidence,
+                persistence_receipt,
+            )
+        except ValueError as exc:
+            return EvidenceBuildResult(None, "incomplete", str(exc))
     if not audio_snapshot_matches(source_path, evidence.files):
         return EvidenceBuildResult(
             None,

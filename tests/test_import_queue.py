@@ -737,6 +737,43 @@ class TestPreviewCompletionEvidenceOwnership(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_preview_completion_rejects_semantically_forged_receipt(self):
+        """#1030: preview completion validates typed receipt combinations."""
+        from lib.quality_evidence import CandidateEvidencePersistenceReceipt
+        from scripts.import_preview_worker import _candidate_evidence_ready_for_job
+
+        root, source, db, job = self._linked_force_job()
+        try:
+            evidence_id = db.get_import_job_candidate_evidence_id(job.id)
+            evidence = db.load_album_quality_evidence_by_id(evidence_id)
+            assert evidence is not None and evidence.id is not None
+            forged = CandidateEvidencePersistenceReceipt(
+                evidence_id=evidence.id,
+                snapshot_fingerprint=evidence.snapshot_fingerprint,
+                spectral_write_intent="merge",
+                spectral_outcome="not_attempted",
+                spectral_grade="genuine",
+                spectral_subject="source",
+                spectral_provenance="measured",
+                spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
+            )
+
+            ready, reason = _candidate_evidence_ready_for_job(
+                db,
+                job,
+                ImportPreviewResult(
+                    mode="path",
+                    source_path=source,
+                    verdict="evidence_ready",
+                    candidate_evidence_receipt=forged,
+                ),
+            )
+
+            self.assertFalse(ready)
+            self.assertIn("receipt semantic", reason)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
 
 class TestImporterWorker(unittest.TestCase):
     def setUp(self) -> None:

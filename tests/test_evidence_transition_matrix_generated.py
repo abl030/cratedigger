@@ -320,9 +320,10 @@ class TestEvidenceTransitionMatrixGenerated(unittest.TestCase):
             receipt = persisted.persistence_receipt
             assert receipt is not None
 
-            if not source_present and candidate_files:
+            if not source_present:
                 for file in candidate_files:
                     os.unlink(Path(source, file.relative_path))
+                source.rmdir()
 
             cache = load_candidate_evidence_for_source(
                 db,
@@ -346,7 +347,7 @@ class TestEvidenceTransitionMatrixGenerated(unittest.TestCase):
             assert canonical is not None
 
             violation = evidence_transition_violation(
-                source_present=source_present or not candidate_files,
+                source_present=source_present,
                 early_fact=early_fact,
                 fresh_audit=fresh_audit,
                 collision=collision,
@@ -375,7 +376,7 @@ class TestEvidenceTransitionMatrixGenerated(unittest.TestCase):
                 canonical.measurement.spectral_measurement_version
                 == SPECTRAL_MEASUREMENT_VERSION
             )
-            if source_present or not candidate_files:
+            if source_present:
                 self.assertEqual(
                     cache.evidence is not None,
                     not canonical_has_spectral or canonical_current,

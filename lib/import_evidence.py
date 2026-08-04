@@ -33,6 +33,7 @@ from lib.quality_evidence import (
     QualityEvidenceDB,
     audio_snapshot_matches,
     backfill_current_evidence_from_album_info,
+    candidate_evidence_persistence_receipt_semantic_error,
     current_evidence_for_policy,
     current_evidence_preserves_source_spectral,
     current_evidence_rebuild_reasons,
@@ -164,12 +165,18 @@ def _candidate_persistence_receipt_for_job(
     if raw is None:
         return None, None
     try:
-        return msgspec.convert(
+        receipt = msgspec.convert(
             raw,
             type=CandidateEvidencePersistenceReceipt,
-        ), None
+        )
     except (TypeError, ValueError, msgspec.ValidationError) as exc:
         return None, f"invalid candidate persistence receipt: {exc}"
+    receipt_error = candidate_evidence_persistence_receipt_semantic_error(
+        receipt
+    )
+    if receipt_error is not None:
+        return None, f"candidate receipt semantic invalid: {receipt_error}"
+    return receipt, None
 
 
 def ensure_candidate_evidence_for_action(

@@ -624,9 +624,14 @@ download-log arms), the raw ownership ledger for all three evidence FKs, and
 an observed-evidence content-address ledger for every canonical row, including
 unlinked audit history. The linear census classifies each row as candidate,
 current, dual, or audit-only and records its analyzer generation, lineage,
-subject/provenance, early reject fact, and preserved-source shape. Always run
-`verify` before either tree decides;
-it rejects unknown manifest fields and recomputes every count, debt, role,
+subject/provenance, early reject fact, and preserved-source shape.
+It also records the historical capture path's read-only snapshot observation
+as `present_exact`, `missing`, `changed`, or `uncheckable`, using the same
+stable manifest comparison as action admission. That observation is bound
+into the matrix class for reproducibility; it does not make `source_path`
+current location or mutation authority.
+Always run `verify` before either tree decides; it rejects unknown manifest
+fields and recomputes every count, debt, role,
 association, address, digest, and green result from those ledgers and the
 corpus bytes. This is an offline artifact check, not a new database read.
 It proves structural self-consistency and stale-pair rejection, not hostile
@@ -641,9 +646,15 @@ action-admission, and unified-decider seams. It accepts no source DSN. The live
 database supplies observations only; every replay write is forced into the
 throwaway cluster. Each class enters through the public measurement-only or
 import-result evidence producer, so legacy shapes that cannot satisfy today's
-producer contract are reported explicitly as `producer_refused` rather than
-being injected below construction. A fresh successful collision must replace
-the canonical tuple for every remeasurable current/dual row; only a stored row
+producer contract make the report red rather than being injected below
+construction. Legacy display-qualified measurement labels are normalized from
+the exact fresh manifest before the public producer runs. Present-source
+classes encode `decided` as their expected outcome; missing, changed, and
+uncheckable classes reproduce that observed state and encode a matched
+cache/action snapshot refusal. Any unexpected producer/admission refusal,
+wrong expected outcome, lost exact FK, or transition violation makes the
+report non-green and the CLI exit nonzero. A fresh successful collision must
+replace the canonical tuple for every remeasurable current/dual row; only a stored row
 that satisfies `current_evidence_preserves_source_spectral` may retain its old
 tuple. The replay reports either direction as a `transition_violation`, marks
 the report non-green, and exits nonzero.
@@ -1434,6 +1445,13 @@ candidate attempt is represented by a typed persistence receipt instead of
 overwriting installed audit history. The receipt records the exact evidence
 ID/fingerprint, write intent, attempt outcome, and spectral tuple and is stored
 with the preview result after the exact import-job/download-log FK is verified.
+One semantic validator protects every receipt boundary. Only
+`merge/not_attempted` with no spectral fields, `replace/measured` with a valid
+source/measured tuple from the current analyzer generation, and
+`replace/failed|empty` with no spectral fields are legal. Construction,
+preview completion, JSONB reload, projection, and decision admission all fail
+closed on every other typed combination; strict JSON decoding alone is not
+receipt authorization.
 An analyzer attempt that produced a valid album tuple before a later per-track
 diagnostic failed remains `measured`; an errored attempt with no tuple is
 `failed` and cannot supply spectral policy evidence.

@@ -23,6 +23,7 @@ from lib.quality import (
     CdRipBitVerification,
     CdTocIdentity,
 )
+from lib.quality_evidence import snapshot_audio_files
 from scripts.decision_differential import (
     _EVIDENCE_SCHEMA_TYPES,
     _FILE_SCHEMA_TYPES,
@@ -287,6 +288,9 @@ class TestDecisionCorpusExport(unittest.TestCase):
         """A verified live-shaped pair is observation, not write authority."""
         from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
 
+        live_sources = TemporaryDirectory()
+        self.addCleanup(live_sources.cleanup)
+
         def source_evidence(
             release: str,
             ordinal: int,
@@ -302,9 +306,12 @@ class TestDecisionCorpusExport(unittest.TestCase):
                 container="mp3",
                 codec="mp3",
             )]
+            source = Path(live_sources.name) / str(ordinal)
+            source.mkdir()
+            _materialize_transition_snapshot(source, files)
             evidence = make_album_quality_evidence(
                 mb_release_id=release,
-                source_path=f"/tmp/decision-transition-{ordinal}",
+                source_path=str(source),
                 files=files,
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=128,
@@ -413,10 +420,86 @@ class TestDecisionCorpusExport(unittest.TestCase):
         )
         self.assertEqual(
             report.decided
+            + report.snapshot_refused
             + report.admission_refused
             + report.producer_refused,
             report.total_matrix_classes,
         )
+
+    def test_source_snapshot_state_distinguishes_present_and_missing_candidates(
+        self,
+    ) -> None:
+        """v3 binds observational source state without making path authority."""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            present = root / "present"
+            present.mkdir()
+            (present / "01.mp3").write_bytes(b"candidate")
+            missing = root / "missing"
+
+            ids: dict[str, int] = {}
+            for label, source in (("present", present), ("missing", missing)):
+                release = f"source-state-{label}"
+                request_id = self._request(release)
+                files = snapshot_audio_files(str(present))
+                evidence = make_album_quality_evidence(
+                    mb_release_id=release,
+                    source_path=str(source),
+                    files=files,
+                )
+                self.db.upsert_album_quality_evidence(evidence)
+                stored = self.db.find_album_quality_evidence(
+                    mb_release_id=release,
+                    snapshot_fingerprint=evidence.snapshot_fingerprint,
+                )
+                assert stored is not None and stored.id is not None
+                ids[label] = stored.id
+                job = self.db.enqueue_import_job(
+                    "force_import",
+                    request_id=request_id,
+                    payload={
+                        "download_log_id": stored.id,
+                        "failed_path": str(source),
+                    },
+                )
+                self.assertTrue(
+                    self.db.set_import_job_candidate_evidence(job.id, stored.id)
+                )
+
+            corpus = root / "corpus.jsonl"
+            coverage_path = root / "coverage.json"
+            report_path = root / "transition.json"
+            export_decision_corpus(TEST_DSN, corpus, coverage_path)
+            coverage = json.loads(coverage_path.read_text())
+            observed = {
+                row["evidence_id"]: row["source_snapshot_state"]
+                for row in coverage["observed_evidence"]
+            }
+            roles = {
+                row["evidence_id"]: row["matrix_class"]
+                for row in coverage["evidence_roles"]
+            }
+
+            self.assertEqual(observed[ids["present"]], "present_exact")
+            self.assertEqual(observed[ids["missing"]], "missing")
+            self.assertIn("source=present_exact", roles[ids["present"]])
+            self.assertIn("source=missing", roles[ids["missing"]])
+
+            report = replay_decision_transitions(
+                corpus,
+                coverage_path,
+                report_path,
+            )
+
+        by_id = {row.evidence_id: row for row in report.representatives}
+        self.assertEqual(by_id[ids["present"]].expected_outcome, "decided")
+        self.assertEqual(by_id[ids["present"]].outcome, "decided")
+        self.assertEqual(
+            by_id[ids["missing"]].expected_outcome,
+            "snapshot_refused",
+        )
+        self.assertEqual(by_id[ids["missing"]].outcome, "snapshot_refused")
+        self.assertTrue(report.green)
 
     def test_transition_sparse_snapshot_restores_exported_mtime(self) -> None:
         """Replay files retain the complete stored manifest, including mtime."""

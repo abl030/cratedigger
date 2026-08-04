@@ -162,6 +162,7 @@ import argparse
 import contextlib
 import hashlib
 import os
+import stat
 import sys
 import tempfile
 from collections import Counter
@@ -1031,6 +1032,9 @@ class _CoverageObservedEvidence(msgspec.Struct, frozen=True, forbid_unknown_fiel
     stored_snapshot_fingerprint: str
     files_snapshot_fingerprint: str
     files_sha256: str
+    source_snapshot_state: Literal[
+        "present_exact", "missing", "changed", "uncheckable"
+    ]
     lineage_version: int
     spectral_generation: Literal["null", "old", "current", "future"]
     spectral_subject: EvidenceSubject | None
@@ -1060,6 +1064,9 @@ class _CoverageEvidenceRole(msgspec.Struct, frozen=True, forbid_unknown_fields=T
     role: Literal["candidate", "current", "dual", "audit_only"]
     candidate_owner_count: int
     current_owner_count: int
+    source_snapshot_state: Literal[
+        "present_exact", "missing", "changed", "uncheckable"
+    ]
     matrix_class: str
 
 
@@ -1190,9 +1197,11 @@ class DecisionCorpusCoverage(msgspec.Struct, frozen=True, forbid_unknown_fields=
 
 TransitionReplayOutcome = Literal[
     "decided",
+    "snapshot_refused",
     "admission_refused",
     "producer_refused",
 ]
+ExpectedTransitionReplayOutcome = Literal["decided", "snapshot_refused"]
 
 
 class DecisionTransitionReplay(msgspec.Struct, frozen=True):
@@ -1203,11 +1212,15 @@ class DecisionTransitionReplay(msgspec.Struct, frozen=True):
     observed_role: Literal["candidate", "current", "dual", "audit_only"]
     candidate_owner_count: int
     current_owner_count: int
+    source_snapshot_state: Literal[
+        "present_exact", "missing", "changed", "uncheckable"
+    ]
     transition_shape: Literal[
         "fresh_current_measurement",
         "fresh_failed_measurement",
         "no_spectral_attempt",
     ]
+    expected_outcome: ExpectedTransitionReplayOutcome
     persistence_status: str
     exact_import_job_fk: bool
     canonical_spectral_generation: int | None
@@ -1226,11 +1239,38 @@ class DecisionTransitionReport(msgspec.Struct, frozen=True):
     coverage_schema_version: int
     total_matrix_classes: int
     decided: int
+    snapshot_refused: int
     admission_refused: int
     producer_refused: int
+    unexpected_outcomes: int
     transition_violations: int
     green: bool
     representatives: list[DecisionTransitionReplay]
+
+
+def _transition_replay_outcome_violation(
+    replay: DecisionTransitionReplay,
+) -> str | None:
+    """Name why one replay did not satisfy its encoded expected outcome."""
+    if replay.outcome != replay.expected_outcome:
+        return (
+            f"expected {replay.expected_outcome}, got {replay.outcome}: "
+            f"{replay.refusal_reason or 'no refusal reason'}"
+        )
+    if not replay.exact_import_job_fk:
+        return "transition did not reload through its exact import-job FK"
+    if replay.expected_outcome == "decided":
+        if replay.persistence_status != "ready":
+            return "decided transition did not persist ready evidence"
+        if replay.admission_status != "ready" or replay.decision is None:
+            return "decided transition did not action-admit and decide"
+        return None
+    if (
+        replay.cache_status != "stale"
+        or replay.admission_status != "stale"
+    ):
+        return "snapshot-refused transition did not fail both snapshot boundaries"
+    return None
 
 
 # Do not replace this projection with ``e.*``.  The JSONL wire and the real
@@ -1691,6 +1731,45 @@ def _coverage_source_links(
     return ledger
 
 
+def _observed_source_snapshot_state(
+    source_path: object,
+    expected_files: list[AlbumQualityEvidenceFile],
+) -> Literal["present_exact", "missing", "changed", "uncheckable"]:
+    """Observe, but never authorize from, the historical capture path.
+
+    The comparison uses the same stable manifest identity as production's
+    ``audio_snapshot_matches`` boundary.  The path remains immutable capture
+    provenance: this census neither selects a replacement path nor treats a
+    positive observation as durable action authority.
+    """
+    if (
+        not isinstance(source_path, str)
+        or not source_path.strip()
+        or not os.path.isabs(source_path)
+    ):
+        return "uncheckable"
+    try:
+        source_stat = os.stat(source_path)
+    except FileNotFoundError:
+        return "missing"
+    except OSError:
+        return "uncheckable"
+    if not stat.S_ISDIR(source_stat.st_mode):
+        return "uncheckable"
+    try:
+        from lib.quality_evidence import snapshot_audio_files, snapshot_fingerprint
+
+        current_files = snapshot_audio_files(source_path)
+    except OSError:
+        return "uncheckable"
+    return (
+        "present_exact"
+        if snapshot_fingerprint(current_files)
+        == snapshot_fingerprint(expected_files)
+        else "changed"
+    )
+
+
 def _observed_evidence(row: Mapping[str, object]) -> _CoverageObservedEvidence:
     """Record the reproducible content address for every fetched evidence ID."""
     evidence_id = row.get("id")
@@ -1734,6 +1813,10 @@ def _observed_evidence(row: Mapping[str, object]) -> _CoverageObservedEvidence:
         stored_snapshot_fingerprint=stored,
         files_snapshot_fingerprint=snapshot_fingerprint(file_rows),
         files_sha256=hashlib.sha256(msgspec.json.encode(files)).hexdigest(),
+        source_snapshot_state=_observed_source_snapshot_state(
+            row.get("source_path"),
+            file_rows,
+        ),
         lineage_version=evidence.lineage_version,
         spectral_generation=generation_class,
         spectral_subject=evidence.measurement.spectral_subject,
@@ -1830,12 +1913,14 @@ def _evidence_role_census(
             role=role,
             candidate_owner_count=candidate_count,
             current_owner_count=current_count,
+            source_snapshot_state=evidence.source_snapshot_state,
             matrix_class=(
                 f"{role}|gen={evidence.spectral_generation}"
                 f"|subject={evidence.spectral_subject or 'null'}"
                 f"|provenance={evidence.spectral_provenance or 'null'}"
                 f"|lineage={evidence.lineage_version}"
                 f"|early={early}|spectral={preservation}"
+                f"|source={evidence.source_snapshot_state}"
             ),
         ))
     return roles, _CoverageRoleCounts(
@@ -2417,6 +2502,25 @@ def _materialize_transition_snapshot(
         os.utime(target, ns=(file.mtime_ns, file.mtime_ns))
 
 
+def _prepare_transition_source(
+    path: Path,
+    files: Sequence[AlbumQualityEvidenceFile],
+    state: Literal["present_exact", "missing", "changed", "uncheckable"],
+) -> Path:
+    """Reproduce the observed source boundary without claiming live authority."""
+    if state == "missing":
+        return path
+    if state == "uncheckable":
+        path.write_bytes(b"not a directory")
+        return path
+    path.mkdir()
+    _materialize_transition_snapshot(path, files)
+    if state == "changed":
+        changed = path / "__transition_changed__.mp3"
+        changed.write_bytes(b"changed")
+    return path
+
+
 def _fresh_transition_candidate(
     evidence: AlbumQualityEvidence,
 ) -> tuple[
@@ -2442,7 +2546,24 @@ def _fresh_transition_candidate(
         candidate_evidence_for_policy(evidence),
         id=None,
     )
-    measurement = candidate.measurement
+    # Legacy lineage-1 labels may include display qualifiers (for example
+    # ``FLAC 16/44``). A fresh producer learns its bare measured codec from
+    # the exact manifest, so replay that fact instead of feeding stale display
+    # text back into the public v4 writer.
+    manifest_codecs = {
+        (file.codec or file.container).strip().lower()
+        for file in candidate.files
+        if (file.codec or file.container).strip()
+    }
+    measurement = (
+        msgspec.structs.replace(
+            candidate.measurement,
+            format=next(iter(manifest_codecs)),
+        )
+        if len(manifest_codecs) == 1
+        else candidate.measurement
+    )
+    candidate = msgspec.structs.replace(candidate, measurement=measurement)
     has_spectral = (
         measurement.spectral_grade is not None
         or measurement.spectral_bitrate_kbps is not None
@@ -2613,14 +2734,22 @@ def replay_decision_transitions(
                     )
                 observed = _evidence_from_corpus_row(entry.row)
                 snapshot_root = Path(snapshot_tmp) / str(role.evidence_id)
-                snapshot_root.mkdir()
-                _materialize_transition_snapshot(snapshot_root, observed.files)
+                action_path = _prepare_transition_source(
+                    snapshot_root,
+                    observed.files,
+                    role.source_snapshot_state,
+                )
+                expected_outcome: ExpectedTransitionReplayOutcome = (
+                    "decided"
+                    if role.source_snapshot_state == "present_exact"
+                    else "snapshot_refused"
+                )
                 release_id = f"transition-replay-{role.evidence_id}"
                 seeded = msgspec.structs.replace(
                     observed,
                     id=None,
                     mb_release_id=release_id,
-                    source_path=str(snapshot_root),
+                    source_path=str(action_path),
                 )
                 db.upsert_album_quality_evidence(seeded)
                 canonical = db.find_album_quality_evidence(
@@ -2653,7 +2782,7 @@ def replay_decision_transitions(
                         request_id=request_id,
                         payload={
                             "download_log_id": download_log_id,
-                            "failed_path": str(snapshot_root),
+                            "failed_path": str(action_path),
                         },
                     )
                     if not db.set_import_job_candidate_evidence(
@@ -2669,7 +2798,7 @@ def replay_decision_transitions(
                     request_id=request_id,
                     payload={
                         "download_log_id": download_log_id,
-                        "failed_path": str(snapshot_root),
+                        "failed_path": str(action_path),
                     },
                 )
                 candidate, raw_attempt, transition_shape = (
@@ -2677,7 +2806,7 @@ def replay_decision_transitions(
                 )
                 candidate = msgspec.structs.replace(
                     candidate,
-                    source_path=str(snapshot_root),
+                    source_path=str(action_path),
                 )
                 attempt = (
                     raw_attempt
@@ -2728,7 +2857,7 @@ def replay_decision_transitions(
                     persisted = persist_candidate_evidence_from_measurement(
                         db,
                         mb_release_id=release_id,
-                        source_path=str(snapshot_root),
+                        source_path=str(action_path),
                         measurement=preimport,
                         import_job_id=transition_job.id,
                         files=candidate.files,
@@ -2748,7 +2877,7 @@ def replay_decision_transitions(
                     persisted = persist_candidate_evidence_from_import_result(
                         db,
                         mb_release_id=release_id,
-                        source_path=str(snapshot_root),
+                        source_path=str(action_path),
                         import_result=ImportResult(
                             source_measurement=candidate_measurement,
                             verified_lossless_proof=(
@@ -2776,7 +2905,9 @@ def replay_decision_transitions(
                         observed_role=role.role,
                         candidate_owner_count=role.candidate_owner_count,
                         current_owner_count=role.current_owner_count,
+                        source_snapshot_state=role.source_snapshot_state,
                         transition_shape=transition_shape,
+                        expected_outcome=expected_outcome,
                         persistence_status=persisted.status,
                         exact_import_job_fk=False,
                         canonical_spectral_generation=(
@@ -2806,12 +2937,12 @@ def replay_decision_transitions(
                     )
                 cache = load_candidate_evidence_for_source(
                     db,
-                    source_path=str(snapshot_root),
+                    source_path=str(action_path),
                     import_job_id=transition_job.id,
                 )
                 admission = load_candidate_evidence_for_decision(
                     db,
-                    source_path=str(snapshot_root),
+                    source_path=str(action_path),
                     import_job_id=transition_job.id,
                     persistence_receipt=persisted.persistence_receipt,
                 )
@@ -2819,7 +2950,15 @@ def replay_decision_transitions(
                 refusal_reason: str | None = None
                 outcome: TransitionReplayOutcome
                 if admission.evidence is None:
-                    outcome = "admission_refused"
+                    outcome = (
+                        "snapshot_refused"
+                        if (
+                            role.source_snapshot_state != "present_exact"
+                            and cache.status == "stale"
+                            and admission.status == "stale"
+                        )
+                        else "admission_refused"
+                    )
                     refusal_reason = admission.reason
                 else:
                     current = None
@@ -2854,7 +2993,9 @@ def replay_decision_transitions(
                     observed_role=role.role,
                     candidate_owner_count=role.candidate_owner_count,
                     current_owner_count=role.current_owner_count,
+                    source_snapshot_state=role.source_snapshot_state,
                     transition_shape=transition_shape,
+                    expected_outcome=expected_outcome,
                     persistence_status=persisted.status,
                     exact_import_job_fk=exact_fk,
                     canonical_spectral_generation=(
@@ -2871,21 +3012,30 @@ def replay_decision_transitions(
             db.close()
 
     report = DecisionTransitionReport(
-        schema_version=2,
+        schema_version=3,
         coverage_schema_version=coverage.schema_version,
         total_matrix_classes=len(replay_rows),
         decided=sum(row.outcome == "decided" for row in replay_rows),
+        snapshot_refused=sum(
+            row.outcome == "snapshot_refused" for row in replay_rows
+        ),
         admission_refused=sum(
             row.outcome == "admission_refused" for row in replay_rows
         ),
         producer_refused=sum(
             row.outcome == "producer_refused" for row in replay_rows
         ),
+        unexpected_outcomes=sum(
+            _transition_replay_outcome_violation(row) is not None
+            for row in replay_rows
+        ),
         transition_violations=sum(
             row.transition_violation is not None for row in replay_rows
         ),
         green=not any(
-            row.transition_violation is not None for row in replay_rows
+            row.transition_violation is not None
+            or _transition_replay_outcome_violation(row) is not None
+            for row in replay_rows
         ),
         representatives=replay_rows,
     )
@@ -3061,8 +3211,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "replayed "
                 f"{report.total_matrix_classes} transition matrix class(es): "
                 f"{report.decided} decided, "
+                f"{report.snapshot_refused} snapshot-refused, "
                 f"{report.admission_refused} admission-refused, "
                 f"{report.producer_refused} producer-refused, "
+                f"{report.unexpected_outcomes} unexpected-outcomes, "
                 f"{report.transition_violations} transition-violations",
                 file=sys.stderr,
             )

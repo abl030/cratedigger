@@ -30,6 +30,7 @@ from contextlib import redirect_stdout
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -45,12 +46,16 @@ from lib.quality import (
     CdTocIdentity,
     full_pipeline_decision_from_evidence,
 )
-from lib.quality_evidence import snapshot_fingerprint
+from lib.quality_evidence import snapshot_audio_files, snapshot_fingerprint
 from scripts.decision_differential import (
     DECISION_ERROR_FIELD,
     DECISION_KEYS,
     PROOF_FIELDS,
+    DecisionTransitionReplay,
     RenderDifferentialError,
+    TransitionReplayOutcome,
+    _observed_source_snapshot_state,
+    _transition_replay_outcome_violation,
     decide_corpus,
     decide_row,
     leg_for_evidence,
@@ -858,6 +863,85 @@ class TestNativeCurrentSidePairing(unittest.TestCase):
                 "verified_lossless_locked",
             )
             self.assertFalse(decided["fields"]["imported"])
+
+
+class TestTransitionExpectedOutcomes(unittest.TestCase):
+    def _replay(
+        self,
+        *,
+        outcome: TransitionReplayOutcome,
+    ) -> DecisionTransitionReplay:
+        return DecisionTransitionReplay(
+            evidence_id=1,
+            matrix_class="candidate|source=present_exact",
+            observed_role="candidate",
+            candidate_owner_count=1,
+            current_owner_count=0,
+            source_snapshot_state="present_exact",
+            transition_shape="fresh_current_measurement",
+            expected_outcome="decided",
+            persistence_status=("failed" if outcome == "producer_refused" else "ready"),
+            exact_import_job_fk=outcome != "producer_refused",
+            canonical_spectral_generation=2,
+            cache_status=("not_run" if outcome == "producer_refused" else "ready"),
+            admission_status=(
+                "not_run"
+                if outcome == "producer_refused"
+                else ("incomplete" if outcome == "admission_refused" else "ready")
+            ),
+            outcome=outcome,
+            refusal_reason="known-bad refusal",
+        )
+
+    def test_known_bad_producer_refusal_is_red(self) -> None:
+        violation = _transition_replay_outcome_violation(
+            self._replay(outcome="producer_refused")
+        )
+        self.assertIn("expected decided", violation or "")
+
+    def test_known_bad_admission_refusal_is_red(self) -> None:
+        violation = _transition_replay_outcome_violation(
+            self._replay(outcome="admission_refused")
+        )
+        self.assertIn("expected decided", violation or "")
+
+    def test_observational_source_snapshot_state_names_all_boundaries(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            present = root / "present"
+            present.mkdir()
+            track = present / "01.flac"
+            track.write_bytes(b"exact")
+            files = snapshot_audio_files(str(present))
+            missing = root / "missing"
+            uncheckable = root / "not-a-directory"
+            uncheckable.write_text("file")
+
+            self.assertEqual(
+                _observed_source_snapshot_state(str(present), files),
+                "present_exact",
+            )
+            self.assertEqual(
+                _observed_source_snapshot_state(str(missing), files),
+                "missing",
+            )
+            self.assertEqual(
+                _observed_source_snapshot_state(str(uncheckable), files),
+                "uncheckable",
+            )
+            with patch(
+                "scripts.decision_differential.os.stat",
+                side_effect=PermissionError("denied"),
+            ):
+                self.assertEqual(
+                    _observed_source_snapshot_state(str(missing), files),
+                    "uncheckable",
+                )
+            track.write_bytes(b"changed bytes")
+            self.assertEqual(
+                _observed_source_snapshot_state(str(present), files),
+                "changed",
+            )
 
 
 class TestCli(unittest.TestCase):
