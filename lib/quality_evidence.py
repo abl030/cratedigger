@@ -245,6 +245,22 @@ def current_spectral_evidence_policy_usable(
     )
 
 
+def candidate_evidence_for_policy(
+    evidence: AlbumQualityEvidence,
+) -> AlbumQualityEvidence:
+    """Project a canonical evidence row into candidate-source semantics."""
+    measurement = evidence.measurement
+    if measurement.was_converted_from is None:
+        return evidence
+    return msgspec.structs.replace(
+        evidence,
+        measurement=msgspec.structs.replace(
+            measurement,
+            was_converted_from=None,
+        ),
+    )
+
+
 def current_evidence_for_policy(
     evidence: AlbumQualityEvidence,
 ) -> AlbumQualityEvidence:
@@ -1271,6 +1287,15 @@ def backfill_current_evidence_from_album_info(
             and existing_measurement.spectral_subject == EVIDENCE_SUBJECT_SOURCE
         )
         measurement = result.evidence.measurement
+        if same_snapshot and existing_measurement.was_converted_from is not None:
+            # Conversion lineage is a current-library fact. Preserve it only
+            # while rebuilding the same installed snapshot; the generic
+            # evidence upsert must remain exact so a fresh candidate NULL can
+            # clear legacy candidate contamination at the same address.
+            measurement = msgspec.structs.replace(
+                measurement,
+                was_converted_from=existing_measurement.was_converted_from,
+            )
         if carry_spectral:
             # issue #829 Phase 5 PR1: cliff_hz/codec_family/
             # ultrasonic_deficit_db/spectral_measurement_version are one
@@ -1446,6 +1471,10 @@ def load_candidate_evidence_for_source(
             "missing",
             f"candidate evidence id {evidence_id} not found",
         )
+    # A content-addressed row can be linked by both candidate and current
+    # owners. Keep installed conversion history in storage, but never expose
+    # that output-only fact as part of a candidate source measurement.
+    evidence = candidate_evidence_for_policy(evidence)
     if not audio_snapshot_matches(source_path, evidence.files):
         return EvidenceBuildResult(
             None,

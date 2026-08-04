@@ -31,7 +31,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from typing import NoReturn, TypeGuard
@@ -2034,11 +2034,10 @@ def main():
         max_distance = 999
         _log("[FORCE] Distance check disabled (max_distance=999)")
 
-    # Accumulate structured result (module-level so crash handler can preserve data)
-    global _current_result
     r = ImportResult()
     r.preview = args.dry_run
     r.existing_v0_probe = _existing_v0_probe_from_args(args)
+    global _current_result
     _current_result = r
 
     # --- Pre-flight: already imported? ---
@@ -2832,19 +2831,33 @@ def main():
     _emit_and_exit(r)
 
 
-if __name__ == "__main__":
+def _run_entrypoint(*, main_fn: Callable[[], None] = main) -> None:
+    """Run the importer and guarantee a fresh terminal crash acknowledgement."""
+    global _current_result
+    _current_result = None
     try:
-        main()
+        main_fn()
     except SystemExit:
         raise  # _emit_and_exit uses sys.exit
     except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
-        # Preserve intermediate data if main() had started building a result
-        if _current_result is not None:
-            r = _current_result
-            r.exit_code = 99
-            r.decision = "crash"
-            r.error = f"{type(exc).__name__}: {exc}"
-        else:
-            r = ImportResult(exit_code=99, decision="crash",
-                             error=f"{type(exc).__name__}: {exc}")
-        _emit_and_exit(r)
+        error = f"{type(exc).__name__}: {exc}"
+        result = _current_result
+        if result is not None:
+            result.exit_code = 99
+            result.decision = "crash"
+            result.error = error
+            try:
+                result.to_json()
+            except Exception:  # noqa: BLE001 - replace an unencodable partial result
+                result = None
+        _emit_and_exit(
+            result or ImportResult(
+                exit_code=99,
+                decision="crash",
+                error=error,
+            )
+        )
+
+
+if __name__ == "__main__":
+    _run_entrypoint()

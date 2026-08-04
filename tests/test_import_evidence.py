@@ -8,6 +8,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import msgspec
+
 from lib.beets_db import (
     AlbumInfo,
     CurrentBeetsItem,
@@ -103,6 +105,61 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
         assert persisted is not None and persisted.id is not None
         self.db.set_request_current_evidence(42, persisted.id)
         return persisted.id
+
+    def test_shared_current_row_projects_source_semantics_for_candidate(self):
+        current = make_album_quality_evidence(
+            mb_release_id="release-1",
+            source_path=self.root,
+            files=snapshot_audio_files(self.root),
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=128,
+                avg_bitrate_kbps=130,
+                median_bitrate_kbps=129,
+                format="MP3",
+                was_converted_from="flac",
+            ),
+            codec="mp3",
+            container="mp3",
+            storage_format="MP3",
+        )
+        self.db.upsert_album_quality_evidence(current)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=current.mb_release_id,
+            snapshot_fingerprint=current.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.assertTrue(self.db.set_request_current_evidence(42, stored.id))
+
+        candidate = make_album_quality_evidence(
+            mb_release_id="release-1",
+            source_path=self.root,
+            files=snapshot_audio_files(self.root),
+            measurement=msgspec.structs.replace(
+                current.measurement,
+                was_converted_from=None,
+            ),
+            codec="mp3",
+            container="mp3",
+            storage_format="MP3",
+        )
+        self.db.upsert_album_quality_evidence(candidate)
+        self.db.set_download_log_candidate_evidence(
+            self.download_log_id,
+            stored.id,
+        )
+
+        result = ensure_candidate_evidence_for_action(
+            self.db,
+            source_path=self.root,
+            download_log_id=self.download_log_id,
+        )
+
+        self.assertTrue(result.available)
+        assert result.evidence is not None
+        self.assertIsNone(result.evidence.measurement.was_converted_from)
+        reloaded = self.db.load_album_quality_evidence_by_id(stored.id)
+        assert reloaded is not None
+        self.assertEqual(reloaded.measurement.was_converted_from, "flac")
 
     def _persist_lossless_transcode_current_without_v0(self) -> int:
         stale_evidence = make_album_quality_evidence(
