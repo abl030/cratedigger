@@ -31,6 +31,14 @@ WEB_ROOT = REPO_ROOT / "web"
 FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures" / "web"
 PROD_BASE_URL = "https://music.ablz.au"
 
+# `live-db` deliberately injects one read-only PipelineDB session so its
+# development boundary cannot accidentally mutate the pipeline.  Unlike the
+# production server's per-thread sessions, psycopg2 cursors on that session
+# cannot overlap.  Keep the whole dev-only request boundary exclusive,
+# including its exception mapping and reconnect, so a failed request cannot
+# replace the shared handle while another handler is still using it.
+_LIVE_DB_DISPATCH_LOCK = threading.Lock()
+
 sys.path.insert(0, str(REPO_ROOT))
 
 from web.index_document import (
@@ -424,29 +432,34 @@ class DevHandler(BaseHTTPRequestHandler):
         import web.server as web_server
         from web import discogs as _discogs
 
-        path = parsed.path.rstrip("/") or "/"
-        params = parse_qs(parsed.query)
-        try:
-            fn = web_server.Handler._FUNC_GET_ROUTES.get(path)
-            if fn:
-                fn(self, params)
-                return
-            for pattern, fn in web_server.Handler._FUNC_GET_PATTERNS:
-                match = pattern.match(path)
-                if match:
-                    fn(self, params, *match.groups())
+        # The injected session is process-global.  This lock intentionally
+        # spans dispatch, HTTP exception mapping, and reconnect: releasing it
+        # earlier would still let a concurrent request race a cursor close or
+        # replacement after an error.
+        with _LIVE_DB_DISPATCH_LOCK:
+            path = parsed.path.rstrip("/") or "/"
+            params = parse_qs(parsed.query)
+            try:
+                fn = web_server.Handler._FUNC_GET_ROUTES.get(path)
+                if fn:
+                    fn(self, params)
                     return
-            self._error("Not found", 404)
-        except _discogs.DiscogsMirrorNotConfigured as exc:
-            # Reuse production's mapping (web/server.py::do_GET) — a
-            # deliberate config posture (no Discogs mirror), not a crash.
-            # Dev sessions should exercise the same 503, not a generic 500
-            # (#501 item 4).
-            self._error(str(exc), 503)
-        except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
-            web_server.log.exception("dev live-db GET %s failed", path)
-            web_server._try_reconnect_db()
-            self._error(str(exc), 500)
+                for pattern, fn in web_server.Handler._FUNC_GET_PATTERNS:
+                    match = pattern.match(path)
+                    if match:
+                        fn(self, params, *match.groups())
+                        return
+                self._error("Not found", 404)
+            except _discogs.DiscogsMirrorNotConfigured as exc:
+                # Reuse production's mapping (web/server.py::do_GET) — a
+                # deliberate config posture (no Discogs mirror), not a crash.
+                # Dev sessions should exercise the same 503, not a generic 500
+                # (#501 item 4).
+                self._error(str(exc), 503)
+            except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
+                web_server.log.exception("dev live-db GET %s failed", path)
+                web_server._try_reconnect_db()
+                self._error(str(exc), 500)
 
     def _serve_events(self) -> None:
         self.send_response(200)
