@@ -2225,7 +2225,7 @@ class TestDryRunMintsVerifiedLosslessProof(unittest.TestCase):
             verified_lossless_proof=True,
         )
 
-        self.assertEqual(equivalent.decision, "transcode_upgrade")
+        self.assertEqual(equivalent.decision, "import")
         self.assertFalse(equivalent.is_terminal)
         assert equivalent.comparison_basis is not None
         self.assertTrue(equivalent.comparison_basis.verified_lossless_bypass)

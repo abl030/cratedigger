@@ -199,14 +199,17 @@ def import_quality_decision(
     ``verified_lossless_proof=True`` still forces an import when the verdict is
     "better" or "equivalent", but NOT when it would be a downgrade — this
     blocks a deliberately too-low ``verified_lossless_target`` (e.g. Opus
-    64) from replacing a good existing album. When the bypass CHANGED the
-    outcome (an "equivalent" verdict imported), the returned basis records
-    ``verified_lossless_bypass=True`` so the persisted audit trail explains
-    the import; a "better" verdict imports on its own merits and the flag
-    stays False.
+    64) from replacing a good existing album. Proof-backed imports use the
+    ordinary ``import`` decision so dispatch runs the terminal quality gate;
+    conversion remains recorded separately on ``ImportResult``. When the
+    bypass CHANGED the outcome (an "equivalent" verdict imported), the
+    returned basis records ``verified_lossless_bypass=True`` so the persisted
+    audit trail explains the import; a "better" verdict imports on its own
+    merits and the flag stays False.
 
     Returns an ImportQualityDecision whose ``decision`` is one of:
-        "import"              — new files are better (or no existing), proceed
+        "import"              — new files are better (or no existing), proceed;
+                                also the terminal path for proof-backed targets
         "downgrade"           — new files are worse, skip (exit 5)
         "transcode_upgrade"   — transcode but better than existing, import + denylist (exit 6)
         "transcode_downgrade" — transcode and not better, skip + denylist (exit 6)
@@ -224,7 +227,12 @@ def import_quality_decision(
 
     if existing is None:
         return ImportQualityDecision(
-            decision="transcode_first" if is_transcode else "import")
+            decision=(
+                "transcode_first"
+                if is_transcode and not verified_lossless_proof
+                else "import"
+            )
+        )
 
     basis = compare_quality(
         new,
@@ -250,10 +258,14 @@ def import_quality_decision(
     # difference if it's laundered or not, is it better? if you denied
     # laundered audio you'd never get anything for this particular release."
     # — https://github.com/abl030/cratedigger/issues/829
-    if verified_lossless_proof and verdict == "equivalent":
+    if verified_lossless_proof and verdict in ("better", "equivalent"):
         return ImportQualityDecision(
-            decision="transcode_upgrade" if is_transcode else "import",
-            basis=msgspec.structs.replace(basis, verified_lossless_bypass=True),
+            decision="import",
+            basis=(
+                msgspec.structs.replace(basis, verified_lossless_bypass=True)
+                if verdict == "equivalent"
+                else basis
+            ),
         )
 
     if verdict == "better":

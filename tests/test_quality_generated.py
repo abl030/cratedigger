@@ -212,6 +212,24 @@ def assert_unverified_lossy_never_terminal(result: SimResult) -> None:
         raise AssertionError(f"retained lossy source was not denylisted: {result!r}")
 
 
+def assert_proof_backed_target_uses_terminal_gate(result: dict) -> None:
+    """A proof-backed configured target must use the terminal import path."""
+    actual = (
+        result["stage2_import"],
+        result["stage3_quality_gate"],
+        result["final_status"],
+        result["imported"],
+        result["keep_searching"],
+        result["denylisted"],
+    )
+    expected = ("import", "accept", "imported", True, False, False)
+    if actual != expected:
+        raise AssertionError(
+            f"proof-backed configured target was not terminal: "
+            f"{actual!r} != {expected!r}"
+        )
+
+
 _POST_IMPORT_EXPECTATIONS = {
     "accept": ("imported", None, False),
     "requeue_lossless": ("wanted", "lossless", True),
@@ -6211,6 +6229,55 @@ class TestStoredFormatIsProofBlindProperties(unittest.TestCase):
         )
 
 
+class TestProofBackedTargetTerminalProperties(unittest.TestCase):
+    @given(
+        source_bitrate=st.integers(min_value=400, max_value=1400),
+        current_bitrate=st.one_of(
+            st.none(), st.integers(min_value=1, max_value=130)
+        ),
+        converted_count=st.integers(min_value=1, max_value=30),
+    )
+    def test_configured_target_finishes_for_every_non_downgrade(
+        self,
+        source_bitrate,
+        current_bitrate,
+        converted_count,
+    ):
+        candidate = build_parity_candidate_evidence(
+            is_flac=True,
+            min_bitrate=source_bitrate,
+            is_cbr=False,
+        )
+        candidate = msgspec.structs.replace(
+            candidate,
+            target_format="opus 128",
+            target_is_cbr=False,
+            verified_lossless_proof=VerifiedLosslessProof(
+                provenance="measured",
+                source="flac",
+                classifier="generated",
+            ),
+        )
+        current = build_parity_current_evidence(
+            min_bitrate=current_bitrate,
+            avg_bitrate=current_bitrate,
+            format="Opus",
+        )
+        result = full_pipeline_decision_from_evidence(
+            candidate,
+            current,
+            facts=AlbumQualityEvidenceDecisionFacts(
+                verified_lossless_target="opus 128",
+                target_format="opus 128",
+                converted_count=converted_count,
+                post_conversion_min_bitrate=114,
+                post_conversion_is_cbr=False,
+            ),
+        )
+
+        assert_proof_backed_target_uses_terminal_gate(result)
+
+
 class TestStoredFormatCheckerSelfTests(unittest.TestCase):
     """Known-bad self-tests for the stored-format invariant checkers."""
 
@@ -6345,6 +6412,17 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
     def test_unverified_lossy_checker_trips_on_terminal_import(self):
         with self.assertRaises(AssertionError):
             assert_unverified_lossy_never_terminal(_planted_bad_import())
+
+    def test_proof_backed_target_checker_trips_on_transcode_routing(self):
+        with self.assertRaises(AssertionError):
+            assert_proof_backed_target_uses_terminal_gate({
+                "stage2_import": "transcode_upgrade",
+                "stage3_quality_gate": "accept",
+                "final_status": "imported",
+                "imported": True,
+                "keep_searching": False,
+                "denylisted": False,
+            })
 
     def test_action_mapping_checker_trips_on_each_output_field(self):
         for field, overrides in (
