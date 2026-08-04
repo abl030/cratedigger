@@ -1387,7 +1387,7 @@ console.log('Iron & Wine: the temporary V0 minimum never wears the FLAC label');
     'detail existing V0 owns its minimum');
 }
 
-console.log('evidence strip CSS keeps desktop alignment and gives each mobile side two readable lines');
+console.log('evidence strip CSS keeps desktop alignment and gives mobile readable aligned one-line rows');
 {
   const css = readFileSync(new URL('../web/index.html', import.meta.url), 'utf8');
   assertContains(css, '.r-ev-row { display: contents; }',
@@ -1395,22 +1395,12 @@ console.log('evidence strip CSS keeps desktop alignment and gives each mobile si
   assertContains(css, 'grid-template-columns: 3.6em minmax(4.5em, 0.8fr) minmax(12em, 1.7fr) minmax(7.5em, 1fr) minmax(9em, 1.35fr)',
     'desktop reserves aligned tag/source/metric/spectral/V0 columns');
   assertContains(css, '@media (max-width: 720px)', 'shared grid has a narrow-screen layout');
-  assertContains(css, 'grid-template-columns: 2.9em max-content minmax(0, 1fr) max-content;',
-    'mobile aligns tag/source/flexible evidence/V0 without starving the verdict');
-  assertContains(css, '"in-tag in-source in-metric in-metric"',
-    'mobile gives IN source and bitrate their own first line');
-  assertContains(css, '". in-spectral in-spectral in-v0"',
-    'mobile gives the full IN spectral verdict and V0 facts a second line');
-  assertContains(css, '"have-tag have-source have-metric have-metric"',
-    'mobile gives HAVE source and bitrate their own first line');
-  assertContains(css, '". have-spectral have-spectral have-v0"',
-    'mobile gives the full HAVE spectral verdict and V0 facts a second line');
+  assertContains(css, '.r-evidence { grid-template-columns: 2.9em 3.2em minmax(8.5em, max-content) minmax(3em, 1fr) max-content; column-gap: 0.45em; font-size: 12px;',
+    'mobile fixes tag+source and floors the bitrate column at a labelled-pair width, so every metric cell (CBR pairs included) keeps aligned column edges');
   assertContains(css, 'font-family: system-ui,',
-    'mobile uses the narrow system font so evidence remains compact');
-  assertContains(css, '.r-ev-spectral { white-space: normal; }',
-    'long spectral verdicts wrap at word boundaries instead of becoming fragments');
-  assertExcludes(css, '.r-ev-cell { overflow: hidden; text-overflow: ellipsis; }',
-    'mobile evidence never hides important verdict text behind ellipses');
+    'mobile uses the narrow system font so full lines fit without squeezing');
+  assertContains(css, '.r-ev-cell { overflow: hidden; text-overflow: ellipsis; }',
+    'squeezed cells drop end characters instead of wrapping');
   assertContains(css, '.r-ev-full { display: none; } .r-ev-compact { display: inline; }',
     'mobile swaps in the spelled-out compact wording');
   assertContains(css, '.r-ev-compact { display: none; }',
@@ -1419,8 +1409,8 @@ console.log('evidence strip CSS keeps desktop alignment and gives each mobile si
   assertExcludes(css, 'grid-template-columns: max-content max-content max-content max-content max-content max-content;',
     'the six-column mobile crush cannot return');
   assertExcludes(css, 'column-gap: 1px', 'the 1px column crush cannot return');
-  assertExcludes(css, 'grid-template-columns: 2.9em 3.2em minmax(8.5em, max-content)',
-    'the one-line layout that starved spectral verdicts cannot return');
+  assertExcludes(css, 'grid-template-rows: auto auto auto;',
+    'mobile does not spend three physical rows on each evidence side');
   assertContains(css, '.r-evidence .r-ev-tag { color: #d3deea; font-weight: 900; font-size: 1.08em;',
     'IN/HAVE labels are visibly prominent');
   assertContains(css, '@media (min-width: 721px) { .r-ev-v0 { padding-left: 1em; } }',

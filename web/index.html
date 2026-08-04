@@ -400,35 +400,19 @@
   .r-ev-compact { display: none; }
   @media (min-width: 721px) { .r-ev-v0 { padding-left: 1em; } }
   @media (max-width: 720px) {
-    /* Mobile: keep the shared IN/HAVE alignment, but give each side two
-       lines. Source + bitrate occupy the first; spectral + V0 occupy the
-       second. The flexible middle track gives verdicts readable space and
-       lets long verdicts wrap at word boundaries instead of ellipsizing. */
-    .r-evidence {
-      grid-template-columns: 2.9em max-content minmax(0, 1fr) max-content;
-      grid-template-areas:
-        "in-tag in-source in-metric in-metric"
-        ". in-spectral in-spectral in-v0"
-        "have-tag have-source have-metric have-metric"
-        ". have-spectral have-spectral have-v0";
-      column-gap: 0.45em;
-      min-width: 0;
-      font-size: 12px;
-      line-height: 1.5;
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      color: #92a2b1;
-    }
-    .r-ev-in .r-ev-tag { grid-area: in-tag; }
-    .r-ev-in .r-ev-source { grid-area: in-source; }
-    .r-ev-in .r-ev-metric { grid-area: in-metric; }
-    .r-ev-in .r-ev-spectral { grid-area: in-spectral; }
-    .r-ev-in .r-ev-v0 { grid-area: in-v0; }
-    .r-ev-have .r-ev-tag { grid-area: have-tag; }
-    .r-ev-have .r-ev-source { grid-area: have-source; }
-    .r-ev-have .r-ev-metric { grid-area: have-metric; }
-    .r-ev-have .r-ev-spectral { grid-area: have-spectral; }
-    .r-ev-have .r-ev-v0 { grid-area: have-v0; }
-    .r-ev-spectral { white-space: normal; }
+    /* Mobile: the same shared grid as desktop, sized for cross-card
+       scanning at 12px. Tag and source columns are FIXED so the bitrate
+       column starts at the same x on every card; the V0 column ends
+       flush right on every card (the flexible spectral column eats the
+       slack between them, ellipsizing under pressure — its color still
+       tells the grade). Number columns are max-content and never shrink.
+       The bitrate column is floored at a labelled-pair width so a bare
+       CBR value ("320k") keeps the same column edges as a full pair —
+       only rare 4-digit pairs grow past it. One line per side,
+       guaranteed. Compact wording labels each number in place (avg/min
+       beside the values), never "a/m". */
+    .r-evidence { grid-template-columns: 2.9em 3.2em minmax(8.5em, max-content) minmax(3em, 1fr) max-content; column-gap: 0.45em; font-size: 12px; line-height: 1.5; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #92a2b1; }
+    .r-ev-cell { overflow: hidden; text-overflow: ellipsis; }
     .r-ev-full { display: none; } .r-ev-compact { display: inline; }
   }
   /* Failure prose can carry raw paths + quoted transport errors — clamp
