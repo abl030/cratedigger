@@ -321,7 +321,7 @@ def spectral_measurement_from_attempt(
     detail: SpectralAnalysisDetail | None,
 ) -> SpectralMeasurement | None:
     """Project a successful attempt audit into policy/persistence evidence."""
-    if detail is None or not detail.attempted or detail.error is not None:
+    if detail is None or not detail.attempted or detail.grade is None:
         return None
     return SpectralMeasurement.from_parts(
         detail.grade,

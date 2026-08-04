@@ -1434,6 +1434,9 @@ candidate attempt is represented by a typed persistence receipt instead of
 overwriting installed audit history. The receipt records the exact evidence
 ID/fingerprint, write intent, attempt outcome, and spectral tuple and is stored
 with the preview result after the exact import-job/download-log FK is verified.
+An analyzer attempt that produced a valid album tuple before a later per-track
+diagnostic failed remains `measured`; an errored attempt with no tuple is
+`failed` and cannot supply spectral policy evidence.
 
 Cache reuse remains generation-strict. Persistence completion is established
 by the upsert plus exact FK and does not re-enter that cache gate. At action
@@ -1445,7 +1448,9 @@ even when a historical spectral tuple is stale, because no spectral comparison
 can change the structural verdict. Spectral-dependent evidence still requires
 the running analyzer generation. Missing, malformed, stale, mismatched, or
 failed/empty attempt evidence without a structural fact fails closed. This is
-forward transition policy, not a blanket rewrite of historical rows.
+forward transition policy, not a blanket rewrite of historical rows. Wrong
+Match cleanup is an action consumer and therefore uses this decision-admission
+path after a stale-evidence refresh, rather than re-entering cache eligibility.
 
 **`source_path` is immutable capture provenance, not live path authority.**
 It records where the evidence snapshot was first measured. A same-address

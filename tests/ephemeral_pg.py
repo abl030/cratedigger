@@ -10,6 +10,24 @@ from pathlib import Path
 from typing import Self
 from urllib.parse import quote
 
+from lib.pipeline_db import PipelineDB
+
+
+def seed_transition_request(
+    db: PipelineDB,
+    *,
+    artist_name: str,
+    album_title: str,
+    mb_release_id: str,
+) -> int:
+    """Seed request authority inside a disposable transition database."""
+    return db.add_request(
+        artist_name=artist_name,
+        album_title=album_title,
+        source="request",
+        mb_release_id=mb_release_id,
+    )
+
 
 class EphemeralPostgresError(RuntimeError):
     """A disposable cluster could not start, with its useful diagnostics."""

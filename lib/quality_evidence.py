@@ -45,6 +45,7 @@ from lib.quality import (
 if TYPE_CHECKING:
     from lib.beets_db import AlbumInfo, CurrentBeetsUnique
     from lib.import_execution import ExecutionLeaseSnapshot
+    from lib.import_queue import ImportJob
     from lib.measurement import PreimportMeasurement
     from lib.pipeline_db.rows import AlbumRequestRow
 
@@ -60,7 +61,7 @@ class QualityEvidenceDB(Protocol):
 
     def get_request(self, request_id: int) -> AlbumRequestRow | None: ...
 
-    def get_import_job(self, job_id: int) -> Any: ...
+    def get_import_job(self, job_id: int) -> ImportJob | None: ...
 
     def upsert_album_quality_evidence(
         self,
@@ -1013,10 +1014,10 @@ def _candidate_spectral_persistence_shape(
 ]:
     """Describe this attempt's spectral write without reading cache state."""
     if attempt is not None and attempt.attempted:
-        if attempt.error is not None:
-            outcome: CandidateSpectralAttemptOutcome = "failed"
-        elif attempt.grade is not None or attempt.bitrate_kbps is not None:
-            outcome = "measured"
+        if attempt.grade is not None:
+            outcome: CandidateSpectralAttemptOutcome = "measured"
+        elif attempt.error is not None:
+            outcome = "failed"
         else:
             outcome = "empty"
         return (

@@ -2591,7 +2591,7 @@ def replay_decision_transitions(
         persist_candidate_evidence_from_import_result,
         persist_candidate_evidence_from_measurement,
     )
-    from tests.ephemeral_pg import EphemeralPostgres
+    from tests.ephemeral_pg import EphemeralPostgres, seed_transition_request
 
     replay_rows: list[DecisionTransitionReplay] = []
     with EphemeralPostgres() as postgres, tempfile.TemporaryDirectory(
@@ -2631,10 +2631,10 @@ def replay_decision_transitions(
                     raise RenderDifferentialError(
                         f"transition seed {role.evidence_id} did not reload"
                     )
-                request_id = db.add_request(
+                request_id = seed_transition_request(
+                    db,
                     artist_name="Decision transition",
                     album_title=role.matrix_class,
-                    source="request",
                     mb_release_id=release_id,
                 )
                 if role.role in {"current", "dual"} and not (
@@ -2719,11 +2719,7 @@ def replay_decision_transitions(
                     audio_file_count=candidate.audio_file_count,
                     filetype_band=candidate.filetype_band,
                     min_bitrate_kbps=candidate_measurement.min_bitrate_kbps,
-                    is_vbr=(
-                        None
-                        if candidate_measurement.is_cbr is None
-                        else not candidate_measurement.is_cbr
-                    ),
+                    is_vbr=not candidate_measurement.is_cbr,
                     spectral_audit=SpectralDetail(candidate=attempt),
                     aac_lattice=candidate.aac_lattice,
                     cd_rip_verification=candidate.cd_rip_verification,

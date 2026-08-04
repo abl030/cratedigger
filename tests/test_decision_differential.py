@@ -936,10 +936,11 @@ import hashlib
 import msgspec
 
 from scripts.decision_differential import (
-    _CoverageObservedEvidence,
     _CoverageSourceLink,
+    _observed_evidence,
     recompute_decision_corpus_coverage,
 )
+from tests.test_decision_differential import _corpus_row
 
 links = [
     _CoverageSourceLink(
@@ -953,12 +954,27 @@ links = [
         authority_reason=None,
     ),
 ]
-observed = [
-    _CoverageObservedEvidence(1, "candidate", "candidate", "candidate", "one"),
-    _CoverageObservedEvidence(2, "current-two", "current-two", "current-two", "two"),
-    _CoverageObservedEvidence(3, "current-three", "current-three", "current-three", "three"),
+corpus_rows = [
+    _corpus_row(
+        id=1, mb_release_id="candidate", is_candidate=False,
+        current_evidence_id=None, request_mb_release_id=None,
+    ),
+    _corpus_row(
+        id=2, mb_release_id="current-two", is_candidate=False,
+        current_evidence_id=None, request_mb_release_id=None,
+    ),
+    _corpus_row(
+        id=3, mb_release_id="current-three", is_candidate=False,
+        current_evidence_id=None, request_mb_release_id=None,
+    ),
 ]
-coverage = recompute_decision_corpus_coverage(links, observed, [], b"")
+observed_rows = [_observed_evidence(row) for row in corpus_rows]
+corpus_bytes = b"".join(
+    msgspec.json.encode(row) + b"\\n" for row in corpus_rows
+)
+coverage = recompute_decision_corpus_coverage(
+    links, observed_rows, corpus_rows, corpus_bytes,
+)
 print(hashlib.sha256(msgspec.json.encode(coverage)).hexdigest())
 '''
         hashes: list[str] = []
