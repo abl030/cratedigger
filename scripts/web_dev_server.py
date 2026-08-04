@@ -568,6 +568,19 @@ def configure_live_db(
     from lib.pipeline_db import PipelineDB
     from web import discogs, mb
 
+    class _ReadOnlyDevPipelineDB(PipelineDB):
+        """PipelineDB whose initial and self-healed sessions are read-only."""
+
+        def _connect(self):
+            connection = super()._connect()
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute("SET default_transaction_read_only = on")
+            except Exception:
+                connection.close()
+                raise
+            return connection
+
     # These adapters use module globals in production too. Assign BOTH for
     # every live-db configuration, including missing values, so a second dev
     # server in the same process cannot inherit a stale mirror from the first.
@@ -579,13 +592,14 @@ def configure_live_db(
     )
 
     def connect_readonly() -> None:
-        if web_server.db is not None:
+        replacement = _ReadOnlyDevPipelineDB(config.dsn)
+        previous = web_server.db
+        if previous is not None:
             try:
-                web_server.db.conn.close()
+                previous.conn.close()
             except Exception:  # noqa: BLE001, S110 - best-effort boundary must not mask primary work
                 pass
-        web_server.db = PipelineDB(config.dsn)
-        web_server.db._execute("SET default_transaction_read_only = on")
+        web_server.db = replacement
         web_server.log.info("Connected dev live-db session in read-only mode")
 
     # Deliberately do NOT set web_server._db_dsn: with a DSN present,

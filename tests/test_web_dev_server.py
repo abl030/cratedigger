@@ -1039,6 +1039,38 @@ class ConfigureLiveDbReadOnlyTest(unittest.TestCase):
                 " VALUES ('ro', 'ro', 'request')"
             )
 
+    def test_internal_reconnect_restores_read_only_session_default(self):
+        from scripts.web_dev_server import configure_live_db
+
+        config = DevConfig(
+            data="live-db",
+            scenario="peers",
+            prod_base_url="https://music.ablz.au",
+            dsn=self.dsn,
+            beets_db=None,
+            mb_api=None,
+            discogs_api=None,
+            redis_host=None,
+            redis_port=6379,
+        )
+        configure_live_db(config)
+        ws = self.web_server
+        configured = ws._db()
+        original_connection = configured.conn
+
+        original_connection.close()
+        row = configured._execute(
+            "SHOW default_transaction_read_only"
+        ).fetchone()
+
+        self.assertIsNot(configured.conn, original_connection)
+        self.assertEqual(row["default_transaction_read_only"], "on")
+        with self.assertRaises(psycopg2.Error):
+            configured._execute(
+                "INSERT INTO album_requests (artist_name, album_title, source)"
+                " VALUES ('reconnected-ro', 'reconnected-ro', 'request')"
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
