@@ -618,16 +618,31 @@ two-tree runbook (recipe in the module docstring). A quality-policy
 change is measured on the live corpus, not reasoned about from the diff.
 
 The export reads one explicitly qualified PostgreSQL `REPEATABLE READ`,
-read-only snapshot. Its v2 coverage companion is a strict typed artifact: it
+read-only snapshot. Its v3 coverage companion is a strict typed artifact: it
 contains the canonically sorted `source_links` ledger (both import-job and
-download-log arms) plus an observed-evidence content-address ledger for every
-required candidate/current ID. Always run `verify` before either tree decides;
+download-log arms), the raw ownership ledger for all three evidence FKs, and
+an observed-evidence content-address ledger for every canonical row, including
+unlinked audit history. The linear census classifies each row as candidate,
+current, dual, or audit-only and records its analyzer generation, lineage,
+subject/provenance, early reject fact, and preserved-source shape. Always run
+`verify` before either tree decides;
 it rejects unknown manifest fields and recomputes every count, debt, role,
 association, address, digest, and green result from those ledgers and the
 corpus bytes. This is an offline artifact check, not a new database read.
 It proves structural self-consistency and stale-pair rejection, not hostile
 rewriting authenticity: the trusted operator's repeatable-read PostgreSQL
 export and the real-PG export tests are the independent completeness authority.
+
+For persistence-boundary changes, run `transition` on that same verified pair.
+It selects one representative per observed ownership/evidence matrix class,
+starts a disposable local PostgreSQL cluster, applies the real migrations, and
+drives the real canonical upsert, exact import-job FK, reload, cache-admission,
+action-admission, and unified-decider seams. It accepts no source DSN. The live
+database supplies observations only; every replay write is forced into the
+throwaway cluster. Each class enters through the public measurement-only or
+import-result evidence producer, so legacy shapes that cannot satisfy today's
+producer contract are reported explicitly as `producer_refused` rather than
+being injected below construction.
 
 Only `--counterfactual` is a flag. It decides whether the run can SEE a
 promotion-gate change; a zero from a run without it is not evidence. Native
@@ -1404,6 +1419,29 @@ them via `import_jobs.candidate_evidence_id`,
 `album_requests.current_evidence_id`. Triage walks the FK chain (direct →
 cross-walk via `request_id` → measure as last resort). Evidence is never
 deleted unless the files actually change.
+
+**Persistence, cache reuse, and action admission are separate transitions.**
+A fresh candidate attempt writes the shared canonical address with an explicit
+spectral intent: `merge` means no analyzer attempt occurred; `replace` means
+the attempt's complete spectral tuple (including an empty or failed result)
+supersedes stale candidate-only cache state atomically. A canonical row that is
+also current-owned keeps any irreplaceable carried source-subject tuple; the
+candidate attempt is represented by a typed persistence receipt instead of
+overwriting installed audit history. The receipt records the exact evidence
+ID/fingerprint, write intent, attempt outcome, and spectral tuple and is stored
+with the preview result after the exact import-job/download-log FK is verified.
+
+Cache reuse remains generation-strict. Persistence completion is established
+by the upsert plus exact FK and does not re-enter that cache gate. At action
+time the importer validates the same snapshot and receipt, projects the exact
+candidate attempt over any dual-owned canonical row, and then calls the one
+unified decider. A concrete structural pre-import fact (corrupt audio, matched
+bad hash, nested layout, empty fileset, or mixed source) may reach that decider
+even when a historical spectral tuple is stale, because no spectral comparison
+can change the structural verdict. Spectral-dependent evidence still requires
+the running analyzer generation. Missing, malformed, stale, mismatched, or
+failed/empty attempt evidence without a structural fact fails closed. This is
+forward transition policy, not a blanket rewrite of historical rows.
 
 **`source_path` is immutable capture provenance, not live path authority.**
 It records where the evidence snapshot was first measured. A same-address

@@ -154,7 +154,10 @@ from lib.quality import (
     CodecFamily,
     CooldownConfig,
 )
-from lib.quality_evidence import current_evidence_preserves_source_spectral
+from lib.quality_evidence import (
+    SpectralWriteIntent,
+    current_evidence_preserves_source_spectral,
+)
 from lib.release_identity import (
     ReleaseIdentity,
     exact_request_evidence_identity_matches,
@@ -4815,8 +4818,14 @@ class FakePipelineDB:
     def upsert_album_quality_evidence(
         self,
         evidence: AlbumQualityEvidence,
+        *,
+        spectral_write_intent: SpectralWriteIntent = "merge",
     ) -> None:
         evidence = evidence.sorted_for_storage()
+        if spectral_write_intent not in {"merge", "replace"}:
+            raise ValueError(
+                f"invalid spectral write intent: {spectral_write_intent!r}"
+            )
         errors = evidence.storage_validation_errors()
         if errors:
             raise ValueError("; ".join(errors))
@@ -4824,6 +4833,20 @@ class FakePipelineDB:
         existing = self.album_quality_evidence.get(key)
         incoming_preserves_source_spectral = (
             current_evidence_preserves_source_spectral(evidence)
+        )
+        current_owned = (
+            existing is not None
+            and any(
+                request.get("current_evidence_id") == existing.id
+                for request in self._requests.values()
+            )
+        )
+        protect_current_source_spectral = (
+            spectral_write_intent == "replace"
+            and current_owned
+            and existing is not None
+            and existing.measurement.spectral_subject
+                == EVIDENCE_SUBJECT_SOURCE
         )
         if (
             existing is not None
@@ -4860,11 +4883,20 @@ class FakePipelineDB:
         if (
             existing is not None
             and existing.lineage_version >= 4
-            and evidence.measurement.spectral_grade is None
-            and not (
-                incoming_preserves_source_spectral
-                and existing.measurement.spectral_subject
-                    == EVIDENCE_SUBJECT_INSTALLED
+            and (
+                protect_current_source_spectral
+                or (
+                    evidence.measurement.spectral_grade is None
+                    and not (
+                        spectral_write_intent == "replace"
+                        and not current_owned
+                    )
+                    and not (
+                        incoming_preserves_source_spectral
+                        and existing.measurement.spectral_subject
+                            == EVIDENCE_SUBJECT_INSTALLED
+                    )
+                )
             )
         ):
             # cliff_hz/codec_family/ultrasonic_deficit_db/

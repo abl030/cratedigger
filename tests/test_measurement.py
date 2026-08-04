@@ -654,8 +654,7 @@ class TestMeasurePreimportState(unittest.TestCase):
                     )
 
     def test_audio_corrupt_short_circuits_with_facts(self):
-        """audio_corrupt=True must flow through; spectral / file counts
-        short-circuit, but the audio facts must be intact."""
+        """audio_corrupt=True and exact failed paths must flow through."""
         from lib.config import CratediggerConfig
         from lib.measurement import measure_preimport_state
         from lib.quality import AudioToolDiagnostic, AudioValidationReport
@@ -693,8 +692,65 @@ class TestMeasurePreimportState(unittest.TestCase):
             )
         self.assertTrue(m.audio_corrupt)
         self.assertEqual(m.corrupt_files, ["track01.mp3"])
-        # Short-circuit: spectral did not run.
-        self.assertIsNone(m.download_spectral)
+
+    def test_audio_corrupt_carries_successful_attempt_audit_into_evidence(self):
+        """#1030: an early fact must not discard a successful fresh scan."""
+        from lib.config import CratediggerConfig
+        from lib.measurement import (
+            ExistingSpectralAuditLookup,
+            measure_preimport_state,
+        )
+        from lib.quality import (
+            AudioToolDiagnostic,
+            AudioValidationReport,
+            SpectralAnalysisDetail,
+        )
+        from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
+        from lib.util import AudioValidationResult
+
+        bad_result = AudioValidationResult(
+            AudioValidationReport(
+                outcome="audio_corrupt",
+                files_checked=1,
+                files_failed=1,
+                diagnostics=[AudioToolDiagnostic(
+                    relative_path="track01.flac",
+                    category="decode_error",
+                    return_code=69,
+                    stderr_excerpt="invalid sync code",
+                )],
+            ),
+            failed_paths=("track01.flac",),
+        )
+        fresh = SpectralAnalysisDetail(
+            attempted=True,
+            grade="genuine",
+            bitrate_kbps=96,
+            spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
+        )
+        with patch("lib.measurement.validate_audio", return_value=bad_result):
+            measured = measure_preimport_state(
+                path="/tmp/does-not-exist",
+                mb_release_id="mbid-corrupt",
+                label="Corrupt",
+                download_filetype="flac",
+                download_min_bitrate_bps=900_000,
+                download_is_vbr=False,
+                cfg=CratediggerConfig(audio_check_mode="normal"),
+                spectral_detail_analyzer=lambda _path: fresh,
+                existing_spectral_resolver=(
+                    lambda _release_id: ExistingSpectralAuditLookup()
+                ),
+            )
+
+        self.assertTrue(measured.audio_corrupt)
+        download_spectral = measured.download_spectral
+        assert download_spectral is not None
+        self.assertEqual(download_spectral.grade, "genuine")
+        self.assertEqual(
+            download_spectral.spectral_measurement_version,
+            SPECTRAL_MEASUREMENT_VERSION,
+        )
 
     def test_empty_directory_reports_zero_file_count(self):
         """No audio files → audio_file_count=0, layout='flat'."""

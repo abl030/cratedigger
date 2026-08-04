@@ -32,6 +32,7 @@ from lib.quality import (
     VerifiedLosslessProof,
 )
 from lib.quality_evidence import (
+    CandidateEvidencePersistenceReceipt,
     EvidenceBuildResult,
     snapshot_audio_files,
 )
@@ -160,6 +161,122 @@ class TestImportEvidenceAcquisition(unittest.TestCase):
         reloaded = self.db.load_album_quality_evidence_by_id(stored.id)
         assert reloaded is not None
         self.assertEqual(reloaded.measurement.was_converted_from, "flac")
+
+    def test_dual_role_action_uses_receipt_without_rewriting_current_source(self):
+        """#1030: one row exposes role-specific spectral truth."""
+        from lib.import_queue import (
+            IMPORT_JOB_FORCE,
+            force_import_dedupe_key,
+            force_import_payload,
+        )
+        from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
+        from tests.helpers import claim_next_import_preview_job
+
+        os.remove(os.path.join(self.root, "01 - Track.mp3"))
+        with open(os.path.join(self.root, "01 - Track.opus"), "wb") as handle:
+            handle.write(b"audio")
+        files = snapshot_audio_files(self.root)
+        current = make_album_quality_evidence(
+            mb_release_id="release-1",
+            source_path=self.root,
+            files=files,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=128,
+                avg_bitrate_kbps=130,
+                median_bitrate_kbps=129,
+                format="Opus",
+                spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=96,
+                spectral_subject="source",
+                spectral_provenance="carried",
+                spectral_measurement_version=None,
+                was_converted_from="flac",
+            ),
+            codec="opus",
+            container="opus",
+            storage_format="Opus",
+            preserve_spectral_measurement_version=True,
+        )
+        self.db.upsert_album_quality_evidence(current)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=current.mb_release_id,
+            snapshot_fingerprint=current.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.assertTrue(self.db.set_request_current_evidence(42, stored.id))
+
+        candidate = msgspec.structs.replace(
+            current,
+            measurement=msgspec.structs.replace(
+                current.measurement,
+                spectral_grade="genuine",
+                spectral_bitrate_kbps=192,
+                spectral_subject="source",
+                spectral_provenance="measured",
+                spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
+                was_converted_from=None,
+            ),
+        )
+        self.db.upsert_album_quality_evidence(
+            candidate,
+            spectral_write_intent="replace",
+        )
+        job = self.db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            dedupe_key=force_import_dedupe_key(self.download_log_id),
+            payload=force_import_payload(
+                download_log_id=self.download_log_id,
+                failed_path=self.root,
+            ),
+        )
+        claimed = claim_next_import_preview_job(self.db, worker_id="preview")
+        assert claimed is not None and claimed.id == job.id
+        self.assertTrue(self.db.set_import_job_candidate_evidence(
+            job.id,
+            stored.id,
+        ))
+        receipt = CandidateEvidencePersistenceReceipt(
+            evidence_id=stored.id,
+            snapshot_fingerprint=stored.snapshot_fingerprint,
+            spectral_write_intent="replace",
+            spectral_outcome="measured",
+            spectral_grade="genuine",
+            spectral_bitrate_kbps=192,
+            spectral_subject="source",
+            spectral_provenance="measured",
+            spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
+        )
+        updated = self.db.mark_import_job_preview_importable(
+            job.id,
+            preview_result={
+                "candidate_evidence_receipt": msgspec.to_builtins(receipt),
+            },
+        )
+        assert updated is not None
+
+        result = ensure_candidate_evidence_for_action(
+            self.db,
+            source_path=self.root,
+            import_job_id=job.id,
+        )
+
+        self.assertTrue(result.available, result.provenance)
+        self.assertEqual(result.provenance.candidate_status, "persisted")
+        assert result.evidence is not None
+        self.assertEqual(result.evidence.measurement.spectral_grade, "genuine")
+        self.assertEqual(result.evidence.measurement.spectral_bitrate_kbps, 192)
+        self.assertIsNone(result.evidence.measurement.was_converted_from)
+        canonical = self.db.load_album_quality_evidence_by_id(stored.id)
+        assert canonical is not None
+        self.assertEqual(
+            (
+                canonical.measurement.spectral_grade,
+                canonical.measurement.spectral_provenance,
+                canonical.measurement.was_converted_from,
+            ),
+            ("likely_transcode", "carried", "flac"),
+        )
 
     def _persist_lossless_transcode_current_without_v0(self) -> int:
         stale_evidence = make_album_quality_evidence(

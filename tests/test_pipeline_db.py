@@ -6729,6 +6729,210 @@ class TestAlbumQualityEvidenceStorage(unittest.TestCase):
             **kwargs,
         )
 
+    def test_back_to_mono_corrupt_attempt_survives_stale_spectral_collision(self):
+        """Issue #1030: persistence completion is not cache eligibility.
+
+        Back to Mono repeatedly produced a fresh, detailed corrupt-FLAC
+        attempt while its content-addressed row retained an older candidate
+        spectral tuple with no analyzer generation.  The attempt was durably
+        linked, but the action loader applied the cache-generation gate and
+        demoted the concrete corruption fact to ``measurement_failed`` before
+        the unified decider could reject it.
+
+        This is deliberately a composed real-PostgreSQL regression: it drives
+        the measurement-only writer, same-address merge, FK reload, action
+        admission, and real policy decider.
+        """
+        from lib.import_evidence import ensure_candidate_evidence_for_action
+        from lib.measurement import PreimportMeasurement
+        from lib.quality import (
+            SpectralAnalysisDetail,
+            SpectralDetail,
+            full_pipeline_decision_from_evidence,
+        )
+        from lib.quality_evidence import (
+            persist_candidate_evidence_from_measurement,
+            snapshot_audio_files,
+        )
+        from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
+        from tests.helpers import make_audio_corrupt_validation_report
+
+        release_id = "a3e94b84-d6e8-4897-938f-250b9e3a6abb"
+        with tempfile.TemporaryDirectory() as source_path:
+            track_path = Path(source_path, "01 - Back to Mono.flac")
+            track_path.write_bytes(b"not really flac")
+            files = snapshot_audio_files(source_path)
+            stale = self._seed(
+                mb_release_id=release_id,
+                source_path=source_path,
+                files=files,
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=900,
+                    avg_bitrate_kbps=920,
+                    median_bitrate_kbps=910,
+                    format="FLAC",
+                    spectral_grade="suspect",
+                    spectral_bitrate_kbps=96,
+                    spectral_subject="source",
+                    spectral_provenance="measured",
+                    spectral_measurement_version=None,
+                ),
+                preserve_spectral_measurement_version=True,
+                codec="flac",
+                container="flac",
+                storage_format="FLAC",
+            )
+            self.db.upsert_album_quality_evidence(stale)
+            download_log_id = self.db.log_download(
+                request_id=self.req_id,
+                outcome="rejected",
+            )
+            corrupt_report = make_audio_corrupt_validation_report(
+                track_path.name,
+                detail="invalid sync code",
+            )
+            measurement = PreimportMeasurement(
+                corrupt_files=[track_path.name],
+                audio_validation=corrupt_report,
+                audio_corrupt=True,
+                audio_error="invalid sync code",
+                folder_layout="flat",
+                audio_file_count=1,
+                filetype_band="flac",
+                lossless_candidate=True,
+                min_bitrate_kbps=900,
+                spectral_audit=SpectralDetail(
+                    candidate=SpectralAnalysisDetail(
+                        attempted=True,
+                        grade="genuine",
+                        bitrate_kbps=96,
+                        spectral_measurement_version=(
+                            SPECTRAL_MEASUREMENT_VERSION
+                        ),
+                    ),
+                    existing=SpectralAnalysisDetail(attempted=False),
+                ),
+            )
+
+            persisted = persist_candidate_evidence_from_measurement(
+                self.db,
+                mb_release_id=release_id,
+                source_path=source_path,
+                measurement=measurement,
+                download_log_id=download_log_id,
+                files=files,
+            )
+            self.assertEqual(persisted.status, "ready")
+
+            admitted = ensure_candidate_evidence_for_action(
+                self.db,
+                source_path=source_path,
+                download_log_id=download_log_id,
+            )
+
+            self.assertTrue(admitted.available, admitted.provenance)
+            assert admitted.evidence is not None
+            decision = full_pipeline_decision_from_evidence(admitted.evidence)
+            self.assertEqual(decision["preimport_audio"], "reject_corrupt")
+            self.assertFalse(decision["imported"])
+
+    def test_candidate_attempt_cannot_overwrite_dual_role_source_spectral(self):
+        """#1030: candidate projection must not rewrite current audit truth."""
+        from lib.quality_evidence import (
+            CandidateEvidencePersistenceReceipt,
+            candidate_evidence_from_persistence_receipt,
+        )
+        from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
+
+        release_id = "dual-role-preserved-source"
+        files = [AlbumQualityEvidenceFile(
+            relative_path="01.opus",
+            size_bytes=128,
+            mtime_ns=1_700_000_000_000_000_000,
+            extension="opus",
+            container="opus",
+            codec="opus",
+        )]
+        current = self._seed(
+            mb_release_id=release_id,
+            files=files,
+            measurement=AudioQualityMeasurement(
+                min_bitrate_kbps=128,
+                avg_bitrate_kbps=130,
+                median_bitrate_kbps=129,
+                format="Opus",
+                spectral_grade="likely_transcode",
+                spectral_bitrate_kbps=96,
+                spectral_subject="source",
+                spectral_provenance="carried",
+                spectral_measurement_version=None,
+                was_converted_from="flac",
+            ),
+            preserve_spectral_measurement_version=True,
+            codec="opus",
+            container="opus",
+            storage_format="Opus",
+        )
+        self.db.upsert_album_quality_evidence(current)
+        stored = self.db.find_album_quality_evidence(
+            mb_release_id=release_id,
+            snapshot_fingerprint=current.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+        self.assertTrue(self.db.set_request_current_evidence(
+            self.req_id,
+            stored.id,
+        ))
+
+        fresh_candidate = msgspec.structs.replace(
+            current,
+            measurement=msgspec.structs.replace(
+                current.measurement,
+                spectral_grade="genuine",
+                spectral_bitrate_kbps=192,
+                spectral_subject="source",
+                spectral_provenance="measured",
+                spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
+                was_converted_from=None,
+            ),
+        )
+        self.db.upsert_album_quality_evidence(
+            fresh_candidate,
+            spectral_write_intent="replace",
+        )
+
+        canonical = self.db.load_album_quality_evidence_by_id(stored.id)
+        assert canonical is not None
+        self.assertEqual(
+            (
+                canonical.measurement.spectral_grade,
+                canonical.measurement.spectral_bitrate_kbps,
+                canonical.measurement.spectral_subject,
+                canonical.measurement.spectral_provenance,
+                canonical.measurement.spectral_measurement_version,
+                canonical.measurement.was_converted_from,
+            ),
+            ("likely_transcode", 96, "source", "carried", None, "flac"),
+        )
+
+        projected = candidate_evidence_from_persistence_receipt(
+            canonical,
+            CandidateEvidencePersistenceReceipt(
+                evidence_id=stored.id,
+                snapshot_fingerprint=stored.snapshot_fingerprint,
+                spectral_write_intent="replace",
+                spectral_outcome="measured",
+                spectral_grade="genuine",
+                spectral_bitrate_kbps=192,
+                spectral_subject="source",
+                spectral_provenance="measured",
+                spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
+            ),
+        )
+        self.assertEqual(projected.measurement.spectral_grade, "genuine")
+        self.assertEqual(projected.measurement.spectral_bitrate_kbps, 192)
+        self.assertIsNone(projected.measurement.was_converted_from)
+
     def test_upsert_then_find_by_content_address_round_trips(self):
         from lib.quality import (
             AlbumQualityEvidenceFile,

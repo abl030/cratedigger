@@ -11,7 +11,7 @@ The two are deliberately the same shape and share one diff engine
 — "on the rows that actually exist, what does this change?" — and because
 a second copy of that engine would be a parallel code path.
 
-Four modes, with ``decide``/``diff`` sharing Rule D's two-tree runbook:
+Five modes, with ``decide``/``diff`` sharing Rule D's two-tree runbook:
 
 * ``export`` reads the live source graph into a corpus plus its coverage
   manifest. ``verify`` recomputes that manifest before either tree trusts it.
@@ -24,6 +24,8 @@ Four modes, with ``decide``/``diff`` sharing Rule D's two-tree runbook:
   It runs ``full_pipeline_decision_from_evidence`` for every candidate and
   writes one decided JSONL row per candidate.
 * ``diff`` compares two decided JSONL files field by field.
+* ``transition`` replays one representative per v3 ownership/evidence matrix
+  class through production persistence and decision seams in disposable PG.
 
     git archive <base-ref> | tar -x -C /tmp/dd-base
     cp scripts/decision_differential.py /tmp/dd-base/scripts/   # if newer
@@ -131,7 +133,7 @@ rows are re-graded under the CURRENT ladder whenever they are measured
 again (a re-download, a re-preview, a force-import retry), and only rows
 that are never re-measured keep their old-era grade.
 
-Three properties keep the measurement honest, and each is the mirror of a
+Four properties keep the measurement honest, and each is the mirror of a
 way a differential can lie:
 
 * **The corpus is decoded by PRODUCTION'S decoder.** Rows go through
@@ -146,6 +148,12 @@ way a differential can lie:
 * **A row the decider refuses is recorded, never dropped.** An evidence
   row that is not action-ready raises in production too; silently
   skipping it would shrink the denominator and flatter the result.
+* **Transitions run only in disposable PostgreSQL.** ``transition`` verifies
+  the v3 pair, selects one representative per observed ownership/evidence
+  matrix class, then exercises the real upsert, exact import-job FK, reload,
+  cache, action-admission, and decider seams in an isolated local cluster.
+  It accepts no source DSN, so a live export is input evidence, never mutation
+  authority.
 """
 
 from __future__ import annotations
@@ -160,7 +168,7 @@ from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Literal, TypeGuard
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -1023,6 +1031,43 @@ class _CoverageObservedEvidence(msgspec.Struct, frozen=True, forbid_unknown_fiel
     stored_snapshot_fingerprint: str
     files_snapshot_fingerprint: str
     files_sha256: str
+    lineage_version: int
+    spectral_generation: Literal["null", "old", "current", "future"]
+    spectral_subject: EvidenceSubject | None
+    spectral_provenance: EvidenceProvenance | None
+    early_fact: str | None
+    preserved_source_spectral: bool
+
+
+EvidenceOwnerKind = Literal[
+    "download_log_candidate",
+    "import_job_candidate",
+    "album_request_current",
+]
+
+
+class _CoverageEvidenceOwnerLink(
+    msgspec.Struct, frozen=True, forbid_unknown_fields=True
+):
+    owner_kind: EvidenceOwnerKind
+    owner_id: int
+    evidence_id: int
+    request_id: int | None
+
+
+class _CoverageEvidenceRole(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    evidence_id: int
+    role: Literal["candidate", "current", "dual", "audit_only"]
+    candidate_owner_count: int
+    current_owner_count: int
+    matrix_class: str
+
+
+class _CoverageRoleCounts(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+    candidate: int
+    current: int
+    dual: int
+    audit_only: int
 
 
 class _CoverageAssociation(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -1113,11 +1158,14 @@ class _CoverageOutputs(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
 
 
 class DecisionCorpusCoverage(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
-    """Strict, self-recomputing coverage artifact schema (v2)."""
+    """Strict, self-recomputing coverage artifact schema (v3)."""
 
     schema_version: int
     source_links: list[_CoverageSourceLink]
     observed_evidence: list[_CoverageObservedEvidence]
+    evidence_owner_links: list[_CoverageEvidenceOwnerLink]
+    evidence_roles: list[_CoverageEvidenceRole]
+    evidence_role_counts: _CoverageRoleCounts
     total_source_links: int
     source_link_counts: _CoverageCounts
     source_distinct_candidate_id_counts: _CoverageCounts
@@ -1138,6 +1186,48 @@ class DecisionCorpusCoverage(msgspec.Struct, frozen=True, forbid_unknown_fields=
     outputs: _CoverageOutputs
     green: bool
     debt_count: int
+
+
+TransitionReplayOutcome = Literal[
+    "decided",
+    "admission_refused",
+    "producer_refused",
+]
+
+
+class DecisionTransitionReplay(msgspec.Struct, frozen=True):
+    """One observed matrix class exercised through the mutation boundary."""
+
+    evidence_id: int
+    matrix_class: str
+    observed_role: Literal["candidate", "current", "dual", "audit_only"]
+    candidate_owner_count: int
+    current_owner_count: int
+    transition_shape: Literal[
+        "fresh_current_measurement",
+        "fresh_failed_measurement",
+        "no_spectral_attempt",
+    ]
+    persistence_status: str
+    exact_import_job_fk: bool
+    canonical_spectral_generation: int | None
+    cache_status: str
+    admission_status: str
+    outcome: TransitionReplayOutcome
+    decision: dict[str, object] | None = None
+    refusal_reason: str | None = None
+
+
+class DecisionTransitionReport(msgspec.Struct, frozen=True):
+    """Disposable-PostgreSQL replay of one representative per matrix class."""
+
+    schema_version: int
+    coverage_schema_version: int
+    total_matrix_classes: int
+    decided: int
+    admission_refused: int
+    producer_refused: int
+    representatives: list[DecisionTransitionReplay]
 
 
 # Do not replace this projection with ``e.*``.  The JSONL wire and the real
@@ -1214,6 +1304,72 @@ def _db_source_links(cursor: object) -> list[_DecisionCorpusSourceLink]:
                 f"decision-corpus source-link projection drift: {exc}"
             ) from exc
     return links
+
+
+def _db_evidence_owner_links(
+    cursor: object,
+) -> list[_CoverageEvidenceOwnerLink]:
+    """Read the raw ownership census across all three evidence FKs."""
+    assert isinstance(cursor, psycopg2.extensions.cursor)
+    cursor.execute("""
+        SELECT owner_kind, owner_id, evidence_id, request_id
+        FROM (
+            SELECT 'import_job_candidate'::text AS owner_kind,
+                   job.id AS owner_id,
+                   job.candidate_evidence_id AS evidence_id,
+                   job.request_id
+            FROM import_jobs AS job
+            WHERE job.candidate_evidence_id IS NOT NULL
+            UNION ALL
+            SELECT 'download_log_candidate'::text AS owner_kind,
+                   log.id AS owner_id,
+                   log.candidate_evidence_id AS evidence_id,
+                   log.request_id
+            FROM download_log AS log
+            WHERE log.candidate_evidence_id IS NOT NULL
+            UNION ALL
+            SELECT 'album_request_current'::text AS owner_kind,
+                   request.id AS owner_id,
+                   request.current_evidence_id AS evidence_id,
+                   request.id AS request_id
+            FROM album_requests AS request
+            WHERE request.current_evidence_id IS NOT NULL
+        ) AS owners
+        ORDER BY owner_kind, owner_id
+    """)
+    try:
+        return [
+            msgspec.convert(dict(raw), type=_CoverageEvidenceOwnerLink)
+            for raw in cursor.fetchall()
+        ]
+    except msgspec.ValidationError as exc:
+        raise RenderDifferentialError(
+            f"decision-corpus evidence-owner projection drift: {exc}"
+        ) from exc
+
+
+def _db_all_evidence_ids(cursor: object) -> list[int]:
+    """Census every canonical evidence row, including unlinked audit history."""
+    assert isinstance(cursor, psycopg2.extensions.cursor)
+    cursor.execute("SELECT id FROM album_quality_evidence ORDER BY id")
+    ids: list[int] = []
+    for raw in cursor.fetchall():
+        if is_str_object_dict(raw):
+            value = raw["id"]
+        else:
+            try:
+                row = msgspec.convert(raw, type=tuple[object, ...])
+            except msgspec.ValidationError as exc:
+                raise RenderDifferentialError(
+                    "decision-corpus evidence-id census returned an invalid row"
+                ) from exc
+            value = row[0] if row else None
+        if not _is_exact_int(value):
+            raise RenderDifferentialError(
+                "decision-corpus evidence-id census returned a non-integer"
+            )
+        ids.append(value)
+    return ids
 
 
 def _qualify_read_snapshot(cursor: object) -> _DecisionCorpusSnapshot:
@@ -1551,7 +1707,23 @@ def _observed_evidence(row: Mapping[str, object]) -> _CoverageObservedEvidence:
         raise RenderDifferentialError(
             f"decision-corpus file projection/wire drift for evidence {evidence_id}: {exc}"
         ) from exc
-    from lib.quality_evidence import snapshot_fingerprint
+    from lib.quality import candidate_preimport_reject_fact
+    from lib.quality_evidence import (
+        current_evidence_preserves_source_spectral,
+        snapshot_fingerprint,
+    )
+    from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
+
+    evidence = _evidence_from_corpus_row(row)
+    generation = evidence.measurement.spectral_measurement_version
+    if generation is None:
+        generation_class: Literal["null", "old", "current", "future"] = "null"
+    elif generation < SPECTRAL_MEASUREMENT_VERSION:
+        generation_class = "old"
+    elif generation == SPECTRAL_MEASUREMENT_VERSION:
+        generation_class = "current"
+    else:
+        generation_class = "future"
 
     return _CoverageObservedEvidence(
         evidence_id=evidence_id,
@@ -1559,6 +1731,14 @@ def _observed_evidence(row: Mapping[str, object]) -> _CoverageObservedEvidence:
         stored_snapshot_fingerprint=stored,
         files_snapshot_fingerprint=snapshot_fingerprint(file_rows),
         files_sha256=hashlib.sha256(msgspec.json.encode(files)).hexdigest(),
+        lineage_version=evidence.lineage_version,
+        spectral_generation=generation_class,
+        spectral_subject=evidence.measurement.spectral_subject,
+        spectral_provenance=evidence.measurement.spectral_provenance,
+        early_fact=candidate_preimport_reject_fact(evidence),
+        preserved_source_spectral=(
+            current_evidence_preserves_source_spectral(evidence)
+        ),
     )
 
 
@@ -1601,11 +1781,74 @@ def _association_order_key(
     return (current_id is not None, current_id or -1, release_id)
 
 
+def _evidence_role_census(
+    observed_evidence: Sequence[_CoverageObservedEvidence],
+    owner_links: Sequence[_CoverageEvidenceOwnerLink],
+) -> tuple[list[_CoverageEvidenceRole], _CoverageRoleCounts]:
+    """Classify every stored row as candidate/current/dual/audit-only."""
+    links = list(owner_links)
+    if links != sorted(links, key=lambda item: (item.owner_kind, item.owner_id)):
+        raise RenderDifferentialError(
+            "coverage evidence_owner_links are not canonically sorted"
+        )
+    observed_ids = {item.evidence_id for item in observed_evidence}
+    dangling = sorted({item.evidence_id for item in links} - observed_ids)
+    if dangling:
+        raise RenderDifferentialError(
+            f"coverage evidence owners reference missing rows: {dangling!r}"
+        )
+    candidate_counts: Counter[int] = Counter()
+    current_counts: Counter[int] = Counter()
+    for link in links:
+        if link.owner_kind == "album_request_current":
+            current_counts[link.evidence_id] += 1
+        else:
+            candidate_counts[link.evidence_id] += 1
+    roles: list[_CoverageEvidenceRole] = []
+    for evidence in observed_evidence:
+        candidate_count = candidate_counts[evidence.evidence_id]
+        current_count = current_counts[evidence.evidence_id]
+        if candidate_count and current_count:
+            role: Literal["candidate", "current", "dual", "audit_only"] = "dual"
+        elif candidate_count:
+            role = "candidate"
+        elif current_count:
+            role = "current"
+        else:
+            role = "audit_only"
+        early = evidence.early_fact or "none"
+        preservation = (
+            "preserved_source"
+            if evidence.preserved_source_spectral
+            else "ordinary"
+        )
+        roles.append(_CoverageEvidenceRole(
+            evidence_id=evidence.evidence_id,
+            role=role,
+            candidate_owner_count=candidate_count,
+            current_owner_count=current_count,
+            matrix_class=(
+                f"{role}|gen={evidence.spectral_generation}"
+                f"|subject={evidence.spectral_subject or 'null'}"
+                f"|provenance={evidence.spectral_provenance or 'null'}"
+                f"|lineage={evidence.lineage_version}"
+                f"|early={early}|spectral={preservation}"
+            ),
+        ))
+    return roles, _CoverageRoleCounts(
+        candidate=sum(item.role == "candidate" for item in roles),
+        current=sum(item.role == "current" for item in roles),
+        dual=sum(item.role == "dual" for item in roles),
+        audit_only=sum(item.role == "audit_only" for item in roles),
+    )
+
+
 def recompute_decision_corpus_coverage(
     source_links: Sequence[_CoverageSourceLink],
     observed_evidence: Sequence[_CoverageObservedEvidence],
     corpus_rows: Sequence[Mapping[str, object]],
     corpus_bytes: bytes,
+    evidence_owner_links: Sequence[_CoverageEvidenceOwnerLink] = (),
 ) -> DecisionCorpusCoverage:
     """Derive *all* coverage values from the two ledgers and corpus.
 
@@ -1621,6 +1864,10 @@ def recompute_decision_corpus_coverage(
         raise RenderDifferentialError("coverage observed_evidence duplicates an ID")
     if list(observed_evidence) != sorted(observed_evidence, key=lambda item: item.evidence_id):
         raise RenderDifferentialError("coverage observed_evidence is not canonically sorted")
+    evidence_roles, evidence_role_counts = _evidence_role_census(
+        observed_evidence,
+        evidence_owner_links,
+    )
 
     source_link_counts = _CoverageCounts(
         download_log=sum(link.source == "download_log" for link in links),
@@ -1753,9 +2000,9 @@ def recompute_decision_corpus_coverage(
         for evidence_id, (current_id, release_id) in sorted(valid_candidates.items())
     ]
     expected_candidate_ids = [item.candidate_evidence_id for item in expected_associations]
-    expected_current_only_ids = sorted(valid_current_ids - set(valid_candidates))
+    expected_current_only_ids = sorted(set(evidence_rows) - set(valid_candidates))
     dual_role_ids = sorted(valid_current_ids & set(valid_candidates))
-    expected_evidence_ids = sorted(set(valid_candidates) | valid_current_ids)
+    expected_evidence_ids = sorted(evidence_rows)
     assert_export_output_exact(
         corpus_rows,
         [
@@ -1763,6 +2010,7 @@ def recompute_decision_corpus_coverage(
             for item in expected_associations
         ],
         sorted(valid_current_ids),
+        expected_all_evidence_ids=expected_evidence_ids,
     )
     entries = [_corpus_evidence(row) for row in corpus_rows]
     written_candidate_ids = [entry.evidence_id for entry in entries if entry.is_candidate]
@@ -1805,9 +2053,12 @@ def recompute_decision_corpus_coverage(
         sha256=hashlib.sha256(corpus_bytes).hexdigest(),
     )
     coverage = DecisionCorpusCoverage(
-        schema_version=2,
+        schema_version=3,
         source_links=list(source_links),
         observed_evidence=list(observed_evidence),
+        evidence_owner_links=list(evidence_owner_links),
+        evidence_roles=evidence_roles,
+        evidence_role_counts=evidence_role_counts,
         total_source_links=len(links),
         source_link_counts=source_link_counts,
         source_distinct_candidate_id_counts=source_distinct_candidate_id_counts,
@@ -1847,6 +2098,8 @@ def assert_export_output_exact(
     rows: Sequence[Mapping[str, object]],
     expected_associations: Sequence[tuple[int, int | None, str]],
     expected_referenced_current_ids: Sequence[int],
+    *,
+    expected_all_evidence_ids: Sequence[int] | None = None,
 ) -> None:
     """Fail closed on omissions, role changes, or substituted pairings."""
     ids = [row["id"] for row in rows]
@@ -1879,9 +2132,17 @@ def assert_export_output_exact(
             f"{written_referenced_current_ids!r} != "
             f"{list(expected_referenced_current_ids)!r}"
         )
-    expected_ids = sorted(
-        {candidate_id for candidate_id, _current_id, _release in expected_associations}
-        | set(expected_referenced_current_ids)
+    expected_ids = (
+        sorted(expected_all_evidence_ids)
+        if expected_all_evidence_ids is not None
+        else sorted(
+            {
+                candidate_id
+                for candidate_id, _current_id, _release
+                in expected_associations
+            }
+            | set(expected_referenced_current_ids)
+        )
     )
     written_ids = [entry.evidence_id for entry in entries]
     if sorted(written_ids) != expected_ids:
@@ -1889,7 +2150,7 @@ def assert_export_output_exact(
             f"corpus evidence IDs {sorted(written_ids)!r} != expected {expected_ids!r}"
         )
     expected_current_only = sorted(
-        set(expected_referenced_current_ids)
+        set(expected_ids)
         - {
             candidate_id
             for candidate_id, _current_id, _release in expected_associations
@@ -1943,6 +2204,8 @@ def export_decision_corpus(
             _assert_live_decision_corpus_schema(cursor)
             snapshot = _qualify_read_snapshot(cursor)
             links = _db_source_links(cursor)
+            owner_links = _db_evidence_owner_links(cursor)
+            all_evidence_ids = _db_all_evidence_ids(cursor)
             if _after_source_links is not None:
                 _after_source_links(snapshot)
             authoritative = [
@@ -1970,18 +2233,10 @@ def export_decision_corpus(
                 for evidence_id, values in associations.items()
                 if evidence_id not in conflict_ids
             }
-            referenced_current_ids = sorted(
-                {
-                    link.current_evidence_id
-                    for link in links
-                    if link.current_evidence_id is not None
-                }
-            )
-            # Account every candidate ID before choosing the valid replay
-            # cohort; conflicts are debt, not permission to skip existence or
-            # content-address validation.
-            all_candidate_ids = {link.evidence_id for link in links}
-            required_ids = sorted(all_candidate_ids | set(referenced_current_ids))
+            # Account every canonical row before choosing the valid replay
+            # cohort; conflicts and unlinked history are observations, not
+            # permission to skip existence or content-address validation.
+            required_ids = all_evidence_ids
             evidence_rows = _db_evidence_rows(cursor, required_ids, batch_size)
             content_mismatches: list[dict[str, object]] = []
             for evidence_id, evidence in evidence_rows.items():
@@ -2053,12 +2308,7 @@ def export_decision_corpus(
                 if (evidence_id, current_id, release_id) in invalid_associations:
                     continue
                 valid_candidates[evidence_id] = (current_id, release_id)
-            valid_current_ids = {
-                current_id
-                for current_id, _release in valid_candidates.values()
-                if current_id is not None
-            }
-            corpus_ids = sorted(set(valid_candidates) | valid_current_ids)
+            corpus_ids = all_evidence_ids
             corpus_rows: list[dict[str, object]] = []
             for evidence_id in corpus_ids:
                 row = dict(evidence_rows[evidence_id])
@@ -2094,6 +2344,7 @@ def export_decision_corpus(
                 ),
                 corpus_rows,
                 corpus_bytes,
+                evidence_owner_links=owner_links,
             )
             debt_count = coverage.debt_count
             # The manifest binds to corpus bytes. Each artifact is atomically
@@ -2122,9 +2373,9 @@ def verify_decision_corpus_pair(
         )
     except (msgspec.DecodeError, msgspec.ValidationError) as exc:
         raise RenderDifferentialError(f"coverage violates its strict schema: {exc}") from exc
-    if coverage.schema_version != 2:
+    if coverage.schema_version != 3:
         raise RenderDifferentialError(
-            f"coverage schema_version must be exactly 2, got {coverage.schema_version!r}"
+            f"coverage schema_version must be exactly 3, got {coverage.schema_version!r}"
         )
     rows = list(_corpus_rows(str(corpus_file)))
     for row in rows:
@@ -2134,11 +2385,459 @@ def verify_decision_corpus_pair(
         coverage.observed_evidence,
         rows,
         corpus_bytes,
+        evidence_owner_links=coverage.evidence_owner_links,
     )
     if coverage != recomputed:
         raise RenderDifferentialError(
             "coverage does not reconcile with its source/evidence ledgers and corpus"
         )
+
+
+def _materialize_transition_snapshot(
+    root: Path,
+    files: Sequence[AlbumQualityEvidenceFile],
+) -> None:
+    """Create a sparse local snapshot matching one exported evidence row."""
+    for file in files:
+        relative = PurePosixPath(file.relative_path)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise RenderDifferentialError(
+                "transition replay refuses an unsafe evidence relative_path: "
+                f"{file.relative_path!r}"
+            )
+        target = root.joinpath(*relative.parts)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("wb") as handle:
+            # Sparse files reproduce the exact snapshot identity without
+            # copying live audio or consuming its physical disk footprint.
+            handle.truncate(file.size_bytes)
+        os.utime(target, ns=(file.mtime_ns, file.mtime_ns))
+
+
+def _fresh_transition_candidate(
+    evidence: AlbumQualityEvidence,
+) -> tuple[
+    AlbumQualityEvidence,
+    object | None,
+    Literal[
+        "fresh_current_measurement",
+        "fresh_failed_measurement",
+        "no_spectral_attempt",
+    ],
+]:
+    """Project an observed canonical shape into one fresh candidate attempt."""
+    from lib.quality import (
+        EVIDENCE_PROVENANCE_MEASURED,
+        EVIDENCE_SUBJECT_SOURCE,
+        SpectralAnalysisDetail,
+        candidate_preimport_reject_fact,
+    )
+    from lib.quality_evidence import candidate_evidence_for_policy
+    from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
+
+    candidate = msgspec.structs.replace(
+        candidate_evidence_for_policy(evidence),
+        id=None,
+    )
+    measurement = candidate.measurement
+    has_spectral = (
+        measurement.spectral_grade is not None
+        or measurement.spectral_bitrate_kbps is not None
+    )
+    if has_spectral:
+        fresh_measurement = msgspec.structs.replace(
+            measurement,
+            spectral_subject=(
+                EVIDENCE_SUBJECT_SOURCE
+                if measurement.spectral_grade is not None
+                else None
+            ),
+            spectral_provenance=(
+                EVIDENCE_PROVENANCE_MEASURED
+                if measurement.spectral_grade is not None
+                else None
+            ),
+            spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
+        )
+        attempt = SpectralAnalysisDetail(
+            attempted=True,
+            grade=fresh_measurement.spectral_grade,
+            bitrate_kbps=fresh_measurement.spectral_bitrate_kbps,
+            cliff_hz=fresh_measurement.cliff_hz,
+            codec_family=fresh_measurement.codec_family,
+            ultrasonic_deficit_db=fresh_measurement.ultrasonic_deficit_db,
+            spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
+        )
+        return (
+            msgspec.structs.replace(candidate, measurement=fresh_measurement),
+            attempt,
+            "fresh_current_measurement",
+        )
+    if candidate_preimport_reject_fact(candidate) is not None:
+        return (
+            candidate,
+            SpectralAnalysisDetail(
+                attempted=True,
+                error="transition replay synthetic failed spectral attempt",
+                spectral_measurement_version=SPECTRAL_MEASUREMENT_VERSION,
+            ),
+            "fresh_failed_measurement",
+        )
+    return candidate, None, "no_spectral_attempt"
+
+
+def replay_decision_transitions(
+    corpus_path: str | Path,
+    coverage_path: str | Path,
+    out_path: str | Path | None = None,
+) -> DecisionTransitionReport:
+    """Replay observed canonical shapes through a disposable local database.
+
+    The input pair is verified before PostgreSQL starts. The source database
+    is not accepted as an argument and cannot be mutated: every upsert and FK
+    write occurs in an isolated Unix-socket cluster created for this run.
+    """
+    verify_decision_corpus_pair(corpus_path, coverage_path)
+    try:
+        coverage = msgspec.json.decode(
+            Path(coverage_path).read_bytes(),
+            type=DecisionCorpusCoverage,
+        )
+    except (msgspec.DecodeError, msgspec.ValidationError) as exc:
+        raise RenderDifferentialError(
+            f"coverage violates its strict schema: {exc}"
+        ) from exc
+    entries = read_decision_corpus(str(corpus_path))
+    entries_by_id = {entry.evidence_id: entry for entry in entries}
+    representatives_by_class: dict[str, _CoverageEvidenceRole] = {}
+    for role in coverage.evidence_roles:
+        representatives_by_class.setdefault(role.matrix_class, role)
+    representatives = [
+        representatives_by_class[matrix_class]
+        for matrix_class in sorted(representatives_by_class)
+    ]
+
+    if out_path is not None:
+        output = Path(out_path).resolve()
+        if output in {Path(corpus_path).resolve(), Path(coverage_path).resolve()}:
+            raise RenderDifferentialError(
+                "transition output must not overwrite corpus or coverage"
+            )
+
+    # Transition-only dependencies stay lazy so a copied historical harness
+    # can continue to run decide/diff even when it predates this mode.
+    from lib.measurement import PreimportMeasurement
+    from lib.migrator import apply_migrations
+    from lib.pipeline_db import PipelineDB
+    from lib.quality import (
+        ImportResult,
+        SpectralAnalysisDetail,
+        SpectralDetail,
+        SpectralMeasurement,
+        TargetQualityContract,
+        candidate_preimport_reject_fact,
+    )
+    from lib.quality_evidence import (
+        audit_v0_probe_from_metric,
+        current_evidence_for_policy,
+        load_candidate_evidence_for_decision,
+        load_candidate_evidence_for_source,
+        persist_candidate_evidence_from_import_result,
+        persist_candidate_evidence_from_measurement,
+    )
+    from tests.ephemeral_pg import EphemeralPostgres
+
+    replay_rows: list[DecisionTransitionReplay] = []
+    with EphemeralPostgres() as postgres, tempfile.TemporaryDirectory(
+        prefix="cratedigger_transition_replay_"
+    ) as snapshot_tmp:
+        if postgres.dsn is None:
+            raise RenderDifferentialError(
+                "disposable PostgreSQL did not publish a DSN"
+            )
+        apply_migrations(postgres.dsn)
+        db = PipelineDB(postgres.dsn)
+        try:
+            for role in representatives:
+                entry = entries_by_id.get(role.evidence_id)
+                if entry is None:
+                    raise RenderDifferentialError(
+                        "coverage representative is absent from corpus: "
+                        f"{role.evidence_id}"
+                    )
+                observed = _evidence_from_corpus_row(entry.row)
+                snapshot_root = Path(snapshot_tmp) / str(role.evidence_id)
+                snapshot_root.mkdir()
+                _materialize_transition_snapshot(snapshot_root, observed.files)
+                release_id = f"transition-replay-{role.evidence_id}"
+                seeded = msgspec.structs.replace(
+                    observed,
+                    id=None,
+                    mb_release_id=release_id,
+                    source_path=str(snapshot_root),
+                )
+                db.upsert_album_quality_evidence(seeded)
+                canonical = db.find_album_quality_evidence(
+                    mb_release_id=release_id,
+                    snapshot_fingerprint=seeded.snapshot_fingerprint,
+                )
+                if canonical is None or canonical.id is None:
+                    raise RenderDifferentialError(
+                        f"transition seed {role.evidence_id} did not reload"
+                    )
+                request_id = db.add_request(
+                    artist_name="Decision transition",
+                    album_title=role.matrix_class,
+                    source="request",
+                    mb_release_id=release_id,
+                )
+                if role.role in {"current", "dual"} and not (
+                    db.set_request_current_evidence(request_id, canonical.id)
+                ):
+                    raise RenderDifferentialError(
+                        f"transition seed {role.evidence_id} did not link current FK"
+                    )
+                download_log_id = db.log_download(
+                    request_id=request_id,
+                    outcome="rejected",
+                )
+                if role.role in {"candidate", "dual"}:
+                    historical_job = db.enqueue_import_job(
+                        "force_import",
+                        request_id=request_id,
+                        payload={
+                            "download_log_id": download_log_id,
+                            "failed_path": str(snapshot_root),
+                        },
+                    )
+                    if not db.set_import_job_candidate_evidence(
+                        historical_job.id,
+                        canonical.id,
+                    ):
+                        raise RenderDifferentialError(
+                            "transition seed did not link historical candidate FK: "
+                            f"{role.evidence_id}"
+                        )
+                transition_job = db.enqueue_import_job(
+                    "force_import",
+                    request_id=request_id,
+                    payload={
+                        "download_log_id": download_log_id,
+                        "failed_path": str(snapshot_root),
+                    },
+                )
+                candidate, raw_attempt, transition_shape = (
+                    _fresh_transition_candidate(canonical)
+                )
+                candidate = msgspec.structs.replace(
+                    candidate,
+                    source_path=str(snapshot_root),
+                )
+                attempt = (
+                    raw_attempt
+                    if isinstance(raw_attempt, SpectralAnalysisDetail)
+                    else None
+                )
+                candidate_measurement = candidate.measurement
+                download_spectral = SpectralMeasurement.from_parts(
+                    candidate_measurement.spectral_grade,
+                    candidate_measurement.spectral_bitrate_kbps,
+                    cliff_hz=candidate_measurement.cliff_hz,
+                    codec_family=candidate_measurement.codec_family,
+                    ultrasonic_deficit_db=(
+                        candidate_measurement.ultrasonic_deficit_db
+                    ),
+                    spectral_measurement_version=(
+                        candidate_measurement.spectral_measurement_version
+                    ),
+                )
+                preimport = PreimportMeasurement(
+                    corrupt_files=[
+                        file.relative_path
+                        for file in candidate.files
+                        if not file.decode_ok
+                    ],
+                    audio_validation=candidate.audio_validation,
+                    audio_corrupt=candidate.audio_corrupt,
+                    audio_error=candidate.audio_error,
+                    matched_bad_hash_id=candidate.matched_bad_audio_hash_id,
+                    matched_bad_track_path=(
+                        candidate.matched_bad_audio_hash_path
+                    ),
+                    download_spectral=download_spectral,
+                    folder_layout=(
+                        "nested"
+                        if candidate.folder_layout == "nested"
+                        else "flat"
+                    ),
+                    audio_file_count=candidate.audio_file_count,
+                    filetype_band=candidate.filetype_band,
+                    min_bitrate_kbps=candidate_measurement.min_bitrate_kbps,
+                    is_vbr=(
+                        None
+                        if candidate_measurement.is_cbr is None
+                        else not candidate_measurement.is_cbr
+                    ),
+                    spectral_audit=SpectralDetail(candidate=attempt),
+                    aac_lattice=candidate.aac_lattice,
+                    cd_rip_verification=candidate.cd_rip_verification,
+                )
+                if candidate_preimport_reject_fact(candidate) is not None:
+                    persisted = persist_candidate_evidence_from_measurement(
+                        db,
+                        mb_release_id=release_id,
+                        source_path=str(snapshot_root),
+                        measurement=preimport,
+                        import_job_id=transition_job.id,
+                        files=candidate.files,
+                    )
+                else:
+                    target_contract = (
+                        TargetQualityContract.from_projection(
+                            candidate.target_format,
+                            projected_is_cbr=candidate.target_is_cbr,
+                        )
+                        if (
+                            candidate.target_format is not None
+                            and candidate.target_is_cbr is not None
+                        )
+                        else None
+                    )
+                    persisted = persist_candidate_evidence_from_import_result(
+                        db,
+                        mb_release_id=release_id,
+                        source_path=str(snapshot_root),
+                        import_result=ImportResult(
+                            source_measurement=candidate_measurement,
+                            verified_lossless_proof=(
+                                candidate.verified_lossless_proof
+                            ),
+                            target_quality_contract=target_contract,
+                            spectral=SpectralDetail(candidate=attempt),
+                            v0_probe=audit_v0_probe_from_metric(
+                                candidate.v0_metric
+                            ),
+                            preview=True,
+                        ),
+                        import_job_id=transition_job.id,
+                        files=candidate.files,
+                        measurement=preimport,
+                    )
+                if (
+                    persisted.evidence is None
+                    or persisted.evidence.id is None
+                    or persisted.persistence_receipt is None
+                ):
+                    replay_rows.append(DecisionTransitionReplay(
+                        evidence_id=role.evidence_id,
+                        matrix_class=role.matrix_class,
+                        observed_role=role.role,
+                        candidate_owner_count=role.candidate_owner_count,
+                        current_owner_count=role.current_owner_count,
+                        transition_shape=transition_shape,
+                        persistence_status=persisted.status,
+                        exact_import_job_fk=False,
+                        canonical_spectral_generation=(
+                            canonical.measurement.spectral_measurement_version
+                        ),
+                        cache_status="not_run",
+                        admission_status="not_run",
+                        outcome="producer_refused",
+                        refusal_reason=persisted.reason,
+                    ))
+                    continue
+                exact_fk = (
+                    db.get_import_job_candidate_evidence_id(transition_job.id)
+                    == persisted.evidence.id
+                )
+                if not exact_fk:
+                    raise RenderDifferentialError(
+                        f"transition evidence {role.evidence_id} lost its exact FK"
+                    )
+                reloaded = db.load_album_quality_evidence_by_id(
+                    persisted.evidence.id
+                )
+                if reloaded is None:
+                    raise RenderDifferentialError(
+                        f"transition evidence {role.evidence_id} did not reload"
+                    )
+                cache = load_candidate_evidence_for_source(
+                    db,
+                    source_path=str(snapshot_root),
+                    import_job_id=transition_job.id,
+                )
+                admission = load_candidate_evidence_for_decision(
+                    db,
+                    source_path=str(snapshot_root),
+                    import_job_id=transition_job.id,
+                    persistence_receipt=persisted.persistence_receipt,
+                )
+                decision: dict[str, object] | None = None
+                refusal_reason: str | None = None
+                outcome: TransitionReplayOutcome
+                if admission.evidence is None:
+                    outcome = "admission_refused"
+                    refusal_reason = admission.reason
+                else:
+                    current = None
+                    if role.role in {"current", "dual"}:
+                        stored_current = db.load_album_quality_evidence_by_id(
+                            canonical.id
+                        )
+                        if stored_current is None:
+                            raise RenderDifferentialError(
+                                "transition current evidence disappeared for "
+                                f"{role.evidence_id}"
+                            )
+                        current = current_evidence_for_policy(stored_current)
+                    decision = msgspec.convert(
+                        full_pipeline_decision_from_evidence(
+                            admission.evidence,
+                            current,
+                        ),
+                        type=dict[str, object],
+                    )
+                    outcome = "decided"
+                replay_rows.append(DecisionTransitionReplay(
+                    evidence_id=role.evidence_id,
+                    matrix_class=role.matrix_class,
+                    observed_role=role.role,
+                    candidate_owner_count=role.candidate_owner_count,
+                    current_owner_count=role.current_owner_count,
+                    transition_shape=transition_shape,
+                    persistence_status=persisted.status,
+                    exact_import_job_fk=exact_fk,
+                    canonical_spectral_generation=(
+                        reloaded.measurement.spectral_measurement_version
+                    ),
+                    cache_status=cache.status,
+                    admission_status=admission.status,
+                    outcome=outcome,
+                    decision=decision,
+                    refusal_reason=refusal_reason,
+                ))
+        finally:
+            db.close()
+
+    report = DecisionTransitionReport(
+        schema_version=1,
+        coverage_schema_version=coverage.schema_version,
+        total_matrix_classes=len(replay_rows),
+        decided=sum(row.outcome == "decided" for row in replay_rows),
+        admission_refused=sum(
+            row.outcome == "admission_refused" for row in replay_rows
+        ),
+        producer_refused=sum(
+            row.outcome == "producer_refused" for row in replay_rows
+        ),
+        representatives=replay_rows,
+    )
+    encoded = msgspec.json.encode(report) + b"\n"
+    if out_path is None:
+        sys.stdout.write(encoded.decode())
+    else:
+        _atomic_write(Path(out_path), encoded)
+    return report
 
 
 def _non_negative_int(raw: str) -> int:
@@ -2229,6 +2928,21 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Evidence IDs per internal fetch; membership and output are invariant",
     )
 
+    transition = sub.add_parser(
+        "transition",
+        help=(
+            "Replay one representative per v3 matrix class through a "
+            "disposable local PostgreSQL cluster"
+        ),
+    )
+    transition.add_argument("--corpus", required=True, help="Exported corpus JSONL")
+    transition.add_argument(
+        "--coverage", required=True, help="Matching v3 coverage manifest"
+    )
+    transition.add_argument(
+        "--out", default=None, help="Transition report JSON (default: stdout)"
+    )
+
     diff = sub.add_parser("diff", help="Compare two decided JSONL files field by field")
     diff.add_argument("--base", required=True, help="Base decided JSONL")
     diff.add_argument("--current", required=True, help="Current decided JSONL")
@@ -2279,6 +2993,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.mode == "verify":
             verify_decision_corpus_pair(args.corpus, args.coverage)
             print("verified decision corpus pair", file=sys.stderr)
+            return 0
+        if args.mode == "transition":
+            report = replay_decision_transitions(
+                args.corpus,
+                args.coverage,
+                args.out,
+            )
+            print(
+                "replayed "
+                f"{report.total_matrix_classes} transition matrix class(es): "
+                f"{report.decided} decided, "
+                f"{report.admission_refused} admission-refused, "
+                f"{report.producer_refused} producer-refused",
+                file=sys.stderr,
+            )
             return 0
         report = summarize_render_diff(
             read_rendered(args.base),

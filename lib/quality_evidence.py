@@ -8,7 +8,7 @@ import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 import msgspec
 
@@ -31,11 +31,14 @@ from lib.quality import (
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
     CdRipBitVerification,
+    CodecFamily,
+    EvidenceProvenance,
     EvidenceSubject,
     ImportResult,
     SpectralAnalysisDetail,
     V0ProbeEvidence,
     VerifiedLosslessProof,
+    candidate_preimport_reject_fact,
     legacy_unrecorded_audio_validation_report,
 )
 
@@ -57,8 +60,13 @@ class QualityEvidenceDB(Protocol):
 
     def get_request(self, request_id: int) -> AlbumRequestRow | None: ...
 
+    def get_import_job(self, job_id: int) -> Any: ...
+
     def upsert_album_quality_evidence(
-        self, evidence: AlbumQualityEvidence,
+        self,
+        evidence: AlbumQualityEvidence,
+        *,
+        spectral_write_intent: SpectralWriteIntent = "merge",
     ) -> None: ...
 
     def find_album_quality_evidence(
@@ -130,6 +138,41 @@ _V0_SUBJECT: dict[str, EvidenceSubject] = {
     V0_PROBE_ON_DISK_RESEARCH: EVIDENCE_SUBJECT_INSTALLED,
 }
 
+SpectralWriteIntent = Literal["merge", "replace"]
+CandidateSpectralAttemptOutcome = Literal[
+    "not_attempted",
+    "measured",
+    "failed",
+    "empty",
+]
+
+
+class CandidateEvidencePersistenceReceipt(
+    msgspec.Struct,
+    frozen=True,
+    forbid_unknown_fields=True,
+):
+    """Durable witness that one exact candidate attempt reached its FK.
+
+    The canonical evidence row is a shared content-addressed cache and may be
+    dual-owned by candidate and current FKs.  This receipt records what this
+    attempt actually established without pretending that cache eligibility is
+    the same thing as persistence completion.
+    """
+
+    evidence_id: int
+    snapshot_fingerprint: str
+    spectral_write_intent: SpectralWriteIntent
+    spectral_outcome: CandidateSpectralAttemptOutcome
+    spectral_grade: str | None = None
+    spectral_bitrate_kbps: int | None = None
+    spectral_subject: EvidenceSubject | None = None
+    spectral_provenance: EvidenceProvenance | None = None
+    cliff_hz: int | None = None
+    codec_family: CodecFamily | None = None
+    ultrasonic_deficit_db: float | None = None
+    spectral_measurement_version: int | None = None
+
 
 class SnapshotAudioFilesError(OSError):
     """Raised when a source fileset cannot be snapshotted completely."""
@@ -143,6 +186,7 @@ class EvidenceBuildResult:
     status: str
     reason: str | None = None
     current_album_path: str | None = None
+    persistence_receipt: CandidateEvidencePersistenceReceipt | None = None
 
     @property
     def available(self) -> bool:
@@ -257,6 +301,37 @@ def candidate_evidence_for_policy(
         measurement=msgspec.structs.replace(
             measurement,
             was_converted_from=None,
+        ),
+    )
+
+
+def candidate_evidence_from_persistence_receipt(
+    evidence: AlbumQualityEvidence,
+    receipt: CandidateEvidencePersistenceReceipt,
+) -> AlbumQualityEvidence:
+    """Project a dual-owned canonical row into this candidate attempt.
+
+    A current-owned row may retain an irreplaceable source tuple in storage.
+    The receipt is the exact-attempt witness that lets candidate policy see
+    the fresh derivative tuple without rewriting that current audit history.
+    """
+    candidate = candidate_evidence_for_policy(evidence)
+    if receipt.spectral_write_intent != "replace":
+        return candidate
+    return msgspec.structs.replace(
+        candidate,
+        measurement=msgspec.structs.replace(
+            candidate.measurement,
+            spectral_grade=receipt.spectral_grade,
+            spectral_bitrate_kbps=receipt.spectral_bitrate_kbps,
+            spectral_subject=receipt.spectral_subject,
+            spectral_provenance=receipt.spectral_provenance,
+            cliff_hz=receipt.cliff_hz,
+            codec_family=receipt.codec_family,
+            ultrasonic_deficit_db=receipt.ultrasonic_deficit_db,
+            spectral_measurement_version=(
+                receipt.spectral_measurement_version
+            ),
         ),
     )
 
@@ -928,6 +1003,188 @@ def evidence_from_album_info(
     return EvidenceBuildResult(evidence, "ready")
 
 
+def _candidate_spectral_persistence_shape(
+    evidence: AlbumQualityEvidence,
+    attempt: SpectralAnalysisDetail | None,
+) -> tuple[
+    SpectralWriteIntent,
+    CandidateSpectralAttemptOutcome,
+    int | None,
+]:
+    """Describe this attempt's spectral write without reading cache state."""
+    if attempt is not None and attempt.attempted:
+        if attempt.error is not None:
+            outcome: CandidateSpectralAttemptOutcome = "failed"
+        elif attempt.grade is not None or attempt.bitrate_kbps is not None:
+            outcome = "measured"
+        else:
+            outcome = "empty"
+        return (
+            "replace",
+            outcome,
+            (
+                attempt.spectral_measurement_version
+                if outcome == "measured"
+                else None
+            ),
+        )
+
+    measurement = evidence.measurement
+    if (
+        measurement.spectral_grade is not None
+        or measurement.spectral_bitrate_kbps is not None
+    ):
+        return (
+            "replace",
+            "measured",
+            measurement.spectral_measurement_version,
+        )
+    return "merge", "not_attempted", None
+
+
+def _candidate_evidence_with_exact_attempt_spectral(
+    evidence: AlbumQualityEvidence,
+    attempt: SpectralAnalysisDetail | None,
+    outcome: CandidateSpectralAttemptOutcome,
+) -> AlbumQualityEvidence:
+    """Make the persisted tuple describe this attempt, including failure."""
+    if attempt is None or not attempt.attempted:
+        return evidence
+    measured = outcome == "measured"
+    grade = attempt.grade if measured else None
+    return msgspec.structs.replace(
+        evidence,
+        measurement=msgspec.structs.replace(
+            evidence.measurement,
+            spectral_grade=grade,
+            spectral_bitrate_kbps=(attempt.bitrate_kbps if measured else None),
+            spectral_subject=(EVIDENCE_SUBJECT_SOURCE if grade is not None else None),
+            spectral_provenance=(
+                EVIDENCE_PROVENANCE_MEASURED if grade is not None else None
+            ),
+            cliff_hz=(attempt.cliff_hz if measured else None),
+            codec_family=(attempt.codec_family if measured else None),
+            ultrasonic_deficit_db=(
+                attempt.ultrasonic_deficit_db if measured else None
+            ),
+            spectral_measurement_version=(
+                attempt.spectral_measurement_version if measured else None
+            ),
+        ),
+    )
+
+
+def _persist_candidate_evidence_result(
+    db: QualityEvidenceDB,
+    result: EvidenceBuildResult,
+    *,
+    attempt: SpectralAnalysisDetail | None,
+    download_log_id: int | None,
+    import_job_id: int | None,
+) -> EvidenceBuildResult:
+    evidence = result.evidence
+    if evidence is None:
+        return result
+    write_intent, spectral_outcome, generation = (
+        _candidate_spectral_persistence_shape(evidence, attempt)
+    )
+    evidence = _candidate_evidence_with_exact_attempt_spectral(
+        evidence,
+        attempt,
+        spectral_outcome,
+    )
+    db.upsert_album_quality_evidence(
+        evidence,
+        spectral_write_intent=write_intent,
+    )
+    persisted = db.find_album_quality_evidence(
+        mb_release_id=evidence.mb_release_id,
+        snapshot_fingerprint=evidence.snapshot_fingerprint,
+    )
+    if persisted is None or persisted.id is None:
+        return EvidenceBuildResult(
+            evidence,
+            "failed",
+            "candidate evidence upsert did not produce a reloadable row",
+        )
+    if import_job_id is not None:
+        linked = db.set_import_job_candidate_evidence(
+            import_job_id,
+            persisted.id,
+        )
+        if (
+            not linked
+            or db.get_import_job_candidate_evidence_id(import_job_id)
+            != persisted.id
+        ):
+            return EvidenceBuildResult(
+                evidence,
+                "failed",
+                "candidate evidence did not link to import job",
+            )
+    if download_log_id is not None:
+        db.set_download_log_candidate_evidence(
+            download_log_id,
+            persisted.id,
+            direct_attribution=True,
+        )
+        if (
+            db.get_download_log_candidate_evidence_id(download_log_id)
+            != persisted.id
+        ):
+            return EvidenceBuildResult(
+                evidence,
+                "failed",
+                "candidate evidence did not link to download log",
+            )
+    return EvidenceBuildResult(
+        persisted,
+        "ready",
+        persistence_receipt=CandidateEvidencePersistenceReceipt(
+            evidence_id=persisted.id,
+            snapshot_fingerprint=persisted.snapshot_fingerprint,
+            spectral_write_intent=write_intent,
+            spectral_outcome=spectral_outcome,
+            spectral_grade=(
+                evidence.measurement.spectral_grade
+                if spectral_outcome == "measured"
+                else None
+            ),
+            spectral_bitrate_kbps=(
+                evidence.measurement.spectral_bitrate_kbps
+                if spectral_outcome == "measured"
+                else None
+            ),
+            spectral_subject=(
+                evidence.measurement.spectral_subject
+                if spectral_outcome == "measured"
+                else None
+            ),
+            spectral_provenance=(
+                evidence.measurement.spectral_provenance
+                if spectral_outcome == "measured"
+                else None
+            ),
+            cliff_hz=(
+                evidence.measurement.cliff_hz
+                if spectral_outcome == "measured"
+                else None
+            ),
+            codec_family=(
+                evidence.measurement.codec_family
+                if spectral_outcome == "measured"
+                else None
+            ),
+            ultrasonic_deficit_db=(
+                evidence.measurement.ultrasonic_deficit_db
+                if spectral_outcome == "measured"
+                else None
+            ),
+            spectral_measurement_version=generation,
+        ),
+    )
+
+
 def persist_candidate_evidence_from_import_result(
     db: QualityEvidenceDB,
     *,
@@ -960,21 +1217,18 @@ def persist_candidate_evidence_from_import_result(
         files=files,
         measurement=measurement,
     )
-    if result.evidence is not None:
-        db.upsert_album_quality_evidence(result.evidence)
-        persisted = db.find_album_quality_evidence(
-            mb_release_id=result.evidence.mb_release_id,
-            snapshot_fingerprint=result.evidence.snapshot_fingerprint,
-        )
-        if persisted is not None and persisted.id is not None:
-            if import_job_id is not None:
-                db.set_import_job_candidate_evidence(import_job_id, persisted.id)
-            if download_log_id is not None:
-                db.set_download_log_candidate_evidence(
-                    download_log_id, persisted.id,
-                    direct_attribution=True,
-                )
-    return result
+    candidate_attempt = (
+        import_result.spectral.candidate
+        if import_result is not None
+        else None
+    )
+    return _persist_candidate_evidence_result(
+        db,
+        result,
+        attempt=candidate_attempt,
+        download_log_id=download_log_id,
+        import_job_id=import_job_id,
+    )
 
 
 def persist_candidate_evidence_from_measurement(
@@ -1009,21 +1263,13 @@ def persist_candidate_evidence_from_measurement(
         measurement=measurement,
         files=files,
     )
-    if result.evidence is not None:
-        db.upsert_album_quality_evidence(result.evidence)
-        persisted = db.find_album_quality_evidence(
-            mb_release_id=result.evidence.mb_release_id,
-            snapshot_fingerprint=result.evidence.snapshot_fingerprint,
-        )
-        if persisted is not None and persisted.id is not None:
-            if import_job_id is not None:
-                db.set_import_job_candidate_evidence(import_job_id, persisted.id)
-            if download_log_id is not None:
-                db.set_download_log_candidate_evidence(
-                    download_log_id, persisted.id,
-                    direct_attribution=True,
-                )
-    return result
+    return _persist_candidate_evidence_result(
+        db,
+        result,
+        attempt=measurement.spectral_audit.candidate,
+        download_log_id=download_log_id,
+        import_job_id=import_job_id,
+    )
 
 
 def propagate_candidate_evidence_to_current(
@@ -1444,20 +1690,24 @@ def backfill_current_evidence_from_album_info(
     return result
 
 
-def load_candidate_evidence_for_source(
+def _load_candidate_evidence_for_source(
     db: QualityEvidenceDB,
     *,
     source_path: str,
     download_log_id: int | None = None,
     import_job_id: int | None = None,
+    admission: Literal["cache", "decision"],
+    persistence_receipt: CandidateEvidencePersistenceReceipt | None = None,
 ) -> EvidenceBuildResult:
-    """Load stored candidate evidence via the FK chain and verify freshness.
+    """Load stored candidate evidence under one explicit admission policy.
 
     Walks explicit ownership only: ``import_jobs.candidate_evidence_id`` when
     ``import_job_id`` is provided, then ``download_log.candidate_evidence_id``.
     It never falls back to another job on the same request. Once a candidate
     evidence row is found, ``audio_snapshot_matches`` confirms it still
-    describes the audio at ``source_path``.
+    describes the audio at ``source_path``. Cache admission remains generation
+    strict. Decision admission may carry a concrete pre-import fact to the
+    unified decider because no spectral comparison can affect that fact.
     """
 
     if download_log_id is None and import_job_id is None:
@@ -1487,6 +1737,21 @@ def load_candidate_evidence_for_source(
     # owners. Keep installed conversion history in storage, but never expose
     # that output-only fact as part of a candidate source measurement.
     evidence = candidate_evidence_for_policy(evidence)
+    if persistence_receipt is not None:
+        if (
+            persistence_receipt.evidence_id != evidence.id
+            or persistence_receipt.snapshot_fingerprint
+                != evidence.snapshot_fingerprint
+        ):
+            return EvidenceBuildResult(
+                None,
+                "incomplete",
+                "candidate persistence receipt does not match evidence row",
+            )
+        evidence = candidate_evidence_from_persistence_receipt(
+            evidence,
+            persistence_receipt,
+        )
     if not audio_snapshot_matches(source_path, evidence.files):
         return EvidenceBuildResult(
             None,
@@ -1495,17 +1760,72 @@ def load_candidate_evidence_for_source(
         )
     errors = evidence.policy_incomplete_reasons()
     measurement = evidence.measurement
+    preimport_fact = candidate_preimport_reject_fact(evidence)
     if (
+        persistence_receipt is not None
+        and persistence_receipt.spectral_outcome in {"failed", "empty"}
+        and preimport_fact is None
+    ):
+        errors.append(
+            "candidate spectral attempt did not produce policy evidence"
+        )
+    spectral_generation_stale = (
         (
             measurement.spectral_grade is not None
             or measurement.spectral_bitrate_kbps is not None
         )
         and not spectral_measurement_generation_is_current(measurement)
+    )
+    if spectral_generation_stale and not (
+        admission == "decision"
+        and preimport_fact is not None
     ):
         errors.append("spectral measurement generation is not current")
     if errors:
         return EvidenceBuildResult(None, "incomplete", "; ".join(errors))
     return EvidenceBuildResult(evidence, "ready")
+
+
+def load_candidate_evidence_for_source(
+    db: QualityEvidenceDB,
+    *,
+    source_path: str,
+    download_log_id: int | None = None,
+    import_job_id: int | None = None,
+) -> EvidenceBuildResult:
+    """Load generation-current candidate evidence for cache reuse."""
+    return _load_candidate_evidence_for_source(
+        db,
+        source_path=source_path,
+        download_log_id=download_log_id,
+        import_job_id=import_job_id,
+        admission="cache",
+    )
+
+
+def load_candidate_evidence_for_decision(
+    db: QualityEvidenceDB,
+    *,
+    source_path: str,
+    download_log_id: int | None = None,
+    import_job_id: int | None = None,
+    persistence_receipt: CandidateEvidencePersistenceReceipt | None = None,
+) -> EvidenceBuildResult:
+    """Load exact-attempt evidence that is valid input to the real decider.
+
+    Unlike the reuse loader, this permits a persisted, snapshot-matched early
+    fact through when a historical spectral tuple is stale. It never makes the
+    quality decision itself, and spectral-dependent evidence remains subject
+    to the same current-generation gate as cache reuse.
+    """
+    return _load_candidate_evidence_for_source(
+        db,
+        source_path=source_path,
+        download_log_id=download_log_id,
+        import_job_id=import_job_id,
+        admission="decision",
+        persistence_receipt=persistence_receipt,
+    )
 
 
 def load_or_backfill_current_evidence(
