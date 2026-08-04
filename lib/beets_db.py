@@ -382,6 +382,11 @@ def album_info_from_current(
         return None
 
     numeric_bitrates = [bitrate for _item, bitrate in measured]
+    measured_formats = {
+        item.format
+        for item, _bitrate in measured
+        if item.format
+    }
     observed_formats = {item.format for item in current.items if item.format}
     return AlbumInfo(
         album_id=current.album_id,
@@ -393,7 +398,7 @@ def album_info_from_current(
         median_bitrate_kbps=int(statistics.median(numeric_bitrates) / 1000),
         is_cbr=len(set(numeric_bitrates)) == 1,
         album_path=current.album_path,
-        format=_reduce_album_format(observed_formats, cfg),
+        format=_reduce_album_format(measured_formats, cfg),
         formats_on_disk=frozenset(
             canonical_beets_codec(observed)
             for observed in observed_formats
