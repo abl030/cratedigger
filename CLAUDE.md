@@ -176,13 +176,14 @@ judgment based on the change, current evidence, and concrete risk. Always use
 `nix-shell --run` for Python:
 
 ```bash
-nix-shell --run "python3 -m unittest tests.test_X -v"  # focused iteration
-nix-shell --run "pyright --threads 4"                   # whole repository
-nix-shell --run "bash scripts/run_tests.sh"             # complete suite
+bash scripts/test.sh tests.test_X                        # target + adjacent/ambient gates
+nix-shell --run "python3 scripts/run_pyright_checks.py"  # both typing contracts
+nix-shell --run "bash scripts/run_tests.sh"              # complete suite
 ```
 
-Direct runs are development feedback; before independent-review handoff, use
-the `check` skill on the converged, clean, committed tree for the one
+`scripts/test.sh` also accepts no selector and derives targets from the current
+diff. Direct runs are development feedback; before independent-review handoff,
+use the `check` skill on the converged, clean, committed tree for the one
 receipt-backed canonical-suite confirmation. Reuse that receipt before push if
 the reviewed commit remains unchanged. The complete operational contract —
 suite bundle, specialized evidence, generated/fuzz testing, no-skips policy,

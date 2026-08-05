@@ -73,10 +73,12 @@ Call the full pipeline.
 
 `scripts/run_tests.sh` owns both complementary typing contracts and they must
 have zero errors: whole-repository Pyright through `pyrightconfig.json`, plus
-production strict mode through `pyrightconfig.production.json`. Direct
-`nix-shell --run "pyright --threads 4"` and focused file checks provide faster
-development feedback but never replace or narrow the canonical suite. Never
-accept a "pre-existing" error in either contract.
+production strict mode through `pyrightconfig.production.json`. One concurrent
+`scripts/run_pyright_checks.py` phase runs both contracts and combines their
+status without hiding either output. Its hardware-aware allocation is capped at
+the measured useful 8 whole-tree + 4 strict threads. Focused file checks provide
+faster development feedback but never replace or narrow the canonical suite.
+Never accept a "pre-existing" error in either contract.
 
 - Use typed dataclasses (not dicts) for structured data crossing module boundaries
 - **No dual-interface types.** Never add `__getitem__`, `.get()`, or `isinstance(x, dict)` dispatch to a dataclass. If a function receives both dicts and dataclasses, that is a type error — fix the callers, not the receiver. Temporary bridges become permanent bugs.
@@ -233,10 +235,17 @@ tests, whole-tree Pyright, the complete deterministic suite, and relevant
 surface-specific checks are all available whenever they add useful feedback:
 
 ```bash
-nix-shell --run "python3 -m unittest tests.test_X -v"  # focused iteration
-nix-shell --run "pyright --threads 4"                   # whole repository
-nix-shell --run "bash scripts/run_tests.sh"             # complete suite
+bash scripts/test.sh tests.test_X                        # target + adjacent/ambient gates
+nix-shell --run "python3 scripts/run_pyright_checks.py"  # both typing contracts
+nix-shell --run "bash scripts/run_tests.sh"              # complete suite
 ```
+
+The targeted entrypoint pairs deterministic and generated siblings, selects
+tests adjacent to changed production surfaces, discovers every `test_*_audit`
+module plus explicitly named ratchets, and reuses the canonical JavaScript,
+Pyright, Ruff, and Vulture phases. With no explicit selector, changed paths are
+the target source. This is development feedback; the full suite remains the
+exhaustive pre-review boundary.
 
 Always use `nix-shell --run` for Python (`.claude/rules/nix-shell.md`). Direct
 Nix-shell runs are ordinary development feedback; fix their failures in the
@@ -248,8 +257,8 @@ converged tree is committed and clean; it owns the receipt and unchanged-tree
 no-replay rules. If review changes nothing, that same receipt is the final
 pre-push confirmation.
 
-`run_tests.sh` exhausts JavaScript, whole-repository Pyright,
-production-strict Pyright, Ruff, Vulture, and the complete Python scheduler
+`run_tests.sh` exhausts JavaScript, the concurrent complementary Pyright phase,
+Ruff, Vulture, and the complete Python scheduler
 before returning one aggregate status. `run_final_gate.sh` can only execute
 that exact suite; it adds clean-commit receipt semantics, not another selection
 of checks. The suite's terminal output is a compact complete failure index; the

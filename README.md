@@ -187,16 +187,18 @@ A request can be `wanted` while intentionally skipped for a few hours: retry-wor
 ## Development
 
 ```bash
-nix-shell --run "python3 -m unittest tests.test_X -v"  # focused iteration
-nix-shell --run "pyright --threads 4"                   # whole repository
-nix-shell --run "bash scripts/run_tests.sh"             # complete suite
+bash scripts/test.sh tests.test_X                        # target + adjacent/ambient gates
+nix-shell --run "python3 scripts/run_pyright_checks.py"  # both typing contracts
+nix-shell --run "bash scripts/run_tests.sh"              # complete suite
 ```
 
-These checks are available throughout development. `run_tests.sh` is the one
-canonical complete suite, including both whole-repository and production-strict
-Pyright. `run_final_gate.sh` runs that exact suite on a clean commit and adds a
-receipt; it does not select different checks. CI does not enforce this local
-workflow.
+`scripts/test.sh` expands the requested unittest selector with its generated or
+deterministic sibling, tests adjacent to every changed path, and every audit and
+ratchet. It also runs JavaScript, both Pyright contracts, Ruff, and Vulture in
+the same aggregate failure bundle. With no selector it derives targets from the
+working-tree diff. `run_tests.sh` remains the one canonical complete suite.
+`run_final_gate.sh` runs that exact suite on a clean commit and adds a receipt;
+it does not select different checks. CI does not enforce this local workflow.
 
 The dev shell resolves the same pinned nixpkgs as the default module package
 set, and `tests/test_harness_beets2_contract.py` runs real Beets so runtime drift

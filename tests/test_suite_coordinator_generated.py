@@ -25,7 +25,6 @@ PHASE_NAMES = (
     "js-syntax",
     "js-unit",
     "pyright",
-    "pyright-production-strict",
     "ruff",
     "vulture",
     "python",

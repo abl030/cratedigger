@@ -55,45 +55,49 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
         for bundle in self.bundles:
             shutil.rmtree(bundle, ignore_errors=True)
 
-    def _run(self, phases: tuple[PhaseSpec, ...]):
+    def _run(
+        self,
+        phases: tuple[PhaseSpec, ...],
+        *,
+        command: str = "bash scripts/run_tests.sh",
+    ):
         stream = io.StringIO()
         result = run_suite(
             repo_root=REPO_ROOT,
             phases=phases,
             runtime_dir=self.runtime,
             stream=stream,
+            command=command,
         )
         self.bundles.append(result.bundle)
         return result, stream.getvalue()
 
-    def test_default_suite_owns_both_complementary_pyright_contracts(self) -> None:
+    def test_default_suite_owns_one_concurrent_complementary_pyright_phase(
+        self,
+    ) -> None:
         pyright_phases = tuple(
             phase for phase in _default_phases() if phase.parser == "pyright"
         )
 
-        self.assertEqual(
-            tuple(phase.name for phase in pyright_phases),
-            ("pyright", "pyright-production-strict"),
-        )
+        self.assertEqual(tuple(phase.name for phase in pyright_phases), ("pyright",))
         self.assertEqual(
             pyright_phases[0].command,
-            ("pyright", "--threads", "4"),
+            ("python3", "scripts/run_pyright_checks.py"),
         )
         self.assertEqual(
             pyright_phases[0].rerun_command,
-            "pyright --threads 4",
+            "python3 scripts/run_pyright_checks.py",
         )
-        self.assertEqual(
-            pyright_phases[1].command,
-            (
-                "pyright", "-p", "pyrightconfig.production.json",
-                "--threads", "4",
-            ),
+
+    def test_summary_records_the_actual_invoked_suite_command(self) -> None:
+        command = "python3 scripts/run_targeted_tests.py tests.test_alpha"
+
+        result, _output = self._run(
+            (PhaseSpec("alpha", _python_command("ok", 0), "alpha", "generic"),),
+            command=command,
         )
-        self.assertEqual(
-            pyright_phases[1].rerun_command,
-            "pyright -p pyrightconfig.production.json --threads 4",
-        )
+
+        self.assertEqual(result.summary.command, command)
 
     def test_one_invocation_indexes_simultaneous_failures_from_every_phase(
         self,
@@ -131,7 +135,7 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
                     "(reportUnknownArgumentType)",
                     1,
                 ),
-                "pyright --threads 4",
+                "python3 scripts/run_pyright_checks.py",
                 "pyright",
             ),
             PhaseSpec(
