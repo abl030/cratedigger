@@ -60,6 +60,30 @@ class TestEphemeralPostgresFailures(unittest.TestCase):
 
 
 class TestEphemeralPostgresIsolation(unittest.TestCase):
+    def test_server_options_bound_delayed_relation_unlink_lifetime(self) -> None:
+        pg = EphemeralPostgres()
+        pg._socket_tmpdir = Path("/tmp/cdpg-checkpoint-contract")
+
+        self.assertEqual(
+            pg._server_options,
+            (
+                "-k /tmp/cdpg-checkpoint-contract",
+                "-c listen_addresses=''",
+                "-c checkpoint_timeout=30s",
+                "-c checkpoint_completion_target=0.1",
+            ),
+        )
+
+    def test_live_cluster_bounds_delayed_relation_unlink_lifetime(self) -> None:
+        with EphemeralPostgres() as pg:
+            assert pg.dsn is not None
+            with psycopg2.connect(pg.dsn) as connection, connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT current_setting('checkpoint_timeout'), "
+                    "current_setting('checkpoint_completion_target')"
+                )
+                self.assertEqual(cursor.fetchone(), ("30s", "0.1"))
+
     def test_long_tmpdir_keeps_socket_path_below_postgres_limit(self) -> None:
         with tempfile.TemporaryDirectory(dir="/tmp") as root:
             long_tmpdir = Path(root) / ("deep-test-scratch-" * 5)

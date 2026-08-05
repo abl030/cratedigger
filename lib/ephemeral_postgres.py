@@ -70,6 +70,18 @@ class EphemeralPostgres:
         assert self._socket_tmpdir is not None
         return self._socket_tmpdir
 
+    @property
+    def _server_options(self) -> tuple[str, ...]:
+        return (
+            f"-k {self._socket_dir}",
+            "-c listen_addresses=''",
+            # PostgreSQL defers unlinking relation files replaced by TRUNCATE
+            # until a checkpoint. Bound that disposable-test scratch lifetime
+            # instead of relying on the five-minute production default.
+            "-c checkpoint_timeout=30s",
+            "-c checkpoint_completion_target=0.1",
+        )
+
     def _failure_detail(self, error: subprocess.CalledProcessError) -> str:
         command = " ".join(str(part) for part in error.cmd)
         stdout = (error.stdout or b"").decode("utf-8", errors="replace")
@@ -130,7 +142,7 @@ class EphemeralPostgres:
             subprocess.run(
                 [
                     "pg_ctl", "-D", str(self._datadir), "-l", str(self._logfile),
-                    "-o", f"-k {self._socket_dir} -c listen_addresses=''", "start",
+                    "-o", " ".join(self._server_options), "start",
                 ],
                 capture_output=True,
                 check=True,
