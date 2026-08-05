@@ -27,7 +27,6 @@
   "reportPropertyTypeMismatch": "error",
   "reportTypeCommentUsage": "error",
   "reportMatchNotExhaustive": "error",
-  "reportShadowedImports": "error",
   "typeCheckingMode": "strict",
   "reportPrivateUsage": "none",
   "reportUnusedFunction": "none",

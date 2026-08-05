@@ -66,10 +66,10 @@ pkgs.mkShell {
 
     # Echo to stderr so the banner doesn't pollute stdout when callers do
     # ``nix-shell --run "cmd" > out`` (e.g. regenerating the vulture whitelist).
-    echo "cratedigger dev shell — run: python3 -m unittest discover -s tests -t . -v" >&2
+    echo "cratedigger dev shell — targeted: python3 scripts/run_targeted_tests.py tests.test_X" >&2
 
     # Pin the IDE's pyright to THIS interpreter so in-editor diagnostics match
-    # ``nix-shell --run "pyright --threads 4"`` (pyrightconfig.json points
+    # ``nix-shell --run "python3 scripts/run_pyright_checks.py"`` (the configs point
     # venvPath/venv here).
     # Without it, the editor's pyright falls back to the system python3 — which
     # lacks psycopg2/msgspec/pydantic/beets/... — and floods the file with

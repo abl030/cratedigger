@@ -250,7 +250,11 @@ EOF
           export HOME="$TMPDIR/home"
           mkdir -p "$HOME"
           cd ${source}
-          ${pkgs.pyright}/bin/pyright --threads 4
+          pyright_threads="$(${pkgs.coreutils}/bin/nproc)"
+          if (( pyright_threads > 8 )); then
+            pyright_threads=8
+          fi
+          ${pkgs.pyright}/bin/pyright --threads "$pyright_threads"
           touch "$out"
         '';
 

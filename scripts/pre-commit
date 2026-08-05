@@ -18,6 +18,10 @@ if [ -z "$STAGED" ]; then
 fi
 
 FILES=$(echo "$STAGED" | tr '\n' ' ')
+PYRIGHT_THREADS=$(nproc)
+if [ "$PYRIGHT_THREADS" -gt 8 ]; then
+    PYRIGHT_THREADS=8
+fi
 echo "pre-commit: pyright on $(echo "$STAGED" | wc -l) staged Python files..."
-nix-shell --run "pyright --threads 4 $FILES"
+nix-shell --run "pyright --threads $PYRIGHT_THREADS $FILES"
 echo "pre-commit: pyright OK"

@@ -36,6 +36,7 @@ from scripts.run_python_tests import (
     HypothesisStatsRecorder,
     RecordingTextTestResult,
     TestModule,
+    TestTarget,
     _classify_test_infrastructure_error,
     _iter_test_cases,
     assert_exact_schedule,
@@ -48,6 +49,7 @@ from scripts.run_python_tests import (
     recommended_worker_count,
     resolve_hypothesis_settings,
     schedule_modules,
+    select_test_targets,
     shard_test_ids,
     test_subprocess_environment,
     worker_environment,
@@ -253,6 +255,59 @@ class TestModuleScheduling(unittest.TestCase):
             tuple(target.test_name for target in targets),
             test_ids,
         )
+
+    def test_selected_module_keeps_the_canonical_hotspot_sharding(self) -> None:
+        module = TestModule("tests.test_hotspot", Path("/test_hotspot.py"), 90)
+        test_ids = (
+            "tests.test_hotspot.TestCases.test_one",
+            "tests.test_hotspot.TestCases.test_two",
+        )
+
+        targets = select_test_targets(
+            (module,),
+            (module.name,),
+            listed_test_ids={module.name: test_ids},
+            hotspot_policies={module.name: "method"},
+        )
+
+        self.assertEqual(tuple(target.test_name for target in targets), test_ids)
+
+    def test_selected_method_runs_only_that_exact_unittest_name(self) -> None:
+        module = TestModule("tests.test_alpha", Path("/test_alpha.py"), 10)
+        selector = "tests.test_alpha.TestCases.test_one"
+
+        targets = select_test_targets((module,), (selector,))
+
+        self.assertEqual(
+            targets,
+            (
+                TestTarget(
+                    module=module,
+                    test_name=selector,
+                    load_names=(selector,),
+                ),
+            ),
+        )
+
+    def test_selected_module_subsumes_duplicate_and_method_selectors(self) -> None:
+        module = TestModule("tests.test_alpha", Path("/test_alpha.py"), 10)
+
+        targets = select_test_targets(
+            (module,),
+            (
+                "tests.test_alpha.TestCases.test_one",
+                "tests.test_alpha",
+                "tests.test_alpha",
+            ),
+        )
+
+        self.assertEqual(targets, (TestTarget(module, module.name),))
+
+    def test_unknown_selected_test_fails_before_workers_start(self) -> None:
+        module = TestModule("tests.test_alpha", Path("/test_alpha.py"), 10)
+
+        with self.assertRaisesRegex(ValueError, "unknown test selector"):
+            select_test_targets((module,), ("tests.test_missing",))
 
     def test_target_coverage_rejects_an_omitted_test(self) -> None:
         module = TestModule("tests.test_hotspot", Path("/test_hotspot.py"), 1)

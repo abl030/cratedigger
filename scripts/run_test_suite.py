@@ -334,14 +334,8 @@ def _default_phases() -> tuple[PhaseSpec, ...]:
         ),
         PhaseSpec(
             "pyright",
-            ("pyright", "--threads", "4"),
-            "pyright --threads 4",
-            "pyright",
-        ),
-        PhaseSpec(
-            "pyright-production-strict",
-            ("pyright", "-p", "pyrightconfig.production.json", "--threads", "4"),
-            "pyright -p pyrightconfig.production.json --threads 4",
+            ("python3", "scripts/run_pyright_checks.py"),
+            "python3 scripts/run_pyright_checks.py",
             "pyright",
         ),
         PhaseSpec(
@@ -658,6 +652,7 @@ def run_suite(
     runtime_dir: Path | None = None,
     executor: PhaseExecutor = execute_phase,
     stream: TextIO | None = None,
+    command: str = CANONICAL_COMMAND,
 ) -> SuiteRun:
     """Run every phase, preserving complete evidence and one terminal result."""
     output = stream if stream is not None else sys.stdout
@@ -675,7 +670,7 @@ def run_suite(
         schema_version=SCHEMA_VERSION,
         runner_version=RUNNER_VERSION,
         state="running",
-        command=CANONICAL_COMMAND,
+        command=command,
         repo_root=str(root),
         head=head,
         dirty=dirty,

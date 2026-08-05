@@ -11,7 +11,8 @@ ALL Python commands must run inside `nix-shell --run "..."`. The dev shell provi
 
 ```bash
 nix-shell --run "bash scripts/run_tests.sh"           # full suite
-nix-shell --run "python3 -m unittest tests.<mod> -v"   # single module
+bash scripts/test.sh tests.<mod>                       # targeted + ambient gates
+nix-shell --run "python3 -m unittest tests.<mod> -v"   # isolated test debugging
 nix-shell --run "python3 -c '...'"                     # one-off
 ```
 

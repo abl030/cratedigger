@@ -599,6 +599,71 @@ def build_test_targets(
     return tuple(targets)
 
 
+def select_test_targets(
+    modules: Sequence[TestModule],
+    selectors: Sequence[str],
+    *,
+    listed_test_ids: Mapping[str, Sequence[str]] | None = None,
+    hotspot_policies: Mapping[str, str] = HOTSPOT_SHARD_POLICIES,
+) -> tuple[TestTarget, ...]:
+    """Resolve unittest selectors while retaining canonical module isolation."""
+    plan = tuple(selectors)
+    if not plan:
+        raise ValueError("at least one test selector is required")
+    module_by_name = {module.name: module for module in modules}
+    if len(module_by_name) != len(modules):
+        raise ValueError("duplicate discovered test module")
+
+    resolved: dict[str, list[str]] = {}
+    exact_modules: set[str] = set()
+    for selector in plan:
+        matches = tuple(
+            name
+            for name in module_by_name
+            if selector == name or selector.startswith(f"{name}.")
+        )
+        if not matches:
+            raise ValueError(f"unknown test selector: {selector}")
+        module_name = max(matches, key=len)
+        if selector == module_name:
+            exact_modules.add(module_name)
+        resolved.setdefault(module_name, []).append(selector)
+
+    selected_modules = schedule_modules(
+        tuple(module_by_name[name] for name in resolved)
+    )
+    manifests = listed_test_ids or {}
+    targets: list[TestTarget] = []
+    for module in selected_modules:
+        if module.name in exact_modules:
+            granularity = hotspot_policies.get(module.name)
+            if granularity is None:
+                targets.append(TestTarget(module, module.name))
+                continue
+            test_ids = manifests.get(module.name)
+            if test_ids is None:
+                raise ValueError(
+                    f"missing discovery manifest for hotspot {module.name}"
+                )
+            targets.extend(
+                shard_test_ids(module, test_ids, granularity=granularity)
+            )
+            continue
+        seen: set[str] = set()
+        for selector in resolved[module.name]:
+            if selector in seen:
+                continue
+            seen.add(selector)
+            targets.append(
+                TestTarget(
+                    module=module,
+                    test_name=selector,
+                    load_names=(selector,),
+                )
+            )
+    return tuple(targets)
+
+
 def assert_exact_target_schedule(
     expected: Sequence[TestTarget],
     actual: Sequence[TestTarget],
@@ -1072,6 +1137,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--top-level-directory", type=Path, default=Path("."))
     parser.add_argument("--pattern", default="test*.py")
     parser.add_argument(
+        "--test",
+        action="append",
+        default=[],
+        metavar="UNITTEST_NAME",
+        help="run one module, class, or method; may be repeated",
+    )
+    parser.add_argument(
         "--jobs", type=_parse_positive_int, default=_default_worker_count()
     )
     parser.add_argument(
@@ -1094,18 +1166,35 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"No Python tests found under {start}", file=sys.stderr)
         return 2
     modules = complete_test_modules(discovered, top)
-    module_schedule = schedule_modules(modules)
-    assert_exact_schedule(modules, module_schedule)
-    hotspot_names = HOTSPOT_SHARD_POLICIES.keys() & {module.name for module in modules}
+    selected_hotspots = {
+        selector
+        for selector in args.test
+        if selector in HOTSPOT_SHARD_POLICIES
+    }
+    hotspot_names = (
+        selected_hotspots
+        if args.test
+        else HOTSPOT_SHARD_POLICIES.keys() & {module.name for module in modules}
+    )
     listed_test_ids = {
         module_name: list_module_test_ids(module_name, top)
         for module_name in sorted(hotspot_names)
     }
-    schedule = build_test_targets(module_schedule, listed_test_ids)
+    if args.test:
+        schedule = select_test_targets(
+            modules,
+            args.test,
+            listed_test_ids=listed_test_ids,
+        )
+    else:
+        module_schedule = schedule_modules(modules)
+        assert_exact_schedule(modules, module_schedule)
+        schedule = build_test_targets(module_schedule, listed_test_ids)
     worker_count = min(args.jobs, len(schedule))
 
     print(
-        f"Python suite: {len(modules)} modules across {worker_count} workers "
+        f"Python suite: {len({target.module.name for target in schedule})} "
+        f"modules across {worker_count} workers "
         f"({os.cpu_count() or 1} host CPUs)"
     )
     sharded_target_count = sum(
