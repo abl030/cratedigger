@@ -96,12 +96,18 @@ fi
                 **os.environ,
                 "FAKE_EXPORT_RC": str(export_returncode),
                 "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                "RUNBOOK_TEST_PATH": f"{bin_dir}:{os.environ['PATH']}",
                 "RUNBOOK_MARKERS": str(marker_dir),
                 "RUNBOOK_TRANSFER_DIR": str(transfer_dir),
                 "RUNBOOK_WORK": str(work),
             }
             remote = subprocess.run(
-                ["zsh", "-fc", fragment or _decision_export_remote_fragment()],
+                [
+                    "zsh",
+                    "-fc",
+                    'export PATH="$RUNBOOK_TEST_PATH"; '
+                    + (fragment or _decision_export_remote_fragment()),
+                ],
                 capture_output=True,
                 check=False,
                 cwd=root,
@@ -109,7 +115,12 @@ fi
                 text=True,
             )
             local = subprocess.run(
-                ["zsh", "-fc", _decision_export_local_acceptance()],
+                [
+                    "zsh",
+                    "-fc",
+                    'export PATH="$RUNBOOK_TEST_PATH"; '
+                    + _decision_export_local_acceptance(),
+                ],
                 capture_output=True,
                 check=False,
                 cwd=root,
