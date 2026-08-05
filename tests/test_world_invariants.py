@@ -249,6 +249,25 @@ class TestWorldInvariantPins(unittest.TestCase):
         )
         self.assertEqual(
             derive_denylist_authorities(
+                username="validation-peer",
+                reason="beets validation rejected",
+                history=[{
+                    **history[0],
+                    "validation_result": {
+                        "valid": False,
+                        "wrong_match_triage": {
+                            "candidate_measurement": {
+                                "format": "MP3",
+                                "verified_lossless": False,
+                            },
+                        },
+                    },
+                }],
+            ),
+            ("validation_reject",),
+        )
+        self.assertEqual(
+            derive_denylist_authorities(
                 username="legacy-secondary-peer",
                 reason="beets validation rejected",
                 history=[{

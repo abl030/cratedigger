@@ -104,6 +104,14 @@ DISTANCE_KEY = "distance"
 SCENARIO_KEY = "scenario"
 WRONG_MATCH_TRIAGE_KEY = "wrong_match_triage"
 
+_TRIAGE_NESTED_STRUCT_FIELDS = {
+    "candidate_measurement": AudioQualityMeasurement.__struct_fields__,
+    "current_measurement": AudioQualityMeasurement.__struct_fields__,
+    "candidate_v0_probe": V0ProbeEvidence.__struct_fields__,
+    "current_v0_probe": V0ProbeEvidence.__struct_fields__,
+    "comparison_basis": QualityComparisonBasis.__struct_fields__,
+}
+
 
 @dataclass(frozen=True)
 class ValidationProjectionUnset:
@@ -190,4 +198,20 @@ def decode_validation_envelope(raw: Any) -> ValidationResultEnvelope:
         return ValidationResultEnvelope()
     if isinstance(raw, (str, bytes)):
         raw = json.loads(raw)
+    if isinstance(raw, dict):
+        raw_object = msgspec.convert(raw, type=dict[str, object])
+        triage = raw_object.get(WRONG_MATCH_TRIAGE_KEY)
+        if isinstance(triage, dict):
+            normalized_triage = msgspec.convert(triage, type=dict[str, object])
+            for field, known_fields in _TRIAGE_NESTED_STRUCT_FIELDS.items():
+                nested = normalized_triage.get(field)
+                if isinstance(nested, dict):
+                    nested_object = msgspec.convert(nested, type=dict[str, object])
+                    normalized_triage[field] = {
+                        key: value
+                        for key, value in nested_object.items()
+                        if key in known_fields
+                    }
+            raw_object[WRONG_MATCH_TRIAGE_KEY] = normalized_triage
+        raw = raw_object
     return msgspec.convert(raw, type=ValidationResultEnvelope)
