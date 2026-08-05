@@ -91,7 +91,7 @@ def make_db():
     """
     from lib import pipeline_db
     db = pipeline_db.PipelineDB(TEST_DSN)
-    for table in [
+    tables = [
         "album_quality_evidence",
         "peer_observations",
         "cycle_metrics",
@@ -112,10 +112,68 @@ def make_db():
         "slskd_transfer_ledger",  # migration 045
         "album_tracks",
         "album_requests",
-    ]:
-        db._execute(f"TRUNCATE {table} CASCADE")
+    ]
+    db._execute("TRUNCATE " + ", ".join(tables) + " CASCADE")
     db.conn.commit()
     return db
+
+
+class _RecordingTestConnection:
+    def __init__(self) -> None:
+        self.commit_count = 0
+
+    def commit(self) -> None:
+        self.commit_count += 1
+
+
+class _RecordingTestDB:
+    def __init__(self) -> None:
+        self.statements: list[str] = []
+        self.conn = _RecordingTestConnection()
+
+    def _execute(self, sql: str) -> None:
+        self.statements.append(sql)
+
+
+class TestMakeDbIsolation(unittest.TestCase):
+    def test_truncates_the_exact_test_slate_once(self) -> None:
+        db = _RecordingTestDB()
+        with patch("lib.pipeline_db.PipelineDB", return_value=db):
+            result = make_db()
+
+        self.assertIs(result, db)
+        self.assertEqual(len(db.statements), 1)
+        sql = db.statements[0]
+        prefix = "TRUNCATE "
+        suffix = " CASCADE"
+        self.assertTrue(sql.startswith(prefix))
+        self.assertTrue(sql.endswith(suffix))
+        self.assertEqual(
+            sql.removeprefix(prefix).removesuffix(suffix).split(", "),
+            [
+                "album_quality_evidence",
+                "peer_observations",
+                "cycle_metrics",
+                "bad_audio_hashes",
+                "processing_cleanup_journal",
+                "import_jobs",
+                "user_cooldowns",
+                "source_denylist",
+                "search_log",
+                "download_log",
+                "album_request_field_resolutions",
+                "youtube_album_mappings",
+                "youtube_album_empty_resolutions",
+                "plex_added_at_pins",
+                "jellyfin_date_created_pins",
+                "slskd_event_cursor",
+                "slskd_search_ledger",
+                "slskd_transfer_ledger",
+                "album_tracks",
+                "album_requests",
+            ],
+        )
+        self.assertEqual(db.conn.commit_count, 1)
 
 
 def _link_projection_evidence(
