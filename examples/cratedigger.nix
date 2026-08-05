@@ -209,6 +209,8 @@ in
       # the sops secret with reloadUnits = [ "nginx.service" ] and
       # restartUnits = [ ]. Never inline the plaintext or verifier, use a Nix
       # path/store derivation, or substitute enableInsecure in production.
+      # If you already run an identity provider, drop this option entirely and
+      # set externalAuth = true instead; see examples/external-auth-nginx.nix.
       basicAuthFile = "/run/secrets/cratedigger.htpasswd";
     };
     # The only other current mode is deliberate insecure operation: omit
