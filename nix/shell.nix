@@ -48,6 +48,7 @@ pkgs.mkShell {
   packages = [
     pkgs.postgresql          # initdb, pg_ctl for ephemeral test DB
     pkgs.util-linux          # flock for deploy-pin concurrency tests
+    pkgs.zsh                 # executable zsh runbook contract tests
     pkgs.ruff                # flake-locked repo-wide lint toolchain
     testPythonEnv
     pkgs.sox                 # spectral analysis tests
