@@ -32,6 +32,7 @@ ARTIST_ID = "00000000-0000-0000-0000-000000000917"
 class _NestedRecordingWorld:
     def __init__(
         self, total: int, short_page: int = 59, *, delay: float = 0,
+        after_write_delay: float = 0,
         catalogue_short_page: int | None = None, fail_release_groups: bool = False,
         blank_catalogue_id: bool = False, catalogue_total: int | None = None,
     ) -> None:
@@ -42,8 +43,9 @@ class _NestedRecordingWorld:
         self.blank_catalogue_id = blank_catalogue_id
         self.catalogue_total = catalogue_total
         self.delay = delay
-        self.active_requests = 0
-        self.max_active_requests = 0
+        self.after_write_delay = after_write_delay
+        self.active_server_handlers = 0
+        self.max_active_server_handlers = 0
         self._lock = threading.Lock()
 
     def response(self, path: str, query: dict[str, list[str]]) -> dict[str, object]:
@@ -130,10 +132,10 @@ class _Mirror:
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
                 with mirror.world._lock:
-                    mirror.world.active_requests += 1
-                    mirror.world.max_active_requests = max(
-                        mirror.world.max_active_requests,
-                        mirror.world.active_requests,
+                    mirror.world.active_server_handlers += 1
+                    mirror.world.max_active_server_handlers = max(
+                        mirror.world.max_active_server_handlers,
+                        mirror.world.active_server_handlers,
                     )
                 try:
                     if mirror.world.delay:
@@ -147,9 +149,11 @@ class _Mirror:
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
                     self.wfile.write(body)
+                    if mirror.world.after_write_delay:
+                        time.sleep(mirror.world.after_write_delay)
                 finally:
                     with mirror.world._lock:
-                        mirror.world.active_requests -= 1
+                        mirror.world.active_server_handlers -= 1
 
             def log_message(self, format: str, *_args: object) -> None:
                 pass
@@ -168,6 +172,72 @@ class _Mirror:
         self.server.shutdown()
         self.thread.join()
         self.server.server_close()
+
+
+class _ClientSlotSemaphore(threading.BoundedSemaphore):
+    """Observe the exact client-side lease guarded by production ``_get``."""
+
+    def __init__(self, slots: int) -> None:
+        super().__init__(slots)
+        self.active = 0
+        self.max_active = 0
+        self._probe_lock = threading.Lock()
+
+    def __enter__(
+        self, blocking: bool = True, timeout: float | None = None,
+    ) -> bool:
+        acquired = super().acquire(blocking, timeout)
+        if not acquired:
+            return False
+        with self._probe_lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        return True
+
+    def __exit__(self, *_exc: object) -> None:
+        with self._probe_lock:
+            self.active -= 1
+        super().release()
+
+
+class _ClientSlotProbe:
+    """Observe the semaphore built by production for one mirror origin."""
+
+    def __init__(self, api_base: str) -> None:
+        self.api_base = api_base
+        self.origin = mb._mirror_origin(api_base)
+        self.semaphore: _ClientSlotSemaphore | None = None
+        self._previous: threading.BoundedSemaphore | None = None
+
+    def __enter__(self) -> _ClientSlotSemaphore:
+        with mb._mb_mirror_semaphores_lock:
+            self._previous = mb._mb_mirror_semaphores.pop(self.origin, None)
+        try:
+            # Intercept only construction: production still chooses the capacity,
+            # origin key, registry entry, and semaphore used by every request.
+            with patch.object(mb.threading, "BoundedSemaphore", _ClientSlotSemaphore):
+                semaphore = mb._mirror_semaphore(self.api_base)
+        except BaseException:
+            with mb._mb_mirror_semaphores_lock:
+                if self._previous is not None:
+                    mb._mb_mirror_semaphores[self.origin] = self._previous
+            raise
+        if not isinstance(semaphore, _ClientSlotSemaphore):
+            with mb._mb_mirror_semaphores_lock:
+                mb._mb_mirror_semaphores.pop(self.origin, None)
+                if self._previous is not None:
+                    mb._mb_mirror_semaphores[self.origin] = self._previous
+            raise TypeError("production did not construct the observable semaphore")
+        self.semaphore = semaphore
+        return semaphore
+
+    def __exit__(self, *_exc: object) -> None:
+        with mb._mb_mirror_semaphores_lock:
+            current = mb._mb_mirror_semaphores.pop(self.origin, None)
+            if self._previous is not None:
+                mb._mb_mirror_semaphores[self.origin] = self._previous
+        if current is not self.semaphore:
+            raise AssertionError("production replaced the observed mirror semaphore")
 
 
 def _without_metadata_cache(
@@ -221,13 +291,18 @@ class TestArtistRecordingPaginationPins(unittest.TestCase):
                 self.assertEqual(len(actual), len(set(actual)))
 
     def test_catalogue_fanout_is_globally_bounded_and_stably_normalized(self) -> None:
-        world = _NestedRecordingWorld(250, delay=0.01)
-        with _Mirror(world) as api_base, patch.object(mb, "MB_API_BASE", api_base), patch(
+        # Keep completed server handlers alive after the client has read the
+        # response.  Server thread lifetime is not the client semaphore lease.
+        world = _NestedRecordingWorld(250, delay=0.01, after_write_delay=0.05)
+        with _Mirror(world) as api_base, _ClientSlotProbe(api_base) as probe, patch.object(
+            mb, "MB_API_BASE", api_base,
+        ), patch(
             "web.mb._cache.memoize_meta", side_effect=_without_metadata_cache,
         ):
             rows = mb.get_artist_release_groups(ARTIST_ID)
-        assert_request_cap(world.max_active_requests)
-        self.assertGreater(world.max_active_requests, 1)
+        assert_request_cap(probe.max_active)
+        self.assertGreater(probe.max_active, 1)
+        self.assertGreater(world.max_active_server_handlers, 4)
         self.assertEqual(
             [(row.first_release_date, row.id) for row in rows],
             sorted((row.first_release_date, row.id) for row in rows),
@@ -350,8 +425,10 @@ class TestArtistRecordingPaginationGenerated(unittest.TestCase):
     def test_nested_pages_preserve_the_canonical_direct_release_universe(
         self, total: int, short_page: int,
     ) -> None:
-        world = _NestedRecordingWorld(total, short_page)
-        with _Mirror(world) as api_base, patch.object(mb, "MB_API_BASE", api_base), patch(
+        world = _NestedRecordingWorld(total, short_page, after_write_delay=0.005)
+        with _Mirror(world) as api_base, _ClientSlotProbe(api_base) as probe, patch.object(
+            mb, "MB_API_BASE", api_base,
+        ), patch(
             "web.mb._cache.memoize_meta", side_effect=_without_metadata_cache,
         ):
             actual = [
@@ -359,7 +436,7 @@ class TestArtistRecordingPaginationGenerated(unittest.TestCase):
                 for release in mb.get_artist_releases_with_recordings(ARTIST_ID)
             ]
         assert_complete_order(world.ids, actual)
-        assert_request_cap(world.max_active_requests)
+        assert_request_cap(probe.max_active)
 
     @settings(max_examples=8)
     @given(total=st.integers(min_value=1, max_value=180),
