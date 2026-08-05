@@ -370,6 +370,40 @@ class TestServerEndpoints(_FakeDbWebServerCase):
             int(insecure),
         )
 
+    def test_external_auth_mode_serves_the_secure_index(self) -> None:
+        """External mode must not claim authentication is disabled.
+
+        The whole point of the mode is that an upstream component owns
+        authorization, so the insecure footer would be a false statement
+        about the operator's deployment.
+        """
+        from web import server as web_server
+
+        previous_insecure = web_server.insecure_mode
+        try:
+            web_server.configure_insecure_mode(False)
+            with self.assertLogs("cratedigger-web", level="INFO") as captured:
+                web_server.configure_external_auth_mode(True)
+            body = self._current_index_bytes()
+        finally:
+            web_server.configure_insecure_mode(previous_insecure)
+
+        self.assertFalse(web_server.insecure_mode)
+        self.assertNotIn(INSECURE_AUTH_WARNING, body)
+        self.assertNotIn(b'<footer class="insecure-auth-footer"', body)
+        self.assertEqual(len(captured.records), 1)
+        self.assertEqual(captured.records[0].levelname, "INFO")
+        self.assertEqual(
+            captured.records[0].getMessage(),
+            web_server.EXTERNAL_AUTH_NOTICE,
+        )
+
+    def test_external_auth_mode_off_records_nothing(self) -> None:
+        from web import server as web_server
+
+        with self.assertNoLogs("cratedigger-web", level="INFO"):
+            web_server.configure_external_auth_mode(False)
+
     def test_index_renderer_rejects_duplicate_footer_marker(self) -> None:
         from web.index_document import render_index_document
 

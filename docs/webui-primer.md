@@ -60,10 +60,13 @@ match the configured canonical `https://<web.hostName>` origin before the body
 or route is touched. Destructive confirmation words remain intent checks, not
 authentication.
 
-There is no external-auth/OIDC option or fallback in the current module. That
-mode is explicitly deferred until the external-session credential bridge is
-settled, so current installations must choose Basic or deliberate insecure
-operation.
+Installations choose exactly one of three mutually exclusive modes: Basic
+authentication, deliberate insecure operation, or `web.externalAuth = true` for
+a deployment whose own reverse proxy authorizes every request before forwarding
+it. In that third mode Cratedigger performs no authorization and contacts no
+authorizer; it stops claiming authentication is absent, and nothing else about
+the perimeter changes. See `docs/nixos-module.md` for the deployment contract it
+depends on.
 
 ## Files
 

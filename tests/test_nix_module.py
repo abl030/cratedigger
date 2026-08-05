@@ -326,6 +326,48 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
                 enableInsecure = true;
               };
             };
+            external = evaluate {
+              services.cratedigger.web = {
+                hostName = "music.example.test";
+                externalAuth = true;
+              };
+            };
+            externalBasicConflict = evaluate {
+              services.cratedigger = {
+                user = "cratedigger";
+                group = "cratedigger";
+                web = {
+                  hostName = "music.example.test";
+                  basicAuthFile = "/run/secrets/cratedigger.htpasswd";
+                  externalAuth = true;
+                };
+              };
+            };
+            externalInsecureConflict = evaluate {
+              services.cratedigger.web = {
+                hostName = "music.example.test";
+                enableInsecure = true;
+                externalAuth = true;
+              };
+            };
+            allThreeConflict = evaluate {
+              services.cratedigger = {
+                user = "cratedigger";
+                group = "cratedigger";
+                web = {
+                  hostName = "music.example.test";
+                  basicAuthFile = "/run/secrets/cratedigger.htpasswd";
+                  enableInsecure = true;
+                  externalAuth = true;
+                };
+              };
+            };
+            disabledExternal = evaluate {
+              services.cratedigger.web = {
+                enable = lib.mkForce false;
+                externalAuth = true;
+              };
+            };
             serviceGroupOverlap = evaluate {
               services.cratedigger = {
                 user = "cratedigger";
@@ -585,6 +627,27 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
                 for message in worlds["disabledInsecure"]
             )
         )
+        # External authorization is a first-class third mode: valid alone,
+        # mutually exclusive with both others, and residue while disabled.
+        self.assertEqual(worlds["external"], [])
+        for world in (
+            "externalBasicConflict",
+            "externalInsecureConflict",
+            "allThreeConflict",
+        ):
+            self.assertTrue(
+                any(
+                    "mutually exclusive" in message
+                    for message in worlds[world]
+                ),
+                (world, worlds[world]),
+            )
+        self.assertTrue(
+            any(
+                "inactive-mode residue" in message
+                for message in worlds["disabledExternal"]
+            )
+        )
         for world in (
             "serviceGroupOverlap",
             "nginxGroupOverlap",
@@ -759,7 +822,7 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
               system = builtins.currentSystem;
             };
             beetsPackage = import ./nix/beets.nix { pkgs = modulePkgs; };
-            render = enableIPv6: basicAuthFile:
+            render = enableIPv6: basicAuthFile: externalAuth:
               let
                 system = lib.nixosSystem {
                   system = builtins.currentSystem;
@@ -786,7 +849,9 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
                         web = ({
                           enable = true;
                           hostName = "music.example.test";
-                          enableInsecure = basicAuthFile == null;
+                          enableInsecure =
+                            basicAuthFile == null && !externalAuth;
+                          inherit externalAuth;
                         } // lib.optionalAttrs (basicAuthFile != null) {
                           inherit basicAuthFile;
                         });
@@ -863,12 +928,13 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
               };
           in {
             dualStack =
-              render true "/run/secrets/cratedigger.htpasswd";
+              render true "/run/secrets/cratedigger.htpasswd" false;
             ipv4Only =
-              render false "/run/secrets/cratedigger.htpasswd";
-            insecureRecovery = render false null;
+              render false "/run/secrets/cratedigger.htpasswd" false;
+            insecureRecovery = render false null false;
             alternateBasic =
-              render false "/run/secrets/cratedigger-alternate.htpasswd";
+              render false "/run/secrets/cratedigger-alternate.htpasswd" false;
+            externalMode = render false null true;
           }
         '''
         result = subprocess.run(
@@ -884,10 +950,12 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
         ipv4 = worlds["ipv4Only"]
         insecure = worlds["insecureRecovery"]
         alternate = worlds["alternateBasic"]
+        external = worlds["externalMode"]
         self.assertEqual(dual["failures"], [])
         self.assertEqual(ipv4["failures"], [])
         self.assertEqual(insecure["failures"], [])
         self.assertEqual(alternate["failures"], [])
+        self.assertEqual(external["failures"], [])
         self.assertEqual(
             dual["listen"],
             [
@@ -912,6 +980,16 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
         self.assertIn(
             "gateway_marker_path=/run/cratedigger-web/gateway-policy-",
             insecure["gatewayPolicy"],
+        )
+        # External mode is its own policy identity: a distinct gateway_mode,
+        # no credential, no Basic attachment, and a marker that cannot be
+        # produced by either other mode's descriptor.
+        self.assertIn("gateway_mode=external", external["gatewayPolicy"])
+        self.assertIn("gateway_credential_path=-", external["gatewayPolicy"])
+        self.assertEqual(external["basicAuthFile"], None)
+        self.assertEqual(external["rootBasicAuthFile"], None)
+        self.assertNotEqual(
+            external["gatewayPolicy"], insecure["gatewayPolicy"]
         )
         marker_pattern = re.compile(
             r"if \(!-f "
@@ -1137,6 +1215,52 @@ class TestWebAuthenticationModuleContract(unittest.TestCase):
             wrapper,
         )
         self.assertEqual(wrapper.count("--insecure-mode"), 1)
+
+    def test_web_wrapper_passes_external_flag_only_for_external_mode(
+        self,
+    ) -> None:
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        web_start = text.index('writeShellScriptBin "cratedigger-web"')
+        web_end = text.index(
+            'writeShellScriptBin "cratedigger-youtube-ingest"', web_start
+        )
+        wrapper = text[web_start:web_end]
+
+        self.assertIn(
+            '${optionalString cfg.web.externalAuth "--external-auth-mode"}',
+            wrapper,
+        )
+        self.assertEqual(wrapper.count("--external-auth-mode"), 1)
+
+    def test_gateway_policy_validator_admits_exactly_three_modes(self) -> None:
+        """The policy descriptor grammar is the fail-closed mode authority.
+
+        A mode the validator does not name must fall through to the invalid
+        arm, so a descriptor can never select a policy nginx would not have
+        been configured for.
+        """
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        read_policy = text[
+            text.index("webGatewayReadPolicy = ''") :
+            text.index("webGatewayAssertPolicyUnchanged = ''")
+        ]
+        self.assertIn("basic)", read_policy)
+        self.assertIn("insecure)", read_policy)
+        self.assertIn("external)", read_policy)
+        self.assertIn("policy descriptor has an invalid mode", read_policy)
+        self.assertIn(
+            "external policy must not name a credential", read_policy
+        )
+
+    def test_external_auth_option_is_declared_and_documented(self) -> None:
+        text = MODULE_NIX.read_text(encoding="utf-8")
+        self.assertIn("externalAuth = mkOption", text)
+        options = text[
+            text.index("externalAuth = mkOption") :
+            text.index("externalAuth = mkOption") + 1200
+        ]
+        self.assertIn("type = types.bool;", options)
+        self.assertIn("default = false;", options)
 
     def test_basic_secret_is_runtime_only_and_checked_before_nginx_start(
         self,

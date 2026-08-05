@@ -53,6 +53,14 @@ MAX_POST_BODY_BYTES = 1024 * 1024
 INSECURE_AUTH_WARNING = (
     "Authentication is disabled for this Cratedigger instance."
 )
+# External authorization is an assertion the deployment makes about the
+# component in front of the gateway. Cratedigger never contacts that component,
+# so this is recorded as an ordinary startup fact, not a warning about a
+# missing perimeter.
+EXTERNAL_AUTH_NOTICE = (
+    "Browser authorization is owned by an external component in front of "
+    "this Cratedigger gateway."
+)
 
 # Ensure this module is importable as 'web.server' even when run as __main__,
 # so route modules can `from web import server` and get the same instance.
@@ -167,6 +175,18 @@ def configure_insecure_mode(enabled: bool) -> None:
     insecure_mode = enabled
     if enabled:
         log.critical(INSECURE_AUTH_WARNING)
+
+
+def configure_external_auth_mode(enabled: bool) -> None:
+    """Record that an external component owns browser authorization.
+
+    Deliberately holds no module state. External mode changes nothing this
+    process does — authentication is present, it just lives in front of the
+    gateway — so the startup record IS the whole behaviour, and a mode flag
+    nothing reads would be dead weight.
+    """
+    if enabled:
+        log.info(EXTERNAL_AUTH_NOTICE)
 
 
 @functools.cache
@@ -767,6 +787,16 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--external-auth-mode",
+        action="store_true",
+        help=(
+            "Record that an established external component in front of this "
+            "gateway owns browser authorization. Cratedigger performs no "
+            "authorization and contacts no authorizer; the request-security "
+            "envelope remains enforced."
+        ),
+    )
+    parser.add_argument(
         "--config",
         default=None,
         help="Immutable runtime config (default: env or cwd/config.ini)",
@@ -814,7 +844,12 @@ def main() -> int:
     active_beets_config.clear()
     active_beets_config.read(user=True, defaults=True)
     canonical_origin = args.canonical_origin
+    if args.insecure_mode and args.external_auth_mode:
+        parser.error(
+            "--insecure-mode and --external-auth-mode are mutually exclusive"
+        )
     configure_insecure_mode(args.insecure_mode)
+    configure_external_auth_mode(args.external_auth_mode)
     beets_db_path = admitted_config.beets_library_db
     beets_library_root = admitted_config.beets_directory
     inherited_listener: socket.socket | None = None

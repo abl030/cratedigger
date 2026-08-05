@@ -83,18 +83,31 @@
     && lib.all webHostLabelIsValid webHostLabels
     && builtins.match "[0-9.]+" webHostName == null;
   webBasicEnabled = cfg.web.basicAuthFile != null;
+  # External authorization is a whole-site allow/deny decision owned by a
+  # component in front of this gateway. The module never calls that component:
+  # it neither proxies to it nor probes it, so a probe result can never be
+  # mistaken for an authorization guarantee. The mode exists so the deployment
+  # stops asserting that authentication is absent.
+  webExternalEnabled = cfg.web.externalAuth;
   webModeCount = lib.count (enabled: enabled) [
     webBasicEnabled
     cfg.web.enableInsecure
+    webExternalEnabled
   ];
   webBasicAuthConfiguredPath =
     if cfg.web.basicAuthFile != null
     then cfg.web.basicAuthFile
     else "/invalid/cratedigger.htpasswd";
+  webGatewayMode =
+    if webBasicEnabled
+    then "basic"
+    else if webExternalEnabled
+    then "external"
+    else "insecure";
   webGatewayPolicyIdentity =
     if webBasicEnabled
     then "basic:${webBasicAuthConfiguredPath}"
-    else "insecure";
+    else webGatewayMode;
   webGatewayPolicyFingerprint =
     builtins.hashString "sha256" webGatewayPolicyIdentity;
   webGatewayActiveMarker =
@@ -104,7 +117,7 @@
     "${webRuntimeDirectory}/gateway-reload-receipt";
   webGatewayPolicyText = ''
     format=1
-    gateway_mode=${if webBasicEnabled then "basic" else "insecure"}
+    gateway_mode=${webGatewayMode}
     gateway_credential_path=${
       if webBasicEnabled then webBasicAuthConfiguredPath else "-"
     }
@@ -447,6 +460,10 @@
       insecure)
         ${pkgs.coreutils}/bin/test "$gateway_credential_path" = "-" \
           || gateway_fail "insecure policy must not name a credential"
+        ;;
+      external)
+        ${pkgs.coreutils}/bin/test "$gateway_credential_path" = "-" \
+          || gateway_fail "external policy must not name a credential"
         ;;
       *)
         gateway_fail "policy descriptor has an invalid mode"
@@ -905,6 +922,7 @@
     exec ${pyRunner} ${src}/web/server.py \
       --canonical-origin "https://${webHostName}" \
       ${optionalString cfg.web.enableInsecure "--insecure-mode"} \
+      ${optionalString cfg.web.externalAuth "--external-auth-mode"} \
       --dsn "${pipelineDsn}" \
       --redis-host "${cfg.web.redis.host}" \
       --redis-port ${toString cfg.web.redis.port} \
@@ -1585,8 +1603,38 @@ in {
         default = false;
         description = ''
           Deliberately run the web gateway without browser authentication.
-          This is mutually exclusive with basicAuthFile; the Unix socket,
-          request provenance checks, and other security boundaries remain.
+          This is mutually exclusive with basicAuthFile and externalAuth; the
+          Unix socket, request provenance checks, and other security
+          boundaries remain.
+        '';
+      };
+      externalAuth = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Declare that an established external component in front of this
+          gateway owns browser authorization, as a whole-site allow or deny
+          decision. Use this when a reverse proxy you operate authenticates
+          every request before forwarding it to gatewayPort — for example an
+          OIDC provider fronted by forward authentication.
+
+          Cratedigger performs no authorization itself in this mode. It sends
+          no sub-request to the authorizer and does not probe whether one is
+          reachable, so selecting this mode is an assertion you make about
+          your own deployment, not one the module verifies. If the component
+          in front fails open, the gateway is served anonymously and
+          Cratedigger cannot detect it.
+
+          The deployment contract this mode depends on: your proxy runs on the
+          same host, reaches the gateway on its loopback port, and forwards the
+          canonical hostName as the Host header. Provider identity, roles,
+          cookies, and tokens are dropped by the gateway's reviewed header set
+          and never reach the application.
+
+          This is mutually exclusive with basicAuthFile and enableInsecure;
+          there is no fallback between modes. The Unix socket, request
+          provenance checks, security headers, and the anonymous /healthz
+          exception are unchanged.
         '';
       };
       redis = {
@@ -2008,11 +2056,19 @@ in {
       }
       {
         assertion = !cfg.web.enable || webModeCount == 1;
-        message = "services.cratedigger.web requires exactly one authentication mode: set basicAuthFile or explicitly set enableInsecure = true.";
+        message = "services.cratedigger.web requires exactly one authentication mode: set basicAuthFile, or explicitly set enableInsecure = true, or set externalAuth = true.";
       }
       {
         assertion = !cfg.web.enable || !(webBasicEnabled && cfg.web.enableInsecure);
         message = "services.cratedigger.web basicAuthFile and enableInsecure are mutually exclusive.";
+      }
+      {
+        assertion = !cfg.web.enable || !(webBasicEnabled && webExternalEnabled);
+        message = "services.cratedigger.web basicAuthFile and externalAuth are mutually exclusive; external authorization never falls back to Basic.";
+      }
+      {
+        assertion = !cfg.web.enable || !(cfg.web.enableInsecure && webExternalEnabled);
+        message = "services.cratedigger.web enableInsecure and externalAuth are mutually exclusive.";
       }
       {
         assertion = !cfg.web.enable || config.services.nginx.enableReload;
@@ -2069,7 +2125,9 @@ in {
         message = "services.cratedigger.web.basicAuthFile must be a normalized absolute runtime path with nginx-token-safe segments outside /nix/store.";
       }
       {
-        assertion = cfg.web.enable || (!webBasicEnabled && !cfg.web.enableInsecure);
+        assertion =
+          cfg.web.enable
+          || (!webBasicEnabled && !cfg.web.enableInsecure && !webExternalEnabled);
         message = "services.cratedigger.web authentication settings are inactive-mode residue while web.enable is false.";
       }
       {

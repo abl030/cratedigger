@@ -456,3 +456,28 @@ export function withApplyDistance(baseHtml, applyDistance) {
   if (applyDistance == null || Number.isNaN(parsed)) return baseHtml;
   return `${baseHtml} <span class="p-hist-was">· apply ${parsed.toFixed(3)}</span>`;
 }
+
+/**
+ * Detect a response that an external authorization component produced
+ * instead of Cratedigger (issue #924).
+ *
+ * When the operator fronts Cratedigger with their own identity provider and
+ * the browser session expires, that component answers the in-flight request.
+ * `fetch` follows the portal redirect transparently, so the call site sees
+ * `ok === true` carrying HTML and reports a generic load failure — the
+ * operator is told "Failed to load imports" when the real answer is "sign in
+ * again".
+ *
+ * Both signals are unambiguous because Cratedigger itself produces neither:
+ * the application never emits 401, and never sends a Location header, so it
+ * can never redirect. Its own refusals are 400/403/404/409/422/500, which are
+ * genuine application answers and must stay untouched here.
+ *
+ * @param {{status?: number, redirected?: boolean, url?: string}|null|undefined} response
+ * @returns {boolean}
+ */
+export function isExternalAuthInterruption(response) {
+  if (!response) return false;
+  if (response.status === 401) return true;
+  return response.redirected === true;
+}

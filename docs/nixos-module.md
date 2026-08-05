@@ -59,12 +59,13 @@ upstream module and adds:
 | `redis.{enable,host,port,maxmemory}` | enabled, `127.0.0.1:6379`, `2gb` | App-owned local Redis server for the pipeline peer cache and web metadata cache. Uses `allkeys-lru`. |
 | `peerCache.{ttlSeconds,speedTtlSeconds,redisConnectTimeoutMs,redisOperationTimeoutMs}` | 7d, 24h, 200ms, 100ms | Redis TTL and timeout settings rendered into `[Peer Cache]`. |
 | `beets.validation.{enable,distanceThreshold,stagingDir,trackingFile,verifiedLosslessTarget}` | sensible defaults | Beets validation config. |
-| `web.enable` | `false` | Enable the Unix-only web backend and module-owned loopback nginx gateway. Exactly one of `basicAuthFile` or `enableInsecure = true` is then required. |
+| `web.enable` | `false` | Enable the Unix-only web backend and module-owned loopback nginx gateway. Exactly one of `basicAuthFile`, `enableInsecure = true`, or `externalAuth = true` is then required. |
 | `web.hostName` | `null` | Lowercase canonical public DNS hostname. Required when web is enabled; it defines the fixed `https://` browser origin and exact gateway vhost. IP literals are rejected. |
 | `web.gatewayPort` | `8086` | Loopback-only nginx gateway port. The public HTTPS reverse proxy forwards here; this is not a Python application listener. |
 | `web.accessGroup` | `"cratedigger-web"` | Dedicated group authorized to connect to the web backend Unix socket. This grants complete HTTP/API authority, not Basic-password-file access or unrelated CLI authority. Known privileged or overlapping authority groups are rejected. |
 | `web.basicAuthFile` | `null` | Absolute runtime `htpasswd` file outside `/nix/store`. Basic mode requires a root-owned, non-empty `root:<nginx-group>` `0440` target readable by nginx and denied to the application/non-nginx socket users. |
-| `web.enableInsecure` | `false` | Explicitly disable browser authentication while retaining the gateway, Unix socket, canonical-origin checks, and all other request-security controls. Mutually exclusive with `basicAuthFile`. |
+| `web.enableInsecure` | `false` | Explicitly disable browser authentication while retaining the gateway, Unix socket, canonical-origin checks, and all other request-security controls. Mutually exclusive with `basicAuthFile` and `externalAuth`. |
+| `web.externalAuth` | `false` | Declare that a component you run in front of the gateway owns browser authorization as a whole-site allow/deny decision. Cratedigger performs no authorization and contacts no authorizer, so fail-closed behaviour is a property of your proxy. Mutually exclusive with `basicAuthFile` and `enableInsecure`. |
 | `web.redis.{host,port}` | shared app Redis | Web metadata-cache connection; follows `services.cratedigger.redis` unless explicitly overridden. |
 | `notifiers.plex.{enable,url,tokenFile,librarySectionId,pathMap}` | disabled | Plex notifier. |
 | `notifiers.jellyfin.{enable,url,tokenFile,libraryId,pathMap}` | disabled | Jellyfin notifier. Every import reports only its mapped final album path through `POST /Library/Media/Updated`; `pathMap` supplies Jellyfin's view of that path and enables the upgrade DateCreated pin. `libraryId` is only a deletion-observation fallback (issues #574/#697, `docs/jellyfin-primer.md`). |
@@ -166,12 +167,51 @@ When `web.enable = true`, module evaluation accepts exactly one mode:
    `basicAuthFile = null`. This is a deliberate test/development escape hatch,
    not a default inferred from localhost or missing configuration.
 
-Missing mode, both modes, a missing/invalid canonical hostname, inactive-mode
-residue, a store-backed Basic path, or overlapping authority groups fail
-closed. Basic additionally requires a non-root application identity distinct
-from nginx. The module exposes no external-auth or OIDC mode. That direction is
-deferred until a provider-neutral external-session credential bridge is
-settled; there is no current option, fallback, or configuration example for it.
+3. **External authorization:** set `web.externalAuth = true` and leave both
+   other settings unset. Use this when a reverse proxy you operate — an OIDC
+   provider fronted by forward authentication, for example — authorizes every
+   request before forwarding it to `gatewayPort`.
+
+Missing mode, more than one mode, a missing/invalid canonical hostname,
+inactive-mode residue, a store-backed Basic path, or overlapping authority
+groups fail closed. Basic additionally requires a non-root application identity
+distinct from nginx. No mode ever falls back to another.
+
+### External authorization mode
+
+Cratedigger performs no authorization in this mode. It sends no sub-request to
+your authorizer and does not probe whether one is reachable, so selecting the
+mode is an assertion you make about your own deployment rather than one the
+module verifies. If the component in front fails open, the gateway is served
+anonymously and Cratedigger cannot detect it. Fail-closed behaviour is a
+property of your proxy configuration.
+
+What the mode changes is honesty: the UI drops the insecure-authentication
+footer and the service records that an external component owns authorization
+instead of logging a `[CRITICAL]` warning that authentication is absent.
+
+The deployment contract you are asserting:
+
+- Your proxy runs on the same host. The module gateway listens on loopback
+  only, so nothing can reach it from another machine without host access.
+- Your proxy forwards the canonical `web.hostName` as the `Host` header. A
+  non-canonical Host is rejected by the module's own default vhost.
+- You decide whether `/healthz` stays anonymous at your layer. The module's
+  anonymous health exception applies to its own gateway; your proxy sees the
+  same path and may authorize or exempt it as you choose.
+
+Provider identity, roles, cookies, and tokens never reach the application: the
+gateway rebuilds a reviewed header set, so an authorizer's `Remote-User`,
+`Remote-Groups`, `Cookie`, and `Authorization` headers are dropped at the
+boundary. This holds in every mode and is proven in the module VM against a
+front proxy that injects them.
+
+A worked forward-auth example is in
+[`examples/external-auth-nginx.nix`](../examples/external-auth-nginx.nix).
+
+One browser-visible consequence is worth knowing: when a session expires, your
+authorizer answers the in-flight request. The UI detects that answer and shows
+an expired-session prompt rather than a generic load failure.
 
 ### Basic mode and the runtime credential
 
@@ -336,8 +376,9 @@ operator explicitly with `users.users.<name>.extraGroups`.
 
 ### Troubleshooting and rollback
 
-- A module assertion about “exactly one authentication mode” means neither or
-  both of `basicAuthFile` and `enableInsecure` were selected.
+- A module assertion about “exactly one authentication mode” means none or more
+  than one of `basicAuthFile`, `enableInsecure`, and `externalAuth` were
+  selected. A “mutually exclusive” assertion names the exact pair that clashed.
 - `Cratedigger Basic authentication validation failed` in the nginx journal
   names a runtime path, ownership, ACL, ancestry, nginx-read, or
   non-nginx-denial failure. Fix the secret deployment; do not weaken the mode.

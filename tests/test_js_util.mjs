@@ -3,11 +3,12 @@
  * Run with: node tests/test_js_util.mjs
  */
 
-import { qualityLabel, qualityLabelShort, toAWST, awstDate, awstTime, awstDateTime, esc, jsArg, overrideToIntent, detectSource, externalReleaseUrl, sourceLabel, youtubeBrowseUrl, renderForensicBlock, parsePastedId, youtubeSectionState, consoleEmphasis, withApplyDistance } from '../web/js/util.js';
+import { qualityLabel, qualityLabelShort, toAWST, awstDate, awstTime, awstDateTime, esc, jsArg, overrideToIntent, detectSource, externalReleaseUrl, sourceLabel, youtubeBrowseUrl, renderForensicBlock, parsePastedId, youtubeSectionState, consoleEmphasis, withApplyDistance, isExternalAuthInterruption } from '../web/js/util.js';
 import { state } from '../web/js/state.js';
 import { applyLabelFilters, sortByYearDesc, buildLabelSearchUrl, buildLabelDetailUrl, loadLabelReleases, parseYear, renderLabelLinks, distinctFormats, renderPaginationControls, renderLabelRows } from '../web/js/labels.js';
 import { __test__ as longTailTest } from '../web/js/long_tail.js';
 import { __test__ as longTailConsoleTest } from '../web/js/long_tail_console.js';
+import { wrapFetchWithSessionGuard, buildSessionExpiredOverlay, installSessionGuard } from '../web/js/session.js';
 
 let passed = 0;
 let failed = 0;
@@ -1916,10 +1917,6 @@ console.log('long_tail_console.js console persistence (#398 / #481 item 1)');
     'DOM-side no-ops leave consoleStates untouched in Node');
 }
 
-// --- Summary ---
-console.log(`\n${passed} passed, ${failed} failed`);
-if (failed > 0) process.exit(1);
-
 {
   // #865: the card's Distance cell appends the apply-time distance (#863)
   // only when one was persisted — legacy rows render unchanged.
@@ -1938,3 +1935,130 @@ if (failed > 0) process.exit(1);
   assertEqual(withApplyDistance('0.082', 'not-a-number'), '0.082',
     'unparseable apply distance leaves the cell unchanged');
 }
+
+{
+  // #924: behind an operator's external authorizer, an expired session is
+  // answered by that component, not by Cratedigger. `fetch` follows the
+  // portal redirect transparently, so the call site sees ok=true with an
+  // HTML body and reports a generic load failure. Cratedigger itself never
+  // emits 401 and never sends a Location header, so both signals below are
+  // unambiguously someone else's response.
+  assert(isExternalAuthInterruption({ status: 401, redirected: false }),
+    '401 is an external authorizer — Cratedigger never emits one');
+  assert(isExternalAuthInterruption({ status: 200, redirected: true }),
+    'a followed redirect is an external authorizer — the app never redirects');
+  assert(isExternalAuthInterruption({ status: 200, redirected: true, url: 'https://auth.example.test/' }),
+    'a cross-origin portal redirect is an interruption');
+  assert(!isExternalAuthInterruption({ status: 200, redirected: false }),
+    'an ordinary successful response is not an interruption');
+  assert(!isExternalAuthInterruption({ status: 404, redirected: false }),
+    'a genuine application 404 is not an interruption');
+  assert(!isExternalAuthInterruption({ status: 403, redirected: false }),
+    'the application provenance 403 is not an interruption');
+  assert(!isExternalAuthInterruption({ status: 500, redirected: false }),
+    'an application error is not an interruption');
+  assert(!isExternalAuthInterruption(null),
+    'a missing response is not an interruption');
+  assert(!isExternalAuthInterruption(undefined),
+    'an undefined response is not an interruption');
+  assert(!isExternalAuthInterruption({}),
+    'a response with no status or redirect flag is not an interruption');
+}
+
+{
+  // #924: the session guard's own behaviour. The DOM is the external edge
+  // here, so it is faked; the guard, the predicate, and the overlay builder
+  // are the real production functions.
+  function fakeDocument() {
+    const byId = new Map();
+    let reloads = 0;
+    const makeElement = (tag) => {
+      const node = {
+        tag, id: '', className: '', textContent: '', type: '',
+        children: [], attributes: {}, listeners: {},
+        setAttribute(name, value) { this.attributes[name] = value; },
+        addEventListener(name, fn) { this.listeners[name] = fn; },
+        append(...kids) { this.children.push(...kids); },
+        appendChild(kid) { this.children.push(kid); return kid; },
+      };
+      return node;
+    };
+    const doc = {
+      body: makeElement('body'),
+      location: { reload() { reloads += 1; } },
+      createElement: makeElement,
+      getElementById: (id) => byId.get(id) || null,
+      reloadCount: () => reloads,
+    };
+    const originalAppend = doc.body.appendChild.bind(doc.body);
+    doc.body.appendChild = (kid) => { byId.set(kid.id, kid); return originalAppend(kid); };
+    return doc;
+  }
+
+  const okResponse = { status: 200, redirected: false };
+  const expiredResponse = { status: 200, redirected: true };
+
+  // An ordinary response passes through untouched and shows no overlay.
+  {
+    const doc = fakeDocument();
+    const guarded = wrapFetchWithSessionGuard(async () => okResponse, doc);
+    const result = await guarded('/api/pipeline/dashboard');
+    assertEqual(result, okResponse, 'ordinary responses pass through the guard');
+    assertEqual(doc.getElementById('session-expired-overlay'), null,
+      'an ordinary response shows no expired-session overlay');
+  }
+
+  // An authorizer-interrupted response never reaches the call site as data.
+  {
+    const doc = fakeDocument();
+    const guarded = wrapFetchWithSessionGuard(async () => expiredResponse, doc);
+    let threw = false;
+    try {
+      await guarded('/api/pipeline/dashboard');
+    } catch (e) {
+      threw = true;
+    }
+    assert(threw, 'an interrupted response rejects instead of returning HTML as data');
+    const overlay = doc.getElementById('session-expired-overlay');
+    assert(overlay !== null, 'an interrupted response shows the expired-session overlay');
+    assertEqual(overlay.attributes['role'], 'alertdialog',
+      'the overlay announces itself as an alert dialog');
+    assertEqual(overlay.attributes['aria-modal'], 'true',
+      'the overlay is a modal for assistive technology');
+  }
+
+  // Concurrent in-flight requests must not stack overlays.
+  {
+    const doc = fakeDocument();
+    const guarded = wrapFetchWithSessionGuard(async () => expiredResponse, doc);
+    for (const _ of [0, 1, 2]) {
+      try { await guarded('/api/pipeline/dashboard'); } catch (e) { /* expected */ }
+    }
+    assertEqual(doc.body.children.length, 1,
+      'repeated interruptions show exactly one overlay');
+  }
+
+  // main.js installs the guard at module scope, and the Node test runner
+  // imports main.js. A window-less install must be a silent no-op or every
+  // JS suite that touches main.js dies on import.
+  assertEqual(installSessionGuard(undefined), false,
+    'installing without a window is a no-op');
+  assertEqual(installSessionGuard({}), false,
+    'installing without fetch or document is a no-op');
+
+  // The overlay's recovery is a document-level reload, which is the only
+  // navigation that lets the external component run its redirect flow.
+  {
+    const doc = fakeDocument();
+    const overlay = buildSessionExpiredOverlay(doc);
+    const panel = overlay.children[0];
+    const button = panel.children.find((child) => child.tag === 'button');
+    assert(button !== undefined, 'the overlay offers a recovery control');
+    button.listeners['click']();
+    assertEqual(doc.reloadCount(), 1, 'the recovery control reloads the document');
+  }
+}
+
+// --- Summary ---
+console.log(`\n${passed} passed, ${failed} failed`);
+if (failed > 0) process.exit(1);

@@ -25,6 +25,14 @@ import { handleProcessingLockedConflict } from './release_action_state.js';
 import { suppressProcessingAction } from './release_actions.js';
 import { toast } from './state.js';
 import { stopConvergedSearch } from './convergence.js';
+import { installSessionGuard } from './session.js';
+
+// Install before any module issues its first fetch (issue #924). Behind an
+// operator's external authorizer, an expired session is answered by that
+// component; without this, every call site would render the portal's HTML
+// as a generic load failure. No-ops under the Node test runner, which has
+// no window.
+installSessionGuard(typeof window === 'undefined' ? undefined : window);
 
 /**
  * Replace-picker wrapper that surfaces success / failure toasts and
