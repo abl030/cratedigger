@@ -89,6 +89,25 @@ class TestDecodeValidationEnvelope(unittest.TestCase):
         self.assertEqual(triage.stage_chain, ["preview", "decide"])
         self.assertEqual(triage.cleared_rows, 2)
 
+    def test_triage_tolerates_legacy_nested_measurement_extra_keys(self) -> None:
+        env = decode_validation_envelope({
+            "valid": False,
+            "wrong_match_triage": {
+                "candidate_measurement": {
+                    "format": "MP3",
+                    "avg_bitrate_kbps": 256,
+                    "verified_lossless": False,
+                },
+            },
+        })
+
+        self.assertFalse(env.valid)
+        triage = env.wrong_match_triage
+        assert triage is not None
+        assert triage.candidate_measurement is not None
+        self.assertEqual(triage.candidate_measurement.format, "MP3")
+        self.assertEqual(triage.candidate_measurement.avg_bitrate_kbps, 256)
+
     def test_wrong_typed_failed_path_raises(self) -> None:
         with self.assertRaises(msgspec.ValidationError):
             decode_validation_envelope({"failed_path": 123})

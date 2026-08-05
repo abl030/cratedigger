@@ -22,8 +22,12 @@ class EphemeralPostgresError(RuntimeError):
 class EphemeralPostgres:
     """Own one temporary PostgreSQL cluster for replay or test isolation."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, temp_directory: str | Path | None = None) -> None:
+        self._temp_directory = (
+            str(temp_directory) if temp_directory is not None else None
+        )
         self.tmpdir: Path | None = None
+        self._socket_tmpdir: Path | None = None
         self.dsn: str | None = None
         self._server_started = False
         self._started = False
@@ -63,8 +67,8 @@ class EphemeralPostgres:
 
     @property
     def _socket_dir(self) -> Path:
-        assert self.tmpdir is not None
-        return self.tmpdir / "socket"
+        assert self._socket_tmpdir is not None
+        return self._socket_tmpdir
 
     def _failure_detail(self, error: subprocess.CalledProcessError) -> str:
         command = " ".join(str(part) for part in error.cmd)
@@ -91,6 +95,9 @@ class EphemeralPostgres:
         if self.tmpdir is not None:
             shutil.rmtree(self.tmpdir, ignore_errors=True)
         self.tmpdir = None
+        if self._socket_tmpdir is not None:
+            shutil.rmtree(self._socket_tmpdir, ignore_errors=True)
+        self._socket_tmpdir = None
 
     def start(self) -> None:
         if self._started:
@@ -100,10 +107,18 @@ class EphemeralPostgres:
                 "initdb/pg_ctl not found; run inside nix-shell"
             )
 
-        self.tmpdir = Path(tempfile.mkdtemp(prefix="cratedigger_ephemeral_pg_"))
-        self._socket_dir.mkdir()
         user = os.getenv("USER", "root")
         try:
+            self.tmpdir = Path(tempfile.mkdtemp(
+                prefix="cratedigger_ephemeral_pg_",
+                dir=self._temp_directory,
+            ))
+            # PostgreSQL's sockaddr_un path is limited to 107 bytes on Linux.
+            # Keep the data and logs under the caller's (possibly long) TMPDIR,
+            # but allocate the tiny private socket directory beneath a stable,
+            # short path. systemd's PrivateTmp still isolates /tmp for the
+            # unattended gate.
+            self._socket_tmpdir = Path(tempfile.mkdtemp(prefix="cdpg-", dir="/tmp"))
             subprocess.run(
                 [
                     "initdb", "-D", str(self._datadir), "--no-locale", "-E", "UTF8",

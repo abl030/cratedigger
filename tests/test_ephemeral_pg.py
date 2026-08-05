@@ -32,10 +32,12 @@ class TestEphemeralPostgresFailures(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             failed_dir = base / "failed-cluster"
+            socket_dir = base / "socket"
 
             def make_tempdir(*_args: object, **_kwargs: object) -> str:
-                failed_dir.mkdir()
-                return str(failed_dir)
+                target = socket_dir if _kwargs.get("dir") == "/tmp" else failed_dir
+                target.mkdir()
+                return str(target)
 
             with (
                 patch("lib.ephemeral_postgres.shutil.which", return_value="/bin/tool"),
@@ -54,9 +56,25 @@ class TestEphemeralPostgresFailures(unittest.TestCase):
                 EphemeralPostgres().start()
 
             self.assertFalse(failed_dir.exists())
+            self.assertFalse(socket_dir.exists())
 
 
 class TestEphemeralPostgresIsolation(unittest.TestCase):
+    def test_long_tmpdir_keeps_socket_path_below_postgres_limit(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as root:
+            long_tmpdir = Path(root) / ("deep-test-scratch-" * 5)
+            long_tmpdir.mkdir()
+            with EphemeralPostgres(temp_directory=long_tmpdir) as pg:
+                assert pg.tmpdir is not None
+                self.assertTrue(pg.tmpdir.is_relative_to(long_tmpdir))
+                socket_path = pg._socket_dir / ".s.PGSQL.5432"
+                self.assertLessEqual(len(str(socket_path).encode()), 107)
+                data_dir = pg.tmpdir
+                socket_dir = pg._socket_dir
+
+            self.assertFalse(data_dir.exists())
+            self.assertFalse(socket_dir.exists())
+
     def test_multiple_instances_have_isolated_live_unix_socket_clusters(self) -> None:
         def start_query_stop(_: int) -> str:
             with EphemeralPostgres() as pg:
