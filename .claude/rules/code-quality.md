@@ -603,6 +603,20 @@ rationale; never allowlist a pure decision.
 - For non-trivial changes (new structs, refactored function signatures, new pipeline paths), review the complete diff before committing.
 - Check correctness bugs, test gaps, missed callers, type errors, unfinished wiring, and production-shape drift. Use the active agent's native review capability; no specialist review workflow is required.
 - Docs freshness: does this diff make any README / `docs/` / `examples/` / CLAUDE.md statement wrong or incomplete, or ship a documented surface (a new option / plugin / CLI subcommand / behavior) undocumented? `test_docs_audit.py` catches structural gaps; the reviewer catches stale prose the audit can't see.
+  - **Search prose by the artifact, not only by the identifier.** Docs name a
+    thing the way an operator meets it — a secret path, a URL, a systemd unit,
+    a header — not by the option or symbol that governs it. A grep for the new
+    identifier therefore returns clean while a paragraph about the same
+    behaviour goes stale. Grep the artifacts the change touches too, and treat
+    an empty result as "wrong pattern" until one search has actually hit the
+    file you expect. Incident: #924's `web.externalAuth` cleared a grep for
+    `basicAuthFile|enableInsecure|externalAuth` across README, `docs/`, and
+    `examples/`, while `README.md` told every operator to provision
+    `/run/secrets/cratedigger.htpasswd` before the first switch — untrue for
+    the new mode, and found only by grepping `htpasswd`.
+  - A symlink does not widen grep scope: `grep -r` and `rg` both skip symlinks
+    during recursive traversal, so `AGENTS.md` never matches on `CLAUDE.md`'s
+    content without an explicit `-R`/`-L`. Do not rely on one for coverage.
 - Fix everything it finds before committing. This is not optional.
 
 ## Commits & PRs
