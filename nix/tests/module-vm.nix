@@ -860,6 +860,44 @@ pkgs.testers.nixosTest {
         enableInsecure = lib.mkForce false;
       };
     };
+    # External authorization as a downstream operator actually deploys it: the
+    # front proxy authorizes every request before forwarding, and Cratedigger
+    # is not a participant. The stub authorizer below is a forward-auth
+    # endpoint reduced to the one decision the module's contract depends on —
+    # allow or deny — which is the same shape Authelia, authentik,
+    # oauth2-proxy, and Pocket ID present to nginx.
+    #
+    # It also injects the identity headers a real authorizer would set, so the
+    # composed path proves the module gateway drops them rather than proving
+    # it in isolation.
+    specialisation.cratedigger-external-auth.configuration = {
+      services.cratedigger.web = {
+        basicAuthFile = lib.mkForce null;
+        enableInsecure = lib.mkForce false;
+        externalAuth = lib.mkForce true;
+      };
+      services.nginx.virtualHosts.cratedigger-test-public = {
+        locations."= /stub-authz".extraConfig = ''
+          internal;
+          if ($http_cookie ~ "vm_session=granted") {
+            return 204;
+          }
+          return 401;
+        '';
+        locations."/".extraConfig = lib.mkForce ''
+          auth_request /stub-authz;
+          proxy_http_version 1.1;
+          proxy_pass http://127.0.0.1:18086;
+          proxy_set_header Host music.vm.test;
+          proxy_set_header X-Forwarded-Proto https;
+          proxy_set_header X-Forwarded-Port 443;
+          proxy_set_header Connection "";
+          proxy_set_header Remote-User "vm-operator";
+          proxy_set_header Remote-Groups "vm-admins";
+          proxy_set_header Remote-Email "vm-operator@example.test";
+        '';
+      };
+    };
     specialisation.cratedigger-beets-hard.configuration = {
       services.cratedigger.beets.runtime.configDir =
         lib.mkForce (toString hardBeetsConfigDir);
@@ -3326,10 +3364,17 @@ pkgs.testers.nixosTest {
         "readlink -f "
         "/run/current-system/specialisation/cratedigger-basic-alternate"
     ).strip()
+    external_auth_system = machine.succeed(
+        "readlink -f "
+        "/run/current-system/specialisation/cratedigger-external-auth"
+    ).strip()
     machine.succeed(f"test -x {basic_system}/bin/switch-to-configuration")
     machine.succeed(f"test -x {insecure_system}/bin/switch-to-configuration")
     machine.succeed(
         f"test -x {alternate_basic_system}/bin/switch-to-configuration"
+    )
+    machine.succeed(
+        f"test -x {external_auth_system}/bin/switch-to-configuration"
     )
 
     def _print_web_transition_diagnostics(label):
@@ -3347,7 +3392,12 @@ pkgs.testers.nixosTest {
             "-c /etc/nginx/nginx.conf 2>&1 || true"
         ))
 
-    def _switch_web_system(system_path, label):
+    # ``readiness_args`` carries whatever the FRONT PROXY requires of an
+    # ordinary request. Under external authorization the operator's authorizer
+    # covers /healthz like everything else, so the readiness probe must
+    # authenticate; the module's own anonymous exception is asserted
+    # separately, directly against its loopback gateway.
+    def _switch_web_system(system_path, label, readiness_args=""):
         nginx_identity_before = _service_runtime_identity("nginx.service")
         reload_invocation_before = _unit_invocation(
             "nginx-config-reload.service"
@@ -3368,7 +3418,7 @@ pkgs.testers.nixosTest {
             "until systemctl is-active --quiet nginx.service "
             "&& systemctl is-active --quiet cratedigger-web.socket "
             "&& test \"$(curl --max-time 2 -sS -o /dev/null "
-            "-w %{http_code} -H Host:music.vm.test "
+            f"-w %{{http_code}} -H Host:music.vm.test {readiness_args} "
             "https://music.vm.test:18443/healthz)\" = 204 "
             "&& systemctl is-active --quiet cratedigger-web.service; "
             "do sleep 0.1; done'"
@@ -3786,6 +3836,170 @@ pkgs.testers.nixosTest {
         "/run/cratedigger-test-auth/basic-alternate.htpasswd;"
         in alternate_nginx
     ), alternate_nginx
+
+    # ------------------------------------------------------------------
+    # External authorization (issue #924).
+    #
+    # The composed world is the point: a real front proxy authorizes, the
+    # real module gateway serves, and Cratedigger never contacts the
+    # authorizer. Asserting only the module's own config would prove the
+    # rendering and miss the composition.
+    # ------------------------------------------------------------------
+    _switch_web_system(
+        external_auth_system,
+        "switch to external authorization",
+        "-H Cookie:vm_session=granted",
+    )
+    machine.succeed(
+        "test \"$(readlink -f /run/current-system)\" "
+        f"= {external_auth_system}"
+    )
+    external_policy_marker = _assert_gateway_marker(True)
+    assert external_policy_marker not in {
+        basic_policy_marker,
+        insecure_policy_marker,
+        alternate_basic_policy_marker,
+    }, (
+        basic_policy_marker,
+        insecure_policy_marker,
+        alternate_basic_policy_marker,
+        external_policy_marker,
+    )
+
+    # Denied before Cratedigger. The authorizer refuses, so the request never
+    # reaches the loopback gateway and the response is not the application's.
+    external_denied_headers = "/tmp/external-denied.headers"
+    external_denied_body = "/tmp/external-denied.body"
+    denied_status = machine.succeed(
+        f"curl --max-time 5 -sS -D {external_denied_headers} "
+        f"-o {external_denied_body} -w '%{{http_code}}' "
+        "-H 'Host: music.vm.test' "
+        "https://music.vm.test:18443/"
+    ).strip()
+    assert denied_status == "401", denied_status
+    denied_body = machine.succeed(f"cat {external_denied_body}")
+    assert "Music Pipeline" not in denied_body, denied_body
+    assert insecure_warning not in denied_body, denied_body
+    for denied_path in ("/api/pipeline/dashboard", "/js/main.js"):
+        status = machine.succeed(
+            "curl --max-time 5 -sS -o /dev/null -w '%{http_code}' "
+            "-H 'Host: music.vm.test' "
+            f"https://music.vm.test:18443{denied_path}"
+        ).strip()
+        assert status == "401", (denied_path, status)
+
+    # Authorized requests reach the application unchanged.
+    authorized = "-H 'Cookie: vm_session=granted'"
+    external_body = machine.succeed(
+        f"curl --max-time 5 -sS {authorized} "
+        "-H 'Host: music.vm.test' https://music.vm.test:18443/"
+    )
+    assert "Music Pipeline" in external_body, external_body
+    for authorized_path in ("/api/_index", "/api/pipeline/dashboard"):
+        status = machine.succeed(
+            "curl --max-time 5 -sS -o /dev/null -w '%{http_code}' "
+            f"{authorized} -H 'Host: music.vm.test' "
+            f"https://music.vm.test:18443{authorized_path}"
+        ).strip()
+        assert status == "200", (authorized_path, status)
+
+    # The mode's whole purpose: no false claim that authentication is absent,
+    # in the served document or in the journal.
+    assert insecure_warning not in external_body, external_body
+    assert '<footer class="insecure-auth-footer">' not in external_body, (
+        external_body
+    )
+    external_log = _web_invocation_log()
+    assert insecure_warning not in external_log, external_log
+    assert "[CRITICAL]" not in external_log, external_log
+    assert (
+        "Browser authorization is owned by an external component in front of "
+        "this Cratedigger gateway." in external_log
+    ), external_log
+    machine.succeed(
+        "pid=$(systemctl show cratedigger-web.service -p MainPID --value); "
+        "tr '\\0' '\\n' < /proc/$pid/cmdline "
+        "| grep -Fx -- '--external-auth-mode'; "
+        "! tr '\\0' '\\n' < /proc/$pid/cmdline "
+        "| grep -Fx -- '--insecure-mode'"
+    )
+
+    # No Basic residue: external mode never inherits or falls back to it.
+    external_nginx = machine.succeed(
+        "${pkgs.nginx}/bin/nginx -T -c /etc/nginx/nginx.conf 2>&1"
+    )
+    assert "auth_basic_user_file" not in external_nginx, external_nginx
+    external_basic_directives = [
+        line.strip()
+        for line in external_nginx.splitlines()
+        if re.match(r"^[ \t]*auth_basic[ \t]+", line)
+    ]
+    assert external_basic_directives == ["auth_basic off;"], (
+        external_basic_directives,
+    )
+
+    # The module's anonymous health exception is unchanged at the gateway the
+    # module owns, while the operator's own layer covers it on their terms —
+    # here, denied like everything else. Both facts are the documented
+    # deployment contract.
+    assert machine.succeed(
+        "curl --max-time 5 -sS -o /dev/null -w '%{http_code}' "
+        "-H 'Host: music.vm.test' http://127.0.0.1:18086/healthz"
+    ).strip() == "204"
+    assert machine.succeed(
+        "curl --max-time 5 -sS -o /dev/null -w '%{http_code}' "
+        "-H 'Host: music.vm.test' "
+        "https://music.vm.test:18443/healthz"
+    ).strip() == "401"
+    _assert_loopback_socket_boundary()
+    _assert_resource_headers(authorized)
+
+    # The authorizer's identity headers must not survive the gateway. This is
+    # the composed proof: a real front proxy sets them, the real gateway
+    # rebuilds its reviewed header set, and the backend sees neither.
+    machine.succeed("systemctl stop cratedigger-web.service")
+    machine.succeed(
+        "rm -f /var/lib/cratedigger/test-header-recorder.jsonl; "
+        "install -d -m 0755 "
+        "/run/systemd/system/cratedigger-web.service.d; "
+        "printf '%s\\n' '[Service]' 'ExecStart=' "
+        "'ExecStart=${pkgs.python3}/bin/python3 ${headerRecorder}' "
+        "> /run/systemd/system/"
+        "cratedigger-web.service.d/header-recorder.conf; "
+        "systemctl daemon-reload; "
+        "systemctl start cratedigger-web.service"
+    )
+    machine.succeed(
+        "test \"$(curl --max-time 5 -sS -o /dev/null "
+        f"-w '%{{http_code}}' {authorized} "
+        "-H 'Host: music.vm.test' "
+        "-H 'Accept: application/json' "
+        "https://music.vm.test:18443/external/headers)\" = 200"
+    )
+    external_recorder_rows = machine.succeed(
+        "cat /var/lib/cratedigger/test-header-recorder.jsonl"
+    ).splitlines()
+    assert len(external_recorder_rows) == 1, external_recorder_rows
+    external_recorder_row = json.loads(external_recorder_rows[0])
+    assert {
+        "remote-user",
+        "remote-groups",
+        "remote-email",
+        "cookie",
+        "authorization",
+    }.isdisjoint(external_recorder_row["headers"]), external_recorder_row
+    assert external_recorder_row["headers"]["host"] == ["music.vm.test"], (
+        external_recorder_row
+    )
+    assert external_recorder_row["headers"][
+        "x-cratedigger-request-channel"
+    ] == ["browser"], external_recorder_row
+    machine.succeed(
+        "rm -f /run/systemd/system/"
+        "cratedigger-web.service.d/header-recorder.conf; "
+        "systemctl daemon-reload; "
+        "systemctl restart cratedigger-web.service"
+    )
 
     _switch_web_system(basic_system, "return to Basic")
     machine.succeed(

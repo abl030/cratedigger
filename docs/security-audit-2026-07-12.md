@@ -143,6 +143,14 @@ claim that doc2 currently runs this chain:
   configurations fail closed. No external-auth/OIDC option or fallback is
   exposed; it is deferred pending a provider-neutral external-session
   credential bridge.
+
+  Superseded on 2026-08-05 by issue #924: a third mutually exclusive mode,
+  `web.externalAuth = true`, declares that a component the operator runs in
+  front of the gateway owns browser authorization. It resolved the deferred
+  credential bridge by removing the need for one — the module issues no
+  authorizer sub-request, so no session credential has to reach the gateway.
+  Cratedigger still performs no authorization itself. See
+  `docs/nixos-module.md` § "External authorization mode".
 - U6B must preserve the existing public HTTPS proxy while changing its
   Cratedigger upstream to the module-owned loopback nginx gateway for the
   configured canonical hostname. In that target chain, the Python server has
