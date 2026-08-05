@@ -47,6 +47,27 @@ class TestWorldModelBurstScript(unittest.TestCase):
         self.assertIn("randomized=true", result.stdout)
         self.assertIn("postgres=ephemeral", result.stdout)
         self.assertIn("database=.hypothesis/custom-world", result.stdout)
+        self.assertIn("jobs=", result.stdout)
+        self.assertIn("root_seed=", result.stdout)
+
+    def test_wrapper_delegates_to_dedicated_coordinator(self) -> None:
+        script = SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn("scripts/run_world_model_burst.py", script)
+        self.assertNotIn("python3 -m unittest", script)
+
+    def test_new_parallel_cli_is_reported_without_starting_storage(self) -> None:
+        result = self._run(
+            "--jobs", "9",
+            "--seed", "1234",
+            "--output-dir", "/tmp/world-output",
+            "--print-config",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("jobs=9", result.stdout)
+        self.assertIn("root_seed=1234", result.stdout)
+        self.assertIn("output_dir=/tmp/world-output", result.stdout)
 
     def test_command_line_budget_overrides_environment(self) -> None:
         result = self._run(

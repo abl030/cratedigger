@@ -366,28 +366,76 @@ normal suite; deeper exploration belongs to the scheduled runners below.
 ### Randomized lifecycle hammer
 
 The operator burst wrapper runs the same real-storage state machine with fresh
-Hypothesis entropy, a persistent replay database, and a default budget of 25
-worlds × 100 steps:
+Hypothesis entropy, a persistent replay database, and a default logical budget
+of 25 worlds × 100 steps:
 
 ```bash
 nix-shell --run "scripts/world_model_burst.sh"
 nix-shell --run "scripts/world_model_burst.sh --examples 10 --steps 50"
+nix-shell --run "scripts/world_model_burst.sh --jobs 30 --seed 4242"
 nix-shell --run "scripts/world_model_burst.sh --print-config"
 ```
 
-Every invocation unsets an ambient `TEST_DB_DSN` before importing the test
-fixture, forcing a new ephemeral PostgreSQL instance. Beets SQLite, generated
-audio, and the library tree remain per-world temporary state. The Hypothesis
-database defaults to `.hypothesis/world-model` (gitignored): it replays a found
-failure first on the next run, but is never a committed artifact. Randomized
-failures print a reproduction blob and shrink to a minimal operation sequence.
+The wrapper delegates to `scripts/run_world_model_burst.py`. The coordinator
+discovers exact unittest IDs in a fresh interpreter, fails closed unless the
+production census is exactly 19 deterministic pins plus five generated targets,
+batches those pins exactly once, and partitions each generated property's
+configured example budget across independent entropy shards. At the default
+30-job/25-example profile, the dominant state machine gets 25 one-example
+shards so its full 100-step worlds can occupy 25 cores. The four shorter
+generated properties use six shards each. Admission is round-robin, so a short
+property cannot hide the state-machine tail behind a block of earlier work.
+Per-property shard budgets always sum back to 25; parallelism never multiplies or reduces logical depth.
 
-On doc1 on 2026-07-19, the initial 3-world × 20-step randomized smoke completed
-all six module tests in 8.470 test-seconds (10 seconds wrapper wall time). The
-default 25 × 100 profile completed cleanly in 449.930 test-seconds (451 seconds
-wrapper wall time). That measured depth is not part of `scripts/run_tests.sh`.
-Its exact-revision doc1 schedule, alongside the long generated fuzz burst, is
-the daily `scripts/daily_flake_update.sh` gate tracked by issue #498.
+The in-process engine defaults to the smaller of host CPUs and 30 jobs. One
+coordinator-owned ephemeral PostgreSQL cluster is migrated once, then every
+active target gets a distinct cloned database. Each target also runs in a fresh
+interpreter with private Beets and Hypothesis paths. Ambient `TEST_DB_DSN` is
+replaced with an owned clone DSN and children cannot stop the shared cluster.
+The mirror-harness engine remains separately capped at two jobs.
+
+Every run prints a random 64-bit root seed before storage starts; `--seed`
+recreates that schedule. Target seeds derive only from the root seed, logical
+test ID, shard index, and shard count—not PID, worker order, or timing. The
+ignored output directory contains per-target logs plus an atomically written
+`replay.json` with the root seed, jobs, budgets, target seeds, outcomes,
+durations, not-started targets, admission state, and any coordinator-level
+error. Active workers write private Hypothesis databases without using the
+public `@seed` decorator, which would disable database replay. For each logical
+property, only shard zero receives that property's primary, secondary, and
+Pareto corpus keys; the other entropy shards start empty. A green run replaces
+only those owned key directories with the private union. All old key backups
+are retained until every swap succeeds, and any caught swap failure rolls back
+every changed key, so one shard cannot resurrect another property's stale
+examples or leave a partial process-level commit. A property failure preserves
+and merges its failing corpus. Coordinator infrastructure failures retain a
+terminal replay receipt and diagnostics; failures before a successful corpus
+commit do not mutate the canonical corpus. An ownership marker rejects
+destructive use of a non-empty unrelated `--database` path. After a failure,
+new admission stops while active children drain cleanly.
+
+The temporary PostgreSQL, Beets SQLite databases, library trees, generated
+audio, and other scratch paths remain disposable and never read or mutate
+production. Normal EXIT handling cleans the current owned root. A hard process
+or host interruption during corpus replacement can leave `.staging` or `.backup`
+directories beside the canonical database because no sequence of filesystem
+renames can make a multi-directory swap crash-atomic. These and any active root
+require explicit operator inspection and cleanup; the test infrastructure has no
+automatic authority over unrelated roots.
+
+The original six-test implementation completed 25 × 100 in 451 seconds on doc1
+on 2026-07-19. After the module expanded to 24 logical tests, production serial
+runs on 2026-08-04 and 2026-08-05 took 1,154 and 1,486 seconds. Those are the
+current operational baseline. A reduced-depth real qualification of the new
+coordinator ran 31 isolated targets (`6 × 1`, 30 jobs) cleanly in 8.7 seconds
+after deterministic seed and replay-database verification. The optimized
+canonical profile then ran all 50 targets at the exact 25 × 100 budget in 22.8
+seconds coordinator wall time and 28.265 seconds end-to-end, averaging 1,375%
+CPU. All 19 pinned regressions ran once; each of the five generated logical
+targets summed to exactly 25 examples, every shard retained 100 steps, and all
+50 outcomes passed. Against the 1,154–1,486 second serial production timings,
+that is a 40.8×–52.6× end-to-end speedup. The canonical profile remains outside
+`scripts/run_tests.sh` and runs in the daily issue-#498 gate.
 
 The default hammer uses the in-process production adapter that performs real
 Beets model/database/filesystem mutations beneath the real dispatch services.
@@ -398,7 +446,7 @@ an explicitly supplied MusicBrainz mirror origin:
 ```bash
 nix-shell --run "scripts/world_model_burst.sh \
   --engine mirror-harness \
-  --mirror-url http://192.168.1.43:5200 \
+  --mirror-url http://musicbrainz-mirror.internal:5200 \
   --examples 2 --steps 5"
 ```
 
