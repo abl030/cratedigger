@@ -176,14 +176,20 @@ judgment based on the change, current evidence, and concrete risk. Always use
 `nix-shell --run` for Python:
 
 ```bash
-bash scripts/test.sh tests.test_X                        # target + adjacent/ambient gates
-nix-shell --run "python3 scripts/run_pyright_checks.py"  # both typing contracts
-nix-shell --run "bash scripts/run_tests.sh"              # complete suite
+bash scripts/test.sh tests.test_X                       # explicit target + adjacent/ambient gates
+bash scripts/test.sh                                    # derive targets from the current diff
+nix-shell --run "python3 -m unittest tests.test_X -v"    # isolated test debugging only
+nix-shell --run "bash scripts/run_tests.sh"              # exhaustive suite
 ```
 
-`scripts/test.sh` also accepts no selector and derives targets from the current
-diff. Direct runs are development feedback; before independent-review handoff,
-use the `check` skill on the converged, clean, committed tree for the one
+Use `scripts/test.sh` for normal development validation. It adds the selected
+test's deterministic/generated sibling, tests adjacent to changed production
+surfaces, every repository audit and ratchet, JavaScript checks, both Pyright
+contracts, Ruff, and Vulture to one failure bundle. Use direct `unittest` only
+to debug an isolated failure, not as local convergence evidence.
+
+Direct runs are development feedback; before independent-review handoff, use
+the `check` skill on the converged, clean, committed tree for the one
 receipt-backed canonical-suite confirmation. Reuse that receipt before push if
 the reviewed commit remains unchanged. The complete operational contract —
 suite bundle, specialized evidence, generated/fuzz testing, no-skips policy,
