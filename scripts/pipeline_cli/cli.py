@@ -36,6 +36,7 @@ from scripts.pipeline_cli.imports import (
     cmd_import_jobs,
     cmd_import_preview,
 )
+from scripts.pipeline_cli.canonical import cmd_canonical
 from scripts.pipeline_cli.long_tail import cmd_long_tail
 from scripts.pipeline_cli.quality import cmd_quality, cmd_repair_spectral
 from scripts.pipeline_cli.query import cmd_query
@@ -158,6 +159,7 @@ def main(*, api_socket: str | None = None):
         "youtube-album": cmd_youtube_album,
         "youtube-rescue": cmd_youtube_rescue,
         "long-tail": cmd_long_tail,
+        "canonical": cmd_canonical,
     }
     search_plan_commands = {
         "show": cmd_search_plan_show,

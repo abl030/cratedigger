@@ -5795,8 +5795,14 @@ class TestPipelineCliLongTail(unittest.TestCase):
 
     @staticmethod
     def _band_fn(mapping):
-        def _fn(release_ids):
-            return {rid: mapping.get(rid, "missing") for rid in release_ids}
+        # band_fn takes request ROWS, not bare ids (#1059): each row resolves
+        # over its own identity union, keyed by the acquisition release id.
+        def _fn(rows):
+            keys = [
+                str(row.get("mb_release_id") or row.get("discogs_release_id"))
+                for row in rows
+            ]
+            return {rid: mapping.get(rid, "missing") for rid in keys}
         return _fn
 
     def _seed(self) -> FakePipelineDB:
@@ -5874,7 +5880,10 @@ class TestPipelineCliLongTail(unittest.TestCase):
                 {"CRATEDIGGER_RUNTIME_CONFIG": config_path},
                 clear=False,
             ), self.assertRaisesRegex(FileNotFoundError, "Beets DB not found"):
-                pipeline_cli_long_tail._cli_band_fn([DISCOGS_RELEASE])
+                pipeline_cli_long_tail._cli_band_fn(
+                    [{"id": 1, "mb_release_id": None,
+                      "discogs_release_id": DISCOGS_RELEASE,
+                      "canonical_release_id": None}])
 
     def test_cli_band_fn_propagates_real_beets_query_failure(self):
         """A real SQLite query error remains distinguishable from absence."""
@@ -5893,7 +5902,10 @@ class TestPipelineCliLongTail(unittest.TestCase):
                 {"CRATEDIGGER_RUNTIME_CONFIG": config_path},
                 clear=False,
             ), self.assertRaises(sqlite3.OperationalError) as raised:
-                pipeline_cli_long_tail._cli_band_fn([DISCOGS_RELEASE])
+                pipeline_cli_long_tail._cli_band_fn(
+                    [{"id": 1, "mb_release_id": None,
+                      "discogs_release_id": DISCOGS_RELEASE,
+                      "canonical_release_id": None}])
 
         self.assertEqual(raised.exception.sqlite_errorcode, sqlite3.SQLITE_ERROR)
 
@@ -6009,7 +6021,7 @@ class TestPipelineCliLongTail(unittest.TestCase):
         rc, out, err = self._run(
             db,
             json_out=True,
-            band_fn=lambda _release_ids: {},
+            band_fn=lambda _rows: {},
         )
 
         self.assertEqual(rc, 4)
@@ -6019,7 +6031,7 @@ class TestPipelineCliLongTail(unittest.TestCase):
     def test_unavailable_text_error_uses_stderr_and_exit_five(self):
         db = self._seed()
 
-        def unavailable(_release_ids):
+        def unavailable(_rows):
             raise FileNotFoundError("Beets DB not found")
 
         rc, out, err = self._run(db, band_fn=unavailable)
@@ -6037,7 +6049,7 @@ class TestPipelineCliLongTail(unittest.TestCase):
         failure = sqlite3.OperationalError("no such table: albums")
         failure.sqlite_errorcode = sqlite3.SQLITE_ERROR
 
-        def broken_schema(_release_ids):
+        def broken_schema(_rows):
             raise failure
 
         with self.assertRaises(sqlite3.OperationalError) as raised:
