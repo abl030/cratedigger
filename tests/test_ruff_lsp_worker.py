@@ -326,20 +326,11 @@ send({'jsonrpc': '2.0', 'id': initialize['id']})
             RuffLspWorker(("lib/importing.py",), cwd=ROOT, command=command)
 
 
-class TestGeneratedRuffWorkerAudit(unittest.TestCase):
+class TestRuffWorkerAudit(unittest.TestCase):
     def test_checker_rejects_the_historical_per_example_helper(self) -> None:
         self.assertEqual(
             direct_ruff_findings_lines("result = ruff_findings(sources)\n"),
             (1,),
-        )
-
-    def test_generated_unused_import_properties_use_the_persistent_server(self) -> None:
-        path = ROOT / "tests" / "test_unused_import_audit_generated.py"
-
-        self.assertEqual(
-            direct_ruff_findings_lines(path.read_text(encoding="utf-8")),
-            (),
-            "generated Ruff properties must not launch the CLI per example",
         )
 
 

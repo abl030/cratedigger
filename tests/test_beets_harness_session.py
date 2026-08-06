@@ -382,6 +382,10 @@ class TestFakeHarnessProcessLifecycle(unittest.TestCase):
             with open(harness_path, encoding="utf-8") as handle:
                 assert_fake_harness_wait_is_owned(handle.read())
 
+    def test_unowned_terminal_wait_is_rejected(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "terminate.*owns"):
+            assert_fake_harness_wait_is_owned("#!/bin/sh\nsleep 20\n")
+
 
 class TestSessionsThatOfferedNothing(unittest.TestCase):
     """``no_choose_match``: the run completed and offered no match."""
