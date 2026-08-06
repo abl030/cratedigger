@@ -17,18 +17,18 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class TestTargetedTestSelection(unittest.TestCase):
-    def test_selected_test_adds_its_generated_sibling_and_global_ratchets(
+    def test_production_test_adds_its_generated_sibling_and_global_ratchets(
         self,
     ) -> None:
         selected = expand_test_selection(
-            ("tests.test_pyright_checks",),
+            ("tests.test_beets_harness_session",),
             changed_paths=(),
             repo_root=REPO_ROOT,
         )
 
         ambient = ambient_test_modules(REPO_ROOT)
-        self.assertEqual(selected[0], "tests.test_pyright_checks")
-        self.assertIn("tests.test_pyright_checks_generated", selected)
+        self.assertEqual(selected[0], "tests.test_beets_harness_session")
+        self.assertIn("tests.test_beets_harness_session_generated", selected)
         self.assertTrue(set(ambient).issubset(selected))
         self.assertEqual(len(selected), len(set(selected)))
 
@@ -44,12 +44,12 @@ class TestTargetedTestSelection(unittest.TestCase):
 
     def test_generated_selection_adds_its_deterministic_sibling(self) -> None:
         selected = expand_test_selection(
-            ("tests.test_pyright_checks_generated",),
+            ("tests.test_beets_harness_session_generated",),
             changed_paths=(),
             repo_root=REPO_ROOT,
         )
 
-        self.assertIn("tests.test_pyright_checks", selected)
+        self.assertIn("tests.test_beets_harness_session", selected)
 
     def test_changed_test_and_production_module_add_direct_neighbours(self) -> None:
         selected = expand_test_selection(
@@ -62,7 +62,7 @@ class TestTargetedTestSelection(unittest.TestCase):
         )
 
         self.assertIn("tests.test_pyright_checks", selected)
-        self.assertIn("tests.test_pyright_checks_generated", selected)
+        self.assertNotIn("tests.test_pyright_checks_generated", selected)
         self.assertIn("tests.test_artist_releases", selected)
 
     def test_pipeline_db_change_adds_shared_boundary_contracts(self) -> None:

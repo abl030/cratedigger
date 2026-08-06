@@ -143,13 +143,13 @@ Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blo
   tiers:
   - **Standard tests** (unit / seam / orchestration / slice, per the
     taxonomy below) — RED reproduction or contract first.
-  - **Generated tests** (Hypothesis, `docs/generated-testing.md`) — if the
-    feature has a generated-testable surface (pure decisions, lifecycles /
-    state machines, wire or event ingestion), the property + strategy ship
-    in the SAME PR as the feature, not as a follow-up. An invariant that
-    only lives in prose is not an invariant.
-- **An invariant ships as a PAIR: one deterministic pin AND one generated
-  property — same PR, no exceptions.** The pin proves the exact scenario;
+  - **Generated tests** (Hypothesis, `docs/generated-testing.md`) — if a
+    production feature has a generated-testable surface (pure decisions,
+    lifecycles / state machines, wire or event ingestion), the property +
+    strategy ship in the SAME PR as the feature, not as a follow-up. An
+    invariant that only lives in prose is not an invariant.
+- **A production invariant ships as a PAIR: one deterministic pin AND one
+  generated property — same PR.** The pin proves the exact scenario;
   the property patrols the world space around it. Finding and defining an
   invariant and then only pinning it is 90% of the race and then sitting
   down (lesson: PR #560 shipped the #550-phase-2 isolation invariant with
@@ -157,6 +157,18 @@ Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blo
   a single-point mutant immediately proved was the load-bearing half).
   Subagent implementation briefs state the pair requirement verbatim and
   never offer a deterministic-only alternative.
+- **Never property-test the test machinery.** Hypothesis and
+  `test_*_generated.py` are reserved for production behavior and
+  production-facing operator tools. Test runners and schedulers, suite and
+  final-gate coordinators, target selectors, profile wiring, tmpfs helpers,
+  fixtures/fakes/strategies, invariant checkers, and static or test-tree
+  audits get deterministic tests only. A deterministic integration test may
+  construct or invoke a tiny Hypothesis property when the boundary under test
+  is Hypothesis integration itself, but that fixture must not be a discovered
+  fuzz target or inherit the daily depth. A generated production test may use
+  test helpers and fakes; classify the subject being asserted, not its leaf
+  dependencies. A regression in test infrastructure gets an exact pin and an
+  end-to-end deterministic contract, not a pin/property pair.
 - **"Agree by construction" stops at the outermost real adapter, never at a
   shared library function.** Name every claimed surface's outermost real
   adapter. Each named adapter must be exercised by the invariant's
@@ -265,15 +277,17 @@ of checks. The suite's terminal output is a compact complete failure index; the
 printed private-tmpfs bundle contains `summary.json`, `summary.md`, and every
 complete phase log.
 
-**Generated (property-based) tests** (`tests/test_*_generated.py`, Hypothesis)
+**Generated (property-based) production tests**
+(`tests/test_*_generated.py`, Hypothesis)
 run deterministically in the suite. After changing quality policy, run the
 randomized fuzz burst: `nix-shell --run "bash scripts/fuzz_burst.sh"` (one
 process per generated module, parallelised to the host's cores — Hypothesis is
 single-threaded, so never run the burst serially). Failures shrink to minimal
 worlds — promote them to named `@example` pins or album-test-set scenarios,
-never JSON artifacts. New features start by writing their invariants down, and
-every invariant ships as a pair — deterministic pin + generated property — in
-the same PR, with known-bad self-tests. When in doubt that the harness
+never JSON artifacts. New production features start by writing their invariants
+down, and every production invariant ships as a pair — deterministic pin +
+generated property — in the same PR, with known-bad self-tests. Test
+infrastructure remains deterministic-only as defined above. When in doubt that the harness
 constrains anything, qualify it by fault injection. See
 `docs/generated-testing.md`.
 
@@ -367,13 +381,16 @@ semantic source scanner.
 - No decision logic inline in cratedigger.py — call the pure function, branch on result
 - Every pure function must have direct unit tests (not just tested through integration)
 
-## Bug Hunting — Generated-First (the house method)
+## Production Bug Hunting — Generated-First (the house method)
 
 Proven on #550 (2026-07-08): a live production bug that static analysis and
 disk forensics could NOT reproduce was found, reproduced, RCA'd and fixed in
 one session by a generated harness driving the real code path. This is how
-bugs are hunted here — reach for it BEFORE log-trawling, before speculative
-instrumentation, before reading code until a theory falls out.
+production bugs are hunted here — reach for it BEFORE log-trawling, before
+speculative instrumentation, before reading code until a theory falls out.
+Test-infrastructure defects are outside this method: reproduce them with an
+exact deterministic contract and do not feed the test machinery back into the
+generated-test scheduler.
 
 1. **Write down the invariant the symptom violates** ("the manifest that
    reaches validation covers every file grabbed"). If you can't state one,

@@ -27,35 +27,27 @@ ROUTE_NEIGHBOURS = (
 EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
     "pyrightconfig.json": (
         "tests.test_pyright_checks",
-        "tests.test_pyright_checks_generated",
     ),
     "pyrightconfig.production.json": (
         "tests.test_pyright_checks",
-        "tests.test_pyright_checks_generated",
     ),
     "scripts/run_pyright_checks.py": (
         "tests.test_pyright_checks",
-        "tests.test_pyright_checks_generated",
     ),
     "scripts/run_python_tests.py": (
         "tests.test_parallel_test_runner",
-        "tests.test_parallel_test_runner_generated",
     ),
     "scripts/run_test_suite.py": (
         "tests.test_suite_coordinator",
-        "tests.test_suite_coordinator_generated",
     ),
     "scripts/run_targeted_tests.py": (
         "tests.test_targeted_test_selection",
-        "tests.test_targeted_test_selection_generated",
     ),
     "scripts/targeted_test_selection.py": (
         "tests.test_targeted_test_selection",
-        "tests.test_targeted_test_selection_generated",
     ),
     "scripts/test.sh": (
         "tests.test_targeted_test_selection",
-        "tests.test_targeted_test_selection_generated",
     ),
 }
 

@@ -21,10 +21,9 @@ docs/generated-testing.md.
 
 from __future__ import annotations
 
-import tempfile
 import unittest
 
-from hypothesis import example, given, settings
+from hypothesis import example, given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401 - loads the active profile
@@ -48,14 +47,12 @@ from tests.test_beets_harness_session import (
     VALIDATION_ERROR_VERDICT_PREFIX,
     assert_evidence_accompanies_the_name,
     assert_evidence_claims_no_cause,
-    assert_fake_harness_wait_is_owned,
     assert_result_round_trips,
     assert_scenario_is_always_named,
     assert_stays_a_wrong_match_candidate,
     assert_the_name_matches_the_error_state,
     choose_match_line,
     run_fake_harness,
-    write_fake_harness,
 )
 from web.classify import LogEntry, classify_log_entry
 
@@ -299,27 +296,6 @@ def assert_the_row_explains_itself(
 # Properties
 # ---------------------------------------------------------------------------
 
-class TestFakeHarnessProcessLifecycleGenerated(unittest.TestCase):
-    @settings(max_examples=25)
-    @given(
-        lines=st.lists(st.text(max_size=40), max_size=4),
-        stderr_text=st.text(max_size=80),
-    )
-    def test_every_fake_harness_owns_its_terminal_wait(
-        self,
-        lines: list[str],
-        stderr_text: str,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            harness_path = write_fake_harness(
-                tmpdir,
-                stdout_lines=lines,
-                stderr_text=stderr_text,
-            )
-            with open(harness_path, encoding="utf-8") as handle:
-                assert_fake_harness_wait_is_owned(handle.read())
-
-
 class TestNoHarnessTranscriptEverRejectsSilently(unittest.TestCase):
     """The invariant the 276 live rows violated, over the world space."""
 
@@ -487,10 +463,6 @@ class TestADecodableMatchStillDecides(unittest.TestCase):
 
 class TestCheckersTripOnViolations(unittest.TestCase):
     """Known-bad self-tests for the checkers this module owns."""
-
-    def test_unowned_terminal_wait_is_rejected(self) -> None:
-        with self.assertRaisesRegex(AssertionError, "terminate.*owns"):
-            assert_fake_harness_wait_is_owned("#!/bin/sh\nsleep 20\n")
 
     def test_consumed_prefix_stops_only_at_controller_terminal_kinds(
         self,
