@@ -53,6 +53,9 @@ _mb_ws2_base: str | None = None
 
 _TIMEOUT_SECONDS = 15
 _USER_AGENT = "cratedigger-canonical/1.0"
+#: A release document with no ``inc`` clause is a few KB; this bounds a
+#: broken or hostile mirror, which the socket timeout alone does not.
+_MAX_RESPONSE_BYTES = 1_000_000
 
 
 def configure_canonical_base(ws2_base: str | None) -> None:
@@ -72,12 +75,58 @@ def _fetch_json(url: str) -> object:
     ``urllib`` follows the ``301`` transparently, so the response body is
     already the survivor's document and its top-level ``id`` is the
     canonical MBID. Verified live against the mirror on 2026-08-06.
+
+    The body is read under a byte cap: this runs inside the web process,
+    and a broken or hostile mirror must not be able to stream unbounded
+    bytes into it.
     """
     request = urllib.request.Request(url)
     request.add_header("User-Agent", _USER_AGENT)
     request.add_header("Connection", "close")
     with urllib.request.urlopen(request, timeout=_TIMEOUT_SECONDS) as response:
-        return json.loads(response.read())
+        body = response.read(_MAX_RESPONSE_BYTES + 1)
+        final_url = response.url
+    if len(body) > _MAX_RESPONSE_BYTES:
+        raise ValueError(
+            f"MusicBrainz release document exceeded {_MAX_RESPONSE_BYTES} bytes"
+        )
+    payload = json.loads(body)
+    # A merge is proven by the REDIRECT, not by a body field. urllib
+    # rewrites ``response.url`` when it follows the 301, so a document
+    # served straight from the requested URL cannot claim a successor no
+    # matter what its ``id`` says. This mirror has served wrong bodies for
+    # adversarially-selected MBIDs from a TTL-less cache, and this lookup
+    # authorizes a duplicate REMOVAL — a body field alone must never be
+    # able to point that at another release (issue #1049).
+    return {"payload": payload, "redirected": final_url != url}
+
+
+def _cached_fetch_json(url: str, release_id: str) -> object:
+    """Fetch through the shared 24h ``meta:`` cache when one is available.
+
+    A merge answer is pure MusicBrainz metadata — exactly what that
+    namespace is for — and the 24h TTL matches the mirror's own currency
+    rule rather than claiming freshness we do not have.
+
+    Only a decoded response is ever cached. ``memoize_meta`` re-raises a
+    failing fetch without storing it, so a mirror outage, a timeout, or a
+    poisoned ``4xx`` is retried next time instead of being pinned for a
+    day. That is the trust posture this module owes (issue #1049): a
+    non-answer must never harden into a remembered one.
+
+    Processes without Redis (pipeline, importer, world audit) degrade to a
+    direct fetch, still sharing one in-flight fill per key. Their volume is
+    the miss cohort of one pass, not a per-page-load fan-out.
+    """
+    try:
+        from web import cache as _cache
+    except ImportError:
+        return _fetch_json(url)
+    return _cache.memoize_meta(
+        f"mb:canonical:{release_id}",
+        lambda: _fetch_json(url),
+        ttl=_cache.TTL_MB,
+    )
 
 
 def canonical_release_id(
@@ -112,7 +161,10 @@ def canonical_release_id(
         f"{urllib.parse.quote(requested, safe='')}?fmt=json"
     )
     try:
-        payload = (fetch or _fetch_json)(url)
+        payload = (
+            fetch(url) if fetch is not None
+            else _cached_fetch_json(url, requested)
+        )
     except Exception as exc:  # noqa: BLE001 - fail-open boundary, never raises
         # Deliberately including HTTPError 4xx: a 404 here is not evidence
         # that the release is gone, only that this lookup did not answer.
@@ -124,7 +176,12 @@ def canonical_release_id(
 
     # Narrowing an already-decoded value: the shared graceful helper, never
     # a re-``convert`` (`.claude/rules/code-quality.md`).
-    canonical = normalize_release_id(json_dict(payload).get("id"))
+    envelope = json_dict(payload)
+    if envelope.get("redirected") is not True:
+        # No observed redirect ⇒ no declared successor, whatever the body
+        # says. Fails closed to the stored id.
+        return None
+    canonical = normalize_release_id(json_dict(envelope.get("payload")).get("id"))
     if detect_release_source(canonical) != "musicbrainz":
         return None
     if canonical == requested:

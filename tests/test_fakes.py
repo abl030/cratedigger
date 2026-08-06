@@ -5732,8 +5732,11 @@ class TestFakeBeetsDB(unittest.TestCase):
         self.assertIsInstance(followed, CurrentBeetsUnique)
         assert isinstance(followed, CurrentBeetsUnique)
         self.assertEqual(followed.album_id, 19345)
-        # Reports the identity Beets actually holds, like production.
-        self.assertEqual(followed.identity.release_id, survivor)
+        # Answers with the REQUESTED identity and carries what Beets holds
+        # separately — production's contract, which banding, the evidence
+        # authority and the destructive services all depend on.
+        self.assertEqual(followed.identity, stored)
+        self.assertEqual(followed.effective_identity.release_id, survivor)
         self.assertEqual(beets.canonical_release_calls, [
             stored.release_id, stored.release_id,
         ])

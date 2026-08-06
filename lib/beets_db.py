@@ -92,13 +92,33 @@ class CurrentBeetsItem:
 
 @dataclass(frozen=True)
 class CurrentBeetsUnique:
-    """Exactly one usable current Beets album for an exact release."""
+    """Exactly one usable current Beets album for an exact release.
+
+    ``identity`` is ALWAYS the identity the caller asked for. Every
+    consumer that compares a resolution back to its request depends on
+    that (``lib/banding.py``, ``lib/quality_evidence.py``, the destructive
+    services), and ``assert_current_resolution`` calls any other value
+    "resolver substituted another release identity".
+
+    ``held_identity`` names the identity the album actually carries in
+    Beets. It differs from ``identity`` only when MusicBrainz has merged
+    the requested release into another one and we followed that redirect
+    (issue #1049). Consumers that must act on the ROW — a delete selector,
+    a post-import lookup — use :attr:`effective_identity`; consumers that
+    are checking "is this still my release" keep using ``identity``.
+    """
 
     identity: ReleaseIdentity
     album_id: int
     album_path: str
     items: tuple[CurrentBeetsItem, ...]
     selectors: tuple[str, ...]
+    held_identity: ReleaseIdentity | None = None
+
+    @property
+    def effective_identity(self) -> ReleaseIdentity:
+        """The identity Beets stores for this album."""
+        return self.held_identity or self.identity
 
 
 @dataclass(frozen=True)
@@ -120,11 +140,22 @@ type CurrentBeetsAmbiguityReason = Literal[
 
 @dataclass(frozen=True)
 class CurrentBeetsAmbiguous:
-    """Exact membership exists but cannot authorize one current album path."""
+    """Exact membership exists but cannot authorize one current album path.
+
+    ``identity`` is the requested identity; ``held_identity`` names the
+    merged-into release whose membership was ambiguous, when the ambiguity
+    was found by following an upstream merge (issue #1049).
+    """
 
     identity: ReleaseIdentity
     album_ids: tuple[int, ...]
     reason: CurrentBeetsAmbiguityReason
+    held_identity: ReleaseIdentity | None = None
+
+    @property
+    def effective_identity(self) -> ReleaseIdentity:
+        """The identity Beets stores for these albums."""
+        return self.held_identity or self.identity
 
 
 type CurrentBeetsResolution = (
@@ -568,23 +599,15 @@ class BeetsDB:
         than the literal behaviour.
         """
 
-        resolver = self._canonical_release_fn
-        if resolver is None:
-            from lib.mb_canonical import canonical_release_id as resolver
-
         canonical_by_requested: dict[ReleaseIdentity, ReleaseIdentity] = {}
         for identity, resolution in literal.items():
             if not isinstance(resolution, CurrentBeetsMissing):
                 continue
             if identity.source != "musicbrainz":
                 continue
-            canonical = resolver(identity.release_id)
-            if not canonical:
-                continue
-            canonical_identity = ReleaseIdentity.from_id(canonical)
-            if canonical_identity is None or canonical_identity == identity:
-                continue
-            canonical_by_requested[identity] = canonical_identity
+            canonical_identity = self._canonical_identity_for(identity)
+            if canonical_identity is not None:
+                canonical_by_requested[identity] = canonical_identity
 
         if not canonical_by_requested:
             return literal
@@ -597,7 +620,27 @@ class BeetsDB:
             found = followed.get(canonical_identity)
             if found is None or isinstance(found, CurrentBeetsMissing):
                 continue
-            resolved[requested] = found
+            # Re-key onto the REQUESTED identity. Every consumer that asks
+            # "is this still my release" compares a resolution back to its
+            # request, so a resolution must never answer with someone
+            # else's identity; what Beets actually stores travels in
+            # ``held_identity`` for the consumers that act on the row.
+            if isinstance(found, CurrentBeetsUnique):
+                resolved[requested] = CurrentBeetsUnique(
+                    identity=requested,
+                    album_id=found.album_id,
+                    album_path=found.album_path,
+                    items=found.items,
+                    selectors=found.selectors,
+                    held_identity=canonical_identity,
+                )
+            else:
+                resolved[requested] = CurrentBeetsAmbiguous(
+                    identity=requested,
+                    album_ids=found.album_ids,
+                    reason=found.reason,
+                    held_identity=canonical_identity,
+                )
         return resolved
 
     def _resolve_current_releases_literal(
@@ -863,11 +906,39 @@ class BeetsDB:
         - Empty → ``[]``.
 
         Returns an empty list if the release is absent.
+
+        Merge-aware on the same miss-triggered terms as the resolver
+        (#1049). This is the post-import verification seam: beets writes
+        the survivor's ``mb_albumid`` for a release MusicBrainz has merged,
+        so a literal-only lookup reports "no row survives" for an album
+        that was in fact just imported — after the library was mutated.
         """
         identity = _lookup_identity(release_id)
         if identity is None:
             return []
-        return list(self._matching_album_ids(identity))
+        album_ids = list(self._matching_album_ids(identity))
+        if album_ids or identity.source != "musicbrainz":
+            return album_ids
+        canonical_identity = self._canonical_identity_for(identity)
+        if canonical_identity is None:
+            return album_ids
+        return list(self._matching_album_ids(canonical_identity))
+
+    def _canonical_identity_for(
+        self,
+        identity: ReleaseIdentity,
+    ) -> ReleaseIdentity | None:
+        """The identity MusicBrainz has merged ``identity`` into, if any."""
+        resolver = self._canonical_release_fn
+        if resolver is None:
+            from lib.mb_canonical import canonical_release_id as resolver
+        canonical = resolver(identity.release_id)
+        if not canonical:
+            return None
+        canonical_identity = ReleaseIdentity.from_id(canonical)
+        if canonical_identity is None or canonical_identity == identity:
+            return None
+        return canonical_identity
 
     def _batch_lookup_album_ids(
         self, release_ids: list[str]

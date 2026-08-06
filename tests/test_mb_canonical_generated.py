@@ -72,10 +72,30 @@ def check_never_a_sibling(
         raise AssertionError(
             "resolver substituted a sibling pressing for the target release"
         )
-    if resolution.identity.release_id not in (STORED, SURVIVOR):
+    if resolution.effective_identity.release_id not in (STORED, SURVIVOR):
         raise AssertionError(
-            "resolution names an identity that is neither the stored id nor "
-            f"its declared successor: {resolution.identity.release_id}"
+            "resolution holds an identity that is neither the stored id nor "
+            f"its declared successor: {resolution.effective_identity.release_id}"
+        )
+
+
+def check_resolution_answers_with_the_requested_identity(
+    requested: ReleaseIdentity,
+    resolution: CurrentBeetsResolution,
+) -> None:
+    """C6 — a resolution NEVER answers with someone else's identity.
+
+    ``lib/banding.py``, ``lib/quality_evidence.py`` and the destructive
+    services all compare a resolution back to its request, and
+    ``assert_current_resolution`` calls any other value "resolver
+    substituted another release identity". What Beets actually holds
+    travels in ``held_identity`` instead. An earlier revision of this PR
+    returned the survivor as ``.identity`` and broke all three.
+    """
+    if resolution.identity != requested:
+        raise AssertionError(
+            "resolution answered with a substituted identity: "
+            f"{resolution.identity!r} != {requested!r}"
         )
 
 
@@ -137,6 +157,47 @@ def check_remaining_miss_has_one_meaning(
         raise AssertionError(
             "a release held under its declared successor still reported "
             "missing after resolve-on-miss"
+        )
+
+
+def check_real_consumers_accept(
+    requested: ReleaseIdentity,
+    resolution: CurrentBeetsResolution,
+) -> None:
+    """C7 — the REAL downstream readers accept what the resolver writes.
+
+    ``CurrentBeetsResolution`` is a shared namespace with a dozen readers,
+    and a guard over a shared namespace legislates for every other reader
+    of it. Stopping this property at the resolver is exactly what let an
+    earlier revision ship a resolution that made ``lib/banding.py`` raise
+    for the whole long-tail cohort while every resolver-scope test stayed
+    green (adversarial review, 2026-08-06).
+
+    So drive the real consumers, not a restatement of their rules.
+    """
+    from lib.banding import (
+        CurrentBeetsBandingAmbiguityError,
+        band_current_resolutions,
+    )
+    from lib.quality import QualityRankConfig
+
+    # Banding is the strictest reader: it raises outright on a substituted
+    # identity. An ambiguous resolution legitimately aborts the batch, so
+    # only that expected failure is tolerated here.
+    try:
+        band_current_resolutions(
+            {requested: resolution}, QualityRankConfig.defaults(),
+        )
+    except CurrentBeetsBandingAmbiguityError:
+        pass
+
+    # The evidence authority's identity gate, called for real.
+    from lib.beets_db import release_identity_for_lookup
+    expected = release_identity_for_lookup(requested.release_id)
+    if expected is not None and resolution.identity != expected:
+        raise AssertionError(
+            "lib/quality_evidence.py's identity gate would report 'current "
+            "Beets resolution identity does not match evidence request'"
         )
 
 
@@ -243,6 +304,10 @@ class TestMergeFollowingProperties(unittest.TestCase):
 
             check_never_a_sibling(resolution, sibling_path)
             check_identity_never_mutated(requested, resolution)
+            check_resolution_answers_with_the_requested_identity(
+                requested, resolution,
+            )
+            check_real_consumers_accept(requested, resolution)
             check_lookup_is_miss_triggered(lookups, requested, literal)
             check_remaining_miss_has_one_meaning(
                 resolution,
@@ -317,6 +382,33 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
                 _identity(DISCOGS),
                 CurrentBeetsMissing(identity=_identity(DISCOGS)),
             )
+
+    def test_substituted_identity_in_a_resolution_is_rejected(self) -> None:
+        """C6's known-bad: the exact defect adversarial review found."""
+        planted = CurrentBeetsUnique(
+            identity=_identity(SURVIVOR),
+            album_id=1,
+            album_path="/library/a",
+            items=(),
+            selectors=(),
+        )
+        with self.assertRaises(AssertionError):
+            check_resolution_answers_with_the_requested_identity(
+                _identity(STORED), planted,
+            )
+
+    def test_real_consumers_reject_a_substituted_identity(self) -> None:
+        """C7's known-bad: the REAL banding reader must trip on it."""
+        planted = CurrentBeetsUnique(
+            identity=_identity(SURVIVOR),
+            album_id=1,
+            album_path="/library/a",
+            items=(),
+            selectors=(),
+        )
+        with self.assertRaises(Exception) as caught:
+            check_real_consumers_accept(_identity(STORED), planted)
+        self.assertNotIsInstance(caught.exception, AssertionError)
 
     def test_unfollowed_declared_merge_is_rejected(self) -> None:
         with self.assertRaises(AssertionError):

@@ -2252,6 +2252,11 @@ class TestImportMatchFollowsMusicBrainzMerges(unittest.TestCase):
     SURVIVOR = "7aabf975-9a06-4b2e-854c-2c700380ebd5"
     SIBLING = "bbbbbbbb-1111-2222-3333-444444444444"
 
+    @staticmethod
+    def _redirected_envelope(release_id: str) -> dict[str, object]:
+        """What the real fetch returns for an observed 301 (issue #1049)."""
+        return {"payload": {"id": release_id}, "redirected": True}
+
     def _wire_mirror(self, payload: object):
         from lib import mb_canonical
         mb_canonical.configure_canonical_base("http://mirror.test/ws/2")
@@ -2261,21 +2266,21 @@ class TestImportMatchFollowsMusicBrainzMerges(unittest.TestCase):
     def test_candidate_under_survivor_id_is_matched(self) -> None:
         from harness.import_one import _find_target_candidate
         cands = [{"album_id": self.SURVIVOR}]
-        with self._wire_mirror({"id": self.SURVIVOR}):
+        with self._wire_mirror(self._redirected_envelope(self.SURVIVOR)):
             self.assertEqual(_find_target_candidate(cands, self.STORED), 0)
 
     def test_sibling_is_never_matched(self) -> None:
         """Strict pressing identity: one declared successor, never a sibling."""
         from harness.import_one import _find_target_candidate
         cands = [{"album_id": self.SIBLING}]
-        with self._wire_mirror({"id": self.SURVIVOR}):
+        with self._wire_mirror(self._redirected_envelope(self.SURVIVOR)):
             self.assertIsNone(_find_target_candidate(cands, self.STORED))
 
     def test_literal_match_never_asks_musicbrainz(self) -> None:
         """Miss-triggered: an ordinary match pays for no lookup."""
         from harness.import_one import _find_target_candidate
         cands = [{"album_id": self.STORED}]
-        with self._wire_mirror({"id": self.SURVIVOR}) as fetch:
+        with self._wire_mirror(self._redirected_envelope(self.SURVIVOR)) as fetch:
             self.assertEqual(_find_target_candidate(cands, self.STORED), 0)
             fetch.assert_not_called()
 
@@ -2299,7 +2304,7 @@ class TestImportMatchFollowsMusicBrainzMerges(unittest.TestCase):
             albumartist="Archivist",
             album="Exact pressing",
         )
-        with self._wire_mirror({"id": self.SURVIVOR}):
+        with self._wire_mirror(self._redirected_envelope(self.SURVIVOR)):
             self.assertIsNone(_duplicate_remove_guard_failure(
                 target_release_id=self.STORED,
                 candidates=[duplicate],
@@ -2319,7 +2324,7 @@ class TestImportMatchFollowsMusicBrainzMerges(unittest.TestCase):
             albumartist="Archivist",
             album="Exact pressing",
         )
-        with self._wire_mirror({"id": self.SURVIVOR}):
+        with self._wire_mirror(self._redirected_envelope(self.SURVIVOR)):
             failure = _duplicate_remove_guard_failure(
                 target_release_id=self.STORED,
                 candidates=[duplicate],

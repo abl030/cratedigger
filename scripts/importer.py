@@ -2109,6 +2109,18 @@ def main() -> int:
     except BeetsStartupError:
         return 1
 
+    # This process runs beets_validate and import_one, so it is the one that
+    # must wire MusicBrainz merge-redirect resolution (#1049). Done here at
+    # real startup rather than in the per-call context factory: that factory
+    # is also a test entry point, and a process-global pointed at the
+    # default public MusicBrainz would leak live lookups into the suite.
+    from lib.config import read_runtime_config
+    from lib.mb_canonical import configure_canonical_base
+    from web.api_bases import mb_ws2_base
+    configure_canonical_base(
+        mb_ws2_base(read_runtime_config(config_path).musicbrainz_api_base)
+    )
+
     worker_id = args.worker_id or f"{socket.gethostname()}:{os.getpid()}"
     db = PipelineDB(args.dsn)
     try:

@@ -351,7 +351,12 @@ def _ban_source_locked(
     if isinstance(current_beets, CurrentBeetsUnique):
         delete_outcome = beets_delete_fn(BeetsDeleteRequest(
             album_id=current_beets.album_id,
-            expected_release_id=release_id,
+            # The delete child re-derives the album's identity from Beets
+            # and refuses a mismatch. After an upstream MusicBrainz merge
+            # the row carries the survivor's id, so the guard must be keyed
+            # on what Beets holds, not on our frozen request id — otherwise
+            # the exact album we resolved can never be deleted (#1049).
+            expected_release_id=current_beets.effective_identity.release_id,
             library_db_path=beets_db.library_db_path,
             library_root=beets_db.library_root,
         ))
@@ -743,7 +748,10 @@ def _delete_under_release_lock(
 
     beets_outcome = beets_delete_fn(BeetsDeleteRequest(
         album_id=current_beets.album_id,
-        expected_release_id=identity.release_id,
+        # Keyed on what Beets holds: after an upstream merge the row
+        # carries the survivor's id and the child's guard would otherwise
+        # refuse the exact album we just resolved (#1049).
+        expected_release_id=current_beets.effective_identity.release_id,
         library_db_path=beets_db.library_db_path,
         library_root=beets_db.library_root,
     ))

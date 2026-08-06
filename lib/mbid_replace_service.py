@@ -995,7 +995,13 @@ class MbidReplaceService:
                 try:
                     delete_outcome = self.beets_delete_fn(BeetsDeleteRequest(
                         album_id=current_beets.album_id,
-                        expected_release_id=old_identity.release_id,
+                        # What Beets holds, which after an upstream merge is
+                        # the survivor's id rather than the old pressing's
+                        # frozen one — otherwise the displaced install can
+                        # never be removed (#1049).
+                        expected_release_id=(
+                            current_beets.effective_identity.release_id
+                        ),
                         library_db_path=current_library_db_path,
                         library_root=current_library_root,
                     ))

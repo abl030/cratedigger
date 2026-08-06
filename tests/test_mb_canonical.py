@@ -47,6 +47,16 @@ CURRENT = "d990b8af-01db-46f1-a2cb-d9ca19f57e94"
 BASE = "http://mirror.test/ws/2"
 
 
+def _redirected(release_id: str) -> dict[str, object]:
+    """The envelope the real fetch returns for an observed 301."""
+    return {"payload": {"id": release_id}, "redirected": True}
+
+
+def _not_redirected(release_id: str) -> dict[str, object]:
+    """A 200 served straight from the requested URL — no merge declared."""
+    return {"payload": {"id": release_id}, "redirected": False}
+
+
 def _fetch_returning(payload: object):
     """A fetch seam that records its URL and returns one decoded body."""
     calls: list[str] = []
@@ -71,7 +81,7 @@ def _fetch_raising(exc: BaseException):
 class TestCanonicalResolution(unittest.TestCase):
     def test_merged_id_resolves_to_survivor(self) -> None:
         """I1 — urllib follows the 301; the body's top-level id is canonical."""
-        fetch, calls = _fetch_returning({"id": SURVIVOR, "title": "Sing It"})
+        fetch, calls = _fetch_returning(_redirected(SURVIVOR))
         self.assertEqual(
             canonical_release_id(MERGED, ws2_base=BASE, fetch=fetch),
             SURVIVOR,
@@ -82,13 +92,27 @@ class TestCanonicalResolution(unittest.TestCase):
 
     def test_current_id_resolves_to_none(self) -> None:
         """I2 — same id back means nothing was merged; caller keeps literal."""
-        fetch, _calls = _fetch_returning({"id": CURRENT})
+        fetch, _calls = _fetch_returning(_not_redirected(CURRENT))
         self.assertIsNone(canonical_release_id(CURRENT, ws2_base=BASE, fetch=fetch))
 
     def test_canonical_comparison_ignores_case(self) -> None:
         """I2 — an uppercased echo of the same id is not a merge."""
-        fetch, _calls = _fetch_returning({"id": CURRENT.upper()})
+        fetch, _calls = _fetch_returning(_redirected(CURRENT.upper()))
         self.assertIsNone(canonical_release_id(CURRENT, ws2_base=BASE, fetch=fetch))
+
+    def test_a_body_without_a_redirect_never_declares_a_successor(self) -> None:
+        """I7 — a merge is proven by the 301, never by a body field.
+
+        The mirror has served wrong bodies for adversarially-selected
+        MBIDs from a TTL-less cache, and this lookup authorizes a
+        duplicate REMOVAL. A 200 answered straight from the requested URL
+        must fail closed to the stored id however plausible its payload.
+        """
+        fetch, calls = _fetch_returning(_not_redirected(SURVIVOR))
+        self.assertIsNone(
+            canonical_release_id(MERGED, ws2_base=BASE, fetch=fetch)
+        )
+        self.assertEqual(len(calls), 1, "the lookup still happened")
 
 
 class TestNonMusicBrainzIdentitiesNeverFetch(unittest.TestCase):
@@ -97,7 +121,7 @@ class TestNonMusicBrainzIdentitiesNeverFetch(unittest.TestCase):
     def test_discogs_numeric_and_malformed_never_reach_the_network(self) -> None:
         for release_id in ("1870", "0", "", "   ", "not-a-uuid", "12345678"):
             with self.subTest(release_id=release_id):
-                fetch, calls = _fetch_returning({"id": SURVIVOR})
+                fetch, calls = _fetch_returning(_redirected(SURVIVOR))
                 self.assertIsNone(
                     canonical_release_id(release_id, ws2_base=BASE, fetch=fetch)
                 )
@@ -142,7 +166,8 @@ class TestFailOpen(unittest.TestCase):
                 )
 
     def test_unusable_response_shapes_return_none(self) -> None:
-        payloads: list[object] = [
+        """Even behind an observed redirect, an unusable body is a non-answer."""
+        bodies: list[object] = [
             {},                       # no id at all
             {"id": None},
             {"id": 12345},            # wrong wire type
@@ -152,9 +177,11 @@ class TestFailOpen(unittest.TestCase):
             "a string",
             None,
         ]
-        for payload in payloads:
-            with self.subTest(payload=payload):
-                fetch, _calls = _fetch_returning(payload)
+        for body in bodies:
+            with self.subTest(body=body):
+                fetch, _calls = _fetch_returning(
+                    {"payload": body, "redirected": True},
+                )
                 self.assertIsNone(
                     canonical_release_id(MERGED, ws2_base=BASE, fetch=fetch)
                 )
@@ -166,7 +193,7 @@ class TestInertWithoutConfiguredBase(unittest.TestCase):
     def test_no_base_configured_never_fetches(self) -> None:
         for base in (None, ""):
             with self.subTest(base=base):
-                fetch, calls = _fetch_returning({"id": SURVIVOR})
+                fetch, calls = _fetch_returning(_redirected(SURVIVOR))
                 self.assertIsNone(
                     canonical_release_id(MERGED, ws2_base=base, fetch=fetch)
                 )
@@ -238,10 +265,15 @@ class TestJoinFollowsMerges(unittest.TestCase):
         assert isinstance(resolution, CurrentBeetsUnique)
         self.assertEqual(resolution.album_path, album_path)
         self.assertEqual(calls, [MERGED], "exactly one miss-triggered lookup")
-        # J2 — the resolution names the identity Beets really holds.
-        self.assertEqual(resolution.identity.release_id, SURVIVOR)
+        # J2 — the resolution ANSWERS with the identity we asked for; what
+        # Beets really holds travels separately. Every consumer that
+        # compares a resolution back to its request depends on the first
+        # half, and the delete/post-import consumers on the second.
+        self.assertEqual(resolution.identity, stored_identity)
+        self.assertEqual(resolution.identity.release_id, MERGED)
+        self.assertEqual(resolution.effective_identity.release_id, SURVIVOR)
+        self.assertEqual(resolution.held_identity, ReleaseIdentity.from_id(SURVIVOR))
         self.assertEqual(resolution.selectors, (f"mb_albumid:{SURVIVOR}",))
-        self.assertNotEqual(stored_identity.release_id, SURVIVOR)
 
     def test_hit_never_asks_musicbrainz(self) -> None:
         """J3 — the trigger is the miss, not a scan."""

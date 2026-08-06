@@ -654,7 +654,23 @@ class FakeBeetsDB:
         followed = self._resolve_current_release_literal(canonical_identity)
         if isinstance(followed, CurrentBeetsMissing):
             return resolution
-        return followed
+        # Re-key onto the requested identity, exactly as production does:
+        # a resolution never answers with someone else's identity.
+        if isinstance(followed, CurrentBeetsUnique):
+            return CurrentBeetsUnique(
+                identity=identity,
+                album_id=followed.album_id,
+                album_path=followed.album_path,
+                items=followed.items,
+                selectors=followed.selectors,
+                held_identity=canonical_identity,
+            )
+        return CurrentBeetsAmbiguous(
+            identity=identity,
+            album_ids=followed.album_ids,
+            reason=followed.reason,
+            held_identity=canonical_identity,
+        )
 
     def _resolve_current_release_literal(
         self,
