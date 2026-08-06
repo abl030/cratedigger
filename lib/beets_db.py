@@ -114,6 +114,13 @@ type CurrentBeetsAmbiguityReason = Literal[
     "split_topology",
     "invalid_path",
     "unresolved_relative_path",
+    # Only ``lib/request_identity.py`` produces this one: a request whose
+    # acquisition id and MusicBrainz merge survivor each resolve to a
+    # DIFFERENT album. Two pressings deliberately held as separate
+    # acquisitions, which MusicBrainz later declared are one release —
+    # the point where upstream identity contradicts "different pressings
+    # ARE different releases", and no release-keyed join can settle it.
+    "merged_identity_split",
 ]
 
 

@@ -25,12 +25,16 @@ type CurrentLibraryUnavailableReason = Literal[
 
 
 class CurrentLibraryReader(Protocol):
-    """Small resolver surface shared by the real and fake Beets stores."""
+    """Small resolver surface shared by the real and fake Beets stores.
 
-    def resolve_current_release(
+    Batched, because a request resolves over the UNION of its acquisition
+    id and any MusicBrainz merge survivor (#1059) — one query, both sides.
+    """
+
+    def resolve_current_releases(
         self,
-        identity: ReleaseIdentity,
-    ) -> CurrentBeetsResolution: ...
+        identities: list[ReleaseIdentity],
+    ) -> dict[ReleaseIdentity, CurrentBeetsResolution]: ...
 
 
 class CurrentLibraryUnavailable(msgspec.Struct, frozen=True):
@@ -127,14 +131,29 @@ def resolve_request_current_library(
     row: Mapping[str, object],
     beets: CurrentLibraryReader | None,
 ) -> CurrentLibraryResolution:
-    """Resolve one request from fresh exact Beets state, or fail closed."""
+    """Resolve one request from fresh exact Beets state, or fail closed.
+
+    Resolution is over the UNION of the request's acquisition id and any
+    stored MusicBrainz merge survivor (#1059), because which side Beets
+    holds depends on whether ``mbsync`` has retagged the files yet. The
+    union lives in ``lib/request_identity.py``; this function keeps owning
+    the operator-facing diagnosis of *why* a row has no usable identity,
+    which the union deliberately does not model.
+    """
+    from lib.request_identity import resolve_current_for_request
 
     identity = _strict_request_identity(row)
     if isinstance(identity, CurrentLibraryUnavailable):
         return identity
     if beets is None:
         return CurrentLibraryUnavailable("beets_unavailable")
-    return beets.resolve_current_release(identity)
+    resolution = resolve_current_for_request(beets, row)
+    if resolution is None:
+        # The strict identity parsed, so the only way here is the resolver
+        # omitting a requested identity — an authority failure, never a
+        # claim that the pressing is absent.
+        return CurrentLibraryUnavailable("beets_unavailable")
+    return resolution
 
 
 def current_library_display(
