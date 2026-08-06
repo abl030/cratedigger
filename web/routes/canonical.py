@@ -16,7 +16,9 @@ from lib.canonical_release_service import (
     OUTCOME_NOT_FOUND,
     CanonicalReconcileResult,
     CanonicalReleaseService,
+    configure_reconciliation_mirror,
 )
+from lib.config import read_runtime_config
 from lib.mb_canonical import canonical_release_id
 from web.routes._pydantic import parse_body
 from web.routes._registry import RouteHandler, RouteRegistration, route
@@ -99,6 +101,21 @@ def post_canonical_reconcile(h: RouteHandler, body: bytes) -> None:
     """
     parsed = parse_body(h, body, CanonicalReconcileRequest)
     if parsed is None:
+        return
+
+    # Same inertness trap as the CLI: lib/mb_canonical is inert until a
+    # process wires a base, and a surface that forgets reports no_redirect
+    # for every row and returns 200 — which reads as "already correct".
+    if configure_reconciliation_mirror(
+        read_runtime_config().musicbrainz_api_base,
+    ) is None:
+        h._json({
+            "error": "canonical_mirror_unavailable",
+            "message": (
+                "musicbrainz.apiBase is unset or public MusicBrainz; "
+                "reconciliation is a local-mirror feature."
+            ),
+        }, status=503)
         return
 
     service = CanonicalReleaseService(

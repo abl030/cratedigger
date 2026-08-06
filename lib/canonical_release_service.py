@@ -102,6 +102,37 @@ class CanonicalSweepResult:
         return len(self.resolved)
 
 
+#: Origins we refuse to sweep. ``musicbrainz.apiBase`` DEFAULTS to public
+#: MusicBrainz and the module asserts it is a scheme-prefixed URL, so an
+#: "unset base" guard fires for a config the module cannot even produce.
+#: A whole-library sweep is ~8,500 requests; against musicbrainz.org, issued
+#: as fast as the socket allows, that is an IP ban that takes every other MB
+#: consumer in the deployment down with it. Reconciliation is a local-mirror
+#: feature: without one, it does nothing rather than something harmful.
+_REFUSED_ORIGINS = ("musicbrainz.org",)
+
+
+def configure_reconciliation_mirror(mb_api_base: str) -> str | None:
+    """Wire the resolver for a sweep, or return ``None`` to refuse.
+
+    **Every** surface that reconciles must call this — the daily oneshot,
+    ``pipeline-cli canonical``, and the API route. ``lib/mb_canonical`` is
+    inert until a process wires a base, so a surface that forgets does not
+    fail loudly: it reports ``no_redirect`` for every row and exits 0,
+    which the outcome vocabulary reads as "the library is already correct".
+    """
+    from lib.mb_canonical import configure_canonical_base
+
+    origin = (mb_api_base or "").strip()
+    if not origin:
+        return None
+    if any(refused in origin for refused in _REFUSED_ORIGINS):
+        return None
+    base = origin.rstrip("/") + "/ws/2"
+    configure_canonical_base(base)
+    return base
+
+
 def _acquisition(row: Mapping[str, object]) -> ReleaseIdentity | None:
     return ReleaseIdentity.from_strict_fields(
         row.get("mb_release_id"),
@@ -248,4 +279,5 @@ __all__ = [
     "CanonicalReleaseDB",
     "CanonicalReleaseService",
     "CanonicalSweepResult",
+    "configure_reconciliation_mirror",
 ]

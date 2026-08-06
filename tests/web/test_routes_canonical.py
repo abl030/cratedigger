@@ -10,6 +10,7 @@ replaced here.
 """
 import os
 import sys
+import tempfile
 import unittest
 from typing import ClassVar
 from unittest.mock import patch
@@ -55,6 +56,24 @@ class TestCanonicalRouteContracts(_FakeDbWebServerCase):
         "outcome_counts",
         "resolved",
     }
+
+    def setUp(self) -> None:
+        super().setUp()
+        # The route refuses to reconcile without a LOCAL mirror configured.
+        # Drive the real guard with a real runtime config rather than
+        # patching it out, so a regression in the guard is visible here.
+        config_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(config_dir.cleanup)
+        config_path = os.path.join(config_dir.name, "config.ini")
+        with open(config_path, "w", encoding="utf-8") as handle:
+            handle.write("[MusicBrainz]\napi_base = http://mirror.test\n")
+        config_patch = patch.dict(
+            os.environ,
+            {"CRATEDIGGER_RUNTIME_CONFIG": config_path},
+            clear=False,
+        )
+        config_patch.start()
+        self.addCleanup(config_patch.stop)
 
     def _seed(self, *, mb: str | None = LOSER) -> int:
         return self.db.add_request(

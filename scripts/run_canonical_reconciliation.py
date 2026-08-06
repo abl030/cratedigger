@@ -31,12 +31,11 @@ if REPO_ROOT not in sys.path:
 from lib.canonical_release_service import (
     CanonicalReconcileResult,
     CanonicalReleaseService,
+    configure_reconciliation_mirror,
 )
 from lib.config import read_runtime_config
-from lib.mb_canonical import configure_canonical_base
 from lib.migrator import SchemaBehindError, assert_schema_current
 from lib.pipeline_db import DEFAULT_DSN, PipelineDB
-from web.api_bases import mb_ws2_base
 
 logger = logging.getLogger("cratedigger-canonical")
 
@@ -84,19 +83,15 @@ def main() -> int:
         else read_runtime_config()
     )
 
-    # ``mb_ws2_base`` falls back to PUBLIC MusicBrainz for an empty origin,
-    # so an unconfigured deployment would otherwise sweep 8,500 rows against
-    # musicbrainz.org at one request per second. Refuse instead: this job
-    # exists to ask a local mirror, and a missing mirror is an operator
-    # configuration error, not a reason to hammer upstream.
-    origin = (cfg.musicbrainz_api_base or "").strip()
-    if not origin:
+    if configure_reconciliation_mirror(cfg.musicbrainz_api_base) is None:
         logger.error(
-            "musicbrainz.apiBase is unset; refusing to sweep the library "
-            "against public MusicBrainz. Configure the local mirror.",
+            "musicbrainz.apiBase (%r) is unset or public MusicBrainz; "
+            "refusing to sweep the library. Reconciliation is a local-mirror "
+            "feature — a whole-library sweep against musicbrainz.org is "
+            "~8,500 unthrottled requests.",
+            cfg.musicbrainz_api_base,
         )
         return 1
-    configure_canonical_base(mb_ws2_base(origin))
 
     try:
         assert_schema_current(args.dsn)

@@ -22,7 +22,9 @@ from lib.canonical_release_service import (
     CanonicalReconcileResult,
     CanonicalReleaseDB,
     CanonicalReleaseService,
+    configure_reconciliation_mirror,
 )
+from lib.config import read_runtime_config
 from scripts.pipeline_cli._format import _json_default
 
 
@@ -56,8 +58,6 @@ def _result_payload(result: CanonicalReconcileResult) -> dict[str, object]:
 
 def cmd_canonical(db: _CanonicalDB, args: argparse.Namespace) -> int:
     """Dispatch ``canonical reconcile`` / ``canonical show``."""
-    service = CanonicalReleaseService(db)
-
     if args.canonical_command == "show":
         row = db.get_request(args.id)
         if row is None:
@@ -72,6 +72,19 @@ def cmd_canonical(db: _CanonicalDB, args: argparse.Namespace) -> int:
             "canonical_resolved_at": row.get("canonical_resolved_at"),
         })
         return 0
+
+    # lib/mb_canonical is inert until a process wires a base. A surface that
+    # forgets does not fail loudly — it reports no_redirect for every row and
+    # exits 0, which reads as "the library is already correct". Refuse
+    # instead, and say why.
+    if configure_reconciliation_mirror(read_runtime_config().musicbrainz_api_base) is None:
+        print(
+            "refusing to reconcile: musicbrainz.apiBase is unset or public "
+            "MusicBrainz. Reconciliation is a local-mirror feature.",
+        )
+        return 5
+
+    service = CanonicalReleaseService(db)
 
     if args.id is not None:
         result = service.reconcile_request(args.id)

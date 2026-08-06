@@ -6473,6 +6473,7 @@ class FakePipelineDB:
         keys = (
             "id", "artist_name", "album_title", "year", "status", "source",
             "mb_release_id", "mb_release_group_id", "discogs_release_id",
+            "canonical_release_id",
             "target_format", "min_bitrate", "search_filetype_override",
             "unfindable_category", "current_spectral_grade",
             "current_spectral_bitrate",

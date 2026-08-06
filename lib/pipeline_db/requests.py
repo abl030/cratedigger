@@ -1741,6 +1741,10 @@ class _RequestsMixin(_PipelineDBBase):
             ar.mb_release_id,
             ar.mb_release_group_id,
             ar.discogs_release_id,
+            -- #1059: band_fn resolves each row over its identity union, so
+            -- the survivor must reach the cohort projection. Without it the
+            -- row-keyed banding signature is dead wiring.
+            ar.canonical_release_id,
             ar.target_format,
             ar.min_bitrate,
             ar.search_filetype_override,
