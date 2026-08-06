@@ -91,12 +91,12 @@ from web.request_security import (
 from web.routes import api_index as _api_index_routes
 from web.routes import beets_distance as _beets_distance_routes
 from web.routes import browse as _browse_routes
+from web.routes import canonical as _canonical_routes
 from web.routes import disk_coverage as _disk_coverage_routes
 from web.routes import health as _health_routes
 from web.routes import imports as _imports_routes
 from web.routes import labels as _labels_routes
 from web.routes import library as _library_routes
-from web.routes import canonical as _canonical_routes
 from web.routes import long_tail as _long_tail_routes
 from web.routes import pipeline as _pipeline_routes
 from web.routes import pipeline_dashboard as _pipeline_dashboard_routes

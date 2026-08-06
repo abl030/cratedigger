@@ -976,9 +976,11 @@
   # into cratedigger-unfindable: that one gates on slskd reachability and
   # fails fast on an outage, which would silently stop merge reconciliation
   # for as long as slskd was down.
+  # No beetsRuntimeEnvironment: this job reads the pipeline DB and the
+  # MusicBrainz mirror and never opens a Beets library, so it carries no
+  # BEETSDIR, no library path, and no Beets runtime coupling at all.
   canonicalReconcilePkg = pkgs.writeShellScriptBin "cratedigger-canonical-reconcile" ''
     export PATH="${runtimePath}:$PATH"
-    ${beetsRuntimeEnvironment}
     export PYTHONPATH="${src}''${PYTHONPATH:+:$PYTHONPATH}"
     exec ${pyRunner} ${src}/scripts/run_canonical_reconciliation.py \
       --dsn "${pipelineDsn}" --config "${configTemplate}" "$@"

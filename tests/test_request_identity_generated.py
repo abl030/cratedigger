@@ -132,16 +132,17 @@ def check_split_is_ambiguous(
     }
     if len(held) < 2:
         return
-    if not isinstance(resolution, CurrentBeetsAmbiguous):
+    reason = getattr(resolution, "reason", None)
+    if reason is None:
         raise AssertionError(
             f"two acceptable identities hold different albums {sorted(held)} "
             f"but the join returned {type(resolution).__name__} — it picked "
             "one instead of surfacing the split"
         )
-    if resolution.reason != "merged_identity_split":
+    if reason != "merged_identity_split":
         raise AssertionError(
             "a two-album split must be reported as merged_identity_split, "
-            f"not {resolution.reason!r}"
+            f"not {reason!r}"
         )
 
 

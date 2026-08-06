@@ -19,7 +19,6 @@ import sqlite3
 import sys
 import unittest
 import uuid
-from typing import Any
 
 import msgspec
 
@@ -79,7 +78,7 @@ def requires_postgres(cls):
     return cls
 
 
-def _acquisition_ids(rows: list[dict[str, Any]]) -> list[str]:
+def _acquisition_ids(rows: list[dict[str, object]]) -> list[str]:
     """The acquisition release id each row is keyed by (#1059).
 
     Mirrors the real ``band_fn``'s keying so the fakes stay honest about
@@ -101,7 +100,7 @@ def _fixed_band_fn(mapping: dict[str, str]):
     per ``mapping``; ids absent from ``mapping`` receive an explicit Beets
     ``Missing`` answer."""
 
-    def _fn(rows: list[dict[str, Any]]) -> dict[str, str]:
+    def _fn(rows: list[dict[str, object]]) -> dict[str, str]:
         return {
             rid: mapping.get(rid, BAND_MISSING)
             for rid in _acquisition_ids(rows)
@@ -113,7 +112,7 @@ def _fixed_band_fn(mapping: dict[str, str]):
 def _recording_empty_band_fn(
     batches: list[list[str]],
 ):
-    def _fn(rows: list[dict[str, Any]]) -> dict[str, str]:
+    def _fn(rows: list[dict[str, object]]) -> dict[str, str]:
         batches.append(_acquisition_ids(rows))
         return {}
 
@@ -244,7 +243,7 @@ class TestListLongTailBanding(unittest.TestCase):
         ))
         batches: list[list[str]] = []
 
-        def band_fn(rows: list[dict[str, Any]]) -> dict[str, str]:
+        def band_fn(rows: list[dict[str, object]]) -> dict[str, str]:
             batches.append(_acquisition_ids(rows))
             return {DISCOGS_RELEASE: "excellent"}
 
@@ -459,7 +458,7 @@ class TestListLongTailN1Guard(unittest.TestCase):
         db = FakePipelineDB()
         band_calls: list[list[str]] = []
 
-        def counting_band_fn(rows: list[dict[str, Any]]) -> dict[str, str]:
+        def counting_band_fn(rows: list[dict[str, object]]) -> dict[str, str]:
             # The real band_fn issues one coherent exact-resolution batch.
             # Record the collaborator call and assert it fires once for the
             # whole cohort.
@@ -592,7 +591,7 @@ class TestLongTailCohortRoundTrip(unittest.TestCase):
             source="request", mb_release_id=str(uuid.uuid4()),
             status="wanted", year=2001)
 
-        def band_fn(rows: list[dict[str, Any]]) -> dict[str, str]:
+        def band_fn(rows: list[dict[str, object]]) -> dict[str, str]:
             return {rid_: "poor" for rid_ in _acquisition_ids(rows)}
 
         result = list_long_tail(self.db, band_fn)

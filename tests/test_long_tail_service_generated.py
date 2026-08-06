@@ -80,6 +80,23 @@ def _valid_request_rows(draw: st.DrawFn) -> list[dict[str, object]]:
     return rows
 
 
+def _selected_release_ids(rows: list[dict[str, object]]) -> list[str]:
+    """The acquisition release id each banded row is keyed by (#1059).
+
+    band_fn receives request rows so each can resolve over its own identity
+    union; the selection this property asserts on is still the exact
+    acquisition identity per row.
+    """
+    keys: list[str] = []
+    for row in rows:
+        identity = ReleaseIdentity.from_strict_fields(
+            row.get("mb_release_id"), row.get("discogs_release_id"),
+        )
+        assert identity is not None
+        keys.append(identity.release_id)
+    return keys
+
+
 def assert_exact_identity_selection(
     rows: Sequence[Mapping[str, object]],
     selected_release_ids: Sequence[str],
@@ -246,9 +263,10 @@ class TestLongTailIdentitySelectionGenerated(unittest.TestCase):
             db.seed_request(row)
         batches: list[list[str]] = []
 
-        def band_fn(release_ids: list[str]) -> dict[str, str]:
-            batches.append(list(release_ids))
-            return {release_id: "good" for release_id in release_ids}
+        def band_fn(banded_rows: list[dict[str, object]]) -> dict[str, str]:
+            ids = _selected_release_ids(banded_rows)
+            batches.append(ids)
+            return {release_id: "good" for release_id in ids}
 
         result = list_long_tail(db, band_fn)
 
@@ -280,8 +298,8 @@ class TestLongTailIdentitySelectionGenerated(unittest.TestCase):
         batches: list[list[str]] = []
         failure = _authority_failure(failure_kind)
 
-        def failed_band_fn(release_ids: list[str]) -> dict[str, str]:
-            batches.append(list(release_ids))
+        def failed_band_fn(banded_rows: list[dict[str, object]]) -> dict[str, str]:
+            batches.append(_selected_release_ids(banded_rows))
             raise failure
 
         with self.assertRaises(type(failure)) as raised:

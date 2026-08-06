@@ -13,16 +13,22 @@ from __future__ import annotations
 
 import argparse
 import json
-from typing import Any
+from typing import Protocol
 
 from lib.canonical_release_service import (
     OUTCOME_FROZEN,
     OUTCOME_INVALID_IDENTITY,
     OUTCOME_NOT_FOUND,
     CanonicalReconcileResult,
+    CanonicalReleaseDB,
     CanonicalReleaseService,
 )
 from scripts.pipeline_cli._format import _json_default
+
+
+class _CanonicalDB(CanonicalReleaseDB, Protocol):
+    """The service's DB surface, which is all this command touches."""
+
 
 #: outcome -> exit code. Every other outcome is a successful observation:
 #: "no merge declared" and "already current" are answers, not failures.
@@ -33,11 +39,11 @@ _EXIT_CODES = {
 }
 
 
-def _emit(payload: dict[str, Any]) -> None:
+def _emit(payload: dict[str, object]) -> None:
     print(json.dumps(payload, indent=2, default=_json_default))
 
 
-def _result_payload(result: CanonicalReconcileResult) -> dict[str, Any]:
+def _result_payload(result: CanonicalReconcileResult) -> dict[str, object]:
     return {
         "request_id": result.request_id,
         "outcome": result.outcome,
@@ -48,7 +54,7 @@ def _result_payload(result: CanonicalReconcileResult) -> dict[str, Any]:
     }
 
 
-def cmd_canonical(args: argparse.Namespace, db: Any) -> int:
+def cmd_canonical(db: _CanonicalDB, args: argparse.Namespace) -> int:
     """Dispatch ``canonical reconcile`` / ``canonical show``."""
     service = CanonicalReleaseService(db)
 
@@ -58,7 +64,7 @@ def cmd_canonical(args: argparse.Namespace, db: Any) -> int:
             _emit({"request_id": args.id, "outcome": OUTCOME_NOT_FOUND})
             return 2
         _emit({
-            "request_id": int(row["id"]),
+            "request_id": args.id,
             "status": row.get("status"),
             "mb_release_id": row.get("mb_release_id"),
             "discogs_release_id": row.get("discogs_release_id"),
@@ -93,7 +99,9 @@ def cmd_canonical(args: argparse.Namespace, db: Any) -> int:
     return 0
 
 
-def add_canonical_subparser(sub: Any) -> None:
+def add_canonical_subparser(
+    sub: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
     parser = sub.add_parser(
         "canonical",
         help="Inspect or reconcile MusicBrainz merge survivors (#1059)",

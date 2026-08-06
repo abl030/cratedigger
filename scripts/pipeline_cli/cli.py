@@ -29,6 +29,7 @@ from scripts.pipeline_cli.api_mutations import (
 )
 from scripts.pipeline_cli.audit import cmd_audit_world
 from scripts.pipeline_cli.beets_distance import cmd_beets_distance
+from scripts.pipeline_cli.canonical import cmd_canonical
 from scripts.pipeline_cli.destructive import cmd_ban_source, cmd_library_delete
 from scripts.pipeline_cli.imports import (
     cmd_force_import,
@@ -36,7 +37,6 @@ from scripts.pipeline_cli.imports import (
     cmd_import_jobs,
     cmd_import_preview,
 )
-from scripts.pipeline_cli.canonical import cmd_canonical
 from scripts.pipeline_cli.long_tail import cmd_long_tail
 from scripts.pipeline_cli.quality import cmd_quality, cmd_repair_spectral
 from scripts.pipeline_cli.query import cmd_query

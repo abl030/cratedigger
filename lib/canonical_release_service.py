@@ -33,7 +33,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from typing import Protocol
 
 from lib.mb_canonical import CanonicalReleaseFn, canonical_release_id
 from lib.release_identity import ReleaseIdentity
@@ -61,9 +61,9 @@ QUIET_OUTCOMES = frozenset({
 class CanonicalReleaseDB(Protocol):
     """The PipelineDB surface this service uses."""
 
-    def get_request(self, request_id: int) -> Mapping[str, Any] | None: ...
+    def get_request(self, request_id: int) -> Mapping[str, object] | None: ...
 
-    def list_non_replaced_requests(self) -> Sequence[Mapping[str, Any]]: ...
+    def list_non_replaced_requests(self) -> Sequence[Mapping[str, object]]: ...
 
     def record_canonical_release_id(
         self,
@@ -102,7 +102,7 @@ class CanonicalSweepResult:
         return len(self.resolved)
 
 
-def _acquisition(row: Mapping[str, Any]) -> ReleaseIdentity | None:
+def _acquisition(row: Mapping[str, object]) -> ReleaseIdentity | None:
     return ReleaseIdentity.from_strict_fields(
         row.get("mb_release_id"),
         row.get("discogs_release_id"),
@@ -133,10 +133,11 @@ class CanonicalReleaseService:
         return self.reconcile_row(row)
 
     def reconcile_row(
-        self, row: Mapping[str, Any],
+        self, row: Mapping[str, object],
     ) -> CanonicalReconcileResult:
         """Reconcile one already-loaded request row."""
-        request_id = int(row["id"])
+        raw_id = row["id"]
+        request_id = raw_id if isinstance(raw_id, int) else int(str(raw_id))
         stored_canonical = row.get("canonical_release_id")
         previous = str(stored_canonical) if stored_canonical else None
 
@@ -215,7 +216,7 @@ class CanonicalReleaseService:
         to the journal without the service accumulating ten minutes of
         output before saying anything.
         """
-        rows: Iterable[Mapping[str, Any]] = self._db.list_non_replaced_requests()
+        rows: Iterable[Mapping[str, object]] = self._db.list_non_replaced_requests()
         counts: dict[str, int] = {}
         resolved: list[CanonicalReconcileResult] = []
         scanned = 0

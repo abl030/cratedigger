@@ -930,55 +930,6 @@ class _RequestsMixin(_PipelineDBBase):
         self.conn.commit()
 
 
-    def record_canonical_release_id(
-        self,
-        request_id: int,
-        *,
-        canonical_release_id: str,
-        resolved_at: datetime,
-    ) -> bool:
-        """Record the MusicBrainz merge survivor proven by an observed 301.
-
-        Returns True when the row was written. False means the request no
-        longer qualifies — it was superseded, or its acquisition id changed
-        under the sweep — and the caller reports that rather than retrying.
-
-        There is deliberately **no** clearing counterpart (#1059 invariant 7).
-        A failed or unavailable lookup must leave the stored survivor exactly
-        as it was, and the reconciler cannot violate that if the operation
-        does not exist for it to call. An un-merge upstream is harmless: the
-        stale survivor simply stops resolving to an album and the union falls
-        through to the acquisition id.
-
-        Guarded on ``status <> 'replaced'``: superseded rows are frozen audit
-        records, and the world audit fails the run if one mutates after
-        supersede. A Replace landing mid-sweep must therefore be a benign
-        no-op here, not a late write that corrupts the frozen row.
-        """
-        cur = self._execute(
-            """
-            UPDATE album_requests
-            SET canonical_release_id = %s,
-                canonical_resolved_at = %s,
-                updated_at = %s
-            WHERE id = %s
-              AND status <> 'replaced'
-              AND mb_release_id IS DISTINCT FROM %s
-            RETURNING id
-            """,
-            (
-                canonical_release_id,
-                resolved_at,
-                resolved_at,
-                request_id,
-                canonical_release_id,
-            ),
-        )
-        written = cur.fetchone() is not None
-        self.conn.commit()
-        return written
-
-
     def get_unfindable_search_log_signal(
         self,
         request_id: int,
@@ -1938,3 +1889,52 @@ class _RequestsMixin(_PipelineDBBase):
         row = cur.fetchone()
         self.conn.commit()
         return row is not None
+
+
+    def record_canonical_release_id(
+        self,
+        request_id: int,
+        *,
+        canonical_release_id: str,
+        resolved_at: datetime,
+    ) -> bool:
+        """Record the MusicBrainz merge survivor proven by an observed 301.
+
+        Returns True when the row was written. False means the request no
+        longer qualifies — it was superseded, or its acquisition id changed
+        under the sweep — and the caller reports that rather than retrying.
+
+        There is deliberately **no** clearing counterpart (#1059 invariant 7).
+        A failed or unavailable lookup must leave the stored survivor exactly
+        as it was, and the reconciler cannot violate that if the operation
+        does not exist for it to call. An un-merge upstream is harmless: the
+        stale survivor simply stops resolving to an album and the union falls
+        through to the acquisition id.
+
+        Guarded on ``status <> 'replaced'``: superseded rows are frozen audit
+        records, and the world audit fails the run if one mutates after
+        supersede. A Replace landing mid-sweep must therefore be a benign
+        no-op here, not a late write that corrupts the frozen row.
+        """
+        cur = self._execute(
+            """
+            UPDATE album_requests
+            SET canonical_release_id = %s,
+                canonical_resolved_at = %s,
+                updated_at = %s
+            WHERE id = %s
+              AND status != 'replaced'
+              AND mb_release_id IS DISTINCT FROM %s
+            RETURNING id
+            """,
+            (
+                canonical_release_id,
+                resolved_at,
+                resolved_at,
+                request_id,
+                canonical_release_id,
+            ),
+        )
+        written = cur.fetchone() is not None
+        self.conn.commit()
+        return written

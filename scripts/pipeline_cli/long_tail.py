@@ -33,7 +33,7 @@ class _LongTailDB(Protocol):
     ) -> dict[str, Any] | None: ...
 
 
-def _cli_band_fn(rows: list[dict[str, Any]]) -> dict[str, str]:
+def _cli_band_fn(rows: list[dict[str, object]]) -> dict[str, str]:
     """Build the long-tail band map for the CLI.
 
     Reuses the SAME exact-resolution banding decision the web route uses,

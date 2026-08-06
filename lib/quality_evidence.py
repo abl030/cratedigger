@@ -2007,8 +2007,8 @@ def load_candidate_evidence_for_decision(
 def _acceptable_identities_for_request(
     db: QualityEvidenceDB,
     request_id: int,
-    identity: "ReleaseIdentity",
-) -> tuple["ReleaseIdentity", ...]:
+    identity: ReleaseIdentity,
+) -> tuple[ReleaseIdentity, ...]:
     """The request's acceptable pressings, survivor first (#1059).
 
     Falls back to the caller's own identity when the row is unreadable, so

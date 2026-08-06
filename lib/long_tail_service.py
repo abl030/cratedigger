@@ -214,7 +214,7 @@ class LongTailResult(msgspec.Struct, frozen=True):
 # Beets resolver banding core in ``web.routes._overlay``; tests inject a
 # counting fake. Every queried row must be present in the result, including
 # ids explicitly banded ``Missing``.
-BandFn = Callable[[list[dict[str, Any]]], dict[str, str]]
+BandFn = Callable[[list[dict[str, object]]], dict[str, str]]
 
 
 class _PipelineDB(Protocol):

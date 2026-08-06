@@ -280,13 +280,16 @@ class TestBackToMonoPostgresOuterComposition(unittest.TestCase):
                 def __exit__(self, *_args: object) -> None:
                     return None
 
-                def resolve_current_release(
+                def resolve_current_releases(
                     self,
-                    requested: ReleaseIdentity,
-                ) -> CurrentBeetsUnique:
-                    if requested != identity:
+                    requested: list[ReleaseIdentity],
+                ) -> dict[ReleaseIdentity, CurrentBeetsUnique]:
+                    # Batched, because the request resolves over its identity
+                    # union (#1059). This row has no stored merge survivor,
+                    # so the union is the acquisition identity alone.
+                    if requested != [identity]:
                         raise AssertionError("unexpected current identity")
-                    return current_release
+                    return {identity: current_release}
             job = db.enqueue_import_job(
                 IMPORT_JOB_FORCE,
                 request_id=request_id,
