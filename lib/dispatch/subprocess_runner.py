@@ -180,7 +180,9 @@ def run_import_one(
         # mirror base this process wired at startup is forwarded explicitly
         # (issue #1049). Unconfigured parent -> unconfigured child -> the
         # literal stored id, which is exactly today's behaviour.
-        musicbrainz_ws2_base=musicbrainz_ws2_base or mb_canonical.MB_WS2_BASE,
+        musicbrainz_ws2_base=(
+            musicbrainz_ws2_base or mb_canonical.configured_canonical_base()
+        ),
     )
     env = beets_subprocess_env(
         beets_config_dir=beets_config_dir,

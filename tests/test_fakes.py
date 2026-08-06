@@ -5704,6 +5704,58 @@ class TestPipelineDBFakeContractInternals(unittest.TestCase):
 class TestFakeBeetsDB(unittest.TestCase):
     """Self-tests for FakeBeetsDB — the minimal in-memory BeetsDB stand-in."""
 
+    def test_current_resolver_mirrors_production_merge_following(self) -> None:
+        """The fake follows a seeded MusicBrainz merge exactly as production
+        does (issue #1049), or tests through the fake describe a world the
+        real resolver does not produce.
+        """
+        from lib.beets_db import CurrentBeetsMissing, CurrentBeetsUnique
+        from lib.release_identity import ReleaseIdentity
+
+        stored = ReleaseIdentity(
+            source="musicbrainz",
+            release_id="4878ee47-f8b8-45c8-832c-62de3bccfa6e",
+        )
+        survivor = "7aabf975-9a06-4b2e-854c-2c700380ebd5"
+
+        beets = FakeBeetsDB(library_root="/library")
+        beets.set_album_ids_for_release(survivor, [19345])
+        beets.set_item_paths(survivor, [(70, "Artist/Album/01.flac")])
+
+        # Without a seeded merge the fake is the literal resolver.
+        self.assertIsInstance(
+            beets.resolve_current_release(stored), CurrentBeetsMissing,
+        )
+
+        beets.set_canonical_release(stored.release_id, survivor)
+        followed = beets.resolve_current_release(stored)
+        self.assertIsInstance(followed, CurrentBeetsUnique)
+        assert isinstance(followed, CurrentBeetsUnique)
+        self.assertEqual(followed.album_id, 19345)
+        # Reports the identity Beets actually holds, like production.
+        self.assertEqual(followed.identity.release_id, survivor)
+        self.assertEqual(beets.canonical_release_calls, [
+            stored.release_id, stored.release_id,
+        ])
+
+    def test_current_resolver_miss_names_the_requested_identity(self) -> None:
+        """An unresolved miss never leaks a substituted identity."""
+        from lib.beets_db import CurrentBeetsMissing
+        from lib.release_identity import ReleaseIdentity
+
+        stored = ReleaseIdentity(
+            source="musicbrainz",
+            release_id="4878ee47-f8b8-45c8-832c-62de3bccfa6e",
+        )
+        beets = FakeBeetsDB(library_root="/library")
+        beets.set_canonical_release(
+            stored.release_id, "7aabf975-9a06-4b2e-854c-2c700380ebd5",
+        )
+        missing = beets.resolve_current_release(stored)
+        self.assertIsInstance(missing, CurrentBeetsMissing)
+        assert isinstance(missing, CurrentBeetsMissing)
+        self.assertEqual(missing.identity, stored)
+
     def test_current_resolver_preserves_cardinality_and_topology(self) -> None:
         from lib.beets_db import CurrentBeetsAmbiguous, CurrentBeetsUnique
         from lib.release_identity import ReleaseIdentity

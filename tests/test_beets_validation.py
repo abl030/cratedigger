@@ -648,3 +648,114 @@ class TestLogValidationResult(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestValidationFollowsMusicBrainzMerges(unittest.TestCase):
+    """Validation accepts the release MusicBrainz merged the target into.
+
+    beets is invoked with ``--search-id <stored id>``; MusicBrainz answers
+    the merge redirect, so after an upstream merge every candidate wears the
+    survivor's id and the literal comparison matches nothing (issue #1049).
+    This is the seam that otherwise makes a merged ``wanted`` request look
+    permanently unfindable — the one cohort we have forbidden ourselves from
+    throttling.
+
+    V1  A candidate carrying the declared successor is accepted, and the
+        accepted id is recorded rather than left to inference.
+    V2  Strict pressing identity holds: a sibling is never accepted, even
+        when the lookup answers.
+    V3  Miss-triggered — an ordinary match never pays for a lookup.
+    V4  Fail-open: no resolver, or an unresolvable one, is byte-identical
+        to today.
+    V5  The stored target is never mutated by any of it.
+    """
+
+    HARNESS = "/fake/harness.sh"
+    STORED = "4878ee47-f8b8-45c8-832c-62de3bccfa6e"
+    SURVIVOR = "7aabf975-9a06-4b2e-854c-2c700380ebd5"
+    SIBLING = "bbbbbbbb-1111-2222-3333-444444444444"
+
+    def _proc(self, candidate_mbid, distance=0.05):
+        proc = MagicMock()
+        proc.stdout = iter([
+            make_choose_match_msg(candidate_mbid, distance) + "\n",
+            make_session_end() + "\n",
+        ])
+        proc.stdin = MagicMock()
+        proc.wait.return_value = 0
+        proc.stderr.read.return_value = ""
+        return proc
+
+    @patch("lib.beets.sp.Popen")
+    def test_candidate_under_survivor_id_is_accepted(self, mock_popen):
+        """V1/V5 — the live merged shape validates, target unmutated."""
+        mock_popen.return_value = self._proc(self.SURVIVOR)
+        lookups = []
+
+        def canonical(release_id):
+            lookups.append(release_id)
+            return self.SURVIVOR
+
+        result = beets_validate(
+            self.HARNESS, "/test/album", self.STORED, 0.15,
+            canonical_release_fn=canonical,
+        )
+
+        self.assertTrue(result.mbid_found)
+        self.assertTrue(result.valid)
+        self.assertEqual(result.scenario, "strong_match")
+        self.assertEqual(lookups, [self.STORED])
+        # The accepted id is recorded; the stored target never moves.
+        self.assertEqual(result.matched_mbid, self.SURVIVOR)
+        self.assertEqual(result.target_mbid, self.STORED)
+
+    @patch("lib.beets.sp.Popen")
+    def test_sibling_is_never_accepted(self, mock_popen):
+        """V2 — a redirect authorizes exactly one successor, not a sibling."""
+        mock_popen.return_value = self._proc(self.SIBLING)
+
+        result = beets_validate(
+            self.HARNESS, "/test/album", self.STORED, 0.15,
+            canonical_release_fn=lambda _rid: self.SURVIVOR,
+        )
+
+        self.assertFalse(result.mbid_found)
+        self.assertFalse(result.valid)
+        self.assertEqual(result.scenario, "mbid_not_found")
+        self.assertIsNone(result.matched_mbid)
+
+    @patch("lib.beets.sp.Popen")
+    def test_ordinary_match_never_asks_musicbrainz(self, mock_popen):
+        """V3 — the trigger is the miss, not a scan."""
+        mock_popen.return_value = self._proc(self.STORED)
+        lookups = []
+
+        def canonical(release_id):
+            lookups.append(release_id)
+            return self.SURVIVOR
+
+        result = beets_validate(
+            self.HARNESS, "/test/album", self.STORED, 0.15,
+            canonical_release_fn=canonical,
+        )
+
+        self.assertTrue(result.valid)
+        self.assertEqual(lookups, [], "a hit must never pay for a lookup")
+        self.assertEqual(result.matched_mbid, self.STORED)
+
+    @patch("lib.beets.sp.Popen")
+    def test_unresolvable_lookup_is_identical_to_today(self, mock_popen):
+        """V4 — mirror down / 4xx: never worse than the status quo."""
+        for label, fn in (
+            ("no resolver", None),
+            ("unresolvable", lambda _rid: None),
+        ):
+            with self.subTest(resolver=label):
+                mock_popen.return_value = self._proc(self.SURVIVOR)
+                result = beets_validate(
+                    self.HARNESS, "/test/album", self.STORED, 0.15,
+                    canonical_release_fn=fn,
+                )
+                self.assertFalse(result.mbid_found)
+                self.assertEqual(result.scenario, "mbid_not_found")
+                self.assertEqual(result.target_mbid, self.STORED)

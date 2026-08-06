@@ -2235,5 +2235,98 @@ class TestDryRunMintsVerifiedLosslessProof(unittest.TestCase):
         self.assertFalse(worse.comparison_basis.verified_lossless_bypass)
 
 
+class TestImportMatchFollowsMusicBrainzMerges(unittest.TestCase):
+    """The import match and the duplicate guard follow a declared merge.
+
+    beets is invoked with ``--search-id <stored id>`` (import_one.py), so
+    after an upstream merge MusicBrainz hands back the survivor and every
+    candidate — and every already-retagged duplicate — wears the survivor's
+    id. Fixing only the candidate match would still leave the duplicate
+    guard refusing the very duplicate it exists to remove (issue #1049).
+
+    Only the external HTTP edge is faked; the real resolution policy and
+    the real production functions run.
+    """
+
+    STORED = "4878ee47-f8b8-45c8-832c-62de3bccfa6e"
+    SURVIVOR = "7aabf975-9a06-4b2e-854c-2c700380ebd5"
+    SIBLING = "bbbbbbbb-1111-2222-3333-444444444444"
+
+    def _wire_mirror(self, payload: object):
+        from lib import mb_canonical
+        mb_canonical.configure_canonical_base("http://mirror.test/ws/2")
+        self.addCleanup(mb_canonical.configure_canonical_base, None)
+        return patch("lib.mb_canonical._fetch_json", return_value=payload)
+
+    def test_candidate_under_survivor_id_is_matched(self) -> None:
+        from harness.import_one import _find_target_candidate
+        cands = [{"album_id": self.SURVIVOR}]
+        with self._wire_mirror({"id": self.SURVIVOR}):
+            self.assertEqual(_find_target_candidate(cands, self.STORED), 0)
+
+    def test_sibling_is_never_matched(self) -> None:
+        """Strict pressing identity: one declared successor, never a sibling."""
+        from harness.import_one import _find_target_candidate
+        cands = [{"album_id": self.SIBLING}]
+        with self._wire_mirror({"id": self.SURVIVOR}):
+            self.assertIsNone(_find_target_candidate(cands, self.STORED))
+
+    def test_literal_match_never_asks_musicbrainz(self) -> None:
+        """Miss-triggered: an ordinary match pays for no lookup."""
+        from harness.import_one import _find_target_candidate
+        cands = [{"album_id": self.STORED}]
+        with self._wire_mirror({"id": self.SURVIVOR}) as fetch:
+            self.assertEqual(_find_target_candidate(cands, self.STORED), 0)
+            fetch.assert_not_called()
+
+    def test_unconfigured_mirror_is_identical_to_today(self) -> None:
+        """Fail-open: unwired stays literal, so a miss stays a miss."""
+        from harness.import_one import _find_target_candidate
+        cands = [{"album_id": self.SURVIVOR}]
+        self.assertIsNone(_find_target_candidate(cands, self.STORED))
+
+    def test_duplicate_guard_admits_the_declared_successor(self) -> None:
+        from harness.import_one import (
+            DuplicateRemoveCandidate,
+            _duplicate_remove_guard_failure,
+        )
+        duplicate = DuplicateRemoveCandidate(
+            beets_album_id=77,
+            mb_albumid=self.SURVIVOR,
+            discogs_albumid="",
+            album_path="/library/album",
+            item_count=10,
+            albumartist="Archivist",
+            album="Exact pressing",
+        )
+        with self._wire_mirror({"id": self.SURVIVOR}):
+            self.assertIsNone(_duplicate_remove_guard_failure(
+                target_release_id=self.STORED,
+                candidates=[duplicate],
+            ))
+
+    def test_duplicate_guard_still_refuses_a_sibling(self) -> None:
+        from harness.import_one import (
+            DuplicateRemoveCandidate,
+            _duplicate_remove_guard_failure,
+        )
+        duplicate = DuplicateRemoveCandidate(
+            beets_album_id=77,
+            mb_albumid=self.SIBLING,
+            discogs_albumid="",
+            album_path="/library/album",
+            item_count=10,
+            albumartist="Archivist",
+            album="Exact pressing",
+        )
+        with self._wire_mirror({"id": self.SURVIVOR}):
+            failure = _duplicate_remove_guard_failure(
+                target_release_id=self.STORED,
+                candidates=[duplicate],
+            )
+        assert failure is not None
+        self.assertEqual(failure.reason, "release_identity_mismatch")
+
+
 if __name__ == "__main__":
     unittest.main()

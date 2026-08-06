@@ -1263,6 +1263,7 @@ class TestLoadCurrentEvidenceForAction(unittest.TestCase):
         beets_cls.assert_called_once_with(
             "/tmp/world/beets-library.db",
             library_root="/tmp/world/library",
+            canonical_release_fn=None,
         )
 
     def test_ensure_raises_returns_fail_closed_result(self):

@@ -33,6 +33,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable
 
+from lib.json_narrow import json_dict
 from lib.release_identity import detect_release_source, normalize_release_id
 
 logger = logging.getLogger("cratedigger")
@@ -45,8 +46,10 @@ type CanonicalReleaseFn = Callable[[str], str | None]
 type CanonicalFetchFn = Callable[[str], object]
 
 #: WS/2 base (``scheme://host[:port]/ws/2``) for canonical resolution.
-#: Unset means inert — see the module docstring.
-MB_WS2_BASE: str | None = None
+#: Unset means inert — see the module docstring. Read it through
+#: :func:`configured_canonical_base`; it is process-startup state, not a
+#: constant.
+_mb_ws2_base: str | None = None
 
 _TIMEOUT_SECONDS = 15
 _USER_AGENT = "cratedigger-canonical/1.0"
@@ -54,8 +57,13 @@ _USER_AGENT = "cratedigger-canonical/1.0"
 
 def configure_canonical_base(ws2_base: str | None) -> None:
     """Point canonical resolution at one MusicBrainz WS/2 base."""
-    global MB_WS2_BASE
-    MB_WS2_BASE = (ws2_base or "").rstrip("/") or None
+    global _mb_ws2_base
+    _mb_ws2_base = (ws2_base or "").rstrip("/") or None
+
+
+def configured_canonical_base() -> str | None:
+    """The wired WS/2 base, or None while this process is inert."""
+    return _mb_ws2_base
 
 
 def _fetch_json(url: str) -> object:
@@ -94,7 +102,7 @@ def canonical_release_id(
     if detect_release_source(requested) != "musicbrainz":
         return None
 
-    base = (ws2_base if ws2_base is not None else MB_WS2_BASE) or ""
+    base = (ws2_base if ws2_base is not None else _mb_ws2_base) or ""
     base = base.rstrip("/")
     if not base:
         return None
@@ -114,9 +122,9 @@ def canonical_release_id(
         )
         return None
 
-    if not isinstance(payload, dict):
-        return None
-    canonical = normalize_release_id(payload.get("id"))
+    # Narrowing an already-decoded value: the shared graceful helper, never
+    # a re-``convert`` (`.claude/rules/code-quality.md`).
+    canonical = normalize_release_id(json_dict(payload).get("id"))
     if detect_release_source(canonical) != "musicbrainz":
         return None
     if canonical == requested:
@@ -137,10 +145,10 @@ def production_canonical_release_fn() -> CanonicalReleaseFn:
 
 
 __all__ = [
-    "MB_WS2_BASE",
     "CanonicalFetchFn",
     "CanonicalReleaseFn",
     "canonical_release_id",
     "configure_canonical_base",
+    "configured_canonical_base",
     "production_canonical_release_fn",
 ]

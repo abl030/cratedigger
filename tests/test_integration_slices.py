@@ -9203,6 +9203,7 @@ class TestWrongMatchTriageRejectsSameSourceDuplicate(unittest.TestCase):
         mocked_beets.assert_called_once_with(
             beets_db_path,
             library_root=library_dir,
+            canonical_release_fn=None,
         )
 
         request_row = db.request(request_id)
@@ -9325,6 +9326,7 @@ class TestWrongMatchTriageRejectsSameSourceDuplicate(unittest.TestCase):
             mocked_beets.assert_called_once_with(
                 self._beets_library_db_path(library_dir),
                 library_root=library_dir,
+                canonical_release_fn=None,
             )
 
             # Load-bearing assertions. RED today: outcome is
@@ -9423,6 +9425,7 @@ class TestWrongMatchTriageRejectsSameSourceDuplicate(unittest.TestCase):
             mocked_beets.assert_called_once_with(
                 self._beets_library_db_path(library_dir),
                 library_root=library_dir,
+                canonical_release_fn=None,
             )
 
             self.assertEqual(result.outcome, OUTCOME_KEPT_WOULD_IMPORT)
@@ -9547,6 +9550,7 @@ class TestWrongMatchTriageRejectsSameSourceDuplicate(unittest.TestCase):
             mocked_beets.assert_called_once_with(
                 self._beets_library_db_path(library_dir),
                 library_root=library_dir,
+                canonical_release_fn=None,
             )
 
             # Decision: lossless_source_locked.
@@ -10655,7 +10659,13 @@ class TestRefreshCurrentEvidenceUsesBeetsLibraryRoot(unittest.TestCase):
         captured: list[tuple[str, str]] = []
 
         class FakeBeetsDB:
-            def __init__(self, db_path: str = "", *, library_root: str = "") -> None:
+            def __init__(
+                self,
+                db_path: str = "",
+                *,
+                library_root: str = "",
+                canonical_release_fn: object = None,
+            ) -> None:
                 captured.append((db_path, library_root))
 
             def __enter__(self):

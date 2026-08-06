@@ -125,6 +125,11 @@ _LEAF_SEAM_PATTERNS = [
     re.compile(r"^redis\."),
     # MusicBrainz / Discogs client objects on the web side
     re.compile(r"^web\.(mb|discogs)\."),
+    # lib.mb_canonical._fetch_json: a 6-line wrapper that builds one
+    # urllib Request and returns json.loads(urlopen(...)) — the external
+    # HTTP edge itself, with no decision in it. Patching it drives the
+    # REAL resolution policy against a controlled MusicBrainz answer.
+    re.compile(r"^lib\.mb_canonical\._fetch_json$"),
     re.compile(r"^web\.routes\.\w+\.(mb_api|discogs_api)"),
     re.compile(r"^web\.server\.(mb_api|discogs_api|_real_beets_db|check_beets_library|check_pipeline|get_library_artist|_beets_db|mb)"),
     # Notifier helpers — fire-and-forget, no return value to mock meaningfully
