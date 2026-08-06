@@ -163,6 +163,7 @@ source scanner.
 | `tests/test_convergence_pipeline_db_generated.py` | the real migration-070 PostgreSQL request-local derivation and atomic stop CAS, differentially checked against `derive_convergence_signal` | genuine Hypothesis worlds cross direct/cross-walk attribution, structured peer arrays including comma and punctuation usernames, empty contributor sets, timestamp ties resolved by log ID, null/different cliff breaks, raw within-band spread, codec diversity, current-evidence replacement, and ineligible worlds; generated late-link, contributor, current-authority, and spectral mutations invalidate captured tokens before mutation, while one-observation/five-peer mosaic and cross-walk mutants qualify the checker. The bounded domain is sampled, not falsely certified as exhaustive |
 | `tests/test_audio_validation_generated.py` | `lib.util.validate_audio` through the real pinned FFmpeg full-decode subprocess plus mocked process-outcome leaves | every generated FLAC audio-frame mutation fails the fixed audio-only strict policy even when the former command returns zero; a real unset STREAMINFO MD5 remains byte-identical and leaves no diagnostic; every positive FFmpeg exit on stable readable bytes is typed bad audio, while arbitrary exit-zero stderr has no policy or audit meaning; diagnostics remain bounded. The real-subprocess property executes 18 mutations in the suite and 96 fresh mutations in the randomized fuzz tier; the former `rc=0` contract is pinned as a known-bad checker input |
 | `tests/test_test_tmpfs_generated.py` | the real `scripts/test_tmpfs.sh` setup subprocess | a low-headroom setup failure stays nonzero, prints no selected directory, and retains the exact headroom diagnostic for generated safe inherited `TMPDIR` values; zero-status, inherited-stdout, and diagnostic-loss inputs are independently qualified as known-bad checker inputs |
+| `tests/test_daily_resource_monitor_generated.py` | the real `scripts/daily_resource_monitor.sh` boundary in its summarize mode over generated phase/sample timelines | every phase retains its true cgroup and scratch maxima, monotonic peak start/end and swap metrics, plus the anon/file/shmem/kernel/scratch values from the same memory-current peak sample; kernel peaks may exceed every sampled current, and the terminal receipt names the first phase to establish that exact peak. Deterministic pins exercise the serialized live phase/sampler boundary and reject zero scratch limits, impossible breakdowns, and regressing kernel peaks, while sampled-current ownership, companion-sample, last-value, and missing-terminal mutations qualify the checker |
 | `tests/test_suite_coordinator_generated.py` | `scripts.run_test_suite.run_suite` over generated all-phase outcome worlds through its real state/persistence loop and a process-free phase executor leaf | every scheduled phase executes exactly once and contributes its pass/fail state to the single terminal result; deterministic process pins cover simultaneous cross-tool failures, private typed bundles, exact failure identities and reruns, command-start infrastructure failure, and signal interruption; old fail-fast and false-green shapes qualify the checker |
 | `tests/test_final_gate_receipt_generated.py` | the real `scripts/run_final_gate.sh` with a PATH-injected canonical-argv fake `nix-shell` over tiny clean Git fixtures | every generated ordinary command exit code has an atomically recorded matching pass/fail terminal state and is returned unchanged while the fake observes only `nix-shell --run "bash scripts/run_tests.sh"`; deterministic pins cover rejection of alternate gate labels, signal-shaped incomplete outcomes, exact active PID/start-tick recovery, changed-tree incomplete publication, output preservation, and the validated suite-bundle path; known-bad command, signal, stale-identity, missing-terminal, and tree-mismatch inputs qualify the checker |
 | `tests/test_web_request_security_generated.py` | the pure request authorizer plus the real HTTP pre-dispatch boundary for the cache-writing YouTube resolver | generated channel, method, canonical-origin, Origin, and Referer worlds match the fail-closed authorization oracle; browser POSTs with missing or mismatched provenance return 403 before resolver dispatch or DB access. Missing-provenance, mismatched-origin, future-unsafe-method, resolver-call, and DB-touch mutants independently qualify the checkers |
@@ -659,6 +660,27 @@ module's live output:
 nix-shell --run "CRATEDIGGER_HYPOTHESIS_PROFILE=fuzz \
     python3 -m unittest tests.test_quality_generated -v"
 ```
+
+The daily gate measures its existing top-level phases from inside the service's
+own mount namespace and cgroup. `scripts/daily_resource_monitor.sh` reads the
+unit's cgroup-v2 `memory.current`, monotonic `memory.peak`, swap, and
+`memory.stat` categories while sampling the private scratch mount with
+`statfs`. Each `CRATEDIGGER_DAILY_RESOURCE_PHASE` line retains the complete
+time-correlated sample at that phase's largest observed `memory.current`, plus
+its independent scratch byte/inode high-water. The terminal
+`CRATEDIGGER_DAILY_RESOURCE_RECEIPT` names the first phase that established the
+exact kernel memory peak. `shmem_at_memory_current_peak_bytes` and
+`non_shmem_at_memory_current_peak_bytes` are from the same sample; never
+subtract independently observed maxima to attribute working memory.
+
+The monitor does not enumerate processes, enter the namespace from outside,
+reset cgroup state, or change phase commands, worker counts, shard counts,
+PostgreSQL admission, example budgets, or tmpfs limits. Missing cgroup files,
+a disk-backed scratch root, zero limits, malformed samples, and regressing
+kernel peaks produce one terminal `status=invalid` receipt rather than zeros.
+The runner's EXIT path emits the terminal receipt after its owned checkout
+cleanup even when a test stage fails or the later live-world post-step makes
+the systemd unit red.
 
 It is pure and safe: no prod DB, no slskd, no beets, no network. Green runs
 write disposable state only to tmpfs. Repeat runs add entropy; there is

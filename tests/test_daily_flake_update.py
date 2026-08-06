@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import signal
+import subprocess
 import tempfile
 import time
 import unittest
@@ -21,6 +24,26 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
         self.addCleanup(self.tempdir.cleanup)
         self.fake = FakeDailyFlakeUpdateCommands(Path(self.tempdir.name))
 
+    def fake_environment(self) -> dict[str, str]:
+        env = os.environ.copy()
+        env.update(
+            {
+                "PATH": f"{self.fake.fake_bin}:{env['PATH']}",
+                "DAILY_UPDATE_FAKE_STATE": str(self.fake.state_path),
+                "CRATEDIGGER_AUTOMATION_STATE_DIR": str(
+                    self.fake.automation_state
+                ),
+                "CRATEDIGGER_MIRROR_URL": "http://mirror.example.test/ws/2",
+                "CRATEDIGGER_UPDATE_REPOSITORY": (
+                    "https://github.com/abl030/cratedigger.git"
+                ),
+                "CRATEDIGGER_UPDATE_BRANCH": "main",
+                "TMPDIR": str(self.fake.tmpdir),
+                "TEST_DB_DSN": "postgresql://production-must-not-leak",
+            }
+        )
+        return env
+
     def test_green_candidate_runs_every_gate_and_pushes_only_lock(self) -> None:
         proc = self.fake.run(SCRIPT)
         state = self.fake.state
@@ -39,6 +62,25 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
         self.assertIn("Refs #498", state["commit_args"])
         self.assertIn("ALL CANDIDATE GATES GREEN", proc.stdout)
         self.assertIn("pushed updated flake.lock", proc.stdout)
+        self.assertEqual(
+            proc.stdout.count("CRATEDIGGER_DAILY_RESOURCE_RECEIPT "), 1
+        )
+        self.assertIn(
+            "CRATEDIGGER_DAILY_RESOURCE_RECEIPT schema=1 status=valid",
+            proc.stdout,
+        )
+        for phase in (
+            "deterministic_suite",
+            "stable_nix",
+            "world_model",
+            "generated_fuzz",
+            "mirror_harness",
+            "cleanup",
+        ):
+            self.assertIn(
+                f"CRATEDIGGER_DAILY_RESOURCE_PHASE schema=1 phase={phase} ",
+                proc.stdout,
+            )
         self.assertEqual(
             state["lock_after_update"]["nodes"]["nixpkgs"]["locked"]["rev"],
             "new-nixpkgs",
@@ -70,6 +112,13 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
         self.assertIn("FAIL world-model burst", proc.stdout)
         self.assertIn("PASS mirror-harness smoke", proc.stdout)
         self.assertIn("candidate failed; flake.lock was not committed", proc.stderr)
+        self.assertEqual(
+            proc.stdout.count("CRATEDIGGER_DAILY_RESOURCE_RECEIPT "), 1
+        )
+        self.assertIn(
+            "CRATEDIGGER_DAILY_RESOURCE_RECEIPT schema=1 status=valid",
+            proc.stdout,
+        )
 
     def test_unchanged_lock_still_runs_gates_without_commit(self) -> None:
         self.fake.update_state(lock_changed=False)
@@ -154,6 +203,56 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertIsNone(self.fake.state["clone_path"])
         self.assertIn("CRATEDIGGER_MIRROR_URL", proc.stderr)
+        self.assertEqual(
+            proc.stdout.count("CRATEDIGGER_DAILY_RESOURCE_RECEIPT "), 1
+        )
+        self.assertIn("status=invalid reason=monitor_not_started", proc.stdout)
+
+    def test_invalid_resource_namespace_fails_before_clone_without_zero_metrics(
+        self,
+    ) -> None:
+        proc = self.fake.run(
+            SCRIPT,
+            extra_env={"XDG_RUNTIME_DIR": str(REPO_ROOT)},
+        )
+
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIsNone(self.fake.state["clone_path"])
+        self.assertEqual(
+            proc.stdout.count("CRATEDIGGER_DAILY_RESOURCE_RECEIPT "), 1
+        )
+        self.assertIn("status=invalid reason=scratch_not_tmpfs", proc.stdout)
+        self.assertNotIn("scratch_byte_peak=0", proc.stdout)
+
+    def test_process_group_term_emits_one_terminal_receipt_without_deadlock(
+        self,
+    ) -> None:
+        self.fake.update_state(hold_stage="suite", hold_seconds=30)
+        process = subprocess.Popen(
+            ["bash", str(SCRIPT)],
+            cwd=self.fake.root,
+            env=self.fake_environment(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        self.addCleanup(lambda: process.poll() is None and process.kill())
+        deadline = time.monotonic() + 5
+        while "suite" not in self.fake.state["stage_started"]:
+            self.assertIsNone(process.poll(), "daily runner exited before suite")
+            self.assertLess(time.monotonic(), deadline, "daily runner never reached suite")
+            time.sleep(0.02)
+
+        os.killpg(process.pid, signal.SIGTERM)
+        stdout, stderr = process.communicate(timeout=5)
+
+        self.assertEqual(process.returncode, 143, stderr)
+        self.assertEqual(
+            stdout.count("CRATEDIGGER_DAILY_RESOURCE_RECEIPT "), 1,
+            stdout,
+        )
+        self.assertRegex(stdout, r"status=(?:valid|invalid) ")
 
     def test_red_tip_canary_cannot_block_green_nixpkgs_candidate(self) -> None:
         # The fake recognises tip-contract as a fault only if a runner invokes

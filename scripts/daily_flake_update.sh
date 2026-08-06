@@ -6,6 +6,39 @@
 # The caller owns scheduling, persistent state, and failure notification.
 set -euo pipefail
 
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+# shellcheck source=scripts/daily_resource_monitor.sh
+source "$script_dir/daily_resource_monitor.sh"
+
+work_root=""
+
+finalize() {
+    local command_status="$?"
+    local resource_status=0
+    trap - EXIT INT TERM
+    set +e
+    # A signal may interrupt a phase transition while the parent owns the
+    # sample lock. Release that descriptor before the cleanup transition so
+    # the EXIT path cannot deadlock itself.
+    _daily_resource_unlock
+    if [[ "${_CRATEDIGGER_RESOURCE_STARTED:-0}" == 1 ]]; then
+        daily_resource_monitor_set_phase cleanup
+    fi
+    if [[ -n "$work_root" && -d "$work_root" ]]; then
+        rm -rf -- "$work_root"
+    fi
+    daily_resource_monitor_finish
+    resource_status=$?
+    if ((command_status == 0 && resource_status != 0)); then
+        command_status=$resource_status
+    fi
+    exit "$command_status"
+}
+
+trap finalize EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 repository="${CRATEDIGGER_UPDATE_REPOSITORY:-https://github.com/abl030/cratedigger.git}"
 branch="${CRATEDIGGER_UPDATE_BRANCH:-main}"
 state_dir="${CRATEDIGGER_AUTOMATION_STATE_DIR:?CRATEDIGGER_AUTOMATION_STATE_DIR is required}"
@@ -27,18 +60,15 @@ mkdir -p \
     "$fuzz_database" \
     "$fuzz_output_dir"
 
+if ! daily_resource_monitor_start; then
+    exit 1
+fi
+
+daily_resource_monitor_set_phase checkout_setup
 work_root=$(mktemp -d "${TMPDIR:-/tmp}/cratedigger-daily-update.XXXXXX")
 checkout="$work_root/repo"
 
-cleanup() {
-    if [[ -n "${work_root:-}" && -d "$work_root" ]]; then
-        rm -rf -- "$work_root"
-    fi
-}
-trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-
+daily_resource_monitor_set_phase clone
 echo "daily unstable gate: cloning $repository branch $branch"
 if ! git clone --quiet --branch "$branch" --single-branch "$repository" "$checkout"; then
     echo "daily unstable gate: clone failed" >&2
@@ -51,6 +81,7 @@ cd "$checkout"
 # too because its conftest accepts TEST_DB_DSN for explicit developer use.
 unset TEST_DB_DSN
 
+daily_resource_monitor_set_phase flake_update
 echo "daily unstable gate: updating flake.lock"
 if ! nix flake update nixpkgs; then
     echo "daily unstable gate: flake update failed" >&2
@@ -61,10 +92,12 @@ declare -a stage_names=()
 declare -a stage_statuses=()
 
 run_stage() {
-    local name="$1"
-    shift
+    local phase="$1"
+    local name="$2"
+    shift 2
     local status
 
+    daily_resource_monitor_set_phase "$phase"
     echo ""
     echo "=== $name ==="
     if "$@"; then
@@ -74,21 +107,23 @@ run_stage() {
     fi
     stage_names+=("$name")
     stage_statuses+=("$status")
+    daily_resource_monitor_set_phase runner_overhead
 }
 
-run_stage "deterministic full suite" \
+daily_resource_monitor_set_phase runner_overhead
+run_stage deterministic_suite "deterministic full suite" \
     nix-shell --run "bash scripts/run_tests.sh"
-run_stage "stable Nix and Beets-release checks" \
+run_stage stable_nix "stable Nix and Beets-release checks" \
     nix build .#checks.x86_64-linux.beetsStableCandidate --print-build-logs
-run_stage "world-model burst" \
+run_stage world_model "world-model burst" \
     env CRATEDIGGER_WORLD_DATABASE="$world_database" \
     nix-shell --run "bash scripts/world_model_burst.sh"
-run_stage "generated fuzz burst" \
+run_stage generated_fuzz "generated fuzz burst" \
     env HYPOTHESIS_STORAGE_DIRECTORY="$fuzz_database" \
         CRATEDIGGER_FUZZ_OUTPUT_DIR="$fuzz_output_dir" \
         CRATEDIGGER_FUZZ_MAX_EXAMPLES="$overnight_fuzz_max_examples" \
     nix-shell --run "bash scripts/fuzz_burst.sh"
-run_stage "mirror-harness smoke" \
+run_stage mirror_harness "mirror-harness smoke" \
     env CRATEDIGGER_WORLD_DATABASE="$mirror_database" \
         CRATEDIGGER_WORLD_ENGINE="mirror-harness" \
         CRATEDIGGER_WORLD_MIRROR_URL="$mirror_url" \
@@ -96,6 +131,7 @@ run_stage "mirror-harness smoke" \
         CRATEDIGGER_WORLD_STEPS="5" \
     nix-shell --run "bash scripts/world_model_burst.sh"
 
+daily_resource_monitor_set_phase candidate_summary
 echo ""
 echo "=== daily candidate summary ==="
 candidate_failed=0
@@ -113,6 +149,7 @@ if [[ "$candidate_failed" -ne 0 ]]; then
     exit 1
 fi
 
+daily_resource_monitor_set_phase lock_publish
 echo "ALL CANDIDATE GATES GREEN"
 if git diff --quiet -- flake.lock; then
     echo "daily unstable gate: flake.lock already current"
