@@ -99,7 +99,8 @@ VALIDATION_ERROR_VERDICT_PREFIX = (
 #: keeps a large stderr from deadlocking against a parent that only drains
 #: stderr after the stdout loop. The trailing sleep keeps the process alive
 #: so the parent's ``{"action":"skip"}`` writes never hit a closed pipe —
-#: ``beets_validate``'s ``finally`` terminates it immediately afterwards.
+#: ``exec`` makes that wait the exact process ``Popen`` owns, so
+#: ``beets_validate``'s ``finally`` terminates it without orphaning a child.
 _HARNESS_TEMPLATE = """#!/bin/sh
 cat {stdout_file}
 exec 1>&-
@@ -142,7 +143,7 @@ def write_fake_harness(
             stdout_file=_shell_quote(stdout_file),
             stderr_file=_shell_quote(stderr_file),
             terminal_action=(
-                "sleep 20"
+                "exec sleep 20"
                 if process_returncode is None
                 else (
                     f"kill -{-process_returncode} $$"
@@ -153,6 +154,15 @@ def write_fake_harness(
         ))
     os.chmod(harness_path, os.stat(harness_path).st_mode | stat.S_IEXEC)
     return harness_path
+
+
+def assert_fake_harness_wait_is_owned(harness_script: str) -> None:
+    """The terminal wait must replace the shell that ``Popen`` owns."""
+    commands = {line.strip() for line in harness_script.splitlines()}
+    if "sleep 20" in commands or "exec sleep 20" not in commands:
+        raise AssertionError(
+            "fake harness must exec its terminal wait so terminate() owns it"
+        )
 
 
 def run_fake_harness(
@@ -361,6 +371,17 @@ def assert_every_invariant(result: ValidationResult) -> None:
 # ---------------------------------------------------------------------------
 # Pins
 # ---------------------------------------------------------------------------
+
+class TestFakeHarnessProcessLifecycle(unittest.TestCase):
+    def test_terminal_wait_replaces_the_exact_harness_process(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            harness_path = write_fake_harness(
+                tmpdir,
+                stdout_lines=[SESSION_END_LINE],
+            )
+            with open(harness_path, encoding="utf-8") as handle:
+                assert_fake_harness_wait_is_owned(handle.read())
+
 
 class TestSessionsThatOfferedNothing(unittest.TestCase):
     """``no_choose_match``: the run completed and offered no match."""
