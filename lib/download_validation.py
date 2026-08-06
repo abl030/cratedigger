@@ -174,11 +174,17 @@ def _process_beets_validation(
             cancellation_token=cancellation_token,
         )
     _checkpoint(cancellation_token)
+    from lib.mb_canonical import canonical_release_id
+
     bv_result = _bv(
         ctx.cfg.beets_harness_path,
         current_path,
         album_data.mb_release_id,
         ctx.cfg.beets_distance_threshold,
+        # An upstream merge retargets every candidate beets offers onto the
+        # survivor id, so the literal comparison stops matching (#1049).
+        # Inert until the process wires a mirror base.
+        canonical_release_fn=canonical_release_id,
     )
     _checkpoint(cancellation_token)
     usernames_pre = {f.username for f in album_data.files if f.username}

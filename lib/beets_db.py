@@ -33,6 +33,7 @@ from lib.release_identity import (
 
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
+    from lib.mb_canonical import CanonicalReleaseFn
     from lib.quality import QualityRankConfig
 
 
@@ -258,19 +259,27 @@ def open_beets_db(
     *,
     db_path: str | None = None,
     library_root: str | None = None,
+    canonical_release_fn: "CanonicalReleaseFn | None" = None,
 ) -> "BeetsDB":
     """Open one inseparable Beets database/root pair.
 
     Production omits explicit paths and reads the guarded deployment-owned
     runtime pair.
     Development/operator overrides must supply both values together.
+
+    ``canonical_release_fn`` is forwarded to :class:`BeetsDB`; ``None``
+    selects the configured production MusicBrainz merge resolver.
     """
 
     validate_beets_storage_pair(db_path=db_path, library_root=library_root)
     if config is not None and (db_path is not None or library_root is not None):
         raise ValueError("config and explicit Beets paths are mutually exclusive")
     if db_path is not None and library_root is not None:
-        return BeetsDB(db_path, library_root=library_root)
+        return BeetsDB(
+            db_path,
+            library_root=library_root,
+            canonical_release_fn=canonical_release_fn,
+        )
     if config is None:
         from lib.config import read_runtime_config
 
@@ -278,6 +287,7 @@ def open_beets_db(
     return BeetsDB(
         config.beets_library_db,
         library_root=config.beets_directory,
+        canonical_release_fn=canonical_release_fn,
     )
 
 
@@ -414,6 +424,7 @@ class BeetsDB:
         db_path: str | None = None,
         *,
         library_root: str | None = None,
+        canonical_release_fn: "CanonicalReleaseFn | None" = None,
     ) -> None:
         """Open the library DB.
 
@@ -422,6 +433,13 @@ class BeetsDB:
         ``directory:`` setting in the beets config). A unique current release
         always exposes absolute paths. A relative stored path with no root is
         an explicit ambiguous result and every legacy lookup fails closed.
+
+        ``canonical_release_fn`` resolves a MusicBrainz merge redirect for a
+        release this library does not hold under its stored id (issue #1049).
+        ``None`` selects the configured production resolver, which is inert
+        until a process wires a mirror base — so an unconfigured process and
+        every test that does not opt in keep the literal behaviour, and a
+        caller that must pin the answer injects its own callable.
         """
         if db_path is None:
             from lib.config import read_runtime_config
@@ -437,6 +455,7 @@ class BeetsDB:
         self._db_path = db_path
         self._conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         self._library_root = library_root
+        self._canonical_release_fn = canonical_release_fn
 
     def close(self) -> None:
         self._conn.close()
@@ -515,7 +534,77 @@ class BeetsDB:
         self,
         identities: list[ReleaseIdentity],
     ) -> dict[ReleaseIdentity, CurrentBeetsResolution]:
-        """Batch the same exact resolver contract without cardinality loss."""
+        """Batch the same exact resolver contract without cardinality loss.
+
+        A MusicBrainz identity this library does not hold is retried once
+        against the release MusicBrainz has merged it into (issue #1049).
+        MusicBrainz owns release identity above both engines: when editors
+        merge two releases the loser's id becomes a permanent ``301`` and
+        ``mbsync`` retags the files onto the survivor, so a literal join on
+        the frozen acquisition id misses a release we demonstrably hold.
+
+        Following the redirect is not inferring a sibling: MusicBrainz
+        declares exactly one successor or none, nothing is chosen here, and
+        the stored acquisition id is never mutated. Resolution stays keyed by
+        the identity the caller asked for, while the returned resolution
+        reports the identity Beets actually holds — which is what a
+        destructive selector must act on.
+        """
+
+        literal = self._resolve_current_releases_literal(identities)
+        return self._follow_musicbrainz_merges(literal)
+
+    def _follow_musicbrainz_merges(
+        self,
+        literal: dict[ReleaseIdentity, CurrentBeetsResolution],
+    ) -> dict[ReleaseIdentity, CurrentBeetsResolution]:
+        """Retry only the misses, and only through a declared MB merge.
+
+        The trigger is the miss, never a scan: a release we hold under its
+        stored id costs nothing, and a lookup is paid exactly when the join
+        has already failed, which is exactly when the answer is needed.
+        Every unresolved lookup leaves the miss untouched, so a mirror that
+        is down, rate-limiting, or serving a poisoned 4xx is never worse
+        than the literal behaviour.
+        """
+
+        resolver = self._canonical_release_fn
+        if resolver is None:
+            from lib.mb_canonical import canonical_release_id as resolver
+
+        canonical_by_requested: dict[ReleaseIdentity, ReleaseIdentity] = {}
+        for identity, resolution in literal.items():
+            if not isinstance(resolution, CurrentBeetsMissing):
+                continue
+            if identity.source != "musicbrainz":
+                continue
+            canonical = resolver(identity.release_id)
+            if not canonical:
+                continue
+            canonical_identity = ReleaseIdentity.from_id(canonical)
+            if canonical_identity is None or canonical_identity == identity:
+                continue
+            canonical_by_requested[identity] = canonical_identity
+
+        if not canonical_by_requested:
+            return literal
+
+        followed = self._resolve_current_releases_literal(
+            list(canonical_by_requested.values()),
+        )
+        resolved = dict(literal)
+        for requested, canonical_identity in canonical_by_requested.items():
+            found = followed.get(canonical_identity)
+            if found is None or isinstance(found, CurrentBeetsMissing):
+                continue
+            resolved[requested] = found
+        return resolved
+
+    def _resolve_current_releases_literal(
+        self,
+        identities: list[ReleaseIdentity],
+    ) -> dict[ReleaseIdentity, CurrentBeetsResolution]:
+        """Resolve exactly the ids given, with no upstream identity lookup."""
 
         unique_identities = tuple(dict.fromkeys(identities))
         album_ids_by_identity: dict[ReleaseIdentity, set[int]] = {

@@ -7,11 +7,21 @@ ValidationResult. No global state, no config dependency.
 import json
 import logging
 import subprocess as sp
+from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import msgspec
 
-from lib.quality import ChooseMatchMessage, HarnessSessionEvidence, ValidationResult
+from lib.quality import (
+    CandidateSummary,
+    ChooseMatchMessage,
+    HarnessSessionEvidence,
+    ValidationResult,
+)
 from lib.util import beets_subprocess_env
+
+if TYPE_CHECKING:
+    from lib.mb_canonical import CanonicalReleaseFn
 
 logger = logging.getLogger("cratedigger")
 
@@ -130,11 +140,42 @@ def _record_unmatched_run(
     result.detail = detail
 
 
+def _accepted_target_ids(
+    mb_release_id: str,
+    candidates: "Sequence[CandidateSummary]",
+    canonical_release_fn: "CanonicalReleaseFn | None",
+) -> frozenset[str]:
+    """The ids that name the target: the stored one, or its canonical.
+
+    Never a sibling and never a release-group relative. MusicBrainz declares
+    exactly one successor or none, so following the redirect chooses nothing
+    — which is why it does not weaken strict pressing identity (issue #1049).
+
+    The lookup is paid only when no candidate carries the stored id, i.e.
+    exactly when the literal comparison has already failed.
+    """
+    literal = frozenset({mb_release_id})
+    if canonical_release_fn is None:
+        return literal
+    if any(cand.mbid == mb_release_id for cand in candidates):
+        return literal
+    canonical = canonical_release_fn(mb_release_id)
+    if not canonical or canonical == mb_release_id:
+        return literal
+    logger.info(
+        "BEETS_VALIDATE: target %s was merged into %s upstream; accepting "
+        "the canonical release", mb_release_id, canonical,
+    )
+    return frozenset({mb_release_id, canonical})
+
+
 def beets_validate(
     harness_path: str,
     album_path: str,
     mb_release_id: str,
     distance_threshold: float = 0.15,
+    *,
+    canonical_release_fn: "CanonicalReleaseFn | None" = None,
 ) -> ValidationResult:
     """Dry-run beets import with specific MBID. Returns ValidationResult.
 
@@ -143,6 +184,10 @@ def beets_validate(
         album_path: Path to the album directory to validate
         mb_release_id: Target MusicBrainz release ID
         distance_threshold: Maximum acceptable distance (default 0.15)
+        canonical_release_fn: Resolves the release MusicBrainz has merged
+            ``mb_release_id`` into, consulted only when no candidate carries
+            the stored id. ``None`` keeps the literal comparison, so this
+            function stays free of config and global state.
 
     Returns: ValidationResult with candidates, distance, scenario, etc.
 
@@ -261,10 +306,23 @@ def beets_validate(
                 # Find the target MBID. Both sides are str (msgspec has
                 # validated `cand.mbid` as str; `mb_release_id` comes
                 # from the DB TEXT column).
+                # The target is the stored acquisition id, or the release
+                # MusicBrainz has since merged it into (issue #1049). beets
+                # is invoked with ``--search-id <stored id>``; MusicBrainz
+                # answers the merge redirect, so every candidate comes back
+                # wearing the survivor's id and a literal comparison can no
+                # longer match anything. Resolving only on the miss keeps a
+                # normal validation free of any lookup.
+                accepted = _accepted_target_ids(
+                    mb_release_id,
+                    cm.candidates,
+                    canonical_release_fn,
+                )
                 for cand in cm.candidates:
-                    if cand.mbid == mb_release_id:
+                    if cand.mbid in accepted:
                         cand.is_target = True
                         result.mbid_found = True
+                        result.matched_mbid = cand.mbid
                         result.distance = cand.distance
                         n_extra = len(cand.extra_tracks)
                         if n_extra > 0:

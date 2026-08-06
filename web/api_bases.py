@@ -33,8 +33,13 @@ def configure_api_bases_from_runtime_config() -> None:
     import web.discogs
     import web.mb
     from lib.config import read_runtime_config
+    from lib.mb_canonical import configure_canonical_base
 
     cfg = read_runtime_config()
     web.mb.MB_API_BASE = mb_ws2_base(cfg.musicbrainz_api_base)
+    # MusicBrainz merge-redirect resolution (issue #1049) shares this base.
+    # It stays inert until wired here, so a process that skips this call
+    # keeps the literal stored id rather than silently reaching public MB.
+    configure_canonical_base(mb_ws2_base(cfg.musicbrainz_api_base))
     if cfg.discogs_api_base:
         web.discogs.DISCOGS_API_BASE = cfg.discogs_api_base

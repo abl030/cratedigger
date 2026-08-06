@@ -1445,7 +1445,13 @@ def main() -> int:
             sys.exit(1)
 
         from album_source import DatabaseSource
+        from lib.mb_canonical import configure_canonical_base
         from web.api_bases import mb_ws2_base
+        # The pipeline resolves MusicBrainz merge redirects at the point of
+        # use (issue #1049): the Beets join for a release we hold only under
+        # its survivor id, and validation of a candidate beets has already
+        # retagged. Unwired, both keep the literal stored id.
+        configure_canonical_base(mb_ws2_base(cfg.musicbrainz_api_base))
         pipeline_db_source = DatabaseSource(
             cfg.pipeline_db_dsn,
             musicbrainz_ws2_base=mb_ws2_base(cfg.musicbrainz_api_base),

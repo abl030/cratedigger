@@ -15,6 +15,7 @@ import threading
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Protocol
 
+from lib import mb_canonical
 from lib.dispatch.types import ImportOneRun
 from lib.import_execution import CancellationToken, MonitoredProcessGroup
 from lib.quality import parse_import_result
@@ -68,6 +69,7 @@ def build_import_one_command(
     beets_python: str | None = None,
     beets_library_db_path: str | None = None,
     beets_library_root: str | None = None,
+    musicbrainz_ws2_base: str | None = None,
 ) -> list[str]:
     """Build the single shared import_one.py command line."""
     from lib.beets_db import validate_beets_storage_pair
@@ -124,6 +126,8 @@ def build_import_one_command(
         cmd.extend(["--beets-config-dir", beets_config_dir])
     if beets_python is not None:
         cmd.extend(["--beets-python", beets_python])
+    if musicbrainz_ws2_base:
+        cmd.extend(["--musicbrainz-ws2-base", musicbrainz_ws2_base])
     return cmd
 
 
@@ -146,6 +150,7 @@ def run_import_one(
     beets_python: str | None = None,
     beets_library_db_path: str | None = None,
     beets_library_root: str | None = None,
+    musicbrainz_ws2_base: str | None = None,
     timeout: int = 1800,
     cancellation_token: CancellationToken | None = None,
     on_spawn: Callable[[int], None] | None = None,
@@ -171,6 +176,11 @@ def run_import_one(
         beets_python=beets_python,
         beets_library_db_path=beets_library_db_path,
         beets_library_root=beets_library_root,
+        # A subprocess does not inherit the parent's module globals, so the
+        # mirror base this process wired at startup is forwarded explicitly
+        # (issue #1049). Unconfigured parent -> unconfigured child -> the
+        # literal stored id, which is exactly today's behaviour.
+        musicbrainz_ws2_base=musicbrainz_ws2_base or mb_canonical.MB_WS2_BASE,
     )
     env = beets_subprocess_env(
         beets_config_dir=beets_config_dir,

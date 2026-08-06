@@ -207,6 +207,13 @@ class ValidationResult(msgspec.Struct):
     detail: str | None = None
     mbid_found: bool = False
     target_mbid: str | None = None
+    # The candidate id actually accepted as the target. Equal to
+    # ``target_mbid`` on every ordinary match; different exactly when
+    # MusicBrainz has merged the stored acquisition id into another release
+    # and we followed the 301 (issue #1049). The stored id is frozen history
+    # and never mutated, so this is the only place the audit trail records
+    # that a non-literal id was matched — never infer it from silence.
+    matched_mbid: str | None = None
     candidate_count: int = 0
     candidates: list[CandidateSummary] = []
     # Local file info (from harness choose_match items) — JSON-plain

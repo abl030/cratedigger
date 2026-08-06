@@ -160,6 +160,18 @@ def _as_json_list(value: object) -> TypeGuard[list[object]]:
     return isinstance(value, list)
 
 
+def _canonical_target_mbid(target_mbid: str) -> str | None:
+    """The release MusicBrainz has merged ``target_mbid`` into, if any.
+
+    Resolved at the point of use and stored nowhere (issue #1049). Inert
+    unless the process wired a mirror base, and fail-open on every failure,
+    so an unreachable or 4xx-serving mirror leaves behaviour unchanged.
+    """
+    from lib.mb_canonical import canonical_release_id
+
+    return canonical_release_id(str(target_mbid))
+
+
 def _find_target_candidate(
     candidates: Sequence[object],
     target_mbid: str,
@@ -168,10 +180,27 @@ def _find_target_candidate(
     target, or None. str() on both sides — beets' Discogs plugin emits
     int album_ids while target_mbid is the str DB column. Same int-vs-str
     trap as lib/beets.py::beets_validate (PR #98).
+
+    The target is the stored acquisition id, or — only when no candidate
+    carries it — the release MusicBrainz has since merged it into. beets is
+    invoked with ``--search-id <stored id>`` and MusicBrainz answers the
+    merge redirect, so after a merge every candidate wears the survivor's
+    id and the literal comparison matches nothing (issue #1049). Following
+    the 301 is not inferring a sibling: MusicBrainz names exactly one
+    successor or none, and nothing here chooses between pressings.
     """
     target = str(target_mbid)
     for i, c in enumerate(candidates):
         if _as_json_dict(c) and str(c.get("album_id", "")) == target:
+            return i
+    canonical = _canonical_target_mbid(target)
+    if not canonical or canonical == target:
+        return None
+    for i, c in enumerate(candidates):
+        if _as_json_dict(c) and str(c.get("album_id", "")) == canonical:
+            print(f"  [MERGED] target {target} was merged upstream into "
+                  f"{canonical}; matching the canonical release",
+                  file=sys.stderr)
             return i
     return None
 
@@ -274,10 +303,23 @@ def _duplicate_remove_guard_failure(
             "beets duplicate album has no comparable release identity",
         )
     if candidate_identity.key != target_identity.key:
-        return _info(
-            "release_identity_mismatch",
-            "beets duplicate album release identity does not match target",
+        # The duplicate beets found may be the same release under the id
+        # MusicBrainz merged ours into — mbsync retags installed albums onto
+        # the survivor, so the guard would otherwise refuse to remove the
+        # very duplicate it exists to remove (issue #1049). Only an upstream
+        # 301 qualifies; a sibling pressing still fails closed here.
+        canonical = _canonical_target_mbid(target_identity.release_id)
+        canonical_identity = (
+            ReleaseIdentity.from_id(canonical) if canonical else None
         )
+        if (
+            canonical_identity is None
+            or candidate_identity.key != canonical_identity.key
+        ):
+            return _info(
+                "release_identity_mismatch",
+                "beets duplicate album release identity does not match target",
+            )
     return None
 
 
@@ -1948,6 +1990,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--beets-python", default=None,
                         help="Explicit pinned Beets Python snapshotted by dispatch "
                              "for the nested Beets harness.")
+    parser.add_argument("--musicbrainz-ws2-base", default=None,
+                        help="MusicBrainz WS/2 base used to resolve an upstream "
+                             "merge redirect for the target release. Omitted "
+                             "leaves the literal stored id in force.")
     parser.add_argument("--existing-v0-probe-min-bitrate", type=int, default=None,
                         help="Current comparable lossless-source V0 probe min bitrate")
     parser.add_argument("--existing-v0-probe-avg-bitrate", type=int, default=None,
@@ -2013,6 +2059,15 @@ def main():
 
     mbid = args.mb_release_id
     request_id = args.request_id
+
+    # Point merge-redirect resolution at the operator's mirror (issue #1049).
+    # This subprocess has no runtime config of its own, so dispatch passes
+    # the base explicitly; unset leaves the literal stored id in force for
+    # both the candidate match and the duplicate-removal guard.
+    if args.musicbrainz_ws2_base:
+        from lib.mb_canonical import configure_canonical_base
+
+        configure_canonical_base(args.musicbrainz_ws2_base)
 
     # Parse --quality-rank-config and replace the module-level _rank_cfg default.
     # Used by BeetsDB.get_album_info() mixed-format reduction + (commit 5)

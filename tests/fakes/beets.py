@@ -56,6 +56,12 @@ class FakeBeetsDB:
     ) -> None:
         self.library_db_path = library_db_path
         self.library_root = library_root
+        # MusicBrainz merge redirects the real resolver follows on a miss
+        # (issue #1049): stored release id -> the survivor MusicBrainz names.
+        # Empty means every lookup is unresolvable, which is the real
+        # resolver's inert/fail-open posture and today's literal behaviour.
+        self._canonical_releases: dict[str, str] = {}
+        self.canonical_release_calls: list[str] = []
         self._album_exists: dict[str, bool] = {}
         self._album_ids_for_release: dict[str, list[int]] = {}
         self._item_paths: dict[str, list[tuple[int, str | None]]] = {}
@@ -613,11 +619,48 @@ class FakeBeetsDB:
             return (f"discogs_albumid:{key}", f"mb_albumid:{key}")
         return (f"mb_albumid:{key}",)
 
+    def set_canonical_release(self, stored_id: str, canonical_id: str) -> None:
+        """Seed the MusicBrainz merge the real resolver would follow."""
+        self._canonical_releases[normalize_release_id(stored_id)] = (
+            normalize_release_id(canonical_id)
+        )
+
     def resolve_current_release(
         self,
         identity: ReleaseIdentity,
     ) -> CurrentBeetsResolution:
-        """State-respecting fake of the exact current-library resolver."""
+        """State-respecting fake of the exact current-library resolver.
+
+        Mirrors production's merge-following second pass: a MusicBrainz
+        identity that misses is retried once against the release
+        MusicBrainz merged it into, keyed by the identity the caller asked
+        for while reporting the identity Beets actually holds. Without a
+        seeded merge this is the literal resolver, exactly as production is
+        before a process wires a mirror base.
+        """
+
+        resolution = self._resolve_current_release_literal(identity)
+        if not isinstance(resolution, CurrentBeetsMissing):
+            return resolution
+        if identity.source != "musicbrainz":
+            return resolution
+        self.canonical_release_calls.append(identity.release_id)
+        canonical = self._canonical_releases.get(identity.release_id)
+        if not canonical or canonical == identity.release_id:
+            return resolution
+        canonical_identity = ReleaseIdentity.from_id(canonical)
+        if canonical_identity is None or canonical_identity == identity:
+            return resolution
+        followed = self._resolve_current_release_literal(canonical_identity)
+        if isinstance(followed, CurrentBeetsMissing):
+            return resolution
+        return followed
+
+    def _resolve_current_release_literal(
+        self,
+        identity: ReleaseIdentity,
+    ) -> CurrentBeetsResolution:
+        """Resolve exactly the id given, with no upstream identity lookup."""
 
         self.resolve_current_release_calls.append(identity)
         if self._album_exists.get(identity.release_id) is False:
