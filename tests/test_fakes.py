@@ -6169,6 +6169,65 @@ class TestFakePipelineDBUnfindable(unittest.TestCase):
                 rid, category="garbage", categorised_at=ts,
             )
 
+    def test_record_canonical_release_id_mirrors_both_production_guards(
+        self,
+    ) -> None:
+        """Fake parity for the migration-074 write (#1059).
+
+        The real behaviour of each branch is pinned against PostgreSQL in
+        ``tests/test_pipeline_db.py::TestCanonicalReleaseId``; this asserts
+        the fake refuses exactly the same two shapes, so an orchestration
+        test built on the fake cannot believe in a write the DB rejects.
+        """
+        loser = "4878ee47-f8b8-45c8-832c-62de3bccfa6e"
+        survivor = "7aabf975-9a06-4b2e-854c-2c700380ebd5"
+        ts = datetime(2026, 8, 6, tzinfo=UTC)
+
+        db = FakePipelineDB()
+        rid = db.add_request(
+            artist_name="Merged", album_title="Release", source="request",
+            mb_release_id=loser,
+        )
+
+        self.assertTrue(db.record_canonical_release_id(
+            rid, canonical_release_id=survivor, resolved_at=ts))
+        row = db.request(rid)
+        self.assertEqual(row["canonical_release_id"], survivor)
+        self.assertEqual(row["canonical_resolved_at"], ts)
+        self.assertEqual(row["mb_release_id"], loser)
+
+        # A survivor equal to the acquisition id is not a merge.
+        self.assertFalse(db.record_canonical_release_id(
+            rid, canonical_release_id=loser, resolved_at=ts))
+        self.assertEqual(db.request(rid)["canonical_release_id"], survivor)
+
+        # Superseded rows are frozen. Drive the real supersede, not a
+        # forced column write — 'replaced' is owned by that transition.
+        db.supersede_request_mbid(
+            rid,
+            new_mb_release_id="bce7d8c3-815b-449c-8e18-df806398986c",
+            new_mb_release_group_id=None,
+            new_mb_artist_id=None,
+            new_artist_name="Merged",
+            new_album_title="Release",
+            new_year=None,
+            new_country=None,
+            new_tracks=[],
+        )
+        self.assertEqual(db.request(rid)["status"], "replaced")
+        self.assertFalse(db.record_canonical_release_id(
+            rid,
+            canonical_release_id="abe18a1c-ad01-423c-b6ca-63cfa8a9daf1",
+            resolved_at=ts + timedelta(days=1),
+        ))
+        self.assertEqual(db.request(rid)["canonical_release_id"], survivor)
+
+        # Unknown request is a no-op, not a KeyError.
+        self.assertFalse(db.record_canonical_release_id(
+            999_999, canonical_release_id=survivor, resolved_at=ts))
+
+        self.assertEqual(len(db.record_canonical_release_id_calls), 4)
+
     def test_list_unfindable_probe_candidates_orders_oldest_first(self) -> None:
         db = FakePipelineDB()
         now = datetime.now(UTC)

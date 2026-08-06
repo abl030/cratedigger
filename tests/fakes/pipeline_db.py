@@ -522,6 +522,8 @@ class FakePipelineDB:
             tuple[int, int, datetime]] = []
         self.set_unfindable_category_calls: list[
             tuple[int, str | None, datetime]] = []
+        self.record_canonical_release_id_calls: list[
+            tuple[int, str, datetime]] = []
         # Cursor-mutation recorders. The R20 runtime guard asserts
         # these stay empty after a detection run. We instrument both
         # cursor writers and the operator-driven advance.
@@ -5552,6 +5554,35 @@ class FakePipelineDB:
         row["unfindable_categorised_at"] = categorised_at
         row["updated_at"] = categorised_at
 
+    def record_canonical_release_id(
+        self,
+        request_id: int,
+        *,
+        canonical_release_id: str,
+        resolved_at: datetime,
+    ) -> bool:
+        """Mirror PipelineDB.record_canonical_release_id.
+
+        Reproduces both production guards, because each one is a real
+        no-op path the service reports on: superseded rows are frozen, and
+        a survivor equal to the acquisition id is not a merge (the DB
+        CHECK rejects it outright, so the fake must not accept it either).
+        """
+        self.record_canonical_release_id_calls.append(
+            (request_id, canonical_release_id, resolved_at),
+        )
+        row = self._requests.get(request_id)
+        if row is None:
+            return False
+        if row.get("status") == "replaced":
+            return False
+        if row.get("mb_release_id") == canonical_release_id:
+            return False
+        row["canonical_release_id"] = canonical_release_id
+        row["canonical_resolved_at"] = resolved_at
+        row["updated_at"] = resolved_at
+        return True
+
     def get_unfindable_search_log_signal(
         self,
         request_id: int,
@@ -5807,6 +5838,10 @@ class FakePipelineDB:
             # Migration 028 / U14 — long-tail-rescue audit columns.
             "rescued_at": None,
             "prior_unfindable_category": None,
+            # Migration 074 — MusicBrainz merge survivor (#1059). Both NULL
+            # until an observed 301 proves one; never set at INSERT.
+            "canonical_release_id": None,
+            "canonical_resolved_at": None,
             # Migration 021 addressing FK.
             "current_evidence_id": None,
             # Migration 023 — supersede lineage.
