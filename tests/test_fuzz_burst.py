@@ -25,6 +25,8 @@ from scripts.run_fuzz_tests import (
     format_depth_report,
     is_structurally_shallow,
     property_profile_max_examples,
+    recommended_fuzz_jobs,
+    recommended_postgres_jobs,
     recommended_property_shards,
     select_fuzz_admissions,
 )
@@ -93,6 +95,43 @@ class TestFuzzTargetPlanning(unittest.TestCase):
             ),
         )
 
+    def test_audited_method_hotspot_splits_fixed_tests_into_twelve_batches(
+        self,
+    ) -> None:
+        module_name = "tests.test_beets_destructive_configs_generated"
+        property_ids = tuple(
+            f"{module_name}.TestWorld.test_property_{index}"
+            for index in range(2)
+        )
+        pin_ids = tuple(
+            f"{module_name}.TestMatrix.test_cell_{index:02d}"
+            for index in range(60)
+        )
+        manifest = FuzzModuleManifest(
+            module_name=module_name,
+            test_ids=property_ids + pin_ids,
+            hypothesis_tests=tuple(
+                self.property(property_id) for property_id in property_ids
+            ),
+        )
+
+        targets = build_fuzz_targets((manifest,))
+
+        assert_exact_fuzz_coverage((manifest,), targets)
+        pin_targets = tuple(
+            target
+            for target in targets
+            if set(target.expected_test_ids).intersection(pin_ids)
+        )
+        self.assertEqual(len(pin_targets), 12)
+        self.assertEqual(
+            {len(target.expected_test_ids) for target in pin_targets},
+            {5},
+        )
+        self.assertTrue(
+            all(target.load_names == target.expected_test_ids for target in pin_targets)
+        )
+
     def test_single_property_module_keeps_one_process(self) -> None:
         property_id = "tests.test_example_generated.TestWorld.test_property"
         manifest = FuzzModuleManifest(
@@ -145,7 +184,7 @@ class TestFuzzTargetPlanning(unittest.TestCase):
             ]
             self.assertEqual(len(shards), 4)
             self.assertEqual(
-                sum(target.profile_max_examples or 0 for target in shards),
+            sum(target.max_examples_override or 0 for target in shards),
                 20_003,
             )
             self.assertEqual(
@@ -159,7 +198,7 @@ class TestFuzzTargetPlanning(unittest.TestCase):
                 )
             )
 
-    def test_explicit_property_budget_is_not_multiplied(self) -> None:
+    def test_explicit_property_budget_is_split_without_multiplication(self) -> None:
         property_id = "tests.test_example_generated.TestWorld.test_property"
         manifest = FuzzModuleManifest(
             module_name="tests.test_example_generated",
@@ -176,8 +215,58 @@ class TestFuzzTargetPlanning(unittest.TestCase):
         targets = build_fuzz_targets((manifest,), property_shards=8)
 
         assert_exact_fuzz_coverage((manifest,), targets)
+        self.assertEqual(len(targets), 8)
+        self.assertEqual(
+            sum(target.max_examples_override or 0 for target in targets),
+            30,
+        )
+        self.assertEqual(
+            {target.shard_index for target in targets},
+            set(range(8)),
+        )
+
+    def test_derandomized_explicit_property_remains_one_target(self) -> None:
+        property_id = "tests.test_example_generated.TestWorld.test_property"
+        manifest = FuzzModuleManifest(
+            module_name="tests.test_example_generated",
+            test_ids=(property_id,),
+            hypothesis_tests=(
+                FuzzPropertyManifest(
+                    test_id=property_id,
+                    max_examples=30,
+                    uses_default_settings=False,
+                    entropy_shardable=False,
+                ),
+            ),
+        )
+
+        targets = build_fuzz_targets((manifest,), property_shards=8)
+
+        assert_exact_fuzz_coverage((manifest,), targets)
         self.assertEqual(len(targets), 1)
-        self.assertIsNone(targets[0].profile_max_examples)
+        self.assertIsNone(targets[0].max_examples_override)
+
+    def test_real_beets_property_remains_one_frontloaded_target(self) -> None:
+        module_name = "tests.test_beets_destructive_configs_generated"
+        property_id = f"{module_name}.TestWorld.test_property"
+        manifest = FuzzModuleManifest(
+            module_name=module_name,
+            test_ids=(property_id,),
+            hypothesis_tests=(
+                FuzzPropertyManifest(
+                    test_id=property_id,
+                    max_examples=96,
+                    uses_default_settings=False,
+                ),
+            ),
+        )
+
+        targets = build_fuzz_targets((manifest,), property_shards=8)
+
+        assert_exact_fuzz_coverage((manifest,), targets)
+        self.assertEqual(len(targets), 1)
+        self.assertEqual(targets[0].module_name, module_name)
+        self.assertIsNone(targets[0].max_examples_override)
 
     def test_property_dense_modules_are_frontloaded(self) -> None:
         light = FuzzModuleManifest(
@@ -216,6 +305,43 @@ class TestFuzzTargetPlanning(unittest.TestCase):
             all(
                 target.module_name == dense.module_name
                 for target in targets[:4]
+            )
+        )
+
+    def test_audited_hotspot_precedes_an_ordinary_property_dense_module(
+        self,
+    ) -> None:
+        hotspot_name = "tests.test_beets_destructive_configs_generated"
+        hotspot_property = f"{hotspot_name}.TestWorld.test_property"
+        hotspot = FuzzModuleManifest(
+            module_name=hotspot_name,
+            test_ids=(
+                hotspot_property,
+                f"{hotspot_name}.TestWorld.test_pin",
+            ),
+            hypothesis_tests=(self.property(hotspot_property),),
+        )
+        ordinary_name = "tests.test_dense_generated"
+        ordinary_ids = tuple(
+            f"{ordinary_name}.TestWorld.test_property_{index}"
+            for index in range(8)
+        )
+        ordinary = FuzzModuleManifest(
+            module_name=ordinary_name,
+            test_ids=ordinary_ids,
+            hypothesis_tests=tuple(
+                self.property(test_id) for test_id in ordinary_ids
+            ),
+        )
+
+        targets = build_fuzz_targets((ordinary, hotspot))
+
+        self.assertEqual(targets[0].module_name, hotspot_name)
+        self.assertTrue(
+            all(
+                target.module_name == hotspot_name
+                for target in targets
+                if target.module_name == hotspot_name
             )
         )
 
@@ -288,13 +414,76 @@ class TestFuzzTargetPlanning(unittest.TestCase):
             postgres_worker_count=1,
         )
         self.assertEqual(admitted, (2,))
-        self.assertEqual(EPHEMERAL_POSTGRES_TARGET_LIMIT, 2)
+        self.assertEqual(EPHEMERAL_POSTGRES_TARGET_LIMIT, 24)
+
+    def test_idle_postgres_lane_is_filled_before_ordinary_capacity(self) -> None:
+        pending = tuple(
+            FuzzTarget(
+                label=f"ordinary-{index}",
+                module_name=f"ordinary-{index}",
+                load_names=(f"ordinary-{index}",),
+                expected_test_ids=(f"ordinary-{index}.test",),
+            )
+            for index in range(3)
+        ) + (
+            FuzzTarget(
+                label="postgres",
+                module_name="postgres",
+                load_names=("postgres",),
+                expected_test_ids=("postgres.test",),
+                uses_ephemeral_postgres=True,
+            ),
+        )
+
+        admitted = select_fuzz_admissions(
+            pending,
+            (),
+            worker_count=3,
+            postgres_worker_count=1,
+        )
+
+        self.assertEqual(len(admitted), 3)
+        self.assertIn(3, admitted)
+
+    def test_admission_checker_rejects_an_idle_postgres_lane(self) -> None:
+        pending = tuple(
+            FuzzTarget(
+                label=f"ordinary-{index}",
+                module_name=f"ordinary-{index}",
+                load_names=(f"ordinary-{index}",),
+                expected_test_ids=(f"ordinary-{index}.test",),
+            )
+            for index in range(2)
+        ) + (
+            FuzzTarget(
+                label="postgres",
+                module_name="postgres",
+                load_names=("postgres",),
+                expected_test_ids=("postgres.test",),
+                uses_ephemeral_postgres=True,
+            ),
+        )
+
+        with self.assertRaisesRegex(AssertionError, "PostgreSQL lane idle"):
+            assert_fuzz_admission(
+                pending,
+                (),
+                (0, 1),
+                worker_count=2,
+                postgres_worker_count=1,
+            )
 
     def test_30_core_500_example_profile_uses_two_entropy_shards(self) -> None:
         self.assertEqual(recommended_property_shards(30, 500), 2)
 
     def test_30_core_overnight_profile_keeps_eight_entropy_shards(self) -> None:
         self.assertEqual(recommended_property_shards(30, 20_000), 8)
+
+    def test_30_core_host_defaults_to_60_by_24_concurrency(self) -> None:
+        workers = recommended_fuzz_jobs(30)
+
+        self.assertEqual(workers, 60)
+        self.assertEqual(recommended_postgres_jobs(30, workers), 24)
 
     def test_discovered_profile_budget_ignores_explicit_properties(self) -> None:
         manifest = FuzzModuleManifest(
@@ -638,10 +827,16 @@ class TestFuzzRunnerProcess(unittest.TestCase):
             "    @settings(max_examples=3, deadline=None)\n"
             "    @given(value=st.integers())\n"
             "    def test_property_one(self, value):\n"
+            "        count_dir = Path(os.environ['FUZZ_COUNT_DIR'])\n"
+            "        with (count_dir / 'property-one-count').open('ab') as stream:\n"
+            "            stream.write(b'x')\n"
             "        self.assertEqual(value, value)\n\n"
             "    @settings(max_examples=3, deadline=None)\n"
             "    @given(value=st.text(max_size=3))\n"
             "    def test_property_two(self, value):\n"
+            "        count_dir = Path(os.environ['FUZZ_COUNT_DIR'])\n"
+            "        with (count_dir / 'property-two-count').open('ab') as stream:\n"
+            "            stream.write(b'x')\n"
             "        self.assertEqual(value, value)\n\n"
             "    def test_pin(self):\n"
             "        database = Path(os.environ['HYPOTHESIS_STORAGE_DIRECTORY'])\n"
@@ -769,6 +964,7 @@ class TestFuzzRunnerProcess(unittest.TestCase):
             "HYPOTHESIS_STORAGE_DIRECTORY": str(self.database),
             "CRATEDIGGER_FUZZ_OUTPUT_DIR": str(self.output_dir),
             "FUZZ_FIXTURE_FAIL": "1" if failing else "0",
+            "FUZZ_COUNT_DIR": str(self.root),
         }
         return subprocess.run(
             [
@@ -911,6 +1107,43 @@ class TestFuzzRunnerProcess(unittest.TestCase):
         self.assertIn("4 targets", completed.stdout)
         self.assertIn("1 tests", completed.stdout)
         self.assertIn("ALL GREEN", completed.stdout)
+
+    def test_explicit_property_shards_run_their_divided_budget(self) -> None:
+        env = {
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join(
+                (str(self.root), str(REPO_ROOT), os.environ.get("PYTHONPATH", ""))
+            ),
+            "HYPOTHESIS_STORAGE_DIRECTORY": str(self.database),
+            "CRATEDIGGER_FUZZ_MAX_EXAMPLES": "100",
+            "FUZZ_COUNT_DIR": str(self.root),
+        }
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(RUNNER),
+                "--jobs",
+                "3",
+                "--profile",
+                "fuzz",
+                "--property-shards",
+                "3",
+                self.module,
+            ],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertIn("7 targets (6 property targets", completed.stdout)
+        self.assertIn("DEPTH 2 properties measured", completed.stdout)
+        self.assertIn("ALL GREEN", completed.stdout)
+        self.assertEqual((self.root / "property-one-count").read_bytes(), b"xxx")
+        self.assertEqual((self.root / "property-two-count").read_bytes(), b"xxx")
 
     def test_burst_discloses_a_structurally_shallow_property(self) -> None:
         """End-to-end: real runner, real child, real Hypothesis statistics."""

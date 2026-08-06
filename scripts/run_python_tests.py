@@ -842,6 +842,45 @@ def hypothesis_example_budgets(suite: unittest.TestSuite) -> dict[str, int]:
     return budgets
 
 
+def override_hypothesis_max_examples(
+    suite: unittest.TestSuite,
+    max_examples: int,
+) -> None:
+    """Set one isolated target's budget without changing its other settings."""
+    if max_examples < 1:
+        raise ValueError("Hypothesis target max_examples must be at least 1")
+    properties = tuple(
+        (test, resolved)
+        for test in _iter_test_cases(suite)
+        if (resolved := resolve_hypothesis_settings(test)) is not None
+    )
+    if len(properties) != 1:
+        raise ValueError(
+            "Hypothesis target budget override requires exactly one property, "
+            f"found {len(properties)}"
+        )
+    test, resolved = properties[0]
+    overridden = settings(
+        parent=resolved.configured,
+        max_examples=max_examples,
+    )
+    if resolved.from_state_machine_class:
+        setattr(  # noqa: B010 - Hypothesis stores state-machine settings here
+            type(test),
+            "settings",
+            overridden,
+        )
+        return
+    method = _test_method(test)
+    if method is None:
+        raise ValueError(f"could not resolve Hypothesis target: {test.id()}")
+    setattr(  # noqa: B010 - Hypothesis stores effective settings on the method
+        method,
+        "_hypothesis_internal_use_settings",
+        overridden,
+    )
+
+
 def assert_hypothesis_deadlines_disabled(suite: unittest.TestSuite) -> None:
     """Every Hypothesis test in this suite must resolve ``deadline=None``.
 
@@ -925,6 +964,7 @@ def _run_test_target_child(
     durations: int,
     result_path: Path,
     selected_test_ids: tuple[str, ...] | None = None,
+    max_examples_override: int | None = None,
 ) -> int:
     """Run one target in a fresh interpreter and persist its complete result."""
     stream = io.StringIO()
@@ -948,6 +988,8 @@ def _run_test_target_child(
         suite = unittest.TestSuite(
             discovered_by_id[test_id] for test_id in selected_test_ids
         )
+    if max_examples_override is not None:
+        override_hypothesis_max_examples(suite, max_examples_override)
     assert_hypothesis_deadlines_disabled(suite)
     recorder = HypothesisStatsRecorder(hypothesis_example_budgets(suite))
 
@@ -1321,7 +1363,7 @@ if __name__ == "__main__":
                 Path(sys.argv[3]),
             )
         )
-    if len(sys.argv) in {5, 6} and sys.argv[1] == "--_run-target":
+    if len(sys.argv) in {5, 6, 7} and sys.argv[1] == "--_run-target":
         raise SystemExit(
             _run_test_target_child(
                 msgspec.json.decode(sys.argv[2], type=tuple[str, ...]),
@@ -1329,9 +1371,10 @@ if __name__ == "__main__":
                 Path(sys.argv[4]),
                 (
                     msgspec.json.decode(sys.argv[5], type=tuple[str, ...])
-                    if len(sys.argv) == 6
+                    if len(sys.argv) >= 6
                     else None
                 ),
+                int(sys.argv[6]) if len(sys.argv) == 7 else None,
             )
         )
     raise SystemExit(main())

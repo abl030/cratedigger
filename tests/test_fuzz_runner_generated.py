@@ -31,11 +31,14 @@ from scripts.run_fuzz_tests import (
     discover_fuzz_manifests,
     format_depth_report,
     is_structurally_shallow,
+    recommended_fuzz_jobs,
+    recommended_postgres_jobs,
     recommended_property_shards,
     select_fuzz_admissions,
 )
 from scripts.run_python_tests import (
     _MIN_VALID_TEMP_HEADROOM_BYTES,
+    HOTSPOT_METHOD_BATCHES,
     STRATEGY_SPACE_EXHAUSTED,
     HypothesisPropertyStats,
     RecordingTextTestResult,
@@ -50,6 +53,63 @@ STOPPED_BECAUSE = (
     "settings.max_examples=2500, but < 1% of examples satisfied assumptions",
     "",
 )
+
+
+def assert_method_batched_fuzz_pins(
+    targets: Sequence[FuzzTarget],
+    pin_ids: Sequence[str],
+) -> None:
+    """Audited method hotspots spread every fixed test across bounded targets."""
+    expected = set(pin_ids)
+    pin_targets = tuple(
+        target
+        for target in targets
+        if expected.intersection(target.expected_test_ids)
+    )
+    scheduled = tuple(
+        test_id
+        for target in pin_targets
+        for test_id in target.expected_test_ids
+        if test_id in expected
+    )
+    if len(scheduled) != len(set(scheduled)) or set(scheduled) != expected:
+        raise AssertionError("method-batched fuzz pins do not have exact coverage")
+    batch_count = min(HOTSPOT_METHOD_BATCHES, len(pin_ids))
+    if len(pin_targets) != batch_count:
+        raise AssertionError(
+            f"method-batched fuzz pins use {len(pin_targets)} batches, "
+            f"expected {batch_count}"
+        )
+    widths = tuple(
+        sum(test_id in expected for test_id in target.expected_test_ids)
+        for target in pin_targets
+    )
+    if widths and max(widths) - min(widths) > 1:
+        raise AssertionError(f"method-batched fuzz pins are imbalanced: {widths}")
+
+
+def assert_fuzz_hotspots_frontloaded(
+    targets: Sequence[FuzzTarget],
+    hotspot_modules: set[str],
+) -> None:
+    """No ordinary target may precede an audited hotspot target."""
+    first_ordinary = next(
+        (
+            index
+            for index, target in enumerate(targets)
+            if target.module_name not in hotspot_modules
+        ),
+        len(targets),
+    )
+    late_hotspots = tuple(
+        target.label
+        for target in targets[first_ordinary:]
+        if target.module_name in hotspot_modules
+    )
+    if late_hotspots:
+        raise AssertionError(
+            f"fuzz hotspots were scheduled after ordinary work: {late_hotspots}"
+        )
 
 
 def property_stats(id_count: int, max_size: int) -> st.SearchStrategy[
@@ -262,6 +322,21 @@ def assert_report_names_exactly_the_discarding_properties(
 
 
 class TestGeneratedFuzzTargetPlanning(unittest.TestCase):
+    @given(cpu_count=st.integers(min_value=1, max_value=256))
+    def test_default_concurrency_keeps_bounded_headroom_above_host_cores(
+        self,
+        cpu_count: int,
+    ) -> None:
+        workers = recommended_fuzz_jobs(cpu_count)
+        postgres_workers = recommended_postgres_jobs(cpu_count, workers)
+
+        self.assertGreaterEqual(workers, cpu_count)
+        self.assertLessEqual(workers, cpu_count * 2)
+        self.assertGreaterEqual(postgres_workers, 1)
+        self.assertLessEqual(postgres_workers, min(workers, 24))
+        if cpu_count >= 29:
+            self.assertEqual(postgres_workers, 24)
+
     @given(
         cpu_count=st.integers(min_value=1, max_value=256),
         max_examples=st.integers(min_value=1, max_value=100_000),
@@ -330,11 +405,11 @@ class TestGeneratedFuzzTargetPlanning(unittest.TestCase):
             ]
             self.assertEqual(len(shards), property_shards)
             if property_shards == 1:
-                self.assertIsNone(shards[0].profile_max_examples)
+                self.assertIsNone(shards[0].max_examples_override)
             else:
                 self.assertEqual(
                     sum(
-                        target.profile_max_examples or 0
+                        target.max_examples_override or 0
                         for target in shards
                     ),
                     max_examples,
@@ -344,6 +419,163 @@ class TestGeneratedFuzzTargetPlanning(unittest.TestCase):
                 sum(pin_id in target.expected_test_ids for target in targets),
                 1,
             )
+
+    @given(
+        max_examples=st.integers(min_value=1, max_value=200),
+        property_shards=st.integers(min_value=1, max_value=12),
+        entropy_shardable=st.booleans(),
+    )
+    def test_randomized_explicit_budgets_are_conserved_across_shards(
+        self,
+        max_examples: int,
+        property_shards: int,
+        entropy_shardable: bool,
+    ) -> None:
+        property_id = "tests.test_generated_world.TestWorld.test_explicit"
+        manifest = FuzzModuleManifest(
+            module_name="tests.test_generated_world",
+            test_ids=(property_id,),
+            hypothesis_tests=(
+                FuzzPropertyManifest(
+                    test_id=property_id,
+                    max_examples=max_examples,
+                    uses_default_settings=False,
+                    entropy_shardable=entropy_shardable,
+                ),
+            ),
+        )
+
+        targets = build_fuzz_targets(
+            (manifest,),
+            property_shards=property_shards,
+        )
+
+        assert_exact_fuzz_coverage((manifest,), targets)
+        expected_shards = (
+            min(property_shards, max_examples)
+            if entropy_shardable
+            else 1
+        )
+        self.assertEqual(len(targets), expected_shards)
+        if expected_shards == 1:
+            self.assertIsNone(targets[0].max_examples_override)
+        else:
+            self.assertEqual(
+                sum(target.max_examples_override or 0 for target in targets),
+                max_examples,
+            )
+
+    @example(pin_count=60)
+    @given(pin_count=st.integers(min_value=1, max_value=100))
+    def test_audited_method_hotspots_balance_every_fixed_test(
+        self,
+        pin_count: int,
+    ) -> None:
+        module_name = "tests.test_beets_destructive_configs_generated"
+        property_ids = tuple(
+            f"{module_name}.TestWorld.test_property_{index}"
+            for index in range(2)
+        )
+        pin_ids = tuple(
+            f"{module_name}.TestMatrix.test_cell_{index:03d}"
+            for index in range(pin_count)
+        )
+        manifest = FuzzModuleManifest(
+            module_name=module_name,
+            test_ids=property_ids + pin_ids,
+            hypothesis_tests=tuple(
+                FuzzPropertyManifest(
+                    test_id=test_id,
+                    max_examples=500,
+                    uses_default_settings=True,
+                )
+                for test_id in property_ids
+            ),
+        )
+
+        targets = build_fuzz_targets((manifest,))
+
+        assert_exact_fuzz_coverage((manifest,), targets)
+        assert_method_batched_fuzz_pins(targets, pin_ids)
+
+    @given(
+        ordinary_properties=st.integers(min_value=2, max_value=30),
+        hotspot_pins=st.integers(min_value=1, max_value=40),
+    )
+    def test_audited_hotspots_never_wait_behind_ordinary_modules(
+        self,
+        ordinary_properties: int,
+        hotspot_pins: int,
+    ) -> None:
+        hotspot_name = "tests.test_beets_destructive_configs_generated"
+        hotspot_property = f"{hotspot_name}.TestWorld.test_property"
+        hotspot = FuzzModuleManifest(
+            module_name=hotspot_name,
+            test_ids=(hotspot_property,) + tuple(
+                f"{hotspot_name}.TestWorld.test_pin_{index}"
+                for index in range(hotspot_pins)
+            ),
+            hypothesis_tests=(
+                FuzzPropertyManifest(
+                    test_id=hotspot_property,
+                    max_examples=500,
+                    uses_default_settings=True,
+                ),
+            ),
+        )
+        ordinary_name = "tests.test_ordinary_generated"
+        ordinary_ids = tuple(
+            f"{ordinary_name}.TestWorld.test_property_{index}"
+            for index in range(ordinary_properties)
+        )
+        ordinary = FuzzModuleManifest(
+            module_name=ordinary_name,
+            test_ids=ordinary_ids,
+            hypothesis_tests=tuple(
+                FuzzPropertyManifest(
+                    test_id=test_id,
+                    max_examples=500,
+                    uses_default_settings=True,
+                )
+                for test_id in ordinary_ids
+            ),
+        )
+
+        targets = build_fuzz_targets((ordinary, hotspot))
+
+        assert_fuzz_hotspots_frontloaded(targets, {hotspot_name})
+
+    @given(
+        max_examples=st.integers(min_value=1, max_value=200),
+        property_shards=st.integers(min_value=1, max_value=12),
+    )
+    def test_real_beets_property_never_multiplies_nested_beets_startup(
+        self,
+        max_examples: int,
+        property_shards: int,
+    ) -> None:
+        module_name = "tests.test_beets_destructive_configs_generated"
+        property_id = f"{module_name}.TestWorld.test_property"
+        manifest = FuzzModuleManifest(
+            module_name=module_name,
+            test_ids=(property_id,),
+            hypothesis_tests=(
+                FuzzPropertyManifest(
+                    test_id=property_id,
+                    max_examples=max_examples,
+                    uses_default_settings=False,
+                ),
+            ),
+        )
+
+        targets = build_fuzz_targets(
+            (manifest,),
+            property_shards=property_shards,
+        )
+
+        assert_exact_fuzz_coverage((manifest,), targets)
+        self.assertEqual(len(targets), 1)
+        self.assertIsNone(targets[0].max_examples_override)
 
     @given(
         active_pg=st.integers(min_value=0, max_value=4),
@@ -388,6 +620,15 @@ class TestGeneratedFuzzTargetPlanning(unittest.TestCase):
             worker_count=worker_count,
             postgres_worker_count=postgres_worker_count,
         )
+        admitted_postgres = sum(
+            queued[index].uses_ephemeral_postgres for index in admitted
+        )
+        expected_postgres = min(
+            postgres_worker_count - active_pg,
+            worker_count - len(active),
+            sum(queued_target.uses_ephemeral_postgres for queued_target in queued),
+        )
+        self.assertEqual(admitted_postgres, expected_postgres)
 
     @given(
         postgres=st.booleans(),
@@ -705,14 +946,43 @@ class TestFuzzCoverageCheckerKnownBad(unittest.TestCase):
             ),
         )
         targets = list(build_fuzz_targets((manifest,), property_shards=4))
-        assert targets[0].profile_max_examples is not None
+        assert targets[0].max_examples_override is not None
         targets[0] = replace(
             targets[0],
-            profile_max_examples=targets[0].profile_max_examples + 1,
+            max_examples_override=targets[0].max_examples_override + 1,
         )
 
         with self.assertRaisesRegex(ValueError, "changed fuzz property budget"):
             assert_exact_fuzz_coverage((manifest,), targets)
+
+    def test_checker_rejects_a_multiplied_explicit_budget(self) -> None:
+        property_id = "tests.test_generated_world.TestWorld.test_explicit"
+        manifest = FuzzModuleManifest(
+            module_name="tests.test_generated_world",
+            test_ids=(property_id,),
+            hypothesis_tests=(
+                FuzzPropertyManifest(
+                    test_id=property_id,
+                    max_examples=30,
+                    uses_default_settings=False,
+                ),
+            ),
+        )
+        multiplied = tuple(
+            FuzzTarget(
+                label=f"{property_id}::{index}",
+                module_name=manifest.module_name,
+                load_names=(manifest.module_name,),
+                expected_test_ids=(property_id,),
+                shard_index=index,
+                shard_count=3,
+                max_examples_override=30,
+            )
+            for index in range(3)
+        )
+
+        with self.assertRaisesRegex(ValueError, "changed fuzz property budget"):
+            assert_exact_fuzz_coverage((manifest,), multiplied)
 
     def test_admission_checker_rejects_too_many_pg_targets(self) -> None:
         pending = (fuzz_target(0, True), fuzz_target(1, True))
@@ -725,6 +995,70 @@ class TestFuzzCoverageCheckerKnownBad(unittest.TestCase):
                 worker_count=2,
                 postgres_worker_count=1,
             )
+
+    def test_method_batch_checker_rejects_the_historical_single_pin_target(
+        self,
+    ) -> None:
+        module_name = "tests.test_beets_destructive_configs_generated"
+        pin_ids = tuple(
+            f"{module_name}.TestMatrix.test_cell_{index}" for index in range(2)
+        )
+        unsplit = (
+            FuzzTarget(
+                label=f"{module_name}::pins",
+                module_name=module_name,
+                load_names=(module_name,),
+                expected_test_ids=pin_ids,
+            ),
+        )
+
+        with self.assertRaisesRegex(AssertionError, "use 1 batches"):
+            assert_method_batched_fuzz_pins(unsplit, pin_ids)
+
+    def test_hotspot_order_checker_rejects_the_historical_late_target(
+        self,
+    ) -> None:
+        ordinary = fuzz_target(0, False)
+        hotspot = replace(
+            fuzz_target(1, False),
+            module_name="tests.test_beets_destructive_configs_generated",
+        )
+
+        with self.assertRaisesRegex(AssertionError, "after ordinary work"):
+            assert_fuzz_hotspots_frontloaded(
+                (ordinary, hotspot),
+                {hotspot.module_name},
+            )
+
+    def test_coverage_checker_rejects_sharded_real_beets_property(self) -> None:
+        module_name = "tests.test_beets_destructive_configs_generated"
+        property_id = f"{module_name}.TestWorld.test_property"
+        manifest = FuzzModuleManifest(
+            module_name=module_name,
+            test_ids=(property_id,),
+            hypothesis_tests=(
+                FuzzPropertyManifest(
+                    test_id=property_id,
+                    max_examples=4,
+                    uses_default_settings=False,
+                ),
+            ),
+        )
+        sharded = tuple(
+            FuzzTarget(
+                label=f"{property_id}::{index}",
+                module_name=module_name,
+                load_names=(module_name,),
+                expected_test_ids=(property_id,),
+                shard_index=index,
+                shard_count=2,
+                max_examples_override=2,
+            )
+            for index in range(2)
+        )
+
+        with self.assertRaisesRegex(ValueError, "resource shard limit"):
+            assert_exact_fuzz_coverage((manifest,), sharded)
 
     def test_capacity_checker_rejects_an_unrelated_io_error(self) -> None:
         with self.assertRaisesRegex(
@@ -774,7 +1108,7 @@ class TestFuzzDiscoverySettingsContract(unittest.TestCase):
         )
         self.assertEqual(len(matching), 1)
         self.assertEqual(matching[0].shard_count, 1)
-        self.assertIsNone(matching[0].profile_max_examples)
+        self.assertIsNone(matching[0].max_examples_override)
 
     def test_finite_metadata_prevents_sharding_even_if_default_flag_drifts(self) -> None:
         property_id = "tests.test_generated_world.TestWorld.test_finite"
@@ -795,7 +1129,7 @@ class TestFuzzDiscoverySettingsContract(unittest.TestCase):
 
         self.assertEqual(len(targets), 1)
         self.assertEqual(targets[0].shard_count, 1)
-        self.assertIsNone(targets[0].profile_max_examples)
+        self.assertIsNone(targets[0].max_examples_override)
 
     def test_finite_metadata_rejects_a_budget_cardinality_mismatch(self) -> None:
         property_id = "tests.test_generated_world.TestWorld.test_finite"
@@ -837,7 +1171,7 @@ class TestFuzzDiscoverySettingsContract(unittest.TestCase):
                 expected_test_ids=(property_id,),
                 shard_index=index,
                 shard_count=2,
-                profile_max_examples=2,
+                max_examples_override=2,
             )
             for index in range(2)
         )

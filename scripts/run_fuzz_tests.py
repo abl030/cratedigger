@@ -31,14 +31,17 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.run_python_tests import (
+    HOTSPOT_SHARD_POLICIES,
     STRATEGY_SPACE_EXHAUSTED,
     ChildTargetResult,
     HypothesisPropertyStats,
+    TestModule,
     _iter_test_cases,
     _test_method,
     assert_hypothesis_deadlines_disabled,
     resolve_hypothesis_settings,
     settings_max_examples,
+    shard_test_ids,
 )
 from tests.finite_domain_metadata import (
     FINITE_DOMAIN_ATTRIBUTE,
@@ -48,8 +51,11 @@ from tests.finite_domain_metadata import (
 TARGET_RUNNER = REPO_ROOT / "scripts" / "run_python_tests.py"
 DEFAULT_PROFILE = "fuzz"
 DEFAULT_DURATIONS = 5
-EPHEMERAL_POSTGRES_TARGET_LIMIT = 2
+EPHEMERAL_POSTGRES_TARGET_LIMIT = 24
 MIN_EXAMPLES_PER_ENTROPY_SHARD = 250
+FUZZ_PROPERTY_SHARD_LIMITS = {
+    "tests.test_beets_destructive_configs_generated": 1,
+}
 _SCHEMA_READY_ENV = "CRATEDIGGER_TEST_SCHEMA_READY"
 _DISCOVERY_DSN = "postgresql:///cratedigger_fuzz_discovery_only"
 
@@ -60,6 +66,14 @@ DEPTH_REPORT_LIMIT = 20
 #: defect: ``assume`` marks a world invalid and Hypothesis refills the budget,
 #: which is exactly why it is the correct way to drop an unanswerable world.
 DISCARD_RATE_THRESHOLD = 0.10
+_DERANDOMIZE_SETTING = "derandomize"
+
+
+def _settings_derandomize(configured: settings) -> bool:
+    value = getattr(configured, _DERANDOMIZE_SETTING)
+    if not isinstance(value, bool):
+        raise TypeError("Hypothesis derandomize setting must be boolean")
+    return value
 
 
 class FuzzPropertyManifest(msgspec.Struct, frozen=True):
@@ -68,6 +82,7 @@ class FuzzPropertyManifest(msgspec.Struct, frozen=True):
     test_id: str
     max_examples: int
     uses_default_settings: bool
+    entropy_shardable: bool = True
     finite_domain_cardinality: int | None = None
 
 
@@ -90,7 +105,7 @@ class FuzzTarget:
     expected_test_ids: tuple[str, ...]
     shard_index: int = 0
     shard_count: int = 1
-    profile_max_examples: int | None = None
+    max_examples_override: int | None = None
     uses_ephemeral_postgres: bool = False
 
 
@@ -159,7 +174,7 @@ class PersistedFuzzTarget(msgspec.Struct, frozen=True):
     expected_test_ids: tuple[str, ...]
     shard_index: int
     shard_count: int
-    profile_max_examples: int | None
+    max_examples_override: int | None
     uses_ephemeral_postgres: bool
 
 
@@ -167,6 +182,55 @@ class PersistedFuzzManifest(msgspec.Struct, frozen=True):
     """Complete target map copied beside retained failure logs."""
 
     targets: tuple[PersistedFuzzTarget, ...]
+
+
+def _build_fuzz_pin_targets(
+    manifest: FuzzModuleManifest,
+    pin_ids: Sequence[str],
+) -> tuple[FuzzTarget, ...]:
+    """Reuse the deterministic runner's audited hotspot sharding for pins."""
+    granularity = HOTSPOT_SHARD_POLICIES.get(manifest.module_name)
+    if granularity is None:
+        return (
+            FuzzTarget(
+                label=f"{manifest.module_name}::pins",
+                module_name=manifest.module_name,
+                load_names=(manifest.module_name,),
+                expected_test_ids=tuple(pin_ids),
+                uses_ephemeral_postgres=manifest.uses_ephemeral_postgres,
+            ),
+        )
+    module = TestModule(
+        name=manifest.module_name,
+        path=Path(),
+        weight=1,
+    )
+    return tuple(
+        FuzzTarget(
+            label=target.test_name,
+            module_name=manifest.module_name,
+            load_names=target.load_names,
+            expected_test_ids=target.expected_test_ids,
+            uses_ephemeral_postgres=manifest.uses_ephemeral_postgres,
+        )
+        for target in shard_test_ids(
+            module,
+            pin_ids,
+            granularity=granularity,
+        )
+    )
+
+
+def _property_shard_count(
+    manifest: FuzzModuleManifest,
+    item: FuzzPropertyManifest,
+) -> int:
+    if item.finite_domain_cardinality is not None or not item.entropy_shardable:
+        return 1
+    return min(
+        item.max_examples,
+        FUZZ_PROPERTY_SHARD_LIMITS.get(manifest.module_name, item.max_examples),
+    )
 
 
 def build_fuzz_targets(
@@ -181,6 +245,7 @@ def build_fuzz_targets(
     ordered_manifests = sorted(
         manifests,
         key=lambda manifest: (
+            manifest.module_name not in HOTSPOT_SHARD_POLICIES,
             -len(manifest.hypothesis_tests),
             -len(manifest.test_ids),
             manifest.module_name,
@@ -206,9 +271,13 @@ def build_fuzz_targets(
         isolate_properties = (
             len(manifest.hypothesis_tests) > 1
             or any(
-                item.uses_default_settings and property_shards > 1
+                min(
+                    property_shards,
+                    _property_shard_count(manifest, item),
+                ) > 1
                 for item in manifest.hypothesis_tests
             )
+            or manifest.module_name in HOTSPOT_SHARD_POLICIES
         )
         if not isolate_properties:
             targets.append(
@@ -230,12 +299,10 @@ def build_fuzz_targets(
                     f"invalid Hypothesis budget for {item.test_id}: "
                     f"{item.max_examples}"
                 )
-            shard_count = 1
-            if (
-                item.finite_domain_cardinality is None
-                and item.uses_default_settings
-            ):
-                shard_count = min(property_shards, item.max_examples)
+            shard_count = min(
+                property_shards,
+                _property_shard_count(manifest, item),
+            )
             quotient, remainder = divmod(item.max_examples, shard_count)
             budgets = tuple(
                 quotient + (1 if index < remainder else 0)
@@ -256,7 +323,7 @@ def build_fuzz_targets(
                         expected_test_ids=(item.test_id,),
                         shard_index=shard_index,
                         shard_count=shard_count,
-                        profile_max_examples=(
+                        max_examples_override=(
                             budget if shard_count > 1 else None
                         ),
                         uses_ephemeral_postgres=(
@@ -270,17 +337,7 @@ def build_fuzz_targets(
             if test_id not in hypothesis_ids
         )
         if pin_ids:
-            targets.append(
-                FuzzTarget(
-                    label=f"{manifest.module_name}::pins",
-                    module_name=manifest.module_name,
-                    load_names=(manifest.module_name,),
-                    expected_test_ids=pin_ids,
-                    uses_ephemeral_postgres=(
-                        manifest.uses_ephemeral_postgres
-                    ),
-                )
-            )
+            targets.extend(_build_fuzz_pin_targets(manifest, pin_ids))
 
     built = tuple(targets)
     assert_exact_fuzz_coverage(manifests, built)
@@ -352,9 +409,9 @@ def assert_exact_fuzz_coverage(
                 )
             if shard_count != 1 or len(scheduled) != 1:
                 raise ValueError(f"finite fuzz property was sharded: {test_id}")
-            if scheduled[0].profile_max_examples is not None:
+            if scheduled[0].max_examples_override is not None:
                 raise ValueError(
-                    f"finite fuzz property received a profile override: {test_id}"
+                    f"finite fuzz property received a budget override: {test_id}"
                 )
             continue
         if shard_count != len(scheduled):
@@ -364,13 +421,20 @@ def assert_exact_fuzz_coverage(
         ):
             raise ValueError(f"invalid fuzz property shard index: {test_id}")
         if shard_count == 1:
-            if scheduled[0].profile_max_examples is not None:
+            if scheduled[0].max_examples_override is not None:
                 raise ValueError(f"unexpected fuzz property budget: {test_id}")
             continue
-        if not item.uses_default_settings:
-            raise ValueError(f"explicit fuzz budget was sharded: {test_id}")
+        resource_limit = FUZZ_PROPERTY_SHARD_LIMITS.get(
+            scheduled[0].module_name,
+        )
+        if resource_limit is not None and shard_count > resource_limit:
+            raise ValueError(
+                f"fuzz property exceeds resource shard limit: {test_id}"
+            )
+        if not item.entropy_shardable:
+            raise ValueError(f"non-randomized fuzz property was sharded: {test_id}")
         shard_budgets = [
-            target.profile_max_examples for target in scheduled
+            target.max_examples_override for target in scheduled
         ]
         if any(budget is None or budget < 1 for budget in shard_budgets):
             raise ValueError(f"invalid fuzz property budget: {test_id}")
@@ -560,11 +624,13 @@ def _discover_module_child(module_name: str, result_path: Path) -> int:
             raise TypeError(f"invalid finite-domain metadata: {test.id()}")
         if raw_finite_spec is not None:
             raw_finite_spec.verify()
+        derandomize = _settings_derandomize(configured)
         hypothesis_tests.append(
             FuzzPropertyManifest(
                 test_id=test.id(),
                 max_examples=configured_max_examples,
                 uses_default_settings=uses_default_settings,
+                entropy_shardable=not derandomize,
                 finite_domain_cardinality=(
                     raw_finite_spec.cardinality
                     if raw_finite_spec is not None
@@ -670,21 +736,20 @@ def _execute_fuzz_target(
     log_path = log_directory / f"{index:04d}.log"
     result_path = log_directory / f"{index:04d}.json"
     child_environment = dict(environment)
-    if target.profile_max_examples is not None:
-        child_environment["CRATEDIGGER_FUZZ_MAX_EXAMPLES"] = str(
-            target.profile_max_examples
-        )
+    command = [
+        sys.executable,
+        str(TARGET_RUNNER),
+        "--_run-target",
+        msgspec.json.encode(target.load_names).decode(),
+        str(DEFAULT_DURATIONS),
+        str(result_path),
+        msgspec.json.encode(target.expected_test_ids).decode(),
+    ]
+    if target.max_examples_override is not None:
+        command.append(str(target.max_examples_override))
     with log_path.open("wb") as raw_output:
         completed = subprocess.run(
-            [
-                sys.executable,
-                str(TARGET_RUNNER),
-                "--_run-target",
-                msgspec.json.encode(target.load_names).decode(),
-                str(DEFAULT_DURATIONS),
-                str(result_path),
-                msgspec.json.encode(target.expected_test_ids).decode(),
-            ],
+            command,
             cwd=REPO_ROOT,
             env=child_environment,
             stdout=raw_output,
@@ -766,6 +831,13 @@ def assert_fuzz_admission(
     )
     if active_postgres + admitted_postgres > postgres_worker_count:
         raise AssertionError("fuzz admission exceeds PostgreSQL capacity")
+    required_postgres = min(
+        postgres_worker_count - active_postgres,
+        worker_count - len(active),
+        sum(target.uses_ephemeral_postgres for target in pending),
+    )
+    if admitted_postgres < required_postgres:
+        raise AssertionError("fuzz admission left PostgreSQL lane idle")
 
     admitted_set = set(admitted_indexes)
     remaining = tuple(
@@ -799,8 +871,17 @@ def select_fuzz_admissions(
     )
     admitted: list[int] = []
     for index, target in enumerate(pending):
+        if postgres_slots < 1 or len(admitted) >= total_slots:
+            break
+        if target.uses_ephemeral_postgres:
+            admitted.append(index)
+            postgres_slots -= 1
+    admitted_set = set(admitted)
+    for index, target in enumerate(pending):
         if len(admitted) >= total_slots:
             break
+        if index in admitted_set:
+            continue
         if target.uses_ephemeral_postgres:
             if postgres_slots < 1:
                 continue
@@ -986,7 +1067,7 @@ def _persist_failure_logs(
                 expected_test_ids=target.expected_test_ids,
                 shard_index=target.shard_index,
                 shard_count=target.shard_count,
-                profile_max_examples=target.profile_max_examples,
+                max_examples_override=target.max_examples_override,
                 uses_ephemeral_postgres=target.uses_ephemeral_postgres,
             )
             for index, target in enumerate(targets)
@@ -1013,11 +1094,41 @@ def _parse_positive_int(value: str) -> int:
     return parsed
 
 
+def recommended_fuzz_jobs(cpu_count: int) -> int:
+    """Keep mixed subprocess/I/O targets runnable at twice host cores."""
+    if cpu_count < 1:
+        raise ValueError("cpu_count must be at least 1")
+    return cpu_count * 2
+
+
+def recommended_postgres_jobs(cpu_count: int, worker_count: int) -> int:
+    """Keep a bounded four-fifths-host PG lane busy through target turnover."""
+    if cpu_count < 1:
+        raise ValueError("cpu_count must be at least 1")
+    if worker_count < 1:
+        raise ValueError("worker_count must be at least 1")
+    return min(
+        worker_count,
+        EPHEMERAL_POSTGRES_TARGET_LIMIT,
+        max(1, (cpu_count * 4 + 4) // 5),
+    )
+
+
 def _default_jobs() -> int:
     configured = os.environ.get("CRATEDIGGER_FUZZ_JOBS")
     if configured is not None:
         return _parse_positive_int(configured)
-    return os.cpu_count() or 1
+    return recommended_fuzz_jobs(os.cpu_count() or 1)
+
+
+def _default_postgres_jobs() -> int:
+    configured = os.environ.get("CRATEDIGGER_FUZZ_POSTGRES_JOBS")
+    if configured is not None:
+        return _parse_positive_int(configured)
+    return recommended_postgres_jobs(
+        os.cpu_count() or 1,
+        _default_jobs(),
+    )
 
 
 def property_profile_max_examples(
@@ -1075,6 +1186,11 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("modules", nargs="*")
     parser.add_argument("--jobs", type=_parse_positive_int, default=_default_jobs())
+    parser.add_argument(
+        "--postgres-jobs",
+        type=_parse_positive_int,
+        default=_default_postgres_jobs(),
+    )
     parser.add_argument(
         "--property-shards",
         type=_parse_positive_int,
@@ -1163,7 +1279,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"{len(targets)} targets ({property_targets} property targets, "
             f"up to {property_shards} entropy shards), "
             f"up to {worker_count} parallel, "
-            f"up to {min(EPHEMERAL_POSTGRES_TARGET_LIMIT, worker_count)} "
+            f"up to {min(args.postgres_jobs, worker_count)} "
             "PostgreSQL-backed "
             f"({os.cpu_count() or 1} host cores), profile={args.profile}",
             flush=True,
@@ -1173,7 +1289,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             targets,
             worker_count=worker_count,
             postgres_worker_count=min(
-                EPHEMERAL_POSTGRES_TARGET_LIMIT,
+                args.postgres_jobs,
                 worker_count,
             ),
             environment=child_environment,
