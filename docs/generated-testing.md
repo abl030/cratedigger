@@ -536,28 +536,37 @@ Two independent gates enforce this:
 
 `scripts/fuzz_burst.sh` discovers the exact unittest IDs and effective
 Hypothesis settings in every generated module. Ordinary deterministic pins run
-once as a batch, and fixed per-test `@settings(max_examples=...)` budgets remain
-single-run. Each property using the default fuzz profile divides its generated
-examples exactly across independent entropy shards. The automatic fan-out is
-bounded by both host cores and the effective budget discovered from the loaded
-profile, with at least 250 examples per entropy child. The total budget does not
-grow: on a 30-core host, the ordinary 500-example profile uses two processes of
-250 examples, while the 20,000-example overnight gate keeps eight processes of
-2,500. The child runner loads the owning module and selects the exact discovered
-ID, so dynamically named state-machine tests can be sharded without repeating
+once; modules already audited as deterministic-suite hotspots reuse that
+runner's bounded class/method batches, and those hotspots are admitted before
+ordinary modules so expensive real-tool work cannot become the tail. Every
+randomized, non-finite property may divide its exact discovered budget across
+independent entropy shards, including a fixed per-test
+`@settings(max_examples=...)` budget. Derandomized and independently proved
+finite properties remain one target. The real-Beets destructive matrix is also
+one property target: multiplying its nested Beets startup/migration work causes
+hard subprocess timeouts, so it is frontloaded instead of sharded.
+
+Automatic fan-out is bounded by both host cores and the effective default
+profile budget, with at least 250 examples per entropy child. The total budget
+does not grow: on a 30-core host, the ordinary 500-example profile uses two
+processes of 250 examples, while the 20,000-example overnight gate keeps eight
+processes of 2,500. The child runner loads the owning module, selects the exact
+discovered ID, and applies only that target's divided budget, so dynamically
+named state-machine tests and explicit budgets can be sharded without repeating
 the module's other properties or pins. An exact-budget check rejects any
 schedule that omits a test, repeats a pin, changes a property's combined example
-count, or invents an ID.
+count, exceeds a resource shard limit, or invents an ID.
 
-The queue uses every host core by default for ordinary targets. Targets whose
-module boots an ephemeral PostgreSQL cluster are capped at two concurrent
-processes, bounding their tmpfs footprint independently of the queue length;
-eligible ordinary work bypasses a PostgreSQL-backed target waiting for that
-resource. Any `ENOSPC`, PostgreSQL `DiskFull`, or unexpected loss of an
-ephemeral database aborts further admission and reports that the property
-verdict is invalid. Set `CRATEDIGGER_FUZZ_JOBS` to cap all concurrent
-processes or `CRATEDIGGER_FUZZ_PROPERTY_SHARDS` to override the automatic
-entropy fan-out. On doc1's 30-core VM on 2026-07-23, the complete 71-module,
+The queue defaults to twice the host's core count because these targets mix
+Python with subprocess and filesystem waits. PostgreSQL-backed targets have a
+separate bounded lane (24 targets on doc1's 30-core host); admission fills that
+lane before ordinary capacity so PostgreSQL work cannot accumulate into a
+low-utilization tail. Any `ENOSPC`, PostgreSQL `DiskFull`, or unexpected loss of
+an ephemeral database aborts further admission and reports that the property
+verdict is invalid. Set `CRATEDIGGER_FUZZ_JOBS` to cap all concurrent processes,
+`CRATEDIGGER_FUZZ_POSTGRES_JOBS` to cap the PostgreSQL lane, or
+`CRATEDIGGER_FUZZ_PROPERTY_SHARDS` to override automatic entropy fan-out. On
+doc1's 30-core VM on 2026-07-23, the complete 71-module,
 769-test overnight burst at 20,000 examples completed in 607.8 seconds. The
 worst subprocess-heavy generated module completed alone in 142.7 seconds; its
 unsharded properties had still not completed after ten minutes.
