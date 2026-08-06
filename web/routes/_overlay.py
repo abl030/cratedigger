@@ -16,7 +16,7 @@ contract in `web/routes/browse.py`).
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from typing import TYPE_CHECKING
 
 import msgspec
@@ -53,8 +53,10 @@ def _band_from_detail(
     return band_from_detail(rid, in_library, quality, overlay._rank_cfg())
 
 
-def band_release_ids(release_ids: Iterable[str]) -> dict[str, str]:
-    """Map each release id to its beets-library quality band.
+def band_request_rows(
+    rows: Iterable[Mapping[str, object]],
+) -> dict[str, str]:
+    """Map each request's acquisition release id to its quality band.
 
     The long-tail web adapter over the shared exact-resolution decision.
     Three-way (KTD1):
@@ -69,10 +71,15 @@ def band_release_ids(release_ids: Iterable[str]) -> dict[str, str]:
     projection. Skips ``check_pipeline`` because the cohort rows already
     carry their pipeline columns.
 
-    Returns a complete dict keyed by the release id string. Ids that are
-    explicitly absent from Beets ARE present with the ``"missing"`` band;
-    omitting a requested identity is an authority failure, never an implicit
-    claim that the pressing is missing.
+    Takes rows rather than bare release ids because a request resolves over
+    the union of its acquisition id and any MusicBrainz merge survivor
+    (#1059); the key stays the acquisition id, which is what the long-tail
+    row displays.
+
+    Returns a complete dict keyed by the acquisition release id string. Ids
+    that are explicitly absent from Beets ARE present with the ``"missing"``
+    band; omitting a requested identity is an authority failure, never an
+    implicit claim that the pressing is missing.
     """
     from lib.banding import (
         CurrentBeetsBandingUnavailableError,
@@ -81,15 +88,15 @@ def band_release_ids(release_ids: Iterable[str]) -> dict[str, str]:
     from web import overlay
     from web import server as srv
 
-    ids_list = [str(rid) for rid in release_ids]
-    if not ids_list:
+    row_list = list(rows)
+    if not row_list:
         return {}
     b = srv._beets_db()
     if b is None:
         raise CurrentBeetsBandingUnavailableError(
             "current Beets authority is unavailable"
         )
-    return resolve_current_release_bands(b, ids_list, overlay._rank_cfg())
+    return resolve_current_release_bands(b, row_list, overlay._rank_cfg())
 
 
 def overlay_release_rows_in_place(

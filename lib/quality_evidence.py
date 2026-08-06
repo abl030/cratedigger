@@ -49,6 +49,7 @@ if TYPE_CHECKING:
     from lib.import_queue import ImportJob
     from lib.measurement import PreimportMeasurement
     from lib.pipeline_db.rows import AlbumRequestRow
+    from lib.release_identity import ReleaseIdentity
 
 
 @runtime_checkable
@@ -2003,6 +2004,25 @@ def load_candidate_evidence_for_decision(
     )
 
 
+def _acceptable_identities_for_request(
+    db: QualityEvidenceDB,
+    request_id: int,
+    identity: "ReleaseIdentity",
+) -> tuple["ReleaseIdentity", ...]:
+    """The request's acceptable pressings, survivor first (#1059).
+
+    Falls back to the caller's own identity when the row is unreadable, so
+    a merge lookup can never make evidence building worse than it is today.
+    """
+    from lib.request_identity import canonical_identity
+
+    row = db.get_request(request_id)
+    canonical = canonical_identity(row) if row is not None else None
+    if canonical is None or canonical == identity:
+        return (identity,)
+    return (canonical, identity)
+
+
 def load_or_backfill_current_evidence(
     db: QualityEvidenceDB,
     *,
@@ -2026,6 +2046,7 @@ def load_or_backfill_current_evidence(
         release_identity_for_lookup,
     )
     from lib.quality import QualityRankConfig
+    from lib.request_identity import resolve_current_for_identities
 
     if current_release is None:
         identity = release_identity_for_lookup(mb_release_id)
@@ -2035,6 +2056,12 @@ def load_or_backfill_current_evidence(
                 "failed",
                 f"invalid exact release identity {mb_release_id!r}",
             )
+        # Resolve over the request's identity union (#1059). The stored
+        # merge survivor is read from the request row we already have a
+        # handle to, so no caller has to learn about merges to benefit.
+        # The resolution still names ``identity``, which is what the
+        # equality check below compares against.
+        acceptable = _acceptable_identities_for_request(db, request_id, identity)
         if beets_library_db_path is None:
             beets_handle = BeetsDB(library_root=beets_library_root)
         else:
@@ -2043,21 +2070,27 @@ def load_or_backfill_current_evidence(
                 library_root=beets_library_root,
             )
         with beets_handle as beets:
-            resolution = beets.resolve_current_release(identity)
-        if isinstance(resolution, CurrentBeetsMissing):
+            union = resolve_current_for_identities(beets, acceptable)
+        if union is None:
+            return EvidenceBuildResult(
+                None,
+                "failed",
+                "current Beets authority omitted a requested release identity",
+            )
+        if isinstance(union, CurrentBeetsMissing):
             return EvidenceBuildResult(
                 None,
                 "empty_current",
                 "exact album not in beets",
             )
-        if isinstance(resolution, CurrentBeetsAmbiguous):
+        if isinstance(union, CurrentBeetsAmbiguous):
             return EvidenceBuildResult(
                 None,
                 "ambiguous_current",
                 "ambiguous current Beets authority: "
-                f"{resolution.reason}; album_ids={resolution.album_ids}",
+                f"{union.reason}; album_ids={union.album_ids}",
             )
-        current_release = resolution
+        current_release = union
 
     expected_identity = release_identity_for_lookup(mb_release_id)
     if expected_identity is None or current_release.identity != expected_identity:

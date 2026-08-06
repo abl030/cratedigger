@@ -20,6 +20,10 @@ from lib.beets_db import (
 )
 from lib.quality import QualityRankConfig
 from lib.release_identity import ReleaseIdentity
+from lib.request_identity import (
+    acceptable_identities,
+    merge_union_resolutions,
+)
 
 BAND_MISSING = "missing"
 BAND_UNKNOWN = "unknown"
@@ -154,25 +158,38 @@ def band_current_resolutions(
 
 def resolve_current_release_bands(
     beets: CurrentBeetsResolver,
-    release_ids: Iterable[str],
+    requests: Iterable[Mapping[str, object]],
     cfg: QualityRankConfig,
 ) -> dict[str, str]:
-    """Resolve one exact batch and band it through the shared decision."""
-    requested: list[tuple[str, ReleaseIdentity]] = []
-    for raw_release_id in release_ids:
-        release_id = str(raw_release_id)
-        identity = ReleaseIdentity.from_id(release_id)
-        if identity is None:
+    """Band a request cohort over each row's identity union (#1059).
+
+    Keyed by the **acquisition** release id, because that is what the
+    long-tail row displays and what the caller asked about. The MusicBrainz
+    merge survivor, when one is stored, only widens which albums may answer
+    — it never becomes the key.
+
+    Still one batched query for the whole cohort, merged or not.
+    """
+    rows = list(requests)
+    requested: list[tuple[str, tuple[ReleaseIdentity, ...]]] = []
+    for row in rows:
+        acceptable = acceptable_identities(row)
+        if not acceptable:
             raise CurrentBeetsBandingIdentityError(
-                f"invalid exact release identity for banding: {release_id!r}"
+                "invalid exact release identity for banding: "
+                f"{row.get('mb_release_id')!r}/"
+                f"{row.get('discogs_release_id')!r}"
             )
-        requested.append((release_id, identity))
+        requested.append((acceptable[-1].release_id, acceptable))
     if not requested:
         return {}
 
-    identities = list(dict.fromkeys(
-        identity for _release_id, identity in requested
-    ))
+    identities: list[ReleaseIdentity] = []
+    for _key, acceptable in requested:
+        for identity in acceptable:
+            if identity not in identities:
+                identities.append(identity)
+
     observed = beets.resolve_current_releases(identities)
     omitted = [
         identity.release_id
@@ -184,14 +201,15 @@ def resolve_current_release_bands(
             "current Beets resolver omitted exact release identities: "
             + ", ".join(omitted)
         )
-    bands = band_current_resolutions(
-        {identity: observed[identity] for identity in identities},
-        cfg,
-    )
-    return {
-        release_id: bands[identity.release_id]
-        for release_id, identity in requested
-    }
+
+    folded: dict[ReleaseIdentity, CurrentBeetsResolution] = {}
+    for _key, acceptable in requested:
+        folded[acceptable[-1]] = merge_union_resolutions(
+            acceptable[-1],
+            [observed[identity] for identity in acceptable],
+        )
+    bands = band_current_resolutions(folded, cfg)
+    return {key: bands[key] for key, _acceptable in requested}
 
 
 def current_library_bitrate(detail: dict[str, object]) -> int:

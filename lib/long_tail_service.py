@@ -206,12 +206,15 @@ class LongTailResult(msgspec.Struct, frozen=True):
     band_filter: str | None
 
 
-# ``band_fn`` maps a list of canonical exact release ids (MB UUIDs or Discogs
-# numerics) to a complete ``{release_id: band}`` dict in a bounded number of
-# queries. The route wires this to the exact Beets resolver banding core in
-# ``web.routes._overlay``; tests inject a counting fake. Every queried id must
-# be present in the result, including ids explicitly banded ``Missing``.
-BandFn = Callable[[list[str]], dict[str, str]]
+# ``band_fn`` maps request rows to a complete ``{acquisition_release_id:
+# band}`` dict in a bounded number of queries. It takes rows, not bare ids,
+# because a request resolves over the union of its acquisition id and any
+# MusicBrainz merge survivor (#1059) — the key stays the acquisition id,
+# which is what the long-tail row displays. The route wires this to the exact
+# Beets resolver banding core in ``web.routes._overlay``; tests inject a
+# counting fake. Every queried row must be present in the result, including
+# ids explicitly banded ``Missing``.
+BandFn = Callable[[list[dict[str, Any]]], dict[str, str]]
 
 
 class _PipelineDB(Protocol):
@@ -277,10 +280,15 @@ def _band_rows(
     rows: list[dict[str, Any]],
     band_fn: BandFn,
 ) -> list[LongTailRow]:
-    """Band a cohort by one strict MB-or-Discogs identity per request."""
+    """Band a cohort by one strict MB-or-Discogs identity per request.
+
+    The strict identity is still derived here so a malformed row fails with
+    the operator-facing ``LongTailIdentityError`` before Beets is consulted;
+    ``band_fn`` then resolves each row over its own identity union.
+    """
     identities = [_strict_request_identity(row) for row in rows]
     release_ids = [identity.release_id for identity in identities]
-    bands = band_fn(release_ids) if release_ids else {}
+    bands = band_fn(rows) if rows else {}
     missing_results = [
         release_id
         for release_id in dict.fromkeys(release_ids)
