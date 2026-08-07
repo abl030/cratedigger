@@ -269,6 +269,81 @@ class TestUnionProperties(unittest.TestCase):
                     check_unmerged_is_inert(resolution, plain)
 
 
+class TestSwitchedConsumersAgreeWithTheUnion(unittest.TestCase):
+    """U6 — every switched consumer answers what the union answers.
+
+    The pins in ``tests/test_request_identity.py`` prove the live 316 shape
+    through each real consumer; this patrols the world space around them.
+    Independent review (2026-08-06) found the evidence build, long-tail
+    banding and the world audit each unconstrained — the union could be
+    deleted from all three and the complete suite stayed green — so the
+    property drives the REAL consumers, not the shared helper they call.
+    """
+
+    world: BeetsWorld
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.world = BeetsWorld(REPO)
+        for index, release_id in enumerate(HELD):
+            cls.world.import_release(BeetsWorldRelease(
+                release_id=release_id,
+                artist=f"Artist {index}",
+                album=f"Album {index}",
+                year=1990 + index,
+            ))
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.world.close()
+
+    @settings(deadline=None, max_examples=25)
+    @given(
+        acquired=st.sampled_from([*HELD, *UNHELD]),
+        canonical=st.one_of(st.none(), st.sampled_from([*HELD, *UNHELD])),
+    )
+    @example(acquired=LOSER, canonical=SURVIVOR)   # the live 316 shape
+    @example(acquired=SURVIVOR, canonical=None)    # unmerged control
+    def test_long_tail_banding_agrees_with_the_union(
+        self, acquired: str, canonical: str | None,
+    ) -> None:
+        """Banding says "missing" exactly when the union says missing."""
+        from lib.banding import resolve_current_release_bands
+        from lib.quality import QualityRankConfig
+
+        if canonical == acquired:
+            canonical = None
+        row = {
+            "id": 316,
+            "mb_release_id": acquired,
+            "discogs_release_id": None,
+            "canonical_release_id": canonical,
+        }
+
+        with open_beets_db(
+            db_path=str(self.world.library_db),
+            library_root=str(self.world.library_root),
+        ) as beets:
+            union = resolve_current_for_requests(beets, [row])[316]
+            bands = resolve_current_release_bands(
+                beets, [row], QualityRankConfig.defaults())
+
+        banded_missing = bands[acquired] == "missing"
+        if isinstance(union, CurrentBeetsAmbiguous):
+            # A split falls back to the acquisition-only answer for display
+            # rather than aborting the cohort; it is the world audit's job
+            # to surface it. Assert the cohort SURVIVED, which is the whole
+            # point — reaching here at all means no exception was raised.
+            return
+        union_missing = isinstance(union, CurrentBeetsMissing)
+        if banded_missing != union_missing:
+            raise AssertionError(
+                f"banding says missing={banded_missing} while the union says "
+                f"missing={union_missing} for acquired={acquired} "
+                f"canonical={canonical}"
+            )
+
+
 class TestInvariantCheckersTripOnViolations(unittest.TestCase):
     """Every checker owes a planted violation proving it can fail."""
 

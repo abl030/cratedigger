@@ -132,9 +132,13 @@ discharge these.
   Provenance for I2/I7; also lets the sweep report staleness.
 - Partial index on `canonical_release_id WHERE canonical_release_id IS NOT NULL`
   (the populated set is single digits; the index is for the join, not the scan).
-- No CHECK forbidding `canonical = acquisition`: the reconciler simply never
-  writes that case, and a constraint would turn a future MB correction into a
-  COMMIT failure rather than a no-op.
+- ~~No CHECK forbidding `canonical = acquisition`.~~ **Superseded during
+  implementation**: the migration DOES add that CHECK. A self-referential
+  canonical would collapse the union resolver's two-identity probe to one and
+  silently hide a real split, which is worse than a COMMIT failure — and
+  nothing does an in-place `SET mb_release_id`, so the "future MB correction"
+  the original text feared cannot arise. The writer guards it too, so the
+  constraint is a second line, not the only one.
 
 ### `lib/mb_canonical.py` — salvaged from `feat/mb-canonical-redirects`
 

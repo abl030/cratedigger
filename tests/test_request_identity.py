@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import unittest
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 
 from lib.beets_db import (
@@ -373,6 +374,127 @@ class TestUnionThroughRealBeetsAndARealConsumer(unittest.TestCase):
         self.assertIsInstance(display, CurrentLibraryAmbiguousDisplay)
         assert isinstance(display, CurrentLibraryAmbiguousDisplay)
         self.assertEqual(display.reason, "merged_identity_split")
+
+
+class TestEveryUnionConsumerIsPinnedOverAMergedWorld(unittest.TestCase):
+    """One composition pin per switched consumer, over the live 316 shape.
+
+    Fault injection during independent review (2026-08-06) showed the
+    library-tab consumer above was the ONLY one constrained: deleting the
+    union from the evidence build, from long-tail banding, and from the
+    world audit each survived the complete suite. Those three surfaces are
+    exactly what this PR's measured-effect table depends on.
+
+    Each test below drives the REAL consumer over a real Beets library
+    holding the SURVIVOR while the request stores the LOSER, and asserts
+    the decided outcome — not an intermediate field. Removing the canonical
+    from that consumer's acceptable set flips every one of them.
+    """
+
+    def _world_holding_survivor(self) -> BeetsWorld:
+        world = BeetsWorld(REPO)
+        self.addCleanup(world.close)
+        world.import_release(BeetsWorldRelease(
+            release_id=SURVIVOR,
+            artist="Merged Artist",
+            album="Merged Album",
+            year=1996,
+        ))
+        return world
+
+    def test_evidence_build_finds_the_album_for_a_merged_request(self) -> None:
+        """Mutant killed: ``_acceptable_identities_for_request`` dropping the
+        canonical makes this ``empty_current`` — which is request 316's live
+        ``evidence_link_without_album`` violation."""
+        from lib.quality import QualityRankConfig
+        from lib.quality_evidence import load_or_backfill_current_evidence
+        from tests.fakes import FakePipelineDB
+
+        world = self._world_holding_survivor()
+        db = FakePipelineDB()
+        request_id = db.add_request(
+            artist_name="Merged Artist", album_title="Merged Album",
+            source="request", mb_release_id=LOSER,
+        )
+        db.record_canonical_release_id(
+            request_id,
+            canonical_release_id=SURVIVOR,
+            resolved_at=datetime(2026, 8, 6, tzinfo=UTC),
+        )
+
+        result = load_or_backfill_current_evidence(
+            db,
+            request_id=request_id,
+            mb_release_id=LOSER,
+            quality_ranks=QualityRankConfig.defaults(),
+            beets_library_db_path=str(world.library_db),
+            beets_library_root=str(world.library_root),
+        )
+
+        self.assertNotEqual(
+            result.status, "empty_current",
+            "the evidence build must resolve the album Beets actually holds",
+        )
+
+    def test_long_tail_banding_bands_a_merged_request_from_disk(self) -> None:
+        """Mutant killed: passing only ``acceptable[-1:]`` bands this
+        ``missing`` while the album is on disk."""
+        from lib.banding import resolve_current_release_bands
+        from lib.quality import QualityRankConfig
+
+        world = self._world_holding_survivor()
+        rows = [_row(canonical=SURVIVOR)]
+
+        with open_beets_db(
+            db_path=str(world.library_db),
+            library_root=str(world.library_root),
+        ) as beets:
+            bands = resolve_current_release_bands(
+                beets, rows, QualityRankConfig.defaults())
+
+        # Keyed by the acquisition id, banded from the survivor's album.
+        self.assertNotEqual(
+            bands[LOSER], "missing",
+            "a held album must not band as missing after a merge",
+        )
+
+    def test_world_audit_reports_no_missing_for_a_merged_request(self) -> None:
+        """Mutant killed: resolving per-acquisition-identity in ``audit_world``
+        reproduces the live ``current_beets_missing`` +
+        ``evidence_link_without_album`` pair for requests 316 / 8832.
+
+        Drives the REAL ``audit_world`` entry point, not the union helper —
+        an earlier version of this pin called the helper directly and the
+        call-site mutant walked straight through it.
+        """
+        from lib.world_audit_service import audit_world
+        from tests.fakes import FakePipelineDB
+
+        world = self._world_holding_survivor()
+        db = FakePipelineDB()
+        request_id = db.add_request(
+            artist_name="Merged Artist", album_title="Merged Album",
+            source="request", mb_release_id=LOSER,
+        )
+        db.update_status(request_id, "imported")
+        db.record_canonical_release_id(
+            request_id,
+            canonical_release_id=SURVIVOR,
+            resolved_at=datetime(2026, 8, 6, tzinfo=UTC),
+        )
+
+        with open_beets_db(
+            db_path=str(world.library_db),
+            library_root=str(world.library_root),
+        ) as beets:
+            report = audit_world(db, beets)
+
+        codes = [v.code for v in report.violations]
+        self.assertNotIn(
+            "current_beets_missing", codes,
+            "an imported request whose album Beets holds under the survivor "
+            "must not be reported missing",
+        )
 
 
 if __name__ == "__main__":

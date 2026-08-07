@@ -204,10 +204,27 @@ def resolve_current_release_bands(
 
     folded: dict[ReleaseIdentity, CurrentBeetsResolution] = {}
     for _key, acceptable in requested:
-        folded[acceptable[-1]] = merge_union_resolutions(
-            acceptable[-1],
+        acquisition = acceptable[-1]
+        union = merge_union_resolutions(
+            acquisition,
             [observed[identity] for identity in acceptable],
         )
+        if (
+            isinstance(union, CurrentBeetsAmbiguous)
+            and union.reason == "merged_identity_split"
+        ):
+            # A double-sided merge is a per-row identity problem, and
+            # ``band_current_resolutions`` aborts the WHOLE cohort on any
+            # ambiguity. Letting a split through would 503 the entire
+            # long-tail worklist for one row — the exact lib/banding.py
+            # cohort-abort that PR #1056 was rejected for. Banding is a
+            # display projection; it falls back to what the request asked
+            # for, which is byte-identical to today. The split itself is
+            # surfaced by the world audit, whose job that is.
+            # Found by tests/test_request_identity_generated.py, which
+            # reproduced it on the live 316 shape immediately.
+            union = observed[acquisition]
+        folded[acquisition] = union
     bands = band_current_resolutions(folded, cfg)
     return {key: bands[key] for key, _acceptable in requested}
 

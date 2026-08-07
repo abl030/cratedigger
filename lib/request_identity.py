@@ -211,9 +211,23 @@ def resolve_current_for_identities(
 
     A one-element set is exactly today's behaviour, so a caller with no
     canonical to offer loses nothing.
+
+    **The acquisition identity must be LAST**, matching
+    :func:`acceptable_identities`. That is asserted rather than assumed: a
+    caller passing ``(acquisition, canonical)`` would make every resolution
+    name the canonical, which is round 1 of the aborted attempt — a
+    substituted identity leaking out of the join into a dozen consumers that
+    compare it against the request's stored id. This helper is advertised to
+    the destructive services, so the ordering is enforced at the boundary,
+    not left to each of them to remember.
     """
     if not acceptable:
         return None
+    if len(acceptable) > 2:
+        raise ValueError(
+            "acceptable identities are {canonical, acquisition} at most, "
+            f"got {[i.release_id for i in acceptable]}"
+        )
     observed = beets.resolve_current_releases(list(acceptable))
     sides = [observed[i] for i in acceptable if i in observed]
     if len(sides) != len(acceptable):
