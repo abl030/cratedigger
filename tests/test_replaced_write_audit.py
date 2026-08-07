@@ -276,7 +276,7 @@ _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "active_automation_import_job_id = %s` predicate and the "
         "owner-clearing final write are unchanged)"
     ),
-    ("lib/pipeline_db/requests.py", 529, "a2f3083f8cbe8885"): (
+    ("lib/pipeline_db/requests.py", 529, "def8ac5be1cbeede"): (
         "Replace holds the row lock and CASes the captured active source status "
         "only when no processing owner exists"
     ),

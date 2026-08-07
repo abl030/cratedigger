@@ -195,6 +195,7 @@ def make_request_row(**overrides: Any) -> dict[str, Any]:
         "source_path": None,
         "reasoning": None,
         "status": "wanted",
+        "replaced_from_status": None,
         "search_attempts": 0,
         "download_attempts": 0,
         "validation_attempts": 0,

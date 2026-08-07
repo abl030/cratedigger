@@ -1160,11 +1160,16 @@ class MbidReplaceService:
                         # A replaced audit row retains the original download
                         # receipt.  That durable #278 exception belongs to
                         # slskd orphan convergence, never this staging tail.
-                        if current_source.get("active_download_state") is not None:
+                        if current_source.get("replaced_from_status") == "downloading":
                             warnings.append(
                                 f"request {request_id} was downloading; in-flight "
                                 "slskd transfers are not cancelled and staging "
                                 "cleanup was skipped (see issue #278)"
+                            )
+                        elif current_source.get("replaced_from_status") is None:
+                            warnings.append(
+                                "Replace tail has unknown historical source status; "
+                                "staging cleanup was skipped fail-safe"
                             )
                         elif staging_dir and artist and title:
                             for auto_import in (True, False):
@@ -1236,6 +1241,7 @@ class MbidReplaceService:
         mandatory_warnings = tuple(
             warning for warning in warnings
             if "was downloading; in-flight slskd transfers" not in warning
+            and "unknown historical source status" not in warning
         )
         if mandatory_warnings:
             return ReplaceResult(

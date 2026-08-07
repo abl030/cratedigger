@@ -235,6 +235,8 @@ class _ServiceCase(unittest.TestCase):
             status=status,
             source=source,
         )
+        if status == "replaced":
+            row["replaced_from_status"] = "wanted"
         db.seed_request(row)
         return request_id
 
@@ -1656,16 +1658,97 @@ class TestReplaceHappyPath(_ServiceCase):
 
     def test_happy_path_downloading_skips_staging_logs_warning(self):
         self._patch_externals()
-        _db, _, svc = self._replace(old_status="downloading")
+        db, _, svc = self._replace(old_status="downloading")
         slskd = svc.slskd
         result = svc.replace_request_mbid(
             42, target_mb_release_id=NEW_MBID,
         )
         self.assertEqual(result.outcome, RESULT_REPLACED)
+        old = db.get_request(42)
+        assert old is not None
+        self.assertEqual(old["replaced_from_status"], "downloading")
         # Warning about orphaned transfer.
         self.assertTrue(any("downloading" in w for w in result.warnings))
         # slskd was never called.
         self._assert_slskd_untouched(slskd)
+
+    def test_broken_downloading_row_without_state_skips_staging_on_retry(self):
+        """Replace preserves the authoritative prior status, not bad metadata."""
+        import tempfile
+
+        from lib.processing_paths import stage_to_ai_path
+
+        self._patch_externals()
+        with tempfile.TemporaryDirectory(prefix="cratedigger-test-staging-") as raw:
+            cfg = CratediggerConfig()
+            object.__setattr__(cfg, "beets_staging_dir", raw)
+            target = stage_to_ai_path(
+                artist="Pet Grief",
+                title="Old Pressing",
+                staging_dir=raw,
+                request_id=42,
+                auto_import=True,
+            )
+            Path(target).mkdir(parents=True)
+            db, plan_service, svc = self._replace(
+                old_status="downloading", cfg=cfg,
+            )
+            self.assertIsNone(db.request(42)["active_download_state"])
+            plan_service.generate_for_request.side_effect = [
+                RuntimeError("injected post-supersede fault"),
+                MagicMock(),
+            ]
+
+            first = svc.replace_request_mbid(42, target_mb_release_id=NEW_MBID)
+            self.assertEqual(first.outcome, RESULT_TRANSIENT)
+            old = db.get_request(42)
+            assert old is not None
+            self.assertEqual(old["replaced_from_status"], "downloading")
+            self.assertTrue(Path(target).is_dir())
+
+            retried = svc.replace_request_mbid(42, target_mb_release_id=NEW_MBID)
+            staging_preserved_after_retry = Path(target).is_dir()
+
+        self.assertEqual(retried.outcome, RESULT_REPLACED)
+        self.assertTrue(staging_preserved_after_retry)
+
+    def test_historical_replace_tail_with_unknown_status_skips_staging(self):
+        """A pre-migration replaced row cannot infer destructive ownership."""
+        import tempfile
+
+        from lib.processing_paths import stage_to_ai_path
+
+        self._patch_externals()
+        with tempfile.TemporaryDirectory(prefix="cratedigger-test-staging-") as raw:
+            cfg = CratediggerConfig()
+            object.__setattr__(cfg, "beets_staging_dir", raw)
+            target = stage_to_ai_path(
+                artist="Pet Grief",
+                title="Old Pressing",
+                staging_dir=raw,
+                request_id=42,
+                auto_import=True,
+            )
+            Path(target).mkdir(parents=True)
+            db = FakePipelineDB()
+            self._seed_old(db, status="replaced")
+            db.request(42)["replaced_from_status"] = None
+            db.seed_request(make_request_row(
+                id=43,
+                mb_release_id=NEW_MBID,
+                mb_release_group_id=RG_ID,
+                artist_name="Pet Grief",
+                album_title="New Pressing",
+                status="wanted",
+                replaces_request_id=42,
+            ))
+            svc = self._make_service(db, cfg=cfg)
+
+            result = svc.replace_request_mbid(42, target_mb_release_id=NEW_MBID)
+            staging_preserved = Path(target).is_dir()
+
+        self.assertEqual(result.outcome, RESULT_REPLACED)
+        self.assertTrue(staging_preserved)
 
     def test_happy_path_manual(self):
         self._patch_externals()

@@ -386,6 +386,7 @@ class TestSupersedeRequestMbidRoundTrip(unittest.TestCase):
         old = db.get_request(old_id)
         assert old is not None
         self.assertEqual(old["status"], "replaced")
+        self.assertEqual(old["replaced_from_status"], "wanted")
         # album_tracks for the new row must round-trip through the same
         # getter the rest of the pipeline reads tracks back with.
         tracks = db.get_tracks(new_id)
