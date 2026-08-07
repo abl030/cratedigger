@@ -22,7 +22,6 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 
 from lib.canonical_release_service import (
-    OUTCOME_BUSY,
     OUTCOME_FROZEN,
     OUTCOME_INVALID_IDENTITY,
     OUTCOME_NO_CANONICAL,
@@ -34,11 +33,6 @@ from lib.canonical_release_service import (
     OUTCOME_STALE,
     OUTCOME_UNCHANGED,
     CanonicalReleaseService,
-)
-from lib.pipeline_db import (
-    ADVISORY_LOCK_NAMESPACE_IMPORT,
-    ADVISORY_LOCK_NAMESPACE_RELEASE,
-    release_id_to_lock_key,
 )
 from tests.fakes import FakePipelineDB
 
@@ -115,43 +109,6 @@ class TestReconcileRequest(unittest.TestCase):
         self.assertEqual(
             self.db.request(rid)["canonical_release_id"], SECOND_SURVIVOR)
 
-    def test_move_locks_acquisition_old_and_new_associations(self) -> None:
-        rid = self._seed()
-        self.db.record_canonical_release_id(
-            rid, canonical_release_id=SURVIVOR, resolved_at=NOW,
-        )
-
-        result = _service(
-            self.db, {LOSER: SECOND_SURVIVOR},
-        ).reconcile_request(rid)
-
-        self.assertEqual(result.outcome, OUTCOME_RESOLVED)
-        self.assertEqual(
-            self.db.advisory_lock_calls,
-            [
-                (ADVISORY_LOCK_NAMESPACE_IMPORT, rid),
-                *[
-                    (ADVISORY_LOCK_NAMESPACE_RELEASE, key)
-                    for key in sorted({
-                        release_id_to_lock_key(LOSER),
-                        release_id_to_lock_key(SURVIVOR),
-                        release_id_to_lock_key(SECOND_SURVIVOR),
-                    })
-                ],
-            ],
-        )
-
-    def test_release_contention_does_not_write_a_survivor(self) -> None:
-        rid = self._seed()
-        self.db.set_advisory_lock_result(
-            lambda namespace, _key: namespace != ADVISORY_LOCK_NAMESPACE_RELEASE,
-        )
-
-        result = _service(self.db, {LOSER: SURVIVOR}).reconcile_request(rid)
-
-        self.assertEqual(result.outcome, OUTCOME_BUSY)
-        self.assertIsNone(self.db.request(rid)["canonical_release_id"])
-
     def test_repeat_of_the_same_answer_is_a_no_op(self) -> None:
         rid = self._seed()
         answers = {LOSER: SURVIVOR}
@@ -187,7 +144,6 @@ class TestReconcileRequest(unittest.TestCase):
             {
                 "get_request",
                 "list_non_replaced_requests",
-                "advisory_lock",
                 "record_canonical_release_id",
                 "retire_canonical_release_id",
             },
@@ -222,24 +178,6 @@ class TestRetireRequest(unittest.TestCase):
                 field for field in before if before[field] != after[field]
             },
             {"canonical_release_id", "canonical_resolved_at"},
-        )
-
-    def test_retire_locks_acquisition_and_survivor_before_clearing(self) -> None:
-        result = CanonicalReleaseService(self.db).retire_request(self.request_id)
-
-        self.assertEqual(result.outcome, OUTCOME_RETIRED)
-        self.assertEqual(
-            self.db.advisory_lock_calls,
-            [
-                (ADVISORY_LOCK_NAMESPACE_IMPORT, self.request_id),
-                *[
-                    (ADVISORY_LOCK_NAMESPACE_RELEASE, key)
-                    for key in sorted({
-                        release_id_to_lock_key(LOSER),
-                        release_id_to_lock_key(SURVIVOR),
-                    })
-                ],
-            ],
         )
 
     def test_missing_no_canonical_and_replaced_are_noops(self) -> None:

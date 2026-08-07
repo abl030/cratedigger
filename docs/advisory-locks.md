@@ -152,33 +152,6 @@ acquires `PLAN` for the new request. The required nesting is therefore
 the deadlock argument. The source mirror fetch intentionally happens before
 `RELEASE`, so a slow metadata request never holds the cross-process lock.
 
-### Request-association writers
-
-`request_identity.acceptable_identities(row)` is the inverse-association
-authority used by Library Delete: every non-`replaced` request contributes its
-acquisition identity and any stored canonical survivor. A writer that adds or
-removes one of those memberships holds every affected RELEASE lock so an
-under-lock inverse reread remains authoritative until its exact Beets child
-completes.
-
-Request-backed writers take `IMPORT(request_id)` first, then the deduplicated
-set of RELEASE **keys** in ascending numeric order. The shared
-`release_identity_locks` helper deduplicates hash collisions by key and unwinds
-earlier acquisitions if a later non-blocking acquire contends. A collision is a
-safe, temporarily wider serialization boundary; it never permits a missing
-lock. There is no reverse `RELEASE -> IMPORT` path. Direct creation has no
-existing request, so its established `RELEASE -> PLAN` nesting remains the
-only non-request-backed order.
-
-| Writer | Before identities | After identities | Lock scope / contention |
-|---|---|---|---|
-| Direct Add / new-row Upgrade | none | acquisition | Existing RELEASE -> PLAN scope includes provisional publication and resume; audited in #1070, no gap found. |
-| Canonical reconcile | acquisition + old canonical | acquisition + resolved canonical | Mirror resolution is outside locks; IMPORT then union RELEASE locks, fresh reread/CAS. Busy retries on the next sweep. |
-| Canonical retire | acquisition + stored canonical | acquisition | IMPORT then before RELEASE locks, fresh reread/CAS. Busy is a typed retryable conflict. |
-| Replace | old acquisition + old canonical | target acquisition | IMPORT then union RELEASE locks through old-row supersede, new-row publication, and old-library cleanup. Target collision is rechecked under lock. |
-| Pipeline Delete / ghost cleanup | current acceptable identities | none | IMPORT then before RELEASE locks, fresh reread and conditional delete. Contention or a stale association is zero mutation. |
-| Library Delete with pipeline purge | current acceptable identities + filed Beets identity | none | IMPORT then sorted union RELEASE locks, fresh request/Beets reread and exact child delete. A survivor-filed merged row still locks its acquisition identity before removing the pipeline row. |
-
 ### IMPORTER — worker singleton lock
 
 **Why**: The import queue is the durable state owner, but beets mutation is
@@ -239,23 +212,6 @@ changes, and automated owner convergence all acquire IMPORT before the durable
 owner reread.
 Authority rejection is a 409 / CLI exit 4 with zero filesystem, audit, job, or
 request mutation.
-
-### Exact-session rule
-
-An advisory lock is authority held by one PostgreSQL backend, not a token that
-survives reconnect. While any advisory-lock scope is open, `PipelineDB`
-disables its normal autocommit reconnect/replay convenience. A lost or replaced
-connection raises `AdvisoryLockSessionLost` and the short association writer
-returns its typed busy/retry result without replaying the failed statement on a
-fresh backend. This applies uniformly to direct `RELEASE -> PLAN` creation and
-to every request-backed `IMPORT -> RELEASE` writer. This is a **SQL
-no-replay** guarantee only: it does not prove that a Beets child or filesystem
-operation remained fenced while a backend died. In particular, a Replace whose
-supersede already committed surfaces its runnable descendant rather than
-inviting a second Replace, but D0 does not validate the external cleanup tail.
-Issue #1071 is the required pre-deploy successor for cancellation/fencing of
-external children and resumable post-supersede cleanup; do not infer either
-property from this lock scope.
 
 Inside a processing transaction, row locks have their own fixed order:
 request, every job for that request in ID order, then cleanup journals in job
@@ -326,13 +282,11 @@ watchdogs have stopped.
 | Automation startup convergence | `lib/pipeline_db/import_jobs.py` | `PipelineDB.recover_automation_import_job` | IMPORT then RELEASE | `request_id`; `release_id_to_lock_key(release_id)` |
 | Auto + force-import dispatch | `lib/dispatch/core.py` | `dispatch_import_core` | RELEASE | `release_id_to_lock_key(mb_release_id)` |
 | Direct Add / new-row Upgrade | `lib/request_creation_service.py` | `RequestCreationService.create_or_resume` | RELEASE then PLAN | `release_id_to_lock_key(creation.release_id)`; `request_id` |
-| Canonical reconcile / retire | `lib/canonical_release_service.py` | `CanonicalReleaseService.reconcile_row` / `retire_request` | IMPORT then sorted RELEASE union | `request_id`; `acceptable_identities(before) ∪ acceptable_identities(after)` |
 | Force-import outer | `lib/dispatch/entry_points.py` | `dispatch_import_from_db` | IMPORT | `request_id` |
 | Ban-source destructive action | `lib/destructive_release_service.py` | `ban_source` | IMPORT then RELEASE | `request_id`; `release_id_to_lock_key(server release id)` |
 | Library-delete destructive action | `lib/destructive_release_service.py` | `delete_release_from_library` | IMPORT then RELEASE, or RELEASE only without a pipeline row; ambiguous dual or malformed-nonempty album identity rejects before locks | server-derived pipeline request id; `release_id_to_lock_key(server release id)` |
-| Replace operator action | `lib/mbid_replace_service.py` | `MbidReplaceService.replace_request_mbid` | IMPORT then sorted RELEASE union | `request_id`; old acceptable identities plus target identity |
-| Direct pipeline delete | `lib/pipeline_delete_service.py` | `delete_pipeline_request` | IMPORT then sorted RELEASE before-set | `request_id`; current acceptable identities |
-| Ghost imported cleanup | `scripts/cleanup_ghost_imported.py` | `cmd_apply` | delegates to direct pipeline delete | no direct DB deletion |
+| Replace operator action | `lib/mbid_replace_service.py` | `MbidReplaceService.replace_request_mbid` | IMPORT | `request_id` |
+| Direct pipeline delete | `lib/pipeline_delete_service.py` | `delete_pipeline_request` | IMPORT | `request_id` |
 | Importer worker singleton | `scripts/importer.py` | `main` | IMPORTER | `1` |
 | Import queue dedupe/owner commands | `lib/pipeline_db/import_jobs.py` | enqueue, claim, heartbeat, recovery, terminal helpers | unique index and IMPORT | `dedupe_key`; `request_id` |
 | Plan generation | `lib/search_plan_service.py` | `SearchPlanService.generate_for_new_request` / `generate_for_request` | PLAN | `request_id` |

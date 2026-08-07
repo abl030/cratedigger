@@ -55,7 +55,6 @@ from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_IMPORT,
     ADVISORY_LOCK_NAMESPACE_RELEASE,
     AlbumRequestRow,
-    release_id_to_lock_key,
 )
 from lib.release_identity import ReleaseIdentity
 from tests.fakes import DenylistEntry, FakeBeetsDB, FakePipelineDB
@@ -1197,7 +1196,6 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
             beets_db=beets,
             request=DeleteRequest(
                 album_id=target_album_id,
-                purge_pipeline=True,
                 expected_pipeline_id=request_id,
                 expected_release_id=filed_release_id,
             ),
@@ -1212,22 +1210,11 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
                 [call.expected_release_id for call in calls], [filed_release_id],
             )
             self.assertIsNone(beets.get_album_detail(target_album_id))
-            self.assertIsNone(db.get_request(request_id))
         else:
             self.assertIsInstance(result, DeleteBeetsAmbiguous)
             self.assertEqual(calls, [])
             self.assertIsNotNone(beets.get_album_detail(target_album_id))
-            self.assertEqual(db.request(request_id)["status"], "imported")
-        self.assertEqual(
-            [
-                key for namespace, key in db.advisory_lock_calls
-                if namespace == ADVISORY_LOCK_NAMESPACE_RELEASE
-            ],
-            sorted({
-                release_id_to_lock_key(acquisition),
-                release_id_to_lock_key(survivor),
-            }),
-        )
+        self.assertEqual(db.request(request_id)["status"], "imported")
 
     def test_lost_delete_ack_always_requires_manual_recovery(self) -> None:
         # Exhaustive finite lost-ack table. It retains the decisive subprocess

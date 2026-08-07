@@ -17,7 +17,6 @@ import json
 from typing import Protocol
 
 from lib.canonical_release_service import (
-    OUTCOME_BUSY,
     OUTCOME_FROZEN,
     OUTCOME_INVALID_IDENTITY,
     OUTCOME_NO_CANONICAL,
@@ -51,7 +50,6 @@ _EXIT_CODES = {
     OUTCOME_FROZEN: 4,
     OUTCOME_NO_CANONICAL: 4,
     OUTCOME_STALE: 4,
-    OUTCOME_BUSY: 4,
     OUTCOME_INVALID_IDENTITY: 5,
 }
 

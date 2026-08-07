@@ -316,7 +316,7 @@ def post_pipeline_replace(
               ``RESULT_TARGET_COLLISION_REQUEST``
       * 422 — ``RESULT_TARGET_INVALID``, ``RESULT_TARGET_RELEASE_GROUP_MISMATCH``,
               ``RESULT_TARGET_SAME_AS_CURRENT``
-      * 503 — ``RESULT_TRANSIENT`` (mirror or Replace lock busy) or
+      * 503 — ``RESULT_TRANSIENT`` (mirror unreachable etc.) or
               ``RESULT_MIRROR_UNCONFIGURED`` (Discogs mirror not configured)
     """
     from lib.config import read_runtime_config

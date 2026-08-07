@@ -554,7 +554,6 @@ class FakePipelineDB:
         self.status_history: list[tuple[int, str]] = []
         self.update_download_state_calls: list[tuple[int, str]] = []
         self.advisory_lock_calls: list[tuple[int, int]] = []
-        self.advisory_lock_events: list[tuple[str, int, int]] = []
         self.closed = False
         self._owner_session_pin: tuple[
             OwnerSessionIdentity,
@@ -946,15 +945,11 @@ class FakePipelineDB:
         before calling the code under test.
         """
         self.advisory_lock_calls.append((namespace, key))
-        self.advisory_lock_events.append(("enter", namespace, key))
         acquired = (
             self._advisory_lock_result(namespace, key)
             if callable(self._advisory_lock_result)
             else self._advisory_lock_result)
-        try:
-            yield acquired
-        finally:
-            self.advisory_lock_events.append(("exit", namespace, key))
+        yield acquired
 
     @contextmanager
     def _pin_owner_session(

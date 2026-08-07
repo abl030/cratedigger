@@ -45,9 +45,7 @@ from lib.pipeline_db import (
     DownloadLogOutcome,
     release_id_to_lock_key,
 )
-from lib.pipeline_db._core import AdvisoryLockSessionLost
 from lib.quality import resolve_user_requeue_override
-from lib.release_association_locks import release_identity_locks
 from lib.release_identity import ReleaseIdentity
 from lib.request_identity import acceptable_identities, resolve_current_for_request
 
@@ -906,18 +904,11 @@ def _delete_with_release_lock(
     preflight_detail: dict[str, object],
     beets_delete_fn: BeetsDeleteFn,
 ) -> DeleteResult:
-    # A request may be filed under its canonical survivor while retaining its
-    # acquisition identity.  Purging that request removes *both* inverse
-    # associations, so it must fence every current association, not merely
-    # the filed Beets identity.  Library-only deletes have no request row and
-    # therefore deliberately retain their single filed-identity scope.
-    association_scope = (
-        (*acceptable_identities(pipeline_row), identity)
-        if pipeline_row is not None
-        else (identity,)
-    )
-    with release_identity_locks(pipeline_db, association_scope) as release_locks:
-        if not release_locks.acquired:
+    with pipeline_db.advisory_lock(
+        ADVISORY_LOCK_NAMESPACE_RELEASE,
+        release_id_to_lock_key(identity.release_id),
+    ) as release_acquired:
+        if not release_acquired:
             return DeleteLockContended(request.album_id, "release")
         return _delete_under_release_lock(
             pipeline_db=pipeline_db,
@@ -949,28 +940,6 @@ def _notify_completed_delete(
 
 
 def delete_release_from_library(
-    *,
-    pipeline_db: SupportsDestructivePipelineDB,
-    beets_db: SupportsDestructiveBeetsDB,
-    request: DeleteRequest,
-    beets_delete_fn: BeetsDeleteFn | None = None,
-    notify_fn: DeleteNotifyFn | None = None,
-) -> DeleteResult:
-    try:
-        return _delete_release_from_library(
-            pipeline_db=pipeline_db,
-            beets_db=beets_db,
-            request=request,
-            beets_delete_fn=beets_delete_fn,
-            notify_fn=notify_fn,
-        )
-    except AdvisoryLockSessionLost:
-        # The server released any IMPORT/RELEASE locks with the dead session.
-        # No statement may replay on a new backend as though it remained held.
-        return DeleteLockContended(request.album_id, "request")
-
-
-def _delete_release_from_library(
     *,
     pipeline_db: SupportsDestructivePipelineDB,
     beets_db: SupportsDestructiveBeetsDB,
