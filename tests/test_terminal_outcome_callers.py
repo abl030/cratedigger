@@ -17,8 +17,8 @@ from lib.import_preview import ImportPreviewResult
 from lib.import_queue import (
     IMPORT_JOB_FORCE,
 )
-from lib.quality import MeasurementFailure
 from lib.media_readiness import MediaReadinessError
+from lib.quality import MeasurementFailure
 from lib.terminal_outcomes import (
     ImportJobTerminal,
     PendingImportTerminalOutcome,

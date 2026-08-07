@@ -68,7 +68,7 @@ current_spectral_accusation_admissible  # unused variable (lib/long_tail_service
 current_spectral_accusation_withheld  # unused variable (lib/long_tail_service.py:188)
 compressed_audio_bytes  # unused variable (lib/media_readiness.py:86)
 normalized_paths  # unused variable (lib/media_readiness.py:95)
-flac_total_samples_only_changed  # unused function (lib/media_readiness.py:263)
+flac_total_samples_only_changed  # unused function (lib/media_readiness.py:264)
 prune_terminal_pin_rows_cycle  # unused function (lib/pin_retention.py:20)
 reported_at  # unused variable (lib/pipeline_db/_shared.py:444)
 next_plan_ordinal  # unused variable (lib/pipeline_db/_shared.py:673)
