@@ -10,7 +10,6 @@ the dangerously stronger ``absent``.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Literal, Protocol
 
@@ -35,7 +34,6 @@ from lib.pipeline_db.cleanup_journal import ProcessingCleanupJournalRow
 from lib.pipeline_db.rows import AlbumRequestRow
 from lib.quality.download_state import ActiveDownloadState
 from lib.release_identity import ReleaseIdentity
-from lib.request_identity import resolve_current_for_request
 
 AUTOMATION_COMPLETION_RESULT_KEY = "automation_completion"
 _AUTOMATION_ACTIVE_STATUSES = frozenset({
@@ -84,11 +82,6 @@ class AutomationRecoveryBeets(Protocol):
         self,
         identity: ReleaseIdentity,
     ) -> CurrentBeetsResolution: ...
-
-    def resolve_current_releases(
-        self,
-        identities: list[ReleaseIdentity],
-    ) -> dict[ReleaseIdentity, CurrentBeetsResolution]: ...
 
 
 class AutomationCompletionReceipt(msgspec.Struct, frozen=True):
@@ -523,7 +516,6 @@ def _library_observation(
     identity: ReleaseIdentity | None,
     *,
     observed_at: str,
-    row: Mapping[str, object] | None = None,
 ) -> AutomationExactLibraryObservation:
     if beets is None or identity is None:
         return AutomationExactLibraryObservation(
@@ -536,16 +528,7 @@ def _library_observation(
             ),
         )
     try:
-        # Union (#1059) when the request row is available: this observation
-        # is what an operator reads to decide whether a recovered job's
-        # album is on disk, and after a merge + mbsync retag it is — under
-        # the survivor. Reporting "missing" there is a misleading fact, not
-        # a destructive one, so it falls back rather than failing.
-        current = (
-            resolve_current_for_request(beets, row) if row is not None else None
-        )
-        if current is None:
-            current = beets.resolve_current_release(identity)
+        current = beets.resolve_current_release(identity)
     except Exception as exc:  # noqa: BLE001 - observation boundary
         return AutomationExactLibraryObservation(
             status="unavailable",
@@ -748,7 +731,6 @@ def _observe_automation_recovery(
         beets,
         identity,
         observed_at=observed,
-        row=request,
     )
     detail = AutomationRecoveryDetail(
         request=AutomationRecoveryRequest(

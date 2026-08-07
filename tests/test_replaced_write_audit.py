@@ -209,20 +209,20 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "request search composes only one fixed optional status predicate over "
         "the fixed presentation projection and value placeholders"
     ),
-    ("lib/pipeline_db/requests.py", 1818, "724128efb25b8439"): (
+    ("lib/pipeline_db/requests.py", 1814, "724128efb25b8439"): (
         "artist request lookup uses the fixed presentation and capture/evidence "
         "projections with a static UUID-aware fallback predicate; the Library "
         "contract no longer selects structured CD proof while the pointed "
         "current-evidence release-id gate remains for exact verified/provisional "
         "facts"
     ),
-    ("lib/pipeline_db/requests.py", 1837, "f59ded429883f2ec"): (
+    ("lib/pipeline_db/requests.py", 1833, "f59ded429883f2ec"): (
         "artist-name fallback uses the fixed presentation and capture/evidence "
         "projections with one escaped value placeholder; the Library contract "
         "no longer selects structured CD proof while the pointed current-evidence "
         "release-id gate remains for exact verified/provisional facts"
     ),
-    ("lib/pipeline_db/requests.py", 1868, "fdbd2821ab3cbb5a"): (
+    ("lib/pipeline_db/requests.py", 1864, "fdbd2821ab3cbb5a"): (
         "attempt kind is validated against the fixed retry-counter vocabulary "
         "and every value remains a direct placeholder; an attached processing "
         "owner makes the compare-and-set a zero-write conflict"

@@ -83,7 +83,7 @@ import msgspec
 
 
 class AlbumRequestRow(TypedDict):
-    """One ``SELECT * FROM album_requests`` row, every column of the table."""
+    """One ``SELECT * FROM album_requests`` row (54 columns as of schema 066)."""
 
     id: int
     mb_release_id: str | None
@@ -139,8 +139,6 @@ class AlbumRequestRow(TypedDict):
     rescued_at: datetime | None
     prior_unfindable_category: str | None
     catalog_number: str | None
-    canonical_release_id: str | None
-    canonical_resolved_at: datetime | None
 
 
 class AlbumRequestPresentationRow(AlbumRequestRow):

@@ -25,7 +25,6 @@ from scripts.pipeline_cli.api_mutations import (
 )
 from scripts.pipeline_cli.audit import add_audit_subparser
 from scripts.pipeline_cli.beets_distance import add_beets_distance_subparser
-from scripts.pipeline_cli.canonical import add_canonical_subparser
 from scripts.pipeline_cli.destructive import add_destructive_subparsers
 from scripts.pipeline_cli.imports import add_imports_subparsers
 from scripts.pipeline_cli.long_tail import add_long_tail_subparser
@@ -87,9 +86,6 @@ def _build_parser(
 
     # long-tail
     add_long_tail_subparser(sub)
-
-    # canonical (MusicBrainz merge survivors)
-    add_canonical_subparser(sub)
 
     # audit world
     add_audit_subparser(sub)

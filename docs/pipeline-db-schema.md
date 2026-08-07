@@ -908,35 +908,6 @@ rejects any reference to cursor-mutation names.
 |---|---|---|
 | `catalog_number` | `TEXT NULL` | Resolved at enqueue via the dual-source field resolver (MB + Discogs), populating the `catalog_number` plan-strategy slot the PR2 generator adds. |
 
-### `album_requests` MusicBrainz merge survivor (migration 074, issue #1059)
-
-| Column | Type | Notes |
-|---|---|---|
-| `canonical_release_id` | `TEXT NULL` | The survivor MusicBrainz redirects `mb_release_id` to, proven by an **observed `301`**. NULL means no merge is known. Never equals `mb_release_id`; never derived from a response body field, metadata, or a release-group relative. |
-| `canonical_resolved_at` | `TIMESTAMPTZ NULL` | When the `301` backing the survivor was observed. NULL exactly when `canonical_release_id` is NULL. |
-
-Two CHECK constraints make the shapes the reconciler must never persist fail
-closed at the schema rather than at review:
-
-- `album_requests_canonical_requires_observation` — a survivor without the
-  observation that proved it cannot be distinguished from a guess.
-- `album_requests_canonical_is_not_acquisition` — a survivor equal to the
-  acquisition id is not a merge, and would collapse the union resolver's
-  two-identity probe to one, silently hiding a real split.
-
-Partial index `idx_album_requests_canonical_release_id` covers the audit/CLI
-enumeration; the join reads the column off request rows it already loaded.
-
-**The acquisition id is never mutated.** `mb_release_id` stays "what I went
-and got". The request→album join resolves over the UNION of both identities
-(`lib/request_identity.py`), because whether Beets holds the acquisition id or
-the survivor depends on whether `mbsync` has retagged those files yet — on the
-live library, both states are present at once. Written only by
-`CanonicalReleaseService` (`pipeline-cli canonical reconcile`,
-`POST /api/canonical/reconcile`, and the daily
-`cratedigger-canonical-reconcile.service`). There is deliberately no clearing
-path.
-
 ### `album_tracks.track_artist` (migration 029, populated at enqueue)
 
 | Column | Type | Notes |

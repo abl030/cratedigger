@@ -26,10 +26,6 @@ from lib.beets_db import (
 )
 from lib.pipeline_db import PipelineDB
 from lib.release_identity import ReleaseIdentity
-from lib.request_identity import (
-    CurrentBeetsBatchResolver,
-    resolve_current_for_requests,
-)
 
 # No hardcoded fallback (#479): the nspawn DB has moved before (last time
 # to 10.20.0.11) and a baked-in IP silently dials a dead host forever
@@ -52,14 +48,9 @@ def _row_release_id(row: ImportedRow) -> str:
     return identity.release_id if identity is not None else ""
 
 
-def _request_id(row: ImportedRow) -> int:
-    raw = row["id"]
-    return raw if isinstance(raw, int) else int(str(raw))
-
-
 def classify_imported_rows(
     rows: Sequence[ImportedRow],
-    beets: CurrentBeetsBatchResolver,
+    beets: BeetsDB,
 ) -> tuple[list[ImportedRow], list[ImportedRow]]:
     """Split imported rows using the typed current-library authority."""
     ghosts: list[ImportedRow] = []
@@ -72,20 +63,12 @@ def classify_imported_rows(
             continue
         identified.append((row, identity))
 
-    # Resolve over each request's identity UNION (#1059). This script
-    # DELETES the requests it calls ghosts, so an acquisition-only resolve
-    # here is a data-loss path, not merely an incomplete one: after a
-    # MusicBrainz merge and an mbsync retag the album is on disk under the
-    # survivor's id, the acquisition-only join misses, and the frozen
-    # acquisition row this whole design rests on would be deleted.
-    resolutions = resolve_current_for_requests(beets, [row for row, _ in identified])
-    for row, _identity in identified:
-        resolution = resolutions.get(_request_id(row))
-        if resolution is None:
-            # The resolver omitted a requested identity — an authority
-            # failure. Never a licence to delete.
-            manual_review.append(row)
-        elif isinstance(resolution, CurrentBeetsMissing):
+    resolutions = beets.resolve_current_releases([
+        identity for _row, identity in identified
+    ])
+    for row, identity in identified:
+        resolution = resolutions[identity]
+        if isinstance(resolution, CurrentBeetsMissing):
             ghosts.append(row)
         elif isinstance(resolution, CurrentBeetsAmbiguous):
             manual_review.append(row)

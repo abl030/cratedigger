@@ -155,22 +155,6 @@ class _Beets:
             raise self.resolution
         return self.resolution
 
-    def resolve_current_releases(
-        self,
-        identities: list[ReleaseIdentity],
-    ) -> dict[ReleaseIdentity, CurrentBeetsResolution]:
-        """Batch facade, mirroring ``BeetsDB`` (#1059).
-
-        The recovery observation resolves over the request's identity
-        union, so a stub with only the singular method makes every probe
-        look ``unavailable`` — a fake less capable than production quietly
-        rewriting the assertion.
-        """
-        return {
-            identity: self.resolve_current_release(identity)
-            for identity in dict.fromkeys(identities)
-        }
-
 
 class _Probe:
     def __init__(
