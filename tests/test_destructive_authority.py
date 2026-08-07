@@ -1105,5 +1105,112 @@ class TestDestructiveAuthorityRealPostgres(unittest.TestCase):
             db.close()
 
 
+class TestMergedAlbumIsActuallyRemovable(unittest.TestCase):
+    """The destructive paths must reach an album filed under the survivor.
+
+    Independent review found the union resolving the right album while the
+    call site handed ``lib/beets_delete.py`` the ACQUISITION id — which the
+    delete child refuses, because it re-reads the album's own
+    ``mb_albumid``. The removal silently no-opped on exactly the merged
+    albums the union exists to reach, and by then Bad Rip had already
+    committed the denylist and the requeue.
+
+    Both tests drive the REAL ``ban_source`` and the REAL
+    ``run_beets_delete`` child over a real Beets library, because a pin on
+    the shared resolver is what missed this: it asserted the selectors named
+    the survivor and never looked at the call site that ignored them.
+    """
+
+    LOSER = "4878ee47-f8b8-45c8-832c-62de3bccfa6e"
+    SURVIVOR = "7aabf975-9a06-4b2e-854c-2c700380ebd5"
+
+    def _world_and_db(self, *, canonical: str | None):
+        from tests.beets_world import BeetsWorld, BeetsWorldRelease
+        from tests.fakes import FakePipelineDB
+
+        repo = Path(__file__).resolve().parent.parent
+        # A subprocess mirror url is what enables the scratch Beets config
+        # the delete child runs under; the child never reaches the network.
+        world = BeetsWorld(repo, subprocess_mirror_url="http://127.0.0.1:9")
+        self.addCleanup(world.close)
+        album = world.import_release(BeetsWorldRelease(
+            release_id=self.SURVIVOR,
+            artist="Merged Artist",
+            album="Merged Album",
+            year=1996,
+        ))
+
+        db = FakePipelineDB()
+        request_id = db.add_request(
+            artist_name="Merged Artist", album_title="Merged Album",
+            source="request", mb_release_id=self.LOSER,
+        )
+        db.update_status(request_id, "imported")
+        if canonical is not None:
+            from datetime import UTC, datetime
+
+            db.record_canonical_release_id(
+                request_id,
+                canonical_release_id=canonical,
+                resolved_at=datetime(2026, 8, 6, tzinfo=UTC),
+            )
+        return world, db, request_id, album
+
+    def _run_ban(self, world, db, request_id):
+        captured: list[BeetsDeleteRequest] = []
+
+        def delete_fn(request: BeetsDeleteRequest):
+            captured.append(request)
+            return run_beets_delete(request)
+
+        with (
+            world.subprocess_environment(),
+            BeetsDB(
+                str(world.library_db), library_root=str(world.library_root),
+            ) as beets,
+        ):
+            result = ban_source(
+                pipeline_db=db,
+                beets_db=beets,
+                request=BanSourceRequest(request_id=request_id),
+                beets_delete_fn=delete_fn,
+            )
+        return result, captured
+
+    def test_bad_rip_removes_an_album_filed_under_the_survivor(self) -> None:
+        world, db, request_id, album = self._world_and_db(
+            canonical=self.SURVIVOR)
+
+        result, captured = self._run_ban(world, db, request_id)
+
+        self.assertEqual(len(captured), 1)
+        # The decisive assertion: the delete child is told where the album
+        # is FILED, not what the request asked for.
+        self.assertEqual(captured[0].expected_release_id, self.SURVIVOR)
+        self.assertIsInstance(result, BanSourceSuccess)
+        assert isinstance(result, BanSourceSuccess)
+        self.assertTrue(
+            result.beets_removed,
+            "Bad Rip committed the denylist and requeue but left the album",
+        )
+        with BeetsDB(
+            str(world.library_db), library_root=str(world.library_root),
+        ) as beets:
+            self.assertIsNone(beets.get_album_detail(album.album_id))
+
+    def test_without_the_survivor_the_album_is_not_even_found(self) -> None:
+        """Must-still-work control, and the proof the fix is load-bearing:
+        the identical world with no stored survivor resolves Missing, so no
+        delete is attempted at all."""
+        world, db, request_id, _album = self._world_and_db(canonical=None)
+
+        result, captured = self._run_ban(world, db, request_id)
+
+        self.assertEqual(captured, [])
+        self.assertIsInstance(result, BanSourceSuccess)
+        assert isinstance(result, BanSourceSuccess)
+        self.assertFalse(result.beets_removed)
+
+
 if __name__ == "__main__":
     unittest.main()

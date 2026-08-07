@@ -124,11 +124,13 @@ def merge_union_resolutions(
     Beets happens to hold would break every one of them, which is round 1
     of the aborted attempt exactly (branch ``feat/mb-canonical-redirects``).
 
-    ``selectors`` is deliberately NOT rewritten. The identity answers "what
-    did this request ask for"; the selectors answer "where is the album
-    actually filed", which after a retag is the survivor. A destructive
-    action needs the second, and silently rewriting it to an id Beets no
-    longer stores would make the removal a no-op.
+    ``selectors`` and ``observed_identity`` are deliberately NOT rewritten.
+    ``identity`` answers "what did this request ask for"; those two answer
+    "where is the album actually filed", which after a retag is the
+    survivor. A destructive action needs the second — ``lib/beets_delete.py``
+    re-reads the album's own ``mb_albumid`` and refuses any mismatch — so
+    rewriting them to an id Beets no longer stores would make the removal a
+    silent no-op on exactly the merged albums this exists to reach.
     """
     ambiguous = [r for r in resolutions if isinstance(r, CurrentBeetsAmbiguous)]
     if ambiguous:
@@ -146,7 +148,16 @@ def merge_union_resolutions(
             album_ids=tuple(album_ids),
             reason="merged_identity_split",
         )
-    return replace(uniques[0], identity=acquisition)
+    held = uniques[0]
+    if held.filed_identity == acquisition:
+        # Unmerged, or held under the id we asked for. Return it untouched
+        # so the ~8,500 rows this change does not concern stay byte-identical
+        # to the plain resolver — the inertness the generated property
+        # patrols, which caught this the moment the field was set eagerly.
+        return replace(held, identity=acquisition)
+    return replace(
+        held, identity=acquisition, observed_identity=held.filed_identity,
+    )
 
 
 def resolve_current_for_requests(

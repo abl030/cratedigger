@@ -924,8 +924,15 @@ class MbidReplaceService:
                         beets_db, source_locked,
                     )
                     if current_beets is None:
-                        current_beets = beets_db.resolve_current_release(
-                            old_identity,
+                        # Unreachable — ``old_identity`` was already proven
+                        # above. Raised rather than resolved acquisition-only:
+                        # the caller converts it to the typed
+                        # ``current_beets_unavailable`` refusal, and an
+                        # authority failure must not become a resolution on
+                        # a path that supersedes and deletes.
+                        raise RuntimeError(
+                            "current Beets authority omitted the request's "
+                            "acceptable release identities"
                         )
                     current_library_db_path = beets_db.library_db_path
                     current_library_root = beets_db.library_root
@@ -1013,7 +1020,15 @@ class MbidReplaceService:
                 try:
                     delete_outcome = self.beets_delete_fn(BeetsDeleteRequest(
                         album_id=current_beets.album_id,
-                        expected_release_id=old_identity.release_id,
+                        # FILED, not requested (#1059). The delete child
+                        # refuses a mismatch against the album's own
+                        # mb_albumid, and the supersede has already
+                        # committed — so the acquisition id here leaves the
+                        # old album on disk, which is the orphan class this
+                        # issue exists to clear.
+                        expected_release_id=(
+                            current_beets.filed_identity.release_id
+                        ),
                         library_db_path=current_library_db_path,
                         library_root=current_library_root,
                     ))

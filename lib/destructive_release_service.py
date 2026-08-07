@@ -278,7 +278,16 @@ def _ban_source_locked(
     # correctly says the album IS installed.
     current_beets = resolve_current_for_request(beets_db, current)
     if current_beets is None:
-        current_beets = beets_db.resolve_current_release(identity)
+        # Unreachable: the identity check above already proved the row has
+        # one exact acceptable identity. Kept as a typed refusal rather than
+        # an acquisition-only fallback, because "authority not established"
+        # must never be laundered into a resolution on a destructive path
+        # (#1059 invariant 6).
+        return BanSourceReleaseMismatch(
+            request.request_id,
+            request.expected_release_id,
+            current_identity.release_id if current_identity else None,
+        )
     if isinstance(current_beets, CurrentBeetsAmbiguous):
         return BanSourceBeetsAmbiguous(
             request_id=request.request_id,
@@ -365,7 +374,12 @@ def _ban_source_locked(
     if isinstance(current_beets, CurrentBeetsUnique):
         delete_outcome = beets_delete_fn(BeetsDeleteRequest(
             album_id=current_beets.album_id,
-            expected_release_id=release_id,
+            # FILED, not requested (#1059). The delete child re-reads the
+            # album's own mb_albumid and refuses any mismatch, so passing
+            # the acquisition id here makes the removal a silent no-op on
+            # exactly the merged albums the union exists to reach — and Bad
+            # Rip has already committed the denylist and requeue by now.
+            expected_release_id=current_beets.filed_identity.release_id,
             library_db_path=beets_db.library_db_path,
             library_root=beets_db.library_root,
         ))
@@ -766,7 +780,8 @@ def _delete_under_release_lock(
 
     beets_outcome = beets_delete_fn(BeetsDeleteRequest(
         album_id=current_beets.album_id,
-        expected_release_id=identity.release_id,
+        # FILED, not requested — see the Bad Rip site above.
+        expected_release_id=current_beets.filed_identity.release_id,
         library_db_path=beets_db.library_db_path,
         library_root=beets_db.library_root,
     ))

@@ -91,13 +91,33 @@ class CurrentBeetsItem:
 
 @dataclass(frozen=True)
 class CurrentBeetsUnique:
-    """Exactly one usable current Beets album for an exact release."""
+    """Exactly one usable current Beets album for an exact release.
+
+    ``identity`` is what the caller ASKED for. ``observed_identity`` is what
+    the album is actually FILED under, which differs only after a
+    MusicBrainz merge + ``mbsync`` retag (#1059): the union resolver rewrites
+    ``identity`` back to the request's acquisition id — a dozen consumers
+    compare it against the stored id and fail the operation on a mismatch —
+    while the album on disk still carries the survivor's.
+
+    **A destructive action needs ``filed_identity``, never ``identity``.**
+    ``lib/beets_delete.py`` re-reads the album's own ``mb_albumid`` and
+    refuses any mismatch, so passing the acquisition id there means the
+    removal silently no-ops on exactly the merged albums this change exists
+    to reach.
+    """
 
     identity: ReleaseIdentity
     album_id: int
     album_path: str
     items: tuple[CurrentBeetsItem, ...]
     selectors: tuple[str, ...]
+    observed_identity: ReleaseIdentity | None = None
+
+    @property
+    def filed_identity(self) -> ReleaseIdentity:
+        """The identity Beets actually stores for this album."""
+        return self.observed_identity or self.identity
 
 
 @dataclass(frozen=True)
