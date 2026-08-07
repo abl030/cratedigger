@@ -32,6 +32,7 @@ import msgspec
 from lib.audio_hash import AudioHashError, hash_audio_content
 from lib.json_narrow import json_dict as _json_dict
 from lib.json_narrow import json_list as _json_list
+from lib.media_readiness import MediaReadinessError, inspect_media
 
 # Extensions audio_hash.py currently knows how to hash. AUDIO_EXTS is broader
 # (includes wav, alac); the bad-hash gate filters to this subset so legitimate
@@ -405,6 +406,18 @@ class LocalFileInspection:
     has_nested_audio: bool = False
 
 
+def _canonical_filetype_label(codec: str, container: str, fallback: str) -> str:
+    """Project admitted stream facts into the existing filetype vocabulary."""
+
+    if codec in {"flac", "alac", "mp3", "aac", "opus", "vorbis"}:
+        return codec
+    if codec.startswith("wma"):
+        return "wma"
+    if container == "wav" and codec.startswith("pcm_"):
+        return "wav"
+    return fallback
+
+
 def inspect_local_files(path: str) -> LocalFileInspection:
     """Scan ``path`` recursively for audio files and report filetype + bitrate + VBR hints.
 
@@ -425,6 +438,12 @@ def inspect_local_files(path: str) -> LocalFileInspection:
     mp3_bitrates: list[int] = []
     any_vbr: bool | None = None
     has_nested_audio = False
+    try:
+        readiness_by_path = {
+            fact.path: fact for fact in inspect_media(path).files
+        }
+    except MediaReadinessError:
+        readiness_by_path = {}
 
     for root, _dirs, files in os.walk(path):
         for name in files:
@@ -435,17 +454,42 @@ def inspect_local_files(path: str) -> LocalFileInspection:
                 continue
             if root != path:
                 has_nested_audio = True
-            extensions.add(ext)
+            full = os.path.join(root, name)
+            facts = readiness_by_path.get(os.path.abspath(full))
+            # The inventory has already identified the actual codec/container.
+            # Keep only malformed-file fallback extension based: a valid AAC
+            # named .flac must not enter the lossless lane, and vice versa.
+            extensions.add(
+                _canonical_filetype_label(facts.codec, facts.container, ext)
+                if facts is not None else ext
+            )
+            if facts is not None and facts.average_bitrate_kbps is not None:
+                bitrate = facts.average_bitrate_kbps * 1000
+                min_bitrate = (
+                    bitrate if min_bitrate is None else min(min_bitrate, bitrate)
+                )
             if ext == "mp3":
-                full = os.path.join(root, name)
                 try:
                     from mutagen.mp3 import MP3
                     mp3 = MP3(full)
                     br = getattr(mp3.info, "bitrate", None)
                     br_mode = getattr(mp3.info, "bitrate_mode", None)
-                    if br is not None:
-                        min_bitrate = br if min_bitrate is None else min(min_bitrate, br)
-                        mp3_bitrates.append(br)
+                    if isinstance(br, int) and br > 0:
+                        # The canonical stream fact wins when available; this
+                        # fallback keeps VBR classification available for
+                        # malformed sources that preview will subsequently
+                        # classify through the strict validation contract.
+                        observed_bitrate = (
+                            facts.average_bitrate_kbps * 1000
+                            if facts is not None and facts.average_bitrate_kbps is not None
+                            else br
+                        )
+                        mp3_bitrates.append(observed_bitrate)
+                        min_bitrate = (
+                            observed_bitrate
+                            if min_bitrate is None
+                            else min(min_bitrate, observed_bitrate)
+                        )
                     # mutagen BitrateMode: UNKNOWN=0, CBR=1, VBR=2, ABR=3
                     if br_mode is not None:
                         is_vbr_file = int(br_mode) in (2, 3)
@@ -786,11 +830,9 @@ def measure_preimport_state(
         bad-hash matches short-circuit the spectral steps to avoid wasting
         cycles, but the returned Struct still has the corresponding flag set.
 
-    Note: ``repair_mp3_headers`` is **not** called here. Callers must run
-    mp3val on the source before measurement (and before snapshotting, in
-    the preview worker) so that header fixes are visible in the evidence
-    snapshot and never mutate the source after the importer's freshness
-    check.
+    Note: media readiness runs before measurement on a canonical processing
+    album or private preview snapshot. This helper remains observational and
+    never repairs an arbitrary source path itself.
     """
     filetype_band = _filetype_band(download_filetype)
     # Enumerate candidate audio once. The same stable path set owns file-count

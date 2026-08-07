@@ -14,6 +14,7 @@ import statistics
 import subprocess
 import tempfile
 
+from lib.media_readiness import MediaReadinessError, inspect_media
 from lib.quality import (
     AUDIO_EXTENSIONS_DOTTED,
     V0_PROBE_ON_DISK_RESEARCH,
@@ -41,63 +42,29 @@ def folder_bitrates(
 ) -> list[int]:
     """Return positive per-track audio bitrates in kbps."""
 
-    bitrates: list[int] = []
-    for fname in os.listdir(folder_path):
-        ext = os.path.splitext(fname)[1].lower()
-        if ext not in AUDIO_EXTENSIONS_DOTTED:
-            continue
-        if ext_filter is not None and ext not in ext_filter:
-            continue
-        fpath = os.path.join(folder_path, fname)
-        try:
-            result = subprocess.run(
-                [
-                    "ffprobe", "-v", "error", "-select_streams", "a:0",
-                    "-show_entries", "stream=bit_rate", "-of", "csv=p=0",
-                    fpath,
-                ],
-                capture_output=True,
-                text=True,
-                errors="replace",
-                timeout=30,
-                check=False,
-            )
-            value = result.stdout.strip().rstrip(",")
-            if not value or not value.isdigit():
-                result = subprocess.run(
-                    [
-                        "ffprobe", "-v", "error", "-show_entries",
-                        "format=bit_rate", "-of", "csv=p=0", fpath,
-                    ],
-                    capture_output=True,
-                    text=True,
-                    errors="replace",
-                    timeout=30,
-                    check=False,
-                )
-                value = result.stdout.strip().rstrip(",")
-            if value and value.isdigit() and int(value) > 0:
-                bitrates.append(int(value) // 1000)
-        except Exception:
-            logger.debug("V0 bitrate probe failed for %s", fpath, exc_info=True)
-    return [value for value in bitrates if value > 0]
+    try:
+        facts = inspect_media(folder_path).files
+    except MediaReadinessError:
+        logger.debug("V0 bitrate probe failed for %s", folder_path, exc_info=True)
+        return []
+    return [
+        fact.average_bitrate_kbps
+        for fact in facts
+        if fact.average_bitrate_kbps is not None
+        and (ext_filter is None or os.path.splitext(fact.path)[1].lower() in ext_filter)
+    ]
 
 
 def probe_duration_seconds(path: str) -> float | None:
     """Read source duration cheaply for a duration-scaled ffmpeg timeout."""
 
     try:
-        # getattr (not `from mutagen import File`) keeps this Any-typed:
-        # mutagen's File() factory has an untyped `filething` parameter and
-        # a partially-unknown overloaded return (many mutagen format
-        # classes) — third-party, not ours to annotate. Same technique as
-        # harness.import_one._probe_source_channels.
+        # This timeout adapter deliberately reads the declared duration only;
+        # readiness owns the expensive frame inventory where recovery needs it.
         import mutagen
-        mutagen_file = getattr(mutagen, "File")  # noqa: B009 - dynamic untyped factory
+        mutagen_file = getattr(mutagen, "File")  # noqa: B009 - untyped factory
         media = mutagen_file(path)
-    except Exception:  # noqa: BLE001 - absence/unreadable is a normal fallback
-        return None
-    if media is None:
+    except Exception:  # noqa: BLE001 - an unreadable probe uses the safe floor
         return None
     length = getattr(getattr(media, "info", None), "length", None)
     if isinstance(length, (int, float)) and length > 0:

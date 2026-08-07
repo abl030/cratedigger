@@ -85,6 +85,30 @@ removes only temporary derivatives, retains every source, records bounded
 `ConversionInfo` diagnostics, and revalidates the retained sources to
 distinguish corrupt audio from an encoder/materialization world failure.
 
+### Decode-valid media readiness
+
+`lib.media_readiness` is the sole owner of recoverable container facts. After
+atomic publication into the private canonical processing album (or after a
+private preview snapshot), it reads the one admitted audio stream's frame
+facts: actual codec/container (never the filename extension), rate, channels,
+bit depth, sample count, encoded packet bytes,
+duration, and average bitrate. Consumers such as the native V0 measurement,
+conversion channel check, Wrong Matches inspection, and CD-rip shape check use
+those facts rather than independently trusting Mutagen or a container duration.
+
+The only metadata rewrite currently admitted is FLAC `STREAMINFO.total_samples`
+when it is zero or contradicts derived frame facts but every stable byte
+strictly decodes. The
+repair changes only the packed 36-bit sample-count field, preserves every
+encoded frame and all other metadata byte-for-byte, leaves an unknown FLAC MD5
+unknown, and requires a second strict decode. MP3 header repair is also owned
+by this boundary. Peer download and quarantine bytes are never normalized:
+only the canonical processing copy or preview snapshot is mutable. Multiple or
+missing audio streams, tool/filesystem failures, and corrupt bytes retain their
+separate typed outcomes; no metadata guess changes the corruption policy.
+Ordinary FLAC handoffs inspect only STREAMINFO first; the full frame/packet
+recovery scan runs only for absent or structurally impossible declared facts.
+
 ### Exact CD-rip bit verification (issue #962)
 
 `lib/cd_rip_verifier.py` admits only flat, sector-aligned 44.1 kHz,

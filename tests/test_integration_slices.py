@@ -7406,6 +7406,7 @@ class TestProcessingOwnerPostgresFilesystemSlice(unittest.TestCase):
         )
         from lib.quality_evidence import snapshot_audio_files
         from scripts import import_preview_worker
+        from tests.audio_fixtures import make_test_flac
 
         slskd_root = os.path.join(root, "slskd")
         processing_root = os.path.join(root, "processing")
@@ -7417,8 +7418,7 @@ class TestProcessingOwnerPostgresFilesystemSlice(unittest.TestCase):
         source_dir = os.path.join(slskd_root, "peer", "Album")
         os.makedirs(source_dir)
         source_path = os.path.join(source_dir, "01.flac")
-        with open(source_path, "wb") as handle:
-            handle.write(b"exact source bytes")
+        make_test_flac(source_path, duration=1)
 
         request_id = self.db.add_request(
             mb_release_id=self._MBID,
@@ -7483,6 +7483,7 @@ class TestProcessingOwnerPostgresFilesystemSlice(unittest.TestCase):
             processing_dir=processing_root,
             pipeline_db_enabled=True,
             pipeline_db_dsn=str(_u7_test_dsn()),
+            var_dir=root,
         )
         preview_lease = _preview_execution_lease(
             f"integration-real-preview-{job.id}",

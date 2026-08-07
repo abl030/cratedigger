@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
 from lib import download_materialization
+from lib.download_rejection import _handle_rejected_result
 
 # Responsibility audit tracks validation as its own dependency.
 # isort: split
@@ -24,7 +25,9 @@ from lib.import_execution import (
     ExecutionLeaseSnapshot,
     OwnerSessionIdentity,
 )
+from lib.media_readiness import MediaReadinessError, normalize_media_metadata
 from lib.processing_paths import canonical_folder_for_row, processing_albums_dir
+from lib.quality import ValidationResult
 from lib.staged_album import StagedAlbum
 
 if TYPE_CHECKING:
@@ -130,6 +133,31 @@ def process_completed_album(
     if isinstance(materialized, download_materialization.MaterializeGuarded):
         return CompletionDeferred(detail=materialized.detail)
     assert isinstance(materialized, download_materialization.Materialized)
+
+    # The atomic materialization above is the first point at which these bytes
+    # are ours.  Make their decode-valid structural facts usable before both
+    # preview evidence and the Beets validation that follows; never touch the
+    # event-stamped slskd originals.
+    try:
+        normalize_media_metadata(staged_album.current_path)
+    except MediaReadinessError as exc:
+        if exc.kind == "audio_corrupt":
+            outcome = _handle_rejected_result(
+                album_data,
+                ValidationResult(
+                    valid=False,
+                    scenario="audio_corrupt",
+                    detail=str(exc),
+                    error=str(exc),
+                    path=staged_album.current_path,
+                ),
+                staged_album,
+                ctx,
+                import_job_id=import_job_id,
+                cancellation_token=cancellation_token,
+            )
+            return CompletionDispatched(outcome=outcome)
+        return CompletionFailed(reason=f"media_readiness_{exc.kind}: {exc}")
 
     logger.info(
         "Processing completed download: %s - %s",

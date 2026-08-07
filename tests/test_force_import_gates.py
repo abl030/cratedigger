@@ -272,6 +272,48 @@ class TestInspectLocalFilesRecursive(unittest.TestCase):
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_detected_flac_beats_misleading_ogg_suffix(self):
+        """The preview quality boundary must use canonical media identity."""
+        import os
+
+        from lib.measurement import inspect_local_files
+        from tests.audio_fixtures import make_test_flac
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            disguised = os.path.join(tmpdir, "01 - Track.ogg")
+            source = os.path.join(tmpdir, "source.flac")
+            make_test_flac(source, duration=1)
+            os.replace(source, disguised)
+
+            inspection = inspect_local_files(tmpdir)
+
+            self.assertEqual(inspection.filetype, "flac")
+
+    def test_detected_aac_beats_misleading_flac_suffix(self):
+        """A lossless-looking filename cannot manufacture a lossless candidate."""
+        import os
+        import subprocess
+
+        from lib.measurement import has_supported_lossless_audio, inspect_local_files
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source = os.path.join(tmpdir, "source.m4a")
+            disguised = os.path.join(tmpdir, "01 - Track.flac")
+            subprocess.run(
+                [
+                    "ffmpeg", "-v", "error", "-nostdin", "-f", "lavfi",
+                    "-i", "sine=frequency=440:duration=0.2", "-c:a", "aac", source,
+                ], check=True, timeout=30,
+            )
+            os.replace(source, disguised)
+
+            inspection = inspect_local_files(tmpdir)
+
+            self.assertEqual(inspection.filetype, "aac")
+            self.assertFalse(
+                has_supported_lossless_audio(inspection.filetype, [Path(disguised)]),
+            )
+
     def test_inspect_reports_avg_bitrate(self):
         """inspect_local_files must also return avg_bitrate_bps across all
         MP3 files so measure_preimport_state can decide whether to gate a
@@ -605,7 +647,7 @@ class TestRepairMp3HeadersRecurses(unittest.TestCase):
         import os
         from unittest.mock import MagicMock, patch
 
-        from lib.util import repair_mp3_headers
+        from lib.media_readiness import repair_mp3_headers
 
         tmpdir = tempfile.mkdtemp()
         try:
@@ -614,7 +656,7 @@ class TestRepairMp3HeadersRecurses(unittest.TestCase):
             nested = os.path.join(cd1, "01.mp3")
             with open(nested, "wb") as f:
                 f.write(b"fake")
-            with patch("lib.util.sp.run") as mock_run:
+            with patch("lib.media_readiness.subprocess.run") as mock_run:
                 mock_run.return_value = MagicMock(returncode=0, stdout="")
                 repair_mp3_headers(tmpdir)
             called_paths = [c[0][0][-1] for c in mock_run.call_args_list]

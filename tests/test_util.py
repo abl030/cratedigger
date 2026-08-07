@@ -16,12 +16,12 @@ from defusedxml.common import DefusedXmlException
 class TestRepairMp3Headers(unittest.TestCase):
 
     def test_calls_mp3val_on_mp3_files(self):
-        from lib.util import repair_mp3_headers
+        from lib.media_readiness import repair_mp3_headers
         tmpdir = tempfile.mkdtemp()
         try:
             open(os.path.join(tmpdir, "track.mp3"), "w").close()
             open(os.path.join(tmpdir, "cover.jpg"), "w").close()
-            with patch("lib.util.sp.run") as mock_run:
+            with patch("lib.media_readiness.subprocess.run") as mock_run:
                 mock_run.return_value = MagicMock(stdout="OK", returncode=0)
                 repair_mp3_headers(tmpdir)
                 # Should only be called for .mp3 files
@@ -33,11 +33,11 @@ class TestRepairMp3Headers(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_no_mp3val_graceful(self):
-        from lib.util import repair_mp3_headers
+        from lib.media_readiness import repair_mp3_headers
         tmpdir = tempfile.mkdtemp()
         try:
             open(os.path.join(tmpdir, "track.mp3"), "w").close()
-            with patch("lib.util.sp.run", side_effect=FileNotFoundError):
+            with patch("lib.media_readiness.subprocess.run", side_effect=FileNotFoundError):
                 # Should not raise
                 repair_mp3_headers(tmpdir)
         finally:

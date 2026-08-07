@@ -15,6 +15,7 @@ import hashlib
 import logging
 import os
 import shutil
+import subprocess
 import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
@@ -61,6 +62,19 @@ def _private_processing_dir(parent: str) -> str:
     os.mkdir(os.path.join(processing_dir, "albums"), 0o700)
     os.mkdir(os.path.join(processing_dir, "preview"), 0o700)
     return processing_dir
+
+
+def _write_test_audio(path: str) -> None:
+    """Write a tiny decodable fixture in the container named by ``path``."""
+    codec = "flac" if path.endswith(".flac") else "libmp3lame"
+    subprocess.run(
+        [
+            "ffmpeg", "-v", "error", "-nostdin", "-f", "lavfi",
+            "-i", "sine=frequency=440:duration=0.1", "-c:a", codec, path,
+        ],
+        check=True,
+        timeout=30,
+    )
 
 
 def _make_ctx(cfg=None, slskd=None, pipeline_db_source=None):
@@ -1891,6 +1905,137 @@ class TestRederiveTransferIds(unittest.TestCase):
 class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
     """Test process_completed_album return ownership."""
 
+    def test_zero_sample_flac_is_normalized_only_after_canonical_publish(self):
+        """#1062: Beets' later validation receives a ready owned album view."""
+        from mediafile import MediaFile
+
+        from lib.download_processing import Completed, process_completed_album
+        from lib.media_readiness import flac_total_samples_only_changed, inspect_media
+        from tests.audio_fixtures import make_test_flac
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_dir = os.path.join(tmpdir, "downloads", "Music")
+            os.makedirs(source_dir)
+            source = os.path.join(source_dir, "01 - Five Suns.flac")
+            make_test_flac(source, duration=1)
+            source_bytes = bytearray(Path(source).read_bytes())
+            packed = int.from_bytes(source_bytes[18:26], "big")
+            source_bytes[18:26] = (packed & ~((1 << 36) - 1)).to_bytes(8, "big")
+            source_bytes[26:42] = b"\0" * 16
+            Path(source).write_bytes(source_bytes)
+
+            file = make_download_file(
+                filename="user1\\Music\\01 - Five Suns.flac",
+                file_dir="user1\\Music",
+            )
+            file.local_path = source
+            album = make_grab_list_entry(files=[file], mb_release_id="")
+            ctx = _make_ctx()
+            for name, value in {
+                "slskd_download_dir": os.path.join(tmpdir, "downloads"),
+                "beets_validation_enabled": False,
+            }.items():
+                setattr(ctx.cfg, name, value)
+
+            result = process_completed_album(album, ctx, import_job_id=1)
+
+            self.assertIsInstance(result, Completed)
+            self.assertIsNotNone(album.import_folder)
+            ready = inspect_media(album.import_folder or "").files[0]
+            self.assertGreater(ready.duration_seconds, 0)
+            canonical = Path(album.import_folder or "") / "01 - Five Suns.flac"
+            # This is the same MediaFile reader Beets validation routes through:
+            # the historical incident reached a zero local length before it
+            # could become a quality/match decision.
+            self.assertGreater(MediaFile(str(canonical)).length, 0)
+            self.assertTrue(flac_total_samples_only_changed(bytes(source_bytes), canonical.read_bytes()))
+            self.assertFalse(Path(source).exists(), "materialization consumes only after canonical publish")
+
+    def test_readiness_audio_corrupt_uses_rejection_owner(self):
+        """Corrupt canonical bytes retain the normal audit and peer policy."""
+        from lib.config import CratediggerConfig
+        from lib.download_processing import (
+            CompletionDispatched,
+            process_completed_album,
+        )
+        from tests.audio_fixtures import make_test_flac
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            downloads = os.path.join(tmpdir, "downloads")
+            source_dir = os.path.join(downloads, "Music")
+            os.makedirs(source_dir)
+            source = os.path.join(source_dir, "01 - Track.flac")
+            make_test_flac(source, duration=1)
+            corrupt = bytearray(Path(source).read_bytes())
+            corrupt[-5] ^= 0xFF
+            Path(source).write_bytes(corrupt)
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=42, status="downloading", artist_name="Artist",
+                album_title="Album", year=2024, mb_release_id="test-mbid",
+            ))
+            cfg = CratediggerConfig(
+                slskd_download_dir=downloads,
+                beets_validation_enabled=False,
+                processing_dir=_private_processing_dir(tmpdir),
+                beets_tracking_file=os.path.join(tmpdir, "beets-tracking.jsonl"),
+            )
+            ctx = make_ctx_with_fake_db(db, cfg=cfg)
+            file = make_download_file(
+                filename="user1\\Music\\01 - Track.flac", file_dir="user1\\Music",
+                username="user1",
+            )
+            file.local_path = source
+            album = make_grab_list_entry(
+                files=[file], artist="Artist", title="Album", year="2024",
+                mb_release_id="test-mbid", db_request_id=42, db_source="request",
+            )
+            result = process_completed_album(album, ctx, import_job_id=1)
+
+            self.assertIsInstance(result, CompletionDispatched)
+            source_db = ctx.pipeline_db_source
+            assert isinstance(source_db, FakePipelineDBSource)
+            self.assertEqual(len(source_db.reject_and_requeue_calls), 1)
+            rejected = source_db.reject_and_requeue_calls[0]["bv_result"]
+            self.assertEqual(rejected.scenario, "audio_corrupt")
+            self.assertEqual(rejected.denylisted_users, ["user1"])
+
+    def test_multi_audio_non_flac_never_reaches_beets_validation(self):
+        import subprocess
+
+        from lib.config import CratediggerConfig
+        from lib.download_processing import CompletionFailed, process_completed_album
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            downloads = os.path.join(tmpdir, "downloads")
+            source_dir = os.path.join(downloads, "Music")
+            os.makedirs(source_dir)
+            source = os.path.join(source_dir, "01 - Two Streams.m4a")
+            subprocess.run([
+                "ffmpeg", "-v", "error", "-nostdin", "-f", "lavfi",
+                "-i", "sine=frequency=440:duration=0.2", "-f", "lavfi",
+                "-i", "sine=frequency=880:duration=0.2", "-map", "0:a",
+                "-map", "1:a", "-c:a", "aac", source,
+            ], check=True, timeout=30)
+            cfg = CratediggerConfig(
+                slskd_download_dir=downloads, beets_validation_enabled=True,
+                processing_dir=_private_processing_dir(tmpdir),
+            )
+            file = make_download_file(
+                filename="user1\\Music\\01 - Two Streams.m4a", file_dir="user1\\Music",
+            )
+            file.local_path = source
+            album = make_grab_list_entry(files=[file], mb_release_id="test-mbid")
+            result = process_completed_album(
+                album, _make_ctx(cfg=cfg), import_job_id=1,
+                validate_fn=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                    AssertionError("must not reach Beets"),
+                ),
+            )
+            self.assertIsInstance(result, CompletionFailed)
+            assert isinstance(result, CompletionFailed)
+            self.assertTrue(result.reason.startswith("media_readiness_ambiguous"))
+
     def test_returns_true_on_success(self):
         """Successful file move + processing returns Completed."""
         import os
@@ -1902,8 +2047,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             src_dir = os.path.join(tmpdir, "source_dir")
             os.makedirs(src_dir)
             src_file = os.path.join(src_dir, "01 - Track.mp3")
-            with open(src_file, "w") as f:
-                f.write("fake audio")
+            _write_test_audio(src_file)
 
             files = [make_download_file(filename="source_dir\\01 - Track.mp3",
                                         file_dir="source_dir")]
@@ -1933,8 +2077,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             src_dir = os.path.join(tmpdir, "source_dir")
             os.makedirs(src_dir)
             src_file = os.path.join(src_dir, "01 - Track.mp3")
-            with open(src_file, "w") as f:
-                f.write("fake audio")
+            _write_test_audio(src_file)
 
             files = [make_download_file(filename="source_dir\\01 - Track.mp3",
                                         file_dir="source_dir")]
@@ -2010,8 +2153,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             source_dir = os.path.join(downloads_root, "Music")
             os.makedirs(source_dir)
             source_file = os.path.join(source_dir, "01 - Track.mp3")
-            with open(source_file, "w") as f:
-                f.write("fake audio")
+            _write_test_audio(source_file)
 
             db = FakePipelineDB()
             db.seed_request(make_request_row(
@@ -2120,8 +2262,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             resumed_path = os.path.join(tmpdir, "staging", "Artist", "Album")
             os.makedirs(resumed_path)
             resumed_file = os.path.join(resumed_path, "01 - Track.mp3")
-            with open(resumed_file, "w") as f:
-                f.write("fake audio")
+            _write_test_audio(resumed_file)
 
             files = [make_download_file(
                 filename="user1\\Music\\01 - Track.mp3",
@@ -2157,8 +2298,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             resumed_path = os.path.join(tmpdir, "staging", "Artist", "Album")
             os.makedirs(resumed_path)
             resumed_file = os.path.join(resumed_path, "Disk 2 - 01 - Track.flac")
-            with open(resumed_file, "w") as f:
-                f.write("fake audio")
+            _write_test_audio(resumed_file)
 
             file = make_download_file(
                 filename="user1\\CD2\\01 - Track.flac",
@@ -2200,8 +2340,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             source_dir = os.path.join(tmpdir, "downloads", "Music")
             os.makedirs(source_dir)
             source_file = os.path.join(source_dir, "01 - Track.mp3")
-            with open(source_file, "w") as f:
-                f.write("fake audio")
+            _write_test_audio(source_file)
 
             stamped = make_download_file(
                 filename="user1\\Music\\01 - Track.mp3",
@@ -2254,8 +2393,7 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             )
             os.makedirs(resumed_path)
             resumed_file = os.path.join(resumed_path, "01 - Track.mp3")
-            with open(resumed_file, "w") as f:
-                f.write("fake audio")
+            _write_test_audio(resumed_file)
 
             album = make_grab_list_entry(
                 files=[make_download_file(
@@ -2494,8 +2632,7 @@ class TestEventPathMaterialization(unittest.TestCase):
                 tmpdir, "somewhere-unrelated",
                 "04 How To Disappear Completely_638827305447447018.mp3")
             os.makedirs(os.path.dirname(event_path))
-            with open(event_path, "w") as fp:
-                fp.write("fake audio")
+            _write_test_audio(event_path)
             album, ctx = self._album(tmpdir, local_path=event_path)
 
             result = process_completed_album(album, ctx, import_job_id=1)
@@ -2513,8 +2650,7 @@ class TestEventPathMaterialization(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             src = os.path.join(tmpdir, "Kid A", self.FNAME)
             os.makedirs(os.path.dirname(src))
-            with open(src, "w") as fp:
-                fp.write("fake audio")
+            _write_test_audio(src)
             files = [make_download_file(
                 filename=f"@@wcren/Music/Radiohead/Kid A/{self.FNAME}",
                 file_dir="@@wcren/Music/Radiohead/Kid A",
@@ -2769,8 +2905,7 @@ class TestEventPathMaterialization(unittest.TestCase):
                 tmpdir, local_path=os.path.join(tmpdir, "Kid A", self.FNAME))
             dst_dir = self._canonical_dir(ctx, album.files)
             os.makedirs(dst_dir)
-            with open(os.path.join(dst_dir, self.FNAME), "w") as fp:
-                fp.write("fake audio")
+            _write_test_audio(os.path.join(dst_dir, self.FNAME))
 
             result = process_completed_album(album, ctx, import_job_id=1)
 
@@ -2787,8 +2922,7 @@ class TestEventPathMaterialization(unittest.TestCase):
             album, ctx = self._album(tmpdir, local_path=None)
             dst_dir = self._canonical_dir(ctx, album.files)
             os.makedirs(dst_dir)
-            with open(os.path.join(dst_dir, self.FNAME), "w") as fp:
-                fp.write("fake audio")
+            _write_test_audio(os.path.join(dst_dir, self.FNAME))
 
             result = process_completed_album(album, ctx, import_job_id=1)
 
@@ -2965,8 +3099,7 @@ class TestPreMatchRejectRecordsNullDistance(unittest.TestCase):
             canonical_path = canonical_folder_for_row(
                 album, os.path.join(cfg.processing_dir, "albums"))
             os.makedirs(canonical_path, exist_ok=True)
-            with open(os.path.join(canonical_path, "leftover.mp3"), "wb") as fp:
-                fp.write(b"stale leftover audio from a different attempt")
+            _write_test_audio(os.path.join(canonical_path, "leftover.mp3"))
 
             # This test owns the rejection/audit boundary, not the
             # materializer. A pre-existing extra file is deliberately an

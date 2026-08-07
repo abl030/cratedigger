@@ -51,7 +51,11 @@ _bootstrap_import_paths()
 
 from lib import transitions
 from lib.beets_db import AlbumInfo, BeetsDB, validate_beets_storage_pair
-from lib.measurement import ffprobe_audio_codec_name
+from lib.media_readiness import (
+    MediaReadinessError,
+    media_facts_for_path,
+    normalize_media_metadata,
+)
 from lib.permissions import fix_library_modes, reset_umask
 from lib.release_identity import ReleaseIdentity
 from lib.util import beets_subprocess_env, validate_audio
@@ -745,8 +749,11 @@ _ALWAYS_LOSSLESS_EXTS = {".flac", ".wav"}
 
 
 def _is_m4a_alac(fpath: str) -> bool:
-    """Check if an .m4a file contains ALAC (lossless) via ffprobe."""
-    return ffprobe_audio_codec_name(fpath) == "alac"
+    """Check an M4A's canonical stream facts for ALAC."""
+    try:
+        return media_facts_for_path(fpath).codec == "alac"
+    except MediaReadinessError:
+        return False
 
 
 def _detect_native_codec_family(folder: str) -> str:
@@ -774,8 +781,11 @@ def _detect_native_codec_family(folder: str) -> str:
                 continue
             probed_any_audio = True
             fpath = os.path.join(root, fname)
-            label = native_codec_format_label(
-                ffprobe_audio_codec_name(fpath), ext)
+            try:
+                codec = media_facts_for_path(fpath).codec
+            except MediaReadinessError:
+                codec = None
+            label = native_codec_format_label(codec, ext)
             if label is not None:
                 return label
     if probed_any_audio:
@@ -794,9 +804,10 @@ def _detect_source_format(folder: str) -> str:
             ext = os.path.splitext(fname)[1].lower()
             if ext not in AUDIO_EXTENSIONS:
                 continue
-            codec = ffprobe_audio_codec_name(os.path.join(root, fname))
-            if codec:
-                return codec.upper()
+            try:
+                return media_facts_for_path(os.path.join(root, fname)).codec.upper()
+            except MediaReadinessError:
+                pass
             return ext.lstrip(".").upper()
     return "UNKNOWN"
 
@@ -880,7 +891,7 @@ def _remove_lossless_files(folder: str) -> None:
 
 
 def _probe_source_channels(path: str) -> int | None:
-    """Read the channel count from an audio file via mutagen.
+    """Read the channel count from canonical stream facts.
 
     Returns the integer channel count or ``None`` if the probe fails. Used
     to detect multichannel sources before convert_lossless / _temp_v0_probe
@@ -890,24 +901,9 @@ def _probe_source_channels(path: str) -> int | None:
     probe lets us log the source layout as a breadcrumb.
     """
     try:
-        # getattr (not `from mutagen import File`) keeps this Any-typed:
-        # mutagen's File() factory has an untyped `filething` parameter and
-        # a partially-unknown overloaded return (many mutagen format
-        # classes) — third-party, not ours to annotate.
-        import mutagen
-        _MutagenFile = getattr(mutagen, "File")  # noqa: B009 - dynamic untyped factory
-    except ImportError:
+        return media_facts_for_path(path).channels
+    except MediaReadinessError:
         return None
-    try:
-        mf = _MutagenFile(path)
-    except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
-        return None
-    if mf is None:
-        return None
-    channels = getattr(getattr(mf, "info", None), "channels", None)
-    if isinstance(channels, int) and channels > 0:
-        return channels
-    return None
 
 
 @dataclass
@@ -2094,6 +2090,19 @@ def main():
         shutil.copytree(args.path, work_path)
         _log_timing("dry_run_copy", stage_start)
         _log(f"[DRY-RUN] Previewing isolated copy: {work_path}")
+
+        # The dry-run path is a private copy.  The real importer receives the
+        # canonical processing album, which download processing already owns
+        # and normalizes; never let this standalone harness mutate an
+        # arbitrary caller path.
+        try:
+            normalize_media_metadata(work_path)
+        except MediaReadinessError as exc:
+            r.exit_code = 1
+            r.decision = f"media_readiness_{exc.kind}"
+            r.error = str(exc)
+            _log(f"[ERROR] {r.error}")
+            _emit_and_exit(r)
 
     # Capture downloaded-source truth before any V0 probe or target conversion
     # mutates the isolated/staged folder.

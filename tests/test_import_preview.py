@@ -2471,6 +2471,71 @@ class TestImportPreviewPath(unittest.TestCase):
         finally:
             shutil.rmtree(source, ignore_errors=True)
 
+    def test_zero_streaminfo_flac_persists_lossless_candidate_evidence(self):
+        """Preview preserves the repaired private FLAC's lossless identity."""
+        from pathlib import Path
+
+        from lib.dispatch.types import ImportOneRun
+        from lib.import_execution import ExecutionLeaseSnapshot, ProcessIdentity
+        from lib.measurement import ExistingSpectralAuditLookup
+        from scripts.import_preview_worker import _AutomationPreviewDB
+        from tests.audio_fixtures import make_test_flac
+        from tests.test_media_readiness import _zero_flac_duration_metadata
+
+        db = self._db()
+        self.assertTrue(db.reset_to_wanted(42, expected_status="unsearchable"))
+        job = handoff_automation_owner(db, 42)
+        lease = ExecutionLeaseSnapshot(
+            host_boot_id="zero-streaminfo-preview", invocation_id="preview",
+            systemd_unit="cratedigger-import-preview-worker.service",
+            worker=ProcessIdentity(pid=7002, start_ticks=70002),
+        )
+        claimed = claim_next_import_preview_job(
+            db, worker_id="preview", execution_lease=lease,
+        )
+        assert claimed is not None and claimed.id == job.id
+        source = tempfile.mkdtemp()
+        try:
+            actual = os.path.join(source, "source.flac")
+            track = os.path.join(source, "01 - Track.ogg")
+            make_test_flac(actual, duration=1)
+            os.replace(actual, track)
+            _zero_flac_duration_metadata(Path(track))
+            run = ImportOneRun(
+                command=("import_one",), returncode=0, stdout="", stderr="",
+                import_result=ImportResult(
+                    decision="import",
+                    source_measurement=AudioQualityMeasurement(
+                        min_bitrate_kbps=700, avg_bitrate_kbps=700,
+                        median_bitrate_kbps=700, format="FLAC",
+                    ),
+                ),
+            )
+            with patch(
+                "lib.config.read_runtime_config",
+                return_value=_preview_runtime_config(
+                    beets_harness_path="/fake/harness/run_beets_harness.sh",
+                    pipeline_db_enabled=True,
+                ),
+            ), patch("lib.beets_db.BeetsDB", lambda **_kwargs: FakeBeetsDB()):
+                preview = measure_and_persist_candidate_evidence(
+                    _AutomationPreviewDB(db, lease),  # pyright: ignore[reportArgumentType]
+                    request_id=42, path=source, import_job_id=job.id,
+                    run_import_fn=lambda **_kwargs: run,
+                    existing_spectral_resolver=(
+                        lambda _release_id: ExistingSpectralAuditLookup()
+                    ),
+                )
+
+            self.assertEqual(preview.verdict, "evidence_ready")
+            evidence_id = db.get_import_job_candidate_evidence_id(job.id)
+            assert evidence_id is not None
+            evidence = db.load_album_quality_evidence_by_id(evidence_id)
+            assert evidence is not None
+            self.assertEqual(evidence.measurement.format, "FLAC")
+        finally:
+            shutil.rmtree(source, ignore_errors=True)
+
     def test_production_preview_prepares_have_before_candidate_ready(self):
         order: list[str] = []
 

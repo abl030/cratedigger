@@ -59,6 +59,7 @@ from lib.measurement import (
     measure_preimport_state,
     spectral_detail_from_persisted_source,
 )
+from lib.media_readiness import normalize_media_metadata
 from lib.processing_paths import (
     path_is_within_root,
     processing_albums_dir,
@@ -113,7 +114,6 @@ from lib.quality_evidence import (
     snapshot_fingerprint,
     spectral_measurement_generation_is_current,
 )
-from lib.util import repair_mp3_headers
 from lib.v0_probe import probe_installed_album_as_v0
 from lib.validation_envelope import decode_validation_envelope
 
@@ -198,6 +198,11 @@ class PreviewSnapshotLimits:
 PreviewCopyFn = Callable[..., int]
 PreviewAvailableBytesFn = Callable[[int], int]
 HeaderRepairFn = Callable[[str], None]
+
+
+def _prepare_preview_media(path: str) -> None:
+    """Normalize only a ready private view; measurement owns invalid evidence."""
+    normalize_media_metadata(path, fail_closed=False)
 
 
 def _preview_available_bytes(preview_fd: int) -> int:
@@ -2110,7 +2115,7 @@ def measure_and_persist_candidate_evidence(
         )
     preserve_have_source = preserve_existing_source_spectral(current_evidence)
 
-    repair = repair_fn or repair_mp3_headers
+    repair = repair_fn or _prepare_preview_media
     owns_path = path_is_within_root(path, processing_albums_dir(cfg.processing_dir))
     # The processing album is the trust transition.  Normalise it before the
     # preview snapshot so evidence and the later importer both see the same
@@ -2816,7 +2821,7 @@ def preview_import_from_path(
         # repair before inspection, measurement, and the dry-run harness.
         try:
             _checkpoint(cancellation_token)
-            repair_mp3_headers(preview_path)
+            _prepare_preview_media(preview_path)
             _checkpoint(cancellation_token)
         except ExecutionCancelled:
             raise
