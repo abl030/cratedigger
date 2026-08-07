@@ -9,6 +9,7 @@ import tempfile
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -452,6 +453,88 @@ class TestLibraryDeleteAuthority(unittest.TestCase):
 
         self.assertIsInstance(result, DeleteLockContended)
         self._assert_no_mutation()
+
+    def test_pipeline_purge_locks_merged_acquisition_and_filed_survivor(self) -> None:
+        """Deleting a survivor-filed merged request removes both associations."""
+        self.db.record_canonical_release_id(
+            41,
+            canonical_release_id=RELEASE_B,
+            resolved_at=datetime.now(UTC),
+        )
+        self.beets.set_album_detail(7, _album(release_id=RELEASE_B))
+        self.beets.set_album_ids_for_release(RELEASE_B, [7])
+
+        def exact_delete(request: BeetsDeleteRequest) -> BeetsDeleteCompleted:
+            self.beets._album_detail.pop(request.album_id)
+            return BeetsDeleteCompleted(
+                album_id=request.album_id,
+                album_name="Album A",
+                artist_name="Artist A",
+                former_album_path="/library/Artist/Album A",
+                deleted_tracks=1,
+                deleted_artifacts=1,
+                preserved_paths=(),
+            )
+
+        result = delete_release_from_library(
+            pipeline_db=self.db,
+            beets_db=self.beets,
+            request=DeleteRequest(
+                album_id=7,
+                purge_pipeline=True,
+                expected_pipeline_id=41,
+                expected_release_id=RELEASE_B,
+            ),
+            beets_delete_fn=exact_delete,
+            notify_fn=lambda _path: (),
+        )
+
+        self.assertIsInstance(result, DeleteSuccess)
+        self.assertEqual(
+            self.db.advisory_lock_calls,
+            [
+                (ADVISORY_LOCK_NAMESPACE_IMPORT, 41),
+                *[
+                    (ADVISORY_LOCK_NAMESPACE_RELEASE, key)
+                    for key in sorted({
+                        release_id_to_lock_key(RELEASE_A),
+                        release_id_to_lock_key(RELEASE_B),
+                    })
+                ],
+            ],
+        )
+        self.assertIsNone(self.db.get_request(41))
+
+    def test_merged_pipeline_purge_release_contention_is_zero_mutation(self) -> None:
+        self.db.record_canonical_release_id(
+            41,
+            canonical_release_id=RELEASE_B,
+            resolved_at=datetime.now(UTC),
+        )
+        self.beets.set_album_detail(7, _album(release_id=RELEASE_B))
+        self.beets.set_album_ids_for_release(RELEASE_B, [7])
+        self.db.set_advisory_lock_result(
+            lambda namespace, key: not (
+                namespace == ADVISORY_LOCK_NAMESPACE_RELEASE
+                and key == release_id_to_lock_key(RELEASE_B)
+            ),
+        )
+
+        result = delete_release_from_library(
+            pipeline_db=self.db,
+            beets_db=self.beets,
+            request=DeleteRequest(
+                album_id=7,
+                purge_pipeline=True,
+                expected_pipeline_id=41,
+                expected_release_id=RELEASE_B,
+            ),
+            notify_fn=lambda _path: (),
+        )
+
+        self.assertIsInstance(result, DeleteLockContended)
+        self.assertEqual(self.db.request(41)["status"], "imported")
+        self.assertIsNotNone(self.beets.get_album_detail(7))
 
     def test_job_claimed_after_release_lock_is_rechecked_under_lock(self) -> None:
         def acquire(namespace: int, _key: int) -> bool:

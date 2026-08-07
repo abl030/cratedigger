@@ -43,6 +43,7 @@ from typing import Protocol
 
 from lib.mb_canonical import CanonicalReleaseFn, canonical_release_id
 from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_IMPORT
+from lib.pipeline_db._core import AdvisoryLockSessionLost
 from lib.release_association_locks import (
     ReleaseAssociationLockDB,
     release_identity_locks,
@@ -209,6 +210,12 @@ class CanonicalReleaseService:
         return self.reconcile_row(row)
 
     def retire_request(self, request_id: int) -> CanonicalRetireResult:
+        try:
+            return self._retire_request(request_id)
+        except AdvisoryLockSessionLost:
+            return CanonicalRetireResult(request_id, OUTCOME_BUSY)
+
+    def _retire_request(self, request_id: int) -> CanonicalRetireResult:
         """Explicitly retire one stored survivor using a fresh-read CAS.
 
         This is deliberately separate from reconciliation: a definitive
@@ -270,6 +277,16 @@ class CanonicalReleaseService:
                 )
 
     def reconcile_row(
+        self, row: Mapping[str, object],
+    ) -> CanonicalReconcileResult:
+        raw_id = row["id"]
+        request_id = raw_id if isinstance(raw_id, int) else int(str(raw_id))
+        try:
+            return self._reconcile_row(row)
+        except AdvisoryLockSessionLost:
+            return CanonicalReconcileResult(request_id, OUTCOME_BUSY)
+
+    def _reconcile_row(
         self, row: Mapping[str, object],
     ) -> CanonicalReconcileResult:
         """Reconcile one already-loaded request row."""

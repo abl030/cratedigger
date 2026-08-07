@@ -177,6 +177,7 @@ only non-request-backed order.
 | Canonical retire | acquisition + stored canonical | acquisition | IMPORT then before RELEASE locks, fresh reread/CAS. Busy is a typed retryable conflict. |
 | Replace | old acquisition + old canonical | target acquisition | IMPORT then union RELEASE locks through old-row supersede, new-row publication, and old-library cleanup. Target collision is rechecked under lock. |
 | Pipeline Delete / ghost cleanup | current acceptable identities | none | IMPORT then before RELEASE locks, fresh reread and conditional delete. Contention or a stale association is zero mutation. |
+| Library Delete with pipeline purge | current acceptable identities + filed Beets identity | none | IMPORT then sorted union RELEASE locks, fresh request/Beets reread and exact child delete. A survivor-filed merged row still locks its acquisition identity before removing the pipeline row. |
 
 ### IMPORTER — worker singleton lock
 
@@ -238,6 +239,23 @@ changes, and automated owner convergence all acquire IMPORT before the durable
 owner reread.
 Authority rejection is a 409 / CLI exit 4 with zero filesystem, audit, job, or
 request mutation.
+
+### Exact-session rule
+
+An advisory lock is authority held by one PostgreSQL backend, not a token that
+survives reconnect. While any advisory-lock scope is open, `PipelineDB`
+disables its normal autocommit reconnect/replay convenience. A lost or replaced
+connection raises `AdvisoryLockSessionLost` and the short association writer
+returns its typed busy/retry result without replaying the failed statement on a
+fresh backend. This applies uniformly to direct `RELEASE -> PLAN` creation and
+to every request-backed `IMPORT -> RELEASE` writer. This is a **SQL
+no-replay** guarantee only: it does not prove that a Beets child or filesystem
+operation remained fenced while a backend died. In particular, a Replace whose
+supersede already committed surfaces its runnable descendant rather than
+inviting a second Replace, but D0 does not validate the external cleanup tail.
+Issue #1071 is the required pre-deploy successor for cancellation/fencing of
+external children and resumable post-supersede cleanup; do not infer either
+property from this lock scope.
 
 Inside a processing transaction, row locks have their own fixed order:
 request, every job for that request in ID order, then cleanup journals in job

@@ -24,6 +24,7 @@ from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_RELEASE,
     release_id_to_lock_key,
 )
+from lib.pipeline_db._core import AdvisoryLockSessionLost
 from lib.pipeline_db.rows import AlbumRequestRow
 from lib.search_plan_service import SearchPlanDB, SearchPlanService, ServiceResult
 
@@ -155,6 +156,18 @@ class RequestCreationService:
     def create_or_resume(
         self, creation: RequestCreationInput,
     ) -> RequestCreationResult:
+        try:
+            return self._create_or_resume(creation)
+        except AdvisoryLockSessionLost:
+            # The RELEASE lock died with its backend.  Do not reconnect and
+            # continue an initializing publication without that authority.
+            return RequestCreationResult(
+                "busy", detail="release lock session lost; retry",
+            )
+
+    def _create_or_resume(
+        self, creation: RequestCreationInput,
+    ) -> RequestCreationResult:
         """Perform every durable boundary under RELEASE then PLAN lock order.
 
         Any exception after insertion deliberately returns the request id and
@@ -253,6 +266,15 @@ class RequestCreationService:
                 )
                 if isinstance(publication, transitions.TransitionConflict):
                     return self._failed(request_id, "publication CAS lost")
+            except AdvisoryLockSessionLost:
+                # This is not an initialization failure: the backend released
+                # RELEASE authority, so the caller must retry against a fresh
+                # session.  Keep any already-created row initializing.
+                return RequestCreationResult(
+                    "busy",
+                    request_id=request_id,
+                    detail="release lock session lost; retry",
+                )
             except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                 # Resolver/database exceptions may contain upstream URLs or
                 # implementation detail. The retained request id is the

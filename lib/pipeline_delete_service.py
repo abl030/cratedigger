@@ -9,6 +9,7 @@ import psycopg2.errors
 
 from lib import transitions
 from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_IMPORT
+from lib.pipeline_db._core import AdvisoryLockSessionLost
 from lib.release_association_locks import (
     ReleaseAssociationLockDB,
     release_identity_locks,
@@ -87,6 +88,16 @@ def _descendant_ids(
 
 
 def delete_pipeline_request(
+    db: PipelineDeleteDB,
+    request_id: int,
+) -> PipelineDeleteResult:
+    try:
+        return _delete_pipeline_request(db, request_id)
+    except AdvisoryLockSessionLost:
+        return PipelineDeleteLockContended(request_id)
+
+
+def _delete_pipeline_request(
     db: PipelineDeleteDB,
     request_id: int,
 ) -> PipelineDeleteResult:

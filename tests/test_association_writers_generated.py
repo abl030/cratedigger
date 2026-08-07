@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import unittest
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
@@ -16,6 +16,8 @@ from lib.config import CratediggerConfig
 from lib.mbid_replace_service import MbidReplaceService
 from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_RELEASE, release_id_to_lock_key
 from lib.pipeline_delete_service import delete_pipeline_request
+from lib.release_association_locks import release_identity_locks
+from lib.release_identity import ReleaseIdentity
 from lib.request_identity import acceptable_identities
 from lib.wrong_match_delete_service import WrongMatchDeleteSummary
 from tests.fakes import FakeBeetsDB, FakePipelineDB, FakeSlskdAPI
@@ -29,10 +31,14 @@ NOW = datetime(2026, 8, 7, tzinfo=UTC)
 
 
 def check_association_writer_locks(
-    before: tuple[str, ...], after: tuple[str, ...], calls: list[tuple[int, int]],
+    before: tuple[str, ...],
+    after: tuple[str, ...],
+    calls: list[tuple[int, int]],
+    *,
+    lock_key: Callable[[str], int] = release_id_to_lock_key,
 ) -> None:
     """Every before/after association key must be protected exactly once."""
-    expected = {release_id_to_lock_key(identity) for identity in (*before, *after)}
+    expected = {lock_key(identity) for identity in (*before, *after)}
     actual = [key for namespace, key in calls if namespace == ADVISORY_LOCK_NAMESPACE_RELEASE]
     if actual != sorted(expected):
         raise AssertionError(f"association locks {actual} did not cover {sorted(expected)}")
@@ -53,6 +59,70 @@ def _empty_wrong_match(_db: object, request_id: int) -> WrongMatchDeleteSummary:
 
 
 class TestAssociationWritersGenerated(unittest.TestCase):
+    @given(
+        before=st.lists(st.integers(min_value=1, max_value=10_000), max_size=8),
+        after=st.lists(st.integers(min_value=1, max_value=10_000), max_size=8),
+        collision_modulus=st.integers(min_value=1, max_value=5),
+    )
+    def test_generated_before_after_sets_dedupe_and_sort_collision_keys(
+        self,
+        before: list[int],
+        after: list[int],
+        collision_modulus: int,
+    ) -> None:
+        """The shared scope protects generated association unions exactly.
+
+        A deliberately tiny key space exercises both duplicate identities and
+        CRC-style key collisions without manufacturing invalid dual identities.
+        """
+        identities = tuple(
+            ReleaseIdentity("discogs", str(value))
+            for value in (*before, *after)
+        )
+        db = FakePipelineDB()
+        key = lambda release_id: int(release_id) % collision_modulus
+
+        with release_identity_locks(
+            db,
+            identities,
+            lock_key_fn=lambda identity: key(identity.release_id),
+        ) as result:
+            self.assertTrue(result.acquired)
+            self.assertEqual(
+                result.keys,
+                tuple(sorted({key(identity.release_id) for identity in identities})),
+            )
+
+        check_association_writer_locks(
+            tuple(str(value) for value in before),
+            tuple(str(value) for value in after),
+            db.advisory_lock_calls,
+            lock_key=key,
+        )
+
+    @given(
+        old=st.integers(min_value=1, max_value=10_000),
+        new=st.integers(min_value=10_001, max_value=20_000),
+    )
+    def test_generated_omitted_before_or_after_mutants_die(
+        self, old: int, new: int,
+    ) -> None:
+        """Removing either side of a changing association union is unsafe."""
+        before = (str(old),)
+        after = (str(new),)
+        key = int
+        for mutant in ((new,), (old,)):
+            with self.assertRaises(AssertionError):
+                check_association_writer_locks(
+                    before,
+                    after,
+                    [
+                        (ADVISORY_LOCK_NAMESPACE_RELEASE, release_id)
+                        for release_id in mutant
+                    ],
+                    lock_key=key,
+                )
+
     @given(st.sampled_from(("add", "move", "retire", "replace", "delete")))
     def test_every_writer_locks_before_and_after_associations(
         self, operation: str,

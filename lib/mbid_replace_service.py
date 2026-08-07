@@ -78,6 +78,7 @@ from lib.pipeline_db import (
     MbidCollisionError,
     SupersedeRaceError,
 )
+from lib.pipeline_db._core import AdvisoryLockSessionLost
 from lib.processing_paths import stage_to_ai_path
 from lib.release_association_locks import release_identity_locks
 from lib.release_identity import (
@@ -89,6 +90,7 @@ from lib.replace_status import (
     REPLACE_REASON_CROSS_PATHWAY_TARGET,
     REPLACE_REASON_CURRENT_BEETS_AMBIGUOUS,
     REPLACE_REASON_CURRENT_BEETS_UNAVAILABLE,
+    REPLACE_REASON_LOCK_CONTENDED,
     REPLACE_REASON_SOURCE_IDENTITY_INVALID,
     REPLACE_REASON_SOURCE_NO_RELEASE_GROUP,
     REPLACE_REASON_TARGET_NO_RELEASE_GROUP,
@@ -328,6 +330,45 @@ class MbidReplaceService:
         )
 
     def replace_request_mbid(
+        self,
+        request_id: int,
+        *,
+        target_mb_release_id: str,
+    ) -> ReplaceResult:
+        try:
+            return self._replace_request_mbid(
+                request_id, target_mb_release_id=target_mb_release_id,
+            )
+        except AdvisoryLockSessionLost:
+            # The lock-bearing backend died.  A supersede may already have
+            # committed, in which case retrying would be wrong: expose the
+            # runnable descendant and let ordinary plan/cycle convergence
+            # finish its derived work.  Before supersede this is a normal
+            # retryable busy result with no mutation.
+            try:
+                descendant = self.db.get_request_by_replaces_request_id(
+                    request_id,
+                )
+            except Exception:  # noqa: BLE001 - session loss is primary
+                descendant = None
+            if descendant is not None:
+                return ReplaceResult(
+                    outcome=RESULT_WRONG_STATE,
+                    request_id=request_id,
+                    descendant_request_id=int(descendant["id"]),
+                    error_message=(
+                        "Replace session was lost after supersede; the new "
+                        f"request {descendant['id']} remains runnable"
+                    ),
+                )
+            return ReplaceResult(
+                outcome=RESULT_TRANSIENT,
+                request_id=request_id,
+                reason=REPLACE_REASON_LOCK_CONTENDED,
+                error_message="Replace lock session was lost; retry",
+            )
+
+    def _replace_request_mbid(
         self,
         request_id: int,
         *,
@@ -856,8 +897,9 @@ class MbidReplaceService:
         ) as acquired:
             if not acquired:
                 return ReplaceResult(
-                    outcome=RESULT_WRONG_STATE,
+                    outcome=RESULT_TRANSIENT,
                     request_id=request_id,
+                    reason=REPLACE_REASON_LOCK_CONTENDED,
                     error_message=(
                         f"importer is currently running for request "
                         f"{request_id}; retry in a few seconds"
@@ -943,8 +985,9 @@ class MbidReplaceService:
             if not release_locks.acquired:
                 release_scope.__exit__(None, None, None)
                 return ReplaceResult(
-                    outcome=RESULT_WRONG_STATE,
+                    outcome=RESULT_TRANSIENT,
                     request_id=request_id,
+                    reason=REPLACE_REASON_LOCK_CONTENDED,
                     error_message=(
                         "release association is currently changing; retry "
                         f"Replace for request {request_id}"
@@ -1141,6 +1184,11 @@ class MbidReplaceService:
                             f"{wm_summary.errors} errors "
                             f"({wm_summary.remaining} remaining)"
                         )
+                except AdvisoryLockSessionLost:
+                    # Do not turn loss of the association-lock session into a
+                    # successful Replace warning.  The public boundary below
+                    # finds the committed descendant and refuses a retry.
+                    raise
                 except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                     warnings.append(
                         f"wrong-matches cleanup raised "
