@@ -403,8 +403,32 @@ def _refresh_current_evidence_after_import(
             "identity_mismatch",
             "candidate evidence exact release identity does not match import",
         )
+    # Union (#1059). Correct-but-redundant today, because an import can only
+    # succeed under the acquisition id, so the just-imported album carries
+    # it. It stops being redundant the moment the match seam accepts a merge
+    # survivor: the album then lands under the SURVIVOR's id and an
+    # acquisition-only resolve here would report "album not in beets" for a
+    # release that had just been imported successfully.
+    from lib.quality_evidence import _canonical_identity_for_request
+    from lib.request_identity import resolve_current_for_identities
+
     with beets_handle as beets:
-        current = beets.resolve_current_release(identity)
+        current = resolve_current_for_identities(
+            beets,
+            acquisition=identity,
+            canonical=_canonical_identity_for_request(db, request_id, identity),
+        )
+    if current is None:
+        # "We could not establish authority" is not "the album is absent".
+        # Every other union consumer keeps those apart; this one used to
+        # collapse them, which is the conflation the union module's
+        # docstring forbids at the site that becomes load-bearing once the
+        # match seam lands.
+        return EvidenceBuildResult(
+            None,
+            "failed",
+            "current Beets authority omitted a requested release identity",
+        )
     if isinstance(current, CurrentBeetsMissing):
         return EvidenceBuildResult(None, "empty_current", "album not in beets")
     if isinstance(current, CurrentBeetsAmbiguous):

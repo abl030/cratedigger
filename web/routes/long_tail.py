@@ -61,7 +61,7 @@ def get_pipeline_long_tail(h: RouteHandler, params: dict[str, list[str]]) -> Non
       * 503 — expected Beets authority/read unavailability.
     """
     from lib.long_tail_service import band_one_long_tail, list_long_tail
-    from web.routes._overlay import band_release_ids
+    from web.routes._overlay import band_request_rows
 
     s = _server()
 
@@ -73,7 +73,7 @@ def get_pipeline_long_tail(h: RouteHandler, params: dict[str, list[str]]) -> Non
             except (TypeError, ValueError):
                 h._error("id must be an integer")
                 return
-            row = band_one_long_tail(s._db(), band_release_ids, request_id)
+            row = band_one_long_tail(s._db(), band_request_rows, request_id)
             if row is None:
                 h._json(
                     {"error": "Not found", "id": request_id},
@@ -88,7 +88,7 @@ def get_pipeline_long_tail(h: RouteHandler, params: dict[str, list[str]]) -> Non
         if band == "":
             band = None
 
-        result = list_long_tail(s._db(), band_release_ids, band=band)
+        result = list_long_tail(s._db(), band_request_rows, band=band)
 
         # Route the serialized rows through _serialize_row to convert any
         # datetime / UUID columns to JSON-safe values (datetime-500 guard).

@@ -16557,5 +16557,167 @@ class TestReadProjectionRegistryParity(unittest.TestCase):
                     real_db.close()
 
 
+class TestCanonicalReleaseId(unittest.TestCase):
+    """Real-PG coverage for the migration-074 merge-survivor columns (#1059).
+
+    Rule A: the write's every field must be readable back through the
+    production read path, and both DB CHECK constraints must behave the way
+    the reconciler will meet them on doc2 — not the way the fake believes.
+    """
+
+    SURVIVOR = "7aabf975-9a06-4b2e-854c-2c700380ebd5"
+    LOSER = "4878ee47-f8b8-45c8-832c-62de3bccfa6e"
+
+    def _seed(self, db, *, mbid=None, status="imported"):
+        request_id = db.add_request(
+            mb_release_id=mbid or self.LOSER,
+            artist_name="Merged",
+            album_title="Release",
+            source="request",
+        )
+        if status != "wanted":
+            db.update_status(request_id, status)
+        return request_id
+
+    def test_record_canonical_release_id_round_trip_preserves_every_field(self):
+        db = make_db()
+        try:
+            request_id = self._seed(db)
+            observed_at = datetime(2026, 8, 6, 12, 0, 0, tzinfo=UTC)
+
+            wrote = db.record_canonical_release_id(
+                request_id,
+                canonical_release_id=self.SURVIVOR,
+                resolved_at=observed_at,
+            )
+            self.assertTrue(wrote)
+
+            row = db.get_request(request_id)
+            assert row is not None
+            self.assertEqual(row["canonical_release_id"], self.SURVIVOR)
+            self.assertEqual(row["canonical_resolved_at"], observed_at)
+            # The acquisition id is frozen history — invariant 1.
+            self.assertEqual(row["mb_release_id"], self.LOSER)
+
+            cur = db._execute(
+                "SELECT canonical_release_id, canonical_resolved_at "
+                "FROM album_requests WHERE id = %s",
+                (request_id,),
+            )
+            stored = cur.fetchone()
+            self.assertEqual(stored["canonical_release_id"], self.SURVIVOR)
+            self.assertEqual(stored["canonical_resolved_at"], observed_at)
+        finally:
+            db.close()
+
+    def test_a_further_merge_updates_the_survivor(self):
+        """Invariant 7: a canonical may move when MusicBrainz merges again."""
+        db = make_db()
+        try:
+            request_id = self._seed(db)
+            first = datetime(2026, 8, 1, tzinfo=UTC)
+            second = datetime(2026, 8, 6, tzinfo=UTC)
+            db.record_canonical_release_id(
+                request_id,
+                canonical_release_id=self.SURVIVOR,
+                resolved_at=first,
+            )
+            next_survivor = "abe18a1c-ad01-423c-b6ca-63cfa8a9daf1"
+            self.assertTrue(db.record_canonical_release_id(
+                request_id,
+                canonical_release_id=next_survivor,
+                resolved_at=second,
+            ))
+            row = db.get_request(request_id)
+            assert row is not None
+            self.assertEqual(row["canonical_release_id"], next_survivor)
+            self.assertEqual(row["canonical_resolved_at"], second)
+        finally:
+            db.close()
+
+    def test_replaced_row_is_a_no_op_and_stays_frozen(self):
+        """Superseded rows are frozen audit records; a late sweep write
+        must not mutate one or the world audit fails the run."""
+        db = make_db()
+        try:
+            request_id = self._seed(db)
+            # 'replaced' is owned by supersede — drive the real transition
+            # rather than forcing the column, so the frozen row under test
+            # is the one Replace actually produces.
+            db.supersede_request_mbid(
+                request_id,
+                new_mb_release_id="bce7d8c3-815b-449c-8e18-df806398986c",
+                new_mb_release_group_id=None,
+                new_mb_artist_id=None,
+                new_artist_name="Merged",
+                new_album_title="Release",
+                new_year=None,
+                new_country=None,
+                new_tracks=[],
+            )
+            before = db.get_request(request_id)
+            assert before is not None
+            self.assertEqual(before["status"], "replaced")
+
+            wrote = db.record_canonical_release_id(
+                request_id,
+                canonical_release_id=self.SURVIVOR,
+                resolved_at=datetime(2026, 8, 6, tzinfo=UTC),
+            )
+
+            self.assertFalse(wrote)
+            after = db.get_request(request_id)
+            assert after is not None
+            self.assertIsNone(after["canonical_release_id"])
+            self.assertIsNone(after["canonical_resolved_at"])
+            self.assertEqual(after["updated_at"], before["updated_at"])
+        finally:
+            db.close()
+
+    def test_survivor_equal_to_acquisition_is_refused(self):
+        """A survivor equal to the stored id is not a merge. The guard
+        keeps it out; the CHECK below proves the DB refuses it too."""
+        db = make_db()
+        try:
+            request_id = self._seed(db)
+            wrote = db.record_canonical_release_id(
+                request_id,
+                canonical_release_id=self.LOSER,
+                resolved_at=datetime(2026, 8, 6, tzinfo=UTC),
+            )
+            self.assertFalse(wrote)
+            row = db.get_request(request_id)
+            assert row is not None
+            self.assertIsNone(row["canonical_release_id"])
+        finally:
+            db.close()
+
+    def test_check_constraints_reject_the_shapes_the_guard_prevents(self):
+        """Known-bad: bypass the method and the schema still fails closed."""
+        import psycopg2.errors
+
+        db = make_db()
+        try:
+            request_id = self._seed(db)
+
+            with self.assertRaises(psycopg2.errors.CheckViolation):
+                db._execute(
+                    "UPDATE album_requests SET canonical_release_id = %s "
+                    "WHERE id = %s",
+                    (self.SURVIVOR, request_id),
+                )
+            db.conn.rollback()
+
+            with self.assertRaises(psycopg2.errors.CheckViolation):
+                db._execute(
+                    "UPDATE album_requests SET canonical_release_id = %s, "
+                    "canonical_resolved_at = %s WHERE id = %s",
+                    (self.LOSER, datetime(2026, 8, 6, tzinfo=UTC), request_id),
+                )
+            db.conn.rollback()
+        finally:
+            db.close()
+
+
 if __name__ == "__main__":
     unittest.main()

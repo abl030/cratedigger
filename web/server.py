@@ -91,6 +91,7 @@ from web.request_security import (
 from web.routes import api_index as _api_index_routes
 from web.routes import beets_distance as _beets_distance_routes
 from web.routes import browse as _browse_routes
+from web.routes import canonical as _canonical_routes
 from web.routes import disk_coverage as _disk_coverage_routes
 from web.routes import health as _health_routes
 from web.routes import imports as _imports_routes
@@ -125,6 +126,7 @@ ALL_ROUTES: list[RouteRegistration] = merge_registries(
     _disk_coverage_routes,
     _labels_routes,
     _long_tail_routes,
+    _canonical_routes,
     _pipeline_routes,
     _pipeline_dashboard_routes,
     _pipeline_mutations_routes,

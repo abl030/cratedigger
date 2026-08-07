@@ -102,6 +102,7 @@ from lib.replace_status import (
     RESULT_TRANSIENT,
     RESULT_WRONG_STATE,
 )
+from lib.request_identity import resolve_current_for_request
 from lib.search_plan_service import SearchPlanDB, SearchPlanService
 from lib.util import (
     trigger_jellyfin_scan,
@@ -241,6 +242,10 @@ class ReplaceBeetsDB(Protocol):
     def resolve_current_release(
         self, identity: ReleaseIdentity,
     ) -> CurrentBeetsResolution: ...
+
+    def resolve_current_releases(
+        self, identities: list[ReleaseIdentity],
+    ) -> dict[ReleaseIdentity, CurrentBeetsResolution]: ...
 
     def close(self) -> None: ...
 
@@ -908,7 +913,27 @@ class MbidReplaceService:
             try:
                 beets_db = self.beets_db_factory()
                 try:
-                    current_beets = beets_db.resolve_current_release(old_identity)
+                    # Union (#1059). ``current_album_path`` below is what
+                    # Replace uses to clean up the superseded album; an
+                    # acquisition-only resolve returns Missing for a merged
+                    # request whose files Beets holds under the survivor, so
+                    # Replace would supersede and leave the old album on
+                    # disk — manufacturing exactly the orphan class this
+                    # issue exists to clear.
+                    current_beets = resolve_current_for_request(
+                        beets_db, source_locked,
+                    )
+                    if current_beets is None:
+                        # Unreachable — ``old_identity`` was already proven
+                        # above. Raised rather than resolved acquisition-only:
+                        # the caller converts it to the typed
+                        # ``current_beets_unavailable`` refusal, and an
+                        # authority failure must not become a resolution on
+                        # a path that supersedes and deletes.
+                        raise RuntimeError(
+                            "current Beets authority omitted the request's "
+                            "acceptable release identities"
+                        )
                     current_library_db_path = beets_db.library_db_path
                     current_library_root = beets_db.library_root
                 finally:
@@ -995,7 +1020,15 @@ class MbidReplaceService:
                 try:
                     delete_outcome = self.beets_delete_fn(BeetsDeleteRequest(
                         album_id=current_beets.album_id,
-                        expected_release_id=old_identity.release_id,
+                        # FILED, not requested (#1059). The delete child
+                        # refuses a mismatch against the album's own
+                        # mb_albumid, and the supersede has already
+                        # committed — so the acquisition id here leaves the
+                        # old album on disk, which is the orphan class this
+                        # issue exists to clear.
+                        expected_release_id=(
+                            current_beets.filed_identity.release_id
+                        ),
                         library_db_path=current_library_db_path,
                         library_root=current_library_root,
                     ))

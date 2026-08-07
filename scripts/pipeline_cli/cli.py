@@ -29,6 +29,7 @@ from scripts.pipeline_cli.api_mutations import (
 )
 from scripts.pipeline_cli.audit import cmd_audit_world
 from scripts.pipeline_cli.beets_distance import cmd_beets_distance
+from scripts.pipeline_cli.canonical import cmd_canonical
 from scripts.pipeline_cli.destructive import cmd_ban_source, cmd_library_delete
 from scripts.pipeline_cli.imports import (
     cmd_force_import,
@@ -158,6 +159,7 @@ def main(*, api_socket: str | None = None):
         "youtube-album": cmd_youtube_album,
         "youtube-rescue": cmd_youtube_rescue,
         "long-tail": cmd_long_tail,
+        "canonical": cmd_canonical,
     }
     search_plan_commands = {
         "show": cmd_search_plan_show,

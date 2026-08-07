@@ -166,6 +166,48 @@ class TestPipelineDashboardRouteContracts(_FakeDbWebServerCase):
             self, dc["drift_rows"][0], self.DISK_COVERAGE_ROW_FIELDS,
             "pipeline dashboard drift row")
 
+    def test_pipeline_dashboard_drift_follows_a_merge_survivor(self):
+        """#1059: a merged request whose album Beets holds under the
+        SURVIVOR is not drift.
+
+        The operator-visible half of the union switch, and the reason it
+        is in this PR at all: with the canonicals stored, this card still
+        listed live requests 316 and 8832 as "imported, missing from
+        beets" while their own detail panels — two clicks away, same
+        browser — showed the real installed path. Two operator surfaces
+        contradicting each other on the same rows is worse than the miss
+        this PR set out to fix.
+        """
+        import web.server as srv
+
+        # Request 316's live merge, probed against the mirror 2026-08-06.
+        loser = "4878ee47-f8b8-45c8-832c-62de3bccfa6e"
+        survivor = "7aabf975-9a06-4b2e-854c-2c700380ebd5"
+        self.db.seed_request(make_request_row(
+            id=9106, status="imported", mb_release_id=loser,
+            artist_name="Merged Artist", album_title="Merged Album",
+        ))
+        self.db.record_canonical_release_id(
+            9106,
+            canonical_release_id=survivor,
+            resolved_at=datetime(2026, 8, 6, tzinfo=UTC),
+        )
+        beets = FakeBeetsDB()
+        # mbsync retagged the files onto the survivor, so the acquisition
+        # id answers for nothing — the live 316 / 8832 shape exactly.
+        beets.set_album_exists(survivor, True)
+        beets.set_album_exists(self.db.request(100)["mb_release_id"], True)
+
+        with patch.object(srv, "_beets_db", return_value=beets):
+            status, data = self._get("/api/pipeline/dashboard")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            [r["id"] for r in data["disk_coverage"]["drift_rows"]], [],
+            "an imported request whose album Beets holds under the merge "
+            "survivor must not be reported as drift",
+        )
+
     def test_pipeline_dashboard_disk_coverage_null_without_beets(self):
         from web import server
 
