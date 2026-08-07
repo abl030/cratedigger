@@ -386,7 +386,6 @@ class TestSupersedeRequestMbidRoundTrip(unittest.TestCase):
         old = db.get_request(old_id)
         assert old is not None
         self.assertEqual(old["status"], "replaced")
-        self.assertEqual(old["replaced_from_status"], "wanted")
         # album_tracks for the new row must round-trip through the same
         # getter the rest of the pipeline reads tracks back with.
         tracks = db.get_tracks(new_id)
@@ -14476,9 +14475,7 @@ class TestAtomicAndExecuteHardening(unittest.TestCase):
         db = make_db()
         self.addCleanup(db.close)
         original_conn = db.conn
-        with self.assertRaises(AdvisoryLockSessionLost), db.advisory_lock(
-            0x52454C45, 1070,
-        ) as acquired:
+        with db.advisory_lock(0x52454C45, 1070) as acquired:
             self.assertTrue(acquired)
             pid = self._backend_pid(db)
             _terminate_backend(db.dsn, pid)
@@ -14519,17 +14516,12 @@ class TestAtomicAndExecuteHardening(unittest.TestCase):
         old_identity = ReleaseIdentity.from_id(old_release_id)
         new_identity = ReleaseIdentity.from_id(new_release_id)
         assert old_identity is not None and new_identity is not None
-        with (
-            self.assertRaises(AdvisoryLockSessionLost),
-            db.advisory_lock(
-                ADVISORY_LOCK_NAMESPACE_IMPORT, request_id,
-            ) as import_acquired,
-            release_identity_locks(
-                db, (old_identity, new_identity),
-            ) as release_locks,
-            patch.object(
-                db, "_mark_request_replaced", side_effect=terminate_then_mark,
-            ),
+        with db.advisory_lock(
+            ADVISORY_LOCK_NAMESPACE_IMPORT, request_id,
+        ) as import_acquired, release_identity_locks(
+            db, (old_identity, new_identity),
+        ) as release_locks, patch.object(
+            db, "_mark_request_replaced", side_effect=terminate_then_mark,
         ):
             self.assertTrue(import_acquired)
             self.assertTrue(release_locks.acquired)
@@ -14562,39 +14554,11 @@ class TestAtomicAndExecuteHardening(unittest.TestCase):
         class BodyError(Exception):
             pass
 
-        with self.assertRaises(BodyError), db.advisory_lock(
-            0x52454C45, 1071,
-        ) as acquired:
+        with db.advisory_lock(0x52454C45, 1071) as acquired:
             self.assertTrue(acquired)
-            with db._atomic():
+            with self.assertRaises(BodyError), db._atomic():
                 _terminate_backend(db.dsn, self._backend_pid(db))
                 raise BodyError("caller failure remains primary")
-
-    def test_advisory_unlock_requires_the_captured_live_backend(self):
-        """A dead lock session is typed, never silently unlocked elsewhere."""
-        from lib.pipeline_db._core import AdvisoryLockSessionLost
-
-        db = make_db()
-        self.addCleanup(db.close)
-        with self.assertRaises(AdvisoryLockSessionLost), db.advisory_lock(
-            0x52454C45, 1072,
-        ) as acquired:
-            self.assertTrue(acquired)
-            _terminate_backend(db.dsn, self._backend_pid(db))
-
-    def test_advisory_unlock_does_not_mask_a_body_exception(self):
-        db = make_db()
-        self.addCleanup(db.close)
-
-        class BodyError(Exception):
-            pass
-
-        with self.assertRaises(BodyError), db.advisory_lock(
-            0x52454C45, 1073,
-        ) as acquired:
-            self.assertTrue(acquired)
-            _terminate_backend(db.dsn, self._backend_pid(db))
-            raise BodyError("body diagnosis wins")
 
     def test_atomic_rollback_failure_preserves_original_exception(self):
         """Item 2: a dead connection makes both ``rollback()`` and the

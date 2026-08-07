@@ -9,9 +9,7 @@ from __future__ import annotations
 
 import os
 import sys
-import threading
 import unittest
-from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
@@ -41,7 +39,6 @@ from lib.mbid_replace_service import (
     REPLACE_REASON_CURRENT_BEETS_AMBIGUOUS,
     REPLACE_REASON_CURRENT_BEETS_UNAVAILABLE,
     REPLACE_REASON_LOCK_CONTENDED,
-    REPLACE_REASON_POST_SUPERSEDE_PARTIAL,
     REPLACE_REASON_SOURCE_IDENTITY_INVALID,
     REPLACE_REASON_SOURCE_NO_RELEASE_GROUP,
     REPLACE_REASON_TARGET_NO_RELEASE_GROUP,
@@ -67,7 +64,6 @@ from lib.pipeline_db import (
 )
 from lib.pipeline_db._core import AdvisoryLockSessionLost
 from lib.release_identity import ReleaseIdentity
-from lib.search_plan_service import ServiceResult
 from lib.wrong_match_delete_service import WrongMatchDeleteSummary
 from tests.beets_world import BeetsWorld, BeetsWorldRelease
 from tests.fakes import FakeBeetsDB, FakePipelineDB, FakeSlskdAPI
@@ -237,8 +233,6 @@ class _ServiceCase(unittest.TestCase):
             status=status,
             source=source,
         )
-        if status == "replaced":
-            row["replaced_from_status"] = "wanted"
         db.seed_request(row)
         return request_id
 
@@ -836,8 +830,7 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
         )
 
         descendant = db.get_request_by_replaces_request_id(42)
-        self.assertEqual(result.outcome, RESULT_TRANSIENT)
-        self.assertEqual(result.reason, REPLACE_REASON_POST_SUPERSEDE_PARTIAL)
+        self.assertEqual(result.outcome, RESULT_WRONG_STATE)
         self.assertIsNotNone(descendant)
         assert descendant is not None
         self.assertEqual(result.descendant_request_id, descendant["id"])
@@ -855,33 +848,7 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
         ).replace_request_mbid(42, target_mb_release_id=NEW_MBID)
 
         descendant = db.get_request_by_replaces_request_id(42)
-        self.assertEqual(result.outcome, RESULT_TRANSIENT)
-        self.assertEqual(result.reason, REPLACE_REASON_POST_SUPERSEDE_PARTIAL)
-        self.assertIsNotNone(descendant)
-        assert descendant is not None
-        self.assertEqual(result.descendant_request_id, descendant["id"])
-
-    def test_session_loss_after_delete_ack_is_resumable_not_success(self):
-        """An acknowledgement cannot outlive the session that authorized it."""
-        db = FakePipelineDB()
-        self._seed_old(db)
-        beets = self._installed_beets()
-
-        def acknowledge_then_lose(
-            request: BeetsDeleteRequest,
-        ) -> BeetsDeleteCompleted:
-            db.closed = True
-            return self._completed_delete(request)
-
-        result = self._make_service(
-            db,
-            beets_db_factory=lambda: beets,
-            beets_delete_fn=acknowledge_then_lose,
-        ).replace_request_mbid(42, target_mb_release_id=NEW_MBID)
-
-        descendant = db.get_request_by_replaces_request_id(42)
-        self.assertEqual(result.outcome, RESULT_TRANSIENT)
-        self.assertEqual(result.reason, REPLACE_REASON_POST_SUPERSEDE_PARTIAL)
+        self.assertEqual(result.outcome, RESULT_WRONG_STATE)
         self.assertIsNotNone(descendant)
         assert descendant is not None
         self.assertEqual(result.descendant_request_id, descendant["id"])
@@ -913,120 +880,6 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
         result = svc.replace_request_mbid(42, target_mb_release_id=NEW_MBID)
         self.assertEqual(result.outcome, RESULT_WRONG_STATE)
         self.assertIsNone(result.descendant_request_id)
-
-    def test_same_target_resumes_committed_replace_tail_without_new_descendant(self):
-        """A post-supersede retry owns the stored exact pair, not a sibling."""
-        db = FakePipelineDB()
-        self._seed_old(db, status="replaced")
-        db.seed_request(make_request_row(
-            id=43, mb_release_id=NEW_MBID, mb_release_group_id=RG_ID,
-            status="wanted", replaces_request_id=42,
-        ))
-        beets = self._installed_beets()
-        deletes: list[BeetsDeleteRequest] = []
-        plans = MagicMock()
-        plans.generate_for_request.return_value = ServiceResult("success")
-        svc = self._make_service(
-            db,
-            beets_db_factory=lambda: beets,
-            beets_delete_fn=lambda request: (
-                deletes.append(request) or self._completed_delete(request)
-            ),
-            wrong_match_delete_fn=_empty_wrong_match_summary,
-            search_plan_service=plans,
-        )
-
-        result = svc.replace_request_mbid(42, target_mb_release_id=NEW_MBID)
-
-        self.assertEqual(result.outcome, RESULT_REPLACED)
-        self.assertEqual(result.new_request_id, 43)
-        self.assertEqual([request.album_id for request in deletes], [77])
-        plans.generate_for_request.assert_called_once_with(43, regenerate=False)
-        self.assertEqual(
-            [row["id"] for row in db._requests.values()
-             if row.get("replaces_request_id") == 42],
-            [43],
-        )
-
-    def test_replaced_source_refuses_a_different_target_without_tail_effects(self):
-        db = FakePipelineDB()
-        self._seed_old(db, status="replaced")
-        db.seed_request(make_request_row(
-            id=43, mb_release_id=NEW_MBID, mb_release_group_id=RG_ID,
-            status="wanted", replaces_request_id=42,
-        ))
-        delete = MagicMock()
-        plans = MagicMock()
-        result = self._make_service(
-            db,
-            beets_delete_fn=delete,
-            search_plan_service=plans,
-            mb_lookup=lambda mbid, *, fresh=False: (
-                _fake_target_payload()
-                if mbid == NEW_MBID
-                else {
-                    "id": mbid,
-                    "release_group_id": RG_ID,
-                    "artist_id": "artist",
-                    "artist_name": "Artist",
-                    "title": "Different",
-                    "tracks": [],
-                }
-            ),
-        ).replace_request_mbid(
-            42,
-            target_mb_release_id="dddddddd-dddd-dddd-dddd-dddddddddddd",
-        )
-
-        self.assertEqual(result.outcome, RESULT_WRONG_STATE)
-        self.assertEqual(result.descendant_request_id, 43)
-        delete.assert_not_called()
-        plans.generate_for_request.assert_not_called()
-
-    def test_resumed_tail_retries_an_ambiguous_old_album_delete(self):
-        """A partial tail is retried against the same installed old album."""
-        db = FakePipelineDB()
-        self._seed_old(db, status="replaced")
-        db.seed_request(make_request_row(
-            id=43, mb_release_id=NEW_MBID, mb_release_group_id=RG_ID,
-            status="wanted", replaces_request_id=42,
-        ))
-        beets = self._installed_beets()
-        attempts: list[int] = []
-        plans = MagicMock()
-        plans.generate_for_request.return_value = ServiceResult("success")
-
-        def flaky_delete(request: BeetsDeleteRequest) -> BeetsDeleteOutcome:
-            attempts.append(request.album_id)
-            if len(attempts) == 1:
-                return BeetsDeleteFailed(
-                    album_id=request.album_id,
-                    reason="subprocess_error",
-                    detail="planted lost acknowledgement",
-                    album_still_present=True,
-                )
-            return self._completed_delete(request)
-
-        svc = self._make_service(
-            db,
-            beets_db_factory=lambda: beets,
-            beets_delete_fn=flaky_delete,
-            wrong_match_delete_fn=_empty_wrong_match_summary,
-            search_plan_service=plans,
-        )
-        first = svc.replace_request_mbid(42, target_mb_release_id=NEW_MBID)
-        second = svc.replace_request_mbid(42, target_mb_release_id=NEW_MBID)
-
-        self.assertEqual(first.outcome, RESULT_TRANSIENT)
-        self.assertEqual(first.reason, REPLACE_REASON_POST_SUPERSEDE_PARTIAL)
-        self.assertEqual(second.outcome, RESULT_REPLACED)
-        self.assertEqual(second.new_request_id, 43)
-        self.assertEqual(attempts, [77, 77])
-        self.assertEqual(
-            [row["id"] for row in db._requests.values()
-             if row.get("replaces_request_id") == 42],
-            [43],
-        )
 
     def test_supersede_race_maps_to_wrong_state_with_descendant(self):
         """SupersedeRaceError (double-click landed first) maps to
@@ -1660,170 +1513,16 @@ class TestReplaceHappyPath(_ServiceCase):
 
     def test_happy_path_downloading_skips_staging_logs_warning(self):
         self._patch_externals()
-        db, _, svc = self._replace(old_status="downloading")
+        _db, _, svc = self._replace(old_status="downloading")
         slskd = svc.slskd
         result = svc.replace_request_mbid(
             42, target_mb_release_id=NEW_MBID,
         )
         self.assertEqual(result.outcome, RESULT_REPLACED)
-        old = db.get_request(42)
-        assert old is not None
-        self.assertEqual(old["replaced_from_status"], "downloading")
         # Warning about orphaned transfer.
         self.assertTrue(any("downloading" in w for w in result.warnings))
         # slskd was never called.
         self._assert_slskd_untouched(slskd)
-
-    def test_post_supersede_status_reread_preserves_downloading_staging(self):
-        """A downloader racing Replace owns the final staging decision.
-
-        Replace first reads ``wanted``. A synchronized production transition
-        then writes ``downloading`` immediately before supersede's locked row
-        read and leaves broken-world ``active_download_state`` NULL. The
-        transaction persists that actual source status, so first-pass cleanup
-        must use the replaced audit row rather than the stale initial read.
-        """
-        import tempfile
-
-        from lib.processing_paths import stage_to_ai_path
-
-        self._patch_externals()
-        with tempfile.TemporaryDirectory(prefix="cratedigger-test-staging-") as raw:
-            cfg = CratediggerConfig()
-            object.__setattr__(cfg, "beets_staging_dir", raw)
-            target = stage_to_ai_path(
-                artist="Pet Grief",
-                title="Old Pressing",
-                staging_dir=raw,
-                request_id=42,
-                auto_import=True,
-            )
-            Path(target).mkdir(parents=True)
-            db, _, svc = self._replace(old_status="wanted", cfg=cfg)
-            source_reads: list[str | None] = []
-            real_get_request = db.get_request
-            real_supersede = db.supersede_request_mbid
-            transition_barrier = threading.Barrier(2)
-            transition_done = threading.Event()
-
-            def record_source_read(request_id: int):
-                row = real_get_request(request_id)
-                if request_id == 42:
-                    source_reads.append(None if row is None else row["status"])
-                return row
-
-            def supersede_after_downloader(*args, **kwargs):
-                transition_barrier.wait(timeout=5)
-                self.assertTrue(transition_done.wait(timeout=5))
-                return real_supersede(*args, **kwargs)
-
-            def transition_to_downloading() -> bool:
-                transition_barrier.wait(timeout=5)
-                transitioned = db.set_downloading(42, "{}")
-                db.request(42)["active_download_state"] = None
-                transition_done.set()
-                return transitioned
-
-            with patch.object(
-                db, "get_request", side_effect=record_source_read,
-            ), patch.object(
-                db, "supersede_request_mbid", side_effect=supersede_after_downloader,
-            ), patch(
-                "lib.mbid_replace_service.shutil.rmtree",
-                side_effect=AssertionError("staging cleanup must not run"),
-            ), ThreadPoolExecutor(max_workers=1) as pool:
-                downloader = pool.submit(transition_to_downloading)
-                result = svc.replace_request_mbid(
-                    42, target_mb_release_id=NEW_MBID,
-                )
-                self.assertTrue(downloader.result(timeout=5))
-            old = db.get_request(42)
-            assert old is not None
-            staging_preserved = Path(target).is_dir()
-
-        self.assertEqual(result.outcome, RESULT_REPLACED)
-        self.assertEqual(source_reads[0], "wanted")
-        self.assertEqual(old["replaced_from_status"], "downloading")
-        self.assertIsNone(old["active_download_state"])
-        self.assertTrue(staging_preserved)
-
-    def test_broken_downloading_row_without_state_skips_staging_on_retry(self):
-        """Replace preserves the authoritative prior status, not bad metadata."""
-        import tempfile
-
-        from lib.processing_paths import stage_to_ai_path
-
-        self._patch_externals()
-        with tempfile.TemporaryDirectory(prefix="cratedigger-test-staging-") as raw:
-            cfg = CratediggerConfig()
-            object.__setattr__(cfg, "beets_staging_dir", raw)
-            target = stage_to_ai_path(
-                artist="Pet Grief",
-                title="Old Pressing",
-                staging_dir=raw,
-                request_id=42,
-                auto_import=True,
-            )
-            Path(target).mkdir(parents=True)
-            db, plan_service, svc = self._replace(
-                old_status="downloading", cfg=cfg,
-            )
-            self.assertIsNone(db.request(42)["active_download_state"])
-            plan_service.generate_for_request.side_effect = [
-                RuntimeError("injected post-supersede fault"),
-                MagicMock(),
-            ]
-
-            first = svc.replace_request_mbid(42, target_mb_release_id=NEW_MBID)
-            self.assertEqual(first.outcome, RESULT_TRANSIENT)
-            old = db.get_request(42)
-            assert old is not None
-            self.assertEqual(old["replaced_from_status"], "downloading")
-            self.assertTrue(Path(target).is_dir())
-
-            retried = svc.replace_request_mbid(42, target_mb_release_id=NEW_MBID)
-            staging_preserved_after_retry = Path(target).is_dir()
-
-        self.assertEqual(retried.outcome, RESULT_REPLACED)
-        self.assertTrue(staging_preserved_after_retry)
-
-    def test_historical_replace_tail_with_unknown_status_skips_staging(self):
-        """A pre-migration replaced row cannot infer destructive ownership."""
-        import tempfile
-
-        from lib.processing_paths import stage_to_ai_path
-
-        self._patch_externals()
-        with tempfile.TemporaryDirectory(prefix="cratedigger-test-staging-") as raw:
-            cfg = CratediggerConfig()
-            object.__setattr__(cfg, "beets_staging_dir", raw)
-            target = stage_to_ai_path(
-                artist="Pet Grief",
-                title="Old Pressing",
-                staging_dir=raw,
-                request_id=42,
-                auto_import=True,
-            )
-            Path(target).mkdir(parents=True)
-            db = FakePipelineDB()
-            self._seed_old(db, status="replaced")
-            db.request(42)["replaced_from_status"] = None
-            db.seed_request(make_request_row(
-                id=43,
-                mb_release_id=NEW_MBID,
-                mb_release_group_id=RG_ID,
-                artist_name="Pet Grief",
-                album_title="New Pressing",
-                status="wanted",
-                replaces_request_id=42,
-            ))
-            svc = self._make_service(db, cfg=cfg)
-
-            result = svc.replace_request_mbid(42, target_mb_release_id=NEW_MBID)
-            staging_preserved = Path(target).is_dir()
-
-        self.assertEqual(result.outcome, RESULT_REPLACED)
-        self.assertTrue(staging_preserved)
 
     def test_happy_path_manual(self):
         self._patch_externals()
@@ -1883,7 +1582,8 @@ class TestReplaceHappyPath(_ServiceCase):
 
 
 class TestReplaceWarnings(_ServiceCase):
-    """Mandatory cleanup failures surface a resumable post-supersede tail."""
+    """Filesystem cleanup failures surface as warnings; outcome stays
+    RESULT_REPLACED (R26)."""
 
     def test_beets_removal_failure_warning(self):
         with patch(
@@ -1907,7 +1607,7 @@ class TestReplaceWarnings(_ServiceCase):
             result = svc.replace_request_mbid(
                 42, target_mb_release_id=NEW_MBID,
             )
-            self.assertEqual(result.outcome, RESULT_TRANSIENT)
+            self.assertEqual(result.outcome, RESULT_REPLACED)
             self.assertTrue(any("beets removal" in w for w in result.warnings))
 
     def test_wrong_match_failure_warning(self):
@@ -1925,7 +1625,7 @@ class TestReplaceWarnings(_ServiceCase):
             result = svc.replace_request_mbid(
                 42, target_mb_release_id=NEW_MBID,
             )
-            self.assertEqual(result.outcome, RESULT_TRANSIENT)
+            self.assertEqual(result.outcome, RESULT_REPLACED)
             self.assertTrue(
                 any("wrong-matches cleanup raised" in w
                     for w in result.warnings)
@@ -1948,7 +1648,7 @@ class TestReplaceWarnings(_ServiceCase):
             result = svc.replace_request_mbid(
                 42, target_mb_release_id=NEW_MBID,
             )
-            self.assertEqual(result.outcome, RESULT_TRANSIENT)
+            self.assertEqual(result.outcome, RESULT_REPLACED)
             self.assertTrue(
                 any("search-plan generation failed" in w
                     for w in result.warnings)
@@ -1980,7 +1680,7 @@ class TestReplaceWarnings(_ServiceCase):
             result = svc.replace_request_mbid(
                 42, target_mb_release_id=NEW_MBID,
             )
-        self.assertEqual(result.outcome, RESULT_TRANSIENT)
+        self.assertEqual(result.outcome, RESULT_REPLACED)
         self.assertTrue(
             any(
                 "id:77" in warning
@@ -1992,7 +1692,7 @@ class TestReplaceWarnings(_ServiceCase):
 
     def test_staging_rmtree_permission_error_warns(self):
         """``shutil.rmtree`` failure on the staging dir (e.g. permission
-        denied) becomes a resumable post-supersede tail."""
+        denied) becomes a warning; outcome stays RESULT_REPLACED."""
         import os as _os
         import shutil as _shutil
         import tempfile
@@ -2030,7 +1730,7 @@ class TestReplaceWarnings(_ServiceCase):
             result = svc.replace_request_mbid(
                 42, target_mb_release_id=NEW_MBID,
             )
-        self.assertEqual(result.outcome, RESULT_TRANSIENT)
+        self.assertEqual(result.outcome, RESULT_REPLACED)
         self.assertTrue(
             any("staging rmtree failed" in w and "PermissionError" in w
                 for w in result.warnings),

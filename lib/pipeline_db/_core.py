@@ -1,6 +1,5 @@
 """PipelineDB core primitives: connection, _execute, advisory_lock, _atomic."""
 import select
-import sys
 import threading
 import time
 from collections.abc import Generator, Mapping, Sequence
@@ -421,28 +420,8 @@ class _CoreMixin(_PipelineDBBase):
         try:
             yield identity
         finally:
-            body_raised = sys.exc_info()[0] is not None
             try:
                 watchdog.stop()
-                # A normal body exit must not convert a cancelled execution
-                # into success.  A pre-existing body exception remains the
-                # primary diagnosis, but otherwise cancellation wins.
-                if token.cancelled:
-                    if not body_raised:
-                        raise OwnerSessionLost(
-                            "owner session execution was cancelled before scope exit"
-                        )
-                else:
-                    probe = self._probe_owner_session(
-                        identity, deadline_seconds=0.75,
-                    )
-                    if not probe.live:
-                        token.cancel("owner_session_exit_validation_failed")
-                        if not body_raised:
-                            raise OwnerSessionLost(
-                                "owner session was lost before scope exit "
-                                f"({probe.reason})"
-                            )
             finally:
                 if self._owner_session_pin is pin:
                     self._owner_session_pin = None
@@ -593,11 +572,9 @@ class _CoreMixin(_PipelineDBBase):
         and call-site index.
         """
         with self._advisory_lock_session():
-            connection = self.conn
             try:
                 with self._owner_session_io():
                     self._ensure_conn()
-                    connection = self.conn
                     with self.conn.cursor() as cur:
                         cur.execute(
                             "SELECT pg_try_advisory_lock(%s, %s)",
@@ -612,62 +589,29 @@ class _CoreMixin(_PipelineDBBase):
             try:
                 yield acquired
             finally:
+                # Swallow unlock errors so they cannot mask the original
+                # exception from the ``with`` body. PostgreSQL releases
+                # session-level advisory locks on connection death anyway,
+                # so a transient cursor/connection failure here cannot
+                # leak the lock beyond the session.
                 if acquired:
-                    body_raised = sys.exc_info()[0] is not None
-                    lost: Exception | None = None
                     try:
-                        # Never reconnect or unlock a replacement session:
-                        # PostgreSQL released the captured session's locks
-                        # when it died. A successful unlock on a replacement
-                        # backend would prove nothing about the authority that
-                        # guarded the body.
-                        if self.conn is not connection or connection.closed:
-                            raise AdvisoryLockSessionLost(
-                                "advisory-lock session was lost before unlock"
-                            )
-                        # Cancellation prevents new *effects*, not the
-                        # cleanup that proves this captured session released
-                        # its advisory authority.  Unlock before surfacing it.
-                        with self._owner_session_io(), connection.cursor() as cur:
+                        with self._owner_session_io(), self.conn.cursor() as cur:
                             cur.execute(
                                 "SELECT pg_advisory_unlock(%s, %s)",
                                 (namespace, key),
                             )
-                            row = cur.fetchone()
-                        if not row or not bool(row[0]):
-                            raise AdvisoryLockSessionLost(
-                                "captured advisory lock was absent at unlock"
-                            )
-                    except (AdvisoryLockSessionLost, OwnerSessionLost) as exc:
-                        lost = exc
-                    except Exception as exc:  # noqa: BLE001 - typed boundary
-                        lost = AdvisoryLockSessionLost(
-                            "advisory-lock session was lost during unlock"
-                        )
-                        lost.__cause__ = exc
-                    if lost is not None:
-                        # Do not leave a healthy-but-unproven captured session
-                        # holding an advisory lock while the caller unwinds.
-                        # Closing it asks PostgreSQL to release every lock on
-                        # precisely that backend; never reconnect here.
-                        try:
-                            connection.close()
-                        except Exception:  # noqa: BLE001 - already fail-closed
-                            logger.debug("captured advisory session close failed")
+                            cur.fetchone()
+                    except Exception:  # noqa: BLE001 - unlock cannot mask body
                         if self._owner_session_pin is not None:
                             self._owner_session_pin.token.cancel(
                                 "owner_session_unlock_failed"
                             )
                         logger.debug(
-                            "advisory_unlock(%s, %s) could not validate the "
-                            "captured session",
+                            "advisory_unlock(%s, %s) failed; lock will be "
+                            "released at session end",
                             namespace, key,
                         )
-                        # The original body exception is still the best
-                        # diagnosis. Otherwise authority loss must remain
-                        # visible to the destructive caller.
-                        if not body_raised:
-                            raise lost
 
 
     @contextmanager

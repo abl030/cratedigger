@@ -256,13 +256,6 @@ Untracked rows.
   exact observed/declared source status. `replaced` has no outgoing edge and is
   created only by the one-way `supersede_request_mbid` transaction.
 
-- `replaced_from_status TEXT NULL` — the source status atomically captured by
-  that same locked Replace transaction immediately before it writes
-  `status='replaced'`. It is constrained to valid pre-replace statuses.
-  Historical rows remain NULL/unknown; Replace-tail staging cleanup fails safe
-  for those rows rather than inferring transfer ownership from stale download
-  metadata.
-
   The explicit operator transition graph still has 11 edges (none out of
   `initializing`): `wanted → downloading/unsearchable/imported/wanted`; `downloading → wanted/imported`; `imported →
   wanted/imported`; and `unsearchable → wanted/imported/unsearchable`.

@@ -99,7 +99,6 @@ class AlbumRequestRow(TypedDict):
     source_path: str | None
     reasoning: str | None
     status: str
-    replaced_from_status: str | None
     search_attempts: int
     download_attempts: int
     validation_attempts: int

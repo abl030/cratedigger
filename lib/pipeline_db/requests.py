@@ -528,11 +528,11 @@ class _RequestsMixin(_PipelineDBBase):
         """Canonical locked-row status CAS used only by Replace."""
         cur.execute(
             "UPDATE album_requests "
-            "SET status = 'replaced', replaced_from_status = %s, updated_at = %s "
+            "SET status = 'replaced', updated_at = %s "
             "WHERE id = %s AND status = %s "
             "AND active_automation_import_job_id IS NULL "
             "RETURNING id",
-            (expected_status, now, request_id, expected_status),
+            (now, request_id, expected_status),
         )
         return cur.fetchone() is not None
 
