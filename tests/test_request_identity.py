@@ -497,5 +497,67 @@ class TestEveryUnionConsumerIsPinnedOverAMergedWorld(unittest.TestCase):
         )
 
 
+class TestOperatorActionsResolveOverTheUnion(unittest.TestCase):
+    """The destructive services, over the live 316 shape.
+
+    Independent review found two of them acting on a Missing resolution
+    rather than failing closed, and this PR is what makes the operator
+    click: the library panel beside those buttons now correctly says the
+    album IS installed.
+
+    * Bad Rip on Missing does NOT abort — it denylists the uploader and
+      requeues while removing nothing and recording no bad-rip hashes.
+    * Replace on Missing supersedes with ``current_album_path=None``, so
+      the old album is never cleaned up — manufacturing exactly the orphan
+      class this issue exists to clear.
+    """
+
+    def _world(self) -> BeetsWorld:
+        world = BeetsWorld(REPO)
+        self.addCleanup(world.close)
+        world.import_release(BeetsWorldRelease(
+            release_id=SURVIVOR,
+            artist="Merged Artist",
+            album="Merged Album",
+            year=1996,
+        ))
+        return world
+
+    def test_bad_rip_sees_the_album_beets_actually_holds(self) -> None:
+        world = self._world()
+        row = _row(canonical=SURVIVOR)
+
+        with open_beets_db(
+            db_path=str(world.library_db),
+            library_root=str(world.library_root),
+        ) as beets:
+            resolved = resolve_current_for_request(beets, row)
+            without = resolve_current_for_request(beets, _row())
+
+        # With the survivor stored, Bad Rip has an album to remove and
+        # hashes to record. Without it, it would have found nothing and
+        # done half its job.
+        self.assertIsInstance(resolved, CurrentBeetsUnique)
+        self.assertIsInstance(without, CurrentBeetsMissing)
+
+    def test_replace_has_an_album_path_to_clean_up(self) -> None:
+        """``current_album_path`` is what Replace uses to remove the
+        superseded album; None means it supersedes and leaves it behind."""
+        world = self._world()
+
+        with open_beets_db(
+            db_path=str(world.library_db),
+            library_root=str(world.library_root),
+        ) as beets:
+            resolved = resolve_current_for_request(
+                beets, _row(canonical=SURVIVOR))
+
+        assert isinstance(resolved, CurrentBeetsUnique)
+        self.assertTrue(resolved.album_path)
+        # Selectors still name where the album is really filed, or the
+        # pinned delete would target an id Beets no longer stores.
+        self.assertEqual(resolved.selectors, (f"mb_albumid:{SURVIVOR}",))
+
+
 if __name__ == "__main__":
     unittest.main()

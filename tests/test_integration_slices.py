@@ -10669,10 +10669,27 @@ class TestRefreshCurrentEvidenceUsesBeetsLibraryRoot(unittest.TestCase):
 
                 return CurrentBeetsMissing(identity=identity)
 
+            def resolve_current_releases(self, identities):
+                return {
+                    identity: self.resolve_current_release(identity)
+                    for identity in identities
+                }
+
+        # A real DB handle, not None: the refresh reads the request's stored
+        # merge survivor (#1059), and a None stand-in only passed before
+        # because nothing on this path touched it.
+        from tests.fakes import FakePipelineDB
+
+        pipeline_db = FakePipelineDB()
+        request_id = pipeline_db.add_request(
+            artist_name="A", album_title="B", source="request",
+            mb_release_id="mbid-test",
+        )
+
         with patch("lib.beets_db.BeetsDB", FakeBeetsDB):
             _refresh_current_evidence_after_import(
-                db=None,  # type: ignore[arg-type]
-                request_id=1,
+                db=pipeline_db,
+                request_id=request_id,
                 mb_release_id="mbid-test",
                 quality_ranks=None,
                 source_candidate=None,
