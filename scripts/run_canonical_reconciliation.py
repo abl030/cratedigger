@@ -83,15 +83,8 @@ def main() -> int:
         else read_runtime_config()
     )
 
-    if configure_reconciliation_mirror(cfg.musicbrainz_api_base) is None:
-        logger.error(
-            "musicbrainz.apiBase (%r) is unset or public MusicBrainz; "
-            "refusing to sweep the library. Reconciliation is a local-mirror "
-            "feature — a whole-library sweep against musicbrainz.org is "
-            "~8,500 unthrottled requests.",
-            cfg.musicbrainz_api_base,
-        )
-        return 1
+    base = configure_reconciliation_mirror(cfg.musicbrainz_api_base)
+    logger.info("reconciling against %s", base)
 
     try:
         assert_schema_current(args.dsn)

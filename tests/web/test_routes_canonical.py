@@ -97,28 +97,6 @@ class TestCanonicalRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(payload["mb_release_id"], LOSER)
         self.assertIsNone(payload["canonical_release_id"])
 
-    def test_reconcile_refuses_when_only_public_musicbrainz_is_configured(
-        self,
-    ) -> None:
-        """The route must not sweep 8,500 rows at musicbrainz.org, and must
-        not report success having wired nothing. `musicbrainz.apiBase`
-        DEFAULTS to public MB, so this is the shipped configuration."""
-        import tempfile
-
-        directory = tempfile.TemporaryDirectory()
-        self.addCleanup(directory.cleanup)
-        public = os.path.join(directory.name, "config.ini")
-        with open(public, "w", encoding="utf-8") as handle:
-            handle.write("[MusicBrainz]\napi_base = https://musicbrainz.org\n")
-
-        with patch.dict(
-            os.environ, {"CRATEDIGGER_RUNTIME_CONFIG": public}, clear=False,
-        ):
-            status, payload = self._post("/api/canonical/reconcile", {})
-
-        self.assertEqual(status, 503)
-        self.assertEqual(payload["error"], "canonical_mirror_unavailable")
-
     def test_show_requires_an_integer_id(self) -> None:
         status, _payload = self._get("/api/canonical?id=abc")
         self.assertEqual(status, 400)

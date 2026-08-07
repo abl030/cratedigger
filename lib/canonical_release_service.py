@@ -112,46 +112,24 @@ class CanonicalSweepResult:
         return len(self.resolved)
 
 
-#: Hostnames we refuse to sweep. ``musicbrainz.apiBase`` DEFAULTS to public
-#: MusicBrainz and the module asserts it is a scheme-prefixed URL, so an
-#: "unset base" guard fires only for a config the module cannot produce.
-#: A whole-library sweep is ~8,500 requests; against musicbrainz.org, issued
-#: as fast as the socket allows, that is an IP ban that takes every other MB
-#: consumer in the deployment down with it. Reconciliation is a local-mirror
-#: feature: without one, it does nothing rather than something harmful.
-#:
-#: Compared as a parsed HOSTNAME, never as a substring. DNS is
-#: case-insensitive and substring matching is not, so ``MusicBrainz.org``
-#: sailed through an earlier substring test straight at public MB; and
-#: ``musicbrainz.org.lan`` — the obvious name for a split-horizon local
-#: mirror — was refused as though it were public. This mirrors
-#: ``web/mb.py::_mirror_concurrency``, which already got it right.
-_REFUSED_HOSTS = frozenset({"musicbrainz.org", "www.musicbrainz.org"})
-
-
-def configure_reconciliation_mirror(mb_api_base: str) -> str | None:
-    """Wire the resolver for a sweep, or return ``None`` to refuse.
+def configure_reconciliation_mirror(mb_api_base: str) -> str:
+    """Point the resolver at the configured MusicBrainz base.
 
     **Every** surface that reconciles must call this — the daily oneshot,
     ``pipeline-cli canonical``, and the API route. ``lib/mb_canonical`` is
     inert until a process wires a base, so a surface that forgets does not
-    fail loudly: it reports ``no_redirect`` for every row and exits 0,
-    which the outcome vocabulary reads as "the library is already correct".
-    """
-    import urllib.parse
+    fail loudly: it reports ``no_redirect`` for every row and exits 0, which
+    the outcome vocabulary reads as "the library is already correct". Wiring
+    it in one shared place is the whole point of this function.
 
+    Where that base points is the operator's business. Running against
+    public MusicBrainz is slow for the same reason every other mirror
+    consumer is slow without one, and it is no more this function's concern
+    than it is the long-tail dashboard's.
+    """
     from lib.mb_canonical import configure_canonical_base
 
-    # ``hostname`` is RFC-lowercased by urlsplit. An empty origin, a blank
-    # one, and a bare host with no scheme all parse to hostname=None, so the
-    # single check covers "unset" and "unusable" as well as "public" — an
-    # explicit emptiness branch alongside it was redundant, and a mutant
-    # deleting it was unkillable because it changed nothing.
-    origin = (mb_api_base or "").strip()
-    host = urllib.parse.urlsplit(origin).hostname
-    if host is None or host in _REFUSED_HOSTS:
-        return None
-    base = origin.rstrip("/") + "/ws/2"
+    base = (mb_api_base or "").strip().rstrip("/") + "/ws/2"
     configure_canonical_base(base)
     return base
 

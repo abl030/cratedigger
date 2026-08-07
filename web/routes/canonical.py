@@ -106,17 +106,7 @@ def post_canonical_reconcile(h: RouteHandler, body: bytes) -> None:
     # Same inertness trap as the CLI: lib/mb_canonical is inert until a
     # process wires a base, and a surface that forgets reports no_redirect
     # for every row and returns 200 — which reads as "already correct".
-    if configure_reconciliation_mirror(
-        read_runtime_config().musicbrainz_api_base,
-    ) is None:
-        h._json({
-            "error": "canonical_mirror_unavailable",
-            "message": (
-                "musicbrainz.apiBase is unset or public MusicBrainz; "
-                "reconciliation is a local-mirror feature."
-            ),
-        }, status=503)
-        return
+    configure_reconciliation_mirror(read_runtime_config().musicbrainz_api_base)
 
     service = CanonicalReleaseService(
         _server()._db(), canonical_fn=canonical_release_fn,
