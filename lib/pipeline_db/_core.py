@@ -60,6 +60,15 @@ class OwnerSessionLost(RuntimeError):
     """The exact PostgreSQL session holding processor authority was lost."""
 
 
+class AdvisoryLockSessionLost(RuntimeError):
+    """The session which held an advisory-lock scope was lost.
+
+    PostgreSQL releases session-scoped advisory locks when that backend dies.
+    Reconnecting and replaying the next autocommit statement would therefore
+    continue a supposedly locked protocol without its authority.
+    """
+
+
 @dataclass(frozen=True)
 class _PinnedOwnerSession:
     connection: object
@@ -192,6 +201,7 @@ class _CoreMixin(_PipelineDBBase):
         self.dsn = dsn or DEFAULT_DSN
         self.conn = self._connect()
         self._owner_session_pin: _PinnedOwnerSession | None = None
+        self._advisory_lock_connection: object | None = None
 
 
     def _connect(self):
@@ -224,6 +234,15 @@ class _CoreMixin(_PipelineDBBase):
             if self.conn.closed:
                 pin.token.cancel("owner_session_closed")
                 raise OwnerSessionLost("pinned owner session is closed")
+            return
+        lock_connection = getattr(self, "_advisory_lock_connection", None)
+        if lock_connection is not None:
+            if self.conn is not lock_connection:
+                raise AdvisoryLockSessionLost(
+                    "advisory-lock session connection was replaced"
+                )
+            if self.conn.closed:
+                raise AdvisoryLockSessionLost("advisory-lock session is closed")
             return
         if self.conn.closed:
             self.conn = self._connect()
@@ -287,6 +306,10 @@ class _CoreMixin(_PipelineDBBase):
                 raise OwnerSessionLost(
                     "pinned owner session was lost; statement was not replayed"
                 )
+            if getattr(self, "_advisory_lock_connection", None) is not None:
+                raise AdvisoryLockSessionLost(
+                    "advisory-lock session was lost; statement was not replayed"
+                )
             # The reconnect below returns a fresh ``autocommit=True``
             # connection (see ``_connect``). That heal is only safe OUTSIDE a
             # transaction. If we are mid-transaction (``autocommit=False`` —
@@ -305,6 +328,33 @@ class _CoreMixin(_PipelineDBBase):
             else:
                 cur.execute(sql)
             return cur
+
+
+    @contextmanager
+    def _advisory_lock_session(self) -> Generator[None]:
+        """Keep a short advisory-lock protocol on exactly one PG session.
+
+        This intentionally does not add a transaction or watchdog.  It only
+        fences the ordinary autocommit reconnect/replay convenience while one
+        or more session advisory locks are held.  Nested locks share the
+        outer connection; owner-pinned execution already provides the
+        stronger equivalent guarantee.
+        """
+        if self._owner_session_pin is not None:
+            yield
+            return
+        existing = getattr(self, "_advisory_lock_connection", None)
+        if existing is not None:
+            self._ensure_conn()
+            yield
+            return
+
+        self._ensure_conn()
+        self._advisory_lock_connection = self.conn
+        try:
+            yield
+        finally:
+            self._advisory_lock_connection = None
 
 
     @contextmanager
@@ -521,48 +571,47 @@ class _CoreMixin(_PipelineDBBase):
         See ``docs/advisory-locks.md`` for namespaces, keys, ordering,
         and call-site index.
         """
-        with self._owner_session_io():
-            # The cancellation check must happen after entering the pinned
-            # session's I/O critical section. Otherwise the watchdog can
-            # cancel while this caller is waiting for the lock and a new
-            # advisory-lock statement can still begin after cancellation.
-            self._ensure_conn()
-            with self.conn.cursor() as cur:
-                cur.execute(
-                    "SELECT pg_try_advisory_lock(%s, %s)",
-                    (namespace, key),
-                )
-                row = cur.fetchone()
-        acquired = bool(row and row[0])
-        try:
-            yield acquired
-        finally:
-            if acquired:
+        with self._advisory_lock_session():
+            try:
+                with self._owner_session_io():
+                    self._ensure_conn()
+                    with self.conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT pg_try_advisory_lock(%s, %s)",
+                            (namespace, key),
+                        )
+                        row = cur.fetchone()
+            except (psycopg2.OperationalError, psycopg2.InterfaceError) as exc:
+                raise AdvisoryLockSessionLost(
+                    "advisory-lock session was lost before acquisition"
+                ) from exc
+            acquired = bool(row and row[0])
+            try:
+                yield acquired
+            finally:
                 # Swallow unlock errors so they cannot mask the original
                 # exception from the ``with`` body. PostgreSQL releases
                 # session-level advisory locks on connection death anyway,
                 # so a transient cursor/connection failure here cannot
                 # leak the lock beyond the session.
-                try:
-                    with (
-                        self._owner_session_io(),
-                        self.conn.cursor() as cur,
-                    ):
-                        cur.execute(
-                            "SELECT pg_advisory_unlock(%s, %s)",
-                            (namespace, key),
+                if acquired:
+                    try:
+                        with self._owner_session_io(), self.conn.cursor() as cur:
+                            cur.execute(
+                                "SELECT pg_advisory_unlock(%s, %s)",
+                                (namespace, key),
+                            )
+                            cur.fetchone()
+                    except Exception:  # noqa: BLE001 - unlock cannot mask body
+                        if self._owner_session_pin is not None:
+                            self._owner_session_pin.token.cancel(
+                                "owner_session_unlock_failed"
+                            )
+                        logger.debug(
+                            "advisory_unlock(%s, %s) failed; lock will be "
+                            "released at session end",
+                            namespace, key,
                         )
-                        cur.fetchone()
-                except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
-                    if self._owner_session_pin is not None:
-                        self._owner_session_pin.token.cancel(
-                            "owner_session_unlock_failed"
-                        )
-                    logger.debug(
-                        "advisory_unlock(%s, %s) failed; lock will be "
-                        "released at session end",
-                        namespace, key,
-                    )
 
 
     @contextmanager
@@ -587,9 +636,12 @@ class _CoreMixin(_PipelineDBBase):
         boilerplate, each of which risked forgetting the ``finally`` restore.
 
         Contract: the **caller commits explicitly** inside the block (every
-        site already does, exactly once on its success path). On any exception
-        the transaction is rolled back and the ORIGINAL exception is re-raised;
-        the prior autocommit mode is restored on the way out. Because the body
+        site already does, exactly once on its success path). On any ordinary
+        exception the transaction is rolled back and the ORIGINAL exception is
+        re-raised; the prior autocommit mode is restored on the way out. A raw
+        database error on a dead advisory-lock session instead becomes
+        ``AdvisoryLockSessionLost``; it is never retried on a replacement
+        connection. Because the body
         commits (success) or this rolls back (failure) before the ``finally``,
         autocommit is only ever restored with no transaction in flight —
         matching the original per-method ordering. A caller that needs to
@@ -610,10 +662,19 @@ class _CoreMixin(_PipelineDBBase):
         """
         self._ensure_conn()
         old_autocommit = self.conn.autocommit
-        self.conn.autocommit = False  # explicit transaction for this block
+        try:
+            self.conn.autocommit = False  # explicit transaction for this block
+        except (psycopg2.OperationalError, psycopg2.InterfaceError) as exc:
+            if self._advisory_lock_session_lost():
+                raise AdvisoryLockSessionLost(
+                    "advisory-lock transaction session was lost"
+                ) from exc
+            raise
+        body_error: Exception | None = None
         try:
             yield self.conn
-        except Exception:
+        except Exception as exc:
+            body_error = exc
             pin = self._owner_session_pin
             if pin is not None and (
                 self.conn is not pin.connection or self.conn.closed
@@ -630,6 +691,14 @@ class _CoreMixin(_PipelineDBBase):
                 logger.debug(
                     "rollback failed during _atomic (connection likely "
                     "dead); original error propagates")
+            if (
+                isinstance(exc, (psycopg2.OperationalError, psycopg2.InterfaceError))
+                and self._advisory_lock_session_lost()
+            ):
+                raise AdvisoryLockSessionLost(
+                    "advisory-lock transaction session was lost; "
+                    "statement was not replayed"
+                ) from exc
             raise  # re-raise the ORIGINAL exception to the caller
         finally:
             # Restoring autocommit on a dead connection ALSO raises
@@ -639,12 +708,23 @@ class _CoreMixin(_PipelineDBBase):
             # connection regardless of whether this restore landed.
             try:
                 self.conn.autocommit = old_autocommit  # restore one-stmt mode
-            except Exception:  # noqa: BLE001 — never mask the original error
+            except Exception as exc:
                 if self._owner_session_pin is not None:
                     self._owner_session_pin.token.cancel(
                         "owner_session_transaction_lost"
                     )
+                if body_error is None and self._advisory_lock_session_lost():
+                    raise AdvisoryLockSessionLost(
+                        "advisory-lock transaction session was lost; "
+                        "autocommit was not restored"
+                    ) from exc
                 logger.debug(
                     "autocommit restore failed during _atomic (connection "
                     "likely dead); a fresh connection will be established on "
                     "next use")
+
+    def _advisory_lock_session_lost(self) -> bool:
+        connection = getattr(self, "_advisory_lock_connection", None)
+        return connection is not None and (
+            self.conn is not connection or bool(self.conn.closed)
+        )

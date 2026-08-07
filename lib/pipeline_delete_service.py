@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
@@ -10,17 +9,18 @@ import psycopg2.errors
 
 from lib import transitions
 from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_IMPORT
+from lib.pipeline_db._core import AdvisoryLockSessionLost
+from lib.release_association_locks import (
+    ReleaseAssociationLockDB,
+    release_identity_locks,
+)
+from lib.request_identity import acceptable_identities
 
 if TYPE_CHECKING:
     from lib.pipeline_db.rows import AlbumRequestRow
 
 
-class PipelineDeleteDB(Protocol):
-    def advisory_lock(
-        self,
-        namespace: int,
-        key: int,
-    ) -> AbstractContextManager[bool]: ...
+class PipelineDeleteDB(ReleaseAssociationLockDB, Protocol):
 
     def get_request(self, request_id: int) -> AlbumRequestRow | None: ...
 
@@ -48,6 +48,16 @@ class PipelineDeleteLockContended:
 
 
 @dataclass(frozen=True)
+class PipelineDeleteAssociationChanged:
+    request_id: int
+
+
+@dataclass(frozen=True)
+class PipelineDeleteConditionalRejected:
+    request_id: int
+
+
+@dataclass(frozen=True)
 class PipelineDeleteDescendantConflict:
     request_id: int
     descendant_request_ids: tuple[int, ...]
@@ -57,6 +67,8 @@ type PipelineDeleteResult = (
     PipelineDeleteApplied
     | PipelineDeleteNotFound
     | PipelineDeleteLockContended
+    | PipelineDeleteAssociationChanged
+    | PipelineDeleteConditionalRejected
     | PipelineDeleteDescendantConflict
     | transitions.TransitionConflict
 )
@@ -76,6 +88,16 @@ def _descendant_ids(
 
 
 def delete_pipeline_request(
+    db: PipelineDeleteDB,
+    request_id: int,
+) -> PipelineDeleteResult:
+    try:
+        return _delete_pipeline_request(db, request_id)
+    except AdvisoryLockSessionLost:
+        return PipelineDeleteLockContended(request_id)
+
+
+def _delete_pipeline_request(
     db: PipelineDeleteDB,
     request_id: int,
 ) -> PipelineDeleteResult:
@@ -104,38 +126,56 @@ def delete_pipeline_request(
         if processing_locked is not None:
             return processing_locked
 
-        descendants = _descendant_ids(db, request_id)
-        if descendants:
-            return PipelineDeleteDescendantConflict(request_id, descendants)
-
-        try:
-            deleted = db.delete_request(request_id)
-        except psycopg2.errors.ForeignKeyViolation:
+        # IMPORT outer, then every identity the non-replaced row currently
+        # claims. See docs/advisory-locks.md. Deletion removes all of those
+        # associations, so a Library delete cannot observe a stale inverse
+        # set halfway through this operation.
+        associations = acceptable_identities(current)
+        with release_identity_locks(db, associations) as release_locks:
+            if not release_locks.acquired:
+                return PipelineDeleteLockContended(request_id)
+            confirmed = db.get_request(request_id)
+            if confirmed is None:
+                return PipelineDeleteNotFound(request_id)
+            if acceptable_identities(confirmed) != associations:
+                return PipelineDeleteAssociationChanged(request_id)
+            processing_locked = transitions.processing_locked_conflict(
+                confirmed,
+                request_id,
+                "deleted",
+                expected_status=str(confirmed["status"]),
+            )
+            if processing_locked is not None:
+                return processing_locked
             descendants = _descendant_ids(db, request_id)
             if descendants:
-                return PipelineDeleteDescendantConflict(
-                    request_id,
-                    descendants,
-                )
-            raise
-        if deleted:
-            return PipelineDeleteApplied(request_id)
+                return PipelineDeleteDescendantConflict(request_id, descendants)
 
-        refreshed = db.get_request(request_id)
-        processing_locked = transitions.processing_locked_conflict(
-            refreshed,
-            request_id,
-            "deleted",
-            expected_status=str(current["status"]),
-        )
-        if processing_locked is not None:
-            return processing_locked
-        if refreshed is None:
-            return PipelineDeleteNotFound(request_id)
-        descendants = _descendant_ids(db, request_id)
-        if descendants:
-            return PipelineDeleteDescendantConflict(request_id, descendants)
-        raise RuntimeError(
-            f"conditional delete of request {request_id} was rejected "
-            "without a processing owner or descendant"
-        )
+            try:
+                deleted = db.delete_request(request_id)
+            except psycopg2.errors.ForeignKeyViolation:
+                descendants = _descendant_ids(db, request_id)
+                if descendants:
+                    return PipelineDeleteDescendantConflict(
+                        request_id,
+                        descendants,
+                    )
+                raise
+            if deleted:
+                return PipelineDeleteApplied(request_id)
+
+            refreshed = db.get_request(request_id)
+            processing_locked = transitions.processing_locked_conflict(
+                refreshed,
+                request_id,
+                "deleted",
+                expected_status=str(confirmed["status"]),
+            )
+            if processing_locked is not None:
+                return processing_locked
+            if refreshed is None:
+                return PipelineDeleteNotFound(request_id)
+            descendants = _descendant_ids(db, request_id)
+            if descendants:
+                return PipelineDeleteDescendantConflict(request_id, descendants)
+            return PipelineDeleteConditionalRejected(request_id)
