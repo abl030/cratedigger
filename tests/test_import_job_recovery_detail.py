@@ -477,34 +477,6 @@ class TestAutomationRecoveryDetail(unittest.TestCase):
                 )
                 self.assertEqual(detail.exact_library.status, expected)
 
-    def test_omitted_request_union_is_unavailable_not_exact_fallback(self) -> None:
-        """Recovery detail must not mistake an omitted union response for unique."""
-        identity = ReleaseIdentity.from_id(_RELEASE_ID)
-        assert identity is not None
-
-        class OmittedUnionBeets(_Beets):
-            def resolve_current_releases(self, identities: list[ReleaseIdentity]):
-                del identities
-                return {}
-
-        omitted = OmittedUnionBeets(CurrentBeetsUnique(
-            identity=identity,
-            album_id=11,
-            album_path="/library/album",
-            items=(CurrentBeetsItem(id=1, path="/library/a.flac"),),
-            selectors=("mb_albumid:" + _RELEASE_ID,),
-        ))
-        detail = _detail(
-            _DetailDB(_job(status="queued", with_lease=False, with_child=False)),
-            beets=omitted,
-        )
-
-        self.assertEqual(detail.exact_library.status, "unavailable")
-        self.assertEqual(
-            detail.exact_library.reason,
-            "request_union_authority_unavailable",
-        )
-
     def test_cleanup_progress_is_visible_without_operator_action_metadata(
         self,
     ) -> None:

@@ -474,6 +474,7 @@ class TestCurrentBeetsResolverGenerated(unittest.TestCase):
                 item_paths = beets.get_item_paths(release_id)
                 tracks = beets.get_tracks_by_mb_release_id(release_id)
                 minimum_bitrate = beets.get_min_bitrate(release_id)
+                average_bitrate = beets.get_avg_bitrate_kbps(release_id)
             expected_path = None
             if cardinality == 1 and topology_error is None:
                 expected_path = snapshots[0].album_path
@@ -496,12 +497,14 @@ class TestCurrentBeetsResolverGenerated(unittest.TestCase):
                 ])
                 self.assertEqual(len(tracks or []), track_count)
                 self.assertIsNotNone(minimum_bitrate)
+                self.assertIsNotNone(average_bitrate)
                 self.assertIn(release_id, detail)
             else:
                 self.assertIsNone(album_info)
                 self.assertEqual(item_paths, [])
                 self.assertIsNone(tracks)
                 self.assertIsNone(minimum_bitrate)
+                self.assertIsNone(average_bitrate)
                 self.assertEqual(detail, {})
 
     def test_checker_kills_limit_one_one_column_and_fuzzy_mutants(self) -> None:

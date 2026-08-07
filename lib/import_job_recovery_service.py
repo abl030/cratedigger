@@ -536,22 +536,16 @@ def _library_observation(
             ),
         )
     try:
-        # A request row is the identity authority.  An omitted union answer
-        # therefore cannot be laundered through an acquisition-only probe:
-        # doing so may turn unavailable current state into a misleading
-        # unique observation that later cleanup trusts.  Untracked jobs have
-        # no row and retain the exact-release observation contract.
+        # Union (#1059) when the request row is available: this observation
+        # is what an operator reads to decide whether a recovered job's
+        # album is on disk, and after a merge + mbsync retag it is — under
+        # the survivor. Reporting "missing" there is a misleading fact, not
+        # a destructive one, so it falls back rather than failing.
         current = (
-            resolve_current_for_request(beets, row)
-            if row is not None
-            else beets.resolve_current_release(identity)
+            resolve_current_for_request(beets, row) if row is not None else None
         )
         if current is None:
-            return AutomationExactLibraryObservation(
-                status="unavailable",
-                observed_at=observed_at,
-                reason="request_union_authority_unavailable",
-            )
+            current = beets.resolve_current_release(identity)
     except Exception as exc:  # noqa: BLE001 - observation boundary
         return AutomationExactLibraryObservation(
             status="unavailable",

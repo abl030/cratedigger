@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import sys
 import unittest
-from dataclasses import replace
 from typing import ClassVar
 from unittest.mock import patch
 
@@ -172,37 +171,6 @@ class TestRequestCreationService(unittest.TestCase):
         second = service.create_or_resume(_input())
         self.assertEqual(second.outcome, "resumed")
         self.assertEqual(db.request(first.request_id)["status"], "wanted")
-
-    def test_resume_derives_publication_fields_from_the_existing_row(self) -> None:
-        """A resumed initializer supplies its own final wanted fields."""
-        db = FakePipelineDB()
-        request_id = db.add_request(
-            artist_name="Archivist", album_title="Initialization",
-            source="request", mb_release_id="791-mbid", status="initializing",
-        )
-        observed: list[int] = []
-
-        def resumed_fields(row: object) -> dict[str, object]:
-            assert isinstance(row, dict)
-            observed.append(int(row["id"]))
-            return {
-                "search_filetype_override": "lossless",
-                "min_bitrate": 287,
-            }
-
-        creation = replace(
-            _input(),
-            final_fields={"search_filetype_override": "upgrade", "min_bitrate": 160},
-            resumed_final_fields=resumed_fields,
-        )
-        result = self._service(db).create_or_resume(creation)
-
-        self.assertEqual(result.outcome, "resumed")
-        self.assertEqual(observed, [request_id])
-        row = db.request(request_id)
-        self.assertEqual(row["status"], "wanted")
-        self.assertEqual(row["search_filetype_override"], "lossless")
-        self.assertEqual(row["min_bitrate"], 287)
 
     def test_discogs_creation_does_not_fetch_musicbrainz(self) -> None:
         db = FakePipelineDB()

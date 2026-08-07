@@ -185,6 +185,7 @@ Every caller that has a request row moves to `resolve_current_for_request(s)`:
 | `lib/world_audit_service.py:319` | has rows |
 | `lib/current_library_display.py:137` | has the row already |
 | `lib/destructive_release_service.py:267,727` | has the request |
+| `lib/sidecar_service.py:105` | has the request |
 | `lib/mbid_replace_service.py:911` | old request |
 | `lib/import_job_recovery_service.py:531` | has the request |
 | `lib/quality_evidence.py:2046` | takes `mb_release_id`; add the canonical as a parameter |
@@ -194,34 +195,6 @@ Every caller that has a request row moves to `resolve_current_for_request(s)`:
 **Unchanged and deliberately so:** `web/routes/_overlay.py::band_release_ids`
 when serving the browse overlay, and the add-path collision check. Those ask
 "do I hold *this release*", which is release-keyed and correct as-is.
-
-### Request-row-derived Beets consumer inventory (current candidate state)
-
-The request-row inventory records the current candidate state. A request row
-must use `resolve_current_for_request(s)` whenever its
-Beets answer changes a request lifecycle or quality outcome; a release-keyed
-caller remains exact only when it genuinely asks whether that exact release is
-held.
-
-| consumer family | disposition |
-|---|---|
-| direct request-row display, audit, destructive, recovery, cleanup and banding consumers listed above | switched in PR 1 |
-| `lib/beets.py` validation and all `harness/import_one.py` target, duplicate-guard/query and postflight exact lookups | deferred write-path work; retain every exact lookup in the inventory |
-| `harness/beets_harness.py` duplicate query | deferred write-path work; retain its exact lookup inventory |
-| preview HAVE spectral audit (`lib/measurement.py`, both `lib/import_preview.py` paths and the preview-worker reused-evidence front gate) | U1: request-aware union; missing/ambiguous/omitted authority fails closed |
-| requeue retained override/minimum bitrate (`web/routes/pipeline_mutations.py::post_pipeline_update`) | U2: only `CurrentBeetsUnique` supplies the retained floor |
-| manual imported quality floor (`web/routes/pipeline_mutations.py::post_pipeline_set_quality`) | U3: only `CurrentBeetsUnique` supplies the survivor-held average bitrate |
-| `lib/import_evidence.py::load_current_evidence_for_action` | deferred indirect action path; retain its exact lookup inventory |
-| `lib/sidecar_service.py::write_sidecar_for_request` | deferred action seam; retain its exact lookup inventory |
-| `lib/wrong_match_cleanup_service.py` through `load_current_evidence_for_action` | deferred indirect action path; do not mistake it for a release-keyed browse read |
-| `lib/disk_coverage_service.py::check_mbids` | raw-union, presence-only reporting disposition: it deliberately flattens canonical + acquisition ids for one non-destructive coverage query and cannot authorize lifecycle, quality, or deletion work |
-| Library artist inverse association, Wrong Matches display, and destructive no-pipeline-id inverse association | deferred to [#1066](https://github.com/abl030/cratedigger/issues/1066): deriving a request from a survivor-filed Beets album needs its own inverse-association contract; it remains a pre-deployment batch blocker and is not PR 1 work |
-
-This ledger records the direct request-row consumers switched in this
-candidate and the deferred match/action and inverse-association work. The
-deferred rows above are not landed work. It is an explicit consumer ledger,
-not a semantic scanner: future request-aware callers are reviewed at their
-production adapter when they are introduced.
 
 ### Reconciler
 
