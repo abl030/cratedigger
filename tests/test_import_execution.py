@@ -609,6 +609,34 @@ class TestCancellationAndProcessGroup(unittest.TestCase):
             with self.assertRaises(ProcessLookupError):
                 os.kill(descendant_pid, 0)
 
+    def test_wait_reaps_lingering_descendant_after_leader_exit(self) -> None:
+        """A clean leader exit cannot leave a destructive group behind."""
+        with tempfile.TemporaryDirectory() as raw:
+            ready = pathlib.Path(raw) / "descendant.pid"
+            descendant = (
+                "import os,pathlib,sys,time;"
+                "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()));"
+                "time.sleep(30)"
+            )
+            leader = (
+                "import subprocess,sys;"
+                f"subprocess.Popen([sys.executable,'-c',{descendant!r},"
+                "sys.argv[1]])"
+            )
+            process = _spawn_monitored(
+                [sys.executable, "-c", leader, str(ready)],
+            )
+            deadline = time.monotonic() + 2.0
+            while not ready.exists() and time.monotonic() < deadline:
+                threading.Event().wait(0.01)
+            self.assertTrue(ready.exists())
+            descendant_pid = int(ready.read_text())
+
+            self.assertEqual(process.wait(CancellationToken()), 0)
+
+            with self.assertRaises(ProcessLookupError):
+                os.kill(descendant_pid, 0)
+
     def test_unproven_group_absence_raises_fail_stop_error(self) -> None:
         child = MagicMock()
         child.pid = 424242

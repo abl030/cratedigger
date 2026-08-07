@@ -76,6 +76,7 @@ from lib.beets_delete import (
 from lib.config import CratediggerConfig
 from lib.import_execution import (
     CancellationToken,
+    ExecutionCancelled,
     OwnerSessionIdentity,
     OwnerSessionProbe,
 )
@@ -114,7 +115,7 @@ from lib.replace_status import (
     RESULT_WRONG_STATE,
 )
 from lib.request_identity import acceptable_identities, resolve_current_for_request
-from lib.search_plan_service import SearchPlanDB, SearchPlanService
+from lib.search_plan_service import SearchPlanDB, SearchPlanService, ServiceResult
 from lib.util import (
     trigger_jellyfin_scan,
     trigger_plex_scan,
@@ -359,7 +360,7 @@ class MbidReplaceService:
             return self._replace_request_mbid(
                 request_id, target_mb_release_id=target_mb_release_id,
             )
-        except AdvisoryLockSessionLost:
+        except (AdvisoryLockSessionLost, ExecutionCancelled):
             # The lock-bearing backend died.  A supersede may already have
             # committed, in which case retrying would be wrong: expose the
             # runnable descendant and let ordinary plan/cycle convergence
@@ -369,9 +370,25 @@ class MbidReplaceService:
                 descendant = self.db.get_request_by_replaces_request_id(
                     request_id,
                 )
+                target_identity = ReleaseIdentity.from_id(target_mb_release_id)
+                if (
+                    target_identity is not None
+                    and target_identity.source == "musicbrainz"
+                ):
+                    resolved = self.mb_lookup(
+                        target_identity.release_id, fresh=True,
+                    )
+                    target_identity = ReleaseIdentity.from_id(
+                        str(resolved.get("id") or target_identity.release_id),
+                    )
             except Exception:  # noqa: BLE001 - session loss is primary
                 descendant = None
-            if descendant is not None:
+                target_identity = None
+            if (
+                descendant is not None
+                and target_identity is not None
+                and target_identity in acceptable_identities(descendant)
+            ):
                 return ReplaceResult(
                     outcome=RESULT_TRANSIENT,
                     request_id=request_id,
@@ -448,16 +465,22 @@ class MbidReplaceService:
                 request_id
             )
             target_identity = ReleaseIdentity.from_id(target_mb_release_id)
-            descendant_identity = (
-                ReleaseIdentity.from_strict_fields(
-                    descendant.get("mb_release_id"),
-                    descendant.get("discogs_release_id"),
-                ) if descendant is not None else None
-            )
+            if target_identity is not None and target_identity.source == "musicbrainz":
+                target_data, err = self._mb_lookup_or_error(
+                    target_identity.release_id,
+                    request_id=request_id,
+                    detail_context=f"target MBID {target_mb_release_id}",
+                )
+                if err is not None:
+                    return err
+                assert target_data is not None
+                target_identity = ReleaseIdentity.from_id(
+                    str(target_data.get("id") or target_identity.release_id),
+                )
             if (
                 descendant is not None
                 and target_identity is not None
-                and target_identity == descendant_identity
+                and target_identity in acceptable_identities(descendant)
             ):
                 return self._resume_replaced_tail(
                     request_id,
@@ -971,8 +994,12 @@ class MbidReplaceService:
                         )
                     assert source_identity is not None
                     assert descendant_identity is not None
+                    lock_identities = (
+                        *acceptable_identities(source),
+                        *acceptable_identities(descendant),
+                    )
                     with release_identity_locks(
-                        self.db, (source_identity, descendant_identity),
+                        self.db, lock_identities,
                     ) as locks:
                         if not locks.acquired:
                             return ReplaceResult(
@@ -991,11 +1018,13 @@ class MbidReplaceService:
                         if (
                             current_source is None
                             or current_source.get("status") != "replaced"
+                            or source_identity not in acceptable_identities(
+                                current_source,
+                            )
                             or current_descendant is None
-                            or ReleaseIdentity.from_strict_fields(
-                                current_descendant.get("mb_release_id"),
-                                current_descendant.get("discogs_release_id"),
-                            ) != target_identity
+                            or target_identity not in acceptable_identities(
+                                current_descendant,
+                            )
                         ):
                             return ReplaceResult(
                                 outcome=RESULT_WRONG_STATE,
@@ -1119,11 +1148,13 @@ class MbidReplaceService:
                     raise AdvisoryLockSessionLost(
                         "Replace tail lost owner session after search-plan readiness"
                     )
-                if plan.outcome not in {"success", "noop_active_plan_exists"}:
+                if type(plan) is ServiceResult and plan.outcome not in {
+                    "success", "noop_active_plan_exists",
+                }:
                     warnings.append(
                         f"search-plan generation returned {plan.outcome}"
                     )
-        except (AdvisoryLockSessionLost, OwnerSessionLost):
+        except (AdvisoryLockSessionLost, OwnerSessionLost, ExecutionCancelled):
             descendant = self.db.get_request_by_replaces_request_id(request_id)
             return ReplaceResult(
                 outcome=RESULT_TRANSIENT,
@@ -1135,14 +1166,18 @@ class MbidReplaceService:
             )
         descendant = self.db.get_request_by_replaces_request_id(request_id)
         assert descendant is not None
-        if warnings:
+        mandatory_warnings = tuple(
+            warning for warning in warnings
+            if "was downloading; in-flight slskd transfers" not in warning
+        )
+        if mandatory_warnings:
             return ReplaceResult(
                 outcome=RESULT_TRANSIENT,
                 request_id=request_id,
                 descendant_request_id=int(descendant["id"]),
                 reason=REPLACE_REASON_POST_SUPERSEDE_PARTIAL,
                 error_message="Replace tail is incomplete; retry the same exact target",
-                warnings=tuple(warnings),
+                warnings=mandatory_warnings,
             )
         return ReplaceResult(
             outcome=RESULT_REPLACED,
@@ -1177,7 +1212,7 @@ class MbidReplaceService:
                     cancellation_token=token,
                     owner_session_identity=owner_session_identity,
                 )
-        except OwnerSessionLost as exc:
+        except (OwnerSessionLost, ExecutionCancelled) as exc:
             raise AdvisoryLockSessionLost(
                 "Replace could not retain its owner session"
             ) from exc
@@ -1610,7 +1645,7 @@ class MbidReplaceService:
                 raise AdvisoryLockSessionLost(
                     "Replace lost owner session before search-plan generation"
                 )
-            self.search_plan_service.generate_for_request(
+            plan = self.search_plan_service.generate_for_request(
                 new_request_id, regenerate=False,
             )
             cancellation_token.raise_if_cancelled()
@@ -1618,12 +1653,33 @@ class MbidReplaceService:
                 raise AdvisoryLockSessionLost(
                     "Replace lost owner session after search-plan generation"
                 )
+            if type(plan) is ServiceResult and plan.outcome not in {
+                "success", "noop_active_plan_exists",
+            }:
+                warnings.append(
+                    "search-plan generation returned "
+                    f"{plan.outcome} (plan_id={plan.plan_id})"
+                )
         except AdvisoryLockSessionLost:
             raise
         except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             warnings.append(
                 f"search-plan generation failed for new request "
                 f"{new_request_id}: {type(exc).__name__}: {exc}"
+            )
+
+        mandatory_warnings = tuple(
+            warning for warning in warnings
+            if "was downloading; in-flight slskd transfers" not in warning
+        )
+        if mandatory_warnings:
+            return ReplaceResult(
+                outcome=RESULT_TRANSIENT,
+                request_id=request_id,
+                descendant_request_id=new_request_id,
+                reason=REPLACE_REASON_POST_SUPERSEDE_PARTIAL,
+                error_message="Replace tail is incomplete; retry the same exact target",
+                warnings=mandatory_warnings,
             )
 
         try:

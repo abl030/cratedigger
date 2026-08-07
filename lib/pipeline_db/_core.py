@@ -421,8 +421,24 @@ class _CoreMixin(_PipelineDBBase):
         try:
             yield identity
         finally:
+            body_raised = sys.exc_info()[0] is not None
             try:
                 watchdog.stop()
+                # A cancelled token is already the authoritative loss
+                # receipt; its caller has observed (or is propagating) the
+                # cancellation. For a normal live scope, prove the exact
+                # captured backend is still live before reporting success.
+                if not token.cancelled:
+                    probe = self._probe_owner_session(
+                        identity, deadline_seconds=0.75,
+                    )
+                    if not probe.live:
+                        token.cancel("owner_session_exit_validation_failed")
+                        if not body_raised:
+                            raise OwnerSessionLost(
+                                "owner session was lost before scope exit "
+                                f"({probe.reason})"
+                            )
             finally:
                 if self._owner_session_pin is pin:
                     self._owner_session_pin = None

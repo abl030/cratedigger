@@ -13,6 +13,7 @@ import fnmatch
 import logging
 import os
 import subprocess as sp
+import tempfile
 import time
 from collections.abc import Callable, Iterable
 from pathlib import Path
@@ -655,76 +656,69 @@ def run_beets_delete(
                     or owner_session_probe()
                 )
 
-            child = popen_factory(
-                argv,
-                stdin=sp.PIPE,
-                stdout=sp.PIPE,
-                stderr=sp.PIPE,
-                env=env,
-                start_new_session=True,
-            )
-            group = MonitoredProcessGroup(child)
-            try:
-                if child.stdin is None:
-                    raise RuntimeError("pinned Beets delete has no stdin pipe")
-                child.stdin.write(encoded_request)
-                child.stdin.close()
-                returncode = group.wait(
-                    token,
-                    owner_session_probe=owner_session_live,
+            # A pipe can fill before the owner probe observes completion.
+            # File-backed capture lets the child make forward progress while
+            # the monitored wait owns cancellation and group reaping.
+            with tempfile.TemporaryFile() as stdout_file, \
+                    tempfile.TemporaryFile() as stderr_file:
+                child = popen_factory(
+                    argv,
+                    stdin=sp.PIPE,
+                    stdout=stdout_file,
+                    stderr=stderr_file,
+                    env=env,
+                    start_new_session=True,
                 )
-                # A cancellation racing acknowledgement wins. Do not parse a
-                # successful frame after the authority that launched it died.
-                token.raise_if_cancelled()
-            except ExecutionCancelled as exc:
-                if child.stdout is not None:
-                    child.stdout.close()
-                if child.stderr is not None:
-                    child.stderr.close()
-                if token.reason == "beets_delete_timeout":
-                    return BeetsDeleteFailed(
-                        album_id=request.album_id,
-                        reason="subprocess_error",
-                        detail=(
-                            "pinned Beets delete exceeded "
-                            f"{DELETE_TIMEOUT_SECONDS}s"
-                        ),
-                        album_still_present=True,
-                    )
-                raise AdvisoryLockSessionLost(
-                    "pinned Beets delete lost destructive authority: "
-                    f"{exc}"
-                ) from exc
-            except ProcessGroupTerminationError as exc:
-                return BeetsDeleteFailed(
-                    album_id=request.album_id,
-                    reason="subprocess_error",
-                    detail=f"process-group termination failed: {exc}",
-                    album_still_present=True,
-                )
-            except Exception:
+                group = MonitoredProcessGroup(child)
                 try:
-                    group.terminate_and_wait()
-                except ProcessGroupTerminationError:
-                    pass
-                raise
-            if child.stdout is None or child.stderr is None:
-                return BeetsDeleteFailed(
-                    album_id=request.album_id,
-                    reason="subprocess_error",
-                    detail="pinned Beets delete has no output pipes",
-                    album_still_present=True,
+                    if child.stdin is None:
+                        raise RuntimeError("pinned Beets delete has no stdin pipe")
+                    child.stdin.write(encoded_request)
+                    child.stdin.close()
+                    returncode = group.wait(
+                        token,
+                        owner_session_probe=owner_session_live,
+                    )
+                    # A cancellation racing acknowledgement wins. Do not parse a
+                    # successful frame after the authority that launched it died.
+                    token.raise_if_cancelled()
+                except ExecutionCancelled as exc:
+                    if token.reason == "beets_delete_timeout":
+                        return BeetsDeleteFailed(
+                            album_id=request.album_id,
+                            reason="subprocess_error",
+                            detail=(
+                                "pinned Beets delete exceeded "
+                                f"{DELETE_TIMEOUT_SECONDS}s"
+                            ),
+                            album_still_present=True,
+                        )
+                    raise AdvisoryLockSessionLost(
+                        "pinned Beets delete lost destructive authority: "
+                        f"{exc}"
+                    ) from exc
+                except ProcessGroupTerminationError as exc:
+                    # No caller may treat an unprovenly absent destructive
+                    # process group as an ordinary child failure.
+                    raise AdvisoryLockSessionLost(
+                        "pinned Beets delete could not prove its process group absent"
+                    ) from exc
+                except Exception:
+                    try:
+                        group.terminate_and_wait()
+                    except ProcessGroupTerminationError as exc:
+                        raise AdvisoryLockSessionLost(
+                            "pinned Beets delete could not prove its process group absent"
+                        ) from exc
+                    raise
+                stdout_file.seek(0)
+                stderr_file.seek(0)
+                proc = sp.CompletedProcess(
+                    argv,
+                    returncode,
+                    stdout=stdout_file.read(),
+                    stderr=stderr_file.read(),
                 )
-            stdout = child.stdout.read()
-            stderr = child.stderr.read()
-            child.stdout.close()
-            child.stderr.close()
-            proc = sp.CompletedProcess(
-                argv,
-                returncode,
-                stdout=stdout,
-                stderr=stderr,
-            )
     except AdvisoryLockSessionLost:
         raise
     except ExecutionCancelled as exc:

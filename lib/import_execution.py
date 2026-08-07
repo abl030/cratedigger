@@ -968,6 +968,12 @@ class MonitoredProcessGroup:
                     # Cancellation may race the child's exit. It wins: reap
                     # and prove the whole group absent before propagating it.
                     token.raise_if_cancelled()
+                    # The leader can exit while a forked descendant still
+                    # owns the destructive runtime.  A leader return code is
+                    # not an authority boundary until the complete session
+                    # group has gone away; otherwise terminate and reap it.
+                    if self._group_exists():
+                        self.terminate_and_wait()
                     return returncode
                 except subprocess.TimeoutExpired:
                     continue

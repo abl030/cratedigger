@@ -954,7 +954,21 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
         delete = MagicMock()
         plans = MagicMock()
         result = self._make_service(
-            db, beets_delete_fn=delete, search_plan_service=plans,
+            db,
+            beets_delete_fn=delete,
+            search_plan_service=plans,
+            mb_lookup=lambda mbid, *, fresh=False: (
+                _fake_target_payload()
+                if mbid == NEW_MBID
+                else {
+                    "id": mbid,
+                    "release_group_id": RG_ID,
+                    "artist_id": "artist",
+                    "artist_name": "Artist",
+                    "title": "Different",
+                    "tracks": [],
+                }
+            ),
         ).replace_request_mbid(
             42,
             target_mb_release_id="dddddddd-dddd-dddd-dddd-dddddddddddd",
@@ -1711,8 +1725,7 @@ class TestReplaceHappyPath(_ServiceCase):
 
 
 class TestReplaceWarnings(_ServiceCase):
-    """Filesystem cleanup failures surface as warnings; outcome stays
-    RESULT_REPLACED (R26)."""
+    """Mandatory cleanup failures surface a resumable post-supersede tail."""
 
     def test_beets_removal_failure_warning(self):
         with patch(
@@ -1736,7 +1749,7 @@ class TestReplaceWarnings(_ServiceCase):
             result = svc.replace_request_mbid(
                 42, target_mb_release_id=NEW_MBID,
             )
-            self.assertEqual(result.outcome, RESULT_REPLACED)
+            self.assertEqual(result.outcome, RESULT_TRANSIENT)
             self.assertTrue(any("beets removal" in w for w in result.warnings))
 
     def test_wrong_match_failure_warning(self):
@@ -1754,7 +1767,7 @@ class TestReplaceWarnings(_ServiceCase):
             result = svc.replace_request_mbid(
                 42, target_mb_release_id=NEW_MBID,
             )
-            self.assertEqual(result.outcome, RESULT_REPLACED)
+            self.assertEqual(result.outcome, RESULT_TRANSIENT)
             self.assertTrue(
                 any("wrong-matches cleanup raised" in w
                     for w in result.warnings)
@@ -1777,7 +1790,7 @@ class TestReplaceWarnings(_ServiceCase):
             result = svc.replace_request_mbid(
                 42, target_mb_release_id=NEW_MBID,
             )
-            self.assertEqual(result.outcome, RESULT_REPLACED)
+            self.assertEqual(result.outcome, RESULT_TRANSIENT)
             self.assertTrue(
                 any("search-plan generation failed" in w
                     for w in result.warnings)
@@ -1809,7 +1822,7 @@ class TestReplaceWarnings(_ServiceCase):
             result = svc.replace_request_mbid(
                 42, target_mb_release_id=NEW_MBID,
             )
-        self.assertEqual(result.outcome, RESULT_REPLACED)
+        self.assertEqual(result.outcome, RESULT_TRANSIENT)
         self.assertTrue(
             any(
                 "id:77" in warning
@@ -1821,7 +1834,7 @@ class TestReplaceWarnings(_ServiceCase):
 
     def test_staging_rmtree_permission_error_warns(self):
         """``shutil.rmtree`` failure on the staging dir (e.g. permission
-        denied) becomes a warning; outcome stays RESULT_REPLACED."""
+        denied) becomes a resumable post-supersede tail."""
         import os as _os
         import shutil as _shutil
         import tempfile
@@ -1859,7 +1872,7 @@ class TestReplaceWarnings(_ServiceCase):
             result = svc.replace_request_mbid(
                 42, target_mb_release_id=NEW_MBID,
             )
-        self.assertEqual(result.outcome, RESULT_REPLACED)
+        self.assertEqual(result.outcome, RESULT_TRANSIENT)
         self.assertTrue(
             any("staging rmtree failed" in w and "PermissionError" in w
                 for w in result.warnings),
