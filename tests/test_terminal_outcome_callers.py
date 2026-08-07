@@ -25,6 +25,7 @@ from lib.terminal_outcomes import (
     TerminalDownloadAudit,
 )
 from scripts import import_preview_worker, importer
+from tests.audio_fixtures import make_test_flac
 from tests.fakes import FakePipelineDB
 from tests.helpers import (
     claim_next_import_job,
@@ -180,11 +181,18 @@ class TestTerminalOutcomeCallers(unittest.TestCase):
             os.mkdir(processing, 0o700)
             os.mkdir(os.path.join(processing, "albums"), 0o700)
             os.mkdir(os.path.join(processing, "preview"), 0o700)
-            # Valid FLAC metadata envelope with a zero total-sample field:
-            # enough to choose the readiness recovery path; decode is mocked
-            # so this caller test isolates a deterministic probe failure.
-            with open(os.path.join(source, "01.flac"), "wb") as handle:
-                handle.write(b"fLaC\0\0\0\x22" + b"\0" * 34)
+            # Decode-valid FLAC with a zero total-sample field: this reaches
+            # the readiness recovery path without mocking corruption policy.
+            flac_path = os.path.join(source, "01.flac")
+            make_test_flac(flac_path)
+            with open(flac_path, "rb") as handle:
+                streaminfo = bytearray(handle.read())
+            packed = int.from_bytes(streaminfo[18:26], "big")
+            streaminfo[18:26] = (
+                packed & ~((1 << 36) - 1)
+            ).to_bytes(8, "big")
+            with open(flac_path, "wb") as handle:
+                handle.write(streaminfo)
             cfg = CratediggerConfig(
                 slskd_download_dir=downloads,
                 processing_dir=processing,
@@ -221,7 +229,7 @@ class TestTerminalOutcomeCallers(unittest.TestCase):
             def no_current_evidence(*_args: object, **_kwargs: object) -> str:
                 return "no_current_evidence"
 
-            with mock.patch("lib.media_readiness._strict_decode"), mock.patch(
+            with mock.patch(
                 "lib.media_readiness._ffprobe_readiness",
                 side_effect=MediaReadinessError("measurement_failed", "ffprobe unavailable"),
             ):
