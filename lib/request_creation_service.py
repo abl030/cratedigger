@@ -62,6 +62,10 @@ class RequestCreationInput:
     discogs_release_payload: dict[str, object] | None = None
     # New-row Upgrade carries its policy into the same CAS that publishes.
     final_fields: dict[str, object] = field(default_factory=_empty_final_fields)
+    # A resumed initializer can already carry authority written after the
+    # caller's preflight. Derive its publication fields while the service owns
+    # that row, immediately before the initializing -> wanted CAS.
+    resumed_final_fields: Callable[[AlbumRequestRow], dict[str, object]] | None = None
 
 
 @dataclass(frozen=True)
@@ -239,8 +243,13 @@ class RequestCreationService:
                     )
                 # Publication is deliberately not an ordinary lifecycle
                 # transition. Only this service may CAS initializing → wanted.
+                if resumed and creation.resumed_final_fields is not None:
+                    assert existing is not None
+                    final_fields = creation.resumed_final_fields(existing)
+                else:
+                    final_fields = creation.final_fields
                 publication = transitions.publish_initialized_request(
-                    self.db, request_id, fields=creation.final_fields,
+                    self.db, request_id, fields=final_fields,
                 )
                 if isinstance(publication, transitions.TransitionConflict):
                     return self._failed(request_id, "publication CAS lost")

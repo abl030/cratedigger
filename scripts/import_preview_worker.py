@@ -1023,6 +1023,7 @@ def process_claimed_preview_job(
         else None
     )
     front_gate_action: str | None = None
+    request_row: Mapping[str, object] | None = None
 
     def handle_measurement_failed(result: ImportPreviewResult) -> ImportJob | None:
         terminal = _handle_measurement_failed(
@@ -1123,6 +1124,7 @@ def process_claimed_preview_job(
                 # type recovers a known shape for the ``.get`` calls below
                 # without touching ``db``'s parameter type.
                 req: dict[str, object] = db.get_request(job.request_id) or {}
+                request_row = req
                 mb_release_id = str(req.get("mb_release_id") or "")
                 current_evidence, persisted_existing, _authoritative = (
                     load_persisted_existing_spectral(
@@ -1212,7 +1214,9 @@ def process_claimed_preview_job(
                 )
                 audit_resolver = lambda _release_id: failed_lookup
             else:
-                audit_resolver = existing_spectral_resolver_for_config(audit_cfg)
+                audit_resolver = existing_spectral_resolver_for_config(
+                    audit_cfg, request=request_row,
+                )
         if cancellation_token is not None:
             cancellation_token.raise_if_cancelled()
         audit, have_lookup = collect_release_attempt_spectral_audit(

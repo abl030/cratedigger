@@ -190,6 +190,28 @@ def beets_authority_availability_category(exc: Exception) -> str | None:
     return f"sqlite_{primary_code}"
 
 
+def min_bitrate_from_current(current: CurrentBeetsUnique) -> int | None:
+    """Project one already-authorized current album to its strict floor."""
+    bitrates = [
+        item.bitrate for item in current.items
+        if item.bitrate is not None and item.bitrate > 0
+    ]
+    if not bitrates:
+        return None
+    return int(min(bitrates) / 1000)
+
+
+def avg_bitrate_from_current(current: CurrentBeetsUnique) -> int | None:
+    """Project one already-authorized current album to its average bitrate."""
+    bitrates = [
+        item.bitrate for item in current.items
+        if item.bitrate is not None and item.bitrate > 0
+    ]
+    if not bitrates:
+        return None
+    return int(sum(bitrates) / len(bitrates) / 1000)
+
+
 def _raise_conflicting_release_identities(
     resolutions: dict[ReleaseIdentity, CurrentBeetsResolution],
 ) -> None:
@@ -880,13 +902,7 @@ class BeetsDB:
         current = self._resolve_unique(mb_release_id)
         if current is None:
             return None
-        bitrates = [
-            item.bitrate for item in current.items
-            if item.bitrate is not None and item.bitrate > 0
-        ]
-        if not bitrates:
-            return None
-        return int(min(bitrates) / 1000)
+        return min_bitrate_from_current(current)
 
     def get_item_paths(self, mb_release_id: str) -> list[tuple[int, str]]:
         """Get all (item_id, path) pairs for an album. Returns empty list if not found."""
@@ -1194,23 +1210,6 @@ class BeetsDB:
         or regress to an N+1 query pattern for large artist pages.
         """
         return self._batch_lookup_album_ids(mbids)
-
-    def get_avg_bitrate_kbps(self, mb_release_id: str) -> int | None:
-        """Get average track bitrate (kbps) for a release. None if not found.
-
-        Routes through ``locate`` (issue #121) so Discogs numerics
-        resolve the same way every other postflight lookup does.
-        """
-        current = self._resolve_unique(mb_release_id)
-        if current is None:
-            return None
-        bitrates = [
-            item.bitrate for item in current.items
-            if item.bitrate is not None and item.bitrate > 0
-        ]
-        if not bitrates:
-            return None
-        return int(sum(bitrates) / len(bitrates) / 1000)
 
     def list_world_albums(self) -> "list[BeetsWorldAlbum]":
         """Return every Beets album with exact identities and resolved paths.

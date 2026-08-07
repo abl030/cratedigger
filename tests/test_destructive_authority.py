@@ -31,6 +31,7 @@ from lib.destructive_release_service import (
     BanSourceTransitionConflict,
     DeleteAlbumAuthorityMismatch,
     DeleteBeetsAmbiguous,
+    DeleteBeetsUnavailable,
     DeleteIncomplete,
     DeleteLockContended,
     DeleteReleaseMismatch,
@@ -567,6 +568,34 @@ class TestLibraryDeleteAuthority(unittest.TestCase):
         self.assertIsInstance(result, DeleteBeetsAmbiguous)
         self.assertEqual(delete_calls, [])
         self._assert_no_mutation()
+
+    def test_omitted_request_union_refuses_before_pinned_delete(self) -> None:
+        """A row makes omission unavailable; it never permits exact fallback."""
+        class OmittedUnionBeets(FakeBeetsDB):
+            def resolve_current_releases(self, identities):
+                del identities
+                return {}
+
+        beets = OmittedUnionBeets()
+        beets.set_album_detail(7, _album())
+        beets.set_album_ids_for_release(RELEASE_A, [7])
+        delete_calls: list[BeetsDeleteRequest] = []
+
+        def unexpected_delete(request: BeetsDeleteRequest) -> BeetsDeleteCompleted:
+            delete_calls.append(request)
+            raise AssertionError("omitted union authority reached pinned delete")
+
+        result = delete_release_from_library(
+            pipeline_db=self.db,
+            beets_db=beets,
+            request=DeleteRequest(album_id=7, purge_pipeline=True),
+            beets_delete_fn=unexpected_delete,
+        )
+
+        self.assertIsInstance(result, DeleteBeetsUnavailable)
+        self.assertEqual(delete_calls, [])
+        self.assertIsNotNone(beets.get_album_detail(7))
+        self.assertIsNotNone(self.db.get_request(41))
 
     def test_requested_album_pk_must_equal_fresh_unique_authority(self) -> None:
         self.beets.set_item_paths(

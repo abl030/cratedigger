@@ -121,6 +121,50 @@ class _RacingRequestFieldsDB(FakePipelineDB):
         )
 
 
+class _CanonicalInitializingRaceDB(FakePipelineDB):
+    """A concurrent initializing row already reconciled to its survivor."""
+
+    SURVIVOR = "d6cd62c4-da2a-4a89-a219-adba66d6c7d4"
+
+    def add_request(
+        self,
+        artist_name: str,
+        album_title: str,
+        source: str,
+        mb_release_id: str | None = None,
+        mb_release_group_id: str | None = None,
+        mb_artist_id: str | None = None,
+        discogs_release_id: str | None = None,
+        year: int | None = None,
+        country: str | None = None,
+        format: str | None = None,
+        source_path: str | None = None,
+        reasoning: str | None = None,
+        status: str = "wanted",
+        release_group_year: int | None = None,
+        is_va_compilation: bool = False,
+    ) -> int:
+        request_id = super().add_request(
+            artist_name,
+            album_title,
+            source,
+            mb_release_id,
+            mb_release_group_id,
+            mb_artist_id,
+            discogs_release_id,
+            year,
+            country,
+            format,
+            source_path,
+            reasoning,
+            status,
+            release_group_year,
+            is_va_compilation,
+        )
+        self.request(request_id)["canonical_release_id"] = self.SURVIVOR
+        return request_id
+
+
 class TestPipelineMutationRouteContracts(_FakeDbWebServerCase):
     """Contract tests for frontend-consumed pipeline mutation routes."""
 
@@ -1625,9 +1669,9 @@ class TestUserRequeueOverridePreservation(_FakeDbWebServerCase):
                          QUALITY_UPGRADE_TIERS)
 
     @patch("web.routes.pipeline_mutations.finalize_request")
-    def test_upgrade_omits_min_bitrate_when_beets_lookup_misses(
+    def test_upgrade_clears_min_bitrate_when_request_union_is_missing(
             self, mock_transition):
-        """Missing Beets quality data must not clear the existing DB baseline."""
+        """Missing request-union authority cannot retain a stale baseline."""
         self.beets_db.set_album_info(self.RELEASE_ID, None)
         self.db.seed_request(make_request_row(
             id=1704, status="imported", min_bitrate=320,
@@ -1640,8 +1684,34 @@ class TestUserRequeueOverridePreservation(_FakeDbWebServerCase):
 
         self.assertEqual(status, 200)
         transition = mock_transition.call_args.args[2]
-        self.assertNotIn("min_bitrate", transition.fields)
+        self.assertIsNone(transition.fields["min_bitrate"])
         self.assertEqual(transition.fields["search_filetype_override"], "lossless")
+
+    @patch("web.routes.pipeline_mutations.finalize_request")
+    @patch("web.routes.pipeline_mutations.mb_api.get_release")
+    @patch("web.routes.pipeline_mutations.mb_api.get_release_raw")
+    def test_upgrade_new_release_uses_its_exact_minimum(
+        self, mock_get_raw, mock_get_release, _mock_transition,
+    ) -> None:
+        """A new request has no row union, so its exact release is authoritative."""
+        release_id = "b6cd62c4-da2a-4a89-a219-adba66d6c7d4"
+        self.beets_db.set_tracks_for_release(release_id, [
+            {"bitrate": 287_000},
+            {"bitrate": 320_000},
+            {"bitrate": 384_000},
+        ])
+        mock_get_release.return_value = {
+            "artist_name": "New Artist", "title": "New Album", "tracks": [],
+        }
+        mock_get_raw.return_value = {}
+
+        status, payload = self._post("/api/pipeline/upgrade", {
+            "mb_release_id": release_id,
+        })
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["min_bitrate"], 287)
+        self.assertEqual(self.beets_db.get_min_bitrate_calls, [release_id])
 
     # -- Update (status → wanted) ---------------------------------------
 
@@ -1678,6 +1748,59 @@ class TestUserRequeueOverridePreservation(_FakeDbWebServerCase):
         self.assertEqual(status, 200)
         self.assertEqual(self._override_passed(mock_transition),
                          QUALITY_UPGRADE_TIERS)
+
+    def test_update_to_wanted_retains_survivor_held_floor(self):
+        """A merge survivor held by Beets still supplies the strict requeue floor."""
+        survivor = "d6cd62c4-da2a-4a89-a219-adba66d6c7d4"
+        self.beets_db.set_album_info(self.RELEASE_ID, None)
+        self.beets_db.set_min_bitrate(survivor, 287)
+        self.db.seed_request(make_request_row(
+            id=1705, status="imported", mb_release_id=self.RELEASE_ID,
+            canonical_release_id=survivor, min_bitrate=None,
+            search_filetype_override="lossless",
+        ))
+        from lib.beets_db import CurrentBeetsUnique
+        from lib.request_identity import resolve_current_for_request
+        self.assertIsInstance(
+            resolve_current_for_request(self.beets_db, self.db.request(1705)),
+            CurrentBeetsUnique,
+        )
+
+        status, data = self._post(
+            "/api/pipeline/update", {"id": 1705, "status": "wanted"},
+        )
+
+        self.assertEqual(status, 200)
+        _assert_required_fields(
+            self, data, {"status", "id", "new_status"}, "update",
+        )
+        row = self.db.request(1705)
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["min_bitrate"], 287)
+        self.assertEqual(row["search_filetype_override"], "lossless")
+
+    def test_set_quality_imported_uses_survivor_held_average(self):
+        """Manual imported status reads the request union, not acquisition only."""
+        survivor = "d6cd62c4-da2a-4a89-a219-adba66d6c7d5"
+        self.beets_db.set_album_info(self.RELEASE_ID, None)
+        self.beets_db.set_tracks_for_release(survivor, [
+            {"bitrate": 256_000},
+            {"bitrate": 320_000},
+            {"bitrate": 384_000},
+        ])
+        self.db.seed_request(make_request_row(
+            id=1706, status="wanted", mb_release_id=self.RELEASE_ID,
+            canonical_release_id=survivor, min_bitrate=None,
+        ))
+
+        status, _data = self._post("/api/pipeline/set-quality", {
+            "mb_release_id": self.RELEASE_ID, "status": "imported",
+        })
+
+        self.assertEqual(status, 200)
+        row = self.db.request(1706)
+        self.assertEqual(row["status"], "imported")
+        self.assertEqual(row["min_bitrate"], 320)
 
     # -- Ban source (regression pin) ------------------------------------
 
@@ -2161,6 +2284,51 @@ class TestBanSourceBadRipExtensions(_FakeDbWebServerCase):
         self.assertEqual(data["hashes_recorded"], 0)
         self.assertNotIn("partial_failures", data)
         self.assertEqual(len(self.db.bad_audio_hashes), 1)
+
+
+class TestPipelineUpgradeInitializingRace(_FakeDbWebServerCase):
+    """Upgrade keeps initializer publication while using its row union."""
+
+    DB_FACTORY = _CanonicalInitializingRaceDB
+    ACQUISITION = "c6cd62c4-da2a-4a89-a219-adba66d6c7d4"
+
+    @patch("web.routes.pipeline_mutations.mb_api.get_release_raw", return_value={})
+    @patch("web.routes.pipeline_mutations.mb_api.get_release")
+    def test_race_resumed_initializer_uses_survivor_minimum(
+        self, mock_get_release, _mock_get_raw,
+    ) -> None:
+        import web.server as srv
+
+        mock_get_release.return_value = {
+            "artist_name": "Race", "title": "Resume", "tracks": [],
+        }
+        self.db.arm_request_creation_race(
+            self.ACQUISITION, status="initializing",
+        )
+        beets = FakeBeetsDB()
+        beets.set_tracks_for_release(_CanonicalInitializingRaceDB.SURVIVOR, [
+            {"bitrate": 287_000},
+            {"bitrate": 320_000},
+            {"bitrate": 384_000},
+        ])
+        previous = srv._beets
+        srv._beets = beets
+        try:
+            status, payload = self._post("/api/pipeline/upgrade", {
+                "mb_release_id": self.ACQUISITION,
+            })
+        finally:
+            srv._beets = previous
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["min_bitrate"], 287)
+        request_id = payload["id"]
+        assert isinstance(request_id, int)
+        row = self.db.request(request_id)
+        self.assertEqual(row["status"], "wanted")
+        self.assertEqual(row["canonical_release_id"], _CanonicalInitializingRaceDB.SURVIVOR)
+        self.assertEqual(row["min_bitrate"], 287)
+
 
 if __name__ == "__main__":
     unittest.main()
