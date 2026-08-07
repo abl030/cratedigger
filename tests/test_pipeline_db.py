@@ -16692,6 +16692,91 @@ class TestCanonicalReleaseId(unittest.TestCase):
         finally:
             db.close()
 
+    def test_retire_canonical_release_id_round_trip_is_a_narrow_cas(self):
+        db = make_db()
+        try:
+            request_id = self._seed(db)
+            observed_at = datetime(2026, 8, 6, 12, tzinfo=UTC)
+            self.assertTrue(db.record_canonical_release_id(
+                request_id,
+                canonical_release_id=self.SURVIVOR,
+                resolved_at=observed_at,
+            ))
+            before = db.get_request(request_id)
+            assert before is not None
+
+            self.assertTrue(db.retire_canonical_release_id(
+                request_id,
+                expected_canonical_release_id=self.SURVIVOR,
+                expected_resolved_at=observed_at,
+            ))
+            after = db.get_request(request_id)
+            assert after is not None
+            self.assertIsNone(after["canonical_release_id"])
+            self.assertIsNone(after["canonical_resolved_at"])
+            self.assertEqual(
+                {
+                    field for field in before if before[field] != after[field]
+                },
+                {"canonical_release_id", "canonical_resolved_at"},
+            )
+
+            stored = db._execute(
+                "SELECT canonical_release_id, canonical_resolved_at "
+                "FROM album_requests WHERE id = %s",
+                (request_id,),
+            ).fetchone()
+            self.assertIsNone(stored["canonical_release_id"])
+            self.assertIsNone(stored["canonical_resolved_at"])
+        finally:
+            db.close()
+
+    def test_retire_cas_refuses_newer_or_replaced_rows_without_mutation(self):
+        db = make_db()
+        try:
+            request_id = self._seed(db)
+            first = datetime(2026, 8, 6, tzinfo=UTC)
+            second = datetime(2026, 8, 7, tzinfo=UTC)
+            self.assertTrue(db.record_canonical_release_id(
+                request_id, canonical_release_id=self.SURVIVOR,
+                resolved_at=first,
+            ))
+            self.assertTrue(db.record_canonical_release_id(
+                request_id, canonical_release_id="abe18a1c-ad01-423c-b6ca-63cfa8a9daf1",
+                resolved_at=second,
+            ))
+            before = db.get_request(request_id)
+            assert before is not None
+            self.assertFalse(db.retire_canonical_release_id(
+                request_id,
+                expected_canonical_release_id=self.SURVIVOR,
+                expected_resolved_at=first,
+            ))
+            self.assertEqual(db.get_request(request_id), before)
+
+            replacement = db.supersede_request_mbid(
+                request_id,
+                new_mb_release_id="bce7d8c3-815b-449c-8e18-df806398986c",
+                new_mb_release_group_id=None,
+                new_mb_artist_id=None,
+                new_artist_name="Merged",
+                new_album_title="Release",
+                new_year=None,
+                new_country=None,
+                new_tracks=[],
+            )
+            frozen = db.get_request(request_id)
+            assert frozen is not None
+            self.assertFalse(db.retire_canonical_release_id(
+                request_id,
+                expected_canonical_release_id="abe18a1c-ad01-423c-b6ca-63cfa8a9daf1",
+                expected_resolved_at=second,
+            ))
+            self.assertEqual(db.get_request(request_id), frozen)
+            self.assertIsNotNone(replacement)
+        finally:
+            db.close()
+
     def test_check_constraints_reject_the_shapes_the_guard_prevents(self):
         """Known-bad: bypass the method and the schema still fails closed."""
         import psycopg2.errors

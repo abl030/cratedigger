@@ -170,6 +170,13 @@ inside socket authorization, never credentials.
 - `pipeline-cli canonical show` — Show one request's frozen acquisition
   release id alongside any stored survivor and when the `301` proving it was
   observed. Exit 2 when the request does not exist.
+- `pipeline-cli canonical retire` — Explicitly retire one stored MusicBrainz
+  merge survivor after independent operator review with `--id N --confirm
+  RETIRE`.
+  It fresh-reads then CAS-clears the survivor and its observation timestamp;
+  it never asks MusicBrainz, so a `200`, `4xx`, outage, or disagreement can
+  never clear a value automatically. Exit 2 for an unknown request and 4 for
+  a replaced, canonical-free, or concurrently changed request.
 - `pipeline-cli library-delete` — Delete one exact server-owned Beets album.
 - `pipeline-cli list` — List album requests.
 - `pipeline-cli long-tail` — Show the wanted long-tail worklist. Exact-authority

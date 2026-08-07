@@ -7,15 +7,19 @@ outcome→exit-code mapping exactly.
 """
 
 import logging
+from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from lib.canonical_release_service import (
     OUTCOME_FROZEN,
     OUTCOME_INVALID_IDENTITY,
+    OUTCOME_NO_CANONICAL,
     OUTCOME_NOT_FOUND,
+    OUTCOME_STALE,
     CanonicalReconcileResult,
     CanonicalReleaseService,
+    CanonicalRetireResult,
     configure_reconciliation_mirror,
 )
 from lib.config import read_runtime_config
@@ -37,6 +41,8 @@ canonical_release_fn = canonical_release_id
 _STATUS = {
     OUTCOME_NOT_FOUND: 404,
     OUTCOME_FROZEN: 409,
+    OUTCOME_NO_CANONICAL: 409,
+    OUTCOME_STALE: 409,
     OUTCOME_INVALID_IDENTITY: 422,
 }
 
@@ -47,6 +53,16 @@ def _payload(result: CanonicalReconcileResult) -> dict[str, object]:
         "outcome": result.outcome,
         "acquisition_release_id": result.acquisition_release_id,
         "canonical_release_id": result.canonical_release_id,
+        "previous_canonical_release_id": result.previous_canonical_release_id,
+        "changed": result.changed,
+    }
+
+
+def _retire_payload(result: CanonicalRetireResult) -> dict[str, object]:
+    return {
+        "request_id": result.request_id,
+        "outcome": result.outcome,
+        "canonical_release_id": None,
         "previous_canonical_release_id": result.previous_canonical_release_id,
         "changed": result.changed,
     }
@@ -91,6 +107,13 @@ class CanonicalReconcileRequest(BaseModel):
     request_id: int | None = None
 
 
+class CanonicalRetireRequest(BaseModel):
+    """Body for ``POST /api/canonical/retire``."""
+
+    request_id: int = Field(gt=0, strict=True)
+    confirm: Literal["RETIRE"]
+
+
 def post_canonical_reconcile(h: RouteHandler, body: bytes) -> None:
     """``POST /api/canonical/reconcile`` — ask MusicBrainz, store the answer.
 
@@ -125,6 +148,17 @@ def post_canonical_reconcile(h: RouteHandler, body: bytes) -> None:
     })
 
 
+def post_canonical_retire(h: RouteHandler, body: bytes) -> None:
+    """``POST /api/canonical/retire`` — explicitly clear one survivor."""
+    parsed = parse_body(h, body, CanonicalRetireRequest)
+    if parsed is None:
+        return
+    result = CanonicalReleaseService(_server()._db()).retire_request(
+        parsed.request_id,
+    )
+    h._json(_retire_payload(result), status=_STATUS.get(result.outcome, 200))
+
+
 ROUTES: list[RouteRegistration] = [
     route(
         "GET", "/api/canonical", get_canonical_request,
@@ -139,6 +173,13 @@ ROUTES: list[RouteRegistration] = [
         "With request_id reconciles one row; without it sweeps every "
         "non-replaced request. Wraps CanonicalReleaseService, the same "
         "service pipeline-cli canonical wraps.",
+        classified=True,
+    ),
+    route(
+        "POST", "/api/canonical/retire", post_canonical_retire,
+        "Explicitly retire one stored MusicBrainz merge survivor after the "
+        "caller confirms RETIRE. The service fresh-reads and CAS-clears the "
+        "survivor plus its observation; it never consults the mirror.",
         classified=True,
     ),
 ]
