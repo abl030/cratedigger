@@ -804,10 +804,17 @@ class TestPinnedOwnerSessionPostgres(unittest.TestCase):
         self,
     ) -> None:
         db = PipelineDB(TEST_DSN)
+        observer = PipelineDB(TEST_DSN)
         token = CancellationToken()
         try:
             with self.assertRaises(OwnerSessionLost), \
-                    db._pin_owner_session(token) as identity:
+                    db._pin_owner_session(token) as identity, db.advisory_lock(
+                    ADVISORY_LOCK_NAMESPACE_IMPORT, 991_001,
+                ) as import_acquired, db.advisory_lock(
+                    ADVISORY_LOCK_NAMESPACE_RELEASE, 991_001,
+                ) as release_acquired:
+                    self.assertTrue(import_acquired)
+                    self.assertTrue(release_acquired)
                     token.cancel("stage_cancelled")
                     self.assertEqual(
                         db._probe_owner_session(identity).reason,
@@ -822,7 +829,15 @@ class TestPinnedOwnerSessionPostgres(unittest.TestCase):
                         db.conn.get_backend_pid(),
                         identity.backend_pid,
                     )
+            with observer.advisory_lock(
+                ADVISORY_LOCK_NAMESPACE_IMPORT, 991_001,
+            ) as import_acquired, observer.advisory_lock(
+                ADVISORY_LOCK_NAMESPACE_RELEASE, 991_001,
+            ) as release_acquired:
+                self.assertTrue(import_acquired)
+                self.assertTrue(release_acquired)
         finally:
+            observer.close()
             db.close()
 
     def test_probe_deadline_bounds_a_stopped_postgres_backend(self) -> None:

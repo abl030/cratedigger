@@ -625,13 +625,9 @@ class _CoreMixin(_PipelineDBBase):
                             raise AdvisoryLockSessionLost(
                                 "advisory-lock session was lost before unlock"
                             )
-                        if (
-                            self._owner_session_pin is not None
-                            and self._owner_session_pin.token.cancelled
-                        ):
-                            raise OwnerSessionLost(
-                                "owner session execution was cancelled before advisory unlock"
-                            )
+                        # Cancellation prevents new *effects*, not the
+                        # cleanup that proves this captured session released
+                        # its advisory authority.  Unlock before surfacing it.
                         with self._owner_session_io(), connection.cursor() as cur:
                             cur.execute(
                                 "SELECT pg_advisory_unlock(%s, %s)",
@@ -650,6 +646,14 @@ class _CoreMixin(_PipelineDBBase):
                         )
                         lost.__cause__ = exc
                     if lost is not None:
+                        # Do not leave a healthy-but-unproven captured session
+                        # holding an advisory lock while the caller unwinds.
+                        # Closing it asks PostgreSQL to release every lock on
+                        # precisely that backend; never reconnect here.
+                        try:
+                            connection.close()
+                        except Exception:  # noqa: BLE001 - already fail-closed
+                            logger.debug("captured advisory session close failed")
                         if self._owner_session_pin is not None:
                             self._owner_session_pin.token.cancel(
                                 "owner_session_unlock_failed"

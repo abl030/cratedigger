@@ -371,8 +371,8 @@ class MbidReplaceService:
                 descendant = self.db.get_request_by_replaces_request_id(
                     request_id,
                 )
-                target_identity = self._canonical_retry_target_identity(
-                    source, target_mb_release_id,
+                target_identity, _retry_error = self._canonical_retry_target_identity(
+                    source, target_mb_release_id, request_id=request_id,
                 )
             except Exception:  # noqa: BLE001 - session loss is primary
                 descendant = None
@@ -403,7 +403,9 @@ class MbidReplaceService:
         self,
         source: Mapping[str, object] | None,
         requested_target: str,
-    ) -> ReleaseIdentity | None:
+        *,
+        request_id: int,
+    ) -> tuple[ReleaseIdentity | None, ReplaceResult | None]:
         """Resolve a retry key through the source pathway's canonicalizer."""
         source_identity = (
             ReleaseIdentity.from_strict_fields(
@@ -417,17 +419,37 @@ class MbidReplaceService:
             or target_identity is None
             or source_identity.source != target_identity.source
         ):
-            return None
-        try:
-            if target_identity.source == "musicbrainz":
-                data = self.mb_lookup(target_identity.release_id, fresh=True)
-            else:
-                data = self.discogs_lookup(int(target_identity.release_id), fresh=True)
-        except Exception:  # noqa: BLE001 - caller preserves primary authority loss
-            return None
-        return ReleaseIdentity.from_id(
-            str(data.get("id") or target_identity.release_id),
-        )
+            return None, None
+        if target_identity.source == "musicbrainz":
+            data, error = self._mb_lookup_or_error(
+                target_identity.release_id,
+                request_id=request_id,
+                detail_context=f"target MBID {requested_target}",
+            )
+        else:
+            data, error = self._discogs_lookup_or_error(
+                int(target_identity.release_id),
+                request_id=request_id,
+                detail_context=f"target Discogs id {requested_target}",
+            )
+        if error is not None:
+            return None, error
+        if not data:
+            return None, ReplaceResult(
+                outcome=RESULT_TARGET_INVALID,
+                request_id=request_id,
+                reason=REPLACE_REASON_UNRESOLVABLE_TARGET,
+                error_message=f"retry target {requested_target} returned empty payload",
+            )
+        canonical = ReleaseIdentity.from_id(str(data.get("id") or ""))
+        if canonical is None or canonical.source != source_identity.source:
+            return None, ReplaceResult(
+                outcome=RESULT_TARGET_INVALID,
+                request_id=request_id,
+                reason=REPLACE_REASON_UNRESOLVABLE_TARGET,
+                error_message=f"retry target {requested_target} resolved malformed identity",
+            )
+        return canonical, None
 
     def _replace_request_mbid(
         self,
@@ -487,9 +509,11 @@ class MbidReplaceService:
             descendant = self.db.get_request_by_replaces_request_id(
                 request_id
             )
-            target_identity = self._canonical_retry_target_identity(
-                source, target_mb_release_id,
+            target_identity, retry_error = self._canonical_retry_target_identity(
+                source, target_mb_release_id, request_id=request_id,
             )
+            if retry_error is not None:
+                return retry_error
             if (
                 descendant is not None
                 and target_identity is not None
@@ -1071,32 +1095,44 @@ class MbidReplaceService:
                                 "Replace tail current Beets authority is unavailable or ambiguous"
                             )
                         if isinstance(current_beets, CurrentBeetsUnique):
-                            token.raise_if_cancelled()
-                            request = BeetsDeleteRequest(
-                                album_id=current_beets.album_id,
-                                expected_release_id=current_beets.filed_identity.release_id,
-                                library_db_path=library_db_path,
-                                library_root=library_root,
-                            )
-                            if self.beets_delete_fn is run_beets_delete:
-                                deleted = run_beets_delete(
-                                    request,
-                                    cancellation_token=token,
-                                    owner_session_probe=lambda: bool(
-                                        self.db._probe_owner_session(owner).live,
-                                    ),
+                            try:
+                                token.raise_if_cancelled()
+                                request = BeetsDeleteRequest(
+                                    album_id=current_beets.album_id,
+                                    expected_release_id=current_beets.filed_identity.release_id,
+                                    library_db_path=library_db_path,
+                                    library_root=library_root,
                                 )
-                            else:
-                                deleted = self.beets_delete_fn(request)
-                            token.raise_if_cancelled()
-                            if not self.db._probe_owner_session(owner).live:
-                                raise AdvisoryLockSessionLost(
-                                    "Replace tail lost owner session after Beets acknowledgement"
-                                )
-                            if isinstance(deleted, BeetsDeleteFailed):
+                                if self.beets_delete_fn is run_beets_delete:
+                                    deleted = run_beets_delete(
+                                        request,
+                                        cancellation_token=token,
+                                        owner_session_probe=lambda: bool(
+                                            self.db._probe_owner_session(owner).live,
+                                        ),
+                                    )
+                                else:
+                                    deleted = self.beets_delete_fn(request)
+                                token.raise_if_cancelled()
+                                if not self.db._probe_owner_session(owner).live:
+                                    raise AdvisoryLockSessionLost(
+                                        "Replace tail lost owner session after Beets acknowledgement"
+                                    )
+                                if isinstance(deleted, BeetsDeleteFailed):
+                                    warnings.append(
+                                        f"beets exact delete id:{current_beets.album_id} "
+                                        f"failed {deleted.reason}: {deleted.detail}"
+                                    )
+                            except (
+                                AdvisoryLockSessionLost,
+                                OwnerSessionLost,
+                                ExecutionCancelled,
+                            ):
+                                raise
+                            except Exception as exc:  # noqa: BLE001 - resume safe tail
                                 warnings.append(
-                                    f"beets exact delete id:{current_beets.album_id} "
-                                    f"failed {deleted.reason}: {deleted.detail}"
+                                    "beets exact delete raised "
+                                    f"{type(exc).__name__}: {exc}"
                                 )
                         token.raise_if_cancelled()
                         try:
@@ -1121,7 +1157,16 @@ class MbidReplaceService:
                         staging_dir = self.config.beets_staging_dir or None
                         artist = str(current_source.get("artist_name") or "")
                         title = str(current_source.get("album_title") or "")
-                        if staging_dir and artist and title:
+                        # A replaced audit row retains the original download
+                        # receipt.  That durable #278 exception belongs to
+                        # slskd orphan convergence, never this staging tail.
+                        if current_source.get("active_download_state") is not None:
+                            warnings.append(
+                                f"request {request_id} was downloading; in-flight "
+                                "slskd transfers are not cancelled and staging "
+                                "cleanup was skipped (see issue #278)"
+                            )
+                        elif staging_dir and artist and title:
                             for auto_import in (True, False):
                                 path = stage_to_ai_path(
                                     artist=artist, title=title,

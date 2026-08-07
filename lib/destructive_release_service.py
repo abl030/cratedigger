@@ -1114,19 +1114,36 @@ def _purge_confirmed_missing_pipeline_request(
     """
     if request.expected_pipeline_id is None or request.expected_release_id is None:
         return DeleteAlbumNotFound(request.album_id)
-    pipeline_row = pipeline_db.get_request(request.expected_pipeline_id)
-    identity = _request_identity(pipeline_row) if pipeline_row is not None else None
-    if not _delete_confirmations_match(request, identity, pipeline_row):
-        return _delete_mismatch(request, identity, pipeline_row)
-    assert pipeline_row is not None
-    assert identity is not None
+    supplied_identity = ReleaseIdentity.from_id(request.expected_release_id)
+    if supplied_identity is None:
+        return _delete_mismatch(request, None, None)
     with pipeline_db._pin_owner_session(token), pipeline_db.advisory_lock(
         ADVISORY_LOCK_NAMESPACE_IMPORT, request.expected_pipeline_id,
     ) as import_acquired:
         if not import_acquired:
             return DeleteLockContended(request.album_id, "request")
+        pipeline_row = pipeline_db.get_request(request.expected_pipeline_id)
+        # Idempotent retry after an acknowledged successful purge: both the
+        # caller's request id and strict release identity are its durable
+        # confirmation, and no Beets child may be relaunched.
+        if pipeline_row is None:
+            return DeleteSuccess(
+                album_id=request.album_id,
+                album_name="",
+                artist_name="",
+                former_album_path="",
+                deleted_files=0,
+                deleted_artifacts=0,
+                pipeline_deleted=True,
+                deleted_pipeline_id=request.expected_pipeline_id,
+                preserved_paths=(),
+            )
+        identity = _request_identity(pipeline_row)
+        if not _delete_confirmations_match(request, identity, pipeline_row):
+            return _delete_mismatch(request, identity, pipeline_row)
+        assert identity is not None
         with release_identity_locks(
-            pipeline_db, acceptable_identities(pipeline_row),
+            pipeline_db, (*acceptable_identities(pipeline_row), supplied_identity),
         ) as release_locks:
             if not release_locks.acquired:
                 return DeleteLockContended(request.album_id, "release")
@@ -1135,11 +1152,25 @@ def _purge_confirmed_missing_pipeline_request(
             if not _delete_confirmations_match(request, current_identity, current):
                 return _delete_mismatch(request, current_identity, current)
             assert current is not None
-            if beets_db.get_album_detail(request.album_id) is not None:
-                return DeleteAlbumAuthorityMismatch(
+            current_beets = resolve_current_for_request(beets_db, current)
+            if not isinstance(current_beets, CurrentBeetsMissing):
+                if isinstance(current_beets, CurrentBeetsAmbiguous):
+                    return DeleteBeetsAmbiguous(
+                        album_id=request.album_id,
+                        release_id=identity.release_id,
+                        album_ids=current_beets.album_ids,
+                        reason=current_beets.reason,
+                    )
+                if isinstance(current_beets, CurrentBeetsUnique):
+                    return DeleteAlbumAuthorityMismatch(
+                        album_id=request.album_id,
+                        authoritative_album_id=current_beets.album_id,
+                        release_id=identity.release_id,
+                    )
+                return DeleteBeetsUnavailable(
                     album_id=request.album_id,
-                    authoritative_album_id=request.album_id,
                     release_id=identity.release_id,
+                    reason="request_union_authority_unavailable",
                 )
             if not pipeline_db.delete_request(request.expected_pipeline_id):
                 return DeletePipelinePurgeFailure(
