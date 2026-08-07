@@ -141,7 +141,10 @@ class TestWorldInvariantPins(unittest.TestCase):
         self.assertEqual(check_folder_exclusivity(albums), ())
         self.assertEqual(check_status_membership(
             requests,
-            {album.release_id: _unique(album) for album in albums},
+            {
+                request.request_id: _unique(album)
+                for request, album in zip(requests, albums, strict=True)
+            },
         ), ())
 
     def test_evidence_proof_policy_and_authority_are_coherent(self) -> None:
@@ -470,7 +473,7 @@ class TestWorldInvariantCheckersTripOnKnownBad(unittest.TestCase):
                 status="imported",
             ),
         ), {
-            "missing-release": CurrentBeetsMissing(
+            10: CurrentBeetsMissing(
                 identity=_identity("missing-release"),
             ),
         })
@@ -481,7 +484,7 @@ class TestWorldInvariantCheckersTripOnKnownBad(unittest.TestCase):
         violations = check_status_membership((
             RequestMembershipSnapshot(10, "release-a", "imported"),
         ), {
-            "release-a": CurrentBeetsAmbiguous(
+            10: CurrentBeetsAmbiguous(
                 identity=_identity("release-a"),
                 album_ids=(1, 2),
                 reason="multiple_matches",

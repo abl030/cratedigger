@@ -65,6 +65,15 @@ class TestTargetedTestSelection(unittest.TestCase):
         self.assertNotIn("tests.test_pyright_checks_generated", selected)
         self.assertIn("tests.test_artist_releases", selected)
 
+    def test_changed_test_support_module_is_not_scheduled_as_a_test(self) -> None:
+        selected = expand_test_selection(
+            (),
+            changed_paths=("tests/world_model/support.py",),
+            repo_root=REPO_ROOT,
+        )
+
+        self.assertNotIn("tests.world_model.support", selected)
+
     def test_pipeline_db_change_adds_shared_boundary_contracts(self) -> None:
         selected = expand_test_selection(
             (),

@@ -46,6 +46,7 @@ import unittest
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock, patch
 
 from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
@@ -570,6 +571,107 @@ class TestSwitchedConsumersAgreeWithTheUnion(unittest.TestCase):
         check_presence_agrees(
             "disk coverage", request_id not in off_disk, union)
 
+    @settings(deadline=None, max_examples=25)
+    @given(
+        acquired=st.sampled_from([*HELD, *UNHELD]),
+        canonical=st.one_of(st.none(), st.sampled_from([*HELD, *UNHELD])),
+    )
+    @example(acquired=LOSER, canonical=SURVIVOR)
+    @example(acquired=SURVIVOR, canonical=None)
+    def test_replace_cleanup_uses_the_union_filed_identity(
+        self, acquired: str, canonical: str | None,
+    ) -> None:
+        """Replace delegates deletion only to the union's filed album.
+
+        The shared BeetsWorld has one real album per held identity, so merged
+        pairs can produce unique, missing, and split authority without the
+        producer-impossible shape of two identities on one Beets row.  The
+        child is injected only to keep that immutable property library intact;
+        the public Replace service and real Beets resolver both run.
+        """
+        from lib.beets_delete import BeetsDeleteCompleted, BeetsDeleteRequest
+        from lib.config import CratediggerConfig
+        from lib.mbid_replace_service import (
+            RESULT_REPLACED,
+            RESULT_WRONG_STATE,
+            MbidReplaceService,
+        )
+        from tests.fakes import FakePipelineDB
+
+        if canonical == acquired:
+            canonical = None
+        db = FakePipelineDB()
+        request_id, row = self._merged_request(db, acquired, canonical)
+        db.request(request_id)["status"] = "imported"
+        db.request(request_id)["mb_release_group_id"] = (
+            "11111111-1111-1111-1111-111111111111"
+        )
+        calls: list[BeetsDeleteRequest] = []
+
+        def exact_delete(request: BeetsDeleteRequest) -> BeetsDeleteCompleted:
+            calls.append(request)
+            return BeetsDeleteCompleted(
+                album_id=request.album_id,
+                album_name="Merged Album",
+                artist_name="Merged Artist",
+                former_album_path="/immutable/generated-world",
+                deleted_tracks=1,
+                deleted_artifacts=1,
+                preserved_paths=(),
+            )
+
+        target = {
+            "id": "99999999-9999-9999-9999-999999999999",
+            "title": "Replacement",
+            "artist_name": "Merged Artist",
+            "artist_id": "artist-1",
+            "release_group_id": "11111111-1111-1111-1111-111111111111",
+            "year": 2026,
+            "country": "AU",
+            "tracks": [],
+        }
+        with open_beets_db(
+            db_path=str(self.world.library_db),
+            library_root=str(self.world.library_root),
+        ) as beets:
+            union = resolve_current_for_requests(beets, [row])[request_id]
+
+        with (
+            patch("lib.mbid_replace_service.trigger_plex_scan"),
+            patch("lib.mbid_replace_service.trigger_jellyfin_scan"),
+        ):
+            result = MbidReplaceService(
+                db,
+                CratediggerConfig(),
+                beets_db_factory=lambda: open_beets_db(
+                    db_path=str(self.world.library_db),
+                    library_root=str(self.world.library_root),
+                ),
+                mb_lookup=lambda _rid, *, fresh=False: target,
+                search_plan_service=MagicMock(),
+                beets_delete_fn=exact_delete,
+                wrong_match_delete_fn=lambda _db, _request_id: MagicMock(
+                    errors=0, remaining=0,
+                ),
+            ).replace_request_mbid(
+                request_id,
+                target_mb_release_id=str(target["id"]),
+            )
+
+        if isinstance(union, CurrentBeetsAmbiguous):
+            self.assertEqual(result.outcome, RESULT_WRONG_STATE)
+            self.assertEqual(calls, [])
+        elif isinstance(union, CurrentBeetsMissing):
+            self.assertEqual(result.outcome, RESULT_REPLACED)
+            self.assertEqual(calls, [])
+        else:
+            self.assertEqual(result.outcome, RESULT_REPLACED)
+            self.assertEqual([call.album_id for call in calls], [union.album_id])
+            self.assertEqual(
+                [call.expected_release_id for call in calls],
+                [union.filed_identity.release_id],
+            )
+
 
 class TestInvariantCheckersTripOnViolations(unittest.TestCase):
     """Every checker owes a planted violation proving it can fail."""
@@ -670,21 +772,37 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
 
     def test_checkers_accept_the_legitimate_worlds(self) -> None:
         """Must-still-work: the real merge passes every checker."""
-        held = _unique(self.acquisition, 19345)
-        check_names_the_acquisition(held, self.acquisition)
+        # The union continues to name the request acquisition, but its only
+        # real Beets filing is the survivor (album 19345). Keep the filing in
+        # the selector rather than fabricating a second identity on that row.
+        survivor_held = _unique(
+            self.acquisition,
+            19345,
+            filed_identity=self.canonical,
+        )
+        acquisition_held = _unique(self.acquisition, 11541)
+        check_names_the_acquisition(survivor_held, self.acquisition)
         check_album_is_acceptable(
-            held, {self.canonical: 19345}, (self.canonical, self.acquisition))
+            survivor_held,
+            {self.canonical: 19345},
+            (self.canonical, self.acquisition),
+        )
         check_split_is_ambiguous(
-            held, {self.canonical: 19345}, (self.canonical, self.acquisition))
-        check_unmerged_is_inert(held, held)
+            survivor_held,
+            {self.canonical: 19345},
+            (self.canonical, self.acquisition),
+        )
+        check_unmerged_is_inert(acquisition_held, acquisition_held)
         check_one_batch(1)
-        check_consumer_state_agrees("a switched consumer", "unique", held)
+        check_consumer_state_agrees(
+            "a switched consumer", "unique", survivor_held,
+        )
         check_consumer_state_agrees(
             "a switched consumer",
             "missing",
             CurrentBeetsMissing(identity=self.acquisition),
         )
-        check_presence_agrees("a presence consumer", True, held)
+        check_presence_agrees("a presence consumer", True, survivor_held)
         check_presence_agrees(
             "a presence consumer",
             False,
@@ -710,13 +828,19 @@ def _identity(release_id: str) -> ReleaseIdentity:
     return identity
 
 
-def _unique(identity: ReleaseIdentity, album_id: int) -> CurrentBeetsUnique:
+def _unique(
+    identity: ReleaseIdentity,
+    album_id: int,
+    *,
+    filed_identity: ReleaseIdentity | None = None,
+) -> CurrentBeetsUnique:
+    filed = filed_identity or identity
     return CurrentBeetsUnique(
         identity=identity,
         album_id=album_id,
         album_path=f"/library/album-{album_id}",
         items=(),
-        selectors=(f"mb_albumid:{identity.release_id}",),
+        selectors=(f"mb_albumid:{filed.release_id}",),
     )
 
 

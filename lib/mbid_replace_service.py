@@ -110,6 +110,7 @@ from lib.util import (
 )
 from lib.wrong_match_delete_service import (
     WrongMatchDeleteDB,
+    WrongMatchDeleteSummary,
     delete_wrong_match_group,
 )
 
@@ -257,6 +258,9 @@ BeetsDBFactory = Callable[[], ReplaceBeetsDB]
 BeetsDeleteFn = Callable[[BeetsDeleteRequest], BeetsDeleteOutcome]
 """Injectable pinned exact-album deletion boundary."""
 
+WrongMatchDeleteFn = Callable[[MbidReplaceDB, int], WrongMatchDeleteSummary]
+"""Injectable post-replace wrong-match cleanup boundary."""
+
 
 def _default_mb_lookup(mbid: str, *, fresh: bool = False) -> dict[str, Any]:
     """Default MB-mirror lookup. Imported lazily so the service module
@@ -298,6 +302,7 @@ class MbidReplaceService:
         discogs_lookup: DiscogsLookup | None = None,
         search_plan_service: SearchPlanService | None = None,
         beets_delete_fn: BeetsDeleteFn | None = None,
+        wrong_match_delete_fn: WrongMatchDeleteFn | None = None,
     ) -> None:
         self.db = db
         self.config = config
@@ -313,6 +318,11 @@ class MbidReplaceService:
         )
         self.beets_delete_fn = (
             beets_delete_fn if beets_delete_fn is not None else run_beets_delete
+        )
+        self.wrong_match_delete_fn = (
+            wrong_match_delete_fn
+            if wrong_match_delete_fn is not None
+            else delete_wrong_match_group
         )
 
     def replace_request_mbid(
@@ -1045,7 +1055,7 @@ class MbidReplaceService:
                     )
 
             try:
-                wm_summary = delete_wrong_match_group(self.db, request_id)
+                wm_summary = self.wrong_match_delete_fn(self.db, request_id)
                 if wm_summary.errors:
                     warnings.append(
                         f"wrong-matches cleanup reported "
