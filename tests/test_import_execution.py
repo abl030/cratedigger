@@ -44,7 +44,11 @@ from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_RELEASE,
     PipelineDB,
 )
-from lib.pipeline_db._core import OwnerSessionLost, _PinnedOwnerSession
+from lib.pipeline_db._core import (
+    AdvisoryLockSessionLost,
+    OwnerSessionLost,
+    _PinnedOwnerSession,
+)
 
 TEST_DSN = os.environ.get("TEST_DB_DSN") or ""
 
@@ -941,10 +945,14 @@ class TestPinnedOwnerSessionPostgres(unittest.TestCase):
             f"CREATE TABLE {table} (marker TEXT PRIMARY KEY)"
         )
         try:
-            with db._pin_owner_session(token) as identity, db.advisory_lock(
-                ADVISORY_LOCK_NAMESPACE_IMPORT,
-                lock_key,
-            ) as acquired:
+            with (
+                self.assertRaises(AdvisoryLockSessionLost),
+                db._pin_owner_session(token) as identity,
+                db.advisory_lock(
+                    ADVISORY_LOCK_NAMESPACE_IMPORT,
+                    lock_key,
+                ) as acquired,
+            ):
                 self.assertTrue(acquired)
                 with self.assertRaises(OwnerSessionLost), db._atomic():
                     db._execute(

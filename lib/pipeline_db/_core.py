@@ -1,5 +1,6 @@
 """PipelineDB core primitives: connection, _execute, advisory_lock, _atomic."""
 import select
+import sys
 import threading
 import time
 from collections.abc import Generator, Mapping, Sequence
@@ -572,9 +573,11 @@ class _CoreMixin(_PipelineDBBase):
         and call-site index.
         """
         with self._advisory_lock_session():
+            connection = self.conn
             try:
                 with self._owner_session_io():
                     self._ensure_conn()
+                    connection = self.conn
                     with self.conn.cursor() as cur:
                         cur.execute(
                             "SELECT pg_try_advisory_lock(%s, %s)",
@@ -589,29 +592,51 @@ class _CoreMixin(_PipelineDBBase):
             try:
                 yield acquired
             finally:
-                # Swallow unlock errors so they cannot mask the original
-                # exception from the ``with`` body. PostgreSQL releases
-                # session-level advisory locks on connection death anyway,
-                # so a transient cursor/connection failure here cannot
-                # leak the lock beyond the session.
                 if acquired:
+                    body_raised = sys.exc_info()[0] is not None
+                    lost: Exception | None = None
                     try:
-                        with self._owner_session_io(), self.conn.cursor() as cur:
+                        # Never reconnect or unlock a replacement session:
+                        # PostgreSQL released the captured session's locks
+                        # when it died. A successful unlock on a replacement
+                        # backend would prove nothing about the authority that
+                        # guarded the body.
+                        if self.conn is not connection or connection.closed:
+                            raise AdvisoryLockSessionLost(
+                                "advisory-lock session was lost before unlock"
+                            )
+                        with self._owner_session_io(), connection.cursor() as cur:
                             cur.execute(
                                 "SELECT pg_advisory_unlock(%s, %s)",
                                 (namespace, key),
                             )
-                            cur.fetchone()
-                    except Exception:  # noqa: BLE001 - unlock cannot mask body
+                            row = cur.fetchone()
+                        if not row or not bool(row[0]):
+                            raise AdvisoryLockSessionLost(
+                                "captured advisory lock was absent at unlock"
+                            )
+                    except AdvisoryLockSessionLost as exc:
+                        lost = exc
+                    except Exception as exc:  # noqa: BLE001 - typed boundary
+                        lost = AdvisoryLockSessionLost(
+                            "advisory-lock session was lost during unlock"
+                        )
+                        lost.__cause__ = exc
+                    if lost is not None:
                         if self._owner_session_pin is not None:
                             self._owner_session_pin.token.cancel(
                                 "owner_session_unlock_failed"
                             )
                         logger.debug(
-                            "advisory_unlock(%s, %s) failed; lock will be "
-                            "released at session end",
+                            "advisory_unlock(%s, %s) could not validate the "
+                            "captured session",
                             namespace, key,
                         )
+                        # The original body exception is still the best
+                        # diagnosis. Otherwise authority loss must remain
+                        # visible to the destructive caller.
+                        if not body_raised:
+                            raise lost
 
 
     @contextmanager

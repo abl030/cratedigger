@@ -39,6 +39,7 @@ from lib.mbid_replace_service import (
     REPLACE_REASON_CURRENT_BEETS_AMBIGUOUS,
     REPLACE_REASON_CURRENT_BEETS_UNAVAILABLE,
     REPLACE_REASON_LOCK_CONTENDED,
+    REPLACE_REASON_POST_SUPERSEDE_PARTIAL,
     REPLACE_REASON_SOURCE_IDENTITY_INVALID,
     REPLACE_REASON_SOURCE_NO_RELEASE_GROUP,
     REPLACE_REASON_TARGET_NO_RELEASE_GROUP,
@@ -64,6 +65,7 @@ from lib.pipeline_db import (
 )
 from lib.pipeline_db._core import AdvisoryLockSessionLost
 from lib.release_identity import ReleaseIdentity
+from lib.search_plan_service import ServiceResult
 from lib.wrong_match_delete_service import WrongMatchDeleteSummary
 from tests.beets_world import BeetsWorld, BeetsWorldRelease
 from tests.fakes import FakeBeetsDB, FakePipelineDB, FakeSlskdAPI
@@ -830,7 +832,8 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
         )
 
         descendant = db.get_request_by_replaces_request_id(42)
-        self.assertEqual(result.outcome, RESULT_WRONG_STATE)
+        self.assertEqual(result.outcome, RESULT_TRANSIENT)
+        self.assertEqual(result.reason, REPLACE_REASON_POST_SUPERSEDE_PARTIAL)
         self.assertIsNotNone(descendant)
         assert descendant is not None
         self.assertEqual(result.descendant_request_id, descendant["id"])
@@ -848,7 +851,33 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
         ).replace_request_mbid(42, target_mb_release_id=NEW_MBID)
 
         descendant = db.get_request_by_replaces_request_id(42)
-        self.assertEqual(result.outcome, RESULT_WRONG_STATE)
+        self.assertEqual(result.outcome, RESULT_TRANSIENT)
+        self.assertEqual(result.reason, REPLACE_REASON_POST_SUPERSEDE_PARTIAL)
+        self.assertIsNotNone(descendant)
+        assert descendant is not None
+        self.assertEqual(result.descendant_request_id, descendant["id"])
+
+    def test_session_loss_after_delete_ack_is_resumable_not_success(self):
+        """An acknowledgement cannot outlive the session that authorized it."""
+        db = FakePipelineDB()
+        self._seed_old(db)
+        beets = self._installed_beets()
+
+        def acknowledge_then_lose(
+            request: BeetsDeleteRequest,
+        ) -> BeetsDeleteCompleted:
+            db.closed = True
+            return self._completed_delete(request)
+
+        result = self._make_service(
+            db,
+            beets_db_factory=lambda: beets,
+            beets_delete_fn=acknowledge_then_lose,
+        ).replace_request_mbid(42, target_mb_release_id=NEW_MBID)
+
+        descendant = db.get_request_by_replaces_request_id(42)
+        self.assertEqual(result.outcome, RESULT_TRANSIENT)
+        self.assertEqual(result.reason, REPLACE_REASON_POST_SUPERSEDE_PARTIAL)
         self.assertIsNotNone(descendant)
         assert descendant is not None
         self.assertEqual(result.descendant_request_id, descendant["id"])
@@ -880,6 +909,106 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
         result = svc.replace_request_mbid(42, target_mb_release_id=NEW_MBID)
         self.assertEqual(result.outcome, RESULT_WRONG_STATE)
         self.assertIsNone(result.descendant_request_id)
+
+    def test_same_target_resumes_committed_replace_tail_without_new_descendant(self):
+        """A post-supersede retry owns the stored exact pair, not a sibling."""
+        db = FakePipelineDB()
+        self._seed_old(db, status="replaced")
+        db.seed_request(make_request_row(
+            id=43, mb_release_id=NEW_MBID, mb_release_group_id=RG_ID,
+            status="wanted", replaces_request_id=42,
+        ))
+        beets = self._installed_beets()
+        deletes: list[BeetsDeleteRequest] = []
+        plans = MagicMock()
+        plans.generate_for_request.return_value = ServiceResult("success")
+        svc = self._make_service(
+            db,
+            beets_db_factory=lambda: beets,
+            beets_delete_fn=lambda request: (
+                deletes.append(request) or self._completed_delete(request)
+            ),
+            wrong_match_delete_fn=_empty_wrong_match_summary,
+            search_plan_service=plans,
+        )
+
+        result = svc.replace_request_mbid(42, target_mb_release_id=NEW_MBID)
+
+        self.assertEqual(result.outcome, RESULT_REPLACED)
+        self.assertEqual(result.new_request_id, 43)
+        self.assertEqual([request.album_id for request in deletes], [77])
+        plans.generate_for_request.assert_called_once_with(43, regenerate=False)
+        self.assertEqual(
+            [row["id"] for row in db._requests.values()
+             if row.get("replaces_request_id") == 42],
+            [43],
+        )
+
+    def test_replaced_source_refuses_a_different_target_without_tail_effects(self):
+        db = FakePipelineDB()
+        self._seed_old(db, status="replaced")
+        db.seed_request(make_request_row(
+            id=43, mb_release_id=NEW_MBID, mb_release_group_id=RG_ID,
+            status="wanted", replaces_request_id=42,
+        ))
+        delete = MagicMock()
+        plans = MagicMock()
+        result = self._make_service(
+            db, beets_delete_fn=delete, search_plan_service=plans,
+        ).replace_request_mbid(
+            42,
+            target_mb_release_id="dddddddd-dddd-dddd-dddd-dddddddddddd",
+        )
+
+        self.assertEqual(result.outcome, RESULT_WRONG_STATE)
+        self.assertEqual(result.descendant_request_id, 43)
+        delete.assert_not_called()
+        plans.generate_for_request.assert_not_called()
+
+    def test_resumed_tail_retries_an_ambiguous_old_album_delete(self):
+        """A partial tail is retried against the same installed old album."""
+        db = FakePipelineDB()
+        self._seed_old(db, status="replaced")
+        db.seed_request(make_request_row(
+            id=43, mb_release_id=NEW_MBID, mb_release_group_id=RG_ID,
+            status="wanted", replaces_request_id=42,
+        ))
+        beets = self._installed_beets()
+        attempts: list[int] = []
+        plans = MagicMock()
+        plans.generate_for_request.return_value = ServiceResult("success")
+
+        def flaky_delete(request: BeetsDeleteRequest) -> BeetsDeleteOutcome:
+            attempts.append(request.album_id)
+            if len(attempts) == 1:
+                return BeetsDeleteFailed(
+                    album_id=request.album_id,
+                    reason="subprocess_error",
+                    detail="planted lost acknowledgement",
+                    album_still_present=True,
+                )
+            return self._completed_delete(request)
+
+        svc = self._make_service(
+            db,
+            beets_db_factory=lambda: beets,
+            beets_delete_fn=flaky_delete,
+            wrong_match_delete_fn=_empty_wrong_match_summary,
+            search_plan_service=plans,
+        )
+        first = svc.replace_request_mbid(42, target_mb_release_id=NEW_MBID)
+        second = svc.replace_request_mbid(42, target_mb_release_id=NEW_MBID)
+
+        self.assertEqual(first.outcome, RESULT_TRANSIENT)
+        self.assertEqual(first.reason, REPLACE_REASON_POST_SUPERSEDE_PARTIAL)
+        self.assertEqual(second.outcome, RESULT_REPLACED)
+        self.assertEqual(second.new_request_id, 43)
+        self.assertEqual(attempts, [77, 77])
+        self.assertEqual(
+            [row["id"] for row in db._requests.values()
+             if row.get("replaces_request_id") == 42],
+            [43],
+        )
 
     def test_supersede_race_maps_to_wrong_state_with_descendant(self):
         """SupersedeRaceError (double-click landed first) maps to

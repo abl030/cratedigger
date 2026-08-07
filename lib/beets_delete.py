@@ -13,12 +13,20 @@ import fnmatch
 import logging
 import os
 import subprocess as sp
+import time
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any, Literal
 
 import msgspec
 
+from lib.import_execution import (
+    CancellationToken,
+    ExecutionCancelled,
+    MonitoredProcessGroup,
+    ProcessGroupTerminationError,
+)
+from lib.pipeline_db._core import AdvisoryLockSessionLost
 from lib.release_identity import ReleaseIdentity
 
 log = logging.getLogger("cratedigger")
@@ -75,6 +83,7 @@ class BeetsDeleteFailed(
 
 type BeetsDeleteOutcome = BeetsDeleteCompleted | BeetsDeleteFailed
 SubprocessRunFn = Callable[..., sp.CompletedProcess[bytes]]
+PopenFactory = Callable[..., sp.Popen[bytes]]
 
 
 class _OwnedPath(msgspec.Struct, frozen=True):
@@ -598,9 +607,18 @@ def execute_pinned_beets_delete(request: BeetsDeleteRequest) -> BeetsDeleteOutco
 def run_beets_delete(
     request: BeetsDeleteRequest,
     *,
-    runner: SubprocessRunFn = sp.run,
+    runner: SubprocessRunFn | None = None,
+    popen_factory: PopenFactory = sp.Popen,
+    cancellation_token: CancellationToken | None = None,
+    owner_session_probe: Callable[[], bool] | None = None,
 ) -> BeetsDeleteOutcome:
-    """Run :func:`execute_pinned_beets_delete` in the pinned Beets Python."""
+    """Run :func:`execute_pinned_beets_delete` in the pinned Beets Python.
+
+    Production uses a dedicated process group so loss of the PostgreSQL
+    authority session kills *every* descendant before this function returns.
+    ``runner`` remains a deterministic, non-production test seam; callers
+    exercising authority loss must use the ``Popen`` path.
+    """
     from lib.util import beets_subprocess_env
 
     try:
@@ -609,13 +627,111 @@ def run_beets_delete(
         if not python:
             raise RuntimeError("CRATEDIGGER_BEETS_PYTHON is not configured")
         harness = Path(__file__).resolve().parent.parent / "harness" / "delete_album.py"
-        proc = runner(
-            [python, str(harness)],
-            input=msgspec.json.encode(request),
-            capture_output=True,
-            timeout=DELETE_TIMEOUT_SECONDS,
-            env=env,
-        )
+        argv = [python, str(harness)]
+        encoded_request = msgspec.json.encode(request)
+        # Existing unit callers supply ``runner`` to assert the protocol
+        # frame. It is deliberately not the production path: production must
+        # retain authority while a cancellable process group is alive.
+        if runner is not None and cancellation_token is None \
+                and owner_session_probe is None:
+            proc = runner(
+                argv,
+                input=encoded_request,
+                capture_output=True,
+                timeout=DELETE_TIMEOUT_SECONDS,
+                env=env,
+            )
+        else:
+            token = cancellation_token or CancellationToken()
+            token.raise_if_cancelled()
+            deadline = time.monotonic() + DELETE_TIMEOUT_SECONDS
+
+            def owner_session_live() -> bool:
+                if time.monotonic() >= deadline:
+                    token.cancel("beets_delete_timeout")
+                    return False
+                return (
+                    owner_session_probe is None
+                    or owner_session_probe()
+                )
+
+            child = popen_factory(
+                argv,
+                stdin=sp.PIPE,
+                stdout=sp.PIPE,
+                stderr=sp.PIPE,
+                env=env,
+                start_new_session=True,
+            )
+            group = MonitoredProcessGroup(child)
+            try:
+                if child.stdin is None:
+                    raise RuntimeError("pinned Beets delete has no stdin pipe")
+                child.stdin.write(encoded_request)
+                child.stdin.close()
+                returncode = group.wait(
+                    token,
+                    owner_session_probe=owner_session_live,
+                )
+                # A cancellation racing acknowledgement wins. Do not parse a
+                # successful frame after the authority that launched it died.
+                token.raise_if_cancelled()
+            except ExecutionCancelled as exc:
+                if child.stdout is not None:
+                    child.stdout.close()
+                if child.stderr is not None:
+                    child.stderr.close()
+                if token.reason == "beets_delete_timeout":
+                    return BeetsDeleteFailed(
+                        album_id=request.album_id,
+                        reason="subprocess_error",
+                        detail=(
+                            "pinned Beets delete exceeded "
+                            f"{DELETE_TIMEOUT_SECONDS}s"
+                        ),
+                        album_still_present=True,
+                    )
+                raise AdvisoryLockSessionLost(
+                    "pinned Beets delete lost destructive authority: "
+                    f"{exc}"
+                ) from exc
+            except ProcessGroupTerminationError as exc:
+                return BeetsDeleteFailed(
+                    album_id=request.album_id,
+                    reason="subprocess_error",
+                    detail=f"process-group termination failed: {exc}",
+                    album_still_present=True,
+                )
+            except Exception:
+                try:
+                    group.terminate_and_wait()
+                except ProcessGroupTerminationError:
+                    pass
+                raise
+            if child.stdout is None or child.stderr is None:
+                return BeetsDeleteFailed(
+                    album_id=request.album_id,
+                    reason="subprocess_error",
+                    detail="pinned Beets delete has no output pipes",
+                    album_still_present=True,
+                )
+            stdout = child.stdout.read()
+            stderr = child.stderr.read()
+            child.stdout.close()
+            child.stderr.close()
+            proc = sp.CompletedProcess(
+                argv,
+                returncode,
+                stdout=stdout,
+                stderr=stderr,
+            )
+    except AdvisoryLockSessionLost:
+        raise
+    except ExecutionCancelled as exc:
+        raise AdvisoryLockSessionLost(
+            "pinned Beets delete lost destructive authority before launch: "
+            f"{exc}"
+        ) from exc
     except (OSError, RuntimeError, sp.TimeoutExpired) as exc:
         return BeetsDeleteFailed(
             album_id=request.album_id,

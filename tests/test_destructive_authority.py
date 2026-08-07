@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
+import psycopg2
 from beets import library
 
 from lib.beets_db import BeetsDB, CurrentBeetsMissing
@@ -987,6 +988,58 @@ class TestDestructiveAuthorityRealPostgres(unittest.TestCase):
             self.assertIsNotNone(beets.get_album_detail(7))
         finally:
             db1.close()
+
+    def test_library_delete_backend_death_never_accepts_child_acknowledgement(self) -> None:
+        """The real pinned backend dies during the exact delete boundary."""
+        db = make_db()
+        beets = FakeBeetsDB()
+        beets.set_album_detail(7, _album())
+        beets.set_album_ids_for_release(RELEASE_A, [7])
+        try:
+            request_id = db.add_request(
+                "Artist A", "Album A", "request",
+                mb_release_id=RELEASE_A, status="imported",
+            )
+
+            def lose_backend(request: BeetsDeleteRequest) -> BeetsDeleteCompleted:
+                killer = psycopg2.connect(db.dsn)
+                killer.autocommit = True
+                try:
+                    with killer.cursor() as cur:
+                        cur.execute(
+                            "SELECT pg_terminate_backend(%s)",
+                            (db.conn.get_backend_pid(),),
+                        )
+                        killed = cur.fetchone()
+                        self.assertIsNotNone(killed)
+                        assert killed is not None
+                        self.assertTrue(killed[0])
+                finally:
+                    killer.close()
+                return BeetsDeleteCompleted(
+                    album_id=request.album_id,
+                    album_name="Album A",
+                    artist_name="Artist A",
+                    former_album_path="/library/Artist A/Album A",
+                    deleted_tracks=1,
+                    deleted_artifacts=1,
+                    preserved_paths=(),
+                )
+
+            result = delete_release_from_library(
+                pipeline_db=db,
+                beets_db=beets,
+                request=DeleteRequest(
+                    album_id=7, expected_pipeline_id=request_id,
+                ),
+                beets_delete_fn=lose_backend,
+            )
+
+            self.assertIsInstance(result, DeleteLockContended)
+            self.assertIsNotNone(db.get_request(request_id))
+            self.assertIsNotNone(beets.get_album_detail(7))
+        finally:
+            db.close()
 
     def test_library_delete_pipeline_lock_then_active_job_both_fail_closed(
         self,

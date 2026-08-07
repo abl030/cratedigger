@@ -62,22 +62,22 @@ class _AlbumRequestUpdate:
 # The ratchet does not infer parameter dataflow: transition SQL must use the
 # canonical direct call grammar below.
 _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
-    ("lib/pipeline_db/_core.py", 288, "d3347c44a6105d85"): (
+    ("lib/pipeline_db/_core.py", 289, "d3347c44a6105d85"): (
         "shared execute wrapper forwards caller-owned SQL with the caller's "
         "unchanged positional or mapping parameters"
     ),
-    ("lib/pipeline_db/_core.py", 290, "0c0e91117a587d97"): (
+    ("lib/pipeline_db/_core.py", 291, "0c0e91117a587d97"): (
         "shared execute wrapper forwards parameterless caller-owned SQL"
     ),
-    ("lib/pipeline_db/_core.py", 327, "d3347c44a6105d85"): (
+    ("lib/pipeline_db/_core.py", 328, "d3347c44a6105d85"): (
         "single reconnect retry forwards the same caller-owned SQL and "
         "unchanged positional or mapping parameters outside atomic scopes"
     ),
-    ("lib/pipeline_db/_core.py", 329, "0c0e91117a587d97"): (
+    ("lib/pipeline_db/_core.py", 330, "0c0e91117a587d97"): (
         "single reconnect retry forwards the same parameterless caller-owned "
         "SQL outside atomic scopes"
     ),
-    ("lib/pipeline_db/_core.py", 474, "cc41f306ff6d2fc6"): (
+    ("lib/pipeline_db/_core.py", 475, "cc41f306ff6d2fc6"): (
         "owner-session liveness probe interpolates only a positive integer "
         "statement timeout before a fixed SELECT"
     ),
