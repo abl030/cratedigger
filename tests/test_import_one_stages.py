@@ -23,6 +23,7 @@ HARNESS_DIR = os.path.join(ROOT_DIR, "harness")
 
 sys.path.insert(0, ROOT_DIR)
 
+from tests.audio_fixtures import make_test_flac
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.test_beets_harness_session import write_fake_harness
 
@@ -601,44 +602,32 @@ class TestConversionTimeoutSeconds(unittest.TestCase):
 class TestM4aAlacDetection(unittest.TestCase):
     """ALAC .m4a detection gates lossless conversion."""
 
-    @patch("lib.media_readiness.subprocess.run")
-    def test_parses_structured_ffprobe_codec_output(self, mock_run):
+    def test_parses_structured_ffprobe_codec_output(self):
         """Canonical stream facts must identify ALAC as lossless."""
         from harness.import_one import _is_m4a_alac
 
-        mock_run.return_value = subprocess.CompletedProcess(
-            args=[],
-            returncode=0,
-            stdout=(
-                '{"streams":[{"codec_type":"audio","codec_name":"alac",'
-                '"sample_rate":"44100","channels":2}],"format":'
-                '{"format_name":"mov,mp4,m4a,3gp,3g2,mj2"},"frames":['
-                '{"nb_samples":44100}],"packets":[{"size":1000}]}'
-            ),
-            stderr="",
-        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "track.m4a")
+            subprocess.run(
+                [
+                    "ffmpeg", "-v", "error", "-nostdin", "-f", "lavfi",
+                    "-i", "sine=frequency=440:duration=0.2", "-c:a", "alac", path,
+                ], check=True, timeout=30,
+            )
+            self.assertTrue(_is_m4a_alac(path))
 
-        self.assertTrue(_is_m4a_alac("track.m4a"))
-        cmd = mock_run.call_args.args[0]
-        self.assertEqual(cmd[cmd.index("-of") + 1], "json")
-
-    @patch("lib.media_readiness.subprocess.run")
-    def test_non_alac_m4a_is_not_lossless(self, mock_run):
+    def test_non_alac_m4a_is_not_lossless(self):
         from harness.import_one import _is_m4a_alac
 
-        mock_run.return_value = subprocess.CompletedProcess(
-            args=[],
-            returncode=0,
-            stdout=(
-                '{"streams":[{"codec_type":"audio","codec_name":"aac",'
-                '"sample_rate":"44100","channels":2}],"format":'
-                '{"format_name":"mov,mp4,m4a,3gp,3g2,mj2"},"frames":['
-                '{"nb_samples":44100}],"packets":[{"size":1000}]}'
-            ),
-            stderr="",
-        )
-
-        self.assertFalse(_is_m4a_alac("track.m4a"))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "track.m4a")
+            subprocess.run(
+                [
+                    "ffmpeg", "-v", "error", "-nostdin", "-f", "lavfi",
+                    "-i", "sine=frequency=440:duration=0.2", "-c:a", "aac", path,
+                ], check=True, timeout=30,
+            )
+            self.assertFalse(_is_m4a_alac(path))
 
 
 # ============================================================================
@@ -2055,8 +2044,7 @@ class TestDryRunMintsVerifiedLosslessProof(unittest.TestCase):
             album = os.path.join(tmpdir, "album")
             os.makedirs(album)
             for name in ("01 - One.flac", "02 - Two.flac"):
-                with open(os.path.join(album, name), "wb") as f:
-                    f.write(b"not real audio")
+                make_test_flac(os.path.join(album, name), duration=1)
 
             result = self._run_dry_run(album)
 
@@ -2110,8 +2098,7 @@ class TestDryRunMintsVerifiedLosslessProof(unittest.TestCase):
             files: list[AlbumQualityEvidenceFile] = []
             for name in ("01 - One.flac", "02 - Two.flac"):
                 full_path = os.path.join(album, name)
-                with open(full_path, "wb") as handle:
-                    handle.write(b"not real audio")
+                make_test_flac(full_path, duration=1)
                 stat = os.stat(full_path)
                 files.append(AlbumQualityEvidenceFile(
                     relative_path=name,

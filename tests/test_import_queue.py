@@ -4,6 +4,7 @@ import copy
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -6766,8 +6767,15 @@ class TestExecuteYoutubeImportJob(unittest.TestCase):
             staged = os.path.join(root, "yt-staged")
             os.makedirs(staged)
             for name in ("01.opus", "02.opus"):
-                with open(os.path.join(staged, name), "wb") as fp:
-                    fp.write(b"audio")
+                subprocess.run(
+                    [
+                        "ffmpeg", "-v", "error", "-nostdin", "-f", "lavfi",
+                        "-i", "sine=frequency=440:duration=0.1", "-c:a",
+                        "libopus", os.path.join(staged, name),
+                    ],
+                    check=True,
+                    timeout=30,
+                )
 
             db = FakePipelineDB()
             db.seed_request(make_request_row(

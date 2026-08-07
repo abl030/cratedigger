@@ -14,7 +14,7 @@ import statistics
 import subprocess
 import tempfile
 
-from lib.media_readiness import MediaReadinessError, inspect_media, media_facts_for_path
+from lib.media_readiness import MediaReadinessError, inspect_media
 from lib.quality import (
     AUDIO_EXTENSIONS_DOTTED,
     V0_PROBE_ON_DISK_RESEARCH,
@@ -59,9 +59,17 @@ def probe_duration_seconds(path: str) -> float | None:
     """Read source duration cheaply for a duration-scaled ffmpeg timeout."""
 
     try:
-        return media_facts_for_path(path).duration_seconds
-    except MediaReadinessError:
+        # This timeout adapter deliberately reads the declared duration only;
+        # readiness owns the expensive frame inventory where recovery needs it.
+        import mutagen
+        mutagen_file = getattr(mutagen, "File")  # noqa: B009 - untyped factory
+        media = mutagen_file(path)
+    except Exception:  # noqa: BLE001 - an unreadable probe uses the safe floor
         return None
+    length = getattr(getattr(media, "info", None), "length", None)
+    if isinstance(length, (int, float)) and length > 0:
+        return float(length)
+    return None
 
 
 def conversion_timeout_seconds(duration_s: float | None) -> int:

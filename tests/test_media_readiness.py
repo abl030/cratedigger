@@ -6,13 +6,13 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
-from unittest import mock
 
 from lib.media_readiness import (
+    MediaReadinessError,
     flac_total_samples_only_changed,
     inspect_media,
     media_facts_for_path,
+    normalize_media_metadata,
     prepare_media_readiness,
 )
 from tests.audio_fixtures import make_test_flac
@@ -58,16 +58,16 @@ class TestFlacReadinessPin(unittest.TestCase):
             start, _ = _streaminfo_span(repaired)
             self.assertEqual(repaired[start + 18:start + 34], b"\0" * 16)
 
-    def test_header_only_checker_rejects_sample_rate_low_byte_mutation(self) -> None:
+    def test_header_only_checker_rejects_bit_depth_high_nibble_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "01.flac"
             make_test_flac(str(path), duration=1)
             before = path.read_bytes()
             changed = bytearray(before)
             start, _ = _streaminfo_span(before)
-            # The first byte adjacent to the packed total-samples field is
-            # still sample-rate metadata.  It must never be admitted.
-            changed[start + 12] ^= 1
+            # The high nibble shares byte 21 with the first total-samples
+            # nibble, but belongs to the bit-depth declaration.
+            changed[start + 13] ^= 0x10
             self.assertFalse(flac_total_samples_only_changed(before, bytes(changed)))
 
     def test_decode_valid_contradictory_sample_count_is_repaired(self) -> None:
@@ -79,7 +79,7 @@ class TestFlacReadinessPin(unittest.TestCase):
             before[18:26] = ((packed & ~((1 << 36) - 1)) | 1).to_bytes(8, "big")
             path.write_bytes(before)
 
-            readiness = prepare_media_readiness(tmp)
+            readiness = normalize_media_metadata(tmp)
 
             self.assertGreater(readiness.files[0].sample_count, 1)
             self.assertTrue(flac_total_samples_only_changed(bytes(before), path.read_bytes()))
@@ -127,21 +127,42 @@ class TestFlacReadinessPin(unittest.TestCase):
             self.assertEqual(facts.codec, "flac")
             self.assertEqual(facts.container, "flac")
 
-    def test_ffprobe_selects_audio_before_reading_frames_and_packets(self) -> None:
-        """Attached artwork must not be counted as audio frame/packet data."""
-        wire = """{
-          "streams": [{"codec_type": "audio", "codec_name": "flac",
-                       "sample_rate": "44100", "channels": 2,
-                       "bits_per_raw_sample": "16"}],
-          "frames": [{"nb_samples": 4096}],
-          "packets": [{"size": "512"}],
-          "format": {"format_name": "flac"}
-        }"""
-        result = SimpleNamespace(returncode=0, stdout=wire)
-        with mock.patch("lib.media_readiness.subprocess.run", return_value=result) as run:
-            facts = media_facts_for_path("/private/album/01.flac")
+    def test_multiple_audio_streams_are_ambiguous(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "two-audio.m4a"
+            subprocess.run(
+                [
+                    "ffmpeg", "-v", "error", "-nostdin",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=0.2",
+                    "-f", "lavfi", "-i", "sine=frequency=880:duration=0.2",
+                    "-map", "0:a", "-map", "1:a", "-c:a", "aac", str(path),
+                ], check=True, timeout=30,
+            )
+            with self.assertRaises(MediaReadinessError) as raised:
+                media_facts_for_path(str(path))
+            self.assertEqual(raised.exception.kind, "ambiguous")
 
-        command = run.call_args.args[0]
-        self.assertEqual(command[command.index("-select_streams") + 1], "a:0")
-        self.assertEqual(facts.sample_count, 4096)
-        self.assertEqual(facts.compressed_audio_bytes, 512)
+    def test_attached_artwork_does_not_make_audio_ambiguous(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cover = root / "cover.jpg"
+            source = root / "source.mp3"
+            path = root / "with-artwork.mp3"
+            subprocess.run(
+                ["ffmpeg", "-v", "error", "-nostdin", "-f", "lavfi", "-i", "color=c=blue:s=16x16", "-frames:v", "1", str(cover)],
+                check=True, timeout=30,
+            )
+            subprocess.run(
+                ["ffmpeg", "-v", "error", "-nostdin", "-f", "lavfi", "-i", "sine=frequency=440:duration=0.2", "-c:a", "libmp3lame", str(source)],
+                check=True, timeout=30,
+            )
+            subprocess.run(
+                [
+                    "ffmpeg", "-v", "error", "-nostdin", "-i", str(source), "-i", str(cover),
+                    "-map", "0:a", "-map", "1:v", "-c:a", "copy", "-c:v", "mjpeg",
+                    "-disposition:v", "attached_pic", str(path),
+                ], check=True, timeout=30,
+            )
+            facts = media_facts_for_path(str(path))
+            self.assertEqual(facts.codec, "mp3")
+            self.assertGreater(facts.sample_count, 0)

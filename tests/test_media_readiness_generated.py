@@ -13,7 +13,7 @@ from hypothesis import strategies as st
 import tests._hypothesis_profiles  # noqa: F401
 from lib.media_readiness import flac_total_samples_only_changed, prepare_media_readiness
 from tests.audio_fixtures import make_test_flac
-from tests.test_media_readiness import _zero_flac_duration_metadata
+from tests.test_media_readiness import _streaminfo_span, _zero_flac_duration_metadata
 
 
 class TestFlacMetadataMutationProperty(unittest.TestCase):
@@ -28,9 +28,13 @@ class TestFlacMetadataMutationProperty(unittest.TestCase):
         shutil.rmtree(cls._fixture_dir)
 
     @settings(max_examples=8)
-    @given(clear_md5=st.booleans(), clear_frame_sizes=st.booleans())
+    @given(
+        clear_md5=st.booleans(),
+        clear_frame_sizes=st.booleans(),
+        declared_total=st.sampled_from((0, 1, 44_099)),
+    )
     def test_metadata_only_mutants_have_clean_stream_facts(
-        self, *, clear_md5: bool, clear_frame_sizes: bool,
+        self, *, clear_md5: bool, clear_frame_sizes: bool, declared_total: int,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             clean_path = Path(tmp) / "clean.flac"
@@ -39,6 +43,13 @@ class TestFlacMetadataMutationProperty(unittest.TestCase):
             shutil.copyfile(self._fixture, broken_path)
             clean = prepare_media_readiness(tmp)
             _zero_flac_duration_metadata(broken_path)
+            raw = bytearray(broken_path.read_bytes())
+            start, _ = _streaminfo_span(bytes(raw))
+            packed = int.from_bytes(raw[start + 10:start + 18], "big")
+            raw[start + 10:start + 18] = (
+                (packed & ~((1 << 36) - 1)) | declared_total
+            ).to_bytes(8, "big")
+            broken_path.write_bytes(raw)
             if not clear_md5 or not clear_frame_sizes:
                 raw = bytearray(broken_path.read_bytes())
                 if not clear_md5:
@@ -71,3 +82,16 @@ class TestFlacMetadataMutationProperty(unittest.TestCase):
             self.assertTrue(
                 flac_total_samples_only_changed(broken_bytes, broken_path.read_bytes()),
             )
+
+    @given(low_nibble=st.integers(min_value=0, max_value=15))
+    def test_checker_allows_only_total_samples_low_nibble(
+        self, *, low_nibble: int,
+    ) -> None:
+        before = self._fixture.read_bytes()
+        start, _ = _streaminfo_span(before)
+        allowed = bytearray(before)
+        allowed[start + 13] = (allowed[start + 13] & 0xF0) | low_nibble
+        self.assertTrue(flac_total_samples_only_changed(before, bytes(allowed)))
+        forbidden = bytearray(allowed)
+        forbidden[start + 13] ^= 0x10
+        self.assertFalse(flac_total_samples_only_changed(before, bytes(forbidden)))

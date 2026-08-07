@@ -406,6 +406,18 @@ class LocalFileInspection:
     has_nested_audio: bool = False
 
 
+def _canonical_filetype_label(codec: str, container: str, fallback: str) -> str:
+    """Project admitted stream facts into the existing filetype vocabulary."""
+
+    if codec in {"flac", "alac", "mp3", "aac", "opus", "vorbis"}:
+        return codec
+    if codec.startswith("wma"):
+        return "wma"
+    if container == "wav" and codec.startswith("pcm_"):
+        return "wav"
+    return fallback
+
+
 def inspect_local_files(path: str) -> LocalFileInspection:
     """Scan ``path`` recursively for audio files and report filetype + bitrate + VBR hints.
 
@@ -442,9 +454,15 @@ def inspect_local_files(path: str) -> LocalFileInspection:
                 continue
             if root != path:
                 has_nested_audio = True
-            extensions.add(ext)
             full = os.path.join(root, name)
             facts = readiness_by_path.get(os.path.abspath(full))
+            # The inventory has already identified the actual codec/container.
+            # Keep only malformed-file fallback extension based: a valid AAC
+            # named .flac must not enter the lossless lane, and vice versa.
+            extensions.add(
+                _canonical_filetype_label(facts.codec, facts.container, ext)
+                if facts is not None else ext
+            )
             if facts is not None and facts.average_bitrate_kbps is not None:
                 bitrate = facts.average_bitrate_kbps * 1000
                 min_bitrate = (

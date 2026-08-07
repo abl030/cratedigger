@@ -13,6 +13,7 @@ import logging
 import os
 import stat
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -35,6 +36,7 @@ class MediaReadinessError(RuntimeError):
 
 
 class _FfprobeStream(msgspec.Struct, kw_only=True, forbid_unknown_fields=False):
+    index: int | str | None = None
     codec_type: str | None = None
     codec_name: str | None = None
     sample_rate: str | int | None = None
@@ -43,31 +45,16 @@ class _FfprobeStream(msgspec.Struct, kw_only=True, forbid_unknown_fields=False):
     bits_per_sample: int | str | None = None
 
 
-class _FfprobeFrame(msgspec.Struct, kw_only=True, forbid_unknown_fields=False):
-    nb_samples: int | str | None = None
-
-
-class _FfprobePacket(msgspec.Struct, kw_only=True, forbid_unknown_fields=False):
-    size: int | str | None = None
-
-
-class _FfprobePacketOrFrame(msgspec.Struct, kw_only=True, forbid_unknown_fields=False):
-    type: Literal["packet", "frame"] | None = None
-    nb_samples: int | str | None = None
-    size: int | str | None = None
-
-
 class _FfprobeFormat(msgspec.Struct, kw_only=True, forbid_unknown_fields=False):
     format_name: str | None = None
 
 
 class _FfprobeReadinessWire(msgspec.Struct, kw_only=True, forbid_unknown_fields=False):
-    """The single ffprobe JSON boundary used for stream-derived facts."""
+    """The bounded ffprobe boundary used for stream-derived facts."""
 
     streams: list[_FfprobeStream] = []
-    frames: list[_FfprobeFrame] = []
-    packets: list[_FfprobePacket] = []
-    packets_and_frames: list[_FfprobePacketOrFrame] = []
+    stream_samples: dict[int, int] = {}
+    stream_packet_bytes: dict[int, int] = {}
     format: _FfprobeFormat | None = None
 
 
@@ -150,25 +137,27 @@ def _strict_decode(folder_path: str) -> None:
         raise MediaReadinessError("audio_corrupt", result.error or "audio decode failed")
 
 
-def _ffprobe_readiness(path: Path) -> _FfprobeReadinessWire:
-    """Decode all stream, frame, and packet facts through one typed command."""
+def _compact_fields(line: str) -> dict[str, str]:
+    return {
+        key: value
+        for field in line.rstrip("\n").split("|")
+        if "=" in field
+        for key, value in (field.split("=", 1),)
+    }
+
+
+def _ffprobe_stream_inventory(path: Path) -> _FfprobeReadinessWire:
+    """Cheap bounded admission inventory for every candidate media file."""
     try:
         result = subprocess.run(
             [
-                "ffprobe", "-v", "error", "-select_streams", "a:0",
-                "-show_streams", "-show_frames",
-                "-show_packets", "-show_entries",
+                "ffprobe", "-v", "error", "-show_streams", "-show_entries",
                 (
-                    "stream=codec_type,codec_name,sample_rate,channels,"
-                    "bits_per_raw_sample,bits_per_sample:format=format_name:"
-                    "frame=nb_samples:packet=size"
+                    "stream=index,codec_type,codec_name,sample_rate,channels,"
+                    "bits_per_raw_sample,bits_per_sample:format=format_name"
                 ),
                 "-of", "json", str(path),
-            ],
-            capture_output=True,
-            text=True,
-            errors="replace",
-            timeout=60,
+            ], capture_output=True, text=True, errors="replace", timeout=60,
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -176,11 +165,72 @@ def _ffprobe_readiness(path: Path) -> _FfprobeReadinessWire:
     if result.returncode != 0:
         raise MediaReadinessError("measurement_failed", f"ffprobe rejected {path.name}")
     try:
-        return msgspec.json.decode(result.stdout, type=_FfprobeReadinessWire)
+        wire = msgspec.json.decode(result.stdout, type=_FfprobeReadinessWire)
     except (msgspec.DecodeError, msgspec.ValidationError) as exc:
-        raise MediaReadinessError(
-            "measurement_failed", f"ffprobe returned invalid facts for {path.name}",
-        ) from exc
+        raise MediaReadinessError("measurement_failed", f"ffprobe returned invalid facts for {path.name}") from exc
+    _stream_facts(path, wire)
+    return wire
+
+
+def _ffprobe_readiness(path: Path) -> _FfprobeReadinessWire:
+    """Stream one typed ffprobe inventory without retaining every frame."""
+    try:
+        with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as output:
+            result = subprocess.run(
+                [
+                    "ffprobe", "-v", "error",
+                    "-show_streams", "-show_frames",
+                    "-show_packets", "-show_entries",
+                    (
+                        "stream=index,codec_type,codec_name,sample_rate,channels,"
+                        "bits_per_raw_sample,bits_per_sample:format=format_name:"
+                        "frame=stream_index,nb_samples:packet=stream_index,size"
+                    ),
+                    "-of", "compact=p=0:nk=0", str(path),
+                ],
+                stdout=output,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                errors="replace",
+                timeout=300,
+                check=False,
+            )
+            if result.returncode != 0:
+                raise MediaReadinessError("measurement_failed", f"ffprobe rejected {path.name}")
+            streams: list[_FfprobeStream] = []
+            stream_samples: dict[int, int] = {}
+            stream_packet_bytes: dict[int, int] = {}
+            format_name: str | None = None
+            output.seek(0)
+            for line in output:
+                fields = _compact_fields(line)
+                if "codec_type" in fields:
+                    streams.append(_FfprobeStream(
+                        index=fields.get("index"), codec_type=fields.get("codec_type"),
+                        codec_name=fields.get("codec_name"), sample_rate=fields.get("sample_rate"),
+                        channels=fields.get("channels"), bits_per_raw_sample=fields.get("bits_per_raw_sample"),
+                        bits_per_sample=fields.get("bits_per_sample"),
+                    ))
+                elif "format_name" in fields:
+                    format_name = fields["format_name"]
+                else:
+                    stream_index = _stream_index(fields.get("stream_index"))
+                    if stream_index is None:
+                        continue
+                    samples = _positive_int(fields.get("nb_samples"))
+                    if samples is not None:
+                        stream_samples[stream_index] = stream_samples.get(stream_index, 0) + samples
+                    else:
+                        packet_bytes = _positive_int(fields.get("size"))
+                        if packet_bytes is not None:
+                            stream_packet_bytes[stream_index] = stream_packet_bytes.get(stream_index, 0) + packet_bytes
+            return _FfprobeReadinessWire(
+                streams=streams, stream_samples=stream_samples,
+                stream_packet_bytes=stream_packet_bytes,
+                format=_FfprobeFormat(format_name=format_name),
+            )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise MediaReadinessError("measurement_failed", f"ffprobe failed for {path.name}: {exc}") from exc
 
 
 def _positive_int(value: object) -> int | None:
@@ -191,27 +241,25 @@ def _positive_int(value: object) -> int | None:
     return parsed if parsed > 0 else None
 
 
-def _frame_facts(path: Path, wire: _FfprobeReadinessWire) -> tuple[int, int]:
-    frames = wire.frames
-    packets = wire.packets
-    if wire.packets_and_frames:
-        frames = [entry for entry in wire.packets_and_frames if entry.type == "frame"]
-        packets = [entry for entry in wire.packets_and_frames if entry.type == "packet"]
-    if not frames:
+def _stream_index(value: object) -> int | None:
+    try:
+        parsed = int(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _frame_facts(
+    path: Path,
+    wire: _FfprobeReadinessWire,
+    *,
+    audio_stream_index: int,
+) -> tuple[int, int]:
+    sample_count = wire.stream_samples.get(audio_stream_index)
+    compressed_bytes = wire.stream_packet_bytes.get(audio_stream_index)
+    if sample_count is None:
         raise MediaReadinessError("measurement_failed", f"ffprobe found no audio frames for {path.name}")
-    sample_count = 0
-    for frame in frames:
-        samples = _positive_int(frame.nb_samples)
-        if samples is None:
-            raise MediaReadinessError("measurement_failed", f"ffprobe omitted frame facts for {path.name}")
-        sample_count += samples
-    compressed_bytes = 0
-    for packet in packets:
-        packet_bytes = _positive_int(packet.size)
-        if packet_bytes is None:
-            raise MediaReadinessError("measurement_failed", f"ffprobe omitted packet facts for {path.name}")
-        compressed_bytes += packet_bytes
-    if sample_count <= 0 or compressed_bytes <= 0:
+    if compressed_bytes is None or sample_count <= 0 or compressed_bytes <= 0:
         raise MediaReadinessError("measurement_failed", f"empty frame facts for {path.name}")
     return sample_count, compressed_bytes
 
@@ -219,21 +267,35 @@ def _frame_facts(path: Path, wire: _FfprobeReadinessWire) -> tuple[int, int]:
 def _stream_facts(
     path: Path,
     wire: _FfprobeReadinessWire,
-) -> tuple[str, int, int, int | None, str]:
+) -> tuple[int, str, int, int, int | None, str]:
     audio = [stream for stream in wire.streams if stream.codec_type == "audio"]
     if len(audio) != 1:
         raise MediaReadinessError("ambiguous", f"expected one audio stream in {path.name}, found {len(audio)}")
     stream = audio[0]
+    stream_index = _stream_index(stream.index)
     codec = stream.codec_name
     sample_rate = _positive_int(stream.sample_rate)
     channels = _positive_int(stream.channels)
     bit_depth = _positive_int(stream.bits_per_raw_sample) or _positive_int(stream.bits_per_sample)
-    if not isinstance(codec, str) or not codec or sample_rate is None or channels is None:
+    if (
+        not isinstance(codec, str)
+        or not codec
+        or stream_index is None
+        or sample_rate is None
+        or channels is None
+    ):
         raise MediaReadinessError("measurement_failed", f"ffprobe omitted stream facts for {path.name}")
     format_name = wire.format.format_name if wire.format is not None else None
     if not isinstance(format_name, str) or not format_name:
         raise MediaReadinessError("measurement_failed", f"ffprobe omitted container facts for {path.name}")
-    return codec.lower(), sample_rate, channels, bit_depth, format_name.lower()
+    return (
+        stream_index,
+        codec.lower(),
+        sample_rate,
+        channels,
+        bit_depth,
+        format_name.lower(),
+    )
 
 
 def _flac_streaminfo(raw: bytes) -> tuple[int, int] | None:
@@ -269,15 +331,18 @@ def flac_total_samples_only_changed(before: bytes, after: bytes) -> bool:
     if before_info is None or after_info is None or len(before) != len(after):
         return False
     start, _ = before_info
-    # STREAMINFO packs 20 sample-rate bits before the 36-bit total-samples
-    # field.  Only the low nibble of byte 12 and the following five bytes may
-    # differ; allowing the whole eight-byte word would silently rewrite the
-    # rate/channel/bit-depth declaration.
-    allowed = set(range(start + 13, start + 18))
-    return all(
-        left == right or index in allowed
-        for index, (left, right) in enumerate(zip(before, after, strict=True))
-    ) and (before[start + 12] & 0xF0) == (after[start + 12] & 0xF0)
+    # STREAMINFO packs 20 sample-rate bits, 3 channel bits, and 5 bit-depth
+    # bits before the 36-bit total-samples field.  The first total-samples
+    # nibble is byte ``start + 13``; only its low nibble and the four following
+    # whole bytes may change.
+    mutable_bytes = set(range(start + 14, start + 18))
+    return (
+        all(
+            left == right or index in mutable_bytes or index == start + 13
+            for index, (left, right) in enumerate(zip(before, after, strict=True))
+        )
+        and (before[start + 13] & 0xF0) == (after[start + 13] & 0xF0)
+    )
 
 
 def _repair_flac_total_samples(path: Path, sample_count: int) -> bool:
@@ -323,8 +388,10 @@ def _repair_flac_total_samples(path: Path, sample_count: int) -> bool:
 
 def _facts_for_path(path: Path) -> MediaFileFacts:
     wire = _ffprobe_readiness(path)
-    codec, sample_rate, channels, bit_depth, container = _stream_facts(path, wire)
-    sample_count, compressed_bytes = _frame_facts(path, wire)
+    stream_index, codec, sample_rate, channels, bit_depth, container = _stream_facts(path, wire)
+    sample_count, compressed_bytes = _frame_facts(
+        path, wire, audio_stream_index=stream_index,
+    )
     duration = sample_count / sample_rate
     bitrate = int((compressed_bytes * 8) / duration / 1000) if duration > 0 else None
     return MediaFileFacts(
@@ -363,6 +430,7 @@ def prepare_media_readiness(
     folder_path: str,
     *,
     fail_closed: bool = True,
+    repair_mp3: bool = True,
 ) -> MediaReadiness:
     """Strictly decode, repair admitted private files, then return stream facts.
 
@@ -373,7 +441,8 @@ def prepare_media_readiness(
     """
 
     try:
-        repair_mp3_headers(folder_path)
+        if repair_mp3:
+            repair_mp3_headers(folder_path)
         _strict_decode(folder_path)
         initial = inspect_media(folder_path)
         repaired: list[str] = []
@@ -382,8 +451,7 @@ def prepare_media_readiness(
                 repaired.append(fact.path)
         if repaired:
             _strict_decode(folder_path)
-        final = inspect_media(folder_path)
-        return MediaReadiness(final.files, tuple(repaired))
+        return MediaReadiness(initial.files, tuple(repaired))
     except MediaReadinessError:
         if fail_closed:
             raise
@@ -399,37 +467,23 @@ def normalize_media_metadata(
     *,
     fail_closed: bool = True,
 ) -> MediaReadiness:
-    """Enter the costly readiness path only for an admitted repair candidate.
+    """Normalize every decode-valid FLAC owned by this private view.
 
-    Normal albums retain their existing validation/measurement cadence.  This
-    is intentionally narrow: zero STREAMINFO sample counts are the allowlisted
-    repair condition, while all facts are still available on demand through
+    A STREAMINFO total is advisory metadata, so only the frame-derived count
+    can establish whether it is stale.  Detect the FLAC envelope from bytes;
+    a filename is not media identity.
     """
 
     try:
         repair_mp3_headers(folder_path)
-        needs_flac_repair = False
         for path in _audio_paths(folder_path):
-            if path.suffix.lower() != ".flac":
-                continue
-            info, min_block_size = _flac_streaminfo_from_path(path)
-            if info is None:
-                # A non-FLAC byte sequence with a .flac suffix belongs to the
-                # ordinary strict validator; do not turn a filename lie into a
-                # metadata rewrite attempt.
-                continue
-            if info[1] == 0:
-                needs_flac_repair = True
-                break
-            if min_block_size > 0 and info[1] < min_block_size:
-                # A declared total below the file's smallest frame is impossible.
-                # This preserves normal retry cost while admitting a cheap
-                # contradiction signal into the one full recovery scan.
-                needs_flac_repair = True
-                break
-        if not needs_flac_repair:
-            return MediaReadiness(())
-        return prepare_media_readiness(folder_path, fail_closed=fail_closed)
+            _ffprobe_stream_inventory(path)
+            info, _min_block_size = _flac_streaminfo_from_path(path)
+            if info is not None:
+                return prepare_media_readiness(
+                    folder_path, fail_closed=fail_closed, repair_mp3=False,
+                )
+        return MediaReadiness(())
     except MediaReadinessError:
         if fail_closed:
             raise

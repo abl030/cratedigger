@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
 from lib import download_materialization
+from lib.download_rejection import _handle_rejected_result
 
 # Responsibility audit tracks validation as its own dependency.
 # isort: split
@@ -26,6 +27,7 @@ from lib.import_execution import (
 )
 from lib.media_readiness import MediaReadinessError, normalize_media_metadata
 from lib.processing_paths import canonical_folder_for_row, processing_albums_dir
+from lib.quality import ValidationResult
 from lib.staged_album import StagedAlbum
 
 if TYPE_CHECKING:
@@ -139,6 +141,22 @@ def process_completed_album(
     try:
         normalize_media_metadata(staged_album.current_path)
     except MediaReadinessError as exc:
+        if exc.kind == "audio_corrupt":
+            outcome = _handle_rejected_result(
+                album_data,
+                ValidationResult(
+                    valid=False,
+                    scenario="audio_corrupt",
+                    detail=str(exc),
+                    error=str(exc),
+                    path=staged_album.current_path,
+                ),
+                staged_album,
+                ctx,
+                import_job_id=import_job_id,
+                cancellation_token=cancellation_token,
+            )
+            return CompletionDispatched(outcome=outcome)
         return CompletionFailed(reason=f"media_readiness_{exc.kind}: {exc}")
 
     logger.info(

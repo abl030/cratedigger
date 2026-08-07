@@ -87,6 +87,7 @@ from lib.quality import (
 )
 from lib.spectral_check import SPECTRAL_MEASUREMENT_VERSION
 from lib.staged_album import StagedAlbum
+from tests.audio_fixtures import make_test_flac
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.finite_domain import finite_generated_domain
 from tests.helpers import make_ctx_with_fake_db, make_grab_list_entry, make_request_row
@@ -156,20 +157,25 @@ def verify_extra_filename_mask_domain() -> None:
 
 def _stamped_files(
     basenames: frozenset[str], src_dir: str, *, username: str = "peer0",
+    real_audio: bool = False,
 ) -> list[DownloadFile]:
     """Real on-disk, event-stamped DownloadFiles for a generated manifest."""
     files: list[DownloadFile] = []
     os.makedirs(src_dir, exist_ok=True)
     for basename in sorted(basenames):
         src_path = os.path.join(src_dir, basename)
-        with open(src_path, "wb") as handle:
-            handle.write(f"fake-audio-bytes:{basename}".encode())
+        if real_audio:
+            assert basename.endswith(".flac")
+            make_test_flac(src_path, duration=1)
+        else:
+            with open(src_path, "wb") as handle:
+                handle.write(f"fake-audio-bytes:{basename}".encode())
         file = DownloadFile(
             filename=f"{username}\\Music\\{basename}",
             id=f"{username}:{basename}",
             file_dir=f"{username}\\Music",
             username=username,
-            size=32,
+            size=os.path.getsize(src_path) if real_audio else 32,
         )
         file.local_path = src_path
         files.append(file)
@@ -183,6 +189,7 @@ def _materialize_canonical_album(
     mb_release_id: str,
     basenames: frozenset[str],
     beets_validation_enabled: bool = False,
+    real_audio: bool = False,
 ) -> tuple[FakePipelineDB, CratediggerContext, GrabListEntry, StagedAlbum]:
     """Build and materialize a real Cratedigger-owned canonical album.
 
@@ -203,8 +210,13 @@ def _materialize_canonical_album(
         pipeline_db_enabled=True,
         beets_validation_enabled=beets_validation_enabled,
         audio_check_mode="off",
+        var_dir=tmp_root,
     )
-    files = _stamped_files(basenames, os.path.join(slskd_dir, "peer0", "Music"))
+    files = _stamped_files(
+        basenames,
+        os.path.join(slskd_dir, "peer0", "Music"),
+        real_audio=real_audio,
+    )
     album = make_grab_list_entry(
         files=files,
         artist="Issue Artist",
@@ -443,6 +455,7 @@ class TestPreviewSidecarManifestPurityPin(unittest.TestCase):
                 mb_release_id=mb_release_id,
                 basenames=basenames,
                 beets_validation_enabled=True,
+                real_audio=True,
             )
             canonical_dir = staged_album.current_path
             expected_basenames = _expected_basenames(album, staged_album)
