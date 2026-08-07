@@ -95,14 +95,18 @@ class TestConversionTimeoutWiring(unittest.TestCase):
                 expected, 300, "fixture must exercise the scaled branch")
 
             captured = {}
+            real_run = subprocess.run
 
             def _fake_run(*args, **kwargs):
                 command = args[0]
                 if "-c:a" in command:
                     captured["timeout"] = kwargs.get("timeout")
-                # returncode!=0 short-circuits the post-conversion file ops;
-                # we only care that the timeout was computed and forwarded.
-                return SimpleNamespace(returncode=1, stderr="", stdout="")
+                    # Returncode!=0 short-circuits the post-conversion file
+                    # ops; we only care that the timeout was forwarded.
+                    return SimpleNamespace(returncode=1, stderr="", stdout="")
+                # The canonical duration probe is a separate ffprobe process.
+                # Preserve it so this double remains scoped to conversion.
+                return real_run(*args, **kwargs)
 
             with mock.patch("harness.import_one.subprocess.run",
                             side_effect=_fake_run):
