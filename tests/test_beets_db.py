@@ -263,7 +263,7 @@ class TestLocate(unittest.TestCase):
 
     Every existing ``album_exists`` / ``get_album_info`` / ``get_min_bitrate``
     / ``get_item_paths`` / ``get_tracks_by_mb_release_id``
-    / ``get_avg_bitrate_kbps`` / ``check_mbids`` caller must route through
+    / ``check_mbids`` caller must route through
     this — see issue #121. Four outcomes:
 
     - UUID in ``albums.mb_albumid`` → ``kind="exact"``,
@@ -625,7 +625,6 @@ class TestBatchLookupAlbumIds(unittest.TestCase):
                     "aaa-111", QualityRankConfig.defaults(),
                 ),
                 "minimum bitrate": lambda: db.get_min_bitrate("aaa-111"),
-                "average bitrate": lambda: db.get_avg_bitrate_kbps("aaa-111"),
                 "item paths": lambda: db.get_item_paths("aaa-111"),
                 "tracks": lambda: db.get_tracks_by_mb_release_id("aaa-111"),
                 "batch detail": lambda: db.check_mbids_detail(["aaa-111"]),
@@ -1613,29 +1612,6 @@ class TestFuzzyMethodsRemoved(unittest.TestCase):
             "_fuzzy_album_id was deleted in issue #123 "
             "— fuzzy LIKE query must not return.",
         )
-
-
-class TestGetAvgBitrateKbps(unittest.TestCase):
-    """Test get_avg_bitrate_kbps — average bitrate in kbps."""
-
-    def setUp(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        self.db_path = os.path.join(self.tmpdir, "test.db")
-        _create_test_db(self.db_path)
-        _insert_album(self.db_path, 1, "aaa-111", [
-            (320000, "/m/a/01.mp3"),
-            (256000, "/m/a/02.mp3"),
-        ])
-
-    def test_correct_average(self) -> None:
-        with BeetsDB(self.db_path) as db:
-            avg = db.get_avg_bitrate_kbps("aaa-111")
-        self.assertEqual(avg, 288)  # (320000 + 256000) / 2 / 1000 = 288
-
-    def test_returns_none_for_missing(self) -> None:
-        with BeetsDB(self.db_path) as db:
-            avg = db.get_avg_bitrate_kbps("zzz-999")
-        self.assertIsNone(avg)
 
 
 class TestGetTracksByMbReleaseId(unittest.TestCase):

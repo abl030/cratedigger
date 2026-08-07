@@ -54,6 +54,7 @@ from lib.measurement import (
     PreimportMeasurement,
     SpectralDetailAnalyzer,
     analyze_spectral_audit_path,
+    existing_spectral_resolver_for_config,
     inspect_local_files,
     measure_aac_lattice,
     measure_preimport_state,
@@ -2066,6 +2067,10 @@ def measure_and_persist_candidate_evidence(
         )
 
     cfg = runtime_config or read_runtime_config()
+    request_aware_spectral_resolver = (
+        existing_spectral_resolver
+        or existing_spectral_resolver_for_config(cfg, request=req)
+    )
     (
         current_evidence,
         existing_spectral_evidence,
@@ -2199,7 +2204,7 @@ def measure_and_persist_candidate_evidence(
                 preserve_existing_source_spectral=preserve_have_source,
                 precomputed_inspection=inspection,
                 spectral_detail_analyzer=spectral_detail_analyzer,
-                existing_spectral_resolver=existing_spectral_resolver,
+                existing_spectral_resolver=request_aware_spectral_resolver,
                 aac_lattice_measure_fn=aac_lattice_measure_fn,
                 cd_rip_verify_fn=verify_cd_rip,
             )
@@ -2728,6 +2733,9 @@ def preview_import_from_path(
     from lib.config import read_runtime_config
 
     cfg = read_runtime_config()
+    request_aware_spectral_resolver = existing_spectral_resolver_for_config(
+        cfg, request=req,
+    )
     (
         preloaded_current_evidence,
         _,
@@ -2900,6 +2908,7 @@ def preview_import_from_path(
                 reuse_existing_spectral_evidence=reuse_have_evidence,
                 preserve_existing_source_spectral=preserve_have_source,
                 precomputed_inspection=inspection,
+                existing_spectral_resolver=request_aware_spectral_resolver,
             )
             _checkpoint(cancellation_token)
             if not reuse_have_evidence:

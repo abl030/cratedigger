@@ -6564,6 +6564,50 @@ class TestDestructiveCliAdapters(unittest.TestCase):
         self.assertEqual(payload["error"], "current_beets_ambiguous")
         self.assertEqual(payload["album_ids"], [7, 8])
 
+    def test_library_delete_omitted_request_union_returns_exit_5(self) -> None:
+        """The destructive CLI preserves the unavailable semantic payload."""
+        class OmittingCurrentBeets(FakeBeetsDB):
+            def resolve_current_releases(self, identities):
+                del identities
+                return {}
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=41, status="imported", mb_release_id=RELEASE_A,
+        ))
+        beets = OmittingCurrentBeets()
+        beets.set_album_detail(7, {
+            "id": 7,
+            "album": "Album A",
+            "artist": "Artist A",
+            "mb_albumid": RELEASE_A,
+        })
+        args = SimpleNamespace(
+            album_id=7,
+            purge_pipeline=False,
+            pipeline_id=None,
+            release_id=None,
+            beets_db=self.beets_path,
+            beets_directory=self.tmpdir.name,
+        )
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            rc = pipeline_cli.cmd_library_delete(
+                db,
+                args,
+                open_beets_fn=lambda _path, _root: beets,
+            )
+
+        self.assertEqual(rc, 5)
+        self.assertEqual(json.loads(output.getvalue()), {
+            "error": "current_beets_unavailable",
+            "release_id": RELEASE_A,
+            "reason": "request_union_authority_unavailable",
+        })
+        self.assertIsNotNone(beets.get_album_detail(7))
+        self.assertIsNotNone(db.get_request(41))
+
     def test_library_delete_success_exposes_artifacts_and_notifier_warnings(self) -> None:
         from lib.beets_delete import BeetsDeleteCompleted
         from lib.library_delete_notifiers import DeleteNotification

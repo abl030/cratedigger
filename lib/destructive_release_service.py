@@ -548,6 +548,15 @@ class DeleteBeetsAmbiguous:
 
 
 @dataclass(frozen=True)
+class DeleteBeetsUnavailable:
+    """A request-row union response omitted its authoritative result."""
+
+    album_id: int
+    release_id: str
+    reason: Literal["request_union_authority_unavailable"]
+
+
+@dataclass(frozen=True)
 class DeleteAlbumAuthorityMismatch:
     """The requested album PK is not the fresh exact-identity album PK."""
 
@@ -604,6 +613,7 @@ type DeleteResult = (
     | DeleteAlbumNotFound
     | DeleteReleaseMismatch
     | DeleteBeetsAmbiguous
+    | DeleteBeetsUnavailable
     | DeleteAlbumAuthorityMismatch
     | DeleteLockContended
     | DeleteImporterBusy
@@ -758,10 +768,19 @@ def _delete_under_release_lock(
     current_beets = (
         resolve_current_for_request(beets_db, current_pipeline)
         if current_pipeline is not None
-        else None
+        else beets_db.resolve_current_release(identity)
     )
     if current_beets is None:
-        current_beets = beets_db.resolve_current_release(identity)
+        # A request row supplied the union input, but the resolver did not
+        # return an answer for it.  This is unavailable authority, not a
+        # missing release: falling back to acquisition-only could delete a
+        # sibling after a merge.  Exact fallback remains valid only for a
+        # genuinely untracked Beets album (no pipeline row).
+        return DeleteBeetsUnavailable(
+            album_id=request.album_id,
+            release_id=identity.release_id,
+            reason="request_union_authority_unavailable",
+        )
     if isinstance(current_beets, CurrentBeetsMissing):
         return DeleteAlbumNotFound(request.album_id)
     if isinstance(current_beets, CurrentBeetsAmbiguous):

@@ -5,7 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Protocol
 
 import msgspec
 
@@ -25,6 +26,7 @@ from lib.destructive_release_service import (
     DeleteAlbumAuthorityMismatch,
     DeleteAlbumNotFound,
     DeleteBeetsAmbiguous,
+    DeleteBeetsUnavailable,
     DeleteImporterBusy,
     DeleteIncomplete,
     DeleteLockContended,
@@ -38,7 +40,20 @@ from lib.destructive_release_service import (
 )
 
 if TYPE_CHECKING:
-    from lib.destructive_release_service import SupportsDestructivePipelineDB
+    from lib.destructive_release_service import (
+        SupportsDestructiveBeetsDB,
+        SupportsDestructivePipelineDB,
+    )
+
+
+class _DestructiveBeetsContext(Protocol):
+    """The CLI's admitted Beets connection boundary."""
+
+    def __enter__(self) -> SupportsDestructiveBeetsDB: ...
+    def __exit__(self, *_args: object) -> None: ...
+
+
+type BeetsOpenFn = Callable[[str | None, str | None], _DestructiveBeetsContext]
 
 
 class _BanSourceArgs(msgspec.Struct, frozen=True):
@@ -168,18 +183,19 @@ def cmd_library_delete(
     *,
     beets_delete_fn: BeetsDeleteFn | None = None,
     notify_fn: DeleteNotifyFn | None = None,
+    open_beets_fn: BeetsOpenFn = _open_beets,
 ) -> int:
     """Delete one exact beets album with optional pipeline purge."""
     typed_args = msgspec.convert(vars(args), type=_LibraryDeleteArgs)
     try:
-        beets = _open_beets(
+        beets_context = open_beets_fn(
             typed_args.beets_db,
             typed_args.beets_directory,
         )
     except (FileNotFoundError, ValueError) as exc:
         print(json.dumps({"error": "beets_db_unavailable", "detail": str(exc)}))
         return 5
-    with beets:
+    with beets_context as beets:
         result = delete_release_from_library(
             pipeline_db=db,
             beets_db=beets,
@@ -232,6 +248,13 @@ def cmd_library_delete(
             "reason": result.reason,
         }))
         return 4
+    if isinstance(result, DeleteBeetsUnavailable):
+        print(json.dumps({
+            "error": "current_beets_unavailable",
+            "release_id": result.release_id,
+            "reason": result.reason,
+        }))
+        return 5
     if isinstance(result, DeleteAlbumAuthorityMismatch):
         print(json.dumps({
             "error": "album_authority_mismatch",
