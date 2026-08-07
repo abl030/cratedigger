@@ -26,7 +26,10 @@ from lib.beets_db import (
 )
 from lib.pipeline_db import PipelineDB
 from lib.release_identity import ReleaseIdentity
-from lib.request_identity import resolve_current_for_requests
+from lib.request_identity import (
+    CurrentBeetsBatchResolver,
+    resolve_current_for_requests,
+)
 
 # No hardcoded fallback (#479): the nspawn DB has moved before (last time
 # to 10.20.0.11) and a baked-in IP silently dials a dead host forever
@@ -56,7 +59,7 @@ def _request_id(row: ImportedRow) -> int:
 
 def classify_imported_rows(
     rows: Sequence[ImportedRow],
-    beets: BeetsDB,
+    beets: CurrentBeetsBatchResolver,
 ) -> tuple[list[ImportedRow], list[ImportedRow]]:
     """Split imported rows using the typed current-library authority."""
     ghosts: list[ImportedRow] = []

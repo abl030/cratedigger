@@ -324,6 +324,7 @@ _LEAF_SEAM_PATTERNS = [
     # branch is covered against the real service in
     # ``tests/test_canonical_release_service.py``.
     re.compile(r"^web\.routes\.canonical\.canonical_release_fn$"),
+    re.compile(r"^scripts\.pipeline_cli\.canonical\.canonical_release_fn$"),
 
     # Route-to-service DI seam. ``cleanup_all_wrong_matches`` triggers
     # real DB mutations + filesystem deletes via the wrong-match cleanup

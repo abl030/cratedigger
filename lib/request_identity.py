@@ -198,41 +198,38 @@ def resolve_current_for_requests(
 
 def resolve_current_for_identities(
     beets: CurrentBeetsBatchResolver,
-    acceptable: Sequence[ReleaseIdentity],
+    *,
+    acquisition: ReleaseIdentity,
+    canonical: ReleaseIdentity | None = None,
 ) -> CurrentBeetsResolution | None:
-    """Resolve one already-derived acceptable set. ``None`` = unresolvable.
+    """Resolve one already-derived identity pair. ``None`` = unresolvable.
 
     The entry point for the operator actions — Bad Rip, Replace, library
-    delete, sidecar refresh, import-job recovery — which receive an
-    identity set rather than a row. They take the set instead of a single
-    identity precisely so that "which pressings answer for this request" is
-    decided once, in :func:`acceptable_identities`, and not re-derived at
-    each destructive boundary.
+    delete, sidecar refresh, import-job recovery — which receive identities
+    rather than a row.
 
-    A one-element set is exactly today's behaviour, so a caller with no
-    canonical to offer loses nothing.
+    **The two roles are keyword-only, so they cannot be transposed.** An
+    earlier version took an ordered sequence and documented "the acquisition
+    must be last"; a caller passing them the other way round got a
+    resolution naming the *survivor*, which is round 1 of the aborted
+    attempt verbatim — a substituted identity leaking into a dozen consumers
+    that compare it against the request's stored id. A runtime length check
+    did not catch that, because the wrong order is the right length. Naming
+    the parameters removes the failure mode instead of describing it.
 
-    **The acquisition identity must be LAST**, matching
-    :func:`acceptable_identities`. That is asserted rather than assumed: a
-    caller passing ``(acquisition, canonical)`` would make every resolution
-    name the canonical, which is round 1 of the aborted attempt — a
-    substituted identity leaking out of the join into a dozen consumers that
-    compare it against the request's stored id. This helper is advertised to
-    the destructive services, so the ordering is enforced at the boundary,
-    not left to each of them to remember.
+    ``canonical=None`` is exactly today's behaviour, so a caller with no
+    survivor to offer loses nothing.
     """
-    if not acceptable:
-        return None
-    if len(acceptable) > 2:
-        raise ValueError(
-            "acceptable identities are {canonical, acquisition} at most, "
-            f"got {[i.release_id for i in acceptable]}"
-        )
-    observed = beets.resolve_current_releases(list(acceptable))
+    acceptable: list[ReleaseIdentity] = []
+    if canonical is not None and canonical != acquisition:
+        acceptable.append(canonical)
+    acceptable.append(acquisition)
+
+    observed = beets.resolve_current_releases(acceptable)
     sides = [observed[i] for i in acceptable if i in observed]
     if len(sides) != len(acceptable):
         return None
-    return merge_union_resolutions(acceptable[-1], sides)
+    return merge_union_resolutions(acquisition, sides)
 
 
 def resolve_current_for_request(
@@ -240,7 +237,14 @@ def resolve_current_for_request(
     row: Mapping[str, object],
 ) -> CurrentBeetsResolution | None:
     """Resolve one request over its union. ``None`` means unresolvable."""
-    return resolve_current_for_identities(beets, acceptable_identities(row))
+    acquisition = acquisition_identity(row)
+    if acquisition is None:
+        return None
+    return resolve_current_for_identities(
+        beets,
+        acquisition=acquisition,
+        canonical=canonical_identity(row),
+    )
 
 
 __all__ = [

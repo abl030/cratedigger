@@ -330,10 +330,15 @@ class TestSwitchedConsumersAgreeWithTheUnion(unittest.TestCase):
 
         banded_missing = bands[acquired] == "missing"
         if isinstance(union, CurrentBeetsAmbiguous):
-            # A split falls back to the acquisition-only answer for display
-            # rather than aborting the cohort; it is the world audit's job
-            # to surface it. Assert the cohort SURVIVED, which is the whole
-            # point — reaching here at all means no exception was raised.
+            # A split bands "unknown" rather than aborting the cohort or
+            # asserting the quality of one arbitrarily chosen side.
+            # Reaching here at all proves the cohort survived.
+            if bands[acquired] != "unknown":
+                raise AssertionError(
+                    f"a split must band unknown, not {bands[acquired]!r} — "
+                    "the worklist band is a decision surface, and #1059 "
+                    "invariant 3 forbids a silent pick"
+                )
             return
         union_missing = isinstance(union, CurrentBeetsMissing)
         if banded_missing != union_missing:

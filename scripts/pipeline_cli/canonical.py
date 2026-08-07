@@ -25,7 +25,14 @@ from lib.canonical_release_service import (
     configure_reconciliation_mirror,
 )
 from lib.config import read_runtime_config
+from lib.mb_canonical import canonical_release_id
 from scripts.pipeline_cli._format import _json_default
+
+#: Module-local DI seam for the argparse dispatcher (``code-quality.md``
+#: § MOCKS, strategy 3), matching ``web.routes.canonical``. The command
+#: constructs the service itself, so a test has no kwarg to inject through.
+#: The MusicBrainz WS/2 call behind it is an external HTTP edge.
+canonical_release_fn = canonical_release_id
 
 
 class _CanonicalDB(CanonicalReleaseDB, Protocol):
@@ -84,7 +91,7 @@ def cmd_canonical(db: _CanonicalDB, args: argparse.Namespace) -> int:
         )
         return 5
 
-    service = CanonicalReleaseService(db)
+    service = CanonicalReleaseService(db, canonical_fn=canonical_release_fn)
 
     if args.id is not None:
         result = service.reconcile_request(args.id)

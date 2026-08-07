@@ -2004,23 +2004,21 @@ def load_candidate_evidence_for_decision(
     )
 
 
-def _acceptable_identities_for_request(
+def _canonical_identity_for_request(
     db: QualityEvidenceDB,
     request_id: int,
     identity: ReleaseIdentity,
-) -> tuple[ReleaseIdentity, ...]:
-    """The request's acceptable pressings, survivor first (#1059).
+) -> ReleaseIdentity | None:
+    """The request's MusicBrainz merge survivor, if one is stored (#1059).
 
-    Falls back to the caller's own identity when the row is unreadable, so
-    a merge lookup can never make evidence building worse than it is today.
+    Returns ``None`` when the row is unreadable, so a merge lookup can never
+    make evidence building worse than it is today.
     """
     from lib.request_identity import canonical_identity
 
     row = db.get_request(request_id)
     canonical = canonical_identity(row) if row is not None else None
-    if canonical is None or canonical == identity:
-        return (identity,)
-    return (canonical, identity)
+    return None if canonical == identity else canonical
 
 
 def load_or_backfill_current_evidence(
@@ -2061,7 +2059,7 @@ def load_or_backfill_current_evidence(
         # handle to, so no caller has to learn about merges to benefit.
         # The resolution still names ``identity``, which is what the
         # equality check below compares against.
-        acceptable = _acceptable_identities_for_request(db, request_id, identity)
+        canonical = _canonical_identity_for_request(db, request_id, identity)
         if beets_library_db_path is None:
             beets_handle = BeetsDB(library_root=beets_library_root)
         else:
@@ -2070,7 +2068,9 @@ def load_or_backfill_current_evidence(
                 library_root=beets_library_root,
             )
         with beets_handle as beets:
-            union = resolve_current_for_identities(beets, acceptable)
+            union = resolve_current_for_identities(
+                beets, acquisition=identity, canonical=canonical,
+            )
         if union is None:
             return EvidenceBuildResult(
                 None,

@@ -203,6 +203,7 @@ def resolve_current_release_bands(
         )
 
     folded: dict[ReleaseIdentity, CurrentBeetsResolution] = {}
+    split_bands: dict[str, str] = {}
     for _key, acceptable in requested:
         acquisition = acceptable[-1]
         union = merge_union_resolutions(
@@ -217,15 +218,23 @@ def resolve_current_release_bands(
             # ``band_current_resolutions`` aborts the WHOLE cohort on any
             # ambiguity. Letting a split through would 503 the entire
             # long-tail worklist for one row — the exact lib/banding.py
-            # cohort-abort that PR #1056 was rejected for. Banding is a
-            # display projection; it falls back to what the request asked
-            # for, which is byte-identical to today. The split itself is
-            # surfaced by the world audit, whose job that is.
-            # Found by tests/test_request_identity_generated.py, which
-            # reproduced it on the live 316 shape immediately.
-            union = observed[acquisition]
+            # cohort-abort that PR #1056 was rejected for. Found by
+            # tests/test_request_identity_generated.py, which reproduced it
+            # on the live 316 shape immediately.
+            #
+            # It bands ``unknown``, NOT the quality of one arbitrarily
+            # chosen side. The worklist band is a decision surface — it
+            # drives which rows get re-acquisition effort — and #1059
+            # invariant 3 says a split is never a silent pick. "Unknown" is
+            # the existing band for "held, but we cannot rank it", which is
+            # exactly true here, and it already renders. Other ambiguity
+            # reasons still abort the cohort: those are library defects,
+            # this is an identity-model one.
+            split_bands[acquisition.release_id] = BAND_UNKNOWN
+            continue
         folded[acquisition] = union
     bands = band_current_resolutions(folded, cfg)
+    bands.update(split_bands)
     return {key: bands[key] for key, _acceptable in requested}
 
 

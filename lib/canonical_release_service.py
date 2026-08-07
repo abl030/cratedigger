@@ -23,9 +23,19 @@ no big deal for people who run local mirrors."
 non-answer alike — mirror down, timeout, ``4xx``, unusable shape, or the
 ordinary case of an id MusicBrainz still considers current. This service
 never distinguishes them into a write, so a bad mirror day leaves the stored
-survivors exactly as they were. There is deliberately no clearing path: an
-un-merge upstream is harmless, because a stale survivor simply stops
-resolving to an album and the union falls through to the acquisition id.
+survivors exactly as they were.
+
+**There is deliberately no clearing path, and that is a known limitation
+rather than a free one.** A stale survivor — from an upstream un-merge, or a
+mirror that once redirected wrongly — is only harmless while nothing holds
+that id. If some *other* album is filed under it, the union returns that
+album as unique with the identity rewritten to the acquisition id, so no
+consumer's identity check trips and another pressing is silently attributed
+to this request. ``canonical_release_id()`` also collapses "asked, got a
+definitive 200 with no redirect" and "could not ask" into the same ``None``,
+so this service structurally cannot tell a retractable canonical from a
+mirror outage; adding a clear would need that distinction first. Zero live
+instances, and retiring one today means raw SQL. Tracked as #1059 F6.
 """
 
 from __future__ import annotations
@@ -102,14 +112,21 @@ class CanonicalSweepResult:
         return len(self.resolved)
 
 
-#: Origins we refuse to sweep. ``musicbrainz.apiBase`` DEFAULTS to public
+#: Hostnames we refuse to sweep. ``musicbrainz.apiBase`` DEFAULTS to public
 #: MusicBrainz and the module asserts it is a scheme-prefixed URL, so an
-#: "unset base" guard fires for a config the module cannot even produce.
+#: "unset base" guard fires only for a config the module cannot produce.
 #: A whole-library sweep is ~8,500 requests; against musicbrainz.org, issued
 #: as fast as the socket allows, that is an IP ban that takes every other MB
 #: consumer in the deployment down with it. Reconciliation is a local-mirror
 #: feature: without one, it does nothing rather than something harmful.
-_REFUSED_ORIGINS = ("musicbrainz.org",)
+#:
+#: Compared as a parsed HOSTNAME, never as a substring. DNS is
+#: case-insensitive and substring matching is not, so ``MusicBrainz.org``
+#: sailed through an earlier substring test straight at public MB; and
+#: ``musicbrainz.org.lan`` — the obvious name for a split-horizon local
+#: mirror — was refused as though it were public. This mirrors
+#: ``web/mb.py::_mirror_concurrency``, which already got it right.
+_REFUSED_HOSTS = frozenset({"musicbrainz.org", "www.musicbrainz.org"})
 
 
 def configure_reconciliation_mirror(mb_api_base: str) -> str | None:
@@ -121,12 +138,18 @@ def configure_reconciliation_mirror(mb_api_base: str) -> str | None:
     fail loudly: it reports ``no_redirect`` for every row and exits 0,
     which the outcome vocabulary reads as "the library is already correct".
     """
+    import urllib.parse
+
     from lib.mb_canonical import configure_canonical_base
 
+    # ``hostname`` is RFC-lowercased by urlsplit. An empty origin, a blank
+    # one, and a bare host with no scheme all parse to hostname=None, so the
+    # single check covers "unset" and "unusable" as well as "public" — an
+    # explicit emptiness branch alongside it was redundant, and a mutant
+    # deleting it was unkillable because it changed nothing.
     origin = (mb_api_base or "").strip()
-    if not origin:
-        return None
-    if any(refused in origin for refused in _REFUSED_ORIGINS):
+    host = urllib.parse.urlsplit(origin).hostname
+    if host is None or host in _REFUSED_HOSTS:
         return None
     base = origin.rstrip("/") + "/ws/2"
     configure_canonical_base(base)
