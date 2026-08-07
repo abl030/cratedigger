@@ -27,6 +27,7 @@ from lib.beets_db import BeetsDB, CurrentBeetsMissing
 from lib.beets_delete import (
     BeetsDeleteCompleted,
     BeetsDeleteFailed,
+    BeetsDeleteOutcome,
     BeetsDeleteRequest,
     run_beets_delete,
 )
@@ -233,6 +234,7 @@ class _ServiceCase(unittest.TestCase):
         search_plan_service=None,
         beets_db_factory=None,
         beets_delete_fn=None,
+        wrong_match_delete_fn=None,
         cfg: CratediggerConfig | None = None,
     ) -> MbidReplaceService:
         if mb_lookup is None:
@@ -254,6 +256,7 @@ class _ServiceCase(unittest.TestCase):
             discogs_lookup=discogs_lookup,
             search_plan_service=search_plan_service,
             beets_delete_fn=beets_delete_fn,
+            wrong_match_delete_fn=wrong_match_delete_fn,
         )
 
     def _installed_beets(
@@ -1773,6 +1776,68 @@ class TestReplaceCallOrder(_ServiceCase):
 
 
 class TestReplaceCurrentAuthorityRealBeets(_ServiceCase):
+    def test_survivor_filed_cleanup_sends_the_child_its_filed_identity(self):
+        """A merged request replaces its filed survivor, never its loser id."""
+        survivor = "7aabf975-9a06-4b2e-854c-2c700380ebd5"
+        with BeetsWorld(REPO, subprocess_mirror_url="http://127.0.0.1:9") as world:
+            album = world.import_release(BeetsWorldRelease(
+                release_id=survivor,
+                artist="Merged Artist",
+                album="Merged Source",
+                year=1996,
+            ))
+            db = FakePipelineDB()
+            self._seed_old(db, status="imported")
+            from datetime import UTC, datetime
+
+            db.record_canonical_release_id(
+                42,
+                canonical_release_id=survivor,
+                resolved_at=datetime(2026, 8, 6, tzinfo=UTC),
+            )
+            captured: list[BeetsDeleteRequest] = []
+
+            def delete_fn(request: BeetsDeleteRequest) -> BeetsDeleteOutcome:
+                captured.append(request)
+                return run_beets_delete(request)
+
+            with world.subprocess_environment(), patch(
+                "lib.mbid_replace_service.trigger_plex_scan",
+            ), patch("lib.mbid_replace_service.trigger_jellyfin_scan"):
+                service = self._make_service(
+                    db,
+                    search_plan_service=MagicMock(),
+                    beets_db_factory=lambda: BeetsDB(
+                        str(world.library_db),
+                        library_root=str(world.library_root),
+                    ),
+                    mb_lookup=lambda _rid, *, fresh=False: _fake_target_payload(),
+                    beets_delete_fn=delete_fn,
+                    wrong_match_delete_fn=_empty_wrong_match_summary,
+                )
+                result = service.replace_request_mbid(
+                    42, target_mb_release_id=NEW_MBID,
+                )
+
+            self.assertEqual(result.outcome, RESULT_REPLACED)
+            self.assertEqual([call.album_id for call in captured], [album.album_id])
+            self.assertEqual(
+                [call.expected_release_id for call in captured], [survivor],
+                "the acquisition-id mutant leaves the survivor filed in Beets",
+            )
+            old = db.get_request(42)
+            assert old is not None
+            self.assertEqual(old["status"], "replaced")
+            assert result.new_request_id is not None
+            new = db.get_request(result.new_request_id)
+            assert new is not None
+            self.assertEqual(new["status"], "wanted")
+            self.assertEqual(new["replaces_request_id"], 42)
+            with BeetsDB(
+                str(world.library_db), library_root=str(world.library_root),
+            ) as beets:
+                self.assertIsNone(beets.get_album_detail(album.album_id))
+
     def test_moved_real_album_exact_delete_and_rescans_across_identities(self):
         worlds = (
             ("mb", OLD_MBID, NEW_MBID, RG_ID, False),

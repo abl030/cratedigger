@@ -157,6 +157,12 @@ def disk_coverage(
     ids are still flattened across the whole cohort before one batched
     ``check_mbids``, so a merged corpus costs the same single query an
     unmerged one does.
+
+    This is deliberately a presence-only projection, not destructive
+    authority. The #1060 verification measured 0 malformed and 0 conflicting
+    raw identity columns across 8,524 rows, which admits this flattened
+    read; destructive callers must instead retain request identity and use
+    the typed current-resolution boundary.
     """
     rows = pipeline_db.list_non_replaced_requests()
     request_ids: dict[int, set[str]] = {}

@@ -1109,6 +1109,91 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
                         ),
                     )
 
+    @given(
+        filed_side=st.sampled_from(("acquisition", "survivor")),
+        authority=st.sampled_from(("unique", "split", "ambiguous")),
+    )
+    @example(filed_side="survivor", authority="unique")
+    @example(filed_side="acquisition", authority="unique")
+    @example(filed_side="survivor", authority="split")
+    def test_known_request_library_delete_composes_union_and_filed_identity(
+        self,
+        filed_side: str,
+        authority: str,
+    ) -> None:
+        """Known request ids admit either filed union side, never a split."""
+        acquisition = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        survivor = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        filed_release_id = (
+            acquisition if filed_side == "acquisition" else survivor
+        )
+        target_album_id = 7 if filed_side == "acquisition" else 8
+        db = FakePipelineDB()
+        request_id = db.add_request(
+            artist_name="Merged Artist",
+            album_title="Merged Album",
+            source="request",
+            mb_release_id=acquisition,
+        )
+        db.request(request_id)["status"] = "imported"
+        db.request(request_id)["canonical_release_id"] = survivor
+        beets = FakeBeetsDB()
+        beets.set_album_detail(target_album_id, {
+            "id": target_album_id,
+            "album": "Merged Album",
+            "artist": "Merged Artist",
+            "mb_albumid": filed_release_id,
+            "discogs_albumid": None,
+            "tracks": [],
+        })
+        if authority == "unique":
+            beets.set_album_ids_for_release(filed_release_id, [target_album_id])
+        elif authority == "split":
+            beets.set_album_ids_for_release(acquisition, [7])
+            beets.set_album_ids_for_release(survivor, [8])
+        else:
+            beets.set_album_ids_for_release(filed_release_id, [target_album_id, 9])
+
+        calls: list[BeetsDeleteRequest] = []
+
+        def exact_delete(request: BeetsDeleteRequest) -> BeetsDeleteCompleted:
+            calls.append(request)
+            beets._album_detail.pop(request.album_id, None)
+            return BeetsDeleteCompleted(
+                album_id=request.album_id,
+                album_name="Merged Album",
+                artist_name="Merged Artist",
+                former_album_path="/library/Merged Artist/Merged Album",
+                deleted_tracks=1,
+                deleted_artifacts=1,
+                preserved_paths=(),
+            )
+
+        result = delete_release_from_library(
+            pipeline_db=db,
+            beets_db=beets,
+            request=DeleteRequest(
+                album_id=target_album_id,
+                expected_pipeline_id=request_id,
+                expected_release_id=filed_release_id,
+            ),
+            beets_delete_fn=exact_delete,
+            notify_fn=lambda _path: (),
+        )
+
+        if authority == "unique":
+            self.assertIsInstance(result, DeleteSuccess)
+            self.assertEqual([call.album_id for call in calls], [target_album_id])
+            self.assertEqual(
+                [call.expected_release_id for call in calls], [filed_release_id],
+            )
+            self.assertIsNone(beets.get_album_detail(target_album_id))
+        else:
+            self.assertIsInstance(result, DeleteBeetsAmbiguous)
+            self.assertEqual(calls, [])
+            self.assertIsNotNone(beets.get_album_detail(target_album_id))
+        self.assertEqual(db.request(request_id)["status"], "imported")
+
     def test_lost_delete_ack_always_requires_manual_recovery(self) -> None:
         # Exhaustive finite lost-ack table. It retains the decisive subprocess
         # track world and protocol/art/orphan world from the former examples.
@@ -1666,10 +1751,10 @@ class TestDestructiveAuthorityCheckerKnownBad(unittest.TestCase):
         class FaultInjectingPipelineDB(FakePipelineDB):
             inject_mutation = False
 
-            def get_request_by_release_id(
-                self, release_id: object | None,
+            def get_request(
+                self, request_id: int,
             ) -> AlbumRequestRow | None:
-                row = super().get_request_by_release_id(release_id)
+                row = super().get_request(request_id)
                 if self.inject_mutation:
                     self.inject_mutation = False
                     self.denylist.append(DenylistEntry(

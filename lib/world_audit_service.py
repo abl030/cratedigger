@@ -325,11 +325,6 @@ def audit_world(
         beets_db,
         [row for row, _request_id, _identity in identified_requests],
     )
-    resolutions_by_release_id = {
-        identity.release_id: resolutions[request_id]
-        for _row, request_id, identity in identified_requests
-        if request_id in resolutions
-    }
 
     for row, request_id, identity in identified_requests:
         release_id = identity.release_id
@@ -410,7 +405,7 @@ def audit_world(
     violations.extend(check_library_filesystem(albums))
     violations.extend(check_status_membership(
         memberships,
-        resolutions_by_release_id,
+        resolutions,
     ))
     violations.extend(
         violation

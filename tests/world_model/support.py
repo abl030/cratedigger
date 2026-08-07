@@ -2008,8 +2008,8 @@ class LifecycleWorld:
             *check_status_membership(
                 tuple(requests),
                 {
-                    identity.release_id: resolution
-                    for identity, resolution in resolutions.items()
+                    int(row["id"]): resolutions[identity]
+                    for row, identity in identified_rows
                 },
             ),
             *check_evidence_disk_coherence(tuple(evidence)),

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING, Any
 
 from lib.dispatch.types import (
@@ -52,6 +53,7 @@ from lib.quality_evidence import (
     backfill_current_evidence_from_album_info,
     propagate_candidate_evidence_to_current,
 )
+from lib.request_identity import CurrentBeetsBatchResolver
 
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
@@ -342,6 +344,7 @@ def _refresh_current_evidence_after_import(
     import_result: ImportResult | None = None,
     beets_library_db_path: str | None = None,
     beets_library_root: str | None = None,
+    beets_factory: Callable[..., AbstractContextManager[CurrentBeetsBatchResolver]] | None = None,
 ) -> EvidenceBuildResult:
     """Persist current evidence for the just-imported Beets album.
 
@@ -383,9 +386,16 @@ def _refresh_current_evidence_after_import(
     # BeetsDB docstring. Both the U10 propagation path and the legacy
     # ``backfill_current_evidence_from_album_info`` path depend on an
     # absolute ``album_info.album_path`` to read the just-imported files.
-    beets_handle = open_beets_db(
-        db_path=beets_library_db_path,
-        library_root=beets_library_root,
+    beets_handle = (
+        beets_factory(
+            db_path=beets_library_db_path,
+            library_root=beets_library_root,
+        )
+        if beets_factory is not None
+        else open_beets_db(
+            db_path=beets_library_db_path,
+            library_root=beets_library_root,
+        )
     )
     identity = release_identity_for_lookup(mb_release_id)
     if identity is None:

@@ -194,16 +194,6 @@ class TestUnionFold(unittest.TestCase):
         # destructive action would target an id Beets no longer stores.
         self.assertEqual(result.selectors, (f"mb_albumid:{SURVIVOR}",))
 
-    def test_both_sides_naming_one_album_resolves_once(self) -> None:
-        held = _unique(self.canonical, 19345)
-        result = merge_union_resolutions(
-            self.acquisition,
-            [held, _unique(self.acquisition, 19345)],
-        )
-        self.assertIsInstance(result, CurrentBeetsUnique)
-        assert isinstance(result, CurrentBeetsUnique)
-        self.assertEqual(result.album_id, 19345)
-
     def test_neither_side_held_is_missing_under_the_acquisition_id(
         self,
     ) -> None:
@@ -582,6 +572,53 @@ class TestEveryUnionConsumerIsPinnedOverAMergedWorld(unittest.TestCase):
             "the post-import refresh must resolve the album Beets holds "
             "under the survivor, or the import leaves no current evidence",
         )
+
+    def test_post_import_refresh_omitted_union_is_unavailable_and_skips_sidecar(self) -> None:
+        """A resolver omission is authority loss, never evidence absence."""
+        from lib.dispatch import (
+            _refresh_current_evidence_after_import,
+            _write_album_sidecar_after_import,
+        )
+        from lib.quality import QualityRankConfig
+        from lib.sidecar_service import OUTCOME_SKIPPED_NO_EVIDENCE
+        from tests.fakes import FakeBeetsDB, FakePipelineDB
+
+        class OmittedUnionBeets(FakeBeetsDB):
+            def resolve_current_releases(self, identities):
+                del identities
+                return {}
+
+        db = FakePipelineDB()
+        request_id = db.add_request(
+            artist_name="Merged Artist", album_title="Merged Album",
+            source="request", mb_release_id=LOSER,
+        )
+        db.record_canonical_release_id(
+            request_id,
+            canonical_release_id=SURVIVOR,
+            resolved_at=datetime(2026, 8, 6, tzinfo=UTC),
+        )
+        beets = OmittedUnionBeets()
+        result = _refresh_current_evidence_after_import(
+            db,
+            request_id=request_id,
+            mb_release_id=LOSER,
+            quality_ranks=QualityRankConfig.defaults(),
+            beets_factory=lambda **_kwargs: beets,
+        )
+
+        self.assertEqual(result.status, "failed")
+        self.assertIn("omitted", result.reason or "")
+        self.assertIsNone(db.get_request_current_evidence_id(request_id))
+        sidecar = _write_album_sidecar_after_import(
+            db,
+            request_id=request_id,
+            mb_release_id=LOSER,
+            cfg=None,
+            beets_factory=lambda **_kwargs: beets,
+        )
+        self.assertEqual(sidecar.outcome, OUTCOME_SKIPPED_NO_EVIDENCE)
+        self.assertEqual(beets.resolve_current_release_calls, [])
 
     def test_disk_coverage_does_not_call_a_merged_request_off_disk(
         self,
