@@ -12,6 +12,7 @@ import os
 import sys
 import tempfile
 import unittest
+from datetime import UTC, datetime
 from typing import ClassVar
 from unittest.mock import patch
 
@@ -50,6 +51,13 @@ class TestCanonicalRouteContracts(_FakeDbWebServerCase):
         "previous_canonical_release_id",
         "changed",
     }
+    RETIRE_REQUIRED_FIELDS: ClassVar[set[str]] = {
+        "request_id",
+        "outcome",
+        "canonical_release_id",
+        "previous_canonical_release_id",
+        "changed",
+    }
     SWEEP_REQUIRED_FIELDS: ClassVar[set[str]] = {
         "scanned",
         "changed",
@@ -59,9 +67,8 @@ class TestCanonicalRouteContracts(_FakeDbWebServerCase):
 
     def setUp(self) -> None:
         super().setUp()
-        # The route refuses to reconcile without a LOCAL mirror configured.
-        # Drive the real guard with a real runtime config rather than
-        # patching it out, so a regression in the guard is visible here.
+        # Reconciliation wires the configured mirror before the real resolver
+        # runs. Drive that configuration rather than patching it out.
         config_dir = tempfile.TemporaryDirectory()
         self.addCleanup(config_dir.cleanup)
         config_path = os.path.join(config_dir.name, "config.ini")
@@ -125,6 +132,45 @@ class TestCanonicalRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(
             self.db.request(request_id)["canonical_release_id"], SURVIVOR)
 
+    def test_reconcile_route_wires_the_real_resolver_before_network(self) -> None:
+        """E15: only urllib is replaced; the route/service stay real."""
+        from lib import mb_canonical
+
+        request_id = self._seed()
+        mb_canonical.configure_canonical_base(None)
+        requested_urls: list[str] = []
+
+        class Response:
+            url = (
+                "http://mirror.test/ws/2/release/"
+                f"{SURVIVOR}?fmt=json"
+            )
+
+            def read(self, _limit: int) -> bytes:
+                return ('{"id": "' + SURVIVOR + '"}').encode()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        def urlopen(request, *, timeout):
+            requested_urls.append(request.full_url)
+            self.assertEqual(timeout, 15)
+            return Response()
+
+        with patch("urllib.request.urlopen", urlopen):
+            status, payload = self._post(
+                "/api/canonical/reconcile", {"request_id": request_id})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["outcome"], "resolved")
+        self.assertEqual(
+            requested_urls,
+            [f"http://mirror.test/ws/2/release/{LOSER}?fmt=json"],
+        )
+
     def test_reconcile_unknown_request_is_404(self) -> None:
         with patch(
             "web.routes.canonical.canonical_release_fn",
@@ -184,6 +230,62 @@ class TestCanonicalRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(payload["scanned"], 2)
         self.assertEqual(payload["changed"], 1)
         self.assertEqual(payload["resolved"][0]["request_id"], merged)
+
+    def test_retire_matches_cli_service_outcomes(self) -> None:
+        request_id = self._seed()
+        self.db.record_canonical_release_id(
+            request_id,
+            canonical_release_id=SURVIVOR,
+            resolved_at=datetime.now(UTC),
+        )
+        status, payload = self._post(
+            "/api/canonical/retire",
+            {"request_id": request_id, "confirm": "RETIRE"},
+        )
+        self.assertEqual(status, 200)
+        _assert_required_fields(
+            self, payload, self.RETIRE_REQUIRED_FIELDS,
+            "POST /api/canonical/retire")
+        self.assertEqual(payload["outcome"], "retired")
+        self.assertTrue(payload["changed"])
+        self.assertIsNone(self.db.request(request_id)["canonical_release_id"])
+
+    def test_retire_rejects_bad_confirmation_and_reports_state(self) -> None:
+        status, _payload = self._post(
+            "/api/canonical/retire", {"request_id": 1, "confirm": "NO"})
+        self.assertEqual(status, 400)
+
+        request_id = self._seed()
+        status, payload = self._post(
+            "/api/canonical/retire",
+            {"request_id": request_id, "confirm": "RETIRE"},
+        )
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["outcome"], "no_canonical")
+
+        status, payload = self._post(
+            "/api/canonical/retire",
+            {"request_id": 999_999, "confirm": "RETIRE"},
+        )
+        self.assertEqual(status, 404)
+        self.assertEqual(payload["outcome"], "not_found")
+
+    def test_retire_requires_a_strict_positive_integer_id(self) -> None:
+        request_id = self._seed()
+        self.db.record_canonical_release_id(
+            request_id,
+            canonical_release_id=SURVIVOR,
+            resolved_at=datetime.now(UTC),
+        )
+        for invalid_id in (True, "1", 1.0, 0):
+            with self.subTest(request_id=invalid_id):
+                before = dict(self.db.request(request_id))
+                status, _payload = self._post(
+                    "/api/canonical/retire",
+                    {"request_id": invalid_id, "confirm": "RETIRE"},
+                )
+                self.assertEqual(status, 400)
+                self.assertEqual(self.db.request(request_id), before)
 
 if __name__ == "__main__":
     unittest.main()
