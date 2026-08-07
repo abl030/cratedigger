@@ -68,6 +68,7 @@ REPLACE_REASON_CURRENT_BEETS_AMBIGUOUS = "current_beets_ambiguous"
 REPLACE_REASON_CURRENT_BEETS_UNAVAILABLE = "current_beets_unavailable"
 REPLACE_REASON_SOURCE_IDENTITY_INVALID = "source_identity_invalid"
 REPLACE_REASON_LOCK_CONTENDED = "replace_lock_contended"
+REPLACE_REASON_POST_SUPERSEDE_PARTIAL = "post_supersede_partial"
 
 # POST /api/pipeline/<id>/resolve-rg status vocabulary
 # (web/routes/release_identity_routes.py::post_pipeline_resolve_rg). Two of these

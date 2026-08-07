@@ -5823,6 +5823,7 @@ class FakePipelineDB:
             "source_path": source_path,
             "reasoning": reasoning,
             "status": status,
+            "replaced_from_status": None,
             # Migration 032 — resolver-populated catalog number; migration
             # 001 — download-time final container format. Neither is part
             # of ``AddRequestInput`` (production's INSERT column list), so
@@ -5937,6 +5938,7 @@ class FakePipelineDB:
         old_source = old_row.get("source", "request")
         # Flip the old row. Nothing else is mutated — characteristic fields
         # stay frozen.
+        old_row["replaced_from_status"] = old_row["status"]
         old_row["status"] = "replaced"
         old_row["updated_at"] = now
 

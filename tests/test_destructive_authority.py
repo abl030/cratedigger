@@ -7,12 +7,14 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
+import psycopg2
 from beets import library
 
 from lib.beets_db import BeetsDB, CurrentBeetsMissing
@@ -536,6 +538,124 @@ class TestLibraryDeleteAuthority(unittest.TestCase):
         self.assertEqual(self.db.request(41)["status"], "imported")
         self.assertIsNotNone(self.beets.get_album_detail(7))
 
+    def test_missing_purge_accepts_filed_canonical_identity_under_full_union(
+        self,
+    ) -> None:
+        """A lost acknowledgement must validate the full request union.
+
+        The pipeline row still names its acquisition identity, but Beets may
+        have filed the deleted album under its canonical survivor. The supplied
+        filed identity is valid only because it belongs to that union.
+        """
+        self.db.record_canonical_release_id(
+            41,
+            canonical_release_id=RELEASE_B,
+            resolved_at=datetime.now(UTC),
+        )
+        self.beets._album_detail.pop(7)
+
+        result = delete_release_from_library(
+            pipeline_db=self.db,
+            beets_db=self.beets,
+            request=DeleteRequest(
+                album_id=7,
+                purge_pipeline=True,
+                expected_pipeline_id=41,
+                expected_release_id=RELEASE_B,
+            ),
+            beets_delete_fn=lambda _request: self.fail(
+                "missing-purge path launched a Beets child",
+            ),
+        )
+
+        self.assertIsInstance(result, DeleteSuccess)
+        self.assertEqual(
+            self.db.advisory_lock_calls,
+            [
+                (ADVISORY_LOCK_NAMESPACE_IMPORT, 41),
+                *[
+                    (ADVISORY_LOCK_NAMESPACE_RELEASE, key)
+                    for key in sorted({
+                        release_id_to_lock_key(RELEASE_A),
+                        release_id_to_lock_key(RELEASE_B),
+                    })
+                ],
+            ],
+        )
+        self.assertIsNone(self.db.get_request(41))
+
+    def test_idempotent_missing_purge_rechecks_supplied_identity_before_success(
+        self,
+    ) -> None:
+        """An absent pipeline row alone never authorizes idempotent success."""
+        self.beets._album_detail.pop(7)
+        self.assertTrue(self.db.delete_request(41))
+        self.beets.set_album_ids_for_release(RELEASE_A, [99])
+        self.beets.set_item_paths(
+            RELEASE_A, [(990, "/library/Unexpected/01.flac")],
+        )
+
+        result = delete_release_from_library(
+            pipeline_db=self.db,
+            beets_db=self.beets,
+            request=DeleteRequest(
+                album_id=7,
+                purge_pipeline=True,
+                expected_pipeline_id=41,
+                expected_release_id=RELEASE_A,
+            ),
+            beets_delete_fn=lambda _request: self.fail(
+                "idempotent missing-purge path launched a Beets child",
+            ),
+        )
+
+        self.assertIsInstance(result, DeleteAlbumAuthorityMismatch)
+        assert isinstance(result, DeleteAlbumAuthorityMismatch)
+        self.assertEqual(result.authoritative_album_id, 99)
+        self.assertEqual(
+            self.db.advisory_lock_calls,
+            [
+                (ADVISORY_LOCK_NAMESPACE_IMPORT, 41),
+                (
+                    ADVISORY_LOCK_NAMESPACE_RELEASE,
+                    release_id_to_lock_key(RELEASE_A),
+                ),
+            ],
+        )
+
+    def test_idempotent_missing_purge_returns_typed_ambiguity_and_unavailable(
+        self,
+    ) -> None:
+        """A stale acknowledgement exposes every non-missing Beets answer."""
+        self.beets._album_detail.pop(7)
+        self.assertTrue(self.db.delete_request(41))
+        self.beets.set_album_ids_for_release(RELEASE_A, [99, 100])
+
+        ambiguous = delete_release_from_library(
+            pipeline_db=self.db,
+            beets_db=self.beets,
+            request=DeleteRequest(
+                album_id=7,
+                purge_pipeline=True,
+                expected_pipeline_id=41,
+                expected_release_id=RELEASE_A,
+            ),
+        )
+        self.assertIsInstance(ambiguous, DeleteBeetsAmbiguous)
+
+        with patch.object(self.beets, "resolve_current_release", return_value=None):
+            unavailable = delete_release_from_library(
+                pipeline_db=self.db,
+                beets_db=self.beets,
+                request=DeleteRequest(
+                    album_id=7,
+                    purge_pipeline=True,
+                    expected_pipeline_id=41,
+                    expected_release_id=RELEASE_A,
+                ),
+            )
+        self.assertIsInstance(unavailable, DeleteBeetsUnavailable)
+
     def test_job_claimed_after_release_lock_is_rechecked_under_lock(self) -> None:
         def acquire(namespace: int, _key: int) -> bool:
             if namespace == ADVISORY_LOCK_NAMESPACE_RELEASE:
@@ -987,6 +1107,162 @@ class TestDestructiveAuthorityRealPostgres(unittest.TestCase):
             self.assertIsNotNone(beets.get_album_detail(7))
         finally:
             db1.close()
+
+    def test_library_delete_backend_death_never_accepts_child_acknowledgement(self) -> None:
+        """The real pinned backend dies during the exact delete boundary."""
+        db = make_db()
+        beets = FakeBeetsDB()
+        beets.set_album_detail(7, _album())
+        beets.set_album_ids_for_release(RELEASE_A, [7])
+        try:
+            request_id = db.add_request(
+                "Artist A", "Album A", "request",
+                mb_release_id=RELEASE_A, status="imported",
+            )
+
+            def lose_backend(request: BeetsDeleteRequest) -> BeetsDeleteCompleted:
+                killer = psycopg2.connect(db.dsn)
+                killer.autocommit = True
+                try:
+                    with killer.cursor() as cur:
+                        cur.execute(
+                            "SELECT pg_terminate_backend(%s)",
+                            (db.conn.get_backend_pid(),),
+                        )
+                        killed = cur.fetchone()
+                        self.assertIsNotNone(killed)
+                        assert killed is not None
+                        self.assertTrue(killed[0])
+                finally:
+                    killer.close()
+                return BeetsDeleteCompleted(
+                    album_id=request.album_id,
+                    album_name="Album A",
+                    artist_name="Artist A",
+                    former_album_path="/library/Artist A/Album A",
+                    deleted_tracks=1,
+                    deleted_artifacts=1,
+                    preserved_paths=(),
+                )
+
+            result = delete_release_from_library(
+                pipeline_db=db,
+                beets_db=beets,
+                request=DeleteRequest(
+                    album_id=7, expected_pipeline_id=request_id,
+                ),
+                beets_delete_fn=lose_backend,
+            )
+
+            self.assertIsInstance(result, DeleteIncomplete)
+            assert isinstance(result, DeleteIncomplete)
+            self.assertTrue(result.acknowledgement_lost)
+            self.assertIsNotNone(db.get_request(request_id))
+            self.assertIsNotNone(beets.get_album_detail(7))
+        finally:
+            db.close()
+
+    def test_real_pg_loss_reaps_production_beets_delete_group_before_return(self) -> None:
+        """Real PG loss fences the actual run_beets_delete Popen path.
+
+        The configured Python executable is a test wrapper around the actual
+        delete harness. It leaves stdin untouched for its eventual ``exec``,
+        but first creates output pressure and a lingering descendant. This
+        proves the service-owned cancellation token and probe reach the real
+        production runner rather than a test override.
+        """
+        db = make_db()
+        descendant_file = Path(tempfile.mkstemp(prefix="delete-descendant-")[1])
+        os.unlink(descendant_file)
+        try:
+            request_id = db.add_request(
+                "Artist A", "Album A", "request",
+                mb_release_id=RELEASE_A, status="imported",
+            )
+            with BeetsWorld(
+                REPO,
+                subprocess_mirror_url="http://127.0.0.1:9",
+            ) as world:
+                release = BeetsWorldRelease(
+                    release_id=RELEASE_A, artist="Artist A", album="Album A",
+                    year=2001, track_count=1,
+                )
+                imported = world.import_release(release)
+                wrapper = world.root / "pressure-python"
+                descendant_path = str(descendant_file)
+                wrapper.write_text(
+                    f"#!{sys.executable}\n"
+                    "import os\n"
+                    "import subprocess\n"
+                    "import sys\n"
+                    "import time\n"
+                    "descendant = subprocess.Popen([\n"
+                    "    sys.executable, '-c', 'import time; time.sleep(30)'\n"
+                    "])\n"
+                    f"with open({descendant_path!r}, 'w', encoding='utf-8') as handle:\n"
+                    "    handle.write(str(descendant.pid))\n"
+                    "sys.stdout.buffer.write(b'x' * 2_000_000)\n"
+                    "sys.stdout.buffer.flush()\n"
+                    "time.sleep(8)\n"
+                    "os.execv(sys.executable, [sys.executable, *sys.argv[1:]])\n",
+                    encoding="utf-8",
+                )
+                wrapper.chmod(0o755)
+                with world.runtime_config_path.open("a", encoding="utf-8") as handle:
+                    handle.write(f"python = {wrapper}\n")
+                with BeetsDB(
+                    str(world.library_db), library_root=str(world.library_root),
+                ) as beets:
+                    def terminate_owner() -> None:
+                        deadline = time.monotonic() + 5
+                        while not descendant_file.exists() and time.monotonic() < deadline:
+                            time.sleep(0.01)
+                        self.assertTrue(descendant_file.exists())
+                        killer = psycopg2.connect(db.dsn)
+                        killer.autocommit = True
+                        try:
+                            with killer.cursor() as cur:
+                                cur.execute(
+                                    "SELECT pg_terminate_backend(%s)",
+                                    (db.conn.get_backend_pid(),),
+                                )
+                                killed = cur.fetchone()
+                                self.assertIsNotNone(killed)
+                                assert killed is not None
+                                self.assertTrue(killed[0])
+                        finally:
+                            killer.close()
+
+                    with world.subprocess_environment(), ThreadPoolExecutor(
+                        max_workers=1,
+                    ) as pool:
+                        killer = pool.submit(terminate_owner)
+                        started_at = time.monotonic()
+                        result = delete_release_from_library(
+                            pipeline_db=db,
+                            beets_db=beets,
+                            request=DeleteRequest(
+                                album_id=imported.album_id,
+                                expected_pipeline_id=request_id,
+                            ),
+                        )
+                        elapsed = time.monotonic() - started_at
+                        killer.result(timeout=5)
+                    self.assertIsInstance(result, DeleteIncomplete)
+                    self.assertLess(
+                        elapsed, 5,
+                        "without the service-owned cancellation probe the wrapper "
+                        "would sleep before executing the real harness",
+                    )
+                    self.assertIsNotNone(db.get_request(request_id))
+                    self.assertIsNotNone(beets.get_album_detail(imported.album_id))
+                    self.assertTrue(descendant_file.exists())
+                    descendant_pid = int(descendant_file.read_text())
+                    with self.assertRaises(ProcessLookupError):
+                        os.kill(descendant_pid, 0)
+        finally:
+            descendant_file.unlink(missing_ok=True)
+            db.close()
 
     def test_library_delete_pipeline_lock_then_active_job_both_fail_closed(
         self,

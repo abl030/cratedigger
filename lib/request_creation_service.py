@@ -161,8 +161,14 @@ class RequestCreationService:
         except AdvisoryLockSessionLost:
             # The RELEASE lock died with its backend.  Do not reconnect and
             # continue an initializing publication without that authority.
+            # The scope can discover this while unwinding after an inner
+            # boundary already retained an initializing row. Recover only the
+            # exact read-only retry handle after the scope exits.
+            existing = self.db.get_request_by_release_id(creation.release_id)
             return RequestCreationResult(
-                "busy", detail="release lock session lost; retry",
+                "busy",
+                request_id=(int(existing["id"]) if existing is not None else None),
+                detail="release lock session lost; retry",
             )
 
     def _create_or_resume(

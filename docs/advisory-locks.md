@@ -177,7 +177,8 @@ only non-request-backed order.
 | Canonical retire | acquisition + stored canonical | acquisition | IMPORT then before RELEASE locks, fresh reread/CAS. Busy is a typed retryable conflict. |
 | Replace | old acquisition + old canonical | target acquisition | IMPORT then union RELEASE locks through old-row supersede, new-row publication, and old-library cleanup. Target collision is rechecked under lock. |
 | Pipeline Delete / ghost cleanup | current acceptable identities | none | IMPORT then before RELEASE locks, fresh reread and conditional delete. Contention or a stale association is zero mutation. |
-| Library Delete with pipeline purge | current acceptable identities + filed Beets identity | none | IMPORT then sorted union RELEASE locks, fresh request/Beets reread and exact child delete. A survivor-filed merged row still locks its acquisition identity before removing the pipeline row. |
+| Ban Source | full `acceptable_identities(request)` union | same request | IMPORT then sorted `release_id_to_lock_key(...)` locks for the full `acceptable_identities(request)` union, with a fresh reread before bad-rip evidence, exact Beets cleanup, and audit. |
+| Library Delete with pipeline purge | full `acceptable_identities(request)` union plus filed Beets identity | none | IMPORT then sorted `release_id_to_lock_key(...)` locks for the full `acceptable_identities(request)` union plus filed identity, fresh request/Beets reread and exact child delete. A survivor-filed merged row still locks its acquisition identity before removing the pipeline row; the missing-row/library-only exception uses only the single supplied/filed identity. |
 
 ### IMPORTER — worker singleton lock
 
@@ -231,12 +232,14 @@ that exact connection, and cancellation prevents each next mutation if the
 session is lost. The persisted execution lease is liveness evidence only; the
 request's owner pointer remains the authority.
 
-Destructive operator actions follow the same order. Ban-source always has a
-pipeline request and therefore takes IMPORT then RELEASE. Library-delete takes
-IMPORT then RELEASE when a request exists, and RELEASE only for a library-only
-album. Replace, force-import, direct pipeline delete, lifecycle/intent/quality
-changes, and automated owner convergence all acquire IMPORT before the durable
-owner reread.
+Destructive operator actions follow the same order. Ban Source and
+request-backed Library Delete take IMPORT then the complete current
+`acceptable_identities(row)` RELEASE union (plus the filed Beets identity for
+Library Delete); a library-only delete takes its single RELEASE lock. This
+#1071 scope remains held through cancellation, exact-child acknowledgement,
+and complete process-group teardown. Replace, force-import, direct pipeline
+delete, lifecycle/intent/quality changes, and automated owner convergence all
+acquire IMPORT before the durable owner reread.
 Authority rejection is a 409 / CLI exit 4 with zero filesystem, audit, job, or
 request mutation.
 
@@ -253,9 +256,9 @@ no-replay** guarantee only: it does not prove that a Beets child or filesystem
 operation remained fenced while a backend died. In particular, a Replace whose
 supersede already committed surfaces its runnable descendant rather than
 inviting a second Replace, but D0 does not validate the external cleanup tail.
-Issue #1071 is the required pre-deploy successor for cancellation/fencing of
-external children and resumable post-supersede cleanup; do not infer either
-property from this lock scope.
+Issue #1071 implements cancellation/fencing of external children and resumable
+post-supersede cleanup; do not infer external-child safety merely from a lock
+scope that has already unwound.
 
 Inside a processing transaction, row locks have their own fixed order:
 request, every job for that request in ID order, then cleanup journals in job
@@ -328,8 +331,8 @@ watchdogs have stopped.
 | Direct Add / new-row Upgrade | `lib/request_creation_service.py` | `RequestCreationService.create_or_resume` | RELEASE then PLAN | `release_id_to_lock_key(creation.release_id)`; `request_id` |
 | Canonical reconcile / retire | `lib/canonical_release_service.py` | `CanonicalReleaseService.reconcile_row` / `retire_request` | IMPORT then sorted RELEASE union | `request_id`; `acceptable_identities(before) ∪ acceptable_identities(after)` |
 | Force-import outer | `lib/dispatch/entry_points.py` | `dispatch_import_from_db` | IMPORT | `request_id` |
-| Ban-source destructive action | `lib/destructive_release_service.py` | `ban_source` | IMPORT then RELEASE | `request_id`; `release_id_to_lock_key(server release id)` |
-| Library-delete destructive action | `lib/destructive_release_service.py` | `delete_release_from_library` | IMPORT then RELEASE, or RELEASE only without a pipeline row; ambiguous dual or malformed-nonempty album identity rejects before locks | server-derived pipeline request id; `release_id_to_lock_key(server release id)` |
+| Ban-source destructive action | `lib/destructive_release_service.py` | `ban_source` | IMPORT then RELEASE | `request_id`; sorted `release_id_to_lock_key(...)` for the full `acceptable_identities(request)` union |
+| Library-delete destructive action | `lib/destructive_release_service.py` | `delete_release_from_library` | IMPORT then RELEASE, or RELEASE only without a pipeline row; ambiguous dual or malformed-nonempty album identity rejects before locks | `request_id`; sorted full `acceptable_identities(request)` union plus filed identity; missing-row/library-only uses single supplied/filed identity |
 | Replace operator action | `lib/mbid_replace_service.py` | `MbidReplaceService.replace_request_mbid` | IMPORT then sorted RELEASE union | `request_id`; old acceptable identities plus target identity |
 | Direct pipeline delete | `lib/pipeline_delete_service.py` | `delete_pipeline_request` | IMPORT then sorted RELEASE before-set | `request_id`; current acceptable identities |
 | Ghost imported cleanup | `scripts/cleanup_ghost_imported.py` | `cmd_apply` | delegates to direct pipeline delete | no direct DB deletion |

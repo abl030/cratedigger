@@ -8,9 +8,11 @@ import subprocess as sp
 import sys
 import tempfile
 import unittest
+from collections.abc import Mapping
 from contextlib import closing
 from pathlib import Path
-from unittest.mock import patch
+from typing import BinaryIO
+from unittest.mock import MagicMock, patch
 
 import msgspec
 from beets import library
@@ -27,6 +29,8 @@ from lib.beets_delete import (
     _remove_album_metadata_atomically,
     run_beets_delete,
 )
+from lib.import_execution import CancellationToken
+from lib.pipeline_db._core import AdvisoryLockSessionLost
 
 RELEASE = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 
@@ -217,6 +221,127 @@ class TestPinnedBeetsDelete(unittest.TestCase):
                 library_root=str(self.root),
             )),
         )
+
+    def test_owner_session_loss_kills_the_production_process_group(self) -> None:
+        """A lost PG session reaps the real delete child before returning."""
+        album_id, _album_dir = self._seed()
+        spawned: list[sp.Popen[bytes]] = []
+        options: list[dict[str, object]] = []
+
+        def sleeping_child(
+            _argv: list[str],
+            *,
+            stdin: int,
+            stdout: int,
+            stderr: int,
+            env: Mapping[str, str],
+            start_new_session: bool,
+        ) -> sp.Popen[bytes]:
+            options.append({
+                "stdin": stdin,
+                "stdout": stdout,
+                "stderr": stderr,
+                "env": env,
+                "start_new_session": start_new_session,
+            })
+            child = sp.Popen(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                text=False,
+                stdin=stdin,
+                stdout=stdout,
+                stderr=stderr,
+                env=env,
+                start_new_session=start_new_session,
+            )
+            spawned.append(child)
+            return child
+
+        with patch.dict(os.environ, {
+            "CRATEDIGGER_RUNTIME_CONFIG": str(self.runtime_config),
+        }), self.assertRaises(AdvisoryLockSessionLost):
+            run_beets_delete(
+                BeetsDeleteRequest(
+                    album_id=album_id,
+                    expected_release_id=RELEASE,
+                    library_db_path=str(self.db_path),
+                    library_root=str(self.root),
+                ),
+                cancellation_token=CancellationToken(),
+                owner_session_probe=lambda: False,
+                popen_factory=sleeping_child,
+            )
+
+        self.assertEqual(len(spawned), 1)
+        self.assertTrue(options[0]["start_new_session"])
+        self.assertIsNotNone(spawned[0].returncode)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(spawned[0].pid, 0)
+
+    def test_prelaunch_authority_loss_spawns_no_delete_child(self) -> None:
+        album_id, _album_dir = self._seed()
+        token = CancellationToken()
+        token.cancel("planted_before_launch")
+        popen = MagicMock()
+
+        with patch.dict(os.environ, {
+            "CRATEDIGGER_RUNTIME_CONFIG": str(self.runtime_config),
+        }), self.assertRaisesRegex(AdvisoryLockSessionLost, "before launch"):
+            run_beets_delete(
+                BeetsDeleteRequest(
+                    album_id=album_id,
+                    expected_release_id=RELEASE,
+                    library_db_path=str(self.db_path),
+                    library_root=str(self.root),
+                ),
+                cancellation_token=token,
+                popen_factory=popen,
+            )
+
+        popen.assert_not_called()
+
+    def test_production_wait_drains_pipe_pressure_to_tempfiles(self) -> None:
+        """A verbose child must finish before its protocol is decoded."""
+        album_id, _album_dir = self._seed()
+
+        def pressure_child(
+            _argv: list[str],
+            *,
+            stdin: int,
+            stdout: BinaryIO,
+            stderr: BinaryIO,
+            env: Mapping[str, str],
+            start_new_session: bool,
+        ) -> sp.Popen[bytes]:
+            return sp.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys; sys.stdout.buffer.write(b'x' * 2_000_000)",
+                ],
+                stdin=stdin,
+                stdout=stdout,
+                stderr=stderr,
+                env=env,
+                start_new_session=start_new_session,
+            )
+
+        with patch.dict(os.environ, {
+            "CRATEDIGGER_RUNTIME_CONFIG": str(self.runtime_config),
+        }):
+            result = run_beets_delete(
+                BeetsDeleteRequest(
+                    album_id=album_id,
+                    expected_release_id=RELEASE,
+                    library_db_path=str(self.db_path),
+                    library_root=str(self.root),
+                ),
+                cancellation_token=CancellationToken(),
+                popen_factory=pressure_child,
+            )
+
+        self.assertIsInstance(result, BeetsDeleteFailed)
+        assert isinstance(result, BeetsDeleteFailed)
+        self.assertEqual(result.reason, "protocol_error")
 
     def test_metadata_kill_equivalent_rolls_back_album_items_and_flex_rows(
         self,
