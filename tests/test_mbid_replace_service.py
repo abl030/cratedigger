@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1671,6 +1673,79 @@ class TestReplaceHappyPath(_ServiceCase):
         self.assertTrue(any("downloading" in w for w in result.warnings))
         # slskd was never called.
         self._assert_slskd_untouched(slskd)
+
+    def test_post_supersede_status_reread_preserves_downloading_staging(self):
+        """A downloader racing Replace owns the final staging decision.
+
+        Replace first reads ``wanted``. A synchronized production transition
+        then writes ``downloading`` immediately before supersede's locked row
+        read and leaves broken-world ``active_download_state`` NULL. The
+        transaction persists that actual source status, so first-pass cleanup
+        must use the replaced audit row rather than the stale initial read.
+        """
+        import tempfile
+
+        from lib.processing_paths import stage_to_ai_path
+
+        self._patch_externals()
+        with tempfile.TemporaryDirectory(prefix="cratedigger-test-staging-") as raw:
+            cfg = CratediggerConfig()
+            object.__setattr__(cfg, "beets_staging_dir", raw)
+            target = stage_to_ai_path(
+                artist="Pet Grief",
+                title="Old Pressing",
+                staging_dir=raw,
+                request_id=42,
+                auto_import=True,
+            )
+            Path(target).mkdir(parents=True)
+            db, _, svc = self._replace(old_status="wanted", cfg=cfg)
+            source_reads: list[str | None] = []
+            real_get_request = db.get_request
+            real_supersede = db.supersede_request_mbid
+            transition_barrier = threading.Barrier(2)
+            transition_done = threading.Event()
+
+            def record_source_read(request_id: int):
+                row = real_get_request(request_id)
+                if request_id == 42:
+                    source_reads.append(None if row is None else row["status"])
+                return row
+
+            def supersede_after_downloader(*args, **kwargs):
+                transition_barrier.wait(timeout=5)
+                self.assertTrue(transition_done.wait(timeout=5))
+                return real_supersede(*args, **kwargs)
+
+            def transition_to_downloading() -> bool:
+                transition_barrier.wait(timeout=5)
+                transitioned = db.set_downloading(42, "{}")
+                db.request(42)["active_download_state"] = None
+                transition_done.set()
+                return transitioned
+
+            with patch.object(
+                db, "get_request", side_effect=record_source_read,
+            ), patch.object(
+                db, "supersede_request_mbid", side_effect=supersede_after_downloader,
+            ), patch(
+                "lib.mbid_replace_service.shutil.rmtree",
+                side_effect=AssertionError("staging cleanup must not run"),
+            ), ThreadPoolExecutor(max_workers=1) as pool:
+                downloader = pool.submit(transition_to_downloading)
+                result = svc.replace_request_mbid(
+                    42, target_mb_release_id=NEW_MBID,
+                )
+                self.assertTrue(downloader.result(timeout=5))
+            old = db.get_request(42)
+            assert old is not None
+            staging_preserved = Path(target).is_dir()
+
+        self.assertEqual(result.outcome, RESULT_REPLACED)
+        self.assertEqual(source_reads[0], "wanted")
+        self.assertEqual(old["replaced_from_status"], "downloading")
+        self.assertIsNone(old["active_download_state"])
+        self.assertTrue(staging_preserved)
 
     def test_broken_downloading_row_without_state_skips_staging_on_retry(self):
         """Replace preserves the authoritative prior status, not bad metadata."""

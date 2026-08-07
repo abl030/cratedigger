@@ -177,8 +177,8 @@ only non-request-backed order.
 | Canonical retire | acquisition + stored canonical | acquisition | IMPORT then before RELEASE locks, fresh reread/CAS. Busy is a typed retryable conflict. |
 | Replace | old acquisition + old canonical | target acquisition | IMPORT then union RELEASE locks through old-row supersede, new-row publication, and old-library cleanup. Target collision is rechecked under lock. |
 | Pipeline Delete / ghost cleanup | current acceptable identities | none | IMPORT then before RELEASE locks, fresh reread and conditional delete. Contention or a stale association is zero mutation. |
-| Ban Source | full acceptable identity union | same request | IMPORT then the full acceptable RELEASE union, with a fresh reread before bad-rip evidence, exact Beets cleanup, and audit. |
-| Library Delete with pipeline purge | full acceptable identity union + filed Beets identity | none | IMPORT then the sorted full union plus filed-identity RELEASE locks, fresh request/Beets reread and exact child delete. A survivor-filed merged row still locks its acquisition identity before removing the pipeline row. |
+| Ban Source | full `acceptable_identities(request)` union | same request | IMPORT then the full `acceptable_identities(request)` RELEASE union, with a fresh reread before bad-rip evidence, exact Beets cleanup, and audit. |
+| Library Delete with pipeline purge | full `acceptable_identities(request)` union plus filed Beets identity | none | IMPORT then the sorted full `acceptable_identities(request)` union plus filed-identity RELEASE locks, fresh request/Beets reread and exact child delete. A survivor-filed merged row still locks its acquisition identity before removing the pipeline row; the missing-row/library-only exception locks only the single supplied/filed identity. |
 
 ### IMPORTER — worker singleton lock
 

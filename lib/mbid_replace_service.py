@@ -467,9 +467,8 @@ class MbidReplaceService:
            canonical-redirect re-check.
         1. Acquire the per-request IMPORT advisory lock; refuse on
            contention (no pre-emption — the importer worker holds it).
-        2. Re-read the source row under the lock and capture
-           pre-supersede state (artist/title for staging path, exact release
-           identity, status), then resolve the current Beets album snapshot.
+        2. Re-read the source row under the lock and capture its exact release
+           identity, then resolve the current Beets album snapshot.
         3. DB transaction: ``supersede_request_mbid`` atomically flips
            the old row's status, inserts the new row, and inserts tracks.
         4. Filesystem cleanup (non-fatal warnings collected):
@@ -478,7 +477,9 @@ class MbidReplaceService:
              an install on disk; ``clear_pipeline_state=False`` so
              characteristic fields stay frozen on the audit row)
            - wrong-matches group delete
-           - staging folder rmtree (skipped when old was downloading)
+           - staging folder rmtree (keyed from the durable post-supersede
+             ``replaced_from_status``; skipped when it was downloading or
+             historical/unknown)
         5. Post-cleanup (advisory lock RELEASED first): regenerate
            search plan for the new request, trigger Plex /
            Jellyfin rescans. The lock is dropped before these run
@@ -1369,10 +1370,6 @@ class MbidReplaceService:
                         f"request {request_id} was replaced concurrently"
                     ),
                 )
-            old_artist = source_locked.get("artist_name") or ""
-            old_title = source_locked.get("album_title") or ""
-            old_status = source_locked.get("status")
-
             old_identity = ReleaseIdentity.from_strict_fields(
                 source_locked.get("mb_release_id"),
                 source_locked.get("discogs_release_id"),
@@ -1571,6 +1568,23 @@ class MbidReplaceService:
                     raise AdvisoryLockSessionLost(
                         "Replace lost owner session immediately after supersede"
                     )
+                # Supersede takes the authoritative row lock itself. A
+                # downloader may therefore transition wanted -> downloading
+                # after our pre-lock read but before that transaction reaches
+                # the row. Read the replaced audit row back under the held
+                # advisory authority: only its atomically persisted source
+                # status may decide whether Replace owns staging cleanup.
+                replaced_source = self.db.get_request(request_id)
+                if (
+                    replaced_source is None
+                    or replaced_source.get("status") != "replaced"
+                ):
+                    raise AdvisoryLockSessionLost(
+                        "Replace could not re-read its replaced audit row"
+                    )
+                replaced_from_status = replaced_source.get("replaced_from_status")
+                old_artist = str(replaced_source.get("artist_name") or "")
+                old_title = str(replaced_source.get("album_title") or "")
 
                 # Phase 4 — filesystem cleanup (non-fatal). Keyed on the fresh
                 # exact Beets album PK — never on request status. "wanted" does not
@@ -1656,11 +1670,16 @@ class MbidReplaceService:
                         f"{type(exc).__name__}: {exc}"
                     )
 
-                if old_status == "downloading":
+                if replaced_from_status == "downloading":
                     warnings.append(
                         f"request {request_id} was downloading; in-flight "
                         "slskd transfers are not cancelled and staging "
                         "cleanup was skipped (see issue #278)"
+                    )
+                elif replaced_from_status is None:
+                    warnings.append(
+                        "Replace has unknown historical source status; staging "
+                        "cleanup was skipped fail-safe"
                     )
                 else:
                     # CratediggerConfig always has the field — empty
