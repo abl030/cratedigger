@@ -12,6 +12,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from lib.canonical_release_service import (
+    OUTCOME_BUSY,
     OUTCOME_FROZEN,
     OUTCOME_INVALID_IDENTITY,
     OUTCOME_NO_CANONICAL,
@@ -43,6 +44,7 @@ _STATUS = {
     OUTCOME_FROZEN: 409,
     OUTCOME_NO_CANONICAL: 409,
     OUTCOME_STALE: 409,
+    OUTCOME_BUSY: 409,
     OUTCOME_INVALID_IDENTITY: 422,
 }
 

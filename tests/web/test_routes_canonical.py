@@ -214,6 +214,23 @@ class TestCanonicalRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(status, 409)
         self.assertEqual(payload["outcome"], "frozen")
 
+    def test_reconcile_release_contention_is_retryable_409(self) -> None:
+        request_id = self._seed()
+        self.db.set_advisory_lock_result(
+            lambda namespace, _key: namespace != 0x52454C45,
+        )
+        with patch(
+            "web.routes.canonical.canonical_release_fn",
+            _redirects_to_survivor,
+        ):
+            status, payload = self._post(
+                "/api/canonical/reconcile", {"request_id": request_id},
+            )
+
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["outcome"], "busy")
+        self.assertIsNone(self.db.request(request_id)["canonical_release_id"])
+
     def test_sweep_without_a_request_id_covers_the_library(self) -> None:
         merged = self._seed()
         self._seed(mb=SURVIVOR)

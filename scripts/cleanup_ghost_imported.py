@@ -25,6 +25,10 @@ from lib.beets_db import (
     open_beets_db,
 )
 from lib.pipeline_db import PipelineDB
+from lib.pipeline_delete_service import (
+    PipelineDeleteApplied,
+    delete_pipeline_request,
+)
 from lib.release_identity import ReleaseIdentity
 from lib.request_identity import (
     CurrentBeetsBatchResolver,
@@ -124,7 +128,8 @@ def cmd_apply(db: PipelineDB, beets: BeetsDB) -> int:
         request_id = row["id"]
         if not isinstance(request_id, int):
             raise TypeError(f"invalid imported request id: {request_id!r}")
-        if not db.delete_request(request_id):
+        deletion = delete_pipeline_request(db, request_id)
+        if not isinstance(deletion, PipelineDeleteApplied):
             rejected_ids.append(request_id)
             current = db.get_request(request_id)
             processing_locked = transitions.processing_locked_conflict(

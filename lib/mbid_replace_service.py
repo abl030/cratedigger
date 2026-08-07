@@ -36,6 +36,7 @@ import logging
 import os
 import shutil
 import socket
+import sys
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from urllib.error import URLError
@@ -78,6 +79,7 @@ from lib.pipeline_db import (
     SupersedeRaceError,
 )
 from lib.processing_paths import stage_to_ai_path
+from lib.release_association_locks import release_identity_locks
 from lib.release_identity import (
     ReleaseIdentity,
     detect_release_source,
@@ -102,7 +104,7 @@ from lib.replace_status import (
     RESULT_TRANSIENT,
     RESULT_WRONG_STATE,
 )
-from lib.request_identity import resolve_current_for_request
+from lib.request_identity import acceptable_identities, resolve_current_for_request
 from lib.search_plan_service import SearchPlanDB, SearchPlanService
 from lib.util import (
     trigger_jellyfin_scan,
@@ -920,185 +922,264 @@ class MbidReplaceService:
                         "conflicting exact release identity fields"
                     ),
                 )
-            try:
-                beets_db = self.beets_db_factory()
-                try:
-                    # Union (#1059). ``current_album_path`` below is what
-                    # Replace uses to clean up the superseded album; an
-                    # acquisition-only resolve returns Missing for a merged
-                    # request whose files Beets holds under the survivor, so
-                    # Replace would supersede and leave the old album on
-                    # disk — manufacturing exactly the orphan class this
-                    # issue exists to clear.
-                    current_beets = resolve_current_for_request(
-                        beets_db, source_locked,
-                    )
-                    if current_beets is None:
-                        # Unreachable — ``old_identity`` was already proven
-                        # above. Raised rather than resolved acquisition-only:
-                        # the caller converts it to the typed
-                        # ``current_beets_unavailable`` refusal, and an
-                        # authority failure must not become a resolution on
-                        # a path that supersedes and deletes.
-                        raise RuntimeError(
-                            "current Beets authority omitted the request's "
-                            "acceptable release identities"
-                        )
-                    current_library_db_path = beets_db.library_db_path
-                    current_library_root = beets_db.library_root
-                finally:
-                    beets_db.close()
-            except Exception as exc:  # noqa: BLE001 -- typed zero-mutation result
-                return ReplaceResult(
-                    outcome=RESULT_WRONG_STATE,
-                    request_id=request_id,
-                    reason=REPLACE_REASON_CURRENT_BEETS_UNAVAILABLE,
-                    error_message=(
-                        "current Beets resolution failed before Replace: "
-                        f"{type(exc).__name__}: {exc}"
-                    ),
-                )
-            if isinstance(current_beets, CurrentBeetsAmbiguous):
-                return ReplaceResult(
-                    outcome=RESULT_WRONG_STATE,
-                    request_id=request_id,
-                    reason=REPLACE_REASON_CURRENT_BEETS_AMBIGUOUS,
-                    error_message=(
-                        f"current Beets authority for {old_identity.release_id} "
-                        f"is ambiguous ({current_beets.reason}; album ids "
-                        f"{list(current_beets.album_ids)})"
-                    ),
-                )
-            current_album_path = (
-                current_beets.album_path
-                if isinstance(current_beets, CurrentBeetsUnique)
-                else None
+            target_identity = ReleaseIdentity.from_strict_fields(
+                canonical_mbid, new_discogs_release_id,
             )
-
-            # Phase 3 — DB transaction.
-            try:
-                new_request_id = self.db.supersede_request_mbid(
-                    request_id,
-                    new_mb_release_id=canonical_mbid,
-                    new_mb_release_group_id=target_rg,
-                    new_mb_artist_id=target_data.get("artist_id"),
-                    new_artist_name=target_data.get("artist_name") or "",
-                    new_album_title=target_data.get("title") or "",
-                    new_year=target_data.get("year"),
-                    new_country=target_data.get("country"),
-                    new_tracks=list(target_data.get("tracks") or []),
-                    new_discogs_release_id=new_discogs_release_id,
-                )
-            except MbidCollisionError as exc:
+            if target_identity is None:
                 return ReplaceResult(
-                    outcome=RESULT_TARGET_COLLISION_REQUEST,
+                    outcome=RESULT_TARGET_INVALID,
                     request_id=request_id,
-                    error_message=(
-                        f"target MBID collision on supersede: {exc}"
-                    ),
+                    error_message="Replace target has no exact release identity",
                 )
-            except SupersedeRaceError as exc:
-                # A concurrent Replace (double-click) landed first
-                # while we held the lock. The descendant row already
-                # exists — surface a deep-link rather than telling the
-                # operator to retry; retrying a race that has already
-                # succeeded is misleading. Mirrors the Phase 0 step 1a
-                # early-exit shape (RESULT_WRONG_STATE +
-                # descendant_request_id).
-                descendant = self.db.get_request_by_replaces_request_id(
-                    request_id
-                )
+
+            # IMPORT is already held. Lock the complete before/after
+            # association union before publishing the old-row removal and
+            # target-row addition. See docs/advisory-locks.md.
+            release_scope = release_identity_locks(
+                self.db,
+                (*acceptable_identities(source_locked), target_identity),
+            )
+            release_locks = release_scope.__enter__()
+            if not release_locks.acquired:
+                release_scope.__exit__(None, None, None)
                 return ReplaceResult(
                     outcome=RESULT_WRONG_STATE,
                     request_id=request_id,
-                    descendant_request_id=(
-                        int(descendant["id"]) if descendant else None
-                    ),
                     error_message=(
-                        f"supersede race on request {request_id}: {exc}"
+                        "release association is currently changing; retry "
+                        f"Replace for request {request_id}"
                     ),
                 )
-
-            # Phase 4 — filesystem cleanup (non-fatal). Keyed on the fresh
-            # exact Beets album PK — never on request status. "wanted" does not
-            # mean "nothing on disk": library-backfill rows (2026-06-04)
-            # track pre-existing installs while still wanted, and Replace
-            # REPLACES — the old pressing's install is displaced whenever
-            # it resolves in beets (the Passenger regression, 2026-07-18).
-            # Missing current Beets authority is a safe no-op.
-            if isinstance(current_beets, CurrentBeetsUnique):
-                try:
-                    delete_outcome = self.beets_delete_fn(BeetsDeleteRequest(
-                        album_id=current_beets.album_id,
-                        # FILED, not requested (#1059). The delete child
-                        # refuses a mismatch against the album's own
-                        # mb_albumid, and the supersede has already
-                        # committed — so the acquisition id here leaves the
-                        # old album on disk, which is the orphan class this
-                        # issue exists to clear.
-                        expected_release_id=(
-                            current_beets.filed_identity.release_id
+            try:
+                source_confirmed = self.db.get_request(request_id)
+                if source_confirmed is None:
+                    return ReplaceResult(
+                        outcome=RESULT_NOT_FOUND,
+                        request_id=request_id,
+                        error_message=(
+                            f"request {request_id} disappeared while "
+                            "acquiring release authority"
                         ),
-                        library_db_path=current_library_db_path,
-                        library_root=current_library_root,
-                    ))
-                    if isinstance(delete_outcome, BeetsDeleteFailed):
+                    )
+                if source_confirmed.get("status") == "replaced":
+                    return ReplaceResult(
+                        outcome=RESULT_WRONG_STATE,
+                        request_id=request_id,
+                        error_message=(
+                            f"request {request_id} was replaced concurrently"
+                        ),
+                    )
+                if ReleaseIdentity.from_strict_fields(
+                    source_confirmed.get("mb_release_id"),
+                    source_confirmed.get("discogs_release_id"),
+                ) != old_identity:
+                    return ReplaceResult(
+                        outcome=RESULT_WRONG_STATE,
+                        request_id=request_id,
+                        error_message=(
+                            f"request {request_id} changed identity while "
+                            "acquiring release authority"
+                        ),
+                    )
+                target_existing = self.db.get_request_by_release_id(
+                    canonical_mbid,
+                )
+                if (
+                    target_existing is not None
+                    and int(target_existing["id"]) != request_id
+                ):
+                    return ReplaceResult(
+                        outcome=RESULT_TARGET_COLLISION_REQUEST,
+                        request_id=request_id,
+                        current_status=target_existing.get("status"),
+                        error_message=(
+                            f"target release {canonical_mbid} is already used "
+                            f"by request {target_existing['id']} "
+                            f"(status={target_existing.get('status')!r})"
+                        ),
+                    )
+                source_locked = source_confirmed
+                try:
+                    beets_db = self.beets_db_factory()
+                    try:
+                        # Union (#1059). ``current_album_path`` below is what
+                        # Replace uses to clean up the superseded album; an
+                        # acquisition-only resolve returns Missing for a merged
+                        # request whose files Beets holds under the survivor, so
+                        # Replace would supersede and leave the old album on
+                        # disk — manufacturing exactly the orphan class this
+                        # issue exists to clear.
+                        current_beets = resolve_current_for_request(
+                            beets_db, source_locked,
+                        )
+                        if current_beets is None:
+                            # Unreachable — ``old_identity`` was already proven
+                            # above. Raised rather than resolved acquisition-only:
+                            # the caller converts it to the typed
+                            # ``current_beets_unavailable`` refusal, and an
+                            # authority failure must not become a resolution on
+                            # a path that supersedes and deletes.
+                            raise RuntimeError(
+                                "current Beets authority omitted the request's "
+                                "acceptable release identities"
+                            )
+                        current_library_db_path = beets_db.library_db_path
+                        current_library_root = beets_db.library_root
+                    finally:
+                        beets_db.close()
+                except Exception as exc:  # noqa: BLE001 -- typed zero-mutation result
+                    return ReplaceResult(
+                        outcome=RESULT_WRONG_STATE,
+                        request_id=request_id,
+                        reason=REPLACE_REASON_CURRENT_BEETS_UNAVAILABLE,
+                        error_message=(
+                            "current Beets resolution failed before Replace: "
+                            f"{type(exc).__name__}: {exc}"
+                        ),
+                    )
+                if isinstance(current_beets, CurrentBeetsAmbiguous):
+                    return ReplaceResult(
+                        outcome=RESULT_WRONG_STATE,
+                        request_id=request_id,
+                        reason=REPLACE_REASON_CURRENT_BEETS_AMBIGUOUS,
+                        error_message=(
+                            f"current Beets authority for {old_identity.release_id} "
+                            f"is ambiguous ({current_beets.reason}; album ids "
+                            f"{list(current_beets.album_ids)})"
+                        ),
+                    )
+                current_album_path = (
+                    current_beets.album_path
+                    if isinstance(current_beets, CurrentBeetsUnique)
+                    else None
+                )
+
+                # Phase 3 — DB transaction.
+                try:
+                    new_request_id = self.db.supersede_request_mbid(
+                        request_id,
+                        new_mb_release_id=canonical_mbid,
+                        new_mb_release_group_id=target_rg,
+                        new_mb_artist_id=target_data.get("artist_id"),
+                        new_artist_name=target_data.get("artist_name") or "",
+                        new_album_title=target_data.get("title") or "",
+                        new_year=target_data.get("year"),
+                        new_country=target_data.get("country"),
+                        new_tracks=list(target_data.get("tracks") or []),
+                        new_discogs_release_id=new_discogs_release_id,
+                    )
+                except MbidCollisionError as exc:
+                    return ReplaceResult(
+                        outcome=RESULT_TARGET_COLLISION_REQUEST,
+                        request_id=request_id,
+                        error_message=(
+                            f"target MBID collision on supersede: {exc}"
+                        ),
+                    )
+                except SupersedeRaceError as exc:
+                    # A concurrent Replace (double-click) landed first
+                    # while we held the lock. The descendant row already
+                    # exists — surface a deep-link rather than telling the
+                    # operator to retry; retrying a race that has already
+                    # succeeded is misleading. Mirrors the Phase 0 step 1a
+                    # early-exit shape (RESULT_WRONG_STATE +
+                    # descendant_request_id).
+                    descendant = self.db.get_request_by_replaces_request_id(
+                        request_id
+                    )
+                    return ReplaceResult(
+                        outcome=RESULT_WRONG_STATE,
+                        request_id=request_id,
+                        descendant_request_id=(
+                            int(descendant["id"]) if descendant else None
+                        ),
+                        error_message=(
+                            f"supersede race on request {request_id}: {exc}"
+                        ),
+                    )
+
+                # Phase 4 — filesystem cleanup (non-fatal). Keyed on the fresh
+                # exact Beets album PK — never on request status. "wanted" does not
+                # mean "nothing on disk": library-backfill rows (2026-06-04)
+                # track pre-existing installs while still wanted, and Replace
+                # REPLACES — the old pressing's install is displaced whenever
+                # it resolves in beets (the Passenger regression, 2026-07-18).
+                # Missing current Beets authority is a safe no-op.
+                if isinstance(current_beets, CurrentBeetsUnique):
+                    try:
+                        delete_outcome = self.beets_delete_fn(BeetsDeleteRequest(
+                            album_id=current_beets.album_id,
+                            # FILED, not requested (#1059). The delete child
+                            # refuses a mismatch against the album's own
+                            # mb_albumid, and the supersede has already
+                            # committed — so the acquisition id here leaves the
+                            # old album on disk, which is the orphan class this
+                            # issue exists to clear.
+                            expected_release_id=(
+                                current_beets.filed_identity.release_id
+                            ),
+                            library_db_path=current_library_db_path,
+                            library_root=current_library_root,
+                        ))
+                        if isinstance(delete_outcome, BeetsDeleteFailed):
+                            warnings.append(
+                                f"beets exact delete id:{current_beets.album_id} "
+                                f"failed {delete_outcome.reason}: "
+                                f"{delete_outcome.detail}"
+                            )
+                    except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                         warnings.append(
-                            f"beets exact delete id:{current_beets.album_id} "
-                            f"failed {delete_outcome.reason}: "
-                            f"{delete_outcome.detail}"
+                            f"beets removal raised "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+
+                try:
+                    wm_summary = self.wrong_match_delete_fn(self.db, request_id)
+                    if wm_summary.errors:
+                        warnings.append(
+                            f"wrong-matches cleanup reported "
+                            f"{wm_summary.errors} errors "
+                            f"({wm_summary.remaining} remaining)"
                         )
                 except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                     warnings.append(
-                        f"beets removal raised "
+                        f"wrong-matches cleanup raised "
                         f"{type(exc).__name__}: {exc}"
                     )
 
-            try:
-                wm_summary = self.wrong_match_delete_fn(self.db, request_id)
-                if wm_summary.errors:
+                if old_status == "downloading":
                     warnings.append(
-                        f"wrong-matches cleanup reported "
-                        f"{wm_summary.errors} errors "
-                        f"({wm_summary.remaining} remaining)"
+                        f"request {request_id} was downloading; in-flight "
+                        "slskd transfers are not cancelled and staging "
+                        "cleanup was skipped (see issue #278)"
                     )
-            except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
-                warnings.append(
-                    f"wrong-matches cleanup raised "
-                    f"{type(exc).__name__}: {exc}"
-                )
-
-            if old_status == "downloading":
-                warnings.append(
-                    f"request {request_id} was downloading; in-flight "
-                    "slskd transfers are not cancelled and staging "
-                    "cleanup was skipped (see issue #278)"
-                )
-            else:
-                # CratediggerConfig always has the field — empty
-                # string when unconfigured. Coerce to None so the
-                # downstream guard reads cleanly.
-                staging_dir = self.config.beets_staging_dir or None
-                if staging_dir and old_artist and old_title:
-                    for auto_import in (True, False):
-                        path = stage_to_ai_path(
-                            artist=old_artist,
-                            title=old_title,
-                            staging_dir=staging_dir,
-                            request_id=request_id,
-                            auto_import=auto_import,
-                        )
-                        if not os.path.isdir(path):
-                            continue
-                        try:
-                            shutil.rmtree(path)
-                        except FileNotFoundError:
-                            pass
-                        except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
-                            warnings.append(
-                                f"staging rmtree failed for {path}: "
-                                f"{type(exc).__name__}: {exc}"
+                else:
+                    # CratediggerConfig always has the field — empty
+                    # string when unconfigured. Coerce to None so the
+                    # downstream guard reads cleanly.
+                    staging_dir = self.config.beets_staging_dir or None
+                    if staging_dir and old_artist and old_title:
+                        for auto_import in (True, False):
+                            path = stage_to_ai_path(
+                                artist=old_artist,
+                                title=old_title,
+                                staging_dir=staging_dir,
+                                request_id=request_id,
+                                auto_import=auto_import,
                             )
+                            if not os.path.isdir(path):
+                                continue
+                            try:
+                                shutil.rmtree(path)
+                            except FileNotFoundError:
+                                pass
+                            except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
+                                warnings.append(
+                                    f"staging rmtree failed for {path}: "
+                                    f"{type(exc).__name__}: {exc}"
+                                )
+            finally:
+                release_scope.__exit__(*sys.exc_info())
 
         # Phase 5 — search plan + rescans (OUTSIDE the advisory lock).
         # Rescans each carry their own ~10s timeout; holding the IMPORT

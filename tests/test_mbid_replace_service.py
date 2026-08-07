@@ -11,6 +11,7 @@ import os
 import sys
 import unittest
 from copy import deepcopy
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
@@ -53,7 +54,13 @@ from lib.mbid_replace_service import (
     RESULT_WRONG_STATE,
     MbidReplaceService,
 )
-from lib.pipeline_db import MbidCollisionError, SupersedeRaceError
+from lib.pipeline_db import (
+    ADVISORY_LOCK_NAMESPACE_IMPORT,
+    ADVISORY_LOCK_NAMESPACE_RELEASE,
+    MbidCollisionError,
+    SupersedeRaceError,
+    release_id_to_lock_key,
+)
 from lib.release_identity import ReleaseIdentity
 from lib.wrong_match_delete_service import WrongMatchDeleteSummary
 from tests.beets_world import BeetsWorld, BeetsWorldRelease
@@ -1794,6 +1801,56 @@ class TestReplaceCallOrder(_ServiceCase):
                 f"{helper_name} ran before advisory_lock_exit "
                 f"(call order: {call_names})",
             )
+
+    def test_replace_locks_old_canonical_and_target_associations(self) -> None:
+        db = FakePipelineDB()
+        self._seed_old(db)
+        old_canonical = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+        db.record_canonical_release_id(
+            42,
+            canonical_release_id=old_canonical,
+            resolved_at=datetime.now(UTC),
+        )
+
+        result = self._make_service(db).replace_request_mbid(
+            42, target_mb_release_id=NEW_MBID,
+        )
+
+        self.assertEqual(result.outcome, RESULT_REPLACED)
+        self.assertEqual(
+            db.advisory_lock_calls,
+            [
+                (ADVISORY_LOCK_NAMESPACE_IMPORT, 42),
+                *[
+                    (ADVISORY_LOCK_NAMESPACE_RELEASE, key)
+                    for key in sorted({
+                        release_id_to_lock_key(OLD_MBID),
+                        release_id_to_lock_key(old_canonical),
+                        release_id_to_lock_key(NEW_MBID),
+                    })
+                ],
+            ],
+        )
+
+    def test_later_release_contention_does_not_supersede(self) -> None:
+        db = FakePipelineDB()
+        self._seed_old(db)
+        db.set_advisory_lock_result(
+            lambda namespace, key: not (
+                namespace == ADVISORY_LOCK_NAMESPACE_RELEASE
+                and key == release_id_to_lock_key(NEW_MBID)
+            ),
+        )
+
+        result = self._make_service(db).replace_request_mbid(
+            42, target_mb_release_id=NEW_MBID,
+        )
+
+        self.assertEqual(result.outcome, RESULT_WRONG_STATE)
+        source = db.get_request(42)
+        assert source is not None
+        self.assertEqual(source["status"], "wanted")
+        self.assertIsNone(db.get_request_by_release_id(NEW_MBID))
 
     def test_supersede_before_fs_helpers_and_rescans_after_cleanup(self):
         manager = MagicMock()

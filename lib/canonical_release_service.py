@@ -42,7 +42,13 @@ from datetime import UTC, datetime
 from typing import Protocol
 
 from lib.mb_canonical import CanonicalReleaseFn, canonical_release_id
+from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_IMPORT
+from lib.release_association_locks import (
+    ReleaseAssociationLockDB,
+    release_identity_locks,
+)
 from lib.release_identity import ReleaseIdentity
+from lib.request_identity import acceptable_identities
 
 logger = logging.getLogger("cratedigger")
 
@@ -58,6 +64,7 @@ OUTCOME_NOT_FOUND = "not_found"
 OUTCOME_RETIRED = "retired"
 OUTCOME_NO_CANONICAL = "no_canonical"
 OUTCOME_STALE = "stale"
+OUTCOME_BUSY = "busy"
 
 #: Outcomes that mean "nothing is wrong, nothing changed". Used by the
 #: sweep summary so an operator reading the journal sees one number for
@@ -69,7 +76,7 @@ QUIET_OUTCOMES = frozenset({
 })
 
 
-class CanonicalReleaseDB(Protocol):
+class CanonicalReleaseDB(ReleaseAssociationLockDB, Protocol):
     """The PipelineDB surface this service uses."""
 
     def get_request(self, request_id: int) -> Mapping[str, object] | None: ...
@@ -170,6 +177,14 @@ def _acquisition(row: Mapping[str, object]) -> ReleaseIdentity | None:
     )
 
 
+def _with_canonical(
+    row: Mapping[str, object], canonical_release_id: str,
+) -> tuple[ReleaseIdentity, ...]:
+    prospective = dict(row)
+    prospective["canonical_release_id"] = canonical_release_id
+    return acceptable_identities(prospective)
+
+
 class CanonicalReleaseService:
     """Reconcile stored acquisition ids against MusicBrainz merge state."""
 
@@ -200,33 +215,59 @@ class CanonicalReleaseService:
         no-redirect answer is indistinguishable from a failed lookup, and
         neither may clear a survivor. Only this named operator action can.
         """
-        row = self._db.get_request(request_id)
-        if row is None:
-            return CanonicalRetireResult(request_id, OUTCOME_NOT_FOUND)
-        if row.get("status") == "replaced":
-            return CanonicalRetireResult(request_id, OUTCOME_FROZEN)
+        # IMPORT outer then every before-state RELEASE lock. See
+        # docs/advisory-locks.md. Retirement removes an association, so the
+        # acquisition and stored survivor must stay serialized together.
+        with self._db.advisory_lock(
+            ADVISORY_LOCK_NAMESPACE_IMPORT, request_id,
+        ) as import_acquired:
+            if not import_acquired:
+                return CanonicalRetireResult(request_id, OUTCOME_BUSY)
+            row = self._db.get_request(request_id)
+            if row is None:
+                return CanonicalRetireResult(request_id, OUTCOME_NOT_FOUND)
+            if row.get("status") == "replaced":
+                return CanonicalRetireResult(request_id, OUTCOME_FROZEN)
 
-        stored = row.get("canonical_release_id")
-        resolved_at = row.get("canonical_resolved_at")
-        if not isinstance(stored, str) or not stored or not isinstance(
-            resolved_at, datetime,
-        ):
-            return CanonicalRetireResult(request_id, OUTCOME_NO_CANONICAL)
+            stored = row.get("canonical_release_id")
+            resolved_at = row.get("canonical_resolved_at")
+            if not isinstance(stored, str) or not stored or not isinstance(
+                resolved_at, datetime,
+            ):
+                return CanonicalRetireResult(request_id, OUTCOME_NO_CANONICAL)
 
-        retired = self._db.retire_canonical_release_id(
-            request_id,
-            expected_canonical_release_id=stored,
-            expected_resolved_at=resolved_at,
-        )
-        if not retired:
-            return CanonicalRetireResult(
-                request_id, OUTCOME_STALE,
-                previous_canonical_release_id=stored,
-            )
-        return CanonicalRetireResult(
-            request_id, OUTCOME_RETIRED,
-            previous_canonical_release_id=stored,
-        )
+            with release_identity_locks(
+                self._db, acceptable_identities(row),
+            ) as release_locks:
+                if not release_locks.acquired:
+                    return CanonicalRetireResult(request_id, OUTCOME_BUSY)
+                current = self._db.get_request(request_id)
+                if current is None:
+                    return CanonicalRetireResult(request_id, OUTCOME_NOT_FOUND)
+                if current.get("status") == "replaced":
+                    return CanonicalRetireResult(request_id, OUTCOME_FROZEN)
+                if (
+                    current.get("canonical_release_id") != stored
+                    or current.get("canonical_resolved_at") != resolved_at
+                ):
+                    return CanonicalRetireResult(
+                        request_id, OUTCOME_STALE,
+                        previous_canonical_release_id=stored,
+                    )
+                retired = self._db.retire_canonical_release_id(
+                    request_id,
+                    expected_canonical_release_id=stored,
+                    expected_resolved_at=resolved_at,
+                )
+                if not retired:
+                    return CanonicalRetireResult(
+                        request_id, OUTCOME_STALE,
+                        previous_canonical_release_id=stored,
+                    )
+                return CanonicalRetireResult(
+                    request_id, OUTCOME_RETIRED,
+                    previous_canonical_release_id=stored,
+                )
 
     def reconcile_row(
         self, row: Mapping[str, object],
@@ -277,29 +318,87 @@ class CanonicalReleaseService:
                 previous_canonical_release_id=previous,
             )
 
-        written = self._db.record_canonical_release_id(
-            request_id,
-            canonical_release_id=survivor,
-            resolved_at=self._now_fn(),
-        )
-        if not written:
-            # A Replace superseded the row mid-sweep, or its acquisition id
-            # moved under us. Frozen rows are audit records; the next sweep
-            # sees the new row.
-            return CanonicalReconcileResult(
-                request_id,
-                OUTCOME_FROZEN,
-                acquisition_release_id=identity.release_id,
-                canonical_release_id=survivor,
-                previous_canonical_release_id=previous,
-            )
-        return CanonicalReconcileResult(
-            request_id,
-            OUTCOME_RESOLVED,
-            acquisition_release_id=identity.release_id,
-            canonical_release_id=survivor,
-            previous_canonical_release_id=previous,
-        )
+        # The mirror call above deliberately ran outside locks. The durable
+        # write now takes IMPORT then the union of before/after associations,
+        # rereads, and only writes the exact state it resolved.
+        with self._db.advisory_lock(
+            ADVISORY_LOCK_NAMESPACE_IMPORT, request_id,
+        ) as import_acquired:
+            if not import_acquired:
+                return CanonicalReconcileResult(
+                    request_id, OUTCOME_BUSY,
+                    acquisition_release_id=identity.release_id,
+                    canonical_release_id=survivor,
+                    previous_canonical_release_id=previous,
+                )
+            fresh = self._db.get_request(request_id)
+            if fresh is None:
+                return CanonicalReconcileResult(request_id, OUTCOME_NOT_FOUND)
+            if fresh.get("status") == "replaced":
+                return CanonicalReconcileResult(
+                    request_id, OUTCOME_FROZEN,
+                    acquisition_release_id=identity.release_id,
+                    canonical_release_id=survivor,
+                    previous_canonical_release_id=previous,
+                )
+            if _acquisition(fresh) != identity or fresh.get(
+                "canonical_release_id",
+            ) != previous:
+                return CanonicalReconcileResult(
+                    request_id, OUTCOME_STALE,
+                    acquisition_release_id=identity.release_id,
+                    canonical_release_id=survivor,
+                    previous_canonical_release_id=previous,
+                )
+            affected = (*acceptable_identities(fresh), *_with_canonical(
+                fresh, survivor,
+            ))
+            with release_identity_locks(self._db, affected) as release_locks:
+                if not release_locks.acquired:
+                    return CanonicalReconcileResult(
+                        request_id, OUTCOME_BUSY,
+                        acquisition_release_id=identity.release_id,
+                        canonical_release_id=survivor,
+                        previous_canonical_release_id=previous,
+                    )
+                current = self._db.get_request(request_id)
+                if current is None:
+                    return CanonicalReconcileResult(request_id, OUTCOME_NOT_FOUND)
+                if current.get("status") == "replaced":
+                    return CanonicalReconcileResult(
+                        request_id, OUTCOME_FROZEN,
+                        acquisition_release_id=identity.release_id,
+                        canonical_release_id=survivor,
+                        previous_canonical_release_id=previous,
+                    )
+                if _acquisition(current) != identity or current.get(
+                    "canonical_release_id",
+                ) != previous:
+                    return CanonicalReconcileResult(
+                        request_id, OUTCOME_STALE,
+                        acquisition_release_id=identity.release_id,
+                        canonical_release_id=survivor,
+                        previous_canonical_release_id=previous,
+                    )
+                written = self._db.record_canonical_release_id(
+                    request_id,
+                    canonical_release_id=survivor,
+                    resolved_at=self._now_fn(),
+                )
+                if not written:
+                    return CanonicalReconcileResult(
+                        request_id, OUTCOME_FROZEN,
+                        acquisition_release_id=identity.release_id,
+                        canonical_release_id=survivor,
+                        previous_canonical_release_id=previous,
+                    )
+                return CanonicalReconcileResult(
+                    request_id,
+                    OUTCOME_RESOLVED,
+                    acquisition_release_id=identity.release_id,
+                    canonical_release_id=survivor,
+                    previous_canonical_release_id=previous,
+                )
 
     def reconcile_all(
         self,
@@ -332,6 +431,7 @@ class CanonicalReleaseService:
 
 
 __all__ = [
+    "OUTCOME_BUSY",
     "OUTCOME_FROZEN",
     "OUTCOME_INVALID_IDENTITY",
     "OUTCOME_NOT_FOUND",

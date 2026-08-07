@@ -56,6 +56,8 @@ from lib.force_import_service import (
 )
 from lib.pipeline_delete_service import (
     PipelineDeleteApplied,
+    PipelineDeleteAssociationChanged,
+    PipelineDeleteConditionalRejected,
     PipelineDeleteDescendantConflict,
     PipelineDeleteLockContended,
     PipelineDeleteNotFound,
@@ -1007,6 +1009,18 @@ def post_pipeline_delete(h: RouteHandler, body: dict[str, object]) -> None:
         h._error("Not found", 404)
         return
     if isinstance(result, PipelineDeleteLockContended):
+        h._json({
+            "error": "destructive_operation_busy",
+            "scope": "request",
+        }, status=409)
+        return
+    if isinstance(result, PipelineDeleteAssociationChanged):
+        h._json({
+            "error": "destructive_operation_busy",
+            "scope": "association",
+        }, status=409)
+        return
+    if isinstance(result, PipelineDeleteConditionalRejected):
         h._json({
             "error": "destructive_operation_busy",
             "scope": "request",
