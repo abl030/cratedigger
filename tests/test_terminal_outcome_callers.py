@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 import unittest
 from typing import Any, cast
+from unittest import mock
 
 from lib import transitions
+from lib.config import CratediggerConfig
 from lib.dispatch import DispatchOutcome
 from lib.dispatch.post_import import _run_or_stage_quality_gate
 from lib.dispatch.quality_gate import QualityGatePlan
@@ -14,6 +18,7 @@ from lib.import_queue import (
     IMPORT_JOB_FORCE,
 )
 from lib.quality import MeasurementFailure
+from lib.media_readiness import MediaReadinessError
 from lib.terminal_outcomes import (
     ImportJobTerminal,
     PendingImportTerminalOutcome,
@@ -163,39 +168,77 @@ class TestTerminalOutcomeCallers(unittest.TestCase):
         command = db.persist_preview_terminal_outcome_calls[0]
         self.assertIsNone(command.request_transition)
 
-    def test_force_audio_corruption_terminalizes_without_preview_retry(self) -> None:
-        """A deterministic private-readiness failure is a completed audit."""
+    def test_force_probe_failure_does_not_escape_into_preview_retry(self) -> None:
+        """Best-effort readiness failures reach force measurement terminalization."""
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="unsearchable"))
-        db.enqueue_import_job(
-            IMPORT_JOB_FORCE,
-            request_id=42,
-            payload={"download_log_id": 1, "failed_path": "/tmp/five-suns"},
-        )
-        claimed = claim_next_import_preview_job(db, worker_id="audio-corrupt-preview")
-        assert claimed is not None
-        result = ImportPreviewResult(
-            mode="path",
-            verdict="confident_reject",
-            decision="audio_corrupt",
-            reason="audio_corrupt",
-            detail="strict decode rejected private readiness copy",
-            source_path="/tmp/five-suns",
-            cleanup_eligible=True,
-        )
+        with tempfile.TemporaryDirectory() as tmp:
+            downloads = os.path.join(tmp, "downloads")
+            processing = os.path.join(tmp, "processing")
+            source = os.path.join(downloads, "failed_imports", "Five Suns")
+            os.makedirs(source)
+            os.mkdir(processing, 0o700)
+            os.mkdir(os.path.join(processing, "albums"), 0o700)
+            os.mkdir(os.path.join(processing, "preview"), 0o700)
+            # Valid FLAC metadata envelope with a zero total-sample field:
+            # enough to choose the readiness recovery path; decode is mocked
+            # so this caller test isolates a deterministic probe failure.
+            with open(os.path.join(source, "01.flac"), "wb") as handle:
+                handle.write(b"fLaC\0\0\0\x22" + b"\0" * 34)
+            cfg = CratediggerConfig(
+                slskd_download_dir=downloads,
+                processing_dir=processing,
+                audio_check_mode="off",
+            )
+            download_log_id = db.log_download(
+                42,
+                outcome="rejected",
+                validation_result={"failed_path": source},
+            )
+            db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                payload={"download_log_id": download_log_id, "failed_path": source},
+            )
+            claimed = claim_next_import_preview_job(db, worker_id="probe-failure-preview")
+            assert claimed is not None
 
-        updated = import_preview_worker.process_claimed_preview_job(
-            db,
-            claimed,
-            preview_fn=lambda _db, _job: result,
-        )
+            def failed_measurement(_db: object, **kwargs: object) -> ImportPreviewResult:
+                source_path = str(kwargs["source_display_path"])
+                return ImportPreviewResult(
+                    mode="path",
+                    verdict="measurement_failed",
+                    reason="measurement_crashed",
+                    detail="ffprobe unavailable",
+                    source_path=source_path,
+                    failure=MeasurementFailure(
+                        reason="measurement_crashed",
+                        detail="ffprobe unavailable",
+                        source_path=source_path,
+                    ),
+                )
 
-        assert updated is not None
-        self.assertEqual(updated.status, "failed")
-        self.assertEqual(updated.preview_status, "measurement_failed")
-        self.assertEqual(updated.preview_error, "measurement_crashed")
-        self.assertEqual(len(db.persist_preview_terminal_outcome_calls), 1)
-        self.assertEqual(db.request(42)["status"], "unsearchable")
+            def no_current_evidence(*_args: object, **_kwargs: object) -> str:
+                return "no_current_evidence"
+
+            with mock.patch("lib.media_readiness._strict_decode"), mock.patch(
+                "lib.media_readiness._ffprobe_readiness",
+                side_effect=MediaReadinessError("measurement_failed", "ffprobe unavailable"),
+            ):
+                updated = import_preview_worker.process_claimed_preview_job(
+                    db,
+                    claimed,
+                    runtime_config=cfg,
+                    candidate_measurement_fn=failed_measurement,
+                    prepare_failure_have_fn=no_current_evidence,
+                )
+
+            assert updated is not None
+            self.assertEqual(updated.status, "failed")
+            self.assertEqual(updated.preview_status, "measurement_failed")
+            self.assertEqual(updated.preview_error, "measurement_crashed")
+            self.assertEqual(len(db.persist_preview_terminal_outcome_calls), 1)
+            self.assertEqual(db.request(42)["status"], "unsearchable")
 
 
 if __name__ == "__main__":

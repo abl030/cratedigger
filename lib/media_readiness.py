@@ -155,7 +155,8 @@ def _ffprobe_readiness(path: Path) -> _FfprobeReadinessWire:
     try:
         result = subprocess.run(
             [
-                "ffprobe", "-v", "error", "-show_streams", "-show_frames",
+                "ffprobe", "-v", "error", "-select_streams", "a:0",
+                "-show_streams", "-show_frames",
                 "-show_packets", "-show_entries",
                 (
                     "stream=codec_type,codec_name,sample_rate,channels,"
@@ -371,22 +372,26 @@ def prepare_media_readiness(
     Beets.
     """
 
-    repair_mp3_headers(folder_path)
     try:
+        repair_mp3_headers(folder_path)
         _strict_decode(folder_path)
+        initial = inspect_media(folder_path)
+        repaired: list[str] = []
+        for fact in initial.files:
+            if fact.container == "flac" and _repair_flac_total_samples(Path(fact.path), fact.sample_count):
+                repaired.append(fact.path)
+        if repaired:
+            _strict_decode(folder_path)
+        final = inspect_media(folder_path)
+        return MediaReadiness(final.files, tuple(repaired))
     except MediaReadinessError:
         if fail_closed:
             raise
+        # Preview has its own terminal measurement-failure lifecycle.  Every
+        # readiness operation is best-effort there, not only strict decode:
+        # an unavailable probe or a refused repair must not turn into a
+        # worker exception/retry loop.
         return MediaReadiness(())
-    initial = inspect_media(folder_path)
-    repaired: list[str] = []
-    for fact in initial.files:
-        if fact.container == "flac" and _repair_flac_total_samples(Path(fact.path), fact.sample_count):
-            repaired.append(fact.path)
-    if repaired:
-        _strict_decode(folder_path)
-    final = inspect_media(folder_path)
-    return MediaReadiness(final.files, tuple(repaired))
 
 
 def normalize_media_metadata(
@@ -401,31 +406,31 @@ def normalize_media_metadata(
     repair condition, while all facts are still available on demand through
     """
 
-    repair_mp3_headers(folder_path)
-    needs_flac_repair = False
-    for path in _audio_paths(folder_path):
-        if path.suffix.lower() != ".flac":
-            continue
-        try:
+    try:
+        repair_mp3_headers(folder_path)
+        needs_flac_repair = False
+        for path in _audio_paths(folder_path):
+            if path.suffix.lower() != ".flac":
+                continue
             info, min_block_size = _flac_streaminfo_from_path(path)
-        except MediaReadinessError:
-            if fail_closed:
-                raise
+            if info is None:
+                # A non-FLAC byte sequence with a .flac suffix belongs to the
+                # ordinary strict validator; do not turn a filename lie into a
+                # metadata rewrite attempt.
+                continue
+            if info[1] == 0:
+                needs_flac_repair = True
+                break
+            if min_block_size > 0 and info[1] < min_block_size:
+                # A declared total below the file's smallest frame is impossible.
+                # This preserves normal retry cost while admitting a cheap
+                # contradiction signal into the one full recovery scan.
+                needs_flac_repair = True
+                break
+        if not needs_flac_repair:
             return MediaReadiness(())
-        if info is None:
-            # A non-FLAC byte sequence with a .flac suffix belongs to the
-            # ordinary strict validator; do not turn a filename lie into a
-            # metadata rewrite attempt.
-            continue
-        if info[1] == 0:
-            needs_flac_repair = True
-            break
-        if min_block_size > 0 and info[1] < min_block_size:
-            # A declared total below the file's smallest frame is impossible.
-            # This preserves normal retry cost while admitting a cheap
-            # contradiction signal into the one full recovery scan.
-            needs_flac_repair = True
-            break
-    if not needs_flac_repair:
+        return prepare_media_readiness(folder_path, fail_closed=fail_closed)
+    except MediaReadinessError:
+        if fail_closed:
+            raise
         return MediaReadiness(())
-    return prepare_media_readiness(folder_path, fail_closed=fail_closed)

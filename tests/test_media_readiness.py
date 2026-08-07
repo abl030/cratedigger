@@ -6,6 +6,8 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 from lib.media_readiness import (
     flac_total_samples_only_changed,
@@ -124,3 +126,22 @@ class TestFlacReadinessPin(unittest.TestCase):
 
             self.assertEqual(facts.codec, "flac")
             self.assertEqual(facts.container, "flac")
+
+    def test_ffprobe_selects_audio_before_reading_frames_and_packets(self) -> None:
+        """Attached artwork must not be counted as audio frame/packet data."""
+        wire = """{
+          "streams": [{"codec_type": "audio", "codec_name": "flac",
+                       "sample_rate": "44100", "channels": 2,
+                       "bits_per_raw_sample": "16"}],
+          "frames": [{"nb_samples": 4096}],
+          "packets": [{"size": "512"}],
+          "format": {"format_name": "flac"}
+        }"""
+        result = SimpleNamespace(returncode=0, stdout=wire)
+        with mock.patch("lib.media_readiness.subprocess.run", return_value=result) as run:
+            facts = media_facts_for_path("/private/album/01.flac")
+
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index("-select_streams") + 1], "a:0")
+        self.assertEqual(facts.sample_count, 4096)
+        self.assertEqual(facts.compressed_audio_bytes, 512)
