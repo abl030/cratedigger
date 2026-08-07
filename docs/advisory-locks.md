@@ -231,12 +231,14 @@ that exact connection, and cancellation prevents each next mutation if the
 session is lost. The persisted execution lease is liveness evidence only; the
 request's owner pointer remains the authority.
 
-Destructive operator actions follow the same order. Ban-source always has a
-pipeline request and therefore takes IMPORT then RELEASE. Library-delete takes
-IMPORT then RELEASE when a request exists, and RELEASE only for a library-only
-album. Replace, force-import, direct pipeline delete, lifecycle/intent/quality
-changes, and automated owner convergence all acquire IMPORT before the durable
-owner reread.
+Destructive operator actions follow the same order. Ban Source and
+request-backed Library Delete take IMPORT then the complete current
+`acceptable_identities(row)` RELEASE union (plus the filed Beets identity for
+Library Delete); a library-only delete takes its single RELEASE lock. This
+#1071 scope remains held through cancellation, exact-child acknowledgement,
+and complete process-group teardown. Replace, force-import, direct pipeline
+delete, lifecycle/intent/quality changes, and automated owner convergence all
+acquire IMPORT before the durable owner reread.
 Authority rejection is a 409 / CLI exit 4 with zero filesystem, audit, job, or
 request mutation.
 
@@ -253,9 +255,9 @@ no-replay** guarantee only: it does not prove that a Beets child or filesystem
 operation remained fenced while a backend died. In particular, a Replace whose
 supersede already committed surfaces its runnable descendant rather than
 inviting a second Replace, but D0 does not validate the external cleanup tail.
-Issue #1071 is the required pre-deploy successor for cancellation/fencing of
-external children and resumable post-supersede cleanup; do not infer either
-property from this lock scope.
+Issue #1071 implements cancellation/fencing of external children and resumable
+post-supersede cleanup; do not infer external-child safety merely from a lock
+scope that has already unwound.
 
 Inside a processing transaction, row locks have their own fixed order:
 request, every job for that request in ID order, then cleanup journals in job

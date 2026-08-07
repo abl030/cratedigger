@@ -367,20 +367,13 @@ class MbidReplaceService:
             # finish its derived work.  Before supersede this is a normal
             # retryable busy result with no mutation.
             try:
+                source = self.db.get_request(request_id)
                 descendant = self.db.get_request_by_replaces_request_id(
                     request_id,
                 )
-                target_identity = ReleaseIdentity.from_id(target_mb_release_id)
-                if (
-                    target_identity is not None
-                    and target_identity.source == "musicbrainz"
-                ):
-                    resolved = self.mb_lookup(
-                        target_identity.release_id, fresh=True,
-                    )
-                    target_identity = ReleaseIdentity.from_id(
-                        str(resolved.get("id") or target_identity.release_id),
-                    )
+                target_identity = self._canonical_retry_target_identity(
+                    source, target_mb_release_id,
+                )
             except Exception:  # noqa: BLE001 - session loss is primary
                 descendant = None
                 target_identity = None
@@ -405,6 +398,36 @@ class MbidReplaceService:
                 reason=REPLACE_REASON_LOCK_CONTENDED,
                 error_message="Replace lock session was lost; retry",
             )
+
+    def _canonical_retry_target_identity(
+        self,
+        source: Mapping[str, object] | None,
+        requested_target: str,
+    ) -> ReleaseIdentity | None:
+        """Resolve a retry key through the source pathway's canonicalizer."""
+        source_identity = (
+            ReleaseIdentity.from_strict_fields(
+                source.get("mb_release_id"),
+                source.get("discogs_release_id"),
+            ) if source is not None else None
+        )
+        target_identity = ReleaseIdentity.from_id(requested_target)
+        if (
+            source_identity is None
+            or target_identity is None
+            or source_identity.source != target_identity.source
+        ):
+            return None
+        try:
+            if target_identity.source == "musicbrainz":
+                data = self.mb_lookup(target_identity.release_id, fresh=True)
+            else:
+                data = self.discogs_lookup(int(target_identity.release_id), fresh=True)
+        except Exception:  # noqa: BLE001 - caller preserves primary authority loss
+            return None
+        return ReleaseIdentity.from_id(
+            str(data.get("id") or target_identity.release_id),
+        )
 
     def _replace_request_mbid(
         self,
@@ -464,19 +487,9 @@ class MbidReplaceService:
             descendant = self.db.get_request_by_replaces_request_id(
                 request_id
             )
-            target_identity = ReleaseIdentity.from_id(target_mb_release_id)
-            if target_identity is not None and target_identity.source == "musicbrainz":
-                target_data, err = self._mb_lookup_or_error(
-                    target_identity.release_id,
-                    request_id=request_id,
-                    detail_context=f"target MBID {target_mb_release_id}",
-                )
-                if err is not None:
-                    return err
-                assert target_data is not None
-                target_identity = ReleaseIdentity.from_id(
-                    str(target_data.get("id") or target_identity.release_id),
-                )
+            target_identity = self._canonical_retry_target_identity(
+                source, target_mb_release_id,
+            )
             if (
                 descendant is not None
                 and target_identity is not None
@@ -946,6 +959,8 @@ class MbidReplaceService:
         """
         token = CancellationToken()
         warnings: list[str] = []
+        library_db_path = ""
+        library_root = ""
         try:
             with self.db._pin_owner_session(token) as owner:
                 with self.db.advisory_lock(
@@ -1046,23 +1061,14 @@ class MbidReplaceService:
                             finally:
                                 beets.close()
                         except Exception as exc:  # noqa: BLE001 - typed retry
-                            return ReplaceResult(
-                                outcome=RESULT_TRANSIENT,
-                                request_id=request_id,
-                                descendant_request_id=int(current_descendant["id"]),
-                                reason=REPLACE_REASON_POST_SUPERSEDE_PARTIAL,
-                                error_message=(
-                                    "Replace tail could not rederive current Beets "
-                                    f"state: {type(exc).__name__}: {exc}"
-                                ),
+                            warnings.append(
+                                "Replace tail could not rederive current Beets "
+                                f"state: {type(exc).__name__}: {exc}"
                             )
+                            current_beets = None
                         if isinstance(current_beets, CurrentBeetsAmbiguous) or current_beets is None:
-                            return ReplaceResult(
-                                outcome=RESULT_TRANSIENT,
-                                request_id=request_id,
-                                descendant_request_id=int(current_descendant["id"]),
-                                reason=REPLACE_REASON_POST_SUPERSEDE_PARTIAL,
-                                error_message="Replace tail current Beets authority is unavailable or ambiguous",
+                            warnings.append(
+                                "Replace tail current Beets authority is unavailable or ambiguous"
                             )
                         if isinstance(current_beets, CurrentBeetsUnique):
                             token.raise_if_cancelled()
@@ -1093,16 +1099,24 @@ class MbidReplaceService:
                                     f"failed {deleted.reason}: {deleted.detail}"
                                 )
                         token.raise_if_cancelled()
-                        summary = self.wrong_match_delete_fn(self.db, request_id)
-                        token.raise_if_cancelled()
-                        if not self.db._probe_owner_session(owner).live:
-                            raise AdvisoryLockSessionLost(
-                                "Replace tail lost owner session after wrong-match cleanup"
-                            )
-                        if summary.errors:
+                        try:
+                            summary = self.wrong_match_delete_fn(self.db, request_id)
+                            token.raise_if_cancelled()
+                            if not self.db._probe_owner_session(owner).live:
+                                raise AdvisoryLockSessionLost(
+                                    "Replace tail lost owner session after wrong-match cleanup"
+                                )
+                            if (not summary.success) or summary.errors:
+                                warnings.append(
+                                    f"wrong-matches cleanup reported {summary.errors} errors "
+                                    f"({summary.remaining} remaining)"
+                                )
+                        except AdvisoryLockSessionLost:
+                            raise
+                        except Exception as exc:  # noqa: BLE001 - resume remaining safe effects
                             warnings.append(
-                                f"wrong-matches cleanup reported {summary.errors} errors "
-                                f"({summary.remaining} remaining)"
+                                "wrong-matches cleanup raised "
+                                f"{type(exc).__name__}: {exc}"
                             )
                         staging_dir = self.config.beets_staging_dir or None
                         artist = str(current_source.get("artist_name") or "")
@@ -1140,19 +1154,27 @@ class MbidReplaceService:
                     raise AdvisoryLockSessionLost(
                         "Replace tail lost owner session before search-plan readiness"
                     )
-                plan = self.search_plan_service.generate_for_request(
-                    int(descendant["id"]), regenerate=False,
-                )
-                token.raise_if_cancelled()
-                if not self.db._probe_owner_session(owner).live:
-                    raise AdvisoryLockSessionLost(
-                        "Replace tail lost owner session after search-plan readiness"
+                try:
+                    plan = self.search_plan_service.generate_for_request(
+                        int(descendant["id"]), regenerate=False,
                     )
-                if type(plan) is ServiceResult and plan.outcome not in {
-                    "success", "noop_active_plan_exists",
-                }:
+                    token.raise_if_cancelled()
+                    if not self.db._probe_owner_session(owner).live:
+                        raise AdvisoryLockSessionLost(
+                            "Replace tail lost owner session after search-plan readiness"
+                        )
+                    if type(plan) is ServiceResult and plan.outcome not in {
+                        "success", "noop_active_plan_exists",
+                    }:
+                        warnings.append(
+                            f"search-plan generation returned {plan.outcome}"
+                        )
+                except AdvisoryLockSessionLost:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - tail stays resumable
                     warnings.append(
-                        f"search-plan generation returned {plan.outcome}"
+                        "search-plan generation raised "
+                        f"{type(exc).__name__}: {exc}"
                     )
         except (AdvisoryLockSessionLost, OwnerSessionLost, ExecutionCancelled):
             descendant = self.db.get_request_by_replaces_request_id(request_id)
@@ -1566,7 +1588,7 @@ class MbidReplaceService:
                         raise AdvisoryLockSessionLost(
                             "Replace lost owner session after wrong-match cleanup"
                         )
-                    if wm_summary.errors:
+                    if not wm_summary.success or wm_summary.errors:
                         warnings.append(
                             f"wrong-matches cleanup reported "
                             f"{wm_summary.errors} errors "

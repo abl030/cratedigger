@@ -1035,7 +1035,9 @@ class TestDestructiveAuthorityRealPostgres(unittest.TestCase):
                 beets_delete_fn=lose_backend,
             )
 
-            self.assertIsInstance(result, DeleteLockContended)
+            self.assertIsInstance(result, DeleteIncomplete)
+            assert isinstance(result, DeleteIncomplete)
+            self.assertTrue(result.acknowledgement_lost)
             self.assertIsNotNone(db.get_request(request_id))
             self.assertIsNotNone(beets.get_album_detail(7))
         finally:

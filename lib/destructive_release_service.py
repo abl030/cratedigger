@@ -230,6 +230,18 @@ class BanSourceBeetsAmbiguous:
     reason: CurrentBeetsAmbiguityReason
 
 
+@dataclass
+class _BanSourceEffectReceipt:
+    """In-memory boundary between zero-effect contention and cleanup tail."""
+
+    started: bool = False
+    release_id: str = ""
+    request_status: Literal["wanted", "unsearchable"] = "wanted"
+    username: str | None = None
+    hashes_recorded: int = 0
+    hash_capture_errors: tuple[HashCaptureFailure, ...] = ()
+
+
 type BanSourceResult = (
     BanSourceSuccess
     | BanSourceCleanupIncomplete
@@ -259,6 +271,7 @@ def _ban_source_locked(
     beets_delete_fn: BeetsDeleteFn,
     cancellation_token: CancellationToken,
     owner_session_identity: OwnerSessionIdentity,
+    effect_receipt: _BanSourceEffectReceipt,
 ) -> BanSourceResult:
     """Run every bad-rip effect while IMPORT and RELEASE are both held."""
     cancellation_token.raise_if_cancelled()
@@ -329,6 +342,8 @@ def _ban_source_locked(
     request_status: Literal["wanted", "unsearchable"] = (
         "unsearchable" if current_status == "unsearchable" else "wanted"
     )
+    effect_receipt.release_id = identity.release_id
+    effect_receipt.request_status = request_status
     transition = (
         transitions.RequestTransition.to_unsearchable_fields(
             from_status=current_status,
@@ -340,6 +355,7 @@ def _ban_source_locked(
             fields=fields,
         )
     )
+    effect_receipt.started = True
     transition_result = finalize_request_fn(
         pipeline_db,
         request.request_id,
@@ -388,11 +404,14 @@ def _ban_source_locked(
         reason,
         hashes,
     ) if hashes else 0
+    effect_receipt.hashes_recorded = hashes_recorded
+    effect_receipt.hash_capture_errors = tuple(hash_failures)
     cancellation_token.raise_if_cancelled()
     if not pipeline_db._probe_owner_session(owner_session_identity).live:
         raise AdvisoryLockSessionLost("Ban Source lost owner session after hash capture")
     if reported_username:
         pipeline_db.add_denylist(request.request_id, reported_username, reason)
+    effect_receipt.username = reported_username
 
     cleanup_errors: tuple[BanSourceCleanupFailure, ...] = ()
     beets_removed = False
@@ -504,6 +523,7 @@ def ban_source(
     # IMPORT is always outer when both namespaces are held.
     # See docs/advisory-locks.md.
     token = CancellationToken()
+    effect_receipt = _BanSourceEffectReceipt()
     try:
         with (
             pipeline_db._pin_owner_session(token) as owner_session_identity,
@@ -550,8 +570,24 @@ def ban_source(
                     beets_delete_fn=beets_delete_fn or run_beets_delete,
                     cancellation_token=token,
                     owner_session_identity=owner_session_identity,
+                    effect_receipt=effect_receipt,
                 )
     except (AdvisoryLockSessionLost, OwnerSessionLost, ExecutionCancelled):
+        if effect_receipt.started:
+            return BanSourceCleanupIncomplete(
+                request_id=request.request_id,
+                release_id=effect_receipt.release_id,
+                request_status=effect_receipt.request_status,
+                username=effect_receipt.username,
+                beets_removed=False,
+                hashes_recorded=effect_receipt.hashes_recorded,
+                cleanup_errors=(BanSourceCleanupFailure(
+                    selector="owner-session",
+                    reason="subprocess_error",
+                    detail="authority was lost after Bad Rip effects began; retry cleanup",
+                ),),
+                hash_capture_errors=effect_receipt.hash_capture_errors,
+            )
         return BanSourceLockContended(request.request_id, "request")
 
 
@@ -660,6 +696,16 @@ class DeleteIncomplete:
     deleted_artifacts: int | None
     remaining_owned_paths: tuple[str, ...]
     preserved_paths: tuple[str, ...]
+
+
+@dataclass
+class _DeleteEffectReceipt:
+    """Records whether a library mutation may have crossed its boundary."""
+
+    started: bool = False
+    preflight_detail: dict[str, object] | None = None
+    former_album_path: str = ""
+    pipeline_row: Mapping[str, object] | None = None
 
 
 type DeleteResult = (
@@ -800,6 +846,7 @@ def _delete_under_release_lock(
     beets_delete_fn: BeetsDeleteFn,
     cancellation_token: CancellationToken,
     owner_session_identity: OwnerSessionIdentity,
+    effect_receipt: _DeleteEffectReceipt,
 ) -> DeleteResult:
     cancellation_token.raise_if_cancelled()
     current_pipeline = (
@@ -875,6 +922,10 @@ def _delete_under_release_lock(
     # seams remain synchronous pure outcomes, but still observe cancellation
     # before and after their effect.
     try:
+        effect_receipt.started = True
+        effect_receipt.preflight_detail = preflight_detail
+        effect_receipt.former_album_path = current_beets.album_path
+        effect_receipt.pipeline_row = current_pipeline
         if beets_delete_fn is run_beets_delete:
             beets_outcome = run_beets_delete(
                 delete_request,
@@ -1001,6 +1052,7 @@ def _delete_with_release_lock(
     beets_delete_fn: BeetsDeleteFn,
     cancellation_token: CancellationToken,
     owner_session_identity: OwnerSessionIdentity,
+    effect_receipt: _DeleteEffectReceipt,
 ) -> DeleteResult:
     # A request may be filed under its canonical survivor while retaining its
     # acquisition identity.  Purging that request removes *both* inverse
@@ -1025,6 +1077,7 @@ def _delete_with_release_lock(
             beets_delete_fn=beets_delete_fn,
             cancellation_token=cancellation_token,
             owner_session_identity=owner_session_identity,
+            effect_receipt=effect_receipt,
         )
 
 
@@ -1046,6 +1099,72 @@ def _notify_completed_delete(
     return result
 
 
+def _purge_confirmed_missing_pipeline_request(
+    *,
+    pipeline_db: SupportsDestructivePipelineDB,
+    beets_db: SupportsDestructiveBeetsDB,
+    request: DeleteRequest,
+    token: CancellationToken,
+) -> DeleteResult:
+    """Finish an exact pipeline purge after a prior delete lost its ack.
+
+    This is deliberately narrower than ordinary library deletion: the caller
+    supplies both immutable identities, Beets is re-read as absent while the
+    same IMPORT/RELEASE authority is held, and no Beets child is launched.
+    """
+    if request.expected_pipeline_id is None or request.expected_release_id is None:
+        return DeleteAlbumNotFound(request.album_id)
+    pipeline_row = pipeline_db.get_request(request.expected_pipeline_id)
+    identity = _request_identity(pipeline_row) if pipeline_row is not None else None
+    if not _delete_confirmations_match(request, identity, pipeline_row):
+        return _delete_mismatch(request, identity, pipeline_row)
+    assert pipeline_row is not None
+    assert identity is not None
+    with pipeline_db._pin_owner_session(token), pipeline_db.advisory_lock(
+        ADVISORY_LOCK_NAMESPACE_IMPORT, request.expected_pipeline_id,
+    ) as import_acquired:
+        if not import_acquired:
+            return DeleteLockContended(request.album_id, "request")
+        with release_identity_locks(
+            pipeline_db, acceptable_identities(pipeline_row),
+        ) as release_locks:
+            if not release_locks.acquired:
+                return DeleteLockContended(request.album_id, "release")
+            current = pipeline_db.get_request(request.expected_pipeline_id)
+            current_identity = _request_identity(current) if current is not None else None
+            if not _delete_confirmations_match(request, current_identity, current):
+                return _delete_mismatch(request, current_identity, current)
+            assert current is not None
+            if beets_db.get_album_detail(request.album_id) is not None:
+                return DeleteAlbumAuthorityMismatch(
+                    album_id=request.album_id,
+                    authoritative_album_id=request.album_id,
+                    release_id=identity.release_id,
+                )
+            if not pipeline_db.delete_request(request.expected_pipeline_id):
+                return DeletePipelinePurgeFailure(
+                    album_id=request.album_id,
+                    pipeline_request_id=request.expected_pipeline_id,
+                    album_name=str(current.get("album_title") or ""),
+                    artist_name=str(current.get("artist_name") or ""),
+                    former_album_path="",
+                    deleted_files=0,
+                    deleted_artifacts=0,
+                    preserved_paths=(),
+                )
+            return DeleteSuccess(
+                album_id=request.album_id,
+                album_name=str(current.get("album_title") or ""),
+                artist_name=str(current.get("artist_name") or ""),
+                former_album_path="",
+                deleted_files=0,
+                deleted_artifacts=0,
+                pipeline_deleted=True,
+                deleted_pipeline_id=request.expected_pipeline_id,
+                preserved_paths=(),
+            )
+
+
 def delete_release_from_library(
     *,
     pipeline_db: SupportsDestructivePipelineDB,
@@ -1054,6 +1173,7 @@ def delete_release_from_library(
     beets_delete_fn: BeetsDeleteFn | None = None,
     notify_fn: DeleteNotifyFn | None = None,
 ) -> DeleteResult:
+    effect_receipt = _DeleteEffectReceipt()
     try:
         return _delete_release_from_library(
             pipeline_db=pipeline_db,
@@ -1061,8 +1181,26 @@ def delete_release_from_library(
             request=request,
             beets_delete_fn=beets_delete_fn,
             notify_fn=notify_fn,
+            effect_receipt=effect_receipt,
         )
-    except (AdvisoryLockSessionLost, OwnerSessionLost):
+    except (AdvisoryLockSessionLost, OwnerSessionLost, ExecutionCancelled) as exc:
+        if effect_receipt.started and effect_receipt.preflight_detail is not None:
+            return _delete_incomplete(
+                album_id=request.album_id,
+                preflight_detail=effect_receipt.preflight_detail,
+                former_album_path=effect_receipt.former_album_path,
+                pipeline_row=effect_receipt.pipeline_row,
+                reason="subprocess_error",
+                detail=(
+                    "Beets acknowledgement lost after launch: "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                album_still_present=True,
+                deleted_files=None,
+                deleted_artifacts=None,
+                remaining_owned_paths=(),
+                preserved_paths=(),
+            )
         # The server released any IMPORT/RELEASE locks with the dead session.
         # No statement may replay on a new backend as though it remained held.
         return DeleteLockContended(request.album_id, "request")
@@ -1075,12 +1213,21 @@ def _delete_release_from_library(
     request: DeleteRequest,
     beets_delete_fn: BeetsDeleteFn | None = None,
     notify_fn: DeleteNotifyFn | None = None,
+    effect_receipt: _DeleteEffectReceipt | None = None,
 ) -> DeleteResult:
     """Delete the exact album identified by the server-owned beets row."""
     delete_op = beets_delete_fn or run_beets_delete
     notifier = notify_fn or _default_delete_notify
+    receipt = effect_receipt or _DeleteEffectReceipt()
     detail = beets_db.get_album_detail(request.album_id)
     if detail is None:
+        if request.purge_pipeline:
+            return _purge_confirmed_missing_pipeline_request(
+                pipeline_db=pipeline_db,
+                beets_db=beets_db,
+                request=request,
+                token=CancellationToken(),
+            )
         return DeleteAlbumNotFound(request.album_id)
     identity = _album_identity(detail)
     pipeline_row = (
@@ -1108,6 +1255,7 @@ def _delete_release_from_library(
                 beets_delete_fn=delete_op,
                 cancellation_token=token,
                 owner_session_identity=owner_session_identity,
+                effect_receipt=receipt,
             )
         return _notify_completed_delete(result, notifier)
 
@@ -1145,5 +1293,6 @@ def _delete_release_from_library(
             beets_delete_fn=delete_op,
             cancellation_token=token,
             owner_session_identity=owner_session_identity,
+            effect_receipt=receipt,
         )
     return _notify_completed_delete(result, notifier)

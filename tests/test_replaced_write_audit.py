@@ -77,7 +77,7 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "single reconnect retry forwards the same parameterless caller-owned "
         "SQL outside atomic scopes"
     ),
-    ("lib/pipeline_db/_core.py", 491, "cc41f306ff6d2fc6"): (
+    ("lib/pipeline_db/_core.py", 495, "cc41f306ff6d2fc6"): (
         "owner-session liveness probe interpolates only a positive integer "
         "statement timeout before a fixed SELECT"
     ),

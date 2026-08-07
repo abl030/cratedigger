@@ -424,11 +424,15 @@ class _CoreMixin(_PipelineDBBase):
             body_raised = sys.exc_info()[0] is not None
             try:
                 watchdog.stop()
-                # A cancelled token is already the authoritative loss
-                # receipt; its caller has observed (or is propagating) the
-                # cancellation. For a normal live scope, prove the exact
-                # captured backend is still live before reporting success.
-                if not token.cancelled:
+                # A normal body exit must not convert a cancelled execution
+                # into success.  A pre-existing body exception remains the
+                # primary diagnosis, but otherwise cancellation wins.
+                if token.cancelled:
+                    if not body_raised:
+                        raise OwnerSessionLost(
+                            "owner session execution was cancelled before scope exit"
+                        )
+                else:
                     probe = self._probe_owner_session(
                         identity, deadline_seconds=0.75,
                     )
@@ -621,6 +625,13 @@ class _CoreMixin(_PipelineDBBase):
                             raise AdvisoryLockSessionLost(
                                 "advisory-lock session was lost before unlock"
                             )
+                        if (
+                            self._owner_session_pin is not None
+                            and self._owner_session_pin.token.cancelled
+                        ):
+                            raise OwnerSessionLost(
+                                "owner session execution was cancelled before advisory unlock"
+                            )
                         with self._owner_session_io(), connection.cursor() as cur:
                             cur.execute(
                                 "SELECT pg_advisory_unlock(%s, %s)",
@@ -631,7 +642,7 @@ class _CoreMixin(_PipelineDBBase):
                             raise AdvisoryLockSessionLost(
                                 "captured advisory lock was absent at unlock"
                             )
-                    except AdvisoryLockSessionLost as exc:
+                    except (AdvisoryLockSessionLost, OwnerSessionLost) as exc:
                         lost = exc
                     except Exception as exc:  # noqa: BLE001 - typed boundary
                         lost = AdvisoryLockSessionLost(

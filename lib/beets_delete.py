@@ -25,7 +25,6 @@ from lib.import_execution import (
     CancellationToken,
     ExecutionCancelled,
     MonitoredProcessGroup,
-    ProcessGroupTerminationError,
 )
 from lib.pipeline_db._core import AdvisoryLockSessionLost
 from lib.release_identity import ReleaseIdentity
@@ -697,19 +696,8 @@ def run_beets_delete(
                         "pinned Beets delete lost destructive authority: "
                         f"{exc}"
                     ) from exc
-                except ProcessGroupTerminationError as exc:
-                    # No caller may treat an unprovenly absent destructive
-                    # process group as an ordinary child failure.
-                    raise AdvisoryLockSessionLost(
-                        "pinned Beets delete could not prove its process group absent"
-                    ) from exc
                 except Exception:
-                    try:
-                        group.terminate_and_wait()
-                    except ProcessGroupTerminationError as exc:
-                        raise AdvisoryLockSessionLost(
-                            "pinned Beets delete could not prove its process group absent"
-                        ) from exc
+                    group.terminate_and_wait()
                     raise
                 stdout_file.seek(0)
                 stderr_file.seek(0)

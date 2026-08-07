@@ -845,10 +845,6 @@ class OwnerSessionWatchdog:
         self.stop()
 
 
-class ProcessGroupTerminationError(RuntimeError):
-    """The spawned process group could not be proven absent by its deadline."""
-
-
 class MonitoredProcessGroup:
     """A ``start_new_session`` child whose entire process group is cancellable."""
 
@@ -921,18 +917,17 @@ class MonitoredProcessGroup:
                 deadline=deadline,
                 require_group_absent=True,
             ):
-                raise ProcessGroupTerminationError(
-                    "process group "
-                    f"{self._process.pid} survived termination deadline"
-                )
-            remaining = max(0.0, deadline - time.monotonic())
-            try:
-                returncode = self._process.wait(timeout=remaining)
-            except subprocess.TimeoutExpired as exc:
-                raise ProcessGroupTerminationError(
-                    "process-group leader "
-                    f"{self._process.pid} was not reaped by termination deadline"
-                ) from exc
+                # This is a destructive authority boundary, not a business
+                # retry.  Keep SIGKILLing and waiting until the *complete*
+                # session group disappears; callers may not unwind a lock
+                # while a child still holds the Beets runtime.
+                while self._group_exists():
+                    try:
+                        os.killpg(self._process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        break
+                    threading.Event().wait(0.05)
+            returncode = self._process.wait()
             self._terminated_returncode = returncode
             return returncode
 
