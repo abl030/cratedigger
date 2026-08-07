@@ -29,12 +29,19 @@ U4  A request with no stored survivor resolves byte-identically to the
 U5  A cohort costs exactly one batched query, however many identities it
     spans. The rejected design's per-read fan-out is what made it
     unaffordable.
+U6  Every switched consumer reports the state the union resolved, driven
+    through that consumer's own outermost adapter. Five consumers were
+    found unconstrained by fault injection across two review rounds; a
+    property that stops at the shared helper cannot see the revert,
+    because the revert lives inside the adapter.
 """
 
 from __future__ import annotations
 
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
@@ -54,6 +61,9 @@ from lib.request_identity import (
     resolve_current_for_requests,
 )
 from tests.beets_world import BeetsWorld, BeetsWorldRelease
+
+if TYPE_CHECKING:
+    from tests.fakes import FakePipelineDB
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -168,6 +178,34 @@ def check_one_batch(batch_count: int) -> None:
         )
 
 
+def check_consumer_state_agrees(
+    consumer: str,
+    observed: str,
+    union: CurrentBeetsResolution,
+) -> None:
+    """U6 — a switched consumer reports the state the union resolved.
+
+    ``observed`` is the consumer's own verdict normalised onto the union's
+    three states. A consumer that quietly reverted to the acquisition id
+    alone reports ``missing`` for a survivor-held album while the union
+    says ``unique`` — the live 316 shape — and this is what separates it
+    from a pin on the shared helper, which such a revert walks straight
+    past.
+    """
+    expected = (
+        "unique"
+        if isinstance(union, CurrentBeetsUnique)
+        else "missing"
+        if isinstance(union, CurrentBeetsMissing)
+        else "ambiguous"
+    )
+    if observed != expected:
+        raise AssertionError(
+            f"{consumer} reports {observed!r} while the union resolved "
+            f"{expected!r}; that consumer is not resolving over the union"
+        )
+
+
 class _CountingResolver:
     """The real resolver plus a call counter. Instrumentation, not a mock."""
 
@@ -274,10 +312,14 @@ class TestSwitchedConsumersAgreeWithTheUnion(unittest.TestCase):
 
     The pins in ``tests/test_request_identity.py`` prove the live 316 shape
     through each real consumer; this patrols the world space around them.
-    Independent review (2026-08-06) found the evidence build, long-tail
-    banding and the world audit each unconstrained — the union could be
-    deleted from all three and the complete suite stayed green — so the
-    property drives the REAL consumers, not the shared helper they call.
+    Independent review found five consumers unconstrained in two rounds —
+    the evidence build, long-tail banding and the world audit (2026-08-06),
+    then automation recovery evidence and the post-import evidence refresh
+    (2026-08-07). Each could have its union deleted with the complete suite
+    still green. So every property here drives the REAL consumer's outermost
+    adapter, never the shared helper it calls: a revert to
+    ``resolve_current_release`` lives inside that adapter and a property
+    stopping at ``resolve_current_for_request`` walks straight past it.
     """
 
     world: BeetsWorld
@@ -348,6 +390,122 @@ class TestSwitchedConsumersAgreeWithTheUnion(unittest.TestCase):
                 f"canonical={canonical}"
             )
 
+    def _merged_request(
+        self, db: FakePipelineDB, acquired: str, canonical: str | None,
+    ) -> tuple[int, dict[str, object]]:
+        """Seed one request in the generated merge state, and its row."""
+        request_id = db.add_request(
+            artist_name="Merged Artist",
+            album_title="Merged Album",
+            source="request",
+            mb_release_id=acquired,
+        )
+        if canonical is not None:
+            db.record_canonical_release_id(
+                request_id,
+                canonical_release_id=canonical,
+                resolved_at=datetime(2026, 8, 6, tzinfo=UTC),
+            )
+        return request_id, {
+            "id": request_id,
+            "mb_release_id": acquired,
+            "discogs_release_id": None,
+            "canonical_release_id": canonical,
+        }
+
+    @settings(deadline=None, max_examples=25)
+    @given(
+        acquired=st.sampled_from([*HELD, *UNHELD]),
+        canonical=st.one_of(st.none(), st.sampled_from([*HELD, *UNHELD])),
+    )
+    @example(acquired=LOSER, canonical=SURVIVOR)   # the live 316 shape
+    @example(acquired=SURVIVOR, canonical=None)    # unmerged control
+    def test_recovery_evidence_agrees_with_the_union(
+        self, acquired: str, canonical: str | None,
+    ) -> None:
+        """``exact_library`` reports what the union resolved.
+
+        Driven through the REAL ``get_automation_recovery_detail`` over a
+        real automation owner: the union call is in a private helper, so
+        this is the outermost adapter an operator's triage read actually
+        goes through.
+        """
+        from lib.import_job_recovery_service import (
+            get_automation_recovery_detail,
+        )
+        from tests.fakes import FakePipelineDB
+        from tests.helpers import handoff_automation_owner
+
+        if canonical == acquired:
+            canonical = None
+        db = FakePipelineDB()
+        request_id, row = self._merged_request(db, acquired, canonical)
+        job = handoff_automation_owner(db, request_id)
+
+        with open_beets_db(
+            db_path=str(self.world.library_db),
+            library_root=str(self.world.library_root),
+        ) as beets:
+            union = resolve_current_for_requests(beets, [row])[request_id]
+            result = get_automation_recovery_detail(db, beets, job.id)
+
+        assert result.detail is not None
+        check_consumer_state_agrees(
+            "automation recovery evidence",
+            result.detail.exact_library.status,
+            union,
+        )
+
+    @settings(deadline=None, max_examples=25)
+    @given(
+        acquired=st.sampled_from([*HELD, *UNHELD]),
+        canonical=st.one_of(st.none(), st.sampled_from([*HELD, *UNHELD])),
+    )
+    @example(acquired=LOSER, canonical=SURVIVOR)   # the live 316 shape
+    @example(acquired=SURVIVOR, canonical=None)    # unmerged control
+    def test_post_import_evidence_refresh_agrees_with_the_union(
+        self, acquired: str, canonical: str | None,
+    ) -> None:
+        """The post-import writer finds an album exactly when the union does.
+
+        Only the three-way resolution fork is compared. ``empty_current``
+        and ``ambiguous_current`` are the refresh's own words for the two
+        non-unique branches; every other status it can return is downstream
+        of a resolved album (missing bitrate metadata, propagation, the
+        exact-linked-row check) and so is folded into ``unique``.
+        """
+        from lib.dispatch import _refresh_current_evidence_after_import
+        from lib.quality import QualityRankConfig
+        from tests.fakes import FakePipelineDB
+
+        if canonical == acquired:
+            canonical = None
+        db = FakePipelineDB()
+        request_id, row = self._merged_request(db, acquired, canonical)
+
+        with open_beets_db(
+            db_path=str(self.world.library_db),
+            library_root=str(self.world.library_root),
+        ) as beets:
+            union = resolve_current_for_requests(beets, [row])[request_id]
+
+        result = _refresh_current_evidence_after_import(
+            db,
+            request_id=request_id,
+            mb_release_id=acquired,
+            quality_ranks=QualityRankConfig.defaults(),
+            beets_library_db_path=str(self.world.library_db),
+            beets_library_root=str(self.world.library_root),
+        )
+
+        observed = (
+            "missing" if result.status == "empty_current"
+            else "ambiguous" if result.status == "ambiguous_current"
+            else "unique"
+        )
+        check_consumer_state_agrees(
+            "the post-import evidence refresh", observed, union)
+
 
 class TestInvariantCheckersTripOnViolations(unittest.TestCase):
     """Every checker owes a planted violation proving it can fail."""
@@ -401,6 +559,29 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         with self.assertRaises(AssertionError):
             check_one_batch(2)
 
+    def test_a_consumer_calling_a_held_album_missing_is_rejected(self) -> None:
+        """The exact shape of both surviving mutants: the union found the
+        survivor's album, the consumer reverted to the acquisition id and
+        told the operator nothing is installed."""
+        with self.assertRaises(AssertionError):
+            check_consumer_state_agrees(
+                "a reverted consumer",
+                "missing",
+                _unique(self.acquisition, 19345),
+            )
+
+    def test_a_consumer_hiding_a_split_is_rejected(self) -> None:
+        with self.assertRaises(AssertionError):
+            check_consumer_state_agrees(
+                "a reverted consumer",
+                "unique",
+                CurrentBeetsAmbiguous(
+                    identity=self.acquisition,
+                    album_ids=(11541, 19345),
+                    reason="merged_identity_split",
+                ),
+            )
+
     def test_checkers_accept_the_legitimate_worlds(self) -> None:
         """Must-still-work: the real merge passes every checker."""
         held = _unique(self.acquisition, 19345)
@@ -411,6 +592,12 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             held, {self.canonical: 19345}, (self.canonical, self.acquisition))
         check_unmerged_is_inert(held, held)
         check_one_batch(1)
+        check_consumer_state_agrees("a switched consumer", "unique", held)
+        check_consumer_state_agrees(
+            "a switched consumer",
+            "missing",
+            CurrentBeetsMissing(identity=self.acquisition),
+        )
 
 
 def _identity(release_id: str) -> ReleaseIdentity:

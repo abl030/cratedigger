@@ -496,6 +496,93 @@ class TestEveryUnionConsumerIsPinnedOverAMergedWorld(unittest.TestCase):
             "must not be reported missing",
         )
 
+    def test_recovery_detail_reports_the_album_a_merged_request_holds(
+        self,
+    ) -> None:
+        """Mutant killed: reverting ``_library_observation`` to
+        ``beets.resolve_current_release(identity)``.
+
+        Drives the REAL ``get_automation_recovery_detail`` entry point over a
+        real automation owner, because the union call lives in a private
+        helper that a pin on ``resolve_current_for_request`` walks straight
+        past. ``exact_library`` is the fact an operator triages a stuck job
+        on — "is the album on disk?" — and after a merge + ``mbsync`` retag
+        it is, under the survivor.
+        """
+        from lib.import_job_recovery_service import (
+            get_automation_recovery_detail,
+        )
+        from tests.fakes import FakePipelineDB
+        from tests.helpers import handoff_automation_owner
+
+        world = self._world_holding_survivor()
+        db = FakePipelineDB()
+        request_id = db.add_request(
+            artist_name="Merged Artist", album_title="Merged Album",
+            source="request", mb_release_id=LOSER,
+        )
+        db.record_canonical_release_id(
+            request_id,
+            canonical_release_id=SURVIVOR,
+            resolved_at=datetime(2026, 8, 6, tzinfo=UTC),
+        )
+        job = handoff_automation_owner(db, request_id)
+
+        with open_beets_db(
+            db_path=str(world.library_db),
+            library_root=str(world.library_root),
+        ) as beets:
+            result = get_automation_recovery_detail(db, beets, job.id)
+
+        assert result.detail is not None
+        self.assertEqual(
+            result.detail.exact_library.status, "unique",
+            "recovery evidence must report the album Beets actually holds; "
+            "'missing' invites the operator to re-acquire a release that is "
+            "already installed under the survivor",
+        )
+
+    def test_post_import_evidence_refresh_finds_a_merged_album(self) -> None:
+        """Mutant killed: reverting the refresh to
+        ``beets.resolve_current_release(identity)``.
+
+        Drives the REAL ``_refresh_current_evidence_after_import`` — the
+        post-import writer ``lib/dispatch/core.py`` calls — rather than the
+        shared helper. ``empty_current`` here means the just-imported album
+        gets no library evidence row at all, so the next candidate for this
+        release is compared against nothing.
+        """
+        from lib.dispatch import _refresh_current_evidence_after_import
+        from lib.quality import QualityRankConfig
+        from tests.fakes import FakePipelineDB
+
+        world = self._world_holding_survivor()
+        db = FakePipelineDB()
+        request_id = db.add_request(
+            artist_name="Merged Artist", album_title="Merged Album",
+            source="request", mb_release_id=LOSER,
+        )
+        db.record_canonical_release_id(
+            request_id,
+            canonical_release_id=SURVIVOR,
+            resolved_at=datetime(2026, 8, 6, tzinfo=UTC),
+        )
+
+        result = _refresh_current_evidence_after_import(
+            db,
+            request_id=request_id,
+            mb_release_id=LOSER,
+            quality_ranks=QualityRankConfig.defaults(),
+            beets_library_db_path=str(world.library_db),
+            beets_library_root=str(world.library_root),
+        )
+
+        self.assertNotEqual(
+            result.status, "empty_current",
+            "the post-import refresh must resolve the album Beets holds "
+            "under the survivor, or the import leaves no current evidence",
+        )
+
 
 class TestOperatorActionsResolveOverTheUnion(unittest.TestCase):
     """The destructive services, over the live 316 shape.
