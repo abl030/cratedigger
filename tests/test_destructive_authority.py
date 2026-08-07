@@ -1153,12 +1153,7 @@ class TestMergedAlbumIsActuallyRemovable(unittest.TestCase):
     LOSER = "4878ee47-f8b8-45c8-832c-62de3bccfa6e"
     SURVIVOR = "7aabf975-9a06-4b2e-854c-2c700380ebd5"
 
-    def _world_and_db(
-        self,
-        *,
-        canonical: str | None,
-        filed_release_id: str | None = None,
-    ):
+    def _world_and_db(self, *, canonical: str | None):
         from tests.beets_world import BeetsWorld, BeetsWorldRelease
         from tests.fakes import FakePipelineDB
 
@@ -1168,7 +1163,7 @@ class TestMergedAlbumIsActuallyRemovable(unittest.TestCase):
         world = BeetsWorld(repo, subprocess_mirror_url="http://127.0.0.1:9")
         self.addCleanup(world.close)
         album = world.import_release(BeetsWorldRelease(
-            release_id=filed_release_id or self.SURVIVOR,
+            release_id=self.SURVIVOR,
             artist="Merged Artist",
             album="Merged Album",
             year=1996,
@@ -1211,32 +1206,6 @@ class TestMergedAlbumIsActuallyRemovable(unittest.TestCase):
             )
         return result, captured
 
-    def _run_library_delete(self, world, db, request_id, album, filed_release_id):
-        captured: list[BeetsDeleteRequest] = []
-
-        def delete_fn(request: BeetsDeleteRequest):
-            captured.append(request)
-            return run_beets_delete(request)
-
-        with (
-            world.subprocess_environment(),
-            BeetsDB(
-                str(world.library_db), library_root=str(world.library_root),
-            ) as beets,
-        ):
-            result = delete_release_from_library(
-                pipeline_db=db,
-                beets_db=beets,
-                request=DeleteRequest(
-                    album_id=album.album_id,
-                    expected_pipeline_id=request_id,
-                    expected_release_id=filed_release_id,
-                ),
-                beets_delete_fn=delete_fn,
-                notify_fn=lambda _path: (),
-            )
-        return result, captured
-
     def test_bad_rip_removes_an_album_filed_under_the_survivor(self) -> None:
         world, db, request_id, album = self._world_and_db(
             canonical=self.SURVIVOR)
@@ -1270,81 +1239,6 @@ class TestMergedAlbumIsActuallyRemovable(unittest.TestCase):
         self.assertIsInstance(result, BanSourceSuccess)
         assert isinstance(result, BanSourceSuccess)
         self.assertFalse(result.beets_removed)
-
-    def test_library_delete_uses_the_known_request_union_and_filed_identity(self) -> None:
-        """Known-request library deletes reach either physical union side."""
-        for filed_release_id in (self.LOSER, self.SURVIVOR):
-            with self.subTest(filed_release_id=filed_release_id):
-                world, db, request_id, album = self._world_and_db(
-                    canonical=self.SURVIVOR,
-                    filed_release_id=filed_release_id,
-                )
-
-                result, captured = self._run_library_delete(
-                    world, db, request_id, album, filed_release_id,
-                )
-
-                self.assertIsInstance(result, DeleteSuccess)
-                self.assertEqual(
-                    [request.expected_release_id for request in captured],
-                    [filed_release_id],
-                    "the pinned child must receive the Beets-filed identity, "
-                    "not the acquisition id",
-                )
-                self.assertEqual(db.request(request_id)["status"], "imported")
-                with BeetsDB(
-                    str(world.library_db), library_root=str(world.library_root),
-                ) as beets:
-                    self.assertIsNone(beets.get_album_detail(album.album_id))
-
-    def test_library_delete_refuses_a_split_request_union_without_mutation(self) -> None:
-        """Two filed pressings behind one request are never silently picked."""
-        world = BeetsWorld(REPO, subprocess_mirror_url="http://127.0.0.1:9")
-        self.addCleanup(world.close)
-        loser = world.import_release(BeetsWorldRelease(
-            release_id=self.LOSER, artist="Merged Artist", album="Loser", year=1996,
-        ))
-        survivor = world.import_release(BeetsWorldRelease(
-            release_id=self.SURVIVOR, artist="Merged Artist", album="Survivor", year=1996,
-        ))
-        db = FakePipelineDB()
-        request_id = db.add_request(
-            artist_name="Merged Artist", album_title="Loser",
-            source="request", mb_release_id=self.LOSER,
-        )
-        db.update_status(request_id, "imported")
-        from datetime import UTC, datetime
-
-        db.record_canonical_release_id(
-            request_id,
-            canonical_release_id=self.SURVIVOR,
-            resolved_at=datetime(2026, 8, 6, tzinfo=UTC),
-        )
-        captured: list[BeetsDeleteRequest] = []
-
-        with BeetsDB(
-            str(world.library_db), library_root=str(world.library_root),
-        ) as beets:
-            result = delete_release_from_library(
-                pipeline_db=db,
-                beets_db=beets,
-                request=DeleteRequest(
-                    album_id=loser.album_id,
-                    expected_pipeline_id=request_id,
-                    expected_release_id=self.LOSER,
-                ),
-                beets_delete_fn=lambda request: captured.append(request) or run_beets_delete(request),
-                notify_fn=lambda _path: (),
-            )
-
-        self.assertIsInstance(result, DeleteBeetsAmbiguous)
-        self.assertEqual(captured, [])
-        self.assertEqual(db.request(request_id)["status"], "imported")
-        with BeetsDB(
-            str(world.library_db), library_root=str(world.library_root),
-        ) as beets:
-            self.assertIsNotNone(beets.get_album_detail(loser.album_id))
-            self.assertIsNotNone(beets.get_album_detail(survivor.album_id))
 
 
 if __name__ == "__main__":

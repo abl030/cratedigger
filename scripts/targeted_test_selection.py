@@ -120,7 +120,7 @@ def _changed_path_neighbours(
     path = PurePosixPath(relative_path)
     neighbours: list[str] = list(EXACT_PATH_NEIGHBOURS.get(relative_path, ()))
     module = _path_module(path)
-    if module is not None and path.name.startswith("test_"):
+    if module is not None and module.startswith("tests."):
         neighbours.append(module)
     for candidate in _direct_test_candidates(path):
         if _existing_module(candidate, repo_root) is not None:

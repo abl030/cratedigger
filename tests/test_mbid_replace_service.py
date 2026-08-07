@@ -10,7 +10,6 @@ from __future__ import annotations
 import os
 import sys
 import unittest
-from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
@@ -28,7 +27,6 @@ from lib.beets_db import BeetsDB, CurrentBeetsMissing
 from lib.beets_delete import (
     BeetsDeleteCompleted,
     BeetsDeleteFailed,
-    BeetsDeleteOutcome,
     BeetsDeleteRequest,
     run_beets_delete,
 )
@@ -36,7 +34,6 @@ from lib.config import CratediggerConfig
 from lib.mbid_replace_service import (
     REPLACE_REASON_CROSS_PATHWAY_TARGET,
     REPLACE_REASON_CURRENT_BEETS_AMBIGUOUS,
-    REPLACE_REASON_CURRENT_BEETS_UNAVAILABLE,
     REPLACE_REASON_SOURCE_IDENTITY_INVALID,
     REPLACE_REASON_SOURCE_NO_RELEASE_GROUP,
     REPLACE_REASON_TARGET_NO_RELEASE_GROUP,
@@ -236,7 +233,6 @@ class _ServiceCase(unittest.TestCase):
         search_plan_service=None,
         beets_db_factory=None,
         beets_delete_fn=None,
-        wrong_match_delete_fn=None,
         cfg: CratediggerConfig | None = None,
     ) -> MbidReplaceService:
         if mb_lookup is None:
@@ -258,7 +254,6 @@ class _ServiceCase(unittest.TestCase):
             discogs_lookup=discogs_lookup,
             search_plan_service=search_plan_service,
             beets_delete_fn=beets_delete_fn,
-            wrong_match_delete_fn=wrong_match_delete_fn,
         )
 
     def _installed_beets(
@@ -402,85 +397,6 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
         self.assertEqual(result.reason, REPLACE_REASON_CURRENT_BEETS_AMBIGUOUS)
         self.assertEqual(db.request(42), before)
         self.assertEqual(delete_calls, [])
-
-    def test_omitted_current_beets_union_refuses_before_any_action(self):
-        """A resolver omission is unavailable authority, never absence."""
-        class OmittedUnionBeets(FakeBeetsDB):
-            def resolve_current_releases(self, identities):
-                del identities
-                return {}
-
-        db = FakePipelineDB()
-        self._seed_old(db, status="wanted")
-        def snapshot() -> dict[str, object]:
-            """All persisted/action surfaces a failed Replace could mutate."""
-            keys = (
-                "_requests", "_tracks", "download_logs", "_import_jobs",
-                "_processing_cleanup_journals", "search_logs", "cycle_metrics",
-                "peer_observations", "user_cooldowns", "_search_ledger",
-                "_transfer_ledger", "denylist", "bad_audio_hashes",
-                "persist_import_terminal_outcome_calls",
-                "persist_preview_terminal_outcome_calls",
-                "clear_on_disk_quality_fields_calls", "update_request_fields_calls",
-                "record_artist_probe_calls", "set_unfindable_category_calls",
-                "record_canonical_release_id_calls",
-                "record_consumed_search_attempt_calls",
-                "record_non_consuming_search_attempt_calls",
-                "album_quality_evidence", "_evidence_by_id", "cooldowns_applied",
-                "field_resolutions", "recorded_attempts", "status_history",
-                "update_download_state_calls", "search_plans", "search_plan_items",
-                "plex_added_at_pins", "jellyfin_date_created_pins",
-                "_youtube_album_mappings", "_next_request_id",
-                "_next_download_log_id", "_next_import_job_id",
-                "_next_search_log_id", "_next_evidence_id",
-                "_next_bad_audio_hash_id", "_next_field_resolution_id",
-                "_next_search_plan_id", "_next_search_plan_item_id",
-                "_next_plex_pin_id", "_next_jellyfin_pin_id",
-                "_next_youtube_mapping_id", "_transfer_ledger_next_id",
-            )
-            return {key: deepcopy(getattr(db, key)) for key in keys}
-
-        before = snapshot()
-        beets = OmittedUnionBeets()
-        delete = MagicMock(side_effect=AssertionError("delete reached"))
-        cleanup = MagicMock(side_effect=AssertionError("cleanup reached"))
-        plan = MagicMock()
-        supersede = MagicMock(side_effect=AssertionError("supersede reached"))
-
-        with patch.object(
-            db,
-            "supersede_request_mbid",
-            supersede,
-        ), patch(
-            "lib.mbid_replace_service.trigger_plex_scan",
-        ) as plex, patch(
-            "lib.mbid_replace_service.trigger_jellyfin_scan",
-        ) as jellyfin:
-            result = self._make_service(
-                db,
-                beets_db_factory=lambda: beets,
-                search_plan_service=plan,
-                beets_delete_fn=delete,
-                wrong_match_delete_fn=cleanup,
-            ).replace_request_mbid(
-                42,
-                target_mb_release_id=NEW_MBID,
-            )
-
-        after = snapshot()
-        # Advisory-lock acquisition is the intentional read-only boundary;
-        # every persisted/action surface must remain byte-for-byte unchanged.
-        self.assertEqual(after, before)
-        self.assertEqual(result.outcome, RESULT_WRONG_STATE)
-        self.assertEqual(result.reason, REPLACE_REASON_CURRENT_BEETS_UNAVAILABLE)
-        self.assertEqual(db.request(42)["status"], "wanted")
-        self.assertEqual(beets.close_calls, 1)
-        delete.assert_not_called()
-        cleanup.assert_not_called()
-        plan.generate_for_request.assert_not_called()
-        supersede.assert_not_called()
-        plex.assert_not_called()
-        jellyfin.assert_not_called()
 
     def test_conflicting_source_identities_are_typed_zero_mutation(self):
         db = FakePipelineDB()
@@ -1857,68 +1773,6 @@ class TestReplaceCallOrder(_ServiceCase):
 
 
 class TestReplaceCurrentAuthorityRealBeets(_ServiceCase):
-    def test_survivor_filed_cleanup_sends_the_child_its_filed_identity(self):
-        """A merged request replaces its filed survivor, never its loser id."""
-        survivor = "7aabf975-9a06-4b2e-854c-2c700380ebd5"
-        with BeetsWorld(REPO, subprocess_mirror_url="http://127.0.0.1:9") as world:
-            album = world.import_release(BeetsWorldRelease(
-                release_id=survivor,
-                artist="Merged Artist",
-                album="Merged Source",
-                year=1996,
-            ))
-            db = FakePipelineDB()
-            self._seed_old(db, status="imported")
-            from datetime import UTC, datetime
-
-            db.record_canonical_release_id(
-                42,
-                canonical_release_id=survivor,
-                resolved_at=datetime(2026, 8, 6, tzinfo=UTC),
-            )
-            captured: list[BeetsDeleteRequest] = []
-
-            def delete_fn(request: BeetsDeleteRequest) -> BeetsDeleteOutcome:
-                captured.append(request)
-                return run_beets_delete(request)
-
-            with world.subprocess_environment(), patch(
-                "lib.mbid_replace_service.trigger_plex_scan",
-            ), patch("lib.mbid_replace_service.trigger_jellyfin_scan"):
-                service = self._make_service(
-                    db,
-                    search_plan_service=MagicMock(),
-                    beets_db_factory=lambda: BeetsDB(
-                        str(world.library_db),
-                        library_root=str(world.library_root),
-                    ),
-                    mb_lookup=lambda _rid, *, fresh=False: _fake_target_payload(),
-                    beets_delete_fn=delete_fn,
-                    wrong_match_delete_fn=_empty_wrong_match_summary,
-                )
-                result = service.replace_request_mbid(
-                    42, target_mb_release_id=NEW_MBID,
-                )
-
-            self.assertEqual(result.outcome, RESULT_REPLACED)
-            self.assertEqual([call.album_id for call in captured], [album.album_id])
-            self.assertEqual(
-                [call.expected_release_id for call in captured], [survivor],
-                "the acquisition-id mutant leaves the survivor filed in Beets",
-            )
-            old = db.get_request(42)
-            assert old is not None
-            self.assertEqual(old["status"], "replaced")
-            assert result.new_request_id is not None
-            new = db.get_request(result.new_request_id)
-            assert new is not None
-            self.assertEqual(new["status"], "wanted")
-            self.assertEqual(new["replaces_request_id"], 42)
-            with BeetsDB(
-                str(world.library_db), library_root=str(world.library_root),
-            ) as beets:
-                self.assertIsNone(beets.get_album_detail(album.album_id))
-
     def test_moved_real_album_exact_delete_and_rescans_across_identities(self):
         worlds = (
             ("mb", OLD_MBID, NEW_MBID, RG_ID, False),

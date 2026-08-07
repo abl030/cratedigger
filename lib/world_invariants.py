@@ -239,19 +239,13 @@ def assert_replaced_row_frozen(
 
 def check_status_membership(
     requests: Sequence[RequestMembershipSnapshot],
-    resolutions: Mapping[int, CurrentBeetsResolution],
+    resolutions: Mapping[str, CurrentBeetsResolution],
 ) -> tuple[WorldViolation, ...]:
-    """Require shared typed authority for every installed exact pressing.
-
-    ``resolutions`` stays keyed by request id. Release ids are evidence on the
-    membership row, not a join key: active requests may deliberately share an
-    acquisition identity, and one request's union answer must never overwrite
-    another's.
-    """
+    """Require shared typed authority for every installed exact pressing."""
 
     violations: list[WorldViolation] = []
     for request in requests:
-        resolution = resolutions.get(request.request_id)
+        resolution = resolutions.get(request.release_id)
         if resolution is None:
             violations.append(WorldViolation(
                 code="current_beets_authority_unavailable",

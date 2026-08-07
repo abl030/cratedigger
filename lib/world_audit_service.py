@@ -325,6 +325,11 @@ def audit_world(
         beets_db,
         [row for row, _request_id, _identity in identified_requests],
     )
+    resolutions_by_release_id = {
+        identity.release_id: resolutions[request_id]
+        for _row, request_id, identity in identified_requests
+        if request_id in resolutions
+    }
 
     for row, request_id, identity in identified_requests:
         release_id = identity.release_id
@@ -336,10 +341,10 @@ def audit_world(
 
         resolution = resolutions.get(request_id)
         if resolution is None:
-            # The resolver omitted this requested row. Its request-id keyed
-            # entry is absent, so check_status_membership reports
-            # current_beets_authority_unavailable — an authority failure,
-            # never an absence claim.
+            # The resolver omitted a requested identity. ``resolutions_by_
+            # release_id`` has no entry either, so check_status_membership
+            # reports current_beets_authority_unavailable — an authority
+            # failure, never an absence claim.
             continue
         if isinstance(resolution, CurrentBeetsAmbiguous):
             continue
@@ -405,7 +410,7 @@ def audit_world(
     violations.extend(check_library_filesystem(albums))
     violations.extend(check_status_membership(
         memberships,
-        resolutions,
+        resolutions_by_release_id,
     ))
     violations.extend(
         violation

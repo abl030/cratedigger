@@ -47,7 +47,7 @@ from lib.pipeline_db import (
 )
 from lib.quality import resolve_user_requeue_override
 from lib.release_identity import ReleaseIdentity
-from lib.request_identity import acceptable_identities, resolve_current_for_request
+from lib.request_identity import resolve_current_for_request
 
 log = logging.getLogger("cratedigger")
 
@@ -655,17 +655,11 @@ def _delete_confirmations_match(
 ) -> bool:
     if identity is None or not _identity_matches(request.expected_release_id, identity):
         return False
-    if (
-        pipeline_row is not None
-        and identity not in acceptable_identities(pipeline_row)
-    ):
-        return False
     if request.expected_pipeline_id is None:
         return True
-    return (
-        pipeline_row is not None
-        and int(pipeline_row["id"]) == request.expected_pipeline_id
-    )
+    if pipeline_row is None or int(pipeline_row["id"]) != request.expected_pipeline_id:
+        return False
+    return _request_identity(pipeline_row) == identity
 
 
 def _incomplete_delete_detail(
@@ -745,11 +739,7 @@ def _delete_under_release_lock(
     preflight_detail: dict[str, object],
     beets_delete_fn: BeetsDeleteFn,
 ) -> DeleteResult:
-    current_pipeline = (
-        pipeline_db.get_request(int(pipeline_row["id"]))
-        if pipeline_row is not None
-        else pipeline_db.get_request_by_release_id(identity.release_id)
-    )
+    current_pipeline = pipeline_db.get_request_by_release_id(identity.release_id)
     if not _delete_confirmations_match(
         request, identity, current_pipeline,
     ):
@@ -955,12 +945,8 @@ def delete_release_from_library(
         return DeleteAlbumNotFound(request.album_id)
     identity = _album_identity(detail)
     pipeline_row = (
-        pipeline_db.get_request(request.expected_pipeline_id)
-        if request.expected_pipeline_id is not None
-        else (
-            pipeline_db.get_request_by_release_id(identity.release_id)
-            if identity is not None else None
-        )
+        pipeline_db.get_request_by_release_id(identity.release_id)
+        if identity is not None else None
     )
     if not _delete_confirmations_match(request, identity, pipeline_row):
         return _delete_mismatch(request, identity, pipeline_row)
@@ -988,6 +974,7 @@ def delete_release_from_library(
         current_pipeline = pipeline_db.get_request(request_id)
         if (
             current_pipeline is None
+            or _request_identity(current_pipeline) != identity
             or not _delete_confirmations_match(
                 request, identity, current_pipeline,
             )
