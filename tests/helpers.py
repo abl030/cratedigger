@@ -235,6 +235,10 @@ def make_request_row(**overrides: Any) -> dict[str, Any]:
         # when an unfindable-categorised request finally imports.
         "rescued_at": None,
         "prior_unfindable_category": None,
+        # Migration 074 remains part of the shipped schema even though
+        # its dual-identity runtime design has been reverted.
+        "canonical_release_id": None,
+        "canonical_resolved_at": None,
         # Migration 021 addressing FK.
         "current_evidence_id": None,
         # Migration 023 — supersede lineage.
