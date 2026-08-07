@@ -45,6 +45,7 @@ from lib.destructive_release_service import (
 )
 from lib.mbid_replace_service import (
     REPLACE_REASON_CURRENT_BEETS_AMBIGUOUS,
+    REPLACE_REASON_CURRENT_BEETS_UNAVAILABLE,
     REPLACE_REASON_SOURCE_IDENTITY_INVALID,
     RESULT_REPLACED,
     RESULT_WRONG_STATE,
@@ -58,6 +59,14 @@ from lib.pipeline_db import (
 from lib.release_identity import ReleaseIdentity
 from tests.fakes import DenylistEntry, FakeBeetsDB, FakePipelineDB
 from tests.helpers import handoff_automation_owner, make_request_row
+
+
+class _OmittedUnionBeets(FakeBeetsDB):
+    """Collaborator fault: requested union authority is absent from batch."""
+
+    def resolve_current_releases(self, identities: list[ReleaseIdentity]):
+        del identities
+        return {}
 
 
 def assert_fresh_destructive_authority(
@@ -355,7 +364,9 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
     @given(
         action=st.sampled_from(("ban", "delete", "replace")),
         source=st.sampled_from(("musicbrainz", "discogs")),
-        authority=st.sampled_from(("unique", "missing", "ambiguous")),
+        authority=st.sampled_from(
+            ("unique", "missing", "ambiguous", "omitted"),
+        ),
         album_id=st.integers(min_value=1, max_value=2_000_000_000),
     )
     def test_each_destructive_caller_requires_fresh_unique_album_authority(
@@ -376,7 +387,11 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
             mb_release_id=release_id,
             discogs_release_id=(release_id if source == "discogs" else None),
         ))
-        beets = FakeBeetsDB(library_root="/library")
+        beets = (
+            _OmittedUnionBeets(library_root="/library")
+            if authority == "omitted"
+            else FakeBeetsDB(library_root="/library")
+        )
         beets.set_album_detail(album_id, {
             "id": album_id,
             "album": "Album",
@@ -496,6 +511,13 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
                 self.assertEqual(
                     result.reason,
                     REPLACE_REASON_CURRENT_BEETS_AMBIGUOUS,
+                )
+                self.assertEqual(db.request(41), before)
+                self.assertEqual(scans, [])
+            elif authority == "omitted":
+                self.assertEqual(
+                    result.reason,
+                    REPLACE_REASON_CURRENT_BEETS_UNAVAILABLE,
                 )
                 self.assertEqual(db.request(41), before)
                 self.assertEqual(scans, [])

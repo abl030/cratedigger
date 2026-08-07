@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
@@ -35,6 +36,7 @@ from lib.config import CratediggerConfig
 from lib.mbid_replace_service import (
     REPLACE_REASON_CROSS_PATHWAY_TARGET,
     REPLACE_REASON_CURRENT_BEETS_AMBIGUOUS,
+    REPLACE_REASON_CURRENT_BEETS_UNAVAILABLE,
     REPLACE_REASON_SOURCE_IDENTITY_INVALID,
     REPLACE_REASON_SOURCE_NO_RELEASE_GROUP,
     REPLACE_REASON_TARGET_NO_RELEASE_GROUP,
@@ -400,6 +402,85 @@ class TestReplaceOutcomeMatrix(_ServiceCase):
         self.assertEqual(result.reason, REPLACE_REASON_CURRENT_BEETS_AMBIGUOUS)
         self.assertEqual(db.request(42), before)
         self.assertEqual(delete_calls, [])
+
+    def test_omitted_current_beets_union_refuses_before_any_action(self):
+        """A resolver omission is unavailable authority, never absence."""
+        class OmittedUnionBeets(FakeBeetsDB):
+            def resolve_current_releases(self, identities):
+                del identities
+                return {}
+
+        db = FakePipelineDB()
+        self._seed_old(db, status="wanted")
+        def snapshot() -> dict[str, object]:
+            """All persisted/action surfaces a failed Replace could mutate."""
+            keys = (
+                "_requests", "_tracks", "download_logs", "_import_jobs",
+                "_processing_cleanup_journals", "search_logs", "cycle_metrics",
+                "peer_observations", "user_cooldowns", "_search_ledger",
+                "_transfer_ledger", "denylist", "bad_audio_hashes",
+                "persist_import_terminal_outcome_calls",
+                "persist_preview_terminal_outcome_calls",
+                "clear_on_disk_quality_fields_calls", "update_request_fields_calls",
+                "record_artist_probe_calls", "set_unfindable_category_calls",
+                "record_canonical_release_id_calls",
+                "record_consumed_search_attempt_calls",
+                "record_non_consuming_search_attempt_calls",
+                "album_quality_evidence", "_evidence_by_id", "cooldowns_applied",
+                "field_resolutions", "recorded_attempts", "status_history",
+                "update_download_state_calls", "search_plans", "search_plan_items",
+                "plex_added_at_pins", "jellyfin_date_created_pins",
+                "_youtube_album_mappings", "_next_request_id",
+                "_next_download_log_id", "_next_import_job_id",
+                "_next_search_log_id", "_next_evidence_id",
+                "_next_bad_audio_hash_id", "_next_field_resolution_id",
+                "_next_search_plan_id", "_next_search_plan_item_id",
+                "_next_plex_pin_id", "_next_jellyfin_pin_id",
+                "_next_youtube_mapping_id", "_transfer_ledger_next_id",
+            )
+            return {key: deepcopy(getattr(db, key)) for key in keys}
+
+        before = snapshot()
+        beets = OmittedUnionBeets()
+        delete = MagicMock(side_effect=AssertionError("delete reached"))
+        cleanup = MagicMock(side_effect=AssertionError("cleanup reached"))
+        plan = MagicMock()
+        supersede = MagicMock(side_effect=AssertionError("supersede reached"))
+
+        with patch.object(
+            db,
+            "supersede_request_mbid",
+            supersede,
+        ), patch(
+            "lib.mbid_replace_service.trigger_plex_scan",
+        ) as plex, patch(
+            "lib.mbid_replace_service.trigger_jellyfin_scan",
+        ) as jellyfin:
+            result = self._make_service(
+                db,
+                beets_db_factory=lambda: beets,
+                search_plan_service=plan,
+                beets_delete_fn=delete,
+                wrong_match_delete_fn=cleanup,
+            ).replace_request_mbid(
+                42,
+                target_mb_release_id=NEW_MBID,
+            )
+
+        after = snapshot()
+        # Advisory-lock acquisition is the intentional read-only boundary;
+        # every persisted/action surface must remain byte-for-byte unchanged.
+        self.assertEqual(after, before)
+        self.assertEqual(result.outcome, RESULT_WRONG_STATE)
+        self.assertEqual(result.reason, REPLACE_REASON_CURRENT_BEETS_UNAVAILABLE)
+        self.assertEqual(db.request(42)["status"], "wanted")
+        self.assertEqual(beets.close_calls, 1)
+        delete.assert_not_called()
+        cleanup.assert_not_called()
+        plan.generate_for_request.assert_not_called()
+        supersede.assert_not_called()
+        plex.assert_not_called()
+        jellyfin.assert_not_called()
 
     def test_conflicting_source_identities_are_typed_zero_mutation(self):
         db = FakePipelineDB()
