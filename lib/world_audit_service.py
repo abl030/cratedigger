@@ -336,10 +336,10 @@ def audit_world(
 
         resolution = resolutions.get(request_id)
         if resolution is None:
-            # The resolver omitted a requested identity. ``resolutions_by_
-            # release_id`` has no entry either, so check_status_membership
-            # reports current_beets_authority_unavailable — an authority
-            # failure, never an absence claim.
+            # The resolver omitted this requested row. Its request-id keyed
+            # entry is absent, so check_status_membership reports
+            # current_beets_authority_unavailable — an authority failure,
+            # never an absence claim.
             continue
         if isinstance(resolution, CurrentBeetsAmbiguous):
             continue

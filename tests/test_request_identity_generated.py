@@ -772,21 +772,37 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
 
     def test_checkers_accept_the_legitimate_worlds(self) -> None:
         """Must-still-work: the real merge passes every checker."""
-        held = _unique(self.acquisition, 19345)
-        check_names_the_acquisition(held, self.acquisition)
+        # The union continues to name the request acquisition, but its only
+        # real Beets filing is the survivor (album 19345). Keep the filing in
+        # the selector rather than fabricating a second identity on that row.
+        survivor_held = _unique(
+            self.acquisition,
+            19345,
+            filed_identity=self.canonical,
+        )
+        acquisition_held = _unique(self.acquisition, 11541)
+        check_names_the_acquisition(survivor_held, self.acquisition)
         check_album_is_acceptable(
-            held, {self.canonical: 19345}, (self.canonical, self.acquisition))
+            survivor_held,
+            {self.canonical: 19345},
+            (self.canonical, self.acquisition),
+        )
         check_split_is_ambiguous(
-            held, {self.canonical: 19345}, (self.canonical, self.acquisition))
-        check_unmerged_is_inert(held, held)
+            survivor_held,
+            {self.canonical: 19345},
+            (self.canonical, self.acquisition),
+        )
+        check_unmerged_is_inert(acquisition_held, acquisition_held)
         check_one_batch(1)
-        check_consumer_state_agrees("a switched consumer", "unique", held)
+        check_consumer_state_agrees(
+            "a switched consumer", "unique", survivor_held,
+        )
         check_consumer_state_agrees(
             "a switched consumer",
             "missing",
             CurrentBeetsMissing(identity=self.acquisition),
         )
-        check_presence_agrees("a presence consumer", True, held)
+        check_presence_agrees("a presence consumer", True, survivor_held)
         check_presence_agrees(
             "a presence consumer",
             False,
@@ -812,13 +828,19 @@ def _identity(release_id: str) -> ReleaseIdentity:
     return identity
 
 
-def _unique(identity: ReleaseIdentity, album_id: int) -> CurrentBeetsUnique:
+def _unique(
+    identity: ReleaseIdentity,
+    album_id: int,
+    *,
+    filed_identity: ReleaseIdentity | None = None,
+) -> CurrentBeetsUnique:
+    filed = filed_identity or identity
     return CurrentBeetsUnique(
         identity=identity,
         album_id=album_id,
         album_path=f"/library/album-{album_id}",
         items=(),
-        selectors=(f"mb_albumid:{identity.release_id}",),
+        selectors=(f"mb_albumid:{filed.release_id}",),
     )
 
 

@@ -554,9 +554,8 @@ class TestAutomationDispatchExecutionFence(unittest.TestCase):
             def refresh_effect(*_args, **_kwargs):
                 order.append("evidence-refreshed")
                 return EvidenceBuildResult(
-                    evidence=None,
-                    status="failed",
-                    reason="synthetic post-effect fixture",
+                    evidence=candidate.evidence,
+                    status="ready",
                 )
 
             with patch.object(
@@ -602,6 +601,11 @@ class TestAutomationDispatchExecutionFence(unittest.TestCase):
             for effect in ("evidence-refreshed", "sidecar-written"):
                 if effect in order:
                     self.assertGreater(order.index(effect), capture_index)
+            self.assertLess(
+                order.index("evidence-refreshed"),
+                order.index("sidecar-written"),
+                "only a ready post-import refresh authorizes sidecar publication",
+            )
             persisted = db.get_import_job(claimed.id)
             assert persisted is not None and persisted.result is not None
             receipt = persisted.result["automation_completion"]
@@ -609,6 +613,91 @@ class TestAutomationDispatchExecutionFence(unittest.TestCase):
             self.assertEqual(receipt["request_id"], 42)
             self.assertEqual(receipt["canonical_path"], root)
             self.assertEqual(receipt["returncode"], 0)
+
+    def test_failed_refresh_does_not_publish_stale_verified_sidecar(self) -> None:
+        """A failed refresh cannot republish a prior matching evidence row."""
+        from lib.dispatch.types import ImportOneRun
+        from lib.quality_evidence import EvidenceBuildResult
+        from lib.sidecar import SIDECAR_FILENAME
+
+        with tempfile.TemporaryDirectory() as root:
+            db, claimed, candidate, execution_lease = self._world(root)
+            token = CancellationToken()
+            verified = make_album_quality_evidence(
+                mb_release_id="test-mbid",
+                source_path=root,
+                files=snapshot_audio_files(root),
+                measurement=AudioQualityMeasurement(
+                    min_bitrate_kbps=900,
+                    avg_bitrate_kbps=1000,
+                    format="flac",
+                    spectral_grade="genuine",
+                    spectral_subject="source",
+                    spectral_provenance="measured",
+                    was_converted_from="flac",
+                ),
+                storage_format="FLAC",
+                verified_lossless_proof=VerifiedLosslessProof(
+                    provenance="measured",
+                    source="flac",
+                    classifier="spectral",
+                ),
+            )
+            db.upsert_album_quality_evidence(verified)
+            linked = db.find_album_quality_evidence(
+                mb_release_id="test-mbid",
+                snapshot_fingerprint=verified.snapshot_fingerprint,
+            )
+            assert linked is not None and linked.id is not None
+            db.set_request_current_evidence(42, linked.id)
+            sidecar_path = os.path.join(root, SIDECAR_FILENAME)
+
+            def runner(**kwargs):
+                kwargs["on_spawn"](os.getpid())
+                return ImportOneRun(
+                    command=("import_one",),
+                    returncode=0,
+                    stdout="",
+                    stderr="",
+                    import_result=make_import_result(decision="import"),
+                )
+
+            def sidecar_writer(*_args, **_kwargs):
+                with open(sidecar_path, "wb") as handle:
+                    handle.write(b"stale sidecar")
+
+            with patch.object(
+                dispatch_core_module,
+                "_write_quality_evidence_action_file",
+                return_value=None,
+            ), patch.object(
+                dispatch_core_module,
+                "_refresh_current_evidence_after_import",
+                return_value=EvidenceBuildResult(
+                    None,
+                    "failed",
+                    "request-union authority omitted",
+                ),
+            ) as refresh, patch.object(
+                dispatch_core_module,
+                "_write_album_sidecar_after_import",
+                side_effect=sidecar_writer,
+            ) as sidecar, patch_dispatch_externals():
+                outcome = self._dispatch(
+                    root=root,
+                    db=db,
+                    claimed=claimed,
+                    candidate=candidate,
+                    execution_lease=execution_lease,
+                    token=token,
+                    runner=runner,
+                )
+
+            self.assertTrue(outcome.success)
+            refresh.assert_called_once()
+            sidecar.assert_not_called()
+            self.assertFalse(os.path.exists(sidecar_path))
+            self.assertEqual(db.get_request_current_evidence_id(42), linked.id)
 
     def test_completion_capture_conflict_stops_post_beets_effects(
         self,

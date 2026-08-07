@@ -1263,14 +1263,18 @@ def dispatch_import_core(
                             cancellation_token=cancellation_token,
                             owner_session_identity=owner_session_identity,
                         )
-                        _write_album_sidecar_after_import(
-                            db,
-                            request_id=request_id,
-                            mb_release_id=mb_release_id,
-                            cfg=cfg,
-                            beets_library_db_path=effective_beets_library_db_path,
-                            beets_library_root=effective_beets_library_root,
-                        )
+                        if (
+                            post_import_evidence.status == "ready"
+                            and post_import_evidence.evidence is not None
+                        ):
+                            _write_album_sidecar_after_import(
+                                db,
+                                request_id=request_id,
+                                mb_release_id=mb_release_id,
+                                cfg=cfg,
+                                beets_library_db_path=effective_beets_library_db_path,
+                                beets_library_root=effective_beets_library_root,
+                            )
                     except ExecutionCancelled:
                         raise
                     except Exception:

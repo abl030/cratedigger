@@ -573,14 +573,10 @@ class TestEveryUnionConsumerIsPinnedOverAMergedWorld(unittest.TestCase):
             "under the survivor, or the import leaves no current evidence",
         )
 
-    def test_post_import_refresh_omitted_union_is_unavailable_and_skips_sidecar(self) -> None:
+    def test_post_import_refresh_omitted_union_is_unavailable(self) -> None:
         """A resolver omission is authority loss, never evidence absence."""
-        from lib.dispatch import (
-            _refresh_current_evidence_after_import,
-            _write_album_sidecar_after_import,
-        )
+        from lib.dispatch import _refresh_current_evidence_after_import
         from lib.quality import QualityRankConfig
-        from lib.sidecar_service import OUTCOME_SKIPPED_NO_EVIDENCE
         from tests.fakes import FakeBeetsDB, FakePipelineDB
 
         class OmittedUnionBeets(FakeBeetsDB):
@@ -610,15 +606,6 @@ class TestEveryUnionConsumerIsPinnedOverAMergedWorld(unittest.TestCase):
         self.assertEqual(result.status, "failed")
         self.assertIn("omitted", result.reason or "")
         self.assertIsNone(db.get_request_current_evidence_id(request_id))
-        sidecar = _write_album_sidecar_after_import(
-            db,
-            request_id=request_id,
-            mb_release_id=LOSER,
-            cfg=None,
-            beets_factory=lambda **_kwargs: beets,
-        )
-        self.assertEqual(sidecar.outcome, OUTCOME_SKIPPED_NO_EVIDENCE)
-        self.assertEqual(beets.resolve_current_release_calls, [])
 
     def test_disk_coverage_does_not_call_a_merged_request_off_disk(
         self,
