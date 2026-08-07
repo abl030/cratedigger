@@ -583,6 +583,44 @@ class TestEveryUnionConsumerIsPinnedOverAMergedWorld(unittest.TestCase):
             "under the survivor, or the import leaves no current evidence",
         )
 
+    def test_disk_coverage_does_not_call_a_merged_request_off_disk(
+        self,
+    ) -> None:
+        """Mutant killed: dropping the canonical from
+        ``_release_ids_for_request``.
+
+        Found by looking at the screen, not at the diff: with the
+        canonicals loaded, the Pipeline dashboard's Disk Coverage card
+        still listed 316 and 8832 under "Drift (imported, missing from
+        beets)" while their own detail panels showed a real installed
+        path. Two operator surfaces contradicting each other on the same
+        two rows is worse than the original miss.
+        """
+        from lib.disk_coverage_service import disk_coverage
+        from tests.fakes import FakePipelineDB
+
+        world = self._world_holding_survivor()
+        db = FakePipelineDB()
+        request_id = db.add_request(
+            artist_name="Merged Artist", album_title="Merged Album",
+            source="request", mb_release_id=LOSER,
+        )
+        db.update_status(request_id, "imported")
+        db.record_canonical_release_id(
+            request_id,
+            canonical_release_id=SURVIVOR,
+            resolved_at=datetime(2026, 8, 6, tzinfo=UTC),
+        )
+
+        with open_beets_db(
+            db_path=str(world.library_db),
+            library_root=str(world.library_root),
+        ) as beets:
+            result = disk_coverage(db, beets, include_rows=True)
+
+        self.assertEqual(result.counts.off_disk_total, 0)
+        self.assertEqual([row.id for row in (result.off_disk or [])], [])
+
 
 class TestOperatorActionsResolveOverTheUnion(unittest.TestCase):
     """The destructive services, over the live 316 shape.

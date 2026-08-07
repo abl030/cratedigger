@@ -34,6 +34,10 @@ U6  Every switched consumer reports the state the union resolved, driven
     found unconstrained by fault injection across two review rounds; a
     property that stops at the shared helper cannot see the revert,
     because the revert lives inside the adapter.
+U7  A presence-only consumer — one that can only ask "is any acceptable
+    id in beets" — holds an album exactly when the union found one. Disk
+    coverage cannot answer U6's three states at all, and a split is
+    ambiguous to the join while still being on disk.
 """
 
 from __future__ import annotations
@@ -203,6 +207,29 @@ def check_consumer_state_agrees(
         raise AssertionError(
             f"{consumer} reports {observed!r} while the union resolved "
             f"{expected!r}; that consumer is not resolving over the union"
+        )
+
+
+def check_presence_agrees(
+    consumer: str,
+    present: bool,
+    union: CurrentBeetsResolution,
+) -> None:
+    """U7 — a presence-only consumer holds an album iff the union found one.
+
+    Disk coverage cannot use :func:`check_consumer_state_agrees`: it asks
+    "is any acceptable id in beets", so it genuinely cannot tell a unique
+    resolution from a split — and both mean the album IS on disk. Forcing
+    it into the three-state checker would make the test read the union to
+    decide what to expect, which proves nothing. The honest agreement is
+    binary: off-disk exactly when the union is missing.
+    """
+    expected = not isinstance(union, CurrentBeetsMissing)
+    if present != expected:
+        raise AssertionError(
+            f"{consumer} reports on-disk={present} while the union "
+            f"resolved {type(union).__name__}, which means on-disk="
+            f"{expected}; that consumer is not resolving over the union"
         )
 
 
@@ -506,6 +533,43 @@ class TestSwitchedConsumersAgreeWithTheUnion(unittest.TestCase):
         check_consumer_state_agrees(
             "the post-import evidence refresh", observed, union)
 
+    @settings(deadline=None, max_examples=25)
+    @given(
+        acquired=st.sampled_from([*HELD, *UNHELD]),
+        canonical=st.one_of(st.none(), st.sampled_from([*HELD, *UNHELD])),
+    )
+    @example(acquired=LOSER, canonical=SURVIVOR)   # the live 316 shape
+    @example(acquired=SURVIVOR, canonical=None)    # unmerged control
+    @example(acquired=LOSER, canonical=SIBLING)    # a split is still on disk
+    def test_disk_coverage_agrees_with_the_union(
+        self, acquired: str, canonical: str | None,
+    ) -> None:
+        """Disk coverage calls a request off-disk exactly when the union
+        finds no album for it, in every world.
+
+        Driven through the REAL ``disk_coverage`` service — the derivation
+        the dashboard card, ``GET /api/disk-coverage`` and
+        ``pipeline-cli disk-coverage`` all share.
+        """
+        from lib.disk_coverage_service import disk_coverage
+        from tests.fakes import FakePipelineDB
+
+        if canonical == acquired:
+            canonical = None
+        db = FakePipelineDB()
+        request_id, row = self._merged_request(db, acquired, canonical)
+
+        with open_beets_db(
+            db_path=str(self.world.library_db),
+            library_root=str(self.world.library_root),
+        ) as beets:
+            union = resolve_current_for_requests(beets, [row])[request_id]
+            result = disk_coverage(db, beets, include_rows=True)
+
+        off_disk = {off.id for off in (result.off_disk or [])}
+        check_presence_agrees(
+            "disk coverage", request_id not in off_disk, union)
+
 
 class TestInvariantCheckersTripOnViolations(unittest.TestCase):
     """Every checker owes a planted violation proving it can fail."""
@@ -582,6 +646,28 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
                 ),
             )
 
+    def test_a_presence_consumer_missing_a_held_album_is_rejected(
+        self,
+    ) -> None:
+        """The disk-coverage mutant: the union found the survivor's album
+        and the drift card still called the request off-disk."""
+        with self.assertRaises(AssertionError):
+            check_presence_agrees(
+                "a reverted presence consumer",
+                False,
+                _unique(self.acquisition, 19345),
+            )
+
+    def test_a_presence_consumer_claiming_an_absent_album_is_rejected(
+        self,
+    ) -> None:
+        with self.assertRaises(AssertionError):
+            check_presence_agrees(
+                "a reverted presence consumer",
+                True,
+                CurrentBeetsMissing(identity=self.acquisition),
+            )
+
     def test_checkers_accept_the_legitimate_worlds(self) -> None:
         """Must-still-work: the real merge passes every checker."""
         held = _unique(self.acquisition, 19345)
@@ -597,6 +683,24 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             "a switched consumer",
             "missing",
             CurrentBeetsMissing(identity=self.acquisition),
+        )
+        check_presence_agrees("a presence consumer", True, held)
+        check_presence_agrees(
+            "a presence consumer",
+            False,
+            CurrentBeetsMissing(identity=self.acquisition),
+        )
+        # A split is ambiguous to the join and still ON DISK to a
+        # presence-only consumer — the case the three-state checker
+        # cannot express.
+        check_presence_agrees(
+            "a presence consumer",
+            True,
+            CurrentBeetsAmbiguous(
+                identity=self.acquisition,
+                album_ids=(11541, 19345),
+                reason="merged_identity_split",
+            ),
         )
 
 
