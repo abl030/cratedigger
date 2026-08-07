@@ -1,8 +1,7 @@
 """pipeline-cli ``canonical`` commands (#1059).
 
 The operator half of the MusicBrainz merge reconciler. Counterpart of
-``POST /api/canonical/reconcile``, ``POST /api/canonical/retire``, and
-``GET /api/canonical``;
+``POST /api/canonical/reconcile`` and ``GET /api/canonical/<request_id>``;
 both surfaces are thin adapters over ``CanonicalReleaseService``, which is
 the one canonical execution path.
 
@@ -19,13 +18,10 @@ from typing import Protocol
 from lib.canonical_release_service import (
     OUTCOME_FROZEN,
     OUTCOME_INVALID_IDENTITY,
-    OUTCOME_NO_CANONICAL,
     OUTCOME_NOT_FOUND,
-    OUTCOME_STALE,
     CanonicalReconcileResult,
     CanonicalReleaseDB,
     CanonicalReleaseService,
-    CanonicalRetireResult,
     configure_reconciliation_mirror,
 )
 from lib.config import read_runtime_config
@@ -48,8 +44,6 @@ class _CanonicalDB(CanonicalReleaseDB, Protocol):
 _EXIT_CODES = {
     OUTCOME_NOT_FOUND: 2,
     OUTCOME_FROZEN: 4,
-    OUTCOME_NO_CANONICAL: 4,
-    OUTCOME_STALE: 4,
     OUTCOME_INVALID_IDENTITY: 5,
 }
 
@@ -69,18 +63,8 @@ def _result_payload(result: CanonicalReconcileResult) -> dict[str, object]:
     }
 
 
-def _retire_payload(result: CanonicalRetireResult) -> dict[str, object]:
-    return {
-        "request_id": result.request_id,
-        "outcome": result.outcome,
-        "canonical_release_id": None,
-        "previous_canonical_release_id": result.previous_canonical_release_id,
-        "changed": result.changed,
-    }
-
-
 def cmd_canonical(db: _CanonicalDB, args: argparse.Namespace) -> int:
-    """Dispatch ``canonical reconcile`` / ``retire`` / ``show``."""
+    """Dispatch ``canonical reconcile`` / ``canonical show``."""
     if args.canonical_command == "show":
         row = db.get_request(args.id)
         if row is None:
@@ -95,11 +79,6 @@ def cmd_canonical(db: _CanonicalDB, args: argparse.Namespace) -> int:
             "canonical_resolved_at": row.get("canonical_resolved_at"),
         })
         return 0
-
-    if args.canonical_command == "retire":
-        result = CanonicalReleaseService(db).retire_request(args.id)
-        _emit(_retire_payload(result))
-        return _EXIT_CODES.get(result.outcome, 0)
 
     # lib/mb_canonical is inert until a process wires a base. A surface that
     # forgets does not fail loudly — it reports no_redirect for every row and
@@ -164,13 +143,3 @@ def add_canonical_subparser(
         help="Show one request's stored acquisition and survivor ids.",
     )
     show.add_argument("id", type=int, help="Request id.")
-
-    retire = canonical_sub.add_parser(
-        "retire",
-        help="Explicitly retire one stored MusicBrainz merge survivor.",
-    )
-    retire.add_argument("--id", type=int, required=True, help="Request id.")
-    retire.add_argument(
-        "--confirm", choices=("RETIRE",), required=True,
-        help="Required acknowledgement for this explicit identity action.",
-    )

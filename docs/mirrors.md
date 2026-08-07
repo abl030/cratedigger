@@ -46,11 +46,6 @@ The operator runs the official MusicBrainz mirror stack in dedicated CT 100
   Configure the external immutable Beets authority separately with the same
   host:port, plain HTTP, and ratelimit 100 values.
 
-Merge reconciliation reads this same base. A blank base logs that the
-reconciler is inert; no public-MusicBrainz fallback is attempted. Transport
-failures and non-redirect responses leave any stored survivor untouched;
-retiring a proven-stale survivor is the separate confirmed canonical action.
-
 **Endgame note:** the long-term plan is `mb-api` — a sibling Rust project
 reimplementing the observed WS/2 subset (XML for musicbrainzngs/beets,
 JSON for `web/mb.py`) against Discogs-style full-dump re-imports, with

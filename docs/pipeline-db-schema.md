@@ -934,12 +934,8 @@ the survivor depends on whether `mbsync` has retagged those files yet — on the
 live library, both states are present at once. Written only by
 `CanonicalReleaseService` (`pipeline-cli canonical reconcile`,
 `POST /api/canonical/reconcile`, and the daily
-`cratedigger-canonical-reconcile.service`). Reconciliation deliberately has
-no clearing path: a `200` without a redirect, any `4xx`, mirror unavailability,
-and disagreement are all non-answers that leave stored state alone. The only
-clear is the explicit operator action `pipeline-cli canonical retire --id N
---confirm RETIRE` / `POST /api/canonical/retire`; it fresh-reads and
-compare-and-set clears both columns only on a non-`replaced` row.
+`cratedigger-canonical-reconcile.service`). There is deliberately no clearing
+path.
 
 ### `album_tracks.track_artist` (migration 029, populated at enqueue)
 

@@ -68,15 +68,6 @@ class TestConfigureReconciliationMirror(_WiringCase):
         self.assertEqual(
             mb_canonical.configured_canonical_base(), f"{MIRROR}/ws/2")
 
-    def test_blank_base_warns_once_and_leaves_the_resolver_inert(self) -> None:
-        with self.assertLogs("cratedigger", level="WARNING") as logs:
-            base = configure_reconciliation_mirror("")
-
-        self.assertIsNone(base)
-        self.assertIsNone(mb_canonical.configured_canonical_base())
-        self.assertEqual(len(logs.output), 1)
-        self.assertIn("musicbrainz.api_base is blank", logs.output[0])
-
 
 class TestEverySurfaceWiresBeforeSweeping(_WiringCase):
     """One test per surface. Removing the wiring call from any of them
@@ -167,35 +158,6 @@ class TestCliReconcileOutcomes(_WiringCase):
 
         self.assertEqual(self._run(args, db, None), 0)
         self.assertIsNone(db.request(request_id)["canonical_release_id"])
-
-
-class TestCliRetireOutcomes(unittest.TestCase):
-    def test_retire_uses_the_service_and_matches_state_exit_codes(self) -> None:
-        from datetime import UTC, datetime
-
-        from scripts.pipeline_cli.canonical import cmd_canonical
-
-        db = FakePipelineDB()
-        request_id = db.add_request(
-            artist_name="Merged", album_title="Release", source="request",
-            mb_release_id=LOSER,
-        )
-        db.record_canonical_release_id(
-            request_id,
-            canonical_release_id=SURVIVOR,
-            resolved_at=datetime(2026, 8, 7, tzinfo=UTC),
-        )
-        args = argparse.Namespace(
-            canonical_command="retire", id=request_id, confirm="RETIRE",
-        )
-        self.assertEqual(cmd_canonical(db, args), 0)
-        self.assertIsNone(db.request(request_id)["canonical_release_id"])
-
-        self.assertEqual(cmd_canonical(db, args), 4)
-        missing = argparse.Namespace(
-            canonical_command="retire", id=999_999, confirm="RETIRE",
-        )
-        self.assertEqual(cmd_canonical(db, missing), 2)
 
 
 if __name__ == "__main__":

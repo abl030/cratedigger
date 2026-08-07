@@ -524,8 +524,6 @@ class FakePipelineDB:
             tuple[int, str | None, datetime]] = []
         self.record_canonical_release_id_calls: list[
             tuple[int, str, datetime]] = []
-        self.retire_canonical_release_id_calls: list[
-            tuple[int, str, datetime]] = []
         # Cursor-mutation recorders. The R20 runtime guard asserts
         # these stay empty after a detection run. We instrument both
         # cursor writers and the operator-driven advance.
@@ -5583,32 +5581,6 @@ class FakePipelineDB:
         row["canonical_release_id"] = canonical_release_id
         row["canonical_resolved_at"] = resolved_at
         row["updated_at"] = resolved_at
-        return True
-
-    def retire_canonical_release_id(
-        self,
-        request_id: int,
-        *,
-        expected_canonical_release_id: str,
-        expected_resolved_at: datetime,
-    ) -> bool:
-        """Mirror PipelineDB.retire_canonical_release_id's CAS guards."""
-        self.retire_canonical_release_id_calls.append(
-            (
-                request_id,
-                expected_canonical_release_id,
-                expected_resolved_at,
-            ),
-        )
-        row = self._requests.get(request_id)
-        if row is None or row.get("status") == "replaced":
-            return False
-        if row.get("canonical_release_id") != expected_canonical_release_id:
-            return False
-        if row.get("canonical_resolved_at") != expected_resolved_at:
-            return False
-        row["canonical_release_id"] = None
-        row["canonical_resolved_at"] = None
         return True
 
     def get_unfindable_search_log_signal(

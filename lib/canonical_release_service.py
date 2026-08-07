@@ -25,17 +25,21 @@ ordinary case of an id MusicBrainz still considers current. This service
 never distinguishes them into a write, so a bad mirror day leaves the stored
 survivors exactly as they were.
 
-**There is no automatic clearing path.** ``canonical_release_id()`` collapses
-"asked, got a definitive 200 with no redirect" and "could not ask" into the
-same ``None``, so reconciliation can never retract a stored survivor. An
-operator may explicitly retire a named survivor when they have independent
-evidence it is stale; that action is a fresh-read compare-and-set and never
-consults the mirror (#1059 F6).
+**There is deliberately no clearing path, and that is a known limitation
+rather than a free one.** A stale survivor — from an upstream un-merge, or a
+mirror that once redirected wrongly — is only harmless while nothing holds
+that id. If some *other* album is filed under it, the union returns that
+album as unique with the identity rewritten to the acquisition id, so no
+consumer's identity check trips and another pressing is silently attributed
+to this request. ``canonical_release_id()`` also collapses "asked, got a
+definitive 200 with no redirect" and "could not ask" into the same ``None``,
+so this service structurally cannot tell a retractable canonical from a
+mirror outage; adding a clear would need that distinction first. Zero live
+instances, and retiring one today means raw SQL. Tracked as #1059 F6.
 """
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -43,8 +47,6 @@ from typing import Protocol
 
 from lib.mb_canonical import CanonicalReleaseFn, canonical_release_id
 from lib.release_identity import ReleaseIdentity
-
-logger = logging.getLogger("cratedigger")
 
 #: One row's outcome. Exactly one per branch, mapped to CLI exit codes and
 #: HTTP statuses by the two thin adapters.
@@ -55,9 +57,6 @@ OUTCOME_NOT_MUSICBRAINZ = "not_musicbrainz"
 OUTCOME_INVALID_IDENTITY = "invalid_identity"
 OUTCOME_FROZEN = "frozen"
 OUTCOME_NOT_FOUND = "not_found"
-OUTCOME_RETIRED = "retired"
-OUTCOME_NO_CANONICAL = "no_canonical"
-OUTCOME_STALE = "stale"
 
 #: Outcomes that mean "nothing is wrong, nothing changed". Used by the
 #: sweep summary so an operator reading the journal sees one number for
@@ -82,14 +81,6 @@ class CanonicalReleaseDB(Protocol):
         *,
         canonical_release_id: str,
         resolved_at: datetime,
-    ) -> bool: ...
-
-    def retire_canonical_release_id(
-        self,
-        request_id: int,
-        *,
-        expected_canonical_release_id: str,
-        expected_resolved_at: datetime,
     ) -> bool: ...
 
 
@@ -121,20 +112,7 @@ class CanonicalSweepResult:
         return len(self.resolved)
 
 
-@dataclass(frozen=True)
-class CanonicalRetireResult:
-    """One explicit operator retirement outcome."""
-
-    request_id: int
-    outcome: str
-    previous_canonical_release_id: str | None = None
-
-    @property
-    def changed(self) -> bool:
-        return self.outcome == OUTCOME_RETIRED
-
-
-def configure_reconciliation_mirror(mb_api_base: str) -> str | None:
+def configure_reconciliation_mirror(mb_api_base: str) -> str:
     """Point the resolver at the configured MusicBrainz base.
 
     **Every** surface that reconciles must call this — the daily oneshot,
@@ -151,14 +129,7 @@ def configure_reconciliation_mirror(mb_api_base: str) -> str | None:
     """
     from lib.mb_canonical import configure_canonical_base
 
-    configured = (mb_api_base or "").strip().rstrip("/")
-    if not configured:
-        logger.warning(
-            "canonical reconciliation is inert: musicbrainz.api_base is blank",
-        )
-        configure_canonical_base(None)
-        return None
-    base = configured + "/ws/2"
+    base = (mb_api_base or "").strip().rstrip("/") + "/ws/2"
     configure_canonical_base(base)
     return base
 
@@ -192,41 +163,6 @@ class CanonicalReleaseService:
         if row is None:
             return CanonicalReconcileResult(request_id, OUTCOME_NOT_FOUND)
         return self.reconcile_row(row)
-
-    def retire_request(self, request_id: int) -> CanonicalRetireResult:
-        """Explicitly retire one stored survivor using a fresh-read CAS.
-
-        This is deliberately separate from reconciliation: a definitive
-        no-redirect answer is indistinguishable from a failed lookup, and
-        neither may clear a survivor. Only this named operator action can.
-        """
-        row = self._db.get_request(request_id)
-        if row is None:
-            return CanonicalRetireResult(request_id, OUTCOME_NOT_FOUND)
-        if row.get("status") == "replaced":
-            return CanonicalRetireResult(request_id, OUTCOME_FROZEN)
-
-        stored = row.get("canonical_release_id")
-        resolved_at = row.get("canonical_resolved_at")
-        if not isinstance(stored, str) or not stored or not isinstance(
-            resolved_at, datetime,
-        ):
-            return CanonicalRetireResult(request_id, OUTCOME_NO_CANONICAL)
-
-        retired = self._db.retire_canonical_release_id(
-            request_id,
-            expected_canonical_release_id=stored,
-            expected_resolved_at=resolved_at,
-        )
-        if not retired:
-            return CanonicalRetireResult(
-                request_id, OUTCOME_STALE,
-                previous_canonical_release_id=stored,
-            )
-        return CanonicalRetireResult(
-            request_id, OUTCOME_RETIRED,
-            previous_canonical_release_id=stored,
-        )
 
     def reconcile_row(
         self, row: Mapping[str, object],
@@ -336,17 +272,13 @@ __all__ = [
     "OUTCOME_INVALID_IDENTITY",
     "OUTCOME_NOT_FOUND",
     "OUTCOME_NOT_MUSICBRAINZ",
-    "OUTCOME_NO_CANONICAL",
     "OUTCOME_NO_REDIRECT",
     "OUTCOME_RESOLVED",
-    "OUTCOME_RETIRED",
-    "OUTCOME_STALE",
     "OUTCOME_UNCHANGED",
     "QUIET_OUTCOMES",
     "CanonicalReconcileResult",
     "CanonicalReleaseDB",
     "CanonicalReleaseService",
-    "CanonicalRetireResult",
     "CanonicalSweepResult",
     "configure_reconciliation_mirror",
 ]

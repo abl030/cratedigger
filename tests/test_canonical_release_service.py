@@ -24,13 +24,10 @@ from datetime import UTC, datetime
 from lib.canonical_release_service import (
     OUTCOME_FROZEN,
     OUTCOME_INVALID_IDENTITY,
-    OUTCOME_NO_CANONICAL,
     OUTCOME_NO_REDIRECT,
     OUTCOME_NOT_FOUND,
     OUTCOME_NOT_MUSICBRAINZ,
     OUTCOME_RESOLVED,
-    OUTCOME_RETIRED,
-    OUTCOME_STALE,
     OUTCOME_UNCHANGED,
     CanonicalReleaseService,
 )
@@ -131,8 +128,12 @@ class TestReconcileRequest(unittest.TestCase):
         self.assertEqual(
             self.db.request(rid)["canonical_release_id"], SURVIVOR)
 
-    def test_only_explicit_retirement_can_clear_a_survivor(self) -> None:
-        """I7: reconciliation itself has no clearing capability."""
+    def test_the_service_has_no_way_to_clear_a_survivor(self) -> None:
+        """I7 by construction, not by discipline.
+
+        A clearing path is the only way this service could violate the
+        invariant, so it must not exist on the DB surface it can reach.
+        """
         from lib.canonical_release_service import CanonicalReleaseDB
 
         surface = {
@@ -145,103 +146,7 @@ class TestReconcileRequest(unittest.TestCase):
                 "get_request",
                 "list_non_replaced_requests",
                 "record_canonical_release_id",
-                "retire_canonical_release_id",
             },
-        )
-
-
-class TestRetireRequest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.db = FakePipelineDB()
-        self.request_id = self.db.add_request(
-            artist_name="Merged", album_title="Release", source="request",
-            mb_release_id=LOSER,
-        )
-        self.db.record_canonical_release_id(
-            self.request_id, canonical_release_id=SURVIVOR, resolved_at=NOW,
-        )
-
-    def test_explicit_retirement_clears_only_canonical_fields(self) -> None:
-        before = dict(self.db.request(self.request_id))
-        result = CanonicalReleaseService(
-            self.db, now_fn=lambda: NOW.replace(hour=13),
-        ).retire_request(self.request_id)
-
-        self.assertEqual(result.outcome, OUTCOME_RETIRED)
-        self.assertTrue(result.changed)
-        self.assertEqual(result.previous_canonical_release_id, SURVIVOR)
-        after = self.db.request(self.request_id)
-        self.assertIsNone(after["canonical_release_id"])
-        self.assertIsNone(after["canonical_resolved_at"])
-        self.assertEqual(
-            {
-                field for field in before if before[field] != after[field]
-            },
-            {"canonical_release_id", "canonical_resolved_at"},
-        )
-
-    def test_missing_no_canonical_and_replaced_are_noops(self) -> None:
-        service = CanonicalReleaseService(self.db, now_fn=lambda: NOW)
-        self.assertEqual(
-            service.retire_request(999_999).outcome, OUTCOME_NOT_FOUND)
-
-        no_canonical = self.db.add_request(
-            artist_name="Plain", album_title="Release", source="request",
-            mb_release_id=SECOND_SURVIVOR,
-        )
-        before = dict(self.db.request(no_canonical))
-        self.assertEqual(
-            service.retire_request(no_canonical).outcome, OUTCOME_NO_CANONICAL)
-        self.assertEqual(self.db.request(no_canonical), before)
-
-        self.db.supersede_request_mbid(
-            self.request_id,
-            new_mb_release_id="bce7d8c3-815b-449c-8e18-df806398986c",
-            new_mb_release_group_id=None,
-            new_mb_artist_id=None,
-            new_artist_name="Merged",
-            new_album_title="Release",
-            new_year=None,
-            new_country=None,
-            new_tracks=[],
-        )
-        frozen = dict(self.db.request(self.request_id))
-        self.assertEqual(
-            service.retire_request(self.request_id).outcome, OUTCOME_FROZEN)
-        self.assertEqual(self.db.request(self.request_id), frozen)
-
-    def test_a_newer_observation_wins_the_retirement_race(self) -> None:
-        class RacingDB(FakePipelineDB):
-            def retire_canonical_release_id(self, request_id, **kwargs):
-                return False
-
-        db = RacingDB()
-        request_id = db.add_request(
-            artist_name="Merged", album_title="Release", source="request",
-            mb_release_id=LOSER,
-        )
-        db.record_canonical_release_id(
-            request_id, canonical_release_id=SURVIVOR, resolved_at=NOW,
-        )
-        before = dict(db.request(request_id))
-        result = CanonicalReleaseService(db, now_fn=lambda: NOW).retire_request(
-            request_id,
-        )
-
-        self.assertEqual(result.outcome, OUTCOME_STALE)
-        self.assertEqual(db.request(request_id), before)
-
-
-class TestReconcileRequestOutcomes(unittest.TestCase):
-    def setUp(self) -> None:
-        self.db = FakePipelineDB()
-
-    def _seed(
-        self, *, mb: str | None = LOSER, discogs: str | None = None,
-    ) -> int:
-        return self.db.add_request(
-            artist_name="Merged", album_title="Release", source="request",
-            mb_release_id=mb, discogs_release_id=discogs,
         )
 
     def test_discogs_request_never_asks_musicbrainz(self) -> None:

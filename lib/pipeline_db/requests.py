@@ -1908,10 +1908,12 @@ class _RequestsMixin(_PipelineDBBase):
         longer qualifies — it was superseded, or its acquisition id changed
         under the sweep — and the caller reports that rather than retrying.
 
-        Reconciliation deliberately never clears a survivor (#1059 invariant
-        7): a failed or unavailable lookup leaves it exactly as it was. The
-        separate explicit operator retirement is a fresh-read CAS and never
-        calls this method.
+        There is deliberately **no** clearing counterpart (#1059 invariant 7).
+        A failed or unavailable lookup must leave the stored survivor exactly
+        as it was, and the reconciler cannot violate that if the operation
+        does not exist for it to call. An un-merge upstream is harmless: the
+        stale survivor simply stops resolving to an album and the union falls
+        through to the acquisition id.
 
         Guarded on ``status <> 'replaced'``: superseded rows are frozen audit
         records, and the world audit fails the run if one mutates after
@@ -1940,38 +1942,3 @@ class _RequestsMixin(_PipelineDBBase):
         written = cur.fetchone() is not None
         self.conn.commit()
         return written
-
-    def retire_canonical_release_id(
-        self,
-        request_id: int,
-        *,
-        expected_canonical_release_id: str,
-        expected_resolved_at: datetime,
-    ) -> bool:
-        """Clear one explicitly retired survivor with a narrow CAS.
-
-        Reconciliation never calls this: a mirror non-answer cannot prove a
-        survivor is stale. The operator service reads the survivor and its
-        observation timestamp immediately before this write, and a concurrent
-        re-observation makes the update a harmless no-op.
-        """
-        cur = self._execute(
-            """
-            UPDATE album_requests
-            SET canonical_release_id = NULL,
-                canonical_resolved_at = NULL
-            WHERE id = %s
-              AND status != 'replaced'
-              AND canonical_release_id IS NOT DISTINCT FROM %s
-              AND canonical_resolved_at IS NOT DISTINCT FROM %s
-            RETURNING id
-            """,
-            (
-                request_id,
-                expected_canonical_release_id,
-                expected_resolved_at,
-            ),
-        )
-        retired = cur.fetchone() is not None
-        self.conn.commit()
-        return retired
