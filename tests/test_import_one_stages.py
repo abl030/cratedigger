@@ -601,15 +601,20 @@ class TestConversionTimeoutSeconds(unittest.TestCase):
 class TestM4aAlacDetection(unittest.TestCase):
     """ALAC .m4a detection gates lossless conversion."""
 
-    @patch("lib.measurement.subprocess.run")
+    @patch("lib.media_readiness.subprocess.run")
     def test_parses_structured_ffprobe_codec_output(self, mock_run):
-        """Structured ffprobe output must identify ALAC as lossless."""
+        """Canonical stream facts must identify ALAC as lossless."""
         from harness.import_one import _is_m4a_alac
 
         mock_run.return_value = subprocess.CompletedProcess(
             args=[],
             returncode=0,
-            stdout='{"streams":[{"codec_name":"alac"}]}',
+            stdout=(
+                '{"streams":[{"codec_type":"audio","codec_name":"alac",'
+                '"sample_rate":"44100","channels":2}],"format":'
+                '{"format_name":"mov,mp4,m4a,3gp,3g2,mj2"},"frames":['
+                '{"nb_samples":44100}],"packets":[{"size":1000}]}'
+            ),
             stderr="",
         )
 
@@ -617,14 +622,19 @@ class TestM4aAlacDetection(unittest.TestCase):
         cmd = mock_run.call_args.args[0]
         self.assertEqual(cmd[cmd.index("-of") + 1], "json")
 
-    @patch("lib.measurement.subprocess.run")
+    @patch("lib.media_readiness.subprocess.run")
     def test_non_alac_m4a_is_not_lossless(self, mock_run):
         from harness.import_one import _is_m4a_alac
 
         mock_run.return_value = subprocess.CompletedProcess(
             args=[],
             returncode=0,
-            stdout='{"streams":[{"codec_name":"aac"}]}',
+            stdout=(
+                '{"streams":[{"codec_type":"audio","codec_name":"aac",'
+                '"sample_rate":"44100","channels":2}],"format":'
+                '{"format_name":"mov,mp4,m4a,3gp,3g2,mj2"},"frames":['
+                '{"nb_samples":44100}],"packets":[{"size":1000}]}'
+            ),
             stderr="",
         )
 

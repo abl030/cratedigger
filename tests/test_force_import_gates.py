@@ -605,7 +605,7 @@ class TestRepairMp3HeadersRecurses(unittest.TestCase):
         import os
         from unittest.mock import MagicMock, patch
 
-        from lib.util import repair_mp3_headers
+        from lib.media_readiness import repair_mp3_headers
 
         tmpdir = tempfile.mkdtemp()
         try:
@@ -614,7 +614,7 @@ class TestRepairMp3HeadersRecurses(unittest.TestCase):
             nested = os.path.join(cd1, "01.mp3")
             with open(nested, "wb") as f:
                 f.write(b"fake")
-            with patch("lib.util.sp.run") as mock_run:
+            with patch("lib.media_readiness.subprocess.run") as mock_run:
                 mock_run.return_value = MagicMock(returncode=0, stdout="")
                 repair_mp3_headers(tmpdir)
             called_paths = [c[0][0][-1] for c in mock_run.call_args_list]

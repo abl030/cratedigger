@@ -1891,6 +1891,52 @@ class TestRederiveTransferIds(unittest.TestCase):
 class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
     """Test process_completed_album return ownership."""
 
+    def test_zero_sample_flac_is_normalized_only_after_canonical_publish(self):
+        """#1062: Beets' later validation receives a ready owned album view."""
+        from mediafile import MediaFile
+
+        from lib.download_processing import Completed, process_completed_album
+        from lib.media_readiness import flac_total_samples_only_changed, inspect_media
+        from tests.audio_fixtures import make_test_flac
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_dir = os.path.join(tmpdir, "downloads", "Music")
+            os.makedirs(source_dir)
+            source = os.path.join(source_dir, "01 - Five Suns.flac")
+            make_test_flac(source, duration=1)
+            source_bytes = bytearray(Path(source).read_bytes())
+            packed = int.from_bytes(source_bytes[18:26], "big")
+            source_bytes[18:26] = (packed & ~((1 << 36) - 1)).to_bytes(8, "big")
+            source_bytes[26:42] = b"\0" * 16
+            Path(source).write_bytes(source_bytes)
+
+            file = make_download_file(
+                filename="user1\\Music\\01 - Five Suns.flac",
+                file_dir="user1\\Music",
+            )
+            file.local_path = source
+            album = make_grab_list_entry(files=[file], mb_release_id="")
+            ctx = _make_ctx()
+            for name, value in {
+                "slskd_download_dir": os.path.join(tmpdir, "downloads"),
+                "beets_validation_enabled": False,
+            }.items():
+                setattr(ctx.cfg, name, value)
+
+            result = process_completed_album(album, ctx, import_job_id=1)
+
+            self.assertIsInstance(result, Completed)
+            self.assertIsNotNone(album.import_folder)
+            ready = inspect_media(album.import_folder or "").files[0]
+            self.assertGreater(ready.duration_seconds, 0)
+            canonical = Path(album.import_folder or "") / "01 - Five Suns.flac"
+            # This is the same MediaFile reader Beets validation routes through:
+            # the historical incident reached a zero local length before it
+            # could become a quality/match decision.
+            self.assertGreater(MediaFile(str(canonical)).length, 0)
+            self.assertTrue(flac_total_samples_only_changed(bytes(source_bytes), canonical.read_bytes()))
+            self.assertFalse(Path(source).exists(), "materialization consumes only after canonical publish")
+
     def test_returns_true_on_success(self):
         """Successful file move + processing returns Completed."""
         import os

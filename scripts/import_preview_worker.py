@@ -624,9 +624,12 @@ def _prepare_force_action_path(
     try:
         # The descriptor copy is now private working state.  Normalize before
         # inventorying/persisting evidence, and never touch ``raw_path``.
-        from lib.util import repair_mp3_headers
+        from lib.media_readiness import normalize_media_metadata
 
-        repair_mp3_headers(snapshot)
+        # A decode failure must rejoin the ordinary measurement-failure
+        # terminal path below, not escape this private-copy helper and be
+        # retried as a worker crash.
+        normalize_media_metadata(snapshot, fail_closed=False)
         return retain_preview_snapshot_for_force_action(
             snapshot,
             cfg,

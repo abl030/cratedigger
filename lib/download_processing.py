@@ -24,6 +24,7 @@ from lib.import_execution import (
     ExecutionLeaseSnapshot,
     OwnerSessionIdentity,
 )
+from lib.media_readiness import MediaReadinessError, normalize_media_metadata
 from lib.processing_paths import canonical_folder_for_row, processing_albums_dir
 from lib.staged_album import StagedAlbum
 
@@ -130,6 +131,15 @@ def process_completed_album(
     if isinstance(materialized, download_materialization.MaterializeGuarded):
         return CompletionDeferred(detail=materialized.detail)
     assert isinstance(materialized, download_materialization.Materialized)
+
+    # The atomic materialization above is the first point at which these bytes
+    # are ours.  Make their decode-valid structural facts usable before both
+    # preview evidence and the Beets validation that follows; never touch the
+    # event-stamped slskd originals.
+    try:
+        normalize_media_metadata(staged_album.current_path)
+    except MediaReadinessError as exc:
+        return CompletionFailed(reason=f"media_readiness_{exc.kind}: {exc}")
 
     logger.info(
         "Processing completed download: %s - %s",

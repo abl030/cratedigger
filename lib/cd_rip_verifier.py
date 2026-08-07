@@ -33,7 +33,6 @@ import xml.etree.ElementTree as ET
 import zlib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from fractions import Fraction
 from http.client import HTTPMessage, HTTPResponse, IncompleteRead
 from multiprocessing.connection import Connection
 from multiprocessing.connection import wait as wait_for_connections
@@ -45,6 +44,7 @@ import msgspec
 import numpy as np
 
 from lib.config import CratediggerConfig
+from lib.media_readiness import MediaReadinessError, media_facts_for_path
 from lib.quality import (
     AUDIO_EXTENSIONS_DOTTED,
     AccurateRipBitMatch,
@@ -104,22 +104,8 @@ class _CtdbEntry:
     response_sha256: str
 
 
-class _FfprobeStream(msgspec.Struct, frozen=True):
-    codec_name: str = ""
-    sample_rate: str | int = ""
-    channels: int = 0
-    bits_per_raw_sample: str | int = ""
-    bits_per_sample: str | int = ""
-    duration_ts: str | int = 0
-    time_base: str = ""
-
-
 def _empty_ffprobe_tags() -> dict[str, str]:
     return {}
-
-
-def _empty_ffprobe_streams() -> list[_FfprobeStream]:
-    return []
 
 
 class _FfprobeFormat(msgspec.Struct, frozen=True):
@@ -127,9 +113,6 @@ class _FfprobeFormat(msgspec.Struct, frozen=True):
 
 
 class _FfprobePayload(msgspec.Struct, frozen=True):
-    streams: list[_FfprobeStream] = msgspec.field(
-        default_factory=_empty_ffprobe_streams
-    )
     format: _FfprobeFormat = msgspec.field(default_factory=_FfprobeFormat)
 
 
@@ -685,9 +668,7 @@ def _probe_track(path: Path, *, deadline: float | None = None) -> _TrackShape:
         timeout = min(timeout, max(0.001, deadline - time.monotonic()))
     result = subprocess.run(
         [
-            "ffprobe", "-v", "error", "-select_streams", "a",
-            "-show_entries",
-            "stream=codec_name,sample_rate,channels,bits_per_raw_sample,bits_per_sample,duration_ts,time_base:format_tags",
+            "ffprobe", "-v", "error", "-show_entries", "format_tags",
             "-of", "json", str(path),
         ],
         capture_output=True,
@@ -698,10 +679,11 @@ def _probe_track(path: Path, *, deadline: float | None = None) -> _TrackShape:
     if result.returncode != 0 or len(result.stdout) > 256 * 1024:
         raise ValueError("ffprobe failed")
     payload = msgspec.json.decode(result.stdout, type=_FfprobePayload)
-    if len(payload.streams) != 1:
-        raise ValueError("exactly one audio stream is required")
-    stream = payload.streams[0]
-    codec = stream.codec_name
+    try:
+        facts = media_facts_for_path(str(path))
+    except MediaReadinessError as exc:
+        raise ValueError(str(exc)) from exc
+    codec = facts.codec
     extension = path.suffix.lower()
     if extension == ".flac" and codec == "flac":
         source_format: Literal["flac", "alac"] = "flac"
@@ -709,17 +691,11 @@ def _probe_track(path: Path, *, deadline: float | None = None) -> _TrackShape:
         source_format = "alac"
     else:
         raise ValueError("source is not exact FLAC or ALAC")
-    bits = stream.bits_per_raw_sample or stream.bits_per_sample
-    if int(stream.sample_rate or 0) != 44100 or stream.channels != 2:
+    if facts.sample_rate != 44100 or facts.channels != 2:
         raise ValueError("source is not 44.1 kHz stereo")
-    if int(bits or 0) != 16:
+    if facts.bit_depth != 16:
         raise ValueError("source is not 16-bit PCM")
-    duration_ts = int(stream.duration_ts or 0)
-    time_base = Fraction(stream.time_base or "0/1")
-    sample_count = duration_ts * time_base * 44100
-    if sample_count.denominator != 1:
-        raise ValueError("source duration is not an exact sample count")
-    samples = sample_count.numerator
+    samples = facts.sample_count
     if samples <= 0 or samples >= 2**32 or samples % SECTOR_SAMPLES:
         raise ValueError("source is not an admitted CD-shaped track")
     tags = {

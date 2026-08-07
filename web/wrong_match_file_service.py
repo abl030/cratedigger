@@ -26,6 +26,7 @@ from lib.json_narrow import (
 from lib.json_narrow import (
     is_str_object_dict as _is_str_object_dict,
 )
+from lib.media_readiness import MediaReadinessError, media_facts_for_open_file
 from lib.processing_paths import (
     normalize_source_dirs,
 )
@@ -371,7 +372,24 @@ def _reorder_files_by_match(
     return reordered, "matched"
 
 
-def _inspect_audio_file(handle: int) -> tuple[dict[str, list[str]], float | None, int | None]:
+def _inspect_audio_file(
+    handle: int,
+    *,
+    container: str,
+) -> tuple[dict[str, list[str]], float | None, int | None]:
+    # Stream facts do not depend on tag parsing.  Preserve them when an
+    # unusual-but-decode-valid file has tags Mutagen cannot open.
+    try:
+        facts = media_facts_for_open_file(handle, container=container)
+        length = facts.duration_seconds
+        bitrate_bps = (
+            facts.average_bitrate_kbps * 1000
+            if facts.average_bitrate_kbps is not None else None
+        )
+    except MediaReadinessError:
+        length = None
+        bitrate_bps = None
+
     try:
         # getattr (not `from mutagen import File`) keeps this Any-typed:
         # mutagen's File() factory has an untyped `filething` parameter and
@@ -381,15 +399,15 @@ def _inspect_audio_file(handle: int) -> tuple[dict[str, list[str]], float | None
         import mutagen
         _mutagen_file = getattr(mutagen, "File")  # noqa: B009 - dynamic untyped factory
     except ImportError:
-        return {}, None, None
+        return {}, length, bitrate_bps
 
     try:
         with os.fdopen(os.dup(handle), "rb") as source:
             audio = _mutagen_file(source, easy=True)
     except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
-        return {}, None, None
+        return {}, length, bitrate_bps
     if audio is None:
-        return {}, None, None
+        return {}, length, bitrate_bps
 
     tags: dict[str, list[str]] = {}
     raw_tags = getattr(audio, "tags", None)
@@ -405,11 +423,6 @@ def _inspect_audio_file(handle: int) -> tuple[dict[str, list[str]], float | None
                     if safe_value not in existing:
                         existing.append(safe_value)
 
-    info = getattr(audio, "info", None)
-    length_raw = getattr(info, "length", None)
-    bitrate_raw = getattr(info, "bitrate", None)
-    length = float(length_raw) if isinstance(length_raw, (int, float)) else None
-    bitrate_bps = int(bitrate_raw) if isinstance(bitrate_raw, (int, float)) else None
     return tags, length, bitrate_bps
 
 
@@ -489,7 +502,9 @@ def build_wrong_match_explorer(
                         if ext not in AUDIO_EXTENSIONS_DOTTED:
                             other_file_count += 1
                             continue
-                        tags, duration_seconds, bitrate_bps = _inspect_audio_file(opened.fd)
+                        tags, duration_seconds, bitrate_bps = _inspect_audio_file(
+                            opened.fd, container=ext[1:],
+                        )
                     finally:
                         opened.close()
                     playable = ext in _PLAYABLE_AUDIO_EXTENSIONS

@@ -163,6 +163,40 @@ class TestTerminalOutcomeCallers(unittest.TestCase):
         command = db.persist_preview_terminal_outcome_calls[0]
         self.assertIsNone(command.request_transition)
 
+    def test_force_audio_corruption_terminalizes_without_preview_retry(self) -> None:
+        """A deterministic private-readiness failure is a completed audit."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="unsearchable"))
+        db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            payload={"download_log_id": 1, "failed_path": "/tmp/five-suns"},
+        )
+        claimed = claim_next_import_preview_job(db, worker_id="audio-corrupt-preview")
+        assert claimed is not None
+        result = ImportPreviewResult(
+            mode="path",
+            verdict="confident_reject",
+            decision="audio_corrupt",
+            reason="audio_corrupt",
+            detail="strict decode rejected private readiness copy",
+            source_path="/tmp/five-suns",
+            cleanup_eligible=True,
+        )
+
+        updated = import_preview_worker.process_claimed_preview_job(
+            db,
+            claimed,
+            preview_fn=lambda _db, _job: result,
+        )
+
+        assert updated is not None
+        self.assertEqual(updated.status, "failed")
+        self.assertEqual(updated.preview_status, "measurement_failed")
+        self.assertEqual(updated.preview_error, "measurement_crashed")
+        self.assertEqual(len(db.persist_preview_terminal_outcome_calls), 1)
+        self.assertEqual(db.request(42)["status"], "unsearchable")
+
 
 if __name__ == "__main__":
     unittest.main()
