@@ -273,6 +273,45 @@ def refusal_is_indeterminate(code: FsAuthorityCode) -> bool | None:
             return False
 
 
+_REFUSAL_CHAIN_MAX_DEPTH = 16
+
+
+def indeterminate_os_refusal(exc: BaseException) -> OSError | None:
+    """Find the storage refusal hiding inside a third-party exception.
+
+    Tag readers convert an ``OSError`` into their own vocabulary before
+    it ever reaches us — mutagen raises ``MutagenError``, mediafile
+    re-raises that as ``UnreadableFileError``, beets wraps it once more
+    as ``ReadError`` — so ``except OSError`` never fires and an EACCES
+    file is indistinguishable from a corrupt one. The originating error
+    survives on the explicit ``__cause__`` / implicit ``__context__``
+    chain; this walks it and returns the first ``OSError`` whose errno
+    :func:`classify_path_errno` + :func:`refusal_is_indeterminate` call a
+    world failure (issue #1063).
+
+    A corrupt, truncated or unsupported file carries no ``OSError``
+    anywhere on that chain and returns ``None``: "this file's tags are
+    garbage" is a fact ABOUT the file, and reporting it as a refusal
+    would re-launder the very distinction this module exists to keep.
+
+    The walk is bounded and cycle-guarded: an exception chain is
+    attacker-influenced data in exactly the same way a path is.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    for _ in range(_REFUSAL_CHAIN_MAX_DEPTH):
+        if current is None or id(current) in seen:
+            break
+        seen.add(id(current))
+        if (
+            isinstance(current, OSError)
+            and refusal_is_indeterminate(classify_path_errno(current)) is True
+        ):
+            return current
+        current = current.__cause__ or current.__context__
+    return None
+
+
 @dataclass(frozen=True)
 class DirectoryObservation:
     """One truthful answer to "is there a directory at this name?".

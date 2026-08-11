@@ -197,7 +197,12 @@ inside socket authorization, never credentials.
 - `pipeline-cli add` — Add a MusicBrainz or Discogs request.
 - `pipeline-cli audit world` — Read-only PipelineDB, Beets, evidence, and disk coherence audit.
 - `pipeline-cli ban-source` — Remove a server-resolved bad rip and requeue its request when appropriate.
-- `pipeline-cli beets-distance` — Measure a rejected download against an exact release.
+- `pipeline-cli beets-distance` — Measure a rejected download against an exact
+  release. A folder that could not be observed or read reports
+  `folder_unavailable` (exit 5), never `folder_missing`/`no_audio`. When only
+  PART of the folder could be read, the outcome stays `ok` and the render
+  prints a `PARTIAL READ` block naming the refusal: the distance is real but it
+  was computed over fewer local tracks than the album holds (#1063).
 - `pipeline-cli disk-coverage` — Compare active pipeline rows with Beets library coverage.
 - `pipeline-cli force-import` — Queue a rejected download for the importer lane.
 - `pipeline-cli import-job-recovery show` — Show read-only exact evidence for one import job.

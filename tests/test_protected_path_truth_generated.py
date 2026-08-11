@@ -17,19 +17,22 @@ rows and the actual filesystem afterwards.
 
 from __future__ import annotations
 
+import itertools
 import os
 import shutil
 import stat
 import tempfile
 import unittest
-from collections.abc import Callable, Sequence
-from types import SimpleNamespace
-from typing import ClassVar
+from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
+from typing import ClassVar, NamedTuple
 
+import msgspec
 from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
+from lib.config import CratediggerConfig
 from lib.fs_authority import DirectoryObservation
 from lib.util import observe_failed_path
 from lib.wrong_match_cleanup_service import (
@@ -56,7 +59,13 @@ from tests.helpers import (
     make_request_row,
     seed_visible_wrong_match,
 )
-from web.wrong_match_file_service import build_wrong_match_explorer
+from tests.node_jsonl_worker import NodeJsonlWorker
+from web.wrong_match_file_service import (
+    WrongMatchSourceUnavailable,
+    build_wrong_match_explorer,
+)
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 #: Every world the property drives. Ordered so a shrink lands on the
 #: simplest one that still violates the invariant.
@@ -575,6 +584,69 @@ ENTRY_WORLDS: tuple[str, ...] = (
 )
 
 
+class _ExplorerWorld(NamedTuple):
+    """One real quarantine album on disk plus the handles to drive it."""
+
+    album: str
+    unreadable: tuple[str, ...]
+    cfg: CratediggerConfig
+    log_id: int
+    entry: Mapping[str, object]
+
+
+def build_explorer_world(
+    db: FakePipelineDB, root: str, worlds: Sequence[str],
+) -> _ExplorerWorld:
+    """Materialize one real album whose entries are readable or refused."""
+    db.seed_request(make_request_row(id=1, mb_release_id="mbid-1"))
+    album = os.path.join(root, "failed_imports", "Album")
+    os.makedirs(album)
+    unreadable: list[str] = []
+    for index, world in enumerate(worlds):
+        if world == "readable_audio":
+            path = os.path.join(album, f"{index:02d} track.mp3")
+            with open(path, "wb") as handle:
+                handle.write(b"\x00" * 32)
+        elif world == "readable_other":
+            path = os.path.join(album, f"{index:02d} notes.txt")
+            with open(path, "wb") as handle:
+                handle.write(b"notes")
+        elif world == "unreadable_file":
+            path = os.path.join(album, f"{index:02d} locked.mp3")
+            with open(path, "wb") as handle:
+                handle.write(b"\x00" * 32)
+            os.chmod(path, 0o000)
+            unreadable.append(path)
+        else:
+            path = os.path.join(album, f"{index:02d} locked-dir")
+            os.makedirs(path)
+            os.chmod(path, 0o000)
+            unreadable.append(path)
+    log_id = db.log_download(
+        1,
+        outcome="rejected",
+        validation_result={"failed_path": album},
+    )
+    entry = db.get_download_log_entry(log_id)
+    assert entry is not None
+    return _ExplorerWorld(
+        album=album,
+        unreadable=tuple(unreadable),
+        # The REAL config type, as the sibling generated test in
+        # ``tests/test_path_authority_generated.py`` does: a
+        # ``SimpleNamespace`` answers to any attribute name, so a renamed
+        # quarantine-root field would leave every property here green
+        # while production consulted different roots.
+        cfg=CratediggerConfig(
+            slskd_download_dir=root,
+            beets_staging_dir=os.path.join(root, "staging"),
+            processing_dir=os.path.join(root, "processing"),
+        ),
+        log_id=log_id,
+        entry=entry,
+    )
+
+
 def assert_explorer_listing_is_honest(
     *,
     worlds: Sequence[str],
@@ -647,49 +719,16 @@ class TestExplorerRefusalHonestyGenerated(unittest.TestCase):
         self, worlds: list[str],
     ) -> None:
         db = FakePipelineDB()
-        db.seed_request(make_request_row(id=1, mb_release_id="mbid-1"))
         with tempfile.TemporaryDirectory() as root:
-            album = os.path.join(root, "failed_imports", "Album")
-            os.makedirs(album)
-            unreadable: list[str] = []
-            for index, world in enumerate(worlds):
-                if world == "readable_audio":
-                    path = os.path.join(album, f"{index:02d} track.mp3")
-                    with open(path, "wb") as handle:
-                        handle.write(b"\x00" * 32)
-                elif world == "readable_other":
-                    path = os.path.join(album, f"{index:02d} notes.txt")
-                    with open(path, "wb") as handle:
-                        handle.write(b"notes")
-                elif world == "unreadable_file":
-                    path = os.path.join(album, f"{index:02d} locked.mp3")
-                    with open(path, "wb") as handle:
-                        handle.write(b"\x00" * 32)
-                    os.chmod(path, 0o000)
-                    unreadable.append(path)
-                else:
-                    path = os.path.join(album, f"{index:02d} locked-dir")
-                    os.makedirs(path)
-                    os.chmod(path, 0o000)
-                    unreadable.append(path)
-            log_id = db.log_download(
-                1,
-                outcome="rejected",
-                validation_result={"failed_path": album},
-            )
-            entry = db.get_download_log_entry(log_id)
-            assert entry is not None
-            cfg = SimpleNamespace(
-                slskd_download_dir=root,
-                beets_staging_dir=os.path.join(root, "staging"),
-                processing_dir=os.path.join(root, "processing"),
-            )
+            world = build_explorer_world(db, root, worlds)
             try:
                 payload = build_wrong_match_explorer(
-                    download_log_id=log_id, entry=entry, cfg=cfg,
+                    download_log_id=world.log_id,
+                    entry=world.entry,
+                    cfg=world.cfg,
                 )
             finally:
-                for path in unreadable:
+                for path in world.unreadable:
                     os.chmod(path, 0o700)
             assert_explorer_listing_is_honest(worlds=worlds, payload=payload)
 
@@ -728,4 +767,440 @@ class TestExplorerRefusalHonestyGenerated(unittest.TestCase):
         assert_explorer_listing_is_honest(
             worlds=["readable_audio"],
             payload={**pre_fix, "audio_file_count": 1},
+        )
+
+
+# ---------------------------------------------------------------------------
+# Composition: the real producer's payload through the real browser code.
+#
+# Every fact above was true of the SERVER and none of it reached the
+# operator. ``build_wrong_match_explorer`` answered 200 with
+# ``status: "unavailable"``, the route passed it through, and
+# ``web/js/wrong-matches.js`` threw it away because its gate read
+# ``status !== 'ok'`` — so the panel said "Failed to load file explorer"
+# with a Retry button that can never succeed on an unreadable tree, and
+# the authored honest copy was unreachable code. Module-scope tests on
+# both halves were green throughout. This is the widest-boundary rule:
+# the invariant lives in the producer/consumer PAIR, so the pin and the
+# property drive the real writer and the real reader over one payload.
+# ---------------------------------------------------------------------------
+
+_EXPLORER_BROWSER_WORKER = """
+import { __test__ } from './web/js/wrong-matches.js';
+
+function freshMount(logId) {
+  const mount = { innerHTML: '' };
+  globalThis.document = {
+    getElementById(id) {
+      return id === `wm-explorer-${logId}` ? mount : null;
+    },
+  };
+  globalThis.setTimeout = (fn) => { fn(); return 0; };
+  return mount;
+}
+
+async function handle(operation, payload) {
+  if (operation === 'renderable_statuses') {
+    return Array.from(__test__.EXPLORER_RENDERABLE_STATUSES);
+  }
+  if (operation === 'explorer') {
+    const logId = Number(payload.log_id);
+    const mount = freshMount(logId);
+    globalThis.fetch = async () => ({
+      ok: Number(payload.http_status) < 400,
+      status: Number(payload.http_status),
+      json: async () => payload.body,
+    });
+    await __test__.maybeLoadWrongMatchExplorer(logId, { open: true });
+    return { html: mount.innerHTML };
+  }
+  throw new Error(`unknown operation ${operation}`);
+}
+"""
+
+#: The copy the panel owes an operator whose listing is incomplete.
+_LOAD_FAILURE_COPY = "Failed to load file explorer"
+_REFUSAL_COPY = "could not be read"
+_NOT_EMPTY_COPY = "NOT evidence that the folder is empty"
+
+
+def assert_browser_told_the_truth(
+    *,
+    worlds: Sequence[str],
+    payload: Mapping[str, object],
+    html: str,
+) -> None:
+    """What the OPERATOR sees, composed from the real payload and real JS."""
+    readable = sum(
+        1 for world in worlds
+        if world in ("readable_audio", "readable_other")
+    )
+    refused = sum(
+        1 for world in worlds
+        if world in ("unreadable_file", "unreadable_dir")
+    )
+    if _LOAD_FAILURE_COPY in html:
+        raise AssertionError(
+            f"worlds {list(worlds)} produced a renderable "
+            f"status={payload.get('status')!r} payload the browser rejected "
+            "as a load failure"
+        )
+    if refused and _REFUSAL_COPY not in html:
+        raise AssertionError(
+            f"worlds {list(worlds)} refused {refused} entries and the "
+            "browser never said so"
+        )
+    if refused and readable == 0 and _NOT_EMPTY_COPY not in html:
+        raise AssertionError(
+            f"worlds {list(worlds)} rendered an intact-but-unreadable folder "
+            "without denying it is empty"
+        )
+    if not refused and (_REFUSAL_COPY in html or _NOT_EMPTY_COPY in html):
+        raise AssertionError(
+            f"worlds {list(worlds)} refused nothing yet the browser claimed "
+            "an incomplete listing"
+        )
+
+
+class TestExplorerReachesTheOperatorGenerated(unittest.TestCase):
+    """Real producer payload -> real ``web/js/wrong-matches.js`` render."""
+
+    def setUp(self) -> None:
+        self.worker = NodeJsonlWorker(_EXPLORER_BROWSER_WORKER, cwd=REPO_ROOT)
+        self.addCleanup(self.worker.close)
+        # ``_entryExplorerState`` is module-scoped in the browser module, so
+        # each request needs its own id or the second render short-circuits.
+        self._ids = itertools.count(9000)
+
+    def _render(self, body: Mapping[str, object], status: int) -> str:
+        result = self.worker.request("explorer", {
+            "log_id": next(self._ids),
+            "http_status": status,
+            "body": body,
+        })
+        if not isinstance(result, dict):
+            raise TypeError(f"explorer worker returned {type(result).__name__}")
+        html = result.get("html")
+        if not isinstance(html, str):
+            raise TypeError("explorer worker returned no html")
+        return html
+
+    @example(worlds=["unreadable_file"])
+    @example(worlds=["unreadable_file", "unreadable_dir"])
+    @example(worlds=["readable_audio", "unreadable_file"])
+    @example(worlds=["readable_other", "unreadable_file"])
+    @example(worlds=["readable_audio"])
+    @example(worlds=[])
+    @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+    @given(worlds=st.lists(
+        st.sampled_from(ENTRY_WORLDS), min_size=0, max_size=4,
+    ))
+    def test_every_producible_payload_renders_honestly(
+        self, worlds: list[str],
+    ) -> None:
+        db = FakePipelineDB()
+        with tempfile.TemporaryDirectory() as root:
+            world = build_explorer_world(db, root, worlds)
+            try:
+                payload = build_wrong_match_explorer(
+                    download_log_id=world.log_id,
+                    entry=world.entry,
+                    cfg=world.cfg,
+                )
+            finally:
+                for path in world.unreadable:
+                    os.chmod(path, 0o700)
+        # The vocabulary contract: every status this producer can emit is
+        # one the consumer agrees to render. Both sides are asked, neither
+        # is hard-coded here.
+        renderable = self.worker.request("renderable_statuses", None)
+        assert isinstance(renderable, list)
+        self.assertIn(
+            payload["status"], renderable,
+            "the producer emitted a status the browser will not render",
+        )
+        html = self._render(payload, 200)
+        assert_browser_told_the_truth(
+            worlds=worlds, payload=payload, html=html)
+
+    def test_a_refused_root_reaches_the_operator_with_its_reason(self) -> None:
+        """Rule C pin: the 503 body comes from the producer that raises it.
+
+        A refusal of the WHOLE root is the one explorer world that is not
+        a 200 payload. The route answers ``h._error(str(exc), 503)``, and
+        the browser used to discard the message entirely — leaving an
+        operator with a bare "Failed to load" over a world that needs
+        fixing.
+        """
+        db = FakePipelineDB()
+        with tempfile.TemporaryDirectory() as root:
+            world = build_explorer_world(db, root, ["readable_audio"])
+            parent = os.path.dirname(world.album)
+            os.chmod(parent, 0o000)
+            try:
+                with self.assertRaises(WrongMatchSourceUnavailable) as caught:
+                    build_wrong_match_explorer(
+                        download_log_id=world.log_id,
+                        entry=world.entry,
+                        cfg=world.cfg,
+                    )
+            finally:
+                os.chmod(parent, 0o700)
+        # Exactly the envelope ``web/routes/imports.py`` writes for it.
+        reason = str(caught.exception)
+        html = self._render({"error": reason}, 503)
+        self.assertIn(_LOAD_FAILURE_COPY, html)
+        self.assertIn(_REFUSAL_COPY, html)
+        self.assertIn("Retry", html)
+
+    def test_known_bad_browser_checker_trips(self) -> None:
+        """The checker must fail on the exact pre-fix render."""
+        unavailable = {"status": "unavailable", "unreadable_entry_count": 1}
+        # 1. The shipped defect: a renderable payload rejected as a load
+        #    failure.
+        with self.assertRaises(AssertionError):
+            assert_browser_told_the_truth(
+                worlds=["unreadable_file"],
+                payload=unavailable,
+                html="<div>Failed to load file explorer. <button>Retry</button></div>",
+            )
+        # 2. Rendered, but silent about the refusal.
+        with self.assertRaises(AssertionError):
+            assert_browser_told_the_truth(
+                worlds=["unreadable_file"],
+                payload=unavailable,
+                html="<div>No audio files found in this folder.</div>",
+            )
+        # 3. Named the refusal but still let "empty" stand.
+        with self.assertRaises(AssertionError):
+            assert_browser_told_the_truth(
+                worlds=["unreadable_file"],
+                payload=unavailable,
+                html="<div>1 entry could not be read</div>",
+            )
+        # 4. Must still work in the other direction: an ordinary complete
+        #    listing may not claim an incomplete one.
+        with self.assertRaises(AssertionError):
+            assert_browser_told_the_truth(
+                worlds=["readable_audio"],
+                payload={"status": "ok", "unreadable_entry_count": 0},
+                html="<div>1 entry could not be read</div>",
+            )
+        assert_browser_told_the_truth(
+            worlds=["readable_audio"],
+            payload={"status": "ok", "unreadable_entry_count": 0},
+            html="<div>1 track in surviving folder</div>",
+        )
+
+
+# ---------------------------------------------------------------------------
+# The same rule, one layer further down: the beets-distance READ.
+#
+# ``os.walk``'s ``onerror`` and the per-file ``os.stat`` see neither of the
+# refusals that actually happen here. A mode-0000 file is listed by the walk
+# and stats perfectly well; only the tag read is refused, and mediafile
+# converts that ``OSError`` into its own ``UnreadableFileError``. So a
+# partial manifest shipped a bare distance, and an album whose files were
+# ALL refused answered ``no_audio`` — HTTP 410 Gone, CLI exit 4, "the
+# artifacts we wanted to compare are gone" — over intact audio.
+#
+# The Replace picker is where the operator chooses a pressing, so the
+# property drives the real service AND the real badge formatter.
+# ---------------------------------------------------------------------------
+
+DISTANCE_FILE_WORLDS: tuple[str, ...] = (
+    "readable",
+    "refused",
+    "unparseable",
+)
+
+_DISTANCE_BADGE_WORKER = """
+import { formatDistanceBadge, pickBestDistance } from './web/js/replace_picker.js';
+
+async function handle(operation, payload) {
+  if (operation === 'badge') {
+    return { text: formatDistanceBadge(pickBestDistance([payload])) };
+  }
+  throw new Error(`unknown operation ${operation}`);
+}
+"""
+
+_INCOMPLETE_BADGE_COPY = "incomplete manifest"
+
+
+def assert_distance_read_is_honest(
+    *,
+    worlds: Sequence[str],
+    outcome: str,
+    partial_read: str | None,
+    total_local_tracks: int | None,
+) -> None:
+    """A distance never hides a refusal, and never invents one."""
+    readable = sum(1 for world in worlds if world == "readable")
+    refused = sum(1 for world in worlds if world == "refused")
+    if refused and readable == 0 and outcome == "no_audio":
+        raise AssertionError(
+            f"worlds {list(worlds)} reported no_audio — a definitive "
+            "negative — for audio the storage refused to show"
+        )
+    if refused and readable == 0 and outcome != "folder_unavailable":
+        raise AssertionError(
+            f"worlds {list(worlds)} refused every file yet reported "
+            f"outcome={outcome!r}"
+        )
+    if refused and readable and partial_read is None:
+        raise AssertionError(
+            f"worlds {list(worlds)} computed a distance over "
+            f"{readable} of {readable + refused} files without flagging the "
+            "incomplete manifest"
+        )
+    if not refused and partial_read is not None:
+        raise AssertionError(
+            f"worlds {list(worlds)} refused nothing yet claimed "
+            f"partial_read={partial_read!r} — an unparseable file is a fact "
+            "about the file, not a refusal"
+        )
+    if outcome == "ok" and total_local_tracks != readable:
+        raise AssertionError(
+            f"worlds {list(worlds)} scored {total_local_tracks!r} local "
+            f"tracks, expected the {readable} it could actually read"
+        )
+
+
+def assert_badge_shows_the_incompleteness(
+    *, partial_read: str | None, text: str,
+) -> None:
+    """The pressing-row badge is the operator's decision surface."""
+    marked = _INCOMPLETE_BADGE_COPY in text
+    if partial_read is not None and text and not marked:
+        raise AssertionError(
+            f"badge {text!r} presented a distance computed over an "
+            f"incomplete manifest ({partial_read!r}) as an ordinary score"
+        )
+    if partial_read is None and marked:
+        raise AssertionError(
+            f"badge {text!r} claimed an incomplete manifest for a complete read"
+        )
+
+
+class TestDistanceReadRefusalGenerated(unittest.TestCase):
+    """Real ``compute_beets_distance`` over real refused/parsed audio."""
+
+    FIXTURE_FLAC: ClassVar[str] = os.path.join(
+        os.path.dirname(__file__), "fixtures", "audio_hash", "sine_440.flac")
+
+    def setUp(self) -> None:
+        self.worker = NodeJsonlWorker(_DISTANCE_BADGE_WORKER, cwd=REPO_ROOT)
+        self.addCleanup(self.worker.close)
+
+    def _badge_text(self, result: object) -> str:
+        from lib.beets_distance import BeetsDistanceResult
+        assert isinstance(result, BeetsDistanceResult)
+        payload = msgspec.to_builtins(result)
+        rendered = self.worker.request("badge", payload)
+        if not isinstance(rendered, dict):
+            raise TypeError(f"badge worker returned {type(rendered).__name__}")
+        text = rendered.get("text")
+        if not isinstance(text, str):
+            raise TypeError("badge worker returned no text")
+        return text
+
+    @example(worlds=["readable", "refused"])
+    @example(worlds=["refused"])
+    @example(worlds=["refused", "refused"])
+    @example(worlds=["readable", "unparseable"])
+    @example(worlds=["readable"])
+    @example(worlds=["unparseable"])
+    @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+    @given(worlds=st.lists(
+        st.sampled_from(DISTANCE_FILE_WORLDS), min_size=1, max_size=3,
+    ))
+    def test_a_refused_read_is_never_a_definitive_negative(
+        self, worlds: list[str],
+    ) -> None:
+        from lib.beets_distance import compute_beets_distance
+        from tests.test_beets_distance import _ok_mb_release, _present, _StubPDB
+
+        with tempfile.TemporaryDirectory() as root:
+            album = os.path.join(root, "wrong_matches", "Album")
+            os.makedirs(album)
+            locked: list[str] = []
+            for index, world in enumerate(worlds):
+                path = os.path.join(album, f"{index:02d} track.flac")
+                if world == "unparseable":
+                    with open(path, "wb") as handle:
+                        handle.write(b"not a flac at all" * 8)
+                    continue
+                shutil.copy(self.FIXTURE_FLAC, path)
+                if world == "refused":
+                    os.chmod(path, 0o000)
+                    locked.append(path)
+            pdb = _StubPDB(
+                download_log_entry={
+                    "id": 1, "request_id": 7,
+                    "validation_result": {"failed_path": album},
+                },
+                request={"id": 7, "mb_release_group_id": "rg-shared"},
+            )
+            try:
+                result = compute_beets_distance(
+                    1, "rel-x",
+                    pdb=pdb,
+                    mb_get_release=lambda mbid: _ok_mb_release(mbid=mbid),
+                    observe_failed_path=_present,
+                )
+            finally:
+                for path in locked:
+                    os.chmod(path, 0o600)
+
+        assert_distance_read_is_honest(
+            worlds=worlds,
+            outcome=result.outcome,
+            partial_read=result.partial_read,
+            total_local_tracks=result.total_local_tracks,
+        )
+        # …and through the outermost real adapter the operator meets it in.
+        assert_badge_shows_the_incompleteness(
+            partial_read=result.partial_read,
+            text=self._badge_text(result),
+        )
+
+    def test_known_bad_distance_checkers_trip(self) -> None:
+        """Both checkers must fail on the exact pre-fix behaviour."""
+        # 1. Every file refused, reported as "there is no audio here".
+        with self.assertRaises(AssertionError):
+            assert_distance_read_is_honest(
+                worlds=["refused"], outcome="no_audio",
+                partial_read=None, total_local_tracks=None,
+            )
+        # 2. Partial manifest scored with no flag.
+        with self.assertRaises(AssertionError):
+            assert_distance_read_is_honest(
+                worlds=["readable", "refused"], outcome="ok",
+                partial_read=None, total_local_tracks=1,
+            )
+        # 3. The mirror image: a corrupt file claimed as a refusal.
+        with self.assertRaises(AssertionError):
+            assert_distance_read_is_honest(
+                worlds=["readable", "unparseable"], outcome="ok",
+                partial_read="x: bad tags", total_local_tracks=1,
+            )
+        # 4. A complete read must pass.
+        assert_distance_read_is_honest(
+            worlds=["readable"], outcome="ok",
+            partial_read=None, total_local_tracks=1,
+        )
+        # 5. The badge checker, both directions.
+        with self.assertRaises(AssertionError):
+            assert_badge_shows_the_incompleteness(
+                partial_read="x: Permission denied", text="best 0.07 (1/2)",
+            )
+        with self.assertRaises(AssertionError):
+            assert_badge_shows_the_incompleteness(
+                partial_read=None,
+                text="best 0.07 (2/2) · incomplete manifest",
+            )
+        assert_badge_shows_the_incompleteness(
+            partial_read="x: Permission denied",
+            text="best 0.07 (1/2) · incomplete manifest",
         )

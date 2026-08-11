@@ -1137,6 +1137,111 @@ console.log('maybeLoadWrongMatchExplorer() lazy-loads explorer tags and audio on
   assertEqual(calls.length, 1, 'reopening the dropdown reuses the loaded explorer state');
 }
 
+console.log('maybeLoadWrongMatchExplorer() renders the honest copy for a refused listing');
+{
+  // Issue #1063. The server answers 200 with ``status: "unavailable"``
+  // when it recorded refusals and could read nothing. This consumer used
+  // to reject anything that was not ``ok``, so the operator saw "Failed
+  // to load file explorer" and the authored copy below was unreachable.
+  // The composed producer->consumer property lives in
+  // tests/test_protected_path_truth_generated.py; this is the fast pin on
+  // the consumer branch itself.
+  installStorage();
+  const dom = installDom();
+  const mount = { innerHTML: '' };
+  const elements = new Map([['wm-explorer-200', mount]]);
+  globalThis.document.getElementById = (id) => {
+    if (id === 'wrong-matches-content') return dom.wrongMatches;
+    if (id === 'toast') return dom.toast;
+    return elements.get(id) || null;
+  };
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      status: 'unavailable',
+      download_log_id: 200,
+      failed_path: '/mnt/virtio/cratedigger/processing/albums/wrong_matches/Guapo - Five Suns',
+      folder_name: 'Guapo - Five Suns',
+      source_dirs: [],
+      audio_file_count: 0,
+      other_file_count: 0,
+      partial: true,
+      truncated_reason: null,
+      unreadable_entry_count: 3,
+      unreadable_reason: '01.flac: cannot open 01.flac: Permission denied',
+      scanned_file_count: 0,
+      scanned_bytes: 0,
+      ordered_by: 'folder',
+      files: [],
+    }),
+  });
+
+  await __test__.maybeLoadWrongMatchExplorer(200, { open: true });
+
+  assert(!mount.innerHTML.includes('Failed to load file explorer'),
+    'a renderable unavailable payload is not treated as a load failure');
+  assert(mount.innerHTML.includes('3 entries could not be read'),
+    'the refusal count reaches the operator');
+  assert(mount.innerHTML.includes('nothing here is confirmed missing'),
+    'the listing is labelled incomplete');
+  assert(mount.innerHTML.includes('NOT evidence that the folder is empty'),
+    'an unreadable folder is never presented as an empty one');
+  assert(mount.innerHTML.includes('Permission denied'),
+    'the refusal reason is shown');
+}
+
+console.log('maybeLoadWrongMatchExplorer() surfaces a 503 refusal reason instead of swallowing it');
+{
+  installStorage();
+  const dom = installDom();
+  const mount = { innerHTML: '' };
+  const elements = new Map([['wm-explorer-201', mount]]);
+  globalThis.document.getElementById = (id) => {
+    if (id === 'wrong-matches-content') return dom.wrongMatches;
+    if (id === 'toast') return dom.toast;
+    return elements.get(id) || null;
+  };
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 503,
+    json: async () => ({
+      error: 'Wrong-match files could not be read: /x/wrong_matches/Album '
+        + '(quarantine path is contained but unavailable: cannot open '
+        + '/x/wrong_matches/Album: Permission denied)',
+    }),
+  });
+
+  await __test__.maybeLoadWrongMatchExplorer(201, { open: true });
+
+  assert(mount.innerHTML.includes('Failed to load file explorer'),
+    'a real transport/authority failure still reads as a failure');
+  assert(mount.innerHTML.includes('could not be read'),
+    'the server’s own reason reaches the operator');
+  assert(mount.innerHTML.includes('Retry'),
+    'the retry affordance survives');
+}
+
+console.log('renderWrongMatchExplorer() must still work: a complete listing claims nothing');
+{
+  const html = __test__.renderWrongMatchExplorer({
+    status: 'ok',
+    audio_file_count: 0,
+    other_file_count: 0,
+    partial: false,
+    truncated_reason: null,
+    unreadable_entry_count: 0,
+    unreadable_reason: null,
+    files: [],
+  });
+  assert(html.includes('No audio files found in this folder.'),
+    'a readable empty folder still reads as empty');
+  assert(!html.includes('could not be read'),
+    'a complete listing never claims a refusal');
+  assert(!html.includes('NOT evidence'),
+    'a complete listing never denies emptiness');
+}
+
 console.log('cleanupSummaryToast() reports kept, skipped, and delete failures');
 {
   const body = __test__.cleanupSummaryToast({

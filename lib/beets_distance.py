@@ -66,7 +66,12 @@ from beets.autotag import distance as _beets_distance_fn
 from beets.autotag import hooks as _beets_hooks
 from beets.autotag import match as _beets_match_mod
 
-from lib.fs_authority import DirectoryObservation
+from lib.fs_authority import (
+    DirectoryObservation,
+    classify_path_errno,
+    indeterminate_os_refusal,
+    refusal_is_indeterminate,
+)
 from lib.validation_envelope import decode_validation_envelope
 
 log = logging.getLogger(__name__)
@@ -265,26 +270,58 @@ def _audio_files_under(folder: str) -> _FolderScan:
     )
 
 
-def _fingerprint_file(path: str) -> _AudioFileFingerprint | None:
+@dataclass(frozen=True)
+class _FileRead:
+    """One file's fingerprint, or the refusal that stopped us reading it.
+
+    Both fields are ``None`` when the file WAS read but could not be
+    parsed: a corrupt, truncated or unsupported tag block is a fact
+    about the file, not a refusal, and laundering it into ``refusal``
+    would make the ``partial_read`` signal meaningless (issue #1063).
+    """
+
+    fingerprint: _AudioFileFingerprint | None = None
+    refusal: str | None = None
+
+
+def _fingerprint_file(path: str) -> _FileRead:
     """Read tags via beets ``Item.from_path`` and project to fingerprint.
 
-    Returns ``None`` if the file can't be read — caller skips it. We
-    deliberately don't raise: a single corrupt sidecar file shouldn't
+    Returns an empty read if the file can't be PARSED — caller skips it.
+    We deliberately don't raise: a single corrupt sidecar file shouldn't
     fail the whole picker query.
+
+    A refused read is a different fact and comes back as ``refusal``.
+    Neither ``os.walk``'s ``onerror`` nor the ``os.stat`` above it sees
+    it: a mode-0000 file stats perfectly well and is listed by the walk,
+    and the ESTALE/EIO this deployment's nested virtiofs really produces
+    fires mid-read. mediafile then converts the ``OSError`` into its own
+    ``UnreadableFileError`` (beets re-wraps that as ``ReadError``), so
+    the refusal used to be swallowed exactly like a corrupt tag — which
+    left an incomplete manifest unflagged and, with EVERY file refused,
+    produced ``no_audio`` (HTTP 410 "gone") off an intact album. That is
+    issue #1063 verbatim, one layer down.
     """
     try:
         item = _item_from_path(path)
     except Exception as exc:  # noqa: BLE001 — beets raises a mediafile mess
+        refused = indeterminate_os_refusal(exc)
+        if refused is not None:
+            log.warning(
+                "beets_distance: tag read REFUSED for %s: %s", path, refused)
+            return _FileRead(refusal=f"{path}: {refused.strerror}")
         log.warning("beets_distance: tag read failed for %s: %s", path, exc)
-        return None
+        return _FileRead()
 
     try:
         st = os.stat(path)
-    except OSError:
-        return None
+    except OSError as exc:
+        if refusal_is_indeterminate(classify_path_errno(exc)) is True:
+            return _FileRead(refusal=f"{path}: {exc.strerror}")
+        return _FileRead()
 
     # Beets Item exposes tag fields as attributes (LightFlavoredDict).
-    return _AudioFileFingerprint(
+    return _FileRead(fingerprint=_AudioFileFingerprint(
         path=path,
         mtime=st.st_mtime,
         size=st.st_size,
@@ -299,7 +336,7 @@ def _fingerprint_file(path: str) -> _AudioFileFingerprint | None:
         length=float(_item_field(item, "length", 0.0) or 0.0),
         format=str(_item_field(item, "format", "") or ""),
         media=str(_item_field(item, "media", "") or ""),
-    )
+    ))
 
 
 @dataclass(frozen=True)
@@ -345,7 +382,10 @@ def _read_folder_fingerprints(
         if cached is not None and cached.mtime == st.st_mtime and cached.size == st.st_size:
             fps.append(cached)
             continue
-        fp = _fingerprint_file(path)
+        read = _fingerprint_file(path)
+        if read.refusal is not None and read_error is None:
+            read_error = read.refusal
+        fp = read.fingerprint
         if fp is None:
             continue
         fps.append(fp)

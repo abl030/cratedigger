@@ -567,7 +567,21 @@ depends on.
   extracted audio tags, and inline browser playback for supported audio files.
   It walks no-follow descriptors with deterministic bounded traversal and
   visibly labels partial/truncated results; audio streaming validates, ranges,
-  and reads the same opened descriptor.
+  and reads the same opened descriptor. **A refused read is labelled
+  separately from a truncating limit** (#1063): entries the server was not
+  permitted to read are counted and named, and when nothing was readable the
+  route answers 200 with `status: "unavailable"` and the panel says the folder
+  is unreadable rather than empty — explicitly "this is NOT evidence that the
+  folder is empty". `web/js/wrong-matches.js` renders both `ok` and
+  `unavailable` payloads; a refusal of the whole root is a 503 whose reason is
+  shown next to the Retry button.
+- **Replace picker distance badge** — each pressing row carries the best
+  beets-distance against the request's Wrong Matches folders. When the service
+  was refused part of a folder, the response's `partial_read` is set and the
+  badge reads `best 0.07 (6/12) · incomplete manifest` in amber, with the
+  refusal on hover (#1063). A distance is a per-track average, so scoring an
+  incomplete manifest as a plain number misinforms the one surface where the
+  operator picks a pressing.
 - **Wrong Matches cleanup** — one top-level action runs over the full Wrong
   Matches queue. It consumes existing evidence only, deletes force-mode
   confident cleanup-eligible rejects, and leaves would-import, uncertain,

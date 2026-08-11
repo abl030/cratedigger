@@ -362,6 +362,92 @@ class TestComputeBeetsDistanceOutcomes(unittest.TestCase):
         assert r.error_message is not None
         self.assertIn("could not read the contents", r.error_message)
 
+    def _refused_tag_read_world(self, locked: tuple[str, ...]) -> str:
+        """Real FLACs under a readable folder, some of them mode 0000.
+
+        The refusal shape the walk CANNOT see: the directory lists fine,
+        every file stats fine, and only the tag read is refused (issue
+        #1063). Restores the modes on teardown so ``TemporaryDirectory``
+        can clean up.
+        """
+        root = self.enterContext(tempfile.TemporaryDirectory())
+        album = os.path.join(root, "wrong_matches", "Album")
+        os.makedirs(album)
+        for name in ("01 - one.flac", "02 - two.flac"):
+            shutil.copy(FIXTURE_FLAC, os.path.join(album, name))
+        for name in locked:
+            os.chmod(os.path.join(album, name), 0o000)
+
+        def _restore() -> None:
+            for name in locked:
+                os.chmod(os.path.join(album, name), 0o600)
+
+        self.addCleanup(_restore)
+        return album
+
+    def _compute_over(self, album: str) -> BeetsDistanceResult:
+        pdb = _StubPDB(
+            download_log_entry={"id": 1, "request_id": 7,
+                                "validation_result": {"failed_path": album}},
+            request={"id": 7, "mb_release_group_id": "rg-shared"},
+        )
+        return compute_beets_distance(
+            1, "rel-x",
+            pdb=pdb,
+            mb_get_release=lambda mbid: _ok_mb_release(mbid=mbid),
+            observe_failed_path=_present,
+        )
+
+    def test_refused_tag_read_flags_the_partial_manifest(self) -> None:
+        """One readable + one refused file is an INCOMPLETE manifest.
+
+        ``partial_read`` is the field that says so on the otherwise-``ok``
+        result. Before the fix, ``_fingerprint_file`` swallowed the
+        refusal (mediafile converts the ``OSError`` into its own
+        ``UnreadableFileError``), so a distance computed over half an
+        album shipped as a plain number (issue #1063).
+        """
+        album = self._refused_tag_read_world(("02 - two.flac",))
+        result = self._compute_over(album)
+        self.assertEqual(result.outcome, "ok")
+        assert result.partial_read is not None
+        self.assertIn("02 - two.flac", result.partial_read)
+        self.assertIn("Permission denied", result.partial_read)
+        self.assertEqual(result.total_local_tracks, 1)
+
+    def test_every_tag_read_refused_is_not_no_audio(self) -> None:
+        """ALL files refused is the #1063 defect verbatim, one layer down.
+
+        Zero fingerprints with no walk-level error used to mean
+        ``no_audio`` — HTTP 410 Gone, CLI exit 4, "the artifacts we
+        wanted to compare are gone" — over an intact album.
+        """
+        album = self._refused_tag_read_world(
+            ("01 - one.flac", "02 - two.flac"))
+        result = self._compute_over(album)
+        self.assertEqual(result.outcome, "folder_unavailable")
+        self.assertNotEqual(result.outcome, "no_audio")
+        assert result.error_message is not None
+        self.assertIn("could not read the contents", result.error_message)
+
+    def test_unparseable_file_is_not_reported_as_a_refusal(self) -> None:
+        """Must still work: a corrupt tag block is a fact about the file.
+
+        It carries no ``OSError`` anywhere on its exception chain, so it
+        must not claim ``partial_read`` — that would make the signal
+        meaningless, which is the mirror-image of the bug.
+        """
+        root = self.enterContext(tempfile.TemporaryDirectory())
+        album = os.path.join(root, "wrong_matches", "Album")
+        os.makedirs(album)
+        shutil.copy(FIXTURE_FLAC, os.path.join(album, "01 - one.flac"))
+        with open(os.path.join(album, "02 - garbage.flac"), "wb") as handle:
+            handle.write(b"not a flac at all" * 8)
+        result = self._compute_over(album)
+        self.assertEqual(result.outcome, "ok")
+        self.assertIsNone(result.partial_read)
+        self.assertEqual(result.total_local_tracks, 1)
+
     def test_empty_readable_folder_is_still_no_audio(self) -> None:
         """Must still work: a readable folder with no audio is no_audio."""
         root = self.enterContext(tempfile.TemporaryDirectory())

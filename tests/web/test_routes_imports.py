@@ -177,6 +177,10 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
     }
     DELETE_GROUP_REQUIRED_FIELDS: ClassVar = {
         "status", "request_id", "outcome", "success", "processed", "deleted",
+        # Issue #1063 split pointer-only clears out of ``deleted`` so the
+        # toast stops calling a folder we never touched "deleted".
+        # ``web/js/wrong-matches.js`` reads this to say so.
+        "cleared_missing",
         "deleted_paths", "cleared", "skipped", "errors", "remaining",
         "group_empty", "results",
     }

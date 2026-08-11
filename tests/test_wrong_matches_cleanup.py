@@ -517,6 +517,98 @@ class TestWrongMatchDeleteService(unittest.TestCase):
             shutil.rmtree(root2, ignore_errors=True)
             shutil.rmtree(root3, ignore_errors=True)
 
+    def test_delete_group_counts_a_proven_absence_as_cleared_missing(self):
+        """A pointer-only clear is NOT a deletion, and the count says so.
+
+        The route ships ``cleared_missing`` to the toast; every other
+        test builds a ``WrongMatchDeleteSummary`` by hand, so nothing
+        proved the REAL group service routes a ``path_missing`` success
+        into that field instead of ``deleted`` — the exact overclaim
+        issue #1063 removed from the single-delete path.
+        """
+        from lib.wrong_match_delete_service import (
+            OUTCOME_DELETED,
+            OUTCOME_PATH_MISSING,
+            delete_wrong_match_group,
+        )
+
+        db = self._make_db()
+        root_present, present = make_failed_import_source()
+        root_absent, absent = make_failed_import_source()
+        try:
+            with open(os.path.join(present, "01.mp3"), "wb") as f:
+                f.write(b"audio")
+            self._log_download(db, failed_path=present)
+            self._log_download(db, failed_path=absent)
+            # Prove the absence rather than asserting it: the folder is
+            # removed before the service ever looks.
+            shutil.rmtree(absent)
+            self.assertFalse(os.path.exists(absent))
+
+            summary = delete_wrong_match_group(db, 1)
+
+            self.assertTrue(summary.success)
+            self.assertEqual(summary.processed, 2)
+            self.assertEqual(summary.deleted, 1)
+            self.assertEqual(summary.cleared_missing, 1)
+            self.assertEqual(summary.deleted_paths, 1)
+            self.assertEqual(summary.cleared, 2)
+            self.assertEqual(
+                sorted(result.outcome for result in summary.results),
+                sorted((OUTCOME_DELETED, OUTCOME_PATH_MISSING)),
+            )
+            self.assertFalse(os.path.exists(present))
+            self.assertEqual(db.get_wrong_matches(), [])
+        finally:
+            shutil.rmtree(root_present, ignore_errors=True)
+            shutil.rmtree(root_absent, ignore_errors=True)
+
+    def test_group_success_always_means_nothing_remains(self):
+        """``success`` implies ``remaining == 0`` — pinned where it is defined.
+
+        ``MbidReplaceService._finalize_replace`` warns on
+        ``not summary.success`` and states in a comment that success
+        already covers ``remaining``. That is a real coupling with no
+        test behind it: a future edit to the ``success`` expression that
+        dropped ``remaining == 0`` would make Replace claim a clean
+        supersede over surviving Wrong Matches sources — the incident in
+        issue #1063's audit section.
+        """
+        from lib.wrong_match_delete_service import delete_wrong_match_group
+
+        db = self._make_db()
+        root_ok, deletable = make_failed_import_source()
+        root_locked, blocked = make_failed_import_source()
+        try:
+            for source in (deletable, blocked):
+                with open(os.path.join(source, "01.mp3"), "wb") as f:
+                    f.write(b"audio")
+            self._log_download(db, failed_path=deletable)
+            blocked_id = self._log_download(db, failed_path=blocked)
+            job = db.enqueue_import_job(
+                "force_import",
+                request_id=1,
+                payload={"download_log_id": blocked_id,
+                         "failed_path": blocked},
+            )
+            assert job is not None
+
+            summary = delete_wrong_match_group(db, 1)
+
+            # The world the invariant is about: one row survives.
+            self.assertGreater(summary.remaining, 0)
+            self.assertFalse(summary.success)
+            self.assertTrue(os.path.isdir(blocked))
+            # Must still work: with the job terminal, nothing remains and
+            # success becomes available again.
+            db.mark_import_job_failed(job.id, error="operator cancelled")
+            second = delete_wrong_match_group(db, 1)
+            self.assertEqual(second.remaining, 0)
+            self.assertTrue(second.success)
+        finally:
+            shutil.rmtree(root_ok, ignore_errors=True)
+            shutil.rmtree(root_locked, ignore_errors=True)
+
     def test_delete_refuses_directory_outside_failed_imports(self):
         from lib.wrong_match_delete_service import (
             OUTCOME_SKIPPED_UNSAFE_PATH,

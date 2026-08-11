@@ -149,7 +149,7 @@ def enqueue_force_import(
     except FilesystemAuthorityError as exc:
         return ForceImportEnqueueResult(
             RESULT_PATH_UNAVAILABLE
-            if refusal_is_indeterminate(exc.code)
+            if refusal_is_indeterminate(exc.code) is True
             else RESULT_UNAUTHORIZED_PATH,
             download_log_id,
             request_id=request_id,

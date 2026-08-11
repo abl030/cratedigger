@@ -49,6 +49,11 @@ class TestBeetsDistanceRouteContract(_FakeDbWebServerCase):
         "request_id",
         "folder_path",
         "error_message",
+        # Issue #1063 — set when part of the folder could not be READ, so
+        # the distance covers fewer local tracks than the album holds.
+        # ``web/js/replace_picker.js`` turns it into the badge's
+        # "incomplete manifest" marker on the pressing-picking surface.
+        "partial_read",
         "duration_ms",
     }
 
@@ -92,6 +97,32 @@ class TestBeetsDistanceRouteContract(_FakeDbWebServerCase):
         self.assertEqual(data["outcome"], "ok")
         self.assertAlmostEqual(data["distance"], 0.07, places=4)
         self.assertEqual(data["matched_tracks"], 12)
+        self.assertIsNone(data["partial_read"])
+
+    def test_partial_read_survives_the_wire(self):
+        """A refused-in-part read stays ``ok`` and ships its reason (#1063).
+
+        The status code is unchanged — the distance is real — but the
+        browser needs the field to stop painting it as a complete score.
+        """
+        with self._patch_service(
+            outcome="ok",
+            distance=0.07,
+            matched_tracks=6,
+            total_local_tracks=6,
+            total_mb_tracks=12,
+            candidate_mbid=self.UUID_A,
+            download_log_id=100,
+            request_id=7,
+            folder_path="/tmp/x",
+            partial_read="/tmp/x/07.flac: Permission denied",
+        ):
+            status, data = self._get(f"/api/beets-distance/100/{self.UUID_A}")
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.REQUIRED_FIELDS,
+                                "beets-distance partial-read response")
+        self.assertEqual(data["partial_read"],
+                         "/tmp/x/07.flac: Permission denied")
 
     def test_download_log_not_found_returns_404(self):
         with self._patch_service(

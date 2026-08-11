@@ -166,7 +166,7 @@ def _opened_wrong_match_root(
         with open_configured_quarantine_directory(failed_path, runtime_config) as root:
             yield validation_result, root
     except FilesystemAuthorityError as exc:
-        if refusal_is_indeterminate(exc.code):
+        if refusal_is_indeterminate(exc.code) is True:
             raise WrongMatchSourceUnavailable(
                 "Wrong-match files could not be read: "
                 f"{failed_path or '<missing>'} ({exc})",
@@ -513,7 +513,7 @@ def build_wrong_match_explorer(
                         # these silently let an intact album render as a
                         # confident empty folder — the panel the operator
                         # reads before deciding to delete (issue #1063).
-                        if refusal_is_indeterminate(exc.code):
+                        if refusal_is_indeterminate(exc.code) is True:
                             unreadable_entry_count += 1
                             if unreadable_reason is None:
                                 unreadable_reason = f"{relative}: {exc}"
@@ -609,7 +609,7 @@ def resolve_wrong_match_stream_file(
         try:
             opened = open_regular_relative(root.fd, cleaned_relative_path)
         except FilesystemAuthorityError as exc:
-            if refusal_is_indeterminate(exc.code):
+            if refusal_is_indeterminate(exc.code) is True:
                 raise WrongMatchSourceUnavailable(
                     f"Wrong-match file could not be read: "
                     f"{cleaned_relative_path} ({exc})",

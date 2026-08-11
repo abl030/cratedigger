@@ -324,6 +324,19 @@ function renderWrongMatchExplorer(data) {
 }
 
 /**
+ * Explorer payload statuses this panel knows how to render.
+ *
+ * ``build_wrong_match_explorer`` emits exactly these two: ``ok`` when it
+ * was allowed to look at everything, ``unavailable`` when refusals were
+ * recorded and nothing was readable. Both are complete payloads that
+ * ``renderWrongMatchExplorer`` turns into honest copy; anything else is
+ * an error envelope.
+ *
+ * @type {Set<unknown>}
+ */
+const EXPLORER_RENDERABLE_STATUSES = new Set(['ok', 'unavailable']);
+
+/**
  * @param {number} logId
  * @returns {Promise<void>}
  */
@@ -338,14 +351,24 @@ async function ensureWrongMatchExplorer(logId) {
   try {
     const r = await fetch(`${API}/api/wrong-matches/explorer?download_log_id=${encodeURIComponent(String(logId))}`);
     const data = await r.json();
-    if (!r.ok || data.status !== 'ok') {
-      throw new Error(data.error || data.message || 'Explorer load failed');
+    // ``unavailable`` is a 200 payload the server DELIBERATELY builds:
+    // nothing readable plus recorded refusals. It is the honest listing,
+    // not a load failure — rejecting it here sent the operator back to
+    // "Failed to load file explorer" with a Retry button that can never
+    // succeed on an unreadable tree, and left the authored copy below
+    // unreachable (issue #1063).
+    if (!r.ok || !EXPLORER_RENDERABLE_STATUSES.has(data?.status)) {
+      throw new Error(data?.error || data?.message || 'Explorer load failed');
     }
     mount.innerHTML = renderWrongMatchExplorer(data);
     _entryExplorerState.set(logId, 'loaded');
-  } catch (_e) {
+  } catch (e) {
     _entryExplorerState.delete(logId);
-    mount.innerHTML = `<div style="color:#f88;font-size:0.78em;padding:8px 0;">Failed to load file explorer. <button class="p-btn" style="margin-left:6px;" onclick="event.stopPropagation(); window.reloadWrongMatchExplorer(${logId})">Retry</button></div>`;
+    // A whole-root refusal answers 503 with the server's own reason
+    // (``Wrong-match files could not be read: … (EACCES)``). Dropping it
+    // told the operator nothing at all about a world that needs fixing.
+    const detail = (e instanceof Error && e.message) ? ` ${esc(e.message)}` : '';
+    mount.innerHTML = `<div style="color:#f88;font-size:0.78em;padding:8px 0;">Failed to load file explorer.${detail} <button class="p-btn" style="margin-left:6px;" onclick="event.stopPropagation(); window.reloadWrongMatchExplorer(${logId})">Retry</button></div>`;
   }
 }
 
@@ -1408,6 +1431,7 @@ async function _pollImportJob(jobId, btn, logId) {
 }
 
 export const __test__ = {
+  EXPLORER_RENDERABLE_STATUSES,
   pollImportJob: _pollImportJob,
   bulkTriageWrongMatches,
   cleanupSummaryToast,
