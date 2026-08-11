@@ -98,6 +98,7 @@ def _empty_wrong_match_summary(_db, request_id: int) -> WrongMatchDeleteSummary:
         success=True,
         processed=0,
         deleted=0,
+        cleared_missing=0,
         deleted_paths=0,
         cleared=0,
         skipped=0,

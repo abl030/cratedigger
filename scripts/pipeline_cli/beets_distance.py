@@ -47,6 +47,10 @@ def _render_beets_distance(status: int, payload: dict[str, object]) -> None:
                 print(f"    {key:<24} {float(value):.4f}")
     if payload.get("folder_path"):
         print(f"  folder:                 {payload['folder_path']}")
+    if payload.get("partial_read"):
+        print("  PARTIAL READ — the distance above was computed over an "
+              "incomplete manifest:")
+        print(f"    {payload['partial_read']}")
     if payload.get("duration_ms") is not None:
         print(f"  latency:                {payload['duration_ms']} ms")
     if payload.get("error_message"):

@@ -402,6 +402,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
             success=True,
             processed=2,
             deleted=2,
+            cleared_missing=0,
             deleted_paths=2,
             cleared=2,
             skipped=0,
@@ -1510,6 +1511,92 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         self.assertEqual(group["pending_count"], 1)
         self.assertEqual([e["download_log_id"] for e in group["entries"]], [20])
 
+    def test_unreadable_entries_never_render_as_an_empty_folder(self):
+        """Issue #1063 F1: the panel read BEFORE deciding to delete.
+
+        An intact album whose entries the server cannot read used to
+        return ``status: ok``, ``audio_file_count: 0``, ``partial: false``
+        and an empty file list — an affirmative "this folder is empty"
+        over an intact album, i.e. an inducement to destroy it.
+        """
+        tmpdir = self.enterContext(tempfile.TemporaryDirectory())
+        failed_dir = os.path.join(tmpdir, "failed_imports", "Intact Album")
+        os.makedirs(failed_dir)
+        for name in ("01 - One.mp3", "02 - Two.mp3"):
+            with open(os.path.join(failed_dir, name), "wb") as handle:
+                handle.write(b"\x00" * 32)
+            os.chmod(os.path.join(failed_dir, name), 0o000)
+        nested = os.path.join(failed_dir, "Disc 2")
+        os.makedirs(nested)
+        os.chmod(nested, 0o000)
+        self.addCleanup(os.chmod, nested, 0o700)
+        log_id = self.db.log_download(
+            100, outcome="rejected",
+            validation_result={"failed_path": failed_dir},
+        )
+
+        with self._wrong_match_runtime_config(tmpdir):
+            status, data = self._get(
+                f"/api/wrong-matches/explorer?download_log_id={log_id}")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["status"], "unavailable")
+        self.assertEqual(data["audio_file_count"], 0)
+        self.assertEqual(data["other_file_count"], 0)
+        self.assertTrue(data["partial"])
+        # The two reasons a listing is incomplete stay distinguishable.
+        self.assertIsNone(data["truncated_reason"])
+        self.assertEqual(data["unreadable_entry_count"], 3)
+        self.assertIn("Permission denied", data["unreadable_reason"])
+
+    def test_readable_entries_alongside_unreadable_ones_are_still_listed(self):
+        """A partial listing is served, and says it is partial."""
+        tmpdir = self.enterContext(tempfile.TemporaryDirectory())
+        failed_dir = os.path.join(tmpdir, "failed_imports", "Mixed Album")
+        os.makedirs(failed_dir)
+        readable = os.path.join(failed_dir, "01 - Readable.mp3")
+        with open(readable, "wb") as handle:
+            handle.write(b"\x00" * 32)
+        unreadable = os.path.join(failed_dir, "02 - Unreadable.mp3")
+        with open(unreadable, "wb") as handle:
+            handle.write(b"\x00" * 32)
+        os.chmod(unreadable, 0o000)
+        log_id = self.db.log_download(
+            100, outcome="rejected",
+            validation_result={"failed_path": failed_dir},
+        )
+
+        with self._wrong_match_runtime_config(tmpdir):
+            status, data = self._get(
+                f"/api/wrong-matches/explorer?download_log_id={log_id}")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["status"], "ok")
+        self.assertEqual(data["audio_file_count"], 1)
+        self.assertTrue(data["partial"])
+        self.assertEqual(data["unreadable_entry_count"], 1)
+
+    def test_a_genuinely_empty_folder_is_still_confidently_empty(self):
+        """Must still work: nothing to read and nothing refused."""
+        tmpdir = self.enterContext(tempfile.TemporaryDirectory())
+        failed_dir = os.path.join(tmpdir, "failed_imports", "Empty Album")
+        os.makedirs(failed_dir)
+        log_id = self.db.log_download(
+            100, outcome="rejected",
+            validation_result={"failed_path": failed_dir},
+        )
+
+        with self._wrong_match_runtime_config(tmpdir):
+            status, data = self._get(
+                f"/api/wrong-matches/explorer?download_log_id={log_id}")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["status"], "ok")
+        self.assertEqual(data["audio_file_count"], 0)
+        self.assertFalse(data["partial"])
+        self.assertEqual(data["unreadable_entry_count"], 0)
+        self.assertIsNone(data["unreadable_reason"])
+
     def test_unreadable_explorer_source_is_retryable_not_not_found(self):
         """The explorer owes the same distinction (#1063 review T2.4).
 
@@ -1533,6 +1620,36 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
 
         self.assertEqual(status, 503)
         self.assertIn("could not be read", data["error"])
+
+    def test_unreadable_single_file_names_the_file_not_the_folder(self):
+        """Issue #1063 F7: attribute a per-FILE refusal to that file.
+
+        ``_opened_wrong_match_root`` is a context manager, so a refusal
+        raised inside its ``with`` used to be converted by the generator
+        and reported against the whole folder.
+        """
+        tmpdir = self.enterContext(tempfile.TemporaryDirectory())
+        failed_dir = os.path.join(tmpdir, "failed_imports", "Album")
+        os.makedirs(failed_dir)
+        track = os.path.join(failed_dir, "01 - Locked.mp3")
+        with open(track, "wb") as handle:
+            handle.write(b"\x00" * 32)
+        os.chmod(track, 0o000)
+        self.addCleanup(os.chmod, track, 0o600)
+        log_id = self.db.log_download(
+            100, outcome="rejected",
+            validation_result={"failed_path": failed_dir},
+        )
+
+        with self._wrong_match_runtime_config(tmpdir):
+            status, data = self._get(
+                f"/api/wrong-matches/audio?download_log_id={log_id}"
+                "&path=01%20-%20Locked.mp3",
+            )
+
+        self.assertEqual(status, 503)
+        self.assertIn("01 - Locked.mp3", data["error"])
+        self.assertNotIn("files could not be read", data["error"])
 
     def test_missing_explorer_source_is_still_not_found(self):
         """Must still work: a genuinely absent source stays 404."""
@@ -1692,6 +1809,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
             success=False,
             processed=1,
             deleted=0,
+            cleared_missing=0,
             deleted_paths=0,
             cleared=0,
             skipped=1,

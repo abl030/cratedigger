@@ -1013,10 +1013,12 @@ class MbidReplaceService:
 
             try:
                 wm_summary = delete_wrong_match_group(self.db, request_id)
-                if not wm_summary.success or wm_summary.remaining:
+                if not wm_summary.success:
                     # Skipped-without-error is just as silent a failure as
                     # an error: sources and their pointers survive while
                     # Replace claims a clean supersede (issue #1063).
+                    # ``success`` already requires ``remaining == 0`` on
+                    # both of its branches, so it is the whole condition.
                     warnings.append(
                         f"wrong-matches cleanup did not complete: "
                         f"{wm_summary.errors} errors, "

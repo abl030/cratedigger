@@ -108,6 +108,14 @@ class WrongMatchDeleteSummary(msgspec.Struct, frozen=True):
     success: bool
     processed: int
     deleted: int
+    """Rows whose FOLDER was actually removed.
+
+    Pointer-only clears over a proven-absent folder are counted in
+    ``cleared_missing`` instead. ``deleted`` headlines the operator's
+    toast, and calling a folder we never touched "deleted" is exactly the
+    overclaim issue #1063 removed from the single-delete path.
+    """
+    cleared_missing: int
     deleted_paths: int
     cleared: int
     skipped: int
@@ -175,7 +183,14 @@ def delete_wrong_match_group(
         results.append(delete_wrong_match(db, log_id, require_visible=True))
 
     remaining = _remaining_visible_count(db, request_id)
-    deleted = sum(1 for result in results if result.success and result.cleared_rows)
+    deleted = sum(
+        1 for result in results
+        if result.success and result.cleared_rows and result.deleted_path
+    )
+    cleared_missing = sum(
+        1 for result in results
+        if result.success and result.cleared_rows and result.path_missing
+    )
     deleted_paths = sum(1 for result in results if result.deleted_path)
     cleared = sum(result.cleared_rows for result in results)
     skipped = sum(1 for result in results if result.skipped)
@@ -201,6 +216,7 @@ def delete_wrong_match_group(
         success=success,
         processed=len(results),
         deleted=deleted,
+        cleared_missing=cleared_missing,
         deleted_paths=deleted_paths,
         cleared=cleared,
         skipped=skipped,

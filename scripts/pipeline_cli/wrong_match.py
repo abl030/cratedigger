@@ -66,7 +66,8 @@ def _render_wrong_match_delete_group(
     if results:
         print()
     for field in (
-        "deleted", "deleted_paths", "cleared", "skipped", "errors", "remaining",
+        "deleted", "cleared_missing", "deleted_paths", "cleared", "skipped",
+        "errors", "remaining",
     ):
         print(f"  {field}: {payload.get(field, 0)}")
 

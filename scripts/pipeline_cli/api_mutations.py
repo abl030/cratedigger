@@ -198,7 +198,10 @@ def _post(
     mutation: _ApiMutation,
     *,
     timeout_seconds: float = _TIMEOUT_SECONDS,
+    report_failure: bool = True,
 ) -> _ApiResult | None:
+    """``report_failure=False`` silences the structured stderr line for a
+    RETRIED attempt; the caller reports once when it finally gives up."""
     try:
         if isinstance(endpoint, UnixApiEndpoint):
             return _send_unix(
@@ -224,21 +227,29 @@ def _post(
         with exc:
             return _ApiResult(status=exc.code, body=exc.read())
     except ValueError as exc:
-        _failure("api_protocol_error", str(exc))
+        _report(report_failure, "api_protocol_error", str(exc))
         return None
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        _failure("api_unavailable", str(exc))
+        _report(report_failure, "api_unavailable", str(exc))
         return None
     except http.client.HTTPException as exc:
-        _failure("api_protocol_error", str(exc))
+        _report(report_failure, "api_protocol_error", str(exc))
         return None
 
 
-def _decode(result: _ApiResult) -> dict[str, object] | None:
+def _report(enabled: bool, error: str, detail: str) -> None:
+    if enabled:
+        _failure(error, detail)
+
+
+def _decode(
+    result: _ApiResult, *, report: bool = True,
+) -> dict[str, object] | None:
     try:
         return msgspec.json.decode(result.body, type=dict[str, object])
     except (msgspec.DecodeError, msgspec.ValidationError):
-        _failure("api_protocol_error", "API response was not a JSON object")
+        _report(report, "api_protocol_error",
+                "API response was not a JSON object")
         return None
 
 
@@ -334,10 +345,18 @@ def relay_polled(
     consecutive_failures = 0
     while True:
         sleep(poll_interval_seconds)
-        polled = _post(
-            endpoint, status_request, timeout_seconds=poll_timeout_seconds,
+        # Only the attempt that gives up reports: retried blips would
+        # otherwise print up to five structured failures for one recovery.
+        final_attempt = (
+            consecutive_failures + 1 >= max_consecutive_poll_failures
         )
-        payload = None if polled is None else _decode(polled)
+        polled = _post(
+            endpoint,
+            status_request,
+            timeout_seconds=poll_timeout_seconds,
+            report_failure=final_attempt,
+        )
+        payload = None if polled is None else _decode(polled, report=final_attempt)
         if polled is None or payload is None:
             consecutive_failures += 1
             if consecutive_failures >= max_consecutive_poll_failures:

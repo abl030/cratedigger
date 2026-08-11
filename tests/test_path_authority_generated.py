@@ -1079,6 +1079,17 @@ class TestPathAuthorityProofCheckers(unittest.TestCase):
         with self.assertRaises(AssertionError):
             assert_quarantine_verdict_is_earned(
                 world="outside", code="missing", message="gone")
+        # Fails closed on a world it has no rule for (issue #1063 F5).
+        with self.assertRaises(AssertionError):
+            assert_quarantine_verdict_is_earned(
+                world="brand_new_world", code="missing", message="gone")
+
+
+#: The worlds that reach a refusal and therefore owe a verdict rule. The
+#: present-* worlds never get here — they succeed.
+_REFUSING_WORLDS: frozenset[str] = frozenset(
+    {"outside", "unreadable_root", "absent"},
+)
 
 
 def assert_quarantine_verdict_is_earned(
@@ -1089,7 +1100,16 @@ def assert_quarantine_verdict_is_earned(
     Only a candidate that is genuinely NOT under a configured root may be
     refused for containment; a root the resolver could not open, and a
     name that is genuinely absent, each owe their own code (issue #1063).
+
+    Fails closed on an unknown world: a checker that silently passes
+    input it has no rule for is unfalsifiable for exactly the cases most
+    likely to be new.
     """
+    if world not in _REFUSING_WORLDS:
+        raise AssertionError(
+            f"world={world!r} has no verdict rule — add one rather than "
+            f"letting an unclassified world pass (code={code!r})"
+        )
     containment_verdict = "outside configured quarantine roots" in message
     if world == "outside":
         if not containment_verdict or code == "missing":

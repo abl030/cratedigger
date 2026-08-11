@@ -94,6 +94,9 @@ def cmd_force_import(_db: object, args: argparse.Namespace) -> int:
       * 2 — 404 download log / request missing
       * 3 — 422 missing release id, missing failed_path, unauthorized path
       * 4 — 409 processing-locked
+      * 5 — 503 ``path_unavailable`` (the quarantine authority could not
+            OBSERVE the folder — permissions, I/O; retryable, and never
+            a claim that the path is wrong or gone)
     """
     return relay_rendered(
         args.api_endpoint,

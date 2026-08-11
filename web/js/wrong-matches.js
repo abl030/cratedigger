@@ -268,10 +268,22 @@ function renderWrongMatchExplorer(data) {
   const sharedTags = sharedExplorerTags(files);
   const orderedBy = typeof data?.ordered_by === 'string' ? data.ordered_by : 'folder';
   const partial = data?.partial === true;
+  const unreadableCount = Number.isFinite(data?.unreadable_entry_count)
+    ? data.unreadable_entry_count : 0;
+  const unreadableReason = typeof data?.unreadable_reason === 'string'
+    ? data.unreadable_reason : '';
   const truncatedReason = typeof data?.truncated_reason === 'string' ? data.truncated_reason.replace(/_/g, ' ') : 'limit';
-  const partialNotice = partial
+  // Two different reasons a listing is incomplete, and they must not be
+  // told as one: a LIMIT stopped us, or the server was REFUSED. Issue
+  // #1063 — this panel is what the operator reads before deciding to
+  // delete, so it must never present a refused read as an empty folder.
+  const truncatedNotice = data?.truncated_reason
     ? `<div style="color:#e5a84b;font-size:0.76em;margin:6px 0;">Partial explorer result: ${esc(truncatedReason)} reached.</div>`
     : '';
+  const unreadableNotice = unreadableCount > 0
+    ? `<div style="color:#d9a441;font-size:0.76em;margin:6px 0;">${unreadableCount} entr${unreadableCount === 1 ? 'y' : 'ies'} could not be read — this listing is incomplete and nothing here is confirmed missing.${unreadableReason ? ` (${esc(unreadableReason)})` : ''}</div>`
+    : '';
+  const partialNotice = `${truncatedNotice}${unreadableNotice}`;
   let summary = '';
   if (sourceDirs.length > 0 || Object.keys(sharedTags).length > 0) {
     const parts = [];
@@ -289,7 +301,13 @@ function renderWrongMatchExplorer(data) {
       </div>`;
   }
   if (files.length === 0) {
-    return `${summary}${partialNotice}<div style="color:#666;font-size:0.78em;padding:8px 0;">${partial ? 'No audio files were found before exploration was truncated.' : 'No audio files found in this folder.'}</div>`;
+    const emptyText = unreadableCount > 0
+      ? 'The server could not read this folder\u2019s contents, so no listing is available. This is NOT evidence that the folder is empty.'
+      : partial
+        ? 'No audio files were found before exploration was truncated.'
+        : 'No audio files found in this folder.';
+    const emptyColour = unreadableCount > 0 ? '#d9a441' : '#666';
+    return `${summary}${partialNotice}<div style="color:${emptyColour};font-size:0.78em;padding:8px 0;">${emptyText}</div>`;
   }
 
   let html = `
@@ -1581,29 +1599,37 @@ export async function deleteWrongMatchGroup(requestId, btn) {
     const summarised = Number.isFinite(Number(data.deleted));
     if (summarised) {
       const deleted = Number(data.deleted) || 0;
+      // A pointer-only clear over a folder that was already gone is not a
+      // deletion, and the headline must not call it one (issue #1063).
+      const clearedMissing = Number(data.cleared_missing) || 0;
+      const cleared = clearedMissing
+        ? ` · cleared ${clearedMissing} already-missing` : '';
       const skipped = data.skipped ? ` · skipped ${data.skipped}` : '';
       const errors = data.errors ? ` · errors ${data.errors}` : '';
       const remaining = data.remaining ? ` · ${data.remaining} left` : '';
-      const failed = deleted === 0;
+      const failed = deleted === 0 && clearedMissing === 0;
+      // Anything left behind needs the operator's attention, even when
+      // some folders did go: a green "all good" toast over `errors 1 ·
+      // 1 left` under-signals exactly the world this issue is about.
+      const incomplete = Boolean(data.errors) || Boolean(data.remaining);
       toast(
         failed
           ? `Deleted nothing${skipped}${errors}${remaining}`
-          : `Deleted ${deleted} candidates${skipped}${errors}${remaining}`,
-        failed,
+          : `Deleted ${deleted} folder${deleted === 1 ? '' : 's'}${cleared}${skipped}${errors}${remaining}`,
+        failed || incomplete,
       );
       invalidateWrongMatches();
       if (r.ok && (data.status === 'ok' || data.remaining === 0)) {
         removeWrongMatchGroup(requestId);
       } else {
-        // Partial outcome: remove the rows that actually deleted, leave the
-        // skipped/errored rows visible so the operator can see what failed.
-        for (const result of (data.results || [])) {
-          if (result && result.success && Number.isFinite(Number(result.download_log_id))) {
-            removeWrongMatchEntry(result.download_log_id);
-          }
-        }
+        // Partial outcome: re-render from the server rather than surgically
+        // removing rows. Surgical removal left the group's own strip stale
+        // — "Delete All (2)" and "1 green" over the ONE unavailable
+        // candidate that survived, which is the client/server green
+        // disagreement all over again (issue #1063 F-review).
         btn.disabled = false;
         btn.textContent = `Delete All (${count})`;
+        await _refreshWrongMatches();
       }
     } else {
       btn.disabled = false;

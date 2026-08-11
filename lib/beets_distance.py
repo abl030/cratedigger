@@ -116,6 +116,13 @@ class BeetsDistanceResult(msgspec.Struct, kw_only=True):
     request_id: int | None = None
     folder_path: str | None = None
     error_message: str | None = None
+    partial_read: str | None = None
+    """Set when part of the folder could NOT be read.
+
+    A distance computed over an incomplete manifest is a misleading
+    number on a decision surface, so the refusal travels with the
+    otherwise-``ok`` result instead of being discarded (issue #1063).
+    """
     # Latency observability — useful in tests + the eventual UI.
     duration_ms: int | None = None
 
@@ -702,6 +709,7 @@ def compute_beets_distance(
     # 6. Build items — either from disk (Replace mode) or from synthetic.
     resolved: str | None = None
     fingerprint_count: int | None = None
+    partial_read: str | None = None
     if items_override is not None:
         items = _build_items_from_synthetic(items_override)
     else:
@@ -783,6 +791,9 @@ def compute_beets_distance(
                 folder_path=resolved,
                 started=started,
             )
+        # Some files read, some refused: the number below is computed over
+        # an INCOMPLETE manifest, so it ships with that fact attached.
+        partial_read = scan.read_error
         fingerprint_count = len(fingerprints)
         items = _build_items(fingerprints)
 
@@ -836,6 +847,7 @@ def compute_beets_distance(
         candidate_release_group_id=candidate_rg,
         candidate_mbid=mbid,
         folder_path=resolved,
+        partial_read=partial_read,
         started=started,
     )
 
@@ -857,6 +869,7 @@ def _result(
     request_id: int | None = None,
     folder_path: str | None = None,
     error: str | None = None,
+    partial_read: str | None = None,
     started: float,
 ) -> BeetsDistanceResult:
     return BeetsDistanceResult(
@@ -875,5 +888,6 @@ def _result(
         request_id=request_id,
         folder_path=folder_path,
         error_message=error,
+        partial_read=partial_read,
         duration_ms=int((time.monotonic() - started) * 1000),
     )

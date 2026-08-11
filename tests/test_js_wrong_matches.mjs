@@ -462,7 +462,10 @@ console.log('deleteWrongMatchGroup() posts request id and removes the group in p
     { request_id: 42 },
     'posts selected request id',
   );
-  assert(dom.toast.textContent.includes('Deleted 3 candidates'), 'toasts group delete result');
+  // "candidates" became "folders": a pointer-only clear over an
+  // already-missing folder is counted separately and never headlined as a
+  // deletion (issue #1063).
+  assert(dom.toast.textContent.includes('Deleted 3 folders'), 'toasts group delete result');
 }
 
 console.log('delete controls handle cancel and failures');
@@ -1335,6 +1338,57 @@ console.log('an unobservable source is surfaced, never silently dropped');
     'must still work: an ordinary entry carries no unavailable badge');
   assertEqual(countOccurrences(ordinary, 'disabled'), 0,
     'must still work: an ordinary entry keeps both actions enabled');
+}
+
+console.log('a partial group delete asks for attention and re-renders');
+{
+  // Found by the disposable Rule D fixture (issue #1063): one folder
+  // deleted, one unavailable. The old code kept a green "all good" toast
+  // and surgically removed the deleted row, leaving the group strip
+  // advertising "Delete All (2)" and "1 green" over the ONE unavailable
+  // candidate that survived.
+  const dom = installDom();
+  const calls = [];
+  global.confirm = () => true;
+  global.fetch = async (url, options) => {
+    calls.push({ url, options });
+    if (url === '/api/wrong-matches/delete-group') {
+      return {
+        ok: false,
+        status: 503,
+        json: async () => ({
+          status: 'partial',
+          processed: 2,
+          deleted: 1,
+          cleared_missing: 0,
+          skipped: 1,
+          errors: 1,
+          remaining: 1,
+          results: [
+            { download_log_id: 1, success: true },
+            { download_log_id: 2, success: false,
+              outcome: 'skipped_path_unavailable' },
+          ],
+        }),
+      };
+    }
+    if (url === '/api/wrong-matches') {
+      return { ok: true, json: async () => ({ groups: [] }) };
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+  const btn = { disabled: false, textContent: 'Delete All (2)', style: {} };
+  await __test__.deleteWrongMatchGroup(42, btn);
+
+  assert(dom.toast.textContent.includes('Deleted 1 folder'),
+    'the toast still credits the folder that really went');
+  assert(dom.toast.textContent.includes('1 left'),
+    'the toast says work remains');
+  assert(dom.toast.className.includes('error'),
+    'an incomplete group delete asks for attention, not a green all-clear');
+  assert(calls.some(call => call.url === '/api/wrong-matches'),
+    'a partial outcome re-renders from the server instead of leaving a '
+    + 'stale group strip');
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

@@ -3256,13 +3256,22 @@ pkgs.testers.nixosTest {
     # Issue #1063: every command that touches a protected quarantine path
     # runs through the same socket. Impossible identifiers give the route's
     # own 404/exit-2 contract without any mirror, filesystem, or Beets work.
+    # (command, expected exit, expects a JSON object on stdout). Every one
+    # of these renders the ROUTE's answer to stdout; argparse's own usage
+    # error also exits 2, also writes only to stderr, and also contains no
+    # ``api_`` token, so an exit-code-only assertion would stay green while
+    # nothing ever reached the socket.
     protected_path_cli_commands = (
-        ("wrong-match-delete 999999 --apply --json", 2),
-        ("force-import 999999", 2),
-        ("beets-distance 999999 aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", 2),
-        ("replace 999999 --to aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa --json", 2),
+        ("wrong-match-delete 999999 --apply --json", 2, True),
+        ("force-import 999999", 2, False),
+        (
+            "beets-distance 999999 aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa --json",
+            2,
+            True,
+        ),
+        ("replace 999999 --to aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa --json", 2, True),
     )
-    for index, (command, expected_exit) in enumerate(
+    for index, (command, expected_exit, expects_json) in enumerate(
         protected_path_cli_commands,
     ):
         stdout_path = f"/tmp/protected-cli-{index}.stdout"
@@ -3272,9 +3281,22 @@ pkgs.testers.nixosTest {
             f"runuser -u beets-operator -- pipeline-cli {command} "
             f"> {stdout_path} 2> {stderr_path}; "
             f"rc=$?; set -e; test \"$rc\" = {expected_exit}; "
+            f"test -s {stdout_path}; "
             f"! grep -Eq 'api_(unavailable|protocol_error)' "
             f"{stdout_path} {stderr_path}"
         )
+        protected_stdout = machine.succeed(f"cat {stdout_path}")
+        if expects_json:
+            protected_payload = json.loads(protected_stdout)
+            assert isinstance(protected_payload, dict), (
+                command, protected_payload,
+            )
+        else:
+            # force-import has no --json flag; its rendered refusal is the
+            # route's own message.
+            assert "Force import rejected" in protected_stdout, (
+                command, protected_stdout,
+            )
 
     # The production ownership contract end to end: the private processing
     # tree is 0700 cratedigger, the operator cannot traverse it, and the

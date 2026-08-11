@@ -456,12 +456,15 @@ def build_wrong_match_explorer(
     scanned_bytes = 0
     entries_seen = 0
     truncated_reason: str | None = None
+    unreadable_entry_count = 0
+    unreadable_reason: str | None = None
     with _opened_wrong_match_root(entry, cfg=cfg) as (validation_result, root):
         root_fd = root.fd
         def scan_directory(directory_fd: int, relative_dir: str, depth: int) -> None:
             """Walk depth-first so a broad tree cannot exhaust descriptors."""
             nonlocal entries_seen, other_file_count, scanned_bytes
             nonlocal scanned_file_count, truncated_reason
+            nonlocal unreadable_entry_count, unreadable_reason
             try:
                 names: list[str] = []
                 with os.scandir(directory_fd) as entries:
@@ -502,7 +505,18 @@ def build_wrong_match_explorer(
                         continue
                     try:
                         opened = open_regular_relative(directory_fd, name)
-                    except FilesystemAuthorityError:
+                    except FilesystemAuthorityError as exc:
+                        # An entry we were REFUSED is not an entry that is
+                        # not there. Both swallow sites funnel here: an
+                        # unreadable subdirectory fails its O_DIRECTORY
+                        # probe above and lands on this open too. Dropping
+                        # these silently let an intact album render as a
+                        # confident empty folder — the panel the operator
+                        # reads before deciding to delete (issue #1063).
+                        if refusal_is_indeterminate(exc.code):
+                            unreadable_entry_count += 1
+                            if unreadable_reason is None:
+                                unreadable_reason = f"{relative}: {exc}"
                         continue
                     try:
                         info = opened.stat_result
@@ -544,16 +558,29 @@ def build_wrong_match_explorer(
 
     files, ordered_by = _reorder_files_by_match(files, validation_result)
 
+    nothing_readable = not files and other_file_count == 0
     return {
-        "status": "ok",
+        # An empty listing is only "ok" when we were allowed to look at
+        # everything. With refusals recorded and nothing readable, this is
+        # an unavailable folder, never a confidently empty one (#1063).
+        "status": (
+            "unavailable"
+            if nothing_readable and unreadable_entry_count
+            else "ok"
+        ),
         "download_log_id": int(download_log_id),
         "failed_path": root.display_path,
         "folder_name": os.path.basename(root.display_path),
         "source_dirs": source_dirs_from_validation_result(validation_result),
         "audio_file_count": len(files),
         "other_file_count": other_file_count,
-        "partial": truncated_reason is not None,
+        # ``partial`` means "this listing is incomplete", for either
+        # reason; the two reasons stay in separate, distinguishable
+        # fields — ``truncated_reason`` remains LIMITS only.
+        "partial": truncated_reason is not None or unreadable_entry_count > 0,
         "truncated_reason": truncated_reason,
+        "unreadable_entry_count": unreadable_entry_count,
+        "unreadable_reason": unreadable_reason,
         "scanned_file_count": scanned_file_count,
         "scanned_bytes": scanned_bytes,
         "ordered_by": ordered_by,
@@ -573,9 +600,21 @@ def resolve_wrong_match_stream_file(
     ext = os.path.splitext(cleaned_relative_path)[1].lower()
     if ext not in AUDIO_EXTENSIONS_DOTTED:
         raise ValueError("Requested file is not an audio file")
-    try:
-        with _opened_wrong_match_root(entry) as (_validation_result, root):
+    # Classify the per-FILE refusal HERE. ``_opened_wrong_match_root`` is a
+    # context manager, so a refusal raised inside its ``with`` is thrown
+    # back into the generator and converted there — attributing a single
+    # unreadable file to the whole folder. Neither replacement type is a
+    # ``FilesystemAuthorityError``, so both pass through untouched.
+    with _opened_wrong_match_root(entry) as (_validation_result, root):
+        try:
             opened = open_regular_relative(root.fd, cleaned_relative_path)
-    except FilesystemAuthorityError as exc:
-        raise FileNotFoundError(f"Wrong-match file not found: {cleaned_relative_path}") from exc
+        except FilesystemAuthorityError as exc:
+            if refusal_is_indeterminate(exc.code):
+                raise WrongMatchSourceUnavailable(
+                    f"Wrong-match file could not be read: "
+                    f"{cleaned_relative_path} ({exc})",
+                ) from exc
+            raise FileNotFoundError(
+                f"Wrong-match file not found: {cleaned_relative_path}",
+            ) from exc
     return opened, _audio_mime_type(cleaned_relative_path)

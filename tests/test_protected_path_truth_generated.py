@@ -23,6 +23,7 @@ import stat
 import tempfile
 import unittest
 from collections.abc import Callable, Sequence
+from types import SimpleNamespace
 from typing import ClassVar
 
 from hypothesis import HealthCheck, example, given, settings
@@ -50,7 +51,12 @@ from lib.wrong_match_delete_service import (
 )
 from lib.wrong_matches import _observed_candidates
 from tests.fakes import FakePipelineDB
-from tests.helpers import SeededWrongMatch, seed_visible_wrong_match
+from tests.helpers import (
+    SeededWrongMatch,
+    make_request_row,
+    seed_visible_wrong_match,
+)
+from web.wrong_match_file_service import build_wrong_match_explorer
 
 #: Every world the property drives. Ordered so a shrink lands on the
 #: simplest one that still violates the invariant.
@@ -552,3 +558,174 @@ class TestCandidateAggregationGenerated(unittest.TestCase):
         self.assertEqual(expected_aggregate(["absent", "unreadable"]), "indeterminate")
         self.assertEqual(expected_aggregate(["unreadable", "present"]), "present")
         self.assertEqual(expected_aggregate(["absent"]), "absent")
+
+
+# ---------------------------------------------------------------------------
+# The explorer is a DECISION surface: the operator reads it before choosing
+# to delete. An entry we were refused is not an entry that is not there, so
+# a listing that hides refusals is an inducement to destroy an intact album
+# (issue #1063 F1).
+# ---------------------------------------------------------------------------
+
+ENTRY_WORLDS: tuple[str, ...] = (
+    "readable_audio",
+    "readable_other",
+    "unreadable_file",
+    "unreadable_dir",
+)
+
+
+def assert_explorer_listing_is_honest(
+    *,
+    worlds: Sequence[str],
+    payload: dict[str, object],
+) -> None:
+    """A listing never claims completeness it did not earn."""
+    readable = sum(
+        1 for world in worlds
+        if world in ("readable_audio", "readable_other")
+    )
+    refused = sum(
+        1 for world in worlds
+        if world in ("unreadable_file", "unreadable_dir")
+    )
+    unreadable_count = payload.get("unreadable_entry_count")
+    if unreadable_count != refused:
+        raise AssertionError(
+            f"worlds {list(worlds)} recorded {unreadable_count} refusals, "
+            f"expected {refused}"
+        )
+    if refused and payload.get("partial") is not True:
+        raise AssertionError(
+            f"worlds {list(worlds)} hid {refused} refused entries behind "
+            "a complete-looking listing"
+        )
+    if not refused and payload.get("partial") is not False:
+        raise AssertionError(
+            f"worlds {list(worlds)} reported a partial listing with nothing "
+            "truncated and nothing refused"
+        )
+    if refused and not payload.get("unreadable_reason"):
+        raise AssertionError(
+            f"worlds {list(worlds)} recorded refusals without naming one"
+        )
+    # The load-bearing case: zero readable entries plus a refusal must
+    # never render as a confident empty folder.
+    empty_claim = readable == 0 and payload.get("status") == "ok"
+    if refused and empty_claim:
+        raise AssertionError(
+            f"worlds {list(worlds)} claimed an intact folder is empty "
+            f"(status={payload.get('status')!r}, "
+            f"audio_file_count={payload.get('audio_file_count')!r})"
+        )
+    if not refused and payload.get("status") != "ok":
+        raise AssertionError(
+            f"worlds {list(worlds)} refused nothing yet reported "
+            f"status={payload.get('status')!r}"
+        )
+    audio = sum(1 for world in worlds if world == "readable_audio")
+    if payload.get("audio_file_count") != audio:
+        raise AssertionError(
+            f"worlds {list(worlds)} listed "
+            f"{payload.get('audio_file_count')!r} audio files, expected {audio}"
+        )
+
+
+class TestExplorerRefusalHonestyGenerated(unittest.TestCase):
+    """The real explorer over real trees of readable/unreadable entries."""
+
+    @example(worlds=["unreadable_file"])
+    @example(worlds=["unreadable_file", "unreadable_file", "unreadable_dir"])
+    @example(worlds=["readable_audio", "unreadable_file"])
+    @example(worlds=["readable_audio"])
+    @example(worlds=[])
+    @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+    @given(worlds=st.lists(
+        st.sampled_from(ENTRY_WORLDS), min_size=0, max_size=4,
+    ))
+    def test_real_explorer_never_hides_a_refusal(
+        self, worlds: list[str],
+    ) -> None:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, mb_release_id="mbid-1"))
+        with tempfile.TemporaryDirectory() as root:
+            album = os.path.join(root, "failed_imports", "Album")
+            os.makedirs(album)
+            unreadable: list[str] = []
+            for index, world in enumerate(worlds):
+                if world == "readable_audio":
+                    path = os.path.join(album, f"{index:02d} track.mp3")
+                    with open(path, "wb") as handle:
+                        handle.write(b"\x00" * 32)
+                elif world == "readable_other":
+                    path = os.path.join(album, f"{index:02d} notes.txt")
+                    with open(path, "wb") as handle:
+                        handle.write(b"notes")
+                elif world == "unreadable_file":
+                    path = os.path.join(album, f"{index:02d} locked.mp3")
+                    with open(path, "wb") as handle:
+                        handle.write(b"\x00" * 32)
+                    os.chmod(path, 0o000)
+                    unreadable.append(path)
+                else:
+                    path = os.path.join(album, f"{index:02d} locked-dir")
+                    os.makedirs(path)
+                    os.chmod(path, 0o000)
+                    unreadable.append(path)
+            log_id = db.log_download(
+                1,
+                outcome="rejected",
+                validation_result={"failed_path": album},
+            )
+            entry = db.get_download_log_entry(log_id)
+            assert entry is not None
+            cfg = SimpleNamespace(
+                slskd_download_dir=root,
+                beets_staging_dir=os.path.join(root, "staging"),
+                processing_dir=os.path.join(root, "processing"),
+            )
+            try:
+                payload = build_wrong_match_explorer(
+                    download_log_id=log_id, entry=entry, cfg=cfg,
+                )
+            finally:
+                for path in unreadable:
+                    os.chmod(path, 0o700)
+            assert_explorer_listing_is_honest(worlds=worlds, payload=payload)
+
+    def test_known_bad_explorer_checker_trips(self) -> None:
+        """The exact pre-fix payload must fail this checker."""
+        pre_fix = {
+            "status": "ok",
+            "audio_file_count": 0,
+            "other_file_count": 0,
+            "partial": False,
+            "truncated_reason": None,
+            "unreadable_entry_count": 0,
+            "unreadable_reason": None,
+            "files": [],
+        }
+        with self.assertRaises(AssertionError):
+            assert_explorer_listing_is_honest(
+                worlds=["unreadable_file", "unreadable_file", "unreadable_dir"],
+                payload=pre_fix,
+            )
+        # Counted but still presented as a confident empty folder.
+        with self.assertRaises(AssertionError):
+            assert_explorer_listing_is_honest(
+                worlds=["unreadable_file"],
+                payload={**pre_fix, "unreadable_entry_count": 1,
+                         "partial": True, "unreadable_reason": "x: denied"},
+            )
+        # Counted, flagged, but no reason named.
+        with self.assertRaises(AssertionError):
+            assert_explorer_listing_is_honest(
+                worlds=["unreadable_file"],
+                payload={**pre_fix, "unreadable_entry_count": 1,
+                         "partial": True, "status": "unavailable"},
+            )
+        # Fail-closed the other way: an honest complete listing must pass.
+        assert_explorer_listing_is_honest(
+            worlds=["readable_audio"],
+            payload={**pre_fix, "audio_file_count": 1},
+        )

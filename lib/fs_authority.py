@@ -237,7 +237,7 @@ DirectoryPresence = Literal["present", "absent", "indeterminate"]
 _ABSENCE_CODES: frozenset[FsAuthorityCode] = frozenset({"missing", "not_a_directory"})
 
 
-def refusal_is_indeterminate(code: FsAuthorityCode) -> bool:
+def refusal_is_indeterminate(code: FsAuthorityCode) -> bool | None:
     """Is this refusal a WORLD failure rather than a verdict about the name?
 
     The single owner of that question for every consumer that translates
@@ -247,6 +247,16 @@ def refusal_is_indeterminate(code: FsAuthorityCode) -> bool:
     complaint about the operator's input. The ``match`` is exhaustive on
     purpose: a new :data:`FsAuthorityCode` must be classified here rather
     than silently inheriting either group (issue #868's rule).
+
+    Declared ``bool | None`` because that is the truth: adding a
+    ``case _`` to satisfy a bare ``-> bool`` would destroy the very
+    exhaustiveness this function exists for (and which
+    ``TestIndeterminateRefusalVocabulary`` checks against
+    ``get_args(FsAuthorityCode)``), so a value outside the ``Literal``
+    falls through and returns ``None``. Every consumer treats that
+    falsy result as "not indeterminate", which is the fail-safe side:
+    an unclassifiable refusal is reported as a refusal, not as a
+    retryable blip.
     """
     match code:
         case "open_failed" | "read_failed" | "write_failed":

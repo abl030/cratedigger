@@ -2672,12 +2672,15 @@ def _refusal_is_world_failure(exc: BaseException) -> bool:
     One helper for both snapshot boundaries. A typed authority refusal
     delegates to ``lib.fs_authority.refusal_is_indeterminate``; a bare
     ``OSError`` escaping the snapshot is classified through the very same
-    errno table (issue #1063).
+    errno table (issue #1063). That classifier returns ``None`` for a
+    code outside its ``Literal`` rather than lose its exhaustiveness
+    guard; ``is True`` keeps that unclassifiable case on the fail-safe
+    side — reported as a refusal, not as a retryable blip.
     """
     if isinstance(exc, FilesystemAuthorityError):
-        return refusal_is_indeterminate(exc.code)
+        return refusal_is_indeterminate(exc.code) is True
     if isinstance(exc, OSError):
-        return refusal_is_indeterminate(classify_path_errno(exc))
+        return refusal_is_indeterminate(classify_path_errno(exc)) is True
     return False
 
 

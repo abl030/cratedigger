@@ -1276,7 +1276,8 @@ class TestCmdWrongMatchTriage(_FakeDbWebServerCase):
         real_post = api_mutations._post
         calls = {"n": 0}
 
-        def flaky_post(endpoint, mutation, *, timeout_seconds=15.0):
+        def flaky_post(endpoint, mutation, *, timeout_seconds=15.0,
+                       report_failure=True):
             if mutation.method == "GET":
                 calls["n"] += 1
                 if calls["n"] == 1:
@@ -1304,7 +1305,8 @@ class TestCmdWrongMatchTriage(_FakeDbWebServerCase):
         )
         real_post = api_mutations._post
 
-        def dead_polls(endpoint, mutation, *, timeout_seconds=15.0):
+        def dead_polls(endpoint, mutation, *, timeout_seconds=15.0,
+                       report_failure=True):
             if mutation.method == "GET":
                 return None
             return real_post(
