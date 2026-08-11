@@ -579,8 +579,10 @@ depends on.
   others — carries a Retry on its refusal notice and is deliberately NOT
   cached**: the operator is expected to go and fix the permission, and only a
   listing with nothing left to repair is worth remembering for the rest of the
-  page session. A `truncated_reason` listing stays cached, because retrying
-  hits the same limit.
+  page session. A listing that was truncated by a LIMIT and recorded no
+  refusals stays cached, because retrying hits the same limit; one that was
+  both truncated and refused is still evicted, since the refusal half is
+  repairable.
 - **Replace picker distance badge** — each pressing row carries the best
   beets-distance against the request's Wrong Matches folders. When the service
   was refused part of a folder, the response's `partial_read` is set and the

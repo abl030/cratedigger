@@ -578,6 +578,53 @@ class TestComputeBeetsDistanceOutcomes(unittest.TestCase):
         self.assertEqual(result.outcome, "ok")
         self.assertIsNone(result.partial_read)
 
+    def test_a_nameless_ambient_error_is_the_accepted_cost(self) -> None:
+        """Pin the half the relaxation newly ACCEPTS, in both directions.
+
+        "Names the subject, or names nothing" rejects an error naming a
+        DIFFERENT file — the ambient-leak protection that survives — but
+        accepts a NAMELESS one, because only ``open()`` attaches a
+        filename and the live mid-read producer therefore has none. The
+        cost is that a nameless *ambient* error is accepted too.
+
+        Unreachable today: the sole production caller does not run inside
+        an ``except OSError:`` body. Pinned anyway, so a future caller
+        that does sit under one fails here instead of shipping a false
+        refusal with everything green. If someone later closes the hole,
+        this test is what tells them they changed the contract.
+        """
+        from lib.fs_authority import os_refusal_in_chain
+
+        subject = "/album/01.flac"
+        # ACCEPTED: nameless. This is the live mid-read shape.
+        nameless = OSError(errno.EIO, "Input/output error")
+        self.assertIs(
+            os_refusal_in_chain(nameless, subject=subject), nameless,
+            "a nameless OSError must still be found — the deployment's "
+            "real mid-read refusal has no filename",
+        )
+        # REJECTED: names a different file. The protection that survives.
+        self.assertIsNone(os_refusal_in_chain(
+            OSError(errno.EIO, "Input/output error", "/elsewhere.flac"),
+            subject=subject,
+        ))
+        # The accepted cost, stated as a fact rather than a hope: an
+        # ambient nameless error reached through ``__context__`` is
+        # indistinguishable from the mid-read one and IS accepted.
+        try:
+            raise OSError(errno.EIO, "Input/output error")
+        except OSError:
+            ambient_chain = ValueError("unrelated parse failure")
+            try:
+                raise ambient_chain
+            except ValueError as exc:
+                found = os_refusal_in_chain(exc, subject=subject)
+        self.assertIsNotNone(
+            found,
+            "if this now returns None the residual hole was closed — "
+            "update this pin deliberately rather than deleting it",
+        )
+
     def test_both_real_refusal_producers_are_found_and_attributed(self) -> None:
         """Rule C: the attribution guard rests on facts of the real stack.
 

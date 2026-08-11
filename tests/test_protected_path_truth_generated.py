@@ -581,13 +581,21 @@ ENTRY_WORLDS: tuple[str, ...] = (
     "readable_other",
     "unreadable_file",
     "unreadable_dir",
-    # A dangling symlink: enumerated by the scan, PROVEN to hold nothing.
-    # The explorer already gets this right — it classifies every refusal
-    # through ``classify_path_errno``, and ENOENT/ELOOP are not
-    # indeterminate — but no world could produce it, so the "refused
-    # nothing" half of every clause below was unproven. That is the same
-    # gap the fifth review found in ``DISTANCE_FILE_WORLDS``, where the
-    # branch was NOT already correct.
+    # A dangling symlink, enumerated by the scan and then NOT read.
+    #
+    # Note what actually happens, because the obvious premise is wrong:
+    # ``open_regular_relative`` is ``O_NOFOLLOW``, so it never reaches
+    # the dangling target and never sees ENOENT. It gets **ELOOP ->
+    # ``unsafe_symlink``** — the identical code it would get for a
+    # symlink pointing at a perfectly readable file. That is correct
+    # issue #868 containment policy (a symlink is not authority,
+    # whatever it points at), and the entry is right to be excluded from
+    # the refusal count.
+    #
+    # The world earns its place regardless: it is the only one in this
+    # set that produces an entry the scan enumerates and then declines,
+    # so it is the only one that exercises the "refused NOTHING" half of
+    # every clause below against a non-empty directory.
     "vanished",
 )
 
@@ -626,6 +634,8 @@ def build_explorer_world(
             os.chmod(path, 0o000)
             unreadable.append(path)
         elif world == "vanished":
+            # Enumerated, then declined as a symlink (ELOOP under
+            # ``O_NOFOLLOW``) — never read, never counted as refused.
             os.symlink(
                 os.path.join(album, f"{index:02d} gone.mp3"),
                 os.path.join(album, f"{index:02d} dangling.mp3"),
@@ -779,11 +789,14 @@ class TestExplorerRefusalHonestyGenerated(unittest.TestCase):
                 payload={**pre_fix, "unreadable_entry_count": 1,
                          "partial": True, "status": "unavailable"},
             )
-        # The ``vanished`` world's own mutant: an entry the errno PROVES
-        # is gone, counted as one we were refused. That is what
-        # ``if refusal_is_indeterminate(exc.code) is True:`` → ``if True:``
-        # produces in ``build_wrong_match_explorer``, and no other world
-        # in ``ENTRY_WORLDS`` can reach it.
+        # The ``vanished`` world's own mutant: an entry the scan
+        # enumerated and then declined on CONTAINMENT grounds (ELOOP ->
+        # ``unsafe_symlink``, per issue #868 — not ENOENT; ``O_NOFOLLOW``
+        # never reaches the target), counted as one the storage refused
+        # us. That is what ``if refusal_is_indeterminate(exc.code) is
+        # True:`` → ``if True:`` produces in
+        # ``build_wrong_match_explorer``, and no other world in
+        # ``ENTRY_WORLDS`` can reach it.
         with self.assertRaises(AssertionError):
             assert_explorer_listing_is_honest(
                 worlds=["vanished"],
@@ -1021,8 +1034,8 @@ class TestExplorerReachesTheOperatorGenerated(unittest.TestCase):
                 html="<div>1 entry could not be read</div>",
             )
         # 4b. The ``vanished`` world's own mutant, at the browser: an
-        #     entry proven gone, rendered to the operator as one the
-        #     server was refused.
+        #     entry declined on containment grounds, rendered to the
+        #     operator as one the storage refused to show.
         with self.assertRaises(AssertionError):
             assert_browser_told_the_truth(
                 worlds=["vanished"],
@@ -1071,9 +1084,27 @@ DISTANCE_FILE_WORLDS: tuple[str, ...] = (
     # ``_refusal_text`` owns, and the sweep for this round found it was
     # the one no world could reach.
     "refused_dir",
+    # ELOOP. Its whole point is that ``refusal_is_indeterminate`` answers
+    # ``False`` for it — a containment verdict, not a sick mount — while
+    # ``errno_proves_absence`` also answers ``False``, because a loop
+    # proves nothing about what the name holds. Without this world the
+    # ``_refusal_text`` predicate could be reverted to the pre-delta
+    # ``refusal_is_indeterminate(...) is not True`` and the property
+    # would patrol nothing: only the deterministic pin killed it.
+    "refused_symlink_loop",
     # A dangling symlink: the walk LISTS the name, ``os.stat`` answers
     # ENOENT. The file is PROVEN not to be there — the one errno that
-    # earns a definitive negative. Without this world the "refused
+    # earns a definitive negative.
+    #
+    # Deliberate asymmetry worth knowing: the SAME on-disk shape is
+    # ``vanished`` in ``ENTRY_WORLDS`` above and resolves differently
+    # there. This path stats, and ``os.stat`` FOLLOWS the link to find
+    # ENOENT; the explorer opens with ``O_NOFOLLOW`` and stops at the
+    # link itself with ELOOP. Both are correct for what they do, and
+    # neither counts the entry as a refusal — but only this one may call
+    # it proven absent.
+    #
+    # Without this world the "refused
     # nothing yet claimed partial_read" clause below could not fire, and
     # the delta shipped a proven absence rendered as an amber
     # "incomplete manifest" badge over a complete manifest.
@@ -1111,7 +1142,10 @@ def assert_distance_read_is_honest(
     # deployment's mount, and it is the one the guard used to drop.
     refused = sum(
         1 for world in worlds
-        if world in ("refused", "refused_mid_read", "refused_dir")
+        if world in (
+            "refused", "refused_mid_read", "refused_dir",
+            "refused_symlink_loop",
+        )
     )
     if refused and readable == 0 and outcome == "no_audio":
         raise AssertionError(
@@ -1201,6 +1235,8 @@ class TestDistanceReadRefusalGenerated(unittest.TestCase):
     @example(worlds=["refused_mid_read", "unparseable"])
     @example(worlds=["refused_dir"])
     @example(worlds=["readable", "refused_dir"])
+    @example(worlds=["refused_symlink_loop"])
+    @example(worlds=["readable", "refused_symlink_loop"])
     @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
     @given(worlds=st.lists(
         st.sampled_from(DISTANCE_FILE_WORLDS), min_size=1, max_size=3,
@@ -1239,6 +1275,10 @@ class TestDistanceReadRefusalGenerated(unittest.TestCase):
                     os.makedirs(subdir)
                     os.chmod(subdir, 0o000)
                     locked.append(subdir)
+                    continue
+                if world == "refused_symlink_loop":
+                    # ELOOP: proves nothing about what the name holds.
+                    os.symlink(path, path)
                     continue
                 shutil.copy(self.FIXTURE_FLAC, path)
                 if world == "refused":

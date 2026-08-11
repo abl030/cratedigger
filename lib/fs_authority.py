@@ -240,17 +240,29 @@ _ABSENCE_CODES: frozenset[FsAuthorityCode] = frozenset({"missing", "not_a_direct
 def errno_proves_absence(code: FsAuthorityCode) -> bool:
     """Did this refusal POSITIVELY establish that the name holds nothing?
 
-    The single owner of the ABSENCE question — a different question from
+    The owner of the ABSENCE question — a different question from
     :func:`refusal_is_indeterminate`, which asks whether a refusal is a
     retryable world failure. The two are not complements, and treating
     them as if they were is how ``ELOOP``/``ENXIO``/``ENODEV`` fell
     through a consumer's absence test: ``refusal_is_indeterminate`` says
     ``False`` for a symlink loop because it is a containment verdict, not
     a sick mount — but ``False`` there means "not a world failure", never
-    "proved absent". :func:`observe_directory` has always keyed off
-    :data:`_ABSENCE_CODES`; every consumer that decides "is this name
-    provably empty" must key off the same set, or the two ends of one
-    request disagree about the same errno.
+    "proved absent". A consumer deciding "is this name provably empty"
+    must ask THIS function.
+
+    Two functions call it today — ``lib.beets_distance._refusal_text``
+    and :func:`os_refusal_in_chain` — and :func:`observe_directory`
+    reaches the same verdict by reading :data:`_ABSENCE_CODES` directly,
+    as it always has. The Wrong Matches explorer
+    (``web/wrong_match_file_service.py``) still gates its per-entry
+    refusal count on :func:`refusal_is_indeterminate`, so for an
+    ``ELOOP``/``ENXIO``/``ENODEV`` entry it silently drops the entry and
+    reports a complete listing while the distance path reports the same
+    folder as incomplete. That divergence predates this delta and is
+    recorded here rather than papered over: the direction is safe (the
+    explorer under-reports a containment refusal, it never invents an
+    absence), but "every consumer agrees" would be a false claim, and
+    this module is not the place to make one.
     """
     return code in _ABSENCE_CODES
 
@@ -325,16 +337,38 @@ def os_refusal_in_chain(
     stack, so a caller that reads a corrupt file from inside an
     ``except OSError:`` block finds that unrelated error on the chain,
     and reporting it produces a refusal message with the wrong errno and
-    someone else's filename. But requiring a filename is the wrong
-    correction, because **only ``open()`` attaches one**: the shape this
-    deployment actually produces is a MID-READ ``EIO``/``ESTALE`` on an
-    already-open descriptor, where the errno and the filename land on
-    two DIFFERENT links of the chain and no single link carries both.
-    Demanding both on one link regressed exactly the live case into
-    ``no_audio``. An error that names a different file is not evidence
-    about this one; an error that names nothing is the storage failing
-    mid-read, and the module's doctrine is to fail toward "refusal"
-    rather than toward a definitive negative.
+    someone else's filename. Requiring a filename looks like the
+    correction and is not, because **only ``open()`` attaches one**: the
+    shape this deployment actually produces is a MID-READ
+    ``EIO``/``ESTALE`` on an already-open descriptor, where the errno and
+    the filename land on two DIFFERENT links of the chain and no single
+    link carries both. Demanding both on one link regressed exactly the
+    live case into ``no_audio``.
+
+    So the rule is a deliberate, ASYMMETRIC trade, and it is worth
+    stating precisely rather than favourably: an error that names a
+    DIFFERENT file is rejected, which is the whole ambient-leak
+    protection that survives; an error that names NOTHING is accepted,
+    and a nameless error can be either the storage failing mid-read (the
+    case we need) or an unrelated ambient one (the case we no longer
+    reject). We accept the second to keep the first, because the
+    module's doctrine is to fail toward "refusal" rather than toward a
+    definitive negative — a false refusal costs a retry, a false
+    ``no_audio`` reports an intact album as gone.
+
+    That residual hole is unreachable today: the sole caller
+    (``lib.beets_distance._fingerprint_file``) does not run inside an
+    ``except OSError:`` body. It is pinned in BOTH directions by
+    ``test_a_nameless_ambient_error_is_the_accepted_cost`` so that a
+    future caller which does sit under one fails a test rather than
+    shipping a false refusal quietly. A ``stop_at`` sentinel captured at
+    the caller's entry would close it — the ambient object is provably
+    the chain TAIL and the mid-read errno appears before it — but that
+    was measured and deliberately not taken: it buys nothing reachable,
+    and mis-placing the capture inside the ``try`` would silently stop
+    the walk at the callee's own exception and drop EVERY refusal into
+    ``no_audio``, which is the exact direction this function exists to
+    protect.
 
     Termination is the ``seen`` set, not a depth cap: each step either
     stops or records a new exception object, and the chain is finite. A

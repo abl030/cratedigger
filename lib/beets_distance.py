@@ -260,8 +260,9 @@ def _refusal_text(path: str, exc: OSError) -> str | None:
     loop, a socket and a driverless device node — none of which prove
     anything is absent. Keying off it silently dropped ``ELOOP`` here
     while :func:`observe_directory` called the same errno indeterminate
-    for the folder, so the two ends of one request disagreed. Everything
-    that is not a proven absence travels as a refusal.
+    for the folder, so the two ends of one request disagreed about the
+    same symlink. Everything that is not a proven absence travels as a
+    refusal.
     """
     if errno_proves_absence(classify_path_errno(exc)):
         return None

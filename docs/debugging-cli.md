@@ -211,9 +211,10 @@ inside socket authorization, never credentials.
   after the walk listed it) is not a refusal, does not set `partial_read`, and
   leaves a folder holding only such names as `no_audio`, because that folder
   was observed and read. A symlink loop, a socket or a driverless device node
-  proves nothing absent and therefore counts as a refusal, matching what
-  `observe_directory` says about the same errno at the other end of the
-  request.
+  proves nothing absent and therefore counts as a refusal. For a symlink loop
+  that matches what `observe_directory` reports for the same name; a socket or
+  device node never reaches it, because `observe_directory` stats rather than
+  opens and calls a successful stat of a non-directory `absent`.
 - `pipeline-cli disk-coverage` — Compare active pipeline rows with Beets library coverage.
 - `pipeline-cli force-import` — Queue a rejected download for the importer lane.
 - `pipeline-cli import-job-recovery show` — Show read-only exact evidence for one import job.
