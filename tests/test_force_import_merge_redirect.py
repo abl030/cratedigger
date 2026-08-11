@@ -38,11 +38,20 @@ F5  **Force never launches Beets at a release its own execution just moved
     pre-check cannot cover, the installed album ends up at the survivor and
     the request does not follow. Continuing would hand the operator the
     pre-#1080 ``mbid_missing`` while their library had silently moved, so the
-    launch is refused and the split is recorded durably.
+    launch is refused and the split is recorded durably. Scoped to the split
+    THIS execution created: one an earlier execution left behind is refused
+    at the occupancy pre-check before the library is read, so force proceeds
+    and F7 is what the operator gets.
 F6  **The comparison seam runs before candidate evidence is loaded.** A rekey
     moves the request's evidence rows onto the survivor in the same
     transaction, so evidence loaded first pins the pre-rekey identity. Pinned
     at the action file the Beets child is actually handed.
+F7  **A merge that only an operator can resolve leaves durable evidence on
+    every force attempt.** An occupied survivor refuses the rekey before the
+    library is touched, and no retry clears it. Force imports DESPITE the
+    verdict, so without an audit the operator gets a bare ``mbid_missing``
+    from ``import_one.py`` — the exact pre-#1080 symptom — attempt after
+    attempt, with nothing naming the merge, the survivor or the collision.
 
 ``lib.beets.beets_validate`` is the one patched name: it is the allowlisted
 harness-subprocess wrapper, not our logic. ``canonical_release_fn`` and
@@ -66,9 +75,13 @@ from lib.beets_retag import BeetsRetagResult
 from lib.config import CratediggerConfig
 from lib.dispatch import dispatch_import_from_db
 from lib.dispatch.types import ImportOneRun, ImportOneRunner
-from lib.download_validation import split_identity_audit_message
+from lib.download_validation import (
+    merge_rekey_blocked_audit_message,
+    split_identity_audit_message,
+)
 from lib.import_execution import CancellationToken
 from lib.import_queue import IMPORT_JOB_FORCE, force_import_payload
+from lib.pipeline_db import MergeRekeyCollision
 from lib.quality import (
     AudioQualityMeasurement,
     V0ProbeEvidence,
@@ -149,6 +162,23 @@ def _action_file_release_id(path: str | None) -> str | None:
             handle.read(), type=QualityEvidenceActionPayload,
         )
     return payload.candidate.mb_release_id
+
+
+def _expected_blocked_audit(*, rival_request_id: int) -> str:
+    """The blocked-audit sentence, composed exactly as production composes it.
+
+    Both halves come from their producers — the collision fragment from
+    ``MergeRekeyCollision.detail`` and the sentence from
+    ``merge_rekey_blocked_audit_message`` — so this pin can never assert copy
+    nothing can emit (test-fidelity Rule C).
+    """
+    return merge_rekey_blocked_audit_message(
+        old_release_id=MERGED,
+        new_release_id=SURVIVOR,
+        collision_detail=MergeRekeyCollision(
+            rival_request_id=rival_request_id,
+        ).detail(),
+    )
 
 
 @dataclass(frozen=True)
@@ -652,12 +682,13 @@ class TestForceRefusesToLaunchAtASplitIdentity(unittest.TestCase):
     def test_a_blocked_rekey_leaves_the_force_import_exactly_as_it_was(
         self,
     ) -> None:
-        """The deliberate scope line: blocked is not split.
+        """F5/F7 — the deliberate scope line: blocked is not split.
 
         A rival already holding the survivor is refused BEFORE the retag, so
         the library is untouched and force proceeds against the id the request
         names — exactly what it did before #1080. Only a divergence THIS
-        execution created stops the launch.
+        execution created stops the launch. The operator is not left guessing
+        either: the seam records why.
         """
         world = _ForceWorld(self.stack)
         world.db.seed_request(make_request_row(
@@ -680,9 +711,66 @@ class TestForceRefusesToLaunchAtASplitIdentity(unittest.TestCase):
         self.assertEqual(runner.release_ids, [MERGED])
         self.assertTrue(outcome.success)
         self.assertEqual(
-            [row for row in world.db.download_logs if row.outcome == "failed"],
-            [],
+            [row.error_message for row in world.db.download_logs
+             if row.outcome == "failed"],
+            [_expected_blocked_audit(rival_request_id=999)],
         )
+
+    def test_a_pre_existing_split_is_not_detected_but_is_explained(
+        self,
+    ) -> None:
+        """F7 — the world an EARLIER execution's lost race left behind.
+
+        The library is already at the survivor, the request still names the
+        merged-away id, and the rival that won that race still holds the
+        survivor. The occupancy pre-check refuses before the library is read,
+        so this execution — which moved nothing — has no split of its own to
+        refuse, and the launch proceeds exactly as it did before #1080:
+        ``import_one.py`` matches by exact ``album_id`` and rejects
+        ``mbid_missing`` rather than landing a second album beside the
+        survivor. Without the blocked audit that repeats forever with no new
+        evidence, which is the reported defect; with it, every attempt says
+        which release this was merged into and what is holding it.
+        """
+        world = _ForceWorld(self.stack)
+        world.db.seed_request(make_request_row(
+            id=999,
+            mb_release_id=SURVIVOR,
+            artist_name="DICE",
+            album_title="Midnight Zoo (other pressing)",
+        ))
+        # The split itself: the installed album is filed at the SURVIVOR
+        # while the request still names the merged-away id.
+        beets = FakeBeetsDB()
+        beets.set_album_ids_for_release(MERGED, [])
+        beets.set_album_ids_for_release(SURVIVOR, [7])
+
+        outcome, runner, _ = force_dispatch(
+            world,
+            mbid_not_found_result(candidate(SURVIVOR, distance=0.02)),
+            canonical=RecordingCanonical(SURVIVOR),
+            retag=real_retag_over(beets),
+        )
+
+        # The seam never read the library, and never touched it.
+        self.assertEqual(beets.get_all_album_ids_for_release(SURVIVOR), [7])
+        self.assertEqual(beets.get_all_album_ids_for_release(MERGED), [])
+        self.assertEqual(world.stored_release_id(), MERGED)
+        self.assertEqual(runner.release_ids, [MERGED])
+        self.assertTrue(outcome.success)
+        # The operator's evidence, from the producer (test-fidelity Rule C).
+        audits = [
+            row for row in world.db.download_logs if row.outcome == "failed"
+        ]
+        self.assertEqual(len(audits), 1)
+        self.assertEqual(audits[0].request_id, REQUEST_ID)
+        self.assertEqual(
+            audits[0].error_message, _expected_blocked_audit(rival_request_id=999),
+        )
+        # Still runnable: surfaced, never parked.
+        row = world.db.request(REQUEST_ID)
+        assert row is not None
+        self.assertEqual(row["status"], "wanted")
 
 
 class TestForceStillImportsDespiteTheVerdict(unittest.TestCase):

@@ -17140,6 +17140,64 @@ class TestMergeRekeyUnderAForceClaim(unittest.TestCase):
             row["mb_release_id"], "1f1f1f1f-2222-3333-4444-555555555555",
         )
 
+    def test_a_running_non_force_job_never_authorizes_the_rekey(self) -> None:
+        """The force arm's ``job_type`` term, on the write that actually writes.
+
+        ``merge_rekey_claim_holds`` refuses a YouTube rescue in Python before
+        the write is attempted — but its own docstring says that is the
+        PRE-check, not the authority, and this SQL "is what actually writes".
+        Drop ``j.job_type = 'force_import'`` from the EXISTS and the arm reads
+        "any import job with this id, running, on this request", so a running
+        YouTube rescue — which holds neither production claim — would
+        authorize an ``mb_release_id`` rewrite.
+
+        Rule A: asserted on the persisted column, from a job claimed through
+        the same ``claim_import_job_candidate`` the importer uses for
+        non-request-scoped work.
+        """
+        from lib.import_queue import (
+            IMPORT_JOB_YOUTUBE,
+            youtube_import_dedupe_key,
+            youtube_import_payload,
+        )
+
+        rescue = self.db.enqueue_import_job(
+            IMPORT_JOB_YOUTUBE,
+            request_id=self.request_id,
+            dedupe_key=youtube_import_dedupe_key(901),
+            payload=youtube_import_payload(
+                staged_path="/Incoming/auto-import/dice",
+                request_id=self.request_id,
+                browse_id="MPREb_dice",
+                download_log_id=901,
+            ),
+        )
+        self.assertIsNotNone(self.db.mark_import_job_preview_importable(
+            rescue.id, preview_result={}, message="rescue preview ready",
+        ))
+        running = self.db.claim_import_job_candidate(
+            rescue.id, worker_id="pg-fence-test",
+        )
+        assert running is not None
+        # Everything the widened arm would match on: same id, same request,
+        # running. Only the job type is wrong.
+        self.assertEqual(running.status, "running")
+        self.assertEqual(running.request_id, self.request_id)
+        self.assertNotEqual(running.job_type, IMPORT_JOB_FORCE)
+        row = self.db.get_request(self.request_id)
+        assert row is not None
+        self.assertEqual(row["status"], "wanted")
+        self.assertIsNone(row["active_automation_import_job_id"])
+
+        self.assertFalse(self.db.update_request_release_for_merge(
+            self.request_id,
+            old_release_id=self.MERGED,
+            new_release_id=self.SURVIVOR,
+            expected_import_job_id=rescue.id,
+        ))
+
+        self.assertEqual(self._stored_release_id(), self.MERGED)
+
     def test_a_replaced_row_is_never_rekeyed_by_a_force_claim(self) -> None:
         """``replaced`` rows are frozen audit ancestors (invariant: pipeline-db).
 

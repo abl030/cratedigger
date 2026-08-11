@@ -7106,7 +7106,11 @@ class TestFakeMergeRekeyForceClaimFence(unittest.TestCase):
     is exactly the test-fidelity Rule B failure: every seam test above it
     would agree with a production write that refuses.
 
-    One term is flipped per case, from a world that otherwise rekeys.
+    Every term is exercised on its own, from a world that otherwise rekeys.
+    The one exception says so where it sits: the automation-owned case flips
+    both owner terms at once, because migration 066's CHECK means PostgreSQL
+    can only ever present them together. The ``processing`` status on its own
+    is a fake-only world, and has its own case.
     """
 
     MERGED = "merged-id"
@@ -7248,6 +7252,13 @@ class TestFakeMergeRekeyForceClaimFence(unittest.TestCase):
         self.assertEqual(row["mb_release_id"], self.MERGED)
 
     def test_an_automation_owned_row_writes_nothing_under_a_force_claim(self):
+        """Both owner terms at once — the world PostgreSQL can actually hold.
+
+        Migration 066's owner-equivalence CHECK ties them together, so this
+        is deliberately a two-term case. The ``processing`` term on its own is
+        exercised by the next test, which the CHECK makes unreachable in
+        PostgreSQL but perfectly reachable in the fake.
+        """
         db, job_id = self._world()
         row = db.request(41)
         assert row is not None
@@ -7259,6 +7270,31 @@ class TestFakeMergeRekeyForceClaimFence(unittest.TestCase):
         after = db.request(41)
         assert after is not None
         self.assertEqual(after["mb_release_id"], self.MERGED)
+
+    def test_a_processing_row_with_no_owner_writes_nothing(self):
+        """The ``processing`` term alone, which only the fake can hold.
+
+        The real SQL states ``status <> 'processing'`` and the owner-is-NULL
+        term separately, and migration 066's CHECK means PostgreSQL can never
+        present the first without the second — so in real PG the owner term
+        already refuses this world and the status term is unreachable. The
+        fake has no CHECK: it is the only place the status term can be
+        exercised on its own, and every seam test in this repository runs
+        against the fake. Without this case a fake force arm that admits
+        ``processing`` agrees with a production write that refuses.
+        """
+        db, job_id = self._world()
+        row = db.request(41)
+        assert row is not None
+        row["status"] = "processing"
+        self.assertIsNone(row["active_automation_import_job_id"])
+
+        self.assertFalse(self._rekey(db, job_id))
+
+        after = db.request(41)
+        assert after is not None
+        self.assertEqual(after["mb_release_id"], self.MERGED)
+        self.assertEqual(after["status"], "processing")
 
     def test_a_replaced_row_writes_nothing_under_a_force_claim(self):
         """Frozen audit ancestors are out of scope for BOTH claims."""

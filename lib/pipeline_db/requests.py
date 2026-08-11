@@ -1901,12 +1901,23 @@ class _RequestsMixin(_PipelineDBBase):
     ) -> MergeRekeyCollision:
         """Read what already occupies the survivor, before the library moves.
 
-        The two ways :meth:`update_request_release_for_merge` writes nothing
-        and returns False are both plain reads, so the merge seam asks first
-        and never retags the shared Beets library for a rekey that is already
-        refused. This is the ordering fix for the split state: retagging and
-        THEN discovering the refusal leaves the installed album filed under
-        the survivor while the request still names the merged-away id, and
+        The two worlds in which :meth:`update_request_release_for_merge`
+        raises a ``UniqueViolation`` — a rival request already at the
+        survivor, and an evidence row already at
+        ``(survivor, snapshot_fingerprint)`` — are
+        both plain reads, so the merge seam asks first and never retags the
+        shared Beets library for a rekey that is already refused. Those two
+        are the whole of this pre-check, and deliberately so: the write's
+        other refusals (the identity compare-and-set, the frozen ``replaced``
+        guard, and both claim arms) are ``rowcount = 0`` misses describing a
+        world the next attempt re-derives, while these two persist until an
+        operator resolves them.
+
+        This is the ordering fix for the split state: retagging and THEN
+        discovering the refusal leaves the installed album filed under the
+        survivor while the request still names the merged-away id, and the
+        collision that refused the write is still there on the next attempt —
+        which this pre-check refuses before the library is read at all, so
         nothing repairs that.
 
         Deliberately NOT the authority — the write re-decides both conditions

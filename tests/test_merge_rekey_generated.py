@@ -51,10 +51,17 @@ P11 The library and the request never disagree about which release this is.
     A retag that succeeds is durable, so a seam that retags and is THEN
     refused the rekey leaves the installed album at the survivor and the
     request at the merged-away id — and nothing re-derives it, because the
-    next attempt finds the library already current and is refused again for
-    the same reason. The seam therefore reads both documented refusal causes
-    BEFORE it retags, and the property watches the resulting pair in every
-    world.
+    collision that refused the write is still there on the next attempt,
+    which is now refused at the pre-check before the library is read at all.
+    The seam therefore reads both ``UniqueViolation`` refusal causes BEFORE
+    it retags, and the property watches the resulting pair in every world.
+P12 A merge refusal no retry can clear is recorded durably, in whichever
+    lane met it. An occupied survivor stays occupied until an operator acts,
+    so every later attempt is refused identically — and force, which imports
+    despite the verdict, then reports a bare ``mbid_missing`` from
+    ``import_one.py`` with nothing naming the merge. The blocked world
+    therefore owes exactly one ``download_log`` row carrying the producer's
+    sentence, and no other world may carry it.
 """
 
 from __future__ import annotations
@@ -84,9 +91,13 @@ from lib.beets_retag import (
     RetagOutcome,
 )
 from lib.config import CratediggerConfig
-from lib.download_validation import _process_beets_validation
+from lib.download_validation import (
+    _process_beets_validation,
+    merge_rekey_blocked_audit_message,
+)
 from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_RELEASE,
+    MergeRekeyCollision,
     release_id_to_lock_key,
 )
 from lib.pipeline_db._shared import REQUEST_STATUSES
@@ -469,8 +480,9 @@ def check_library_and_request_agree(
     P1/P2 watch the row, P3 watches the retag's view of the row, and both are
     satisfied by a world where the library moved and the row correctly did
     not. That world is the durable split — nothing re-derives it, because the
-    next attempt reads the library as already current, is refused for the same
-    reason, and repeats forever.
+    collision that refused the write is still there on the next attempt,
+    which the occupancy pre-check now refuses before the library is read at
+    all.
 
     A disagreement that was already there when the seam arrived is not this
     seam's doing (it is the residue of an earlier one, and it is what the
@@ -490,7 +502,8 @@ def check_library_and_request_agree(
         f"{library_after!r} while the request names {stored_after!r} "
         f"(library was {library_before!r}, request was {stored_before!r}): "
         "nothing repairs that split and nothing re-derives it — the next "
-        "attempt reads the library as already current and is refused again"
+        "attempt is refused at the occupancy pre-check, before it ever "
+        "reads the library"
     )
 
 
@@ -1144,6 +1157,10 @@ if __name__ == "__main__":
 #: the property calls on their behalf.
 LANES = st.sampled_from(["automation", "force"])
 
+#: The rival request the fixtures seed at the survivor. Named once so the
+#: world model, the fixture and P12's expected copy cannot drift apart.
+RIVAL_REQUEST_ID = REQUEST_ID + 1
+
 #: The survivor candidate's Beets distance. One inside
 #: ``beets_distance_threshold`` and one far outside it, so the threshold
 #: override is exercised as a discriminator rather than described.
@@ -1212,6 +1229,96 @@ def check_force_launches_the_release_the_row_names(
             )
 
 
+def merge_is_blocked_before_the_retag(
+    *,
+    scenario: str,
+    owned: bool,
+    mirror_answer: str | None,
+    candidates: tuple[str, ...],
+    release_lock_state: str,
+    survivor_taken: bool,
+) -> bool:
+    """The world reaches the occupancy pre-check AND the pre-check refuses.
+
+    Derived from the world independently of production: everything a retag
+    needs held, except that the survivor is already occupied. ``survivor_taken``
+    is passed as ``False`` to the retag predicate on purpose — the question is
+    "would this world have retagged if the survivor were free", which is
+    exactly the world in which the pre-check has something to refuse.
+    """
+    if not survivor_taken:
+        return False
+    return retag_is_authorized(
+        scenario=scenario,
+        owned=owned,
+        mirror_answer=mirror_answer,
+        candidates=candidates,
+        release_lock_state=release_lock_state,
+        survivor_taken=False,
+    )
+
+
+def expected_blocked_audit_message(survivor: str | None) -> str | None:
+    """The sentence the blocked world owes, from its two producers.
+
+    ``merge_rekey_blocked_audit_message`` composes it and
+    ``MergeRekeyCollision.detail`` composes the collision fragment inside it,
+    so this property can never assert copy production cannot emit
+    (test-fidelity Rule C). ``None`` when the world has no survivor a rival
+    could occupy.
+    """
+    if survivor is None:
+        return None
+    return merge_rekey_blocked_audit_message(
+        old_release_id=MERGED,
+        new_release_id=survivor,
+        collision_detail=MergeRekeyCollision(
+            rival_request_id=RIVAL_REQUEST_ID,
+        ).detail(),
+    )
+
+
+def check_a_blocked_merge_is_audited(
+    audit_rows: list[tuple[str | None, str | None]],
+    *,
+    blocked: bool,
+    expected_message: str | None,
+) -> None:
+    """P12 — the one refusal no retry can clear leaves durable evidence.
+
+    Counted by the producer's exact sentence rather than by outcome, so
+    unrelated ``download_log`` rows (the rejection each lane writes for
+    itself) neither satisfy nor break it.
+    """
+    matched = [
+        outcome for outcome, message in audit_rows
+        if expected_message is not None and message == expected_message
+    ]
+    if not blocked:
+        if matched:
+            raise AssertionError(
+                "a world that was never blocked recorded the blocked audit "
+                f"{len(matched)} time(s): {expected_message!r}"
+            )
+        return
+    if expected_message is None:
+        raise AssertionError(
+            "a blocked world has no survivor identity to name — the world "
+            "model and the seam disagree about what blocked means"
+        )
+    if len(matched) != 1:
+        raise AssertionError(
+            f"a blocked merge recorded {len(matched)} audit rows, not 1; the "
+            "operator is the only one who can clear this world, so every "
+            "execution that meets it owes exactly one durable row"
+        )
+    if matched[0] != "failed":
+        raise AssertionError(
+            f"the blocked merge audit was recorded under {matched[0]!r}, not "
+            "the environment-failure outcome the operator's Recents surfaces"
+        )
+
+
 @dataclass
 class LaneRun:
     """What one lane did to the shared world, in lane-independent terms."""
@@ -1222,6 +1329,16 @@ class LaneRun:
     validation_threshold: float | None
     launched_release_ids: list[str]
     valid: bool
+    #: Every ``download_log`` row the lane left behind, as
+    #: ``(outcome, error_message)``. P12 counts the merge audit inside it by
+    #: the producer's sentence, so each lane's own rejection rows are simply
+    #: other rows rather than noise the fixture has to filter.
+    audit_rows: list[tuple[str | None, str | None]]
+
+
+def _audit_rows(db: FakePipelineDB) -> list[tuple[str | None, str | None]]:
+    """Every ``download_log`` row the lane wrote, as ``(outcome, message)``."""
+    return [(row.outcome, row.error_message) for row in db.download_logs]
 
 
 def _merge_world_cfg(tmpdir: str) -> CratediggerConfig:
@@ -1245,7 +1362,7 @@ def _seed_rival_and_locks(
     taken = _taken_survivor_id(mirror_answer) if survivor_taken else None
     if taken is not None:
         db.seed_request(make_request_row(
-            id=REQUEST_ID + 1,
+            id=RIVAL_REQUEST_ID,
             mb_release_id=taken,
             artist_name="DICE",
             album_title="Midnight Zoo (other pressing)",
@@ -1345,6 +1462,7 @@ class TestForceAndAutomationAgreeOnTheMerge(unittest.TestCase):
             # seed, so it reports no launch rather than a fabricated one.
             launched_release_ids=[],
             valid=bv_result.valid,
+            audit_rows=_audit_rows(db),
         )
 
     def _run_force(
@@ -1392,6 +1510,7 @@ class TestForceAndAutomationAgreeOnTheMerge(unittest.TestCase):
                 ),
                 launched_release_ids=list(runner.release_ids),
                 valid=bv_result.valid,
+                audit_rows=_audit_rows(world.db),
             )
 
     @settings(deadline=None)
@@ -1436,6 +1555,19 @@ class TestForceAndAutomationAgreeOnTheMerge(unittest.TestCase):
         lane="force", scenario="mbid_not_found", mirror_answer=SURVIVOR,
         candidates=(SURVIVOR,), retag_outcome=RETAG_RETAGGED, claimed=False,
         survivor_taken=False, release_lock_state="free", survivor_distance=0.02,
+    )
+    # The blocked world in each lane: the survivor is already held, so the
+    # library is never touched, the row never moves, and the durable audit is
+    # the only evidence the operator ever gets (P12).
+    @example(
+        lane="force", scenario="mbid_not_found", mirror_answer=SURVIVOR,
+        candidates=(SURVIVOR,), retag_outcome=RETAG_RETAGGED, claimed=True,
+        survivor_taken=True, release_lock_state="free", survivor_distance=0.02,
+    )
+    @example(
+        lane="automation", scenario="mbid_not_found", mirror_answer=SURVIVOR,
+        candidates=(SURVIVOR,), retag_outcome=RETAG_RETAGGED, claimed=True,
+        survivor_taken=True, release_lock_state="free", survivor_distance=0.02,
     )
     def test_both_lanes_decide_the_same_merge(
         self,
@@ -1521,6 +1653,20 @@ class TestForceAndAutomationAgreeOnTheMerge(unittest.TestCase):
         check_force_launches_the_release_the_row_names(
             run.launched_release_ids, run.stored_after,
         )
+        # P12: the refusal the operator alone can clear is durable in BOTH
+        # lanes — and no other world claims it.
+        check_a_blocked_merge_is_audited(
+            run.audit_rows,
+            blocked=merge_is_blocked_before_the_retag(
+                scenario=scenario,
+                owned=claimed,
+                mirror_answer=mirror_answer,
+                candidates=candidates,
+                release_lock_state=release_lock_state,
+                survivor_taken=survivor_taken,
+            ),
+            expected_message=expected_blocked_audit_message(survivor_id),
+        )
 
 
 class TestForceParityCheckersTripOnViolations(unittest.TestCase):
@@ -1566,6 +1712,85 @@ class TestForceParityCheckersTripOnViolations(unittest.TestCase):
         with self.assertRaises(AssertionError):
             check_force_launches_the_release_the_row_names([MERGED], SURVIVOR)
 
+    def test_a_blocked_merge_that_recorded_nothing_is_rejected(self) -> None:
+        """P12 known-bad: exactly the #1080 silence, in either lane."""
+        with self.assertRaises(AssertionError):
+            check_a_blocked_merge_is_audited(
+                [("rejected", "Target MBID not in candidates")],
+                blocked=True,
+                expected_message=expected_blocked_audit_message(SURVIVOR),
+            )
+
+    def test_a_blocked_audit_under_the_wrong_outcome_is_rejected(self) -> None:
+        message = expected_blocked_audit_message(SURVIVOR)
+        with self.assertRaises(AssertionError):
+            check_a_blocked_merge_is_audited(
+                [("rejected", message)],
+                blocked=True,
+                expected_message=message,
+            )
+
+    def test_a_blocked_merge_audited_twice_in_one_execution_is_rejected(
+        self,
+    ) -> None:
+        message = expected_blocked_audit_message(SURVIVOR)
+        with self.assertRaises(AssertionError):
+            check_a_blocked_merge_is_audited(
+                [("failed", message), ("failed", message)],
+                blocked=True,
+                expected_message=message,
+            )
+
+    def test_an_unblocked_world_claiming_the_blocked_audit_is_rejected(
+        self,
+    ) -> None:
+        message = expected_blocked_audit_message(SURVIVOR)
+        with self.assertRaises(AssertionError):
+            check_a_blocked_merge_is_audited(
+                [("failed", message)],
+                blocked=False,
+                expected_message=message,
+            )
+
+    def test_a_blocked_world_with_no_survivor_identity_is_rejected(
+        self,
+    ) -> None:
+        """Fail closed: "blocked" with nothing to name is a model disagreement."""
+        with self.assertRaises(AssertionError):
+            check_a_blocked_merge_is_audited(
+                [], blocked=True, expected_message=None,
+            )
+
+    def test_the_blocked_predicate_names_the_pre_check_world(self) -> None:
+        """The world model's own contract, derived without production."""
+        self.assertTrue(merge_is_blocked_before_the_retag(
+            scenario="mbid_not_found", owned=True, mirror_answer=SURVIVOR,
+            candidates=(SURVIVOR,), release_lock_state="free",
+            survivor_taken=True,
+        ))
+        # A free survivor is not blocked, and neither is a world that never
+        # reached the pre-check at all.
+        self.assertFalse(merge_is_blocked_before_the_retag(
+            scenario="mbid_not_found", owned=True, mirror_answer=SURVIVOR,
+            candidates=(SURVIVOR,), release_lock_state="free",
+            survivor_taken=False,
+        ))
+        self.assertFalse(merge_is_blocked_before_the_retag(
+            scenario="strong_match", owned=True, mirror_answer=SURVIVOR,
+            candidates=(SURVIVOR,), release_lock_state="free",
+            survivor_taken=True,
+        ))
+        self.assertFalse(merge_is_blocked_before_the_retag(
+            scenario="mbid_not_found", owned=True, mirror_answer=SURVIVOR,
+            candidates=(SURVIVOR,), release_lock_state="old_held",
+            survivor_taken=True,
+        ))
+        self.assertFalse(merge_is_blocked_before_the_retag(
+            scenario="mbid_not_found", owned=False, mirror_answer=SURVIVOR,
+            candidates=(SURVIVOR,), release_lock_state="free",
+            survivor_taken=True,
+        ))
+
     def test_the_agreeing_worlds_still_pass(self) -> None:
         check_validation_ran_at_the_lane_threshold(
             "force", FORCE_IMPORT_DISTANCE_THRESHOLD,
@@ -1586,3 +1811,17 @@ class TestForceParityCheckersTripOnViolations(unittest.TestCase):
         )
         check_force_launches_the_release_the_row_names([SURVIVOR], SURVIVOR)
         check_force_launches_the_release_the_row_names([], None)
+        blocked_message = expected_blocked_audit_message(SURVIVOR)
+        # The lane's own rejection row sits alongside the audit and neither
+        # satisfies nor breaks P12.
+        check_a_blocked_merge_is_audited(
+            [("rejected", "beets rejected the download"),
+             ("failed", blocked_message)],
+            blocked=True,
+            expected_message=blocked_message,
+        )
+        check_a_blocked_merge_is_audited(
+            [("rejected", "beets rejected the download")],
+            blocked=False,
+            expected_message=blocked_message,
+        )

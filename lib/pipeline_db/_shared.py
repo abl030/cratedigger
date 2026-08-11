@@ -448,15 +448,18 @@ class BadAudioHashRow:
 class MergeRekeyCollision:
     """What already occupies the merge survivor, read before anything moves.
 
-    ``update_request_release_for_merge`` documents exactly two ways it writes
-    nothing and returns False: another request already holds the survivor
+    ``update_request_release_for_merge`` has exactly two refusals that raise a
+    ``UniqueViolation``: another request already holds the survivor
     (``UNIQUE(mb_release_id)``), and an evidence row already exists at
     ``(survivor, snapshot_fingerprint)`` for a fingerprint the rekey would
     move (``UNIQUE (mb_release_id, snapshot_fingerprint)``). Both are plain
     reads, so the merge seam asks BEFORE it retags the shared Beets library:
     discovering a refusal after the library has moved leaves the installed
     album at the survivor and the request at the merged-away id, which nothing
-    repairs.
+    repairs. Its remaining refusals — the identity compare-and-set, the frozen
+    ``replaced`` guard, and both claim arms — write nothing and return False
+    on a ``rowcount = 0`` miss instead, and describe a world the next attempt
+    re-derives, so they are deliberately outside this pre-check.
 
     This is a pre-check, not the authority. The write re-decides both
     conditions atomically; a rival that appears in between is the residual the

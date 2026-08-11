@@ -1049,6 +1049,16 @@ its apply-time `max_distance` to that same number. Two consequences:
   is no longer where the library filed that album. The refusal is recorded as
   a `download_log` row with `outcome='failed'`, and the request keeps whatever
   runnable status it had.
+- A rekey the seam refuses BEFORE touching the library — the survivor is
+  already held by another request, or already carries an evidence row at the
+  fingerprint being moved — also writes a `download_log` row with
+  `outcome='failed'` naming the collision, and force then launches exactly as
+  it did before #1080. That audit is the only durable record of the world:
+  the collision persists until an operator resolves it, so every later force
+  attempt would otherwise repeat a bare `mbid_missing` with no reason
+  attached. One row per execution that reaches the branch (one per force
+  action, one per completed-download validation); it is deliberately not
+  deduplicated.
 
 **Path resolution**: old entries stored relative paths
 (`failed_imports/Foo - Bar`); new entries under `wrong_matches/` store absolute

@@ -277,15 +277,26 @@ def _dispatch_import_from_db_locked(
         )
         mbid = validation.merge.survivor
     elif validation.merge.split_identity:
-        # The seam moved the installed album onto the survivor and the request
-        # could not follow (the survivor was claimed inside the race window
-        # the pre-check cannot cover). Launching Beets at the id the row still
-        # names would import against a library album that is no longer filed
-        # there — no duplicate would be flagged and the operator would read
-        # the pre-#1080 ``mbid_missing`` while their library had silently
-        # moved. Refuse instead; the seam has already recorded the durable
-        # audit row. Nothing is parked: the job terminalizes failed with this
-        # message and the request keeps whatever runnable status it had.
+        # THIS execution moved the installed album onto the survivor and the
+        # request could not follow (the survivor was taken inside the race
+        # window the pre-check cannot cover). Launching Beets at the id the
+        # row still names would report the pre-#1080 ``mbid_missing`` while
+        # the library had silently moved under the operator. Refuse instead;
+        # the seam has already recorded the durable audit row. Nothing is
+        # parked: the job terminalizes failed with this message and the
+        # request keeps whatever runnable status it had.
+        #
+        # Scope, deliberately: this is the split this execution CREATED, not
+        # a detector for one that already exists. A pre-existing split is
+        # refused at the seam's occupancy pre-check — the rival that won the
+        # earlier race still holds the survivor — so it arrives as
+        # ``rekey_blocked`` with ``library_moved`` false, and the launch
+        # proceeds exactly as it did before #1080: ``import_one.py`` matches
+        # by exact ``album_id`` and rejects ``mbid_missing`` rather than
+        # landing a second album. The operator's evidence in that world is
+        # the seam's blocked audit row, which names the collision; detecting
+        # the split itself would need a Beets read this seam deliberately
+        # does not take.
         return DispatchOutcome(
             success=False,
             message=validation.merge.detail,

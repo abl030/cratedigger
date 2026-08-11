@@ -48,17 +48,32 @@ M7  **Both RELEASE advisory locks are held across the retag and the rekey.**
     could otherwise bind to the album we just retagged onto that id.
     Contention is a typed non-ready outcome, never a wait.
 M8  **The library and the request never disagree about which release this
-    is.** Both of the rekey write's documented refusals are plain reads, so
-    they are asked BEFORE the library is retagged. Retagging first and
-    discovering the refusal afterwards leaves the installed album at the
+    is.** Both of the rekey write's ``UniqueViolation`` refusals are plain
+    reads, so they are asked BEFORE the library is retagged. Retagging first
+    and discovering the refusal afterwards leaves the installed album at the
     survivor and the request at the merged-away id — a divergence nothing
-    re-derives, because the next attempt finds the library already current
-    and is refused again for the same reason, forever.
-M9  **The residual race is audited, never silent.** No lock covers "another
-    request acquires this release id", so the pre-check narrows that window
-    without closing it. When it loses, the split state owes durable Recents
-    evidence (invariant 11), and the force lane must not go on to launch
-    Beets at the id whose library album it just moved away.
+    re-derives, because the collision that refused the write is still there
+    on the next attempt, which this same pre-check refuses before the library
+    is read at all.
+M9  **A merge outcome no retry can clear is audited, never silent.** Two
+    qualify, and each writes one durable ``download_log`` row (invariant 11's
+    Recents audit evidence, not a log line that is gone at the next journal
+    rotation). A survivor that is already occupied stays occupied until an
+    operator resolves it, and the force lane carries no rejection of its own
+    to explain it — it imports despite the verdict and then reports a bare
+    ``mbid_missing`` from ``import_one.py``, attempt after attempt. And no
+    lock covers "another request acquires this release id", so when the
+    pre-check loses that race the split state owes the same evidence, and the
+    force lane must not go on to launch Beets at the id whose library album
+    it just moved away. One row per execution that reaches the branch,
+    deliberately not deduplicated: an execution is an operator force action
+    or a completed download, each of which already writes its own row.
+M10 **``library_moved`` means THIS execution moved the library.** The
+    discriminator between "we created a split" and "we found the world as it
+    was". ``already_current`` and ``not_held`` are READY outcomes that moved
+    nothing, so a rekey refused after one of them must not claim a retag that
+    never ran, and must not refuse a force launch over a divergence this
+    execution did not create.
 
 ``canonical_release_fn`` and ``retag_fn`` are definition-time defaults on
 ``_process_beets_validation``: these tests INJECT replacements and never patch
@@ -81,8 +96,10 @@ from unittest.mock import patch
 
 from lib.beets_db import AlbumInfo
 from lib.beets_retag import (
+    RETAG_ALREADY_CURRENT,
     RETAG_AMBIGUOUS,
     RETAG_FAILED,
+    RETAG_NOT_HELD,
     RETAG_READY_OUTCOMES,
     BeetsRetagResult,
     MbsyncRun,
@@ -103,6 +120,7 @@ from lib.download_validation import (
     MergeRekeyOutcome,
     _follow_merged_release,
     _process_beets_validation,
+    merge_rekey_blocked_audit_message,
     merge_rekey_claim_holds,
     split_identity_audit_message,
 )
@@ -118,6 +136,7 @@ from lib.import_queue import (
 )
 from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_RELEASE,
+    MergeRekeyCollision,
     release_id_to_lock_key,
 )
 from lib.quality import (
@@ -554,10 +573,24 @@ class TestMergeRedirectBranches(unittest.TestCase):
         self.assertFalse(outcome.split_identity)
         self.assertIn("999", outcome.detail)
         # M8: the installed album is exactly where it was — ``mbsync`` never
-        # ran, so there is no split identity to repair or record.
+        # ran, so there is no split identity to repair.
         self.assertEqual(beets.get_all_album_ids_for_release(MERGED), [7])
         self.assertEqual(beets.get_all_album_ids_for_release(SURVIVOR), [])
-        self.assertEqual(self.world.db.download_logs, [])
+        # M9: but the operator still owes a decision no retry can make for
+        # them, so it is recorded durably. Both the expected sentence and the
+        # collision fragment inside it come from their PRODUCERS
+        # (test-fidelity Rule C), never from a hand-typed literal.
+        expected = merge_rekey_blocked_audit_message(
+            old_release_id=MERGED,
+            new_release_id=SURVIVOR,
+            collision_detail=MergeRekeyCollision(rival_request_id=999).detail(),
+        )
+        self.assertEqual(len(self.world.db.download_logs), 1)
+        audit = self.world.db.download_logs[0]
+        self.assertEqual(audit.request_id, REQUEST_ID)
+        self.assertEqual(audit.outcome, "failed")
+        self.assertEqual(audit.error_message, expected)
+        self.assertEqual(outcome.detail, expected)
         self.assertEqual(bv_result.to_json(), before.to_json())
         self.assertEqual(self.world.stored_release_id(), MERGED)
         self.assertEqual(self.world.album_data.mb_release_id, MERGED)
@@ -602,6 +635,13 @@ class TestMergeRedirectBranches(unittest.TestCase):
         self.assertEqual(beets.get_all_album_ids_for_release(SURVIVOR), [])
         self.assertEqual(self.world.stored_release_id(), MERGED)
         self.assertEqual(self.world.db.update_request_release_for_merge_calls, [])
+        # M9 — the other blocked cause is audited exactly the same way, and
+        # names the fingerprint rather than a rival request.
+        self.assertEqual(len(self.world.db.download_logs), 1)
+        audit = self.world.db.download_logs[0]
+        self.assertEqual(audit.outcome, "failed")
+        self.assertEqual(audit.error_message, outcome.detail)
+        self.assertIn("evidence already exists", audit.error_message or "")
 
     def test_a_survivor_claimed_during_the_retag_records_the_split(self) -> None:
         """M9 — the residual race is audited, never silent.
@@ -678,6 +718,129 @@ class TestMergeRedirectBranches(unittest.TestCase):
         self.assertEqual(
             row["active_automation_import_job_id"], self.world.import_job_id,
         )
+
+    def test_a_ready_but_unmoved_library_never_claims_a_retag(self) -> None:
+        """M10 — a refusal only ever asserts the move THIS execution made.
+
+        ``already_current`` and ``not_held`` are READY outcomes that moved
+        nothing: the first found the album already at the survivor, the
+        second found no album at all. Losing the same race after one of them
+        is a refusal, not a split — the seam changed nothing about the
+        library. Widening ``library_moved`` to "the retag was ready" would
+        write the split sentence ("the installed album was retagged onto the
+        survivor") about a retag that never ran, and would refuse a force
+        launch over a divergence this execution did not create.
+        """
+        unmoved: tuple[tuple[RetagOutcome, str], ...] = (
+            (RETAG_ALREADY_CURRENT, "library already holds the survivor"),
+            (RETAG_NOT_HELD, "no album is filed under the merged-away id"),
+        )
+        for retag_outcome, retag_detail in unmoved:
+            with self.subTest(retag_outcome=retag_outcome):
+                world = _MergeWorld(self.stack)
+
+                def retag_and_lose_the_race(
+                    cfg: CratediggerConfig,
+                    *,
+                    old_identity: ReleaseIdentity,
+                    new_identity: ReleaseIdentity,
+                    _world: _MergeWorld = world,
+                    _outcome: RetagOutcome = retag_outcome,
+                    _detail: str = retag_detail,
+                ) -> BeetsRetagResult:
+                    del cfg, old_identity, new_identity
+                    # The rival appears in the same window the split pin
+                    # uses — but here the library was never moved.
+                    _world.db.seed_request(make_request_row(
+                        id=999,
+                        mb_release_id=SURVIVOR,
+                        artist_name="DICE",
+                        album_title="Midnight Zoo (other pressing)",
+                    ))
+                    return BeetsRetagResult(
+                        outcome=_outcome, detail=_detail,
+                    )
+
+                self.assertIn(retag_outcome, RETAG_READY_OUTCOMES)
+                outcome = follow_merge(
+                    world,
+                    mbid_not_found_result(candidate(SURVIVOR)),
+                    canonical=RecordingCanonical(SURVIVOR),
+                    retag=retag_and_lose_the_race,
+                )
+
+                self.assertEqual(outcome.status, MERGE_REKEY_REFUSED)
+                # The consequences first, because they are what a widened
+                # discriminator actually costs the operator. No audit row at
+                # all: nothing here is stuck — the library is exactly where
+                # the seam found it, and the next attempt is refused at the
+                # pre-check, which audits its own reason.
+                self.assertEqual(world.db.download_logs, [])
+                # And the refusal does not claim a move. The forbidden
+                # sentence comes from the split PRODUCER (Rule C), so this
+                # asserts the exact copy a widened discriminator would emit.
+                self.assertNotEqual(
+                    outcome.detail,
+                    split_identity_audit_message(
+                        old_release_id=MERGED,
+                        new_release_id=SURVIVOR,
+                        retag_detail=retag_detail,
+                    ),
+                )
+                # The force lane's consequence: nothing to refuse a launch
+                # over, because this execution created no divergence.
+                self.assertFalse(outcome.split_identity)
+                self.assertFalse(outcome.library_moved)
+                self.assertEqual(world.stored_release_id(), MERGED)
+
+    def test_every_blocked_attempt_records_its_own_audit_row(self) -> None:
+        """M9 — the blocked audit is per execution, not deduplicated.
+
+        A blocked world persists across every retry, so the choice is
+        explicit: one row per execution that reaches the branch — one per
+        operator force action, one per completed-download validation. Each of
+        those already writes its own ``download_log`` row, so the audit trail
+        stays proportional to the work attempted rather than to elapsed time,
+        and a second force attempt is never silent. Deduplicating would need
+        a read-before-write plus a staleness policy to answer "is this the
+        same collision?", and would hide exactly the repetition the operator
+        needs to see.
+        """
+        self.world.db.seed_request(make_request_row(
+            id=999,
+            mb_release_id=SURVIVOR,
+            artist_name="DICE",
+            album_title="Midnight Zoo (other pressing)",
+        ))
+        beets = FakeBeetsDB()
+        beets.set_album_ids_for_release(MERGED, [7])
+        beets.set_album_ids_for_release(SURVIVOR, [])
+
+        outcomes = [
+            self._follow(
+                mbid_not_found_result(candidate(SURVIVOR)),
+                canonical=RecordingCanonical(SURVIVOR),
+                retag=real_retag_over(beets),
+            )
+            for _ in range(2)
+        ]
+
+        self.assertEqual(
+            [outcome.status for outcome in outcomes],
+            [MERGE_REKEY_BLOCKED, MERGE_REKEY_BLOCKED],
+        )
+        expected = merge_rekey_blocked_audit_message(
+            old_release_id=MERGED,
+            new_release_id=SURVIVOR,
+            collision_detail=MergeRekeyCollision(rival_request_id=999).detail(),
+        )
+        self.assertEqual(len(self.world.db.download_logs), 2)
+        for audit in self.world.db.download_logs:
+            self.assertEqual(audit.request_id, REQUEST_ID)
+            self.assertEqual(audit.outcome, "failed")
+            self.assertEqual(audit.error_message, expected)
+        # And the library is still untouched after both attempts.
+        self.assertEqual(beets.get_all_album_ids_for_release(MERGED), [7])
 
     def test_a_request_without_its_exact_owner_never_asks_the_mirror(self) -> None:
         """M2 — an unowned world cannot act on the answer, so it isn't sought."""

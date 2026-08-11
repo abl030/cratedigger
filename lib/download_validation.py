@@ -148,15 +148,17 @@ MERGE_RELEASE_LOCKED: Final = "release_locked"
 #: evidence row already exists at ``(survivor, fingerprint)`` — so the rekey
 #: is refused BEFORE the library is touched. Read under the release locks,
 #: immediately before the retag: the alternative is discovering the refusal
-#: afterwards, with the library moved and the request left behind.
+#: afterwards, with the library moved and the request left behind. Durably
+#: audited, because it is the one non-ready outcome no retry can clear.
 MERGE_REKEY_BLOCKED: Final = "rekey_blocked"
 #: The library could not be moved onto the survivor. Nothing else happens:
 #: rekeying now would make the next import land a SECOND album.
 MERGE_RETAG_NOT_READY: Final = "retag_not_ready"
-#: The library moved but the request row did not: the survivor was claimed in
+#: The library moved but the request row did not: the survivor was taken in
 #: the window between the pre-check and the write, or the claim was lost.
 #: Fails closed, and — when this execution is what moved the library — records
-#: a durable audit row, because that split is the one state nothing re-derives.
+#: a durable audit row, because a split nobody is told about is one nothing
+#: will re-derive.
 MERGE_REKEY_REFUSED: Final = "rekey_refused"
 #: The library is at the survivor and the request row now names it.
 MERGE_REKEYED: Final = "rekeyed"
@@ -173,11 +175,12 @@ type MergeRekeyStatus = Literal[
     "rekeyed",
 ]
 
-#: The audit outcome a split identity is recorded under. It is not a quality
-#: verdict and not a download result: the world is broken and surfaced
-#: (invariant 11), so it takes the existing environment-failure outcome rather
-#: than a new one that would need a migration to say the same thing.
-_SPLIT_IDENTITY_AUDIT_OUTCOME: Final = "failed"
+#: The audit outcome BOTH durable merge audits are recorded under — the
+#: occupied survivor and the residual split. Neither is a quality verdict and
+#: neither is a download result: the world is stuck and surfaced (invariant
+#: 11), so they take the existing environment-failure outcome rather than a
+#: new one that would need a migration to say the same thing.
+_MERGE_AUDIT_OUTCOME: Final = "failed"
 
 
 @dataclass(frozen=True)
@@ -202,10 +205,16 @@ class MergeRekeyOutcome:
         """The library moved onto the survivor and the request did not.
 
         The durable divergence: Beets holds the album at one release id and
-        the request names another. Nothing re-derives it — the next attempt
-        finds the library already current, the write is refused for the same
-        reason, and the loop repeats — so it is audited, and the force lane
-        refuses to launch Beets at the id the row still names.
+        the request names another. Nothing is guaranteed to re-derive it —
+        whatever claimed the survivor inside the race window still holds it,
+        so the next attempt is refused at the occupancy pre-check BEFORE the
+        library is read at all — so it is audited, and the force lane refuses
+        to launch Beets at the id the row still names.
+
+        Scoped to the split THIS execution created (``library_moved`` is
+        ``RETAG_RETAGGED``), never a detector for one that already exists: a
+        pre-existing split arrives as :data:`MERGE_REKEY_BLOCKED`, which is
+        why that outcome is durably audited too.
         """
         return self.library_moved and not self.rekeyed
 
@@ -371,31 +380,73 @@ def split_identity_audit_message(
     )
 
 
-def _record_split_identity(
+def merge_rekey_blocked_audit_message(
+    *,
+    old_release_id: str,
+    new_release_id: str,
+    collision_detail: str,
+) -> str:
+    """The operator-facing sentence for a survivor that is already occupied.
+
+    One producer, so the outcome detail, the durable audit row and the copy
+    the operator reads in Recents are the same string
+    (``.claude/rules/test-fidelity.md`` Rule C: a pin for this copy takes its
+    input from here, never a literal).
+
+    Lane-neutral like its split sibling — both lanes reach this branch — and
+    it deliberately names the collision rather than the lane's symptom,
+    because the collision is the only thing an operator can act on.
+    """
+    return (
+        f"{old_release_id} was merged into {new_release_id}, but the survivor "
+        f"is already occupied: {collision_detail}. The library was not "
+        "touched, and no retry clears this: resolving the collision — two "
+        "requests over one release, or two measurements of the same bytes — "
+        "is an operator decision."
+    )
+
+
+def _record_merge_audit(
     db: MergeRekeyDB,
     *,
     request_id: int,
-    new_release_id: str,
+    log_label: str,
+    beets_detail: str,
     message: str,
 ) -> None:
-    """Record the one merge outcome that does not re-derive itself.
+    """Record a merge outcome the pipeline cannot clear by trying again.
 
-    Every other non-ready outcome leaves the world exactly as the next cycle
-    will find it, so the existing rejection IS the audit. This one does not:
-    the library moved and the request did not, and no later attempt can tell
-    the difference between that and a request that was always wrong. Invariant
-    11's "record Recents audit evidence" is the whole point — a log line is
-    gone at the next journal rotation.
+    Most non-ready outcomes leave the world exactly as the next cycle will
+    find it — the mirror said nothing, a lock was held, the retag failed — so
+    the existing rejection IS the audit. Exactly two are different, and both
+    come here:
+
+    * :data:`MERGE_REKEY_BLOCKED` — the collision persists until an operator
+      resolves it, so every later attempt is refused identically. The force
+      lane in particular carries no rejection of its own to explain it: force
+      imports DESPITE the verdict, so it goes on to meet the merged-away id
+      inside ``import_one.py`` and reports ``mbid_missing`` with no reason
+      attached, attempt after attempt.
+    * :data:`MERGE_REKEY_REFUSED` after this execution moved the library — no
+      later attempt can tell that state apart from a request that was always
+      wrong.
+
+    Invariant 11's "record Recents audit evidence" is the whole point: a log
+    line is gone at the next journal rotation. One row per execution that
+    reaches the branch, deliberately NOT deduplicated — an execution is a
+    discrete operator force action or completed-download validation, each of
+    which already writes its own ``download_log`` row, so the audit trail
+    stays proportional to the work attempted rather than to elapsed time.
 
     Deliberately unguarded: a DB blip here raises into the importer, which
     self-heals the request and re-derives on the next cycle. Swallowing it
     would trade the audit for silence, which is the defect this exists to fix.
     """
-    logger.error("MERGE REKEY SPLIT IDENTITY: request=%s %s", request_id, message)
+    logger.error("%s: request=%s %s", log_label, request_id, message)
     db.log_download(
         request_id,
-        outcome=_SPLIT_IDENTITY_AUDIT_OUTCOME,
-        beets_detail=f"merge rekey refused after retag onto {new_release_id}",
+        outcome=_MERGE_AUDIT_OUTCOME,
+        beets_detail=beets_detail,
         error_message=message,
     )
 
@@ -442,15 +493,21 @@ def _follow_merged_release(
     (``docs/advisory-locks.md``); the acquires are non-blocking, so contention
     is a typed non-ready outcome, never a wait.
 
-    **The rekey's two documented refusals are read BEFORE the retag.** Both
-    causes — a rival request already at the survivor, and an evidence row
+    **The rekey's two UNIQUE-violating refusals are read BEFORE the retag.**
+    Both causes — a rival request already at the survivor, and an evidence row
     already at ``(survivor, fingerprint)`` — are plain reads
     (:meth:`PipelineDB.merge_rekey_collision`), taken under the release locks
-    already held, immediately before Beets is mutated. Retagging first and
-    discovering the refusal afterwards leaves the installed album filed under
-    the survivor while the request still names the merged-away id, and NOTHING
-    re-derives that: the next attempt finds the library already current, the
-    write is refused for the same reason, and the loop repeats forever.
+    already held, immediately before Beets is mutated. (The write's other
+    refusals are compare-and-set misses whose world the next attempt
+    re-derives; these two persist until an operator acts, which is why exactly
+    these two are worth a pre-check.) Retagging first and discovering the
+    refusal afterwards leaves the installed album filed under the survivor
+    while the request still names the merged-away id, and nothing is
+    guaranteed to re-derive that: the collision that refused the write is
+    still there on the next attempt, which is now refused at this same
+    pre-check — before the library is read at all. A blocked world is
+    therefore durably audited too (:func:`_record_merge_audit`): it is the one
+    non-ready outcome no retry can clear.
 
     Every failure keeps today's rejection exactly as it was and leaves the
     request runnable for the next cycle — nothing is flagged for a human
@@ -460,9 +517,11 @@ def _follow_merged_release(
     mutated argument.
 
     The pre-check narrows the race; it cannot close it, because no lock covers
-    "some other request acquires this release id". If the survivor is claimed
-    in that window, the retag has already moved the library and the write
-    refuses: :attr:`MergeRekeyOutcome.library_moved` says so, a durable
+    "some other request acquires this release id", and none covers "another
+    lane's preview writes an evidence row at ``(survivor, fingerprint)``"
+    either. If the survivor is taken in that window, the retag has already
+    moved the library and the write refuses:
+    :attr:`MergeRekeyOutcome.library_moved` says so, a durable
     ``download_log`` row records it for the operator, and the force lane
     refuses to launch Beets at the id the row still names. The REQUEST is
     still runnable in that world — but the LIBRARY has moved, which is why
@@ -597,15 +656,28 @@ def _follow_merged_release(
             new_release_id=new_identity.release_id,
         )
         if collision.blocked:
+            blocked_detail = merge_rekey_blocked_audit_message(
+                old_release_id=old_identity.release_id,
+                new_release_id=new_identity.release_id,
+                collision_detail=collision.detail(),
+            )
+            # The library is untouched, so nothing here is broken — but
+            # nothing here re-derives either, and the operator is the only
+            # one who can clear it. Durable evidence, once per execution that
+            # reaches this branch.
+            _record_merge_audit(
+                db,
+                request_id=request_id,
+                log_label="MERGE REKEY BLOCKED",
+                beets_detail=(
+                    "merge rekey blocked before the retag onto "
+                    f"{new_identity.release_id}"
+                ),
+                message=blocked_detail,
+            )
             return MergeRekeyOutcome(
                 MERGE_REKEY_BLOCKED,
-                (
-                    f"{old_identity.release_id} was merged into "
-                    f"{new_identity.release_id}, but the survivor is already "
-                    f"occupied: {collision.detail()}. The library was not "
-                    "touched (merging or deleting a request is an operator "
-                    "decision)"
-                ),
+                blocked_detail,
                 survivor=new_identity.release_id,
             )
 
@@ -625,7 +697,11 @@ def _follow_merged_release(
 
         # Only ``retagged`` means THIS execution moved the installed album.
         # ``already_current`` found it there and ``not_held`` found no album
-        # at all; neither leaves a divergence this execution created.
+        # at all; neither leaves a divergence this execution created. Widening
+        # this to "the retag was ready" would make a refused rekey assert a
+        # move that never happened — a false audit row, and a force refusal in
+        # a world this execution did not create. Pinned by
+        # ``test_a_ready_but_unmoved_library_never_claims_a_retag``.
         library_moved = retag.outcome == RETAG_RETAGGED
 
         if not db.update_request_release_for_merge(
@@ -651,10 +727,14 @@ def _follow_merged_release(
                     new_release_id=new_identity.release_id,
                     retag_detail=retag.detail,
                 )
-                _record_split_identity(
+                _record_merge_audit(
                     db,
                     request_id=request_id,
-                    new_release_id=new_identity.release_id,
+                    log_label="MERGE REKEY SPLIT IDENTITY",
+                    beets_detail=(
+                        "merge rekey refused after retag onto "
+                        f"{new_identity.release_id}"
+                    ),
                     message=detail,
                 )
             return MergeRekeyOutcome(
