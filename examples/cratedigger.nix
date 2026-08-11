@@ -40,7 +40,7 @@ let
     statefile = beetsStateFile;
     include = [ beetsSecretInclude ];
     asciify_paths = true;
-    plugins = "musicbrainz discogs fetchart embedart lyrics lastgenre scrub info missing duplicates edit fromfilename ftintitle the inline permissions";
+    plugins = "musicbrainz mbsync discogs fetchart embedart lyrics lastgenre scrub info missing duplicates edit fromfilename ftintitle the inline permissions";
     import = {
       copy = false;
       autotag = true;

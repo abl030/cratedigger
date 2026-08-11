@@ -514,6 +514,11 @@ class FakePipelineDB:
         # can assert what was written without relying on MagicMock
         # introspection.
         self.update_request_fields_calls: list[tuple[int, dict[str, Any]]] = []
+        # The MusicBrainz merge rekey (#1059) — (request_id, old, new, job).
+        # Recorded so ordering tests can prove the row never moves before the
+        # library retag reached a ready outcome.
+        self.update_request_release_for_merge_calls: list[
+            tuple[int, str, str, int]] = []
         # U13 unfindable detection writers. The R20 runtime guard
         # asserts these recorders fire while the cursor-mutation
         # recorders (``record_consumed_search_attempt_calls``,
@@ -5436,6 +5441,47 @@ class FakePipelineDB:
         row["updated_at"] = _utcnow()
         return True
 
+    def update_request_release_for_merge(
+        self,
+        request_id: int,
+        *,
+        old_release_id: str,
+        new_release_id: str,
+        expected_import_job_id: int,
+    ) -> bool:
+        """Mirror ``PipelineDB.update_request_release_for_merge`` (#1059).
+
+        Same four predicates as production's compare-and-set: the row still
+        holds ``old_release_id``, it is ``processing``, and the exact
+        automation owner is attached. A survivor already held by another
+        request is production's ``UNIQUE(mb_release_id)`` violation, which
+        this write reports as False rather than raising.
+        """
+        if not old_release_id or not new_release_id:
+            raise ValueError("merge rekey requires both release ids")
+        if old_release_id == new_release_id:
+            raise ValueError(
+                "refusing to rekey a request onto itself: "
+                f"{old_release_id}"
+            )
+        self.update_request_release_for_merge_calls.append(
+            (request_id, old_release_id, new_release_id, expected_import_job_id),
+        )
+        row = self._requests.get(request_id)
+        if (
+            row is None
+            or row.get("mb_release_id") != old_release_id
+            or row.get("status") != "processing"
+            or row.get("active_automation_import_job_id") != expected_import_job_id
+        ):
+            return False
+        for other_id, other in self._requests.items():
+            if other_id != request_id and other.get("mb_release_id") == new_release_id:
+                return False
+        row["mb_release_id"] = new_release_id
+        row["updated_at"] = _utcnow()
+        return True
+
     # --- Unfindable detection (U13) ---
     #
     # Each fake mirrors the production PipelineDB writer's contract:
@@ -5807,10 +5853,6 @@ class FakePipelineDB:
             # Migration 028 / U14 — long-tail-rescue audit columns.
             "rescued_at": None,
             "prior_unfindable_category": None,
-            # Migration 074 remains part of the shipped schema even though
-            # its dual-identity runtime design has been reverted.
-            "canonical_release_id": None,
-            "canonical_resolved_at": None,
             # Migration 021 addressing FK.
             "current_evidence_id": None,
             # Migration 023 — supersede lineage.

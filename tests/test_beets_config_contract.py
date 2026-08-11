@@ -14,8 +14,13 @@ from unittest import mock
 import msgspec
 import yaml
 
-from lib.beets_config_contract import BeetsConfigError, check_beets_config
+from lib.beets_config_contract import (
+    REQUIRED_PLUGINS,
+    BeetsConfigError,
+    check_beets_config,
+)
 from tests.fakes.beets_contract import (
+    BASELINE_PLUGINS,
     RUNTIME_AUTHORITIES,
     SAFE_COMP_PATH,
     SAFE_DEFAULT_PATH,
@@ -44,6 +49,21 @@ class TestBeetsConfigContract(unittest.TestCase):
         self.assertNotEqual(self.world.state_dir.stat().st_uid, os.geteuid())
         self.assertFalse(self.world.state_dir.stat().st_mode & stat.S_IWGRP)
         self.assertTrue(self.world.state_file.stat().st_mode & stat.S_IWGRP)
+
+    def test_admitted_plugin_contract_reports_every_required_plugin(self):
+        report = check_beets_config(self.world.cfg(), role="importer")
+
+        self.assertTrue(report.ok, report.hard_failures)
+        contract = report.plugin_contract
+        self.assertEqual(
+            {
+                "musicbrainz": contract.musicbrainz,
+                "mbsync": contract.mbsync,
+                "permissions": contract.permissions,
+                "inline": contract.inline,
+            },
+            dict.fromkeys(REQUIRED_PLUGINS, True),
+        )
 
     def test_each_runtime_authority_is_required_independently(self):
         cfg = self.world.cfg()
@@ -264,22 +284,30 @@ class TestBeetsConfigContract(unittest.TestCase):
         unsafe_cases: tuple[tuple[str, dict[str, object], str], ...] = (
             (
                 "missing musicbrainz",
-                {"plugins": ["discogs", "inline", "permissions"]},
+                {"plugins": ["mbsync", "discogs", "inline", "permissions"]},
                 "musicbrainz_plugin_missing",
             ),
             (
+                "missing mbsync",
+                {"plugins": ["musicbrainz", "discogs", "inline", "permissions"]},
+                "mbsync_plugin_missing",
+            ),
+            (
                 "unavailable configured plugin",
-                {"plugins": ["musicbrainz", "discogs", "inline", "permissions", "not_a_plugin"]},
+                {"plugins": [
+                    "musicbrainz", "mbsync", "discogs", "inline", "permissions",
+                    "not_a_plugin",
+                ]},
                 "plugin_unavailable",
             ),
             (
                 "missing permissions",
-                {"plugins": ["musicbrainz", "discogs", "inline"]},
+                {"plugins": ["musicbrainz", "mbsync", "discogs", "inline"]},
                 "permissions_plugin_missing",
             ),
             (
                 "missing inline",
-                {"plugins": ["musicbrainz", "discogs", "permissions"]},
+                {"plugins": ["musicbrainz", "mbsync", "discogs", "permissions"]},
                 "inline_plugin_missing",
             ),
             (
@@ -332,13 +360,15 @@ class TestBeetsConfigContract(unittest.TestCase):
             ("unsafe dir mode", {"permissions": {"file": "0664", "dir": "0755"}}, "permissions_dir_unsafe"),
             (
                 "convert auto",
-                {"plugins": ["musicbrainz", "discogs", "inline", "permissions", "convert"],
+                {"plugins": ["musicbrainz", "mbsync", "discogs", "inline",
+                             "permissions", "convert"],
                  "convert": {"auto": True, "auto_keep": False}},
                 "convert_auto_conflict",
             ),
             (
                 "convert auto keep",
-                {"plugins": ["musicbrainz", "discogs", "inline", "permissions", "convert"],
+                {"plugins": ["musicbrainz", "mbsync", "discogs", "inline",
+                             "permissions", "convert"],
                  "convert": {"auto": False, "auto_keep": True}},
                 "convert_auto_keep_conflict",
             ),
@@ -359,12 +389,9 @@ class TestBeetsConfigContract(unittest.TestCase):
                     world.close()
 
     def test_package_level_musicbrainz_absence_is_rejected(self):
-        available_without_musicbrainz = frozenset((
-            "discogs",
-            "inline",
-            "permissions",
-            "fetchart",
-        ))
+        available_without_musicbrainz = frozenset(
+            plugin for plugin in BASELINE_PLUGINS if plugin != "musicbrainz"
+        )
         report = check_beets_config(
             self.world.cfg(),
             role="importer",
@@ -525,7 +552,7 @@ class TestBeetsConfigContract(unittest.TestCase):
             encoding="utf-8",
         )
         second.write_text(
-            "plugins: [musicbrainz, discogs, inline, permissions]\n"
+            "plugins: [musicbrainz, mbsync, discogs, inline, permissions]\n"
             "import:\n  write: true\n",
             encoding="utf-8",
         )
@@ -569,7 +596,7 @@ class TestBeetsConfigContract(unittest.TestCase):
         self.world._write_main_config(
             pluginpath=[str(plugin_dir)],
             plugins=[
-                "musicbrainz", "discogs", "inline", "permissions",
+                "musicbrainz", "mbsync", "discogs", "inline", "permissions",
                 plugin_token,
             ],
         )

@@ -86,8 +86,12 @@ live reload.
 Each top-level application performs intrinsic exactly-once startup admission in
 a fresh Beets configuration context. Hard failures include a missing or
 incompatible runtime, mismatched database/root/state/interpreter, mutable
-non-secret config, invalid state capability, unsafe import/path policy, or a
-missing, multiple, wrong, or non-token-only designated secret include. Approved
+non-secret config, invalid state capability, unsafe import/path policy, an
+inactive required plugin (`musicbrainz`, `mbsync`, `permissions`, `inline`), or
+a missing, multiple, wrong, or non-token-only designated secret include. A
+deployment without `mbsync` cannot follow a MusicBrainz release merge on the
+library side, and merged requests would simply never converge with no error
+anywhere — so the contract refuses to start instead. Approved
 MusicBrainz endpoint drift is warning-only. The checker rejects only named
 harness conflicts: active `convert.auto` or `convert.auto_keep` is unsafe, while
 intentional metadata/artwork hooks such as `fetchart`, `embedart`, `scrub`,
@@ -164,7 +168,7 @@ match:
     original_year: true
 
 # Active plugins
-plugins: musicbrainz discogs fetchart embedart lyrics lastgenre scrub info missing duplicates edit fromfilename ftintitle the inline permissions
+plugins: musicbrainz mbsync discogs fetchart embedart lyrics lastgenre scrub info missing duplicates edit fromfilename ftintitle the inline permissions
 ```
 
 ### Active Plugins
@@ -172,6 +176,7 @@ plugins: musicbrainz discogs fetchart embedart lyrics lastgenre scrub info missi
 | Plugin | Purpose | Auto? |
 |--------|---------|-------|
 | `musicbrainz` | MB lookups (REQUIRED — without it, 0 candidates) | — |
+| `mbsync` | `beet mbsync` command — refetches an album by its stored `mb_albumid`, follows a MusicBrainz merge redirect, and rewrites the ID (REQUIRED — it is the only library-side way to follow a release merge). Cratedigger invokes it at exactly one album, `mb_albumid::^<old-id>$`, from the merge sweep — never library-wide | — |
 | `discogs` | Discogs lookups (fallback for obscure releases) | — |
 | `fetchart` | Downloads cover art from CAA/iTunes/Amazon | Yes |
 | `embedart` | Embeds cover art into audio file tags | Yes |

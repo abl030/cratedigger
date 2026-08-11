@@ -1889,3 +1889,72 @@ class _RequestsMixin(_PipelineDBBase):
         row = cur.fetchone()
         self.conn.commit()
         return row is not None
+
+
+    def update_request_release_for_merge(
+        self,
+        request_id: int,
+        *,
+        old_release_id: str,
+        new_release_id: str,
+        expected_import_job_id: int,
+    ) -> bool:
+        """Rekey one request onto its MusicBrainz merge survivor (#1059).
+
+        MusicBrainz editors merge release A into release B; the loser's MBID
+        becomes a permanent 301 and a request stored at A can never import
+        again — Beets offers B, the matcher demands A. This is the ONE write
+        that moves ``mb_release_id``, and it is deliberately not
+        ``update_request_fields``: that seam reserves immutable identity, and
+        refuses any row with a processing owner attached, which is exactly the
+        world this write happens in.
+
+        Every predicate is load-bearing and the write fails closed on each:
+
+        * ``mb_release_id = %s`` — a compare-and-set on the identity being
+          moved. A row somebody else already rekeyed, superseded, or pointed
+          elsewhere is left alone.
+        * ``status = 'processing'`` + ``active_automation_import_job_id = %s``
+          — the exact owner fence every processing write owes
+          (``.claude/rules/pipeline-db.md``). It also excludes the frozen
+          ``replaced`` status by construction: a frozen audit ancestor is
+          never ``processing``.
+
+        Returns False rather than raising when another request already holds
+        the survivor (``UNIQUE(mb_release_id)``): two requests are two
+        curated pressings and merging or deleting either is the operator's
+        call (invariant 5). The caller keeps its existing rejection and the
+        request stays runnable — nothing is parked (invariant 11).
+
+        The library must already be at ``new_release_id`` before this runs.
+        Beets keys album duplicate detection on ``mb_albumid``, so rekeying a
+        request whose installed album is still filed under the old id makes
+        the next import land a SECOND album beside the first. See
+        ``lib/beets_retag.py``.
+        """
+        if not old_release_id or not new_release_id:
+            raise ValueError("merge rekey requires both release ids")
+        if old_release_id == new_release_id:
+            raise ValueError(
+                "refusing to rekey a request onto itself: "
+                f"{old_release_id}"
+            )
+        try:
+            cur = self._execute(
+                "UPDATE album_requests "
+                "SET mb_release_id = %s, updated_at = %s "
+                "WHERE id = %s AND mb_release_id = %s "
+                "AND status = 'processing' "
+                "AND active_automation_import_job_id = %s",
+                (
+                    new_release_id,
+                    datetime.now(UTC),
+                    request_id,
+                    old_release_id,
+                    expected_import_job_id,
+                ),
+            )
+        except psycopg2.errors.UniqueViolation:
+            return False
+        self.conn.commit()
+        return cur.rowcount > 0

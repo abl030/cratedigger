@@ -139,10 +139,6 @@ class AlbumRequestRow(TypedDict):
     rescued_at: datetime | None
     prior_unfindable_category: str | None
     catalog_number: str | None
-    # Migration 074 shipped before its runtime design was reverted. These
-    # columns remain inert until a forward migration retires them.
-    canonical_release_id: str | None
-    canonical_resolved_at: datetime | None
 
 
 class AlbumRequestPresentationRow(AlbumRequestRow):

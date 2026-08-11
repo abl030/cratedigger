@@ -32,6 +32,18 @@ SAFE_PATH_DISAMBIG = (
     "albumdisambig or releasegroupdisambig or catalognum or label or str(year)"
 )
 
+#: The valid baseline plugin list every fixture world starts from: every
+#: plugin the contract requires, plus the optional ones the tests exercise.
+#: Mutant worlds are written as this list minus or plus exactly one entry.
+BASELINE_PLUGINS: tuple[str, ...] = (
+    "musicbrainz",
+    "mbsync",
+    "discogs",
+    "inline",
+    "permissions",
+    "fetchart",
+)
+
 RUNTIME_AUTHORITIES = (
     "beets_config_dir",
     "beets_library_db",
@@ -314,9 +326,7 @@ class BeetsContractWorld:
             "directory": str(self.library_root),
             "statefile": str(self.state_file),
             "include": [str(self.secret_include)],
-            "plugins": [
-                "musicbrainz", "discogs", "inline", "permissions", "fetchart",
-            ],
+            "plugins": list(BASELINE_PLUGINS),
             "import": {
                 "autotag": True,
                 "move": True,

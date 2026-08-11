@@ -46,6 +46,7 @@ class TestConsumerBeetsWorldConfig(unittest.TestCase):
             consumer.deployment_plugins,
             (
                 "musicbrainz",
+                "mbsync",
                 "discogs",
                 "fetchart",
                 "embedart",

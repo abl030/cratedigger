@@ -39,7 +39,7 @@ let
     statefile = externalStateFile;
     asciify_paths = true;
     include = [externalSecretInclude];
-    plugins = "musicbrainz discogs fetchart embedart lyrics lastgenre scrub info missing duplicates edit fromfilename ftintitle the inline permissions";
+    plugins = "musicbrainz mbsync discogs fetchart embedart lyrics lastgenre scrub info missing duplicates edit fromfilename ftintitle the inline permissions";
     import = {
       copy = false;
       autotag = true;
@@ -4292,7 +4292,7 @@ pkgs.testers.nixosTest {
     )
     loaded = {p.strip() for p in plugins_line.split(":", 1)[1].split(",")}
     for plugin in (
-        "musicbrainz discogs fetchart embedart lyrics lastgenre scrub "
+        "musicbrainz mbsync discogs fetchart embedart lyrics lastgenre scrub "
         "info missing duplicates edit fromfilename ftintitle the inline "
         "permissions"
     ).split():

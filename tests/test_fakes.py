@@ -1080,6 +1080,69 @@ class TestFakePipelineDB(unittest.TestCase):
         self.assertEqual(db.request(41), active_before)
         self.assertEqual(db.request(42), replaced_before)
 
+    def test_merge_rekey_moves_only_an_owned_processing_row(self):
+        """Fake mirror of ``PipelineDB.update_request_release_for_merge``."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=41,
+            mb_release_id="merged-id",
+            status="processing",
+            active_automation_import_job_id=7,
+        ))
+        db.seed_request(make_request_row(id=42, mb_release_id="wanted-id"))
+
+        self.assertTrue(db.update_request_release_for_merge(
+            41,
+            old_release_id="merged-id",
+            new_release_id="survivor-id",
+            expected_import_job_id=7,
+        ))
+        self.assertEqual(db.request(41)["mb_release_id"], "survivor-id")
+        self.assertEqual(
+            db.update_request_release_for_merge_calls,
+            [(41, "merged-id", "survivor-id", 7)],
+        )
+
+        # A stale identity, a foreign owner, an unowned row, and a survivor
+        # another request already holds all fail closed without writing.
+        self.assertFalse(db.update_request_release_for_merge(
+            41,
+            old_release_id="merged-id",
+            new_release_id="another-id",
+            expected_import_job_id=7,
+        ))
+        self.assertFalse(db.update_request_release_for_merge(
+            41,
+            old_release_id="survivor-id",
+            new_release_id="another-id",
+            expected_import_job_id=8,
+        ))
+        self.assertFalse(db.update_request_release_for_merge(
+            42,
+            old_release_id="wanted-id",
+            new_release_id="another-id",
+            expected_import_job_id=7,
+        ))
+        self.assertFalse(db.update_request_release_for_merge(
+            41,
+            old_release_id="survivor-id",
+            new_release_id="wanted-id",
+            expected_import_job_id=7,
+        ))
+        self.assertEqual(db.request(41)["mb_release_id"], "survivor-id")
+        self.assertEqual(db.request(42)["mb_release_id"], "wanted-id")
+
+        for old_id, new_id in (
+            ("survivor-id", "survivor-id"), ("", "x"), ("x", ""),
+        ):
+            with self.assertRaises(ValueError):
+                db.update_request_release_for_merge(
+                    41,
+                    old_release_id=old_id,
+                    new_release_id=new_id,
+                    expected_import_job_id=7,
+                )
+
     def test_metadata_update_rejects_every_reserved_field(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=41, status="wanted"))

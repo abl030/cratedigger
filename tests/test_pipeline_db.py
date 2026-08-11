@@ -16557,5 +16557,155 @@ class TestReadProjectionRegistryParity(unittest.TestCase):
                     real_db.close()
 
 
+@requires_postgres
+class TestMergeRekeyWrite(unittest.TestCase):
+    """Real-PostgreSQL transcript for the MusicBrainz merge rekey (#1059).
+
+    Rule A: the identity this write moves must be readable back — through
+    ``get_request`` AND through a raw SELECT on the column itself, because the
+    whole point of the write is that ``album_requests.mb_release_id`` really
+    changed in PostgreSQL, not just in a Python dict.
+    """
+
+    MERGED = "6b209cc5-62b0-4ef7-9336-c2dbd876301a"
+    SURVIVOR = "9b59f78b-3ca6-41e1-8025-6ed4bcfad4e4"
+    ENQUEUED = "2026-08-11T00:00:00+00:00"
+
+    def setUp(self) -> None:
+        self.db = make_db()
+        self.addCleanup(self.db.close)
+        self.request_id = self.db.add_request(
+            mb_release_id=self.MERGED,
+            artist_name="DICE",
+            album_title="Midnight Zoo",
+            source="request",
+        )
+        self.assertTrue(self.db.set_downloading(
+            self.request_id,
+            json.dumps({
+                "filetype": "flac",
+                "enqueued_at": self.ENQUEUED,
+                "last_progress_at": self.ENQUEUED,
+                "files": [],
+            }),
+            expected_status="wanted",
+        ))
+        handoff = self.db.handoff_automation_import(
+            request_id=self.request_id,
+            expected_enqueued_at=self.ENQUEUED,
+            canonical_path="/processing/albums/dice-midnight-zoo",
+            message="merge rekey fixture",
+        )
+        self.assertTrue(handoff.committed)
+        assert handoff.job is not None
+        self.job_id = handoff.job.id
+
+    def _stored_release_id(self) -> str | None:
+        cur = self.db._execute(
+            "SELECT mb_release_id FROM album_requests WHERE id = %s",
+            (self.request_id,),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        value = row["mb_release_id"]
+        return None if value is None else str(value)
+
+    def test_rekey_round_trip_preserves_the_survivor_identity(self):
+        applied = self.db.update_request_release_for_merge(
+            self.request_id,
+            old_release_id=self.MERGED,
+            new_release_id=self.SURVIVOR,
+            expected_import_job_id=self.job_id,
+        )
+
+        self.assertTrue(applied)
+        cur = self.db._execute(
+            "SELECT mb_release_id FROM album_requests WHERE id = %s",
+            (self.request_id,),
+        )
+        stored = cur.fetchone()
+        assert stored is not None
+        self.assertEqual(stored["mb_release_id"], self.SURVIVOR)
+        row = self.db.get_request(self.request_id)
+        assert row is not None
+        self.assertEqual(row["mb_release_id"], self.SURVIVOR)
+        # The rekey moves identity and nothing else: the owner fence, the
+        # processing state and the immutable download witness all stand.
+        self.assertEqual(row["status"], "processing")
+        self.assertEqual(row["active_automation_import_job_id"], self.job_id)
+        self.assertIsNotNone(row["active_download_state"])
+
+    def test_a_stale_identity_or_foreign_owner_writes_nothing(self):
+        cases = (
+            ("stale old id", "0" * 8 + "-0000-0000-0000-" + "0" * 12, self.job_id),
+            ("foreign owner", self.MERGED, self.job_id + 1000),
+        )
+        for label, old_release_id, job_id in cases:
+            with self.subTest(case=label):
+                self.assertFalse(self.db.update_request_release_for_merge(
+                    self.request_id,
+                    old_release_id=old_release_id,
+                    new_release_id=self.SURVIVOR,
+                    expected_import_job_id=job_id,
+                ))
+                self.assertEqual(self._stored_release_id(), self.MERGED)
+
+    def test_a_survivor_another_request_holds_fails_closed(self):
+        """UNIQUE(mb_release_id) is reported, never raised or merged."""
+        other = self.db.add_request(
+            mb_release_id=self.SURVIVOR,
+            artist_name="DICE",
+            album_title="Midnight Zoo (other pressing request)",
+            source="request",
+        )
+
+        self.assertFalse(self.db.update_request_release_for_merge(
+            self.request_id,
+            old_release_id=self.MERGED,
+            new_release_id=self.SURVIVOR,
+            expected_import_job_id=self.job_id,
+        ))
+        self.assertEqual(self._stored_release_id(), self.MERGED)
+        survivor_row = self.db.get_request(other)
+        assert survivor_row is not None
+        self.assertEqual(survivor_row["mb_release_id"], self.SURVIVOR)
+
+    def test_a_request_without_its_processing_owner_is_refused(self):
+        """A row with no attached automation owner is never rekeyed."""
+        idle = self.db.add_request(
+            mb_release_id="1f1f1f1f-2222-3333-4444-555555555555",
+            artist_name="Idle",
+            album_title="Wanted",
+            source="request",
+        )
+
+        self.assertFalse(self.db.update_request_release_for_merge(
+            idle,
+            old_release_id="1f1f1f1f-2222-3333-4444-555555555555",
+            new_release_id=self.SURVIVOR,
+            expected_import_job_id=self.job_id,
+        ))
+        row = self.db.get_request(idle)
+        assert row is not None
+        self.assertEqual(
+            row["mb_release_id"], "1f1f1f1f-2222-3333-4444-555555555555",
+        )
+
+    def test_degenerate_release_ids_are_rejected_before_any_sql(self):
+        for label, old_id, new_id in (
+            ("same id", self.MERGED, self.MERGED),
+            ("blank old", "", self.SURVIVOR),
+            ("blank new", self.MERGED, ""),
+        ):
+            with self.subTest(case=label), self.assertRaises(ValueError):
+                self.db.update_request_release_for_merge(
+                    self.request_id,
+                    old_release_id=old_id,
+                    new_release_id=new_id,
+                    expected_import_job_id=self.job_id,
+                )
+        self.assertEqual(self._stored_release_id(), self.MERGED)
+
+
 if __name__ == "__main__":
     unittest.main()
