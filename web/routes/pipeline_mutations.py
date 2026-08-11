@@ -13,11 +13,6 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, Field, model_validator
 
-from lib.beets_db import (
-    CurrentBeetsUnique,
-    avg_bitrate_from_current,
-    min_bitrate_from_current,
-)
 from lib.config import read_runtime_config
 from lib.json_narrow import is_object_list, is_str_object_dict
 from lib.pipeline_db import PipelineDB
@@ -26,10 +21,6 @@ from lib.request_creation_service import (
     RequestCreationInput,
     RequestCreationResult,
     RequestCreationService,
-)
-from lib.request_identity import (
-    CurrentBeetsBatchResolver,
-    resolve_current_for_request,
 )
 from web.routes._pydantic import parse_body
 from web.routes._registry import RouteHandler, RouteRegistration, route
@@ -56,8 +47,6 @@ from lib.force_import_service import (
 )
 from lib.pipeline_delete_service import (
     PipelineDeleteApplied,
-    PipelineDeleteAssociationChanged,
-    PipelineDeleteConditionalRejected,
     PipelineDeleteDescendantConflict,
     PipelineDeleteLockContended,
     PipelineDeleteNotFound,
@@ -219,13 +208,9 @@ def _queue_existing_upgrade(h: RouteHandler, db: PipelineDB,
     """Apply the sole existing-row Upgrade policy and report its result."""
     quality = resolve_user_requeue_override(existing.get("search_filetype_override"))
     req_id = int(existing["id"])
-    transition_fields: dict[str, object] = {
-        "search_filetype_override": quality,
-        # An existing row has request-union authority.  Do not retain a
-        # stale acquisition-only floor when that union is missing, ambiguous,
-        # or unavailable.
-        "min_bitrate": min_bitrate,
-    }
+    transition_fields: dict[str, object] = {"search_filetype_override": quality}
+    if min_bitrate is not None:
+        transition_fields["min_bitrate"] = min_bitrate
     result = finalize_request(
         db,
         req_id,
@@ -241,18 +226,6 @@ def _queue_existing_upgrade(h: RouteHandler, db: PipelineDB,
         "min_bitrate": min_bitrate,
         "search_filetype_override": quality,
     })
-
-
-def _existing_request_min_bitrate(
-    beets: CurrentBeetsBatchResolver | None, existing: AlbumRequestRow,
-) -> int | None:
-    """Return the current minimum only from one request-union survivor."""
-    if beets is None:
-        return None
-    current = resolve_current_for_request(beets, existing)
-    if not isinstance(current, CurrentBeetsUnique):
-        return None
-    return min_bitrate_from_current(current)
 
 
 def _create_or_resume(creation: RequestCreationInput) -> RequestCreationResult:
@@ -412,25 +385,22 @@ def post_pipeline_update(h: RouteHandler, body: dict[str, object]) -> None:
         return
 
     if new_status == "wanted" and req["status"] != "wanted":
+        mbid = req.get("mb_release_id")
         quality = None
         min_br = None
         b = s._beets_db()
-        current = resolve_current_for_request(b, req) if b else None
-        if isinstance(current, CurrentBeetsUnique):
+        if mbid and b and b.album_exists(mbid):
             # Preserve a stricter existing override (e.g. "lossless"
             # set by the quality gate) — reverting status shouldn't
             # re-open tiers the gate intentionally closed.
             quality = resolve_user_requeue_override(
                 req.get("search_filetype_override"))
-            min_br = min_bitrate_from_current(current)
-        # No unique request-union authority means neither retained value can
-        # describe the installed album.  Clear both rather than preserving
-        # stale strictness from a prior pressing; only one exact current
-        # result may project a new requeue floor/override.
-        wanted_fields: dict[str, object] = {
-            "search_filetype_override": quality,
-            "min_bitrate": min_br,
-        }
+            min_br = b.get_min_bitrate(mbid)
+        wanted_fields: dict[str, object] = {}
+        if quality is not None:
+            wanted_fields["search_filetype_override"] = quality
+        if min_br is not None:
+            wanted_fields["min_bitrate"] = min_br
         result = finalize_request(
             s._db(),
             int(req_id),
@@ -475,30 +445,17 @@ def post_pipeline_upgrade(h: RouteHandler, body: dict[str, object]) -> None:
 
     source = detect_release_source(mbid)
 
-    existing = s._db().get_request_by_release_id(mbid)
+    min_bitrate = None
     b = s._beets_db()
-    quality = QUALITY_UPGRADE_TIERS
-    if existing is not None:
-        min_bitrate = _existing_request_min_bitrate(b, existing)
-        if existing["status"] != "initializing":
-            _queue_existing_upgrade(h, s._db(), existing, min_bitrate)
-            return
+    if b:
+        min_bitrate = b.get_min_bitrate(mbid)
+
+    existing = s._db().get_request_by_release_id(mbid)
+    if existing and existing["status"] != "initializing":
+        _queue_existing_upgrade(h, s._db(), existing, min_bitrate)
     else:
-        # Only a genuinely absent request has no row union to resolve. Its
-        # exact release lookup is therefore the admitted authority.
-        min_bitrate = b.get_min_bitrate(mbid) if b is not None else None
-
-    def resumed_upgrade_fields(row: AlbumRequestRow) -> dict[str, object]:
-        return {
-            "search_filetype_override": quality,
-            "min_bitrate": _existing_request_min_bitrate(b, row),
-        }
-
-    # Brand-new requests and initializing rows share the creation-owned
-    # publication protocol. The latter receives its request-union quality
-    # fields through ``resumed_upgrade_fields`` under the service's lock.
-    if existing is None or existing["status"] == "initializing":
-        # Creation owns publication; an initializing row resumes under its lock.
+        # Brand-new request — no prior override to preserve.
+        quality = QUALITY_UPGRADE_TIERS
         # Discogs upgrade leaves release_group_year NULL (no MB release-group).
         rg_year_upgrade: int | None = None
         # Bypass the 24h meta cache — both branches persist metadata
@@ -523,7 +480,6 @@ def post_pipeline_upgrade(h: RouteHandler, body: dict[str, object]) -> None:
                     "search_filetype_override": quality,
                     "min_bitrate": min_bitrate,
                 },
-                resumed_final_fields=resumed_upgrade_fields,
             )
         else:
             release = mb_api.get_release(mbid, fresh=True)
@@ -560,7 +516,6 @@ def post_pipeline_upgrade(h: RouteHandler, body: dict[str, object]) -> None:
                     "search_filetype_override": quality,
                     "min_bitrate": min_bitrate,
                 },
-                resumed_final_fields=resumed_upgrade_fields,
             )
         creation_result = _creation_result_or_respond(h, _create_or_resume(creation))
         if creation_result is None:
@@ -570,21 +525,10 @@ def post_pipeline_upgrade(h: RouteHandler, body: dict[str, object]) -> None:
             if existing_after_race is None:
                 h._error("Request disappeared during creation", 409)
                 return
-            _queue_existing_upgrade(
-                h,
-                s._db(),
-                existing_after_race,
-                _existing_request_min_bitrate(b, existing_after_race),
-            )
+            _queue_existing_upgrade(h, s._db(), existing_after_race, min_bitrate)
             return
         req_id = creation_result.request_id
         assert req_id is not None
-        published = s._db().get_request(req_id)
-        if published is not None:
-            published_minimum = published.get("min_bitrate")
-            min_bitrate = (
-                published_minimum if isinstance(published_minimum, int) else None
-            )
         h._json({
             "status": "upgrade_queued",
             "id": req_id,
@@ -630,11 +574,10 @@ def post_pipeline_set_quality(h: RouteHandler, body: dict[str, object]) -> None:
             h._error(f"Invalid status: {new_status}")
             return
         if new_status == "imported":
-            if min_bitrate is None:
+            if min_bitrate is None and mbid:
                 b = s._beets_db()
-                current = resolve_current_for_request(b, existing) if b else None
-                if isinstance(current, CurrentBeetsUnique):
-                    min_bitrate = avg_bitrate_from_current(current)
+                if b:
+                    min_bitrate = b.get_avg_bitrate_kbps(mbid)
             imported_fields: dict[str, object] = {
                 "search_filetype_override": None,
             }
@@ -1009,18 +952,6 @@ def post_pipeline_delete(h: RouteHandler, body: dict[str, object]) -> None:
         h._error("Not found", 404)
         return
     if isinstance(result, PipelineDeleteLockContended):
-        h._json({
-            "error": "destructive_operation_busy",
-            "scope": "request",
-        }, status=409)
-        return
-    if isinstance(result, PipelineDeleteAssociationChanged):
-        h._json({
-            "error": "destructive_operation_busy",
-            "scope": "association",
-        }, status=409)
-        return
-    if isinstance(result, PipelineDeleteConditionalRejected):
         h._json({
             "error": "destructive_operation_busy",
             "scope": "request",

@@ -55,7 +55,6 @@ from lib.pipeline_db import (
     SearchPlanInspection,
     SearchPlanItemInput,
 )
-from lib.pipeline_db._core import AdvisoryLockSessionLost
 from lib.release_snapshot import (
     ReleaseSnapshot,
     ResolverFailure,
@@ -1227,8 +1226,6 @@ class SearchPlanService:
                 )
             except ReplacedRequestMutationError:
                 return self._replaced_result(request_id)
-            except AdvisoryLockSessionLost:
-                raise
             except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                 return self._record_failure(
                     request_id,
@@ -1254,8 +1251,6 @@ class SearchPlanService:
             )
         except ReplacedRequestMutationError:
             return self._replaced_result(request_id)
-        except AdvisoryLockSessionLost:
-            raise
         except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             return self._record_failure(
                 request_id,
@@ -1293,8 +1288,6 @@ class SearchPlanService:
             )
         except ReplacedRequestMutationError:
             return self._replaced_result(request_id)
-        except AdvisoryLockSessionLost:
-            raise
         except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             # If we can't even persist the failure row, surface that as
             # a transient outcome but do not raise — callers (CLI/web)

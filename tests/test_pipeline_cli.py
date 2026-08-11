@@ -5795,14 +5795,8 @@ class TestPipelineCliLongTail(unittest.TestCase):
 
     @staticmethod
     def _band_fn(mapping):
-        # band_fn takes request ROWS, not bare ids (#1059): each row resolves
-        # over its own identity union, keyed by the acquisition release id.
-        def _fn(rows):
-            keys = [
-                str(row.get("mb_release_id") or row.get("discogs_release_id"))
-                for row in rows
-            ]
-            return {rid: mapping.get(rid, "missing") for rid in keys}
+        def _fn(release_ids):
+            return {rid: mapping.get(rid, "missing") for rid in release_ids}
         return _fn
 
     def _seed(self) -> FakePipelineDB:
@@ -5880,10 +5874,7 @@ class TestPipelineCliLongTail(unittest.TestCase):
                 {"CRATEDIGGER_RUNTIME_CONFIG": config_path},
                 clear=False,
             ), self.assertRaisesRegex(FileNotFoundError, "Beets DB not found"):
-                pipeline_cli_long_tail._cli_band_fn(
-                    [{"id": 1, "mb_release_id": None,
-                      "discogs_release_id": DISCOGS_RELEASE,
-                      "canonical_release_id": None}])
+                pipeline_cli_long_tail._cli_band_fn([DISCOGS_RELEASE])
 
     def test_cli_band_fn_propagates_real_beets_query_failure(self):
         """A real SQLite query error remains distinguishable from absence."""
@@ -5902,10 +5893,7 @@ class TestPipelineCliLongTail(unittest.TestCase):
                 {"CRATEDIGGER_RUNTIME_CONFIG": config_path},
                 clear=False,
             ), self.assertRaises(sqlite3.OperationalError) as raised:
-                pipeline_cli_long_tail._cli_band_fn(
-                    [{"id": 1, "mb_release_id": None,
-                      "discogs_release_id": DISCOGS_RELEASE,
-                      "canonical_release_id": None}])
+                pipeline_cli_long_tail._cli_band_fn([DISCOGS_RELEASE])
 
         self.assertEqual(raised.exception.sqlite_errorcode, sqlite3.SQLITE_ERROR)
 
@@ -6021,7 +6009,7 @@ class TestPipelineCliLongTail(unittest.TestCase):
         rc, out, err = self._run(
             db,
             json_out=True,
-            band_fn=lambda _rows: {},
+            band_fn=lambda _release_ids: {},
         )
 
         self.assertEqual(rc, 4)
@@ -6031,7 +6019,7 @@ class TestPipelineCliLongTail(unittest.TestCase):
     def test_unavailable_text_error_uses_stderr_and_exit_five(self):
         db = self._seed()
 
-        def unavailable(_rows):
+        def unavailable(_release_ids):
             raise FileNotFoundError("Beets DB not found")
 
         rc, out, err = self._run(db, band_fn=unavailable)
@@ -6049,7 +6037,7 @@ class TestPipelineCliLongTail(unittest.TestCase):
         failure = sqlite3.OperationalError("no such table: albums")
         failure.sqlite_errorcode = sqlite3.SQLITE_ERROR
 
-        def broken_schema(_rows):
+        def broken_schema(_release_ids):
             raise failure
 
         with self.assertRaises(sqlite3.OperationalError) as raised:
@@ -6563,50 +6551,6 @@ class TestDestructiveCliAdapters(unittest.TestCase):
         self.assertEqual(rc, 4)
         self.assertEqual(payload["error"], "current_beets_ambiguous")
         self.assertEqual(payload["album_ids"], [7, 8])
-
-    def test_library_delete_omitted_request_union_returns_exit_5(self) -> None:
-        """The destructive CLI preserves the unavailable semantic payload."""
-        class OmittingCurrentBeets(FakeBeetsDB):
-            def resolve_current_releases(self, identities):
-                del identities
-                return {}
-
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=41, status="imported", mb_release_id=RELEASE_A,
-        ))
-        beets = OmittingCurrentBeets()
-        beets.set_album_detail(7, {
-            "id": 7,
-            "album": "Album A",
-            "artist": "Artist A",
-            "mb_albumid": RELEASE_A,
-        })
-        args = SimpleNamespace(
-            album_id=7,
-            purge_pipeline=False,
-            pipeline_id=None,
-            release_id=None,
-            beets_db=self.beets_path,
-            beets_directory=self.tmpdir.name,
-        )
-        output = io.StringIO()
-
-        with redirect_stdout(output):
-            rc = pipeline_cli.cmd_library_delete(
-                db,
-                args,
-                open_beets_fn=lambda _path, _root: beets,
-            )
-
-        self.assertEqual(rc, 5)
-        self.assertEqual(json.loads(output.getvalue()), {
-            "error": "current_beets_unavailable",
-            "release_id": RELEASE_A,
-            "reason": "request_union_authority_unavailable",
-        })
-        self.assertIsNotNone(beets.get_album_detail(7))
-        self.assertIsNotNone(db.get_request(41))
 
     def test_library_delete_success_exposes_artifacts_and_notifier_warnings(self) -> None:
         from lib.beets_delete import BeetsDeleteCompleted

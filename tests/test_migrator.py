@@ -1567,62 +1567,6 @@ class TestReplaceSupersedeSchema(unittest.TestCase):
 
 
 @requires_postgres
-class TestReplacedFromStatusSchema(unittest.TestCase):
-    """Migration 075 records the only safe Replace-tail staging authority."""
-
-    def test_records_nullable_column_and_valid_pre_replace_domain(self):
-        conn = psycopg2.connect(TEST_DSN)
-        conn.autocommit = True
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT version FROM schema_migrations WHERE version = 75",
-                )
-                self.assertEqual(cur.fetchall(), [(75,)])
-                cur.execute(
-                    """
-                    SELECT is_nullable, data_type
-                    FROM information_schema.columns
-                    WHERE table_name = 'album_requests'
-                      AND column_name = 'replaced_from_status'
-                    """,
-                )
-                self.assertEqual(cur.fetchall(), [("YES", "text")])
-                cur.execute(
-                    """
-                    INSERT INTO album_requests
-                        (mb_release_id, artist_name, album_title, source, status)
-                    VALUES ('075-replaced-from-status', 'A', 'B', 'request', 'replaced')
-                    RETURNING id
-                    """,
-                )
-                inserted = cur.fetchone()
-                self.assertIsNotNone(inserted)
-                assert inserted is not None
-                request_id = int(inserted[0])
-                for status in (
-                    "initializing", "wanted", "downloading", "processing",
-                    "imported", "unsearchable",
-                ):
-                    cur.execute(
-                        "UPDATE album_requests SET replaced_from_status = %s WHERE id = %s",
-                        (status, request_id),
-                    )
-                with self.assertRaises(psycopg2.errors.CheckViolation):
-                    cur.execute(
-                        "UPDATE album_requests SET replaced_from_status = 'replaced' WHERE id = %s",
-                        (request_id,),
-                    )
-                cur.execute(
-                    "UPDATE album_requests SET replaced_from_status = NULL WHERE id = %s",
-                    (request_id,),
-                )
-                cur.execute("DELETE FROM album_requests WHERE id = %s", (request_id,))
-        finally:
-            conn.close()
-
-
-@requires_postgres
 class TestBackfillV0MetricFromMeasurementSchema(unittest.TestCase):
     """Migration 024 backfills v0_metric on album_quality_evidence and
     v0_probe_* columns on download_log from the row's own

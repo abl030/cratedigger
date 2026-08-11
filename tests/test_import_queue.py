@@ -17,7 +17,7 @@ from typing import Any, cast
 from unittest.mock import ANY, MagicMock, patch
 
 import msgspec
-from hypothesis import example, given
+from hypothesis import given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
@@ -5607,6 +5607,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
     def test_reused_evidence_reuses_complete_matching_have(self):
         """Candidate and HAVE reuse are independently snapshot-authorized."""
         from lib.beets_db import AlbumInfo
+        from lib.measurement import ExistingSpectralAuditLookup
         from lib.quality import SpectralAnalysisDetail
         from scripts import import_preview_worker
 
@@ -5616,17 +5617,11 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                 with open(os.path.join(root, "01.mp3"), "wb") as handle:
                     handle.write(b"audio")
             db = FakePipelineDB()
-            acquisition = "a6cd62c4-da2a-4a89-a219-adba66d6c704"
-            survivor = "b6cd62c4-da2a-4a89-a219-adba66d6c704"
-            db.seed_request(make_request_row(
-                id=42,
-                mb_release_id=acquisition,
-                canonical_release_id=survivor,
-            ))
+            db.seed_request(make_request_row(id=42, mb_release_id="mbid-42"))
             _seed_current_for_request(
                 db,
                 42,
-                mb_release_id=acquisition,
+                mb_release_id="mbid-42",
                 source_path=existing,
                 files=snapshot_audio_files(existing),
                 measurement=AudioQualityMeasurement(
@@ -5660,7 +5655,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
             self._seed_evidence_for_download_log(db, download_log_id, source)
             calls: list[str] = []
             fake_beets = FakeBeetsDB()
-            fake_beets.set_album_info(survivor, AlbumInfo(
+            fake_beets.set_album_info("mbid-42", AlbumInfo(
                 album_id=1,
                 track_count=1,
                 min_bitrate_kbps=320,
@@ -5690,6 +5685,9 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                     db,
                     claimed,
                     spectral_detail_analyzer=analyze,
+                    existing_spectral_resolver=lambda _mbid: (
+                        ExistingSpectralAuditLookup(path=existing)
+                    ),
                     runtime_config=cfg,
                 )
 
@@ -5707,11 +5705,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
         self.assertEqual(import_result.spectral.existing.grade, "genuine")
         self.assertEqual(import_result.spectral.existing.bitrate_kbps, 192)
 
-    @given(candidate_kbps=st.sampled_from((160, 192, 224)))
-    @example(candidate_kbps=192)
-    def test_reused_evidence_persists_missing_have_spectral(
-        self, candidate_kbps: int,
-    ):
+    def test_reused_evidence_persists_missing_have_spectral(self):
         """Front-gate reuse must make its HAVE scan durable pre-decision.
 
         download_log 37206 (French Quarter): the reuse fast path scanned
@@ -5720,6 +5714,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
         HAVE side and called a ~96k transcode an upgrade.
         """
         from lib.beets_db import AlbumInfo
+        from lib.measurement import ExistingSpectralAuditLookup
         from lib.quality import SpectralAnalysisDetail
         from scripts import import_preview_worker
 
@@ -5729,17 +5724,11 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                 with open(os.path.join(root, "01.mp3"), "wb") as handle:
                     handle.write(b"audio")
             db = FakePipelineDB()
-            acquisition = "a6cd62c4-da2a-4a89-a219-adba66d6c704"
-            survivor = "b6cd62c4-da2a-4a89-a219-bdba66d6c704"
-            db.seed_request(make_request_row(
-                id=42,
-                mb_release_id=acquisition,
-                canonical_release_id=survivor,
-            ))
+            db.seed_request(make_request_row(id=42, mb_release_id="mbid-42"))
             _seed_current_for_request(
                 db,
                 42,
-                mb_release_id=acquisition,
+                mb_release_id="mbid-42",
                 source_path=existing,
                 files=snapshot_audio_files(existing),
                 measurement=AudioQualityMeasurement(
@@ -5754,7 +5743,7 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                 storage_format="MP3",
             )
             fake_beets = FakeBeetsDB()
-            fake_beets.set_album_info(survivor, AlbumInfo(
+            fake_beets.set_album_info("mbid-42", AlbumInfo(
                 album_id=1,
                 track_count=1,
                 min_bitrate_kbps=320,
@@ -5782,10 +5771,8 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
             def analyze(path: str) -> SpectralAnalysisDetail:
                 return SpectralAnalysisDetail(
                     attempted=True,
-                    grade=(
-                        "likely_transcode" if path == existing else "genuine"
-                    ),
-                    bitrate_kbps=96 if path == existing else None,
+                    grade="suspect" if path == existing else "genuine",
+                    bitrate_kbps=128 if path == existing else None,
                     spectral_measurement_version=(
                         SPECTRAL_MEASUREMENT_VERSION
                     ),
@@ -5799,6 +5786,9 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
                     db,
                     claimed,
                     spectral_detail_analyzer=analyze,
+                    existing_spectral_resolver=lambda _mbid: (
+                        ExistingSpectralAuditLookup(path=existing)
+                    ),
                     runtime_config=cfg,
                 )
 
@@ -5808,40 +5798,8 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
         assert updated is not None
         self.assertEqual(updated.preview_status, "evidence_ready")
         assert linked is not None
-        self.assertEqual(linked.measurement.spectral_grade, "likely_transcode")
-        self.assertEqual(linked.measurement.spectral_bitrate_kbps, 96)
-        from lib.quality import full_pipeline_decision_from_evidence
-
-        candidate = make_album_quality_evidence(
-            mb_release_id=acquisition,
-            measurement=AudioQualityMeasurement(
-                min_bitrate_kbps=candidate_kbps,
-                avg_bitrate_kbps=candidate_kbps,
-                median_bitrate_kbps=candidate_kbps,
-                format="MP3",
-                is_cbr=True,
-                spectral_grade="genuine",
-                spectral_bitrate_kbps=candidate_kbps,
-            ),
-        )
-        blind_current = make_album_quality_evidence(
-            mb_release_id=survivor,
-            measurement=AudioQualityMeasurement(
-                min_bitrate_kbps=320,
-                avg_bitrate_kbps=320,
-                median_bitrate_kbps=320,
-                format="MP3",
-                is_cbr=True,
-            ),
-        )
-        self.assertFalse(
-            full_pipeline_decision_from_evidence(
-                candidate, blind_current,
-            )["imported"],
-        )
-        decision = full_pipeline_decision_from_evidence(candidate, linked)
-        self.assertTrue(decision["imported"])
-        self.assertEqual(decision["stage3_quality_gate"], "requeue_upgrade")
+        self.assertEqual(linked.measurement.spectral_grade, "suspect")
+        self.assertEqual(linked.measurement.spectral_bitrate_kbps, 128)
 
     def test_reused_evidence_never_overwrites_present_have_spectral(self):
         """A fresh audit scan must not clobber persisted HAVE provenance."""
@@ -6029,15 +5987,8 @@ class TestImportPreviewWorkerFrontGate(unittest.TestCase):
         self.assertTrue(result.spectral.candidate.attempted)
         self.assertEqual(result.spectral.candidate.grade, "genuine")
         self.assertIsNone(result.spectral.candidate.error)
-        # A request row without a valid exact identity is not a claim that
-        # no HAVE exists. The request-aware front gate preserves that as
-        # failed authority audit data and never calls the analyzer on an
-        # inferred path.
-        self.assertTrue(result.spectral.existing.attempted)
-        self.assertEqual(
-            result.spectral.existing.error,
-            "request current Beets authority unavailable",
-        )
+        self.assertFalse(result.spectral.existing.attempted)
+        self.assertIsNone(result.spectral.existing.error)
 
     def test_automation_job_valid_evidence_skips_measurement_after_materialization(
         self,

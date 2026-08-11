@@ -155,7 +155,7 @@ class TestWorldInvariantGenerated(unittest.TestCase):
             check_status_membership(
                 tuple(requests),
                 {
-                    index: _unique(release_id, index, os.path.join(
+                    release_id: _unique(release_id, index, os.path.join(
                         "/library", f"album-{index}",
                     ))
                     for index, release_id in enumerate(release_ids, start=1)
@@ -235,7 +235,7 @@ class TestWorldInvariantGenerated(unittest.TestCase):
                 release_id,
                 "imported",
             ),
-        ), {1: CurrentBeetsMissing(identity=identity)})
+        ), {release_id: CurrentBeetsMissing(identity=identity)})
 
         self.assertIn("current_beets_missing", {v.code for v in violations})
 
@@ -260,7 +260,7 @@ class TestWorldInvariantGenerated(unittest.TestCase):
             release_id=release_id,
             status=status,
         ),), {
-            request_id: CurrentBeetsAmbiguous(
+            release_id: CurrentBeetsAmbiguous(
                 identity=identity,
                 album_ids=tuple(sorted(album_ids)),
                 reason="multiple_matches",

@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING, Any
 
 from lib.dispatch.types import (
@@ -53,7 +52,6 @@ from lib.quality_evidence import (
     backfill_current_evidence_from_album_info,
     propagate_candidate_evidence_to_current,
 )
-from lib.request_identity import CurrentBeetsBatchResolver
 
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
@@ -344,7 +342,6 @@ def _refresh_current_evidence_after_import(
     import_result: ImportResult | None = None,
     beets_library_db_path: str | None = None,
     beets_library_root: str | None = None,
-    beets_factory: Callable[..., AbstractContextManager[CurrentBeetsBatchResolver]] | None = None,
 ) -> EvidenceBuildResult:
     """Persist current evidence for the just-imported Beets album.
 
@@ -386,16 +383,9 @@ def _refresh_current_evidence_after_import(
     # BeetsDB docstring. Both the U10 propagation path and the legacy
     # ``backfill_current_evidence_from_album_info`` path depend on an
     # absolute ``album_info.album_path`` to read the just-imported files.
-    beets_handle = (
-        beets_factory(
-            db_path=beets_library_db_path,
-            library_root=beets_library_root,
-        )
-        if beets_factory is not None
-        else open_beets_db(
-            db_path=beets_library_db_path,
-            library_root=beets_library_root,
-        )
+    beets_handle = open_beets_db(
+        db_path=beets_library_db_path,
+        library_root=beets_library_root,
     )
     identity = release_identity_for_lookup(mb_release_id)
     if identity is None:
@@ -413,32 +403,8 @@ def _refresh_current_evidence_after_import(
             "identity_mismatch",
             "candidate evidence exact release identity does not match import",
         )
-    # Union (#1059). Correct-but-redundant today, because an import can only
-    # succeed under the acquisition id, so the just-imported album carries
-    # it. It stops being redundant the moment the match seam accepts a merge
-    # survivor: the album then lands under the SURVIVOR's id and an
-    # acquisition-only resolve here would report "album not in beets" for a
-    # release that had just been imported successfully.
-    from lib.quality_evidence import _canonical_identity_for_request
-    from lib.request_identity import resolve_current_for_identities
-
     with beets_handle as beets:
-        current = resolve_current_for_identities(
-            beets,
-            acquisition=identity,
-            canonical=_canonical_identity_for_request(db, request_id, identity),
-        )
-    if current is None:
-        # "We could not establish authority" is not "the album is absent".
-        # Every other union consumer keeps those apart; this one used to
-        # collapse them, which is the conflation the union module's
-        # docstring forbids at the site that becomes load-bearing once the
-        # match seam lands.
-        return EvidenceBuildResult(
-            None,
-            "failed",
-            "current Beets authority omitted a requested release identity",
-        )
+        current = beets.resolve_current_release(identity)
     if isinstance(current, CurrentBeetsMissing):
         return EvidenceBuildResult(None, "empty_current", "album not in beets")
     if isinstance(current, CurrentBeetsAmbiguous):

@@ -33,7 +33,7 @@ class _LongTailDB(Protocol):
     ) -> dict[str, Any] | None: ...
 
 
-def _cli_band_fn(rows: list[dict[str, object]]) -> dict[str, str]:
+def _cli_band_fn(release_ids: list[str]) -> dict[str, str]:
     """Build the long-tail band map for the CLI.
 
     Reuses the SAME exact-resolution banding decision the web route uses,
@@ -41,9 +41,6 @@ def _cli_band_fn(rows: list[dict[str, object]]) -> dict[str, str]:
     server's module-level ``_beets`` global (which the CLI process never
     sets). No parallel membership/detail projection exists; only the
     composition root and rank-config source differ between the two surfaces.
-
-    Takes request rows, not bare ids, so each resolves over its own
-    identity union (#1059) — the key stays the acquisition release id.
 
     Returns ``{release_id: band}`` (``"missing"`` / a lowercase
     ``QualityRank`` / ``"unknown"``). Beets authority/read failures
@@ -53,11 +50,12 @@ def _cli_band_fn(rows: list[dict[str, object]]) -> dict[str, str]:
     from lib.banding import load_rank_config, resolve_current_release_bands
     from lib.beets_db import open_beets_db
 
-    if not rows:
+    ids_list = [str(rid) for rid in release_ids]
+    if not ids_list:
         return {}
     cfg = load_rank_config()
     with open_beets_db() as beets:
-        return resolve_current_release_bands(beets, rows, cfg)
+        return resolve_current_release_bands(beets, ids_list, cfg)
 
 
 def _render_long_tail_failure(exc: Exception, *, json_mode: bool) -> int | None:

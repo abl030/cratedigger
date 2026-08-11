@@ -10,7 +10,6 @@ the dangerously stronger ``absent``.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Literal, Protocol
 
@@ -35,7 +34,6 @@ from lib.pipeline_db.cleanup_journal import ProcessingCleanupJournalRow
 from lib.pipeline_db.rows import AlbumRequestRow
 from lib.quality.download_state import ActiveDownloadState
 from lib.release_identity import ReleaseIdentity
-from lib.request_identity import resolve_current_for_request
 
 AUTOMATION_COMPLETION_RESULT_KEY = "automation_completion"
 _AUTOMATION_ACTIVE_STATUSES = frozenset({
@@ -84,11 +82,6 @@ class AutomationRecoveryBeets(Protocol):
         self,
         identity: ReleaseIdentity,
     ) -> CurrentBeetsResolution: ...
-
-    def resolve_current_releases(
-        self,
-        identities: list[ReleaseIdentity],
-    ) -> dict[ReleaseIdentity, CurrentBeetsResolution]: ...
 
 
 class AutomationCompletionReceipt(msgspec.Struct, frozen=True):
@@ -523,7 +516,6 @@ def _library_observation(
     identity: ReleaseIdentity | None,
     *,
     observed_at: str,
-    row: Mapping[str, object] | None = None,
 ) -> AutomationExactLibraryObservation:
     if beets is None or identity is None:
         return AutomationExactLibraryObservation(
@@ -536,22 +528,7 @@ def _library_observation(
             ),
         )
     try:
-        # A request row is the identity authority.  An omitted union answer
-        # therefore cannot be laundered through an acquisition-only probe:
-        # doing so may turn unavailable current state into a misleading
-        # unique observation that later cleanup trusts.  Untracked jobs have
-        # no row and retain the exact-release observation contract.
-        current = (
-            resolve_current_for_request(beets, row)
-            if row is not None
-            else beets.resolve_current_release(identity)
-        )
-        if current is None:
-            return AutomationExactLibraryObservation(
-                status="unavailable",
-                observed_at=observed_at,
-                reason="request_union_authority_unavailable",
-            )
+        current = beets.resolve_current_release(identity)
     except Exception as exc:  # noqa: BLE001 - observation boundary
         return AutomationExactLibraryObservation(
             status="unavailable",
@@ -754,7 +731,6 @@ def _observe_automation_recovery(
         beets,
         identity,
         observed_at=observed,
-        row=request,
     )
     detail = AutomationRecoveryDetail(
         request=AutomationRecoveryRequest(

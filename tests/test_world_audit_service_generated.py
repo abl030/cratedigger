@@ -11,19 +11,12 @@ from hypothesis import example, given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads active profile)
-from lib.beets_db import (
-    BeetsWorldAlbum,
-    CurrentBeetsMissing,
-    CurrentBeetsResolution,
-)
+from lib.beets_db import BeetsWorldAlbum, CurrentBeetsResolution
 from lib.release_identity import ReleaseIdentity
 from lib.world_audit_service import (
-    WorldAuditCounts,
     WorldAuditReport,
-    audit_world,
     audit_world_from_borrowed_factory,
     audit_world_from_factory,
-    build_world_audit_report,
 )
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import make_request_row
@@ -263,26 +256,6 @@ def assert_resolver_failure_contract(
         )
 
 
-def assert_duplicate_acquisition_membership(
-    report: WorldAuditReport,
-    *,
-    present_request_id: int,
-    missing_request_id: int,
-) -> None:
-    """Only the request whose own union is missing may report missing."""
-    missing_members = tuple(
-        member.request_id
-        for member in report.groups.b.members
-        if member.code == "current_beets_missing"
-    )
-    if missing_members != (missing_request_id,):
-        raise AssertionError(
-            "duplicate acquisition membership was rekeyed by release id: "
-            f"present={present_request_id}, missing={missing_request_id}, "
-            f"observed={missing_members}"
-        )
-
-
 class TestWorldAuditResolverFailureGenerated(unittest.TestCase):
     @given(world=_resolver_failure_worlds())
     @example(world=_ResolverFailureWorld(
@@ -355,92 +328,6 @@ class TestWorldAuditResolverFailureGenerated(unittest.TestCase):
 
         with self.assertRaisesRegex(AssertionError, "availability failure escaped"):
             assert_resolver_failure_contract(world, known_bad)
-
-
-class TestWorldAuditDuplicateAcquisitionGenerated(unittest.TestCase):
-    """The public audit keeps duplicated acquisition rows distinct by id."""
-
-    @given(
-        request_ids=st.lists(
-            st.integers(min_value=1, max_value=2_000_000_000),
-            min_size=2,
-            max_size=2,
-            unique=True,
-        ),
-        survivor_first=st.booleans(),
-    )
-    @example(request_ids=[11, 12], survivor_first=True)
-    def test_duplicate_acquisition_union_answers_do_not_collide(
-        self,
-        request_ids: list[int],
-        survivor_first: bool,
-    ) -> None:
-        acquisition = _RELEASE_ID
-        survivor = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
-        present_request_id, missing_request_id = (
-            (request_ids[0], request_ids[1])
-            if survivor_first else (request_ids[1], request_ids[0])
-        )
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=present_request_id,
-            mb_release_id=acquisition,
-            canonical_release_id=survivor,
-            status="imported",
-        ))
-        db._requests[missing_request_id] = make_request_row(
-            id=missing_request_id,
-            mb_release_id=acquisition,
-            status="imported",
-        )
-        beets = FakeBeetsDB()
-        beets.set_album_ids_for_release(survivor, [77])
-        beets.set_world_albums([BeetsWorldAlbum(
-            album_id=77,
-            release_ids=(survivor,),
-            album_path="",
-            item_paths=(),
-        )])
-
-        report = audit_world(db, beets)
-
-        assert_duplicate_acquisition_membership(
-            report,
-            present_request_id=present_request_id,
-            missing_request_id=missing_request_id,
-        )
-
-    def test_checker_rejects_the_legacy_release_keyed_mutant(self) -> None:
-        from lib.world_invariants import (
-            RequestMembershipSnapshot,
-            check_status_membership,
-        )
-
-        requests = (
-            RequestMembershipSnapshot(11, _RELEASE_ID, "imported"),
-            RequestMembershipSnapshot(12, _RELEASE_ID, "imported"),
-        )
-        legacy_by_release = {
-            _RELEASE_ID: CurrentBeetsMissing(identity=_EXPECTED_IDENTITY),
-        }
-        release_keyed = check_status_membership(
-            requests,
-            {
-                request.request_id: legacy_by_release[request.release_id]
-                for request in requests
-            },
-        )
-        known_bad = build_world_audit_report(
-            counts=WorldAuditCounts(2, 1, 0, 0),
-            violations=release_keyed,
-        )
-
-        with self.assertRaisesRegex(AssertionError, "rekeyed by release id"):
-            assert_duplicate_acquisition_membership(
-                known_bad,
-                present_request_id=11,
-                missing_request_id=12,
-            )
 
 
 if __name__ == "__main__":

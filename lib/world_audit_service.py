@@ -21,7 +21,6 @@ from lib.beets_db import (
 from lib.quality import AlbumQualityEvidence
 from lib.quality_evidence import snapshot_audio_files, snapshot_fingerprint
 from lib.release_identity import ReleaseIdentity
-from lib.request_identity import resolve_current_for_requests
 from lib.world_invariants import (
     DenylistAuthoritySnapshot,
     EvidenceDiskSnapshot,
@@ -317,14 +316,13 @@ def audit_world(
             continue
         identified_requests.append((row, request_id, identity))
 
-    # Resolve over each request's identity UNION (#1059): after a MusicBrainz
-    # merge, whether Beets holds the acquisition id or the survivor depends on
-    # whether ``mbsync`` has retagged those files yet, and on the live library
-    # both states are present at once. One batched query still.
-    resolutions = resolve_current_for_requests(
-        beets_db,
-        [row for row, _request_id, _identity in identified_requests],
-    )
+    resolutions = beets_db.resolve_current_releases([
+        identity for _row, _request_id, identity in identified_requests
+    ])
+    resolutions_by_release_id = {
+        identity.release_id: resolution
+        for identity, resolution in resolutions.items()
+    }
 
     for row, request_id, identity in identified_requests:
         release_id = identity.release_id
@@ -334,13 +332,7 @@ def audit_world(
             status=str(row.get("status") or ""),
         ))
 
-        resolution = resolutions.get(request_id)
-        if resolution is None:
-            # The resolver omitted this requested row. Its request-id keyed
-            # entry is absent, so check_status_membership reports
-            # current_beets_authority_unavailable — an authority failure,
-            # never an absence claim.
-            continue
+        resolution = resolutions[identity]
         if isinstance(resolution, CurrentBeetsAmbiguous):
             continue
         current = resolution if isinstance(resolution, CurrentBeetsUnique) else None
@@ -405,7 +397,7 @@ def audit_world(
     violations.extend(check_library_filesystem(albums))
     violations.extend(check_status_membership(
         memberships,
-        resolutions,
+        resolutions_by_release_id,
     ))
     violations.extend(
         violation

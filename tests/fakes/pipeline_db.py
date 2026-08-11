@@ -522,10 +522,6 @@ class FakePipelineDB:
             tuple[int, int, datetime]] = []
         self.set_unfindable_category_calls: list[
             tuple[int, str | None, datetime]] = []
-        self.record_canonical_release_id_calls: list[
-            tuple[int, str, datetime]] = []
-        self.retire_canonical_release_id_calls: list[
-            tuple[int, str, datetime]] = []
         # Cursor-mutation recorders. The R20 runtime guard asserts
         # these stay empty after a detection run. We instrument both
         # cursor writers and the operator-driven advance.
@@ -554,7 +550,6 @@ class FakePipelineDB:
         self.status_history: list[tuple[int, str]] = []
         self.update_download_state_calls: list[tuple[int, str]] = []
         self.advisory_lock_calls: list[tuple[int, int]] = []
-        self.advisory_lock_events: list[tuple[str, int, int]] = []
         self.closed = False
         self._owner_session_pin: tuple[
             OwnerSessionIdentity,
@@ -946,15 +941,11 @@ class FakePipelineDB:
         before calling the code under test.
         """
         self.advisory_lock_calls.append((namespace, key))
-        self.advisory_lock_events.append(("enter", namespace, key))
         acquired = (
             self._advisory_lock_result(namespace, key)
             if callable(self._advisory_lock_result)
             else self._advisory_lock_result)
-        try:
-            yield acquired
-        finally:
-            self.advisory_lock_events.append(("exit", namespace, key))
+        yield acquired
 
     @contextmanager
     def _pin_owner_session(
@@ -5561,61 +5552,6 @@ class FakePipelineDB:
         row["unfindable_categorised_at"] = categorised_at
         row["updated_at"] = categorised_at
 
-    def record_canonical_release_id(
-        self,
-        request_id: int,
-        *,
-        canonical_release_id: str,
-        resolved_at: datetime,
-    ) -> bool:
-        """Mirror PipelineDB.record_canonical_release_id.
-
-        Reproduces both production guards, because each one is a real
-        no-op path the service reports on: superseded rows are frozen, and
-        a survivor equal to the acquisition id is not a merge (the DB
-        CHECK rejects it outright, so the fake must not accept it either).
-        """
-        self.record_canonical_release_id_calls.append(
-            (request_id, canonical_release_id, resolved_at),
-        )
-        row = self._requests.get(request_id)
-        if row is None:
-            return False
-        if row.get("status") == "replaced":
-            return False
-        if row.get("mb_release_id") == canonical_release_id:
-            return False
-        row["canonical_release_id"] = canonical_release_id
-        row["canonical_resolved_at"] = resolved_at
-        row["updated_at"] = resolved_at
-        return True
-
-    def retire_canonical_release_id(
-        self,
-        request_id: int,
-        *,
-        expected_canonical_release_id: str,
-        expected_resolved_at: datetime,
-    ) -> bool:
-        """Mirror PipelineDB.retire_canonical_release_id's CAS guards."""
-        self.retire_canonical_release_id_calls.append(
-            (
-                request_id,
-                expected_canonical_release_id,
-                expected_resolved_at,
-            ),
-        )
-        row = self._requests.get(request_id)
-        if row is None or row.get("status") == "replaced":
-            return False
-        if row.get("canonical_release_id") != expected_canonical_release_id:
-            return False
-        if row.get("canonical_resolved_at") != expected_resolved_at:
-            return False
-        row["canonical_release_id"] = None
-        row["canonical_resolved_at"] = None
-        return True
-
     def get_unfindable_search_log_signal(
         self,
         request_id: int,
@@ -5823,7 +5759,6 @@ class FakePipelineDB:
             "source_path": source_path,
             "reasoning": reasoning,
             "status": status,
-            "replaced_from_status": None,
             # Migration 032 — resolver-populated catalog number; migration
             # 001 — download-time final container format. Neither is part
             # of ``AddRequestInput`` (production's INSERT column list), so
@@ -5872,8 +5807,8 @@ class FakePipelineDB:
             # Migration 028 / U14 — long-tail-rescue audit columns.
             "rescued_at": None,
             "prior_unfindable_category": None,
-            # Migration 074 — MusicBrainz merge survivor (#1059). Both NULL
-            # until an observed 301 proves one; never set at INSERT.
+            # Migration 074 remains part of the shipped schema even though
+            # its dual-identity runtime design has been reverted.
             "canonical_release_id": None,
             "canonical_resolved_at": None,
             # Migration 021 addressing FK.
@@ -5938,7 +5873,6 @@ class FakePipelineDB:
         old_source = old_row.get("source", "request")
         # Flip the old row. Nothing else is mutated — characteristic fields
         # stay frozen.
-        old_row["replaced_from_status"] = old_row["status"]
         old_row["status"] = "replaced"
         old_row["updated_at"] = now
 
@@ -6508,7 +6442,6 @@ class FakePipelineDB:
         keys = (
             "id", "artist_name", "album_title", "year", "status", "source",
             "mb_release_id", "mb_release_group_id", "discogs_release_id",
-            "canonical_release_id",
             "target_format", "min_bitrate", "search_filetype_override",
             "unfindable_category", "current_spectral_grade",
             "current_spectral_bitrate",

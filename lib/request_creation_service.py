@@ -24,7 +24,6 @@ from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_RELEASE,
     release_id_to_lock_key,
 )
-from lib.pipeline_db._core import AdvisoryLockSessionLost
 from lib.pipeline_db.rows import AlbumRequestRow
 from lib.search_plan_service import SearchPlanDB, SearchPlanService, ServiceResult
 
@@ -63,10 +62,6 @@ class RequestCreationInput:
     discogs_release_payload: dict[str, object] | None = None
     # New-row Upgrade carries its policy into the same CAS that publishes.
     final_fields: dict[str, object] = field(default_factory=_empty_final_fields)
-    # A resumed initializer can already carry authority written after the
-    # caller's preflight. Derive its publication fields while the service owns
-    # that row, immediately before the initializing -> wanted CAS.
-    resumed_final_fields: Callable[[AlbumRequestRow], dict[str, object]] | None = None
 
 
 @dataclass(frozen=True)
@@ -154,24 +149,6 @@ class RequestCreationService:
         self.plan_service_factory = plan_service_factory
 
     def create_or_resume(
-        self, creation: RequestCreationInput,
-    ) -> RequestCreationResult:
-        try:
-            return self._create_or_resume(creation)
-        except AdvisoryLockSessionLost:
-            # The RELEASE lock died with its backend.  Do not reconnect and
-            # continue an initializing publication without that authority.
-            # The scope can discover this while unwinding after an inner
-            # boundary already retained an initializing row. Recover only the
-            # exact read-only retry handle after the scope exits.
-            existing = self.db.get_request_by_release_id(creation.release_id)
-            return RequestCreationResult(
-                "busy",
-                request_id=(int(existing["id"]) if existing is not None else None),
-                detail="release lock session lost; retry",
-            )
-
-    def _create_or_resume(
         self, creation: RequestCreationInput,
     ) -> RequestCreationResult:
         """Perform every durable boundary under RELEASE then PLAN lock order.
@@ -262,25 +239,11 @@ class RequestCreationService:
                     )
                 # Publication is deliberately not an ordinary lifecycle
                 # transition. Only this service may CAS initializing → wanted.
-                if resumed and creation.resumed_final_fields is not None:
-                    assert existing is not None
-                    final_fields = creation.resumed_final_fields(existing)
-                else:
-                    final_fields = creation.final_fields
                 publication = transitions.publish_initialized_request(
-                    self.db, request_id, fields=final_fields,
+                    self.db, request_id, fields=creation.final_fields,
                 )
                 if isinstance(publication, transitions.TransitionConflict):
                     return self._failed(request_id, "publication CAS lost")
-            except AdvisoryLockSessionLost:
-                # This is not an initialization failure: the backend released
-                # RELEASE authority, so the caller must retry against a fresh
-                # session.  Keep any already-created row initializing.
-                return RequestCreationResult(
-                    "busy",
-                    request_id=request_id,
-                    detail="release lock session lost; retry",
-                )
             except Exception:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                 # Resolver/database exceptions may contain upstream URLs or
                 # implementation detail. The retained request id is the

@@ -30,6 +30,7 @@ from lib.import_execution import (
     OwnerSessionIdentity,
     OwnerSessionProbe,
     OwnerSessionWatchdog,
+    ProcessGroupTerminationError,
     ProcessIdentity,
     ProcessObservation,
     ProcessState,
@@ -43,11 +44,7 @@ from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_RELEASE,
     PipelineDB,
 )
-from lib.pipeline_db._core import (
-    AdvisoryLockSessionLost,
-    OwnerSessionLost,
-    _PinnedOwnerSession,
-)
+from lib.pipeline_db._core import OwnerSessionLost, _PinnedOwnerSession
 
 TEST_DSN = os.environ.get("TEST_DB_DSN") or ""
 
@@ -608,48 +605,18 @@ class TestCancellationAndProcessGroup(unittest.TestCase):
             with self.assertRaises(ProcessLookupError):
                 os.kill(descendant_pid, 0)
 
-    def test_wait_reaps_lingering_descendant_after_leader_exit(self) -> None:
-        """A clean leader exit cannot leave a destructive group behind."""
-        with tempfile.TemporaryDirectory() as raw:
-            ready = pathlib.Path(raw) / "descendant.pid"
-            descendant = (
-                "import os,pathlib,sys,time;"
-                "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()));"
-                "time.sleep(30)"
-            )
-            leader = (
-                "import subprocess,sys;"
-                f"subprocess.Popen([sys.executable,'-c',{descendant!r},"
-                "sys.argv[1]])"
-            )
-            process = _spawn_monitored(
-                [sys.executable, "-c", leader, str(ready)],
-            )
-            deadline = time.monotonic() + 2.0
-            while not ready.exists() and time.monotonic() < deadline:
-                threading.Event().wait(0.01)
-            self.assertTrue(ready.exists())
-            descendant_pid = int(ready.read_text())
-
-            self.assertEqual(process.wait(CancellationToken()), 0)
-
-            with self.assertRaises(ProcessLookupError):
-                os.kill(descendant_pid, 0)
-
-    def test_unproven_group_absence_keeps_killing_until_absent(self) -> None:
+    def test_unproven_group_absence_raises_fail_stop_error(self) -> None:
         child = MagicMock()
         child.pid = 424242
         child.poll.return_value = 0
         process = MonitoredProcessGroup(child)
 
-        with patch("lib.import_execution.os.killpg") as killpg, patch.object(
+        with patch("lib.import_execution.os.killpg"), patch.object(
             process,
             "_group_exists",
-            side_effect=(True, True, True, False),
-        ):
+            return_value=True,
+        ), self.assertRaises(ProcessGroupTerminationError):
             process.terminate_and_wait(timeout=0.02)
-
-        self.assertGreaterEqual(killpg.call_count, 2)
 
 
 class TestPinnedOwnerSessionPostgres(unittest.TestCase):
@@ -662,36 +629,32 @@ class TestPinnedOwnerSessionPostgres(unittest.TestCase):
         db = PipelineDB(TEST_DSN)
         killer = PipelineDB(TEST_DSN)
         token = CancellationToken()
-        identity: OwnerSessionIdentity | None = None
         try:
-            with self.assertRaises(OwnerSessionLost), \
-                    db._pin_owner_session(token) as pinned_identity:
-                    identity = pinned_identity
-                    original_conn = db.conn
-                    row = db._execute(
-                        "SELECT pg_backend_pid() AS backend_pid"
-                    ).fetchone()
-                    self.assertEqual(int(row["backend_pid"]), identity.backend_pid)
-                    self.assertTrue(db._probe_owner_session(identity).live)
+            with db._pin_owner_session(token) as identity:
+                original_conn = db.conn
+                row = db._execute(
+                    "SELECT pg_backend_pid() AS backend_pid"
+                ).fetchone()
+                self.assertEqual(int(row["backend_pid"]), identity.backend_pid)
+                self.assertTrue(db._probe_owner_session(identity).live)
 
-                    killed = killer._execute(
-                        "SELECT pg_terminate_backend(%s) AS killed",
-                        (identity.backend_pid,),
-                    ).fetchone()
-                    self.assertTrue(killed["killed"])
-                    probe = db._probe_owner_session(identity)
+                killed = killer._execute(
+                    "SELECT pg_terminate_backend(%s) AS killed",
+                    (identity.backend_pid,),
+                ).fetchone()
+                self.assertTrue(killed["killed"])
+                probe = db._probe_owner_session(identity)
 
-                    self.assertFalse(probe.live)
-                    self.assertTrue(token.cancelled)
-                    self.assertIs(db.conn, original_conn)
-                    with self.assertRaises(OwnerSessionLost):
-                        db._execute("SELECT 1")
-                    self.assertIs(db.conn, original_conn)
+                self.assertFalse(probe.live)
+                self.assertTrue(token.cancelled)
+                self.assertIs(db.conn, original_conn)
+                with self.assertRaises(OwnerSessionLost):
+                    db._execute("SELECT 1")
+                self.assertIs(db.conn, original_conn)
 
             row = db._execute(
                 "SELECT pg_backend_pid() AS backend_pid"
             ).fetchone()
-            assert identity is not None
             self.assertNotEqual(int(row["backend_pid"]), identity.backend_pid)
         finally:
             killer.close()
@@ -786,15 +749,14 @@ class TestPinnedOwnerSessionPostgres(unittest.TestCase):
         token = CancellationToken()
         original = db.conn
         try:
-            with self.assertRaises(OwnerSessionLost), \
-                    db._pin_owner_session(token) as identity:
-                    db.conn = replacement.conn
-                    probe = db._probe_owner_session(identity)
-                    self.assertFalse(probe.live)
-                    self.assertEqual(probe.reason, "connection_replaced")
-                    self.assertTrue(token.cancelled)
-                    with self.assertRaises(OwnerSessionLost):
-                        db._execute("SELECT 1")
+            with db._pin_owner_session(token) as identity:
+                db.conn = replacement.conn
+                probe = db._probe_owner_session(identity)
+                self.assertFalse(probe.live)
+                self.assertEqual(probe.reason, "connection_replaced")
+                self.assertTrue(token.cancelled)
+                with self.assertRaises(OwnerSessionLost):
+                    db._execute("SELECT 1")
         finally:
             db.conn = original
             replacement.close()
@@ -804,40 +766,24 @@ class TestPinnedOwnerSessionPostgres(unittest.TestCase):
         self,
     ) -> None:
         db = PipelineDB(TEST_DSN)
-        observer = PipelineDB(TEST_DSN)
         token = CancellationToken()
         try:
-            with self.assertRaises(OwnerSessionLost), \
-                    db._pin_owner_session(token) as identity, db.advisory_lock(
-                    ADVISORY_LOCK_NAMESPACE_IMPORT, 991_001,
-                ) as import_acquired, db.advisory_lock(
-                    ADVISORY_LOCK_NAMESPACE_RELEASE, 991_001,
-                ) as release_acquired:
-                    self.assertTrue(import_acquired)
-                    self.assertTrue(release_acquired)
-                    token.cancel("stage_cancelled")
-                    self.assertEqual(
-                        db._probe_owner_session(identity).reason,
-                        "execution_cancelled",
-                    )
-                    with self.assertRaisesRegex(
-                        OwnerSessionLost,
-                        "owner execution is cancelled",
-                    ):
-                        db._execute("SELECT 1")
-                    self.assertEqual(
-                        db.conn.get_backend_pid(),
-                        identity.backend_pid,
-                    )
-            with observer.advisory_lock(
-                ADVISORY_LOCK_NAMESPACE_IMPORT, 991_001,
-            ) as import_acquired, observer.advisory_lock(
-                ADVISORY_LOCK_NAMESPACE_RELEASE, 991_001,
-            ) as release_acquired:
-                self.assertTrue(import_acquired)
-                self.assertTrue(release_acquired)
+            with db._pin_owner_session(token) as identity:
+                token.cancel("stage_cancelled")
+                self.assertEqual(
+                    db._probe_owner_session(identity).reason,
+                    "execution_cancelled",
+                )
+                with self.assertRaisesRegex(
+                    OwnerSessionLost,
+                    "owner execution is cancelled",
+                ):
+                    db._execute("SELECT 1")
+                self.assertEqual(
+                    db.conn.get_backend_pid(),
+                    identity.backend_pid,
+                )
         finally:
-            observer.close()
             db.close()
 
     def test_probe_deadline_bounds_a_stopped_postgres_backend(self) -> None:
@@ -845,24 +791,23 @@ class TestPinnedOwnerSessionPostgres(unittest.TestCase):
         token = CancellationToken()
         backend_pid: int | None = None
         try:
-            with self.assertRaises(OwnerSessionLost), \
-                    db._pin_owner_session(token) as identity:
-                    backend_pid = identity.backend_pid
-                    # Let the automatic watchdog's immediate first probe finish,
-                    # so this assertion measures the explicit 150 ms deadline
-                    # rather than waiting behind that probe's 750 ms lock scope.
-                    self.assertTrue(db._probe_owner_session(identity).live)
-                    os.kill(backend_pid, signal.SIGSTOP)
-                    started = time.monotonic()
-                    probe = db._probe_owner_session(
-                        identity,
-                        deadline_seconds=0.15,
-                    )
-                    elapsed = time.monotonic() - started
+            with db._pin_owner_session(token) as identity:
+                backend_pid = identity.backend_pid
+                # Let the automatic watchdog's immediate first probe finish,
+                # so this assertion measures the explicit 150 ms deadline
+                # rather than waiting behind that probe's 750 ms lock scope.
+                self.assertTrue(db._probe_owner_session(identity).live)
+                os.kill(backend_pid, signal.SIGSTOP)
+                started = time.monotonic()
+                probe = db._probe_owner_session(
+                    identity,
+                    deadline_seconds=0.15,
+                )
+                elapsed = time.monotonic() - started
 
-                    self.assertFalse(probe.live)
-                    self.assertTrue(token.cancelled)
-                    self.assertLess(elapsed, 0.5)
+                self.assertFalse(probe.live)
+                self.assertTrue(token.cancelled)
+                self.assertLess(elapsed, 0.5)
         finally:
             if backend_pid is not None:
                 try:
@@ -996,14 +941,10 @@ class TestPinnedOwnerSessionPostgres(unittest.TestCase):
             f"CREATE TABLE {table} (marker TEXT PRIMARY KEY)"
         )
         try:
-            with (
-                self.assertRaises(AdvisoryLockSessionLost),
-                db._pin_owner_session(token) as identity,
-                db.advisory_lock(
-                    ADVISORY_LOCK_NAMESPACE_IMPORT,
-                    lock_key,
-                ) as acquired,
-            ):
+            with db._pin_owner_session(token) as identity, db.advisory_lock(
+                ADVISORY_LOCK_NAMESPACE_IMPORT,
+                lock_key,
+            ) as acquired:
                 self.assertTrue(acquired)
                 with self.assertRaises(OwnerSessionLost), db._atomic():
                     db._execute(

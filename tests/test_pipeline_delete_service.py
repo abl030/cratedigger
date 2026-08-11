@@ -7,12 +7,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 
 from lib import transitions
-from lib.pipeline_db import (
-    ADVISORY_LOCK_NAMESPACE_IMPORT,
-    ADVISORY_LOCK_NAMESPACE_RELEASE,
-    PipelineDB,
-    release_id_to_lock_key,
-)
+from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_IMPORT, PipelineDB
 from lib.pipeline_delete_service import (
     PipelineDeleteApplied,
     PipelineDeleteDescendantConflict,
@@ -54,47 +49,6 @@ class TestPipelineDeleteService(unittest.TestCase):
 
         self.assertEqual(result, PipelineDeleteApplied(41))
         self.assertIsNone(db.get_request(41))
-
-    def test_delete_locks_every_before_association_in_sorted_order(self) -> None:
-        db = FakePipelineDB()
-        acquisition = "4878ee47-f8b8-45c8-832c-62de3bccfa6e"
-        canonical = "7aabf975-9a06-4b2e-854c-2c700380ebd5"
-        db.seed_request(make_request_row(
-            id=41, status="imported", mb_release_id=acquisition,
-            canonical_release_id=canonical,
-        ))
-
-        result = delete_pipeline_request(db, 41)
-
-        self.assertEqual(result, PipelineDeleteApplied(41))
-        self.assertEqual(
-            db.advisory_lock_calls,
-            [
-                (ADVISORY_LOCK_NAMESPACE_IMPORT, 41),
-                *[
-                    (ADVISORY_LOCK_NAMESPACE_RELEASE, key)
-                    for key in sorted({
-                        release_id_to_lock_key(acquisition),
-                        release_id_to_lock_key(canonical),
-                    })
-                ],
-            ],
-        )
-
-    def test_release_contention_has_zero_delete_mutation(self) -> None:
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=41, status="imported",
-            mb_release_id="4878ee47-f8b8-45c8-832c-62de3bccfa6e",
-        ))
-        db.set_advisory_lock_result(
-            lambda namespace, _key: namespace != ADVISORY_LOCK_NAMESPACE_RELEASE,
-        )
-
-        result = delete_pipeline_request(db, 41)
-
-        self.assertEqual(result, PipelineDeleteLockContended(41))
-        self.assertIsNotNone(db.get_request(41))
 
     def test_descendant_conflict_preserves_the_complete_chain(self) -> None:
         db = FakePipelineDB()

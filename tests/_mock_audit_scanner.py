@@ -314,18 +314,6 @@ _LEAF_SEAM_PATTERNS = [
     # handlers are dispatched by URL and don't take dependency kwargs.
     re.compile(r"^web\.routes\.pipeline_mutations\.finalize_request$"),
 
-    # Route-to-resolver DI seam for the MusicBrainz merge reconciler (#1059).
-    # ``web.routes.canonical.canonical_release_fn`` binds
-    # ``lib.mb_canonical.canonical_release_id``, whose only job is one WS/2
-    # HTTP request — an external network edge, not our own logic. The route
-    # constructs ``CanonicalReleaseService`` itself and is dispatched by URL,
-    # so there is no kwarg to inject through; same shape as
-    # ``web.routes.pipeline_mutations.finalize_request`` above. Every outcome
-    # branch is covered against the real service in
-    # ``tests/test_canonical_release_service.py``.
-    re.compile(r"^web\.routes\.canonical\.canonical_release_fn$"),
-    re.compile(r"^scripts\.pipeline_cli\.canonical\.canonical_release_fn$"),
-
     # Route-to-service DI seam. ``cleanup_all_wrong_matches`` triggers
     # real DB mutations + filesystem deletes via the wrong-match cleanup
     # service. Service behaviour is tested in

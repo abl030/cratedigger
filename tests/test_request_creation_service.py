@@ -5,17 +5,12 @@ from __future__ import annotations
 import os
 import sys
 import unittest
-from collections.abc import Callable
-from dataclasses import replace
 from typing import ClassVar
 from unittest.mock import patch
-
-import psycopg2
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from lib.config import CratediggerConfig
-from lib.pipeline_db._core import AdvisoryLockSessionLost
 from lib.request_creation_service import (
     PlanServiceFactory,
     RequestCreationDB,
@@ -24,7 +19,6 @@ from lib.request_creation_service import (
 )
 from lib.search_plan_service import SearchPlanService, ServiceResult
 from tests.fakes import FakePipelineDB
-from tests.test_pipeline_db import make_db, requires_postgres
 
 
 class _UnpersistedPlan:
@@ -85,27 +79,6 @@ class _FailPublishOnce(FakePipelineDB):
         if status == "wanted" and expected_status == "initializing" and self.fail_publish_once:
             self.fail_publish_once = False
             return False
-        return super().update_status(
-            request_id, status, expected_status=expected_status, **extra,
-        )
-
-
-class _LoseSessionAt(FakePipelineDB):
-    def __init__(self, stage: str) -> None:
-        super().__init__()
-        self.stage = stage
-
-    def set_tracks(self, request_id: int, tracks: list[dict[str, object]]) -> None:
-        if self.stage == "tracks":
-            raise AdvisoryLockSessionLost("planted tracks session loss")
-        super().set_tracks(request_id, tracks)
-
-    def update_status(
-        self, request_id: int, status: str, *, expected_status: str | None = None,
-        **extra: object,
-    ) -> bool:
-        if self.stage == "publication" and status == "wanted":
-            raise AdvisoryLockSessionLost("planted publication session loss")
         return super().update_status(
             request_id, status, expected_status=expected_status, **extra,
         )
@@ -199,37 +172,6 @@ class TestRequestCreationService(unittest.TestCase):
         self.assertEqual(second.outcome, "resumed")
         self.assertEqual(db.request(first.request_id)["status"], "wanted")
 
-    def test_resume_derives_publication_fields_from_the_existing_row(self) -> None:
-        """A resumed initializer supplies its own final wanted fields."""
-        db = FakePipelineDB()
-        request_id = db.add_request(
-            artist_name="Archivist", album_title="Initialization",
-            source="request", mb_release_id="791-mbid", status="initializing",
-        )
-        observed: list[int] = []
-
-        def resumed_fields(row: object) -> dict[str, object]:
-            assert isinstance(row, dict)
-            observed.append(int(row["id"]))
-            return {
-                "search_filetype_override": "lossless",
-                "min_bitrate": 287,
-            }
-
-        creation = replace(
-            _input(),
-            final_fields={"search_filetype_override": "upgrade", "min_bitrate": 160},
-            resumed_final_fields=resumed_fields,
-        )
-        result = self._service(db).create_or_resume(creation)
-
-        self.assertEqual(result.outcome, "resumed")
-        self.assertEqual(observed, [request_id])
-        row = db.request(request_id)
-        self.assertEqual(row["status"], "wanted")
-        self.assertEqual(row["search_filetype_override"], "lossless")
-        self.assertEqual(row["min_bitrate"], 287)
-
     def test_discogs_creation_does_not_fetch_musicbrainz(self) -> None:
         db = FakePipelineDB()
         with (
@@ -256,60 +198,3 @@ class TestRequestCreationService(unittest.TestCase):
         result = self._service(db).create_or_resume(_input())
         self.assertEqual(result.outcome, "busy")
         self.assertEqual(db.count_by_status(), {})
-
-    def test_session_loss_after_creation_is_busy_not_initialization_failure(self) -> None:
-        cases: tuple[tuple[str, Callable[[], FakePipelineDB], PlanServiceFactory], ...] = (
-            ("tracks", lambda: _LoseSessionAt("tracks"), SearchPlanService),
-            ("publication", lambda: _LoseSessionAt("publication"), SearchPlanService),
-        )
-        for stage, build_db, plan in cases:
-            with self.subTest(stage=stage):
-                db = build_db()
-                result = self._service(db, plan).create_or_resume(_input())
-
-                self.assertEqual(result.outcome, "busy")
-                self.assertEqual(result.detail, "release lock session lost; retry")
-                self.assertIsNotNone(result.request_id)
-                assert result.request_id is not None
-                self.assertEqual(db.request(result.request_id)["status"], "initializing")
-
-
-@requires_postgres
-class TestRequestCreationSessionLossRealPostgres(unittest.TestCase):
-    def test_real_search_plan_session_loss_returns_busy(self) -> None:
-        """SearchPlanService must not downgrade lost authority to failure."""
-        db = make_db()
-        self.addCleanup(db.close)
-        original_persist = db.create_successful_search_plan
-
-        def terminate_then_persist(*args: object, **kwargs: object) -> int:
-            killer = psycopg2.connect(db.dsn)
-            killer.autocommit = True
-            try:
-                with db.conn.cursor() as cur:
-                    cur.execute("SELECT pg_backend_pid()")
-                    backend_pid = int(cur.fetchone()[0])
-                with killer.cursor() as cur:
-                    cur.execute("SELECT pg_terminate_backend(%s)", (backend_pid,))
-                    cur.fetchone()
-            finally:
-                killer.close()
-            return original_persist(*args, **kwargs)
-
-        with patch.object(
-            db,
-            "create_successful_search_plan",
-            side_effect=terminate_then_persist,
-        ):
-            result = RequestCreationService(
-                db, CratediggerConfig(),
-            ).create_or_resume(_input(release_id="1071"))
-
-        self.assertEqual(result.outcome, "busy")
-        self.assertEqual(result.detail, "release lock session lost; retry")
-        self.assertIsNotNone(result.request_id)
-        assert result.request_id is not None
-        row = db.get_request(result.request_id)
-        assert row is not None
-        self.assertEqual(row["status"], "initializing")
-        self.assertIsNone(db.get_active_search_plan(result.request_id))

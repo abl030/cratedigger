@@ -195,7 +195,6 @@ def make_request_row(**overrides: Any) -> dict[str, Any]:
         "source_path": None,
         "reasoning": None,
         "status": "wanted",
-        "replaced_from_status": None,
         "search_attempts": 0,
         "download_attempts": 0,
         "validation_attempts": 0,
@@ -236,8 +235,8 @@ def make_request_row(**overrides: Any) -> dict[str, Any]:
         # when an unfindable-categorised request finally imports.
         "rescued_at": None,
         "prior_unfindable_category": None,
-        # Migration 074 — MusicBrainz merge survivor (#1059). NULL until an
-        # observed 301 proves one; resolved_at is NULL exactly when it is.
+        # Migration 074 remains part of the shipped schema even though
+        # its dual-identity runtime design has been reverted.
         "canonical_release_id": None,
         "canonical_resolved_at": None,
         # Migration 021 addressing FK.

@@ -538,52 +538,6 @@ class TestWorldAuditService(unittest.TestCase):
             len(codes),
         )
 
-    def test_duplicate_acquisition_ids_keep_request_keyed_union_answers(self) -> None:
-        """One duplicate acquisition cannot overwrite another request's union."""
-        survivor = "dddddddd-dddd-dddd-dddd-dddddddddddd"
-        with tempfile.TemporaryDirectory() as root:
-            album_path = os.path.join(root, "survivor")
-            os.makedirs(album_path)
-            track_path = os.path.join(album_path, "01.flac")
-            with open(track_path, "wb") as handle:
-                handle.write(b"authority")
-
-            db = FakePipelineDB()
-            db.seed_request(make_request_row(
-                id=11,
-                mb_release_id=RELEASE_A,
-                canonical_release_id=survivor,
-                status="imported",
-            ))
-            duplicate = make_request_row(
-                id=12,
-                mb_release_id=RELEASE_A,
-                status="imported",
-            )
-            # The audit is read-only over persisted rows.  Its keying must
-            # remain correct even if an operator import or historical DB
-            # contains duplicate acquisitions; do not change schema policy
-            # merely to make this projection easier to test.
-            db._requests[12] = duplicate
-            beets = FakeBeetsDB(library_root=root)
-            beets.set_album_ids_for_release(survivor, [7])
-            beets.set_item_paths(survivor, [(71, track_path)])
-            beets.set_world_albums([BeetsWorldAlbum(
-                album_id=7,
-                release_ids=(survivor,),
-                album_path=album_path,
-                item_paths=(track_path,),
-            )])
-
-            report = audit_world(db, beets)
-
-        missing_members = [
-            member.request_id
-            for member in report.groups.b.members
-            if member.code == "current_beets_missing"
-        ]
-        self.assertEqual(missing_members, [12])
-
     def test_denylist_audit_includes_frozen_replaced_requests(self) -> None:
         db = FakePipelineDB()
         db.seed_request(make_request_row(

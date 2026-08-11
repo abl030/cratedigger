@@ -22,7 +22,7 @@ import json
 import logging
 import os
 import subprocess
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -258,66 +258,18 @@ def collect_release_attempt_spectral_audit(
 def resolve_existing_spectral_audit(
     mb_release_id: str,
     cfg: CratediggerConfig,
-    *,
-    request: Mapping[str, object] | None = None,
 ) -> ExistingSpectralAuditLookup:
-    """Resolve HAVE files, using a request's identity union when available.
-
-    A release id alone remains a legitimate exact-release caller contract.
-    Preview callers hold the request row, however, and must resolve its
-    acquisition/canonical union. An unusable union is an authority failure,
-    never evidence that no installed copy exists.
-    """
-    if request is not None and not mb_release_id:
-        return ExistingSpectralAuditLookup(
-            failure=SpectralAnalysisDetail(
-                attempted=True,
-                error="request current Beets authority missing acquisition identity",
-            ),
-        )
+    """Resolve exact-release files, preserving lookup failure as audit data."""
     if not mb_release_id:
         return ExistingSpectralAuditLookup()
-    from lib.beets_db import (
-        BeetsDB,
-        CurrentBeetsAmbiguous,
-        CurrentBeetsMissing,
-        CurrentBeetsUnique,
-        album_info_from_current,
-    )
-    from lib.request_identity import resolve_current_for_request
+    from lib.beets_db import BeetsDB
 
     try:
         with BeetsDB(library_root=getattr(cfg, "beets_directory", "")) as beets:
-            if request is None:
-                existing_info = beets.get_album_info(
-                    mb_release_id,
-                    cfg.quality_ranks,
-                )
-            else:
-                current = resolve_current_for_request(beets, request)
-                if current is None:
-                    return ExistingSpectralAuditLookup(
-                        failure=SpectralAnalysisDetail(
-                            attempted=True,
-                            error="request current Beets authority unavailable",
-                        ),
-                    )
-                if isinstance(current, CurrentBeetsMissing):
-                    return ExistingSpectralAuditLookup()
-                if isinstance(current, CurrentBeetsAmbiguous):
-                    return ExistingSpectralAuditLookup(
-                        failure=SpectralAnalysisDetail(
-                            attempted=True,
-                            error=(
-                                "request current Beets authority ambiguous: "
-                                f"{current.reason}"
-                            ),
-                        ),
-                    )
-                assert isinstance(current, CurrentBeetsUnique)
-                existing_info = album_info_from_current(
-                    current, cfg.quality_ranks,
-                )
+            existing_info = beets.get_album_info(
+                mb_release_id,
+                cfg.quality_ranks,
+            )
         if existing_info is not None:
             return ExistingSpectralAuditLookup(
                 path=(existing_info.album_path
@@ -337,12 +289,8 @@ def resolve_existing_spectral_audit(
 
 def existing_spectral_resolver_for_config(
     cfg: CratediggerConfig,
-    *,
-    request: Mapping[str, object] | None = None,
 ) -> ExistingSpectralResolver:
-    return lambda release_id: resolve_existing_spectral_audit(
-        release_id, cfg, request=request,
-    )
+    return lambda release_id: resolve_existing_spectral_audit(release_id, cfg)
 
 
 def spectral_detail_from_persisted_source(

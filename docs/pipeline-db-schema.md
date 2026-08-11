@@ -256,13 +256,6 @@ Untracked rows.
   exact observed/declared source status. `replaced` has no outgoing edge and is
   created only by the one-way `supersede_request_mbid` transaction.
 
-- `replaced_from_status TEXT NULL` — the source status atomically captured by
-  that same locked Replace transaction immediately before it writes
-  `status='replaced'`. It is constrained to valid pre-replace statuses.
-  Historical rows remain NULL/unknown; Replace-tail staging cleanup fails safe
-  for those rows rather than inferring transfer ownership from stale download
-  metadata.
-
   The explicit operator transition graph still has 11 edges (none out of
   `initializing`): `wanted → downloading/unsearchable/imported/wanted`; `downloading → wanted/imported`; `imported →
   wanted/imported`; and `unsearchable → wanted/imported/unsearchable`.
@@ -914,39 +907,6 @@ rejects any reference to cursor-mutation names.
 | Column | Type | Notes |
 |---|---|---|
 | `catalog_number` | `TEXT NULL` | Resolved at enqueue via the dual-source field resolver (MB + Discogs), populating the `catalog_number` plan-strategy slot the PR2 generator adds. |
-
-### `album_requests` MusicBrainz merge survivor (migration 074, issue #1059)
-
-| Column | Type | Notes |
-|---|---|---|
-| `canonical_release_id` | `TEXT NULL` | The survivor MusicBrainz redirects `mb_release_id` to, proven by an **observed `301`**. NULL means no merge is known. Never equals `mb_release_id`; never derived from a response body field, metadata, or a release-group relative. |
-| `canonical_resolved_at` | `TIMESTAMPTZ NULL` | When the `301` backing the survivor was observed. NULL exactly when `canonical_release_id` is NULL. |
-
-Two CHECK constraints make the shapes the reconciler must never persist fail
-closed at the schema rather than at review:
-
-- `album_requests_canonical_requires_observation` — a survivor without the
-  observation that proved it cannot be distinguished from a guess.
-- `album_requests_canonical_is_not_acquisition` — a survivor equal to the
-  acquisition id is not a merge, and would collapse the union resolver's
-  two-identity probe to one, silently hiding a real split.
-
-Partial index `idx_album_requests_canonical_release_id` covers the audit/CLI
-enumeration; the join reads the column off request rows it already loaded.
-
-**The acquisition id is never mutated.** `mb_release_id` stays "what I went
-and got". The request→album join resolves over the UNION of both identities
-(`lib/request_identity.py`), because whether Beets holds the acquisition id or
-the survivor depends on whether `mbsync` has retagged those files yet — on the
-live library, both states are present at once. Written only by
-`CanonicalReleaseService` (`pipeline-cli canonical reconcile`,
-`POST /api/canonical/reconcile`, and the daily
-`cratedigger-canonical-reconcile.service`). Reconciliation deliberately has
-no clearing path: a `200` without a redirect, any `4xx`, mirror unavailability,
-and disagreement are all non-answers that leave stored state alone. The only
-clear is the explicit operator action `pipeline-cli canonical retire --id N
---confirm RETIRE` / `POST /api/canonical/retire`; it fresh-reads and
-compare-and-set clears both columns only on a non-`replaced` row.
 
 ### `album_tracks.track_artist` (migration 029, populated at enqueue)
 

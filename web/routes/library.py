@@ -63,7 +63,6 @@ def post_beets_delete(h: RouteHandler, body: dict[str, object]) -> None:
         DeleteAlbumAuthorityMismatch,
         DeleteAlbumNotFound,
         DeleteBeetsAmbiguous,
-        DeleteBeetsUnavailable,
         DeleteImporterBusy,
         DeleteIncomplete,
         DeleteLockContended,
@@ -138,14 +137,6 @@ def post_beets_delete(h: RouteHandler, body: dict[str, object]) -> None:
             "album_ids": list(result.album_ids),
             "reason": result.reason,
         }, status=409)
-        return
-
-    if isinstance(result, DeleteBeetsUnavailable):
-        h._json({
-            "error": "current_beets_unavailable",
-            "release_id": result.release_id,
-            "reason": result.reason,
-        }, status=503)
         return
 
     if isinstance(result, DeleteAlbumAuthorityMismatch):

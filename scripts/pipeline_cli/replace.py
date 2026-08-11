@@ -36,7 +36,7 @@ def cmd_replace(db: MbidReplaceDB, args: argparse.Namespace) -> int:
       * 4 — ``RESULT_WRONG_STATE`` (including supersede race —
             double-click landed first; descendant_request_id is set),
             ``RESULT_TARGET_COLLISION_REQUEST``
-      * 5 — ``RESULT_TRANSIENT`` (retryable; mirror or Replace lock busy),
+      * 5 — ``RESULT_TRANSIENT`` (retryable; mirror unreachable etc.),
             ``RESULT_MIRROR_UNCONFIGURED`` (Discogs mirror not configured)
     """
     from lib.config import read_runtime_config

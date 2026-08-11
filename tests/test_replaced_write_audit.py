@@ -62,22 +62,22 @@ class _AlbumRequestUpdate:
 # The ratchet does not infer parameter dataflow: transition SQL must use the
 # canonical direct call grammar below.
 _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
-    ("lib/pipeline_db/_core.py", 289, "d3347c44a6105d85"): (
+    ("lib/pipeline_db/_core.py", 269, "472331a54ebaf9a6"): (
         "shared execute wrapper forwards caller-owned SQL with the caller's "
         "unchanged positional or mapping parameters"
     ),
-    ("lib/pipeline_db/_core.py", 291, "0c0e91117a587d97"): (
+    ("lib/pipeline_db/_core.py", 271, "04ca6be85bb75a81"): (
         "shared execute wrapper forwards parameterless caller-owned SQL"
     ),
-    ("lib/pipeline_db/_core.py", 328, "d3347c44a6105d85"): (
+    ("lib/pipeline_db/_core.py", 304, "472331a54ebaf9a6"): (
         "single reconnect retry forwards the same caller-owned SQL and "
         "unchanged positional or mapping parameters outside atomic scopes"
     ),
-    ("lib/pipeline_db/_core.py", 330, "0c0e91117a587d97"): (
+    ("lib/pipeline_db/_core.py", 306, "04ca6be85bb75a81"): (
         "single reconnect retry forwards the same parameterless caller-owned "
         "SQL outside atomic scopes"
     ),
-    ("lib/pipeline_db/_core.py", 495, "cc41f306ff6d2fc6"): (
+    ("lib/pipeline_db/_core.py", 424, "cc41f306ff6d2fc6"): (
         "owner-session liveness probe interpolates only a positive integer "
         "statement timeout before a fixed SELECT"
     ),
@@ -209,20 +209,20 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "request search composes only one fixed optional status predicate over "
         "the fixed presentation projection and value placeholders"
     ),
-    ("lib/pipeline_db/requests.py", 1818, "724128efb25b8439"): (
+    ("lib/pipeline_db/requests.py", 1814, "724128efb25b8439"): (
         "artist request lookup uses the fixed presentation and capture/evidence "
         "projections with a static UUID-aware fallback predicate; the Library "
         "contract no longer selects structured CD proof while the pointed "
         "current-evidence release-id gate remains for exact verified/provisional "
         "facts"
     ),
-    ("lib/pipeline_db/requests.py", 1837, "f59ded429883f2ec"): (
+    ("lib/pipeline_db/requests.py", 1833, "f59ded429883f2ec"): (
         "artist-name fallback uses the fixed presentation and capture/evidence "
         "projections with one escaped value placeholder; the Library contract "
         "no longer selects structured CD proof while the pointed current-evidence "
         "release-id gate remains for exact verified/provisional facts"
     ),
-    ("lib/pipeline_db/requests.py", 1868, "fdbd2821ab3cbb5a"): (
+    ("lib/pipeline_db/requests.py", 1864, "fdbd2821ab3cbb5a"): (
         "attempt kind is validated against the fixed retry-counter vocabulary "
         "and every value remains a direct placeholder; an attached processing "
         "owner makes the compare-and-set a zero-write conflict"
@@ -276,7 +276,7 @@ _REVIEWED_STATUS_SQL_CALLS: dict[tuple[str, int, str], str] = {
         "active_automation_import_job_id = %s` predicate and the "
         "owner-clearing final write are unchanged)"
     ),
-    ("lib/pipeline_db/requests.py", 529, "def8ac5be1cbeede"): (
+    ("lib/pipeline_db/requests.py", 529, "a2f3083f8cbe8885"): (
         "Replace holds the row lock and CASes the captured active source status "
         "only when no processing owner exists"
     ),

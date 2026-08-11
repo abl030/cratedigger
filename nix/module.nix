@@ -971,21 +971,6 @@
       --dsn "${pipelineDsn}" "$@"
   '';
 
-  # MusicBrainz merge reconciliation oneshot (#1059) — see
-  # lib/canonical_release_service.py. Its own unit, deliberately NOT folded
-  # into cratedigger-unfindable: that one gates on slskd reachability and
-  # fails fast on an outage, which would silently stop merge reconciliation
-  # for as long as slskd was down.
-  # No beetsRuntimeEnvironment: this job reads the pipeline DB and the
-  # MusicBrainz mirror and never opens a Beets library, so it carries no
-  # BEETSDIR, no library path, and no Beets runtime coupling at all.
-  canonicalReconcilePkg = pkgs.writeShellScriptBin "cratedigger-canonical-reconcile" ''
-    export PATH="${runtimePath}:$PATH"
-    export PYTHONPATH="${src}''${PYTHONPATH:+:$PYTHONPATH}"
-    exec ${pyRunner} ${src}/scripts/run_canonical_reconciliation.py \
-      --dsn "${pipelineDsn}" --config "${configTemplate}" "$@"
-  '';
-
   # [Quality Ranks] section — declarative mirror of QualityRankConfig.defaults().
   # Pinned by TestQualityRankConfigDefaults in tests/test_quality_decisions.py.
   qualityRanksSection = let
@@ -2491,46 +2476,6 @@ in {
         # postgres autovacuum, etc.). Single-operator install — there
         # is no fleet of NixOS deployments to spread across, the
         # randomisation is purely a local cron-collision avoidance.
-        RandomizedDelaySec = "30min";
-      };
-    };
-
-    # MusicBrainz merge reconciliation (#1059). Whole library, every day.
-    systemd.services.cratedigger-canonical-reconcile = {
-      description = "Cratedigger MusicBrainz merge reconciliation oneshot";
-      after = ["cratedigger-db-migrate.service" "network.target"];
-      # wants, never requires: timer-driven with restartIfChanged = false, so
-      # a requires edge would propagate the migrate unit's every-deploy
-      # restart as a SIGTERM into a mid-sweep run. The script gates on schema
-      # currency itself instead.
-      wants = ["cratedigger-db-migrate.service"];
-      restartIfChanged = false;
-      serviceConfig = {
-        Type = "oneshot";
-        User = cfg.user;
-        Group = cfg.group;
-        UMask = "0000";
-        # Deliberately NO slskd health gate: this job never talks to slskd,
-        # and gating on it would stop merge reconciliation for the length of
-        # any slskd outage.
-        Environment = "PIPELINE_DB_DSN=${pipelineDsn}";
-        ExecStart = "${canonicalReconcilePkg}/bin/cratedigger-canonical-reconcile";
-        WorkingDirectory = cfg.stateDir;
-        # ~8,500 rows at ~72ms against the local mirror is about 10 minutes.
-        # An hour gives headroom for a slow mirror while still surfacing a
-        # genuinely stuck run.
-        TimeoutStartSec = "1h";
-      };
-    };
-
-    systemd.timers.cratedigger-canonical-reconcile = {
-      description = "Cratedigger MusicBrainz merge reconciliation daily timer";
-      wantedBy = ["timers.target"];
-      timerConfig = {
-        OnCalendar = "daily";
-        Persistent = true;
-        # Same local cron-collision avoidance as the unfindable timer, and it
-        # also keeps two daily mirror consumers off the same instant.
         RandomizedDelaySec = "30min";
       };
     };

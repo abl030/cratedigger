@@ -155,22 +155,6 @@ class _Beets:
             raise self.resolution
         return self.resolution
 
-    def resolve_current_releases(
-        self,
-        identities: list[ReleaseIdentity],
-    ) -> dict[ReleaseIdentity, CurrentBeetsResolution]:
-        """Batch facade, mirroring ``BeetsDB`` (#1059).
-
-        The recovery observation resolves over the request's identity
-        union, so a stub with only the singular method makes every probe
-        look ``unavailable`` — a fake less capable than production quietly
-        rewriting the assertion.
-        """
-        return {
-            identity: self.resolve_current_release(identity)
-            for identity in dict.fromkeys(identities)
-        }
-
 
 class _Probe:
     def __init__(
@@ -476,34 +460,6 @@ class TestAutomationRecoveryDetail(unittest.TestCase):
                     beets=_Beets(resolution),
                 )
                 self.assertEqual(detail.exact_library.status, expected)
-
-    def test_omitted_request_union_is_unavailable_not_exact_fallback(self) -> None:
-        """Recovery detail must not mistake an omitted union response for unique."""
-        identity = ReleaseIdentity.from_id(_RELEASE_ID)
-        assert identity is not None
-
-        class OmittedUnionBeets(_Beets):
-            def resolve_current_releases(self, identities: list[ReleaseIdentity]):
-                del identities
-                return {}
-
-        omitted = OmittedUnionBeets(CurrentBeetsUnique(
-            identity=identity,
-            album_id=11,
-            album_path="/library/album",
-            items=(CurrentBeetsItem(id=1, path="/library/a.flac"),),
-            selectors=("mb_albumid:" + _RELEASE_ID,),
-        ))
-        detail = _detail(
-            _DetailDB(_job(status="queued", with_lease=False, with_child=False)),
-            beets=omitted,
-        )
-
-        self.assertEqual(detail.exact_library.status, "unavailable")
-        self.assertEqual(
-            detail.exact_library.reason,
-            "request_union_authority_unavailable",
-        )
 
     def test_cleanup_progress_is_visible_without_operator_action_metadata(
         self,

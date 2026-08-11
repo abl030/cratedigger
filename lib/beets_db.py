@@ -91,33 +91,13 @@ class CurrentBeetsItem:
 
 @dataclass(frozen=True)
 class CurrentBeetsUnique:
-    """Exactly one usable current Beets album for an exact release.
-
-    ``identity`` is what the caller ASKED for. ``observed_identity`` is what
-    the album is actually FILED under, which differs only after a
-    MusicBrainz merge + ``mbsync`` retag (#1059): the union resolver rewrites
-    ``identity`` back to the request's acquisition id — a dozen consumers
-    compare it against the stored id and fail the operation on a mismatch —
-    while the album on disk still carries the survivor's.
-
-    **A destructive action needs ``filed_identity``, never ``identity``.**
-    ``lib/beets_delete.py`` re-reads the album's own ``mb_albumid`` and
-    refuses any mismatch, so passing the acquisition id there means the
-    removal silently no-ops on exactly the merged albums this change exists
-    to reach.
-    """
+    """Exactly one usable current Beets album for an exact release."""
 
     identity: ReleaseIdentity
     album_id: int
     album_path: str
     items: tuple[CurrentBeetsItem, ...]
     selectors: tuple[str, ...]
-    observed_identity: ReleaseIdentity | None = None
-
-    @property
-    def filed_identity(self) -> ReleaseIdentity:
-        """The identity Beets actually stores for this album."""
-        return self.observed_identity or self.identity
 
 
 @dataclass(frozen=True)
@@ -134,13 +114,6 @@ type CurrentBeetsAmbiguityReason = Literal[
     "split_topology",
     "invalid_path",
     "unresolved_relative_path",
-    # Only ``lib/request_identity.py`` produces this one: a request whose
-    # acquisition id and MusicBrainz merge survivor each resolve to a
-    # DIFFERENT album. Two pressings deliberately held as separate
-    # acquisitions, which MusicBrainz later declared are one release —
-    # the point where upstream identity contradicts "different pressings
-    # ARE different releases", and no release-keyed join can settle it.
-    "merged_identity_split",
 ]
 
 
@@ -188,28 +161,6 @@ def beets_authority_availability_category(exc: Exception) -> str | None:
     if primary_code not in _SQLITE_AUTHORITY_AVAILABILITY_CODES:
         return None
     return f"sqlite_{primary_code}"
-
-
-def min_bitrate_from_current(current: CurrentBeetsUnique) -> int | None:
-    """Project one already-authorized current album to its strict floor."""
-    bitrates = [
-        item.bitrate for item in current.items
-        if item.bitrate is not None and item.bitrate > 0
-    ]
-    if not bitrates:
-        return None
-    return int(min(bitrates) / 1000)
-
-
-def avg_bitrate_from_current(current: CurrentBeetsUnique) -> int | None:
-    """Project one already-authorized current album to its average bitrate."""
-    bitrates = [
-        item.bitrate for item in current.items
-        if item.bitrate is not None and item.bitrate > 0
-    ]
-    if not bitrates:
-        return None
-    return int(sum(bitrates) / len(bitrates) / 1000)
 
 
 def _raise_conflicting_release_identities(
@@ -902,7 +853,13 @@ class BeetsDB:
         current = self._resolve_unique(mb_release_id)
         if current is None:
             return None
-        return min_bitrate_from_current(current)
+        bitrates = [
+            item.bitrate for item in current.items
+            if item.bitrate is not None and item.bitrate > 0
+        ]
+        if not bitrates:
+            return None
+        return int(min(bitrates) / 1000)
 
     def get_item_paths(self, mb_release_id: str) -> list[tuple[int, str]]:
         """Get all (item_id, path) pairs for an album. Returns empty list if not found."""
@@ -1210,6 +1167,23 @@ class BeetsDB:
         or regress to an N+1 query pattern for large artist pages.
         """
         return self._batch_lookup_album_ids(mbids)
+
+    def get_avg_bitrate_kbps(self, mb_release_id: str) -> int | None:
+        """Get average track bitrate (kbps) for a release. None if not found.
+
+        Routes through ``locate`` (issue #121) so Discogs numerics
+        resolve the same way every other postflight lookup does.
+        """
+        current = self._resolve_unique(mb_release_id)
+        if current is None:
+            return None
+        bitrates = [
+            item.bitrate for item in current.items
+            if item.bitrate is not None and item.bitrate > 0
+        ]
+        if not bitrates:
+            return None
+        return int(sum(bitrates) / len(bitrates) / 1000)
 
     def list_world_albums(self) -> "list[BeetsWorldAlbum]":
         """Return every Beets album with exact identities and resolved paths.

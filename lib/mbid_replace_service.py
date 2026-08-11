@@ -36,9 +36,7 @@ import logging
 import os
 import shutil
 import socket
-import sys
 from collections.abc import Callable, Mapping
-from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from urllib.error import URLError
 
@@ -74,20 +72,12 @@ from lib.beets_delete import (
     run_beets_delete,
 )
 from lib.config import CratediggerConfig
-from lib.import_execution import (
-    CancellationToken,
-    ExecutionCancelled,
-    OwnerSessionIdentity,
-    OwnerSessionProbe,
-)
 from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_IMPORT,
     MbidCollisionError,
     SupersedeRaceError,
 )
-from lib.pipeline_db._core import AdvisoryLockSessionLost, OwnerSessionLost
 from lib.processing_paths import stage_to_ai_path
-from lib.release_association_locks import release_identity_locks
 from lib.release_identity import (
     ReleaseIdentity,
     detect_release_source,
@@ -97,8 +87,6 @@ from lib.replace_status import (
     REPLACE_REASON_CROSS_PATHWAY_TARGET,
     REPLACE_REASON_CURRENT_BEETS_AMBIGUOUS,
     REPLACE_REASON_CURRENT_BEETS_UNAVAILABLE,
-    REPLACE_REASON_LOCK_CONTENDED,
-    REPLACE_REASON_POST_SUPERSEDE_PARTIAL,
     REPLACE_REASON_SOURCE_IDENTITY_INVALID,
     REPLACE_REASON_SOURCE_NO_RELEASE_GROUP,
     REPLACE_REASON_TARGET_NO_RELEASE_GROUP,
@@ -114,19 +102,15 @@ from lib.replace_status import (
     RESULT_TRANSIENT,
     RESULT_WRONG_STATE,
 )
-from lib.request_identity import acceptable_identities, resolve_current_for_request
-from lib.search_plan_service import SearchPlanDB, SearchPlanService, ServiceResult
+from lib.search_plan_service import SearchPlanDB, SearchPlanService
 from lib.util import (
     trigger_jellyfin_scan,
     trigger_plex_scan,
 )
 from lib.wrong_match_delete_service import (
     WrongMatchDeleteDB,
-    WrongMatchDeleteSummary,
     delete_wrong_match_group,
 )
-
-type TargetData = dict[str, Any]
 
 logger = logging.getLogger(__name__)
 
@@ -154,17 +138,6 @@ class MbidReplaceDB(
     def get_request_by_replaces_request_id(
         self, replaced_id: int,
     ) -> AlbumRequestRow | None: ...
-
-    def _pin_owner_session(
-        self, token: CancellationToken,
-    ) -> AbstractContextManager[OwnerSessionIdentity]: ...
-
-    def _probe_owner_session(
-        self,
-        identity: OwnerSessionIdentity,
-        *,
-        deadline_seconds: float = 0.75,
-    ) -> OwnerSessionProbe: ...
 
     def supersede_request_mbid(
         self,
@@ -269,10 +242,6 @@ class ReplaceBeetsDB(Protocol):
         self, identity: ReleaseIdentity,
     ) -> CurrentBeetsResolution: ...
 
-    def resolve_current_releases(
-        self, identities: list[ReleaseIdentity],
-    ) -> dict[ReleaseIdentity, CurrentBeetsResolution]: ...
-
     def close(self) -> None: ...
 
 
@@ -282,9 +251,6 @@ BeetsDBFactory = Callable[[], ReplaceBeetsDB]
 
 BeetsDeleteFn = Callable[[BeetsDeleteRequest], BeetsDeleteOutcome]
 """Injectable pinned exact-album deletion boundary."""
-
-WrongMatchDeleteFn = Callable[[MbidReplaceDB, int], WrongMatchDeleteSummary]
-"""Injectable post-replace wrong-match cleanup boundary."""
 
 
 def _default_mb_lookup(mbid: str, *, fresh: bool = False) -> dict[str, Any]:
@@ -327,7 +293,6 @@ class MbidReplaceService:
         discogs_lookup: DiscogsLookup | None = None,
         search_plan_service: SearchPlanService | None = None,
         beets_delete_fn: BeetsDeleteFn | None = None,
-        wrong_match_delete_fn: WrongMatchDeleteFn | None = None,
     ) -> None:
         self.db = db
         self.config = config
@@ -344,114 +309,8 @@ class MbidReplaceService:
         self.beets_delete_fn = (
             beets_delete_fn if beets_delete_fn is not None else run_beets_delete
         )
-        self.wrong_match_delete_fn = (
-            wrong_match_delete_fn
-            if wrong_match_delete_fn is not None
-            else delete_wrong_match_group
-        )
 
     def replace_request_mbid(
-        self,
-        request_id: int,
-        *,
-        target_mb_release_id: str,
-    ) -> ReplaceResult:
-        try:
-            return self._replace_request_mbid(
-                request_id, target_mb_release_id=target_mb_release_id,
-            )
-        except (AdvisoryLockSessionLost, ExecutionCancelled):
-            # The lock-bearing backend died.  A supersede may already have
-            # committed, in which case retrying would be wrong: expose the
-            # runnable descendant and let ordinary plan/cycle convergence
-            # finish its derived work.  Before supersede this is a normal
-            # retryable busy result with no mutation.
-            try:
-                source = self.db.get_request(request_id)
-                descendant = self.db.get_request_by_replaces_request_id(
-                    request_id,
-                )
-                target_identity, _retry_error = self._canonical_retry_target_identity(
-                    source, target_mb_release_id, request_id=request_id,
-                )
-            except Exception:  # noqa: BLE001 - session loss is primary
-                descendant = None
-                target_identity = None
-            if (
-                descendant is not None
-                and target_identity is not None
-                and target_identity in acceptable_identities(descendant)
-            ):
-                return ReplaceResult(
-                    outcome=RESULT_TRANSIENT,
-                    request_id=request_id,
-                    descendant_request_id=int(descendant["id"]),
-                    reason=REPLACE_REASON_POST_SUPERSEDE_PARTIAL,
-                    error_message=(
-                        "Replace session was lost after supersede; the new "
-                        f"request {descendant['id']} needs tail resumption"
-                    ),
-                )
-            return ReplaceResult(
-                outcome=RESULT_TRANSIENT,
-                request_id=request_id,
-                reason=REPLACE_REASON_LOCK_CONTENDED,
-                error_message="Replace lock session was lost; retry",
-            )
-
-    def _canonical_retry_target_identity(
-        self,
-        source: Mapping[str, object] | None,
-        requested_target: str,
-        *,
-        request_id: int,
-    ) -> tuple[ReleaseIdentity | None, ReplaceResult | None]:
-        """Resolve a retry key through the source pathway's canonicalizer."""
-        source_identity = (
-            ReleaseIdentity.from_strict_fields(
-                source.get("mb_release_id"),
-                source.get("discogs_release_id"),
-            ) if source is not None else None
-        )
-        target_identity = ReleaseIdentity.from_id(requested_target)
-        if (
-            source_identity is None
-            or target_identity is None
-            or source_identity.source != target_identity.source
-        ):
-            return None, None
-        if target_identity.source == "musicbrainz":
-            data, error = self._mb_lookup_or_error(
-                target_identity.release_id,
-                request_id=request_id,
-                detail_context=f"target MBID {requested_target}",
-            )
-        else:
-            data, error = self._discogs_lookup_or_error(
-                int(target_identity.release_id),
-                request_id=request_id,
-                detail_context=f"target Discogs id {requested_target}",
-            )
-        if error is not None:
-            return None, error
-        if not data:
-            return None, ReplaceResult(
-                outcome=RESULT_TARGET_INVALID,
-                request_id=request_id,
-                reason=REPLACE_REASON_UNRESOLVABLE_TARGET,
-                error_message=f"retry target {requested_target} returned empty payload",
-            )
-        canonical = ReleaseIdentity.from_id(str(data.get("id") or ""))
-        if canonical is None or canonical.source != source_identity.source:
-            return None, ReplaceResult(
-                outcome=RESULT_TARGET_INVALID,
-                request_id=request_id,
-                reason=REPLACE_REASON_UNRESOLVABLE_TARGET,
-                error_message=f"retry target {requested_target} resolved malformed identity",
-            )
-        return canonical, None
-
-    def _replace_request_mbid(
         self,
         request_id: int,
         *,
@@ -467,8 +326,9 @@ class MbidReplaceService:
            canonical-redirect re-check.
         1. Acquire the per-request IMPORT advisory lock; refuse on
            contention (no pre-emption — the importer worker holds it).
-        2. Re-read the source row under the lock and capture its exact release
-           identity, then resolve the current Beets album snapshot.
+        2. Re-read the source row under the lock and capture
+           pre-supersede state (artist/title for staging path, exact release
+           identity, status), then resolve the current Beets album snapshot.
         3. DB transaction: ``supersede_request_mbid`` atomically flips
            the old row's status, inserts the new row, and inserts tracks.
         4. Filesystem cleanup (non-fatal warnings collected):
@@ -477,9 +337,7 @@ class MbidReplaceService:
              an install on disk; ``clear_pipeline_state=False`` so
              characteristic fields stay frozen on the audit row)
            - wrong-matches group delete
-           - staging folder rmtree (keyed from the durable post-supersede
-             ``replaced_from_status``; skipped when it was downloading or
-             historical/unknown)
+           - staging folder rmtree (skipped when old was downloading)
         5. Post-cleanup (advisory lock RELEASED first): regenerate
            search plan for the new request, trigger Plex /
            Jellyfin rescans. The lock is dropped before these run
@@ -504,26 +362,11 @@ class MbidReplaceService:
             return processing_locked
 
         # Step 1a — double-click / already-replaced source. The frozen
-        # audit row cannot mint another descendant. The same exact requested
-        # target is instead the idempotent post-supersede tail-resume key.
+        # audit row is not a valid source for another Replace.
         if source.get("status") == "replaced":
             descendant = self.db.get_request_by_replaces_request_id(
                 request_id
             )
-            target_identity, retry_error = self._canonical_retry_target_identity(
-                source, target_mb_release_id, request_id=request_id,
-            )
-            if retry_error is not None:
-                return retry_error
-            if (
-                descendant is not None
-                and target_identity is not None
-                and target_identity in acceptable_identities(descendant)
-            ):
-                return self._resume_replaced_tail(
-                    request_id,
-                    target_identity=target_identity,
-                )
             return ReplaceResult(
                 outcome=RESULT_WRONG_STATE,
                 request_id=request_id,
@@ -968,339 +811,14 @@ class MbidReplaceService:
             )
         return data, None
 
-    def _resume_replaced_tail(
-        self,
-        request_id: int,
-        *,
-        target_identity: ReleaseIdentity,
-    ) -> ReplaceResult:
-        """Converge a committed Replace without inventing another request.
-
-        ``replaces_request_id`` is the durable receipt for the only allowed
-        descendant.  The request target is checked before locking and again
-        under IMPORT plus the complete old/new RELEASE-key union. Each tail
-        effect is monotonic: an interrupted deletion or directory cleanup is
-        simply re-derived and retried by the same exact Replace invocation.
-        """
-        token = CancellationToken()
-        warnings: list[str] = []
-        library_db_path = ""
-        library_root = ""
-        try:
-            with self.db._pin_owner_session(token) as owner:
-                with self.db.advisory_lock(
-                    ADVISORY_LOCK_NAMESPACE_IMPORT, request_id,
-                ) as acquired:
-                    if not acquired:
-                        return ReplaceResult(
-                            outcome=RESULT_TRANSIENT,
-                            request_id=request_id,
-                            reason=REPLACE_REASON_LOCK_CONTENDED,
-                            error_message="Replace source is busy; retry tail resumption",
-                        )
-                    source = self.db.get_request(request_id)
-                    descendant = self.db.get_request_by_replaces_request_id(
-                        request_id,
-                    )
-                    source_identity = (
-                        ReleaseIdentity.from_strict_fields(
-                            source.get("mb_release_id"),
-                            source.get("discogs_release_id"),
-                        ) if source is not None else None
-                    )
-                    descendant_identity = (
-                        ReleaseIdentity.from_strict_fields(
-                            descendant.get("mb_release_id"),
-                            descendant.get("discogs_release_id"),
-                        ) if descendant is not None else None
-                    )
-                    if (
-                        source is None
-                        or source.get("status") != "replaced"
-                        or source_identity is None
-                        or descendant is None
-                        or descendant_identity != target_identity
-                    ):
-                        return ReplaceResult(
-                            outcome=RESULT_WRONG_STATE,
-                            request_id=request_id,
-                            descendant_request_id=(
-                                int(descendant["id"]) if descendant else None
-                            ),
-                            error_message=(
-                                "Replace tail no longer names the exact requested "
-                                "source/descendant pair"
-                            ),
-                        )
-                    assert source_identity is not None
-                    assert descendant_identity is not None
-                    lock_identities = (
-                        *acceptable_identities(source),
-                        *acceptable_identities(descendant),
-                    )
-                    with release_identity_locks(
-                        self.db, lock_identities,
-                    ) as locks:
-                        if not locks.acquired:
-                            return ReplaceResult(
-                                outcome=RESULT_TRANSIENT,
-                                request_id=request_id,
-                                descendant_request_id=int(descendant["id"]),
-                                reason=REPLACE_REASON_LOCK_CONTENDED,
-                                error_message="Replace association is busy; retry tail resumption",
-                            )
-                        # Re-read after the full lock union; a stale source or
-                        # a sibling descendant is never safe to clean up.
-                        current_source = self.db.get_request(request_id)
-                        current_descendant = self.db.get_request_by_replaces_request_id(
-                            request_id,
-                        )
-                        if (
-                            current_source is None
-                            or current_source.get("status") != "replaced"
-                            or source_identity not in acceptable_identities(
-                                current_source,
-                            )
-                            or current_descendant is None
-                            or target_identity not in acceptable_identities(
-                                current_descendant,
-                            )
-                        ):
-                            return ReplaceResult(
-                                outcome=RESULT_WRONG_STATE,
-                                request_id=request_id,
-                                descendant_request_id=(
-                                    int(current_descendant["id"])
-                                    if current_descendant else None
-                                ),
-                                error_message="Replace pair changed while acquiring authority",
-                            )
-                        try:
-                            beets = self.beets_db_factory()
-                            try:
-                                current_beets = resolve_current_for_request(
-                                    beets, current_source,
-                                )
-                                library_db_path = beets.library_db_path
-                                library_root = beets.library_root
-                            finally:
-                                beets.close()
-                        except Exception as exc:  # noqa: BLE001 - typed retry
-                            warnings.append(
-                                "Replace tail could not rederive current Beets "
-                                f"state: {type(exc).__name__}: {exc}"
-                            )
-                            current_beets = None
-                        if isinstance(current_beets, CurrentBeetsAmbiguous) or current_beets is None:
-                            warnings.append(
-                                "Replace tail current Beets authority is unavailable or ambiguous"
-                            )
-                        if isinstance(current_beets, CurrentBeetsUnique):
-                            try:
-                                token.raise_if_cancelled()
-                                request = BeetsDeleteRequest(
-                                    album_id=current_beets.album_id,
-                                    expected_release_id=current_beets.filed_identity.release_id,
-                                    library_db_path=library_db_path,
-                                    library_root=library_root,
-                                )
-                                if self.beets_delete_fn is run_beets_delete:
-                                    deleted = run_beets_delete(
-                                        request,
-                                        cancellation_token=token,
-                                        owner_session_probe=lambda: bool(
-                                            self.db._probe_owner_session(owner).live,
-                                        ),
-                                    )
-                                else:
-                                    deleted = self.beets_delete_fn(request)
-                                token.raise_if_cancelled()
-                                if not self.db._probe_owner_session(owner).live:
-                                    raise AdvisoryLockSessionLost(
-                                        "Replace tail lost owner session after Beets acknowledgement"
-                                    )
-                                if isinstance(deleted, BeetsDeleteFailed):
-                                    warnings.append(
-                                        f"beets exact delete id:{current_beets.album_id} "
-                                        f"failed {deleted.reason}: {deleted.detail}"
-                                    )
-                            except (
-                                AdvisoryLockSessionLost,
-                                OwnerSessionLost,
-                                ExecutionCancelled,
-                            ):
-                                raise
-                            except Exception as exc:  # noqa: BLE001 - resume safe tail
-                                warnings.append(
-                                    "beets exact delete raised "
-                                    f"{type(exc).__name__}: {exc}"
-                                )
-                        token.raise_if_cancelled()
-                        try:
-                            summary = self.wrong_match_delete_fn(self.db, request_id)
-                            token.raise_if_cancelled()
-                            if not self.db._probe_owner_session(owner).live:
-                                raise AdvisoryLockSessionLost(
-                                    "Replace tail lost owner session after wrong-match cleanup"
-                                )
-                            if (not summary.success) or summary.errors:
-                                warnings.append(
-                                    f"wrong-matches cleanup reported {summary.errors} errors "
-                                    f"({summary.remaining} remaining)"
-                                )
-                        except AdvisoryLockSessionLost:
-                            raise
-                        except Exception as exc:  # noqa: BLE001 - resume remaining safe effects
-                            warnings.append(
-                                "wrong-matches cleanup raised "
-                                f"{type(exc).__name__}: {exc}"
-                            )
-                        staging_dir = self.config.beets_staging_dir or None
-                        artist = str(current_source.get("artist_name") or "")
-                        title = str(current_source.get("album_title") or "")
-                        # A replaced audit row retains the original download
-                        # receipt.  That durable #278 exception belongs to
-                        # slskd orphan convergence, never this staging tail.
-                        if current_source.get("replaced_from_status") == "downloading":
-                            warnings.append(
-                                f"request {request_id} was downloading; in-flight "
-                                "slskd transfers are not cancelled and staging "
-                                "cleanup was skipped (see issue #278)"
-                            )
-                        elif current_source.get("replaced_from_status") is None:
-                            warnings.append(
-                                "Replace tail has unknown historical source status; "
-                                "staging cleanup was skipped fail-safe"
-                            )
-                        elif staging_dir and artist and title:
-                            for auto_import in (True, False):
-                                path = stage_to_ai_path(
-                                    artist=artist, title=title,
-                                    staging_dir=staging_dir, request_id=request_id,
-                                    auto_import=auto_import,
-                                )
-                                if os.path.isdir(path):
-                                    try:
-                                        # ``rmtree`` cannot be made atomically
-                                        # interruptible.  Its monotonic cleanup
-                                        # is safe to retry, but a failed pass
-                                        # remains an explicit resumable tail.
-                                        token.raise_if_cancelled()
-                                        shutil.rmtree(path)
-                                    except FileNotFoundError:
-                                        pass
-                                    # Cleanup failure remains a resumable boundary.
-                                    except Exception as exc:  # noqa: BLE001
-                                        warnings.append(
-                                            f"staging rmtree failed for {path}: "
-                                            f"{type(exc).__name__}: {exc}"
-                                        )
-                                    token.raise_if_cancelled()
-                                    if not self.db._probe_owner_session(owner).live:
-                                        raise AdvisoryLockSessionLost(
-                                            "Replace tail lost owner session after staging cleanup"
-                                        )
-                token.raise_if_cancelled()
-                if not self.db._probe_owner_session(owner).live:
-                    raise AdvisoryLockSessionLost(
-                        "Replace tail lost owner session before search-plan readiness"
-                    )
-                try:
-                    plan = self.search_plan_service.generate_for_request(
-                        int(descendant["id"]), regenerate=False,
-                    )
-                    token.raise_if_cancelled()
-                    if not self.db._probe_owner_session(owner).live:
-                        raise AdvisoryLockSessionLost(
-                            "Replace tail lost owner session after search-plan readiness"
-                        )
-                    if type(plan) is ServiceResult and plan.outcome not in {
-                        "success", "noop_active_plan_exists",
-                    }:
-                        warnings.append(
-                            f"search-plan generation returned {plan.outcome}"
-                        )
-                except AdvisoryLockSessionLost:
-                    raise
-                except Exception as exc:  # noqa: BLE001 - tail stays resumable
-                    warnings.append(
-                        "search-plan generation raised "
-                        f"{type(exc).__name__}: {exc}"
-                    )
-        except (AdvisoryLockSessionLost, OwnerSessionLost, ExecutionCancelled):
-            descendant = self.db.get_request_by_replaces_request_id(request_id)
-            return ReplaceResult(
-                outcome=RESULT_TRANSIENT,
-                request_id=request_id,
-                descendant_request_id=(int(descendant["id"]) if descendant else None),
-                reason=REPLACE_REASON_POST_SUPERSEDE_PARTIAL,
-                error_message="Replace tail lost authority; retry the same exact target",
-                warnings=tuple(warnings),
-            )
-        descendant = self.db.get_request_by_replaces_request_id(request_id)
-        assert descendant is not None
-        mandatory_warnings = tuple(
-            warning for warning in warnings
-            if "was downloading; in-flight slskd transfers" not in warning
-            and "unknown historical source status" not in warning
-        )
-        if mandatory_warnings:
-            return ReplaceResult(
-                outcome=RESULT_TRANSIENT,
-                request_id=request_id,
-                descendant_request_id=int(descendant["id"]),
-                reason=REPLACE_REASON_POST_SUPERSEDE_PARTIAL,
-                error_message="Replace tail is incomplete; retry the same exact target",
-                warnings=mandatory_warnings,
-            )
-        return ReplaceResult(
-            outcome=RESULT_REPLACED,
-            request_id=request_id,
-            new_request_id=int(descendant["id"]),
-        )
-
     def _finalize_replace(
         self,
         request_id: int,
         *,
         canonical_mbid: str,
         target_rg: str,
-        target_data: TargetData,
+        target_data: dict[str, Any],
         new_discogs_release_id: str | None,
-    ) -> ReplaceResult:
-        """Pin the exact PostgreSQL owner before any destructive lock.
-
-        The pin starts the existing owner-session watchdog.  Every advisory
-        lock and external delete below therefore belongs to one backend; a
-        session death cannot be repaired by reconnecting mid-Replace.
-        """
-        token = CancellationToken()
-        try:
-            with self.db._pin_owner_session(token) as owner_session_identity:
-                return self._finalize_replace_pinned(
-                    request_id,
-                    canonical_mbid=canonical_mbid,
-                    target_rg=target_rg,
-                    target_data=target_data,
-                    new_discogs_release_id=new_discogs_release_id,
-                    cancellation_token=token,
-                    owner_session_identity=owner_session_identity,
-                )
-        except (OwnerSessionLost, ExecutionCancelled) as exc:
-            raise AdvisoryLockSessionLost(
-                "Replace could not retain its owner session"
-            ) from exc
-
-    def _finalize_replace_pinned(
-        self,
-        request_id: int,
-        *,
-        canonical_mbid: str,
-        target_rg: str,
-        target_data: TargetData,
-        new_discogs_release_id: str | None,
-        cancellation_token: CancellationToken,
-        owner_session_identity: OwnerSessionIdentity,
     ) -> ReplaceResult:
         """Phases 1-5 — the mutation half, shared by the MB and Discogs
         arms once the target identity is resolved and validated.
@@ -1321,9 +839,8 @@ class MbidReplaceService:
         ) as acquired:
             if not acquired:
                 return ReplaceResult(
-                    outcome=RESULT_TRANSIENT,
+                    outcome=RESULT_WRONG_STATE,
                     request_id=request_id,
-                    reason=REPLACE_REASON_LOCK_CONTENDED,
                     error_message=(
                         f"importer is currently running for request "
                         f"{request_id}; retry in a few seconds"
@@ -1370,6 +887,10 @@ class MbidReplaceService:
                         f"request {request_id} was replaced concurrently"
                     ),
                 )
+            old_artist = source_locked.get("artist_name") or ""
+            old_title = source_locked.get("album_title") or ""
+            old_status = source_locked.get("status")
+
             old_identity = ReleaseIdentity.from_strict_fields(
                 source_locked.get("mb_release_id"),
                 source_locked.get("discogs_release_id"),
@@ -1384,345 +905,157 @@ class MbidReplaceService:
                         "conflicting exact release identity fields"
                     ),
                 )
-            target_identity = ReleaseIdentity.from_strict_fields(
-                canonical_mbid, new_discogs_release_id,
-            )
-            if target_identity is None:
+            try:
+                beets_db = self.beets_db_factory()
+                try:
+                    current_beets = beets_db.resolve_current_release(old_identity)
+                    current_library_db_path = beets_db.library_db_path
+                    current_library_root = beets_db.library_root
+                finally:
+                    beets_db.close()
+            except Exception as exc:  # noqa: BLE001 -- typed zero-mutation result
                 return ReplaceResult(
-                    outcome=RESULT_TARGET_INVALID,
+                    outcome=RESULT_WRONG_STATE,
                     request_id=request_id,
-                    error_message="Replace target has no exact release identity",
-                )
-
-            # IMPORT is already held. Lock the complete before/after
-            # association union before publishing the old-row removal and
-            # target-row addition. See docs/advisory-locks.md.
-            release_scope = release_identity_locks(
-                self.db,
-                (*acceptable_identities(source_locked), target_identity),
-            )
-            release_locks = release_scope.__enter__()
-            if not release_locks.acquired:
-                release_scope.__exit__(None, None, None)
-                return ReplaceResult(
-                    outcome=RESULT_TRANSIENT,
-                    request_id=request_id,
-                    reason=REPLACE_REASON_LOCK_CONTENDED,
+                    reason=REPLACE_REASON_CURRENT_BEETS_UNAVAILABLE,
                     error_message=(
-                        "release association is currently changing; retry "
-                        f"Replace for request {request_id}"
+                        "current Beets resolution failed before Replace: "
+                        f"{type(exc).__name__}: {exc}"
                     ),
                 )
+            if isinstance(current_beets, CurrentBeetsAmbiguous):
+                return ReplaceResult(
+                    outcome=RESULT_WRONG_STATE,
+                    request_id=request_id,
+                    reason=REPLACE_REASON_CURRENT_BEETS_AMBIGUOUS,
+                    error_message=(
+                        f"current Beets authority for {old_identity.release_id} "
+                        f"is ambiguous ({current_beets.reason}; album ids "
+                        f"{list(current_beets.album_ids)})"
+                    ),
+                )
+            current_album_path = (
+                current_beets.album_path
+                if isinstance(current_beets, CurrentBeetsUnique)
+                else None
+            )
+
+            # Phase 3 — DB transaction.
             try:
-                source_confirmed = self.db.get_request(request_id)
-                if source_confirmed is None:
-                    return ReplaceResult(
-                        outcome=RESULT_NOT_FOUND,
-                        request_id=request_id,
-                        error_message=(
-                            f"request {request_id} disappeared while "
-                            "acquiring release authority"
-                        ),
-                    )
-                if source_confirmed.get("status") == "replaced":
-                    return ReplaceResult(
-                        outcome=RESULT_WRONG_STATE,
-                        request_id=request_id,
-                        error_message=(
-                            f"request {request_id} was replaced concurrently"
-                        ),
-                    )
-                if ReleaseIdentity.from_strict_fields(
-                    source_confirmed.get("mb_release_id"),
-                    source_confirmed.get("discogs_release_id"),
-                ) != old_identity:
-                    return ReplaceResult(
-                        outcome=RESULT_WRONG_STATE,
-                        request_id=request_id,
-                        error_message=(
-                            f"request {request_id} changed identity while "
-                            "acquiring release authority"
-                        ),
-                    )
-                target_existing = self.db.get_request_by_release_id(
-                    canonical_mbid,
+                new_request_id = self.db.supersede_request_mbid(
+                    request_id,
+                    new_mb_release_id=canonical_mbid,
+                    new_mb_release_group_id=target_rg,
+                    new_mb_artist_id=target_data.get("artist_id"),
+                    new_artist_name=target_data.get("artist_name") or "",
+                    new_album_title=target_data.get("title") or "",
+                    new_year=target_data.get("year"),
+                    new_country=target_data.get("country"),
+                    new_tracks=list(target_data.get("tracks") or []),
+                    new_discogs_release_id=new_discogs_release_id,
                 )
-                if (
-                    target_existing is not None
-                    and int(target_existing["id"]) != request_id
-                ):
-                    return ReplaceResult(
-                        outcome=RESULT_TARGET_COLLISION_REQUEST,
-                        request_id=request_id,
-                        current_status=target_existing.get("status"),
-                        error_message=(
-                            f"target release {canonical_mbid} is already used "
-                            f"by request {target_existing['id']} "
-                            f"(status={target_existing.get('status')!r})"
-                        ),
-                    )
-                source_locked = source_confirmed
-                try:
-                    beets_db = self.beets_db_factory()
-                    try:
-                        # Union (#1059). ``current_album_path`` below is what
-                        # Replace uses to clean up the superseded album; an
-                        # acquisition-only resolve returns Missing for a merged
-                        # request whose files Beets holds under the survivor, so
-                        # Replace would supersede and leave the old album on
-                        # disk — manufacturing exactly the orphan class this
-                        # issue exists to clear.
-                        current_beets = resolve_current_for_request(
-                            beets_db, source_locked,
-                        )
-                        if current_beets is None:
-                            # Unreachable — ``old_identity`` was already proven
-                            # above. Raised rather than resolved acquisition-only:
-                            # the caller converts it to the typed
-                            # ``current_beets_unavailable`` refusal, and an
-                            # authority failure must not become a resolution on
-                            # a path that supersedes and deletes.
-                            raise RuntimeError(
-                                "current Beets authority omitted the request's "
-                                "acceptable release identities"
-                            )
-                        current_library_db_path = beets_db.library_db_path
-                        current_library_root = beets_db.library_root
-                    finally:
-                        beets_db.close()
-                except Exception as exc:  # noqa: BLE001 -- typed zero-mutation result
-                    return ReplaceResult(
-                        outcome=RESULT_WRONG_STATE,
-                        request_id=request_id,
-                        reason=REPLACE_REASON_CURRENT_BEETS_UNAVAILABLE,
-                        error_message=(
-                            "current Beets resolution failed before Replace: "
-                            f"{type(exc).__name__}: {exc}"
-                        ),
-                    )
-                if isinstance(current_beets, CurrentBeetsAmbiguous):
-                    return ReplaceResult(
-                        outcome=RESULT_WRONG_STATE,
-                        request_id=request_id,
-                        reason=REPLACE_REASON_CURRENT_BEETS_AMBIGUOUS,
-                        error_message=(
-                            f"current Beets authority for {old_identity.release_id} "
-                            f"is ambiguous ({current_beets.reason}; album ids "
-                            f"{list(current_beets.album_ids)})"
-                        ),
-                    )
-                current_album_path = (
-                    current_beets.album_path
-                    if isinstance(current_beets, CurrentBeetsUnique)
-                    else None
+            except MbidCollisionError as exc:
+                return ReplaceResult(
+                    outcome=RESULT_TARGET_COLLISION_REQUEST,
+                    request_id=request_id,
+                    error_message=(
+                        f"target MBID collision on supersede: {exc}"
+                    ),
+                )
+            except SupersedeRaceError as exc:
+                # A concurrent Replace (double-click) landed first
+                # while we held the lock. The descendant row already
+                # exists — surface a deep-link rather than telling the
+                # operator to retry; retrying a race that has already
+                # succeeded is misleading. Mirrors the Phase 0 step 1a
+                # early-exit shape (RESULT_WRONG_STATE +
+                # descendant_request_id).
+                descendant = self.db.get_request_by_replaces_request_id(
+                    request_id
+                )
+                return ReplaceResult(
+                    outcome=RESULT_WRONG_STATE,
+                    request_id=request_id,
+                    descendant_request_id=(
+                        int(descendant["id"]) if descendant else None
+                    ),
+                    error_message=(
+                        f"supersede race on request {request_id}: {exc}"
+                    ),
                 )
 
-                # Phase 3 — DB transaction.
+            # Phase 4 — filesystem cleanup (non-fatal). Keyed on the fresh
+            # exact Beets album PK — never on request status. "wanted" does not
+            # mean "nothing on disk": library-backfill rows (2026-06-04)
+            # track pre-existing installs while still wanted, and Replace
+            # REPLACES — the old pressing's install is displaced whenever
+            # it resolves in beets (the Passenger regression, 2026-07-18).
+            # Missing current Beets authority is a safe no-op.
+            if isinstance(current_beets, CurrentBeetsUnique):
                 try:
-                    new_request_id = self.db.supersede_request_mbid(
-                        request_id,
-                        new_mb_release_id=canonical_mbid,
-                        new_mb_release_group_id=target_rg,
-                        new_mb_artist_id=target_data.get("artist_id"),
-                        new_artist_name=target_data.get("artist_name") or "",
-                        new_album_title=target_data.get("title") or "",
-                        new_year=target_data.get("year"),
-                        new_country=target_data.get("country"),
-                        new_tracks=list(target_data.get("tracks") or []),
-                        new_discogs_release_id=new_discogs_release_id,
-                    )
-                except MbidCollisionError as exc:
-                    return ReplaceResult(
-                        outcome=RESULT_TARGET_COLLISION_REQUEST,
-                        request_id=request_id,
-                        error_message=(
-                            f"target MBID collision on supersede: {exc}"
-                        ),
-                    )
-                except SupersedeRaceError as exc:
-                    # A concurrent Replace (double-click) landed first
-                    # while we held the lock. The descendant row already
-                    # exists — surface a deep-link rather than telling the
-                    # operator to retry; retrying a race that has already
-                    # succeeded is misleading. Mirrors the Phase 0 step 1a
-                    # early-exit shape (RESULT_WRONG_STATE +
-                    # descendant_request_id).
-                    descendant = self.db.get_request_by_replaces_request_id(
-                        request_id
-                    )
-                    return ReplaceResult(
-                        outcome=RESULT_WRONG_STATE,
-                        request_id=request_id,
-                        descendant_request_id=(
-                            int(descendant["id"]) if descendant else None
-                        ),
-                        error_message=(
-                            f"supersede race on request {request_id}: {exc}"
-                        ),
-                    )
-
-                cancellation_token.raise_if_cancelled()
-                if not self.db._probe_owner_session(
-                    owner_session_identity,
-                ).live:
-                    raise AdvisoryLockSessionLost(
-                        "Replace lost owner session immediately after supersede"
-                    )
-                # Supersede takes the authoritative row lock itself. A
-                # downloader may therefore transition wanted -> downloading
-                # after our pre-lock read but before that transaction reaches
-                # the row. Read the replaced audit row back under the held
-                # advisory authority: only its atomically persisted source
-                # status may decide whether Replace owns staging cleanup.
-                replaced_source = self.db.get_request(request_id)
-                if (
-                    replaced_source is None
-                    or replaced_source.get("status") != "replaced"
-                ):
-                    raise AdvisoryLockSessionLost(
-                        "Replace could not re-read its replaced audit row"
-                    )
-                replaced_from_status = replaced_source.get("replaced_from_status")
-                old_artist = str(replaced_source.get("artist_name") or "")
-                old_title = str(replaced_source.get("album_title") or "")
-
-                # Phase 4 — filesystem cleanup (non-fatal). Keyed on the fresh
-                # exact Beets album PK — never on request status. "wanted" does not
-                # mean "nothing on disk": library-backfill rows (2026-06-04)
-                # track pre-existing installs while still wanted, and Replace
-                # REPLACES — the old pressing's install is displaced whenever
-                # it resolves in beets (the Passenger regression, 2026-07-18).
-                # Missing current Beets authority is a safe no-op.
-                if isinstance(current_beets, CurrentBeetsUnique):
-                    cancellation_token.raise_if_cancelled()
-                    try:
-                        delete_request = BeetsDeleteRequest(
-                            album_id=current_beets.album_id,
-                            # FILED, not requested (#1059). The delete child
-                            # refuses a mismatch against the album's own
-                            # mb_albumid, and the supersede has already
-                            # committed — so the acquisition id here leaves the
-                            # old album on disk, which is the orphan class this
-                            # issue exists to clear.
-                            expected_release_id=(
-                                current_beets.filed_identity.release_id
-                            ),
-                            library_db_path=current_library_db_path,
-                            library_root=current_library_root,
-                        )
-                        if self.beets_delete_fn is run_beets_delete:
-                            delete_outcome = run_beets_delete(
-                                delete_request,
-                                cancellation_token=cancellation_token,
-                                owner_session_probe=lambda: bool(
-                                    self.db._probe_owner_session(
-                                        owner_session_identity,
-                                    ).live,
-                                ),
-                            )
-                        else:
-                            delete_outcome = self.beets_delete_fn(delete_request)
-                        cancellation_token.raise_if_cancelled()
-                        if not self.db._probe_owner_session(
-                            owner_session_identity,
-                        ).live:
-                            raise AdvisoryLockSessionLost(
-                                "Replace lost owner session after Beets acknowledgement"
-                            )
-                        if isinstance(delete_outcome, BeetsDeleteFailed):
-                            warnings.append(
-                                f"beets exact delete id:{current_beets.album_id} "
-                                f"failed {delete_outcome.reason}: "
-                                f"{delete_outcome.detail}"
-                            )
-                    except AdvisoryLockSessionLost:
-                        raise
-                    except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
+                    delete_outcome = self.beets_delete_fn(BeetsDeleteRequest(
+                        album_id=current_beets.album_id,
+                        expected_release_id=old_identity.release_id,
+                        library_db_path=current_library_db_path,
+                        library_root=current_library_root,
+                    ))
+                    if isinstance(delete_outcome, BeetsDeleteFailed):
                         warnings.append(
-                            f"beets removal raised "
-                            f"{type(exc).__name__}: {exc}"
+                            f"beets exact delete id:{current_beets.album_id} "
+                            f"failed {delete_outcome.reason}: "
+                            f"{delete_outcome.detail}"
                         )
-
-                try:
-                    cancellation_token.raise_if_cancelled()
-                    wm_summary = self.wrong_match_delete_fn(self.db, request_id)
-                    cancellation_token.raise_if_cancelled()
-                    if not self.db._probe_owner_session(
-                        owner_session_identity,
-                    ).live:
-                        raise AdvisoryLockSessionLost(
-                            "Replace lost owner session after wrong-match cleanup"
-                        )
-                    if not wm_summary.success or wm_summary.errors:
-                        warnings.append(
-                            f"wrong-matches cleanup reported "
-                            f"{wm_summary.errors} errors "
-                            f"({wm_summary.remaining} remaining)"
-                        )
-                except AdvisoryLockSessionLost:
-                    # Do not turn loss of the association-lock session into a
-                    # successful Replace warning.  The public boundary below
-                    # finds the committed descendant and refuses a retry.
-                    raise
                 except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
                     warnings.append(
-                        f"wrong-matches cleanup raised "
+                        f"beets removal raised "
                         f"{type(exc).__name__}: {exc}"
                     )
 
-                if replaced_from_status == "downloading":
+            try:
+                wm_summary = delete_wrong_match_group(self.db, request_id)
+                if wm_summary.errors:
                     warnings.append(
-                        f"request {request_id} was downloading; in-flight "
-                        "slskd transfers are not cancelled and staging "
-                        "cleanup was skipped (see issue #278)"
+                        f"wrong-matches cleanup reported "
+                        f"{wm_summary.errors} errors "
+                        f"({wm_summary.remaining} remaining)"
                     )
-                elif replaced_from_status is None:
-                    warnings.append(
-                        "Replace has unknown historical source status; staging "
-                        "cleanup was skipped fail-safe"
-                    )
-                else:
-                    # CratediggerConfig always has the field — empty
-                    # string when unconfigured. Coerce to None so the
-                    # downstream guard reads cleanly.
-                    staging_dir = self.config.beets_staging_dir or None
-                    if staging_dir and old_artist and old_title:
-                        for auto_import in (True, False):
-                            path = stage_to_ai_path(
-                                artist=old_artist,
-                                title=old_title,
-                                staging_dir=staging_dir,
-                                request_id=request_id,
-                                auto_import=auto_import,
+            except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
+                warnings.append(
+                    f"wrong-matches cleanup raised "
+                    f"{type(exc).__name__}: {exc}"
+                )
+
+            if old_status == "downloading":
+                warnings.append(
+                    f"request {request_id} was downloading; in-flight "
+                    "slskd transfers are not cancelled and staging "
+                    "cleanup was skipped (see issue #278)"
+                )
+            else:
+                # CratediggerConfig always has the field — empty
+                # string when unconfigured. Coerce to None so the
+                # downstream guard reads cleanly.
+                staging_dir = self.config.beets_staging_dir or None
+                if staging_dir and old_artist and old_title:
+                    for auto_import in (True, False):
+                        path = stage_to_ai_path(
+                            artist=old_artist,
+                            title=old_title,
+                            staging_dir=staging_dir,
+                            request_id=request_id,
+                            auto_import=auto_import,
+                        )
+                        if not os.path.isdir(path):
+                            continue
+                        try:
+                            shutil.rmtree(path)
+                        except FileNotFoundError:
+                            pass
+                        except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
+                            warnings.append(
+                                f"staging rmtree failed for {path}: "
+                                f"{type(exc).__name__}: {exc}"
                             )
-                            if not os.path.isdir(path):
-                                continue
-                            try:
-                                # ``rmtree`` cannot be made atomically
-                                # interruptible. Its monotonic path cleanup is
-                                # safe to retry, but cancellation is checked on
-                                # both sides so we never claim the ambiguous
-                                # span completed under lost authority.
-                                cancellation_token.raise_if_cancelled()
-                                shutil.rmtree(path)
-                                cancellation_token.raise_if_cancelled()
-                                if not self.db._probe_owner_session(
-                                    owner_session_identity,
-                                ).live:
-                                    raise AdvisoryLockSessionLost(
-                                        "Replace lost owner session after staging cleanup"
-                                    )
-                            except FileNotFoundError:
-                                pass
-                            except AdvisoryLockSessionLost:
-                                raise
-                            except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
-                                warnings.append(
-                                    f"staging rmtree failed for {path}: "
-                                    f"{type(exc).__name__}: {exc}"
-                                )
-            finally:
-                release_scope.__exit__(*sys.exc_info())
 
         # Phase 5 — search plan + rescans (OUTSIDE the advisory lock).
         # Rescans each carry their own ~10s timeout; holding the IMPORT
@@ -1732,46 +1065,13 @@ class MbidReplaceService:
         # it has work to do. Releasing early caps lock-hold at fs
         # cleanup (sub-second) rather than ~30s worst case.
         try:
-            cancellation_token.raise_if_cancelled()
-            if not self.db._probe_owner_session(owner_session_identity).live:
-                raise AdvisoryLockSessionLost(
-                    "Replace lost owner session before search-plan generation"
-                )
-            plan = self.search_plan_service.generate_for_request(
+            self.search_plan_service.generate_for_request(
                 new_request_id, regenerate=False,
             )
-            cancellation_token.raise_if_cancelled()
-            if not self.db._probe_owner_session(owner_session_identity).live:
-                raise AdvisoryLockSessionLost(
-                    "Replace lost owner session after search-plan generation"
-                )
-            if type(plan) is ServiceResult and plan.outcome not in {
-                "success", "noop_active_plan_exists",
-            }:
-                warnings.append(
-                    "search-plan generation returned "
-                    f"{plan.outcome} (plan_id={plan.plan_id})"
-                )
-        except AdvisoryLockSessionLost:
-            raise
         except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures
             warnings.append(
                 f"search-plan generation failed for new request "
                 f"{new_request_id}: {type(exc).__name__}: {exc}"
-            )
-
-        mandatory_warnings = tuple(
-            warning for warning in warnings
-            if "was downloading; in-flight slskd transfers" not in warning
-        )
-        if mandatory_warnings:
-            return ReplaceResult(
-                outcome=RESULT_TRANSIENT,
-                request_id=request_id,
-                descendant_request_id=new_request_id,
-                reason=REPLACE_REASON_POST_SUPERSEDE_PARTIAL,
-                error_message="Replace tail is incomplete; retry the same exact target",
-                warnings=mandatory_warnings,
             )
 
         try:

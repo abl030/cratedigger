@@ -10,8 +10,6 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import msgspec
 
-from lib.request_identity import canonical_identity
-
 if TYPE_CHECKING:
     from lib.pipeline_db.rows import AlbumRequestRow
 
@@ -50,27 +48,7 @@ class DiskCoverageResult(msgspec.Struct, kw_only=True):
 
 
 def _release_ids_for_request(row: Mapping[str, Any]) -> list[str]:
-    """Every release id that can answer for this request, survivor first.
-
-    The MusicBrainz merge survivor is read from the module that owns it
-    (#1059), never re-derived here. Without it this join called requests
-    316 and 8832 "imported, missing from beets" on the dashboard's drift
-    card while their own detail panels, two clicks away, showed the real
-    installed path — two operator surfaces contradicting each other about
-    the same two rows.
-
-    The acquisition side deliberately stays on the raw column values
-    rather than the strict identity authority: ``check_mbids`` resolves
-    through ``lib/beets_db.py::_lookup_identity``, which keeps malformed
-    values on the MusicBrainz column path ON PURPOSE so an audit
-    projection can still match bad historical rows. Narrowing that here
-    would trade one false "drift" class for another, which is the exact
-    failure this change exists to remove.
-    """
     ids: list[str] = []
-    canonical = canonical_identity(row)
-    if canonical is not None:
-        ids.append(canonical.release_id)
     for key in ("mb_release_id", "discogs_release_id"):
         value = row.get(key)
         if value is not None and str(value):
@@ -151,18 +129,6 @@ def disk_coverage(
     Presence is determined by exact beets identity: MB UUIDs in
     ``albums.mb_albumid`` and Discogs numerics in either ``discogs_albumid``
     or legacy ``mb_albumid`` via ``BeetsDB.check_mbids``.
-
-    A request is present when ANY id that can answer for it is — its
-    acquisition id, or a stored MusicBrainz merge survivor (#1059). Those
-    ids are still flattened across the whole cohort before one batched
-    ``check_mbids``, so a merged corpus costs the same single query an
-    unmerged one does.
-
-    This is deliberately a presence-only projection, not destructive
-    authority. The #1060 verification measured 0 malformed and 0 conflicting
-    raw identity columns across 8,524 rows, which admits this flattened
-    read; destructive callers must instead retain request identity and use
-    the typed current-resolution boundary.
     """
     rows = pipeline_db.list_non_replaced_requests()
     request_ids: dict[int, set[str]] = {}

@@ -35,14 +35,6 @@ class _FailingDeleteDB(FakePipelineDB):
         raise RuntimeError("boom")
 
 
-class _OmittingCurrentBeets(FakeBeetsDB):
-    """Simulate an incomplete batch response at the Beets authority edge."""
-
-    def resolve_current_releases(self, identities):
-        del identities
-        return {}
-
-
 class TestBeetsRouteContracts(_FakeDbWebServerCase):
     """Contract tests for frontend-consumed beets library routes."""
 
@@ -669,29 +661,6 @@ class TestBeetsRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(data["album_ids"], [7, 8])
         self.assertEqual(self.delete_requests, [])
         self.assertIsNotNone(self.beets_db.get_album_detail(7))
-
-    def test_beets_delete_omitted_request_union_returns_unavailable(self):
-        """The Library HTTP adapter maps omitted union authority to 503."""
-        omitted = _OmittingCurrentBeets()
-        detail = self._album()
-        detail["tracks"] = [self._track()]
-        omitted.set_album_detail(7, detail)
-        omitted.set_album_ids_for_release(self.RELEASE_ID, [7])
-        self._srv._beets = omitted
-
-        status, data = self._post("/api/beets/delete", {
-            "id": 7,
-            "confirm": "DELETE",
-        })
-
-        self.assertEqual(status, 503)
-        self.assertEqual(data, {
-            "error": "current_beets_unavailable",
-            "release_id": self.RELEASE_ID,
-            "reason": "request_union_authority_unavailable",
-        })
-        self.assertEqual(self.delete_requests, [])
-        self.assertIsNotNone(omitted.get_album_detail(7))
 
 if __name__ == "__main__":
     unittest.main()

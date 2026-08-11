@@ -83,7 +83,7 @@ import msgspec
 
 
 class AlbumRequestRow(TypedDict):
-    """One ``SELECT * FROM album_requests`` row, every column of the table."""
+    """One ``SELECT * FROM album_requests`` row, every shipped column."""
 
     id: int
     mb_release_id: str | None
@@ -99,7 +99,6 @@ class AlbumRequestRow(TypedDict):
     source_path: str | None
     reasoning: str | None
     status: str
-    replaced_from_status: str | None
     search_attempts: int
     download_attempts: int
     validation_attempts: int
@@ -140,6 +139,8 @@ class AlbumRequestRow(TypedDict):
     rescued_at: datetime | None
     prior_unfindable_category: str | None
     catalog_number: str | None
+    # Migration 074 shipped before its runtime design was reverted. These
+    # columns remain inert until a forward migration retires them.
     canonical_release_id: str | None
     canonical_resolved_at: datetime | None
 

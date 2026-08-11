@@ -21,7 +21,7 @@ from lib.quality import QualityRankConfig
 from lib.release_identity import ConflictingReleaseIdentityError, ReleaseIdentity
 from tests.fakes import FakeBeetsDB
 from tests.test_beets_db import _create_test_db, _insert_album
-from web.routes._overlay import band_request_rows, overlay_release_rows_in_place
+from web.routes._overlay import band_release_ids, overlay_release_rows_in_place
 
 MB_RELEASE_1 = "00000000-0000-0000-0000-000000000001"
 MB_RELEASE_2 = "00000000-0000-0000-0000-000000000002"
@@ -241,23 +241,6 @@ class TestOverlayReleaseRowsInPlace(unittest.TestCase):
         ])
 
 
-def _request_rows(release_ids: list[str]) -> list[dict[str, object]]:
-    """Minimal request rows for the row-keyed bander (#1059).
-
-    No ``canonical_release_id``, so every row here exercises the unmerged
-    path — which must stay byte-identical to the pre-union behaviour.
-    """
-    return [
-        {
-            "id": 1000 + index,
-            "mb_release_id": release_id,
-            "discogs_release_id": None,
-            "canonical_release_id": None,
-        }
-        for index, release_id in enumerate(release_ids)
-    ]
-
-
 class TestBandReleaseIds(unittest.TestCase):
     def test_unique_mixed_format_band_uses_canonical_precedence_not_item_order(
         self,
@@ -323,7 +306,7 @@ class TestBandReleaseIds(unittest.TestCase):
 
         with patch("web.server._beets_db", return_value=beets), \
                 self.assertRaises(CurrentBeetsBandingAmbiguityError) as raised:
-            band_request_rows(_request_rows([MB_RELEASE_1]))
+            band_release_ids([MB_RELEASE_1])
 
         self.assertEqual(raised.exception.ambiguities[0].reason,
                          "multiple_matches")
@@ -335,7 +318,7 @@ class TestBandReleaseIds(unittest.TestCase):
         with patch("web.server._beets_db",
                    side_effect=OSError("db locked")), self.assertRaisesRegex(
                        OSError, "db locked"):
-            band_request_rows(_request_rows([MB_RELEASE_1, MB_RELEASE_2]))
+            band_release_ids([MB_RELEASE_1, MB_RELEASE_2])
 
     def test_bands_three_way_from_exact_resolution_snapshot(self):
         """Missing, unrankable Unique, and rankable Unique stay distinct."""
@@ -347,11 +330,11 @@ class TestBandReleaseIds(unittest.TestCase):
         )
         beets.set_album_exists(MB_RELEASE_2, True)
         with patch("web.server._beets_db", return_value=beets):
-            out = band_request_rows(_request_rows([
+            out = band_release_ids([
                 MB_RELEASE_1,
                 MB_RELEASE_2,
                 MB_RELEASE_3,
-            ]))
+            ])
         self.assertEqual(out[MB_RELEASE_1], "lossless")
         self.assertEqual(out[MB_RELEASE_2], "unknown")
         self.assertEqual(out[MB_RELEASE_3], "missing")
@@ -380,7 +363,7 @@ class TestBandReleaseIds(unittest.TestCase):
             with BeetsDB(db_path, library_root="/music") as beets, patch(
                 "web.server._beets_db", return_value=beets,
             ):
-                out = band_request_rows(_request_rows(["12856590", "5555555"]))
+                out = band_release_ids(["12856590", "5555555"])
 
         self.assertEqual(out, {
             "12856590": "lossless",

@@ -20,10 +20,6 @@ from lib.beets_db import (
 )
 from lib.quality import QualityRankConfig
 from lib.release_identity import ReleaseIdentity
-from lib.request_identity import (
-    acceptable_identities,
-    merge_union_resolutions,
-)
 
 BAND_MISSING = "missing"
 BAND_UNKNOWN = "unknown"
@@ -158,38 +154,25 @@ def band_current_resolutions(
 
 def resolve_current_release_bands(
     beets: CurrentBeetsResolver,
-    requests: Iterable[Mapping[str, object]],
+    release_ids: Iterable[str],
     cfg: QualityRankConfig,
 ) -> dict[str, str]:
-    """Band a request cohort over each row's identity union (#1059).
-
-    Keyed by the **acquisition** release id, because that is what the
-    long-tail row displays and what the caller asked about. The MusicBrainz
-    merge survivor, when one is stored, only widens which albums may answer
-    — it never becomes the key.
-
-    Still one batched query for the whole cohort, merged or not.
-    """
-    rows = list(requests)
-    requested: list[tuple[str, tuple[ReleaseIdentity, ...]]] = []
-    for row in rows:
-        acceptable = acceptable_identities(row)
-        if not acceptable:
+    """Resolve one exact batch and band it through the shared decision."""
+    requested: list[tuple[str, ReleaseIdentity]] = []
+    for raw_release_id in release_ids:
+        release_id = str(raw_release_id)
+        identity = ReleaseIdentity.from_id(release_id)
+        if identity is None:
             raise CurrentBeetsBandingIdentityError(
-                "invalid exact release identity for banding: "
-                f"{row.get('mb_release_id')!r}/"
-                f"{row.get('discogs_release_id')!r}"
+                f"invalid exact release identity for banding: {release_id!r}"
             )
-        requested.append((acceptable[-1].release_id, acceptable))
+        requested.append((release_id, identity))
     if not requested:
         return {}
 
-    identities: list[ReleaseIdentity] = []
-    for _key, acceptable in requested:
-        for identity in acceptable:
-            if identity not in identities:
-                identities.append(identity)
-
+    identities = list(dict.fromkeys(
+        identity for _release_id, identity in requested
+    ))
     observed = beets.resolve_current_releases(identities)
     omitted = [
         identity.release_id
@@ -201,41 +184,14 @@ def resolve_current_release_bands(
             "current Beets resolver omitted exact release identities: "
             + ", ".join(omitted)
         )
-
-    folded: dict[ReleaseIdentity, CurrentBeetsResolution] = {}
-    split_bands: dict[str, str] = {}
-    for _key, acceptable in requested:
-        acquisition = acceptable[-1]
-        union = merge_union_resolutions(
-            acquisition,
-            [observed[identity] for identity in acceptable],
-        )
-        if (
-            isinstance(union, CurrentBeetsAmbiguous)
-            and union.reason == "merged_identity_split"
-        ):
-            # A double-sided merge is a per-row identity problem, and
-            # ``band_current_resolutions`` aborts the WHOLE cohort on any
-            # ambiguity. Letting a split through would 503 the entire
-            # long-tail worklist for one row — the exact lib/banding.py
-            # cohort-abort that PR #1056 was rejected for. Found by
-            # tests/test_request_identity_generated.py, which reproduced it
-            # on the live 316 shape immediately.
-            #
-            # It bands ``unknown``, NOT the quality of one arbitrarily
-            # chosen side. The worklist band is a decision surface — it
-            # drives which rows get re-acquisition effort — and #1059
-            # invariant 3 says a split is never a silent pick. "Unknown" is
-            # the existing band for "held, but we cannot rank it", which is
-            # exactly true here, and it already renders. Other ambiguity
-            # reasons still abort the cohort: those are library defects,
-            # this is an identity-model one.
-            split_bands[acquisition.release_id] = BAND_UNKNOWN
-            continue
-        folded[acquisition] = union
-    bands = band_current_resolutions(folded, cfg)
-    bands.update(split_bands)
-    return {key: bands[key] for key, _acceptable in requested}
+    bands = band_current_resolutions(
+        {identity: observed[identity] for identity in identities},
+        cfg,
+    )
+    return {
+        release_id: bands[identity.release_id]
+        for release_id, identity in requested
+    }
 
 
 def current_library_bitrate(detail: dict[str, object]) -> int:
