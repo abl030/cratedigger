@@ -16,12 +16,14 @@ from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
 from lib.beets_config_contract import (
+    REQUIRED_PLUGINS,
     BeetsConfigError,
     _can_open_for_write,
     check_beets_config,
 )
 from lib.config import CratediggerConfig, read_runtime_config_strict
 from tests.fakes.beets_contract import (
+    BASELINE_PLUGINS,
     BeetsContractWorld,
     assert_discogs_token_missing,
     assert_hard_code,
@@ -261,7 +263,7 @@ class TestGeneratedIntegrationRegressions(unittest.TestCase):
         report = check_beets_config(world.cfg(), role="importer")
         assert_hard_code(report.hard_failures, expected)
 
-    @given(st.sampled_from(("musicbrainz", "permissions", "inline", "convert")))
+    @given(st.sampled_from((*REQUIRED_PLUGINS, "convert")))
     def test_disabled_plugins_are_absent_from_the_active_contract(
         self, plugin: str
     ) -> None:
@@ -269,9 +271,7 @@ class TestGeneratedIntegrationRegressions(unittest.TestCase):
         self.addCleanup(world.close)
         world.unseal()
         world._write_main_config(
-            plugins=[
-                "musicbrainz", "discogs", "inline", "permissions", "convert",
-            ],
+            plugins=[*BASELINE_PLUGINS, "convert"],
             disabled_plugins=[plugin],
             convert={"auto": True, "auto_keep": True},
         )
@@ -292,7 +292,7 @@ class TestGeneratedIntegrationRegressions(unittest.TestCase):
         self.addCleanup(world.close)
         world.unseal()
         world._write_main_config(
-            plugins=["musicbrainz", "discogs", "inline", "permissions", token]
+            plugins=[*BASELINE_PLUGINS, token]
         )
         world._seal("importer")
         encoded = msgspec.json.encode(
@@ -364,7 +364,7 @@ class TestGeneratedIntegrationRegressions(unittest.TestCase):
         world.unseal()
         convert = {} if configured is None else {"auto": configured, "auto_keep": False}
         world._write_main_config(
-            plugins=["musicbrainz", "discogs", "inline", "permissions", "convert"],
+            plugins=[*BASELINE_PLUGINS, "convert"],
             convert=convert,
         )
         world._seal("importer")

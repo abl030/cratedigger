@@ -17,11 +17,13 @@ from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401
 from lib.beets_config_contract import (
+    REQUIRED_PLUGINS,
     BeetsConfigError,
     BeetsRole,
     check_beets_config,
 )
 from tests.fakes.beets_contract import (
+    BASELINE_PLUGINS,
     RUNTIME_AUTHORITIES,
     SAFE_COMP_PATH,
     SAFE_DEFAULT_PATH,
@@ -35,13 +37,19 @@ from tests.fakes.beets_contract import (
     assert_token_absent_from_owned_report,
 )
 
+# Derived from the contract's own required set, so a new required plugin is
+# covered the moment it is required and a silently dropped one fails here.
+_REQUIRED_PLUGIN_MUTANTS: tuple[tuple[str, dict[str, object], str], ...] = tuple(
+    (
+        f"{required}-plugin",
+        {"plugins": [name for name in BASELINE_PLUGINS if name != required]},
+        f"{required}_plugin_missing",
+    )
+    for required in REQUIRED_PLUGINS
+)
+
 _SETTING_MUTANTS: tuple[tuple[str, dict[str, object], str], ...] = (
-    ("musicbrainz", {"plugins": ["discogs", "inline", "permissions"]},
-     "musicbrainz_plugin_missing"),
-    ("permissions-plugin", {"plugins": ["musicbrainz", "discogs", "inline"]},
-     "permissions_plugin_missing"),
-    ("inline-plugin", {"plugins": ["musicbrainz", "discogs", "permissions"]},
-     "inline_plugin_missing"),
+    *_REQUIRED_PLUGIN_MUTANTS,
     ("autotag", {"import": {"autotag": False, "move": True, "write": True,
                               "duplicate_keys": {"album": ["mb_albumid", "discogs_albumid"]}}},
      "import_autotag_disabled"),
@@ -71,14 +79,14 @@ _SETTING_MUTANTS: tuple[tuple[str, dict[str, object], str], ...] = (
      "permissions_file_unsafe"),
     ("dir-mode", {"permissions": {"file": "0664", "dir": "0755"}},
      "permissions_dir_unsafe"),
-    ("plugin", {"plugins": ["musicbrainz", "discogs", "inline", "permissions", "absent_plugin"]},
+    ("plugin", {"plugins": [*BASELINE_PLUGINS, "absent_plugin"]},
      "plugin_unavailable"),
     ("convert-auto", {
-        "plugins": ["musicbrainz", "discogs", "inline", "permissions", "convert"],
+        "plugins": [*BASELINE_PLUGINS, "convert"],
         "convert": {"auto": True, "auto_keep": False},
     }, "convert_auto_conflict"),
     ("convert-auto-keep", {
-        "plugins": ["musicbrainz", "discogs", "inline", "permissions", "convert"],
+        "plugins": [*BASELINE_PLUGINS, "convert"],
         "convert": {"auto": False, "auto_keep": True},
     }, "convert_auto_keep_conflict"),
 )
@@ -716,12 +724,9 @@ class TestGeneratedEffectiveSettings(unittest.TestCase):
     ) -> None:
         world = BeetsContractWorld()
         self.addCleanup(world.close)
-        available_without_musicbrainz = frozenset((
-            "discogs",
-            "inline",
-            "permissions",
-            "fetchart",
-        )) - additionally_absent
+        available_without_musicbrainz = frozenset(
+            name for name in BASELINE_PLUGINS if name != "musicbrainz"
+        ) - additionally_absent
         report = check_beets_config(
             world.cfg(),
             role="importer",

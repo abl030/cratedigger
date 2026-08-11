@@ -67,6 +67,7 @@ from lib.import_queue import (
     ImportJob,
     YoutubeImportPayload,
 )
+from lib.mb_canonical import configure_canonical_base
 from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_IMPORT,
     ADVISORY_LOCK_NAMESPACE_IMPORTER,
@@ -2071,6 +2072,32 @@ def recover_abandoned_running_jobs(
     return recovered
 
 
+def configure_canonical_release_lookup(cfg: CratediggerConfig) -> None:
+    """Point MusicBrainz merge-survivor resolution at the operator's mirror.
+
+    ``lib.mb_canonical`` starts inert, and an unwired process does not fail
+    loudly — it reports "no redirect" forever and looks perfectly healthy. The
+    importer is the ONE process that reaches the merge seam
+    (``lib.download_validation._follow_merged_release``): the main loop only
+    enqueues automation jobs, and this worker drains them.
+
+    A blank base leaves resolution inert rather than silently reaching out to
+    public MusicBrainz from a deployment that configured a mirror on purpose.
+    """
+    from web.api_bases import mb_ws2_base
+
+    origin = (cfg.musicbrainz_api_base or "").strip()
+    if not origin:
+        logger.warning(
+            "No [MusicBrainz] api_base configured; MusicBrainz merge "
+            "survivors will not be resolved and a merged-away request will "
+            "keep rejecting as mbid_not_found",
+        )
+        configure_canonical_base(None)
+        return
+    configure_canonical_base(mb_ws2_base(origin))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Drain the Cratedigger import queue",
@@ -2100,7 +2127,7 @@ def main() -> int:
         format="%(asctime)s [%(levelname)s] %(message)s",
     )
     try:
-        enforce_beets_startup(
+        cfg = enforce_beets_startup(
             role="importer",
             config_path=config_path,
             runtime_dir=runtime_dir,
@@ -2108,6 +2135,7 @@ def main() -> int:
         )
     except BeetsStartupError:
         return 1
+    configure_canonical_release_lookup(cfg)
 
     worker_id = args.worker_id or f"{socket.gethostname()}:{os.getpid()}"
     db = PipelineDB(args.dsn)

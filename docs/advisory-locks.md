@@ -111,8 +111,21 @@ album's files vanish.
 **Scope**: Held for the duration of every `import_one.py` subprocess and its
 release-specific filesystem/terminal work. `dispatch_import_core` is the
 funnel. Automation acquires RELEASE inside its already-pinned IMPORT session;
-force and other request-backed destructive paths use the same order. It also
-serializes direct request creation in `RequestCreationService`:
+force and other request-backed destructive paths use the same order.
+
+The import-time MusicBrainz merge retag (`_follow_merged_release`, issue
+#1059) is the one site that holds **two** RELEASE locks at once: the retag
+takes an installed album away from the merged-away id and files it under the
+survivor, mutating two release identities in one `beet mbsync` invocation,
+and the destructive operator lanes fence Beets mutation per release from other
+processes. Without the survivor's lock, an operator Bad Rip or library-delete
+resolving "the one album at the survivor" could bind to the album `mbsync`
+just retagged onto that id. The keys are acquired in sorted order and released
+after the request rekey commits; both acquires are non-blocking, so contention
+returns a typed non-ready outcome (`release_locked`) that keeps the existing
+rejection and leaves the request runnable.
+
+RELEASE also serializes direct request creation in `RequestCreationService`:
 Add and new-row Upgrade hold the exact release lock while rechecking identity,
 persisting their provisional row, and nesting the per-request PLAN lock before
 the final publication CAS.
@@ -281,6 +294,7 @@ watchdogs have stopped.
 | Automation importer owner scope | `scripts/importer.py` | `_process_automation_claim` | IMPORT then RELEASE | `request_id`; `release_id_to_lock_key(release_id)` |
 | Automation startup convergence | `lib/pipeline_db/import_jobs.py` | `PipelineDB.recover_automation_import_job` | IMPORT then RELEASE | `request_id`; `release_id_to_lock_key(release_id)` |
 | Auto + force-import dispatch | `lib/dispatch/core.py` | `dispatch_import_core` | RELEASE | `release_id_to_lock_key(mb_release_id)` |
+| Import-time MusicBrainz merge retag | `lib/download_validation.py` | `_follow_merged_release` | RELEASE, both identities, inside the importer's IMPORT session | `release_id_to_lock_key(old_release_id)` and `release_id_to_lock_key(new_release_id)`, acquired in sorted key order |
 | Direct Add / new-row Upgrade | `lib/request_creation_service.py` | `RequestCreationService.create_or_resume` | RELEASE then PLAN | `release_id_to_lock_key(creation.release_id)`; `request_id` |
 | Force-import outer | `lib/dispatch/entry_points.py` | `dispatch_import_from_db` | IMPORT | `request_id` |
 | Ban-source destructive action | `lib/destructive_release_service.py` | `ban_source` | IMPORT then RELEASE | `request_id`; `release_id_to_lock_key(server release id)` |

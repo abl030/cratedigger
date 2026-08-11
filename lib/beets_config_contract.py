@@ -41,6 +41,21 @@ SAFE_PATH_DISAMBIG = (
 )
 SAFE_DUPLICATE_KEYS = frozenset(("mb_albumid", "discogs_albumid"))
 
+# Plugins whose absence is a hard startup failure for every role.
+#
+# ``mbsync`` is Beets' own "MusicBrainz changed its mind" command: it refetches
+# an album by the release ID already stored on it, follows the merge redirect,
+# and rewrites ``mb_albumid``.  It is the only library-side way to follow a
+# MusicBrainz release merge, so a deployment without it cannot converge a
+# merged request at all — and would fail silently, since nothing else errors.
+# The contract therefore says so once, loudly, at startup rather than never.
+REQUIRED_PLUGINS: tuple[str, ...] = (
+    "musicbrainz",
+    "mbsync",
+    "permissions",
+    "inline",
+)
+
 
 class BeetsConfigError(RuntimeError):
     """The configured Beets file set cannot be read exactly as declared."""
@@ -78,6 +93,7 @@ class BeetsPluginContract(msgspec.Struct, frozen=True):
     """Bounded active-plugin facts safe to expose in owned output."""
 
     musicbrainz: bool = False
+    mbsync: bool = False
     permissions: bool = False
     inline: bool = False
     discogs: bool = False
@@ -525,6 +541,7 @@ def _active_plugin_names(active: IncludeLazyConfig) -> tuple[str, ...]:
 def _plugin_contract(plugins: frozenset[str]) -> BeetsPluginContract:
     return BeetsPluginContract(
         musicbrainz="musicbrainz" in plugins,
+        mbsync="mbsync" in plugins,
         permissions="permissions" in plugins,
         inline="inline" in plugins,
         discogs="discogs" in plugins,
@@ -826,7 +843,7 @@ def check_beets_config(
                 "plugin_unavailable",
                 "one or more configured Beets plugins are unavailable",
             ))
-        for plugin in ("musicbrainz", "permissions", "inline"):
+        for plugin in REQUIRED_PLUGINS:
             if plugin not in configured:
                 hard.append(_finding(
                     f"{plugin}_plugin_missing", f"required Beets plugin is not active: {plugin}"

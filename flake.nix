@@ -104,9 +104,9 @@
           cratedigger = import ./nix/package.nix { inherit pkgs; beetsPackage = beets; };
           python = pkgs.python3.withPackages (ps: cratedigger.pythonPackages ps);
           activePlugins = if name == "beets-release-2.1.0" then
-            "discogs, fetchart, embedart, lyrics, lastgenre, scrub, info, missing, duplicates, edit, fromfilename, ftintitle, the, inline, permissions"
+            "mbsync, discogs, fetchart, embedart, lyrics, lastgenre, scrub, info, missing, duplicates, edit, fromfilename, ftintitle, the, inline, permissions"
           else
-            "musicbrainz, discogs, fetchart, embedart, lyrics, lastgenre, scrub, info, missing, duplicates, edit, fromfilename, ftintitle, the, inline, permissions";
+            "musicbrainz, mbsync, discogs, fetchart, embedart, lyrics, lastgenre, scrub, info, missing, duplicates, edit, fromfilename, ftintitle, the, inline, permissions";
           authority = pkgs.runCommand "cratedigger-${name}-matrix-authority" { } ''
             mkdir -p "$out/beets" "$out/secrets"
             cat > "$out/runtime.ini" <<EOF

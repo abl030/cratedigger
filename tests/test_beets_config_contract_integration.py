@@ -15,6 +15,7 @@ import yaml
 from lib.beets_config_contract import BeetsConfigError, check_beets_config
 from scripts.check_beets_config import CheckerResult
 from tests.fakes.beets_contract import (
+    BASELINE_PLUGINS,
     BeetsContractWorld,
     assert_redacted_load_failure,
     snapshot_contract_world,
@@ -65,12 +66,12 @@ class TestBeetsConfigIntegrationFindings(unittest.TestCase):
             ("disabled required", {"disabled_plugins": ["permissions"]}, False,
              "permissions_plugin_missing"),
             ("disabled convert", {
-                "plugins": ["musicbrainz", "discogs", "inline", "permissions", "convert"],
+                "plugins": [*BASELINE_PLUGINS, "convert"],
                 "disabled_plugins": ["convert"],
                 "convert": {"auto": True, "auto_keep": True},
             }, True, None),
             ("mb enabled", {
-                "plugins": ["discogs", "inline", "permissions"],
+                "plugins": ["mbsync", "discogs", "inline", "permissions"],
                 "musicbrainz": {"enabled": True, "host": "musicbrainz.org", "https": True},
             }, True, None),
             ("mb false", {
@@ -94,7 +95,7 @@ class TestBeetsConfigIntegrationFindings(unittest.TestCase):
     def test_active_convert_with_omitted_options_uses_pinned_false_defaults(self):
         self.world.unseal()
         self.world._write_main_config(
-            plugins=["musicbrainz", "discogs", "inline", "permissions", "convert"],
+            plugins=[*BASELINE_PLUGINS, "convert"],
             convert={},
         )
         self.world._seal("importer")
@@ -162,7 +163,7 @@ class TestBeetsConfigIntegrationFindings(unittest.TestCase):
         token = "SECRET::plugin-shaped-token::TOKEN"
         self.world.unseal()
         self.world._write_main_config(
-            plugins=["musicbrainz", "discogs", "inline", "permissions", token]
+            plugins=[*BASELINE_PLUGINS, token]
         )
         self.world._seal("importer")
         encoded = msgspec.json.encode(

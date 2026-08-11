@@ -10,7 +10,12 @@ import subprocess as sp
 
 import msgspec
 
-from lib.quality import ChooseMatchMessage, HarnessSessionEvidence, ValidationResult
+from lib.quality import (
+    CandidateSummary,
+    ChooseMatchMessage,
+    HarnessSessionEvidence,
+    ValidationResult,
+)
 from lib.util import beets_subprocess_env
 
 logger = logging.getLogger("cratedigger")
@@ -128,6 +133,43 @@ def _record_unmatched_run(
     if len(detail) > _DETAIL_MAX_CHARS:
         detail = detail[:_DETAIL_MAX_CHARS - 1] + "…"
     result.detail = detail
+
+
+def apply_candidate_scenario(
+    result: ValidationResult,
+    candidate: CandidateSummary,
+    distance_threshold: float,
+) -> None:
+    """Turn ONE matched candidate into the result's exact-release scenario.
+
+    The single place a candidate becomes a scenario. ``beets_validate``
+    calls it for the candidate whose MBID equals the requested release; the
+    merge-redirect seam in ``lib/download_validation.py`` calls it for the
+    survivor's candidate once MusicBrainz's 301 has been followed, the local
+    album retagged, and the request rekeyed. Re-deriving those four fields at
+    a second site is the parallel-code-path trap (issue #1059).
+
+    Total and idempotent by construction: every branch assigns ``valid``, so
+    calling it on a result that already named ``mbid_not_found`` leaves no
+    stale field behind.
+    """
+    candidate.is_target = True
+    result.mbid_found = True
+    result.target_mbid = candidate.mbid
+    result.distance = candidate.distance
+    n_extra = len(candidate.extra_tracks)
+    if n_extra > 0:
+        result.valid = False
+        result.scenario = "extra_tracks"
+        result.detail = f"MB has {n_extra} more tracks than local files"
+    elif candidate.distance <= distance_threshold:
+        result.valid = True
+        result.scenario = "strong_match"
+        result.detail = f"distance={candidate.distance}"
+    else:
+        result.valid = False
+        result.scenario = "high_distance"
+        result.detail = f"distance={candidate.distance}"
 
 
 def beets_validate(
@@ -263,20 +305,9 @@ def beets_validate(
                 # from the DB TEXT column).
                 for cand in cm.candidates:
                     if cand.mbid == mb_release_id:
-                        cand.is_target = True
-                        result.mbid_found = True
-                        result.distance = cand.distance
-                        n_extra = len(cand.extra_tracks)
-                        if n_extra > 0:
-                            result.scenario = "extra_tracks"
-                            result.detail = f"MB has {n_extra} more tracks than local files"
-                        elif cand.distance <= distance_threshold:
-                            result.valid = True
-                            result.scenario = "strong_match"
-                            result.detail = f"distance={cand.distance}"
-                        else:
-                            result.scenario = "high_distance"
-                            result.detail = f"distance={cand.distance}"
+                        apply_candidate_scenario(
+                            result, cand, distance_threshold,
+                        )
                         break
                 if not result.mbid_found:
                     result.scenario = "mbid_not_found"

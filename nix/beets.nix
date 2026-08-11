@@ -2,8 +2,8 @@
 #
 # Returns the pinned nixpkgs' python beets package (python3Packages.beets),
 # which carries every built-in plugin's dependency closure — the production
-# plugin list (musicbrainz discogs fetchart embedart lyrics lastgenre scrub
-# info missing duplicates edit fromfilename ftintitle the inline) is all
+# plugin list (musicbrainz mbsync discogs fetchart embedart lyrics lastgenre
+# scrub info missing duplicates edit fromfilename ftintitle the inline) is all
 # built-ins, so no pluginOverrides are needed. Because this is the *python
 # package* (pkgs.beets is just `toPythonApplication python3Packages.beets`),
 # the same store path can serve the Cratedigger Python environment, checker,

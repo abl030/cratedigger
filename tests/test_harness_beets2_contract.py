@@ -206,9 +206,9 @@ print("DISCOGS_NEUTRALIZE_OK")
 from beets import config
 
 ACTIVE_PLUGINS = [
-    "musicbrainz", "discogs", "fetchart", "embedart", "lyrics", "lastgenre",
-    "scrub", "info", "missing", "duplicates", "edit", "fromfilename",
-    "ftintitle", "the", "inline", "permissions",
+    "musicbrainz", "mbsync", "discogs", "fetchart", "embedart", "lyrics",
+    "lastgenre", "scrub", "info", "missing", "duplicates", "edit",
+    "fromfilename", "ftintitle", "the", "inline", "permissions",
 ]
 # Beets 2.1 exposes MusicBrainz as its built-in autotag provider. The test
 # keeps that capability active via musicbrainz.enabled while avoiding an

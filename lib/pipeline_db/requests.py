@@ -1889,3 +1889,119 @@ class _RequestsMixin(_PipelineDBBase):
         row = cur.fetchone()
         self.conn.commit()
         return row is not None
+
+
+    def update_request_release_for_merge(
+        self,
+        request_id: int,
+        *,
+        old_release_id: str,
+        new_release_id: str,
+        expected_import_job_id: int,
+    ) -> bool:
+        """Rekey one request AND its evidence onto the merge survivor (#1059).
+
+        MusicBrainz editors merge release A into release B; the loser's MBID
+        becomes a permanent 301 and a request stored at A can never import
+        again — Beets offers B, the matcher demands A. This is the ONE write
+        that moves ``mb_release_id``, and it is deliberately not
+        ``update_request_fields``: that seam reserves immutable identity, and
+        refuses any row with a processing owner attached, which is exactly the
+        world this write happens in.
+
+        Every predicate is load-bearing and the write fails closed on each:
+
+        * ``mb_release_id = %s`` — a compare-and-set on the identity being
+          moved. A row somebody else already rekeyed, superseded, or pointed
+          elsewhere is left alone.
+        * ``status = 'processing'`` + ``active_automation_import_job_id = %s``
+          — the exact owner fence every processing write owes
+          (``.claude/rules/pipeline-db.md``). It also excludes the frozen
+          ``replaced`` status by construction: a frozen audit ancestor is
+          never ``processing``.
+
+        **The evidence moves with the row, in the same transaction.**
+        ``album_quality_evidence`` is content-addressed by
+        ``(mb_release_id, snapshot_fingerprint)`` (migration 021) and
+        ``album_requests.mb_release_id`` is UNIQUE, so every evidence row at
+        the merged-away id belongs to this one request's pressing. Leaving
+        them behind strands the request's whole evidence lineage at an id
+        nothing names any more: ``backfill_current_evidence_from_album_info``
+        nulls a current-evidence row whose identity no longer matches and the
+        rebuilt HAVE row silently loses its ``verified_lossless_proof`` and
+        ``cd_rip_verification`` (the proof lock is absolute for every import
+        mode); ``_refresh_current_evidence_after_import`` returns
+        ``identity_mismatch``; the quality gate then loads no state and
+        reopens full-tier search on the very import this rekey exists to
+        enable; the sidecar writer skips; and every ``_evidence_*`` field on
+        the operator's Recents card blanks. The rekey is one identity change,
+        so it is one transaction.
+
+        Returns False rather than raising, writing NOTHING, when:
+
+        * another request already holds the survivor
+          (``UNIQUE(mb_release_id)``) — two requests are two curated
+          pressings and merging or deleting either is the operator's call
+          (invariant 5); or
+        * a snapshot fingerprint being moved already exists at the survivor
+          (``UNIQUE(mb_release_id, snapshot_fingerprint)``) — two independent
+          measurements of the same bytes, and choosing between them would be
+          an unowned quality decision.
+
+        Either way the caller keeps its existing rejection and the request
+        stays runnable — nothing is parked (invariant 11).
+
+        The library must already be at ``new_release_id`` before this runs.
+        Beets keys album duplicate detection on ``mb_albumid``, so rekeying a
+        request whose installed album is still filed under the old id makes
+        the next import land a SECOND album beside the first. See
+        ``lib/beets_retag.py``.
+        """
+        if not old_release_id or not new_release_id:
+            raise ValueError("merge rekey requires both release ids")
+        if old_release_id == new_release_id:
+            raise ValueError(
+                "refusing to rekey a request onto itself: "
+                f"{old_release_id}"
+            )
+        now = datetime.now(UTC)
+        try:
+            with self._atomic():
+                with self.conn.cursor(
+                    cursor_factory=psycopg2.extras.RealDictCursor,
+                ) as cur:
+                    cur.execute(
+                        "UPDATE album_requests "
+                        "SET mb_release_id = %s, updated_at = %s "
+                        "WHERE id = %s AND mb_release_id = %s "
+                        "AND status = 'processing' "
+                        "AND active_automation_import_job_id = %s",
+                        (
+                            new_release_id,
+                            now,
+                            request_id,
+                            old_release_id,
+                            expected_import_job_id,
+                        ),
+                    )
+                    if cur.rowcount <= 0:
+                        self.conn.rollback()
+                        return False
+                    # The survivor's own evidence rows are the collision. A
+                    # matching fingerprint on both sides means two rows
+                    # describing the same bytes; the UNIQUE constraint would
+                    # raise anyway, and choosing a winner is not this write's
+                    # call.
+                    cur.execute(
+                        "UPDATE album_quality_evidence "
+                        "SET mb_release_id = %s, updated_at = %s "
+                        "WHERE mb_release_id = %s",
+                        (new_release_id, now, old_release_id),
+                    )
+                self.conn.commit()
+                return True
+        except psycopg2.errors.UniqueViolation:
+            # ``_atomic`` already rolled the whole transaction back, so the
+            # request row is still at the merged-away id and every evidence
+            # row is exactly where it was.
+            return False

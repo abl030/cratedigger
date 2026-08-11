@@ -20,6 +20,7 @@ from tests.beets_config_startup_support import (
 )
 from tests.fakes import FakePipelineDB
 from tests.fakes.beets_contract import (
+    BASELINE_PLUGINS,
     BeetsContractWorld,
     assert_redacted_load_failure,
 )
@@ -135,6 +136,33 @@ class TestBeetsStartupAdapter(unittest.TestCase):
 
         self.assertIn("import_write_disabled", captured.output[0])
         self.assertNotIn("secret", captured.output[0].lower())
+
+    def test_missing_mbsync_plugin_refuses_startup(self) -> None:
+        """Without mbsync a merge cannot be followed, so nothing may start."""
+        from lib.beets_startup import BeetsStartupError, enforce_beets_startup
+
+        world = BeetsContractWorld(role="main")
+        self.addCleanup(world.close)
+        world.unseal()
+        world._write_main_config(plugins=[
+            plugin for plugin in BASELINE_PLUGINS if plugin != "mbsync"
+        ])
+        world._seal("main")
+        logger = logging.getLogger("test.beets-startup-mbsync")
+
+        with (
+            _isolated_installed_authority(),
+            self.assertLogs(logger, level="ERROR") as captured,
+            self.assertRaises(BeetsStartupError),
+        ):
+            enforce_beets_startup(
+                role="main",
+                config_path=str(world.runtime_config),
+                runtime_dir=str(world.runtime_dir),
+                logger=logger,
+            )
+
+        self.assertIn("mbsync_plugin_missing", captured.output[0])
 
     def test_runtime_parser_failure_logs_only_a_redacted_category(self) -> None:
         from lib.beets_startup import BeetsStartupError, enforce_beets_startup
