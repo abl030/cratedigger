@@ -46,6 +46,22 @@ P7  The library retag is only ever observed with BOTH release identities'
     ``RELEASE`` advisory locks held. The retag mutates two release identities
     at once and the destructive operator lanes fence per release from other
     processes; contention keeps today's rejection instead of waiting.
+P11 The library and the request never disagree about which release this is.
+    Every other invariant here watches the ROW; this one watches the pair.
+    A retag that succeeds is durable, so a seam that retags and is THEN
+    refused the rekey leaves the installed album at the survivor and the
+    request at the merged-away id — and nothing re-derives it, because the
+    collision that refused the write is still there on the next attempt,
+    which is now refused at the pre-check before the library is read at all.
+    The seam therefore reads both ``UniqueViolation`` refusal causes BEFORE
+    it retags, and the property watches the resulting pair in every world.
+P12 A merge refusal no retry can clear is recorded durably, in whichever
+    lane met it. An occupied survivor stays occupied until an operator acts,
+    so every later attempt is refused identically — and force, which imports
+    despite the verdict, then reports a bare ``mbid_missing`` from
+    ``import_one.py`` with nothing naming the merge. The blocked world
+    therefore owes exactly one ``download_log`` row carrying the producer's
+    sentence, and no other world may carry it.
 """
 
 from __future__ import annotations
@@ -56,12 +72,14 @@ import os
 import tempfile
 import unittest
 from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
 from unittest.mock import patch
 
 from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
+from lib.beets import FORCE_IMPORT_DISTANCE_THRESHOLD
 from lib.beets_retag import (
     RETAG_ALREADY_CURRENT,
     RETAG_AMBIGUOUS,
@@ -73,9 +91,13 @@ from lib.beets_retag import (
     RetagOutcome,
 )
 from lib.config import CratediggerConfig
-from lib.download_validation import _process_beets_validation
+from lib.download_validation import (
+    _process_beets_validation,
+    merge_rekey_blocked_audit_message,
+)
 from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_RELEASE,
+    MergeRekeyCollision,
     release_id_to_lock_key,
 )
 from lib.pipeline_db._shared import REQUEST_STATUSES
@@ -217,8 +239,16 @@ def retag_is_authorized(
     mirror_answer: str | None,
     candidates: tuple[str, ...],
     release_lock_state: str,
+    survivor_taken: bool = False,
 ) -> bool:
-    """Everything that must hold before Beets may be mutated at all."""
+    """Everything that must hold before Beets may be mutated at all.
+
+    ``survivor_taken`` is a term of THIS predicate, not only of the rekey's:
+    a rival already holding the survivor is a documented refusal of the write,
+    it is knowable by a plain read, and mutating the shared library for a
+    rekey that is already refused is what leaves the library and the request
+    disagreeing (P11).
+    """
     if scenario != "mbid_not_found" or not owned:
         return False
     identity = (
@@ -232,7 +262,42 @@ def retag_is_authorized(
         return False
     if identity.release_id not in candidates:
         return False
+    if survivor_taken:
+        return False
     return release_lock_state == "free"
+
+
+def library_before_retag(
+    retag_outcome: str,
+    survivor: str | None,
+) -> str | None:
+    """Where the installed album is filed when the seam arrives.
+
+    Derived from the outcome the library authority reports, because that
+    outcome IS a statement about the library's placement:
+    ``already_current`` means it was at the survivor before we asked,
+    ``not_held`` means the library holds neither identity, and every other
+    outcome describes an album still filed under the merged-away id — which
+    is the upgrade world this whole seam exists for.
+    """
+    if retag_outcome == RETAG_ALREADY_CURRENT:
+        return survivor
+    if retag_outcome == RETAG_NOT_HELD:
+        return None
+    return MERGED
+
+
+def library_after_retag(
+    retag_outcome: str,
+    survivor: str | None,
+    *,
+    retag_ran: bool,
+) -> str | None:
+    """Where the installed album is filed once the seam is done with it."""
+    before = library_before_retag(retag_outcome, survivor)
+    if retag_ran and retag_outcome == RETAG_RETAGGED:
+        return survivor
+    return before
 
 
 def rekey_is_authorized(
@@ -257,11 +322,10 @@ def rekey_is_authorized(
         mirror_answer=mirror_answer,
         candidates=candidates,
         release_lock_state=release_lock_state,
+        survivor_taken=survivor_taken,
     ):
         return False
-    if retag_outcome not in RETAG_READY_OUTCOMES:
-        return False
-    return not survivor_taken
+    return retag_outcome in RETAG_READY_OUTCOMES
 
 
 def check_row_moves_only_when_authorized(
@@ -403,6 +467,46 @@ def check_current_evidence_follows_the_request(
         )
 
 
+def check_library_and_request_agree(
+    *,
+    library_before: str | None,
+    library_after: str | None,
+    stored_before: str | None,
+    stored_after: str | None,
+) -> None:
+    """P11 — the seam never creates a library/request identity disagreement.
+
+    Watches the PAIR, which is the one thing no other checker here can see:
+    P1/P2 watch the row, P3 watches the retag's view of the row, and both are
+    satisfied by a world where the library moved and the row correctly did
+    not. That world is the durable split — nothing re-derives it, because the
+    collision that refused the write is still there on the next attempt,
+    which the occupancy pre-check now refuses before the library is read at
+    all.
+
+    A disagreement that was already there when the seam arrived is not this
+    seam's doing (it is the residue of an earlier one, and it is what the
+    audit row records), so the checker fires only when this execution moved
+    the library or the row.
+    """
+    if library_after == stored_after:
+        return
+    if library_after is None:
+        # The library holds neither identity; there is nothing to disagree.
+        return
+    if library_after == library_before and stored_after == stored_before:
+        # Arrived divergent, left it exactly so.
+        return
+    raise AssertionError(
+        "the merge seam left the installed album filed at "
+        f"{library_after!r} while the request names {stored_after!r} "
+        f"(library was {library_before!r}, request was {stored_before!r}): "
+        "nothing repairs that split and nothing re-derives it — the next "
+        "attempt is refused at the occupancy pre-check, before it ever "
+        "reads the library"
+    )
+
+
 def check_retag_ran_under_both_release_locks(
     observed_locks: list[tuple[tuple[int, int], ...]],
     *,
@@ -465,9 +569,17 @@ class _RecordingRetag:
 def _validation_result(
     scenario: str,
     candidates: tuple[str, ...],
+    *,
+    survivor_distance: float = 0.04,
 ) -> ValidationResult:
-    """The exact result shape ``beets_validate`` returns for each scenario."""
-    summaries = [candidate(mbid) for mbid in candidates]
+    """The exact result shape ``beets_validate`` returns for each scenario.
+
+    ``survivor_distance`` is carried by EVERY candidate, so whichever one a
+    world's mirror names is the one the threshold has to judge (#1080's P9).
+    """
+    summaries = [
+        candidate(mbid, distance=survivor_distance) for mbid in candidates
+    ]
     if scenario == "mbid_not_found":
         return ValidationResult(
             valid=False,
@@ -701,12 +813,23 @@ class TestMergeRekeyProperties(unittest.TestCase):
             retag.observed_locks,
             survivor=_taken_survivor_id(mirror_answer),
         )
+        survivor_id = _taken_survivor_id(mirror_answer)
+        retag_ran = bool(retag.observed_release_ids)
+        check_library_and_request_agree(
+            library_before=library_before_retag(retag_outcome, survivor_id),
+            library_after=library_after_retag(
+                retag_outcome, survivor_id, retag_ran=retag_ran,
+            ),
+            stored_before=row_before.get("mb_release_id"),
+            stored_after=row_after.get("mb_release_id"),
+        )
         if not retag_is_authorized(
             scenario=scenario,
             owned=owned,
             mirror_answer=mirror_answer,
             candidates=candidates,
             release_lock_state=release_lock_state,
+            survivor_taken=survivor_taken,
         ) and retag.observed_locks:
             raise AssertionError(
                 "the library was retagged in a world that authorized no "
@@ -866,6 +989,24 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         for label, authorized in widened:
             with self.subTest(widened=label):
                 self.assertFalse(authorized)
+        # And the RETAG predicate carries the rival term too, not only the
+        # rekey's: mutating the shared library for a write that is already
+        # refused is what creates the split (P11).
+        self.assertTrue(retag_is_authorized(
+            scenario="mbid_not_found",
+            owned=True,
+            mirror_answer=SURVIVOR,
+            candidates=(SURVIVOR,),
+            release_lock_state="free",
+        ))
+        self.assertFalse(retag_is_authorized(
+            scenario="mbid_not_found",
+            owned=True,
+            mirror_answer=SURVIVOR,
+            candidates=(SURVIVOR,),
+            release_lock_state="free",
+            survivor_taken=True,
+        ))
 
     def test_stranded_current_evidence_is_rejected(self) -> None:
         """P6 known-bad: the row moved and its evidence did not."""
@@ -880,6 +1021,62 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             check_current_evidence_follows_the_request(
                 request_release_id=SURVIVOR, evidence_release_id=None,
             )
+
+    def test_a_moved_library_with_an_unmoved_request_is_rejected(self) -> None:
+        """P11 known-bad: exactly the #1080 split state.
+
+        The library was retagged onto the survivor and the rekey was then
+        refused — the world every other checker here calls legal.
+        """
+        with self.assertRaises(AssertionError) as caught:
+            check_library_and_request_agree(
+                library_before=MERGED,
+                library_after=SURVIVOR,
+                stored_before=MERGED,
+                stored_after=MERGED,
+            )
+        self.assertIn("nothing repairs that split", str(caught.exception))
+
+    def test_a_moved_request_with_an_unmoved_library_is_rejected(self) -> None:
+        """P11 known-bad: the other half — the second-album ordering defect."""
+        with self.assertRaises(AssertionError):
+            check_library_and_request_agree(
+                library_before=MERGED,
+                library_after=MERGED,
+                stored_before=MERGED,
+                stored_after=SURVIVOR,
+            )
+
+    def test_a_pre_existing_divergence_is_not_blamed_on_this_seam(self) -> None:
+        """P11 must-still-work: arrived divergent, moved nothing, left it so."""
+        check_library_and_request_agree(
+            library_before=SURVIVOR,
+            library_after=SURVIVOR,
+            stored_before=MERGED,
+            stored_after=MERGED,
+        )
+
+    def test_the_agreeing_pairs_pass_p11(self) -> None:
+        """P11 must-still-work: the legitimate rekey and the untouched world."""
+        check_library_and_request_agree(
+            library_before=MERGED,
+            library_after=SURVIVOR,
+            stored_before=MERGED,
+            stored_after=SURVIVOR,
+        )
+        check_library_and_request_agree(
+            library_before=MERGED,
+            library_after=MERGED,
+            stored_before=MERGED,
+            stored_after=MERGED,
+        )
+        # A library holding neither identity can disagree with nothing.
+        check_library_and_request_agree(
+            library_before=None,
+            library_after=None,
+            stored_before=MERGED,
+            stored_after=SURVIVOR,
+        )
 
     def test_a_retag_without_the_survivor_lock_is_rejected(self) -> None:
         """P7 known-bad: exactly the state before the RELEASE fence."""
@@ -931,3 +1128,700 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# #1080 — force import is the same path with the distance overridden
+# ---------------------------------------------------------------------------
+#
+# P8  The merge decision does not depend on WHICH lane is asking. Given the
+#     same world, the automation lane and the force lane retag the same
+#     library, move the same row to the same survivor, and spend the same one
+#     mirror lookup. Before #1080 the force lane made no merge decision at
+#     all: it never reached the comparison seam, so a merged-away request was
+#     rejected ``mbid_missing`` by ``import_one.py`` forever.
+# P9  The distance threshold is the ONLY thing the two lanes do differently.
+#     Automation validates at ``beets_distance_threshold``; force validates at
+#     ``FORCE_IMPORT_DISTANCE_THRESHOLD``. That single argument is what makes
+#     a rekeyed force result acceptable at any distance, and it is the whole
+#     of "exactly the same as anything else just with beets distance
+#     over-ridden".
+# P10 A force import launches Beets at the release the request row names.
+#     The decided consequence of the seam, asserted at the argv boundary
+#     rather than on an intermediate field: an id that disagrees with the row
+#     is the second-album defect the ordering rule exists to prevent.
+
+#: Which import lane is asking. Both reach the comparison seam through their
+#: own outermost real adapter — ``_process_beets_validation`` and
+#: ``dispatch_import_from_db`` respectively — never through a shared helper
+#: the property calls on their behalf.
+LANES = st.sampled_from(["automation", "force"])
+
+#: The rival request the fixtures seed at the survivor. Named once so the
+#: world model, the fixture and P12's expected copy cannot drift apart.
+RIVAL_REQUEST_ID = REQUEST_ID + 1
+
+#: The survivor candidate's Beets distance. One inside
+#: ``beets_distance_threshold`` and one far outside it, so the threshold
+#: override is exercised as a discriminator rather than described.
+SURVIVOR_DISTANCES = st.sampled_from([0.02, 0.62])
+
+CONFIG_DISTANCE_THRESHOLD = 0.15
+
+
+def lane_distance_threshold(lane: str, *, config_threshold: float) -> float:
+    """The threshold each lane owes, derived independently of production."""
+    if lane == "force":
+        return FORCE_IMPORT_DISTANCE_THRESHOLD
+    return config_threshold
+
+
+def check_validation_ran_at_the_lane_threshold(
+    lane: str,
+    observed: float | None,
+    *,
+    config_threshold: float,
+) -> None:
+    """P9 — the one argument the two lanes are allowed to disagree on."""
+    if observed is None:
+        raise AssertionError(
+            f"the {lane} lane never reached the exact-release comparison; "
+            "both lanes must run the same seam"
+        )
+    expected = lane_distance_threshold(lane, config_threshold=config_threshold)
+    if observed != expected:
+        raise AssertionError(
+            f"the {lane} lane validated at threshold {observed}, not the "
+            f"{expected} its lane owes"
+        )
+
+
+def check_rekeyed_verdict_uses_the_lane_threshold(
+    *,
+    lane: str,
+    authorized: bool,
+    valid: bool,
+    survivor_distance: float,
+    config_threshold: float,
+) -> None:
+    """P9's consequence: the rekeyed result is named by the lane's threshold."""
+    if not authorized:
+        return
+    threshold = lane_distance_threshold(lane, config_threshold=config_threshold)
+    expected = survivor_distance <= threshold
+    if valid is not expected:
+        raise AssertionError(
+            f"a rekeyed {lane} result at distance {survivor_distance} was "
+            f"valid={valid}; threshold {threshold} demands {expected}"
+        )
+
+
+def check_force_launches_the_release_the_row_names(
+    launched: list[str],
+    stored_after: str | None,
+) -> None:
+    """P10 — Beets is launched at the identity the request actually holds."""
+    for release_id in launched:
+        if release_id != stored_after:
+            raise AssertionError(
+                f"force launched Beets at {release_id} while the request row "
+                f"names {stored_after}; a mismatch lands a second album"
+            )
+
+
+def merge_is_blocked_before_the_retag(
+    *,
+    scenario: str,
+    owned: bool,
+    mirror_answer: str | None,
+    candidates: tuple[str, ...],
+    release_lock_state: str,
+    survivor_taken: bool,
+) -> bool:
+    """The world reaches the occupancy pre-check AND the pre-check refuses.
+
+    Derived from the world independently of production: everything a retag
+    needs held, except that the survivor is already occupied. ``survivor_taken``
+    is passed as ``False`` to the retag predicate on purpose — the question is
+    "would this world have retagged if the survivor were free", which is
+    exactly the world in which the pre-check has something to refuse.
+    """
+    if not survivor_taken:
+        return False
+    return retag_is_authorized(
+        scenario=scenario,
+        owned=owned,
+        mirror_answer=mirror_answer,
+        candidates=candidates,
+        release_lock_state=release_lock_state,
+        survivor_taken=False,
+    )
+
+
+def expected_blocked_audit_message(survivor: str | None) -> str | None:
+    """The sentence the blocked world owes, from its two producers.
+
+    ``merge_rekey_blocked_audit_message`` composes it and
+    ``MergeRekeyCollision.detail`` composes the collision fragment inside it,
+    so this property can never assert copy production cannot emit
+    (test-fidelity Rule C). ``None`` when the world has no survivor a rival
+    could occupy.
+    """
+    if survivor is None:
+        return None
+    return merge_rekey_blocked_audit_message(
+        old_release_id=MERGED,
+        new_release_id=survivor,
+        collision_detail=MergeRekeyCollision(
+            rival_request_id=RIVAL_REQUEST_ID,
+        ).detail(),
+    )
+
+
+def check_a_blocked_merge_is_audited(
+    audit_rows: list[tuple[str | None, str | None]],
+    *,
+    blocked: bool,
+    expected_message: str | None,
+) -> None:
+    """P12 — the one refusal no retry can clear leaves durable evidence.
+
+    Counted by the producer's exact sentence rather than by outcome, so
+    unrelated ``download_log`` rows (the rejection each lane writes for
+    itself) neither satisfy nor break it.
+    """
+    matched = [
+        outcome for outcome, message in audit_rows
+        if expected_message is not None and message == expected_message
+    ]
+    if not blocked:
+        if matched:
+            raise AssertionError(
+                "a world that was never blocked recorded the blocked audit "
+                f"{len(matched)} time(s): {expected_message!r}"
+            )
+        return
+    if expected_message is None:
+        raise AssertionError(
+            "a blocked world has no survivor identity to name — the world "
+            "model and the seam disagree about what blocked means"
+        )
+    if len(matched) != 1:
+        raise AssertionError(
+            f"a blocked merge recorded {len(matched)} audit rows, not 1; the "
+            "operator is the only one who can clear this world, so every "
+            "execution that meets it owes exactly one durable row"
+        )
+    if matched[0] != "failed":
+        raise AssertionError(
+            f"the blocked merge audit was recorded under {matched[0]!r}, not "
+            "the environment-failure outcome the operator's Recents surfaces"
+        )
+
+
+@dataclass
+class LaneRun:
+    """What one lane did to the shared world, in lane-independent terms."""
+
+    stored_after: str | None
+    mirror_calls: list[str]
+    retag_observed_release_ids: list[str | None]
+    validation_threshold: float | None
+    launched_release_ids: list[str]
+    valid: bool
+    #: Every ``download_log`` row the lane left behind, as
+    #: ``(outcome, error_message)``. P12 counts the merge audit inside it by
+    #: the producer's sentence, so each lane's own rejection rows are simply
+    #: other rows rather than noise the fixture has to filter.
+    audit_rows: list[tuple[str | None, str | None]]
+
+
+def _audit_rows(db: FakePipelineDB) -> list[tuple[str | None, str | None]]:
+    """Every ``download_log`` row the lane wrote, as ``(outcome, message)``."""
+    return [(row.outcome, row.error_message) for row in db.download_logs]
+
+
+def _merge_world_cfg(tmpdir: str) -> CratediggerConfig:
+    return CratediggerConfig(
+        beets_harness_path="/nix/store/fake/harness.sh",
+        beets_distance_threshold=CONFIG_DISTANCE_THRESHOLD,
+        beets_staging_dir=os.path.join(tmpdir, "staging"),
+        slskd_download_dir=tmpdir,
+        pipeline_db_enabled=True,
+    )
+
+
+def _seed_rival_and_locks(
+    db: FakePipelineDB,
+    *,
+    mirror_answer: str | None,
+    survivor_taken: bool,
+    release_lock_state: str,
+) -> None:
+    """Apply the two world dimensions that live outside the fixture builders."""
+    taken = _taken_survivor_id(mirror_answer) if survivor_taken else None
+    if taken is not None:
+        db.seed_request(make_request_row(
+            id=RIVAL_REQUEST_ID,
+            mb_release_id=taken,
+            artist_name="DICE",
+            album_title="Midnight Zoo (other pressing)",
+        ))
+    survivor_id = _taken_survivor_id(mirror_answer)
+    held_key = {
+        "free": None,
+        "old_held": release_id_to_lock_key(MERGED),
+        "new_held": (
+            None if survivor_id is None else release_id_to_lock_key(survivor_id)
+        ),
+    }[release_lock_state]
+    if held_key is not None:
+        db.set_advisory_lock_result(
+            lambda namespace, key, held_key=held_key: not (
+                namespace == ADVISORY_LOCK_NAMESPACE_RELEASE
+                and key == held_key
+            )
+        )
+
+
+class TestForceAndAutomationAgreeOnTheMerge(unittest.TestCase):
+    """P8–P10 over both real lane adapters (#1080)."""
+
+    def _run_automation(
+        self,
+        tmpdir: str,
+        *,
+        claimed: bool,
+        bv_result: ValidationResult,
+        canonical: _RecordingCanonical,
+        retag_outcome: RetagOutcome,
+        mirror_answer: str | None,
+        survivor_taken: bool,
+        release_lock_state: str,
+    ) -> LaneRun:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=REQUEST_ID,
+            mb_release_id=MERGED,
+            artist_name="DICE",
+            album_title="Midnight Zoo",
+        ))
+        if claimed:
+            import_job_id = handoff_automation_owner(
+                db,
+                REQUEST_ID,
+                state={
+                    "filetype": "mp3",
+                    "enqueued_at": "2026-08-11T00:00:00+00:00",
+                    "current_path": tmpdir,
+                    "files": [],
+                },
+                canonical_path=tmpdir,
+            ).id
+        else:
+            import_job_id = 4242
+        _seed_rival_and_locks(
+            db,
+            mirror_answer=mirror_answer,
+            survivor_taken=survivor_taken,
+            release_lock_state=release_lock_state,
+        )
+        cfg = _merge_world_cfg(tmpdir)
+        ctx = make_ctx_with_fake_db(db, cfg=cfg)
+        album_data = make_grab_list_entry(
+            album_id=REQUEST_ID,
+            artist="DICE",
+            title="Midnight Zoo",
+            mb_release_id=MERGED,
+            db_source="request",
+            db_request_id=REQUEST_ID,
+        )
+        retag = _RecordingRetag(db, retag_outcome)
+        with (
+            _silence_logs(),
+            patch("lib.beets.beets_validate", return_value=bv_result) as validate,
+        ):
+            _process_beets_validation(
+                album_data,
+                StagedAlbum(current_path=tmpdir, request_id=REQUEST_ID),
+                ctx,
+                import_job_id=import_job_id,
+                canonical_release_fn=canonical,
+                retag_fn=retag,
+            )
+        row = db.request(REQUEST_ID)
+        return LaneRun(
+            stored_after=None if row is None else row.get("mb_release_id"),
+            mirror_calls=list(canonical.calls),
+            retag_observed_release_ids=list(retag.observed_release_ids),
+            validation_threshold=(
+                validate.call_args.args[3] if validate.call_args else None
+            ),
+            # P10 is the force lane's consequence: the automation lane's
+            # launch is fenced by evidence this fixture deliberately does not
+            # seed, so it reports no launch rather than a fabricated one.
+            launched_release_ids=[],
+            valid=bv_result.valid,
+            audit_rows=_audit_rows(db),
+        )
+
+    def _run_force(
+        self,
+        tmpdir: str,
+        *,
+        claimed: bool,
+        bv_result: ValidationResult,
+        canonical: _RecordingCanonical,
+        retag_outcome: RetagOutcome,
+        mirror_answer: str | None,
+        survivor_taken: bool,
+        release_lock_state: str,
+    ) -> LaneRun:
+        from tests.test_force_import_merge_redirect import (
+            _ForceWorld,
+            _RecordingRunImport,
+            force_dispatch,
+        )
+
+        with contextlib.ExitStack() as stack:
+            world = _ForceWorld(stack, claim=claimed, path=tmpdir)
+            retag = _RecordingRetag(world.db, retag_outcome)
+            _seed_rival_and_locks(
+                world.db,
+                mirror_answer=mirror_answer,
+                survivor_taken=survivor_taken,
+                release_lock_state=release_lock_state,
+            )
+            runner = _RecordingRunImport()
+            _, _, validate = force_dispatch(
+                world,
+                bv_result,
+                canonical=canonical,
+                retag=retag,
+                run_import=runner,
+            )
+            row = world.db.request(REQUEST_ID)
+            return LaneRun(
+                stored_after=None if row is None else row.get("mb_release_id"),
+                mirror_calls=list(canonical.calls),
+                retag_observed_release_ids=list(retag.observed_release_ids),
+                validation_threshold=(
+                    validate.call_args.args[3] if validate.call_args else None
+                ),
+                launched_release_ids=list(runner.release_ids),
+                valid=bv_result.valid,
+                audit_rows=_audit_rows(world.db),
+            )
+
+    @settings(deadline=None)
+    @given(
+        lane=LANES,
+        scenario=SCENARIOS,
+        mirror_answer=MIRROR_ANSWERS,
+        candidates=CANDIDATE_SETS,
+        retag_outcome=RETAG_OUTCOMES,
+        claimed=st.booleans(),
+        survivor_taken=st.booleans(),
+        release_lock_state=RELEASE_LOCK_STATES,
+        survivor_distance=SURVIVOR_DISTANCES,
+    )
+    # The live request-346 world, in each lane. The force one is the world
+    # #1080 was reported from; before the fix it rekeyed nothing.
+    @example(
+        lane="force", scenario="mbid_not_found", mirror_answer=SURVIVOR,
+        candidates=(SURVIVOR,), retag_outcome=RETAG_RETAGGED, claimed=True,
+        survivor_taken=False, release_lock_state="free", survivor_distance=0.02,
+    )
+    @example(
+        lane="automation", scenario="mbid_not_found", mirror_answer=SURVIVOR,
+        candidates=(SURVIVOR,), retag_outcome=RETAG_RETAGGED, claimed=True,
+        survivor_taken=False, release_lock_state="free", survivor_distance=0.02,
+    )
+    # The threshold discriminator: the same survivor, far outside
+    # ``beets_distance_threshold``. Automation must name it ``high_distance``;
+    # force must name it ``strong_match`` and import it.
+    @example(
+        lane="force", scenario="mbid_not_found", mirror_answer=SURVIVOR,
+        candidates=(SURVIVOR,), retag_outcome=RETAG_RETAGGED, claimed=True,
+        survivor_taken=False, release_lock_state="free", survivor_distance=0.62,
+    )
+    @example(
+        lane="automation", scenario="mbid_not_found", mirror_answer=SURVIVOR,
+        candidates=(SURVIVOR,), retag_outcome=RETAG_RETAGGED, claimed=True,
+        survivor_taken=False, release_lock_state="free", survivor_distance=0.62,
+    )
+    # An unclaimed lane has no authority in either shape.
+    @example(
+        lane="force", scenario="mbid_not_found", mirror_answer=SURVIVOR,
+        candidates=(SURVIVOR,), retag_outcome=RETAG_RETAGGED, claimed=False,
+        survivor_taken=False, release_lock_state="free", survivor_distance=0.02,
+    )
+    # The blocked world in each lane: the survivor is already held, so the
+    # library is never touched, the row never moves, and the durable audit is
+    # the only evidence the operator ever gets (P12).
+    @example(
+        lane="force", scenario="mbid_not_found", mirror_answer=SURVIVOR,
+        candidates=(SURVIVOR,), retag_outcome=RETAG_RETAGGED, claimed=True,
+        survivor_taken=True, release_lock_state="free", survivor_distance=0.02,
+    )
+    @example(
+        lane="automation", scenario="mbid_not_found", mirror_answer=SURVIVOR,
+        candidates=(SURVIVOR,), retag_outcome=RETAG_RETAGGED, claimed=True,
+        survivor_taken=True, release_lock_state="free", survivor_distance=0.02,
+    )
+    def test_both_lanes_decide_the_same_merge(
+        self,
+        lane: str,
+        scenario: str,
+        mirror_answer: str | None,
+        candidates: tuple[str, ...],
+        retag_outcome: RetagOutcome,
+        claimed: bool,
+        survivor_taken: bool,
+        release_lock_state: str,
+        survivor_distance: float,
+    ) -> None:
+        bv_result = _validation_result(
+            scenario, candidates, survivor_distance=survivor_distance,
+        )
+        canonical = _RecordingCanonical(mirror_answer)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, "01 - Track.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            lane_runner = (
+                self._run_force if lane == "force" else self._run_automation
+            )
+            run = lane_runner(
+                tmpdir,
+                claimed=claimed,
+                bv_result=bv_result,
+                canonical=canonical,
+                retag_outcome=retag_outcome,
+                mirror_answer=mirror_answer,
+                survivor_taken=survivor_taken,
+                release_lock_state=release_lock_state,
+            )
+
+        # P8: the authorization is derived from the world alone. Nothing in it
+        # names a lane, so asserting it against both lanes IS the parity claim.
+        authorized = rekey_is_authorized(
+            scenario=scenario,
+            owned=claimed,
+            mirror_answer=mirror_answer,
+            candidates=candidates,
+            retag_outcome=retag_outcome,
+            survivor_taken=survivor_taken,
+            release_lock_state=release_lock_state,
+        )
+        check_row_moves_only_when_authorized(
+            run.stored_after,
+            authorized=authorized,
+            expected_survivor=mirror_answer,
+        )
+        check_retag_never_saw_a_moved_row(run.retag_observed_release_ids)
+        # P11 in BOTH lanes: whichever one is asking, it never walks away from
+        # a library and a request naming different releases.
+        survivor_id = _taken_survivor_id(mirror_answer)
+        check_library_and_request_agree(
+            library_before=library_before_retag(retag_outcome, survivor_id),
+            library_after=library_after_retag(
+                retag_outcome,
+                survivor_id,
+                retag_ran=bool(run.retag_observed_release_ids),
+            ),
+            stored_before=MERGED,
+            stored_after=run.stored_after,
+        )
+        check_mirror_asked_only_where_it_can_be_used(
+            run.mirror_calls, scenario=scenario, owned=claimed,
+        )
+        # P9: both lanes reached the seam, at their own threshold and no other
+        # difference.
+        check_validation_ran_at_the_lane_threshold(
+            lane,
+            run.validation_threshold,
+            config_threshold=CONFIG_DISTANCE_THRESHOLD,
+        )
+        check_rekeyed_verdict_uses_the_lane_threshold(
+            lane=lane,
+            authorized=authorized,
+            valid=run.valid,
+            survivor_distance=survivor_distance,
+            config_threshold=CONFIG_DISTANCE_THRESHOLD,
+        )
+        # P10: whatever the seam decided, the launch agrees with the row.
+        check_force_launches_the_release_the_row_names(
+            run.launched_release_ids, run.stored_after,
+        )
+        # P12: the refusal the operator alone can clear is durable in BOTH
+        # lanes — and no other world claims it.
+        check_a_blocked_merge_is_audited(
+            run.audit_rows,
+            blocked=merge_is_blocked_before_the_retag(
+                scenario=scenario,
+                owned=claimed,
+                mirror_answer=mirror_answer,
+                candidates=candidates,
+                release_lock_state=release_lock_state,
+                survivor_taken=survivor_taken,
+            ),
+            expected_message=expected_blocked_audit_message(survivor_id),
+        )
+
+
+class TestForceParityCheckersTripOnViolations(unittest.TestCase):
+    """Known-bad self-tests for the #1080 checkers."""
+
+    def test_a_lane_that_skipped_the_seam_is_rejected(self) -> None:
+        with self.assertRaises(AssertionError):
+            check_validation_ran_at_the_lane_threshold(
+                "force", None, config_threshold=CONFIG_DISTANCE_THRESHOLD,
+            )
+
+    def test_a_lane_validating_at_the_other_threshold_is_rejected(self) -> None:
+        for lane, wrong in (
+            ("force", CONFIG_DISTANCE_THRESHOLD),
+            ("automation", FORCE_IMPORT_DISTANCE_THRESHOLD),
+        ):
+            with self.subTest(lane=lane), self.assertRaises(AssertionError):
+                check_validation_ran_at_the_lane_threshold(
+                    lane, wrong, config_threshold=CONFIG_DISTANCE_THRESHOLD,
+                )
+
+    def test_a_force_verdict_narrowed_to_the_config_threshold_is_rejected(
+        self,
+    ) -> None:
+        with self.assertRaises(AssertionError):
+            check_rekeyed_verdict_uses_the_lane_threshold(
+                lane="force", authorized=True, valid=False,
+                survivor_distance=0.62,
+                config_threshold=CONFIG_DISTANCE_THRESHOLD,
+            )
+
+    def test_an_automation_verdict_widened_to_the_override_is_rejected(
+        self,
+    ) -> None:
+        with self.assertRaises(AssertionError):
+            check_rekeyed_verdict_uses_the_lane_threshold(
+                lane="automation", authorized=True, valid=True,
+                survivor_distance=0.62,
+                config_threshold=CONFIG_DISTANCE_THRESHOLD,
+            )
+
+    def test_a_launch_disagreeing_with_the_row_is_rejected(self) -> None:
+        with self.assertRaises(AssertionError):
+            check_force_launches_the_release_the_row_names([MERGED], SURVIVOR)
+
+    def test_a_blocked_merge_that_recorded_nothing_is_rejected(self) -> None:
+        """P12 known-bad: exactly the #1080 silence, in either lane."""
+        with self.assertRaises(AssertionError):
+            check_a_blocked_merge_is_audited(
+                [("rejected", "Target MBID not in candidates")],
+                blocked=True,
+                expected_message=expected_blocked_audit_message(SURVIVOR),
+            )
+
+    def test_a_blocked_audit_under_the_wrong_outcome_is_rejected(self) -> None:
+        message = expected_blocked_audit_message(SURVIVOR)
+        with self.assertRaises(AssertionError):
+            check_a_blocked_merge_is_audited(
+                [("rejected", message)],
+                blocked=True,
+                expected_message=message,
+            )
+
+    def test_a_blocked_merge_audited_twice_in_one_execution_is_rejected(
+        self,
+    ) -> None:
+        message = expected_blocked_audit_message(SURVIVOR)
+        with self.assertRaises(AssertionError):
+            check_a_blocked_merge_is_audited(
+                [("failed", message), ("failed", message)],
+                blocked=True,
+                expected_message=message,
+            )
+
+    def test_an_unblocked_world_claiming_the_blocked_audit_is_rejected(
+        self,
+    ) -> None:
+        message = expected_blocked_audit_message(SURVIVOR)
+        with self.assertRaises(AssertionError):
+            check_a_blocked_merge_is_audited(
+                [("failed", message)],
+                blocked=False,
+                expected_message=message,
+            )
+
+    def test_a_blocked_world_with_no_survivor_identity_is_rejected(
+        self,
+    ) -> None:
+        """Fail closed: "blocked" with nothing to name is a model disagreement."""
+        with self.assertRaises(AssertionError):
+            check_a_blocked_merge_is_audited(
+                [], blocked=True, expected_message=None,
+            )
+
+    def test_the_blocked_predicate_names_the_pre_check_world(self) -> None:
+        """The world model's own contract, derived without production."""
+        self.assertTrue(merge_is_blocked_before_the_retag(
+            scenario="mbid_not_found", owned=True, mirror_answer=SURVIVOR,
+            candidates=(SURVIVOR,), release_lock_state="free",
+            survivor_taken=True,
+        ))
+        # A free survivor is not blocked, and neither is a world that never
+        # reached the pre-check at all.
+        self.assertFalse(merge_is_blocked_before_the_retag(
+            scenario="mbid_not_found", owned=True, mirror_answer=SURVIVOR,
+            candidates=(SURVIVOR,), release_lock_state="free",
+            survivor_taken=False,
+        ))
+        self.assertFalse(merge_is_blocked_before_the_retag(
+            scenario="strong_match", owned=True, mirror_answer=SURVIVOR,
+            candidates=(SURVIVOR,), release_lock_state="free",
+            survivor_taken=True,
+        ))
+        self.assertFalse(merge_is_blocked_before_the_retag(
+            scenario="mbid_not_found", owned=True, mirror_answer=SURVIVOR,
+            candidates=(SURVIVOR,), release_lock_state="old_held",
+            survivor_taken=True,
+        ))
+        self.assertFalse(merge_is_blocked_before_the_retag(
+            scenario="mbid_not_found", owned=False, mirror_answer=SURVIVOR,
+            candidates=(SURVIVOR,), release_lock_state="free",
+            survivor_taken=True,
+        ))
+
+    def test_the_agreeing_worlds_still_pass(self) -> None:
+        check_validation_ran_at_the_lane_threshold(
+            "force", FORCE_IMPORT_DISTANCE_THRESHOLD,
+            config_threshold=CONFIG_DISTANCE_THRESHOLD,
+        )
+        check_validation_ran_at_the_lane_threshold(
+            "automation", CONFIG_DISTANCE_THRESHOLD,
+            config_threshold=CONFIG_DISTANCE_THRESHOLD,
+        )
+        check_rekeyed_verdict_uses_the_lane_threshold(
+            lane="force", authorized=True, valid=True, survivor_distance=0.62,
+            config_threshold=CONFIG_DISTANCE_THRESHOLD,
+        )
+        check_rekeyed_verdict_uses_the_lane_threshold(
+            lane="automation", authorized=True, valid=False,
+            survivor_distance=0.62,
+            config_threshold=CONFIG_DISTANCE_THRESHOLD,
+        )
+        check_force_launches_the_release_the_row_names([SURVIVOR], SURVIVOR)
+        check_force_launches_the_release_the_row_names([], None)
+        blocked_message = expected_blocked_audit_message(SURVIVOR)
+        # The lane's own rejection row sits alongside the audit and neither
+        # satisfies nor breaks P12.
+        check_a_blocked_merge_is_audited(
+            [("rejected", "beets rejected the download"),
+             ("failed", blocked_message)],
+            blocked=True,
+            expected_message=blocked_message,
+        )
+        check_a_blocked_merge_is_audited(
+            [("rejected", "beets rejected the download")],
+            blocked=False,
+            expected_message=blocked_message,
+        )

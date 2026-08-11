@@ -47,6 +47,33 @@ M7  **Both RELEASE advisory locks are held across the retag and the rekey.**
     operator Bad Rip resolving "the one album at the survivor" mid-``mbsync``
     could otherwise bind to the album we just retagged onto that id.
     Contention is a typed non-ready outcome, never a wait.
+M8  **The library and the request never disagree about which release this
+    is.** Both of the rekey write's ``UniqueViolation`` refusals are plain
+    reads, so they are asked BEFORE the library is retagged. Retagging first
+    and discovering the refusal afterwards leaves the installed album at the
+    survivor and the request at the merged-away id — a divergence nothing
+    re-derives, because the collision that refused the write is still there
+    on the next attempt, which this same pre-check refuses before the library
+    is read at all.
+M9  **A merge outcome no retry can clear is audited, never silent.** Two
+    qualify, and each writes one durable ``download_log`` row (invariant 11's
+    Recents audit evidence, not a log line that is gone at the next journal
+    rotation). A survivor that is already occupied stays occupied until an
+    operator resolves it, and the force lane carries no rejection of its own
+    to explain it — it imports despite the verdict and then reports a bare
+    ``mbid_missing`` from ``import_one.py``, attempt after attempt. And no
+    lock covers "another request acquires this release id", so when the
+    pre-check loses that race the split state owes the same evidence, and the
+    force lane must not go on to launch Beets at the id whose library album
+    it just moved away. One row per execution that reaches the branch,
+    deliberately not deduplicated: an execution is an operator force action
+    or a completed download, each of which already writes its own row.
+M10 **``library_moved`` means THIS execution moved the library.** The
+    discriminator between "we created a split" and "we found the world as it
+    was". ``already_current`` and ``not_held`` are READY outcomes that moved
+    nothing, so a rekey refused after one of them must not claim a retag that
+    never ran, and must not refuse a force launch over a divergence this
+    execution did not create.
 
 ``canonical_release_fn`` and ``retag_fn`` are definition-time defaults on
 ``_process_beets_validation``: these tests INJECT replacements and never patch
@@ -69,8 +96,10 @@ from unittest.mock import patch
 
 from lib.beets_db import AlbumInfo
 from lib.beets_retag import (
+    RETAG_ALREADY_CURRENT,
     RETAG_AMBIGUOUS,
     RETAG_FAILED,
+    RETAG_NOT_HELD,
     RETAG_READY_OUTCOMES,
     BeetsRetagResult,
     MbsyncRun,
@@ -82,17 +111,32 @@ from lib.download_validation import (
     MERGE_NO_REDIRECT,
     MERGE_NOT_APPLICABLE,
     MERGE_NOT_OWNED,
+    MERGE_REKEY_BLOCKED,
     MERGE_REKEY_REFUSED,
     MERGE_REKEYED,
     MERGE_RELEASE_LOCKED,
     MERGE_RETAG_NOT_READY,
     MERGE_SURVIVOR_NOT_OFFERED,
+    MergeRekeyOutcome,
     _follow_merged_release,
     _process_beets_validation,
+    merge_rekey_blocked_audit_message,
+    merge_rekey_claim_holds,
+    split_identity_audit_message,
 )
 from lib.grab_list import GrabListEntry
+from lib.import_queue import (
+    IMPORT_JOB_AUTOMATION,
+    IMPORT_JOB_FORCE,
+    IMPORT_JOB_YOUTUBE,
+    ImportJob,
+    automation_import_payload,
+    force_import_payload,
+    youtube_import_payload,
+)
 from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_RELEASE,
+    MergeRekeyCollision,
     release_id_to_lock_key,
 )
 from lib.quality import (
@@ -107,6 +151,7 @@ from lib.staged_album import StagedAlbum
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import (
     handoff_automation_owner,
+    make_album_quality_evidence,
     make_ctx_with_fake_db,
     make_grab_list_entry,
     make_request_row,
@@ -330,6 +375,35 @@ class _MergeWorld:
         return None if row is None else row.get("mb_release_id")
 
 
+def follow_merge(
+    world: _MergeWorld,
+    bv_result: ValidationResult,
+    *,
+    canonical: Callable[[str], str | None],
+    retag: Callable[..., BeetsRetagResult],
+) -> MergeRekeyOutcome:
+    """Drive the production merge seam over ``world``. Pure delegation.
+
+    The helper builds the seam's arguments the way both production callers do
+    and nothing else — in particular it does NOT apply the survivor to the
+    in-flight entry, because since #1080 the seam reports the survivor and the
+    CALLER applies it. That application is pinned through the real caller in
+    ``TestMergeRedirectAtTheValidationSeam``.
+    """
+    with _silence_logs():
+        return _follow_merged_release(
+            bv_result,
+            db=world.db,
+            cfg=world.cfg,
+            request_id=world.album_data.db_request_id,
+            stored_release_id=world.album_data.mb_release_id,
+            import_job_id=world.import_job_id,
+            distance_threshold=world.cfg.beets_distance_threshold,
+            canonical_release_fn=canonical,
+            retag_fn=retag,
+        )
+
+
 class TestMergeRedirectBranches(unittest.TestCase):
     """Every branch of the merge-redirect helper, on the real production path."""
 
@@ -346,13 +420,8 @@ class TestMergeRedirectBranches(unittest.TestCase):
         retag: Callable[..., BeetsRetagResult],
     ):
         with _silence_logs():
-            return _follow_merged_release(
-                self.world.album_data,
-                bv_result,
-                self.world.ctx,
-                import_job_id=self.world.import_job_id,
-                canonical_release_fn=canonical,
-                retag_fn=retag,
+            return follow_merge(
+                self.world, bv_result, canonical=canonical, retag=retag,
             )
 
     def test_dice_shape_retags_then_rekeys_then_revalidates(self) -> None:
@@ -373,9 +442,14 @@ class TestMergeRedirectBranches(unittest.TestCase):
         self.assertEqual(retag.observations[0].stored_release_id, MERGED)
         self.assertEqual(retag.observations[0].old_identity, OLD)
         self.assertEqual(retag.observations[0].new_identity, NEW)
-        # And it moved afterwards, in both the row and the in-flight entry.
+        # And it moved afterwards. The seam moves the ROW and reports the
+        # survivor; since #1080 it never reaches into a caller's in-flight
+        # state, because it now has two callers with two different ones.
+        # ``TestMergeRedirectAtTheValidationSeam`` pins the automation
+        # caller applying it, and ``tests/test_force_import_merge_redirect.py``
+        # pins the force caller applying it.
         self.assertEqual(self.world.stored_release_id(), SURVIVOR)
-        self.assertEqual(self.world.album_data.mb_release_id, SURVIVOR)
+        self.assertEqual(self.world.album_data.mb_release_id, MERGED)
         self.assertEqual(
             self.world.db.update_request_release_for_merge_calls,
             [(REQUEST_ID, MERGED, SURVIVOR, self.world.import_job_id)],
@@ -442,13 +516,10 @@ class TestMergeRedirectBranches(unittest.TestCase):
                 ))
 
                 with _silence_logs():
-                    result = _follow_merged_release(
-                        world.album_data,
-                        bv_result,
-                        world.ctx,
-                        import_job_id=world.import_job_id,
-                        canonical_release_fn=RecordingCanonical(SURVIVOR),
-                        retag_fn=retag,
+                    result = follow_merge(
+                        world, bv_result,
+                        canonical=RecordingCanonical(SURVIVOR),
+                        retag=retag,
                     )
 
                 self.assertEqual(result.status, MERGE_RETAG_NOT_READY)
@@ -468,33 +539,308 @@ class TestMergeRedirectBranches(unittest.TestCase):
                     row["active_automation_import_job_id"], world.import_job_id,
                 )
 
-    def test_a_survivor_another_request_holds_fails_closed(self) -> None:
-        """M4 — never merge or delete a curated request row."""
+    def test_a_survivor_another_request_holds_never_touches_the_library(
+        self,
+    ) -> None:
+        """M4/M8 — the refusal is known BEFORE the library is mutated.
+
+        The reproduced #1080 world: 84 artist+album groups in the live DB hold
+        more than one non-``replaced`` request (invariant 5 working as
+        designed), and that is exactly the population an MB merge collides in.
+        The REAL retag runs over a real fake library, so "the library was not
+        touched" is asserted on the library, not on a stub's call count.
+        """
         self.world.db.seed_request(make_request_row(
             id=999,
             mb_release_id=SURVIVOR,
             artist_name="DICE",
             album_title="Midnight Zoo (other pressing)",
         ))
+        beets = FakeBeetsDB()
+        beets.set_album_ids_for_release(MERGED, [7])
+        beets.set_album_ids_for_release(SURVIVOR, [])
         bv_result = mbid_not_found_result(candidate(SURVIVOR))
         before = copy.deepcopy(bv_result)
-        retag = RecordingRetag(self.world.db, BeetsRetagResult(
-            outcome="retagged", detail="retagged album 7",
-        ))
 
         outcome = self._follow(
             bv_result,
             canonical=RecordingCanonical(SURVIVOR),
-            retag=retag,
+            retag=real_retag_over(beets),
         )
 
-        self.assertEqual(outcome.status, MERGE_REKEY_REFUSED)
+        self.assertEqual(outcome.status, MERGE_REKEY_BLOCKED)
+        self.assertFalse(outcome.library_moved)
+        self.assertFalse(outcome.split_identity)
+        self.assertIn("999", outcome.detail)
+        # M8: the installed album is exactly where it was — ``mbsync`` never
+        # ran, so there is no split identity to repair.
+        self.assertEqual(beets.get_all_album_ids_for_release(MERGED), [7])
+        self.assertEqual(beets.get_all_album_ids_for_release(SURVIVOR), [])
+        # M9: but the operator still owes a decision no retry can make for
+        # them, so it is recorded durably. Both the expected sentence and the
+        # collision fragment inside it come from their PRODUCERS
+        # (test-fidelity Rule C), never from a hand-typed literal.
+        expected = merge_rekey_blocked_audit_message(
+            old_release_id=MERGED,
+            new_release_id=SURVIVOR,
+            collision_detail=MergeRekeyCollision(rival_request_id=999).detail(),
+        )
+        self.assertEqual(len(self.world.db.download_logs), 1)
+        audit = self.world.db.download_logs[0]
+        self.assertEqual(audit.request_id, REQUEST_ID)
+        self.assertEqual(audit.outcome, "failed")
+        self.assertEqual(audit.error_message, expected)
+        self.assertEqual(outcome.detail, expected)
         self.assertEqual(bv_result.to_json(), before.to_json())
         self.assertEqual(self.world.stored_release_id(), MERGED)
         self.assertEqual(self.world.album_data.mb_release_id, MERGED)
+        self.assertEqual(self.world.db.update_request_release_for_merge_calls, [])
         other = self.world.db.request(999)
         assert other is not None
         self.assertEqual(other["mb_release_id"], SURVIVOR)
+        # Still runnable: the operator decides, the pipeline keeps moving.
+        row = self.world.db.request(REQUEST_ID)
+        assert row is not None
+        self.assertEqual(row["status"], "processing")
+
+    def test_an_evidence_collision_at_the_survivor_blocks_before_the_retag(
+        self,
+    ) -> None:
+        """M8 — the second documented refusal cause is a read too.
+
+        ``UNIQUE (mb_release_id, snapshot_fingerprint)``: the same bytes
+        already measured at the survivor. The write refuses, so the library
+        must not have moved by the time it does.
+        """
+        for release_id in (MERGED, SURVIVOR):
+            self.world.db.upsert_album_quality_evidence(
+                make_album_quality_evidence(
+                    mb_release_id=release_id,
+                    source_path=f"/library/{release_id}",
+                ),
+            )
+        beets = FakeBeetsDB()
+        beets.set_album_ids_for_release(MERGED, [7])
+        beets.set_album_ids_for_release(SURVIVOR, [])
+
+        outcome = self._follow(
+            mbid_not_found_result(candidate(SURVIVOR)),
+            canonical=RecordingCanonical(SURVIVOR),
+            retag=real_retag_over(beets),
+        )
+
+        self.assertEqual(outcome.status, MERGE_REKEY_BLOCKED)
+        self.assertIn("evidence already exists", outcome.detail)
+        self.assertEqual(beets.get_all_album_ids_for_release(MERGED), [7])
+        self.assertEqual(beets.get_all_album_ids_for_release(SURVIVOR), [])
+        self.assertEqual(self.world.stored_release_id(), MERGED)
+        self.assertEqual(self.world.db.update_request_release_for_merge_calls, [])
+        # M9 — the other blocked cause is audited exactly the same way, and
+        # names the fingerprint rather than a rival request.
+        self.assertEqual(len(self.world.db.download_logs), 1)
+        audit = self.world.db.download_logs[0]
+        self.assertEqual(audit.outcome, "failed")
+        self.assertEqual(audit.error_message, outcome.detail)
+        self.assertIn("evidence already exists", audit.error_message or "")
+
+    def test_a_survivor_claimed_during_the_retag_records_the_split(self) -> None:
+        """M9 — the residual race is audited, never silent.
+
+        No lock covers "another request acquires this release id", so the
+        pre-check narrows the window and cannot close it. When it loses, the
+        library HAS moved and the request has not — the one merge outcome
+        nothing re-derives — so it owes durable Recents evidence rather than a
+        log line that is gone at the next journal rotation.
+        """
+        beets = FakeBeetsDB()
+        beets.set_album_ids_for_release(MERGED, [7])
+        beets.set_album_ids_for_release(SURVIVOR, [])
+        real_retag = real_retag_over(beets)
+        observed: list[BeetsRetagResult] = []
+
+        def retag_and_lose_the_race(
+            cfg: CratediggerConfig,
+            *,
+            old_identity: ReleaseIdentity,
+            new_identity: ReleaseIdentity,
+        ) -> BeetsRetagResult:
+            # The rival appears while ``mbsync`` is running — the exact window
+            # the pre-check cannot cover.
+            self.world.db.seed_request(make_request_row(
+                id=999,
+                mb_release_id=SURVIVOR,
+                artist_name="DICE",
+                album_title="Midnight Zoo (other pressing)",
+            ))
+            result = real_retag(
+                cfg, old_identity=old_identity, new_identity=new_identity,
+            )
+            observed.append(result)
+            return result
+
+        bv_result = mbid_not_found_result(candidate(SURVIVOR))
+        before = copy.deepcopy(bv_result)
+
+        outcome = self._follow(
+            bv_result,
+            canonical=RecordingCanonical(SURVIVOR),
+            retag=retag_and_lose_the_race,
+        )
+
+        self.assertEqual(outcome.status, MERGE_REKEY_REFUSED)
+        self.assertTrue(outcome.library_moved)
+        self.assertTrue(outcome.split_identity)
+        # The world really is split: the album moved, the request did not.
+        self.assertEqual(beets.get_all_album_ids_for_release(MERGED), [])
+        self.assertEqual(beets.get_all_album_ids_for_release(SURVIVOR), [7])
+        self.assertEqual(self.world.stored_release_id(), MERGED)
+        self.assertEqual(bv_result.to_json(), before.to_json())
+        # And the operator can find it. The expected copy comes from the
+        # PRODUCER, and its retag detail from the real retag that ran
+        # (test-fidelity Rule C), never from a hand-typed literal.
+        self.assertEqual(len(observed), 1)
+        expected = split_identity_audit_message(
+            old_release_id=MERGED,
+            new_release_id=SURVIVOR,
+            retag_detail=observed[0].detail,
+        )
+        self.assertEqual(len(self.world.db.download_logs), 1)
+        audit = self.world.db.download_logs[0]
+        self.assertEqual(audit.request_id, REQUEST_ID)
+        self.assertEqual(audit.outcome, "failed")
+        self.assertEqual(audit.error_message, expected)
+        self.assertEqual(outcome.detail, expected)
+        # Still runnable — the REQUEST is not parked by the split (the
+        # library is what diverged, and that is what the audit is for).
+        row = self.world.db.request(REQUEST_ID)
+        assert row is not None
+        self.assertEqual(row["status"], "processing")
+        self.assertEqual(
+            row["active_automation_import_job_id"], self.world.import_job_id,
+        )
+
+    def test_a_ready_but_unmoved_library_never_claims_a_retag(self) -> None:
+        """M10 — a refusal only ever asserts the move THIS execution made.
+
+        ``already_current`` and ``not_held`` are READY outcomes that moved
+        nothing: the first found the album already at the survivor, the
+        second found no album at all. Losing the same race after one of them
+        is a refusal, not a split — the seam changed nothing about the
+        library. Widening ``library_moved`` to "the retag was ready" would
+        write the split sentence ("the installed album was retagged onto the
+        survivor") about a retag that never ran, and would refuse a force
+        launch over a divergence this execution did not create.
+        """
+        unmoved: tuple[tuple[RetagOutcome, str], ...] = (
+            (RETAG_ALREADY_CURRENT, "library already holds the survivor"),
+            (RETAG_NOT_HELD, "no album is filed under the merged-away id"),
+        )
+        for retag_outcome, retag_detail in unmoved:
+            with self.subTest(retag_outcome=retag_outcome):
+                world = _MergeWorld(self.stack)
+
+                def retag_and_lose_the_race(
+                    cfg: CratediggerConfig,
+                    *,
+                    old_identity: ReleaseIdentity,
+                    new_identity: ReleaseIdentity,
+                    _world: _MergeWorld = world,
+                    _outcome: RetagOutcome = retag_outcome,
+                    _detail: str = retag_detail,
+                ) -> BeetsRetagResult:
+                    del cfg, old_identity, new_identity
+                    # The rival appears in the same window the split pin
+                    # uses — but here the library was never moved.
+                    _world.db.seed_request(make_request_row(
+                        id=999,
+                        mb_release_id=SURVIVOR,
+                        artist_name="DICE",
+                        album_title="Midnight Zoo (other pressing)",
+                    ))
+                    return BeetsRetagResult(
+                        outcome=_outcome, detail=_detail,
+                    )
+
+                self.assertIn(retag_outcome, RETAG_READY_OUTCOMES)
+                outcome = follow_merge(
+                    world,
+                    mbid_not_found_result(candidate(SURVIVOR)),
+                    canonical=RecordingCanonical(SURVIVOR),
+                    retag=retag_and_lose_the_race,
+                )
+
+                self.assertEqual(outcome.status, MERGE_REKEY_REFUSED)
+                # The consequences first, because they are what a widened
+                # discriminator actually costs the operator. No audit row at
+                # all: nothing here is stuck — the library is exactly where
+                # the seam found it, and the next attempt is refused at the
+                # pre-check, which audits its own reason.
+                self.assertEqual(world.db.download_logs, [])
+                # And the refusal does not claim a move. The forbidden
+                # sentence comes from the split PRODUCER (Rule C), so this
+                # asserts the exact copy a widened discriminator would emit.
+                self.assertNotEqual(
+                    outcome.detail,
+                    split_identity_audit_message(
+                        old_release_id=MERGED,
+                        new_release_id=SURVIVOR,
+                        retag_detail=retag_detail,
+                    ),
+                )
+                # The force lane's consequence: nothing to refuse a launch
+                # over, because this execution created no divergence.
+                self.assertFalse(outcome.split_identity)
+                self.assertFalse(outcome.library_moved)
+                self.assertEqual(world.stored_release_id(), MERGED)
+
+    def test_every_blocked_attempt_records_its_own_audit_row(self) -> None:
+        """M9 — the blocked audit is per execution, not deduplicated.
+
+        A blocked world persists across every retry, so the choice is
+        explicit: one row per execution that reaches the branch — one per
+        operator force action, one per completed-download validation. Each of
+        those already writes its own ``download_log`` row, so the audit trail
+        stays proportional to the work attempted rather than to elapsed time,
+        and a second force attempt is never silent. Deduplicating would need
+        a read-before-write plus a staleness policy to answer "is this the
+        same collision?", and would hide exactly the repetition the operator
+        needs to see.
+        """
+        self.world.db.seed_request(make_request_row(
+            id=999,
+            mb_release_id=SURVIVOR,
+            artist_name="DICE",
+            album_title="Midnight Zoo (other pressing)",
+        ))
+        beets = FakeBeetsDB()
+        beets.set_album_ids_for_release(MERGED, [7])
+        beets.set_album_ids_for_release(SURVIVOR, [])
+
+        outcomes = [
+            self._follow(
+                mbid_not_found_result(candidate(SURVIVOR)),
+                canonical=RecordingCanonical(SURVIVOR),
+                retag=real_retag_over(beets),
+            )
+            for _ in range(2)
+        ]
+
+        self.assertEqual(
+            [outcome.status for outcome in outcomes],
+            [MERGE_REKEY_BLOCKED, MERGE_REKEY_BLOCKED],
+        )
+        expected = merge_rekey_blocked_audit_message(
+            old_release_id=MERGED,
+            new_release_id=SURVIVOR,
+            collision_detail=MergeRekeyCollision(rival_request_id=999).detail(),
+        )
+        self.assertEqual(len(self.world.db.download_logs), 2)
+        for audit in self.world.db.download_logs:
+            self.assertEqual(audit.request_id, REQUEST_ID)
+            self.assertEqual(audit.outcome, "failed")
+            self.assertEqual(audit.error_message, expected)
+        # And the library is still untouched after both attempts.
+        self.assertEqual(beets.get_all_album_ids_for_release(MERGED), [7])
 
     def test_a_request_without_its_exact_owner_never_asks_the_mirror(self) -> None:
         """M2 — an unowned world cannot act on the answer, so it isn't sought."""
@@ -506,13 +852,8 @@ class TestMergeRedirectBranches(unittest.TestCase):
         bv_result = mbid_not_found_result(candidate(SURVIVOR))
 
         with _silence_logs():
-            outcome = _follow_merged_release(
-                world.album_data,
-                bv_result,
-                world.ctx,
-                import_job_id=world.import_job_id,
-                canonical_release_fn=canonical,
-                retag_fn=retag,
+            outcome = follow_merge(
+                world, bv_result, canonical=canonical, retag=retag,
             )
 
         self.assertEqual(outcome.status, MERGE_NOT_OWNED)
@@ -527,13 +868,9 @@ class TestMergeRedirectBranches(unittest.TestCase):
         bv_result = mbid_not_found_result(candidate(SURVIVOR), target="1870")
 
         with _silence_logs():
-            outcome = _follow_merged_release(
-                world.album_data,
-                bv_result,
-                world.ctx,
-                import_job_id=world.import_job_id,
-                canonical_release_fn=canonical,
-                retag_fn=RecordingRetag(world.db, BeetsRetagResult(
+            outcome = follow_merge(
+                world, bv_result, canonical=canonical,
+                retag=RecordingRetag(world.db, BeetsRetagResult(
                     outcome="retagged", detail="should never run",
                 )),
             )
@@ -548,13 +885,10 @@ class TestMergeRedirectBranches(unittest.TestCase):
         canonical = RecordingCanonical(SURVIVOR)
 
         with _silence_logs():
-            outcome = _follow_merged_release(
-                world.album_data,
-                mbid_not_found_result(candidate(SURVIVOR)),
-                world.ctx,
-                import_job_id=world.import_job_id,
-                canonical_release_fn=canonical,
-                retag_fn=RecordingRetag(world.db, BeetsRetagResult(
+            outcome = follow_merge(
+                world, mbid_not_found_result(candidate(SURVIVOR)),
+                canonical=canonical,
+                retag=RecordingRetag(world.db, BeetsRetagResult(
                     outcome="retagged", detail="should never run",
                 )),
             )
@@ -639,6 +973,139 @@ class TestMergeRedirectBranches(unittest.TestCase):
         self.assertFalse(bv_result.valid)
         self.assertEqual(bv_result.scenario, "high_distance")
         self.assertEqual(bv_result.distance, 0.9)
+
+
+class TestMergeRekeyClaimHolds(unittest.TestCase):
+    """The pure gate that stops an unclaimed world touching the library.
+
+    ``merge_rekey_claim_holds`` mirrors production's two import claims term
+    for term, and it is the reason a YouTube rescue or a stale claim never
+    spends a mirror lookup or retags the shared Beets library. The seam tests
+    above it reach a handful of its rows; this is the whole table, asserted on
+    the decision itself.
+
+    Job rows are built through ``ImportJob.from_row`` — the production decoder
+    — so a payload or field-shape change fails here rather than passing
+    against a hand-made object production could never produce.
+    """
+
+    CASES: tuple[tuple[str, str, str, str, int | None, bool], ...] = (
+        # (description, job_type, job_status, row status, row owner, expected)
+        # --- automation: the pointer IS ownership (invariant 10) ---
+        ("automation owner attached", IMPORT_JOB_AUTOMATION, "running",
+         "processing", 1, True),
+        ("automation pointer names another job", IMPORT_JOB_AUTOMATION,
+         "running", "processing", 99, False),
+        ("automation with no pointer at all", IMPORT_JOB_AUTOMATION, "running",
+         "processing", None, False),
+        ("automation on a non-processing row", IMPORT_JOB_AUTOMATION,
+         "running", "wanted", None, False),
+        ("automation on a replaced row", IMPORT_JOB_AUTOMATION, "running",
+         "replaced", None, False),
+        # The automation arm has no job-status term in the SQL either: the
+        # request's pointer is the claim, so this mirrors it exactly.
+        ("automation pointer outlives the job status",
+         IMPORT_JOB_AUTOMATION, "completed", "processing", 1, True),
+        # --- force: a running job on an unowned, non-frozen row ---
+        ("force claim on a wanted row", IMPORT_JOB_FORCE, "running",
+         "wanted", None, True),
+        ("force claim on an imported row", IMPORT_JOB_FORCE, "running",
+         "imported", None, True),
+        ("force claim on an unsearchable row", IMPORT_JOB_FORCE, "running",
+         "unsearchable", None, True),
+        ("force claim on a downloading row", IMPORT_JOB_FORCE, "running",
+         "downloading", None, True),
+        ("force job still queued", IMPORT_JOB_FORCE, "queued", "wanted",
+         None, False),
+        ("force job already completed", IMPORT_JOB_FORCE, "completed",
+         "wanted", None, False),
+        ("force job failed", IMPORT_JOB_FORCE, "failed", "wanted",
+         None, False),
+        ("force against a processing row", IMPORT_JOB_FORCE, "running",
+         "processing", 1, False),
+        ("force against a frozen replaced row", IMPORT_JOB_FORCE, "running",
+         "replaced", None, False),
+        # Migration 066's owner-equivalence CHECK makes an owner pointer on a
+        # non-processing row impossible in the live DB. The term is still
+        # asserted because this function mirrors the SQL conjunction, and a
+        # dropped term must fail somewhere.
+        ("force against a row with an owner attached", IMPORT_JOB_FORCE,
+         "running", "wanted", 1, False),
+        # --- everything else holds neither claim ---
+        ("youtube rescue", IMPORT_JOB_YOUTUBE, "running", "wanted",
+         None, False),
+        ("youtube rescue on a processing row", IMPORT_JOB_YOUTUBE, "running",
+         "processing", 1, False),
+    )
+
+    def _job(self, job_type: str, status: str) -> ImportJob:
+        payloads = {
+            IMPORT_JOB_AUTOMATION: automation_import_payload(),
+            IMPORT_JOB_FORCE: force_import_payload(
+                download_log_id=5, failed_path="/quarantine/dice",
+            ),
+            IMPORT_JOB_YOUTUBE: youtube_import_payload(
+                staged_path="/Incoming/auto-import/dice",
+                request_id=REQUEST_ID,
+                browse_id="MPREb_dice",
+                download_log_id=5,
+            ),
+        }
+        return ImportJob.from_row({
+            "id": 1,
+            "job_type": job_type,
+            "status": status,
+            "request_id": REQUEST_ID,
+            "dedupe_key": None,
+            "payload": payloads[job_type],
+            "result": None,
+            "message": None,
+            "error": None,
+            "attempts": 0,
+            "worker_id": None,
+            "created_at": None,
+            "updated_at": None,
+            "started_at": None,
+            "heartbeat_at": None,
+            "completed_at": None,
+        })
+
+    def test_every_claim_world(self) -> None:
+        for desc, job_type, job_status, status, owner, expected in self.CASES:
+            with self.subTest(case=desc):
+                self.assertEqual(
+                    merge_rekey_claim_holds(
+                        {
+                            "status": status,
+                            "active_automation_import_job_id": owner,
+                        },
+                        self._job(job_type, job_status),
+                    ),
+                    expected,
+                )
+
+    def test_the_two_arms_cover_disjoint_worlds(self) -> None:
+        """No world satisfies both claims — they are mutually exclusive.
+
+        The automation arm requires ``processing``; the force arm excludes it.
+        That is what makes migration 066's reservation of the processing owner
+        pointer for one active automation job safe to rely on here.
+        """
+        for status in ("processing", "wanted", "imported", "replaced"):
+            for owner in (None, 1):
+                with self.subTest(status=status, owner=owner):
+                    row = {
+                        "status": status,
+                        "active_automation_import_job_id": owner,
+                    }
+                    self.assertFalse(
+                        merge_rekey_claim_holds(
+                            row, self._job(IMPORT_JOB_AUTOMATION, "running"),
+                        )
+                        and merge_rekey_claim_holds(
+                            row, self._job(IMPORT_JOB_FORCE, "running"),
+                        ),
+                    )
 
 
 class TestMergeRedirectAtTheValidationSeam(unittest.TestCase):
@@ -818,13 +1285,10 @@ class TestRekeyedRequestKeepsItsEvidence(unittest.TestCase):
 
         bv_result = mbid_not_found_result(candidate(SURVIVOR, distance=0.02))
         with _silence_logs():
-            outcome = _follow_merged_release(
-                self.world.album_data,
-                bv_result,
-                self.world.ctx,
-                import_job_id=self.world.import_job_id,
-                canonical_release_fn=RecordingCanonical(SURVIVOR),
-                retag_fn=RecordingRetag(self.world.db, BeetsRetagResult(
+            outcome = follow_merge(
+                self.world, bv_result,
+                canonical=RecordingCanonical(SURVIVOR),
+                retag=RecordingRetag(self.world.db, BeetsRetagResult(
                     outcome="retagged", detail="retagged album 7",
                 )),
             )
@@ -869,13 +1333,10 @@ class TestRekeyedRequestKeepsItsEvidence(unittest.TestCase):
         self.assertEqual(seeded.status, "ready")
 
         with _silence_logs():
-            outcome = _follow_merged_release(
-                self.world.album_data,
-                mbid_not_found_result(candidate(SURVIVOR)),
-                self.world.ctx,
-                import_job_id=self.world.import_job_id,
-                canonical_release_fn=RecordingCanonical(SURVIVOR),
-                retag_fn=RecordingRetag(self.world.db, BeetsRetagResult(
+            outcome = follow_merge(
+                self.world, mbid_not_found_result(candidate(SURVIVOR)),
+                canonical=RecordingCanonical(SURVIVOR),
+                retag=RecordingRetag(self.world.db, BeetsRetagResult(
                     outcome=RETAG_FAILED, detail="the library did not move",
                 )),
             )
@@ -902,13 +1363,9 @@ class TestMergeRetagHoldsBothReleaseLocks(unittest.TestCase):
 
     def _follow(self, bv_result: ValidationResult, retag: RecordingRetag):
         with _silence_logs():
-            return _follow_merged_release(
-                self.world.album_data,
-                bv_result,
-                self.world.ctx,
-                import_job_id=self.world.import_job_id,
-                canonical_release_fn=RecordingCanonical(SURVIVOR),
-                retag_fn=retag,
+            return follow_merge(
+                self.world, bv_result,
+                canonical=RecordingCanonical(SURVIVOR), retag=retag,
             )
 
     def test_both_release_locks_are_held_while_the_library_is_retagged(
@@ -960,13 +1417,9 @@ class TestMergeRetagHoldsBothReleaseLocks(unittest.TestCase):
                 ))
 
                 with _silence_logs():
-                    outcome = _follow_merged_release(
-                        world.album_data,
-                        bv_result,
-                        world.ctx,
-                        import_job_id=world.import_job_id,
-                        canonical_release_fn=RecordingCanonical(SURVIVOR),
-                        retag_fn=retag,
+                    outcome = follow_merge(
+                        world, bv_result,
+                        canonical=RecordingCanonical(SURVIVOR), retag=retag,
                     )
 
                 self.assertEqual(outcome.status, MERGE_RELEASE_LOCKED)

@@ -108,6 +108,7 @@ from lib.pipeline_db import (
     DownloadLogCounts,
     DryRunPlanClassification,
     JellyfinTerminalPinStatus,
+    MergeRekeyCollision,
     NonConsumingAttemptInput,
     PersistedYoutubeRow,
     PlexTerminalPinStatus,
@@ -5441,6 +5442,43 @@ class FakePipelineDB:
         row["updated_at"] = _utcnow()
         return True
 
+    def merge_rekey_collision(
+        self,
+        request_id: int,
+        *,
+        old_release_id: str,
+        new_release_id: str,
+    ) -> MergeRekeyCollision:
+        """Mirror ``PipelineDB.merge_rekey_collision`` (#1080).
+
+        Deliberately derived from the SAME state
+        ``update_request_release_for_merge`` refuses on below — the other
+        request rows and the evidence keyspace — so the pre-check and the
+        write cannot drift apart in the fake the way they must not drift apart
+        in PostgreSQL. No status filter on the rival: production's
+        ``UNIQUE(mb_release_id)`` is global.
+        """
+        rival = next(
+            (
+                other_id
+                for other_id, other in sorted(self._requests.items())
+                if other_id != request_id
+                and other.get("mb_release_id") == new_release_id
+            ),
+            None,
+        )
+        moving = [
+            key[1] for key in self.album_quality_evidence
+            if key[0] == old_release_id
+        ]
+        return MergeRekeyCollision(
+            rival_request_id=rival,
+            colliding_fingerprints=tuple(sorted(
+                fingerprint for fingerprint in moving
+                if (new_release_id, fingerprint) in self.album_quality_evidence
+            )),
+        )
+
     def update_request_release_for_merge(
         self,
         request_id: int,
@@ -5451,11 +5489,14 @@ class FakePipelineDB:
     ) -> bool:
         """Mirror ``PipelineDB.update_request_release_for_merge`` (#1059).
 
-        Same four predicates as production's compare-and-set: the row still
-        holds ``old_release_id``, it is ``processing``, and the exact
-        automation owner is attached. A survivor already held by another
-        request is production's ``UNIQUE(mb_release_id)`` violation, which
-        this write reports as False rather than raising.
+        Same predicates as production's compare-and-set: the row still holds
+        ``old_release_id``, and the caller still holds the import claim that
+        authorizes an identity write — either the automation owner pointer
+        (``processing`` + ``active_automation_import_job_id``) or a
+        ``running`` ``force_import`` job on an unowned, non-``replaced`` row
+        (#1080). A survivor already held by another request is production's
+        ``UNIQUE(mb_release_id)`` violation, which this write reports as False
+        rather than raising.
 
         The request's ``album_quality_evidence`` rows move with it, in the
         same all-or-nothing step: evidence is content-addressed by
@@ -5477,12 +5518,23 @@ class FakePipelineDB:
             (request_id, old_release_id, new_release_id, expected_import_job_id),
         )
         row = self._requests.get(request_id)
-        if (
-            row is None
-            or row.get("mb_release_id") != old_release_id
-            or row.get("status") != "processing"
-            or row.get("active_automation_import_job_id") != expected_import_job_id
-        ):
+        if row is None or row.get("mb_release_id") != old_release_id:
+            return False
+        job = self.get_import_job(expected_import_job_id)
+        automation_claim = (
+            row.get("status") == "processing"
+            and row.get("active_automation_import_job_id")
+            == expected_import_job_id
+        )
+        force_claim = (
+            job is not None
+            and job.job_type == IMPORT_JOB_FORCE
+            and job.status == "running"
+            and job.request_id == request_id
+            and row.get("active_automation_import_job_id") is None
+            and row.get("status") not in ("processing", "replaced")
+        )
+        if not (automation_claim or force_claim):
             return False
         for other_id, other in self._requests.items():
             if other_id != request_id and other.get("mb_release_id") == new_release_id:

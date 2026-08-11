@@ -10,13 +10,17 @@ in :mod:`lib.download_rejection`.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Literal, Protocol
 
 from lib.beets_retag import (
     RETAG_FAILED,
     RETAG_READY_OUTCOMES,
+    RETAG_RETAGGED,
     BeetsRetagResult,
+    MergeRetagFn,
     retag_merged_album,
 )
 from lib.dispatch import (
@@ -48,6 +52,7 @@ from lib.import_manifest import (
     manifest_trace_summary,
     tracked_audio_paths_for_downloads,
 )
+from lib.import_queue import IMPORT_JOB_AUTOMATION, IMPORT_JOB_FORCE, ImportJob
 from lib.mb_canonical import CanonicalReleaseFn, production_canonical_release_fn
 from lib.processing_paths import source_dirs_for_album, stage_to_ai_path
 from lib.quality import (
@@ -63,6 +68,9 @@ from lib.util import log_validation_result
 if TYPE_CHECKING:
     from lib.config import CratediggerConfig
     from lib.context import CratediggerContext
+    from lib.pipeline_db._shared import MergeRekeyCollision
+    from lib.pipeline_db.download_log import DownloadLogOutcome
+    from lib.pipeline_db.rows import AlbumRequestRow
 
 logger = logging.getLogger("cratedigger")
 
@@ -118,12 +126,13 @@ class ValidateFn(Protocol):
     ) -> DispatchOutcome | None: ...
 
 
-#: The request was never a candidate for a merge rekey: no request row, or a
-#: release identity MusicBrainz has no redirect concept for (Discogs).
+#: The request was never a candidate for a merge rekey: no request row, a
+#: release identity MusicBrainz has no redirect concept for (Discogs), or a
+#: validation that never reached ``mbid_not_found`` at all.
 MERGE_NOT_APPLICABLE: Final = "not_applicable"
-#: This validation does not hold the request's exact processing owner, so it
-#: has no authority to retag the library or move the row (YouTube rescue, or a
-#: stale owner). Checked BEFORE the mirror so the lookup is never spent on a
+#: This validation does not hold the request's exact import claim, so it has
+#: no authority to retag the library or move the row (a YouTube rescue, or a
+#: stale claim). Checked BEFORE the mirror so the lookup is never spent on a
 #: world that could not act on the answer.
 MERGE_NOT_OWNED: Final = "not_owned"
 #: MusicBrainz still considers the stored id current, or would not answer.
@@ -135,11 +144,21 @@ MERGE_SURVIVOR_NOT_OFFERED: Final = "survivor_not_offered"
 #: Another process holds the per-release lock on one of the two identities the
 #: retag mutates. Nothing was attempted; the request stays runnable.
 MERGE_RELEASE_LOCKED: Final = "release_locked"
+#: The survivor is already occupied — another request holds it, or an
+#: evidence row already exists at ``(survivor, fingerprint)`` — so the rekey
+#: is refused BEFORE the library is touched. Read under the release locks,
+#: immediately before the retag: the alternative is discovering the refusal
+#: afterwards, with the library moved and the request left behind. Durably
+#: audited, because it is the one non-ready outcome no retry can clear.
+MERGE_REKEY_BLOCKED: Final = "rekey_blocked"
 #: The library could not be moved onto the survivor. Nothing else happens:
 #: rekeying now would make the next import land a SECOND album.
 MERGE_RETAG_NOT_READY: Final = "retag_not_ready"
-#: The library moved but the request row did not (another request already
-#: holds the survivor, or the owner fence lost). Fails closed.
+#: The library moved but the request row did not: the survivor was taken in
+#: the window between the pre-check and the write, or the claim was lost.
+#: Fails closed, and — when this execution is what moved the library — records
+#: a durable audit row, because a split nobody is told about is one nothing
+#: will re-derive.
 MERGE_REKEY_REFUSED: Final = "rekey_refused"
 #: The library is at the survivor and the request row now names it.
 MERGE_REKEYED: Final = "rekeyed"
@@ -150,10 +169,18 @@ type MergeRekeyStatus = Literal[
     "no_redirect",
     "survivor_not_offered",
     "release_locked",
+    "rekey_blocked",
     "retag_not_ready",
     "rekey_refused",
     "rekeyed",
 ]
+
+#: The audit outcome BOTH durable merge audits are recorded under — the
+#: occupied survivor and the residual split. Neither is a quality verdict and
+#: neither is a download result: the world is stuck and surfaced (invariant
+#: 11), so they take the existing environment-failure outcome rather than a
+#: new one that would need a migration to say the same thing.
+_MERGE_AUDIT_OUTCOME: Final = "failed"
 
 
 @dataclass(frozen=True)
@@ -163,22 +190,136 @@ class MergeRekeyOutcome:
     status: MergeRekeyStatus
     detail: str = ""
     survivor: str | None = None
+    #: THIS execution observably moved the installed album onto the survivor
+    #: (``RETAG_RETAGGED``). Set independently of ``status`` because the two
+    #: together name the one state that needs both an audit row and a refusal
+    #: to launch Beets: moved library, unmoved request.
+    library_moved: bool = False
 
     @property
     def rekeyed(self) -> bool:
         return self.status == MERGE_REKEYED
 
+    @property
+    def split_identity(self) -> bool:
+        """The library moved onto the survivor and the request did not.
 
-class MergeRetagFn(Protocol):
-    """Exact injection contract for the one-album library retag."""
+        The durable divergence: Beets holds the album at one release id and
+        the request names another. Nothing is guaranteed to re-derive it —
+        whatever claimed the survivor inside the race window still holds it,
+        so the next attempt is refused at the occupancy pre-check BEFORE the
+        library is read at all — so it is audited, and the force lane refuses
+        to launch Beets at the id the row still names.
 
-    def __call__(
+        Scoped to the split THIS execution created (``library_moved`` is
+        ``RETAG_RETAGGED``), never a detector for one that already exists: a
+        pre-existing split arrives as :data:`MERGE_REKEY_BLOCKED`, which is
+        why that outcome is durably audited too.
+        """
+        return self.library_moved and not self.rekeyed
+
+
+@dataclass(frozen=True)
+class ReleaseValidation:
+    """One exact-release validation plus whatever the merge seam did about it."""
+
+    result: ValidationResult
+    merge: MergeRekeyOutcome
+
+
+class MergeRekeyDB(Protocol):
+    """The exact pipeline-DB surface the merge seam needs.
+
+    Declared locally on purpose: the seam depends on a handful of methods, not
+    on the whole ``PipelineDB``, and both lanes that reach it (the automation
+    validation and the force-import dispatch entry point) satisfy it
+    structurally.
+    """
+
+    def get_request(self, request_id: int) -> AlbumRequestRow | None: ...
+
+    def get_import_job(self, job_id: int) -> ImportJob | None: ...
+
+    def advisory_lock(
         self,
-        cfg: CratediggerConfig,
+        namespace: int,
+        key: int,
+    ) -> AbstractContextManager[bool]: ...
+
+    def merge_rekey_collision(
+        self,
+        request_id: int,
         *,
-        old_identity: ReleaseIdentity,
-        new_identity: ReleaseIdentity,
-    ) -> BeetsRetagResult: ...
+        old_release_id: str,
+        new_release_id: str,
+    ) -> MergeRekeyCollision: ...
+
+    def update_request_release_for_merge(
+        self,
+        request_id: int,
+        *,
+        old_release_id: str,
+        new_release_id: str,
+        expected_import_job_id: int,
+    ) -> bool: ...
+
+    def log_download(
+        self,
+        request_id: int,
+        *,
+        beets_detail: str | None = ...,
+        outcome: DownloadLogOutcome | None = ...,
+        error_message: str | None = ...,
+    ) -> int: ...
+
+
+#: The two request states an import claim can legally rekey identity from.
+#: Verbatim the complement of ``claim_force_import_job_under_lock``'s request
+#: fence: ``processing`` belongs to an automation owner (and is that claim's
+#: own arm below), and ``replaced`` rows are frozen audit ancestors.
+_FORCE_CLAIM_EXCLUDED_STATUSES: Final = frozenset({"processing", "replaced"})
+
+
+def merge_rekey_claim_holds(
+    row: Mapping[str, object],
+    job: ImportJob,
+) -> bool:
+    """Does ``job`` still hold the import claim that authorizes a rekey?
+
+    Moving ``mb_release_id`` is an identity write, so it is fenced on the
+    caller still holding the exact claim it took. There are two claims in
+    production and this mirrors both, term for term:
+
+    * ``claim_automation_import_job_under_lock`` — the request is
+      ``processing`` and its ``active_automation_import_job_id`` names this
+      job. That pointer IS ownership (invariant 10).
+    * ``claim_force_import_job_under_lock`` — the request has no automation
+      owner and is neither ``processing`` nor the frozen ``replaced``, and
+      this force job is ``running`` against it. The force lane cannot take
+      the ``processing`` pointer at all: migration 066's owner-equivalence
+      CHECK and its partial unique index reserve it for one active
+      ``automation_import`` job.
+
+    A YouTube rescue job holds neither claim and never rekeys, exactly as
+    before (#1059).
+
+    This is the PRE-check, not the authority: it exists so an unclaimed world
+    never spends a mirror lookup or retags the shared Beets library for a
+    rekey that could not land. ``PipelineDB.update_request_release_for_merge``
+    re-decides the same conjunction atomically and is what actually writes.
+    """
+    if job.job_type == IMPORT_JOB_AUTOMATION:
+        return (
+            row.get("status") == "processing"
+            and row.get("active_automation_import_job_id") == job.id
+        )
+    if job.job_type == IMPORT_JOB_FORCE:
+        return (
+            job.status == "running"
+            and row.get("active_automation_import_job_id") is None
+            and row.get("status") not in _FORCE_CLAIM_EXCLUDED_STATUSES
+        )
+    return False
 
 
 def _retag_merged_album_with_beets(
@@ -212,12 +353,113 @@ def _retag_merged_album_with_beets(
         )
 
 
-def _follow_merged_release(
-    album_data: GrabListEntry,
-    bv_result: ValidationResult,
-    ctx: CratediggerContext,
+def split_identity_audit_message(
     *,
-    import_job_id: int,
+    old_release_id: str,
+    new_release_id: str,
+    retag_detail: str,
+) -> str:
+    """The operator-facing sentence for a moved library and an unmoved request.
+
+    One producer, so the copy the operator reads in Recents and the copy the
+    audit row stores are the same string (``.claude/rules/test-fidelity.md``
+    Rule C: a pin for this copy takes its input from here, never a literal).
+
+    Deliberately carries no lane-specific prefix: BOTH lanes can write this
+    row, so "force import attempt failed" would be false half the time. It is
+    genuinely import-phase text, which is exactly what
+    ``lib.failure_presentation`` labels ``Import error:``.
+    """
+    return (
+        f"Library and request disagree after a MusicBrainz merge: "
+        f"{old_release_id} was merged into {new_release_id} and the installed "
+        f"album was retagged onto the survivor ({retag_detail}), but the "
+        "request could not be rekeyed — the survivor was claimed, or this "
+        "import's claim was lost, between the check and the write. Two "
+        "requests over one release is an operator decision."
+    )
+
+
+def merge_rekey_blocked_audit_message(
+    *,
+    old_release_id: str,
+    new_release_id: str,
+    collision_detail: str,
+) -> str:
+    """The operator-facing sentence for a survivor that is already occupied.
+
+    One producer, so the outcome detail, the durable audit row and the copy
+    the operator reads in Recents are the same string
+    (``.claude/rules/test-fidelity.md`` Rule C: a pin for this copy takes its
+    input from here, never a literal).
+
+    Lane-neutral like its split sibling — both lanes reach this branch — and
+    it deliberately names the collision rather than the lane's symptom,
+    because the collision is the only thing an operator can act on.
+    """
+    return (
+        f"{old_release_id} was merged into {new_release_id}, but the survivor "
+        f"is already occupied: {collision_detail}. The library was not "
+        "touched, and no retry clears this: resolving the collision — two "
+        "requests over one release, or two measurements of the same bytes — "
+        "is an operator decision."
+    )
+
+
+def _record_merge_audit(
+    db: MergeRekeyDB,
+    *,
+    request_id: int,
+    log_label: str,
+    beets_detail: str,
+    message: str,
+) -> None:
+    """Record a merge outcome the pipeline cannot clear by trying again.
+
+    Most non-ready outcomes leave the world exactly as the next cycle will
+    find it — the mirror said nothing, a lock was held, the retag failed — so
+    the existing rejection IS the audit. Exactly two are different, and both
+    come here:
+
+    * :data:`MERGE_REKEY_BLOCKED` — the collision persists until an operator
+      resolves it, so every later attempt is refused identically. The force
+      lane in particular carries no rejection of its own to explain it: force
+      imports DESPITE the verdict, so it goes on to meet the merged-away id
+      inside ``import_one.py`` and reports ``mbid_missing`` with no reason
+      attached, attempt after attempt.
+    * :data:`MERGE_REKEY_REFUSED` after this execution moved the library — no
+      later attempt can tell that state apart from a request that was always
+      wrong.
+
+    Invariant 11's "record Recents audit evidence" is the whole point: a log
+    line is gone at the next journal rotation. One row per execution that
+    reaches the branch, deliberately NOT deduplicated — an execution is a
+    discrete operator force action or completed-download validation, each of
+    which already writes its own ``download_log`` row, so the audit trail
+    stays proportional to the work attempted rather than to elapsed time.
+
+    Deliberately unguarded: a DB blip here raises into the importer, which
+    self-heals the request and re-derives on the next cycle. Swallowing it
+    would trade the audit for silence, which is the defect this exists to fix.
+    """
+    logger.error("%s: request=%s %s", log_label, request_id, message)
+    db.log_download(
+        request_id,
+        outcome=_MERGE_AUDIT_OUTCOME,
+        beets_detail=beets_detail,
+        error_message=message,
+    )
+
+
+def _follow_merged_release(
+    bv_result: ValidationResult,
+    *,
+    db: MergeRekeyDB,
+    cfg: CratediggerConfig,
+    request_id: int | None,
+    stored_release_id: str | None,
+    import_job_id: int | None,
+    distance_threshold: float,
     canonical_release_fn: CanonicalReleaseFn,
     retag_fn: MergeRetagFn,
 ) -> MergeRekeyOutcome:
@@ -246,15 +488,45 @@ def _follow_merged_release(
     ``pipeline-cli destructive``). Without both locks, an operator Bad Rip or
     library-delete resolving "the one album at the survivor" can bind to the
     album ``mbsync`` just retagged onto that id and delete files the operator
-    never selected. The IMPORT lock this validation already runs under stays
+    never selected. The IMPORT lock both callers already run under stays
     outer, preserving the documented ``IMPORT → RELEASE`` order
     (``docs/advisory-locks.md``); the acquires are non-blocking, so contention
     is a typed non-ready outcome, never a wait.
 
+    **The rekey's two UNIQUE-violating refusals are read BEFORE the retag.**
+    Both causes — a rival request already at the survivor, and an evidence row
+    already at ``(survivor, fingerprint)`` — are plain reads
+    (:meth:`PipelineDB.merge_rekey_collision`), taken under the release locks
+    already held, immediately before Beets is mutated. (The write's other
+    refusals are compare-and-set misses whose world the next attempt
+    re-derives; these two persist until an operator acts, which is why exactly
+    these two are worth a pre-check.) Retagging first and discovering the
+    refusal afterwards leaves the installed album filed under the survivor
+    while the request still names the merged-away id, and nothing is
+    guaranteed to re-derive that: the collision that refused the write is
+    still there on the next attempt, which is now refused at this same
+    pre-check — before the library is read at all. A blocked world is
+    therefore durably audited too (:func:`_record_merge_audit`): it is the one
+    non-ready outcome no retry can clear.
+
     Every failure keeps today's rejection exactly as it was and leaves the
     request runnable for the next cycle — nothing is flagged for a human
-    (invariant 11). ``bv_result`` and ``album_data`` are mutated only on the
-    final success, after every fallible step has already succeeded.
+    (invariant 11). ``bv_result`` is mutated only on the final success, after
+    every fallible step has already succeeded, and the caller learns the new
+    identity from :attr:`MergeRekeyOutcome.survivor` rather than from a
+    mutated argument.
+
+    The pre-check narrows the race; it cannot close it, because no lock covers
+    "some other request acquires this release id", and none covers "another
+    lane's preview writes an evidence row at ``(survivor, fingerprint)``"
+    either. If the survivor is taken in that window, the retag has already
+    moved the library and the write refuses:
+    :attr:`MergeRekeyOutcome.library_moved` says so, a durable
+    ``download_log`` row records it for the operator, and the force lane
+    refuses to launch Beets at the id the row still names. The REQUEST is
+    still runnable in that world — but the LIBRARY has moved, which is why
+    "nothing is flagged for a human" describes the request and never the
+    library.
     """
     from contextlib import ExitStack
 
@@ -263,39 +535,44 @@ def _follow_merged_release(
         release_id_to_lock_key,
     )
 
-    request_id = album_data.db_request_id
     if request_id is None:
         return MergeRekeyOutcome(MERGE_NOT_APPLICABLE, "no request row")
-    stored = normalize_release_id(album_data.mb_release_id)
+    stored = normalize_release_id(stored_release_id)
     old_identity = ReleaseIdentity.from_id(stored)
     if old_identity is None or old_identity.source != "musicbrainz":
         # Discogs release ids have no redirect concept; this is not an
         # adapter between the two sources.
         return MergeRekeyOutcome(
             MERGE_NOT_APPLICABLE,
-            f"{album_data.mb_release_id!r} is not a MusicBrainz release id",
+            f"{stored_release_id!r} is not a MusicBrainz release id",
         )
 
-    # The write below is fenced on all three of these anyway; checking them
-    # here means an unowned world (a YouTube rescue, a stale owner, a row
+    # The write below is fenced on all of these anyway; checking them here
+    # means an unclaimed world (a YouTube rescue, a stale claim, a row
     # somebody else already moved) never spends a mirror lookup or retags the
     # shared Beets library for a rekey that could not land.
-    db = ctx.pipeline_db_source._get_db()
     row = db.get_request(request_id)
     if row is None:
         return MergeRekeyOutcome(
             MERGE_NOT_OWNED, f"request {request_id} no longer exists",
         )
-    if (
-        row.get("status") != "processing"
-        or row.get("active_automation_import_job_id") != import_job_id
-    ):
+    job = db.get_import_job(import_job_id) if import_job_id is not None else None
+    if job is None or job.request_id != request_id:
+        return MergeRekeyOutcome(
+            MERGE_NOT_OWNED,
+            (
+                f"import job {import_job_id!r} does not name request "
+                f"{request_id}"
+            ),
+        )
+    if not merge_rekey_claim_holds(row, job):
         return MergeRekeyOutcome(
             MERGE_NOT_OWNED,
             (
                 f"request {request_id} is {row.get('status')!r} owned by "
-                f"{row.get('active_automation_import_job_id')!r}, not by this "
-                f"import job {import_job_id}"
+                f"{row.get('active_automation_import_job_id')!r}; "
+                f"{job.job_type} job {job.id} ({job.status}) does not hold "
+                "its import claim"
             ),
         )
     if normalize_release_id(row.get("mb_release_id")) != old_identity.release_id:
@@ -370,8 +647,42 @@ def _follow_merged_release(
                     survivor=new_identity.release_id,
                 )
 
+        # Ask what already occupies the survivor while nothing has moved yet.
+        # Both refusal causes are reads, so "retag, then discover we cannot
+        # rekey" is avoidable in every world except a live race.
+        collision = db.merge_rekey_collision(
+            request_id,
+            old_release_id=old_identity.release_id,
+            new_release_id=new_identity.release_id,
+        )
+        if collision.blocked:
+            blocked_detail = merge_rekey_blocked_audit_message(
+                old_release_id=old_identity.release_id,
+                new_release_id=new_identity.release_id,
+                collision_detail=collision.detail(),
+            )
+            # The library is untouched, so nothing here is broken — but
+            # nothing here re-derives either, and the operator is the only
+            # one who can clear it. Durable evidence, once per execution that
+            # reaches this branch.
+            _record_merge_audit(
+                db,
+                request_id=request_id,
+                log_label="MERGE REKEY BLOCKED",
+                beets_detail=(
+                    "merge rekey blocked before the retag onto "
+                    f"{new_identity.release_id}"
+                ),
+                message=blocked_detail,
+            )
+            return MergeRekeyOutcome(
+                MERGE_REKEY_BLOCKED,
+                blocked_detail,
+                survivor=new_identity.release_id,
+            )
+
         retag = retag_fn(
-            ctx.cfg,
+            cfg,
             old_identity=old_identity,
             new_identity=new_identity,
         )
@@ -384,29 +695,63 @@ def _follow_merged_release(
                 survivor=new_identity.release_id,
             )
 
+        # Only ``retagged`` means THIS execution moved the installed album.
+        # ``already_current`` found it there and ``not_held`` found no album
+        # at all; neither leaves a divergence this execution created. Widening
+        # this to "the retag was ready" would make a refused rekey assert a
+        # move that never happened — a false audit row, and a force refusal in
+        # a world this execution did not create. Pinned by
+        # ``test_a_ready_but_unmoved_library_never_claims_a_retag``.
+        library_moved = retag.outcome == RETAG_RETAGGED
+
         if not db.update_request_release_for_merge(
             request_id,
             old_release_id=old_identity.release_id,
             new_release_id=new_identity.release_id,
-            expected_import_job_id=import_job_id,
+            # The claim verified above IS the write's fence, so the job that
+            # proved it is the job the compare-and-set names.
+            expected_import_job_id=job.id,
         ):
+            detail = (
+                f"request {request_id} could not be rekeyed onto "
+                f"{new_identity.release_id}; another request may already "
+                "hold it (merging or deleting a request is an operator "
+                "decision)"
+            )
+            if library_moved:
+                # ONE producer for the split sentence: the durable audit row,
+                # the outcome detail, and therefore the force lane's refusal
+                # message are all this string.
+                detail = split_identity_audit_message(
+                    old_release_id=old_identity.release_id,
+                    new_release_id=new_identity.release_id,
+                    retag_detail=retag.detail,
+                )
+                _record_merge_audit(
+                    db,
+                    request_id=request_id,
+                    log_label="MERGE REKEY SPLIT IDENTITY",
+                    beets_detail=(
+                        "merge rekey refused after retag onto "
+                        f"{new_identity.release_id}"
+                    ),
+                    message=detail,
+                )
             return MergeRekeyOutcome(
                 MERGE_REKEY_REFUSED,
-                (
-                    f"request {request_id} could not be rekeyed onto "
-                    f"{new_identity.release_id}; another request may already "
-                    "hold it (merging or deleting a request is an operator "
-                    "decision)"
-                ),
+                detail,
                 survivor=new_identity.release_id,
+                library_moved=library_moved,
             )
 
-    album_data.mb_release_id = new_identity.release_id
     # ONE place turns a candidate into a scenario — the same function
-    # ``beets_validate`` uses for the requested release (issue #1059).
+    # ``beets_validate`` uses for the requested release (issue #1059) — and it
+    # is handed THIS validation's threshold, not the config default, so a
+    # rekeyed force import is named by the override it actually ran under
+    # (#1080).
     from lib.beets import apply_candidate_scenario
 
-    apply_candidate_scenario(bv_result, match, ctx.cfg.beets_distance_threshold)
+    apply_candidate_scenario(bv_result, match, distance_threshold)
     return MergeRekeyOutcome(
         MERGE_REKEYED,
         (
@@ -414,7 +759,109 @@ def _follow_merged_release(
             f"{new_identity.release_id}; {retag.detail}"
         ),
         survivor=new_identity.release_id,
+        library_moved=library_moved,
     )
+
+
+def validate_release_with_merge_redirect(
+    *,
+    db: MergeRekeyDB,
+    cfg: CratediggerConfig,
+    album_path: str,
+    request_id: int | None,
+    release_id: str,
+    import_job_id: int | None,
+    distance_threshold: float,
+    cancellation_token: CancellationToken | None = None,
+    canonical_release_fn: CanonicalReleaseFn | None = None,
+    retag_fn: MergeRetagFn | None = None,
+) -> ReleaseValidation:
+    """Validate one album against one exact release, following MB merges.
+
+    THE exact-release comparison seam. Both import lanes run it, differing in
+    exactly one argument — the distance threshold, which force import
+    overrides to :data:`lib.beets.FORCE_IMPORT_DISTANCE_THRESHOLD` and
+    automation takes from ``beets_distance_threshold`` (#1080). Everything
+    else, including the merge-redirect follow, is the same code over the same
+    inputs, so a request whose release MusicBrainz merged away is rescued by
+    whichever lane reaches it first.
+
+    Before #1080 only the automation lane called this: force import went
+    straight to ``dispatch_import_core`` and so met the merged-away release at
+    the OTHER comparison site, ``harness/import_one.py::_find_target_candidate``,
+    which has no redirect concept and rejects ``mbid_missing`` forever.
+
+    The mirror is asked ONLY on ``mbid_not_found``, so a healthy validation
+    never makes a network call — the ~8,500-rows-a-cycle performance contract.
+
+    The returned :class:`ReleaseValidation` reports the redirect outcome
+    separately from the validation result. The caller decides what to do with
+    each: automation routes on ``result.valid``; force import uses only
+    ``merge.survivor``, because "import despite the verdict" is what force is.
+
+    ``canonical_release_fn`` / ``retag_fn`` resolve to this module's
+    production singletons when omitted. Tests INJECT replacements explicitly;
+    they never patch the module binding, because patching does not replace a
+    captured default (``.claude/rules/code-quality.md`` § mocks, strategy 2).
+    """
+    from lib.beets import beets_validate as _bv
+
+    result = _bv(
+        cfg.beets_harness_path,
+        album_path,
+        release_id,
+        distance_threshold,
+    )
+    if result.scenario != "mbid_not_found":
+        return ReleaseValidation(
+            result,
+            MergeRekeyOutcome(
+                MERGE_NOT_APPLICABLE,
+                f"validation named {result.scenario!r}, not mbid_not_found",
+            ),
+        )
+    # An execution that lost its owner while the harness was running must not
+    # go on to retag the shared library and move an identity. The harness is
+    # the long pole here, so the checkpoint belongs after it and before the
+    # first mutation, not only at the caller's next stage.
+    _checkpoint(cancellation_token)
+    # The one place a MusicBrainz merge is followed. Gated on the exact
+    # scenario so the mirror is never touched by a healthy validation.
+    merge = _follow_merged_release(
+        result,
+        db=db,
+        cfg=cfg,
+        request_id=request_id,
+        stored_release_id=release_id,
+        import_job_id=import_job_id,
+        distance_threshold=distance_threshold,
+        canonical_release_fn=(
+            canonical_release_fn
+            if canonical_release_fn is not None
+            else _PRODUCTION_CANONICAL_RELEASE_FN
+        ),
+        retag_fn=(
+            retag_fn if retag_fn is not None else _retag_merged_album_with_beets
+        ),
+    )
+    if merge.rekeyed:
+        logger.info(
+            "MERGE REKEY: request=%s %s (now scenario=%s valid=%s)",
+            request_id,
+            merge.detail,
+            result.scenario,
+            result.valid,
+        )
+    elif merge.status not in (MERGE_NOT_APPLICABLE, MERGE_NO_REDIRECT):
+        # Surfaced, never parked: the existing rejection stands and the
+        # request goes back to the search pool for the next cycle.
+        logger.warning(
+            "MERGE REKEY DECLINED (%s): request=%s %s",
+            merge.status,
+            request_id,
+            merge.detail,
+        )
+    return ReleaseValidation(result, merge)
 
 
 def _check_staged_audio_manifest(
@@ -464,8 +911,6 @@ def _process_beets_validation(
     patch the module binding, because patching does not replace a captured
     default (``.claude/rules/code-quality.md`` § mocks, strategy 2).
     """
-    from lib.beets import beets_validate as _bv
-
     current_path = staged_album.current_path
     manifest_ok, manifest_detail = _check_staged_audio_manifest(
         album_data,
@@ -498,12 +943,23 @@ def _process_beets_validation(
             cancellation_token=cancellation_token,
         )
     _checkpoint(cancellation_token)
-    bv_result = _bv(
-        ctx.cfg.beets_harness_path,
-        current_path,
-        album_data.mb_release_id,
-        ctx.cfg.beets_distance_threshold,
+    validation = validate_release_with_merge_redirect(
+        db=ctx.pipeline_db_source._get_db(),
+        cfg=ctx.cfg,
+        album_path=current_path,
+        request_id=album_data.db_request_id,
+        release_id=album_data.mb_release_id,
+        import_job_id=import_job_id,
+        distance_threshold=ctx.cfg.beets_distance_threshold,
+        cancellation_token=cancellation_token,
+        canonical_release_fn=canonical_release_fn,
+        retag_fn=retag_fn,
     )
+    bv_result = validation.result
+    if validation.merge.rekeyed and validation.merge.survivor is not None:
+        # The row and the library are both at the survivor now; the in-flight
+        # entry follows so dispatch imports the identity that was rekeyed.
+        album_data.mb_release_id = validation.merge.survivor
     _checkpoint(cancellation_token)
     usernames_pre = {f.username for f in album_data.files if f.username}
     bv_result.soulseek_username = (
@@ -511,34 +967,6 @@ def _process_beets_validation(
     )
     bv_result.download_folder = current_path
     bv_result.source_dirs = source_dirs_for_album(album_data)
-    if bv_result.scenario == "mbid_not_found":
-        # The one place a MusicBrainz merge is followed. Gated on the exact
-        # scenario so the mirror is never touched by a healthy validation.
-        merge = _follow_merged_release(
-            album_data,
-            bv_result,
-            ctx,
-            import_job_id=import_job_id,
-            canonical_release_fn=canonical_release_fn,
-            retag_fn=retag_fn,
-        )
-        if merge.rekeyed:
-            logger.info(
-                "MERGE REKEY: request=%s %s (now scenario=%s valid=%s)",
-                album_data.db_request_id,
-                merge.detail,
-                bv_result.scenario,
-                bv_result.valid,
-            )
-        elif merge.status not in (MERGE_NOT_APPLICABLE, MERGE_NO_REDIRECT):
-            # Surfaced, never parked: the existing rejection stands and the
-            # request goes back to the search pool for the next cycle.
-            logger.warning(
-                "MERGE REKEY DECLINED (%s): request=%s %s",
-                merge.status,
-                album_data.db_request_id,
-                merge.detail,
-            )
     if bv_result.valid:
         _checkpoint(cancellation_token)
         db = ctx.pipeline_db_source._get_db()

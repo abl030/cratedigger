@@ -1,7 +1,7 @@
 """Tests for force-import feature — CLI, DB, and import_one --force flag.
 
 Tests cover:
-- import_one.py --force flag (sets max_distance=999)
+- import_one.py --force flag (raises max_distance to the shared override)
 - pipeline_cli.py force-import command
 - pipeline_db.py get_download_log_entry() method
 - 'force_import' outcome in download_log
@@ -43,9 +43,16 @@ class TestImportOneForceFlag(unittest.TestCase):
         os.umask(self._saved_umask)
         self.addCleanup(os.umask, self._saved_umask)
 
-    def test_force_flag_sets_max_distance_999(self) -> None:
-        """--force must set max_distance=999 in the real main() entry point."""
+    def test_force_flag_raises_max_distance_to_the_shared_override(self) -> None:
+        """--force must raise ``max_distance`` to the ONE override constant.
+
+        The expected value comes from the producing module, not a literal:
+        ``lib.beets.FORCE_IMPORT_DISTANCE_THRESHOLD`` is the same number the
+        force lane hands ``beets_validate``, so both comparison sites in a
+        force import run under one override (#1080).
+        """
         from harness import import_one
+        from lib.beets import FORCE_IMPORT_DISTANCE_THRESHOLD
 
         class _StopAfterForce(Exception):
             pass
@@ -60,7 +67,9 @@ class TestImportOneForceFlag(unittest.TestCase):
             ), self.assertRaises(_StopAfterForce):
                 import_one.main()
 
-            self.assertEqual(import_one.max_distance, 999)
+            self.assertEqual(
+                import_one.max_distance, FORCE_IMPORT_DISTANCE_THRESHOLD,
+            )
         finally:
             import_one.max_distance = original
 

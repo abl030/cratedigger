@@ -125,6 +125,13 @@ after the request rekey commits; both acquires are non-blocking, so contention
 returns a typed non-ready outcome (`release_locked`) that keeps the existing
 rejection and leaves the request runnable.
 
+Both importer lanes reach that site, each already holding IMPORT for the
+request: the automation validation seam
+(`_process_beets_validation`) and the force-import entry point
+(`dispatch_import_from_db`, issue #1080). Force import is the same path with
+the Beets distance overridden, so it runs the same
+`validate_release_with_merge_redirect` call and inherits the same lock order.
+
 RELEASE also serializes direct request creation in `RequestCreationService`:
 Add and new-row Upgrade hold the exact release lock while rechecking identity,
 persisting their provisional row, and nesting the per-request PLAN lock before
@@ -294,7 +301,7 @@ watchdogs have stopped.
 | Automation importer owner scope | `scripts/importer.py` | `_process_automation_claim` | IMPORT then RELEASE | `request_id`; `release_id_to_lock_key(release_id)` |
 | Automation startup convergence | `lib/pipeline_db/import_jobs.py` | `PipelineDB.recover_automation_import_job` | IMPORT then RELEASE | `request_id`; `release_id_to_lock_key(release_id)` |
 | Auto + force-import dispatch | `lib/dispatch/core.py` | `dispatch_import_core` | RELEASE | `release_id_to_lock_key(mb_release_id)` |
-| Import-time MusicBrainz merge retag | `lib/download_validation.py` | `_follow_merged_release` | RELEASE, both identities, inside the importer's IMPORT session | `release_id_to_lock_key(old_release_id)` and `release_id_to_lock_key(new_release_id)`, acquired in sorted key order |
+| Import-time MusicBrainz merge retag (both importer lanes) | `lib/download_validation.py` | `_follow_merged_release`, via `validate_release_with_merge_redirect` | RELEASE, both identities, inside the importer's IMPORT session | `release_id_to_lock_key(old_release_id)` and `release_id_to_lock_key(new_release_id)`, acquired in sorted key order |
 | Direct Add / new-row Upgrade | `lib/request_creation_service.py` | `RequestCreationService.create_or_resume` | RELEASE then PLAN | `release_id_to_lock_key(creation.release_id)`; `request_id` |
 | Force-import outer | `lib/dispatch/entry_points.py` | `dispatch_import_from_db` | IMPORT | `request_id` |
 | Ban-source destructive action | `lib/destructive_release_service.py` | `ban_source` | IMPORT then RELEASE | `request_id`; `release_id_to_lock_key(server release id)` |

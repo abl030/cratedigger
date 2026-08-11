@@ -1213,6 +1213,81 @@ class TestFakePipelineDB(unittest.TestCase):
             mb_release_id="survivor-id", snapshot_fingerprint=fingerprint,
         ))
 
+    def test_merge_rekey_collision_reports_both_documented_refusals(self):
+        """The pre-check reads the same state the write refuses on (#1080).
+
+        ``merge_rekey_collision`` exists so the seam never retags the shared
+        Beets library for a rekey that is already refused. Fake and production
+        must agree on both causes, and — critically — the fake's pre-check and
+        its own write must not drift apart: every world this reports blocked,
+        the write must refuse.
+        """
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=41,
+            mb_release_id="merged-id",
+            status="processing",
+            active_automation_import_job_id=7,
+        ))
+
+        clear = db.merge_rekey_collision(
+            41, old_release_id="merged-id", new_release_id="survivor-id",
+        )
+        self.assertFalse(clear.blocked)
+        self.assertIsNone(clear.rival_request_id)
+        self.assertEqual(clear.colliding_fingerprints, ())
+        self.assertEqual(clear.detail(), "")
+
+        # A rival request at the survivor — production's UNIQUE(mb_release_id).
+        # Any row counts, including a frozen ``replaced`` ancestor.
+        db.seed_request(make_request_row(
+            id=42, mb_release_id="survivor-id", status="replaced",
+        ))
+        rival = db.merge_rekey_collision(
+            41, old_release_id="merged-id", new_release_id="survivor-id",
+        )
+        self.assertTrue(rival.blocked)
+        self.assertEqual(rival.rival_request_id, 42)
+        self.assertIn("42", rival.detail())
+        # The write refuses the same world, so the pre-check never promises
+        # something the write would then take back.
+        self.assertFalse(db.update_request_release_for_merge(
+            41,
+            old_release_id="merged-id",
+            new_release_id="survivor-id",
+            expected_import_job_id=7,
+        ))
+
+        # An evidence fingerprint already at the survivor — production's
+        # UNIQUE (mb_release_id, snapshot_fingerprint).
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=41,
+            mb_release_id="merged-id",
+            status="processing",
+            active_automation_import_job_id=7,
+        ))
+        evidence = make_album_quality_evidence(mb_release_id="merged-id")
+        for release_id in ("merged-id", "survivor-id"):
+            db.upsert_album_quality_evidence(
+                make_album_quality_evidence(mb_release_id=release_id),
+            )
+        collision = db.merge_rekey_collision(
+            41, old_release_id="merged-id", new_release_id="survivor-id",
+        )
+        self.assertTrue(collision.blocked)
+        self.assertIsNone(collision.rival_request_id)
+        self.assertEqual(
+            collision.colliding_fingerprints, (evidence.snapshot_fingerprint,),
+        )
+        self.assertIn("evidence already exists", collision.detail())
+        self.assertFalse(db.update_request_release_for_merge(
+            41,
+            old_release_id="merged-id",
+            new_release_id="survivor-id",
+            expected_import_job_id=7,
+        ))
+
     def test_metadata_update_rejects_every_reserved_field(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=41, status="wanted"))
@@ -7015,6 +7090,238 @@ class TestFakeListLibraryRequestCandidates(unittest.TestCase):
             db.list_library_request_candidates(["not-a-release-id"]),
             [],
         )
+
+
+class TestFakeMergeRekeyForceClaimFence(unittest.TestCase):
+    """The fake's force arm, term for term against the real SQL (#1080).
+
+    ``update_request_release_for_merge``'s force arm is a five-term
+    conjunction: a ``force_import`` job, ``running``, naming THIS request, on
+    a row with no automation owner whose status is neither ``processing`` nor
+    ``replaced``. Two permissiveness mutants — dropping ``job.status ==
+    "running"`` and dropping ``job.request_id == request_id`` — survived the
+    whole relevant suite before this table existed, while their real-SQL twins
+    were killed by ``tests/test_pipeline_db.py::TestMergeRekeyUnderAForceClaim``
+    on real PostgreSQL. A fake more permissive than the write it stands in for
+    is exactly the test-fidelity Rule B failure: every seam test above it
+    would agree with a production write that refuses.
+
+    Every term is exercised on its own, from a world that otherwise rekeys.
+    The one exception says so where it sits: the automation-owned case flips
+    both owner terms at once, because migration 066's CHECK means PostgreSQL
+    can only ever present them together. The ``processing`` status on its own
+    is a fake-only world, and has its own case.
+    """
+
+    MERGED = "merged-id"
+    SURVIVOR = "survivor-id"
+
+    def _force_job(
+        self,
+        db: FakePipelineDB,
+        *,
+        request_id: int,
+        download_log_id: int,
+        claim: bool = True,
+    ) -> int:
+        from lib.import_queue import (
+            IMPORT_JOB_FORCE,
+            force_import_dedupe_key,
+            force_import_payload,
+        )
+
+        job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=request_id,
+            dedupe_key=force_import_dedupe_key(download_log_id),
+            payload=force_import_payload(
+                download_log_id=download_log_id,
+                failed_path="/quarantine/album",
+            ),
+        )
+        db.mark_import_job_preview_importable(
+            job.id, preview_result={}, message="ready",
+        )
+        if claim:
+            claimed = db.claim_force_import_job_under_lock(
+                job.id, request_id=request_id, worker_id="fence-test",
+            )
+            assert claimed is not None and claimed.status == "running"
+        return job.id
+
+    def _world(self, *, status: str = "wanted", claim: bool = True):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=41, mb_release_id=self.MERGED, status=status,
+        ))
+        job_id = self._force_job(
+            db, request_id=41, download_log_id=1, claim=claim,
+        )
+        return db, job_id
+
+    def _rekey(self, db: FakePipelineDB, job_id: int, request_id: int = 41):
+        return db.update_request_release_for_merge(
+            request_id,
+            old_release_id=self.MERGED,
+            new_release_id=self.SURVIVOR,
+            expected_import_job_id=job_id,
+        )
+
+    def test_a_claimed_running_force_job_rekeys_its_own_request(self):
+        db, job_id = self._world()
+
+        self.assertTrue(self._rekey(db, job_id))
+
+        row = db.request(41)
+        assert row is not None
+        self.assertEqual(row["mb_release_id"], self.SURVIVOR)
+        # The lifecycle is untouched: force borrows the identity, never owns
+        # the request.
+        self.assertEqual(row["status"], "wanted")
+        self.assertIsNone(row["active_automation_import_job_id"])
+
+    def test_every_runnable_status_is_a_legal_force_rekey_target(self):
+        for status in ("wanted", "imported", "unsearchable", "downloading"):
+            with self.subTest(status=status):
+                db, job_id = self._world(status=status)
+
+                self.assertTrue(self._rekey(db, job_id))
+
+                row = db.request(41)
+                assert row is not None
+                self.assertEqual(row["mb_release_id"], self.SURVIVOR)
+
+    def test_a_job_that_is_not_running_writes_nothing(self):
+        """``queued`` is not a claim, and neither is a finished job."""
+        db, job_id = self._world(claim=False)
+        job = db.get_import_job(job_id)
+        assert job is not None and job.status != "running"
+
+        self.assertFalse(self._rekey(db, job_id))
+
+        row = db.request(41)
+        assert row is not None
+        self.assertEqual(row["mb_release_id"], self.MERGED)
+
+        db, job_id = self._world()
+        self.assertIsNotNone(db.mark_import_job_completed(
+            job_id, result={}, message="done",
+        ))
+
+        self.assertFalse(self._rekey(db, job_id))
+
+        row = db.request(41)
+        assert row is not None
+        self.assertEqual(row["mb_release_id"], self.MERGED)
+
+    def test_a_job_naming_another_request_writes_nothing(self):
+        db, _ = self._world()
+        db.seed_request(make_request_row(id=42, mb_release_id="other-id"))
+        other_job_id = self._force_job(db, request_id=42, download_log_id=2)
+
+        # The claimed job is real and running — it just does not name request
+        # 41, which is the term the mutant dropped.
+        running = db.get_import_job(other_job_id)
+        assert running is not None
+        self.assertEqual(running.status, "running")
+        self.assertFalse(self._rekey(db, other_job_id))
+
+        row = db.request(41)
+        assert row is not None
+        self.assertEqual(row["mb_release_id"], self.MERGED)
+
+    def test_a_non_force_job_writes_nothing(self):
+        from lib.import_queue import IMPORT_JOB_YOUTUBE, youtube_import_payload
+
+        db, _ = self._world()
+        youtube = db.enqueue_import_job(
+            IMPORT_JOB_YOUTUBE,
+            request_id=41,
+            payload=youtube_import_payload(
+                staged_path="/Incoming/auto-import/album",
+                request_id=41,
+                browse_id="MPREb_x",
+                download_log_id=9,
+            ),
+        )
+
+        self.assertFalse(self._rekey(db, youtube.id))
+
+        row = db.request(41)
+        assert row is not None
+        self.assertEqual(row["mb_release_id"], self.MERGED)
+
+    def test_an_automation_owned_row_writes_nothing_under_a_force_claim(self):
+        """Both owner terms at once — the world PostgreSQL can actually hold.
+
+        Migration 066's owner-equivalence CHECK ties them together, so this
+        is deliberately a two-term case. The ``processing`` term on its own is
+        exercised by the next test, which the CHECK makes unreachable in
+        PostgreSQL but perfectly reachable in the fake.
+        """
+        db, job_id = self._world()
+        row = db.request(41)
+        assert row is not None
+        row["status"] = "processing"
+        row["active_automation_import_job_id"] = 777
+
+        self.assertFalse(self._rekey(db, job_id))
+
+        after = db.request(41)
+        assert after is not None
+        self.assertEqual(after["mb_release_id"], self.MERGED)
+
+    def test_a_processing_row_with_no_owner_writes_nothing(self):
+        """The ``processing`` term alone, which only the fake can hold.
+
+        The real SQL states ``status <> 'processing'`` and the owner-is-NULL
+        term separately, and migration 066's CHECK means PostgreSQL can never
+        present the first without the second — so in real PG the owner term
+        already refuses this world and the status term is unreachable. The
+        fake has no CHECK: it is the only place the status term can be
+        exercised on its own, and every seam test in this repository runs
+        against the fake. Without this case a fake force arm that admits
+        ``processing`` agrees with a production write that refuses.
+        """
+        db, job_id = self._world()
+        row = db.request(41)
+        assert row is not None
+        row["status"] = "processing"
+        self.assertIsNone(row["active_automation_import_job_id"])
+
+        self.assertFalse(self._rekey(db, job_id))
+
+        after = db.request(41)
+        assert after is not None
+        self.assertEqual(after["mb_release_id"], self.MERGED)
+        self.assertEqual(after["status"], "processing")
+
+    def test_a_replaced_row_writes_nothing_under_a_force_claim(self):
+        """Frozen audit ancestors are out of scope for BOTH claims."""
+        db, job_id = self._world()
+        row = db.request(41)
+        assert row is not None
+        row["status"] = "replaced"
+
+        self.assertFalse(self._rekey(db, job_id))
+
+        after = db.request(41)
+        assert after is not None
+        self.assertEqual(after["mb_release_id"], self.MERGED)
+
+    def test_a_stale_identity_writes_nothing_under_a_force_claim(self):
+        db, job_id = self._world()
+
+        self.assertFalse(db.update_request_release_for_merge(
+            41,
+            old_release_id="somebody-elses-id",
+            new_release_id=self.SURVIVOR,
+            expected_import_job_id=job_id,
+        ))
+
+        row = db.request(41)
+        assert row is not None
+        self.assertEqual(row["mb_release_id"], self.MERGED)
 
 
 class TestFakeRequestUniqueMbReleaseId(unittest.TestCase):
