@@ -7,6 +7,7 @@ import unittest
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
+from lib.fs_authority import observe_directory
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 
@@ -127,15 +128,13 @@ class TestWrongMatchCleanup(unittest.TestCase):
                 username="new",
             )
 
-            def fake_resolve(path):
+            def fake_observe(path):
                 if path == raw_path and os.path.isdir(source):
-                    return os.path.abspath(source)
-                if os.path.isdir(path):
-                    return os.path.abspath(path)
-                return None
+                    return observe_directory(source)
+                return observe_directory(path)
 
-            with patch("lib.wrong_matches.resolve_failed_path",
-                       side_effect=fake_resolve):
+            with patch("lib.wrong_matches.observe_failed_path",
+                       side_effect=fake_observe):
                 result = cleanup_wrong_match_source(db, absolute_id)
 
             self.assertTrue(result.success)

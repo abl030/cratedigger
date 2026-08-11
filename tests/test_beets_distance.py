@@ -28,6 +28,28 @@ from lib.beets_distance import (
     SyntheticItem,
     compute_beets_distance,
 )
+from lib.fs_authority import DirectoryObservation
+
+
+def _present(path: str) -> DirectoryObservation:
+    """Injected observer: this exact name holds a directory."""
+    return DirectoryObservation(presence="present", path=path)
+
+
+def _absent(_path: str) -> DirectoryObservation:
+    """Injected observer: proven absent (never merely unreadable)."""
+    return DirectoryObservation(presence="absent", code="missing")
+
+
+def _unreadable(path: str) -> DirectoryObservation:
+    """Injected observer mirroring a real EACCES probe refusal."""
+    return DirectoryObservation(
+        presence="indeterminate",
+        code="open_failed",
+        errno_symbol="EACCES",
+        detail=f"{path}: Permission denied",
+    )
+
 
 FIXTURE_FLAC = os.path.join(
     os.path.dirname(__file__), "fixtures", "audio_hash", "sine_440.flac")
@@ -42,6 +64,7 @@ OUTCOMES = (
     "download_log_not_found",
     "request_not_found",
     "folder_missing",
+    "folder_unavailable",
     "no_audio",
     "mb_lookup_failed",
     "mb_no_release_group",
@@ -141,6 +164,7 @@ class TestComputeBeetsDistanceOutcomes(unittest.TestCase):
                 "download_log_not_found",
                 "request_not_found",
                 "folder_missing",
+                "folder_unavailable",
                 "no_audio",
                 "mb_lookup_failed",
                 "mb_no_release_group",
@@ -155,7 +179,7 @@ class TestComputeBeetsDistanceOutcomes(unittest.TestCase):
             42, "rel-x",
             pdb=pdb,
             mb_get_release=lambda mbid: _ok_mb_release(mbid=mbid),
-            resolve_failed_path=lambda p: p,
+            observe_failed_path=_present,
         )
         self.assertEqual(r.outcome, "download_log_not_found")
         self.assertIsNone(r.distance)
@@ -170,7 +194,7 @@ class TestComputeBeetsDistanceOutcomes(unittest.TestCase):
             1, "rel-x",
             pdb=pdb,
             mb_get_release=lambda mbid: _ok_mb_release(mbid=mbid),
-            resolve_failed_path=lambda p: p,
+            observe_failed_path=_present,
         )
         self.assertEqual(r.outcome, "request_not_found")
 
@@ -183,7 +207,7 @@ class TestComputeBeetsDistanceOutcomes(unittest.TestCase):
             1, "rel-x",
             pdb=pdb,
             mb_get_release=lambda mbid: _ok_mb_release(mbid=mbid),
-            resolve_failed_path=lambda p: p,
+            observe_failed_path=_present,
         )
         self.assertEqual(r.outcome, "request_not_found")
 
@@ -196,7 +220,7 @@ class TestComputeBeetsDistanceOutcomes(unittest.TestCase):
             1, "rel-x",
             pdb=pdb,
             mb_get_release=lambda mbid: None,
-            resolve_failed_path=lambda p: p,
+            observe_failed_path=_present,
         )
         self.assertEqual(r.outcome, "mb_lookup_failed")
         self.assertEqual(r.request_release_group_id, "rg-shared")
@@ -213,7 +237,7 @@ class TestComputeBeetsDistanceOutcomes(unittest.TestCase):
             1, "rel-x",
             pdb=pdb,
             mb_get_release=_boom,
-            resolve_failed_path=lambda p: p,
+            observe_failed_path=_present,
         )
         self.assertEqual(r.outcome, "mb_lookup_failed")
         assert r.error_message is not None
@@ -230,7 +254,7 @@ class TestComputeBeetsDistanceOutcomes(unittest.TestCase):
             1, "rel-x",
             pdb=pdb,
             mb_get_release=lambda mbid: mb,
-            resolve_failed_path=lambda p: p,
+            observe_failed_path=_present,
         )
         self.assertEqual(r.outcome, "mb_no_release_group")
 
@@ -245,7 +269,7 @@ class TestComputeBeetsDistanceOutcomes(unittest.TestCase):
             1, "rel-alien",
             pdb=pdb,
             mb_get_release=lambda mbid: _ok_mb_release(mbid=mbid, rg="rg-other"),
-            resolve_failed_path=lambda p: p,
+            observe_failed_path=_present,
         )
         self.assertEqual(r.outcome, "wrong_release_group")
         self.assertEqual(r.request_release_group_id, "rg-source")
@@ -272,7 +296,7 @@ class TestComputeBeetsDistanceOutcomes(unittest.TestCase):
             1, "rel-alien",
             pdb=pdb,
             mb_get_release=lambda mbid: _ok_mb_release(mbid=mbid, rg="rg-other"),
-            resolve_failed_path=lambda p: None,  # file not on disk
+            observe_failed_path=_absent,
         )
         self.assertEqual(r.outcome, "folder_missing")  # not wrong_release_group
         self.assertEqual(r.candidate_release_group_id, "rg-other")
@@ -287,9 +311,26 @@ class TestComputeBeetsDistanceOutcomes(unittest.TestCase):
             1, "rel-x",
             pdb=pdb,
             mb_get_release=lambda mbid: _ok_mb_release(mbid=mbid),
-            resolve_failed_path=lambda p: None,
+            observe_failed_path=_absent,
         )
         self.assertEqual(r.outcome, "folder_missing")
+
+    def test_folder_unavailable_is_not_folder_missing(self) -> None:
+        """An unreadable folder is a distinct, non-absent outcome (#1063)."""
+        pdb = _StubPDB(
+            download_log_entry={"id": 1, "request_id": 7,
+                                "validation_result": {"failed_path": "/private/x"}},
+            request={"id": 7, "mb_release_group_id": "rg-shared"},
+        )
+        r = compute_beets_distance(
+            1, "rel-x",
+            pdb=pdb,
+            mb_get_release=lambda mbid: _ok_mb_release(mbid=mbid),
+            observe_failed_path=_unreadable,
+        )
+        self.assertEqual(r.outcome, "folder_unavailable")
+        assert r.error_message is not None
+        self.assertIn("EACCES", r.error_message)
 
     def test_folder_missing_when_validation_result_absent(self) -> None:
         pdb = _StubPDB(
@@ -301,7 +342,7 @@ class TestComputeBeetsDistanceOutcomes(unittest.TestCase):
             1, "rel-x",
             pdb=pdb,
             mb_get_release=lambda mbid: _ok_mb_release(mbid=mbid),
-            resolve_failed_path=lambda p: None,
+            observe_failed_path=_absent,
         )
         self.assertEqual(r.outcome, "folder_missing")
 
@@ -316,7 +357,7 @@ class TestComputeBeetsDistanceOutcomes(unittest.TestCase):
                 1, "rel-x",
                 pdb=pdb,
                 mb_get_release=lambda mbid: _ok_mb_release(mbid=mbid),
-                resolve_failed_path=lambda p: p,
+                observe_failed_path=_present,
             )
             self.assertEqual(r.outcome, "no_audio")
             self.assertEqual(r.folder_path, tmp)
@@ -422,7 +463,7 @@ class TestBeetsDistanceIntegrationSlice(unittest.TestCase):
             100, "rel-aaa",
             pdb=pdb,
             mb_get_release=lambda mbid: mb,
-            resolve_failed_path=lambda p: p,
+            observe_failed_path=_present,
             cache=cache,
         )
 
@@ -863,7 +904,7 @@ class TestComputeBeetsDistanceWithItemsOverride(unittest.TestCase):
             mbid="rel-alien",
             pdb=pdb,
             mb_get_release=lambda mbid: _ok_mb_release(mbid=mbid, rg="rg-other"),
-            resolve_failed_path=lambda p: p,
+            observe_failed_path=_present,
         )
         # Existing test_wrong_release_group_guardrail asserts the same shape.
         self.assertEqual(r.outcome, "wrong_release_group")

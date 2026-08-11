@@ -446,11 +446,26 @@ function distanceValue(value) {
 }
 
 /**
+ * Is this entry's source folder unobservable right now?
+ *
+ * The server sends `path_unavailable` when its probe was REFUSED
+ * (permissions, I/O) rather than answering "gone" — issue #1063. Such an
+ * entry is still real; it just cannot be acted on, so every destructive
+ * or importing action is disabled and it never counts as converge-green.
+ * @param {any} entry
+ * @returns {boolean}
+ */
+export function entryPathUnavailable(entry) {
+  return entry?.path_unavailable === true;
+}
+
+/**
  * @param {any} entry
  * @param {number} thresholdMilli
  * @returns {boolean}
  */
 function isConvergeGreen(entry, thresholdMilli) {
+  if (entryPathUnavailable(entry)) return false;
   const distance = distanceValue(entry?.distance);
   return distance != null && distance <= normalizeThreshold(thresholdMilli) / 1000;
 }
@@ -631,7 +646,10 @@ function convergeButtonLabel(greenCount) {
  * @param {boolean} green
  * @returns {string}
  */
-function entryItemStyle(green) {
+function entryItemStyle(green, unavailable = false) {
+  if (unavailable) {
+    return 'background:#1f1a14;margin:4px 0;border-color:#8a6a2a;box-shadow:inset 3px 0 0 #d9a441;';
+  }
   return green
     ? 'background:#142014;margin:4px 0;border-color:#426b42;box-shadow:inset 3px 0 0 #6d6;'
     : 'background:#1a1a1a;margin:4px 0;';
@@ -1062,8 +1080,12 @@ function renderEntry(e, thresholdMilli, requestId) {
   const job = e.import_job || null;
   const jobBadge = job ? `<span class="badge" style="background:#222;color:#9bf;margin-left:8px;">${esc(job.status)}</span>` : '';
   const green = isConvergeGreen(e, thresholdMilli);
+  const unavailable = entryPathUnavailable(e);
   const distColor = green ? '#6d6' : '#aaa';
   const evidence = formatEntryEvidence(e);
+  const unavailableBadge = unavailable
+    ? '<span class="badge" style="background:#2a2114;color:#d9a441;border:1px solid #8a6a2a;margin-left:8px;">source unavailable</span>'
+    : '';
 
   // Rank badge mirrors the group-header palette so operators can sort
   // candidates visually. Sort order is server-side (best first); the
@@ -1078,13 +1100,13 @@ function renderEntry(e, thresholdMilli, requestId) {
     : '';
 
   const header = `
-    <div id="wm-entry-card-${e.download_log_id}" class="p-item" data-request-id="${requestId}" data-distance="${distValue != null ? distValue : ''}" style="${entryItemStyle(green)}" onclick="window.toggleWrongMatchEntry('${detailId}', ${e.download_log_id})">
+    <div id="wm-entry-card-${e.download_log_id}" class="p-item" data-request-id="${requestId}" data-distance="${distValue != null ? distValue : ''}" style="${entryItemStyle(green, unavailable)}" onclick="window.toggleWrongMatchEntry('${detailId}', ${e.download_log_id})">
       <div class="p-top">
         <div>
           <span style="font-family:monospace;color:#aaa;">#${e.download_log_id}</span>
           <span style="color:#6a9;margin-left:8px;">${esc(e.soulseek_username || '?')}</span>
           <span id="wm-entry-green-${e.download_log_id}" class="badge" style="${entryGreenBadgeStyle(green)}">green</span>
-          ${rankBadge}${verifiedBadge}${jobBadge}
+          ${unavailableBadge}${rankBadge}${verifiedBadge}${jobBadge}
         </div>
       </div>
       <div class="p-meta">
@@ -1114,13 +1136,20 @@ function renderEntryDetail(e, job, requestId) {
 
   // Action buttons up top: operators are usually here to act, not browse.
   const active = job && ['queued', 'running', 'recovery_required'].includes(job.status);
+  const unavailable = entryPathUnavailable(e);
   const importLabel = job?.status === 'recovery_required'
     ? 'Recovery required'
     : (active ? job.status[0].toUpperCase() + job.status.slice(1) : 'Force Import');
+  const blocked = Boolean(active) || unavailable;
   let html = '<div class="p-actions" style="margin-bottom:10px;">';
-  html += `<button class="p-btn" data-pipeline-request-id="${requestId}" style="border-color:#6a9;color:#6a9;" ${active ? 'disabled' : ''} onclick="event.stopPropagation(); window.forceImportWrongMatch(${e.download_log_id}, this)">${importLabel}</button>`;
-  html += `<button class="p-btn delete" data-pipeline-request-id="${requestId}" ${active ? 'disabled' : ''} onclick="event.stopPropagation(); window.deleteWrongMatch(${e.download_log_id}, this)">Delete</button>`;
+  html += `<button class="p-btn" data-pipeline-request-id="${requestId}" style="border-color:#6a9;color:#6a9;" ${blocked ? 'disabled' : ''} onclick="event.stopPropagation(); window.forceImportWrongMatch(${e.download_log_id}, this)">${importLabel}</button>`;
+  html += `<button class="p-btn delete" data-pipeline-request-id="${requestId}" ${blocked ? 'disabled' : ''} onclick="event.stopPropagation(); window.deleteWrongMatch(${e.download_log_id}, this)">Delete</button>`;
   html += '</div>';
+  if (unavailable) {
+    // Say what is actually true: the server could not look. Nothing here
+    // claims the folder is gone, and nothing offers to delete it.
+    html += `<div class="p-detail-row"><span class="p-detail-label" style="color:#d9a441;">Source</span><span class="p-detail-value" style="color:#d9a441;">Unavailable \u2014 the server could not read this folder, so it cannot be imported or deleted. It has NOT been confirmed missing.${e.path_unavailable_reason ? ` (${esc(String(e.path_unavailable_reason))})` : ''}</span></div>`;
+  }
 
   if (c) {
     html += `<div class="p-detail-row"><span class="p-detail-label">Matched</span><span class="p-detail-value">${esc(c.artist || '?')} — ${esc(c.album || '?')}${c.year ? ` (${esc(c.year)})` : ''}${c.country ? ` [${esc(c.country)}]` : ''}</span></div>`;
@@ -1369,6 +1398,7 @@ export const __test__ = {
   deleteWrongMatch,
   deleteWrongMatchGroup,
   deleteUnmatchedOnConverge,
+  entryPathUnavailable,
   entrySpectralCell,
   formatEntryEvidence,
   greenEntries,
@@ -1377,6 +1407,7 @@ export const __test__ = {
   normalizeThreshold,
   refreshWrongMatches,
   reloadWrongMatchExplorer,
+  renderEntry,
   removeWrongMatchEntry,
   removeWrongMatchGroup,
   renderLatestImport,

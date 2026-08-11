@@ -88,6 +88,7 @@ from scripts.pipeline_cli.imports import (
     cmd_import_job_recovery,
     cmd_import_jobs,
     cmd_import_preview,
+    cmd_import_preview_from_download_log,
 )
 from scripts.pipeline_cli.long_tail import cmd_long_tail
 from scripts.pipeline_cli.quality import (
@@ -137,6 +138,7 @@ __all__ = [
     "cmd_import_job_recovery",
     "cmd_import_jobs",
     "cmd_import_preview",
+    "cmd_import_preview_from_download_log",
     "cmd_library_delete",
     "cmd_list",
     "cmd_long_tail",

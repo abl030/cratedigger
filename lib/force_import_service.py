@@ -32,15 +32,11 @@ RESULT_FAILED_PATH_MISSING = "failed_path_missing"
 RESULT_UNAUTHORIZED_PATH = "unauthorized_path"
 RESULT_PROCESSING_LOCKED = "processing_locked"
 
-FORCE_IMPORT_EXIT_CODE = {
-    RESULT_QUEUED: 0,
-    RESULT_DOWNLOAD_LOG_MISSING: 2,
-    RESULT_REQUEST_MISSING: 2,
-    RESULT_REQUEST_MBID_MISSING: 3,
-    RESULT_FAILED_PATH_MISSING: 3,
-    RESULT_UNAUTHORIZED_PATH: 3,
-    RESULT_PROCESSING_LOCKED: 4,
-}
+# There is no separate CLI exit-code table: ``pipeline-cli force-import``
+# executes through ``POST /api/pipeline/force-import`` (issue #1063) and
+# derives its exit code from the status below. The historical
+# outcome -> exit mapping is pinned against that derivation in
+# ``tests/test_force_import_service.py``.
 FORCE_IMPORT_HTTP_STATUS = {
     RESULT_QUEUED: 202,
     RESULT_DOWNLOAD_LOG_MISSING: 404,

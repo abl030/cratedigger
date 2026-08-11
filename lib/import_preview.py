@@ -40,6 +40,7 @@ from lib.fs_authority import (
     FilesystemAuthorityError,
     copy_opened_file,
     exclusive_relative_lock,
+    observe_directory,
     open_configured_quarantine_directory,
     open_directory_path,
     open_private_child_directory,
@@ -2714,7 +2715,21 @@ def preview_import_from_path(
             download_log_id=download_log_id,
             source_path=path,
         )
-    if not os.path.isdir(path):
+    observation = observe_directory(path)
+    if observation.indeterminate:
+        # Explicit-path preview under an identity that cannot traverse the
+        # private processing tree used to answer "Path not found" — a
+        # definitive negative fact it had no evidence for (issue #1063).
+        return _preview_result(
+            mode="path",
+            verdict=PREVIEW_VERDICT_UNCERTAIN,
+            decision="path_unavailable",
+            reason=f"Path could not be observed: {observation.unavailable_reason()}",
+            request_id=request_id,
+            download_log_id=download_log_id,
+            source_path=path,
+        )
+    if observation.absent:
         return _preview_result(
             mode="path",
             verdict=PREVIEW_VERDICT_UNCERTAIN,

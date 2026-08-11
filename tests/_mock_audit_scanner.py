@@ -209,6 +209,9 @@ _LEAF_SEAM_PATTERNS = [
     # in-memory) is also valid and used in many tests.
     re.compile(r"^lib\.config\.read_runtime_config$"),
     re.compile(r"^scripts\.\w+\.read_runtime_config$"),  # re-exports
+    # Route modules bind the loader at import time, so the ``lib.config``
+    # patch above cannot reach them — the binding IS the seam (#1063).
+    re.compile(r"^web\.routes\.\w+\.read_runtime_config$"),
     re.compile(r"^lib\.config\.CratediggerConfig\.from_ini$"),
 
     # Filesystem permission helper — wraps chmod calls.
@@ -301,7 +304,7 @@ _LEAF_SEAM_PATTERNS = [
     # web.routes re-exports of allowlisted helpers. Same physical
     # function lives in lib.* and is allowlisted there; tests just
     # patch the import binding inside the route module.
-    re.compile(r"^web\.routes\.\w+\.resolve_failed_path$"),
+    re.compile(r"^web\.routes\.\w+\.observe_failed_path$"),
     # Destructive service binding around the ffmpeg-backed audio hash leaf.
     re.compile(r"^lib\.destructive_release_service\.hash_audio_content$"),
 
@@ -385,12 +388,15 @@ _LEAF_SEAM_PATTERNS = [
     # ``lib.download_validation._handle_valid_result`` uses kwarg DI alongside
     # the rest of the lib.download chain (see comment above).
 
-    # Broadened ``resolve_failed_path`` re-export allowlist. The pattern
+    # Broadened ``observe_failed_path`` re-export allowlist. The pattern
     # already covers ``web.routes.*`` re-exports; ``lib.wrong_matches``
-    # also re-exports ``resolve_failed_path`` from ``lib.util``. Same
-    # rationale: ``lib.util.resolve_failed_path`` is the actual
-    # filesystem boundary; the re-export is the test seam.
-    re.compile(r"^lib\.\w+\.resolve_failed_path$"),
+    # also re-exports ``observe_failed_path`` from ``lib.util``. Same
+    # rationale: ``lib.util.observe_failed_path`` is the actual
+    # filesystem boundary (issue #1063 renamed it from
+    # ``resolve_failed_path`` when it started returning a typed
+    # observation instead of ``str | None``); the re-export is the test
+    # seam.
+    re.compile(r"^lib\.\w+\.observe_failed_path$"),
 
     # ``harness.import_one`` RED-guard seams. The test
     # ``test_evidence_backed_import_skips_candidate_measurement_helpers``
@@ -467,23 +473,27 @@ MULTILINE_PATCH_BASELINE: dict[str, int] = {
     'lib.download_processing.process_completed_album': 9,
     'lib.import_evidence.ensure_current_evidence_for_action': 6,
     'lib.import_evidence.load_or_backfill_current_evidence': 1,
-    'lib.import_preview.preview_import_from_download_log': 1,
     'lib.matching._browse_directories': 1,
     'lib.mbid_replace_service.delete_wrong_match_group': 9,
     'lib.quality.full_pipeline_decision_from_evidence': 1,
     'lib.quarantine_triage_service.os.scandir': 1,
-    'lib.wrong_match_cleanup_service.cleanup_all_wrong_matches': 3,
+    'lib.wrong_match_cleanup_service.cleanup_all_wrong_matches': 1,
     'lib.wrong_match_cleanup_service.cleanup_wrong_match_source': 6,
     'lib.wrong_match_cleanup_service.full_pipeline_decision_from_evidence': 7,
     'lib.wrong_match_cleanup_service.load_current_evidence_for_action': 1,
-    'lib.wrong_match_delete_service.delete_wrong_match': 6,
-    'lib.wrong_match_delete_service.delete_wrong_match_group': 4,
+    'lib.wrong_match_delete_service.delete_wrong_match': 1,
+    'lib.wrong_match_delete_service.delete_wrong_match_group': 1,
     'scripts.import_preview_worker.measure_and_persist_candidate_evidence': 13,
     'scripts.pipeline_cli.youtube._RedisYoutubeCache': 2,
     'scripts.pipeline_cli.youtube._build_youtube_client': 2,
     'scripts.pipeline_cli.youtube.resolve_youtube_album': 1,
     'scripts.repair.find_blocked_processing_path_issues': 1,
     'web.routes.imports.cleanup_wrong_match': 1,
+    # Moved, not added (#1063): ``import-preview --download-log-id``
+    # now executes through the route, so the CLI's single patch of the
+    # preview service moved from ``lib.import_preview`` to the route
+    # module's own binding. Net count unchanged.
+    'web.routes.imports.preview_import_from_download_log': 1,
     'web.routes.imports.delete_wrong_match': 1,
     'web.routes.imports.delete_wrong_match_group': 1,
     'web.routes.youtube._RedisYoutubeCache': 2,

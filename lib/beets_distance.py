@@ -65,6 +65,7 @@ from beets.autotag import distance as _beets_distance_fn
 from beets.autotag import hooks as _beets_hooks
 from beets.autotag import match as _beets_match_mod
 
+from lib.fs_authority import DirectoryObservation
 from lib.validation_envelope import decode_validation_envelope
 
 log = logging.getLogger(__name__)
@@ -476,7 +477,7 @@ def compute_beets_distance(
     pdb: BeetsDistancePipelineDB,
     mb_get_release: Callable[[str], dict[str, object] | None],
     cache: BeetsDistanceCache | None = None,
-    resolve_failed_path: Callable[[str], str | None] | None = None,
+    observe_failed_path: Callable[[str], DirectoryObservation] | None = None,
 ) -> BeetsDistanceResult:
     """Compute beets match distance for one MBID.
 
@@ -671,11 +672,32 @@ def compute_beets_distance(
         assert log_row is not None  # narrowed above; Replace-mode invariant
         failed_path = decode_validation_envelope(
             log_row.get("validation_result")).failed_path or ""
-        resolver = resolve_failed_path
-        if resolver is None:
-            from lib.util import resolve_failed_path as default_resolver
-            resolver = default_resolver
-        resolved = resolver(str(failed_path)) if failed_path else None
+        observer = observe_failed_path
+        if observer is None:
+            from lib.util import observe_failed_path as default_observer
+            observer = default_observer
+        observation = (
+            observer(str(failed_path)) if failed_path
+            else DirectoryObservation(presence="absent", code="missing")
+        )
+        if observation.indeterminate:
+            # "The folder is gone" and "I was not allowed to look" are
+            # different facts and must not share an outcome (#1063).
+            return _result(
+                "folder_unavailable",
+                error=(
+                    f"download_log #{download_log_id} failed_path "
+                    f"{failed_path!r} could not be observed: "
+                    f"{observation.unavailable_reason()}"
+                ),
+                download_log_id=download_log_id,
+                request_id=request_id,
+                request_release_group_id=request_rg,
+                candidate_release_group_id=candidate_rg,
+                candidate_mbid=mbid,
+                started=started,
+            )
+        resolved = observation.path
         if not resolved:
             return _result(
                 "folder_missing",

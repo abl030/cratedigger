@@ -35,6 +35,8 @@ from scripts.pipeline_cli.imports import (
     cmd_import_job_recovery,
     cmd_import_jobs,
     cmd_import_preview,
+    cmd_import_preview_from_download_log,
+    import_preview_is_routed,
 )
 from scripts.pipeline_cli.long_tail import cmd_long_tail
 from scripts.pipeline_cli.quality import cmd_quality, cmd_repair_spectral
@@ -99,19 +101,38 @@ def main(*, api_socket: str | None = None):
     # These adapters intentionally call the canonical web route.  They must
     # return before mirror configuration or PipelineDB construction so an API
     # mutation never acquires a hidden direct-DB fallback.
+    #
+    # Everything below the first five joined them in issue #1063: each one
+    # reads or destroys a path under the private 0700 processing tree, which
+    # only the service identity can traverse. Run in the operator's own
+    # process they reported intact folders as missing, cleared their DB
+    # pointers, and claimed success.
     api_commands = {
         "pipeline-delete": cmd_pipeline_delete,
         "set-quality": cmd_set_quality,
         "upgrade": cmd_upgrade,
         "wrong-match-converge": cmd_wrong_match_converge,
         "resolve-rg": cmd_resolve_rg,
+        "wrong-match-delete": cmd_wrong_match_delete,
+        "wrong-match-delete-group": cmd_wrong_match_delete_group,
+        "wrong-match-triage": cmd_wrong_match_triage,
+        "replace": cmd_replace,
+        "force-import": cmd_force_import,
+        "beets-distance": cmd_beets_distance,
     }
     if args.command in api_commands:
         sys.exit(api_commands[args.command](None, args))
+    # ``import-preview`` is per-mode: only --download-log-id resolves a
+    # DB-owned protected path. --values is a pure decision and --path is
+    # the explicit-path inspector CD-SEC-03 keeps off the HTTP surface;
+    # neither is a fallback for the routed mode.
+    if args.command == "import-preview" and import_preview_is_routed(args):
+        sys.exit(cmd_import_preview_from_download_log(None, args))
 
-    # Mirror origins for every web.mb / web.discogs consumer in this
-    # process (add --discogs, youtube-album, distance, Replace, field
-    # resolution). Quarantine is filesystem/DB-only and must not fail on
+    # Mirror origins for every web.mb / web.discogs consumer left in this
+    # process (add --discogs, youtube-album). Distance and Replace moved to
+    # the web routes in #1063, so their mirror lookups now happen in the
+    # service process. Quarantine is filesystem/DB-only and must not fail on
     # unrelated mirror configuration before its own unavailable mapping can
     # run. ``routes`` already returned above for the same zero-init reason.
     if not is_quarantine:
@@ -143,16 +164,10 @@ def main(*, api_socket: str | None = None):
         "set-intent": cmd_set_intent,
         "show": cmd_show,
         "quality": cmd_quality,
-        "force-import": cmd_force_import,
         "import-job-recovery": cmd_import_job_recovery,
         "import-jobs": cmd_import_jobs,
         "import-preview": cmd_import_preview,
-        "wrong-match-triage": cmd_wrong_match_triage,
-        "wrong-match-delete": cmd_wrong_match_delete,
-        "wrong-match-delete-group": cmd_wrong_match_delete_group,
         "repair-spectral": cmd_repair_spectral,
-        "replace": cmd_replace,
-        "beets-distance": cmd_beets_distance,
         "ban-source": cmd_ban_source,
         "library-delete": cmd_library_delete,
         "youtube-album": cmd_youtube_album,

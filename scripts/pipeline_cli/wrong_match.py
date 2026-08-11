@@ -3,45 +3,118 @@
 ``wrong-match-triage`` (whole-queue evidence cleanup), ``wrong-match-delete``
 (single source folder), ``wrong-match-delete-group`` (all visible source
 folders for one request).
+
+All three touch the private ``0700`` processing tree, so all three execute
+through the canonical web routes over the permissioned Unix socket rather
+than in the operator's own process (issue #1063). There is no direct-DB
+fallback: the installed CLI cannot traverse that tree, and an in-process
+run there reported intact 445MB folders as "missing" and cleared their
+pointers. Only the presentation below is CLI-local.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import sys
-from typing import TYPE_CHECKING
+import time
+from collections.abc import Callable, Mapping
 
-if TYPE_CHECKING:
-    from lib.wrong_match_cleanup_service import WrongMatchCleanupDB
-    from lib.wrong_match_delete_service import (
-        WrongMatchDeleteDB,
-        WrongMatchDeleteResult,
-        WrongMatchDeleteSummary,
-    )
+from lib.json_narrow import is_object_list, is_str_object_dict
+from scripts.pipeline_cli.api_mutations import (
+    TIMEOUT_GROUP_DELETE_SECONDS,
+    TIMEOUT_SOURCE_DELETE_SECONDS,
+    _ApiMutation,
+    relay_polled,
+    relay_rendered,
+    render_api_error,
+)
+
+# Every non-success Wrong Matches delete status already had an exit code
+# while the command ran in-process; 500 is the one the generic table would
+# have changed (delete_failed has always been 1, not 5).
+_WRONG_MATCH_DELETE_EXIT_OVERRIDES: Mapping[int, int] = {500: 1}
+
+def _render_wrong_match_delete(status: int, payload: dict[str, object]) -> None:
+    if not 200 <= status < 300:
+        render_api_error(status, payload)
+        return
+    print(f"  [{payload.get('download_log_id')}] {payload.get('outcome')}")
+    if payload.get("reason"):
+        print(f"  reason: {payload['reason']}")
+    if payload.get("deleted_path"):
+        print(f"  deleted_path: {payload['deleted_path']}")
+    if payload.get("path_missing"):
+        print("  path_missing: yes")
+    print(f"  cleared_rows: {payload.get('cleared_rows', 0)}")
+
+
+def _render_wrong_match_delete_group(
+    status: int, payload: dict[str, object],
+) -> None:
+    results = payload.get("results")
+    if not is_object_list(results):
+        render_api_error(status, payload)
+        return
+    for result in results:
+        if not is_str_object_dict(result):
+            continue
+        print(f"  [{result.get('download_log_id')}] {result.get('outcome')}")
+        if result.get("reason"):
+            print(f"    reason: {result['reason']}")
+    if results:
+        print()
+    for field in (
+        "deleted", "deleted_paths", "cleared", "skipped", "errors", "remaining",
+    ):
+        print(f"  {field}: {payload.get(field, 0)}")
+
+
+def _render_wrong_match_triage(status: int, payload: dict[str, object]) -> None:
+    from lib.wrong_match_cleanup_service import OUTCOME_KEYS
+
+    summary = payload.get("summary")
+    if not is_str_object_dict(summary):
+        render_api_error(status, payload)
+        return
+    results = summary.get("results")
+    if is_object_list(results):
+        for result in results:
+            if not is_str_object_dict(result):
+                continue
+            reason = result.get("reason")
+            print(
+                f"  [{result.get('download_log_id')}] {result.get('outcome')}"
+                f"{': ' + str(reason) if reason else ''}"
+            )
+        if results:
+            print()
+    for outcome in OUTCOME_KEYS:
+        print(f"  {outcome}: {summary.get(outcome, 0)}")
+    print(f"  total: {summary.get('processed', 0)}")
+
+
+def _triage_is_complete(payload: dict[str, object]) -> bool:
+    return payload.get("state") != "running"
+
+
+def _triage_exit_code(payload: dict[str, object]) -> int:
+    if payload.get("state") == "completed" and not payload.get("error"):
+        return 0
+    return 5
 
 
 def cmd_wrong_match_triage(
-    db: WrongMatchCleanupDB, args: argparse.Namespace,
+    _db: object,
+    args: argparse.Namespace,
+    *,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> int:
-    """Run evidence-only cleanup for the full Wrong Matches queue."""
-    from lib.wrong_match_cleanup_service import (
-        OUTCOME_KEYS,
-        cleanup_all_wrong_matches,
-    )
+    """Run evidence-only cleanup for the full Wrong Matches queue.
 
-    forbidden_scope: list[str] = []
-    for name in ("download_log_id", "request_id", "limit", "all"):
-        value = getattr(args, name, None)
-        if value is not None and value is not False:
-            forbidden_scope.append(f"--{name.replace('_', '-')}")
-    if forbidden_scope:
-        print(
-            "  wrong-match-triage processes the whole Wrong Matches queue; "
-            f"scope flags are not supported: {', '.join(forbidden_scope)}.",
-            file=sys.stderr,
-        )
-        return 2
+    Starts the canonical background sweep and follows its status route to
+    completion, so the operator still gets the whole summary and exit 0
+    while the deletions happen under the service identity (issue #1063).
+    """
     if not args.apply:
         print(
             "  Refusing destructive wrong-match triage without --apply. "
@@ -50,55 +123,27 @@ def cmd_wrong_match_triage(
         )
         return 2
 
-    summary = cleanup_all_wrong_matches(db, confirm_all_wrong_matches=True)
-    if args.json:
-        print(json.dumps(summary.to_dict(), indent=2, sort_keys=True))
-        return 0
-
-    for result in summary.results:
-        print(
-            f"  [{result.download_log_id}] {result.outcome}"
-            f"{': ' + result.reason if result.reason else ''}"
-        )
-    if summary.results:
-        print()
-    for outcome in OUTCOME_KEYS:
-        print(f"  {outcome}: {getattr(summary, outcome)}")
-    print(f"  total: {summary.processed}")
-    return 0
-
-
-def _print_wrong_match_delete_result(
-    result: WrongMatchDeleteResult, *, json_output: bool,
-) -> None:
-    if json_output:
-        print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
-        return
-    print(f"  [{result.download_log_id}] {result.outcome}")
-    if result.reason:
-        print(f"  reason: {result.reason}")
-    if result.deleted_path:
-        print(f"  deleted_path: {result.deleted_path}")
-    if result.path_missing:
-        print("  path_missing: yes")
-    print(f"  cleared_rows: {result.cleared_rows}")
-
-
-def cmd_wrong_match_delete(
-    db: WrongMatchDeleteDB, args: argparse.Namespace,
-) -> int:
-    """Delete one visible Wrong Matches source folder."""
-    from lib.wrong_match_delete_service import (
-        OUTCOME_DELETE_FAILED,
-        OUTCOME_DELETED,
-        OUTCOME_SKIPPED_ACTIVE_JOB,
-        OUTCOME_SKIPPED_INVALID_ROW,
-        OUTCOME_SKIPPED_LOCKED,
-        OUTCOME_SKIPPED_NOT_VISIBLE,
-        OUTCOME_SKIPPED_UNSAFE_PATH,
-        delete_wrong_match,
+    return relay_polled(
+        args.api_endpoint,
+        _ApiMutation(
+            path="/api/wrong-matches/triage",
+            body={"confirm_all_wrong_matches": True},
+        ),
+        _ApiMutation(
+            path="/api/wrong-matches/triage/status",
+            body={},
+            method="GET",
+        ),
+        is_complete=_triage_is_complete,
+        render=_render_wrong_match_triage,
+        json_output=args.json,
+        completed_exit_code=_triage_exit_code,
+        sleep=sleep,
     )
 
+
+def cmd_wrong_match_delete(_db: object, args: argparse.Namespace) -> int:
+    """Delete one visible Wrong Matches source folder."""
     if not args.apply:
         print(
             "  Refusing destructive wrong-match delete without --apply.",
@@ -106,33 +151,21 @@ def cmd_wrong_match_delete(
         )
         return 2
 
-    result = delete_wrong_match(
-        db,
-        args.download_log_id,
-        require_visible=True,
+    return relay_rendered(
+        args.api_endpoint,
+        _ApiMutation(
+            path="/api/wrong-matches/delete",
+            body={"download_log_id": args.download_log_id},
+        ),
+        render=_render_wrong_match_delete,
+        json_output=args.json,
+        timeout_seconds=TIMEOUT_SOURCE_DELETE_SECONDS,
+        exit_overrides=_WRONG_MATCH_DELETE_EXIT_OVERRIDES,
     )
-    _print_wrong_match_delete_result(result, json_output=args.json)
-    if result.outcome == OUTCOME_DELETED:
-        return 0
-    if result.outcome in (OUTCOME_SKIPPED_INVALID_ROW, OUTCOME_SKIPPED_NOT_VISIBLE):
-        return 2
-    if result.outcome == OUTCOME_SKIPPED_ACTIVE_JOB:
-        return 4
-    if result.outcome == OUTCOME_SKIPPED_UNSAFE_PATH:
-        return 3
-    if result.outcome == OUTCOME_SKIPPED_LOCKED:
-        return 5
-    if result.outcome == OUTCOME_DELETE_FAILED:
-        return 1
-    return 1
 
 
-def cmd_wrong_match_delete_group(
-    db: WrongMatchDeleteDB, args: argparse.Namespace,
-) -> int:
+def cmd_wrong_match_delete_group(_db: object, args: argparse.Namespace) -> int:
     """Delete every visible Wrong Matches source folder for one request."""
-    from lib.wrong_match_delete_service import delete_wrong_match_group
-
     if not args.apply:
         print(
             "  Refusing destructive wrong-match group delete without --apply.",
@@ -140,52 +173,17 @@ def cmd_wrong_match_delete_group(
         )
         return 2
 
-    summary = delete_wrong_match_group(db, args.request_id)
-    if args.json:
-        print(json.dumps(summary.to_dict(), indent=2, sort_keys=True))
-        return _wrong_match_delete_group_exit_code(summary)
-
-    for result in summary.results:
-        print(f"  [{result.download_log_id}] {result.outcome}")
-        if result.reason:
-            print(f"    reason: {result.reason}")
-    if summary.results:
-        print()
-    print(f"  deleted: {summary.deleted}")
-    print(f"  deleted_paths: {summary.deleted_paths}")
-    print(f"  cleared: {summary.cleared}")
-    print(f"  skipped: {summary.skipped}")
-    print(f"  errors: {summary.errors}")
-    print(f"  remaining: {summary.remaining}")
-    return _wrong_match_delete_group_exit_code(summary)
-
-
-def _wrong_match_delete_group_exit_code(
-    summary: WrongMatchDeleteSummary,
-) -> int:
-    from lib.wrong_match_delete_service import (
-        OUTCOME_DELETE_FAILED,
-        OUTCOME_SKIPPED_ACTIVE_JOB,
-        OUTCOME_SKIPPED_INVALID_ROW,
-        OUTCOME_SKIPPED_LOCKED,
-        OUTCOME_SKIPPED_NOT_VISIBLE,
-        OUTCOME_SKIPPED_UNSAFE_PATH,
+    return relay_rendered(
+        args.api_endpoint,
+        _ApiMutation(
+            path="/api/wrong-matches/delete-group",
+            body={"request_id": args.request_id},
+        ),
+        render=_render_wrong_match_delete_group,
+        json_output=args.json,
+        timeout_seconds=TIMEOUT_GROUP_DELETE_SECONDS,
+        exit_overrides=_WRONG_MATCH_DELETE_EXIT_OVERRIDES,
     )
-
-    if summary.success:
-        return 0
-    outcomes = {result.outcome for result in summary.results}
-    if OUTCOME_DELETE_FAILED in outcomes:
-        return 1
-    if OUTCOME_SKIPPED_LOCKED in outcomes:
-        return 5
-    if OUTCOME_SKIPPED_ACTIVE_JOB in outcomes:
-        return 4
-    if OUTCOME_SKIPPED_UNSAFE_PATH in outcomes:
-        return 3
-    if outcomes & {OUTCOME_SKIPPED_INVALID_ROW, OUTCOME_SKIPPED_NOT_VISIBLE}:
-        return 2
-    return 1
 
 
 def add_wrong_match_subparsers(

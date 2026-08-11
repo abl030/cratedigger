@@ -684,12 +684,10 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
             log_id,
             _store_evidence(self.db, _evidence(source, matched_bad_audio_hash=True)),
         )
-        cleanup = types.SimpleNamespace(
-            success=False,
+        cleanup = WrongMatchCleanupResult(
+            download_log_id=log_id,
+            entry_found=True,
             error="permission denied",
-            path_missing=False,
-            cleared_rows=0,
-            deleted_path=None,
         )
 
         with patch(
@@ -714,12 +712,10 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
             log_id,
             _store_evidence(self.db, _evidence(source, matched_bad_audio_hash=True)),
         )
-        cleanup = types.SimpleNamespace(
-            success=True,
-            error=None,
+        cleanup = WrongMatchCleanupResult(
+            download_log_id=log_id,
+            entry_found=True,
             path_missing=True,
-            cleared_rows=0,
-            deleted_path=None,
         )
 
         with patch(
@@ -1004,10 +1000,9 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
             )
         )
 
-        cleanup = types.SimpleNamespace(
-            success=True,
-            error=None,
-            path_missing=False,
+        cleanup = WrongMatchCleanupResult(
+            download_log_id=log_id,
+            entry_found=True,
             cleared_rows=1,
             deleted_path=source,
         )

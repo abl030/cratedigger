@@ -8,7 +8,6 @@ import unittest
 from types import SimpleNamespace
 
 from lib.force_import_service import (
-    FORCE_IMPORT_EXIT_CODE,
     FORCE_IMPORT_HTTP_STATUS,
     RESULT_DOWNLOAD_LOG_MISSING,
     RESULT_FAILED_PATH_MISSING,
@@ -27,20 +26,37 @@ from tests.helpers import handoff_automation_owner, make_request_row
 
 class TestForceImportService(unittest.TestCase):
     def test_centralized_adapter_outcome_maps(self) -> None:
-        self.assertEqual(FORCE_IMPORT_EXIT_CODE[RESULT_QUEUED], 0)
-        self.assertEqual(FORCE_IMPORT_HTTP_STATUS[RESULT_QUEUED], 202)
-        for outcome in (RESULT_DOWNLOAD_LOG_MISSING, RESULT_REQUEST_MISSING):
-            self.assertEqual(FORCE_IMPORT_EXIT_CODE[outcome], 2)
-            self.assertEqual(FORCE_IMPORT_HTTP_STATUS[outcome], 404)
-        for outcome in (
-            RESULT_REQUEST_MBID_MISSING,
-            RESULT_FAILED_PATH_MISSING,
-            RESULT_UNAUTHORIZED_PATH,
-        ):
-            self.assertEqual(FORCE_IMPORT_EXIT_CODE[outcome], 3)
-            self.assertEqual(FORCE_IMPORT_HTTP_STATUS[outcome], 422)
-        self.assertEqual(FORCE_IMPORT_EXIT_CODE[RESULT_PROCESSING_LOCKED], 4)
-        self.assertEqual(FORCE_IMPORT_HTTP_STATUS[RESULT_PROCESSING_LOCKED], 409)
+        """One table now serves both surfaces (issue #1063).
+
+        ``pipeline-cli force-import`` relays the route, so its exit code
+        is DERIVED from the status below. Pinning the derivation is what
+        proves the historical CLI mapping survived the move.
+        """
+        from scripts.pipeline_cli.api_mutations import _exit_code
+
+        expected_exit = {
+            RESULT_QUEUED: 0,
+            RESULT_DOWNLOAD_LOG_MISSING: 2,
+            RESULT_REQUEST_MISSING: 2,
+            RESULT_REQUEST_MBID_MISSING: 3,
+            RESULT_FAILED_PATH_MISSING: 3,
+            RESULT_UNAUTHORIZED_PATH: 3,
+            RESULT_PROCESSING_LOCKED: 4,
+        }
+        expected_status = {
+            RESULT_QUEUED: 202,
+            RESULT_DOWNLOAD_LOG_MISSING: 404,
+            RESULT_REQUEST_MISSING: 404,
+            RESULT_REQUEST_MBID_MISSING: 422,
+            RESULT_FAILED_PATH_MISSING: 422,
+            RESULT_UNAUTHORIZED_PATH: 422,
+            RESULT_PROCESSING_LOCKED: 409,
+        }
+        self.assertEqual(FORCE_IMPORT_HTTP_STATUS, expected_status)
+        for outcome, exit_code in expected_exit.items():
+            with self.subTest(outcome=outcome):
+                self.assertEqual(
+                    _exit_code(FORCE_IMPORT_HTTP_STATUS[outcome]), exit_code)
 
     def test_processing_owner_is_rejected_before_filesystem_or_enqueue(self) -> None:
         db, cfg, staging, log_id = self._world()

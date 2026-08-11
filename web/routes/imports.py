@@ -27,7 +27,7 @@ from lib.pipeline_db._shared import (
     CURRENT_EVIDENCE_PREFIX,
 )
 from lib.quality import _is_explicit_label
-from lib.util import resolve_failed_path
+from lib.util import observe_failed_path
 from lib.validation_envelope import (
     ValidationResultEnvelope,
     decode_validation_envelope,
@@ -49,6 +49,9 @@ from lib.wrong_match_delete_service import (
 )
 from lib.wrong_match_delete_service import (
     OUTCOME_SKIPPED_NOT_VISIBLE as DELETE_OUTCOME_NOT_VISIBLE,
+)
+from lib.wrong_match_delete_service import (
+    OUTCOME_SKIPPED_PATH_UNAVAILABLE as DELETE_OUTCOME_PATH_UNAVAILABLE,
 )
 from lib.wrong_match_delete_service import (
     OUTCOME_SKIPPED_UNSAFE_PATH as DELETE_OUTCOME_UNSAFE_PATH,
@@ -314,10 +317,15 @@ def _build_wrong_match_groups(
             continue
         vr = decode_validation_envelope(row.get("validation_result"))
         failed_path = vr.failed_path or ""
-        resolved_path = resolve_failed_path(failed_path)
-        files_exist = resolved_path is not None
-        if not files_exist:
+        observation = observe_failed_path(failed_path)
+        resolved_path = observation.path
+        files_exist = observation.present
+        # A folder we PROVED is gone leaves the worklist; one we merely
+        # could not read stays, flagged. Dropping it silently hid the
+        # broken world from the only surface that could report it (#1063).
+        if not files_exist and not observation.indeterminate:
             continue
+        path_unavailable = observation.indeterminate
 
         request_id = row["request_id"]
         assert isinstance(request_id, int)
@@ -399,6 +407,10 @@ def _build_wrong_match_groups(
             "download_log_id": log_id,
             "failed_path": resolved_path or failed_path,
             "files_exist": files_exist,
+            "path_unavailable": path_unavailable,
+            "path_unavailable_reason": (
+                observation.unavailable_reason() if path_unavailable else None
+            ),
             "distance": vr.distance,
             "scenario": vr.scenario,
             "detail": vr.detail,
@@ -660,6 +672,10 @@ def post_wrong_match_delete(h: RouteHandler, body: dict[str, object]) -> None:
     if result.outcome == DELETE_OUTCOME_ACTIVE_JOB:
         h._error("active_import_job", 409)
         return
+    if result.outcome == DELETE_OUTCOME_PATH_UNAVAILABLE:
+        # Retryable world failure, not a verdict about the folder.
+        h._error(result.reason or result.outcome, 503)
+        return
     if result.outcome == DELETE_OUTCOME_LOCKED:
         h._error(result.reason or result.outcome, 503)
         return
@@ -694,12 +710,21 @@ def post_wrong_match_delete_group(
 
 
 def _wrong_match_delete_group_http_status(summary: WrongMatchDeleteSummary) -> int:
-    """Mirror the CLI status/exit-code precedence for group delete."""
+    """Precedence the routed CLI adapter maps straight back to exit codes.
+
+    This route IS the group-delete execution path for both surfaces
+    (issue #1063), so the mapping below plus
+    ``_WRONG_MATCH_DELETE_EXIT_OVERRIDES`` in
+    ``scripts/pipeline_cli/wrong_match.py`` is the whole CLI ⇄ API
+    exit-code contract.
+    """
     if summary.success:
         return 200
     outcomes = {result.outcome for result in summary.results}
     if DELETE_OUTCOME_FAILED in outcomes:
         return 500
+    if DELETE_OUTCOME_PATH_UNAVAILABLE in outcomes:
+        return 503
     if DELETE_OUTCOME_LOCKED in outcomes:
         return 503
     if DELETE_OUTCOME_ACTIVE_JOB in outcomes:
@@ -708,7 +733,10 @@ def _wrong_match_delete_group_http_status(summary: WrongMatchDeleteSummary) -> i
         return 422
     if outcomes & {DELETE_OUTCOME_INVALID_ROW, DELETE_OUTCOME_NOT_VISIBLE}:
         return 404
-    return 409
+    # Not success and no recognized outcome: the summary contradicts
+    # itself, which is a server fault (and the CLI's own residual exit
+    # code for the same shape is 1, which 500 maps back to).
+    return 500
 
 
 class _GreenCandidate(TypedDict):

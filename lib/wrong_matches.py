@@ -8,7 +8,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from lib.util import FAILED_IMPORT_SEARCH_DIRS, resolve_failed_path
+from lib.fs_authority import DirectoryObservation
+from lib.util import FAILED_IMPORT_SEARCH_DIRS, observe_failed_path
 from lib.validation_envelope import decode_validation_envelope
 from lib.wrong_match_policy import (
     WRONG_MATCH_QUARANTINE_DIR,
@@ -76,6 +77,7 @@ class WrongMatchCleanupResult:
     resolved_path: str | None = None
     deleted_path: str | None = None
     path_missing: bool = False
+    path_unavailable: bool = False
     cleared_rows: int = 0
     error: str | None = None
 
@@ -93,6 +95,7 @@ class WrongMatchCleanupResult:
             "resolved_path": self.resolved_path,
             "deleted_path": self.deleted_path,
             "path_missing": self.path_missing,
+            "path_unavailable": self.path_unavailable,
             "cleared_rows": self.cleared_rows,
             "error": self.error,
             "success": self.success,
@@ -162,15 +165,23 @@ def _wrong_match_entry_parts(
     return entry, request_id, raw_path
 
 
-def _resolved_candidates(candidates: list[str]) -> tuple[str | None, list[str]]:
-    resolved_path: str | None = None
+def _observed_candidates(
+    candidates: list[str],
+) -> tuple[DirectoryObservation, list[str]]:
+    """Observe every candidate name; a refused probe outranks absence.
+
+    The aggregate is what the caller acts on, so it must not report
+    "gone" while one of the names was merely unreadable (issue #1063).
+    """
+    refused: DirectoryObservation | None = None
+    last = DirectoryObservation(presence="absent", code="missing")
     for path in candidates:
-        resolved_path = resolve_failed_path(path)
-        if resolved_path is not None:
-            resolved_path = os.path.abspath(resolved_path)
-            candidates = _path_candidates(*candidates, resolved_path)
-            break
-    return resolved_path, candidates
+        last = observe_failed_path(path)
+        if last.present and last.path is not None:
+            return last, _path_candidates(*candidates, last.path)
+        if last.indeterminate and refused is None:
+            refused = last
+    return (refused if refused is not None else last), candidates
 
 
 def unsafe_failed_import_path_reason(path: str) -> str | None:
@@ -229,8 +240,12 @@ def _equivalent_failed_path_aliases(
         raw_path = validation_failed_path(row.get("validation_result"))
         if not raw_path:
             continue
-        row_resolved = resolve_failed_path(raw_path)
-        if row_resolved and os.path.realpath(row_resolved) == target_path:
+        row_observation = observe_failed_path(raw_path)
+        if (
+            row_observation.present
+            and row_observation.path is not None
+            and os.path.realpath(row_observation.path) == target_path
+        ):
             aliases.append(raw_path)
     return aliases
 
@@ -257,7 +272,11 @@ def dismiss_wrong_match_source(
         )
 
     candidates = _path_candidates(failed_path_hint, raw_path)
-    resolved_path, candidates = _resolved_candidates(candidates)
+    # Dismissal is an explicit operator intent to stop reviewing a row; it
+    # deletes nothing and therefore claims nothing about the filesystem.
+    # An unreadable source is not a reason to keep the row in the queue.
+    observation, candidates = _observed_candidates(candidates)
+    resolved_path = observation.path
     candidates = _path_candidates(
         *candidates,
         *_equivalent_failed_path_aliases(db, request_id, resolved_path),
@@ -304,7 +323,23 @@ def cleanup_wrong_match_source(
         )
 
     candidates = _path_candidates(failed_path_hint, raw_path)
-    resolved_path, candidates = _resolved_candidates(candidates)
+    observation, candidates = _observed_candidates(candidates)
+    if observation.indeterminate:
+        # We could not look. Deleting nothing and clearing nothing is the
+        # only truthful outcome: `path_missing` here is what cleared live
+        # pointers off intact 445MB folders (issue #1063). Return before
+        # the alias scan — it would probe the same unreadable tree again.
+        return WrongMatchCleanupResult(
+            download_log_id=download_log_id,
+            entry_found=True,
+            request_id=request_id,
+            raw_failed_path=raw_path,
+            failed_path_hint=failed_path_hint,
+            path_unavailable=True,
+            error=observation.unavailable_reason(),
+        )
+
+    resolved_path = observation.path
     candidates = _path_candidates(
         *candidates,
         *_equivalent_failed_path_aliases(db, request_id, resolved_path),

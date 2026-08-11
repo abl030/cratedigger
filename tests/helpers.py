@@ -1430,3 +1430,75 @@ class _AutomationHandoffDB(Protocol):
         canonical_path: str,
         message: str,
     ) -> AutomationHandoffResult: ...
+
+
+class SeededWrongMatch(msgspec.Struct, frozen=True):
+    """One real Wrong Matches source folder plus its seeded DB rows."""
+
+    request_id: int
+    download_log_id: int
+    path: str
+    parent: str
+
+
+class WrongMatchSeedDB(Protocol):
+    """The three fake-DB methods :func:`seed_visible_wrong_match` uses."""
+
+    def get_request(self, request_id: int) -> Mapping[str, Any] | None: ...
+
+    def seed_request(self, row: Mapping[str, Any]) -> None: ...
+
+    def log_download(self, request_id: int, **fields: Any) -> int: ...
+
+
+def seed_visible_wrong_match(
+    db: WrongMatchSeedDB,
+    root: str,
+    *,
+    request_id: int = 1,
+    quarantine: str = "wrong_matches",
+    name: str = "Artist - Album (2024) [abcd1234]",
+) -> SeededWrongMatch:
+    """Create a real quarantine folder and the rows that make it visible.
+
+    Shared by every protected-path test (issue #1063) so the delete,
+    triage and UI lanes all run against the same production-shaped
+    world: a real directory holding a real file under a real
+    ``wrong_matches`` ancestor, a request row, and a ``download_log`` row
+    whose rejection scenario keeps it in the operator worklist.
+
+    ``quarantine`` names the ancestor directory; passing something other
+    than ``wrong_matches``/``failed_imports`` produces the unsafe-path
+    world on purpose.
+    """
+    parent = os.path.join(root, quarantine)
+    os.makedirs(parent, exist_ok=True)
+    path = os.path.join(parent, name)
+    os.makedirs(path, exist_ok=True)
+    with open(os.path.join(path, "01 Track.mp3"), "wb") as handle:
+        handle.write(b"audio")
+    if db.get_request(request_id) is None:
+        db.seed_request(make_request_row(
+            id=request_id,
+            status="wanted",
+            mb_release_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        ))
+    download_log_id = db.log_download(
+        request_id,
+        outcome="rejected",
+        validation_result={
+            "scenario": "wrong_match",
+            "detail": "wrong album",
+            "distance": 0.6,
+            "failed_path": path,
+            "soulseek_username": "peer",
+            "candidates": [],
+            "items": [],
+        },
+    )
+    return SeededWrongMatch(
+        request_id=request_id,
+        download_log_id=download_log_id,
+        path=path,
+        parent=parent,
+    )

@@ -403,8 +403,103 @@ class TestPrivateProcessingAuthority(unittest.TestCase):
                 self.assertEqual(os.fstat(opened.fd).st_ino, os.stat(album).st_ino)
             lookalike = os.path.join(incoming, "failed_imports-old", "Album")
             os.makedirs(lookalike)
-            with self.assertRaises(FilesystemAuthorityError), open_configured_quarantine_directory(lookalike, cfg):
+            with self.assertRaises(FilesystemAuthorityError) as refused, \
+                    open_configured_quarantine_directory(lookalike, cfg):
                 pass
+            self.assertEqual(
+                str(refused.exception),
+                "path is outside configured quarantine roots")
+
+    def test_contained_but_unreadable_root_is_not_a_containment_verdict(self) -> None:
+        """The exact #1063 force-import lie.
+
+        EACCES on the 0700 processing root used to be swallowed by the
+        loop's ``continue``, exhaust it, and emerge as a CONTAINMENT
+        verdict the resolver never evaluated — an accusation against the
+        operator's configuration that was simply false.
+        """
+        with tempfile.TemporaryDirectory() as parent:
+            slskd = os.path.join(parent, "slskd")
+            incoming = os.path.join(parent, "Incoming")
+            processing = os.path.join(parent, "processing")
+            for directory in (slskd, incoming, processing):
+                os.mkdir(directory, 0o700)
+            albums = os.path.join(processing, "albums")
+            os.mkdir(albums, 0o700)
+            os.mkdir(os.path.join(processing, "preview"), 0o700)
+            album = os.path.join(albums, "wrong_matches", "Album")
+            os.makedirs(album)
+            cfg = MagicMock()
+            cfg.slskd_download_dir = slskd
+            cfg.beets_staging_dir = incoming
+            cfg.processing_dir = processing
+
+            # Must still work while the root is readable.
+            with open_configured_quarantine_directory(album, cfg) as opened:
+                self.assertEqual(
+                    os.fstat(opened.fd).st_ino, os.stat(album).st_ino)
+
+            os.chmod(albums, 0o000)
+            try:
+                with self.assertRaises(FilesystemAuthorityError) as refused, \
+                        open_configured_quarantine_directory(album, cfg):
+                    pass
+            finally:
+                os.chmod(albums, 0o700)
+            self.assertEqual(refused.exception.code, "open_failed")
+            self.assertEqual(refused.exception.errno_symbol, "EACCES")
+            self.assertIn("contained but unavailable", str(refused.exception))
+            self.assertNotIn(
+                "outside configured quarantine roots",
+                str(refused.exception))
+
+    def test_contained_but_absent_says_missing_not_outside(self) -> None:
+        """A deleted quarantine folder is missing, not mis-configured."""
+        with tempfile.TemporaryDirectory() as parent:
+            slskd = os.path.join(parent, "slskd")
+            incoming = os.path.join(parent, "Incoming")
+            processing = os.path.join(parent, "processing")
+            for directory in (slskd, incoming, processing):
+                os.mkdir(directory, 0o700)
+            os.mkdir(os.path.join(processing, "albums"), 0o700)
+            os.mkdir(os.path.join(processing, "preview"), 0o700)
+            cfg = MagicMock()
+            cfg.slskd_download_dir = slskd
+            cfg.beets_staging_dir = incoming
+            cfg.processing_dir = processing
+            gone = os.path.join(
+                processing, "albums", "wrong_matches", "Deleted Album")
+
+            with self.assertRaises(FilesystemAuthorityError) as refused, \
+                    open_configured_quarantine_directory(gone, cfg):
+                pass
+            self.assertEqual(refused.exception.code, "missing")
+            self.assertIn("does not exist under its configured root",
+                          str(refused.exception))
+
+    def test_relative_legacy_path_still_probes_every_configured_root(self) -> None:
+        """``missing`` under one root must keep probing the next."""
+        with tempfile.TemporaryDirectory() as parent:
+            slskd = os.path.join(parent, "slskd")
+            incoming = os.path.join(parent, "Incoming")
+            processing = os.path.join(parent, "processing")
+            for directory in (slskd, incoming, processing):
+                os.mkdir(directory, 0o700)
+            os.mkdir(os.path.join(processing, "albums"), 0o700)
+            os.mkdir(os.path.join(processing, "preview"), 0o700)
+            cfg = MagicMock()
+            cfg.slskd_download_dir = slskd
+            cfg.beets_staging_dir = incoming
+            cfg.processing_dir = processing
+            # Present only under the THIRD configured root.
+            album = os.path.join(
+                processing, "albums", "wrong_matches", "Relative Album")
+            os.makedirs(album)
+
+            relative = os.path.join("wrong_matches", "Relative Album")
+            with open_configured_quarantine_directory(relative, cfg) as opened:
+                self.assertEqual(
+                    os.fstat(opened.fd).st_ino, os.stat(album).st_ino)
 
 
 class TestPrivatePreviewCopyBounds(unittest.TestCase):

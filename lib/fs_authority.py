@@ -167,8 +167,13 @@ def errno_symbol(exc: OSError) -> str:
 _SPECIAL_FILE_ERRNOS = (errno.ENXIO, errno.ENODEV)
 
 
-def _raise_path_error(path: str, exc: OSError) -> FilesystemAuthorityError:
-    """Classify one failed no-follow open into a structured refusal.
+def classify_path_errno(exc: OSError) -> FsAuthorityCode:
+    """Map one failed path syscall onto the structured refusal vocabulary.
+
+    The ONE errno classifier in the repository: both the raising
+    descriptor helpers and the non-raising :func:`observe_directory`
+    probe read their code from here, so "what does EACCES mean" cannot
+    drift between the two (issue #1063).
 
     ELOOP (a symlink), ENOTDIR (a non-directory used as a path component)
     and the special-file errnos all mean the *name* is not what we
@@ -176,31 +181,131 @@ def _raise_path_error(path: str, exc: OSError) -> FilesystemAuthorityError:
     code that says "symlink" about a regular-file-as-directory is a lie
     the message would immediately contradict. ENOENT means the name is
     simply gone. Every other errno is the storage layer failing (ESTALE
-    and EIO are the live virtiofs shapes); those must never be confused
-    with a containment violation, so the errno name travels with the
-    error instead of only reaching a human-readable ``strerror``.
+    and EIO are the live virtiofs shapes, EACCES the live private-tree
+    shape); those must never be confused with a containment violation,
+    so the errno name travels with the error instead of only reaching a
+    human-readable ``strerror``.
     """
     if exc.errno == errno.ELOOP:
-        return FilesystemAuthorityError(
-            f"unsafe symlink: {path}", code="unsafe_symlink")
+        return "unsafe_symlink"
     if exc.errno == errno.ENOTDIR:
         # openat(O_DIRECTORY|O_NOFOLLOW) answers ENOTDIR — not ELOOP — for
         # a symlink to a directory, so this branch cannot tell the two
         # apart and must not claim to (issue #868 review).
+        return "not_a_directory"
+    if exc.errno in _SPECIAL_FILE_ERRNOS:
+        return "not_regular_file"
+    if exc.errno == errno.ENOENT:
+        return "missing"
+    return "open_failed"
+
+
+def _raise_path_error(path: str, exc: OSError) -> FilesystemAuthorityError:
+    """Classify one failed no-follow open into a structured refusal."""
+    code = classify_path_errno(exc)
+    if code == "unsafe_symlink":
+        return FilesystemAuthorityError(
+            f"unsafe symlink: {path}", code=code)
+    if code == "not_a_directory":
         return FilesystemAuthorityError(
             f"path component is not a directory, or is a symlink to one: {path}",
-            code="not_a_directory")
-    if exc.errno in _SPECIAL_FILE_ERRNOS:
+            code=code)
+    if code == "not_regular_file":
         return FilesystemAuthorityError(
-            f"not a regular file: {path}", code="not_regular_file")
-    if exc.errno == errno.ENOENT:
+            f"not a regular file: {path}", code=code)
+    if code == "missing":
         return FilesystemAuthorityError(
-            f"cannot open {path}: {exc.strerror}", code="missing")
+            f"cannot open {path}: {exc.strerror}", code=code)
     return FilesystemAuthorityError(
         f"cannot open {path}: {exc.strerror}",
-        code="open_failed",
+        code=code,
         errno_symbol=errno_symbol(exc),
     )
+
+
+DirectoryPresence = Literal["present", "absent", "indeterminate"]
+"""Whether a name was PROVEN to hold a directory, proven not to, or neither."""
+
+
+# Only these two codes prove a directory is genuinely not there: the name
+# does not exist (ENOENT), or something that is not a directory does
+# (ENOTDIR, or a successful stat of a non-directory). Every other refusal
+# — EACCES/EPERM on an unreadable parent, EIO/ESTALE on a sick mount, a
+# symlink loop — is an observation we were not permitted or able to make.
+# Reporting one of those as absence is the issue #1063 defect: an
+# indeterminate observation stated as a definitive negative fact.
+_ABSENCE_CODES: frozenset[FsAuthorityCode] = frozenset({"missing", "not_a_directory"})
+
+
+@dataclass(frozen=True)
+class DirectoryObservation:
+    """One truthful answer to "is there a directory at this name?".
+
+    ``present`` carries the absolute ``path``. ``absent`` is a POSITIVE
+    proof of absence and is the only state that may authorize
+    absence-driven cleanup. ``indeterminate`` means the probe was
+    refused: fail closed, keep the pointer, say so.
+
+    Deliberately NOT ``str | None``: that shape is exactly what let
+    ``os.path.isdir`` — which answers ``False`` for EACCES just as it
+    does for ENOENT — launder "I could not look" into "it is not there"
+    (issue #1063).
+    """
+
+    presence: DirectoryPresence
+    path: str | None = None
+    code: FsAuthorityCode | None = None
+    errno_symbol: str | None = None
+    detail: str | None = None
+
+    @property
+    def present(self) -> bool:
+        return self.presence == "present"
+
+    @property
+    def absent(self) -> bool:
+        return self.presence == "absent"
+
+    @property
+    def indeterminate(self) -> bool:
+        return self.presence == "indeterminate"
+
+    def unavailable_reason(self) -> str:
+        """Stable operator/audit text for an indeterminate observation."""
+        symbol = self.errno_symbol or self.code or "UNKNOWN"
+        return f"path_unavailable[{symbol}]: {self.detail or 'probe refused'}"
+
+
+def observe_directory(path: str) -> DirectoryObservation:
+    """Probe one absolute-or-relative name without ever lying about it."""
+    if not path:
+        return DirectoryObservation(
+            presence="absent", code="missing", detail="empty path")
+    try:
+        info = os.stat(path)
+    except OSError as exc:
+        code = classify_path_errno(exc)
+        return DirectoryObservation(
+            presence="absent" if code in _ABSENCE_CODES else "indeterminate",
+            code=code,
+            errno_symbol=errno_symbol(exc),
+            detail=f"{path}: {exc.strerror}",
+        )
+    except ValueError as exc:
+        # An embedded NUL (or other un-syscallable name) is not evidence
+        # of absence; ``os.path.isdir`` swallowed it as ``False``.
+        return DirectoryObservation(
+            presence="indeterminate",
+            code="path_escape",
+            detail=f"{path!r}: {exc}",
+        )
+    if not stat.S_ISDIR(info.st_mode):
+        return DirectoryObservation(
+            presence="absent",
+            code="not_a_directory",
+            detail=f"{path}: not a directory",
+        )
+    return DirectoryObservation(presence="present", path=os.path.abspath(path))
 
 
 @contextmanager
@@ -589,6 +694,17 @@ def open_configured_quarantine_directory(
     if not raw_path:
         raise FilesystemAuthorityError("quarantine path is missing")
 
+    # A refusal AFTER containment was established says nothing about
+    # containment. Keeping the first such refusal is what stops the loop
+    # from exhausting into the "outside configured quarantine roots"
+    # verdict it never evaluated — the live #1063 lie, where EACCES on
+    # the 0700 processing root accused the operator's config of a
+    # containment problem that did not exist. ``missing`` is the one
+    # refusal that legitimately continues: a relative legacy path is
+    # contained by every root lexically and must be probed under each.
+    contained_refusal: FilesystemAuthorityError | None = None
+    contained_missing = False
+
     for root, markers in roots:
         if not os.path.isabs(root):
             continue
@@ -609,13 +725,28 @@ def open_configured_quarantine_directory(
                     fd=os.dup(candidate_fd),
                     display_path=os.path.abspath(os.path.join(root, relative)),
                 )
-        except FilesystemAuthorityError:
+        except FilesystemAuthorityError as exc:
+            if exc.code == "missing":
+                contained_missing = True
+            elif contained_refusal is None:
+                contained_refusal = exc
             continue
         try:
             yield held
         finally:
             held.close()
         return
+    if contained_refusal is not None:
+        raise FilesystemAuthorityError(
+            f"quarantine path is contained but unavailable: {contained_refusal}",
+            code=contained_refusal.code,
+            errno_symbol=contained_refusal.errno_symbol,
+        )
+    if contained_missing:
+        raise FilesystemAuthorityError(
+            f"quarantine path does not exist under its configured root: {raw_path}",
+            code="missing",
+        )
     raise FilesystemAuthorityError("path is outside configured quarantine roots")
 
 

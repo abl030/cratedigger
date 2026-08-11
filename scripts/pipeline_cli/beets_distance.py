@@ -1,120 +1,94 @@
 """pipeline-cli ``beets-distance`` command (#495 carve).
 
 Real beets-distance between a download_log's failed_path and an MBID.
+
+The folder it reads lives under the private ``0700`` processing tree, so
+the command executes through the canonical web route over the
+permissioned Unix socket (issue #1063) instead of reading the tree as the
+invoking operator, where every protected candidate answered
+``folder_missing``.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
-from collections.abc import Callable
-from typing import TYPE_CHECKING
+import urllib.parse
 
-from scripts.pipeline_cli._format import _json_default
+from lib.json_narrow import is_str_object_dict
+from scripts.pipeline_cli.api_mutations import (
+    TIMEOUT_FOLDER_READ_SECONDS,
+    _ApiMutation,
+    relay_rendered,
+    render_api_error,
+)
 
-if TYPE_CHECKING:
-    from lib.beets_distance import BeetsDistancePipelineDB
+
+def _render_beets_distance(status: int, payload: dict[str, object]) -> None:
+    if payload.get("outcome") is None:
+        render_api_error(status, payload)
+        return
+    print(f"  download_log_id:        {payload.get('download_log_id')}")
+    print(f"  request_id:             {payload.get('request_id')}")
+    print(f"  candidate_mbid:         {payload.get('candidate_mbid')}")
+    print(f"  outcome:                {payload.get('outcome')}")
+    distance = payload.get("distance")
+    if isinstance(distance, (int, float)):
+        print(f"  distance:               {float(distance):.4f}")
+    matched = payload.get("matched_tracks")
+    if isinstance(matched, int):
+        print(f"  matched tracks:         "
+              f"{matched} / {payload.get('total_mb_tracks')} "
+              f"({payload.get('total_local_tracks')} local)")
+    components = payload.get("components")
+    if is_str_object_dict(components) and components:
+        print("  components:")
+        for key, value in sorted(components.items()):
+            if isinstance(value, (int, float)):
+                print(f"    {key:<24} {float(value):.4f}")
+    if payload.get("folder_path"):
+        print(f"  folder:                 {payload['folder_path']}")
+    if payload.get("duration_ms") is not None:
+        print(f"  latency:                {payload['duration_ms']} ms")
+    if payload.get("error_message"):
+        print(f"  error:                  {payload['error_message']}")
 
 
-def cmd_beets_distance(
-    db: BeetsDistancePipelineDB, args: argparse.Namespace,
-) -> int:
+def cmd_beets_distance(_db: object, args: argparse.Namespace) -> int:
     """Real beets-distance between a download_log's failed_path and an MBID.
 
-    Counterpart of ``GET /api/beets-distance/<download_log_id>/<mbid>``.
-    Both surfaces wrap ``lib.beets_distance.compute_beets_distance`` —
-    keep them in sync (see ``CLAUDE.md`` § "CLI ⇄ API surface
-    symmetry").
+    Thin adapter over ``GET /api/beets-distance/<download_log_id>/<mbid>``,
+    which is the one execution path for both surfaces (see ``CLAUDE.md``
+    § "CLI ⇄ API surface symmetry").
 
     ``args.mbid`` may be an MB release UUID or a bare Discogs numeric
-    release id (#530 — same dispatch as the API route: numeric ⇒
-    Discogs, mirroring ``browse.py::get_release_group``).
-    ``compute_beets_distance`` is source-agnostic; no MB<->Discogs
-    adapter needed.
+    release id (#530); the route owns that dispatch.
 
-    Exit codes:
-      * 0 — ``ok``
-      * 2 — ``download_log_not_found``, ``request_not_found``
-      * 3 — ``mb_no_release_group``, ``wrong_release_group`` (semantic
-            input violations, including the cross-RG guardrail)
-      * 4 — ``folder_missing``, ``no_audio`` (the artifacts we wanted
+    Exit codes, derived from that route's status codes:
+      * 0 — 200 ``ok``
+      * 2 — 404 ``download_log_not_found``, ``request_not_found`` (and an
+            id shape the route does not accept)
+      * 3 — 422 ``mb_no_release_group``, ``wrong_release_group``
+      * 4 — 410 ``folder_missing``, ``no_audio`` (the artifacts we wanted
             to compare are gone)
-      * 5 — ``mb_lookup_failed`` (transient MB-mirror failure)
-      * 1 — ``distance_failed`` / unknown outcome
+      * 5 — 503 ``mb_lookup_failed`` (transient mirror failure) or
+            ``folder_unavailable`` (the folder could not be observed)
+      * 1 — 500 ``distance_failed`` / unknown outcome
     """
-    from lib.beets_distance import compute_beets_distance
-    from lib.release_identity import detect_release_source
-    from web import discogs as discogs_api
-    from web import mb as mb_api
-
-    get_release_fn: Callable[[str], dict[str, object] | None]
-    if detect_release_source(args.mbid) == "discogs":
-        get_release_fn = lambda m: discogs_api.get_release(int(m), fresh=False)
-    else:
-        get_release_fn = lambda m: mb_api.get_release(m, fresh=False)
-
-    result = compute_beets_distance(
-        int(args.download_log_id),
-        args.mbid,
-        pdb=db,
-        mb_get_release=get_release_fn,
-        cache=None,
+    return relay_rendered(
+        args.api_endpoint,
+        _ApiMutation(
+            path=(
+                f"/api/beets-distance/{int(args.download_log_id)}/"
+                f"{urllib.parse.quote(str(args.mbid), safe='')}"
+            ),
+            body={},
+            method="GET",
+        ),
+        render=_render_beets_distance,
+        json_output=getattr(args, "json", False),
+        timeout_seconds=TIMEOUT_FOLDER_READ_SECONDS,
+        exit_overrides={500: 1},
     )
-
-    payload = {
-        "outcome": result.outcome,
-        "distance": result.distance,
-        "matched_tracks": result.matched_tracks,
-        "total_local_tracks": result.total_local_tracks,
-        "total_mb_tracks": result.total_mb_tracks,
-        "extra_local_tracks": result.extra_local_tracks,
-        "extra_mb_tracks": result.extra_mb_tracks,
-        "components": result.components,
-        "request_release_group_id": result.request_release_group_id,
-        "candidate_release_group_id": result.candidate_release_group_id,
-        "candidate_mbid": result.candidate_mbid,
-        "download_log_id": result.download_log_id,
-        "request_id": result.request_id,
-        "folder_path": result.folder_path,
-        "error_message": result.error_message,
-        "duration_ms": result.duration_ms,
-    }
-    if getattr(args, "json", False):
-        print(json.dumps(payload, indent=2, sort_keys=True,
-                         default=_json_default))
-    else:
-        print(f"  download_log_id:        {result.download_log_id}")
-        print(f"  request_id:             {result.request_id}")
-        print(f"  candidate_mbid:         {result.candidate_mbid}")
-        print(f"  outcome:                {result.outcome}")
-        if result.distance is not None:
-            print(f"  distance:               {result.distance:.4f}")
-        if result.matched_tracks is not None:
-            print(f"  matched tracks:         "
-                  f"{result.matched_tracks} / {result.total_mb_tracks} "
-                  f"({result.total_local_tracks} local)")
-        if result.components:
-            print("  components:")
-            for k, v in sorted(result.components.items()):
-                print(f"    {k:<24} {v:.4f}")
-        if result.folder_path:
-            print(f"  folder:                 {result.folder_path}")
-        if result.duration_ms is not None:
-            print(f"  latency:                {result.duration_ms} ms")
-        if result.error_message:
-            print(f"  error:                  {result.error_message}")
-
-    if result.outcome == "ok":
-        return 0
-    if result.outcome in ("download_log_not_found", "request_not_found"):
-        return 2
-    if result.outcome in ("mb_no_release_group", "wrong_release_group"):
-        return 3
-    if result.outcome in ("folder_missing", "no_audio"):
-        return 4
-    if result.outcome == "mb_lookup_failed":
-        return 5
-    return 1
 
 
 def add_beets_distance_subparser(

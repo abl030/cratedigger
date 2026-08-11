@@ -1063,6 +1063,122 @@ class TestPathAuthorityProofCheckers(unittest.TestCase):
                 source_exists=True, replacement_has_canonical=True,
             )
 
+    def test_quarantine_verdict_checker_rejects_a_laundered_refusal(self) -> None:
+        with self.assertRaises(AssertionError):
+            assert_quarantine_verdict_is_earned(
+                world="unreadable_root",
+                code="unspecified",
+                message="path is outside configured quarantine roots",
+            )
+        with self.assertRaises(AssertionError):
+            assert_quarantine_verdict_is_earned(
+                world="absent",
+                code="unspecified",
+                message="path is outside configured quarantine roots",
+            )
+        with self.assertRaises(AssertionError):
+            assert_quarantine_verdict_is_earned(
+                world="outside", code="missing", message="gone")
+
+
+def assert_quarantine_verdict_is_earned(
+    *, world: str, code: str, message: str,
+) -> None:
+    """A quarantine refusal must name the fact it actually established.
+
+    Only a candidate that is genuinely NOT under a configured root may be
+    refused for containment; a root the resolver could not open, and a
+    name that is genuinely absent, each owe their own code (issue #1063).
+    """
+    containment_verdict = "outside configured quarantine roots" in message
+    if world == "outside":
+        if not containment_verdict or code == "missing":
+            raise AssertionError(
+                f"an uncontained path was refused as {code!r}: {message}")
+        return
+    if containment_verdict:
+        raise AssertionError(
+            f"world={world!r} was refused with a containment verdict the "
+            f"resolver never evaluated: {message}")
+    if world == "unreadable_root" and code != "open_failed":
+        raise AssertionError(
+            f"an unreadable root was refused as {code!r}, not a storage failure")
+    if world == "absent" and code != "missing":
+        raise AssertionError(
+            f"an absent candidate was refused as {code!r}, not missing")
+
+
+class TestGeneratedQuarantineVerdicts(unittest.TestCase):
+    """Every quarantine refusal states the fact it actually observed."""
+
+    @example(world="unreadable_root", leaf="album")
+    @example(world="absent", leaf="album")
+    @example(world="outside", leaf="album")
+    @given(
+        world=st.sampled_from(("present", "unreadable_root", "absent", "outside")),
+        leaf=_SAFE_COMPONENTS,
+    )
+    def test_real_resolver_never_invents_a_containment_verdict(
+        self, world: str, leaf: str,
+    ) -> None:
+        from lib.fs_authority import open_configured_quarantine_directory
+
+        with tempfile.TemporaryDirectory() as parent:
+            slskd = os.path.join(parent, "slskd")
+            incoming = os.path.join(parent, "Incoming")
+            processing = os.path.join(parent, "processing")
+            for directory in (slskd, incoming, processing):
+                os.mkdir(directory, 0o700)
+            albums = os.path.join(processing, "albums")
+            os.mkdir(albums, 0o700)
+            os.mkdir(os.path.join(processing, "preview"), 0o700)
+            cfg = CratediggerConfig.from_ini(_quarantine_ini(
+                slskd=slskd, incoming=incoming, processing=processing))
+            quarantine = os.path.join(albums, "wrong_matches")
+            os.makedirs(quarantine, exist_ok=True)
+            album = os.path.join(quarantine, leaf)
+            candidate = album
+            if world != "absent":
+                os.makedirs(album, exist_ok=True)
+            if world == "outside":
+                candidate = os.path.join(parent, "unconfigured", leaf)
+                os.makedirs(candidate, exist_ok=True)
+            if world == "unreadable_root":
+                os.chmod(albums, 0o000)
+            try:
+                if world == "present":
+                    with open_configured_quarantine_directory(
+                        candidate, cfg,
+                    ) as opened:
+                        self.assertEqual(
+                            os.fstat(opened.fd).st_ino,
+                            os.stat(album).st_ino,
+                        )
+                    return
+                with self.assertRaises(FilesystemAuthorityError) as refused, \
+                        open_configured_quarantine_directory(candidate, cfg):
+                    pass
+            finally:
+                os.chmod(albums, 0o700)
+            assert_quarantine_verdict_is_earned(
+                world=world,
+                code=refused.exception.code,
+                message=str(refused.exception),
+            )
+
+
+def _quarantine_ini(*, slskd: str, incoming: str, processing: str):
+    import configparser
+
+    parser = configparser.RawConfigParser()
+    parser.read_string(
+        "[Paths]\n"
+        f"slskd_download_dir = {slskd}\n"
+        f"beets_staging_dir = {incoming}\n"
+        f"processing_dir = {processing}\n"
+    )
+    return parser
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -101,7 +101,7 @@ depends on.
 | `/api/wrong-matches/audio` | GET | Stream an individual wrong-match audio file with byte-range support |
 | `/api/wrong-matches/converge` | POST | Queue every wrong-match candidate within a release's loosen threshold and delete the rest |
 | `/api/wrong-matches/triage` | POST | Evidence-only full-queue Wrong Matches cleanup; requires `{"confirm_all_wrong_matches": true}` |
-| `/api/import-preview` | POST | Strict path-free preview: nested typed `values` or a positive `download_log_id`; the local CLI retains explicit path preview. |
+| `/api/import-preview` | POST | Strict path-free preview: nested typed `values` or a positive `download_log_id`. `pipeline-cli import-preview --download-log-id` relays this route (its `failed_path` is under the private processing tree, #1063); the CLI-only `--path` mode keeps the explicit-path inspector off the HTTP surface (CD-SEC-03). |
 | `/api/import-jobs` | GET | List recent import queue jobs |
 | `/api/import-jobs/timeline` | GET | List active queued/running/recovery-required import jobs in importer order, with server-classified display fields |
 | `/api/import-jobs/<id>` | GET | Poll a single import queue job |
@@ -520,6 +520,14 @@ depends on.
   stay invariant under the diagnostic. Measured against the live corpus
   (Rule D, 36,323 rows): 148 changed rows, every one in `verdict` +
   `summary`, each token moving exactly its own rows.
+- **Wrong Matches unavailable sources** — a candidate whose folder the server
+  could not READ (permissions, I/O — never a folder proven gone) stays in the
+  list with a `source unavailable` badge, an amber card, both Force Import and
+  Delete disabled, and copy that says the folder has NOT been confirmed
+  missing. It is also excluded from Converge's green set. Before issue #1063
+  such a row was silently dropped from the payload, hiding the broken world
+  from the only surface that could report it. A folder proven absent still
+  leaves the list as before.
 - **Wrong Matches evidence provenance** — candidate rows keep the downloaded
   source codec, configured target contract, and temporary V0 probe separate.
   A lossless candidate destined for Opus therefore reads `FLAC → OPUS 128

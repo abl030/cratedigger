@@ -1300,5 +1300,42 @@ console.log('entrySpectralCell() withholds an audit-only candidate accusation');
   assert(!html.includes('audit-only'), 'a gradeless candidate withholds nothing');
 }
 
+console.log('an unobservable source is surfaced, never silently dropped');
+{
+  // Issue #1063: the server sends `path_unavailable` when its probe was
+  // REFUSED. The row must stay visible, say so, disable both destructive
+  // actions, and never be counted as converge-green.
+  const unavailable = {
+    download_log_id: 77,
+    soulseek_username: 'peer',
+    distance: 0.05,
+    path_unavailable: true,
+    path_unavailable_reason: 'path_unavailable[EACCES]: /x: Permission denied',
+  };
+  assert(__test__.entryPathUnavailable(unavailable),
+    'the payload flag is the single source of the unavailable state');
+  assert(!__test__.entryPathUnavailable({ download_log_id: 78, distance: 0.05 }),
+    'an ordinary entry is not unavailable');
+  assert(!__test__.isConvergeGreen(unavailable, 180),
+    'an unobservable source is never converge-green, whatever its distance');
+  assert(__test__.isConvergeGreen({ distance: 0.05 }, 180),
+    'must still work: an observable close match is still green');
+
+  const html = __test__.renderEntry(unavailable, 180, 42);
+  assert(html.includes('source unavailable'), 'the card is badged unavailable');
+  assert(html.includes('NOT been confirmed missing'),
+    'the copy refuses to claim the folder is gone');
+  assert(html.includes('EACCES'), 'the refusal reason reaches the operator');
+  assertEqual(countOccurrences(html, 'disabled'), 2,
+    'both Force Import and Delete are disabled');
+
+  const ordinary = __test__.renderEntry(
+    { download_log_id: 78, soulseek_username: 'peer', distance: 0.05 }, 180, 42);
+  assert(!ordinary.includes('source unavailable'),
+    'must still work: an ordinary entry carries no unavailable badge');
+  assertEqual(countOccurrences(ordinary, 'disabled'), 0,
+    'must still work: an ordinary entry keeps both actions enabled');
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

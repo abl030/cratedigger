@@ -22,11 +22,23 @@ ssh doc2 'pipeline-cli routes --json'
 
 The installed wrapper has two independent authority shapes:
 
-- `pipeline-delete`, `set-quality`, `upgrade`, `wrong-match-converge`, and
-  `resolve-rg` connect to `/run/cratedigger-web/web.sock`. The caller must be a
+- `pipeline-delete`, `set-quality`, `upgrade`, `wrong-match-converge`,
+  `resolve-rg`, `wrong-match-delete`, `wrong-match-delete-group`,
+  `wrong-match-triage`, `replace`, `force-import`, `beets-distance`, and
+  `import-preview --download-log-id` connect to
+  `/run/cratedigger-web/web.sock`. The caller must be a
   member of `services.cratedigger.web.accessGroup` (default
   `cratedigger-web`). That membership grants complete local HTTP/API authority,
-  not merely permission to execute those five subcommands.
+  not merely permission to execute those subcommands.
+
+  Everything after `resolve-rg` in that list joined it in issue #1063: each one
+  reads or destroys a path under the private `0700 cratedigger:users`
+  processing tree, which only the service identity can traverse. Executed in
+  the invoking operator's own process they reported intact folders as missing,
+  cleared their Wrong Matches pointers, and claimed success. Routing them
+  through the socket makes ONE identity own those filesystem facts. There is no
+  direct-database fallback: if the socket is unreachable the command exits 5
+  and changes nothing.
 - Every other command retains its existing resource-specific boundary:
   PostgreSQL credentials/peer identity for database work, filesystem and Beets
   access for media/quarantine operations, and the relevant secret-file groups
@@ -120,8 +132,11 @@ remains after a purge failure.
 
 ## API-backed mutation commands
 
-`pipeline-delete`, `set-quality`, `upgrade`, `wrong-match-converge`, and
-`resolve-rg` call the canonical web route over the module-owned Unix socket.
+`pipeline-delete`, `set-quality`, `upgrade`, `wrong-match-converge`,
+`resolve-rg`, `wrong-match-delete`, `wrong-match-delete-group`,
+`wrong-match-triage`, `replace`, `force-import`, `beets-distance`, and
+`import-preview --download-log-id` call the canonical web route over the
+module-owned Unix socket.
 The installed Nix wrapper selects that socket while constructing the parser:
 it accepts no `--api-base`, carries no Basic username/password, and has no TCP,
 direct-database, or duplicate-service fallback. In the installed production
@@ -139,9 +154,21 @@ it is deliberately insecure, must remain loopback-only, and exists only for
 adapter development/tests. Never expose it or use it as a production escape
 hatch. The installed wrapper does not expose `--api-base`.
 
-Valid JSON route responses, including 5xx responses, are relayed on stdout.
-Any 2xx exits 0; 404 exits 2; 400/422 exits 3; 409 exits 4; other statuses exit
-5. Locally generated transport/protocol failures (including a missing or
+Valid JSON route responses, including 5xx responses, are relayed on stdout —
+except for the commands that kept their own text/`--json` presentation
+(`wrong-match-delete`, `wrong-match-delete-group`, `wrong-match-triage`,
+`replace`, `force-import`, `beets-distance`, `import-preview`), which render
+the route's payload exactly as they did when they executed in-process.
+Any 2xx exits 0; 404 exits 2; 400/422 exits 3; 409/410 exits 4; other statuses
+exit 5. The two Wrong Matches delete commands additionally map 500 to exit 1,
+preserving the `delete_failed` exit code they have always returned.
+Each routed command carries its own request deadline sized to the work the
+route performs — an enqueue is 15s, a source delete 300s, a group delete 900s,
+Replace 300s (inline mirror lookups), a download-log preview 900s (inline
+snapshot + measurement), and a beets distance 180s. `wrong-match-triage` starts
+the canonical background sweep and then follows
+`/api/wrong-matches/triage/status` to completion, so it still blocks and prints
+the whole summary; the sweep itself is deliberately unbounded. Locally generated transport/protocol failures (including a missing or
 unreachable socket, malformed development origins, redirects, or non-object
 JSON responses) exit 5 with a structured error on stderr and never fall back.
 `pipeline-delete ID --confirm DELETE` and
