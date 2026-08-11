@@ -268,10 +268,32 @@ function renderWrongMatchExplorer(data) {
   const sharedTags = sharedExplorerTags(files);
   const orderedBy = typeof data?.ordered_by === 'string' ? data.ordered_by : 'folder';
   const partial = data?.partial === true;
+  const unreadableCount = Number.isFinite(data?.unreadable_entry_count)
+    ? data.unreadable_entry_count : 0;
+  const unreadableReason = typeof data?.unreadable_reason === 'string'
+    ? data.unreadable_reason : '';
   const truncatedReason = typeof data?.truncated_reason === 'string' ? data.truncated_reason.replace(/_/g, ' ') : 'limit';
-  const partialNotice = partial
+  // Two different reasons a listing is incomplete, and they must not be
+  // told as one: a LIMIT stopped us, or the server was REFUSED. Issue
+  // #1063 — this panel is what the operator reads before deciding to
+  // delete, so it must never present a refused read as an empty folder.
+  const truncatedNotice = data?.truncated_reason
     ? `<div style="color:#e5a84b;font-size:0.76em;margin:6px 0;">Partial explorer result: ${esc(truncatedReason)} reached.</div>`
     : '';
+  // A refused listing describes a world the operator can REPAIR (fix the
+  // mode, remount the share), so the notice carries its own Retry. It
+  // rides on the NOTICE, not on the empty-state branch: a PARTIAL listing
+  // — some files read, some refused — renders the notice above a real
+  // track list and is exactly as repairable, but it answers
+  // ``status: "ok"`` and so never reached the empty branch (issue #1063).
+  const retryId = Number(data?.download_log_id);
+  const retry = Number.isFinite(retryId)
+    ? ` <button class="p-btn" style="margin-left:6px;" onclick="event.stopPropagation(); window.reloadWrongMatchExplorer(${retryId})">Retry</button>`
+    : '';
+  const unreadableNotice = unreadableCount > 0
+    ? `<div style="color:#d9a441;font-size:0.76em;margin:6px 0;">${unreadableCount} entr${unreadableCount === 1 ? 'y' : 'ies'} could not be read — this listing is incomplete and nothing here is confirmed missing.${unreadableReason ? ` (${esc(unreadableReason)})` : ''}${retry}</div>`
+    : '';
+  const partialNotice = `${truncatedNotice}${unreadableNotice}`;
   let summary = '';
   if (sourceDirs.length > 0 || Object.keys(sharedTags).length > 0) {
     const parts = [];
@@ -289,7 +311,13 @@ function renderWrongMatchExplorer(data) {
       </div>`;
   }
   if (files.length === 0) {
-    return `${summary}${partialNotice}<div style="color:#666;font-size:0.78em;padding:8px 0;">${partial ? 'No audio files were found before exploration was truncated.' : 'No audio files found in this folder.'}</div>`;
+    const emptyText = unreadableCount > 0
+      ? 'The server could not read this folder\u2019s contents, so no listing is available. This is NOT evidence that the folder is empty.'
+      : partial
+        ? 'No audio files were found before exploration was truncated.'
+        : 'No audio files found in this folder.';
+    const emptyColour = unreadableCount > 0 ? '#d9a441' : '#666';
+    return `${summary}${partialNotice}<div style="color:${emptyColour};font-size:0.78em;padding:8px 0;">${emptyText}</div>`;
   }
 
   let html = `
@@ -303,6 +331,39 @@ function renderWrongMatchExplorer(data) {
       ${files.map(renderWrongMatchExplorerFile).join('')}
     </div>`;
   return html;
+}
+
+/**
+ * Explorer payload statuses this panel knows how to render.
+ *
+ * ``build_wrong_match_explorer`` emits exactly these two: ``ok`` when it
+ * was allowed to look at everything, ``unavailable`` when refusals were
+ * recorded and nothing was readable. Both are complete payloads that
+ * ``renderWrongMatchExplorer`` turns into honest copy; anything else is
+ * an error envelope.
+ *
+ * @type {Set<unknown>}
+ */
+const EXPLORER_RENDERABLE_STATUSES = new Set(['ok', 'unavailable']);
+
+/**
+ * Did the server record a refusal the operator could go and repair?
+ *
+ * Keyed on the refusal COUNT, not on `status`: the server only says
+ * `unavailable` when NOTHING was readable, so a partial listing — some
+ * files read, some refused — answers `ok` while being exactly as
+ * repairable. Caching that state meant the operator fixed the permission
+ * and still needed a full page reload to see it (issue #1063).
+ *
+ * A `truncated_reason` is deliberately NOT repairable: retrying hits the
+ * same limit, so a truncated listing stays cached.
+ *
+ * @param {any} data
+ * @returns {boolean}
+ */
+function explorerListingIsRepairable(data) {
+  return Number(data?.unreadable_entry_count) > 0
+    || data?.status === 'unavailable';
 }
 
 /**
@@ -320,14 +381,33 @@ async function ensureWrongMatchExplorer(logId) {
   try {
     const r = await fetch(`${API}/api/wrong-matches/explorer?download_log_id=${encodeURIComponent(String(logId))}`);
     const data = await r.json();
-    if (!r.ok || data.status !== 'ok') {
-      throw new Error(data.error || data.message || 'Explorer load failed');
+    // ``unavailable`` is a 200 payload the server DELIBERATELY builds:
+    // nothing readable plus recorded refusals. It is the honest listing,
+    // not a load failure — rejecting it here sent the operator back to
+    // "Failed to load file explorer" with a Retry button that can never
+    // succeed on an unreadable tree, and left the authored copy below
+    // unreachable (issue #1063).
+    if (!r.ok || !EXPLORER_RENDERABLE_STATUSES.has(data?.status)) {
+      throw new Error(data?.error || data?.message || 'Explorer load failed');
     }
     mount.innerHTML = renderWrongMatchExplorer(data);
-    _entryExplorerState.set(logId, 'loaded');
-  } catch (_e) {
+    // Only a listing with nothing left to repair is worth caching. One
+    // that recorded refusals describes a broken world the operator is
+    // expected to go and fix; caching it would make reopening the
+    // disclosure short-circuit on the stale answer until the whole page
+    // is reloaded.
+    if (explorerListingIsRepairable(data)) {
+      _entryExplorerState.delete(logId);
+    } else {
+      _entryExplorerState.set(logId, 'loaded');
+    }
+  } catch (e) {
     _entryExplorerState.delete(logId);
-    mount.innerHTML = `<div style="color:#f88;font-size:0.78em;padding:8px 0;">Failed to load file explorer. <button class="p-btn" style="margin-left:6px;" onclick="event.stopPropagation(); window.reloadWrongMatchExplorer(${logId})">Retry</button></div>`;
+    // A whole-root refusal answers 503 with the server's own reason
+    // (``Wrong-match files could not be read: … (EACCES)``). Dropping it
+    // told the operator nothing at all about a world that needs fixing.
+    const detail = (e instanceof Error && e.message) ? ` ${esc(e.message)}` : '';
+    mount.innerHTML = `<div style="color:#f88;font-size:0.78em;padding:8px 0;">Failed to load file explorer.${detail} <button class="p-btn" style="margin-left:6px;" onclick="event.stopPropagation(); window.reloadWrongMatchExplorer(${logId})">Retry</button></div>`;
   }
 }
 
@@ -446,11 +526,26 @@ function distanceValue(value) {
 }
 
 /**
+ * Is this entry's source folder unobservable right now?
+ *
+ * The server sends `path_unavailable` when its probe was REFUSED
+ * (permissions, I/O) rather than answering "gone" — issue #1063. Such an
+ * entry is still real; it just cannot be acted on, so every destructive
+ * or importing action is disabled and it never counts as converge-green.
+ * @param {any} entry
+ * @returns {boolean}
+ */
+export function entryPathUnavailable(entry) {
+  return entry?.path_unavailable === true;
+}
+
+/**
  * @param {any} entry
  * @param {number} thresholdMilli
  * @returns {boolean}
  */
 function isConvergeGreen(entry, thresholdMilli) {
+  if (entryPathUnavailable(entry)) return false;
   const distance = distanceValue(entry?.distance);
   return distance != null && distance <= normalizeThreshold(thresholdMilli) / 1000;
 }
@@ -631,7 +726,10 @@ function convergeButtonLabel(greenCount) {
  * @param {boolean} green
  * @returns {string}
  */
-function entryItemStyle(green) {
+function entryItemStyle(green, unavailable = false) {
+  if (unavailable) {
+    return 'background:#1f1a14;margin:4px 0;border-color:#8a6a2a;box-shadow:inset 3px 0 0 #d9a441;';
+  }
   return green
     ? 'background:#142014;margin:4px 0;border-color:#426b42;box-shadow:inset 3px 0 0 #6d6;'
     : 'background:#1a1a1a;margin:4px 0;';
@@ -1062,8 +1160,12 @@ function renderEntry(e, thresholdMilli, requestId) {
   const job = e.import_job || null;
   const jobBadge = job ? `<span class="badge" style="background:#222;color:#9bf;margin-left:8px;">${esc(job.status)}</span>` : '';
   const green = isConvergeGreen(e, thresholdMilli);
+  const unavailable = entryPathUnavailable(e);
   const distColor = green ? '#6d6' : '#aaa';
   const evidence = formatEntryEvidence(e);
+  const unavailableBadge = unavailable
+    ? '<span class="badge" style="background:#2a2114;color:#d9a441;border:1px solid #8a6a2a;margin-left:8px;">source unavailable</span>'
+    : '';
 
   // Rank badge mirrors the group-header palette so operators can sort
   // candidates visually. Sort order is server-side (best first); the
@@ -1078,13 +1180,13 @@ function renderEntry(e, thresholdMilli, requestId) {
     : '';
 
   const header = `
-    <div id="wm-entry-card-${e.download_log_id}" class="p-item" data-request-id="${requestId}" data-distance="${distValue != null ? distValue : ''}" style="${entryItemStyle(green)}" onclick="window.toggleWrongMatchEntry('${detailId}', ${e.download_log_id})">
+    <div id="wm-entry-card-${e.download_log_id}" class="p-item" data-request-id="${requestId}" data-distance="${distValue != null ? distValue : ''}" style="${entryItemStyle(green, unavailable)}" onclick="window.toggleWrongMatchEntry('${detailId}', ${e.download_log_id})">
       <div class="p-top">
         <div>
           <span style="font-family:monospace;color:#aaa;">#${e.download_log_id}</span>
           <span style="color:#6a9;margin-left:8px;">${esc(e.soulseek_username || '?')}</span>
           <span id="wm-entry-green-${e.download_log_id}" class="badge" style="${entryGreenBadgeStyle(green)}">green</span>
-          ${rankBadge}${verifiedBadge}${jobBadge}
+          ${unavailableBadge}${rankBadge}${verifiedBadge}${jobBadge}
         </div>
       </div>
       <div class="p-meta">
@@ -1114,13 +1216,20 @@ function renderEntryDetail(e, job, requestId) {
 
   // Action buttons up top: operators are usually here to act, not browse.
   const active = job && ['queued', 'running', 'recovery_required'].includes(job.status);
+  const unavailable = entryPathUnavailable(e);
   const importLabel = job?.status === 'recovery_required'
     ? 'Recovery required'
     : (active ? job.status[0].toUpperCase() + job.status.slice(1) : 'Force Import');
+  const blocked = Boolean(active) || unavailable;
   let html = '<div class="p-actions" style="margin-bottom:10px;">';
-  html += `<button class="p-btn" data-pipeline-request-id="${requestId}" style="border-color:#6a9;color:#6a9;" ${active ? 'disabled' : ''} onclick="event.stopPropagation(); window.forceImportWrongMatch(${e.download_log_id}, this)">${importLabel}</button>`;
-  html += `<button class="p-btn delete" data-pipeline-request-id="${requestId}" ${active ? 'disabled' : ''} onclick="event.stopPropagation(); window.deleteWrongMatch(${e.download_log_id}, this)">Delete</button>`;
+  html += `<button class="p-btn" data-pipeline-request-id="${requestId}" style="border-color:#6a9;color:#6a9;" ${blocked ? 'disabled' : ''} onclick="event.stopPropagation(); window.forceImportWrongMatch(${e.download_log_id}, this)">${importLabel}</button>`;
+  html += `<button class="p-btn delete" data-pipeline-request-id="${requestId}" ${blocked ? 'disabled' : ''} onclick="event.stopPropagation(); window.deleteWrongMatch(${e.download_log_id}, this)">Delete</button>`;
   html += '</div>';
+  if (unavailable) {
+    // Say what is actually true: the server could not look. Nothing here
+    // claims the folder is gone, and nothing offers to delete it.
+    html += `<div class="p-detail-row"><span class="p-detail-label" style="color:#d9a441;">Source</span><span class="p-detail-value" style="color:#d9a441;">Unavailable \u2014 the server could not read this folder, so it cannot be imported or deleted. It has NOT been confirmed missing.${e.path_unavailable_reason ? ` (${esc(String(e.path_unavailable_reason))})` : ''}</span></div>`;
+  }
 
   if (c) {
     html += `<div class="p-detail-row"><span class="p-detail-label">Matched</span><span class="p-detail-value">${esc(c.artist || '?')} — ${esc(c.album || '?')}${c.year ? ` (${esc(c.year)})` : ''}${c.country ? ` [${esc(c.country)}]` : ''}</span></div>`;
@@ -1361,6 +1470,8 @@ async function _pollImportJob(jobId, btn, logId) {
 }
 
 export const __test__ = {
+  EXPLORER_RENDERABLE_STATUSES,
+  explorerListingIsRepairable,
   pollImportJob: _pollImportJob,
   bulkTriageWrongMatches,
   cleanupSummaryToast,
@@ -1369,6 +1480,7 @@ export const __test__ = {
   deleteWrongMatch,
   deleteWrongMatchGroup,
   deleteUnmatchedOnConverge,
+  entryPathUnavailable,
   entrySpectralCell,
   formatEntryEvidence,
   greenEntries,
@@ -1377,6 +1489,7 @@ export const __test__ = {
   normalizeThreshold,
   refreshWrongMatches,
   reloadWrongMatchExplorer,
+  renderEntry,
   removeWrongMatchEntry,
   removeWrongMatchGroup,
   renderLatestImport,
@@ -1542,25 +1655,50 @@ export async function deleteWrongMatchGroup(requestId, btn) {
       body: JSON.stringify({request_id: requestId}),
     });
     const data = await r.json();
-    if (r.ok && (data.status === 'ok' || data.status === 'partial')) {
+    // A non-2xx group delete is NOT "nothing happened": the route reports
+    // the worst outcome in the group, so N folders can already be gone
+    // while one was skipped. Telling the operator "failed" and leaving a
+    // stale list is the #1063 shape in the browser — always refresh, and
+    // only say "failed" when nothing was deleted (issue #1063 T3.4).
+    const summarised = Number.isFinite(Number(data.deleted));
+    if (summarised) {
+      const deleted = Number(data.deleted) || 0;
+      // A pointer-only clear over a folder that was already gone is not a
+      // deletion, and the headline must not call it one (issue #1063).
+      const clearedMissing = Number(data.cleared_missing) || 0;
+      const cleared = clearedMissing
+        ? ` · cleared ${clearedMissing} already-missing` : '';
       const skipped = data.skipped ? ` · skipped ${data.skipped}` : '';
       const errors = data.errors ? ` · errors ${data.errors}` : '';
-      toast(`Deleted ${data.deleted || 0} candidates${skipped}${errors}`);
+      const remaining = data.remaining ? ` · ${data.remaining} left` : '';
+      const failed = deleted === 0 && clearedMissing === 0;
+      // Anything left behind needs the operator's attention, even when
+      // some folders did go: a green "all good" toast over `errors 1 ·
+      // 1 left` under-signals exactly the world this issue is about.
+      const incomplete = Boolean(data.errors) || Boolean(data.remaining);
+      toast(
+        failed
+          ? `Deleted nothing${skipped}${errors}${remaining}`
+          : `Deleted ${deleted} folder${deleted === 1 ? '' : 's'}${cleared}${skipped}${errors}${remaining}`,
+        failed || incomplete,
+      );
       invalidateWrongMatches();
-      if (data.status === 'ok' || (data.remaining === 0)) {
+      if (r.ok && (data.status === 'ok' || data.remaining === 0)) {
         removeWrongMatchGroup(requestId);
       } else {
-        // Partial outcome: remove the rows that actually deleted, leave the
-        // skipped/errored rows visible so the operator can see what failed.
-        for (const result of (data.results || [])) {
-          if (result && result.success && Number.isFinite(Number(result.download_log_id))) {
-            removeWrongMatchEntry(result.download_log_id);
-          }
-        }
+        // Partial outcome: re-render from the server rather than surgically
+        // removing rows. Surgical removal left the group's own strip stale
+        // — "Delete All (2)" and "1 green" over the ONE unavailable
+        // candidate that survived, which is the client/server green
+        // disagreement all over again (issue #1063 F-review).
+        btn.disabled = false;
+        btn.textContent = `Delete All (${count})`;
+        await _refreshWrongMatches();
       }
     } else {
       btn.disabled = false;
       btn.textContent = `Delete All (${count})`;
+      invalidateWrongMatches();
       toast(data.error || data.message || 'Delete all failed', true);
     }
   } catch (_e) {

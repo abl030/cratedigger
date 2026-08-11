@@ -3252,6 +3252,179 @@ pkgs.testers.nixosTest {
         cli_payload = json.loads(machine.succeed(f"cat {stdout_path}"))
         assert isinstance(cli_payload, dict), (command, cli_payload)
 
+
+    # Issue #1063: every command that touches a protected quarantine path
+    # runs through the same socket. Impossible identifiers give the route's
+    # own 404/exit-2 contract without any mirror, filesystem, or Beets work.
+    # (command, expected exit, expects a JSON object on stdout). Every one
+    # of these renders the ROUTE's answer to stdout; argparse's own usage
+    # error also exits 2, also writes only to stderr, and also contains no
+    # ``api_`` token, so an exit-code-only assertion would stay green while
+    # nothing ever reached the socket.
+    protected_path_cli_commands = (
+        ("wrong-match-delete 999999 --apply --json", 2, True),
+        ("force-import 999999", 2, False),
+        (
+            "beets-distance 999999 aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa --json",
+            2,
+            True,
+        ),
+        ("replace 999999 --to aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa --json", 2, True),
+    )
+    for index, (command, expected_exit, expects_json) in enumerate(
+        protected_path_cli_commands,
+    ):
+        stdout_path = f"/tmp/protected-cli-{index}.stdout"
+        stderr_path = f"/tmp/protected-cli-{index}.stderr"
+        machine.succeed(
+            "set +e; "
+            f"runuser -u beets-operator -- pipeline-cli {command} "
+            f"> {stdout_path} 2> {stderr_path}; "
+            f"rc=$?; set -e; test \"$rc\" = {expected_exit}; "
+            f"test -s {stdout_path}; "
+            f"! grep -Eq 'api_(unavailable|protocol_error)' "
+            f"{stdout_path} {stderr_path}"
+        )
+        protected_stdout = machine.succeed(f"cat {stdout_path}")
+        if expects_json:
+            protected_payload = json.loads(protected_stdout)
+            assert isinstance(protected_payload, dict), (
+                command, protected_payload,
+            )
+        else:
+            # force-import has no --json flag; its rendered refusal is the
+            # route's own message.
+            assert "Force import rejected" in protected_stdout, (
+                command, protected_stdout,
+            )
+
+    # The production ownership contract end to end: the private processing
+    # tree is 0700 cratedigger, the operator cannot traverse it, and the
+    # installed wrapper still deletes the exact folder through the socket
+    # because the WEB SERVICE performs the deletion. Before issue #1063
+    # this same command reported `deleted` while the folder survived.
+    machine.succeed(
+        "test \"$(stat -c %U:%a /var/lib/cratedigger/processing/albums)\" "
+        "= cratedigger:700"
+    )
+    machine.succeed(
+        "runuser -u cratedigger -- mkdir -p "
+        "'/var/lib/cratedigger/processing/albums/wrong_matches/VM Artist - VM Album'"
+    )
+    machine.succeed(
+        "runuser -u cratedigger -- sh -c \"printf audio > "
+        "'/var/lib/cratedigger/processing/albums/wrong_matches/VM Artist - VM Album/01.mp3'\""
+    )
+    machine.fail(
+        "runuser -u beets-operator -- test -r "
+        "/var/lib/cratedigger/processing/albums"
+    )
+    wrong_match_request_id = machine.succeed(
+        "sudo -u postgres psql cratedigger -At -c \""
+        "INSERT INTO album_requests "
+        "(mb_release_id, artist_name, album_title, source, status) VALUES "
+        "('cccccccc-cccc-cccc-cccc-cccccccccccc', 'VM Artist', 'VM Album', "
+        "'request', 'wanted') RETURNING id\""
+    ).strip().splitlines()[0].strip()  # psql prints the command tag too
+    wrong_match_log_id = machine.succeed(
+        "sudo -u postgres psql cratedigger -At -c \""
+        "INSERT INTO download_log (request_id, outcome, validation_result) "
+        f"VALUES ({wrong_match_request_id}, 'rejected', "
+        "'{\\\"scenario\\\": \\\"wrong_match\\\", \\\"failed_path\\\": "
+        "\\\"/var/lib/cratedigger/processing/albums/wrong_matches/VM Artist - VM Album\\\"}'::jsonb) "
+        "RETURNING id\""
+    ).strip().splitlines()[0].strip()  # psql prints the command tag too
+    machine.succeed(
+        "set +e; "
+        "runuser -u beets-operator -- pipeline-cli wrong-match-delete "
+        f"{wrong_match_log_id} --apply --json "
+        "> /tmp/protected-cli-delete.stdout "
+        "2> /tmp/protected-cli-delete.stderr; "
+        "rc=$?; set -e; test \"$rc\" = 0"
+    )
+    delete_payload = json.loads(
+        machine.succeed("cat /tmp/protected-cli-delete.stdout")
+    )
+    assert delete_payload["outcome"] == "deleted", delete_payload
+    assert delete_payload["path_missing"] is False, delete_payload
+    assert delete_payload["deleted_path"] == (
+        "/var/lib/cratedigger/processing/albums/wrong_matches/VM Artist - VM Album"
+    ), delete_payload
+    assert delete_payload["cleared_rows"] == 1, delete_payload
+    machine.fail(
+        "test -e '/var/lib/cratedigger/processing/albums/wrong_matches/"
+        "VM Artist - VM Album'"
+    )
+    cleared_pointer = machine.succeed(
+        "sudo -u postgres psql cratedigger -At -c \""
+        "SELECT validation_result->>'failed_path' IS NULL FROM download_log "
+        f"WHERE id = {wrong_match_log_id}\""
+    ).strip()
+    assert cleared_pointer == "t", cleared_pointer
+
+    # An unobservable source is refused, not reported as missing: the same
+    # command against a folder the SERVICE cannot read keeps both the folder
+    # and its pointer, and exits 5 (retryable), never 0.
+    machine.succeed(
+        "runuser -u cratedigger -- mkdir -p "
+        "'/var/lib/cratedigger/processing/albums/wrong_matches/VM Unreadable'"
+    )
+    unreadable_log_id = machine.succeed(
+        "sudo -u postgres psql cratedigger -At -c \""
+        "INSERT INTO download_log (request_id, outcome, validation_result) "
+        f"VALUES ({wrong_match_request_id}, 'rejected', "
+        "'{\\\"scenario\\\": \\\"wrong_match\\\", \\\"failed_path\\\": "
+        "\\\"/var/lib/cratedigger/processing/albums/wrong_matches/VM Unreadable/Album\\\"}'::jsonb) "
+        "RETURNING id\""
+    ).strip().splitlines()[0].strip()  # psql prints the command tag too
+    machine.succeed(
+        "runuser -u cratedigger -- mkdir "
+        "'/var/lib/cratedigger/processing/albums/wrong_matches/VM Unreadable/Album'"
+    )
+    machine.succeed(
+        "chmod 000 '/var/lib/cratedigger/processing/albums/wrong_matches/"
+        "VM Unreadable'"
+    )
+    machine.succeed(
+        "set +e; "
+        "runuser -u beets-operator -- pipeline-cli wrong-match-delete "
+        f"{unreadable_log_id} --apply --json "
+        "> /tmp/protected-cli-unreadable.stdout "
+        "2> /tmp/protected-cli-unreadable.stderr; "
+        "rc=$?; set -e; test \"$rc\" = 5"
+    )
+    unreadable_payload = json.loads(
+        machine.succeed("cat /tmp/protected-cli-unreadable.stdout")
+    )
+    assert unreadable_payload["outcome"] == "skipped_path_unavailable", (
+        unreadable_payload
+    )
+    assert unreadable_payload["path_missing"] is False, unreadable_payload
+    assert unreadable_payload["deleted_path"] is None, unreadable_payload
+    assert unreadable_payload["cleared_rows"] == 0, unreadable_payload
+    machine.succeed(
+        "chmod 700 '/var/lib/cratedigger/processing/albums/wrong_matches/"
+        "VM Unreadable'"
+    )
+    machine.succeed(
+        "test -d '/var/lib/cratedigger/processing/albums/wrong_matches/"
+        "VM Unreadable/Album'"
+    )
+    retained_pointer = machine.succeed(
+        "sudo -u postgres psql cratedigger -At -c \""
+        "SELECT validation_result->>'failed_path' IS NOT NULL FROM download_log "
+        f"WHERE id = {unreadable_log_id}\""
+    ).strip()
+    assert retained_pointer == "t", retained_pointer
+    machine.succeed(
+        "runuser -u cratedigger -- rm -rf "
+        "'/var/lib/cratedigger/processing/albums/wrong_matches/VM Unreadable'"
+    )
+    machine.succeed(
+        "sudo -u postgres psql cratedigger -At -c \""
+        f"DELETE FROM album_requests WHERE id = {wrong_match_request_id}\""
+    )
+
     # An unrelated user fails at Unix parent traversal. The structured
     # unavailable result cannot be a TCP or direct-DB fallback: the production
     # wrapper has selected the fixed socket and the Python process has no TCP

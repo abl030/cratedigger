@@ -4,6 +4,16 @@
 — the import-queue operator surface: force a rejected download through,
 list recent queue jobs, and preview
 whether an import would pass without actually running one.
+
+``force-import`` and ``import-preview --download-log-id`` both open a
+DB-owned quarantine path under the private ``0700`` processing tree, so
+both execute through their canonical web routes over the permissioned
+Unix socket (issue #1063). ``import-preview``'s other two modes stay
+in-process on purpose and neither is a fallback for a routed one:
+``--values`` is a pure decision that touches no filesystem, and
+``--path`` is the explicit-path inspector that CD-SEC-03 deliberately
+keeps off the HTTP surface (``docs/security-audit-2026-07-12.md``,
+``docs/webui-primer.md``). Each mode has exactly one execution path.
 """
 
 from __future__ import annotations
@@ -15,17 +25,17 @@ from typing import TYPE_CHECKING, Protocol
 
 import msgspec
 
-from lib import transitions
 from lib.beets_db import BeetsDB, open_beets_db
-from lib.force_import_service import (
-    FORCE_IMPORT_EXIT_CODE,
-    RESULT_PROCESSING_LOCKED,
-    RESULT_QUEUED,
-    enqueue_force_import,
-)
 from lib.import_preview import ImportPreviewValues
 from lib.import_queue import ImportJob
-from lib.json_narrow import is_str_object_dict
+from lib.json_narrow import is_object_list, is_str_object_dict
+from scripts.pipeline_cli.api_mutations import (
+    TIMEOUT_ENQUEUE_SECONDS,
+    TIMEOUT_MEASUREMENT_SECONDS,
+    _ApiMutation,
+    relay_rendered,
+    render_api_error,
+)
 from scripts.pipeline_cli.quality import _load_runtime_rank_config
 
 if TYPE_CHECKING:
@@ -33,30 +43,8 @@ if TYPE_CHECKING:
         AutomationRecoveryDetailDB,
     )
     from lib.import_preview import ImportPreviewDB, ImportPreviewResult
-    from lib.pipeline_db.rows import AlbumRequestRow, DownloadLogWithEvidenceRow
 
 SPECTRAL_GRADE_CHOICES = ("genuine", "marginal", "suspect", "likely_transcode")
-
-class _ForceImportDB(Protocol):
-    """``db`` shape ``cmd_force_import`` touches (issue #784, #409
-    pattern) -- ``ImportPreviewDB``'s two reads plus the import-queue
-    write, which ``ImportPreviewDB`` doesn't carry."""
-
-    def get_download_log_entry(
-        self, log_id: int,
-    ) -> DownloadLogWithEvidenceRow | None: ...
-
-    def get_request(self, request_id: int) -> AlbumRequestRow | None: ...
-
-    def enqueue_import_job(
-        self,
-        job_type: str,
-        *,
-        request_id: int | None = None,
-        dedupe_key: str | None = None,
-        payload: dict[str, object] | None = None,
-        message: str | None = None,
-    ) -> ImportJob: ...
 
 
 class _ImportJobsDB(Protocol):
@@ -74,37 +62,52 @@ def _open_recovery_beets(
     return open_beets_db(db_path=path, library_root=library_root)
 
 
-def cmd_force_import(
-    db: _ForceImportDB, args: argparse.Namespace,
-) -> int:
-    """Force-import a rejected download by download_log ID."""
-    log_id = args.download_log_id
+def _render_force_import(status: int, payload: dict[str, object]) -> None:
+    if 200 <= status < 300:
+        job = payload.get("job")
+        job_status = job.get("status") if is_str_object_dict(job) else None
+        deduped = " existing" if payload.get("deduped") else ""
+        print(
+            f"  [OK] Queued{deduped} import job "
+            f"#{payload.get('job_id')} ({job_status})."
+        )
+        return
+    if payload.get("processing_owner") is not None:
+        # The exact owner blob stays machine-readable, as it was when this
+        # command enqueued in-process.
+        print(json.dumps(payload, sort_keys=True))
+        return
+    error = payload.get("error") or payload.get("detail")
+    print(f"  Force import rejected: {error or status}.")
 
-    from lib.config import read_runtime_config
 
-    result = enqueue_force_import(db, read_runtime_config(), log_id)
-    if result.outcome == RESULT_PROCESSING_LOCKED:
-        owner = transitions.processing_owner_payload(result.processing_owner)
-        if owner is None:
-            raise RuntimeError(
-                "processing-locked force import is missing its exact owner"
-            )
-        print(json.dumps({
-            "error": RESULT_PROCESSING_LOCKED,
-            "reason": RESULT_PROCESSING_LOCKED,
-            "request_id": result.request_id,
-            "processing_owner": owner,
-            "detail": result.detail,
-        }, sort_keys=True))
-        return FORCE_IMPORT_EXIT_CODE[result.outcome]
-    if result.outcome != RESULT_QUEUED:
-        print(f"  Force import rejected: {result.detail or result.outcome}.")
-        return FORCE_IMPORT_EXIT_CODE[result.outcome]
-    assert result.job is not None
-    job = result.job
-    deduped = " existing" if job.deduped else ""
-    print(f"  [OK] Queued{deduped} import job #{job.id} ({job.status}).")
-    return 0
+def cmd_force_import(_db: object, args: argparse.Namespace) -> int:
+    """Force-import a rejected download by download_log ID.
+
+    Thin adapter over ``POST /api/pipeline/force-import``, the one
+    execution path for both surfaces. The route's authority preflight
+    opens the quarantine folder as the service identity, which is the
+    only identity that can (issue #1063).
+
+    Exit codes, derived from ``FORCE_IMPORT_HTTP_STATUS``:
+      * 0 — 202 queued
+      * 2 — 404 download log / request missing
+      * 3 — 422 missing release id, missing failed_path, unauthorized path
+      * 4 — 409 processing-locked
+      * 5 — 503 ``path_unavailable`` (the quarantine authority could not
+            OBSERVE the folder — permissions, I/O; retryable, and never
+            a claim that the path is wrong or gone)
+    """
+    return relay_rendered(
+        args.api_endpoint,
+        _ApiMutation(
+            path="/api/pipeline/force-import",
+            body={"download_log_id": int(args.download_log_id)},
+        ),
+        render=_render_force_import,
+        json_output=False,
+        timeout_seconds=TIMEOUT_ENQUEUE_SECONDS,
+    )
 
 
 def cmd_import_jobs(db: _ImportJobsDB, args: argparse.Namespace) -> None:
@@ -228,12 +231,75 @@ def _print_preview_result(
             print(f"    - {stage}")
 
 
+def import_preview_is_routed(args: argparse.Namespace) -> bool:
+    """Does this invocation touch a DB-owned protected quarantine path?
+
+    Only ``--download-log-id`` does. ``cli.py`` asks this before it
+    builds a database handle, so the routed mode never acquires one.
+    """
+    return getattr(args, "download_log_id", None) is not None
+
+
+def _render_import_preview(status: int, payload: dict[str, object]) -> None:
+    if payload.get("verdict") is None:
+        render_api_error(status, payload)
+        return
+    print(f"  verdict: {payload.get('verdict')}")
+    decision = payload.get("decision")
+    if decision:
+        print(f"  decision: {decision}")
+    reason = payload.get("reason")
+    if reason and reason != decision:
+        print(f"  reason: {reason}")
+    if payload.get("detail"):
+        print(f"  detail: {payload['detail']}")
+    if payload.get("cleanup_eligible"):
+        print("  cleanup_eligible: yes")
+    stages = payload.get("stage_chain")
+    if is_object_list(stages) and stages:
+        print("  stages:")
+        for stage in stages:
+            print(f"    - {stage}")
+
+
+def cmd_import_preview_from_download_log(
+    _db: object, args: argparse.Namespace,
+) -> int:
+    """Preview one download_log row through the canonical web route.
+
+    The row's ``failed_path`` lives under the private processing tree,
+    and the route's snapshot runs as the service identity (issue #1063).
+
+    Exit codes: 0 on 200, 3 on 400/422 (bad id), 5 otherwise.
+    """
+    if args.path is not None or args.values or args.values_json is not None:
+        print(
+            "  Provide exactly one mode: --download-log-id, --request-id/--path, or --values.",
+            file=sys.stderr,
+        )
+        return 2
+    return relay_rendered(
+        args.api_endpoint,
+        _ApiMutation(
+            path="/api/import-preview",
+            body={"download_log_id": int(args.download_log_id)},
+        ),
+        render=_render_import_preview,
+        json_output=args.json,
+        timeout_seconds=TIMEOUT_MEASUREMENT_SECONDS,
+    )
+
+
 def cmd_import_preview(
     db: ImportPreviewDB, args: argparse.Namespace,
 ) -> int:
-    """Preview a real folder/download-log row or a typed values scenario."""
+    """Preview an explicit folder or a typed values scenario.
+
+    The ``--download-log-id`` mode is not handled here — ``cli.py``
+    routes it to :func:`cmd_import_preview_from_download_log` before any
+    database handle exists.
+    """
     from lib.import_preview import (
-        preview_import_from_download_log,
         preview_import_from_path,
         preview_import_from_values,
     )
@@ -251,9 +317,7 @@ def cmd_import_preview(
         return 2
 
     try:
-        if args.download_log_id is not None:
-            result = preview_import_from_download_log(db, args.download_log_id)
-        elif args.path is not None:
+        if args.path is not None:
             if args.request_id is None:
                 print("  --request-id is required with --path", file=sys.stderr)
                 return 2

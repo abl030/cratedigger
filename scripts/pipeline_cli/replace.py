@@ -2,130 +2,90 @@
 
 Supersede a request with a new row at a different release id in the
 same release group / master. Counterpart of the Replace web action.
+
+Replace's post-supersede cleanup deletes the old request's Wrong Matches
+source folders under the private ``0700`` processing tree, so the command
+executes through the canonical web route over the permissioned Unix
+socket (issue #1063). Run in the operator's own process it would classify
+every unreadable folder as missing, clear every pointer, observe zero
+remaining, and report success with no warning.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
-from typing import TYPE_CHECKING
 
-from lib import transitions
-from scripts.pipeline_cli._format import _json_default
+from lib.json_narrow import is_object_list, is_str_object_dict
+from scripts.pipeline_cli.api_mutations import (
+    TIMEOUT_MIRROR_SECONDS,
+    _ApiMutation,
+    relay_rendered,
+    render_api_error,
+)
 
-if TYPE_CHECKING:
-    from lib.mbid_replace_service import MbidReplaceDB
+
+def _render_replace(status: int, payload: dict[str, object]) -> None:
+    if payload.get("outcome") is None:
+        render_api_error(status, payload)
+        return
+    print(f"  Request ID:        {payload.get('request_id')}")
+    print(f"  Outcome:           {payload.get('outcome')}")
+    if payload.get("new_request_id") is not None:
+        print(f"  New request id:    {payload['new_request_id']}")
+    if payload.get("current_status") is not None:
+        print(f"  Holder status:     {payload['current_status']}")
+    if payload.get("descendant_request_id") is not None:
+        print(f"  Descendant id:     {payload['descendant_request_id']}")
+    if payload.get("reason") is not None:
+        print(f"  Reason:            {payload['reason']}")
+    owner = payload.get("processing_owner")
+    if is_str_object_dict(owner):
+        print(
+            "  Processing owner:  "
+            f"job {owner.get('job_id')} "
+            f"({owner.get('status')}/{owner.get('preview_status')})"
+        )
+    if payload.get("error_message"):
+        print(f"  Error message:     {payload['error_message']}")
+    warnings = payload.get("warnings")
+    if is_object_list(warnings) and warnings:
+        print("  Warnings:")
+        for warning in warnings:
+            print(f"    - {warning}")
 
 
-def cmd_replace(db: MbidReplaceDB, args: argparse.Namespace) -> int:
+def cmd_replace(_db: object, args: argparse.Namespace) -> int:
     """Supersede a request with a new row at a different release id (an
     MB release UUID or a Discogs numeric release id — must share the
     source's pathway and release group/master).
 
-    Counterpart of ``POST /api/pipeline/<id>/replace``. Both surfaces
-    wrap ``MbidReplaceService.replace_request_mbid`` — keep them in
-    sync (see ``CLAUDE.md`` § "CLI ⇄ API surface symmetry").
+    Thin adapter over ``POST /api/pipeline/<id>/replace``, which is the
+    one execution path for both surfaces (see ``CLAUDE.md`` § "CLI ⇄ API
+    surface symmetry").
 
-    Exit codes:
-      * 0 — ``RESULT_REPLACED``
-      * 2 — ``RESULT_NOT_FOUND``
-      * 3 — ``RESULT_TARGET_INVALID`` (``reason`` carries the typed
+    Exit codes, derived from that route's status codes:
+      * 0 — 200 ``RESULT_REPLACED``
+      * 2 — 404 ``RESULT_NOT_FOUND``
+      * 3 — 422 ``RESULT_TARGET_INVALID`` (``reason`` carries the typed
             sub-code — see ``lib/replace_status.py``),
             ``RESULT_TARGET_RELEASE_GROUP_MISMATCH``,
-            ``RESULT_TARGET_SAME_AS_CURRENT`` (semantic input violations)
-      * 4 — ``RESULT_WRONG_STATE`` (including supersede race —
+            ``RESULT_TARGET_SAME_AS_CURRENT``
+      * 4 — 409 ``RESULT_WRONG_STATE`` (including supersede race —
             double-click landed first; descendant_request_id is set),
             ``RESULT_TARGET_COLLISION_REQUEST``
-      * 5 — ``RESULT_TRANSIENT`` (retryable; mirror unreachable etc.),
+      * 5 — 503 ``RESULT_TRANSIENT`` (retryable; mirror unreachable etc.),
             ``RESULT_MIRROR_UNCONFIGURED`` (Discogs mirror not configured)
     """
-    from lib.config import read_runtime_config
-    from lib.mbid_replace_service import (
-        RESULT_MIRROR_UNCONFIGURED,
-        RESULT_NOT_FOUND,
-        RESULT_REPLACED,
-        RESULT_TARGET_COLLISION_REQUEST,
-        RESULT_TARGET_INVALID,
-        RESULT_TARGET_RELEASE_GROUP_MISMATCH,
-        RESULT_TARGET_SAME_AS_CURRENT,
-        RESULT_TRANSIENT,
-        RESULT_WRONG_STATE,
-        MbidReplaceService,
-    )
-
-    cfg = read_runtime_config()
-    svc = MbidReplaceService(db=db, config=cfg)
-    result = svc.replace_request_mbid(
-        int(args.id),
-        target_mb_release_id=args.target_mb_release_id,
-    )
-
-    payload = {
-        "request_id": result.request_id,
-        "outcome": result.outcome,
-        "new_request_id": result.new_request_id,
-        "current_status": result.current_status,
-        "descendant_request_id": result.descendant_request_id,
-        "error_message": result.error_message,
-        "reason": result.reason,
-        "warnings": list(result.warnings),
-        "processing_owner": transitions.processing_owner_payload(
-            result.processing_owner
+    return relay_rendered(
+        args.api_endpoint,
+        _ApiMutation(
+            path=f"/api/pipeline/{int(args.id)}/replace",
+            body={"target_mb_release_id": args.target_mb_release_id},
         ),
-    }
-    if (
-        result.reason
-        == transitions.TransitionConflictKind.processing_locked.value
-    ):
-        payload["error"] = (
-            transitions.TransitionConflictKind.processing_locked.value
-        )
-    if getattr(args, "json", False):
-        print(json.dumps(payload, indent=2, sort_keys=True,
-                         default=_json_default))
-    else:
-        print(f"  Request ID:        {payload['request_id']}")
-        print(f"  Outcome:           {result.outcome}")
-        if result.new_request_id is not None:
-            print(f"  New request id:    {result.new_request_id}")
-        if result.current_status is not None:
-            print(f"  Holder status:     {result.current_status}")
-        if result.descendant_request_id is not None:
-            print(f"  Descendant id:     {result.descendant_request_id}")
-        if result.reason is not None:
-            print(f"  Reason:            {result.reason}")
-        if result.processing_owner is not None:
-            print(
-                "  Processing owner:  "
-                f"job {result.processing_owner.job_id} "
-                f"({result.processing_owner.status}/"
-                f"{result.processing_owner.preview_status})"
-            )
-        if result.error_message:
-            print(f"  Error message:     {result.error_message}")
-        if result.warnings:
-            print("  Warnings:")
-            for w in result.warnings:
-                print(f"    - {w}")
-
-    if result.outcome == RESULT_REPLACED:
-        return 0
-    if result.outcome == RESULT_NOT_FOUND:
-        return 2
-    if result.outcome in (
-        RESULT_TARGET_INVALID,
-        RESULT_TARGET_RELEASE_GROUP_MISMATCH,
-        RESULT_TARGET_SAME_AS_CURRENT,
-    ):
-        return 3
-    if result.outcome in (
-        RESULT_WRONG_STATE,
-        RESULT_TARGET_COLLISION_REQUEST,
-    ):
-        return 4
-    if result.outcome in (RESULT_TRANSIENT, RESULT_MIRROR_UNCONFIGURED):
-        return 5
-    return 1
+        render=_render_replace,
+        json_output=getattr(args, "json", False),
+        timeout_seconds=TIMEOUT_MIRROR_SECONDS,
+    )
 
 
 def add_replace_subparser(

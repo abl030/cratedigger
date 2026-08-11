@@ -43,6 +43,7 @@ import logging
 import os
 import time
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Protocol
 
 import msgspec
@@ -65,6 +66,12 @@ from beets.autotag import distance as _beets_distance_fn
 from beets.autotag import hooks as _beets_hooks
 from beets.autotag import match as _beets_match_mod
 
+from lib.fs_authority import (
+    DirectoryObservation,
+    classify_path_errno,
+    errno_proves_absence,
+    os_refusal_in_chain,
+)
 from lib.validation_envelope import decode_validation_envelope
 
 log = logging.getLogger(__name__)
@@ -114,6 +121,13 @@ class BeetsDistanceResult(msgspec.Struct, kw_only=True):
     request_id: int | None = None
     folder_path: str | None = None
     error_message: str | None = None
+    partial_read: str | None = None
+    """Set when part of the folder could NOT be read.
+
+    A distance computed over an incomplete manifest is a misleading
+    number on a decision surface, so the refusal travels with the
+    otherwise-``ok`` result instead of being discarded (issue #1063).
+    """
     # Latency observability — useful in tests + the eventual UI.
     duration_ms: int | None = None
 
@@ -214,8 +228,49 @@ class SyntheticItem(msgspec.Struct, kw_only=True):
     length: float
 
 
-def _audio_files_under(folder: str) -> list[str]:
-    """Return absolute paths to audio files under ``folder``.
+@dataclass(frozen=True)
+class _FolderScan:
+    """What the walk found AND whether it was allowed to look.
+
+    ``os.walk``'s default ``onerror`` silently swallows EACCES/EIO, so an
+    unreadable folder produced an empty list indistinguishable from an
+    empty one — and the caller called that ``no_audio``. The refusal now
+    travels with the result (issue #1063).
+    """
+
+    paths: tuple[str, ...]
+    read_error: str | None = None
+
+
+def _refusal_text(path: str, exc: OSError) -> str | None:
+    """What to report for one failed path syscall, or ``None`` if it proved.
+
+    The single owner of that question for every site in this module that
+    can record a read refusal — the walk's ``onerror``, the per-file
+    ``stat``, and the tag read. ``None`` means the errno POSITIVELY
+    established that the name holds nothing (``ENOENT``, ``ENOTDIR``: a
+    vanished file, a dangling symlink), and issue #1063's rule cuts both
+    ways — laundering a proven absence into a refusal is the same lie
+    told backwards. It reaches the operator as an amber ``· incomplete
+    manifest`` badge over a manifest that is complete.
+
+    The predicate is :func:`errno_proves_absence`, NOT
+    ``refusal_is_indeterminate(...) is not True``. The latter asks
+    whether a refusal is retryable and answers ``False`` for a symlink
+    loop, a socket and a driverless device node — none of which prove
+    anything is absent. Keying off it silently dropped ``ELOOP`` here
+    while :func:`observe_directory` called the same errno indeterminate
+    for the folder, so the two ends of one request disagreed about the
+    same symlink. Everything that is not a proven absence travels as a
+    refusal.
+    """
+    if errno_proves_absence(classify_path_errno(exc)):
+        return None
+    return f"{path}: {exc.strerror}"
+
+
+def _audio_files_under(folder: str) -> _FolderScan:
+    """Return audio files under ``folder`` plus any refusal that hid some.
 
     Sorts for deterministic ordering — beets distance is order-
     insensitive but stable ordering makes the cache key stable, the
@@ -225,35 +280,77 @@ def _audio_files_under(folder: str) -> list[str]:
     from lib.measurement import AUDIO_EXTS
 
     out: list[str] = []
-    for root, _dirs, files in os.walk(folder):
+    refusals: list[str] = []
+
+    def _record(exc: OSError) -> None:
+        # A directory that VANISHED between enumeration and descent is
+        # not a directory we were refused.
+        refusal = _refusal_text(str(exc.filename or folder), exc)
+        if refusal is not None:
+            refusals.append(refusal)
+
+    for root, _dirs, files in os.walk(folder, onerror=_record):
         for f in files:
             ext = f.rsplit(".", 1)[-1].lower() if "." in f else ""
             if ext in AUDIO_EXTS:
                 out.append(os.path.join(root, f))
     out.sort()
-    return out
+    return _FolderScan(
+        paths=tuple(out),
+        read_error=refusals[0] if refusals else None,
+    )
 
 
-def _fingerprint_file(path: str) -> _AudioFileFingerprint | None:
+@dataclass(frozen=True)
+class _FileRead:
+    """One file's fingerprint, or the refusal that stopped us reading it.
+
+    Both fields are ``None`` when the file WAS read but could not be
+    parsed: a corrupt, truncated or unsupported tag block is a fact
+    about the file, not a refusal, and laundering it into ``refusal``
+    would make the ``partial_read`` signal meaningless (issue #1063).
+    """
+
+    fingerprint: _AudioFileFingerprint | None = None
+    refusal: str | None = None
+
+
+def _fingerprint_file(path: str) -> _FileRead:
     """Read tags via beets ``Item.from_path`` and project to fingerprint.
 
-    Returns ``None`` if the file can't be read — caller skips it. We
-    deliberately don't raise: a single corrupt sidecar file shouldn't
+    Returns an empty read if the file can't be PARSED — caller skips it.
+    We deliberately don't raise: a single corrupt sidecar file shouldn't
     fail the whole picker query.
+
+    A refused read is a different fact and comes back as ``refusal``.
+    Neither ``os.walk``'s ``onerror`` nor the ``os.stat`` above it sees
+    it: a mode-0000 file stats perfectly well and is listed by the walk,
+    and the ESTALE/EIO this deployment's nested virtiofs really produces
+    fires mid-read. mediafile then converts the ``OSError`` into its own
+    ``UnreadableFileError`` (beets re-wraps that as ``ReadError``), so
+    the refusal used to be swallowed exactly like a corrupt tag — which
+    left an incomplete manifest unflagged and, with EVERY file refused,
+    produced ``no_audio`` (HTTP 410 "gone") off an intact album. That is
+    issue #1063 verbatim, one layer down.
     """
     try:
         item = _item_from_path(path)
     except Exception as exc:  # noqa: BLE001 — beets raises a mediafile mess
+        refused = os_refusal_in_chain(exc, subject=path)
+        if refused is not None:
+            log.warning(
+                "beets_distance: tag read REFUSED for %s: %s", path, refused)
+            return _FileRead(refusal=_refusal_text(path, refused))
         log.warning("beets_distance: tag read failed for %s: %s", path, exc)
-        return None
+        return _FileRead()
 
     try:
         st = os.stat(path)
-    except OSError:
-        return None
+    except OSError as exc:
+        return _FileRead(refusal=_refusal_text(path, exc))
 
     # Beets Item exposes tag fields as attributes (LightFlavoredDict).
-    return _AudioFileFingerprint(
+    return _FileRead(fingerprint=_AudioFileFingerprint(
         path=path,
         mtime=st.st_mtime,
         size=st.st_size,
@@ -268,13 +365,21 @@ def _fingerprint_file(path: str) -> _AudioFileFingerprint | None:
         length=float(_item_field(item, "length", 0.0) or 0.0),
         format=str(_item_field(item, "format", "") or ""),
         media=str(_item_field(item, "media", "") or ""),
-    )
+    ))
+
+
+@dataclass(frozen=True)
+class _FolderFingerprints:
+    """Fingerprints plus the first refusal that stopped us reading more."""
+
+    fingerprints: tuple[_AudioFileFingerprint, ...]
+    read_error: str | None = None
 
 
 def _read_folder_fingerprints(
     folder: str,
     cache: BeetsDistanceCache | None,
-) -> list[_AudioFileFingerprint]:
+) -> _FolderFingerprints:
     """Read fingerprints for every audio file under ``folder``.
 
     Per-file cache keyed by ``(path, mtime, size)``: if any of those
@@ -283,11 +388,20 @@ def _read_folder_fingerprints(
     without any individual file's stats changing — the os.walk is cheap
     relative to tag reads.
     """
+    scan = _audio_files_under(folder)
+    read_error = scan.read_error
     fps: list[_AudioFileFingerprint] = []
-    for path in _audio_files_under(folder):
+    for path in scan.paths:
         try:
             st = os.stat(path)
-        except OSError:
+        except OSError as exc:
+            # Same rule one level down, in BOTH directions: a file we
+            # could not stat is not a file that is not there — and a file
+            # the errno proves is gone (a dangling symlink, a file
+            # unlinked after the walk listed it) is not a refusal.
+            refusal = _refusal_text(path, exc)
+            if refusal is not None and read_error is None:
+                read_error = refusal
             continue
         cached: _AudioFileFingerprint | None = None
         if cache is not None:
@@ -300,7 +414,10 @@ def _read_folder_fingerprints(
         if cached is not None and cached.mtime == st.st_mtime and cached.size == st.st_size:
             fps.append(cached)
             continue
-        fp = _fingerprint_file(path)
+        read = _fingerprint_file(path)
+        if read.refusal is not None and read_error is None:
+            read_error = read.refusal
+        fp = read.fingerprint
         if fp is None:
             continue
         fps.append(fp)
@@ -310,7 +427,7 @@ def _read_folder_fingerprints(
                 msgspec.json.encode(fp),
                 _FOLDER_CACHE_TTL_S,
             )
-    return fps
+    return _FolderFingerprints(fingerprints=tuple(fps), read_error=read_error)
 
 
 def _file_cache_key(path: str, mtime: float, size: int) -> str:
@@ -476,7 +593,7 @@ def compute_beets_distance(
     pdb: BeetsDistancePipelineDB,
     mb_get_release: Callable[[str], dict[str, object] | None],
     cache: BeetsDistanceCache | None = None,
-    resolve_failed_path: Callable[[str], str | None] | None = None,
+    observe_failed_path: Callable[[str], DirectoryObservation] | None = None,
 ) -> BeetsDistanceResult:
     """Compute beets match distance for one MBID.
 
@@ -664,6 +781,7 @@ def compute_beets_distance(
     # 6. Build items — either from disk (Replace mode) or from synthetic.
     resolved: str | None = None
     fingerprint_count: int | None = None
+    partial_read: str | None = None
     if items_override is not None:
         items = _build_items_from_synthetic(items_override)
     else:
@@ -671,11 +789,32 @@ def compute_beets_distance(
         assert log_row is not None  # narrowed above; Replace-mode invariant
         failed_path = decode_validation_envelope(
             log_row.get("validation_result")).failed_path or ""
-        resolver = resolve_failed_path
-        if resolver is None:
-            from lib.util import resolve_failed_path as default_resolver
-            resolver = default_resolver
-        resolved = resolver(str(failed_path)) if failed_path else None
+        observer = observe_failed_path
+        if observer is None:
+            from lib.util import observe_failed_path as default_observer
+            observer = default_observer
+        observation = (
+            observer(str(failed_path)) if failed_path
+            else DirectoryObservation(presence="absent", code="missing")
+        )
+        if observation.indeterminate:
+            # "The folder is gone" and "I was not allowed to look" are
+            # different facts and must not share an outcome (#1063).
+            return _result(
+                "folder_unavailable",
+                error=(
+                    f"download_log #{download_log_id} failed_path "
+                    f"{failed_path!r} could not be observed: "
+                    f"{observation.unavailable_reason()}"
+                ),
+                download_log_id=download_log_id,
+                request_id=request_id,
+                request_release_group_id=request_rg,
+                candidate_release_group_id=candidate_rg,
+                candidate_mbid=mbid,
+                started=started,
+            )
+        resolved = observation.path
         if not resolved:
             return _result(
                 "folder_missing",
@@ -692,7 +831,26 @@ def compute_beets_distance(
             )
 
         # 7. Read (or cache-hit) audio fingerprints.
-        fingerprints = _read_folder_fingerprints(resolved, cache)
+        scan = _read_folder_fingerprints(resolved, cache)
+        fingerprints = list(scan.fingerprints)
+        if not fingerprints and scan.read_error is not None:
+            # We were refused mid-read. "No audio here" is a claim we did
+            # not earn (issue #1063) — the folder resolved, the storage
+            # then declined to show it.
+            return _result(
+                "folder_unavailable",
+                error=(
+                    f"could not read the contents of {resolved}: "
+                    f"{scan.read_error}"
+                ),
+                download_log_id=download_log_id,
+                request_id=request_id,
+                request_release_group_id=request_rg,
+                candidate_release_group_id=candidate_rg,
+                candidate_mbid=mbid,
+                folder_path=resolved,
+                started=started,
+            )
         if not fingerprints:
             return _result(
                 "no_audio",
@@ -705,6 +863,9 @@ def compute_beets_distance(
                 folder_path=resolved,
                 started=started,
             )
+        # Some files read, some refused: the number below is computed over
+        # an INCOMPLETE manifest, so it ships with that fact attached.
+        partial_read = scan.read_error
         fingerprint_count = len(fingerprints)
         items = _build_items(fingerprints)
 
@@ -758,6 +919,7 @@ def compute_beets_distance(
         candidate_release_group_id=candidate_rg,
         candidate_mbid=mbid,
         folder_path=resolved,
+        partial_read=partial_read,
         started=started,
     )
 
@@ -779,6 +941,7 @@ def _result(
     request_id: int | None = None,
     folder_path: str | None = None,
     error: str | None = None,
+    partial_read: str | None = None,
     started: float,
 ) -> BeetsDistanceResult:
     return BeetsDistanceResult(
@@ -797,5 +960,6 @@ def _result(
         request_id=request_id,
         folder_path=folder_path,
         error_message=error,
+        partial_read=partial_read,
         duration_ms=int((time.monotonic() - started) * 1000),
     )

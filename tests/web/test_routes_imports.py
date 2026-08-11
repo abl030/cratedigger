@@ -5,6 +5,7 @@ tests/web/_harness.py.
 """
 import copy
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -18,8 +19,13 @@ from urllib.request import Request, urlopen
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
+from lib.fs_authority import DirectoryObservation
 from lib.import_queue import ForceImportPayload
-from tests.helpers import handoff_automation_owner, make_request_row
+from tests.helpers import (
+    handoff_automation_owner,
+    make_request_row,
+    seed_visible_wrong_match,
+)
 from tests.web._harness import (
     _DEFAULT_WRONG_MATCH_VALIDATION,
     _assert_required_fields,
@@ -27,6 +33,16 @@ from tests.web._harness import (
     _fresh_triage_runner,
 )
 from web.request_security import BROWSER_CHANNEL, CHANNEL_HEADER
+
+
+def _observed_paths(observe):
+    """Patch the route's ONE filesystem observation seam."""
+    return patch("web.routes.imports.observe_failed_path", side_effect=observe)
+
+
+def _present_paths():
+    return _observed_paths(
+        lambda p: DirectoryObservation(presence="present", path=p))
 
 
 class TestWrongMatchesContract(_FakeDbWebServerCase):
@@ -82,16 +98,34 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
             "web.routes.imports.delete_wrong_match_group",
             side_effect=lambda _db, rid: self._manual_group_cleanup_result(rid),
         )
-        resolve_patch = patch("web.routes.imports.resolve_failed_path",
-                              side_effect=lambda p: p if p else None)
+        # The route's own filesystem observation is the leaf seam here;
+        # every path in these fixtures is nominal and present.
+        resolve_patch = patch(
+            "web.routes.imports.observe_failed_path",
+            side_effect=lambda p: DirectoryObservation(
+                presence="present", path=p,
+            ) if p else DirectoryObservation(
+                presence="absent", code="missing",
+            ),
+        )
         self.mock_cleanup = cleanup_patch.start()
         self.mock_manual_cleanup = manual_cleanup_patch.start()
         self.mock_manual_group_cleanup = manual_group_cleanup_patch.start()
-        self.mock_resolve_failed_path = resolve_patch.start()
+        self.mock_observe_failed_path = resolve_patch.start()
+        # Two tests need the REAL primitive against a REAL unreadable
+        # directory — the #1063 defect WAS a fake answer from this seam.
+        self._observe_patch_running = True
+
+        def _stop_observe_patch() -> None:
+            if self._observe_patch_running:
+                resolve_patch.stop()
+                self._observe_patch_running = False
+
+        self.use_real_path_observation = _stop_observe_patch
         self.addCleanup(cleanup_patch.stop)
         self.addCleanup(manual_cleanup_patch.stop)
         self.addCleanup(manual_group_cleanup_patch.stop)
-        self.addCleanup(resolve_patch.stop)
+        self.addCleanup(_stop_observe_patch)
         self.addCleanup(lambda: delattr(_imports_mod, "cleanup_wrong_match"))
 
     GROUP_REQUIRED_FIELDS: ClassVar = {
@@ -129,6 +163,11 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         # so wrong-match rows show their actual codec/rank instead of
         # dashes from the legacy denorm columns. Drives entry sort order.
         "format", "min_bitrate", "avg_bitrate", "verified_lossless", "quality_rank",
+        # Issue #1063 — a source the server could not READ stays in the
+        # payload flagged, instead of vanishing from the operator's only
+        # view of the broken world. The JS turns these into a badge, an
+        # amber card, disabled actions, and an explanation.
+        "path_unavailable", "path_unavailable_reason",
     }
     DELETE_RESULT_REQUIRED_FIELDS: ClassVar = {
         "status", "download_log_id", "outcome", "success", "request_id",
@@ -138,6 +177,10 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
     }
     DELETE_GROUP_REQUIRED_FIELDS: ClassVar = {
         "status", "request_id", "outcome", "success", "processed", "deleted",
+        # Issue #1063 split pointer-only clears out of ``deleted`` so the
+        # toast stops calling a folder we never touched "deleted".
+        # ``web/js/wrong-matches.js`` reads this to say so.
+        "cleared_missing",
         "deleted_paths", "cleared", "skipped", "errors", "remaining",
         "group_empty", "results",
     }
@@ -363,6 +406,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
             success=True,
             processed=2,
             deleted=2,
+            cleared_missing=0,
             deleted_paths=2,
             cleared=2,
             skipped=0,
@@ -648,6 +692,44 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
                     self.assertIsInstance(
                         entry[field], expected_type,
                         f"entry.{field}={entry[field]!r} should be {expected_type}")
+
+    def test_unreadable_source_is_surfaced_flagged_not_dropped(self):
+        """Issue #1063: the drop-guard hid the broken world from the UI.
+
+        Uses the REAL observation primitive against a REAL unreadable
+        directory — the route's own seam is unpatched here, because the
+        whole defect was a fake answer from that seam.
+        """
+        self.db.delete_request(100)  # drop the setUp group
+        root = self.enterContext(tempfile.TemporaryDirectory())
+        source = seed_visible_wrong_match(self.db, root, request_id=771)
+        os.chmod(source.parent, 0o000)
+        self.addCleanup(os.chmod, source.parent, 0o700)
+
+        self.use_real_path_observation()
+        status, data = self._get("/api/wrong-matches")
+
+        self.assertEqual(status, 200)
+        entries = data["groups"][0]["entries"]
+        self.assertEqual(len(entries), 1)
+        entry = entries[0]
+        self.assertEqual(entry["download_log_id"], source.download_log_id)
+        self.assertTrue(entry["path_unavailable"])
+        self.assertFalse(entry["files_exist"])
+        self.assertIn("EACCES", entry["path_unavailable_reason"])
+
+    def test_genuinely_missing_source_still_leaves_the_worklist(self):
+        """Must still work: PROVEN absence keeps the old drop behaviour."""
+        self.db.delete_request(100)  # drop the setUp group
+        root = self.enterContext(tempfile.TemporaryDirectory())
+        source = seed_visible_wrong_match(self.db, root, request_id=772)
+        shutil.rmtree(source.path)
+
+        self.use_real_path_observation()
+        status, data = self._get("/api/wrong-matches")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["groups"], [])
 
     def test_untracked_audio_entry_has_null_distance_and_is_not_green(self):
         """Issue #550 defect #4: a pre-match reject (no beets distance was
@@ -1165,8 +1247,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         _seed(903, "MP3",  320)    # transparent
         _seed(904, "FLAC", 0)      # lossless
         _seed(905, "MP3",  192)    # good
-        with patch("web.routes.imports.resolve_failed_path",
-                   side_effect=lambda p: p):
+        with _present_paths():
             status, data = self._get("/api/wrong-matches")
         self.assertEqual(status, 200)
         entries = data["groups"][0]["entries"]
@@ -1190,8 +1271,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
                                username="gatybfb", failed_path="/fi/path_8")
         self._seed_wrong_match(download_log_id=3584, request_id=515,
                                username="ascalaphid", failed_path="/fi/path_9")
-        with patch("web.routes.imports.resolve_failed_path",
-                   side_effect=lambda p: p):
+        with _present_paths():
             status, data = self._get("/api/wrong-matches")
         self.assertEqual(status, 200)
         groups = data["groups"]
@@ -1216,8 +1296,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         self._seed_wrong_match(download_log_id=300, request_id=2,
                                username="u3", failed_path="/fi/c",
                                artist="A2", album="B2", mb_release_id="mb-2")
-        with patch("web.routes.imports.resolve_failed_path",
-                   side_effect=lambda p: p):
+        with _present_paths():
             status, data = self._get("/api/wrong-matches")
         self.assertEqual(status, 200)
         groups = data["groups"]
@@ -1412,7 +1491,8 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
                                username="u1", failed_path="/gone/a")
         self._seed_wrong_match(download_log_id=11, request_id=5,
                                username="u2", failed_path="/gone/b")
-        with patch("web.routes.imports.resolve_failed_path", return_value=None):
+        with _observed_paths(lambda _p: DirectoryObservation(
+                presence="absent", code="missing")):
             status, data = self._get("/api/wrong-matches")
         self.assertEqual(status, 200)
         self.assertEqual(data["groups"], [])
@@ -1424,8 +1504,9 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
                                username="present", failed_path="/on-disk/a")
         self._seed_wrong_match(download_log_id=21, request_id=7,
                                username="missing", failed_path="/gone/b")
-        with patch("web.routes.imports.resolve_failed_path",
-                   side_effect=lambda p: p if p.endswith("/a") else None):
+        with _observed_paths(lambda p: DirectoryObservation(
+                presence="present", path=p) if p.endswith("/a")
+                else DirectoryObservation(presence="absent", code="missing")):
             status, data = self._get("/api/wrong-matches")
         self.assertEqual(status, 200)
         groups = data["groups"]
@@ -1433,6 +1514,163 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         group = groups[0]
         self.assertEqual(group["pending_count"], 1)
         self.assertEqual([e["download_log_id"] for e in group["entries"]], [20])
+
+    def test_unreadable_entries_never_render_as_an_empty_folder(self):
+        """Issue #1063 F1: the panel read BEFORE deciding to delete.
+
+        An intact album whose entries the server cannot read used to
+        return ``status: ok``, ``audio_file_count: 0``, ``partial: false``
+        and an empty file list — an affirmative "this folder is empty"
+        over an intact album, i.e. an inducement to destroy it.
+        """
+        tmpdir = self.enterContext(tempfile.TemporaryDirectory())
+        failed_dir = os.path.join(tmpdir, "failed_imports", "Intact Album")
+        os.makedirs(failed_dir)
+        for name in ("01 - One.mp3", "02 - Two.mp3"):
+            with open(os.path.join(failed_dir, name), "wb") as handle:
+                handle.write(b"\x00" * 32)
+            os.chmod(os.path.join(failed_dir, name), 0o000)
+        nested = os.path.join(failed_dir, "Disc 2")
+        os.makedirs(nested)
+        os.chmod(nested, 0o000)
+        self.addCleanup(os.chmod, nested, 0o700)
+        log_id = self.db.log_download(
+            100, outcome="rejected",
+            validation_result={"failed_path": failed_dir},
+        )
+
+        with self._wrong_match_runtime_config(tmpdir):
+            status, data = self._get(
+                f"/api/wrong-matches/explorer?download_log_id={log_id}")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["status"], "unavailable")
+        self.assertEqual(data["audio_file_count"], 0)
+        self.assertEqual(data["other_file_count"], 0)
+        self.assertTrue(data["partial"])
+        # The two reasons a listing is incomplete stay distinguishable.
+        self.assertIsNone(data["truncated_reason"])
+        self.assertEqual(data["unreadable_entry_count"], 3)
+        self.assertIn("Permission denied", data["unreadable_reason"])
+
+    def test_readable_entries_alongside_unreadable_ones_are_still_listed(self):
+        """A partial listing is served, and says it is partial."""
+        tmpdir = self.enterContext(tempfile.TemporaryDirectory())
+        failed_dir = os.path.join(tmpdir, "failed_imports", "Mixed Album")
+        os.makedirs(failed_dir)
+        readable = os.path.join(failed_dir, "01 - Readable.mp3")
+        with open(readable, "wb") as handle:
+            handle.write(b"\x00" * 32)
+        unreadable = os.path.join(failed_dir, "02 - Unreadable.mp3")
+        with open(unreadable, "wb") as handle:
+            handle.write(b"\x00" * 32)
+        os.chmod(unreadable, 0o000)
+        log_id = self.db.log_download(
+            100, outcome="rejected",
+            validation_result={"failed_path": failed_dir},
+        )
+
+        with self._wrong_match_runtime_config(tmpdir):
+            status, data = self._get(
+                f"/api/wrong-matches/explorer?download_log_id={log_id}")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["status"], "ok")
+        self.assertEqual(data["audio_file_count"], 1)
+        self.assertTrue(data["partial"])
+        self.assertEqual(data["unreadable_entry_count"], 1)
+
+    def test_a_genuinely_empty_folder_is_still_confidently_empty(self):
+        """Must still work: nothing to read and nothing refused."""
+        tmpdir = self.enterContext(tempfile.TemporaryDirectory())
+        failed_dir = os.path.join(tmpdir, "failed_imports", "Empty Album")
+        os.makedirs(failed_dir)
+        log_id = self.db.log_download(
+            100, outcome="rejected",
+            validation_result={"failed_path": failed_dir},
+        )
+
+        with self._wrong_match_runtime_config(tmpdir):
+            status, data = self._get(
+                f"/api/wrong-matches/explorer?download_log_id={log_id}")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["status"], "ok")
+        self.assertEqual(data["audio_file_count"], 0)
+        self.assertFalse(data["partial"])
+        self.assertEqual(data["unreadable_entry_count"], 0)
+        self.assertIsNone(data["unreadable_reason"])
+
+    def test_unreadable_explorer_source_is_retryable_not_not_found(self):
+        """The explorer owes the same distinction (#1063 review T2.4).
+
+        ESTALE/EIO on this deployment's nested virtiofs, or EACCES on the
+        private tree, must not reach the operator as 404 "not found".
+        """
+        tmpdir = self.enterContext(tempfile.TemporaryDirectory())
+        quarantine = os.path.join(tmpdir, "failed_imports")
+        failed_dir = os.path.join(quarantine, "Unreadable Album")
+        os.makedirs(failed_dir)
+        log_id = self.db.log_download(
+            100, outcome="rejected",
+            validation_result={"failed_path": failed_dir},
+        )
+        os.chmod(quarantine, 0o000)
+        self.addCleanup(os.chmod, quarantine, 0o700)
+
+        with self._wrong_match_runtime_config(tmpdir):
+            status, data = self._get(
+                f"/api/wrong-matches/explorer?download_log_id={log_id}")
+
+        self.assertEqual(status, 503)
+        self.assertIn("could not be read", data["error"])
+
+    def test_unreadable_single_file_names_the_file_not_the_folder(self):
+        """Issue #1063 F7: attribute a per-FILE refusal to that file.
+
+        ``_opened_wrong_match_root`` is a context manager, so a refusal
+        raised inside its ``with`` used to be converted by the generator
+        and reported against the whole folder.
+        """
+        tmpdir = self.enterContext(tempfile.TemporaryDirectory())
+        failed_dir = os.path.join(tmpdir, "failed_imports", "Album")
+        os.makedirs(failed_dir)
+        track = os.path.join(failed_dir, "01 - Locked.mp3")
+        with open(track, "wb") as handle:
+            handle.write(b"\x00" * 32)
+        os.chmod(track, 0o000)
+        self.addCleanup(os.chmod, track, 0o600)
+        log_id = self.db.log_download(
+            100, outcome="rejected",
+            validation_result={"failed_path": failed_dir},
+        )
+
+        with self._wrong_match_runtime_config(tmpdir):
+            status, data = self._get(
+                f"/api/wrong-matches/audio?download_log_id={log_id}"
+                "&path=01%20-%20Locked.mp3",
+            )
+
+        self.assertEqual(status, 503)
+        self.assertIn("01 - Locked.mp3", data["error"])
+        self.assertNotIn("files could not be read", data["error"])
+
+    def test_missing_explorer_source_is_still_not_found(self):
+        """Must still work: a genuinely absent source stays 404."""
+        tmpdir = self.enterContext(tempfile.TemporaryDirectory())
+        failed_dir = os.path.join(tmpdir, "failed_imports", "Gone Album")
+        os.makedirs(os.path.dirname(failed_dir))
+        log_id = self.db.log_download(
+            100, outcome="rejected",
+            validation_result={"failed_path": failed_dir},
+        )
+
+        with self._wrong_match_runtime_config(tmpdir):
+            status, data = self._get(
+                f"/api/wrong-matches/explorer?download_log_id={log_id}")
+
+        self.assertEqual(status, 404)
+        self.assertIn("not found", data["error"])
 
     def test_candidate_has_distance_breakdown(self):
         _status, data = self._get("/api/wrong-matches")
@@ -1442,9 +1680,11 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         self.assertIn("distance_breakdown", candidate)
         self.assertIn("mapping", candidate)
 
-    @patch("web.routes.imports.resolve_failed_path",
-           return_value="/mnt/virtio/music/slskd/failed_imports/Test")
-    def test_relative_failed_path_uses_resolved_path(self, _mock_resolve):
+    @patch("web.routes.imports.observe_failed_path",
+           return_value=DirectoryObservation(
+               presence="present",
+               path="/mnt/virtio/music/slskd/failed_imports/Test"))
+    def test_relative_failed_path_uses_resolved_path(self, _mock_observe):
         self.db.delete_request(100)  # replace the setUp row wholesale
         self._seed_wrong_match(download_log_id=43,
                                failed_path="failed_imports/Test")
@@ -1573,6 +1813,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
             success=False,
             processed=1,
             deleted=0,
+            cleared_missing=0,
             deleted_paths=0,
             cleared=0,
             skipped=1,

@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import logging
-import os
 from collections.abc import Iterable
 from contextlib import AbstractContextManager
 from typing import Any, Protocol, runtime_checkable
 
 import msgspec
 
+from lib.fs_authority import DirectoryObservation
 from lib.import_evidence import CURRENT_STATUS_LOADED, load_current_evidence_for_action
 from lib.import_queue import ImportJob
 from lib.pipeline_db import (
@@ -34,7 +34,7 @@ from lib.quality_evidence import (
     audit_v0_probe_from_metric,
     load_candidate_evidence_for_decision,
 )
-from lib.util import resolve_failed_path
+from lib.util import observe_failed_path
 from lib.validation_envelope import (
     WrongMatchTriageAudit,
     decode_validation_envelope,
@@ -319,7 +319,20 @@ def _cleanup_wrong_match(
         )
 
     candidates = _path_candidates(failed_path_hint, raw_path)
-    resolved_path = _resolve_first_existing(candidates)
+    observation = _observe_first_existing(candidates)
+    if observation.indeterminate:
+        # An unreadable source is an operational world failure, not a
+        # missing folder. `skipped_missing_path` here would tell the
+        # operator the queue is clean when it is only unreadable (#1063).
+        return _result(
+            download_log_id,
+            OUTCOME_SKIPPED_OPERATIONAL,
+            request_id=request_id,
+            source_path=failed_path_hint or raw_path,
+            reason=observation.unavailable_reason(),
+            error=observation.unavailable_reason(),
+        )
+    resolved_path = observation.path
     if resolved_path is None:
         return _result(
             download_log_id,
@@ -583,6 +596,21 @@ def _perform_cleanup_deletion(
             clear_missing=False,
         )
 
+    if cleanup.path_unavailable:
+        return _result(
+            download_log_id,
+            OUTCOME_SKIPPED_OPERATIONAL,
+            request_id=request_id,
+            source_path=resolved_path,
+            reason=cleanup.error or "path_unavailable",
+            verdict=verdict,
+            preview_decision=preview_decision,
+            cleanup_eligible=cleanup_eligible,
+            decision=decision,
+            error=cleanup.error,
+            candidate_evidence=candidate_evidence,
+            current_evidence=current_evidence,
+        )
     if not cleanup.success or cleanup.error:
         return _result(
             download_log_id,
@@ -828,12 +856,17 @@ def _path_candidates(*paths: str | None) -> list[str]:
     return result
 
 
-def _resolve_first_existing(paths: Iterable[str]) -> str | None:
+def _observe_first_existing(paths: Iterable[str]) -> DirectoryObservation:
+    """First present candidate wins; otherwise a refused probe outranks absence."""
+    refused: DirectoryObservation | None = None
+    last = DirectoryObservation(presence="absent", code="missing")
     for path in paths:
-        resolved = resolve_failed_path(path)
-        if resolved is not None:
-            return os.path.abspath(resolved)
-    return None
+        last = observe_failed_path(path)
+        if last.present:
+            return last
+        if last.indeterminate and refused is None:
+            refused = last
+    return refused if refused is not None else last
 
 
 def _runtime_config() -> Any:

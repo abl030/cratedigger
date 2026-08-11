@@ -633,6 +633,7 @@ const tracklistCache = new Map();
  * @property {number|null} [total_mb_tracks]
  * @property {string|null} [folder_path]
  * @property {number|null} [download_log_id]
+ * @property {string|null} [partial_read]
  */
 
 /**
@@ -655,11 +656,31 @@ export function pickBestDistance(results) {
 }
 
 /**
+ * Is this scored result computed over an INCOMPLETE local manifest?
+ *
+ * ``partial_read`` carries the first refusal the service hit while
+ * reading the folder. A distance is a per-track average, so dropping the
+ * refused tracks moves the number in a direction nobody can predict —
+ * on the one surface where the operator picks a pressing, that must not
+ * read as an ordinary score (issue #1063).
+ *
+ * @param {BeetsDistanceResult|null} best
+ * @returns {boolean}
+ */
+export function distanceIsPartial(best) {
+  return typeof best?.partial_read === 'string' && best.partial_read.length > 0;
+}
+
+/**
  * Format a distance badge for the pressing-row meta line: `best 0.07 (12/12)`.
  *
  * Distance only — no folder path, that's a different surface (the
  * expanded-row breakdown will carry the per-download details). Returns
  * an empty string for null so callers can concatenate unconditionally.
+ *
+ * A partial read appends `· incomplete manifest`: the number is real but
+ * it was computed over fewer local tracks than the folder holds, and a
+ * bare score would state a completeness we did not earn (issue #1063).
  *
  * @param {BeetsDistanceResult|null} best
  * @returns {string}
@@ -672,7 +693,8 @@ export function formatDistanceBadge(best) {
   const ratio = (typeof matched === 'number' && typeof total === 'number')
     ? ` (${matched}/${total})`
     : '';
-  return `best ${best.distance.toFixed(2)}${ratio}`;
+  const partial = distanceIsPartial(best) ? ' · incomplete manifest' : '';
+  return `best ${best.distance.toFixed(2)}${ratio}${partial}`;
 }
 
 /**
@@ -923,6 +945,15 @@ function paintDistanceBadge(modal, mbid, best) {
     meta.appendChild(badge);
   }
   badge.textContent = text;
+  // Amber + the refusal itself on hover: the same vocabulary the Wrong
+  // Matches explorer uses for an incomplete listing (issue #1063).
+  const partial = distanceIsPartial(best);
+  badge.style.color = partial ? '#d9a441' : '';
+  if (partial && best && typeof best.partial_read === 'string') {
+    badge.title = `Distance computed over an incomplete manifest: ${best.partial_read}`;
+  } else {
+    badge.removeAttribute('title');
+  }
 }
 
 /**

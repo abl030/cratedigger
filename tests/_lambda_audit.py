@@ -22,10 +22,12 @@ the real exception contract pinned by ``tests/test_mirror_contracts.py``.
 Why it is deliberately NARROW (no false positives)
 --------------------------------------------------
 * Only the strict-raise adapters are scanned. The year lookups
-  (``mb_get_release_group_year`` / ``discogs_get_master_year``) and
-  ``resolve_failed_path`` legitimately return ``None`` on their documented
-  "record exists but no year" / "file not on disk" paths — ``: None`` there
-  is correct, not a violation.
+  (``mb_get_release_group_year`` / ``discogs_get_master_year``)
+  legitimately return ``None`` on their documented "record exists but no
+  year" path — ``: None`` there is correct, not a violation. (The former
+  ``resolve_failed_path`` example is gone: issue #1063 replaced it with
+  ``observe_failed_path``, which returns a typed observation precisely so
+  that "not on disk" and "could not look" stop sharing one ``None``.)
 * Only a bare-``None`` lambda body is flagged. A lambda returning a
   constructed payload is a happy-path stub, not a miss-fake, and is fine.
 

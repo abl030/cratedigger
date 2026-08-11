@@ -850,6 +850,7 @@ import {
   formatLength,
   pickBestDistance,
   formatDistanceBadge,
+  distanceIsPartial,
   runWithConcurrency,
   renderMasterlessNote,
   extractTracklist,
@@ -1014,6 +1015,35 @@ assertEqual(
   'best 0.00',
   'formatDistanceBadge no track-count metadata → distance only',
 );
+// Issue #1063: ``partial_read`` means the service was refused part of the
+// folder, so the score covers fewer local tracks than the album holds.
+// The Replace picker is where the operator chooses a pressing — a bare
+// number there states a completeness we did not earn. The composed
+// service->badge property lives in tests/test_protected_path_truth_generated.py.
+assertEqual(
+  formatDistanceBadge({ outcome: 'ok', distance: 0.0712,
+                        matched_tracks: 6, total_mb_tracks: 12,
+                        partial_read: '07.flac: Permission denied' }),
+  'best 0.07 (6/12) · incomplete manifest',
+  'formatDistanceBadge flags a distance computed over a partial manifest',
+);
+assertEqual(
+  formatDistanceBadge({ outcome: 'ok', distance: 0.0712,
+                        matched_tracks: 12, total_mb_tracks: 12,
+                        partial_read: null }),
+  'best 0.07 (12/12)',
+  'formatDistanceBadge must still work: a complete read stays unadorned',
+);
+assert(
+  distanceIsPartial({ outcome: 'ok', distance: 0.1,
+                      partial_read: 'x: Input/output error' }),
+  'distanceIsPartial true for a recorded refusal',
+);
+assert(
+  !distanceIsPartial({ outcome: 'ok', distance: 0.1, partial_read: '' }),
+  'distanceIsPartial false for an empty reason',
+);
+assert(!distanceIsPartial(null), 'distanceIsPartial false for no result');
 
 // runWithConcurrency — caps in-flight workers; preserves input order
 {

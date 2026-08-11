@@ -167,8 +167,13 @@ def errno_symbol(exc: OSError) -> str:
 _SPECIAL_FILE_ERRNOS = (errno.ENXIO, errno.ENODEV)
 
 
-def _raise_path_error(path: str, exc: OSError) -> FilesystemAuthorityError:
-    """Classify one failed no-follow open into a structured refusal.
+def classify_path_errno(exc: OSError) -> FsAuthorityCode:
+    """Map one failed path syscall onto the structured refusal vocabulary.
+
+    The ONE errno classifier in the repository: both the raising
+    descriptor helpers and the non-raising :func:`observe_directory`
+    probe read their code from here, so "what does EACCES mean" cannot
+    drift between the two (issue #1063).
 
     ELOOP (a symlink), ENOTDIR (a non-directory used as a path component)
     and the special-file errnos all mean the *name* is not what we
@@ -176,31 +181,300 @@ def _raise_path_error(path: str, exc: OSError) -> FilesystemAuthorityError:
     code that says "symlink" about a regular-file-as-directory is a lie
     the message would immediately contradict. ENOENT means the name is
     simply gone. Every other errno is the storage layer failing (ESTALE
-    and EIO are the live virtiofs shapes); those must never be confused
-    with a containment violation, so the errno name travels with the
-    error instead of only reaching a human-readable ``strerror``.
+    and EIO are the live virtiofs shapes, EACCES the live private-tree
+    shape); those must never be confused with a containment violation,
+    so the errno name travels with the error instead of only reaching a
+    human-readable ``strerror``.
     """
     if exc.errno == errno.ELOOP:
-        return FilesystemAuthorityError(
-            f"unsafe symlink: {path}", code="unsafe_symlink")
+        return "unsafe_symlink"
     if exc.errno == errno.ENOTDIR:
         # openat(O_DIRECTORY|O_NOFOLLOW) answers ENOTDIR — not ELOOP — for
         # a symlink to a directory, so this branch cannot tell the two
         # apart and must not claim to (issue #868 review).
+        return "not_a_directory"
+    if exc.errno in _SPECIAL_FILE_ERRNOS:
+        return "not_regular_file"
+    if exc.errno == errno.ENOENT:
+        return "missing"
+    return "open_failed"
+
+
+def _raise_path_error(path: str, exc: OSError) -> FilesystemAuthorityError:
+    """Classify one failed no-follow open into a structured refusal."""
+    code = classify_path_errno(exc)
+    if code == "unsafe_symlink":
+        return FilesystemAuthorityError(
+            f"unsafe symlink: {path}", code=code)
+    if code == "not_a_directory":
         return FilesystemAuthorityError(
             f"path component is not a directory, or is a symlink to one: {path}",
-            code="not_a_directory")
-    if exc.errno in _SPECIAL_FILE_ERRNOS:
+            code=code)
+    if code == "not_regular_file":
         return FilesystemAuthorityError(
-            f"not a regular file: {path}", code="not_regular_file")
-    if exc.errno == errno.ENOENT:
+            f"not a regular file: {path}", code=code)
+    if code == "missing":
         return FilesystemAuthorityError(
-            f"cannot open {path}: {exc.strerror}", code="missing")
+            f"cannot open {path}: {exc.strerror}", code=code)
     return FilesystemAuthorityError(
         f"cannot open {path}: {exc.strerror}",
-        code="open_failed",
+        code=code,
         errno_symbol=errno_symbol(exc),
     )
+
+
+DirectoryPresence = Literal["present", "absent", "indeterminate"]
+"""Whether a name was PROVEN to hold a directory, proven not to, or neither."""
+
+
+# Only these two codes prove a directory is genuinely not there: the name
+# does not exist (ENOENT), or something that is not a directory does
+# (ENOTDIR, or a successful stat of a non-directory). Every other refusal
+# — EACCES/EPERM on an unreadable parent, EIO/ESTALE on a sick mount, a
+# symlink loop — is an observation we were not permitted or able to make.
+# Reporting one of those as absence is the issue #1063 defect: an
+# indeterminate observation stated as a definitive negative fact.
+_ABSENCE_CODES: frozenset[FsAuthorityCode] = frozenset({"missing", "not_a_directory"})
+
+
+def errno_proves_absence(code: FsAuthorityCode) -> bool:
+    """Did this refusal POSITIVELY establish that the name holds nothing?
+
+    The owner of the ABSENCE question — a different question from
+    :func:`refusal_is_indeterminate`, which asks whether a refusal is a
+    retryable world failure. The two are not complements, and treating
+    them as if they were is how ``ELOOP``/``ENXIO``/``ENODEV`` fell
+    through a consumer's absence test: ``refusal_is_indeterminate`` says
+    ``False`` for a symlink loop because it is a containment verdict, not
+    a sick mount — but ``False`` there means "not a world failure", never
+    "proved absent". A consumer deciding "is this name provably empty"
+    must ask THIS function.
+
+    Two functions call it today — ``lib.beets_distance._refusal_text``
+    and :func:`os_refusal_in_chain` — and :func:`observe_directory`
+    reaches the same verdict by reading :data:`_ABSENCE_CODES` directly,
+    as it always has. The Wrong Matches explorer
+    (``web/wrong_match_file_service.py``) still gates its per-entry
+    refusal count on :func:`refusal_is_indeterminate`, so for an
+    ``ELOOP``/``ENXIO``/``ENODEV`` entry it silently drops the entry and
+    reports a complete listing while the distance path reports the same
+    folder as incomplete. That divergence predates this delta and is
+    recorded here rather than papered over: the direction is safe (the
+    explorer under-reports a containment refusal, it never invents an
+    absence), but "every consumer agrees" would be a false claim, and
+    this module is not the place to make one.
+    """
+    return code in _ABSENCE_CODES
+
+
+def refusal_is_indeterminate(code: FsAuthorityCode) -> bool | None:
+    """Is this refusal a WORLD failure rather than a verdict about the name?
+
+    The single owner of that question for every consumer that translates
+    :class:`FilesystemAuthorityError` into its own vocabulary (issue
+    #1063). ``True`` means the storage layer refused or failed and the
+    caller learned nothing about the path — retryable, never a semantic
+    complaint about the operator's input. The ``match`` is exhaustive on
+    purpose: a new :data:`FsAuthorityCode` must be classified here rather
+    than silently inheriting either group (issue #868's rule).
+
+    Declared ``bool | None`` because that is the truth: adding a
+    ``case _`` to satisfy a bare ``-> bool`` would destroy the very
+    exhaustiveness this function exists for (and which
+    ``TestIndeterminateRefusalVocabulary`` checks against
+    ``get_args(FsAuthorityCode)``), so a value outside the ``Literal``
+    falls through and returns ``None``. Every consumer treats that
+    falsy result as "not indeterminate", which is the fail-safe side:
+    an unclassifiable refusal is reported as a refusal, not as a
+    retryable blip.
+    """
+    match code:
+        case "open_failed" | "read_failed" | "write_failed":
+            return True
+        case (
+            "unspecified"
+            | "path_escape"
+            | "unsafe_symlink"
+            | "not_a_directory"
+            | "not_regular_file"
+            | "untrusted_ownership"
+            | "missing"
+        ):
+            return False
+
+
+def os_refusal_in_chain(
+    exc: BaseException, *, subject: str,
+) -> OSError | None:
+    """Find the storage refusal hiding inside a third-party exception.
+
+    Tag readers convert an ``OSError`` into their own vocabulary before
+    it ever reaches us — mutagen raises ``MutagenError``, mediafile
+    re-raises that as ``UnreadableFileError``, beets wraps it once more
+    as ``ReadError`` — so ``except OSError`` never fires and an EACCES
+    file is indistinguishable from a corrupt one. The originating error
+    survives on the explicit ``__cause__`` / implicit ``__context__``
+    chain; this walks it and returns the first ``OSError`` that is
+    compatible with ``subject`` and whose errno
+    :func:`errno_proves_absence` does NOT call a proven absence (issue
+    #1063).
+
+    Named for what it finds, not for :func:`refusal_is_indeterminate`:
+    that predicate answers a different question (is this refusal
+    retryable) and calls a symlink loop ``False``, which would silently
+    drop ``ELOOP``/``ENXIO``/``ENODEV`` here while
+    :func:`observe_directory` calls the very same errno indeterminate at
+    the other end of the request.
+
+    A corrupt, truncated or unsupported file carries no ``OSError``
+    anywhere on that chain and returns ``None``: "this file's tags are
+    garbage" is a fact ABOUT the file, and reporting it as a refusal
+    would re-launder the very distinction this module exists to keep.
+
+    ``subject`` is REQUIRED, and the match is deliberately
+    "names ``subject``, or names nothing". Python sets ``__context__``
+    implicitly to whatever exception is being handled anywhere up the
+    stack, so a caller that reads a corrupt file from inside an
+    ``except OSError:`` block finds that unrelated error on the chain,
+    and reporting it produces a refusal message with the wrong errno and
+    someone else's filename. Requiring a filename looks like the
+    correction and is not, because **only ``open()`` attaches one**: the
+    shape this deployment actually produces is a MID-READ
+    ``EIO``/``ESTALE`` on an already-open descriptor, where the errno and
+    the filename land on two DIFFERENT links of the chain and no single
+    link carries both. Demanding both on one link regressed exactly the
+    live case into ``no_audio``.
+
+    So the rule is a deliberate, ASYMMETRIC trade, and it is worth
+    stating precisely rather than favourably: an error that names a
+    DIFFERENT file is rejected, which is the whole ambient-leak
+    protection that survives; an error that names NOTHING is accepted,
+    and a nameless error can be either the storage failing mid-read (the
+    case we need) or an unrelated ambient one (the case we no longer
+    reject). We accept the second to keep the first, because the
+    module's doctrine is to fail toward "refusal" rather than toward a
+    definitive negative — a false refusal costs a retry, a false
+    ``no_audio`` reports an intact album as gone.
+
+    That residual hole is unreachable today: the sole caller
+    (``lib.beets_distance._fingerprint_file``) does not run inside an
+    ``except OSError:`` body. It is pinned in BOTH directions by
+    ``test_a_nameless_ambient_error_is_the_accepted_cost`` so that a
+    future caller which does sit under one fails a test rather than
+    shipping a false refusal quietly. A ``stop_at`` sentinel captured at
+    the caller's entry would close it — the ambient object is provably
+    the chain TAIL and the mid-read errno appears before it — but that
+    was measured and deliberately not taken: it buys nothing reachable,
+    and mis-placing the capture inside the ``try`` would silently stop
+    the walk at the callee's own exception and drop EVERY refusal into
+    ``no_audio``, which is the exact direction this function exists to
+    protect.
+
+    Termination is the ``seen`` set, not a depth cap: each step either
+    stops or records a new exception object, and the chain is finite. A
+    cap would have to choose a direction to fail in, and truncating the
+    walk fails toward "no refusal found" — the ``no_audio`` side, which
+    is the #1063-violating one.
+    """
+    def names_something_else(name: object) -> bool:
+        # beets works in ``syspath`` bytes internally, so an errno raised
+        # from its own os call can carry a bytes filename. Comparing that
+        # to a str subject would never match, and a non-match here fails
+        # toward "no refusal found" — the unsafe direction.
+        if name is None:
+            return False
+        if isinstance(name, (str, bytes)):
+            return os.fsdecode(name) != subject
+        return True
+
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if (
+            isinstance(current, OSError)
+            and not names_something_else(current.filename)
+            and not names_something_else(current.filename2)
+            and not errno_proves_absence(classify_path_errno(current))
+        ):
+            return current
+        # ``raise X from None`` means the author explicitly disowned the
+        # context; honour that rather than mining it for attribution.
+        current = current.__cause__ or (
+            None if current.__suppress_context__ else current.__context__
+        )
+    return None
+
+
+@dataclass(frozen=True)
+class DirectoryObservation:
+    """One truthful answer to "is there a directory at this name?".
+
+    ``present`` carries the absolute ``path``. ``absent`` is a POSITIVE
+    proof of absence and is the only state that may authorize
+    absence-driven cleanup. ``indeterminate`` means the probe was
+    refused: fail closed, keep the pointer, say so.
+
+    Deliberately NOT ``str | None``: that shape is exactly what let
+    ``os.path.isdir`` — which answers ``False`` for EACCES just as it
+    does for ENOENT — launder "I could not look" into "it is not there"
+    (issue #1063).
+    """
+
+    presence: DirectoryPresence
+    path: str | None = None
+    code: FsAuthorityCode | None = None
+    errno_symbol: str | None = None
+    detail: str | None = None
+
+    @property
+    def present(self) -> bool:
+        return self.presence == "present"
+
+    @property
+    def absent(self) -> bool:
+        return self.presence == "absent"
+
+    @property
+    def indeterminate(self) -> bool:
+        return self.presence == "indeterminate"
+
+    def unavailable_reason(self) -> str:
+        """Stable operator/audit text for an indeterminate observation."""
+        symbol = self.errno_symbol or self.code or "UNKNOWN"
+        return f"path_unavailable[{symbol}]: {self.detail or 'probe refused'}"
+
+
+def observe_directory(path: str) -> DirectoryObservation:
+    """Probe one absolute-or-relative name without ever lying about it."""
+    if not path:
+        return DirectoryObservation(
+            presence="absent", code="missing", detail="empty path")
+    try:
+        info = os.stat(path)
+    except OSError as exc:
+        code = classify_path_errno(exc)
+        return DirectoryObservation(
+            presence="absent" if code in _ABSENCE_CODES else "indeterminate",
+            code=code,
+            errno_symbol=errno_symbol(exc),
+            detail=f"{path}: {exc.strerror}",
+        )
+    except ValueError as exc:
+        # An embedded NUL (or other un-syscallable name) is not evidence
+        # of absence; ``os.path.isdir`` swallowed it as ``False``.
+        return DirectoryObservation(
+            presence="indeterminate",
+            code="path_escape",
+            detail=f"{path!r}: {exc}",
+        )
+    if not stat.S_ISDIR(info.st_mode):
+        return DirectoryObservation(
+            presence="absent",
+            code="not_a_directory",
+            detail=f"{path}: not a directory",
+        )
+    return DirectoryObservation(presence="present", path=os.path.abspath(path))
 
 
 @contextmanager
@@ -589,6 +863,17 @@ def open_configured_quarantine_directory(
     if not raw_path:
         raise FilesystemAuthorityError("quarantine path is missing")
 
+    # A refusal AFTER containment was established says nothing about
+    # containment. Keeping the first such refusal is what stops the loop
+    # from exhausting into the "outside configured quarantine roots"
+    # verdict it never evaluated — the live #1063 lie, where EACCES on
+    # the 0700 processing root accused the operator's config of a
+    # containment problem that did not exist. ``missing`` is the one
+    # refusal that legitimately continues: a relative legacy path is
+    # contained by every root lexically and must be probed under each.
+    contained_refusal: FilesystemAuthorityError | None = None
+    contained_missing = False
+
     for root, markers in roots:
         if not os.path.isabs(root):
             continue
@@ -609,13 +894,28 @@ def open_configured_quarantine_directory(
                     fd=os.dup(candidate_fd),
                     display_path=os.path.abspath(os.path.join(root, relative)),
                 )
-        except FilesystemAuthorityError:
+        except FilesystemAuthorityError as exc:
+            if exc.code == "missing":
+                contained_missing = True
+            elif contained_refusal is None:
+                contained_refusal = exc
             continue
         try:
             yield held
         finally:
             held.close()
         return
+    if contained_refusal is not None:
+        raise FilesystemAuthorityError(
+            f"quarantine path is contained but unavailable: {contained_refusal}",
+            code=contained_refusal.code,
+            errno_symbol=contained_refusal.errno_symbol,
+        )
+    if contained_missing:
+        raise FilesystemAuthorityError(
+            f"quarantine path does not exist under its configured root: {raw_path}",
+            code="missing",
+        )
     raise FilesystemAuthorityError("path is outside configured quarantine roots")
 
 

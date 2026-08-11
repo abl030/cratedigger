@@ -15,6 +15,7 @@ number on a second call (mtime-stable).
 
 from __future__ import annotations
 
+import errno
 import os
 import shutil
 import tempfile
@@ -28,6 +29,28 @@ from lib.beets_distance import (
     SyntheticItem,
     compute_beets_distance,
 )
+from lib.fs_authority import DirectoryObservation
+
+
+def _present(path: str) -> DirectoryObservation:
+    """Injected observer: this exact name holds a directory."""
+    return DirectoryObservation(presence="present", path=path)
+
+
+def _absent(_path: str) -> DirectoryObservation:
+    """Injected observer: proven absent (never merely unreadable)."""
+    return DirectoryObservation(presence="absent", code="missing")
+
+
+def _unreadable(path: str) -> DirectoryObservation:
+    """Injected observer mirroring a real EACCES probe refusal."""
+    return DirectoryObservation(
+        presence="indeterminate",
+        code="open_failed",
+        errno_symbol="EACCES",
+        detail=f"{path}: Permission denied",
+    )
+
 
 FIXTURE_FLAC = os.path.join(
     os.path.dirname(__file__), "fixtures", "audio_hash", "sine_440.flac")
@@ -42,6 +65,7 @@ OUTCOMES = (
     "download_log_not_found",
     "request_not_found",
     "folder_missing",
+    "folder_unavailable",
     "no_audio",
     "mb_lookup_failed",
     "mb_no_release_group",
@@ -141,6 +165,7 @@ class TestComputeBeetsDistanceOutcomes(unittest.TestCase):
                 "download_log_not_found",
                 "request_not_found",
                 "folder_missing",
+                "folder_unavailable",
                 "no_audio",
                 "mb_lookup_failed",
                 "mb_no_release_group",
@@ -155,7 +180,7 @@ class TestComputeBeetsDistanceOutcomes(unittest.TestCase):
             42, "rel-x",
             pdb=pdb,
             mb_get_release=lambda mbid: _ok_mb_release(mbid=mbid),
-            resolve_failed_path=lambda p: p,
+            observe_failed_path=_present,
         )
         self.assertEqual(r.outcome, "download_log_not_found")
         self.assertIsNone(r.distance)
@@ -170,7 +195,7 @@ class TestComputeBeetsDistanceOutcomes(unittest.TestCase):
             1, "rel-x",
             pdb=pdb,
             mb_get_release=lambda mbid: _ok_mb_release(mbid=mbid),
-            resolve_failed_path=lambda p: p,
+            observe_failed_path=_present,
         )
         self.assertEqual(r.outcome, "request_not_found")
 
@@ -183,7 +208,7 @@ class TestComputeBeetsDistanceOutcomes(unittest.TestCase):
             1, "rel-x",
             pdb=pdb,
             mb_get_release=lambda mbid: _ok_mb_release(mbid=mbid),
-            resolve_failed_path=lambda p: p,
+            observe_failed_path=_present,
         )
         self.assertEqual(r.outcome, "request_not_found")
 
@@ -196,7 +221,7 @@ class TestComputeBeetsDistanceOutcomes(unittest.TestCase):
             1, "rel-x",
             pdb=pdb,
             mb_get_release=lambda mbid: None,
-            resolve_failed_path=lambda p: p,
+            observe_failed_path=_present,
         )
         self.assertEqual(r.outcome, "mb_lookup_failed")
         self.assertEqual(r.request_release_group_id, "rg-shared")
@@ -213,7 +238,7 @@ class TestComputeBeetsDistanceOutcomes(unittest.TestCase):
             1, "rel-x",
             pdb=pdb,
             mb_get_release=_boom,
-            resolve_failed_path=lambda p: p,
+            observe_failed_path=_present,
         )
         self.assertEqual(r.outcome, "mb_lookup_failed")
         assert r.error_message is not None
@@ -230,7 +255,7 @@ class TestComputeBeetsDistanceOutcomes(unittest.TestCase):
             1, "rel-x",
             pdb=pdb,
             mb_get_release=lambda mbid: mb,
-            resolve_failed_path=lambda p: p,
+            observe_failed_path=_present,
         )
         self.assertEqual(r.outcome, "mb_no_release_group")
 
@@ -245,7 +270,7 @@ class TestComputeBeetsDistanceOutcomes(unittest.TestCase):
             1, "rel-alien",
             pdb=pdb,
             mb_get_release=lambda mbid: _ok_mb_release(mbid=mbid, rg="rg-other"),
-            resolve_failed_path=lambda p: p,
+            observe_failed_path=_present,
         )
         self.assertEqual(r.outcome, "wrong_release_group")
         self.assertEqual(r.request_release_group_id, "rg-source")
@@ -272,7 +297,7 @@ class TestComputeBeetsDistanceOutcomes(unittest.TestCase):
             1, "rel-alien",
             pdb=pdb,
             mb_get_release=lambda mbid: _ok_mb_release(mbid=mbid, rg="rg-other"),
-            resolve_failed_path=lambda p: None,  # file not on disk
+            observe_failed_path=_absent,
         )
         self.assertEqual(r.outcome, "folder_missing")  # not wrong_release_group
         self.assertEqual(r.candidate_release_group_id, "rg-other")
@@ -287,9 +312,417 @@ class TestComputeBeetsDistanceOutcomes(unittest.TestCase):
             1, "rel-x",
             pdb=pdb,
             mb_get_release=lambda mbid: _ok_mb_release(mbid=mbid),
-            resolve_failed_path=lambda p: None,
+            observe_failed_path=_absent,
         )
         self.assertEqual(r.outcome, "folder_missing")
+
+    def test_folder_unavailable_is_not_folder_missing(self) -> None:
+        """An unreadable folder is a distinct, non-absent outcome (#1063)."""
+        pdb = _StubPDB(
+            download_log_entry={"id": 1, "request_id": 7,
+                                "validation_result": {"failed_path": "/private/x"}},
+            request={"id": 7, "mb_release_group_id": "rg-shared"},
+        )
+        r = compute_beets_distance(
+            1, "rel-x",
+            pdb=pdb,
+            mb_get_release=lambda mbid: _ok_mb_release(mbid=mbid),
+            observe_failed_path=_unreadable,
+        )
+        self.assertEqual(r.outcome, "folder_unavailable")
+        assert r.error_message is not None
+        self.assertIn("EACCES", r.error_message)
+
+    def test_unreadable_folder_contents_are_not_no_audio(self) -> None:
+        """The READ leg owes the same distinction (#1063 review T2.2).
+
+        The folder resolves; the walk is then refused. ``os.walk`` swallows
+        that by default, so zero fingerprints used to mean ``no_audio`` — a
+        definitive negative from an observation we were not allowed to make.
+        """
+        root = self.enterContext(tempfile.TemporaryDirectory())
+        album = os.path.join(root, "wrong_matches", "Album")
+        os.makedirs(album)
+        shutil.copy(FIXTURE_FLAC, os.path.join(album, "01.flac"))
+        pdb = _StubPDB(
+            download_log_entry={"id": 1, "request_id": 7,
+                                "validation_result": {"failed_path": album}},
+            request={"id": 7, "mb_release_group_id": "rg-shared"},
+        )
+        os.chmod(album, 0o000)
+        try:
+            r = compute_beets_distance(
+                1, "rel-x",
+                pdb=pdb,
+                mb_get_release=lambda mbid: _ok_mb_release(mbid=mbid),
+                observe_failed_path=_present,
+            )
+        finally:
+            os.chmod(album, 0o700)
+        self.assertEqual(r.outcome, "folder_unavailable")
+        assert r.error_message is not None
+        self.assertIn("could not read the contents", r.error_message)
+
+    def _refused_tag_read_world(self, locked: tuple[str, ...]) -> str:
+        """Real FLACs under a readable folder, some of them mode 0000.
+
+        The refusal shape the walk CANNOT see: the directory lists fine,
+        every file stats fine, and only the tag read is refused (issue
+        #1063). Restores the modes on teardown so ``TemporaryDirectory``
+        can clean up.
+        """
+        root = self.enterContext(tempfile.TemporaryDirectory())
+        album = os.path.join(root, "wrong_matches", "Album")
+        os.makedirs(album)
+        for name in ("01 - one.flac", "02 - two.flac"):
+            shutil.copy(FIXTURE_FLAC, os.path.join(album, name))
+        for name in locked:
+            os.chmod(os.path.join(album, name), 0o000)
+
+        def _restore() -> None:
+            for name in locked:
+                os.chmod(os.path.join(album, name), 0o600)
+
+        self.addCleanup(_restore)
+        return album
+
+    def _compute_over(self, album: str) -> BeetsDistanceResult:
+        pdb = _StubPDB(
+            download_log_entry={"id": 1, "request_id": 7,
+                                "validation_result": {"failed_path": album}},
+            request={"id": 7, "mb_release_group_id": "rg-shared"},
+        )
+        return compute_beets_distance(
+            1, "rel-x",
+            pdb=pdb,
+            mb_get_release=lambda mbid: _ok_mb_release(mbid=mbid),
+            observe_failed_path=_present,
+        )
+
+    def test_refused_tag_read_flags_the_partial_manifest(self) -> None:
+        """One readable + one refused file is an INCOMPLETE manifest.
+
+        ``partial_read`` is the field that says so on the otherwise-``ok``
+        result. Before the fix, ``_fingerprint_file`` swallowed the
+        refusal (mediafile converts the ``OSError`` into its own
+        ``UnreadableFileError``), so a distance computed over half an
+        album shipped as a plain number (issue #1063).
+        """
+        album = self._refused_tag_read_world(("02 - two.flac",))
+        result = self._compute_over(album)
+        self.assertEqual(result.outcome, "ok")
+        assert result.partial_read is not None
+        self.assertIn("02 - two.flac", result.partial_read)
+        self.assertIn("Permission denied", result.partial_read)
+        self.assertEqual(result.total_local_tracks, 1)
+
+    def test_every_tag_read_refused_is_not_no_audio(self) -> None:
+        """ALL files refused is the #1063 defect verbatim, one layer down.
+
+        Zero fingerprints with no walk-level error used to mean
+        ``no_audio`` — HTTP 410 Gone, CLI exit 4, "the artifacts we
+        wanted to compare are gone" — over an intact album.
+        """
+        album = self._refused_tag_read_world(
+            ("01 - one.flac", "02 - two.flac"))
+        result = self._compute_over(album)
+        self.assertEqual(result.outcome, "folder_unavailable")
+        self.assertNotEqual(result.outcome, "no_audio")
+        assert result.error_message is not None
+        self.assertIn("could not read the contents", result.error_message)
+
+    def test_a_proven_absence_is_not_reported_as_a_refusal(self) -> None:
+        """ENOENT is the one errno that EARNS a definitive negative.
+
+        A dangling symlink is listed by the walk and answers ENOENT on
+        ``stat``: the file is provably gone. Recording that as a refusal
+        reaches the operator as an amber ``· incomplete manifest`` badge
+        on the Replace picker — over a manifest that is complete. Issue
+        #1063's rule cuts both ways.
+        """
+        root = self.enterContext(tempfile.TemporaryDirectory())
+        album = os.path.join(root, "wrong_matches", "Album")
+        os.makedirs(album)
+        shutil.copy(FIXTURE_FLAC, os.path.join(album, "01 - one.flac"))
+        os.symlink(os.path.join(album, "nothing-here.flac"),
+                   os.path.join(album, "02 - dangling.flac"))
+        result = self._compute_over(album)
+        self.assertEqual(result.outcome, "ok")
+        self.assertIsNone(result.partial_read)
+        self.assertEqual(result.total_local_tracks, 1)
+
+    def test_only_proven_absences_is_no_audio_not_unavailable(self) -> None:
+        """A folder holding one dangling name WAS observed and read.
+
+        ``folder_unavailable`` (503 / exit 5) means the folder could not
+        be observed; that would be false here, and the CLI doc this
+        series wrote says so.
+        """
+        root = self.enterContext(tempfile.TemporaryDirectory())
+        album = os.path.join(root, "wrong_matches", "Album")
+        os.makedirs(album)
+        os.symlink(os.path.join(album, "nothing-here.flac"),
+                   os.path.join(album, "01 - dangling.flac"))
+        result = self._compute_over(album)
+        self.assertEqual(result.outcome, "no_audio")
+        self.assertIsNone(result.partial_read)
+
+    def _mid_read_refusal(self, album: str, name: str) -> None:
+        """Plant a file that OPENS fine and answers EIO on every read.
+
+        The deployment's live refusal shape (nested virtiofs
+        EIO/ESTALE), reproduced without a flaky mount.
+        """
+        os.symlink("/proc/self/mem", os.path.join(album, name))
+
+    def test_a_mid_read_refusal_is_never_no_audio(self) -> None:
+        """The live shape: errno and filename on DIFFERENT chain links.
+
+        Only ``open()`` attaches a filename; ``FileIO.read`` does not. An
+        attribution guard that demanded both on one link answered
+        ``no_audio`` — HTTP 410 Gone, CLI exit 4 — over an intact album
+        on the exact mount this deployment runs on.
+        """
+        root = self.enterContext(tempfile.TemporaryDirectory())
+        album = os.path.join(root, "wrong_matches", "Album")
+        os.makedirs(album)
+        self._mid_read_refusal(album, "01 - one.flac")
+        result = self._compute_over(album)
+        self.assertEqual(result.outcome, "folder_unavailable")
+        self.assertNotEqual(result.outcome, "no_audio")
+        assert result.error_message is not None
+        self.assertIn("could not read the contents", result.error_message)
+
+    def test_a_partial_mid_read_refusal_flags_the_manifest(self) -> None:
+        """…and one readable file beside it is an incomplete manifest."""
+        root = self.enterContext(tempfile.TemporaryDirectory())
+        album = os.path.join(root, "wrong_matches", "Album")
+        os.makedirs(album)
+        shutil.copy(FIXTURE_FLAC, os.path.join(album, "01 - one.flac"))
+        self._mid_read_refusal(album, "02 - sick-mount.flac")
+        result = self._compute_over(album)
+        self.assertEqual(result.outcome, "ok")
+        assert result.partial_read is not None
+        self.assertIn("02 - sick-mount.flac", result.partial_read)
+        self.assertEqual(result.total_local_tracks, 1)
+
+    def test_a_walk_refusal_and_a_walk_absence_are_told_apart(self) -> None:
+        """The third refusal site: ``os.walk``'s ``onerror``.
+
+        A subdirectory we may not descend into is a refusal; a name that
+        is not there when the walk reaches it is not. The generated
+        property reaches the EACCES direction (``refused_dir``); the
+        ENOENT direction needs the folder to disappear between the
+        observation and the walk, which is a race no strategy can
+        generate — so it is pinned here instead of faked.
+        """
+        root = self.enterContext(tempfile.TemporaryDirectory())
+        album = os.path.join(root, "wrong_matches", "Album")
+        os.makedirs(album)
+        shutil.copy(FIXTURE_FLAC, os.path.join(album, "01 - one.flac"))
+        disc = os.path.join(album, "Disc 2")
+        os.makedirs(disc)
+        os.chmod(disc, 0o000)
+        self.addCleanup(os.chmod, disc, 0o700)
+        refused = self._compute_over(album)
+        self.assertEqual(refused.outcome, "ok")
+        assert refused.partial_read is not None
+        self.assertIn("Disc 2", refused.partial_read)
+
+        # ENOENT at the walk proves absence, so it claims no refusal.
+        vanished = os.path.join(root, "wrong_matches", "Vanished")
+        absent = self._compute_over(vanished)
+        self.assertEqual(absent.outcome, "no_audio")
+        self.assertIsNone(absent.partial_read)
+
+    def test_a_symlink_loop_is_a_refusal_at_both_ends(self) -> None:
+        """ELOOP proves nothing absent, and both ends must agree.
+
+        ``refusal_is_indeterminate`` answers ``False`` for a symlink loop
+        because it is a containment verdict, not a sick mount — but
+        ``False`` there means "not retryable", never "proved absent".
+        Keying the read off it dropped ELOOP into ``no_audio`` while
+        ``observe_directory`` called the very same errno indeterminate
+        for the folder.
+        """
+        from lib.fs_authority import observe_directory
+
+        root = self.enterContext(tempfile.TemporaryDirectory())
+        album = os.path.join(root, "wrong_matches", "Album")
+        os.makedirs(album)
+        loop = os.path.join(album, "01 - loop.flac")
+        os.symlink(loop, loop)
+        self.assertEqual(observe_directory(loop).presence, "indeterminate")
+        result = self._compute_over(album)
+        self.assertEqual(result.outcome, "folder_unavailable")
+
+    def test_refusal_attribution_survives_an_ambient_os_error(self) -> None:
+        """A refusal names ONE file; an unrelated error is not evidence.
+
+        Python sets ``__context__`` implicitly to whatever exception is
+        being handled anywhere up the stack, so reading a corrupt file
+        from inside an ``except OSError:`` block put that unrelated error
+        on the chain — and the walk reported a refusal with the wrong
+        errno and someone else's filename.
+        """
+        root = self.enterContext(tempfile.TemporaryDirectory())
+        album = os.path.join(root, "wrong_matches", "Album")
+        os.makedirs(album)
+        shutil.copy(FIXTURE_FLAC, os.path.join(album, "01 - one.flac"))
+        with open(os.path.join(album, "02 - garbage.flac"), "wb") as handle:
+            handle.write(b"not a flac at all" * 8)
+        try:
+            raise PermissionError(13, "Permission denied", "/elsewhere.flac")
+        except OSError:
+            result = self._compute_over(album)
+        self.assertEqual(result.outcome, "ok")
+        self.assertIsNone(result.partial_read)
+
+    def test_a_nameless_ambient_error_is_the_accepted_cost(self) -> None:
+        """Pin the half the relaxation newly ACCEPTS, in both directions.
+
+        "Names the subject, or names nothing" rejects an error naming a
+        DIFFERENT file — the ambient-leak protection that survives — but
+        accepts a NAMELESS one, because only ``open()`` attaches a
+        filename and the live mid-read producer therefore has none. The
+        cost is that a nameless *ambient* error is accepted too.
+
+        Unreachable today: the sole production caller does not run inside
+        an ``except OSError:`` body. Pinned anyway, so a future caller
+        that does sit under one fails here instead of shipping a false
+        refusal with everything green. If someone later closes the hole,
+        this test is what tells them they changed the contract.
+        """
+        from lib.fs_authority import os_refusal_in_chain
+
+        subject = "/album/01.flac"
+        # ACCEPTED: nameless. This is the live mid-read shape.
+        nameless = OSError(errno.EIO, "Input/output error")
+        self.assertIs(
+            os_refusal_in_chain(nameless, subject=subject), nameless,
+            "a nameless OSError must still be found — the deployment's "
+            "real mid-read refusal has no filename",
+        )
+        # REJECTED: names a different file. The protection that survives.
+        self.assertIsNone(os_refusal_in_chain(
+            OSError(errno.EIO, "Input/output error", "/elsewhere.flac"),
+            subject=subject,
+        ))
+        # The accepted cost, stated as a fact rather than a hope: an
+        # ambient nameless error reached through ``__context__`` is
+        # indistinguishable from the mid-read one and IS accepted.
+        try:
+            raise OSError(errno.EIO, "Input/output error")
+        except OSError:
+            ambient_chain = ValueError("unrelated parse failure")
+            try:
+                raise ambient_chain
+            except ValueError as exc:
+                found = os_refusal_in_chain(exc, subject=subject)
+        self.assertIsNotNone(
+            found,
+            "if this now returns None the residual hole was closed — "
+            "update this pin deliberately rather than deleting it",
+        )
+
+    def test_both_real_refusal_producers_are_found_and_attributed(self) -> None:
+        """Rule C: the attribution guard rests on facts of the real stack.
+
+        There are TWO producers, and they carry different evidence:
+
+        * **open-time** (EACCES on a mode-0000 file) — ``open()`` attaches
+          the exact filename, which is what lets an unrelated ambient
+          error be rejected;
+        * **mid-read** (EIO/ESTALE on an already-open descriptor — the
+          shape this deployment's nested virtiofs really produces) —
+          ``FileIO.read`` attaches NO filename, and the errno and the
+          filename land on two different links of the chain.
+
+        Requiring a filename therefore drops the live producer into
+        ``no_audio``, which is why the guard accepts "names the subject,
+        or names nothing". Both halves are pinned so a future upgrade
+        that changed either producer fails loudly.
+        """
+        from lib.beets_distance import _item_from_path
+        from lib.fs_authority import os_refusal_in_chain
+
+        root = self.enterContext(tempfile.TemporaryDirectory())
+
+        locked = os.path.join(root, "locked.flac")
+        shutil.copy(FIXTURE_FLAC, locked)
+        os.chmod(locked, 0o000)
+        self.addCleanup(os.chmod, locked, 0o600)
+        with self.assertRaises(Exception) as caught_open:
+            _item_from_path(locked)
+        opened = os_refusal_in_chain(caught_open.exception, subject=locked)
+        assert opened is not None
+        self.assertEqual(opened.filename, locked)
+        self.assertEqual(opened.errno, errno.EACCES)
+        # …and the same chain read for a DIFFERENT subject is not evidence.
+        self.assertIsNone(os_refusal_in_chain(
+            caught_open.exception, subject=os.path.join(root, "other.flac")))
+
+        # /proc/self/mem opens fine and answers EIO on every read: a real
+        # mid-read refusal with no flaky mount required.
+        mid_read = os.path.join(root, "mid-read.flac")
+        os.symlink("/proc/self/mem", mid_read)
+        with self.assertRaises(Exception) as caught_read:
+            _item_from_path(mid_read)
+        during = os_refusal_in_chain(caught_read.exception, subject=mid_read)
+        assert during is not None
+        self.assertEqual(during.errno, errno.EIO)
+        self.assertIsNone(
+            during.filename,
+            "a read on an open descriptor attaches no filename — the guard "
+            "must not require one",
+        )
+
+        # beets works in ``syspath`` bytes internally, so a bytes filename
+        # naming the SAME file must still match, and one naming a
+        # different file must still be rejected.
+        as_bytes = PermissionError(
+            errno.EACCES, "Permission denied", os.fsencode(locked))
+        self.assertIs(os_refusal_in_chain(as_bytes, subject=locked), as_bytes)
+        self.assertIsNone(os_refusal_in_chain(
+            PermissionError(errno.EACCES, "Permission denied",
+                            os.fsencode(os.path.join(root, "other.flac"))),
+            subject=locked))
+
+    def test_unparseable_file_is_not_reported_as_a_refusal(self) -> None:
+        """Must still work: a corrupt tag block is a fact about the file.
+
+        It carries no ``OSError`` anywhere on its exception chain, so it
+        must not claim ``partial_read`` — that would make the signal
+        meaningless, which is the mirror-image of the bug.
+        """
+        root = self.enterContext(tempfile.TemporaryDirectory())
+        album = os.path.join(root, "wrong_matches", "Album")
+        os.makedirs(album)
+        shutil.copy(FIXTURE_FLAC, os.path.join(album, "01 - one.flac"))
+        with open(os.path.join(album, "02 - garbage.flac"), "wb") as handle:
+            handle.write(b"not a flac at all" * 8)
+        result = self._compute_over(album)
+        self.assertEqual(result.outcome, "ok")
+        self.assertIsNone(result.partial_read)
+        self.assertEqual(result.total_local_tracks, 1)
+
+    def test_empty_readable_folder_is_still_no_audio(self) -> None:
+        """Must still work: a readable folder with no audio is no_audio."""
+        root = self.enterContext(tempfile.TemporaryDirectory())
+        album = os.path.join(root, "wrong_matches", "Album")
+        os.makedirs(album)
+        pdb = _StubPDB(
+            download_log_entry={"id": 1, "request_id": 7,
+                                "validation_result": {"failed_path": album}},
+            request={"id": 7, "mb_release_group_id": "rg-shared"},
+        )
+        r = compute_beets_distance(
+            1, "rel-x",
+            pdb=pdb,
+            mb_get_release=lambda mbid: _ok_mb_release(mbid=mbid),
+            observe_failed_path=_present,
+        )
+        self.assertEqual(r.outcome, "no_audio")
 
     def test_folder_missing_when_validation_result_absent(self) -> None:
         pdb = _StubPDB(
@@ -301,7 +734,7 @@ class TestComputeBeetsDistanceOutcomes(unittest.TestCase):
             1, "rel-x",
             pdb=pdb,
             mb_get_release=lambda mbid: _ok_mb_release(mbid=mbid),
-            resolve_failed_path=lambda p: None,
+            observe_failed_path=_absent,
         )
         self.assertEqual(r.outcome, "folder_missing")
 
@@ -316,7 +749,7 @@ class TestComputeBeetsDistanceOutcomes(unittest.TestCase):
                 1, "rel-x",
                 pdb=pdb,
                 mb_get_release=lambda mbid: _ok_mb_release(mbid=mbid),
-                resolve_failed_path=lambda p: p,
+                observe_failed_path=_present,
             )
             self.assertEqual(r.outcome, "no_audio")
             self.assertEqual(r.folder_path, tmp)
@@ -422,7 +855,7 @@ class TestBeetsDistanceIntegrationSlice(unittest.TestCase):
             100, "rel-aaa",
             pdb=pdb,
             mb_get_release=lambda mbid: mb,
-            resolve_failed_path=lambda p: p,
+            observe_failed_path=_present,
             cache=cache,
         )
 
@@ -863,7 +1296,7 @@ class TestComputeBeetsDistanceWithItemsOverride(unittest.TestCase):
             mbid="rel-alien",
             pdb=pdb,
             mb_get_release=lambda mbid: _ok_mb_release(mbid=mbid, rg="rg-other"),
-            resolve_failed_path=lambda p: p,
+            observe_failed_path=_present,
         )
         # Existing test_wrong_release_group_guardrail asserts the same shape.
         self.assertEqual(r.outcome, "wrong_release_group")

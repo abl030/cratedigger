@@ -57,6 +57,7 @@ _BEETS_DISTANCE_OUTCOME_STATUS: dict[str, int] = {
     "request_not_found": 404,
     "folder_missing": 410,
     "no_audio": 410,
+    "folder_unavailable": 503,
     "mb_lookup_failed": 503,
     "mb_no_release_group": 422,
     "wrong_release_group": 422,
@@ -93,7 +94,9 @@ def get_beets_distance(
       * 422 — ``mb_no_release_group`` / ``wrong_release_group``
               (semantic input violations — including the
               cross-release-group guardrail)
-      * 503 — ``mb_lookup_failed`` (MB mirror transient)
+      * 503 — ``mb_lookup_failed`` (MB mirror transient) /
+              ``folder_unavailable`` (the candidate folder could not be
+              observed — permissions, I/O; never evidence it is gone)
       * 500 — ``distance_failed`` (unexpected beets error)
     """
     from lib.beets_distance import compute_beets_distance

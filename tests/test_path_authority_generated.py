@@ -1063,6 +1063,213 @@ class TestPathAuthorityProofCheckers(unittest.TestCase):
                 source_exists=True, replacement_has_canonical=True,
             )
 
+    def test_quarantine_verdict_checker_rejects_a_laundered_refusal(self) -> None:
+        with self.assertRaises(AssertionError):
+            assert_quarantine_verdict_is_earned(
+                world="unreadable_root",
+                code="unspecified",
+                message="path is outside configured quarantine roots",
+            )
+        with self.assertRaises(AssertionError):
+            assert_quarantine_verdict_is_earned(
+                world="absent",
+                code="unspecified",
+                message="path is outside configured quarantine roots",
+            )
+        with self.assertRaises(AssertionError):
+            assert_quarantine_verdict_is_earned(
+                world="outside", code="missing", message="gone")
+        # Fails closed on a world it has no rule for (issue #1063 F5).
+        with self.assertRaises(AssertionError):
+            assert_quarantine_verdict_is_earned(
+                world="brand_new_world", code="missing", message="gone")
+
+
+#: The worlds that reach a refusal and therefore owe a verdict rule. The
+#: present-* worlds never get here — they succeed.
+_REFUSING_WORLDS: frozenset[str] = frozenset(
+    {"outside", "unreadable_root", "absent"},
+)
+
+
+def assert_quarantine_verdict_is_earned(
+    *, world: str, code: str, message: str,
+) -> None:
+    """A quarantine refusal must name the fact it actually established.
+
+    Only a candidate that is genuinely NOT under a configured root may be
+    refused for containment; a root the resolver could not open, and a
+    name that is genuinely absent, each owe their own code (issue #1063).
+
+    Fails closed on an unknown world: a checker that silently passes
+    input it has no rule for is unfalsifiable for exactly the cases most
+    likely to be new.
+    """
+    if world not in _REFUSING_WORLDS:
+        raise AssertionError(
+            f"world={world!r} has no verdict rule — add one rather than "
+            f"letting an unclassified world pass (code={code!r})"
+        )
+    containment_verdict = "outside configured quarantine roots" in message
+    if world == "outside":
+        if not containment_verdict or code == "missing":
+            raise AssertionError(
+                f"an uncontained path was refused as {code!r}: {message}")
+        return
+    if containment_verdict:
+        raise AssertionError(
+            f"world={world!r} was refused with a containment verdict the "
+            f"resolver never evaluated: {message}")
+    if world == "unreadable_root" and code != "open_failed":
+        raise AssertionError(
+            f"an unreadable root was refused as {code!r}, not a storage failure")
+    if world == "absent" and code != "missing":
+        raise AssertionError(
+            f"an absent candidate was refused as {code!r}, not missing")
+
+
+class TestGeneratedQuarantineVerdicts(unittest.TestCase):
+    """Every quarantine refusal states the fact it actually observed.
+
+    All three configured roots are live here, and a legacy RELATIVE name
+    is lexically contained by every one of them — the only shape that
+    exercises the ``contained_refusal`` / ``contained_missing``
+    precedence added for issue #1063.
+    """
+
+    @example(world="present_third_root", leaf="album", relative=False)
+    @example(world="present_third_root", leaf="album", relative=True)
+    @example(world="unreadable_earlier_root", leaf="album", relative=True)
+    @example(world="unreadable_later_root", leaf="album", relative=True)
+    @example(world="unreadable_root", leaf="album", relative=False)
+    @example(world="unreadable_root", leaf="album", relative=True)
+    @example(world="absent", leaf="album", relative=False)
+    @example(world="absent", leaf="album", relative=True)
+    @example(world="outside", leaf="album", relative=False)
+    @given(
+        world=st.sampled_from((
+            "present_third_root",
+            "present_first_root",
+            "unreadable_earlier_root",
+            "unreadable_later_root",
+            "unreadable_root",
+            "absent",
+            "outside",
+        )),
+        leaf=_SAFE_COMPONENTS,
+        relative=st.booleans(),
+    )
+    def test_real_resolver_never_invents_a_containment_verdict(
+        self, world: str, leaf: str, relative: bool,
+    ) -> None:
+        from lib.fs_authority import open_configured_quarantine_directory
+
+        if world in ("unreadable_earlier_root", "unreadable_later_root"):
+            # An absolute candidate is lexically contained by exactly one
+            # root, so "another configured root also refused / also held
+            # it" only exists for the relative legacy shape.
+            relative = True
+
+        with tempfile.TemporaryDirectory() as parent:
+            slskd = os.path.join(parent, "slskd")
+            incoming = os.path.join(parent, "Incoming")
+            processing = os.path.join(parent, "processing")
+            for directory in (slskd, incoming, processing):
+                os.mkdir(directory, 0o700)
+            albums = os.path.join(processing, "albums")
+            os.mkdir(albums, 0o700)
+            os.mkdir(os.path.join(processing, "preview"), 0o700)
+            cfg = CratediggerConfig.from_ini(_quarantine_ini(
+                slskd=slskd, incoming=incoming, processing=processing))
+            self.assertEqual(
+                [cfg.slskd_download_dir, cfg.beets_staging_dir,
+                 cfg.processing_dir],
+                [slskd, incoming, processing],
+                "fixture config must populate every configured root",
+            )
+
+            # Resolver root order: slskd, staging, processing/albums.
+            first_quarantine = os.path.join(slskd, "wrong_matches")
+            third_quarantine = os.path.join(albums, "wrong_matches")
+            os.makedirs(first_quarantine, exist_ok=True)
+            os.makedirs(third_quarantine, exist_ok=True)
+            first_album = os.path.join(first_quarantine, leaf)
+            third_album = os.path.join(third_quarantine, leaf)
+
+            expected_album: str | None = None
+            if world in ("present_third_root", "unreadable_earlier_root"):
+                os.makedirs(third_album, exist_ok=True)
+                expected_album = third_album
+            elif world in ("present_first_root", "unreadable_later_root"):
+                os.makedirs(first_album, exist_ok=True)
+                expected_album = first_album
+            elif world == "unreadable_root":
+                os.makedirs(third_album, exist_ok=True)
+
+            candidate = os.path.join("wrong_matches", leaf)
+            if not relative:
+                candidate = (
+                    expected_album if expected_album is not None else third_album
+                )
+            if world == "outside":
+                candidate = os.path.join(parent, "unconfigured", leaf)
+                os.makedirs(candidate, exist_ok=True)
+
+            if world in ("unreadable_earlier_root", "unreadable_root"):
+                os.chmod(first_quarantine, 0o000)
+            if world in ("unreadable_later_root", "unreadable_root"):
+                os.chmod(third_quarantine, 0o000)
+
+            try:
+                if expected_album is not None:
+                    # A root that cannot be READ must never deny a name a
+                    # DIFFERENT configured root positively holds — and the
+                    # descriptor handed back must be that exact folder.
+                    with open_configured_quarantine_directory(
+                        candidate, cfg,
+                    ) as opened:
+                        self.assertEqual(
+                            os.fstat(opened.fd).st_ino,
+                            os.stat(expected_album).st_ino,
+                        )
+                    return
+                with self.assertRaises(FilesystemAuthorityError) as refused, \
+                        open_configured_quarantine_directory(candidate, cfg):
+                    pass
+            finally:
+                os.chmod(first_quarantine, 0o700)
+                os.chmod(third_quarantine, 0o700)
+
+            assert_quarantine_verdict_is_earned(
+                world=world,
+                code=refused.exception.code,
+                message=str(refused.exception),
+            )
+
+
+def _quarantine_ini(*, slskd: str, incoming: str, processing: str):
+    """Build config through the sections ``CratediggerConfig`` really reads.
+
+    ``slskd_download_dir`` comes from ``[Slskd] download_dir`` and
+    ``beets_staging_dir`` from ``[Beets Validation] staging_dir``; only
+    ``processing_dir`` lives under ``[Paths]``. Putting all three under
+    ``[Paths]`` silently left TWO of the three quarantine roots empty, so
+    the multi-root precedence this property exists to exercise never ran
+    (test-fidelity Rule C — issue #1063 review T1.2).
+    """
+    import configparser
+
+    parser = configparser.RawConfigParser()
+    parser.read_string(
+        "[Slskd]\n"
+        f"download_dir = {slskd}\n"
+        "[Beets Validation]\n"
+        f"staging_dir = {incoming}\n"
+        "[Paths]\n"
+        f"processing_dir = {processing}\n"
+    )
+    return parser
+
 
 if __name__ == "__main__":
     unittest.main()

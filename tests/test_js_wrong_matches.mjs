@@ -462,7 +462,10 @@ console.log('deleteWrongMatchGroup() posts request id and removes the group in p
     { request_id: 42 },
     'posts selected request id',
   );
-  assert(dom.toast.textContent.includes('Deleted 3 candidates'), 'toasts group delete result');
+  // "candidates" became "folders": a pointer-only clear over an
+  // already-missing folder is counted separately and never headlined as a
+  // deletion (issue #1063).
+  assert(dom.toast.textContent.includes('Deleted 3 folders'), 'toasts group delete result');
 }
 
 console.log('delete controls handle cancel and failures');
@@ -1134,6 +1137,226 @@ console.log('maybeLoadWrongMatchExplorer() lazy-loads explorer tags and audio on
   assertEqual(calls.length, 1, 'reopening the dropdown reuses the loaded explorer state');
 }
 
+console.log('maybeLoadWrongMatchExplorer() renders the honest copy for a refused listing');
+{
+  // Issue #1063. The server answers 200 with ``status: "unavailable"``
+  // when it recorded refusals and could read nothing. This consumer used
+  // to reject anything that was not ``ok``, so the operator saw "Failed
+  // to load file explorer" and the authored copy below was unreachable.
+  // The composed producer->consumer property lives in
+  // tests/test_protected_path_truth_generated.py; this is the fast pin on
+  // the consumer branch itself.
+  installStorage();
+  const dom = installDom();
+  const mount = { innerHTML: '' };
+  const elements = new Map([['wm-explorer-200', mount]]);
+  globalThis.document.getElementById = (id) => {
+    if (id === 'wrong-matches-content') return dom.wrongMatches;
+    if (id === 'toast') return dom.toast;
+    return elements.get(id) || null;
+  };
+  const calls = [];
+  globalThis.fetch = async (url) => ({
+    ok: (calls.push(String(url)), true),
+    status: 200,
+    json: async () => ({
+      status: 'unavailable',
+      download_log_id: 200,
+      failed_path: '/mnt/virtio/cratedigger/processing/albums/wrong_matches/Guapo - Five Suns',
+      folder_name: 'Guapo - Five Suns',
+      source_dirs: [],
+      audio_file_count: 0,
+      other_file_count: 0,
+      partial: true,
+      truncated_reason: null,
+      unreadable_entry_count: 3,
+      unreadable_reason: '01.flac: cannot open 01.flac: Permission denied',
+      scanned_file_count: 0,
+      scanned_bytes: 0,
+      ordered_by: 'folder',
+      files: [],
+    }),
+  });
+
+  await __test__.maybeLoadWrongMatchExplorer(200, { open: true });
+
+  assert(!mount.innerHTML.includes('Failed to load file explorer'),
+    'a renderable unavailable payload is not treated as a load failure');
+  assert(mount.innerHTML.includes('3 entries could not be read'),
+    'the refusal count reaches the operator');
+  assert(mount.innerHTML.includes('nothing here is confirmed missing'),
+    'the listing is labelled incomplete');
+  assert(mount.innerHTML.includes('NOT evidence that the folder is empty'),
+    'an unreadable folder is never presented as an empty one');
+  assert(mount.innerHTML.includes('Permission denied'),
+    'the refusal reason is shown');
+  // An unreadable folder is a world the operator can REPAIR, so the panel
+  // owes a Retry and must not cache the answer — otherwise the only way
+  // to see a fixed permission is a full page reload (issue #1063).
+  assert(mount.innerHTML.includes('Retry'),
+    'an unavailable listing offers a retry');
+  assert(mount.innerHTML.includes('window.reloadWrongMatchExplorer(200)'),
+    'the retry re-reads THIS entry');
+
+  await __test__.maybeLoadWrongMatchExplorer(200, { open: true });
+  assertEqual(calls.length, 2,
+    'reopening after an unavailable listing re-fetches instead of caching');
+}
+
+console.log('maybeLoadWrongMatchExplorer() surfaces a 503 refusal reason instead of swallowing it');
+{
+  installStorage();
+  const dom = installDom();
+  const mount = { innerHTML: '' };
+  const elements = new Map([['wm-explorer-201', mount]]);
+  globalThis.document.getElementById = (id) => {
+    if (id === 'wrong-matches-content') return dom.wrongMatches;
+    if (id === 'toast') return dom.toast;
+    return elements.get(id) || null;
+  };
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 503,
+    json: async () => ({
+      error: 'Wrong-match files could not be read: /x/wrong_matches/Album '
+        + '(quarantine path is contained but unavailable: cannot open '
+        + '/x/wrong_matches/Album: Permission denied)',
+    }),
+  });
+
+  await __test__.maybeLoadWrongMatchExplorer(201, { open: true });
+
+  assert(mount.innerHTML.includes('Failed to load file explorer'),
+    'a real transport/authority failure still reads as a failure');
+  assert(mount.innerHTML.includes('could not be read'),
+    'the server’s own reason reaches the operator');
+  assert(mount.innerHTML.includes('Retry'),
+    'the retry affordance survives');
+}
+
+console.log('maybeLoadWrongMatchExplorer() treats a PARTIAL listing as repairable too');
+{
+  // Issue #1063 / N1. The server only says `unavailable` when NOTHING was
+  // readable, so a partial listing — some files read, some refused —
+  // answers `ok`. It was therefore cached as loaded and rendered no
+  // Retry: the operator saw the amber notice, fixed the permission, and
+  // still needed a full page reload. Exactly the complaint C2 raised,
+  // unfixed for the case that actually has partial evidence.
+  installStorage();
+  const dom = installDom();
+  const mount = { innerHTML: '' };
+  const elements = new Map([['wm-explorer-202', mount]]);
+  globalThis.document.getElementById = (id) => {
+    if (id === 'wrong-matches-content') return dom.wrongMatches;
+    if (id === 'toast') return dom.toast;
+    return elements.get(id) || null;
+  };
+  const calls = [];
+  let refused = true;
+  globalThis.fetch = async (url) => ({
+    ok: (calls.push(String(url)), true),
+    status: 200,
+    json: async () => (refused ? {
+      status: 'ok',
+      download_log_id: 202,
+      folder_name: 'Album',
+      source_dirs: [],
+      audio_file_count: 1,
+      other_file_count: 0,
+      partial: true,
+      truncated_reason: null,
+      unreadable_entry_count: 1,
+      unreadable_reason: '02.flac: cannot open 02.flac: Permission denied',
+      ordered_by: 'folder',
+      files: [{
+        relative_path: '01.flac', filename: '01.flac', format: 'FLAC',
+        playable: false, size_bytes: 10, tags: {},
+      }],
+    } : {
+      status: 'ok',
+      download_log_id: 202,
+      folder_name: 'Album',
+      source_dirs: [],
+      audio_file_count: 2,
+      other_file_count: 0,
+      partial: false,
+      truncated_reason: null,
+      unreadable_entry_count: 0,
+      unreadable_reason: null,
+      ordered_by: 'folder',
+      files: [{
+        relative_path: '01.flac', filename: '01.flac', format: 'FLAC',
+        playable: false, size_bytes: 10, tags: {},
+      }, {
+        relative_path: '02.flac', filename: '02.flac', format: 'FLAC',
+        playable: false, size_bytes: 10, tags: {},
+      }],
+    }),
+  });
+
+  await __test__.maybeLoadWrongMatchExplorer(202, { open: true });
+  assert(mount.innerHTML.includes('1 entry could not be read'),
+    'the partial listing names its refusal');
+  assert(mount.innerHTML.includes('1 track in surviving folder'),
+    'the partial listing still lists what it could read');
+  assert(mount.innerHTML.includes('Retry'),
+    'a PARTIAL listing offers a retry, not only an empty one');
+  assert(mount.innerHTML.includes('window.reloadWrongMatchExplorer(202)'),
+    'the partial listing retry re-reads THIS entry');
+
+  // The operator repairs the world; the retry must show the repair.
+  refused = false;
+  await __test__.reloadWrongMatchExplorer(202);
+  assertEqual(calls.length, 2, 'the retry re-reads the folder');
+  assert(!mount.innerHTML.includes('could not be read'),
+    'the repaired listing drops the refusal notice');
+  assert(mount.innerHTML.includes('2 tracks in surviving folder'),
+    'the repaired listing shows the previously-refused track');
+  assert(!mount.innerHTML.includes('Retry'),
+    'a complete listing needs no retry');
+
+  // …and a complete listing IS cached again.
+  await __test__.maybeLoadWrongMatchExplorer(202, { open: true });
+  assertEqual(calls.length, 2,
+    'a complete listing is cached, so reopening does not re-fetch');
+}
+
+console.log('explorerListingIsRepairable() keys off refusals, not status');
+{
+  assert(__test__.explorerListingIsRepairable(
+    { status: 'ok', unreadable_entry_count: 1 }),
+    'a partial ok listing is repairable');
+  assert(__test__.explorerListingIsRepairable(
+    { status: 'unavailable', unreadable_entry_count: 0 }),
+    'an unavailable listing is repairable');
+  assert(!__test__.explorerListingIsRepairable(
+    { status: 'ok', unreadable_entry_count: 0 }),
+    'a complete listing is not repairable');
+  assert(!__test__.explorerListingIsRepairable(
+    { status: 'ok', unreadable_entry_count: 0, truncated_reason: 'file_limit' }),
+    'a truncated listing is not repairable — retrying hits the same limit');
+}
+
+console.log('renderWrongMatchExplorer() must still work: a complete listing claims nothing');
+{
+  const html = __test__.renderWrongMatchExplorer({
+    status: 'ok',
+    audio_file_count: 0,
+    other_file_count: 0,
+    partial: false,
+    truncated_reason: null,
+    unreadable_entry_count: 0,
+    unreadable_reason: null,
+    files: [],
+  });
+  assert(html.includes('No audio files found in this folder.'),
+    'a readable empty folder still reads as empty');
+  assert(!html.includes('could not be read'),
+    'a complete listing never claims a refusal');
+  assert(!html.includes('NOT evidence'),
+    'a complete listing never denies emptiness');
+}
+
 console.log('cleanupSummaryToast() reports kept, skipped, and delete failures');
 {
   const body = __test__.cleanupSummaryToast({
@@ -1298,6 +1521,94 @@ console.log('entrySpectralCell() withholds an audit-only candidate accusation');
   html = __test__.entrySpectralCell({}, '—');
   assert(html.includes('quality-tone-unknown'), 'a gradeless candidate is neutral');
   assert(!html.includes('audit-only'), 'a gradeless candidate withholds nothing');
+}
+
+console.log('an unobservable source is surfaced, never silently dropped');
+{
+  // Issue #1063: the server sends `path_unavailable` when its probe was
+  // REFUSED. The row must stay visible, say so, disable both destructive
+  // actions, and never be counted as converge-green.
+  const unavailable = {
+    download_log_id: 77,
+    soulseek_username: 'peer',
+    distance: 0.05,
+    path_unavailable: true,
+    path_unavailable_reason: 'path_unavailable[EACCES]: /x: Permission denied',
+  };
+  assert(__test__.entryPathUnavailable(unavailable),
+    'the payload flag is the single source of the unavailable state');
+  assert(!__test__.entryPathUnavailable({ download_log_id: 78, distance: 0.05 }),
+    'an ordinary entry is not unavailable');
+  assert(!__test__.isConvergeGreen(unavailable, 180),
+    'an unobservable source is never converge-green, whatever its distance');
+  assert(__test__.isConvergeGreen({ distance: 0.05 }, 180),
+    'must still work: an observable close match is still green');
+
+  const html = __test__.renderEntry(unavailable, 180, 42);
+  assert(html.includes('source unavailable'), 'the card is badged unavailable');
+  assert(html.includes('NOT been confirmed missing'),
+    'the copy refuses to claim the folder is gone');
+  assert(html.includes('EACCES'), 'the refusal reason reaches the operator');
+  assertEqual(countOccurrences(html, 'disabled'), 2,
+    'both Force Import and Delete are disabled');
+
+  const ordinary = __test__.renderEntry(
+    { download_log_id: 78, soulseek_username: 'peer', distance: 0.05 }, 180, 42);
+  assert(!ordinary.includes('source unavailable'),
+    'must still work: an ordinary entry carries no unavailable badge');
+  assertEqual(countOccurrences(ordinary, 'disabled'), 0,
+    'must still work: an ordinary entry keeps both actions enabled');
+}
+
+console.log('a partial group delete asks for attention and re-renders');
+{
+  // Found by the disposable Rule D fixture (issue #1063): one folder
+  // deleted, one unavailable. The old code kept a green "all good" toast
+  // and surgically removed the deleted row, leaving the group strip
+  // advertising "Delete All (2)" and "1 green" over the ONE unavailable
+  // candidate that survived.
+  const dom = installDom();
+  const calls = [];
+  global.confirm = () => true;
+  global.fetch = async (url, options) => {
+    calls.push({ url, options });
+    if (url === '/api/wrong-matches/delete-group') {
+      return {
+        ok: false,
+        status: 503,
+        json: async () => ({
+          status: 'partial',
+          processed: 2,
+          deleted: 1,
+          cleared_missing: 0,
+          skipped: 1,
+          errors: 1,
+          remaining: 1,
+          results: [
+            { download_log_id: 1, success: true },
+            { download_log_id: 2, success: false,
+              outcome: 'skipped_path_unavailable' },
+          ],
+        }),
+      };
+    }
+    if (url === '/api/wrong-matches') {
+      return { ok: true, json: async () => ({ groups: [] }) };
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+  const btn = { disabled: false, textContent: 'Delete All (2)', style: {} };
+  await __test__.deleteWrongMatchGroup(42, btn);
+
+  assert(dom.toast.textContent.includes('Deleted 1 folder'),
+    'the toast still credits the folder that really went');
+  assert(dom.toast.textContent.includes('1 left'),
+    'the toast says work remains');
+  assert(dom.toast.className.includes('error'),
+    'an incomplete group delete asks for attention, not a green all-clear');
+  assert(calls.some(call => call.url === '/api/wrong-matches'),
+    'a partial outcome re-renders from the server instead of leaving a '
+    + 'stale group strip');
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

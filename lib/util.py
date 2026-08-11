@@ -25,6 +25,7 @@ from xml.etree.ElementTree import Element
 
 from defusedxml import ElementTree as ET
 
+from lib.fs_authority import DirectoryObservation, observe_directory
 from lib.json_narrow import (
     is_object_list as _is_object_list,
 )
@@ -139,29 +140,43 @@ def beets_subprocess_env(
 FAILED_IMPORT_SEARCH_DIRS = ("/mnt/virtio/music/slskd",)
 
 
-def resolve_failed_path(
+def observe_failed_path(
     failed_path: str,
     search_dirs: Sequence[str] | None = None,
-) -> str | None:
-    """Resolve a failed-path entry to an existing absolute directory.
+) -> DirectoryObservation:
+    """Observe a failed-path entry without ever guessing at absence.
 
     Older download_log rows stored paths relative to the slskd download root
     (for example ``failed_imports/Foo - Bar``). Newer rows store absolute
-    paths. This helper accepts either representation and returns an absolute
-    path when the directory still exists.
+    paths. This helper accepts either representation and returns the typed
+    :class:`DirectoryObservation` for the first name that is PROVEN to hold
+    a directory.
+
+    When no candidate is present, an indeterminate observation wins over an
+    absent one: the caller must not be told "gone" when one of the probes
+    was refused (issue #1063 — the 0700 processing tree answers EACCES to
+    the operator identity, and ``os.path.isdir`` reported that as ``False``
+    exactly like a genuinely deleted folder).
     """
     if not failed_path:
-        return None
+        return DirectoryObservation(
+            presence="absent", code="missing", detail="empty failed_path")
 
-    if os.path.isdir(failed_path):
-        return os.path.abspath(failed_path)
+    refused: DirectoryObservation | None = None
+    direct = observe_directory(failed_path)
+    if direct.present:
+        return direct
+    if direct.indeterminate:
+        refused = direct
 
     for base in search_dirs or FAILED_IMPORT_SEARCH_DIRS:
-        candidate = os.path.join(base, failed_path)
-        if os.path.isdir(candidate):
-            return os.path.abspath(candidate)
+        candidate = observe_directory(os.path.join(base, failed_path))
+        if candidate.present:
+            return candidate
+        if candidate.indeterminate and refused is None:
+            refused = candidate
 
-    return None
+    return refused if refused is not None else direct
 
 # === Audio validation ===
 

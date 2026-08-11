@@ -17,6 +17,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import ClassVar, Self
 from unittest.mock import patch
 
+from scripts import pipeline_cli
 from scripts.pipeline_cli import api_mutations
 from scripts.pipeline_cli.routes_meta import _build_parser
 from tests.fakes import FakePipelineDB, FakeYTMusic
@@ -36,6 +37,27 @@ class _Response:
         return self
 
     def __exit__(self, *_values: object) -> None:
+        return None
+
+
+class _JsonEchoHandler(BaseHTTPRequestHandler):
+    """Answers any method with a JSON object; used for deadline pins."""
+
+    def _respond(self) -> None:
+        length = int(self.headers.get("Content-Length", "0"))
+        if length:
+            self.rfile.read(length)
+        body = b'{"state": "completed", "summary": {}, "error": null}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    do_POST = _respond
+    do_GET = _respond
+
+    def log_message(self, format: str, *_args: object) -> None:
         return None
 
 
@@ -829,6 +851,161 @@ class TestApiMutationUnixRealRouteRoundTrips(unittest.TestCase):
              in self.handler.observations},
             {"cli"},
         )
+
+
+class TestRoutedCommandDeadlines(unittest.TestCase):
+    """Each routed command applies ITS OWN deadline to the real socket.
+
+    The single 15s constant only ever covered enqueue-shaped routes. A
+    900s group delete cut off at 15s reports ``api_unavailable``/exit 5
+    while the server finishes the destructive work — a production-only
+    failure mode, so the constants are pinned at the boundary that
+    actually applies them: ``socket.settimeout`` (issue #1063 T3.2).
+    """
+
+    def setUp(self) -> None:
+        self._temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temp_dir.cleanup)
+        self.socket_path = os.path.join(self._temp_dir.name, "deadline.sock")
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(self.socket_path)
+        listener.listen()
+        from web.server import ThreadingUnixHTTPServer
+
+        self.server = ThreadingUnixHTTPServer(listener, _JsonEchoHandler)
+        self.thread = threading.Thread(
+            target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.addCleanup(self.thread.join, 5)
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+
+    def _timeouts_applied(self, run) -> list[float]:
+        """Record every ``settimeout`` the real client applies, live."""
+        recorded: list[float] = []
+        original = socket.socket.settimeout
+
+        def spy(self_socket, value):
+            if isinstance(value, float):
+                recorded.append(value)
+            return original(self_socket, value)
+
+        with patch.object(socket.socket, "settimeout", spy), \
+                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            run()
+        return recorded
+
+    def _args(self, **values: object) -> argparse.Namespace:
+        return argparse.Namespace(
+            api_endpoint=api_mutations.UnixApiEndpoint(self.socket_path),
+            **values,
+        )
+
+    def test_each_command_uses_its_declared_deadline(self) -> None:
+        cases = [
+            (
+                "force-import",
+                lambda: pipeline_cli.cmd_force_import(
+                    None, self._args(download_log_id=1)),
+                api_mutations.TIMEOUT_ENQUEUE_SECONDS,
+            ),
+            (
+                "wrong-match-delete",
+                lambda: pipeline_cli.cmd_wrong_match_delete(
+                    None, self._args(download_log_id=1, apply=True, json=True)),
+                api_mutations.TIMEOUT_SOURCE_DELETE_SECONDS,
+            ),
+            (
+                "wrong-match-delete-group",
+                lambda: pipeline_cli.cmd_wrong_match_delete_group(
+                    None, self._args(request_id=1, apply=True, json=True)),
+                api_mutations.TIMEOUT_GROUP_DELETE_SECONDS,
+            ),
+            (
+                "replace",
+                lambda: pipeline_cli.cmd_replace(
+                    None,
+                    self._args(id=1, target_mb_release_id="x", json=True)),
+                api_mutations.TIMEOUT_MIRROR_SECONDS,
+            ),
+            (
+                "beets-distance",
+                lambda: pipeline_cli.cmd_beets_distance(
+                    None, self._args(download_log_id=1, mbid="1", json=True)),
+                api_mutations.TIMEOUT_FOLDER_READ_SECONDS,
+            ),
+            (
+                "import-preview",
+                lambda: pipeline_cli.cmd_import_preview_from_download_log(
+                    None,
+                    self._args(
+                        download_log_id=1, path=None, values=False,
+                        values_json=None, json=True)),
+                api_mutations.TIMEOUT_MEASUREMENT_SECONDS,
+            ),
+        ]
+        for name, run, expected in cases:
+            with self.subTest(command=name):
+                self.assertEqual(self._timeouts_applied(run), [expected])
+
+    def test_the_deadlines_are_not_all_the_enqueue_default(self) -> None:
+        """Known-bad guard: reverting any constant to 15s must be visible."""
+        self.assertEqual(api_mutations.TIMEOUT_ENQUEUE_SECONDS, 15.0)
+        for constant in (
+            api_mutations.TIMEOUT_SOURCE_DELETE_SECONDS,
+            api_mutations.TIMEOUT_GROUP_DELETE_SECONDS,
+            api_mutations.TIMEOUT_MIRROR_SECONDS,
+            api_mutations.TIMEOUT_MEASUREMENT_SECONDS,
+            api_mutations.TIMEOUT_FOLDER_READ_SECONDS,
+        ):
+            self.assertGreater(constant, api_mutations.TIMEOUT_ENQUEUE_SECONDS)
+
+    def test_triage_start_and_poll_use_their_own_deadlines(self) -> None:
+        recorded = self._timeouts_applied(
+            lambda: pipeline_cli.cmd_wrong_match_triage(
+                None,
+                self._args(apply=True, json=True),
+                sleep=lambda _seconds: None,
+            ),
+        )
+        # Start (enqueue-shaped) then one status poll; the sweep itself is
+        # deliberately unbounded.
+        self.assertEqual(
+            recorded[:2],
+            [
+                api_mutations.TIMEOUT_ENQUEUE_SECONDS,
+                api_mutations.TIMEOUT_POLL_SECONDS,
+            ],
+        )
+
+    def test_a_short_deadline_really_aborts_the_request(self) -> None:
+        """The mechanism is real, not just a number passed around."""
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        stalled_path = os.path.join(self._temp_dir.name, "stalled.sock")
+        listener.bind(stalled_path)
+        listener.listen()
+
+        def serve() -> None:
+            connection, _address = listener.accept()
+            try:
+                threading.Event().wait(2.0)
+            finally:
+                connection.close()
+                listener.close()
+
+        thread = threading.Thread(target=serve)
+        thread.start()
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            code = api_mutations._relay(
+                api_mutations.UnixApiEndpoint(stalled_path),
+                api_mutations._ApiMutation(
+                    path="/api/pipeline/upgrade", body={"mb_release_id": "r"}),
+                timeout_seconds=0.05,
+            )
+        thread.join(timeout=5)
+        self.assertEqual(code, 5)
+        self.assertEqual(json.loads(stderr.getvalue())["error"], "api_unavailable")
 
 
 class TestApiMutationRedirectSafety(unittest.TestCase):

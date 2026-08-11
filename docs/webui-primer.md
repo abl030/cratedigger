@@ -101,7 +101,7 @@ depends on.
 | `/api/wrong-matches/audio` | GET | Stream an individual wrong-match audio file with byte-range support |
 | `/api/wrong-matches/converge` | POST | Queue every wrong-match candidate within a release's loosen threshold and delete the rest |
 | `/api/wrong-matches/triage` | POST | Evidence-only full-queue Wrong Matches cleanup; requires `{"confirm_all_wrong_matches": true}` |
-| `/api/import-preview` | POST | Strict path-free preview: nested typed `values` or a positive `download_log_id`; the local CLI retains explicit path preview. |
+| `/api/import-preview` | POST | Strict path-free preview: nested typed `values` or a positive `download_log_id`. `pipeline-cli import-preview --download-log-id` relays this route (its `failed_path` is under the private processing tree, #1063); the CLI-only `--path` mode keeps the explicit-path inspector off the HTTP surface (CD-SEC-03). |
 | `/api/import-jobs` | GET | List recent import queue jobs |
 | `/api/import-jobs/timeline` | GET | List active queued/running/recovery-required import jobs in importer order, with server-classified display fields |
 | `/api/import-jobs/<id>` | GET | Poll a single import queue job |
@@ -520,6 +520,14 @@ depends on.
   stay invariant under the diagnostic. Measured against the live corpus
   (Rule D, 36,323 rows): 148 changed rows, every one in `verdict` +
   `summary`, each token moving exactly its own rows.
+- **Wrong Matches unavailable sources** — a candidate whose folder the server
+  could not READ (permissions, I/O — never a folder proven gone) stays in the
+  list with a `source unavailable` badge, an amber card, both Force Import and
+  Delete disabled, and copy that says the folder has NOT been confirmed
+  missing. It is also excluded from Converge's green set. Before issue #1063
+  such a row was silently dropped from the payload, hiding the broken world
+  from the only surface that could report it. A folder proven absent still
+  leaves the list as before.
 - **Wrong Matches evidence provenance** — candidate rows keep the downloaded
   source codec, configured target contract, and temporary V0 probe separate.
   A lossless candidate destined for Opus therefore reads `FLAC → OPUS 128
@@ -559,7 +567,29 @@ depends on.
   extracted audio tags, and inline browser playback for supported audio files.
   It walks no-follow descriptors with deterministic bounded traversal and
   visibly labels partial/truncated results; audio streaming validates, ranges,
-  and reads the same opened descriptor.
+  and reads the same opened descriptor. **A refused read is labelled
+  separately from a truncating limit** (#1063): entries the server was not
+  permitted to read are counted and named, and when nothing was readable the
+  route answers 200 with `status: "unavailable"` and the panel says the folder
+  is unreadable rather than empty — explicitly "this is NOT evidence that the
+  folder is empty". `web/js/wrong-matches.js` renders both `ok` and
+  `unavailable` payloads; a refusal of the whole root is a 503 whose reason is
+  shown next to the Retry button. **Any listing that recorded a refusal —
+  `unavailable`, or a PARTIAL `ok` listing that read some files and was refused
+  others — carries a Retry on its refusal notice and is deliberately NOT
+  cached**: the operator is expected to go and fix the permission, and only a
+  listing with nothing left to repair is worth remembering for the rest of the
+  page session. A listing that was truncated by a LIMIT and recorded no
+  refusals stays cached, because retrying hits the same limit; one that was
+  both truncated and refused is still evicted, since the refusal half is
+  repairable.
+- **Replace picker distance badge** — each pressing row carries the best
+  beets-distance against the request's Wrong Matches folders. When the service
+  was refused part of a folder, the response's `partial_read` is set and the
+  badge reads `best 0.07 (6/12) · incomplete manifest` in amber, with the
+  refusal on hover (#1063). A distance is a per-track average, so scoring an
+  incomplete manifest as a plain number misinforms the one surface where the
+  operator picks a pressing.
 - **Wrong Matches cleanup** — one top-level action runs over the full Wrong
   Matches queue. It consumes existing evidence only, deletes force-mode
   confident cleanup-eligible rejects, and leaves would-import, uncertain,

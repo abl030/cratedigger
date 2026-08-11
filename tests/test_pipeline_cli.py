@@ -4,6 +4,7 @@ import argparse
 import io
 import json
 import os
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -28,13 +29,17 @@ if TYPE_CHECKING:
 import scripts.pipeline_cli.album_requests as pipeline_cli_album_requests
 import scripts.pipeline_cli.long_tail as pipeline_cli_long_tail
 from scripts import pipeline_cli
+from scripts.pipeline_cli import api_mutations
+from scripts.pipeline_cli.api_mutations import TcpApiEndpoint
 from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import (
     handoff_automation_owner,
     make_album_quality_evidence,
     make_request_row,
+    seed_visible_wrong_match,
 )
 from tests.test_beets_db import _create_test_db, _insert_album
+from tests.web._harness import _FakeDbWebServerCase, _fresh_triage_runner
 
 TEST_DSN = os.environ.get("TEST_DB_DSN")
 
@@ -787,38 +792,48 @@ class TestCmdImportJobRecovery(unittest.TestCase):
                 ])
 
 
-class TestCmdForceImport(unittest.TestCase):
+class TestCmdForceImport(_FakeDbWebServerCase):
+    """``force-import`` is a thin adapter over ``POST
+    /api/pipeline/force-import`` (issue #1063): the quarantine authority
+    preflight must run under the service identity, so these pins drive
+    the real route through the real dispatcher and assert the CLI's
+    historical exit codes come back unchanged."""
+
+    def _run(self, log_id: int) -> tuple[int, str]:
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            rc = pipeline_cli.cmd_force_import(
+                None,
+                argparse.Namespace(
+                    download_log_id=log_id,
+                    api_endpoint=TcpApiEndpoint(self.base),
+                ),
+            )
+        return rc, stdout.getvalue()
+
     def test_processing_owner_conflict_is_typed_and_exit_four(self) -> None:
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
+        self.db.seed_request(make_request_row(
             id=123,
             status="wanted",
             mb_release_id="mbid-123",
             artist_name="Artist",
             album_title="Album",
         ))
-        log_id = db.log_download(
+        log_id = self.db.log_download(
             request_id=123,
             outcome="rejected",
             validation_result={},
         )
-        owner = handoff_automation_owner(db, 123)
-        stdout = io.StringIO()
+        owner = handoff_automation_owner(self.db, 123)
 
-        with (
-            patch(
-                "lib.config.read_runtime_config",
-                return_value=MagicMock(),
-            ),
-            redirect_stdout(stdout),
+        with patch(
+            "web.routes.pipeline_mutations.read_runtime_config",
+            return_value=MagicMock(),
         ):
-            rc = pipeline_cli.cmd_force_import(
-                db,
-                argparse.Namespace(download_log_id=log_id),
-            )
+            rc, out = self._run(log_id)
 
         self.assertEqual(rc, 4)
-        self.assertEqual(json.loads(stdout.getvalue()), {
+        self.assertEqual(json.loads(out), {
             "error": "processing_locked",
             "reason": "processing_locked",
             "request_id": 123,
@@ -832,24 +847,17 @@ class TestCmdForceImport(unittest.TestCase):
             ),
         })
         self.assertEqual(
-            [job.id for job in db.list_import_jobs()],
+            [job.id for job in self.db.list_import_jobs()],
             [owner.id],
         )
 
-    @patch("builtins.print")
-    def test_force_import_passes_source_username_to_queue(self, _mock_print):
+    def test_force_import_passes_source_username_to_queue(self):
         from lib.import_queue import IMPORT_JOB_FORCE, force_import_dedupe_key
 
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
+        self.db.seed_request(make_request_row(
             id=123, status="unsearchable", min_bitrate=320,
             mb_release_id="mbid-123", artist_name="Artist", album_title="Album",
         ))
-        # Seed a download_log entry that ``get_download_log_entry`` will
-        # retrieve.  ``cmd_force_import`` reads it for the failed_path
-        # and soulseek_username.  Production stores validation_result as
-        # a JSONB dict — pass a dict, not the typed Struct, so the
-        # downstream ``json.loads`` branch isn't tripped.
         with tempfile.TemporaryDirectory() as root:
             staging = os.path.join(root, "Incoming")
             album = os.path.join(staging, "failed_imports", "Test Album")
@@ -861,19 +869,21 @@ class TestCmdForceImport(unittest.TestCase):
             )
             os.makedirs(cfg.slskd_download_dir)
             os.makedirs(cfg.processing_dir)
-            db.log_download(
+            self.db.log_download(
                 request_id=123, soulseek_username="baduser", outcome="rejected",
                 validation_result={"failed_path": album, "source_dirs": ["peer\\Album"]},
             )
-            log_id = db.download_logs[0].id
-            args = MagicMock(download_log_id=log_id)
-            with patch("lib.config.read_runtime_config", return_value=cfg):
-                rc = pipeline_cli.cmd_force_import(db, args)
+            log_id = self.db.download_logs[0].id
+            with patch(
+                "web.routes.pipeline_mutations.read_runtime_config",
+                return_value=cfg,
+            ):
+                rc, out = self._run(log_id)
 
-        # Exactly one import job was enqueued. Inspect the persisted row.
         self.assertEqual(rc, 0)
-        self.assertEqual(len(db._import_jobs), 1)
-        job_row = db._import_jobs[0]
+        self.assertIn("[OK] Queued", out)
+        self.assertEqual(len(self.db._import_jobs), 1)
+        job_row = self.db._import_jobs[0]
         self.assertEqual(job_row["job_type"], IMPORT_JOB_FORCE)
         self.assertEqual(job_row["request_id"], 123)
         self.assertEqual(job_row["dedupe_key"], force_import_dedupe_key(log_id))
@@ -881,15 +891,11 @@ class TestCmdForceImport(unittest.TestCase):
         self.assertEqual(job_row["payload"]["source_username"], "baduser")
         self.assertEqual(job_row["payload"]["source_dirs"], ["peer\\Album"])
 
-    @patch("builtins.print")
-    def test_force_import_failure_exit_codes_enqueue_nothing(self, _mock_print):
-        from scripts import pipeline_cli
-
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
+    def test_force_import_failure_exit_codes_enqueue_nothing(self):
+        self.db.seed_request(make_request_row(
             id=123, mb_release_id="mbid-123", artist_name="Artist", album_title="Album",
         ))
-        db.seed_request(make_request_row(
+        self.db.seed_request(make_request_row(
             id=124, mb_release_id=None, discogs_release_id="124",
             artist_name="Discogs Artist", album_title="Discogs Album",
         ))
@@ -905,28 +911,31 @@ class TestCmdForceImport(unittest.TestCase):
                 slskd_download_dir=slskd,
                 processing_dir=processing,
             )
-            missing_request_log_id = db.log_download(
+            missing_request_log_id = self.db.log_download(
                 request_id=999, outcome="rejected", validation_result={},
             )
-            missing_path_log_id = db.log_download(
+            missing_path_log_id = self.db.log_download(
                 request_id=123, outcome="rejected", validation_result={},
             )
             unauthorized = os.path.join(staging, "failed_imports-old", "Album")
             os.makedirs(unauthorized)
-            unauthorized_log_id = db.log_download(
+            unauthorized_log_id = self.db.log_download(
                 request_id=123,
                 outcome="rejected",
                 validation_result={"failed_path": unauthorized},
             )
             discogs_album = os.path.join(staging, "failed_imports", "Discogs Album")
             os.makedirs(discogs_album)
-            missing_mbid_log_id = db.log_download(
+            missing_mbid_log_id = self.db.log_download(
                 request_id=124,
                 outcome="rejected",
                 validation_result={"failed_path": discogs_album},
             )
 
-            with patch("lib.config.read_runtime_config", return_value=cfg):
+            with patch(
+                "web.routes.pipeline_mutations.read_runtime_config",
+                return_value=cfg,
+            ):
                 for name, log_id, expected_rc in (
                     ("missing log", 999_999, 2),
                     ("missing request", missing_request_log_id, 2),
@@ -935,12 +944,9 @@ class TestCmdForceImport(unittest.TestCase):
                     ("missing MusicBrainz ID", missing_mbid_log_id, 3),
                 ):
                     with self.subTest(name=name):
-                        rc = pipeline_cli.cmd_force_import(
-                            db,
-                            argparse.Namespace(download_log_id=log_id),
-                        )
+                        rc, _out = self._run(log_id)
                         self.assertEqual(rc, expected_rc)
-                        self.assertEqual(db.list_import_jobs(), [])
+                        self.assertEqual(self.db.list_import_jobs(), [])
 
 
 class TestCmdImportPreview(unittest.TestCase):
@@ -953,7 +959,7 @@ class TestCmdImportPreview(unittest.TestCase):
         this CLI test just verifies the wire shape of the JSON output.
         """
         db = FakePipelineDB()
-        args = SimpleNamespace(
+        args = argparse.Namespace(
             download_log_id=None,
             request_id=None,
             path=None,
@@ -964,7 +970,7 @@ class TestCmdImportPreview(unittest.TestCase):
         )
         stdout = io.StringIO()
         with redirect_stdout(stdout):
-            rc = pipeline_cli.cmd_import_preview(db, cast(Any, args))
+            rc = pipeline_cli.cmd_import_preview(db, args)
 
         self.assertEqual(rc, 0)
         payload = json.loads(stdout.getvalue())
@@ -985,7 +991,7 @@ class TestCmdImportPreview(unittest.TestCase):
         the decision — so the JSON output reflects threading.
         """
         db = FakePipelineDB()
-        args = SimpleNamespace(
+        args = argparse.Namespace(
             download_log_id=None,
             request_id=None,
             path=None,
@@ -1007,7 +1013,7 @@ class TestCmdImportPreview(unittest.TestCase):
         )
         stdout = io.StringIO()
         with redirect_stdout(stdout):
-            rc = pipeline_cli.cmd_import_preview(db, cast(Any, args))
+            rc = pipeline_cli.cmd_import_preview(db, args)
 
         self.assertEqual(rc, 0)
         payload = json.loads(stdout.getvalue())
@@ -1023,7 +1029,7 @@ class TestCmdImportPreview(unittest.TestCase):
     def test_values_json_rejects_invalid_spectral_grade(self):
         """Validation rejects before reaching the preview engine."""
         db = FakePipelineDB()
-        args = SimpleNamespace(
+        args = argparse.Namespace(
             download_log_id=None,
             request_id=None,
             path=None,
@@ -1034,7 +1040,7 @@ class TestCmdImportPreview(unittest.TestCase):
         )
         stderr = io.StringIO()
         with redirect_stderr(stderr):
-            rc = pipeline_cli.cmd_import_preview(db, cast(Any, args))
+            rc = pipeline_cli.cmd_import_preview(db, args)
 
         # rc=2 + the expected stderr message is sufficient evidence that
         # validation rejected before the preview engine was invoked.
@@ -1043,7 +1049,7 @@ class TestCmdImportPreview(unittest.TestCase):
 
     def test_values_json_rejects_invalid_existing_spectral_grade(self):
         db = FakePipelineDB()
-        args = SimpleNamespace(
+        args = argparse.Namespace(
             download_log_id=None,
             request_id=None,
             path=None,
@@ -1054,7 +1060,7 @@ class TestCmdImportPreview(unittest.TestCase):
         )
         stderr = io.StringIO()
         with redirect_stderr(stderr):
-            rc = pipeline_cli.cmd_import_preview(db, cast(Any, args))
+            rc = pipeline_cli.cmd_import_preview(db, args)
 
         self.assertEqual(rc, 2)
         self.assertIn(
@@ -1062,11 +1068,69 @@ class TestCmdImportPreview(unittest.TestCase):
             stderr.getvalue(),
         )
 
-    def test_download_log_mode_delegates_to_preview_service(self):
+    def test_explicit_path_mode_reports_unavailable_not_missing(self):
+        """The CLI-only explicit-path inspector owes the same distinction.
+
+        An unreadable parent used to answer "Path not found" — a
+        definitive negative fact it had no evidence for (issue #1063).
+        """
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=7, mb_release_id=RELEASE_A))
+        root = self.enterContext(tempfile.TemporaryDirectory())
+        parent = os.path.join(root, "private")
+        album = os.path.join(parent, "Album")
+        os.makedirs(album)
+        os.chmod(parent, 0o000)
+        self.addCleanup(os.chmod, parent, 0o700)
+        args = argparse.Namespace(
+            download_log_id=None,
+            request_id=7,
+            path=album,
+            no_force=False,
+            values=False,
+            values_json=None,
+            json=True,
+        )
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            rc = pipeline_cli.cmd_import_preview(db, args)
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(rc, 0)
+        self.assertEqual(payload["decision"], "path_unavailable")
+        self.assertIn("could not be observed", payload["reason"])
+
+    def test_explicit_path_mode_still_reports_a_genuinely_missing_path(self):
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=7, mb_release_id=RELEASE_A))
+        root = self.enterContext(tempfile.TemporaryDirectory())
+        args = argparse.Namespace(
+            download_log_id=None,
+            request_id=7,
+            path=os.path.join(root, "gone"),
+            no_force=False,
+            values=False,
+            values_json=None,
+            json=True,
+        )
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            rc = pipeline_cli.cmd_import_preview(db, args)
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(rc, 0)
+        self.assertEqual(payload["decision"], "path_missing")
+
+
+class TestCmdImportPreviewDownloadLogMode(_FakeDbWebServerCase):
+    """``--download-log-id`` resolves a DB-owned protected path, so it is
+    the one preview mode that runs through the canonical route under the
+    service identity (issue #1063)."""
+
+    def test_download_log_mode_routes_through_the_preview_endpoint(self):
         from lib.import_preview import ImportPreviewResult
 
-        db = FakePipelineDB()
-        args = SimpleNamespace(
+        args = argparse.Namespace(
             download_log_id=99,
             request_id=None,
             path=None,
@@ -1074,10 +1138,11 @@ class TestCmdImportPreview(unittest.TestCase):
             values=False,
             values_json=None,
             json=False,
+            api_endpoint=TcpApiEndpoint(self.base),
         )
         stdout = io.StringIO()
         with patch(
-            "lib.import_preview.preview_import_from_download_log",
+            "web.routes.imports.preview_import_from_download_log",
             return_value=ImportPreviewResult(
                 mode="download_log",
                 verdict="confident_reject",
@@ -1086,257 +1151,434 @@ class TestCmdImportPreview(unittest.TestCase):
                 cleanup_eligible=True,
             ),
         ) as mock_preview, redirect_stdout(stdout):
-            rc = pipeline_cli.cmd_import_preview(db, cast(Any, args))
+            rc = pipeline_cli.cmd_import_preview_from_download_log(
+                None, args)
 
         self.assertEqual(rc, 0)
-        mock_preview.assert_called_once_with(db, 99)
+        mock_preview.assert_called_once_with(self.db, 99)
         self.assertIn("cleanup_eligible: yes", stdout.getvalue())
 
-
-class TestCmdWrongMatchTriage(unittest.TestCase):
-    def test_triage_requires_apply(self):
-        db = FakePipelineDB()
-        args = SimpleNamespace(apply=False, json=False)
+    def test_other_modes_are_refused_by_the_routed_adapter(self):
+        args = argparse.Namespace(
+            download_log_id=99,
+            request_id=None,
+            path="/tmp/album",
+            no_force=False,
+            values=False,
+            values_json=None,
+            json=False,
+            api_endpoint=TcpApiEndpoint(self.base),
+        )
         stderr = io.StringIO()
-        with patch(
-            "lib.wrong_match_cleanup_service.cleanup_all_wrong_matches"
-        ) as cleanup, redirect_stderr(stderr):
-            rc = pipeline_cli.cmd_wrong_match_triage(db, cast(Any, args))
+        with redirect_stderr(stderr):
+            rc = pipeline_cli.cmd_import_preview_from_download_log(
+                None, args)
 
         self.assertEqual(rc, 2)
-        cleanup.assert_not_called()
-        self.assertIn("--apply", stderr.getvalue())
+        self.assertIn("exactly one mode", stderr.getvalue())
 
-    def test_triage_rejects_scope_flags(self):
-        db = FakePipelineDB()
-        args = SimpleNamespace(
-            download_log_id=99,
-            apply=True,
-            json=False,
+
+class TestCmdWrongMatchTriage(_FakeDbWebServerCase):
+    """``wrong-match-triage`` starts the canonical background sweep and
+    follows it to completion over the same route the browser uses
+    (issue #1063)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        _fresh_triage_runner(self)
+
+    def test_triage_requires_apply(self):
+        args = argparse.Namespace(
+            apply=False, json=False, api_endpoint=TcpApiEndpoint(self.base),
         )
         stderr = io.StringIO()
         with patch(
             "lib.wrong_match_cleanup_service.cleanup_all_wrong_matches"
         ) as cleanup, redirect_stderr(stderr):
-            rc = pipeline_cli.cmd_wrong_match_triage(db, cast(Any, args))
+            rc = pipeline_cli.cmd_wrong_match_triage(None, args)
 
         self.assertEqual(rc, 2)
         cleanup.assert_not_called()
-        self.assertIn("whole Wrong Matches queue", stderr.getvalue())
-        self.assertIn("--download-log-id", stderr.getvalue())
+        self.assertIn("--apply", stderr.getvalue())
 
-    def test_triage_apply_delegates_to_full_queue_service(self):
-        from lib.wrong_match_cleanup_service import WrongMatchCleanupSummary
-
-        db = FakePipelineDB()
-        args = SimpleNamespace(apply=True, json=True)
-        summary = WrongMatchCleanupSummary(processed=1, deleted=1)
+    def test_triage_apply_runs_the_canonical_sweep_and_prints_its_summary(self):
+        self.db.seed_request(make_request_row(id=1))
+        args = argparse.Namespace(
+            apply=True, json=True, api_endpoint=TcpApiEndpoint(self.base),
+        )
         stdout = io.StringIO()
-        with patch(
-            "lib.wrong_match_cleanup_service.cleanup_all_wrong_matches",
-            return_value=summary,
-        ) as cleanup, redirect_stdout(stdout):
-            rc = pipeline_cli.cmd_wrong_match_triage(db, cast(Any, args))
+        with redirect_stdout(stdout):
+            rc = pipeline_cli.cmd_wrong_match_triage(
+                None,
+                args,
+                sleep=lambda _seconds: None,
+            )
 
         self.assertEqual(rc, 0)
-        cleanup.assert_called_once_with(db, confirm_all_wrong_matches=True)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["processed"], 1)
-        self.assertEqual(payload["deleted"], 1)
+        self.assertEqual(payload["state"], "completed")
+        self.assertIsNone(payload["error"])
+        self.assertEqual(payload["summary"]["processed"], 0)
+
+    def test_crashed_sweep_is_reported_as_a_failure_not_an_api_refusal(self):
+        """A sweep that raised must say so, and exit non-zero (#1063 T3.5)."""
+        import web.routes.imports as imports_routes
+
+        def _boom(_db, **_kwargs):
+            raise OSError("[Errno 5] Input/output error: /mnt/virtio")
+
+        args = argparse.Namespace(
+            apply=True, json=False, api_endpoint=TcpApiEndpoint(self.base),
+        )
+        stdout = io.StringIO()
+        with patch.object(
+            imports_routes, "cleanup_all_wrong_matches", _boom,
+        ), redirect_stdout(stdout):
+            rc = pipeline_cli.cmd_wrong_match_triage(
+                None, args, sleep=lambda _seconds: None,
+            )
+            imports_routes._triage_runner.join(timeout=5)
+
+        self.assertEqual(rc, 5)
+        output = stdout.getvalue()
+        self.assertIn("sweep FAILED", output)
+        self.assertIn("Input/output error", output)
+        self.assertNotIn("API refused", output)
+
+    def test_lost_sweep_status_is_reported_as_lost_not_an_api_refusal(self):
+        """The web service restarted mid-sweep: idle with no summary."""
+        import web.routes.imports as imports_routes
+
+        args = argparse.Namespace(
+            apply=True, json=False, api_endpoint=TcpApiEndpoint(self.base),
+        )
+        stdout = io.StringIO()
+        with patch.object(
+            imports_routes._triage_runner, "status",
+            return_value={
+                "state": "idle", "started_at": None, "finished_at": None,
+                "summary": None, "error": None,
+            },
+        ), redirect_stdout(stdout):
+            rc = pipeline_cli.cmd_wrong_match_triage(
+                None, args, sleep=lambda _seconds: None,
+            )
+            imports_routes._triage_runner.join(timeout=5)
+
+        self.assertEqual(rc, 5)
+        output = stdout.getvalue()
+        self.assertIn("No Wrong Matches sweep result is available", output)
+        self.assertNotIn("API refused", output)
+
+    def test_transient_poll_failures_do_not_abandon_the_sweep(self):
+        """One blip must not detach the operator mid-delete (#1063 T3.6)."""
+        self.db.seed_request(make_request_row(id=1))
+        real_post = api_mutations._post
+        calls = {"n": 0}
+
+        def flaky_post(endpoint, mutation, *, timeout_seconds=15.0,
+                       report_failure=True):
+            if mutation.method == "GET":
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    return None
+            return real_post(
+                endpoint, mutation, timeout_seconds=timeout_seconds)
+
+        args = argparse.Namespace(
+            apply=True, json=True, api_endpoint=TcpApiEndpoint(self.base),
+        )
+        stdout = io.StringIO()
+        with patch.object(api_mutations, "_post", flaky_post), \
+                redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+            rc = pipeline_cli.cmd_wrong_match_triage(
+                None, args, sleep=lambda _seconds: None,
+            )
+
+        self.assertEqual(rc, 0)
+        self.assertGreaterEqual(calls["n"], 2)
+        self.assertEqual(json.loads(stdout.getvalue())["state"], "completed")
+
+    def test_persistent_poll_failure_still_gives_up(self):
+        args = argparse.Namespace(
+            apply=True, json=True, api_endpoint=TcpApiEndpoint(self.base),
+        )
+        real_post = api_mutations._post
+
+        def dead_polls(endpoint, mutation, *, timeout_seconds=15.0,
+                       report_failure=True):
+            if mutation.method == "GET":
+                return None
+            return real_post(
+                endpoint, mutation, timeout_seconds=timeout_seconds)
+
+        with patch.object(api_mutations, "_post", dead_polls), \
+                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            rc = pipeline_cli.cmd_wrong_match_triage(
+                None, args, sleep=lambda _seconds: None,
+            )
+
+        self.assertEqual(rc, 5)
+
+    def test_triage_conflict_when_a_sweep_is_already_running(self):
+        import web.routes.imports as imports_routes
+
+        args = argparse.Namespace(
+            apply=True, json=True, api_endpoint=TcpApiEndpoint(self.base),
+        )
+        with patch.object(
+            imports_routes._triage_runner, "start", return_value=False,
+        ), redirect_stdout(io.StringIO()):
+            rc = pipeline_cli.cmd_wrong_match_triage(
+                None,
+                args,
+                sleep=lambda _seconds: None,
+            )
+
+        self.assertEqual(rc, 4)
 
 
-class TestCmdWrongMatchDelete(unittest.TestCase):
+class TestCmdWrongMatchDelete(_FakeDbWebServerCase):
+    """``wrong-match-delete`` exit codes, proven end to end: CLI adapter →
+    real HTTP route → real delete service → real filesystem. Every
+    outcome below is produced by an actual world, not a stubbed result
+    (issue #1063)."""
+
+    def _run(self, log_id: int, *, apply: bool = True) -> tuple[int, str]:
+        args = argparse.Namespace(
+            download_log_id=log_id,
+            apply=apply,
+            json=True,
+            api_endpoint=TcpApiEndpoint(self.base),
+        )
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            rc = pipeline_cli.cmd_wrong_match_delete(None, args)
+        return rc, stdout.getvalue()
+
     def test_delete_requires_apply(self):
-        db = FakePipelineDB()
-        args = SimpleNamespace(download_log_id=42, apply=False, json=False)
         stderr = io.StringIO()
         with patch(
             "lib.wrong_match_delete_service.delete_wrong_match"
         ) as delete, redirect_stderr(stderr):
-            rc = pipeline_cli.cmd_wrong_match_delete(db, cast(Any, args))
+            rc, _out = self._run(42, apply=False)
 
         self.assertEqual(rc, 2)
         delete.assert_not_called()
         self.assertIn("--apply", stderr.getvalue())
 
-    def test_delete_apply_delegates_to_service(self):
-        from lib.wrong_match_delete_service import (
-            OUTCOME_DELETED,
-            WrongMatchDeleteResult,
-        )
-
-        db = FakePipelineDB()
-        args = SimpleNamespace(download_log_id=42, apply=True, json=True)
-        result = WrongMatchDeleteResult(
-            download_log_id=42,
-            outcome=OUTCOME_DELETED,
-            success=True,
-            cleared_rows=1,
-            deleted_path="/fi/a",
-        )
-        stdout = io.StringIO()
-        with patch(
-            "lib.wrong_match_delete_service.delete_wrong_match",
-            return_value=result,
-        ) as delete, redirect_stdout(stdout):
-            rc = pipeline_cli.cmd_wrong_match_delete(db, cast(Any, args))
+    def test_delete_removes_the_folder_and_clears_the_pointer(self):
+        source = seed_visible_wrong_match(self.db, self.enterContext(
+            tempfile.TemporaryDirectory()))
+        rc, out = self._run(source.download_log_id)
 
         self.assertEqual(rc, 0)
-        delete.assert_called_once_with(db, 42, require_visible=True)
-        payload = json.loads(stdout.getvalue())
-        self.assertEqual(payload["outcome"], OUTCOME_DELETED)
+        payload = json.loads(out)
+        self.assertEqual(payload["outcome"], "deleted")
+        self.assertEqual(payload["deleted_path"], source.path)
+        self.assertFalse(payload["path_missing"])
         self.assertEqual(payload["cleared_rows"], 1)
-
-    def test_delete_active_job_returns_conflict_exit_code(self):
-        from lib.wrong_match_delete_service import (
-            OUTCOME_SKIPPED_ACTIVE_JOB,
-            WrongMatchDeleteResult,
-        )
-
-        db = FakePipelineDB()
-        args = SimpleNamespace(download_log_id=42, apply=True, json=True)
-        result = WrongMatchDeleteResult(
-            download_log_id=42,
-            outcome=OUTCOME_SKIPPED_ACTIVE_JOB,
-            skipped=True,
-            reason="active_import_job",
-        )
-        with patch(
-            "lib.wrong_match_delete_service.delete_wrong_match",
-            return_value=result,
-        ), redirect_stdout(io.StringIO()):
-            rc = pipeline_cli.cmd_wrong_match_delete(db, cast(Any, args))
-
-        self.assertEqual(rc, 4)
+        self.assertFalse(os.path.exists(source.path))
+        self.assertEqual(self.db.get_wrong_matches(), [])
 
     def test_delete_missing_row_returns_not_found_exit_code(self):
-        from lib.wrong_match_delete_service import (
-            OUTCOME_SKIPPED_NOT_VISIBLE,
-            WrongMatchDeleteResult,
-        )
-
-        db = FakePipelineDB()
-        args = SimpleNamespace(download_log_id=42, apply=True, json=True)
-        result = WrongMatchDeleteResult(
-            download_log_id=42,
-            outcome=OUTCOME_SKIPPED_NOT_VISIBLE,
-            skipped=True,
-            reason="wrong_match_not_visible",
-        )
-        with patch(
-            "lib.wrong_match_delete_service.delete_wrong_match",
-            return_value=result,
-        ), redirect_stdout(io.StringIO()):
-            rc = pipeline_cli.cmd_wrong_match_delete(db, cast(Any, args))
-
+        rc, _out = self._run(999_999)
         self.assertEqual(rc, 2)
 
-    def test_delete_locked_returns_transient_exit_code(self):
-        from lib.wrong_match_delete_service import (
-            OUTCOME_SKIPPED_LOCKED,
-            WrongMatchDeleteResult,
+    def test_delete_not_visible_row_returns_not_found_exit_code(self):
+        self.db.seed_request(make_request_row(id=1))
+        log_id = self.db.log_download(
+            request_id=1,
+            outcome="rejected",
+            validation_result={
+                "scenario": "spectral_reject",
+                "failed_path": "/nowhere/wrong_matches/A",
+            },
+        )
+        rc, _out = self._run(log_id)
+        self.assertEqual(rc, 2)
+
+    def test_genuinely_missing_folder_still_clears_the_pointer(self):
+        """Must-still-work: PROVEN absence is allowed to clear (issue #1063)."""
+        root = self.enterContext(tempfile.TemporaryDirectory())
+        source = seed_visible_wrong_match(self.db, root)
+        shutil.rmtree(source.path)
+
+        rc, out = self._run(source.download_log_id)
+
+        payload = json.loads(out)
+        self.assertEqual(rc, 0)
+        # Successful and clearing, but never headlined "deleted" — the
+        # folder was proven absent, not removed by us (#1063 invariant 1).
+        self.assertEqual(payload["outcome"], "path_missing")
+        self.assertTrue(payload["success"])
+        self.assertTrue(payload["path_missing"])
+        self.assertIsNone(payload["deleted_path"])
+        self.assertEqual(payload["cleared_rows"], 1)
+        self.assertEqual(self.db.get_wrong_matches(), [])
+
+    def test_unreadable_parent_refuses_and_keeps_both_folder_and_pointer(self):
+        """The exact #1063 world: EACCES is not evidence of absence.
+
+        The operator identity cannot traverse the private parent, so the
+        probe is refused. The command must fail, delete nothing, and keep
+        the row actionable — never report ``deleted``/``path_missing``.
+        """
+        root = self.enterContext(tempfile.TemporaryDirectory())
+        source = seed_visible_wrong_match(self.db, root)
+        os.chmod(source.parent, 0o000)
+        self.addCleanup(os.chmod, source.parent, 0o700)
+
+        rc, out = self._run(source.download_log_id)
+
+        payload = json.loads(out)
+        self.assertEqual(rc, 5)
+        # The refusal keeps the whole typed result, so --json can still
+        # express "neither deleted nor missing" (#1063 review T3.1).
+        self.assertEqual(payload["outcome"], "skipped_path_unavailable")
+        self.assertFalse(payload["success"])
+        self.assertIn("path_unavailable", payload["error"])
+        self.assertIsNone(payload["deleted_path"])
+        self.assertFalse(payload["path_missing"])
+        self.assertEqual(payload["cleared_rows"], 0)
+        os.chmod(source.parent, 0o700)
+        self.assertTrue(os.path.isdir(source.path))
+        self.assertEqual(
+            [row["download_log_id"] for row in self.db.get_wrong_matches()],
+            [source.download_log_id],
         )
 
-        db = FakePipelineDB()
-        args = SimpleNamespace(download_log_id=42, apply=True, json=True)
-        result = WrongMatchDeleteResult(
-            download_log_id=42,
-            outcome=OUTCOME_SKIPPED_LOCKED,
-            skipped=True,
-            reason="cleanup_lock_unavailable",
+    def test_delete_active_job_returns_conflict_exit_code(self):
+        source = seed_visible_wrong_match(self.db, self.enterContext(
+            tempfile.TemporaryDirectory()))
+        self.db.enqueue_import_job(
+            "force_import",
+            request_id=1,
+            payload={
+                "download_log_id": source.download_log_id,
+                "failed_path": source.path,
+            },
         )
-        with patch(
-            "lib.wrong_match_delete_service.delete_wrong_match",
-            return_value=result,
-        ), redirect_stdout(io.StringIO()):
-            rc = pipeline_cli.cmd_wrong_match_delete(db, cast(Any, args))
+        rc, _out = self._run(source.download_log_id)
+
+        self.assertEqual(rc, 4)
+        self.assertTrue(os.path.isdir(source.path))
+
+    def test_delete_unsafe_path_returns_semantic_violation_exit_code(self):
+        root = self.enterContext(tempfile.TemporaryDirectory())
+        source = seed_visible_wrong_match(self.db, root, quarantine="elsewhere")
+        rc, _out = self._run(source.download_log_id)
+
+        self.assertEqual(rc, 3)
+        self.assertTrue(os.path.isdir(source.path))
+
+    def test_delete_locked_returns_transient_exit_code(self):
+        source = seed_visible_wrong_match(self.db, self.enterContext(
+            tempfile.TemporaryDirectory()))
+        self.db.set_advisory_lock_result(False)
+        rc, _out = self._run(source.download_log_id)
 
         self.assertEqual(rc, 5)
+        self.assertTrue(os.path.isdir(source.path))
+
+    def test_delete_failure_returns_generic_failure_exit_code(self):
+        root = self.enterContext(tempfile.TemporaryDirectory())
+        source = seed_visible_wrong_match(self.db, root)
+        # The album directory itself is readable but not writable, so the
+        # real rmtree fails partway — a genuine delete failure, not an
+        # unobservable path.
+        os.chmod(source.path, 0o500)
+        self.addCleanup(os.chmod, source.path, 0o700)
+        rc, _out = self._run(source.download_log_id)
+
+        self.assertEqual(rc, 1)
+        self.assertTrue(os.path.isdir(source.path))
+        self.assertNotEqual(self.db.get_wrong_matches(), [])
 
 
-class TestCmdWrongMatchDeleteGroup(unittest.TestCase):
+class TestCmdWrongMatchDeleteGroup(_FakeDbWebServerCase):
+    """``wrong-match-delete-group`` exit codes through the real route."""
+
+    def _run(self, request_id: int, *, apply: bool = True) -> tuple[int, str]:
+        args = argparse.Namespace(
+            request_id=request_id,
+            apply=apply,
+            json=True,
+            api_endpoint=TcpApiEndpoint(self.base),
+        )
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            rc = pipeline_cli.cmd_wrong_match_delete_group(
+                None, args)
+        return rc, stdout.getvalue()
+
     def test_delete_group_requires_apply(self):
-        db = FakePipelineDB()
-        args = SimpleNamespace(request_id=42, apply=False, json=False)
         stderr = io.StringIO()
         with patch(
             "lib.wrong_match_delete_service.delete_wrong_match_group"
         ) as delete, redirect_stderr(stderr):
-            rc = pipeline_cli.cmd_wrong_match_delete_group(db, cast(Any, args))
+            rc, _out = self._run(42, apply=False)
 
         self.assertEqual(rc, 2)
         delete.assert_not_called()
         self.assertIn("--apply", stderr.getvalue())
 
-    def test_delete_group_apply_delegates_to_service(self):
-        from lib.wrong_match_delete_service import WrongMatchDeleteSummary
+    def test_delete_group_removes_every_visible_source(self):
+        root = self.enterContext(tempfile.TemporaryDirectory())
+        first = seed_visible_wrong_match(self.db, root, name="Album One")
+        second = seed_visible_wrong_match(self.db, root, name="Album Two")
 
-        db = FakePipelineDB()
-        args = SimpleNamespace(request_id=42, apply=True, json=True)
-        summary = WrongMatchDeleteSummary(
-            request_id=42,
-            outcome="deleted",
-            success=True,
-            processed=2,
-            deleted=2,
-            deleted_paths=2,
-            cleared=2,
-            skipped=0,
-            errors=0,
-            remaining=0,
-            group_empty=True,
-            results=(),
-        )
-        stdout = io.StringIO()
-        with patch(
-            "lib.wrong_match_delete_service.delete_wrong_match_group",
-            return_value=summary,
-        ) as delete, redirect_stdout(stdout):
-            rc = pipeline_cli.cmd_wrong_match_delete_group(db, cast(Any, args))
+        rc, out = self._run(first.request_id)
 
+        payload = json.loads(out)
         self.assertEqual(rc, 0)
-        delete.assert_called_once_with(db, 42)
-        payload = json.loads(stdout.getvalue())
         self.assertEqual(payload["deleted"], 2)
-        self.assertEqual(payload["cleared"], 2)
+        self.assertEqual(payload["deleted_paths"], 2)
+        self.assertEqual(payload["remaining"], 0)
+        self.assertFalse(os.path.exists(first.path))
+        self.assertFalse(os.path.exists(second.path))
 
     def test_delete_group_active_job_returns_conflict_exit_code(self):
-        from lib.wrong_match_delete_service import (
-            OUTCOME_SKIPPED_ACTIVE_JOB,
-            WrongMatchDeleteResult,
-            WrongMatchDeleteSummary,
+        root = self.enterContext(tempfile.TemporaryDirectory())
+        source = seed_visible_wrong_match(self.db, root)
+        self.db.enqueue_import_job(
+            "force_import",
+            request_id=source.request_id,
+            payload={
+                "download_log_id": source.download_log_id,
+                "failed_path": source.path,
+            },
         )
 
-        db = FakePipelineDB()
-        args = SimpleNamespace(request_id=42, apply=True, json=True)
-        result = WrongMatchDeleteResult(
-            download_log_id=100,
-            outcome=OUTCOME_SKIPPED_ACTIVE_JOB,
-            skipped=True,
-            reason="active_import_job",
-        )
-        summary = WrongMatchDeleteSummary(
-            request_id=42,
-            outcome="partial",
-            success=False,
-            processed=1,
-            deleted=0,
-            deleted_paths=0,
-            cleared=0,
-            skipped=1,
-            errors=0,
-            remaining=1,
-            group_empty=False,
-            results=(result,),
-        )
-        with patch(
-            "lib.wrong_match_delete_service.delete_wrong_match_group",
-            return_value=summary,
-        ), redirect_stdout(io.StringIO()):
-            rc = pipeline_cli.cmd_wrong_match_delete_group(db, cast(Any, args))
+        rc, out = self._run(source.request_id)
 
+        payload = json.loads(out)
         self.assertEqual(rc, 4)
+        self.assertEqual(payload["remaining"], 1)
+        self.assertTrue(os.path.isdir(source.path))
 
+    def test_delete_group_unreadable_parent_keeps_every_pointer(self):
+        """Replace's cleanup lane: unreadable sources must not clear."""
+        root = self.enterContext(tempfile.TemporaryDirectory())
+        source = seed_visible_wrong_match(self.db, root)
+        os.chmod(source.parent, 0o000)
+        self.addCleanup(os.chmod, source.parent, 0o700)
+
+        rc, out = self._run(source.request_id)
+
+        payload = json.loads(out)
+        self.assertEqual(rc, 5)
+        self.assertEqual(payload["remaining"], 1)
+        self.assertEqual(payload["deleted"], 0)
+        self.assertEqual(payload["deleted_paths"], 0)
+        self.assertEqual(payload["cleared"], 0)
+        self.assertGreaterEqual(payload["errors"], 1)
+        os.chmod(source.parent, 0o700)
+        self.assertTrue(os.path.isdir(source.path))
+        self.assertEqual(
+            [row["download_log_id"] for row in self.db.get_wrong_matches()],
+            [source.download_log_id],
+        )
 
 class TestMainExitCodes(unittest.TestCase):
     def test_convergence_stop_constructor_outage_maps_to_exit_five(self):
@@ -1527,90 +1769,88 @@ class TestMainExitCodes(unittest.TestCase):
             "postgresql://example/test",
             "wrong-match-triage",
         ]
-        db = FakePipelineDB()
         with patch.object(sys, "argv", argv), patch(
             "scripts.pipeline_cli.cli.PipelineDB",
-            return_value=db,
-        ), self.assertRaises(SystemExit) as raised:
+        ) as constructor, self.assertRaises(SystemExit) as raised:
             pipeline_cli.main()
 
         self.assertEqual(raised.exception.code, 2)
-        self.assertEqual(db.close_calls, 1)
+        constructor.assert_not_called()
+
+
+class TestMainProtectedPathDispatch(_FakeDbWebServerCase):
+    """Protected-path commands run through the API and never open a DB.
+
+    ``main()`` must reach the canonical route before it constructs a
+    ``PipelineDB`` or configures mirrors, otherwise the command could
+    still execute in the operator's own process against a tree that
+    identity cannot read (issue #1063).
+    """
+
+    def _main(self, *argv_tail: str) -> tuple[int, str]:
+        argv = [
+            "pipeline_cli.py",
+            "--dsn",
+            "postgresql://example/test",
+            "--api-base",
+            self.base,
+            *argv_tail,
+        ]
+        stdout = io.StringIO()
+        with patch.object(sys, "argv", argv), patch(
+            "scripts.pipeline_cli.cli.PipelineDB",
+        ) as constructor, redirect_stdout(stdout), self.assertRaises(
+            SystemExit,
+        ) as raised:
+            pipeline_cli.main()
+        constructor.assert_not_called()
+        return cast(int, raised.exception.code), stdout.getvalue()
 
     def test_main_routes_wrong_match_delete(self):
-        from lib.wrong_match_delete_service import (
-            OUTCOME_DELETED,
-            WrongMatchDeleteResult,
+        root = self.enterContext(tempfile.TemporaryDirectory())
+        source = seed_visible_wrong_match(self.db, root)
+
+        code, out = self._main(
+            "wrong-match-delete", str(source.download_log_id),
+            "--apply", "--json",
         )
 
-        argv = [
-            "pipeline_cli.py",
-            "--dsn",
-            "postgresql://example/test",
-            "wrong-match-delete",
-            "42",
-            "--apply",
-            "--json",
-        ]
-        db = FakePipelineDB()
-        result = WrongMatchDeleteResult(
-            download_log_id=42,
-            outcome=OUTCOME_DELETED,
-            success=True,
-            cleared_rows=1,
-        )
-        with patch.object(sys, "argv", argv), patch(
-            "scripts.pipeline_cli.cli.PipelineDB",
-            return_value=db,
-        ), patch(
-            "lib.wrong_match_delete_service.delete_wrong_match",
-            return_value=result,
-        ) as delete, redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as raised:
-            pipeline_cli.main()
-
-        self.assertEqual(raised.exception.code, 0)
-        delete.assert_called_once_with(db, 42, require_visible=True)
-        self.assertEqual(db.close_calls, 1)
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["outcome"], "deleted")
+        self.assertFalse(os.path.exists(source.path))
 
     def test_main_routes_wrong_match_delete_group(self):
-        from lib.wrong_match_delete_service import WrongMatchDeleteSummary
+        root = self.enterContext(tempfile.TemporaryDirectory())
+        source = seed_visible_wrong_match(self.db, root)
 
-        argv = [
-            "pipeline_cli.py",
-            "--dsn",
-            "postgresql://example/test",
-            "wrong-match-delete-group",
-            "42",
-            "--apply",
-            "--json",
-        ]
-        db = FakePipelineDB()
-        summary = WrongMatchDeleteSummary(
-            request_id=42,
-            outcome="empty",
-            success=True,
-            processed=0,
-            deleted=0,
-            deleted_paths=0,
-            cleared=0,
-            skipped=0,
-            errors=0,
-            remaining=0,
-            group_empty=True,
-            results=(),
+        code, out = self._main(
+            "wrong-match-delete-group", str(source.request_id),
+            "--apply", "--json",
         )
-        with patch.object(sys, "argv", argv), patch(
-            "scripts.pipeline_cli.cli.PipelineDB",
-            return_value=db,
-        ), patch(
-            "lib.wrong_match_delete_service.delete_wrong_match_group",
-            return_value=summary,
-        ) as delete, redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as raised:
-            pipeline_cli.main()
 
-        self.assertEqual(raised.exception.code, 0)
-        delete.assert_called_once_with(db, 42)
-        self.assertEqual(db.close_calls, 1)
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["deleted"], 1)
+        self.assertFalse(os.path.exists(source.path))
+
+    def test_main_routes_every_protected_path_command_without_a_db(self):
+        """Each routed command reaches HTTP; none constructs a DB handle."""
+        root = self.enterContext(tempfile.TemporaryDirectory())
+        source = seed_visible_wrong_match(self.db, root)
+        for argv_tail in (
+            ["wrong-match-delete", str(source.download_log_id), "--apply"],
+            ["wrong-match-delete-group", str(source.request_id), "--apply"],
+            ["replace", str(source.request_id), "--to", RELEASE_B],
+            ["force-import", str(source.download_log_id)],
+            ["beets-distance", str(source.download_log_id), RELEASE_B],
+            ["import-preview", "--download-log-id",
+             str(source.download_log_id)],
+        ):
+            with self.subTest(command=argv_tail[0]):
+                # Only the dispatch boundary is under test here (``_main``
+                # asserts no DB handle was constructed); each route's own
+                # outcome has its pins above.
+                code, _out = self._main(*argv_tail)
+                self.assertIsInstance(code, int)
 
 
 class TestCmdQuery(unittest.TestCase):
@@ -3794,10 +4034,10 @@ class TestCmdSearchPlanShow(unittest.TestCase):
         )
 
     def _run(self, db, rid, *, json_out: bool = False):
-        args = SimpleNamespace(id=rid, json=json_out)
+        args = argparse.Namespace(id=rid, json=json_out)
         stdout = io.StringIO()
         with redirect_stdout(stdout):
-            rc = pipeline_cli.cmd_search_plan_show(db, cast(Any, args))
+            rc = pipeline_cli.cmd_search_plan_show(db, args)
         return rc, stdout.getvalue()
 
     def test_search_plan_show_human_renders_active_plan(self):
@@ -4003,10 +4243,10 @@ class TestCmdSearchPlanShowStats(unittest.TestCase):
 
     def test_show_emits_stats_section_by_default(self):
         db, rid = self._seed_with_plan()
-        args = SimpleNamespace(id=rid, json=False, no_stats=False)
+        args = argparse.Namespace(id=rid, json=False, no_stats=False)
         stdout = io.StringIO()
         with redirect_stdout(stdout):
-            rc = pipeline_cli.cmd_search_plan_show(db, cast(Any, args))
+            rc = pipeline_cli.cmd_search_plan_show(db, args)
         self.assertEqual(rc, 0)
         out = stdout.getvalue()
         self.assertIn("Stats:", out)
@@ -4014,20 +4254,20 @@ class TestCmdSearchPlanShowStats(unittest.TestCase):
 
     def test_show_suppresses_stats_when_no_stats_flag(self):
         db, rid = self._seed_with_plan()
-        args = SimpleNamespace(id=rid, json=False, no_stats=True)
+        args = argparse.Namespace(id=rid, json=False, no_stats=True)
         stdout = io.StringIO()
         with redirect_stdout(stdout):
-            rc = pipeline_cli.cmd_search_plan_show(db, cast(Any, args))
+            rc = pipeline_cli.cmd_search_plan_show(db, args)
         self.assertEqual(rc, 0)
         out = stdout.getvalue()
         self.assertNotIn("Stats:", out)
 
     def test_show_json_contains_stats_block(self):
         db, rid = self._seed_with_plan()
-        args = SimpleNamespace(id=rid, json=True, no_stats=False)
+        args = argparse.Namespace(id=rid, json=True, no_stats=False)
         stdout = io.StringIO()
         with redirect_stdout(stdout):
-            rc = pipeline_cli.cmd_search_plan_show(db, cast(Any, args))
+            rc = pipeline_cli.cmd_search_plan_show(db, args)
         self.assertEqual(rc, 0)
         payload = json.loads(stdout.getvalue())
         self.assertIn("stats", payload)
@@ -4052,10 +4292,10 @@ class TestCmdSearchPlanShowStats(unittest.TestCase):
             request_id=rid, query="legacy 1", outcome="no_match")
         db.log_search(
             request_id=rid, query="legacy 2", outcome="no_results")
-        args = SimpleNamespace(id=rid, json=True, no_stats=False)
+        args = argparse.Namespace(id=rid, json=True, no_stats=False)
         stdout = io.StringIO()
         with redirect_stdout(stdout):
-            rc = pipeline_cli.cmd_search_plan_show(db, cast(Any, args))
+            rc = pipeline_cli.cmd_search_plan_show(db, args)
         self.assertEqual(rc, 0)
         payload = json.loads(stdout.getvalue())
         legacy = payload["stats"]["superseded_and_legacy"]["legacy_bucket"]
@@ -4094,7 +4334,7 @@ class TestCmdSearchPlanRegenerate(unittest.TestCase):
         return db, rid, plan_id
 
     def _run(self, db, rid, *, json_out=False, prepend=False):
-        args = SimpleNamespace(
+        args = argparse.Namespace(
             id=rid, json=json_out, prepend_artist=prepend)
         stdout = io.StringIO()
         with redirect_stdout(stdout), patch("lib.config.read_runtime_config") as mock_cfg:
@@ -4106,7 +4346,7 @@ class TestCmdSearchPlanRegenerate(unittest.TestCase):
             cp = configparser.RawConfigParser()
             cp.read_string("[General]\n")
             mock_cfg.return_value = CratediggerConfig.from_ini(cp)
-            rc = pipeline_cli.cmd_search_plan_regenerate(db, cast(Any, args))
+            rc = pipeline_cli.cmd_search_plan_regenerate(db, args)
         return rc, stdout.getvalue()
 
     def test_regenerate_succeeds_creates_new_active_plan_and_resets_cursor(self):
@@ -4228,7 +4468,7 @@ class TestCmdSearchPlanDryRun(unittest.TestCase):
         return db, rid
 
     def _run(self, db, rid, *, json_out: bool = False, prepend: bool = False):
-        args = SimpleNamespace(
+        args = argparse.Namespace(
             id=rid, json=json_out, prepend_artist=prepend)
         stdout = io.StringIO()
         with redirect_stdout(stdout), patch("lib.config.read_runtime_config") as mock_cfg:
@@ -4238,7 +4478,7 @@ class TestCmdSearchPlanDryRun(unittest.TestCase):
             cp = configparser.RawConfigParser()
             cp.read_string("[General]\n")
             mock_cfg.return_value = CratediggerConfig.from_ini(cp)
-            rc = pipeline_cli.cmd_search_plan_dry_run(db, cast(Any, args))
+            rc = pipeline_cli.cmd_search_plan_dry_run(db, args)
         return rc, stdout.getvalue()
 
     def test_dry_run_happy_path_prints_plan_items_without_persisting(self):
@@ -4356,7 +4596,7 @@ class TestCmdSearchPlanSaturation(unittest.TestCase):
 
     def _run(self, db, rid, *, json_out: bool = False,
              window_days: int | None = None):
-        args = SimpleNamespace(
+        args = argparse.Namespace(
             id=rid, json=json_out, window_days=window_days)
         stdout = io.StringIO()
         with redirect_stdout(stdout), patch("lib.config.read_runtime_config") as mock_cfg:
@@ -4366,7 +4606,7 @@ class TestCmdSearchPlanSaturation(unittest.TestCase):
             cp = configparser.RawConfigParser()
             cp.read_string("[General]\n")
             mock_cfg.return_value = CratediggerConfig.from_ini(cp)
-            rc = pipeline_cli.cmd_search_plan_saturation(db, cast(Any, args))
+            rc = pipeline_cli.cmd_search_plan_saturation(db, args)
         return rc, stdout.getvalue()
 
     def test_happy_path_prints_human_summary(self):
@@ -4569,7 +4809,7 @@ class TestCmdSearchPlanAdvance(unittest.TestCase):
 
     def _run(self, db, rid, *, to_ordinal=None, to_strategy=None,
              json_out=False):
-        args = SimpleNamespace(
+        args = argparse.Namespace(
             id=rid, to_ordinal=to_ordinal, to_strategy=to_strategy,
             json=json_out,
         )
@@ -4581,7 +4821,7 @@ class TestCmdSearchPlanAdvance(unittest.TestCase):
             cp = configparser.RawConfigParser()
             cp.read_string("[General]\n")
             mock_cfg.return_value = CratediggerConfig.from_ini(cp)
-            rc = pipeline_cli.cmd_search_plan_advance(db, cast(Any, args))
+            rc = pipeline_cli.cmd_search_plan_advance(db, args)
         return rc, stdout.getvalue()
 
     def test_advance_to_ordinal_succeeds_and_moves_cursor(self):
@@ -4650,11 +4890,12 @@ class TestCmdSearchPlanAdvance(unittest.TestCase):
         self.assertEqual(payload["new_query"], "Love Till Tuesday")
 
 
-class TestCmdReplace(unittest.TestCase):
-    """``pipeline-cli replace`` wraps
-    ``MbidReplaceService.replace_request_mbid``. Counterpart of the
-    API endpoint ``POST /api/pipeline/<id>/replace`` — both must stay
-    in sync; see ``CLAUDE.md`` § "CLI ⇄ API surface symmetry"."""
+class TestCmdReplace(_FakeDbWebServerCase):
+    """``pipeline-cli replace`` is a thin adapter over ``POST
+    /api/pipeline/<id>/replace``, which owns the one execution path
+    (issue #1063 — Replace's cleanup deletes protected Wrong Matches
+    folders). These pins drive the real route and assert the CLI's
+    historical exit codes and text/JSON output survive the move."""
 
     def _run(self, *, mock_outcome, mock_kwargs=None, json_out=False,
              req_id=42, target_mbid="new-mbid"):
@@ -4665,8 +4906,9 @@ class TestCmdReplace(unittest.TestCase):
             request_id=req_id,
             **(mock_kwargs or {}),
         )
-        args = SimpleNamespace(
+        args = argparse.Namespace(
             id=req_id, target_mb_release_id=target_mbid, json=json_out,
+            api_endpoint=TcpApiEndpoint(self.base),
         )
         stdout = io.StringIO()
         with redirect_stdout(stdout), patch("lib.config.read_runtime_config") as mock_cfg, \
@@ -4678,7 +4920,7 @@ class TestCmdReplace(unittest.TestCase):
             cp.read_string("[General]\n")
             mock_cfg.return_value = CratediggerConfig.from_ini(cp)
             MS.return_value.replace_request_mbid.return_value = result
-            rc = pipeline_cli.cmd_replace(MagicMock(), cast(Any, args))
+            rc = pipeline_cli.cmd_replace(None, args)
         return rc, stdout.getvalue()
 
     def test_exit_0_on_replaced(self):
@@ -4805,27 +5047,28 @@ class TestCmdReplace(unittest.TestCase):
         self.assertEqual(cm.exception.code, 2)
 
 
-class TestCmdBeetsDistance(unittest.TestCase):
-    """``pipeline-cli beets-distance`` wraps
-    ``lib.beets_distance.compute_beets_distance``. Counterpart of
-    ``GET /api/beets-distance/<download_log_id>/<mbid>``. Service-layer
-    correctness lives in ``tests.test_beets_distance``; here we pin the
-    exit-code mapping per the CLI ⇄ API symmetry rule."""
+class TestCmdBeetsDistance(_FakeDbWebServerCase):
+    """``pipeline-cli beets-distance`` is a thin adapter over ``GET
+    /api/beets-distance/<download_log_id>/<mbid>`` (issue #1063 — the
+    folder it reads lives under the private processing tree).
+    Service-layer correctness lives in ``tests.test_beets_distance``;
+    here we pin the status-code ⇄ exit-code mapping."""
 
     UUID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
     def _run(self, *, outcome, json_out=False, **result_kwargs):
         from lib.beets_distance import BeetsDistanceResult
         result = BeetsDistanceResult(outcome=outcome, **result_kwargs)
-        args = SimpleNamespace(
+        args = argparse.Namespace(
             download_log_id=100, mbid=self.UUID, json=json_out,
+            api_endpoint=TcpApiEndpoint(self.base),
         )
         stdout = io.StringIO()
         with redirect_stdout(stdout), patch(
             "lib.beets_distance.compute_beets_distance",
             return_value=result,
         ):
-            rc = pipeline_cli.cmd_beets_distance(MagicMock(), cast(Any, args))
+            rc = pipeline_cli.cmd_beets_distance(None, args)
         return rc, stdout.getvalue()
 
     def test_exit_0_on_ok(self):
@@ -4917,7 +5160,10 @@ class TestCmdBeetsDistance(unittest.TestCase):
             "release_group_id": None,
             "tracks": [],
         }
-        args = SimpleNamespace(download_log_id=100, mbid="2048516", json=False)
+        args = argparse.Namespace(
+            download_log_id=100, mbid="2048516", json=False,
+            api_endpoint=TcpApiEndpoint(self.base),
+        )
         stdout = io.StringIO()
         with redirect_stdout(stdout), patch(
             "lib.beets_distance.compute_beets_distance",
@@ -4926,7 +5172,7 @@ class TestCmdBeetsDistance(unittest.TestCase):
             "web.discogs.get_release",
             return_value=discogs_release,
         ) as discogs_get:
-            rc = pipeline_cli.cmd_beets_distance(MagicMock(), cast(Any, args))
+            rc = pipeline_cli.cmd_beets_distance(None, args)
             self.assertIn("mb_get_release", captured)
             resolved = captured["mb_get_release"]("2048516")
             discogs_get.assert_called_once_with(2048516, fresh=False)
@@ -5006,7 +5252,7 @@ class TestCmdYoutubeAlbum(unittest.TestCase):
         if result is None:
             assert outcome is not None, "must pass outcome= or result="
             result = self._make_result(outcome=outcome)
-        args = SimpleNamespace(
+        args = argparse.Namespace(
             identifier=self.IDENT, refresh=refresh, watch_url=watch_url, json=json_out,
         )
         stdout = io.StringIO()
@@ -5045,7 +5291,7 @@ class TestCmdYoutubeAlbum(unittest.TestCase):
             side_effect=resolver_side_effect,
         ) as mock_resolve:
             rc = pipeline_cli.cmd_youtube_album(
-                FakePipelineDB(), cast(Any, args))
+                FakePipelineDB(), args)
         return rc, stdout.getvalue(), mock_resolve
 
     def test_exit_code_mapping_uses_service_module_dict(self):
@@ -5208,7 +5454,7 @@ class TestCmdSearchPlanHistory(unittest.TestCase):
         return db, rid
 
     def _run(self, db, rid, *, limit=None, before_id=None, json_out=False):
-        args = SimpleNamespace(
+        args = argparse.Namespace(
             id=rid,
             limit=limit,
             before_id=before_id,
@@ -5222,7 +5468,7 @@ class TestCmdSearchPlanHistory(unittest.TestCase):
             cp = configparser.RawConfigParser()
             cp.read_string("[General]\n")
             mock_cfg.return_value = CratediggerConfig.from_ini(cp)
-            rc = pipeline_cli.cmd_search_plan_history(db, cast(Any, args))
+            rc = pipeline_cli.cmd_search_plan_history(db, args)
         return rc, stdout.getvalue()
 
     def test_history_success_default_limit_human_output(self):
@@ -5384,18 +5630,18 @@ class TestPipelineCliTriage(unittest.TestCase):
     # --- triage show ----------------------------------------------------
 
     def _run_show(self, db, rid, *, json_out=False):
-        args = SimpleNamespace(id=rid, json=json_out)
+        args = argparse.Namespace(id=rid, json=json_out)
         stdout = io.StringIO()
         stderr = io.StringIO()
         with redirect_stdout(stdout), redirect_stderr(stderr):
-            rc = pipeline_cli.cmd_triage_show(db, cast(Any, args))
+            rc = pipeline_cli.cmd_triage_show(db, args)
         return rc, stdout.getvalue(), stderr.getvalue()
 
     def _run_quarantine(self, db, root, *, json_out=False):
         config_path = os.path.join(root, "config.ini")
         with open(config_path, "w", encoding="utf-8") as f:
             f.write(f"[Slskd]\ndownload_dir = {root}\n")
-        args = SimpleNamespace(json=json_out)
+        args = argparse.Namespace(json=json_out)
         stdout = io.StringIO()
         stderr = io.StringIO()
         with patch.dict(
@@ -5403,7 +5649,7 @@ class TestPipelineCliTriage(unittest.TestCase):
             {"CRATEDIGGER_RUNTIME_CONFIG": config_path},
             clear=False,
         ), redirect_stdout(stdout), redirect_stderr(stderr):
-            rc = pipeline_cli.cmd_triage_quarantine(db, cast(Any, args))
+            rc = pipeline_cli.cmd_triage_quarantine(db, args)
         return rc, stdout.getvalue(), stderr.getvalue()
 
     def _run_stop(
@@ -5608,7 +5854,7 @@ class TestPipelineCliTriage(unittest.TestCase):
 
     def _run_list(self, db, *, filter_spec="all", limit=50, after=None,
                   json_out=False):
-        args = SimpleNamespace(
+        args = argparse.Namespace(
             filter=filter_spec,
             limit=limit,
             after=after,
@@ -5617,7 +5863,7 @@ class TestPipelineCliTriage(unittest.TestCase):
         stdout = io.StringIO()
         stderr = io.StringIO()
         with redirect_stdout(stdout), redirect_stderr(stderr):
-            rc = pipeline_cli.cmd_triage_list(db, cast(Any, args))
+            rc = pipeline_cli.cmd_triage_list(db, args)
         return rc, stdout.getvalue(), stderr.getvalue()
 
     def _seed_cohort(self) -> FakePipelineDB:
@@ -5813,12 +6059,12 @@ class TestPipelineCliLongTail(unittest.TestCase):
 
     def _run(self, db, *, band=None, request_id=None, json_out=False,
              band_fn=None):
-        args = SimpleNamespace(band=band, id=request_id, json=json_out)
+        args = argparse.Namespace(band=band, id=request_id, json=json_out)
         stdout = io.StringIO()
         stderr = io.StringIO()
         with redirect_stdout(stdout), redirect_stderr(stderr):
             rc = pipeline_cli.cmd_long_tail(
-                cast(Any, db), cast(Any, args), band_fn=band_fn)
+                cast(Any, db), args, band_fn=band_fn)
         return rc, stdout.getvalue(), stderr.getvalue()
 
     def test_band_missing_filter_returns_only_missing_rows(self):
@@ -6193,14 +6439,14 @@ class TestCmdYoutubeRescue(unittest.TestCase):
         def _factory(_db):
             return _StubService()
 
-        args = SimpleNamespace(
+        args = argparse.Namespace(
             request_id=request_id, browse_id=browse_id, json=json_out,
         )
         stdout = io.StringIO()
         stderr = io.StringIO()
         with redirect_stdout(stdout), redirect_stderr(stderr):
             rc = pipeline_cli.cmd_youtube_rescue(
-                MagicMock(), cast(Any, args), service_factory=_factory)
+                MagicMock(), args, service_factory=_factory)
         return rc, stdout.getvalue(), stderr.getvalue()
 
     # ----- outcome → exit code subTest table -----
@@ -6345,7 +6591,7 @@ class TestDestructiveCliAdapters(unittest.TestCase):
         db.seed_request(make_request_row(
             id=41, status="imported", mb_release_id=RELEASE_A,
         ))
-        args = SimpleNamespace(
+        args = argparse.Namespace(
             request_id=41,
             release_id=RELEASE_B,
             beets_db=self.beets_path,
@@ -6376,7 +6622,7 @@ class TestDestructiveCliAdapters(unittest.TestCase):
             status="imported",
             mb_release_id=RELEASE_A,
         ))
-        args = SimpleNamespace(
+        args = argparse.Namespace(
             request_id=41,
             release_id=RELEASE_A,
             beets_db=self.beets_path,
@@ -6401,7 +6647,7 @@ class TestDestructiveCliAdapters(unittest.TestCase):
             mb_release_id=RELEASE_A,
         ))
         owner = handoff_automation_owner(db, 41)
-        args = SimpleNamespace(
+        args = argparse.Namespace(
             request_id=41,
             release_id=RELEASE_A,
             beets_db=self.beets_path,
@@ -6427,7 +6673,7 @@ class TestDestructiveCliAdapters(unittest.TestCase):
     def test_ban_source_incomplete_reports_resulting_searchability(self) -> None:
         from lib.beets_delete import BeetsDeleteFailed
 
-        args = SimpleNamespace(
+        args = argparse.Namespace(
             request_id=41,
             release_id=RELEASE_A,
             beets_db=self.beets_path,
@@ -6472,7 +6718,7 @@ class TestDestructiveCliAdapters(unittest.TestCase):
             id=41, status="imported", mb_release_id=RELEASE_A,
         ))
         db.set_advisory_lock_result(False)
-        args = SimpleNamespace(
+        args = argparse.Namespace(
             album_id=7,
             purge_pipeline=True,
             pipeline_id=41,
@@ -6499,7 +6745,7 @@ class TestDestructiveCliAdapters(unittest.TestCase):
             mb_release_id=RELEASE_A,
         ))
         owner = handoff_automation_owner(db, 41)
-        args = SimpleNamespace(
+        args = argparse.Namespace(
             album_id=7,
             purge_pipeline=True,
             pipeline_id=41,
@@ -6534,7 +6780,7 @@ class TestDestructiveCliAdapters(unittest.TestCase):
             albumartist="Artist A",
         )
         db = FakePipelineDB()
-        args = SimpleNamespace(
+        args = argparse.Namespace(
             album_id=7,
             purge_pipeline=False,
             pipeline_id=None,
@@ -6557,7 +6803,7 @@ class TestDestructiveCliAdapters(unittest.TestCase):
         from lib.library_delete_notifiers import DeleteNotification
 
         db = FakePipelineDB()
-        args = SimpleNamespace(
+        args = argparse.Namespace(
             album_id=7,
             purge_pipeline=False,
             pipeline_id=None,
@@ -6615,7 +6861,7 @@ class TestDestructiveCliAdapters(unittest.TestCase):
         db.seed_request(make_request_row(
             id=41, status="imported", mb_release_id=RELEASE_A,
         ))
-        args = SimpleNamespace(
+        args = argparse.Namespace(
             album_id=7,
             purge_pipeline=True,
             pipeline_id=41,

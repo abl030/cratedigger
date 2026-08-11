@@ -22,11 +22,23 @@ ssh doc2 'pipeline-cli routes --json'
 
 The installed wrapper has two independent authority shapes:
 
-- `pipeline-delete`, `set-quality`, `upgrade`, `wrong-match-converge`, and
-  `resolve-rg` connect to `/run/cratedigger-web/web.sock`. The caller must be a
+- `pipeline-delete`, `set-quality`, `upgrade`, `wrong-match-converge`,
+  `resolve-rg`, `wrong-match-delete`, `wrong-match-delete-group`,
+  `wrong-match-triage`, `replace`, `force-import`, `beets-distance`, and
+  `import-preview --download-log-id` connect to
+  `/run/cratedigger-web/web.sock`. The caller must be a
   member of `services.cratedigger.web.accessGroup` (default
   `cratedigger-web`). That membership grants complete local HTTP/API authority,
-  not merely permission to execute those five subcommands.
+  not merely permission to execute those subcommands.
+
+  Everything after `resolve-rg` in that list joined it in issue #1063: each one
+  reads or destroys a path under the private `0700 cratedigger:users`
+  processing tree, which only the service identity can traverse. Executed in
+  the invoking operator's own process they reported intact folders as missing,
+  cleared their Wrong Matches pointers, and claimed success. Routing them
+  through the socket makes ONE identity own those filesystem facts. There is no
+  direct-database fallback: if the socket is unreachable the command exits 5
+  and changes nothing.
 - Every other command retains its existing resource-specific boundary:
   PostgreSQL credentials/peer identity for database work, filesystem and Beets
   access for media/quarantine operations, and the relevant secret-file groups
@@ -120,8 +132,11 @@ remains after a purge failure.
 
 ## API-backed mutation commands
 
-`pipeline-delete`, `set-quality`, `upgrade`, `wrong-match-converge`, and
-`resolve-rg` call the canonical web route over the module-owned Unix socket.
+`pipeline-delete`, `set-quality`, `upgrade`, `wrong-match-converge`,
+`resolve-rg`, `wrong-match-delete`, `wrong-match-delete-group`,
+`wrong-match-triage`, `replace`, `force-import`, `beets-distance`, and
+`import-preview --download-log-id` call the canonical web route over the
+module-owned Unix socket.
 The installed Nix wrapper selects that socket while constructing the parser:
 it accepts no `--api-base`, carries no Basic username/password, and has no TCP,
 direct-database, or duplicate-service fallback. In the installed production
@@ -139,9 +154,37 @@ it is deliberately insecure, must remain loopback-only, and exists only for
 adapter development/tests. Never expose it or use it as a production escape
 hatch. The installed wrapper does not expose `--api-base`.
 
-Valid JSON route responses, including 5xx responses, are relayed on stdout.
-Any 2xx exits 0; 404 exits 2; 400/422 exits 3; 409 exits 4; other statuses exit
-5. Locally generated transport/protocol failures (including a missing or
+Valid JSON route responses, including 5xx responses, are relayed on stdout —
+except for the commands that kept their own text/`--json` presentation
+(`wrong-match-delete`, `wrong-match-delete-group`, `wrong-match-triage`,
+`replace`, `force-import`, `beets-distance`, `import-preview`), which render
+the route's payload exactly as they did when they executed in-process.
+Any 2xx exits 0; 404 exits 2; 400/422 exits 3; 409 exits 4; other statuses
+exit 5. Per-command overrides preserve exit codes those commands already had:
+the two Wrong Matches delete commands and `beets-distance` map 500 to exit 1,
+and `beets-distance` additionally maps its own 410 Gone (`folder_missing` /
+`no_audio`) to exit 4.
+Each routed command carries its own request deadline sized to the work the
+route performs — an enqueue is 15s, a source delete 300s, a group delete 900s,
+Replace 300s (inline mirror lookups), a download-log preview 900s (inline
+snapshot + measurement), and a beets distance 180s. `wrong-match-triage` starts
+the canonical background sweep and then follows
+`/api/wrong-matches/triage/status` to completion, so it still blocks and prints
+the whole summary; the sweep itself is deliberately unbounded, and a few
+consecutive failed status polls are retried before the follow gives up.
+
+⚠ **`wrong-match-triage` cannot be cancelled from the CLI.** The sweep runs on
+a background thread inside `cratedigger-web`; the command only follows it.
+Ctrl-C (or any other way of killing the CLI) detaches the operator from a
+destructive whole-queue delete that keeps running server-side, and
+`TriageRunner` exposes no abort. To stop a sweep you must restart
+`cratedigger-web`, which loses the in-memory status while leaving every
+deletion already performed durable. Its `--json` output is the STATUS
+envelope (`state`, `started_at`, `finished_at`, `summary`, `error`), not the
+bare summary the in-process command printed; the counts live under
+`summary`.
+
+Locally generated transport/protocol failures (including a missing or
 unreachable socket, malformed development origins, redirects, or non-object
 JSON responses) exit 5 with a structured error on stderr and never fall back.
 `pipeline-delete ID --confirm DELETE` and
@@ -154,7 +197,24 @@ inside socket authorization, never credentials.
 - `pipeline-cli add` — Add a MusicBrainz or Discogs request.
 - `pipeline-cli audit world` — Read-only PipelineDB, Beets, evidence, and disk coherence audit.
 - `pipeline-cli ban-source` — Remove a server-resolved bad rip and requeue its request when appropriate.
-- `pipeline-cli beets-distance` — Measure a rejected download against an exact release.
+- `pipeline-cli beets-distance` — Measure a rejected download against an exact
+  release. A folder that could not be observed or read reports
+  `folder_unavailable` (exit 5), never `folder_missing`/`no_audio`. When only
+  PART of the folder could be read, the outcome stays `ok` and the render
+  prints a `PARTIAL READ` block naming the refusal: the distance is real but it
+  was computed over fewer local tracks than the album holds (#1063). A refusal
+  counts whether it fires when the file is OPENED (EACCES on the private tree)
+  or MID-READ (the EIO/ESTALE this deployment's nested virtiofs produces on an
+  already-open descriptor) — the two carry different evidence, and only the
+  second occurs on the live mount. The rule runs both ways: a name the errno
+  PROVES is gone (`ENOENT`/`ENOTDIR` — a dangling symlink, a file unlinked
+  after the walk listed it) is not a refusal, does not set `partial_read`, and
+  leaves a folder holding only such names as `no_audio`, because that folder
+  was observed and read. A symlink loop, a socket or a driverless device node
+  proves nothing absent and therefore counts as a refusal. For a symlink loop
+  that matches what `observe_directory` reports for the same name; a socket or
+  device node never reaches it, because `observe_directory` stats rather than
+  opens and calls a successful stat of a non-directory `absent`.
 - `pipeline-cli disk-coverage` — Compare active pipeline rows with Beets library coverage.
 - `pipeline-cli force-import` — Queue a rejected download for the importer lane.
 - `pipeline-cli import-job-recovery show` — Show read-only exact evidence for one import job.

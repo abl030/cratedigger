@@ -8,13 +8,14 @@ from typing import Any, Protocol, runtime_checkable
 
 import msgspec
 
+from lib.fs_authority import DirectoryObservation
 from lib.import_queue import ImportJob
 from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_WRONG_MATCH_CLEANUP,
     wrong_match_cleanup_lock_key,
 )
 from lib.processing_paths import normalize_source_dirs
-from lib.util import resolve_failed_path
+from lib.util import observe_failed_path
 from lib.validation_envelope import (
     ValidationResultEnvelope,
     decode_validation_envelope,
@@ -53,12 +54,26 @@ class WrongMatchDeleteDB(WrongMatchSourceDB, Protocol):
 
 
 OUTCOME_DELETED = "deleted"
+OUTCOME_PATH_MISSING = "path_missing"
+"""The folder was PROVEN absent, so its stale pointer was cleared.
+
+Successful and clearing, exactly as before, but no longer reported as
+``deleted``: invariant 1 of issue #1063 says ``deleted`` means the exact
+authorized source folder was actually removed, and ``[39527] deleted``
+over an intact 445MB folder is the headline the incident quoted.
+"""
 OUTCOME_DELETE_FAILED = "delete_failed"
 OUTCOME_SKIPPED_ACTIVE_JOB = "skipped_active_job"
 OUTCOME_SKIPPED_INVALID_ROW = "skipped_invalid_row"
 OUTCOME_SKIPPED_NOT_VISIBLE = "skipped_not_visible"
 OUTCOME_SKIPPED_LOCKED = "skipped_locked"
 OUTCOME_SKIPPED_UNSAFE_PATH = "skipped_unsafe_path"
+OUTCOME_SKIPPED_PATH_UNAVAILABLE = "skipped_path_unavailable"
+"""The source could not be OBSERVED — never evidence that it is gone.
+
+Carries neither ``deleted_path`` nor ``path_missing``, keeps the DB
+pointer, and is non-success (issue #1063).
+"""
 
 GROUP_OUTCOME_DELETED = "deleted"
 GROUP_OUTCOME_EMPTY = "empty"
@@ -93,6 +108,14 @@ class WrongMatchDeleteSummary(msgspec.Struct, frozen=True):
     success: bool
     processed: int
     deleted: int
+    """Rows whose FOLDER was actually removed.
+
+    Pointer-only clears over a proven-absent folder are counted in
+    ``cleared_missing`` instead. ``deleted`` headlines the operator's
+    toast, and calling a folder we never touched "deleted" is exactly the
+    overclaim issue #1063 removed from the single-delete path.
+    """
+    cleared_missing: int
     deleted_paths: int
     cleared: int
     skipped: int
@@ -160,7 +183,14 @@ def delete_wrong_match_group(
         results.append(delete_wrong_match(db, log_id, require_visible=True))
 
     remaining = _remaining_visible_count(db, request_id)
-    deleted = sum(1 for result in results if result.success and result.cleared_rows)
+    deleted = sum(
+        1 for result in results
+        if result.success and result.cleared_rows and result.deleted_path
+    )
+    cleared_missing = sum(
+        1 for result in results
+        if result.success and result.cleared_rows and result.path_missing
+    )
     deleted_paths = sum(1 for result in results if result.deleted_path)
     cleared = sum(result.cleared_rows for result in results)
     skipped = sum(1 for result in results if result.skipped)
@@ -186,6 +216,7 @@ def delete_wrong_match_group(
         success=success,
         processed=len(results),
         deleted=deleted,
+        cleared_missing=cleared_missing,
         deleted_paths=deleted_paths,
         cleared=cleared,
         skipped=skipped,
@@ -238,7 +269,24 @@ def _delete_wrong_match(
         )
 
     candidates = _path_candidates(failed_path_hint, raw_failed_path)
-    resolved_path = _resolve_first_existing(candidates)
+    observation = _observe_first_existing(candidates)
+    if observation.indeterminate:
+        # Refuse before the lock and before any pointer write: an
+        # unreadable source is not a deletable one, and it is certainly
+        # not an absent one (issue #1063).
+        return _result(
+            download_log_id,
+            OUTCOME_SKIPPED_PATH_UNAVAILABLE,
+            request_id=request_id,
+            entry_found=True,
+            visible=True,
+            raw_failed_path=raw_failed_path,
+            failed_path_hint=failed_path_hint,
+            skipped=True,
+            reason=observation.unavailable_reason(),
+            error=observation.unavailable_reason(),
+        )
+    resolved_path = observation.path
     if resolved_path:
         candidates = _path_candidates(*candidates, resolved_path)
         unsafe_reason = unsafe_failed_import_path_reason(resolved_path)
@@ -341,6 +389,24 @@ def _delete_wrong_match(
             failed_path_hint=resolved_path or failed_path_hint,
         )
 
+    if cleanup.path_unavailable:
+        # The observation flipped under us (a mount went away, a mode
+        # changed) between the preflight above and the locked cleanup.
+        # Same rule at both sites: unreadable is not deleted and not gone.
+        return _result(
+            download_log_id,
+            OUTCOME_SKIPPED_PATH_UNAVAILABLE,
+            request_id=cleanup.request_id,
+            entry_found=cleanup.entry_found,
+            visible=True,
+            raw_failed_path=cleanup.raw_failed_path,
+            failed_path_hint=cleanup.failed_path_hint,
+            resolved_path=cleanup.resolved_path,
+            cleared_rows=cleanup.cleared_rows,
+            skipped=True,
+            reason=cleanup.error or "path_unavailable",
+            error=cleanup.error or "path_unavailable",
+        )
     if not cleanup.success or cleanup.error:
         return _result(
             download_log_id,
@@ -358,7 +424,7 @@ def _delete_wrong_match(
         )
     return _result(
         download_log_id,
-        OUTCOME_DELETED,
+        OUTCOME_PATH_MISSING if cleanup.path_missing else OUTCOME_DELETED,
         success=True,
         request_id=cleanup.request_id,
         entry_found=cleanup.entry_found,
@@ -462,12 +528,17 @@ def _path_candidates(*paths: str | None) -> list[str]:
     return result
 
 
-def _resolve_first_existing(paths: Iterable[str]) -> str | None:
+def _observe_first_existing(paths: Iterable[str]) -> DirectoryObservation:
+    """First present candidate wins; otherwise a refused probe outranks absence."""
+    refused: DirectoryObservation | None = None
+    last = DirectoryObservation(presence="absent", code="missing")
     for path in paths:
-        resolved = resolve_failed_path(path)
-        if resolved is not None:
-            return resolved
-    return None
+        last = observe_failed_path(path)
+        if last.present:
+            return last
+        if last.indeterminate and refused is None:
+            refused = last
+    return refused if refused is not None else last
 
 
 def _active_jobs(

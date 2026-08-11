@@ -3,6 +3,12 @@
 These commands deliberately have no database or mirror setup path: the web
 route remains the one execution authority and this module only preserves its
 JSON response plus the CLI's stable exit-code convention.
+
+Issue #1063 widened the set: every action that touches a protected
+quarantine path now runs here too, because the installed CLI executes as
+the invoking operator while the private ``0700`` processing tree is
+readable only by the service identity. Routing them through the
+permissioned Unix socket makes ONE identity own those filesystem facts.
 """
 
 from __future__ import annotations
@@ -12,8 +18,10 @@ import http.client
 import json
 import socket
 import sys
+import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 import msgspec
@@ -23,6 +31,42 @@ from web.request_security import CHANNEL_HEADER, CLI_CHANNEL
 DEFAULT_API_BASE = "http://127.0.0.1:8085"
 _TIMEOUT_SECONDS = 15.0
 _INTERNAL_HOST = "cratedigger.internal"
+
+# Per-command deadlines. The historical single 15s constant only ever
+# covered enqueue-shaped routes; the #1063 commands run real work inside
+# the request, and one blanket value would either time out honest work or
+# hide a wedged socket. Each value below is the work the route performs.
+TIMEOUT_ENQUEUE_SECONDS = _TIMEOUT_SECONDS
+"""Row lookups plus one INSERT (delete/upgrade/force-import/resolve-rg)."""
+
+TIMEOUT_MIRROR_SECONDS = 300.0
+"""Replace: several inline MB/Discogs mirror lookups (this deployment's
+mirror timeout is 15s per call), a Beets exact delete, Wrong Matches group
+cleanup, and staging cleanup — all before the response is written."""
+
+TIMEOUT_SOURCE_DELETE_SECONDS = 300.0
+"""One ``rmtree`` of a full album folder over virtiofs, behind an
+advisory lock that may be held by a concurrent cleanup."""
+
+TIMEOUT_GROUP_DELETE_SECONDS = 900.0
+"""The same, once per visible Wrong Matches candidate for a request."""
+
+TIMEOUT_MEASUREMENT_SECONDS = 900.0
+"""Download-log import preview: a full private snapshot copy of the album
+plus audio validation and spectral measurement, inline in the request."""
+
+TIMEOUT_FOLDER_READ_SECONDS = 180.0
+"""Beets distance: tag reads across every file in the folder plus one MB
+or Discogs mirror lookup."""
+
+TIMEOUT_POLL_SECONDS = 30.0
+"""One bulk-triage status poll; the sweep itself is unbounded by design."""
+
+_TRIAGE_POLL_INTERVAL_SECONDS = 2.0
+
+#: A transient blip on one cheap status read must not abandon the
+#: operator mid-sweep while the destructive work continues server-side.
+_TRIAGE_POLL_MAX_CONSECUTIVE_FAILURES = 5
 
 
 @dataclass(frozen=True)
@@ -45,6 +89,10 @@ ApiEndpoint = TcpApiEndpoint | UnixApiEndpoint
 class _ApiMutation(msgspec.Struct, frozen=True):
     path: str
     body: dict[str, object]
+    method: str = "POST"
+    """``GET`` reads (beets distance, triage status) share this transport
+    so there is exactly one socket/TCP client, one redirect policy, and
+    one failure vocabulary."""
 
 
 class _ApiResult(msgspec.Struct, frozen=True):
@@ -90,7 +138,19 @@ def _failure(error: str, detail: str) -> int:
     return 5
 
 
-def _exit_code(status: int) -> int:
+def _exit_code(
+    status: int,
+    exit_overrides: Mapping[int, int] | None = None,
+) -> int:
+    """Map one HTTP status onto the CLI's stable exit-code convention.
+
+    ``exit_overrides`` is how a routed command keeps the exact exit code
+    it had while it executed in-process. It never invents a mapping: each
+    entry pins one status to the code that command's own outcome table
+    already used (issue #1063).
+    """
+    if exit_overrides is not None and status in exit_overrides:
+        return exit_overrides[status]
     if 200 <= status < 300:
         return 0
     if status == 404:
@@ -102,7 +162,7 @@ def _exit_code(status: int) -> int:
     return 5
 
 
-def _post_unix(
+def _send_unix(
     endpoint: UnixApiEndpoint,
     mutation: _ApiMutation,
     *,
@@ -113,15 +173,19 @@ def _post_unix(
         timeout=timeout_seconds,
     )
     try:
+        headers = {
+            "Host": _INTERNAL_HOST,
+            CHANNEL_HEADER: CLI_CHANNEL,
+        }
+        body: bytes | None = None
+        if mutation.method != "GET":
+            body = msgspec.json.encode(mutation.body)
+            headers["Content-Type"] = "application/json"
         connection.request(
-            "POST",
+            mutation.method,
             mutation.path,
-            body=msgspec.json.encode(mutation.body),
-            headers={
-                "Host": _INTERNAL_HOST,
-                "Content-Type": "application/json",
-                CHANNEL_HEADER: CLI_CHANNEL,
-            },
+            body=body,
+            headers=headers,
         )
         response = connection.getresponse()
         return _ApiResult(status=response.status, body=response.read())
@@ -134,22 +198,27 @@ def _post(
     mutation: _ApiMutation,
     *,
     timeout_seconds: float = _TIMEOUT_SECONDS,
+    report_failure: bool = True,
 ) -> _ApiResult | None:
+    """``report_failure=False`` silences the structured stderr line for a
+    RETRIED attempt; the caller reports once when it finally gives up."""
     try:
         if isinstance(endpoint, UnixApiEndpoint):
-            return _post_unix(
+            return _send_unix(
                 endpoint,
                 mutation,
                 timeout_seconds=timeout_seconds,
             )
+        headers = {CHANNEL_HEADER: CLI_CHANNEL}
+        data: bytes | None = None
+        if mutation.method != "GET":
+            data = msgspec.json.encode(mutation.body)
+            headers["Content-Type"] = "application/json"
         request = urllib.request.Request(
             f"{endpoint.api_base.rstrip('/')}{mutation.path}",
-            data=msgspec.json.encode(mutation.body),
-            headers={
-                "Content-Type": "application/json",
-                CHANNEL_HEADER: CLI_CHANNEL,
-            },
-            method="POST",
+            data=data,
+            headers=headers,
+            method=mutation.method,
         )
         opener = urllib.request.build_opener(_NoRedirectHandler())
         with opener.open(request, timeout=timeout_seconds) as response:
@@ -158,13 +227,29 @@ def _post(
         with exc:
             return _ApiResult(status=exc.code, body=exc.read())
     except ValueError as exc:
-        _failure("api_protocol_error", str(exc))
+        _report(report_failure, "api_protocol_error", str(exc))
         return None
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        _failure("api_unavailable", str(exc))
+        _report(report_failure, "api_unavailable", str(exc))
         return None
     except http.client.HTTPException as exc:
-        _failure("api_protocol_error", str(exc))
+        _report(report_failure, "api_protocol_error", str(exc))
+        return None
+
+
+def _report(enabled: bool, error: str, detail: str) -> None:
+    if enabled:
+        _failure(error, detail)
+
+
+def _decode(
+    result: _ApiResult, *, report: bool = True,
+) -> dict[str, object] | None:
+    try:
+        return msgspec.json.decode(result.body, type=dict[str, object])
+    except (msgspec.DecodeError, msgspec.ValidationError):
+        _report(report, "api_protocol_error",
+                "API response was not a JSON object")
         return None
 
 
@@ -173,6 +258,7 @@ def _relay(
     mutation: _ApiMutation,
     *,
     timeout_seconds: float = _TIMEOUT_SECONDS,
+    exit_overrides: Mapping[int, int] | None = None,
 ) -> int:
     result = _post(
         endpoint,
@@ -181,12 +267,120 @@ def _relay(
     )
     if result is None:
         return 5
-    try:
-        msgspec.json.decode(result.body, type=dict[str, object])
-    except (msgspec.DecodeError, msgspec.ValidationError):
-        return _failure("api_protocol_error", "API response was not a JSON object")
+    if _decode(result) is None:
+        return 5
     print(result.body.decode("utf-8"))
-    return _exit_code(result.status)
+    return _exit_code(result.status, exit_overrides)
+
+
+ApiRenderer = Callable[[int, dict[str, object]], None]
+
+
+def relay_rendered(
+    endpoint: ApiEndpoint,
+    mutation: _ApiMutation,
+    *,
+    render: ApiRenderer,
+    json_output: bool,
+    timeout_seconds: float = _TIMEOUT_SECONDS,
+    exit_overrides: Mapping[int, int] | None = None,
+) -> int:
+    """Relay one canonical route and keep the command's own presentation.
+
+    The route stays the single execution authority; only rendering is
+    CLI-local, so an operator keeps the text output (and the ``--json``
+    flag) these commands have always had.
+    """
+    result = _post(endpoint, mutation, timeout_seconds=timeout_seconds)
+    if result is None:
+        return 5
+    payload = _decode(result)
+    if payload is None:
+        return 5
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        render(result.status, payload)
+    return _exit_code(result.status, exit_overrides)
+
+
+def relay_polled(
+    endpoint: ApiEndpoint,
+    start: _ApiMutation,
+    status_request: _ApiMutation,
+    *,
+    is_complete: Callable[[dict[str, object]], bool],
+    render: ApiRenderer,
+    json_output: bool,
+    completed_exit_code: Callable[[dict[str, object]], int],
+    start_timeout_seconds: float = _TIMEOUT_SECONDS,
+    poll_timeout_seconds: float = TIMEOUT_POLL_SECONDS,
+    poll_interval_seconds: float = _TRIAGE_POLL_INTERVAL_SECONDS,
+    max_consecutive_poll_failures: int = _TRIAGE_POLL_MAX_CONSECUTIVE_FAILURES,
+    sleep: Callable[[float], None] = time.sleep,
+) -> int:
+    """Start an asynchronous route, then follow it to completion.
+
+    The bulk Wrong Matches sweep runs on a web thread and answers 202
+    immediately; the operator's command has always blocked until the
+    sweep finished and then printed its summary. Polling the canonical
+    status route keeps that contract without giving the CLI a second
+    execution path. The sweep itself is deliberately unbounded — it takes
+    minutes when rows need re-measurement — so only each individual poll
+    has a deadline.
+    """
+    started = _post(endpoint, start, timeout_seconds=start_timeout_seconds)
+    if started is None:
+        return 5
+    start_payload = _decode(started)
+    if start_payload is None:
+        return 5
+    if not 200 <= started.status < 300:
+        if json_output:
+            print(json.dumps(start_payload, indent=2, sort_keys=True))
+        else:
+            render(started.status, start_payload)
+        return _exit_code(started.status)
+
+    consecutive_failures = 0
+    while True:
+        sleep(poll_interval_seconds)
+        # Only the attempt that gives up reports: retried blips would
+        # otherwise print up to five structured failures for one recovery.
+        final_attempt = (
+            consecutive_failures + 1 >= max_consecutive_poll_failures
+        )
+        polled = _post(
+            endpoint,
+            status_request,
+            timeout_seconds=poll_timeout_seconds,
+            report_failure=final_attempt,
+        )
+        payload = None if polled is None else _decode(polled, report=final_attempt)
+        if polled is None or payload is None:
+            consecutive_failures += 1
+            if consecutive_failures >= max_consecutive_poll_failures:
+                return 5
+            continue
+        consecutive_failures = 0
+        if not 200 <= polled.status < 300:
+            if json_output:
+                print(json.dumps(payload, indent=2, sort_keys=True))
+            else:
+                render(polled.status, payload)
+            return _exit_code(polled.status)
+        if is_complete(payload):
+            if json_output:
+                print(json.dumps(payload, indent=2, sort_keys=True))
+            else:
+                render(polled.status, payload)
+            return completed_exit_code(payload)
+
+
+def render_api_error(status: int, payload: Mapping[str, object]) -> None:
+    """Print the route's own refusal; used by every rendered adapter."""
+    error = payload.get("error") or payload.get("reason") or payload.get("detail")
+    print(f"  API refused ({status}): {error or 'no detail'}")
 
 
 def cmd_pipeline_delete(_db: object, args: argparse.Namespace) -> int:

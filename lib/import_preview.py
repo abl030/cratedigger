@@ -38,13 +38,16 @@ from lib.evidence_action_file import (
 )
 from lib.fs_authority import (
     FilesystemAuthorityError,
+    classify_path_errno,
     copy_opened_file,
     exclusive_relative_lock,
+    observe_directory,
     open_configured_quarantine_directory,
     open_directory_path,
     open_private_child_directory,
     open_private_processing_root,
     open_regular_relative,
+    refusal_is_indeterminate,
     remove_relative_tree,
 )
 from lib.import_execution import CancellationToken, ExecutionCancelled
@@ -2663,6 +2666,24 @@ def _measurement_decision_hint(measurement: Any) -> str:
     return "evidence_ready"
 
 
+def _refusal_is_world_failure(exc: BaseException) -> bool:
+    """Did the storage layer refuse, rather than the name being wrong?
+
+    One helper for both snapshot boundaries. A typed authority refusal
+    delegates to ``lib.fs_authority.refusal_is_indeterminate``; a bare
+    ``OSError`` escaping the snapshot is classified through the very same
+    errno table (issue #1063). That classifier returns ``None`` for a
+    code outside its ``Literal`` rather than lose its exhaustiveness
+    guard; ``is True`` keeps that unclassifiable case on the fail-safe
+    side — reported as a refusal, not as a retryable blip.
+    """
+    if isinstance(exc, FilesystemAuthorityError):
+        return refusal_is_indeterminate(exc.code) is True
+    if isinstance(exc, OSError):
+        return refusal_is_indeterminate(classify_path_errno(exc)) is True
+    return False
+
+
 def preview_import_from_path(
     db: ImportPreviewDB,
     *,
@@ -2714,7 +2735,21 @@ def preview_import_from_path(
             download_log_id=download_log_id,
             source_path=path,
         )
-    if not os.path.isdir(path):
+    observation = observe_directory(path)
+    if observation.indeterminate:
+        # Explicit-path preview under an identity that cannot traverse the
+        # private processing tree used to answer "Path not found" — a
+        # definitive negative fact it had no evidence for (issue #1063).
+        return _preview_result(
+            mode="path",
+            verdict=PREVIEW_VERDICT_UNCERTAIN,
+            decision="path_unavailable",
+            reason=f"Path could not be observed: {observation.unavailable_reason()}",
+            request_id=request_id,
+            download_log_id=download_log_id,
+            source_path=path,
+        )
+    if observation.absent:
         return _preview_result(
             mode="path",
             verdict=PREVIEW_VERDICT_UNCERTAIN,
@@ -2799,11 +2834,19 @@ def preview_import_from_path(
             )
         )
     except (FilesystemAuthorityError, OSError) as exc:
+        # A refused observation is a world failure, not a verdict about
+        # the operator's path. Saying "unauthorized" about an EACCES on
+        # our own private tree is the #1063 shape one layer down.
+        decision = (
+            "path_unavailable"
+            if _refusal_is_world_failure(exc)
+            else "path_unauthorized"
+        )
         return _preview_result(
             mode="path",
             verdict=PREVIEW_VERDICT_UNCERTAIN,
-            decision="path_unauthorized",
-            reason="path_unauthorized",
+            decision=decision,
+            reason=decision,
             detail=str(exc),
             request_id=request_id,
             download_log_id=download_log_id,
@@ -3177,11 +3220,16 @@ def preview_import_from_download_log(
             cancellation_token=cancellation_token,
         )
     except (FilesystemAuthorityError, OSError) as exc:
+        unavailable = _refusal_is_world_failure(exc)
         return _preview_result(
             mode="download_log",
             verdict=PREVIEW_VERDICT_UNCERTAIN,
-            decision="path_unauthorized",
-            reason=f"Failed path is missing or unauthorized: {raw_path}",
+            decision="path_unavailable" if unavailable else "path_unauthorized",
+            reason=(
+                f"Failed path could not be read: {raw_path}"
+                if unavailable
+                else f"Failed path is missing or unauthorized: {raw_path}"
+            ),
             detail=str(exc),
             request_id=request_id_raw,
             download_log_id=download_log_id,

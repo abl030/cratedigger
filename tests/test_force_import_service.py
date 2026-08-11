@@ -8,10 +8,10 @@ import unittest
 from types import SimpleNamespace
 
 from lib.force_import_service import (
-    FORCE_IMPORT_EXIT_CODE,
     FORCE_IMPORT_HTTP_STATUS,
     RESULT_DOWNLOAD_LOG_MISSING,
     RESULT_FAILED_PATH_MISSING,
+    RESULT_PATH_UNAVAILABLE,
     RESULT_PROCESSING_LOCKED,
     RESULT_QUEUED,
     RESULT_REQUEST_MBID_MISSING,
@@ -20,6 +20,7 @@ from lib.force_import_service import (
     ForceImportEnqueueResult,
     enqueue_force_import,
 )
+from lib.fs_authority import refusal_is_indeterminate
 from lib.import_queue import ForceImportPayload, force_import_dedupe_key
 from tests.fakes import FakePipelineDB
 from tests.helpers import handoff_automation_owner, make_request_row
@@ -27,20 +28,41 @@ from tests.helpers import handoff_automation_owner, make_request_row
 
 class TestForceImportService(unittest.TestCase):
     def test_centralized_adapter_outcome_maps(self) -> None:
-        self.assertEqual(FORCE_IMPORT_EXIT_CODE[RESULT_QUEUED], 0)
-        self.assertEqual(FORCE_IMPORT_HTTP_STATUS[RESULT_QUEUED], 202)
-        for outcome in (RESULT_DOWNLOAD_LOG_MISSING, RESULT_REQUEST_MISSING):
-            self.assertEqual(FORCE_IMPORT_EXIT_CODE[outcome], 2)
-            self.assertEqual(FORCE_IMPORT_HTTP_STATUS[outcome], 404)
-        for outcome in (
-            RESULT_REQUEST_MBID_MISSING,
-            RESULT_FAILED_PATH_MISSING,
-            RESULT_UNAUTHORIZED_PATH,
-        ):
-            self.assertEqual(FORCE_IMPORT_EXIT_CODE[outcome], 3)
-            self.assertEqual(FORCE_IMPORT_HTTP_STATUS[outcome], 422)
-        self.assertEqual(FORCE_IMPORT_EXIT_CODE[RESULT_PROCESSING_LOCKED], 4)
-        self.assertEqual(FORCE_IMPORT_HTTP_STATUS[RESULT_PROCESSING_LOCKED], 409)
+        """One table now serves both surfaces (issue #1063).
+
+        ``pipeline-cli force-import`` relays the route, so its exit code
+        is DERIVED from the status below. Pinning the derivation is what
+        proves the historical CLI mapping survived the move.
+        """
+        from scripts.pipeline_cli.api_mutations import _exit_code
+
+        expected_exit = {
+            RESULT_QUEUED: 0,
+            RESULT_DOWNLOAD_LOG_MISSING: 2,
+            RESULT_REQUEST_MISSING: 2,
+            RESULT_REQUEST_MBID_MISSING: 3,
+            RESULT_FAILED_PATH_MISSING: 3,
+            RESULT_UNAUTHORIZED_PATH: 3,
+            # New in #1063: a refused observation is retryable, so it does
+            # NOT inherit unauthorized_path's semantic 422/exit 3.
+            RESULT_PATH_UNAVAILABLE: 5,
+            RESULT_PROCESSING_LOCKED: 4,
+        }
+        expected_status = {
+            RESULT_QUEUED: 202,
+            RESULT_DOWNLOAD_LOG_MISSING: 404,
+            RESULT_REQUEST_MISSING: 404,
+            RESULT_REQUEST_MBID_MISSING: 422,
+            RESULT_FAILED_PATH_MISSING: 422,
+            RESULT_UNAUTHORIZED_PATH: 422,
+            RESULT_PATH_UNAVAILABLE: 503,
+            RESULT_PROCESSING_LOCKED: 409,
+        }
+        self.assertEqual(FORCE_IMPORT_HTTP_STATUS, expected_status)
+        for outcome, exit_code in expected_exit.items():
+            with self.subTest(outcome=outcome):
+                self.assertEqual(
+                    _exit_code(FORCE_IMPORT_HTTP_STATUS[outcome]), exit_code)
 
     def test_processing_owner_is_rejected_before_filesystem_or_enqueue(self) -> None:
         db, cfg, staging, log_id = self._world()
@@ -291,3 +313,95 @@ class TestForceImportService(unittest.TestCase):
 
         self.assertEqual(result.outcome, RESULT_UNAUTHORIZED_PATH)
         self.assertEqual(db.list_import_jobs(), [])
+
+
+class TestIndeterminateRefusalVocabulary(unittest.TestCase):
+    """Every consumer of a typed refusal keeps world-failure separate.
+
+    Issue #1063 review T2.1/T2.4: an EACCES/EIO/ESTALE refusal is not a
+    semantic complaint about the operator's input, so it must not arrive
+    as 422 ``unauthorized_path`` or as 404 ``not found``.
+    """
+
+    def test_only_storage_codes_are_indeterminate(self) -> None:
+        for code in ("open_failed", "read_failed", "write_failed"):
+            with self.subTest(code=code):
+                self.assertTrue(refusal_is_indeterminate(code))
+        for code in (
+            "unspecified", "path_escape", "unsafe_symlink", "not_a_directory",
+            "not_regular_file", "untrusted_ownership", "missing",
+        ):
+            with self.subTest(code=code):
+                self.assertFalse(refusal_is_indeterminate(code))
+
+    def test_every_declared_code_is_classified(self) -> None:
+        """The match is exhaustive: a new code cannot slip in unclassified."""
+        import typing
+
+        from lib.fs_authority import FsAuthorityCode
+
+        for code in typing.get_args(FsAuthorityCode):
+            with self.subTest(code=code):
+                self.assertIsInstance(refusal_is_indeterminate(code), bool)
+
+    def test_force_import_reports_an_unreadable_root_as_retryable(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            staging = os.path.join(root, "Incoming")
+            quarantine = os.path.join(staging, "wrong_matches")
+            album = os.path.join(quarantine, "Album")
+            os.makedirs(album)
+            cfg = SimpleNamespace(
+                beets_staging_dir=staging,
+                slskd_download_dir=os.path.join(root, "slskd"),
+                processing_dir=os.path.join(root, "processing"),
+            )
+            os.makedirs(cfg.slskd_download_dir)
+            os.makedirs(cfg.processing_dir)
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=51, mb_release_id="mbid-51",
+                artist_name="A", album_title="B"))
+            log_id = db.log_download(
+                51, outcome="rejected",
+                validation_result={"failed_path": album})
+            os.chmod(quarantine, 0o000)
+            try:
+                result = enqueue_force_import(db, cfg, log_id)
+            finally:
+                os.chmod(quarantine, 0o700)
+
+            self.assertEqual(result.outcome, RESULT_PATH_UNAVAILABLE)
+            self.assertEqual(
+                FORCE_IMPORT_HTTP_STATUS[result.outcome], 503,
+                "an unreadable world must be retryable, not a 422 semantic "
+                "complaint about the operator's input",
+            )
+            self.assertEqual(db.list_import_jobs(), [])
+
+    def test_force_import_still_reports_a_lookalike_root_as_unauthorized(
+        self,
+    ) -> None:
+        """Must still work: a real containment violation stays 422."""
+        with tempfile.TemporaryDirectory() as root:
+            staging = os.path.join(root, "Incoming")
+            album = os.path.join(staging, "failed_imports-old", "Album")
+            os.makedirs(album)
+            cfg = SimpleNamespace(
+                beets_staging_dir=staging,
+                slskd_download_dir=os.path.join(root, "slskd"),
+                processing_dir=os.path.join(root, "processing"),
+            )
+            os.makedirs(cfg.slskd_download_dir)
+            os.makedirs(cfg.processing_dir)
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=52, mb_release_id="mbid-52",
+                artist_name="A", album_title="B"))
+            log_id = db.log_download(
+                52, outcome="rejected",
+                validation_result={"failed_path": album})
+
+            result = enqueue_force_import(db, cfg, log_id)
+
+            self.assertEqual(result.outcome, RESULT_UNAUTHORIZED_PATH)
+            self.assertEqual(FORCE_IMPORT_HTTP_STATUS[result.outcome], 422)
