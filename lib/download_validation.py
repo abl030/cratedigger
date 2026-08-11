@@ -132,6 +132,9 @@ MERGE_NOT_OWNED: Final = "not_owned"
 MERGE_NO_REDIRECT: Final = "no_redirect"
 #: A merge is real, but this download is not the survivor either.
 MERGE_SURVIVOR_NOT_OFFERED: Final = "survivor_not_offered"
+#: Another process holds the per-release lock on one of the two identities the
+#: retag mutates. Nothing was attempted; the request stays runnable.
+MERGE_RELEASE_LOCKED: Final = "release_locked"
 #: The library could not be moved onto the survivor. Nothing else happens:
 #: rekeying now would make the next import land a SECOND album.
 MERGE_RETAG_NOT_READY: Final = "retag_not_ready"
@@ -146,6 +149,7 @@ type MergeRekeyStatus = Literal[
     "not_owned",
     "no_redirect",
     "survivor_not_offered",
+    "release_locked",
     "retag_not_ready",
     "rekey_refused",
     "rekeyed",
@@ -234,11 +238,31 @@ def _follow_merged_release(
     downgrade guard. Retag first, verify the library observably moved, and only
     then move the row.
 
+    **Both release locks are held across the retag and the rekey.** The retag
+    mutates TWO release identities at once — it takes the installed album away
+    from the merged-away id and files it under the survivor — and
+    ``lib/destructive_release_service.py`` fences Beets mutation per release
+    with ``RELEASE(release_id)`` from OTHER processes (the web routes and
+    ``pipeline-cli destructive``). Without both locks, an operator Bad Rip or
+    library-delete resolving "the one album at the survivor" can bind to the
+    album ``mbsync`` just retagged onto that id and delete files the operator
+    never selected. The IMPORT lock this validation already runs under stays
+    outer, preserving the documented ``IMPORT → RELEASE`` order
+    (``docs/advisory-locks.md``); the acquires are non-blocking, so contention
+    is a typed non-ready outcome, never a wait.
+
     Every failure keeps today's rejection exactly as it was and leaves the
     request runnable for the next cycle — nothing is flagged for a human
     (invariant 11). ``bv_result`` and ``album_data`` are mutated only on the
     final success, after every fallible step has already succeeded.
     """
+    from contextlib import ExitStack
+
+    from lib.pipeline_db import (
+        ADVISORY_LOCK_NAMESPACE_RELEASE,
+        release_id_to_lock_key,
+    )
+
     request_id = album_data.db_request_id
     if request_id is None:
         return MergeRekeyOutcome(MERGE_NOT_APPLICABLE, "no request row")
@@ -322,35 +346,60 @@ def _follow_merged_release(
             survivor=new_identity.release_id,
         )
 
-    retag = retag_fn(
-        ctx.cfg,
-        old_identity=old_identity,
-        new_identity=new_identity,
-    )
-    if retag.outcome not in RETAG_READY_OUTCOMES:
-        # Gate on membership, never on ``!= failed``: ``ambiguous`` is not a
-        # failure and still must not authorize a rekey.
-        return MergeRekeyOutcome(
-            MERGE_RETAG_NOT_READY,
-            f"library retag returned {retag.outcome}: {retag.detail}",
-            survivor=new_identity.release_id,
-        )
+    # Deterministic key order so two racing followers of the same merge queue
+    # behind each other identically. The acquires are ``pg_try_advisory_lock``,
+    # so a deadlock is impossible in either order; the fixed order just makes
+    # contention reproducible.
+    release_lock_keys = sorted({
+        release_id_to_lock_key(old_identity.release_id),
+        release_id_to_lock_key(new_identity.release_id),
+    })
+    with ExitStack() as release_locks:
+        for lock_key in release_lock_keys:
+            if not release_locks.enter_context(db.advisory_lock(
+                ADVISORY_LOCK_NAMESPACE_RELEASE, lock_key,
+            )):
+                return MergeRekeyOutcome(
+                    MERGE_RELEASE_LOCKED,
+                    (
+                        "another process holds the release lock covering "
+                        f"{old_identity.release_id} -> "
+                        f"{new_identity.release_id}; the library was not "
+                        "touched"
+                    ),
+                    survivor=new_identity.release_id,
+                )
 
-    if not db.update_request_release_for_merge(
-        request_id,
-        old_release_id=old_identity.release_id,
-        new_release_id=new_identity.release_id,
-        expected_import_job_id=import_job_id,
-    ):
-        return MergeRekeyOutcome(
-            MERGE_REKEY_REFUSED,
-            (
-                f"request {request_id} could not be rekeyed onto "
-                f"{new_identity.release_id}; another request may already hold "
-                "it (merging or deleting a request is an operator decision)"
-            ),
-            survivor=new_identity.release_id,
+        retag = retag_fn(
+            ctx.cfg,
+            old_identity=old_identity,
+            new_identity=new_identity,
         )
+        if retag.outcome not in RETAG_READY_OUTCOMES:
+            # Gate on membership, never on ``!= failed``: ``ambiguous`` is not
+            # a failure and still must not authorize a rekey.
+            return MergeRekeyOutcome(
+                MERGE_RETAG_NOT_READY,
+                f"library retag returned {retag.outcome}: {retag.detail}",
+                survivor=new_identity.release_id,
+            )
+
+        if not db.update_request_release_for_merge(
+            request_id,
+            old_release_id=old_identity.release_id,
+            new_release_id=new_identity.release_id,
+            expected_import_job_id=import_job_id,
+        ):
+            return MergeRekeyOutcome(
+                MERGE_REKEY_REFUSED,
+                (
+                    f"request {request_id} could not be rekeyed onto "
+                    f"{new_identity.release_id}; another request may already "
+                    "hold it (merging or deleting a request is an operator "
+                    "decision)"
+                ),
+                survivor=new_identity.release_id,
+            )
 
     album_data.mb_release_id = new_identity.release_id
     # ONE place turns a candidate into a scenario — the same function

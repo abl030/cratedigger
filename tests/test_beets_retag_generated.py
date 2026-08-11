@@ -28,6 +28,14 @@ G3  The query handed to ``mbsync`` always names the OLD identity, never the
     mutation at worst.
 G4  Both sides held never returns a ready outcome. Two installed albums that
     MusicBrainz now calls one release is the operator's decision.
+G5  Over every shape a merge can take, the retag moves the IDENTITY and not
+    one file. This one patrols the REAL ``beet mbsync`` against a REAL
+    temporary Beets library: ``mbsync`` honours ``import.move`` (which the
+    config contract pins to ``yes``) unless ``-M`` is passed, and no fake in
+    this repository models file movement — which is exactly how the missing
+    flag survived implementation, review and the whole suite. The domain is
+    finite and certified: one world per subset of path components the survivor
+    can change.
 """
 
 from __future__ import annotations
@@ -54,13 +62,28 @@ from lib.beets_retag import (
     RETAG_FAILED,
     RETAG_READY_OUTCOMES,
     RETAG_RETAGGED,
+    BeetsRetagResult,
     MbsyncRun,
+    RetagOutcome,
     mbsync_album_query,
     retag_merged_album,
 )
 from lib.release_identity import ReleaseIdentity
 from tests.fakes import FakeBeetsDB
-from tests.test_beets_retag import MERGED, NEW, OLD, SURVIVOR, library
+from tests.finite_domain import finite_generated_domain
+from tests.test_beets_retag import (
+    MERGE_SHAPES,
+    MERGED,
+    NEW,
+    OLD,
+    SIDECAR_NAME,
+    SURVIVOR,
+    MergeShape,
+    RealMbsyncObservation,
+    check_real_retag_moved_identity_only,
+    library,
+    observe_real_mbsync_retag,
+)
 
 
 @contextmanager
@@ -368,6 +391,41 @@ class TestRetagProperties(unittest.TestCase):
             self.assertNotEqual(result.outcome, RETAG_RETAGGED)
 
 
+def _verify_merge_shape_domain() -> None:
+    """Prove the G5 domain: one world per distinct rendered merge shape."""
+    rendered = {
+        (shape.albumartist, shape.album, shape.year) for shape in MERGE_SHAPES
+    }
+    if len(rendered) != len(MERGE_SHAPES):
+        raise AssertionError(
+            "merge shapes collapsed: two worlds render the same album path"
+        )
+    if len(MERGE_SHAPES) != 4:
+        raise AssertionError(
+            f"the merge-shape domain changed cardinality: {MERGE_SHAPES!r}"
+        )
+
+
+class TestRealMbsyncNeverMovesFiles(unittest.TestCase):
+    """G5 — the real command over the whole finite merge-shape domain.
+
+    Each world runs the REAL ``beet mbsync`` subprocess once (memoised by
+    ``observe_real_mbsync_retag``), so the budget is exactly the certified
+    cardinality no matter which tier schedules this module.
+    """
+
+    @finite_generated_domain(
+        cardinality=len(MERGE_SHAPES), verify=_verify_merge_shape_domain,
+    )
+    @given(shape=st.sampled_from(MERGE_SHAPES))
+    @example(shape=MERGE_SHAPES[0])
+    @example(shape=MERGE_SHAPES[-1])
+    def test_every_merge_shape_moves_the_identity_and_nothing_else(
+        self, shape: MergeShape,
+    ) -> None:
+        check_real_retag_moved_identity_only(observe_real_mbsync_retag(shape))
+
+
 class TestInvariantCheckersTripOnViolations(unittest.TestCase):
     """Every checker owes a planted violation proving it can fail."""
 
@@ -448,8 +506,55 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
                 new_before=self._unique(NEW),
             )
 
+    @staticmethod
+    def _real_observation(
+        *,
+        item_dir: str = "/library/Old Artist/1999 - Old Album",
+        entries: tuple[str, ...] = (
+            "01 Installed 1.mp3", "02 Installed 2.mp3", SIDECAR_NAME,
+        ),
+        mb_albumid: str | None = SURVIVOR,
+        outcome: RetagOutcome = RETAG_RETAGGED,
+    ) -> RealMbsyncObservation:
+        """One G5 observation, defaulting to the legitimate retag."""
+        return RealMbsyncObservation(
+            shape=MERGE_SHAPES[-1],
+            result=BeetsRetagResult(outcome=outcome, detail="planted"),
+            album_mb_albumid=mb_albumid,
+            album_title="New Album",
+            item_titles=("Survivor One", "Survivor Two"),
+            item_paths=(
+                f"{item_dir}/01 Installed 1.mp3",
+                f"{item_dir}/02 Installed 2.mp3",
+            ),
+            installed_dir_entries=tuple(sorted(entries)),
+        )
+
+    def test_a_relocated_file_is_rejected(self) -> None:
+        """The exact ``-M``-less mutant: identity moved, files moved too."""
+        with self.assertRaises(AssertionError) as caught:
+            check_real_retag_moved_identity_only(self._real_observation(
+                item_dir="/library/New Artist/2001 - New Album",
+                entries=(),
+            ))
+        self.assertIn("RELOCATED", str(caught.exception))
+
+    def test_a_pruned_sidecar_is_rejected(self) -> None:
+        with self.assertRaises(AssertionError) as caught:
+            check_real_retag_moved_identity_only(self._real_observation(
+                entries=("01 Installed 1.mp3", "02 Installed 2.mp3"),
+            ))
+        self.assertIn("sidecar", str(caught.exception))
+
+    def test_an_identity_that_never_moved_is_rejected(self) -> None:
+        with self.assertRaises(AssertionError):
+            check_real_retag_moved_identity_only(self._real_observation(
+                mb_albumid=None, outcome=RETAG_FAILED,
+            ))
+
     def test_checkers_accept_the_legitimate_retag(self) -> None:
         """Must-still-work: a real successful retag passes every checker."""
+        check_real_retag_moved_identity_only(self._real_observation())
         check_ready_only_when_rekeyable(
             RETAG_RETAGGED,
             old_after=self._missing(OLD),

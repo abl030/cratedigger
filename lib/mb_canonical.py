@@ -94,11 +94,17 @@ def configured_canonical_base() -> str | None:
 
 
 def _fetch_json(url: str) -> object:
-    """Fetch and decode one MB URL, following the merge redirect.
+    """Fetch and decode one MB URL, reporting whether it was redirected.
 
-    ``urllib`` follows the ``301`` transparently, so the response body is
-    already the survivor's document and its top-level ``id`` is the
+    ``urllib`` follows the merge ``301`` transparently, so the response body
+    is already the survivor's document and its top-level ``id`` is the
     canonical MBID. Verified live against the mirror on 2026-08-06.
+
+    ``redirected`` reports the observable fact — ``response.url`` differs
+    from the URL we asked for — and nothing more. It is TRUE for any
+    redirect the transport followed, a merge ``301`` among them; see
+    :func:`canonical_release_id` for why that is sound as a gate rather
+    than as proof.
 
     The body is read under a byte cap: a broken or hostile mirror must not
     be able to stream unbounded bytes into the sweep process.
@@ -114,14 +120,19 @@ def _fetch_json(url: str) -> object:
             f"MusicBrainz release document exceeded {_MAX_RESPONSE_BYTES} bytes"
         )
     payload = json.loads(body)
-    # A merge is proven by the REDIRECT, not by a body field. urllib
-    # rewrites ``response.url`` when it follows the 301, so a document
-    # served straight from the requested URL cannot claim a successor no
-    # matter what its ``id`` says. This mirror has served wrong bodies for
-    # adversarially-selected MBIDs from a TTL-less cache, and this lookup
-    # authorizes a RETAG of installed files plus a rekey of the request —
-    # a body field alone must never be able to point that at another
-    # release (issue #1049).
+    # A body field alone can NEVER declare a successor: a redirect must
+    # also have been observed. urllib rewrites ``response.url`` when it
+    # follows one, so a document served straight from the requested URL is
+    # gated out no matter what its ``id`` says. This is a necessary
+    # condition, not a sufficient one — ``final_url != url`` is true for
+    # any redirect the transport followed (host or scheme normalisation, a
+    # trailing slash), not only a merge 301. The sufficient half is
+    # :func:`canonical_release_id`'s ``canonical == requested`` check: a
+    # cosmetic redirect returns the same id and is rejected there. The
+    # mirror has served wrong bodies for adversarially-selected MBIDs from
+    # a TTL-less cache, and this lookup authorizes a RETAG of installed
+    # files plus a rekey of the request, so the two conditions are both
+    # required (issue #1049).
     return {"payload": payload, "redirected": final_url != url}
 
 
@@ -179,6 +190,9 @@ def canonical_release_id(
     if detect_release_source(canonical) != "musicbrainz":
         return None
     if canonical == requested:
+        # A redirect that lands on the same release id is a cosmetic one
+        # (scheme/host normalisation, a trailing slash) — not a merge. This
+        # is the half of the gate that makes "redirected" mean "merged".
         return None
     logger.info(
         "MusicBrainz canonicalizes release %s to %s", requested, canonical,

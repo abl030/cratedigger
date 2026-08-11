@@ -11,16 +11,36 @@ would miss — routing the quality decision through ``import_no_exist`` and
 silently skipping the downgrade guard on exactly the albums we already hold.
 
 So the library moves first. This module runs Beets' own ``mbsync`` — the
-command for "MusicBrainz changed its mind" — against ONE album, selected by an
-anchored regex on the old ID, and then re-reads the library to decide what
-actually happened. Only when the observable end state is "the old ID is gone
-and the new ID is uniquely held" may the caller rekey the request.
+command for "MusicBrainz changed its mind" — under an anchored query on the
+old ID, and then re-reads the library to decide what actually happened. Only
+when the observable end state is "the old ID is gone and the new ID is uniquely
+held" may the caller rekey the request.
 
-Three properties are load-bearing:
+Four properties are load-bearing:
 
 * **The query names one album.** ``mbsync`` accepts a query and will happily
   retag everything it matches. :func:`mbsync_album_query` anchors the regex so
-  it can only ever name albums filed under exactly the old ID.
+  it can only ever name albums filed under exactly the old ID. Note that
+  ``beetsplug/mbsync.py::func`` runs ``self.singletons(lib, [*query,
+  "singleton:true"], …)`` BEFORE ``self.albums(query)``: the command is two
+  passes, not one. The singleton pass keys on ``mb_trackid`` and cannot move an
+  ``mb_albumid``, and an album's items are not singletons, so the anchored
+  album query still reaches exactly one album — but the invariant is "this
+  query can only name our album", not "mbsync only looks at albums".
+* **Identity only — the files never move.** ``mbsync`` is a metadata command
+  that ALSO relocates files: ``func`` computes ``move =
+  ui.should_move(opts.move)``, which defaults to ``config['import']['move'] or
+  config['import']['copy']``, and ``lib/beets_config_contract.py`` hard-requires
+  ``import.move: yes``. With that default it calls ``item.move()`` and
+  ``album.move()``, so a merge that changes any path component (`$albumartist`,
+  `$year`, `$album`, or ``path_disambig`` — which is exactly the field family
+  that made two entries look like duplicates) would rename the album directory:
+  new Jellyfin item identities (identity is MD5 of the path) dropping the album
+  into "Recently Added", the documented Plex album-split footgun, and
+  ``Item.move()``'s vacated-directory prune deleting the ``cratedigger.json``
+  verified-lossless sidecar as ``clutter``. :func:`run_beets_mbsync` therefore
+  passes ``-M`` / ``--nomove``. We are following an identity change, not
+  reorganising the library.
 * **``mbsync``'s exit status is not evidence.** It logs-and-skips a release it
   cannot fetch and still exits 0. Nothing about the subprocess decides the
   outcome; the re-read library does.
@@ -52,10 +72,20 @@ from lib.release_identity import ReleaseIdentity
 
 log = logging.getLogger("cratedigger")
 
-#: ``mbsync`` fetches one release from the configured MusicBrainz endpoint and
-#: rewrites tags on every track. The local mirror answers in milliseconds; the
-#: bound exists so a wedged endpoint cannot stall a whole sweep.
+#: ``mbsync`` fetches one release from the configured MusicBrainz endpoint,
+#: rewrites tags on every track, and stores the album row. The local mirror
+#: answers in milliseconds; the bound exists so a wedged endpoint cannot stall
+#: a whole sweep.
 MBSYNC_TIMEOUT_SECONDS = 120
+
+#: ``-M`` is ``--nomove``: ``beetsplug/mbsync.py`` declares it as
+#: ``action="store_false", dest="move"``, and ``beets/ui/__init__.py::
+#: should_move`` returns that explicit ``False`` instead of falling back to
+#: ``import.move or import.copy`` (which our config contract pins to True).
+#: Without it, ``apply_item_changes`` calls ``item.move()`` and ``mbsync``
+#: calls ``album.move()`` — see the module docstring for what that destroys.
+#: This flag is load-bearing, not a tidiness preference.
+MBSYNC_NOMOVE_FLAG: Final = "-M"
 
 #: The library observably moved from the old ID to the new one.
 RETAG_RETAGGED: Final = "retagged"
@@ -152,14 +182,21 @@ def run_beets_mbsync(
     runner: SubprocessRunFn = sp.run,
     timeout: int = MBSYNC_TIMEOUT_SECONDS,
 ) -> MbsyncRun:
-    """Run ``mbsync`` for one query in the deployment-supplied Beets runtime.
+    """Run ``mbsync -M`` for one query in the deployment-supplied Beets runtime.
 
-    Invoked as ``<beets python> -m beets mbsync <query>``: ``python -m beets``
-    is a valid entry point in the pinned 2.13.1, and depending on a ``beet``
-    binary being on this process's PATH would silently pick up whatever beets
-    the invoking user happens to have. The interpreter and environment come
-    from ``lib/util.py::beets_subprocess_env`` — the single source of truth for
-    how a beets subprocess finds its config and interpreter.
+    Invoked as ``<beets python> -m beets mbsync -M <query>``: ``python -m
+    beets`` is a valid entry point in the pinned 2.13.1, and depending on a
+    ``beet`` binary being on this process's PATH would silently pick up
+    whatever beets the invoking user happens to have. The interpreter and
+    environment come from ``lib/util.py::beets_subprocess_env`` — the single
+    source of truth for how a beets subprocess finds its config and
+    interpreter.
+
+    ``-M`` (:data:`MBSYNC_NOMOVE_FLAG`) is not optional: without it this
+    command renames and relocates the album whenever the merge changes a path
+    component, and prunes the vacated directory's ``clutter`` — including the
+    ``cratedigger.json`` verified-lossless sidecar. We follow an identity
+    change; the files stay exactly where they are.
 
     Raises on a launch/timeout failure; :func:`retag_merged_album` turns that
     into a typed outcome after re-reading the library.
@@ -171,7 +208,7 @@ def run_beets_mbsync(
     if not python:
         raise RuntimeError("CRATEDIGGER_BEETS_PYTHON is not configured")
     proc = runner(
-        [python, "-m", "beets", "mbsync", query],
+        [python, "-m", "beets", "mbsync", MBSYNC_NOMOVE_FLAG, query],
         capture_output=True,
         timeout=timeout,
         env=env,
@@ -358,6 +395,7 @@ def retag_merged_album(
 
 
 __all__ = [
+    "MBSYNC_NOMOVE_FLAG",
     "MBSYNC_TIMEOUT_SECONDS",
     "RETAG_ALREADY_CURRENT",
     "RETAG_AMBIGUOUS",

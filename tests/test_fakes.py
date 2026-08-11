@@ -1143,6 +1143,76 @@ class TestFakePipelineDB(unittest.TestCase):
                     expected_import_job_id=7,
                 )
 
+    def test_merge_rekey_moves_the_requests_evidence_with_it(self):
+        """Production moves both tables in one transaction; so does the fake."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=41,
+            mb_release_id="merged-id",
+            status="processing",
+            active_automation_import_job_id=7,
+        ))
+        evidence = make_album_quality_evidence(mb_release_id="merged-id")
+        db.upsert_album_quality_evidence(evidence)
+        stored = db.find_album_quality_evidence(
+            mb_release_id="merged-id",
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert stored is not None and stored.id is not None
+
+        self.assertTrue(db.update_request_release_for_merge(
+            41,
+            old_release_id="merged-id",
+            new_release_id="survivor-id",
+            expected_import_job_id=7,
+        ))
+
+        self.assertIsNone(db.find_album_quality_evidence(
+            mb_release_id="merged-id",
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        ))
+        moved = db.find_album_quality_evidence(
+            mb_release_id="survivor-id",
+            snapshot_fingerprint=evidence.snapshot_fingerprint,
+        )
+        assert moved is not None
+        self.assertEqual(moved.id, stored.id)
+        by_id = db.load_album_quality_evidence_by_id(stored.id)
+        assert by_id is not None
+        self.assertEqual(by_id.mb_release_id, "survivor-id")
+
+    def test_merge_rekey_refuses_a_fingerprint_collision_at_the_survivor(self):
+        """Mirrors UNIQUE (mb_release_id, snapshot_fingerprint): nothing moves."""
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=41,
+            mb_release_id="merged-id",
+            status="processing",
+            active_automation_import_job_id=7,
+        ))
+        for release_id in ("merged-id", "survivor-id"):
+            db.upsert_album_quality_evidence(
+                make_album_quality_evidence(mb_release_id=release_id),
+            )
+        fingerprint = make_album_quality_evidence(
+            mb_release_id="merged-id",
+        ).snapshot_fingerprint
+
+        self.assertFalse(db.update_request_release_for_merge(
+            41,
+            old_release_id="merged-id",
+            new_release_id="survivor-id",
+            expected_import_job_id=7,
+        ))
+
+        self.assertEqual(db.request(41)["mb_release_id"], "merged-id")
+        self.assertIsNotNone(db.find_album_quality_evidence(
+            mb_release_id="merged-id", snapshot_fingerprint=fingerprint,
+        ))
+        self.assertIsNotNone(db.find_album_quality_evidence(
+            mb_release_id="survivor-id", snapshot_fingerprint=fingerprint,
+        ))
+
     def test_metadata_update_rejects_every_reserved_field(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=41, status="wanted"))

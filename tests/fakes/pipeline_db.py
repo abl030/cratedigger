@@ -5456,6 +5456,15 @@ class FakePipelineDB:
         automation owner is attached. A survivor already held by another
         request is production's ``UNIQUE(mb_release_id)`` violation, which
         this write reports as False rather than raising.
+
+        The request's ``album_quality_evidence`` rows move with it, in the
+        same all-or-nothing step: evidence is content-addressed by
+        ``(mb_release_id, snapshot_fingerprint)``, so leaving it at the
+        merged-away id strands the request's verified-lossless proof. A
+        fingerprint that already exists at the survivor is production's
+        ``UNIQUE (mb_release_id, snapshot_fingerprint)`` violation — reported
+        as False with nothing written, because choosing between two
+        measurements of the same bytes is not this write's decision.
         """
         if not old_release_id or not new_release_id:
             raise ValueError("merge rekey requires both release ids")
@@ -5478,6 +5487,23 @@ class FakePipelineDB:
         for other_id, other in self._requests.items():
             if other_id != request_id and other.get("mb_release_id") == new_release_id:
                 return False
+        moving = [
+            key for key in self.album_quality_evidence
+            if key[0] == old_release_id
+        ]
+        if any(
+            (new_release_id, fingerprint) in self.album_quality_evidence
+            for _, fingerprint in moving
+        ):
+            return False
+        for key in moving:
+            evidence = self.album_quality_evidence.pop(key)
+            moved = msgspec.structs.replace(
+                evidence, mb_release_id=new_release_id,
+            )
+            self.album_quality_evidence[(new_release_id, key[1])] = moved
+            if moved.id is not None:
+                self._evidence_by_id[moved.id] = moved
         row["mb_release_id"] = new_release_id
         row["updated_at"] = _utcnow()
         return True

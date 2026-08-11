@@ -43,12 +43,40 @@ final release. These checks do not establish live-catalog upgrade or downgrade
 safety. LRCLIB and unrelated external plugin behaviour are deployment-owned
 configuration, outside the compatibility promise.
 
-Cratedigger has exactly two Beets mutation lanes:
+Cratedigger has exactly three Beets mutation lanes:
 
 1. The serial importer worker drives the JSON harness for admitted imports and
    same-release duplicate replacement.
 2. An explicitly operator-authorized library deletion resolves one exact Beets
    album primary key and drives the exact-album delete child.
+3. The import-time MusicBrainz merge retag runs `beet mbsync -M` under an
+   anchored `mb_albumid::^<old-id>$` query (`lib/beets_retag.py`), from inside
+   the importer's own processing-owner session.
+
+Lane 3 is deliberately the narrowest of the three, and every clause is
+load-bearing:
+
+- **Identity only, never layout.** `-M` (`--nomove`) is mandatory. `mbsync`
+  otherwise honours `import.move` — which the config contract pins to `yes` —
+  and relocates the album whenever the merge changes a path component, minting
+  new Jellyfin item identities (identity is a hash of the path), risking the
+  documented Plex album-split footgun, and pruning the vacated directory's
+  `clutter`, which includes the `cratedigger.json` verified-lossless sidecar.
+- **One album.** The regex is anchored, so it can only name albums filed under
+  exactly the merged-away release id.
+- **Only on `mbid_not_found`, only under the exact processing owner**, and only
+  when MusicBrainz observably redirects the stored id to a survivor Beets just
+  offered as a candidate.
+- **Both `RELEASE` advisory locks are held** across the retag and the request
+  rekey, because the retag mutates two release identities at once and the
+  destructive operator lanes fence per release from other processes.
+- **The library moves before the row.** Beets keys album duplicate detection on
+  `mb_albumid`, so rekeying first would land a second album.
+
+Authority: "this was supposed to be just at import time. we go, oh, re=direct.
+re-tag and then import." and "update the request row definitely. we don't care
+about the old ID. the new ID is -the- ID" —
+https://github.com/abl030/cratedigger/issues/1059
 
 Every other Cratedigger Beets access is observational. Deployment-owned plain
 `beet` remains a powerful trusted-librarian command outside Cratedigger's

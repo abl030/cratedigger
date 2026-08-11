@@ -12,20 +12,39 @@ I6  An unconfigured process is inert, so an entry point that forgets to
     wire the base degrades to today's literal behaviour rather than to
     public MusicBrainz.
 I7  A merge is proven by the observed 301, never by a response body field.
+I8  The ``{"payload": …, "redirected": …}`` envelope every other test hands
+    to the seam is the envelope the REAL ``_fetch_json`` produces, and its
+    ``redirected`` flag really is set by a real HTTP redirect.
 
 The fetch seam is the external HTTP edge (leaf-seam mocking is sanctioned
 there). Per test-fidelity Rule B the failure fakes raise the exception
 classes ``urllib`` really raises — verified live against the mirror on
 2026-08-06, where a bogus UUID returns **400**, not 404.
+
+Per test-fidelity Rule C, the envelope those seam fakes return is not left
+as a hand-written literal: ``TestRealFetchProducesTheEnvelope`` drives the
+real ``_fetch_json`` (and the whole uninjected ``canonical_release_id``)
+against a stdlib ``http.server`` serving a real 301, a real direct 200, and
+a real oversized body — so the producer of ``redirected`` and the enforcer
+of the byte cap are exercised, not assumed.
 """
 
 from __future__ import annotations
 
 import json
+import threading
 import unittest
 import urllib.error
+from collections.abc import Iterator
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from typing import ClassVar
 
-from lib.mb_canonical import canonical_release_id
+from lib.mb_canonical import (
+    _MAX_RESPONSE_BYTES,
+    _fetch_json,
+    canonical_release_id,
+)
 
 # The live merge probed on 2026-08-06: request 316's frozen acquisition id
 # and the survivor MusicBrainz redirects it to.
@@ -188,6 +207,141 @@ class TestInertWithoutConfiguredBase(unittest.TestCase):
                     canonical_release_id(MERGED, ws2_base=base, fetch=fetch)
                 )
                 self.assertEqual(calls, [], "unconfigured base must not fetch")
+
+
+#: The release id whose document is deliberately larger than the byte cap.
+OVERSIZED = "cafecafe-0000-4000-8000-cafecafecafe"
+#: A release whose WS/2 URL redirects to itself — a cosmetic redirect, the
+#: shape a scheme/host normalisation or trailing-slash rewrite produces.
+SELF_REDIRECT = "beefbeef-0000-4000-8000-beefbeefbeef"
+
+
+class _MirrorHandler(BaseHTTPRequestHandler):
+    """A real WS/2-shaped mirror: one merge 301, direct 200s, one huge body."""
+
+    protocol_version = "HTTP/1.0"
+    received_user_agents: ClassVar[list[str]] = []
+
+    def log_message(self, format: str, *args: object) -> None:
+        del format, args  # a test server must not narrate onto stderr
+
+    def _send(self, status: int, body: bytes) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self) -> None:
+        type(self).received_user_agents.append(self.headers.get("User-Agent", ""))
+        if MERGED in self.path:
+            # Exactly what MusicBrainz does for a merged-away release.
+            self.send_response(301)
+            self.send_header(
+                "Location", f"/ws/2/release/{SURVIVOR}?fmt=json",
+            )
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if SELF_REDIRECT in self.path and "redirected=1" not in self.path:
+            self.send_response(301)
+            self.send_header(
+                "Location",
+                f"/ws/2/release/{SELF_REDIRECT}?fmt=json&redirected=1",
+            )
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if SELF_REDIRECT in self.path:
+            self._send(200, json.dumps({"id": SELF_REDIRECT}).encode())
+            return
+        if OVERSIZED in self.path:
+            filler = "x" * (_MAX_RESPONSE_BYTES + 1)
+            self._send(
+                200, json.dumps({"id": SURVIVOR, "filler": filler}).encode(),
+            )
+            return
+        release_id = self.path.split("/release/")[1].split("?")[0]
+        self._send(200, json.dumps({"id": release_id}).encode())
+
+
+@contextmanager
+def _mirror() -> Iterator[str]:
+    """Serve the handler above on a loopback port; yield its WS/2 base."""
+    _MirrorHandler.received_user_agents = []
+    server = HTTPServer(("127.0.0.1", 0), _MirrorHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address[:2]
+        yield f"http://{host}:{port}/ws/2"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+class TestRealFetchProducesTheEnvelope(unittest.TestCase):
+    """I8 — the producer of ``redirected`` and the byte cap, driven for real.
+
+    Every other test in this file injects ``fetch`` and hands the module an
+    envelope. ``_fetch_json`` is the only thing that can build one, and it
+    also enforces ``_MAX_RESPONSE_BYTES``; without this class neither line
+    would ever execute (test-fidelity Rule C).
+    """
+
+    def _url(self, base: str, release_id: str) -> str:
+        return f"{base}/release/{release_id}?fmt=json"
+
+    def test_a_real_301_sets_redirected_and_carries_the_survivor(self) -> None:
+        with _mirror() as base:
+            envelope = _fetch_json(self._url(base, MERGED))
+
+        self.assertEqual(
+            envelope, {"payload": {"id": SURVIVOR}, "redirected": True},
+        )
+        # The seam fakes' ``_redirected`` helper claims exactly this shape.
+        self.assertEqual(envelope, _redirected(SURVIVOR))
+        self.assertTrue(
+            all(
+                agent.startswith("cratedigger-canonical/")
+                for agent in _MirrorHandler.received_user_agents
+            ),
+            _MirrorHandler.received_user_agents,
+        )
+
+    def test_a_real_direct_200_leaves_redirected_false(self) -> None:
+        with _mirror() as base:
+            envelope = _fetch_json(self._url(base, CURRENT))
+
+        self.assertEqual(envelope, _not_redirected(CURRENT))
+
+    def test_an_oversized_body_is_refused_by_the_byte_cap(self) -> None:
+        with _mirror() as base, self.assertRaises(ValueError) as caught:
+            _fetch_json(self._url(base, OVERSIZED))
+
+        self.assertIn(str(_MAX_RESPONSE_BYTES), str(caught.exception))
+
+    def test_the_uninjected_resolver_follows_a_real_merge(self) -> None:
+        """The whole production path: no ``fetch`` argument anywhere."""
+        with _mirror() as base:
+            self.assertEqual(
+                canonical_release_id(MERGED, ws2_base=base), SURVIVOR,
+            )
+            self.assertIsNone(canonical_release_id(CURRENT, ws2_base=base))
+            # I5/I4 fail-open still holds over a real socket.
+            self.assertIsNone(canonical_release_id(OVERSIZED, ws2_base=base))
+
+    def test_a_cosmetic_redirect_to_the_same_id_declares_no_successor(
+        self,
+    ) -> None:
+        """``redirected`` is necessary, not sufficient: the id must differ."""
+        with _mirror() as base:
+            envelope = _fetch_json(self._url(base, SELF_REDIRECT))
+            self.assertEqual(envelope, _redirected(SELF_REDIRECT))
+            self.assertIsNone(
+                canonical_release_id(SELF_REDIRECT, ws2_base=base),
+            )
 
 
 if __name__ == "__main__":

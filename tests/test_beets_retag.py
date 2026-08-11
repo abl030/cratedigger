@@ -17,13 +17,26 @@ T4  Both sides held is the double-sided merge: fail closed, never retag.
 T5  An unreadable or incomplete Beets authority is a failure, never
     "absent". Reading it as absence would authorize a rekey that
     manufactures a duplicate pressing.
+T6  **The retag moves an identity, never a file.** ``mbsync`` is not a
+    tag-only command: ``func`` computes ``move = ui.should_move(opts.move)``,
+    defaulting to ``import.move or import.copy`` — and our config contract
+    pins ``import.move: yes`` — then relocates every item and the album.
+    ``run_beets_mbsync`` therefore passes ``-M``. This one is pinned against
+    the REAL pinned Beets in ``TestRealMbsyncMovesIdentityNotFiles``, because
+    no fake models file movement and that is exactly how the missing flag
+    survived implementation and review.
 
-The Beets read is driven by the repository's ``FakeBeetsDB``, whose
+Most of the Beets read is driven by the repository's ``FakeBeetsDB``, whose
 current-release resolver is state-derived — so the injected ``mbsync``
 mutates the fake library exactly as the real command mutates the real one,
 and the REAL ``retag_merged_album`` re-reads it. ``run_mbsync`` is injected,
 never patched: it is a definition-time default, and patching the module
-binding does not replace a captured default.
+binding does not replace a captured default. T6 is the exception: it composes
+the REAL ``retag_merged_album``, the REAL ``run_beets_mbsync`` captured
+default, the REAL ``beet mbsync`` subprocess, and the REAL ``BeetsDB``
+resolver over one real temporary library, because the invariant is about
+what the command does to a shared filesystem namespace
+(`.claude/rules/code-quality.md` § "Invariants live at the widest boundary").
 """
 
 from __future__ import annotations
@@ -37,9 +50,15 @@ import subprocess as sp
 import tempfile
 import unittest
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
+from functools import cache
+from pathlib import Path
 from unittest.mock import patch
 
-from lib.beets_db import CurrentBeetsMissing, CurrentBeetsResolution
+import yaml
+from beets import library as beets_library
+
+from lib.beets_db import BeetsDB, CurrentBeetsMissing, CurrentBeetsResolution
 from lib.beets_retag import (
     MBSYNC_TIMEOUT_SECONDS,
     RETAG_ALREADY_CURRENT,
@@ -48,6 +67,7 @@ from lib.beets_retag import (
     RETAG_NOT_HELD,
     RETAG_READY_OUTCOMES,
     RETAG_RETAGGED,
+    BeetsRetagResult,
     MbsyncRun,
     mbsync_album_query,
     retag_merged_album,
@@ -461,7 +481,7 @@ class TestRunBeetsMbsyncSeam(unittest.TestCase):
         argv, kwargs = calls[0]
         self.assertEqual(argv, [
             "/nix/store/fake-beets/bin/python3",
-            "-m", "beets", "mbsync",
+            "-m", "beets", "mbsync", "-M",
             mbsync_album_query(OLD),
         ])
         env = kwargs["env"]
@@ -504,6 +524,362 @@ class TestRunBeetsMbsyncSeam(unittest.TestCase):
         ).parameters["run_mbsync"].default
 
         self.assertIs(default, run_beets_mbsync)
+
+
+# ---------------------------------------------------------------------------
+# T6 — the real command, against a real library, on a real filesystem
+# ---------------------------------------------------------------------------
+
+#: The two recordings the fixture release carries, on both sides of the merge.
+TRACK_ONE = "11111111-1111-4111-8111-111111111111"
+TRACK_TWO = "22222222-2222-4222-8222-222222222222"
+#: The verified-lossless sidecar. It is declared ``clutter`` in the production
+#: Beets config, so ``Item.move()``'s vacated-directory prune deletes it.
+SIDECAR_NAME = "cratedigger.json"
+
+#: A real Beets metadata-source plugin. ``beets.metadata_plugins`` dispatches
+#: ``album_for_id(album_id, data_source)`` to whichever loaded plugin declares
+#: a matching ``data_source``, and ``mbsync`` reads that name off the album
+#: (defaulting to ``MusicBrainz``). This stands in for the network at the
+#: same seam the real ``musicbrainz`` plugin occupies — nothing about mbsync's
+#: own behaviour, the metadata application, or the file handling is faked.
+_METADATA_SOURCE_PLUGIN = '''\
+from beets.autotag.hooks import AlbumInfo, TrackInfo
+from beets.plugins import BeetsPlugin
+
+SURVIVOR = {survivor!r}
+TRACK_ONE = {track_one!r}
+TRACK_TWO = {track_two!r}
+ALBUMARTIST = {albumartist!r}
+ALBUM = {album!r}
+YEAR = {year!r}
+
+
+class MergedReleasePlugin(BeetsPlugin):
+    """What MusicBrainz serves for a merged-away release: the survivor."""
+
+    data_source = "MusicBrainz"
+    data_source_mismatch_penalty = 0.0
+
+    def album_for_id(self, album_id):
+        return AlbumInfo(
+            album=ALBUM,
+            album_id=SURVIVOR,
+            artist=ALBUMARTIST,
+            artist_id="33333333-3333-4333-8333-333333333333",
+            tracks=[
+                TrackInfo(
+                    title="Survivor One", track_id=TRACK_ONE,
+                    index=1, medium=1, medium_index=1,
+                ),
+                TrackInfo(
+                    title="Survivor Two", track_id=TRACK_TWO,
+                    index=2, medium=1, medium_index=2,
+                ),
+            ],
+            year=YEAR,
+            albumtype="album",
+            va=False,
+            data_source="MusicBrainz",
+        )
+
+    def track_for_id(self, track_id):
+        return None
+
+    def candidates(self, *args, **kwargs):
+        return []
+
+    def item_candidates(self, *args, **kwargs):
+        return []
+'''
+
+
+@dataclass(frozen=True)
+class MergeShape:
+    """What the survivor's metadata renders to, in path terms.
+
+    ``path_disambig`` in the production path format is
+    ``albumdisambig or releasegroupdisambig or catalognum or label or
+    str(year)`` — differing year/label/catalognum being exactly why two
+    entries looked like duplicates in the first place. So a merge routinely
+    changes ``$albumartist``, ``$year`` and ``$album``, and any one of them
+    renames the album directory.
+    """
+
+    name: str
+    albumartist: str
+    album: str
+    year: int
+
+
+#: What the library holds before the merge is followed.
+INSTALLED_SHAPE = MergeShape("installed", "Old Artist", "Old Album", 1999)
+
+#: The finite world space: every subset of path components a merge can change.
+MERGE_SHAPES: tuple[MergeShape, ...] = (
+    MergeShape("identity_only", "Old Artist", "Old Album", 1999),
+    MergeShape("year_only", "Old Artist", "Old Album", 2001),
+    MergeShape("artist_and_album", "New Artist", "New Album", 1999),
+    MergeShape("everything", "New Artist", "New Album", 2001),
+)
+
+
+@dataclass(frozen=True)
+class RealMbsyncObservation:
+    """Everything the real world looked like after one real retag."""
+
+    shape: MergeShape
+    result: BeetsRetagResult
+    album_mb_albumid: str | None
+    album_title: str | None
+    item_titles: tuple[str, ...]
+    item_paths: tuple[str, ...]
+    installed_dir_entries: tuple[str, ...]
+
+
+def _installed_dir(root: Path) -> Path:
+    return (
+        root
+        / INSTALLED_SHAPE.albumartist
+        / f"{INSTALLED_SHAPE.year} - {INSTALLED_SHAPE.album}"
+    )
+
+
+def _seed_real_beets_world(base: Path, shape: MergeShape) -> tuple[Path, Path]:
+    """Build one real Beets world: config, plugin, library DB, files."""
+    root = base / "library"
+    root.mkdir()
+    config_dir = base / "beets-config"
+    config_dir.mkdir()
+    plugin_dir = base / "beets-plugins"
+    plugin_dir.mkdir()
+    (plugin_dir / "merged_release_source.py").write_text(
+        _METADATA_SOURCE_PLUGIN.format(
+            survivor=SURVIVOR,
+            track_one=TRACK_ONE,
+            track_two=TRACK_TWO,
+            albumartist=shape.albumartist,
+            album=shape.album,
+            year=shape.year,
+        ),
+        encoding="utf-8",
+    )
+
+    album_dir = _installed_dir(root)
+    album_dir.mkdir(parents=True)
+    track_paths: list[Path] = []
+    for ordinal in (1, 2):
+        track_path = album_dir / f"{ordinal:02d} Installed {ordinal}.mp3"
+        track_path.write_bytes(b"installed audio")
+        track_paths.append(track_path)
+    (album_dir / SIDECAR_NAME).write_text(
+        '{"verified_lossless": true}', encoding="utf-8",
+    )
+
+    library_db = base / "library.db"
+    # The production path format and clutter list: this is the world whose
+    # rename would mint new Jellyfin items and prune the sidecar.
+    (config_dir / "config.yaml").write_text(
+        yaml.safe_dump({
+            "directory": str(root),
+            "library": str(library_db),
+            "pluginpath": [str(plugin_dir)],
+            "plugins": "mbsync merged_release_source",
+            "clutter": ["*.jpg", SIDECAR_NAME],
+            "import": {"move": True, "copy": False, "write": True},
+            "paths": {
+                "default": "$albumartist/$year - $album/$track $title",
+            },
+        }, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    items = [
+        beets_library.Item(
+            path=str(track_path),
+            title=f"Installed {ordinal}",
+            artist=INSTALLED_SHAPE.albumartist,
+            album=INSTALLED_SHAPE.album,
+            albumartist=INSTALLED_SHAPE.albumartist,
+            track=ordinal,
+            disc=1,
+            year=INSTALLED_SHAPE.year,
+            mb_albumid=MERGED,
+            mb_trackid=track_id,
+        )
+        for ordinal, (track_path, track_id) in enumerate(
+            zip(track_paths, (TRACK_ONE, TRACK_TWO), strict=True), start=1,
+        )
+    ]
+    lib = beets_library.Library(str(library_db), str(root))
+    album = lib.add_album(items)
+    if album.id is None:
+        raise AssertionError("seeded Beets album is missing its database id")
+    lib._close()
+
+    runtime_config = base / "config.ini"
+    beets_python = os.environ.get("CRATEDIGGER_BEETS_PYTHON", "")
+    if not beets_python:
+        raise AssertionError(
+            "CRATEDIGGER_BEETS_PYTHON is unset — run under nix-shell, which "
+            "supplies the admitted Beets interpreter"
+        )
+    runtime_config.write_text(
+        "[Beets]\n"
+        f"config_dir = {config_dir}\n"
+        f"python = {beets_python}\n",
+        encoding="utf-8",
+    )
+    return root, library_db
+
+
+@cache
+def observe_real_mbsync_retag(shape: MergeShape) -> RealMbsyncObservation:
+    """Run the REAL retag once per world; every caller reuses the answer."""
+    with tempfile.TemporaryDirectory() as raw:
+        base = Path(raw)
+        root, library_db = _seed_real_beets_world(base, shape)
+        with patch.dict(
+            os.environ,
+            {"CRATEDIGGER_RUNTIME_CONFIG": str(base / "config.ini")},
+            clear=False,
+        ), BeetsDB(str(library_db), library_root=str(root)) as beets:
+            # No ``run_mbsync=`` — the captured production default launches
+            # the real ``beet mbsync`` against the real library.
+            result = retag_merged_album(
+                beets, old_identity=OLD, new_identity=NEW,
+            )
+
+        lib = beets_library.Library(str(library_db), str(root))
+        albums = list(lib.albums(f"mb_albumid::^{re.escape(SURVIVOR)}$"))
+        album = albums[0] if len(albums) == 1 else None
+        items = list(album.items()) if album is not None else []
+        observation = RealMbsyncObservation(
+            shape=shape,
+            result=result,
+            album_mb_albumid=(
+                None if album is None else str(album.mb_albumid)
+            ),
+            album_title=None if album is None else str(album.album),
+            item_titles=tuple(str(item.title) for item in items),
+            item_paths=tuple(os.fsdecode(item.path) for item in items),
+            installed_dir_entries=tuple(sorted(
+                entry.name for entry in _installed_dir(root).iterdir()
+            )) if _installed_dir(root).exists() else (),
+        )
+        lib._close()
+        return observation
+
+
+def check_real_retag_moved_identity_only(
+    observation: RealMbsyncObservation,
+) -> None:
+    """T6 — the identity moved; not one byte of the library layout did.
+
+    Module level so the known-bad self-test can call it directly. The
+    ``-M``-less mutant fails on the layout half while passing the identity
+    half — which is precisely why the identity assertion alone is not
+    evidence.
+    """
+    if observation.result.outcome != RETAG_RETAGGED:
+        raise AssertionError(
+            f"real mbsync did not retag: {observation.result!r}"
+        )
+    if observation.album_mb_albumid != SURVIVOR:
+        raise AssertionError(
+            "the album is not filed under the survivor: "
+            f"{observation.album_mb_albumid!r}"
+        )
+    if observation.item_titles != ("Survivor One", "Survivor Two"):
+        raise AssertionError(
+            f"mbsync did not apply the survivor's metadata: "
+            f"{observation.item_titles!r}"
+        )
+    expected_dir = str(_installed_dir(
+        Path(observation.item_paths[0]).parents[2],
+    )) if observation.item_paths else ""
+    for path in observation.item_paths:
+        if os.path.dirname(path) != expected_dir:
+            raise AssertionError(
+                f"mbsync RELOCATED an installed file to {path!r}: the merge "
+                "retag follows an identity change, it does not reorganise "
+                "the library (missing -M/--nomove)"
+            )
+    if SIDECAR_NAME not in observation.installed_dir_entries:
+        raise AssertionError(
+            "the verified-lossless sidecar is gone from the album directory: "
+            f"{observation.installed_dir_entries!r} — Item.move() pruned the "
+            "vacated directory's clutter"
+        )
+    if len(observation.installed_dir_entries) != 3:
+        raise AssertionError(
+            "the album directory no longer holds exactly its two tracks and "
+            f"the sidecar: {observation.installed_dir_entries!r}"
+        )
+
+
+class TestRealMbsyncMovesIdentityNotFiles(unittest.TestCase):
+    """T6 — the real command, composed with the real guard, real filesystem.
+
+    Every other test in this file stands ``mbsync`` down to a stub that
+    mutates a dict. No stub models file movement, so the missing
+    ``-M``/``--nomove`` flag was invisible to the whole suite while the real
+    command renamed the album directory and deleted the sidecar with it.
+    """
+
+    def test_the_full_merge_shape_retags_without_touching_the_files(
+        self,
+    ) -> None:
+        """The worst case: artist, album AND year all change."""
+        observation = observe_real_mbsync_retag(MERGE_SHAPES[-1])
+
+        check_real_retag_moved_identity_only(observation)
+        # Metadata really did change underneath — the layout survived a real
+        # rename opportunity, not a no-op.
+        self.assertEqual(observation.album_title, "New Album")
+        self.assertTrue(
+            all(
+                "Old Artist" in path and "1999 - Old Album" in path
+                for path in observation.item_paths
+            ),
+            observation.item_paths,
+        )
+
+    def test_the_production_argv_carries_the_nomove_flag(self) -> None:
+        """The mechanism behind T6, pinned where a reader will find it.
+
+        ``beetsplug/mbsync.py`` declares ``-M`` as ``action="store_false",
+        dest="move"``, and ``beets/ui/__init__.py::should_move`` returns that
+        explicit False instead of falling back to ``import.move or
+        import.copy``.
+        """
+        calls: list[list[str]] = []
+
+        def runner(argv: list[str], **kwargs: object) -> sp.CompletedProcess[bytes]:
+            del kwargs
+            calls.append(argv)
+            return sp.CompletedProcess(argv, 0, b"", b"")
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "config.ini")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "[Beets]\nconfig_dir = /var/lib/cratedigger/beets\n"
+                    "python = /nix/store/fake-beets/bin/python3\n"
+                )
+            with patch.dict(
+                os.environ,
+                {"CRATEDIGGER_RUNTIME_CONFIG": path},
+                clear=False,
+            ):
+                run_beets_mbsync("mb_albumid::^x$", runner=runner)
+
+        self.assertIn("-M", calls[0])
+        self.assertLess(
+            calls[0].index("mbsync"),
+            calls[0].index("-M"),
+            "the flag must follow the subcommand it belongs to",
+        )
 
 
 if __name__ == "__main__":

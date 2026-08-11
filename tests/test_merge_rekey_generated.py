@@ -35,6 +35,17 @@ P4  The mirror is asked at most once, and only for an owned, MusicBrainz,
 P5  The request is left runnable in every branch: an active acquisition
     status, ``processing`` only while its exact owner is attached, and never
     the frozen ``replaced``. No world parks a request for a human.
+P6  The request's linked current evidence ALWAYS names the request's own
+    release id. Evidence is content-addressed by
+    ``(mb_release_id, snapshot_fingerprint)``, so a rekey that leaves it
+    behind strands the verified-lossless proof: the HAVE rebuild drops it,
+    ``_refresh_current_evidence_after_import`` returns ``identity_mismatch``,
+    and the quality gate reopens full-tier search on the import this seam
+    exists to enable.
+P7  The library retag is only ever observed with BOTH release identities'
+    ``RELEASE`` advisory locks held. The retag mutates two release identities
+    at once and the destructive operator lanes fence per release from other
+    processes; contention keeps today's rejection instead of waiting.
 """
 
 from __future__ import annotations
@@ -63,13 +74,22 @@ from lib.beets_retag import (
 )
 from lib.config import CratediggerConfig
 from lib.download_validation import _process_beets_validation
+from lib.pipeline_db import (
+    ADVISORY_LOCK_NAMESPACE_RELEASE,
+    release_id_to_lock_key,
+)
 from lib.pipeline_db._shared import REQUEST_STATUSES
-from lib.quality import ValidationResult
+from lib.quality import (
+    AudioQualityMeasurement,
+    ValidationResult,
+    VerifiedLosslessProof,
+)
 from lib.release_identity import ReleaseIdentity
 from lib.staged_album import StagedAlbum
 from tests.fakes import FakePipelineDB
 from tests.helpers import (
     handoff_automation_owner,
+    make_album_quality_evidence,
     make_ctx_with_fake_db,
     make_grab_list_entry,
     make_request_row,
@@ -116,6 +136,11 @@ _RETAG_OUTCOME_VALUES: list[RetagOutcome] = [
 ]
 RETAG_OUTCOMES = st.sampled_from(_RETAG_OUTCOME_VALUES)
 
+#: Which RELEASE advisory lock (if any) another process already holds. The
+#: destructive operator lanes take these per release from OTHER processes, so
+#: either side can be contended independently.
+RELEASE_LOCK_STATES = st.sampled_from(["free", "old_held", "new_held"])
+
 
 @contextlib.contextmanager
 def _silence_logs() -> Iterator[None]:
@@ -125,6 +150,41 @@ def _silence_logs() -> Iterator[None]:
         yield
     finally:
         logging.disable(previous)
+
+
+def _link_current_evidence(db: FakePipelineDB, release_id: str) -> None:
+    """Give the request a linked HAVE row carrying a verified-lossless proof.
+
+    ``source_path`` is deliberately the library path, never the staged
+    download folder, so this row is the request's CURRENT evidence and can
+    never be mistaken for the action's candidate evidence.
+    """
+    evidence = make_album_quality_evidence(
+        mb_release_id=release_id,
+        source_path=f"/library/{release_id}",
+        measurement=AudioQualityMeasurement(
+            min_bitrate_kbps=900,
+            avg_bitrate_kbps=950,
+            median_bitrate_kbps=940,
+            format="FLAC",
+        ),
+        codec="flac",
+        container="flac",
+        storage_format="FLAC",
+        verified_lossless_proof=VerifiedLosslessProof(
+            provenance="measured",
+            source="flac",
+            classifier="spectral_verified_lossless",
+            detail="genuine",
+        ),
+    )
+    db.upsert_album_quality_evidence(evidence)
+    stored = db.find_album_quality_evidence(
+        mb_release_id=release_id,
+        snapshot_fingerprint=evidence.snapshot_fingerprint,
+    )
+    assert stored is not None and stored.id is not None
+    assert db.set_request_current_evidence(REQUEST_ID, stored.id)
 
 
 # ---------------------------------------------------------------------------
@@ -150,21 +210,15 @@ def _taken_survivor_id(mirror_answer: str | None) -> str | None:
     return identity.release_id
 
 
-def rekey_is_authorized(
+def retag_is_authorized(
     *,
     scenario: str,
     owned: bool,
     mirror_answer: str | None,
     candidates: tuple[str, ...],
-    retag_outcome: str,
-    survivor_taken: bool,
+    release_lock_state: str,
 ) -> bool:
-    """The complete conjunction that permits moving ``mb_release_id``.
-
-    Derived from the world, independently of the production code, so a
-    production change that widens ANY term is a property failure rather than a
-    silently agreeing reimplementation.
-    """
+    """Everything that must hold before Beets may be mutated at all."""
     if scenario != "mbid_not_found" or not owned:
         return False
     identity = (
@@ -177,6 +231,33 @@ def rekey_is_authorized(
     if identity.release_id == MERGED:
         return False
     if identity.release_id not in candidates:
+        return False
+    return release_lock_state == "free"
+
+
+def rekey_is_authorized(
+    *,
+    scenario: str,
+    owned: bool,
+    mirror_answer: str | None,
+    candidates: tuple[str, ...],
+    retag_outcome: str,
+    survivor_taken: bool,
+    release_lock_state: str = "free",
+) -> bool:
+    """The complete conjunction that permits moving ``mb_release_id``.
+
+    Derived from the world, independently of the production code, so a
+    production change that widens ANY term is a property failure rather than a
+    silently agreeing reimplementation.
+    """
+    if not retag_is_authorized(
+        scenario=scenario,
+        owned=owned,
+        mirror_answer=mirror_answer,
+        candidates=candidates,
+        release_lock_state=release_lock_state,
+    ):
         return False
     if retag_outcome not in RETAG_READY_OUTCOMES:
         return False
@@ -303,6 +384,49 @@ def check_request_remains_runnable(row: Mapping[str, object] | None) -> None:
         )
 
 
+def check_current_evidence_follows_the_request(
+    *,
+    request_release_id: object,
+    evidence_release_id: str | None,
+) -> None:
+    """P6 — the linked HAVE row always names the request's own pressing."""
+    if evidence_release_id is None:
+        raise AssertionError(
+            "the request lost its linked current evidence entirely"
+        )
+    if evidence_release_id != request_release_id:
+        raise AssertionError(
+            f"the request now names {request_release_id!r} while its linked "
+            f"current evidence is still filed at {evidence_release_id!r} — "
+            "the verified-lossless proof is stranded, the HAVE rebuild will "
+            "drop it, and the quality gate will reopen full-tier search"
+        )
+
+
+def check_retag_ran_under_both_release_locks(
+    observed_locks: list[tuple[tuple[int, int], ...]],
+    *,
+    survivor: str | None,
+) -> None:
+    """P7 — Beets is only mutated with both release identities fenced."""
+    if not observed_locks:
+        return
+    if survivor is None:
+        raise AssertionError("the retag ran with no survivor identity")
+    required = {
+        (ADVISORY_LOCK_NAMESPACE_RELEASE, release_id_to_lock_key(MERGED)),
+        (ADVISORY_LOCK_NAMESPACE_RELEASE, release_id_to_lock_key(survivor)),
+    }
+    for held in observed_locks:
+        missing = required - set(held)
+        if missing:
+            raise AssertionError(
+                "the library retag mutated Beets without holding "
+                f"{sorted(missing)!r}: an operator Bad Rip or library-delete "
+                "on either identity could bind to the album being retagged"
+            )
+
+
 class _RecordingCanonical:
     def __init__(self, answer: str | None) -> None:
         self._answer = answer
@@ -314,12 +438,13 @@ class _RecordingCanonical:
 
 
 class _RecordingRetag:
-    """Reports one outcome and snapshots the row it ran under (P3)."""
+    """Reports one outcome and snapshots the world it ran under (P3, P7)."""
 
     def __init__(self, db: FakePipelineDB, outcome: RetagOutcome) -> None:
         self._db = db
         self._outcome: RetagOutcome = outcome
         self.observed_release_ids: list[str | None] = []
+        self.observed_locks: list[tuple[tuple[int, int], ...]] = []
 
     def __call__(
         self,
@@ -333,6 +458,7 @@ class _RecordingRetag:
         self.observed_release_ids.append(
             None if row is None else row.get("mb_release_id"),
         )
+        self.observed_locks.append(tuple(self._db.advisory_lock_calls))
         return BeetsRetagResult(outcome=self._outcome, detail="generated world")
 
 
@@ -374,28 +500,29 @@ class TestMergeRekeyProperties(unittest.TestCase):
         retag_outcome=RETAG_OUTCOMES,
         owned=st.booleans(),
         survivor_taken=st.booleans(),
+        release_lock_state=RELEASE_LOCK_STATES,
     )
     # The DICE world (request 346), the ordering-critical world, and the two
     # that motivated the READY-membership gate.
     @example(
         scenario="mbid_not_found", mirror_answer=SURVIVOR,
         candidates=(SURVIVOR,), retag_outcome=RETAG_RETAGGED,
-        owned=True, survivor_taken=False,
+        owned=True, survivor_taken=False, release_lock_state="free",
     )
     @example(
         scenario="mbid_not_found", mirror_answer=SURVIVOR,
         candidates=(SURVIVOR,), retag_outcome=RETAG_AMBIGUOUS,
-        owned=True, survivor_taken=False,
+        owned=True, survivor_taken=False, release_lock_state="free",
     )
     @example(
         scenario="mbid_not_found", mirror_answer=SURVIVOR,
         candidates=(SURVIVOR,), retag_outcome=RETAG_RETAGGED,
-        owned=True, survivor_taken=True,
+        owned=True, survivor_taken=True, release_lock_state="free",
     )
     @example(
         scenario="strong_match", mirror_answer=SURVIVOR,
         candidates=(SURVIVOR,), retag_outcome=RETAG_RETAGGED,
-        owned=True, survivor_taken=False,
+        owned=True, survivor_taken=False, release_lock_state="free",
     )
     # Shrunk by the 2026-08-11 fuzz burst: the survivor is an arbitrary MB id
     # rather than the fixture's constant, and a rival request holds THAT id.
@@ -403,7 +530,20 @@ class TestMergeRekeyProperties(unittest.TestCase):
     @example(
         scenario="mbid_not_found", mirror_answer=UNRELATED,
         candidates=(UNRELATED,), retag_outcome=RETAG_RETAGGED,
-        owned=True, survivor_taken=True,
+        owned=True, survivor_taken=True, release_lock_state="free",
+    )
+    # An operator destructive action already fences each identity in turn:
+    # the survivor's lock is the one a Bad Rip on "the album at the survivor"
+    # would hold while ``mbsync`` was mid-retag.
+    @example(
+        scenario="mbid_not_found", mirror_answer=SURVIVOR,
+        candidates=(SURVIVOR,), retag_outcome=RETAG_RETAGGED,
+        owned=True, survivor_taken=False, release_lock_state="new_held",
+    )
+    @example(
+        scenario="mbid_not_found", mirror_answer=SURVIVOR,
+        candidates=(SURVIVOR,), retag_outcome=RETAG_RETAGGED,
+        owned=True, survivor_taken=False, release_lock_state="old_held",
     )
     def test_every_world_upholds_the_merge_rekey_invariants(
         self,
@@ -413,6 +553,7 @@ class TestMergeRekeyProperties(unittest.TestCase):
         retag_outcome: RetagOutcome,
         owned: bool,
         survivor_taken: bool,
+        release_lock_state: str,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             with open(os.path.join(tmpdir, "01 - Track.mp3"), "wb") as handle:
@@ -450,6 +591,27 @@ class TestMergeRekeyProperties(unittest.TestCase):
                 ).id
             else:
                 import_job_id = 4242
+            # P6: the request always carries a linked HAVE row with a proof.
+            # Whatever the seam does to the identity, the evidence must end up
+            # naming the same pressing the request does.
+            _link_current_evidence(db, MERGED)
+            # P7: another process may already hold either release lock.
+            survivor_id = _taken_survivor_id(mirror_answer)
+            held_key = {
+                "free": None,
+                "old_held": release_id_to_lock_key(MERGED),
+                "new_held": (
+                    None if survivor_id is None
+                    else release_id_to_lock_key(survivor_id)
+                ),
+            }[release_lock_state]
+            if held_key is not None:
+                db.set_advisory_lock_result(
+                    lambda namespace, key, held_key=held_key: not (
+                        namespace == ADVISORY_LOCK_NAMESPACE_RELEASE
+                        and key == held_key
+                    )
+                )
             cfg = CratediggerConfig(
                 beets_harness_path="/nix/store/fake/harness.sh",
                 beets_distance_threshold=0.15,
@@ -489,6 +651,16 @@ class TestMergeRekeyProperties(unittest.TestCase):
                 )
 
             row_after = dict(db.request(REQUEST_ID) or {})
+            current_evidence_id = db.get_request_current_evidence_id(REQUEST_ID)
+            linked_evidence = (
+                db.load_album_quality_evidence_by_id(current_evidence_id)
+                if current_evidence_id is not None
+                else None
+            )
+            evidence_release_after = (
+                None if linked_evidence is None
+                else linked_evidence.mb_release_id
+            )
 
         authorized = rekey_is_authorized(
             scenario=scenario,
@@ -497,6 +669,7 @@ class TestMergeRekeyProperties(unittest.TestCase):
             candidates=candidates,
             retag_outcome=retag_outcome,
             survivor_taken=survivor_taken,
+            release_lock_state=release_lock_state,
         )
         check_row_moves_only_when_authorized(
             row_after.get("mb_release_id"),
@@ -520,6 +693,25 @@ class TestMergeRekeyProperties(unittest.TestCase):
             canonical.calls, scenario=scenario, owned=owned,
         )
         check_request_remains_runnable(row_after)
+        check_current_evidence_follows_the_request(
+            request_release_id=row_after.get("mb_release_id"),
+            evidence_release_id=evidence_release_after,
+        )
+        check_retag_ran_under_both_release_locks(
+            retag.observed_locks,
+            survivor=_taken_survivor_id(mirror_answer),
+        )
+        if not retag_is_authorized(
+            scenario=scenario,
+            owned=owned,
+            mirror_answer=mirror_answer,
+            candidates=candidates,
+            release_lock_state=release_lock_state,
+        ) and retag.observed_locks:
+            raise AssertionError(
+                "the library was retagged in a world that authorized no "
+                "Beets mutation at all"
+            )
 
 
 def _rejection_fingerprint(result: ValidationResult) -> str:
@@ -539,6 +731,7 @@ def _authorized(
     candidates: tuple[str, ...] = (SURVIVOR,),
     retag_outcome: RetagOutcome = RETAG_RETAGGED,
     survivor_taken: bool = False,
+    release_lock_state: str = "free",
 ) -> bool:
     """The fully authorized DICE world, with one term widened at a time."""
     return rekey_is_authorized(
@@ -548,6 +741,14 @@ def _authorized(
         candidates=candidates,
         retag_outcome=retag_outcome,
         survivor_taken=survivor_taken,
+        release_lock_state=release_lock_state,
+    )
+
+
+def _both_release_locks() -> tuple[tuple[int, int], ...]:
+    return (
+        (ADVISORY_LOCK_NAMESPACE_RELEASE, release_id_to_lock_key(MERGED)),
+        (ADVISORY_LOCK_NAMESPACE_RELEASE, release_id_to_lock_key(SURVIVOR)),
     )
 
 
@@ -653,13 +854,60 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             ("ambiguous retag", _authorized(retag_outcome=RETAG_AMBIGUOUS)),
             ("failed retag", _authorized(retag_outcome=RETAG_FAILED)),
             ("survivor already held", _authorized(survivor_taken=True)),
+            (
+                "old release lock contended",
+                _authorized(release_lock_state="old_held"),
+            ),
+            (
+                "survivor release lock contended",
+                _authorized(release_lock_state="new_held"),
+            ),
         )
         for label, authorized in widened:
             with self.subTest(widened=label):
                 self.assertFalse(authorized)
 
+    def test_stranded_current_evidence_is_rejected(self) -> None:
+        """P6 known-bad: the row moved and its evidence did not."""
+        with self.assertRaises(AssertionError) as caught:
+            check_current_evidence_follows_the_request(
+                request_release_id=SURVIVOR, evidence_release_id=MERGED,
+            )
+        self.assertIn("stranded", str(caught.exception))
+
+    def test_a_request_with_no_linked_evidence_is_rejected(self) -> None:
+        with self.assertRaises(AssertionError):
+            check_current_evidence_follows_the_request(
+                request_release_id=SURVIVOR, evidence_release_id=None,
+            )
+
+    def test_a_retag_without_the_survivor_lock_is_rejected(self) -> None:
+        """P7 known-bad: exactly the state before the RELEASE fence."""
+        with self.assertRaises(AssertionError) as caught:
+            check_retag_ran_under_both_release_locks(
+                [(_both_release_locks()[0],)], survivor=SURVIVOR,
+            )
+        self.assertIn("without holding", str(caught.exception))
+
+    def test_a_retag_without_the_merged_away_lock_is_rejected(self) -> None:
+        with self.assertRaises(AssertionError):
+            check_retag_ran_under_both_release_locks(
+                [(_both_release_locks()[1],)], survivor=SURVIVOR,
+            )
+
+    def test_a_retag_holding_no_release_lock_at_all_is_rejected(self) -> None:
+        with self.assertRaises(AssertionError):
+            check_retag_ran_under_both_release_locks([()], survivor=SURVIVOR)
+
     def test_checkers_accept_the_legitimate_dice_rekey(self) -> None:
         """Must-still-work: the real fix passes every checker."""
+        check_current_evidence_follows_the_request(
+            request_release_id=SURVIVOR, evidence_release_id=SURVIVOR,
+        )
+        check_retag_ran_under_both_release_locks(
+            [_both_release_locks()], survivor=SURVIVOR,
+        )
+        check_retag_ran_under_both_release_locks([], survivor=None)
         check_row_moves_only_when_authorized(
             SURVIVOR, authorized=True, expected_survivor=SURVIVOR,
         )
