@@ -1234,6 +1234,109 @@ console.log('maybeLoadWrongMatchExplorer() surfaces a 503 refusal reason instead
     'the retry affordance survives');
 }
 
+console.log('maybeLoadWrongMatchExplorer() treats a PARTIAL listing as repairable too');
+{
+  // Issue #1063 / N1. The server only says `unavailable` when NOTHING was
+  // readable, so a partial listing — some files read, some refused —
+  // answers `ok`. It was therefore cached as loaded and rendered no
+  // Retry: the operator saw the amber notice, fixed the permission, and
+  // still needed a full page reload. Exactly the complaint C2 raised,
+  // unfixed for the case that actually has partial evidence.
+  installStorage();
+  const dom = installDom();
+  const mount = { innerHTML: '' };
+  const elements = new Map([['wm-explorer-202', mount]]);
+  globalThis.document.getElementById = (id) => {
+    if (id === 'wrong-matches-content') return dom.wrongMatches;
+    if (id === 'toast') return dom.toast;
+    return elements.get(id) || null;
+  };
+  const calls = [];
+  let refused = true;
+  globalThis.fetch = async (url) => ({
+    ok: (calls.push(String(url)), true),
+    status: 200,
+    json: async () => (refused ? {
+      status: 'ok',
+      download_log_id: 202,
+      folder_name: 'Album',
+      source_dirs: [],
+      audio_file_count: 1,
+      other_file_count: 0,
+      partial: true,
+      truncated_reason: null,
+      unreadable_entry_count: 1,
+      unreadable_reason: '02.flac: cannot open 02.flac: Permission denied',
+      ordered_by: 'folder',
+      files: [{
+        relative_path: '01.flac', filename: '01.flac', format: 'FLAC',
+        playable: false, size_bytes: 10, tags: {},
+      }],
+    } : {
+      status: 'ok',
+      download_log_id: 202,
+      folder_name: 'Album',
+      source_dirs: [],
+      audio_file_count: 2,
+      other_file_count: 0,
+      partial: false,
+      truncated_reason: null,
+      unreadable_entry_count: 0,
+      unreadable_reason: null,
+      ordered_by: 'folder',
+      files: [{
+        relative_path: '01.flac', filename: '01.flac', format: 'FLAC',
+        playable: false, size_bytes: 10, tags: {},
+      }, {
+        relative_path: '02.flac', filename: '02.flac', format: 'FLAC',
+        playable: false, size_bytes: 10, tags: {},
+      }],
+    }),
+  });
+
+  await __test__.maybeLoadWrongMatchExplorer(202, { open: true });
+  assert(mount.innerHTML.includes('1 entry could not be read'),
+    'the partial listing names its refusal');
+  assert(mount.innerHTML.includes('1 track in surviving folder'),
+    'the partial listing still lists what it could read');
+  assert(mount.innerHTML.includes('Retry'),
+    'a PARTIAL listing offers a retry, not only an empty one');
+  assert(mount.innerHTML.includes('window.reloadWrongMatchExplorer(202)'),
+    'the partial listing retry re-reads THIS entry');
+
+  // The operator repairs the world; the retry must show the repair.
+  refused = false;
+  await __test__.reloadWrongMatchExplorer(202);
+  assertEqual(calls.length, 2, 'the retry re-reads the folder');
+  assert(!mount.innerHTML.includes('could not be read'),
+    'the repaired listing drops the refusal notice');
+  assert(mount.innerHTML.includes('2 tracks in surviving folder'),
+    'the repaired listing shows the previously-refused track');
+  assert(!mount.innerHTML.includes('Retry'),
+    'a complete listing needs no retry');
+
+  // …and a complete listing IS cached again.
+  await __test__.maybeLoadWrongMatchExplorer(202, { open: true });
+  assertEqual(calls.length, 2,
+    'a complete listing is cached, so reopening does not re-fetch');
+}
+
+console.log('explorerListingIsRepairable() keys off refusals, not status');
+{
+  assert(__test__.explorerListingIsRepairable(
+    { status: 'ok', unreadable_entry_count: 1 }),
+    'a partial ok listing is repairable');
+  assert(__test__.explorerListingIsRepairable(
+    { status: 'unavailable', unreadable_entry_count: 0 }),
+    'an unavailable listing is repairable');
+  assert(!__test__.explorerListingIsRepairable(
+    { status: 'ok', unreadable_entry_count: 0 }),
+    'a complete listing is not repairable');
+  assert(!__test__.explorerListingIsRepairable(
+    { status: 'ok', unreadable_entry_count: 0, truncated_reason: 'file_limit' }),
+    'a truncated listing is not repairable — retrying hits the same limit');
+}
+
 console.log('renderWrongMatchExplorer() must still work: a complete listing claims nothing');
 {
   const html = __test__.renderWrongMatchExplorer({

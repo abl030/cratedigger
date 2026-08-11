@@ -779,6 +779,22 @@ class TestExplorerRefusalHonestyGenerated(unittest.TestCase):
                 payload={**pre_fix, "unreadable_entry_count": 1,
                          "partial": True, "status": "unavailable"},
             )
+        # The ``vanished`` world's own mutant: an entry the errno PROVES
+        # is gone, counted as one we were refused. That is what
+        # ``if refusal_is_indeterminate(exc.code) is True:`` → ``if True:``
+        # produces in ``build_wrong_match_explorer``, and no other world
+        # in ``ENTRY_WORLDS`` can reach it.
+        with self.assertRaises(AssertionError):
+            assert_explorer_listing_is_honest(
+                worlds=["vanished"],
+                payload={**pre_fix, "unreadable_entry_count": 1,
+                         "partial": True, "status": "unavailable",
+                         "unreadable_reason": "02 dangling.mp3: ELOOP"},
+            )
+        # Must still work: the honest answer for that same world.
+        assert_explorer_listing_is_honest(
+            worlds=["vanished"], payload=pre_fix,
+        )
         # Fail-closed the other way: an honest complete listing must pass.
         assert_explorer_listing_is_honest(
             worlds=["readable_audio"],
@@ -1004,6 +1020,20 @@ class TestExplorerReachesTheOperatorGenerated(unittest.TestCase):
                 payload={"status": "ok", "unreadable_entry_count": 0},
                 html="<div>1 entry could not be read</div>",
             )
+        # 4b. The ``vanished`` world's own mutant, at the browser: an
+        #     entry proven gone, rendered to the operator as one the
+        #     server was refused.
+        with self.assertRaises(AssertionError):
+            assert_browser_told_the_truth(
+                worlds=["vanished"],
+                payload={"status": "unavailable", "unreadable_entry_count": 1},
+                html="<div>1 entry could not be read</div>",
+            )
+        assert_browser_told_the_truth(
+            worlds=["vanished"],
+            payload={"status": "ok", "unreadable_entry_count": 0},
+            html="<div>No audio files found in this folder.</div>",
+        )
         assert_browser_told_the_truth(
             worlds=["readable_audio"],
             payload={"status": "ok", "unreadable_entry_count": 0},
@@ -1028,7 +1058,19 @@ class TestExplorerReachesTheOperatorGenerated(unittest.TestCase):
 
 DISTANCE_FILE_WORLDS: tuple[str, ...] = (
     "readable",
+    # EACCES at OPEN. Its ``OSError`` carries the filename.
     "refused",
+    # EIO on an ALREADY-OPEN descriptor — the nested-virtiofs shape this
+    # deployment really runs on, and the world whose absence hid a defect
+    # through a pin, a property and six reviews. ``FileIO.read`` attaches
+    # no filename, so the errno and the filename land on DIFFERENT links
+    # of the wrapped chain and no single link carries both.
+    "refused_mid_read",
+    # EACCES on a SUBDIRECTORY, which fails in ``os.walk``'s ``onerror``
+    # rather than on a file. That is the third of the three sites
+    # ``_refusal_text`` owns, and the sweep for this round found it was
+    # the one no world could reach.
+    "refused_dir",
     # A dangling symlink: the walk LISTS the name, ``os.stat`` answers
     # ENOENT. The file is PROVEN not to be there — the one errno that
     # earns a definitive negative. Without this world the "refused
@@ -1062,7 +1104,15 @@ def assert_distance_read_is_honest(
 ) -> None:
     """A distance never hides a refusal, and never invents one."""
     readable = sum(1 for world in worlds if world == "readable")
-    refused = sum(1 for world in worlds if world == "refused")
+    # Both refusal PRODUCERS count the same — that equality is the point.
+    # ``refused`` is EACCES at open (errno + filename on one link);
+    # ``refused_mid_read`` is EIO on an open descriptor (errno and
+    # filename on different links). Only the second occurs on this
+    # deployment's mount, and it is the one the guard used to drop.
+    refused = sum(
+        1 for world in worlds
+        if world in ("refused", "refused_mid_read", "refused_dir")
+    )
     if refused and readable == 0 and outcome == "no_audio":
         raise AssertionError(
             f"worlds {list(worlds)} reported no_audio — a definitive "
@@ -1145,6 +1195,12 @@ class TestDistanceReadRefusalGenerated(unittest.TestCase):
     @example(worlds=["readable", "absent"])
     @example(worlds=["absent"])
     @example(worlds=["absent", "refused"])
+    @example(worlds=["refused_mid_read"])
+    @example(worlds=["readable", "refused_mid_read"])
+    @example(worlds=["refused_mid_read", "absent"])
+    @example(worlds=["refused_mid_read", "unparseable"])
+    @example(worlds=["refused_dir"])
+    @example(worlds=["readable", "refused_dir"])
     @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
     @given(worlds=st.lists(
         st.sampled_from(DISTANCE_FILE_WORLDS), min_size=1, max_size=3,
@@ -1170,6 +1226,20 @@ class TestDistanceReadRefusalGenerated(unittest.TestCase):
                     os.symlink(os.path.join(album, f"{index:02d} gone.flac"),
                                path)
                     continue
+                if world == "refused_mid_read":
+                    # Opens and stats fine; every read answers EIO. The
+                    # deployment's real virtiofs shape, no flaky mount
+                    # required.
+                    os.symlink("/proc/self/mem", path)
+                    continue
+                if world == "refused_dir":
+                    # The walk's ``onerror`` leg: a subdirectory we may
+                    # not descend into.
+                    subdir = os.path.join(album, f"{index:02d} disc")
+                    os.makedirs(subdir)
+                    os.chmod(subdir, 0o000)
+                    locked.append(subdir)
+                    continue
                 shutil.copy(self.FIXTURE_FLAC, path)
                 if world == "refused":
                     os.chmod(path, 0o000)
@@ -1190,7 +1260,7 @@ class TestDistanceReadRefusalGenerated(unittest.TestCase):
                 )
             finally:
                 for path in locked:
-                    os.chmod(path, 0o600)
+                    os.chmod(path, 0o700 if os.path.isdir(path) else 0o600)
 
         assert_distance_read_is_honest(
             worlds=worlds,

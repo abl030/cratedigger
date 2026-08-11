@@ -202,11 +202,18 @@ inside socket authorization, never credentials.
   `folder_unavailable` (exit 5), never `folder_missing`/`no_audio`. When only
   PART of the folder could be read, the outcome stays `ok` and the render
   prints a `PARTIAL READ` block naming the refusal: the distance is real but it
-  was computed over fewer local tracks than the album holds (#1063). The rule
-  runs both ways — a name the errno PROVES is gone (a dangling symlink, a file
-  unlinked after the walk listed it) is not a refusal, does not set
-  `partial_read`, and leaves a folder holding only such names as `no_audio`,
-  because that folder was observed and read.
+  was computed over fewer local tracks than the album holds (#1063). A refusal
+  counts whether it fires when the file is OPENED (EACCES on the private tree)
+  or MID-READ (the EIO/ESTALE this deployment's nested virtiofs produces on an
+  already-open descriptor) — the two carry different evidence, and only the
+  second occurs on the live mount. The rule runs both ways: a name the errno
+  PROVES is gone (`ENOENT`/`ENOTDIR` — a dangling symlink, a file unlinked
+  after the walk listed it) is not a refusal, does not set `partial_read`, and
+  leaves a folder holding only such names as `no_audio`, because that folder
+  was observed and read. A symlink loop, a socket or a driverless device node
+  proves nothing absent and therefore counts as a refusal, matching what
+  `observe_directory` says about the same errno at the other end of the
+  request.
 - `pipeline-cli disk-coverage` — Compare active pipeline rows with Beets library coverage.
 - `pipeline-cli force-import` — Queue a rejected download for the importer lane.
 - `pipeline-cli import-job-recovery show` — Show read-only exact evidence for one import job.

@@ -69,8 +69,8 @@ from beets.autotag import match as _beets_match_mod
 from lib.fs_authority import (
     DirectoryObservation,
     classify_path_errno,
-    indeterminate_os_refusal,
-    refusal_is_indeterminate,
+    errno_proves_absence,
+    os_refusal_in_chain,
 )
 from lib.validation_envelope import decode_validation_envelope
 
@@ -247,19 +247,23 @@ def _refusal_text(path: str, exc: OSError) -> str | None:
 
     The single owner of that question for every site in this module that
     can record a read refusal — the walk's ``onerror``, the per-file
-    ``stat``, and the tag read. ``None`` means the errno established a
-    FACT about the name rather than failing to observe it: ``ENOENT`` and
-    ``ENOTDIR`` say the file is genuinely not there (a vanished file, a
-    dangling symlink), and issue #1063's rule cuts both ways —
-    laundering a proven absence into a refusal is the same lie told
-    backwards. It reaches the operator as an amber ``· incomplete
+    ``stat``, and the tag read. ``None`` means the errno POSITIVELY
+    established that the name holds nothing (``ENOENT``, ``ENOTDIR``: a
+    vanished file, a dangling symlink), and issue #1063's rule cuts both
+    ways — laundering a proven absence into a refusal is the same lie
+    told backwards. It reaches the operator as an amber ``· incomplete
     manifest`` badge over a manifest that is complete.
 
-    Everything else is the storage failing to answer, and travels as a
-    refusal. Classification is :func:`classify_path_errno` +
-    :func:`refusal_is_indeterminate`, exactly as everywhere else.
+    The predicate is :func:`errno_proves_absence`, NOT
+    ``refusal_is_indeterminate(...) is not True``. The latter asks
+    whether a refusal is retryable and answers ``False`` for a symlink
+    loop, a socket and a driverless device node — none of which prove
+    anything is absent. Keying off it silently dropped ``ELOOP`` here
+    while :func:`observe_directory` called the same errno indeterminate
+    for the folder, so the two ends of one request disagreed. Everything
+    that is not a proven absence travels as a refusal.
     """
-    if refusal_is_indeterminate(classify_path_errno(exc)) is not True:
+    if errno_proves_absence(classify_path_errno(exc)):
         return None
     return f"{path}: {exc.strerror}"
 
@@ -331,7 +335,7 @@ def _fingerprint_file(path: str) -> _FileRead:
     try:
         item = _item_from_path(path)
     except Exception as exc:  # noqa: BLE001 — beets raises a mediafile mess
-        refused = indeterminate_os_refusal(exc, subject=path)
+        refused = os_refusal_in_chain(exc, subject=path)
         if refused is not None:
             log.warning(
                 "beets_distance: tag read REFUSED for %s: %s", path, refused)

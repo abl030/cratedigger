@@ -574,10 +574,13 @@ depends on.
   is unreadable rather than empty — explicitly "this is NOT evidence that the
   folder is empty". `web/js/wrong-matches.js` renders both `ok` and
   `unavailable` payloads; a refusal of the whole root is a 503 whose reason is
-  shown next to the Retry button. An `unavailable` listing carries its own
-  Retry and is deliberately NOT cached: the operator is expected to go and fix
-  the permission, and only a complete listing is worth remembering for the rest
-  of the page session.
+  shown next to the Retry button. **Any listing that recorded a refusal —
+  `unavailable`, or a PARTIAL `ok` listing that read some files and was refused
+  others — carries a Retry on its refusal notice and is deliberately NOT
+  cached**: the operator is expected to go and fix the permission, and only a
+  listing with nothing left to repair is worth remembering for the rest of the
+  page session. A `truncated_reason` listing stays cached, because retrying
+  hits the same limit.
 - **Replace picker distance badge** — each pressing row carries the best
   beets-distance against the request's Wrong Matches folders. When the service
   was refused part of a folder, the response's `partial_read` is set and the

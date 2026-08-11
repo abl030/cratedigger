@@ -237,6 +237,24 @@ DirectoryPresence = Literal["present", "absent", "indeterminate"]
 _ABSENCE_CODES: frozenset[FsAuthorityCode] = frozenset({"missing", "not_a_directory"})
 
 
+def errno_proves_absence(code: FsAuthorityCode) -> bool:
+    """Did this refusal POSITIVELY establish that the name holds nothing?
+
+    The single owner of the ABSENCE question — a different question from
+    :func:`refusal_is_indeterminate`, which asks whether a refusal is a
+    retryable world failure. The two are not complements, and treating
+    them as if they were is how ``ELOOP``/``ENXIO``/``ENODEV`` fell
+    through a consumer's absence test: ``refusal_is_indeterminate`` says
+    ``False`` for a symlink loop because it is a containment verdict, not
+    a sick mount — but ``False`` there means "not a world failure", never
+    "proved absent". :func:`observe_directory` has always keyed off
+    :data:`_ABSENCE_CODES`; every consumer that decides "is this name
+    provably empty" must key off the same set, or the two ends of one
+    request disagree about the same errno.
+    """
+    return code in _ABSENCE_CODES
+
+
 def refusal_is_indeterminate(code: FsAuthorityCode) -> bool | None:
     """Is this refusal a WORLD failure rather than a verdict about the name?
 
@@ -273,7 +291,7 @@ def refusal_is_indeterminate(code: FsAuthorityCode) -> bool | None:
             return False
 
 
-def indeterminate_os_refusal(
+def os_refusal_in_chain(
     exc: BaseException, *, subject: str,
 ) -> OSError | None:
     """Find the storage refusal hiding inside a third-party exception.
@@ -284,29 +302,39 @@ def indeterminate_os_refusal(
     as ``ReadError`` — so ``except OSError`` never fires and an EACCES
     file is indistinguishable from a corrupt one. The originating error
     survives on the explicit ``__cause__`` / implicit ``__context__``
-    chain; this walks it and returns the first ``OSError`` that both
-    names ``subject`` and carries an errno
-    :func:`classify_path_errno` + :func:`refusal_is_indeterminate` call a
-    world failure (issue #1063).
+    chain; this walks it and returns the first ``OSError`` that is
+    compatible with ``subject`` and whose errno
+    :func:`errno_proves_absence` does NOT call a proven absence (issue
+    #1063).
+
+    Named for what it finds, not for :func:`refusal_is_indeterminate`:
+    that predicate answers a different question (is this refusal
+    retryable) and calls a symlink loop ``False``, which would silently
+    drop ``ELOOP``/``ENXIO``/``ENODEV`` here while
+    :func:`observe_directory` calls the very same errno indeterminate at
+    the other end of the request.
 
     A corrupt, truncated or unsupported file carries no ``OSError``
     anywhere on that chain and returns ``None``: "this file's tags are
     garbage" is a fact ABOUT the file, and reporting it as a refusal
     would re-launder the very distinction this module exists to keep.
 
-    ``subject`` is REQUIRED, and the match is on the errno's own
-    ``filename``. Python sets ``__context__`` implicitly to whatever
-    exception is being handled anywhere up the stack, so a caller that
-    reads a corrupt file from inside an ``except OSError:`` block finds
-    that unrelated error on the chain — and reporting it produces a
-    refusal message with the wrong errno and someone else's filename.
-    A refusal is a claim about ONE file; an error that does not name
-    that file is not evidence for it. Every refusal this deployment
-    really produces carries its filename (mutagen's ``PermissionError``
-    does; ``tests/test_beets_distance.py``'s
-    ``test_real_refusal_carries_its_filename`` pins that against the
-    installed stack, so an upgrade that stopped attaching it fails loudly
-    rather than degrading every refusal into ``no_audio``).
+    ``subject`` is REQUIRED, and the match is deliberately
+    "names ``subject``, or names nothing". Python sets ``__context__``
+    implicitly to whatever exception is being handled anywhere up the
+    stack, so a caller that reads a corrupt file from inside an
+    ``except OSError:`` block finds that unrelated error on the chain,
+    and reporting it produces a refusal message with the wrong errno and
+    someone else's filename. But requiring a filename is the wrong
+    correction, because **only ``open()`` attaches one**: the shape this
+    deployment actually produces is a MID-READ ``EIO``/``ESTALE`` on an
+    already-open descriptor, where the errno and the filename land on
+    two DIFFERENT links of the chain and no single link carries both.
+    Demanding both on one link regressed exactly the live case into
+    ``no_audio``. An error that names a different file is not evidence
+    about this one; an error that names nothing is the storage failing
+    mid-read, and the module's doctrine is to fail toward "refusal"
+    rather than toward a definitive negative.
 
     Termination is the ``seen`` set, not a depth cap: each step either
     stops or records a new exception object, and the chain is finite. A
@@ -314,14 +342,26 @@ def indeterminate_os_refusal(
     walk fails toward "no refusal found" — the ``no_audio`` side, which
     is the #1063-violating one.
     """
+    def names_something_else(name: object) -> bool:
+        # beets works in ``syspath`` bytes internally, so an errno raised
+        # from its own os call can carry a bytes filename. Comparing that
+        # to a str subject would never match, and a non-match here fails
+        # toward "no refusal found" — the unsafe direction.
+        if name is None:
+            return False
+        if isinstance(name, (str, bytes)):
+            return os.fsdecode(name) != subject
+        return True
+
     seen: set[int] = set()
     current: BaseException | None = exc
     while current is not None and id(current) not in seen:
         seen.add(id(current))
         if (
             isinstance(current, OSError)
-            and subject in (current.filename, current.filename2)
-            and refusal_is_indeterminate(classify_path_errno(current)) is True
+            and not names_something_else(current.filename)
+            and not names_something_else(current.filename2)
+            and not errno_proves_absence(classify_path_errno(current))
         ):
             return current
         # ``raise X from None`` means the author explicitly disowned the

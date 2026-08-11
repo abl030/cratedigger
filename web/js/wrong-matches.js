@@ -280,8 +280,18 @@ function renderWrongMatchExplorer(data) {
   const truncatedNotice = data?.truncated_reason
     ? `<div style="color:#e5a84b;font-size:0.76em;margin:6px 0;">Partial explorer result: ${esc(truncatedReason)} reached.</div>`
     : '';
+  // A refused listing describes a world the operator can REPAIR (fix the
+  // mode, remount the share), so the notice carries its own Retry. It
+  // rides on the NOTICE, not on the empty-state branch: a PARTIAL listing
+  // — some files read, some refused — renders the notice above a real
+  // track list and is exactly as repairable, but it answers
+  // ``status: "ok"`` and so never reached the empty branch (issue #1063).
+  const retryId = Number(data?.download_log_id);
+  const retry = Number.isFinite(retryId)
+    ? ` <button class="p-btn" style="margin-left:6px;" onclick="event.stopPropagation(); window.reloadWrongMatchExplorer(${retryId})">Retry</button>`
+    : '';
   const unreadableNotice = unreadableCount > 0
-    ? `<div style="color:#d9a441;font-size:0.76em;margin:6px 0;">${unreadableCount} entr${unreadableCount === 1 ? 'y' : 'ies'} could not be read — this listing is incomplete and nothing here is confirmed missing.${unreadableReason ? ` (${esc(unreadableReason)})` : ''}</div>`
+    ? `<div style="color:#d9a441;font-size:0.76em;margin:6px 0;">${unreadableCount} entr${unreadableCount === 1 ? 'y' : 'ies'} could not be read — this listing is incomplete and nothing here is confirmed missing.${unreadableReason ? ` (${esc(unreadableReason)})` : ''}${retry}</div>`
     : '';
   const partialNotice = `${truncatedNotice}${unreadableNotice}`;
   let summary = '';
@@ -307,15 +317,7 @@ function renderWrongMatchExplorer(data) {
         ? 'No audio files were found before exploration was truncated.'
         : 'No audio files found in this folder.';
     const emptyColour = unreadableCount > 0 ? '#d9a441' : '#666';
-    // An unreadable folder is a world the operator can REPAIR (fix the
-    // mode, remount the share). Without a Retry the only way to see the
-    // repair was a full page reload, because the panel caches its loaded
-    // state \u2014 the pre-fix error path at least offered one (issue #1063).
-    const retryId = Number(data?.download_log_id);
-    const retry = (unreadableCount > 0 && Number.isFinite(retryId))
-      ? ` <button class="p-btn" style="margin-left:6px;" onclick="event.stopPropagation(); window.reloadWrongMatchExplorer(${retryId})">Retry</button>`
-      : '';
-    return `${summary}${partialNotice}<div style="color:${emptyColour};font-size:0.78em;padding:8px 0;">${emptyText}${retry}</div>`;
+    return `${summary}${partialNotice}<div style="color:${emptyColour};font-size:0.78em;padding:8px 0;">${emptyText}</div>`;
   }
 
   let html = `
@@ -345,6 +347,26 @@ function renderWrongMatchExplorer(data) {
 const EXPLORER_RENDERABLE_STATUSES = new Set(['ok', 'unavailable']);
 
 /**
+ * Did the server record a refusal the operator could go and repair?
+ *
+ * Keyed on the refusal COUNT, not on `status`: the server only says
+ * `unavailable` when NOTHING was readable, so a partial listing — some
+ * files read, some refused — answers `ok` while being exactly as
+ * repairable. Caching that state meant the operator fixed the permission
+ * and still needed a full page reload to see it (issue #1063).
+ *
+ * A `truncated_reason` is deliberately NOT repairable: retrying hits the
+ * same limit, so a truncated listing stays cached.
+ *
+ * @param {any} data
+ * @returns {boolean}
+ */
+function explorerListingIsRepairable(data) {
+  return Number(data?.unreadable_entry_count) > 0
+    || data?.status === 'unavailable';
+}
+
+/**
  * @param {number} logId
  * @returns {Promise<void>}
  */
@@ -369,14 +391,15 @@ async function ensureWrongMatchExplorer(logId) {
       throw new Error(data?.error || data?.message || 'Explorer load failed');
     }
     mount.innerHTML = renderWrongMatchExplorer(data);
-    // Only a COMPLETE listing is worth caching. An unavailable one
-    // describes a broken world that the operator is expected to go and
-    // fix; caching it would make reopening the disclosure short-circuit
-    // on the stale answer until the whole page is reloaded.
-    if (data.status === 'ok') {
-      _entryExplorerState.set(logId, 'loaded');
-    } else {
+    // Only a listing with nothing left to repair is worth caching. One
+    // that recorded refusals describes a broken world the operator is
+    // expected to go and fix; caching it would make reopening the
+    // disclosure short-circuit on the stale answer until the whole page
+    // is reloaded.
+    if (explorerListingIsRepairable(data)) {
       _entryExplorerState.delete(logId);
+    } else {
+      _entryExplorerState.set(logId, 'loaded');
     }
   } catch (e) {
     _entryExplorerState.delete(logId);
@@ -1448,6 +1471,7 @@ async function _pollImportJob(jobId, btn, logId) {
 
 export const __test__ = {
   EXPLORER_RENDERABLE_STATUSES,
+  explorerListingIsRepairable,
   pollImportJob: _pollImportJob,
   bulkTriageWrongMatches,
   cleanupSummaryToast,
