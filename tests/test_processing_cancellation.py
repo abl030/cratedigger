@@ -332,6 +332,18 @@ class TestPreviewCancellation(unittest.TestCase):
             self.assertTrue(os.path.exists(snapshot))
 
 
+def _refuse_db_use(token: CancellationToken) -> object:
+    """A pipeline-DB handle that must never be used in this stage."""
+    if token.cancelled:
+        raise AssertionError("DB used after cancellation")
+
+    class _Unusable:
+        def __getattr__(self, name: str) -> object:
+            raise AssertionError(f"DB used during validation: {name}")
+
+    return _Unusable()
+
+
 class TestValidationAndRejectionCancellation(unittest.TestCase):
     def test_cancellation_after_validation_prevents_the_next_stage(self) -> None:
         token = CancellationToken()
@@ -351,9 +363,11 @@ class TestValidationAndRejectionCancellation(unittest.TestCase):
                     beets_distance_threshold=0.15,
                 ),
                 pipeline_db_source=SimpleNamespace(
-                    _get_db=lambda: (_ for _ in ()).throw(
-                        AssertionError("DB used after cancellation")
-                    ),
+                    # Refuses once the token is cancelled, and hands back a
+                    # handle whose every attribute raises before that — so the
+                    # test still proves no DB WORK happens after cancellation,
+                    # and no DB work happens before it either.
+                    _get_db=lambda: _refuse_db_use(token),
                 ),
             )
 
@@ -381,6 +395,83 @@ class TestValidationAndRejectionCancellation(unittest.TestCase):
                 )
 
             self.assertTrue(os.path.exists(path))
+
+    def test_cancellation_during_validation_never_reaches_the_merge_seam(
+        self,
+    ) -> None:
+        """An execution that lost its owner mid-harness retags nothing.
+
+        The harness is the long pole in a validation, so an owner can be lost
+        while it runs. The checkpoint that catches that sits between the
+        harness and the merge seam — the first mutation — because everything
+        after it is durable: a MusicBrainz lookup, an ``mbsync`` against the
+        SHARED Beets library, and an identity write. Without it, an execution
+        with no authority left would still move another process's library.
+        """
+        token = CancellationToken()
+        mirror_calls: list[str] = []
+        retag_calls: list[tuple[str, str]] = []
+
+        def canonical(release_id: str) -> str | None:
+            mirror_calls.append(release_id)
+            return "9b59f78b-3ca6-41e1-8025-6ed4bcfad4e4"
+
+        def retag(_cfg: object, **kwargs: object) -> object:
+            retag_calls.append((
+                str(kwargs["old_identity"]), str(kwargs["new_identity"]),
+            ))
+            raise AssertionError("the shared library was retagged after cancel")
+
+        with tempfile.TemporaryDirectory() as raw:
+            path = os.path.join(raw, "album")
+            os.mkdir(path)
+            pathlib.Path(path, "01.flac").write_bytes(b"audio")
+            album = make_grab_list_entry(
+                files=[make_download_file(filename="peer\\album\\01.flac")],
+                db_request_id=42,
+                db_source="request",
+                mb_release_id="6b209cc5-62b0-4ef7-9336-c2dbd876301a",
+            )
+            ctx = SimpleNamespace(
+                cfg=SimpleNamespace(
+                    beets_harness_path="/fake/harness",
+                    beets_distance_threshold=0.15,
+                ),
+                pipeline_db_source=SimpleNamespace(
+                    _get_db=lambda: _refuse_db_use(token),
+                ),
+            )
+
+            def validate(*_args: object, **_kwargs: object) -> ValidationResult:
+                # The owner is lost while the harness runs, and the harness
+                # reports the one scenario that reaches the merge seam.
+                token.cancel("lost_during_validation")
+                return ValidationResult(
+                    valid=False,
+                    scenario="mbid_not_found",
+                    detail="Target MBID not in candidates",
+                    target_mbid="6b209cc5-62b0-4ef7-9336-c2dbd876301a",
+                )
+
+            with patch(
+                "lib.beets.beets_validate",
+                side_effect=validate,
+            ), self.assertRaisesRegex(
+                ExecutionCancelled,
+                "lost_during_validation",
+            ):
+                _process_beets_validation(
+                    album,
+                    StagedAlbum(path, request_id=42),
+                    ctx,  # pyright: ignore[reportArgumentType] - stage-only context
+                    import_job_id=7,
+                    cancellation_token=token,
+                    canonical_release_fn=canonical,
+                    retag_fn=retag,  # pyright: ignore[reportArgumentType]
+                )
+
+            self.assertEqual(mirror_calls, [])
+            self.assertEqual(retag_calls, [])
 
     def test_cancellation_before_quarantine_keeps_source_untouched(self) -> None:
         token = CancellationToken()

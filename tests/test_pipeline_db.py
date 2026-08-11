@@ -16908,6 +16908,274 @@ class TestMergeRekeyWrite(unittest.TestCase):
                 )
         self.assertEqual(self._stored_release_id(), self.MERGED)
 
+    def _collision(self):
+        return self.db.merge_rekey_collision(
+            self.request_id,
+            old_release_id=self.MERGED,
+            new_release_id=self.SURVIVOR,
+        )
+
+    def test_a_clear_survivor_reports_no_collision_and_the_write_lands(self):
+        """The pre-check and the write must agree, in real PostgreSQL (#1080).
+
+        The seam reads this BEFORE it retags the shared Beets library, so a
+        pre-check that says "clear" while the write refuses would be worse
+        than no pre-check at all: it would authorize the library mutation that
+        creates the split identity.
+        """
+        self._seed_evidence(self.MERGED, relative_path="01 Installed.flac")
+
+        collision = self._collision()
+
+        self.assertFalse(collision.blocked)
+        self.assertIsNone(collision.rival_request_id)
+        self.assertEqual(collision.colliding_fingerprints, ())
+        self.assertTrue(self.db.update_request_release_for_merge(
+            self.request_id,
+            old_release_id=self.MERGED,
+            new_release_id=self.SURVIVOR,
+            expected_import_job_id=self.job_id,
+        ))
+        self.assertEqual(self._stored_release_id(), self.SURVIVOR)
+
+    def test_a_rival_request_at_the_survivor_is_reported_before_anything_moves(
+        self,
+    ):
+        """UNIQUE(mb_release_id), knowable by a read."""
+        other = self.db.add_request(
+            mb_release_id=self.SURVIVOR,
+            artist_name="DICE",
+            album_title="Midnight Zoo (other pressing request)",
+            source="request",
+        )
+
+        collision = self._collision()
+
+        self.assertTrue(collision.blocked)
+        self.assertEqual(collision.rival_request_id, other)
+        self.assertIn(str(other), collision.detail())
+        # And the write really does refuse that world.
+        self.assertFalse(self.db.update_request_release_for_merge(
+            self.request_id,
+            old_release_id=self.MERGED,
+            new_release_id=self.SURVIVOR,
+            expected_import_job_id=self.job_id,
+        ))
+        self.assertEqual(self._stored_release_id(), self.MERGED)
+
+    def test_a_frozen_replaced_rival_still_blocks_the_rekey(self):
+        """``album_requests.mb_release_id`` is UNIQUE with no status filter.
+
+        A frozen audit ancestor occupies the survivor exactly as a live
+        request does, so the pre-check must not filter by status — filtering
+        would report "clear" for a world the write refuses, which is the one
+        answer that authorizes a library mutation it should not.
+        """
+        rival = self.db.add_request(
+            mb_release_id=self.SURVIVOR,
+            artist_name="DICE",
+            album_title="Midnight Zoo (ancestor)",
+            source="request",
+        )
+        self.db.supersede_request_mbid(
+            rival,
+            new_mb_release_id="7777aaaa-8888-4888-8888-999999999999",
+            new_mb_release_group_id=None,
+            new_mb_artist_id=None,
+            new_artist_name="DICE",
+            new_album_title="Midnight Zoo",
+            new_year=None,
+            new_country=None,
+            new_tracks=[],
+        )
+        frozen = self.db.get_request(rival)
+        assert frozen is not None
+        self.assertEqual(frozen["status"], "replaced")
+        self.assertEqual(frozen["mb_release_id"], self.SURVIVOR)
+
+        collision = self._collision()
+
+        self.assertTrue(collision.blocked)
+        self.assertEqual(collision.rival_request_id, rival)
+        self.assertFalse(self.db.update_request_release_for_merge(
+            self.request_id,
+            old_release_id=self.MERGED,
+            new_release_id=self.SURVIVOR,
+            expected_import_job_id=self.job_id,
+        ))
+        self.assertEqual(self._stored_release_id(), self.MERGED)
+
+    def test_a_fingerprint_already_at_the_survivor_is_reported(self):
+        """UNIQUE(mb_release_id, snapshot_fingerprint), knowable by a read."""
+        _, fingerprint = self._seed_evidence(
+            self.MERGED, relative_path="01 Installed.flac",
+        )
+        _, colliding = self._seed_evidence(
+            self.SURVIVOR, relative_path="01 Installed.flac",
+        )
+        self.assertEqual(colliding, fingerprint)
+        # A fingerprint that exists only on ONE side is not a collision.
+        self._seed_evidence(self.MERGED, relative_path="01 Candidate.flac")
+        self._seed_evidence(self.SURVIVOR, relative_path="01 Neighbour.flac")
+
+        collision = self._collision()
+
+        self.assertTrue(collision.blocked)
+        self.assertIsNone(collision.rival_request_id)
+        self.assertEqual(collision.colliding_fingerprints, (fingerprint,))
+        self.assertFalse(self.db.update_request_release_for_merge(
+            self.request_id,
+            old_release_id=self.MERGED,
+            new_release_id=self.SURVIVOR,
+            expected_import_job_id=self.job_id,
+        ))
+        self.assertEqual(self._stored_release_id(), self.MERGED)
+
+
+@requires_postgres
+class TestMergeRekeyUnderAForceClaim(unittest.TestCase):
+    """The force lane's arm of the merge-rekey fence, in real PostgreSQL (#1080).
+
+    Force import is the same path as any other import with the Beets distance
+    overridden, so it follows a MusicBrainz merge through the same seam. It
+    cannot hold the ``processing`` owner pointer — migration 066 reserves that
+    for one active ``automation_import`` job — so the identity write's fence
+    admits the OTHER production claim instead:
+    ``claim_force_import_job_under_lock``'s exact request predicate plus a
+    ``running`` force job on this request.
+
+    Rule A: every case here asserts the persisted column, not a return value.
+    """
+
+    MERGED = "6b209cc5-62b0-4ef7-9336-c2dbd876301a"
+    SURVIVOR = "9b59f78b-3ca6-41e1-8025-6ed4bcfad4e4"
+
+    def setUp(self) -> None:
+        self.db = make_db()
+        self.addCleanup(self.db.close)
+        self.request_id = self.db.add_request(
+            mb_release_id=self.MERGED,
+            artist_name="DICE",
+            album_title="Midnight Zoo",
+            source="request",
+        )
+        self.job_id = self._queue_force_job()
+
+    def _queue_force_job(self) -> int:
+        from lib.import_queue import force_import_dedupe_key
+
+        job = self.db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=self.request_id,
+            dedupe_key=force_import_dedupe_key(self.request_id),
+            payload=force_import_payload(
+                download_log_id=1,
+                failed_path="/quarantine/dice",
+            ),
+        )
+        self.assertIsNotNone(self.db.mark_import_job_preview_importable(
+            job.id, preview_result={}, message="force preview ready",
+        ))
+        return job.id
+
+    def _claim(self) -> None:
+        claimed = self.db.claim_force_import_job_under_lock(
+            self.job_id, request_id=self.request_id, worker_id="pg-fence-test",
+        )
+        assert claimed is not None and claimed.status == "running"
+
+    def _stored_release_id(self) -> str | None:
+        row = self.db.get_request(self.request_id)
+        assert row is not None
+        value = row["mb_release_id"]
+        return None if value is None else str(value)
+
+    def test_a_running_force_claim_rekeys_the_wanted_request(self) -> None:
+        self._claim()
+
+        self.assertTrue(self.db.update_request_release_for_merge(
+            self.request_id,
+            old_release_id=self.MERGED,
+            new_release_id=self.SURVIVOR,
+            expected_import_job_id=self.job_id,
+        ))
+
+        self.assertEqual(self._stored_release_id(), self.SURVIVOR)
+        row = self.db.get_request(self.request_id)
+        assert row is not None
+        # The lifecycle is untouched: a force import does not own the request,
+        # it only borrows the identity long enough to correct it.
+        self.assertEqual(row["status"], "wanted")
+        self.assertIsNone(row["active_automation_import_job_id"])
+
+    def test_an_unclaimed_force_job_writes_nothing(self) -> None:
+        """``queued`` is not a claim. Only the worker that took it may rekey."""
+        self.assertFalse(self.db.update_request_release_for_merge(
+            self.request_id,
+            old_release_id=self.MERGED,
+            new_release_id=self.SURVIVOR,
+            expected_import_job_id=self.job_id,
+        ))
+        self.assertEqual(self._stored_release_id(), self.MERGED)
+
+    def test_a_force_job_naming_another_request_writes_nothing(self) -> None:
+        other = self.db.add_request(
+            mb_release_id="1f1f1f1f-2222-3333-4444-555555555555",
+            artist_name="Other",
+            album_title="Other",
+            source="request",
+        )
+        self._claim()
+
+        self.assertFalse(self.db.update_request_release_for_merge(
+            other,
+            old_release_id="1f1f1f1f-2222-3333-4444-555555555555",
+            new_release_id=self.SURVIVOR,
+            expected_import_job_id=self.job_id,
+        ))
+
+        row = self.db.get_request(other)
+        assert row is not None
+        self.assertEqual(
+            row["mb_release_id"], "1f1f1f1f-2222-3333-4444-555555555555",
+        )
+
+    def test_a_replaced_row_is_never_rekeyed_by_a_force_claim(self) -> None:
+        """``replaced`` rows are frozen audit ancestors (invariant: pipeline-db).
+
+        The automation arm excluded them by construction — a frozen row is
+        never ``processing``. The force arm has to say so explicitly, because
+        every other non-``processing`` status IS a legal force target.
+        """
+        self._claim()
+        self.db.supersede_request_mbid(
+            self.request_id,
+            new_mb_release_id=self.SURVIVOR,
+            new_mb_release_group_id=None,
+            new_mb_artist_id=None,
+            new_artist_name="DICE",
+            new_album_title="Midnight Zoo",
+            new_year=None,
+            new_country=None,
+            new_tracks=[],
+        )
+        frozen = self.db.get_request(self.request_id)
+        assert frozen is not None
+        self.assertEqual(frozen["status"], "replaced")
+        frozen_release_id = str(frozen["mb_release_id"])
+
+        self.assertFalse(self.db.update_request_release_for_merge(
+            self.request_id,
+            old_release_id=frozen_release_id,
+            new_release_id="2a2a2a2a-3333-4444-8555-666666666666",
+            expected_import_job_id=self.job_id,
+        ))
+
+        still = self.db.get_request(self.request_id)
+        assert still is not None
+        self.assertEqual(still["mb_release_id"], frozen_release_id)
+        self.assertEqual(still["status"], "replaced")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -50,6 +50,7 @@ def _bootstrap_import_paths() -> None:
 _bootstrap_import_paths()
 
 from lib import transitions
+from lib.beets import FORCE_IMPORT_DISTANCE_THRESHOLD
 from lib.beets_db import AlbumInfo, BeetsDB, validate_beets_storage_pair
 from lib.media_readiness import (
     MediaReadinessError,
@@ -2024,11 +2025,17 @@ def main():
                  f"falling back to defaults")
             _rank_cfg = QualityRankConfig.defaults()
 
-    # --force: raise distance threshold so high-distance candidates are accepted
+    # --force: raise distance threshold so high-distance candidates are
+    # accepted. The same number the force path already handed to
+    # ``beets_validate`` at the validation seam, so both comparison sites in a
+    # force import run under one override rather than two conventions (#1080).
     global max_distance
     if args.force:
-        max_distance = 999
-        _log("[FORCE] Distance check disabled (max_distance=999)")
+        max_distance = FORCE_IMPORT_DISTANCE_THRESHOLD
+        _log(
+            "[FORCE] Distance check disabled "
+            f"(max_distance={FORCE_IMPORT_DISTANCE_THRESHOLD})"
+        )
 
     r = ImportResult()
     r.preview = args.dry_run

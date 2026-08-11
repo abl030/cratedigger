@@ -7,6 +7,7 @@ ValidationResult. No global state, no config dependency.
 import json
 import logging
 import subprocess as sp
+from typing import Final
 
 import msgspec
 
@@ -19,6 +20,17 @@ from lib.quality import (
 from lib.util import beets_subprocess_env
 
 logger = logging.getLogger("cratedigger")
+
+#: The Beets distance an import runs under once the operator has explicitly
+#: overridden the distance check — that is, force import. ONE number with two
+#: users, so "force import is the same path with the distance overridden"
+#: cannot drift into two conventions: ``harness/import_one.py`` raises its
+#: apply-time ``max_distance`` to it under ``--force``, and the force path
+#: hands it to :func:`beets_validate` as that validation's threshold.
+#:
+#: Effectively unbounded rather than infinite: it is only ever compared
+#: against a Beets distance, which is normalised to ``[0, 1]``.
+FORCE_IMPORT_DISTANCE_THRESHOLD: Final[float] = 999.0
 
 #: Scenario for a run that COMPLETED without error and never offered a match
 #: to review. It names the OBSERVATION — nothing was put in front of us — and

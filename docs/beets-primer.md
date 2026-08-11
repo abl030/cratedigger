@@ -51,7 +51,8 @@ Cratedigger has exactly three Beets mutation lanes:
    album primary key and drives the exact-album delete child.
 3. The import-time MusicBrainz merge retag runs `beet mbsync -M` under an
    anchored `mb_albumid::^<old-id>$` query (`lib/beets_retag.py`), from inside
-   the importer's own processing-owner session.
+   whichever importer lane holds the request's exact import claim — the
+   automation processing owner, or a claimed force-import job (#1080).
 
 Lane 3 is deliberately the narrowest of the three, and every clause is
 load-bearing:
@@ -64,14 +65,40 @@ load-bearing:
   `clutter`, which includes the `cratedigger.json` verified-lossless sidecar.
 - **One album.** The regex is anchored, so it can only name albums filed under
   exactly the merged-away release id.
-- **Only on `mbid_not_found`, only under the exact processing owner**, and only
+- **Only on `mbid_not_found`, only under an exact import claim**, and only
   when MusicBrainz observably redirects the stored id to a survivor Beets just
-  offered as a candidate.
+  offered as a candidate. Two claims qualify, and they are the two the
+  importer already takes: the automation processing owner
+  (`status='processing'` + `active_automation_import_job_id`) and a `running`
+  `force_import` job on an unowned, non-`replaced` row. Force import is the
+  same path as any other import with the Beets distance overridden, so it
+  follows a merge through the same seam (#1080).
 - **Both `RELEASE` advisory locks are held** across the retag and the request
   rekey, because the retag mutates two release identities at once and the
   destructive operator lanes fence per release from other processes.
 - **The library moves before the row.** Beets keys album duplicate detection on
   `mb_albumid`, so rekeying first would land a second album.
+- **The library is not touched until the rekey is known to be possible.** The
+  rekey write refuses in exactly two documented worlds — another request
+  already holds the survivor (`UNIQUE(mb_release_id)`, including a frozen
+  `replaced` ancestor) and an evidence row already exists at
+  `(survivor, snapshot_fingerprint)` — and both are plain reads
+  (`PipelineDB.merge_rekey_collision`), taken under the release locks
+  immediately before the retag. Retagging first and discovering the refusal
+  afterwards leaves the installed album at the survivor and the request at the
+  merged-away id; nothing re-derives that, because the next attempt reads the
+  library as already current and is refused again for the same reason. Note
+  that a curated collection deliberately holds multiple pressings per album,
+  so a rival at the survivor is a normal state, not an anomaly (invariant 5).
+- **The residual race is audited, and stops the force launch.** No lock covers
+  "another request acquires this release id", so the pre-check narrows that
+  window without closing it. If it loses, the seam records a durable
+  `download_log` row naming the split (invariant 11's Recents audit evidence,
+  not a log line), and the force lane refuses to launch Beets at the id whose
+  library album it just moved away — continuing would report the pre-#1080
+  `mbid_missing` while the library had silently moved. The request stays
+  runnable throughout; resolving two requests over one release is an operator
+  decision.
 
 Authority: "this was supposed to be just at import time. we go, oh, re=direct.
 re-tag and then import." and "update the request row definitely. we don't care
