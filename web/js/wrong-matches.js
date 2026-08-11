@@ -1573,12 +1573,26 @@ export async function deleteWrongMatchGroup(requestId, btn) {
       body: JSON.stringify({request_id: requestId}),
     });
     const data = await r.json();
-    if (r.ok && (data.status === 'ok' || data.status === 'partial')) {
+    // A non-2xx group delete is NOT "nothing happened": the route reports
+    // the worst outcome in the group, so N folders can already be gone
+    // while one was skipped. Telling the operator "failed" and leaving a
+    // stale list is the #1063 shape in the browser — always refresh, and
+    // only say "failed" when nothing was deleted (issue #1063 T3.4).
+    const summarised = Number.isFinite(Number(data.deleted));
+    if (summarised) {
+      const deleted = Number(data.deleted) || 0;
       const skipped = data.skipped ? ` · skipped ${data.skipped}` : '';
       const errors = data.errors ? ` · errors ${data.errors}` : '';
-      toast(`Deleted ${data.deleted || 0} candidates${skipped}${errors}`);
+      const remaining = data.remaining ? ` · ${data.remaining} left` : '';
+      const failed = deleted === 0;
+      toast(
+        failed
+          ? `Deleted nothing${skipped}${errors}${remaining}`
+          : `Deleted ${deleted} candidates${skipped}${errors}${remaining}`,
+        failed,
+      );
       invalidateWrongMatches();
-      if (data.status === 'ok' || (data.remaining === 0)) {
+      if (r.ok && (data.status === 'ok' || data.remaining === 0)) {
         removeWrongMatchGroup(requestId);
       } else {
         // Partial outcome: remove the rows that actually deleted, leave the
@@ -1588,10 +1602,13 @@ export async function deleteWrongMatchGroup(requestId, btn) {
             removeWrongMatchEntry(result.download_log_id);
           }
         }
+        btn.disabled = false;
+        btn.textContent = `Delete All (${count})`;
       }
     } else {
       btn.disabled = false;
       btn.textContent = `Delete All (${count})`;
+      invalidateWrongMatches();
       toast(data.error || data.message || 'Delete all failed', true);
     }
   } catch (_e) {

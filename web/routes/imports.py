@@ -71,6 +71,7 @@ from web.routes._server_access import _server
 from web.routes.pipeline import _serialize_import_job
 from web.triage_runner import TriageRunner
 from web.wrong_match_file_service import (
+    WrongMatchSourceUnavailable,
     build_wrong_match_explorer,
     resolve_wrong_match_stream_file,
     source_dirs_from_validation_result,
@@ -276,10 +277,13 @@ def _build_wrong_match_groups(
 ) -> list[dict[str, object]]:
     """Group wrong-match rejections by release (issue #113).
 
-    Each ``album_requests`` row becomes one group; every rejected
-    ``download_log`` entry with an on-disk ``failed_path`` becomes one entry
-    inside its group. Groups with zero surviving entries are dropped so the
-    UI only shows actionable work.
+    Each ``album_requests`` row becomes one group; a rejected
+    ``download_log`` entry becomes an entry inside its group when its
+    ``failed_path`` is either present on disk or UNOBSERVABLE. Only entries
+    whose folder was PROVEN absent are dropped, so a group can be dropped
+    for having no surviving entries while an entry that merely could not be
+    read stays visible, flagged ``path_unavailable`` (issue #1063 — silently
+    dropping those hid the broken world from its only operator surface).
 
     Each group also carries an on-disk quality snapshot (format, bitrate,
     verified_lossless, spectral grade, rank tier) and the most-recent
@@ -532,6 +536,10 @@ def get_wrong_match_explorer(h: RouteHandler, params: dict[str, list[str]]) -> N
             download_log_id=log_id,
             entry=entry,
         )
+    except WrongMatchSourceUnavailable as exc:
+        # Refused observation: retryable world failure, never "not found".
+        h._error(str(exc), 503)
+        return
     except FileNotFoundError as exc:
         h._error(str(exc), 404)
         return
@@ -590,6 +598,9 @@ def get_wrong_match_audio(
         )
     except ValueError as exc:
         h._error(str(exc))
+        return
+    except WrongMatchSourceUnavailable as exc:
+        h._error(str(exc), 503)
         return
     except FileNotFoundError as exc:
         h._error(str(exc), 404)
@@ -669,23 +680,39 @@ def post_wrong_match_delete(h: RouteHandler, body: dict[str, object]) -> None:
     if result.success:
         h._json({"status": "ok", **result.to_dict()})
         return
-    if result.outcome == DELETE_OUTCOME_ACTIVE_JOB:
-        h._error("active_import_job", 409)
-        return
-    if result.outcome == DELETE_OUTCOME_PATH_UNAVAILABLE:
-        # Retryable world failure, not a verdict about the folder.
-        h._error(result.reason or result.outcome, 503)
-        return
-    if result.outcome == DELETE_OUTCOME_LOCKED:
-        h._error(result.reason or result.outcome, 503)
-        return
-    if result.outcome in (DELETE_OUTCOME_INVALID_ROW, DELETE_OUTCOME_NOT_VISIBLE):
-        h._error(result.reason or result.outcome, 404)
-        return
-    if result.outcome == DELETE_OUTCOME_UNSAFE_PATH:
-        h._error(result.reason or result.outcome, 422)
-        return
-    h._error(result.error or result.reason or result.outcome, 500)
+    # Every refusal keeps the whole typed result. ``{"error": ...}`` alone
+    # cannot express "operational refusal has neither deleted_path nor
+    # path_missing and is non-success" — and the #1063 reproduction was
+    # captured with ``--json`` (issue #1063 review T3.1).
+    _wrong_match_delete_error(h, result)
+
+
+def _wrong_match_delete_error(
+    h: RouteHandler, result: WrongMatchDeleteResult,
+) -> None:
+    status = _WRONG_MATCH_DELETE_ERROR_STATUS.get(result.outcome, 500)
+    error = (
+        "active_import_job"
+        if result.outcome == DELETE_OUTCOME_ACTIVE_JOB
+        else result.error or result.reason or result.outcome
+    )
+    # Spread FIRST: the typed result carries its own ``error`` key (often
+    # ``None``), which would otherwise overwrite the message.
+    h._json(
+        {**result.to_dict(), "status": "error", "error": error},
+        status=status,
+    )
+
+
+_WRONG_MATCH_DELETE_ERROR_STATUS: dict[str, int] = {
+    DELETE_OUTCOME_ACTIVE_JOB: 409,
+    # Retryable world failures, not verdicts about the folder.
+    DELETE_OUTCOME_PATH_UNAVAILABLE: 503,
+    DELETE_OUTCOME_LOCKED: 503,
+    DELETE_OUTCOME_INVALID_ROW: 404,
+    DELETE_OUTCOME_NOT_VISIBLE: 404,
+    DELETE_OUTCOME_UNSAFE_PATH: 422,
+}
 
 
 class WrongMatchDeleteGroupRequest(BaseModel):
@@ -811,6 +838,20 @@ def post_wrong_match_converge(h: RouteHandler, body: dict[str, object]) -> None:
 
         vr = decode_validation_envelope(row.get("validation_result"))
         distance = vr.distance
+        observation = observe_failed_path(vr.failed_path or "")
+        if observation.indeterminate:
+            # Neither green nor unmatched: we cannot see this source, so
+            # we neither import it nor delete it, and the green count the
+            # operator reads must agree with that (issue #1063 T4.5 —
+            # ``web/js/wrong-matches.js::isConvergeGreen`` excludes the
+            # same entries client-side).
+            skipped.append({
+                "download_log_id": lid,
+                "reason": "path_unavailable",
+                "detail": observation.unavailable_reason(),
+            })
+            remaining += 1
+            continue
         green = _is_green_distance(vr, threshold_milli)
 
         if green:

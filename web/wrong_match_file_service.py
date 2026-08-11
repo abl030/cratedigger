@@ -19,6 +19,7 @@ from lib.fs_authority import (
     OpenedRegularFile,
     open_configured_quarantine_directory,
     open_regular_relative,
+    refusal_is_indeterminate,
 )
 from lib.json_narrow import (
     is_object_list as _is_object_list,
@@ -141,6 +142,16 @@ def source_dirs_from_validation_result(
     return normalize_source_dirs(validation_result.source_dirs)
 
 
+class WrongMatchSourceUnavailable(OSError):
+    """The storage refused to answer for a Wrong Matches source.
+
+    Its own type so the routes answer 503 instead of 404: EACCES on the
+    private tree — or the ESTALE/EIO this deployment's nested virtiofs
+    really produces — is not evidence that the files are not found
+    (issue #1063).
+    """
+
+
 @contextmanager
 def _opened_wrong_match_root(
     entry: Mapping[str, object],
@@ -155,6 +166,11 @@ def _opened_wrong_match_root(
         with open_configured_quarantine_directory(failed_path, runtime_config) as root:
             yield validation_result, root
     except FilesystemAuthorityError as exc:
+        if refusal_is_indeterminate(exc.code):
+            raise WrongMatchSourceUnavailable(
+                "Wrong-match files could not be read: "
+                f"{failed_path or '<missing>'} ({exc})",
+            ) from exc
         raise FileNotFoundError(
             f"Wrong-match files not found or unauthorized: {failed_path or '<missing>'}",
         ) from exc

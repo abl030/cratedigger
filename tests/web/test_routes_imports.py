@@ -1510,6 +1510,47 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         self.assertEqual(group["pending_count"], 1)
         self.assertEqual([e["download_log_id"] for e in group["entries"]], [20])
 
+    def test_unreadable_explorer_source_is_retryable_not_not_found(self):
+        """The explorer owes the same distinction (#1063 review T2.4).
+
+        ESTALE/EIO on this deployment's nested virtiofs, or EACCES on the
+        private tree, must not reach the operator as 404 "not found".
+        """
+        tmpdir = self.enterContext(tempfile.TemporaryDirectory())
+        quarantine = os.path.join(tmpdir, "failed_imports")
+        failed_dir = os.path.join(quarantine, "Unreadable Album")
+        os.makedirs(failed_dir)
+        log_id = self.db.log_download(
+            100, outcome="rejected",
+            validation_result={"failed_path": failed_dir},
+        )
+        os.chmod(quarantine, 0o000)
+        self.addCleanup(os.chmod, quarantine, 0o700)
+
+        with self._wrong_match_runtime_config(tmpdir):
+            status, data = self._get(
+                f"/api/wrong-matches/explorer?download_log_id={log_id}")
+
+        self.assertEqual(status, 503)
+        self.assertIn("could not be read", data["error"])
+
+    def test_missing_explorer_source_is_still_not_found(self):
+        """Must still work: a genuinely absent source stays 404."""
+        tmpdir = self.enterContext(tempfile.TemporaryDirectory())
+        failed_dir = os.path.join(tmpdir, "failed_imports", "Gone Album")
+        os.makedirs(os.path.dirname(failed_dir))
+        log_id = self.db.log_download(
+            100, outcome="rejected",
+            validation_result={"failed_path": failed_dir},
+        )
+
+        with self._wrong_match_runtime_config(tmpdir):
+            status, data = self._get(
+                f"/api/wrong-matches/explorer?download_log_id={log_id}")
+
+        self.assertEqual(status, 404)
+        self.assertIn("not found", data["error"])
+
     def test_candidate_has_distance_breakdown(self):
         _status, data = self._get("/api/wrong-matches")
         entry = data["groups"][0]["entries"][0]

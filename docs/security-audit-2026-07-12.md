@@ -178,7 +178,8 @@ claim that doc2 currently runs this chain:
   dispatch. Insecure mode bypasses only Basic; the same provenance and
   transport controls remain, with a `CRITICAL` startup warning and persistent
   footer.
-- The five API-backed `pipeline-cli` mutations use the same canonical routes
+- The API-backed `pipeline-cli` mutations (five originally; twelve after
+  issue #1063 routed every protected-quarantine-path action) use the same canonical routes
   over the Unix socket with web access group authority and no Basic credential,
   TCP override, direct-DB fallback, or duplicate service path. Other CLI
   families retain their PostgreSQL, filesystem, Beets, and secret-specific

@@ -8,6 +8,11 @@ from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 from lib.fs_authority import observe_directory
+from lib.wrong_match_delete_service import (
+    OUTCOME_SKIPPED_PATH_UNAVAILABLE,
+    delete_wrong_match,
+)
+from lib.wrong_matches import cleanup_wrong_match_source
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 
@@ -589,6 +594,120 @@ class TestSourceDBProtocolParity(unittest.TestCase):
 
         self.assertTrue(issubclass(WrongMatchCleanupDB, WrongMatchSourceDB))
         self.assertTrue(issubclass(WrongMatchDeleteDB, WrongMatchSourceDB))
+
+
+class TestRefusedCandidateOutranksAbsentCandidate(unittest.TestCase):
+    """One refused candidate name poisons the whole aggregate (#1063).
+
+    Several names describe one source: the converge/cleanup hint, the
+    row's own ``failed_path``, and its equivalent aliases. If ANY of them
+    could not be observed, the aggregate is indeterminate — otherwise the
+    exact live shape returns: a legacy relative row whose direct probe
+    says ENOENT while the slskd-root probe says EACCES, laundered into
+    ``path_missing=True`` and a cleared pointer over an intact folder.
+
+    Both candidate orderings are pinned because the two mutants that
+    survived review differed only in which end of the sequence won.
+    """
+
+    def _world(self, tmp: str) -> tuple[FakePipelineDB, str, str]:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1, status="wanted", mb_release_id="mbid-1"))
+        unreadable_parent = os.path.join(tmp, "unreadable", "wrong_matches")
+        unreadable = os.path.join(unreadable_parent, "Album")
+        os.makedirs(unreadable)
+        with open(os.path.join(unreadable, "01.mp3"), "wb") as handle:
+            handle.write(b"audio")
+        absent = os.path.join(tmp, "gone", "wrong_matches", "Album")
+        os.makedirs(os.path.dirname(absent))
+        os.chmod(unreadable_parent, 0o000)
+        self.addCleanup(os.chmod, unreadable_parent, 0o700)
+        return db, unreadable, absent
+
+    def _log(self, db: FakePipelineDB, failed_path: str) -> int:
+        return db.log_download(
+            1,
+            outcome="rejected",
+            validation_result={
+                "scenario": "wrong_match",
+                "failed_path": failed_path,
+            },
+        )
+
+    def test_refused_hint_with_absent_row_path_refuses(self) -> None:
+        tmp = self.enterContext(tempfile.TemporaryDirectory())
+        db, unreadable, absent = self._world(tmp)
+        log_id = self._log(db, absent)
+
+        result = delete_wrong_match(
+            db, log_id, failed_path_hint=unreadable, require_visible=True)
+
+        self.assertEqual(result.outcome, OUTCOME_SKIPPED_PATH_UNAVAILABLE)
+        self.assertFalse(result.success)
+        self.assertFalse(result.path_missing)
+        self.assertIsNone(result.deleted_path)
+        self.assertEqual(result.cleared_rows, 0)
+        os.chmod(os.path.dirname(unreadable), 0o700)
+        self.assertTrue(os.path.isdir(unreadable))
+        self.assertEqual(
+            [row["download_log_id"] for row in db.get_wrong_matches()],
+            [log_id],
+        )
+
+    def test_absent_hint_with_refused_row_path_refuses(self) -> None:
+        tmp = self.enterContext(tempfile.TemporaryDirectory())
+        db, unreadable, absent = self._world(tmp)
+        log_id = self._log(db, unreadable)
+
+        result = delete_wrong_match(
+            db, log_id, failed_path_hint=absent, require_visible=True)
+
+        self.assertEqual(result.outcome, OUTCOME_SKIPPED_PATH_UNAVAILABLE)
+        self.assertEqual(result.cleared_rows, 0)
+        os.chmod(os.path.dirname(unreadable), 0o700)
+        self.assertTrue(os.path.isdir(unreadable))
+        self.assertEqual(len(db.get_wrong_matches()), 1)
+
+    def test_all_candidates_absent_still_clears(self) -> None:
+        """Must still work: with no refusal anywhere, absence clears."""
+        tmp = self.enterContext(tempfile.TemporaryDirectory())
+        db, _unreadable, absent = self._world(tmp)
+        other_absent = os.path.join(tmp, "gone", "wrong_matches", "Other")
+        log_id = self._log(db, absent)
+
+        result = delete_wrong_match(
+            db, log_id, failed_path_hint=other_absent, require_visible=True)
+
+        self.assertTrue(result.success)
+        self.assertTrue(result.path_missing)
+        self.assertEqual(result.cleared_rows, 1)
+        self.assertEqual(db.get_wrong_matches(), [])
+
+    def test_relative_legacy_row_under_an_unreadable_search_dir_refuses(self) -> None:
+        """The exact #1063 relative shape, through the real cleanup helper."""
+        tmp = self.enterContext(tempfile.TemporaryDirectory())
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=1, status="wanted", mb_release_id="mbid-1"))
+        base = os.path.join(tmp, "slskd")
+        quarantine = os.path.join(base, "failed_imports")
+        album = os.path.join(quarantine, "Album")
+        os.makedirs(album)
+        log_id = self._log(db, "failed_imports/Album")
+        os.chmod(quarantine, 0o000)
+        self.addCleanup(os.chmod, quarantine, 0o700)
+
+        with patch("lib.util.FAILED_IMPORT_SEARCH_DIRS", (base,)):
+            result = cleanup_wrong_match_source(db, log_id)
+
+        self.assertTrue(result.path_unavailable)
+        self.assertFalse(result.path_missing)
+        self.assertFalse(result.success)
+        self.assertEqual(result.cleared_rows, 0)
+        os.chmod(quarantine, 0o700)
+        self.assertTrue(os.path.isdir(album))
+        self.assertEqual(len(db.get_wrong_matches()), 1)
 
 
 if __name__ == "__main__":

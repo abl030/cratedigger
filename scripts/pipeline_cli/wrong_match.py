@@ -35,7 +35,9 @@ from scripts.pipeline_cli.api_mutations import (
 _WRONG_MATCH_DELETE_EXIT_OVERRIDES: Mapping[int, int] = {500: 1}
 
 def _render_wrong_match_delete(status: int, payload: dict[str, object]) -> None:
-    if not 200 <= status < 300:
+    # The route returns the whole typed result on refusals too, so the
+    # text output stays identical to the in-process command's (#1063).
+    if payload.get("outcome") is None:
         render_api_error(status, payload)
         return
     print(f"  [{payload.get('download_log_id')}] {payload.get('outcome')}")
@@ -74,7 +76,20 @@ def _render_wrong_match_triage(status: int, payload: dict[str, object]) -> None:
 
     summary = payload.get("summary")
     if not is_str_object_dict(summary):
-        render_api_error(status, payload)
+        # A sweep that crashed, or one that finished under a different
+        # caller and left no summary here, is not an "API refused" —
+        # say what actually happened (#1063 review T3.5).
+        state = payload.get("state")
+        if state == "failed":
+            print(f"  Wrong Matches sweep FAILED: {payload.get('error')}")
+        elif state == "idle":
+            print(
+                "  No Wrong Matches sweep result is available: the server "
+                "reports no sweep in progress and no summary. It may have "
+                "been restarted mid-sweep."
+            )
+        else:
+            render_api_error(status, payload)
         return
     results = summary.get("results")
     if is_object_list(results):

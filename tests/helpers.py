@@ -15,11 +15,16 @@ from collections.abc import Callable, Generator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from copy import deepcopy
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 from unittest.mock import MagicMock, patch
 
 import msgspec
 import requests
+
+if TYPE_CHECKING:
+    # Import-time cycle: ``tests.fakes`` does not import this module, but
+    # keeping the reference type-only preserves that independence.
+    from tests.fakes import FakePipelineDB
 
 from lib.grab_list import DownloadFile, GrabListEntry
 from lib.import_execution import (
@@ -1441,18 +1446,8 @@ class SeededWrongMatch(msgspec.Struct, frozen=True):
     parent: str
 
 
-class WrongMatchSeedDB(Protocol):
-    """The three fake-DB methods :func:`seed_visible_wrong_match` uses."""
-
-    def get_request(self, request_id: int) -> Mapping[str, Any] | None: ...
-
-    def seed_request(self, row: Mapping[str, Any]) -> None: ...
-
-    def log_download(self, request_id: int, **fields: Any) -> int: ...
-
-
 def seed_visible_wrong_match(
-    db: WrongMatchSeedDB,
+    db: FakePipelineDB,
     root: str,
     *,
     request_id: int = 1,

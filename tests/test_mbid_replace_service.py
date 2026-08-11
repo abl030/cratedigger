@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -55,7 +56,11 @@ from lib.release_identity import ReleaseIdentity
 from lib.wrong_match_delete_service import WrongMatchDeleteSummary
 from tests.beets_world import BeetsWorld, BeetsWorldRelease
 from tests.fakes import FakeBeetsDB, FakePipelineDB, FakeSlskdAPI
-from tests.helpers import handoff_automation_owner, make_request_row
+from tests.helpers import (
+    handoff_automation_owner,
+    make_request_row,
+    seed_visible_wrong_match,
+)
 from web.discogs import DiscogsMirrorNotConfigured
 
 # NOTE: must be a valid MB release id per ``detect_release_source``
@@ -1477,6 +1482,84 @@ class TestReplaceWarnings(_ServiceCase):
             )
             self.assertEqual(result.outcome, RESULT_REPLACED)
             self.assertTrue(any("beets removal" in w for w in result.warnings))
+
+    def test_unreadable_wrong_match_source_warns_and_keeps_everything(self):
+        """Replace over a REAL unobservable source (issue #1063).
+
+        No stubbed summary: the real ``delete_wrong_match_group`` runs
+        against a real 0000 quarantine parent. Replace must still
+        supersede, but it must say the cleanup did not complete — the
+        original incident's Replace extension was "reports success with
+        no warning" while every folder survived and every pointer was
+        cleared.
+        """
+        with patch(
+            "lib.mbid_replace_service.trigger_plex_scan"
+        ), patch(
+            "lib.mbid_replace_service.trigger_jellyfin_scan"
+        ):
+            db = FakePipelineDB()
+            self._seed_old(db)
+            root = self.enterContext(tempfile.TemporaryDirectory())
+            source = seed_visible_wrong_match(db, root, request_id=42)
+            os.chmod(source.parent, 0o000)
+            self.addCleanup(os.chmod, source.parent, 0o700)
+
+            svc = self._make_service(db)
+            result = svc.replace_request_mbid(
+                42, target_mb_release_id=NEW_MBID,
+            )
+
+            self.assertEqual(result.outcome, RESULT_REPLACED)
+            self.assertTrue(
+                any("wrong-matches cleanup did not complete" in w
+                    for w in result.warnings),
+                f"expected a cleanup warning, got {result.warnings!r}",
+            )
+            os.chmod(source.parent, 0o700)
+            self.assertTrue(os.path.isdir(source.path))
+            self.assertEqual(
+                [row["download_log_id"] for row in db.get_wrong_matches()],
+                [source.download_log_id],
+            )
+
+    def test_skipped_without_error_still_warns(self):
+        """A group skipped with ZERO errors is still an incomplete cleanup.
+
+        Driven by a real active import job — the source and its pointer
+        both survive, and Replace must not report a clean supersede
+        (issue #1063 review T2.3).
+        """
+        with patch(
+            "lib.mbid_replace_service.trigger_plex_scan"
+        ), patch(
+            "lib.mbid_replace_service.trigger_jellyfin_scan"
+        ):
+            db = FakePipelineDB()
+            self._seed_old(db)
+            root = self.enterContext(tempfile.TemporaryDirectory())
+            source = seed_visible_wrong_match(db, root, request_id=42)
+            db.enqueue_import_job(
+                "force_import",
+                request_id=42,
+                payload={
+                    "download_log_id": source.download_log_id,
+                    "failed_path": source.path,
+                },
+            )
+
+            svc = self._make_service(db)
+            result = svc.replace_request_mbid(
+                42, target_mb_release_id=NEW_MBID,
+            )
+
+            self.assertEqual(result.outcome, RESULT_REPLACED)
+            self.assertTrue(
+                any("0 errors" in w and "1 skipped" in w and "1 remaining" in w
+                    for w in result.warnings),
+                f"expected a skipped/remaining warning, got {result.warnings!r}",
+            )
+            self.assertTrue(os.path.isdir(source.path))
 
     def test_wrong_match_failure_warning(self):
         with patch(

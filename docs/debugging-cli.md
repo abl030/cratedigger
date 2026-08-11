@@ -159,16 +159,32 @@ except for the commands that kept their own text/`--json` presentation
 (`wrong-match-delete`, `wrong-match-delete-group`, `wrong-match-triage`,
 `replace`, `force-import`, `beets-distance`, `import-preview`), which render
 the route's payload exactly as they did when they executed in-process.
-Any 2xx exits 0; 404 exits 2; 400/422 exits 3; 409/410 exits 4; other statuses
-exit 5. The two Wrong Matches delete commands additionally map 500 to exit 1,
-preserving the `delete_failed` exit code they have always returned.
+Any 2xx exits 0; 404 exits 2; 400/422 exits 3; 409 exits 4; other statuses
+exit 5. Per-command overrides preserve exit codes those commands already had:
+the two Wrong Matches delete commands and `beets-distance` map 500 to exit 1,
+and `beets-distance` additionally maps its own 410 Gone (`folder_missing` /
+`no_audio`) to exit 4.
 Each routed command carries its own request deadline sized to the work the
 route performs — an enqueue is 15s, a source delete 300s, a group delete 900s,
 Replace 300s (inline mirror lookups), a download-log preview 900s (inline
 snapshot + measurement), and a beets distance 180s. `wrong-match-triage` starts
 the canonical background sweep and then follows
 `/api/wrong-matches/triage/status` to completion, so it still blocks and prints
-the whole summary; the sweep itself is deliberately unbounded. Locally generated transport/protocol failures (including a missing or
+the whole summary; the sweep itself is deliberately unbounded, and a few
+consecutive failed status polls are retried before the follow gives up.
+
+⚠ **`wrong-match-triage` cannot be cancelled from the CLI.** The sweep runs on
+a background thread inside `cratedigger-web`; the command only follows it.
+Ctrl-C (or any other way of killing the CLI) detaches the operator from a
+destructive whole-queue delete that keeps running server-side, and
+`TriageRunner` exposes no abort. To stop a sweep you must restart
+`cratedigger-web`, which loses the in-memory status while leaving every
+deletion already performed durable. Its `--json` output is the STATUS
+envelope (`state`, `started_at`, `finished_at`, `summary`, `error`), not the
+bare summary the in-process command printed; the counts live under
+`summary`.
+
+Locally generated transport/protocol failures (including a missing or
 unreachable socket, malformed development origins, redirects, or non-object
 JSON responses) exit 5 with a structured error on stderr and never fall back.
 `pipeline-delete ID --confirm DELETE` and

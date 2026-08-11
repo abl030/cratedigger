@@ -22,15 +22,22 @@ import shutil
 import stat
 import tempfile
 import unittest
+from collections.abc import Callable, Sequence
+from typing import ClassVar
 
 from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
+from lib.fs_authority import DirectoryObservation
 from lib.util import observe_failed_path
+from lib.wrong_match_cleanup_service import (
+    _observe_first_existing as _cleanup_observe_first_existing,
+)
 from lib.wrong_match_delete_service import (
     OUTCOME_DELETE_FAILED,
     OUTCOME_DELETED,
+    OUTCOME_PATH_MISSING,
     OUTCOME_SKIPPED_ACTIVE_JOB,
     OUTCOME_SKIPPED_LOCKED,
     OUTCOME_SKIPPED_PATH_UNAVAILABLE,
@@ -38,6 +45,10 @@ from lib.wrong_match_delete_service import (
     WrongMatchDeleteResult,
     delete_wrong_match,
 )
+from lib.wrong_match_delete_service import (
+    _observe_first_existing as _delete_observe_first_existing,
+)
+from lib.wrong_matches import _observed_candidates
 from tests.fakes import FakePipelineDB
 from tests.helpers import SeededWrongMatch, seed_visible_wrong_match
 
@@ -272,9 +283,9 @@ class TestProtectedPathTruthGenerated(unittest.TestCase):
         """Entropy guard: the worlds are distinct, not one world ten times."""
         expected: dict[str, str] = {
             "present": OUTCOME_DELETED,
-            "genuinely_missing": OUTCOME_DELETED,
-            "not_a_directory": OUTCOME_DELETED,
-            "delete_race": OUTCOME_DELETED,
+            "genuinely_missing": OUTCOME_PATH_MISSING,
+            "not_a_directory": OUTCOME_PATH_MISSING,
+            "delete_race": OUTCOME_PATH_MISSING,
             "unreadable_parent": OUTCOME_SKIPPED_PATH_UNAVAILABLE,
             "unreadable_album": OUTCOME_DELETE_FAILED,
             "unsafe_root": OUTCOME_SKIPPED_UNSAFE_PATH,
@@ -317,3 +328,227 @@ class TestProtectedPathTruthGenerated(unittest.TestCase):
                 self.assertTrue(observe_failed_path(album).indeterminate)
             finally:
                 os.chmod(parent, 0o700)
+
+
+# ---------------------------------------------------------------------------
+# The aggregation rule: a refused probe outranks absence.
+#
+# Four helpers reduce SEVERAL candidate names to one observation, and every
+# one of them states this rule in its docstring: the first PRESENT name
+# wins; otherwise a refused probe must beat an absent one. Nothing
+# constrained it, and two mutants proved it — dropping the "remember the
+# refusal" branch, and reverting to "return the last/direct observation" —
+# survived the whole suite (issue #1063 review T1.1).
+#
+# The world it reopens is #1063 verbatim: a legacy relative row
+# ``failed_imports/Album`` whose direct probe answers ENOENT while the
+# slskd-root probe answers EACCES. Laundered to absent, that clears the
+# pointer off an intact folder.
+# ---------------------------------------------------------------------------
+
+CANDIDATE_WORLDS: tuple[str, ...] = ("present", "absent", "unreadable")
+
+
+def expected_aggregate(worlds: Sequence[str]) -> str:
+    """The rule itself, written once, in the order it must be applied."""
+    if "present" in worlds:
+        return "present"
+    if "unreadable" in worlds:
+        return "indeterminate"
+    return "absent"
+
+
+def assert_aggregate_obeys_the_refusal_rule(
+    *,
+    aggregator: str,
+    worlds: Sequence[str],
+    observation: DirectoryObservation,
+    expected_path: str | None,
+) -> None:
+    """Checker: one aggregator, one candidate sequence, one verdict."""
+    expected = expected_aggregate(worlds)
+    if observation.presence != expected:
+        raise AssertionError(
+            f"{aggregator}: candidates {list(worlds)} aggregated to "
+            f"{observation.presence!r}, expected {expected!r}"
+            + (
+                " — a refused probe was laundered into absence"
+                if expected == "indeterminate" else ""
+            )
+        )
+    if expected == "present" and observation.path != expected_path:
+        raise AssertionError(
+            f"{aggregator}: resolved {observation.path!r}, expected the "
+            f"FIRST present candidate {expected_path!r}"
+        )
+    if expected != "present" and observation.path is not None:
+        raise AssertionError(
+            f"{aggregator}: reported a path {observation.path!r} for a "
+            f"{expected!r} aggregate"
+        )
+
+
+def _candidate_dir(root: str, index: int, world: str) -> str:
+    """Build one real candidate directory for the given world."""
+    parent = os.path.join(root, f"root{index}")
+    os.makedirs(parent, exist_ok=True)
+    path = os.path.join(parent, "wrong_matches", "Album")
+    if world in ("present", "unreadable"):
+        os.makedirs(path, exist_ok=True)
+    if world == "unreadable":
+        os.chmod(os.path.dirname(path), 0o000)
+    return path
+
+
+def _restore_candidates(paths: Sequence[str]) -> None:
+    for path in paths:
+        try:
+            os.chmod(os.path.dirname(path), 0o700)
+        except OSError:
+            continue
+
+
+class TestCandidateAggregationGenerated(unittest.TestCase):
+    """Every aggregator of several candidate names obeys the same rule."""
+
+    #: name -> callable taking the ordered candidate paths.
+    AGGREGATORS: ClassVar[dict[str, Callable[[list[str]], DirectoryObservation]]] = {
+        "lib.wrong_matches._observed_candidates":
+            lambda paths: _observed_candidates(list(paths))[0],
+        "lib.wrong_match_delete_service._observe_first_existing":
+            _delete_observe_first_existing,
+        "lib.wrong_match_cleanup_service._observe_first_existing":
+            _cleanup_observe_first_existing,
+    }
+
+    @example(worlds=["absent", "unreadable"])
+    @example(worlds=["unreadable", "absent"])
+    @example(worlds=["absent", "absent"])
+    @example(worlds=["unreadable", "present"])
+    @example(worlds=["present", "unreadable"])
+    @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+    @given(worlds=st.lists(
+        st.sampled_from(CANDIDATE_WORLDS), min_size=1, max_size=4,
+    ))
+    def test_every_aggregator_agrees_on_the_refusal_rule(
+        self, worlds: list[str],
+    ) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            paths = [
+                _candidate_dir(root, index, world)
+                for index, world in enumerate(worlds)
+            ]
+            expected_path = next(
+                (
+                    os.path.abspath(path)
+                    for path, world in zip(paths, worlds, strict=True)
+                    if world == "present"
+                ),
+                None,
+            )
+            try:
+                for name, aggregate in self.AGGREGATORS.items():
+                    assert_aggregate_obeys_the_refusal_rule(
+                        aggregator=name,
+                        worlds=worlds,
+                        observation=aggregate(paths),
+                        expected_path=expected_path,
+                    )
+            finally:
+                _restore_candidates(paths)
+
+    @example(worlds=["absent", "unreadable"])
+    @example(worlds=["unreadable", "absent"])
+    @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+    @given(worlds=st.lists(
+        st.sampled_from(CANDIDATE_WORLDS), min_size=1, max_size=3,
+    ))
+    def test_search_dir_fallback_obeys_the_same_rule(
+        self, worlds: list[str],
+    ) -> None:
+        """``lib.util.observe_failed_path``'s own aggregation.
+
+        A relative legacy name is probed directly (absent — the name does
+        not exist relative to the process cwd) and then under every
+        configured search directory. This is the exact live shape the
+        mutants reopened.
+        """
+        with tempfile.TemporaryDirectory() as root:
+            bases: list[str] = []
+            for index, world in enumerate(worlds):
+                base = os.path.join(root, f"base{index}")
+                quarantine = os.path.join(base, "wrong_matches")
+                if world in ("present", "unreadable"):
+                    os.makedirs(os.path.join(quarantine, "Album"))
+                else:
+                    os.makedirs(base)
+                if world == "unreadable":
+                    os.chmod(quarantine, 0o000)
+                bases.append(base)
+            expected_path = next(
+                (
+                    os.path.join(base, "wrong_matches", "Album")
+                    for base, world in zip(bases, worlds, strict=True)
+                    if world == "present"
+                ),
+                None,
+            )
+            try:
+                assert_aggregate_obeys_the_refusal_rule(
+                    aggregator="lib.util.observe_failed_path",
+                    # The direct probe is one more absent candidate.
+                    worlds=["absent", *worlds],
+                    observation=observe_failed_path(
+                        os.path.join("wrong_matches", "Album"),
+                        search_dirs=bases,
+                    ),
+                    expected_path=expected_path,
+                )
+            finally:
+                for base in bases:
+                    try:
+                        os.chmod(os.path.join(base, "wrong_matches"), 0o700)
+                    except OSError:
+                        continue
+
+    def test_known_bad_aggregation_checkers_trip(self) -> None:
+        """The checker must fail on both mutants it exists to catch."""
+        absent = DirectoryObservation(presence="absent", code="missing")
+        refused = DirectoryObservation(
+            presence="indeterminate", code="open_failed", errno_symbol="EACCES")
+        present = DirectoryObservation(presence="present", path="/a")
+
+        # Mutant A/B shape: a refusal anywhere in the sequence laundered
+        # into absence, whichever end it sat at.
+        for worlds in (["absent", "unreadable"], ["unreadable", "absent"]):
+            with self.assertRaises(AssertionError):
+                assert_aggregate_obeys_the_refusal_rule(
+                    aggregator="mutant", worlds=worlds,
+                    observation=absent, expected_path=None,
+                )
+        # Fail-closed in the other direction: a present candidate must not
+        # be downgraded to a refusal.
+        with self.assertRaises(AssertionError):
+            assert_aggregate_obeys_the_refusal_rule(
+                aggregator="mutant", worlds=["unreadable", "present"],
+                observation=refused, expected_path="/a",
+            )
+        # The wrong present candidate.
+        with self.assertRaises(AssertionError):
+            assert_aggregate_obeys_the_refusal_rule(
+                aggregator="mutant", worlds=["present"],
+                observation=present, expected_path="/b",
+            )
+        # A non-present aggregate must not carry a path.
+        with self.assertRaises(AssertionError):
+            assert_aggregate_obeys_the_refusal_rule(
+                aggregator="mutant", worlds=["absent"],
+                observation=DirectoryObservation(
+                    presence="absent", path="/a", code="missing"),
+                expected_path=None,
+            )
+
+    def test_the_rule_itself_is_ordered(self) -> None:
+        self.assertEqual(expected_aggregate(["absent", "unreadable"]), "indeterminate")
+        self.assertEqual(expected_aggregate(["unreadable", "present"]), "present")
+        self.assertEqual(expected_aggregate(["absent"]), "absent")

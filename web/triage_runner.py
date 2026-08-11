@@ -1,10 +1,12 @@
 """Background runner for the bulk Wrong Matches triage sweep.
 
-The web server is a single-threaded ``http.server`` — a synchronous bulk
-triage sweep (minutes when stale rows trigger re-measurement, see #271)
-held the only request thread and made the whole UI unresponsive. The POST
-handler now starts the sweep here and returns immediately; the UI polls
-the status endpoint for the summary.
+A synchronous bulk triage sweep (minutes when stale rows trigger
+re-measurement, see #271) held its request thread for the whole run and
+made the UI unresponsive. The POST handler now starts the sweep here and
+returns immediately; the UI — and, since issue #1063,
+``pipeline-cli wrong-match-triage`` — polls the status endpoint for the
+summary. There is no abort: killing a caller detaches it from a sweep
+that keeps running.
 
 The sweep thread gets its OWN pipeline-DB connection from ``db_factory``
 — psycopg2 connections must not be shared between the handler thread and

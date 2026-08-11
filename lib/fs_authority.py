@@ -237,6 +237,32 @@ DirectoryPresence = Literal["present", "absent", "indeterminate"]
 _ABSENCE_CODES: frozenset[FsAuthorityCode] = frozenset({"missing", "not_a_directory"})
 
 
+def refusal_is_indeterminate(code: FsAuthorityCode) -> bool:
+    """Is this refusal a WORLD failure rather than a verdict about the name?
+
+    The single owner of that question for every consumer that translates
+    :class:`FilesystemAuthorityError` into its own vocabulary (issue
+    #1063). ``True`` means the storage layer refused or failed and the
+    caller learned nothing about the path — retryable, never a semantic
+    complaint about the operator's input. The ``match`` is exhaustive on
+    purpose: a new :data:`FsAuthorityCode` must be classified here rather
+    than silently inheriting either group (issue #868's rule).
+    """
+    match code:
+        case "open_failed" | "read_failed" | "write_failed":
+            return True
+        case (
+            "unspecified"
+            | "path_escape"
+            | "unsafe_symlink"
+            | "not_a_directory"
+            | "not_regular_file"
+            | "untrusted_ownership"
+            | "missing"
+        ):
+            return False
+
+
 @dataclass(frozen=True)
 class DirectoryObservation:
     """One truthful answer to "is there a directory at this name?".

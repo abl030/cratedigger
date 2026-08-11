@@ -87,7 +87,11 @@ def cmd_beets_distance(_db: object, args: argparse.Namespace) -> int:
         render=_render_beets_distance,
         json_output=getattr(args, "json", False),
         timeout_seconds=TIMEOUT_FOLDER_READ_SECONDS,
-        exit_overrides={500: 1},
+        # 410 Gone is this route's "the artifacts we wanted to compare
+        # are gone" status; the in-process command has always exited 4
+        # for it. Scoped here rather than made global so a future route
+        # using 410 cannot silently inherit "wrong state" (#1063 T4.4).
+        exit_overrides={410: 4, 500: 1},
     )
 
 

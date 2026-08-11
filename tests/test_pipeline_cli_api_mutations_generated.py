@@ -26,13 +26,13 @@ def _status_has_expected_exit(
 ) -> bool:
     """Checker kept separate so its known-bad test proves it can fail.
 
-    410 Gone joined 409 in issue #1063: it is the beets-distance
-    "the artifacts we wanted to compare are gone" status, and that
-    command's in-process exit code has always been 4.
+    This is the DEFAULT table. Per-command ``exit_overrides`` (e.g.
+    beets-distance's 410 -> 4, the delete commands' 500 -> 1) are pinned
+    against their own commands, never folded in here (issue #1063).
     """
     if transport not in {"tcp", "unix"}:
         return False
-    expected = 0 if 200 <= status < 300 else 2 if status == 404 else 3 if status in (400, 422) else 4 if status in (409, 410) else 5
+    expected = 0 if 200 <= status < 300 else 2 if status == 404 else 3 if status in (400, 422) else 4 if status == 409 else 5
     return exit_code == expected
 
 
@@ -138,8 +138,8 @@ class TestApiMutationGenerated(unittest.TestCase):
 
     def test_known_bad_checker_self_test(self) -> None:
         self.assertFalse(_status_has_expected_exit("unix", 404, 0))
-        self.assertFalse(_status_has_expected_exit("unix", 410, 5))
-        self.assertTrue(_status_has_expected_exit("unix", 410, 4))
+        self.assertFalse(_status_has_expected_exit("unix", 410, 4))
+        self.assertTrue(_status_has_expected_exit("unix", 410, 5))
         self.assertFalse(_status_has_expected_exit("unknown", 200, 0))
         self.assertFalse(_selected_transport_is_fallback_free("unix", 1))
 

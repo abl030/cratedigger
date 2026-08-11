@@ -43,6 +43,7 @@ import logging
 import os
 import time
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Protocol
 
 import msgspec
@@ -215,8 +216,22 @@ class SyntheticItem(msgspec.Struct, kw_only=True):
     length: float
 
 
-def _audio_files_under(folder: str) -> list[str]:
-    """Return absolute paths to audio files under ``folder``.
+@dataclass(frozen=True)
+class _FolderScan:
+    """What the walk found AND whether it was allowed to look.
+
+    ``os.walk``'s default ``onerror`` silently swallows EACCES/EIO, so an
+    unreadable folder produced an empty list indistinguishable from an
+    empty one — and the caller called that ``no_audio``. The refusal now
+    travels with the result (issue #1063).
+    """
+
+    paths: tuple[str, ...]
+    read_error: str | None = None
+
+
+def _audio_files_under(folder: str) -> _FolderScan:
+    """Return audio files under ``folder`` plus any refusal that hid some.
 
     Sorts for deterministic ordering — beets distance is order-
     insensitive but stable ordering makes the cache key stable, the
@@ -226,13 +241,21 @@ def _audio_files_under(folder: str) -> list[str]:
     from lib.measurement import AUDIO_EXTS
 
     out: list[str] = []
-    for root, _dirs, files in os.walk(folder):
+    refusals: list[str] = []
+
+    def _record(exc: OSError) -> None:
+        refusals.append(f"{exc.filename or folder}: {exc.strerror}")
+
+    for root, _dirs, files in os.walk(folder, onerror=_record):
         for f in files:
             ext = f.rsplit(".", 1)[-1].lower() if "." in f else ""
             if ext in AUDIO_EXTS:
                 out.append(os.path.join(root, f))
     out.sort()
-    return out
+    return _FolderScan(
+        paths=tuple(out),
+        read_error=refusals[0] if refusals else None,
+    )
 
 
 def _fingerprint_file(path: str) -> _AudioFileFingerprint | None:
@@ -272,10 +295,18 @@ def _fingerprint_file(path: str) -> _AudioFileFingerprint | None:
     )
 
 
+@dataclass(frozen=True)
+class _FolderFingerprints:
+    """Fingerprints plus the first refusal that stopped us reading more."""
+
+    fingerprints: tuple[_AudioFileFingerprint, ...]
+    read_error: str | None = None
+
+
 def _read_folder_fingerprints(
     folder: str,
     cache: BeetsDistanceCache | None,
-) -> list[_AudioFileFingerprint]:
+) -> _FolderFingerprints:
     """Read fingerprints for every audio file under ``folder``.
 
     Per-file cache keyed by ``(path, mtime, size)``: if any of those
@@ -284,11 +315,17 @@ def _read_folder_fingerprints(
     without any individual file's stats changing — the os.walk is cheap
     relative to tag reads.
     """
+    scan = _audio_files_under(folder)
+    read_error = scan.read_error
     fps: list[_AudioFileFingerprint] = []
-    for path in _audio_files_under(folder):
+    for path in scan.paths:
         try:
             st = os.stat(path)
-        except OSError:
+        except OSError as exc:
+            # Same rule one level down: a file we could not stat is not a
+            # file that is not there.
+            if read_error is None:
+                read_error = f"{path}: {exc.strerror}"
             continue
         cached: _AudioFileFingerprint | None = None
         if cache is not None:
@@ -311,7 +348,7 @@ def _read_folder_fingerprints(
                 msgspec.json.encode(fp),
                 _FOLDER_CACHE_TTL_S,
             )
-    return fps
+    return _FolderFingerprints(fingerprints=tuple(fps), read_error=read_error)
 
 
 def _file_cache_key(path: str, mtime: float, size: int) -> str:
@@ -714,7 +751,26 @@ def compute_beets_distance(
             )
 
         # 7. Read (or cache-hit) audio fingerprints.
-        fingerprints = _read_folder_fingerprints(resolved, cache)
+        scan = _read_folder_fingerprints(resolved, cache)
+        fingerprints = list(scan.fingerprints)
+        if not fingerprints and scan.read_error is not None:
+            # We were refused mid-read. "No audio here" is a claim we did
+            # not earn (issue #1063) — the folder resolved, the storage
+            # then declined to show it.
+            return _result(
+                "folder_unavailable",
+                error=(
+                    f"could not read the contents of {resolved}: "
+                    f"{scan.read_error}"
+                ),
+                download_log_id=download_log_id,
+                request_id=request_id,
+                request_release_group_id=request_rg,
+                candidate_release_group_id=candidate_rg,
+                candidate_mbid=mbid,
+                folder_path=resolved,
+                started=started,
+            )
         if not fingerprints:
             return _result(
                 "no_audio",

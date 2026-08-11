@@ -477,6 +477,109 @@ class TestPrivateProcessingAuthority(unittest.TestCase):
             self.assertIn("does not exist under its configured root",
                           str(refused.exception))
 
+    def test_unreadable_earlier_root_never_denies_a_later_root_match(self) -> None:
+        """A root we cannot read is not a verdict on a name another holds.
+
+        The relative legacy shape is contained by every configured root,
+        so an EACCES under the first must not become the answer when the
+        third positively holds the folder (issue #1063 review T1.2).
+        """
+        with tempfile.TemporaryDirectory() as parent:
+            slskd = os.path.join(parent, "slskd")
+            incoming = os.path.join(parent, "Incoming")
+            processing = os.path.join(parent, "processing")
+            for directory in (slskd, incoming, processing):
+                os.mkdir(directory, 0o700)
+            os.mkdir(os.path.join(processing, "albums"), 0o700)
+            os.mkdir(os.path.join(processing, "preview"), 0o700)
+            cfg = MagicMock()
+            cfg.slskd_download_dir = slskd
+            cfg.beets_staging_dir = incoming
+            cfg.processing_dir = processing
+
+            first_quarantine = os.path.join(slskd, "wrong_matches")
+            third_quarantine = os.path.join(
+                processing, "albums", "wrong_matches")
+            os.makedirs(first_quarantine)
+            album = os.path.join(third_quarantine, "Album")
+            os.makedirs(album)
+            relative = os.path.join("wrong_matches", "Album")
+
+            os.chmod(first_quarantine, 0o000)
+            try:
+                with open_configured_quarantine_directory(relative, cfg) as opened:
+                    self.assertEqual(
+                        os.fstat(opened.fd).st_ino, os.stat(album).st_ino)
+            finally:
+                os.chmod(first_quarantine, 0o700)
+
+    def test_unreadable_later_root_never_denies_an_earlier_root_match(self) -> None:
+        """The reverse: the first root holds it, a later one is unreadable."""
+        with tempfile.TemporaryDirectory() as parent:
+            slskd = os.path.join(parent, "slskd")
+            incoming = os.path.join(parent, "Incoming")
+            processing = os.path.join(parent, "processing")
+            for directory in (slskd, incoming, processing):
+                os.mkdir(directory, 0o700)
+            os.mkdir(os.path.join(processing, "albums"), 0o700)
+            os.mkdir(os.path.join(processing, "preview"), 0o700)
+            cfg = MagicMock()
+            cfg.slskd_download_dir = slskd
+            cfg.beets_staging_dir = incoming
+            cfg.processing_dir = processing
+
+            third_quarantine = os.path.join(
+                processing, "albums", "wrong_matches")
+            os.makedirs(third_quarantine)
+            album = os.path.join(slskd, "wrong_matches", "Album")
+            os.makedirs(album)
+            relative = os.path.join("wrong_matches", "Album")
+
+            os.chmod(third_quarantine, 0o000)
+            try:
+                with open_configured_quarantine_directory(relative, cfg) as opened:
+                    self.assertEqual(
+                        os.fstat(opened.fd).st_ino, os.stat(album).st_ino)
+            finally:
+                os.chmod(third_quarantine, 0o700)
+
+    def test_every_root_unreadable_reports_the_refusal_not_containment(self) -> None:
+        """When no root can answer, the refusal is what gets reported."""
+        with tempfile.TemporaryDirectory() as parent:
+            slskd = os.path.join(parent, "slskd")
+            incoming = os.path.join(parent, "Incoming")
+            processing = os.path.join(parent, "processing")
+            for directory in (slskd, incoming, processing):
+                os.mkdir(directory, 0o700)
+            os.mkdir(os.path.join(processing, "albums"), 0o700)
+            os.mkdir(os.path.join(processing, "preview"), 0o700)
+            cfg = MagicMock()
+            cfg.slskd_download_dir = slskd
+            cfg.beets_staging_dir = incoming
+            cfg.processing_dir = processing
+
+            first_quarantine = os.path.join(slskd, "wrong_matches")
+            third_quarantine = os.path.join(
+                processing, "albums", "wrong_matches")
+            os.makedirs(first_quarantine)
+            os.makedirs(os.path.join(third_quarantine, "Album"))
+            relative = os.path.join("wrong_matches", "Album")
+
+            os.chmod(first_quarantine, 0o000)
+            os.chmod(third_quarantine, 0o000)
+            try:
+                with self.assertRaises(FilesystemAuthorityError) as refused, \
+                        open_configured_quarantine_directory(relative, cfg):
+                    pass
+            finally:
+                os.chmod(first_quarantine, 0o700)
+                os.chmod(third_quarantine, 0o700)
+            self.assertEqual(refused.exception.code, "open_failed")
+            self.assertEqual(refused.exception.errno_symbol, "EACCES")
+            self.assertNotIn(
+                "outside configured quarantine roots",
+                str(refused.exception))
+
     def test_relative_legacy_path_still_probes_every_configured_root(self) -> None:
         """``missing`` under one root must keep probing the next."""
         with tempfile.TemporaryDirectory() as parent:

@@ -64,6 +64,10 @@ TIMEOUT_POLL_SECONDS = 30.0
 
 _TRIAGE_POLL_INTERVAL_SECONDS = 2.0
 
+#: A transient blip on one cheap status read must not abandon the
+#: operator mid-sweep while the destructive work continues server-side.
+_TRIAGE_POLL_MAX_CONSECUTIVE_FAILURES = 5
+
 
 @dataclass(frozen=True)
 class TcpApiEndpoint:
@@ -153,9 +157,7 @@ def _exit_code(
         return 2
     if status in (400, 422):
         return 3
-    # 410 Gone is the beets-distance "the artifacts we wanted to compare
-    # are gone" status, whose in-process exit code has always been 4.
-    if status in (409, 410):
+    if status == 409:
         return 4
     return 5
 
@@ -303,6 +305,7 @@ def relay_polled(
     start_timeout_seconds: float = _TIMEOUT_SECONDS,
     poll_timeout_seconds: float = TIMEOUT_POLL_SECONDS,
     poll_interval_seconds: float = _TRIAGE_POLL_INTERVAL_SECONDS,
+    max_consecutive_poll_failures: int = _TRIAGE_POLL_MAX_CONSECUTIVE_FAILURES,
     sleep: Callable[[float], None] = time.sleep,
 ) -> int:
     """Start an asynchronous route, then follow it to completion.
@@ -328,16 +331,19 @@ def relay_polled(
             render(started.status, start_payload)
         return _exit_code(started.status)
 
+    consecutive_failures = 0
     while True:
         sleep(poll_interval_seconds)
         polled = _post(
             endpoint, status_request, timeout_seconds=poll_timeout_seconds,
         )
-        if polled is None:
-            return 5
-        payload = _decode(polled)
-        if payload is None:
-            return 5
+        payload = None if polled is None else _decode(polled)
+        if polled is None or payload is None:
+            consecutive_failures += 1
+            if consecutive_failures >= max_consecutive_poll_failures:
+                return 5
+            continue
+        consecutive_failures = 0
         if not 200 <= polled.status < 300:
             if json_output:
                 print(json.dumps(payload, indent=2, sort_keys=True))

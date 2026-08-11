@@ -9,6 +9,7 @@ from lib import transitions
 from lib.fs_authority import (
     FilesystemAuthorityError,
     open_configured_quarantine_directory,
+    refusal_is_indeterminate,
 )
 from lib.import_queue import (
     IMPORT_JOB_FORCE,
@@ -30,6 +31,15 @@ RESULT_REQUEST_MISSING = "request_missing"
 RESULT_REQUEST_MBID_MISSING = "request_mbid_missing"
 RESULT_FAILED_PATH_MISSING = "failed_path_missing"
 RESULT_UNAUTHORIZED_PATH = "unauthorized_path"
+RESULT_PATH_UNAVAILABLE = "path_unavailable"
+"""The quarantine authority could not OBSERVE the path (EACCES, EIO,
+ESTALE …).
+
+Deliberately not ``unauthorized_path``: 422 tells the operator, and any
+retry consumer, that the input is semantically wrong. A refused probe is
+a transient world failure and gets retryable vocabulary, exactly like the
+sibling Wrong Matches surfaces (issue #1063).
+"""
 RESULT_PROCESSING_LOCKED = "processing_locked"
 
 # There is no separate CLI exit-code table: ``pipeline-cli force-import``
@@ -44,6 +54,7 @@ FORCE_IMPORT_HTTP_STATUS = {
     RESULT_REQUEST_MBID_MISSING: 422,
     RESULT_FAILED_PATH_MISSING: 422,
     RESULT_UNAUTHORIZED_PATH: 422,
+    RESULT_PATH_UNAVAILABLE: 503,
     RESULT_PROCESSING_LOCKED: 409,
 }
 
@@ -137,7 +148,9 @@ def enqueue_force_import(
             authorized_path = opened.display_path
     except FilesystemAuthorityError as exc:
         return ForceImportEnqueueResult(
-            RESULT_UNAUTHORIZED_PATH,
+            RESULT_PATH_UNAVAILABLE
+            if refusal_is_indeterminate(exc.code)
+            else RESULT_UNAUTHORIZED_PATH,
             download_log_id,
             request_id=request_id,
             failed_path=failed_path,

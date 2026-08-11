@@ -332,6 +332,54 @@ class TestComputeBeetsDistanceOutcomes(unittest.TestCase):
         assert r.error_message is not None
         self.assertIn("EACCES", r.error_message)
 
+    def test_unreadable_folder_contents_are_not_no_audio(self) -> None:
+        """The READ leg owes the same distinction (#1063 review T2.2).
+
+        The folder resolves; the walk is then refused. ``os.walk`` swallows
+        that by default, so zero fingerprints used to mean ``no_audio`` — a
+        definitive negative from an observation we were not allowed to make.
+        """
+        root = self.enterContext(tempfile.TemporaryDirectory())
+        album = os.path.join(root, "wrong_matches", "Album")
+        os.makedirs(album)
+        shutil.copy(FIXTURE_FLAC, os.path.join(album, "01.flac"))
+        pdb = _StubPDB(
+            download_log_entry={"id": 1, "request_id": 7,
+                                "validation_result": {"failed_path": album}},
+            request={"id": 7, "mb_release_group_id": "rg-shared"},
+        )
+        os.chmod(album, 0o000)
+        try:
+            r = compute_beets_distance(
+                1, "rel-x",
+                pdb=pdb,
+                mb_get_release=lambda mbid: _ok_mb_release(mbid=mbid),
+                observe_failed_path=_present,
+            )
+        finally:
+            os.chmod(album, 0o700)
+        self.assertEqual(r.outcome, "folder_unavailable")
+        assert r.error_message is not None
+        self.assertIn("could not read the contents", r.error_message)
+
+    def test_empty_readable_folder_is_still_no_audio(self) -> None:
+        """Must still work: a readable folder with no audio is no_audio."""
+        root = self.enterContext(tempfile.TemporaryDirectory())
+        album = os.path.join(root, "wrong_matches", "Album")
+        os.makedirs(album)
+        pdb = _StubPDB(
+            download_log_entry={"id": 1, "request_id": 7,
+                                "validation_result": {"failed_path": album}},
+            request={"id": 7, "mb_release_group_id": "rg-shared"},
+        )
+        r = compute_beets_distance(
+            1, "rel-x",
+            pdb=pdb,
+            mb_get_release=lambda mbid: _ok_mb_release(mbid=mbid),
+            observe_failed_path=_present,
+        )
+        self.assertEqual(r.outcome, "no_audio")
+
     def test_folder_missing_when_validation_result_absent(self) -> None:
         pdb = _StubPDB(
             download_log_entry={"id": 1, "request_id": 7,

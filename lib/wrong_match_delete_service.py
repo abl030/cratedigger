@@ -54,6 +54,14 @@ class WrongMatchDeleteDB(WrongMatchSourceDB, Protocol):
 
 
 OUTCOME_DELETED = "deleted"
+OUTCOME_PATH_MISSING = "path_missing"
+"""The folder was PROVEN absent, so its stale pointer was cleared.
+
+Successful and clearing, exactly as before, but no longer reported as
+``deleted``: invariant 1 of issue #1063 says ``deleted`` means the exact
+authorized source folder was actually removed, and ``[39527] deleted``
+over an intact 445MB folder is the headline the incident quoted.
+"""
 OUTCOME_DELETE_FAILED = "delete_failed"
 OUTCOME_SKIPPED_ACTIVE_JOB = "skipped_active_job"
 OUTCOME_SKIPPED_INVALID_ROW = "skipped_invalid_row"
@@ -400,7 +408,7 @@ def _delete_wrong_match(
         )
     return _result(
         download_log_id,
-        OUTCOME_DELETED,
+        OUTCOME_PATH_MISSING if cleanup.path_missing else OUTCOME_DELETED,
         success=True,
         request_id=cleanup.request_id,
         entry_found=cleanup.entry_found,

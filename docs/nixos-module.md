@@ -96,7 +96,7 @@ Three options under `services.cratedigger.searchSettings.*` control the slskd se
    operator CLI, effective config, catalog, library, state, and secrets remain
    outside the module's ownership. `nix/beets.nix` is an optional compatible
    package factory for consumers, not an implicit module owner.
-2. Wraps `cratedigger.py` / `pipeline_cli.py` / `migrate_db.py` / `scripts/importer.py` / `scripts/import_preview_worker.py` / `web/server.py` in shell scripts with ffmpeg, sox, mp3val, flac in PATH. The installed `pipeline-cli` wrapper fixes the five API-backed mutation commands to the permissioned web Unix socket; it exposes no production `--api-base` override. Direct commands such as `youtube-album` retain their database/mirror boundary and do not depend on `web.enable`.
+2. Wraps `cratedigger.py` / `pipeline_cli.py` / `migrate_db.py` / `scripts/importer.py` / `scripts/import_preview_worker.py` / `web/server.py` in shell scripts with ffmpeg, sox, mp3val, flac in PATH. The installed `pipeline-cli` wrapper fixes the twelve API-backed mutation commands to the permissioned web Unix socket; it exposes no production `--api-base` override. Direct commands such as `youtube-album` retain their database/mirror boundary and do not depend on `web.enable`. **A `web.enable = false` deployment has no execution path for those twelve commands**: the wrapper always passes the socket, and issue #1063 forbids a direct-DB fallback because the invoking operator identity cannot traverse the private `0700` processing tree those commands read and destroy. Such an installation must run them through a web instance or not at all.
 3. Builds one immutable Nix-store application config containing the six
    external Beets authority fields, then pins its path in every wrapper. There
    is no mutable config renderer or fallback. The module does not render Beets
@@ -355,7 +355,8 @@ and renders neither warning.
 
 `web.accessGroup` grants the ability to connect to the complete Unix HTTP API
 and assert the local `cli` request channel. The installed wrapper uses that
-authority only for the five API-backed mutations; it carries no Basic
+authority only for the API-backed mutations enumerated in
+`docs/debugging-cli.md`; it carries no Basic
 credential and has no TCP fallback. Group membership is therefore
 security-sensitive and must be explicit.
 
