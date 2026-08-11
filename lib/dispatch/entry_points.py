@@ -32,9 +32,11 @@ from lib.processing_paths import normalize_source_dirs
 from lib.terminal_outcomes import ImportJobTerminal
 
 if TYPE_CHECKING:
+    from lib.beets_retag import MergeRetagFn
     from lib.config import CratediggerConfig
     from lib.dispatch.types import ImportOneRunner, QualityGateFn
     from lib.import_execution import CancellationToken, OwnerSessionIdentity
+    from lib.mb_canonical import CanonicalReleaseFn
     from lib.pipeline_db import PipelineDB
 
 logger = logging.getLogger("cratedigger")
@@ -57,6 +59,8 @@ def dispatch_import_from_db(
     beets_library_root: str | None = None,
     cancellation_token: CancellationToken | None = None,
     owner_session_identity: OwnerSessionIdentity | None = None,
+    canonical_release_fn: CanonicalReleaseFn | None = None,
+    retag_fn: MergeRetagFn | None = None,
 ) -> DispatchOutcome:
     """Run a force-import through the full dispatch pipeline.
 
@@ -71,7 +75,14 @@ def dispatch_import_from_db(
     ``DISPATCH_CODE_REQUEUED_FOR_PREVIEW``); the actual measurement happens
     on the preview worker's next claim. Quality decisions (downgrade
     prevention, quality gate, media-server scans, denylist) still run identically
-    to auto-import — only the beets *distance* check is skipped.
+    to auto-import — only the beets *distance* check is overridden.
+
+    Since #1080 that override is literal rather than structural: this lane
+    runs the SAME exact-release validation the automation lane runs
+    (``lib.download_validation.validate_release_with_merge_redirect``),
+    differing in one argument — the distance threshold, raised to
+    ``FORCE_IMPORT_DISTANCE_THRESHOLD``. See ``_dispatch_import_from_db_locked``
+    for why the result is identity resolution and never a verdict.
 
     Concurrency (issue #92): a per-``request_id`` advisory lock (IMPORT
     namespace) is taken up front. Two concurrent force imports
@@ -141,6 +152,8 @@ def dispatch_import_from_db(
             beets_library_root=beets_library_root,
             cancellation_token=cancellation_token,
             owner_session_identity=owner_session_identity,
+            canonical_release_fn=canonical_release_fn,
+            retag_fn=retag_fn,
         )
 
 
@@ -161,6 +174,8 @@ def _dispatch_import_from_db_locked(
     beets_library_root: str | None = None,
     cancellation_token: CancellationToken | None = None,
     owner_session_identity: OwnerSessionIdentity | None = None,
+    canonical_release_fn: CanonicalReleaseFn | None = None,
+    retag_fn: MergeRetagFn | None = None,
 ) -> DispatchOutcome:
     """Body of dispatch_import_from_db, called once the advisory lock is held.
 
@@ -223,6 +238,69 @@ def _dispatch_import_from_db_locked(
     from lib.config import read_runtime_config
 
     resolved_cfg = cfg or read_runtime_config()
+
+    # The exact-release comparison, run through the SAME seam the automation
+    # lane runs, with the one documented difference: the distance threshold is
+    # the operator's override (#1080). Its purpose here is identity
+    # resolution, not a verdict — a force import exists to import DESPITE the
+    # validation verdict, so nothing below branches on ``result.valid``. What
+    # it does buy is the merge-redirect follow: when MusicBrainz has merged
+    # this release away, the library is retagged and the request rekeyed here,
+    # and the survivor is what dispatch imports. Before this, force met the
+    # merged-away release at ``import_one.py::_find_target_candidate`` instead
+    # and rejected ``mbid_missing`` forever.
+    #
+    # Ordering: this runs before candidate evidence is loaded, because a rekey
+    # moves the request's ``album_quality_evidence`` rows onto the survivor in
+    # the same transaction. Loading evidence first would pin the pre-rekey
+    # identity. It also runs under the IMPORT lock taken above, preserving the
+    # documented ``IMPORT → RELEASE`` order for the retag's two release locks.
+    from lib.beets import FORCE_IMPORT_DISTANCE_THRESHOLD
+    from lib.download_validation import validate_release_with_merge_redirect
+
+    validation = validate_release_with_merge_redirect(
+        db=db,
+        cfg=resolved_cfg,
+        album_path=failed_path,
+        request_id=request_id,
+        release_id=mbid,
+        import_job_id=import_job_id,
+        distance_threshold=FORCE_IMPORT_DISTANCE_THRESHOLD,
+        cancellation_token=cancellation_token,
+        canonical_release_fn=canonical_release_fn,
+        retag_fn=retag_fn,
+    )
+    if validation.merge.rekeyed and validation.merge.survivor is not None:
+        logger.info(
+            "FORCE-IMPORT MERGE REKEY: request %s %s -> %s",
+            request_id, mbid, validation.merge.survivor,
+        )
+        mbid = validation.merge.survivor
+    elif validation.merge.split_identity:
+        # THIS execution moved the installed album onto the survivor and the
+        # request could not follow (the survivor was taken inside the race
+        # window the pre-check cannot cover). Launching Beets at the id the
+        # row still names would report the pre-#1080 ``mbid_missing`` while
+        # the library had silently moved under the operator. Refuse instead;
+        # the seam has already recorded the durable audit row. Nothing is
+        # parked: the job terminalizes failed with this message and the
+        # request keeps whatever runnable status it had.
+        #
+        # Scope, deliberately: this is the split this execution CREATED, not
+        # a detector for one that already exists. A pre-existing split is
+        # refused at the seam's occupancy pre-check — the rival that won the
+        # earlier race still holds the survivor — so it arrives as
+        # ``rekey_blocked`` with ``library_moved`` false, and the launch
+        # proceeds exactly as it did before #1080: ``import_one.py`` matches
+        # by exact ``album_id`` and rejects ``mbid_missing`` rather than
+        # landing a second album. The operator's evidence in that world is
+        # the seam's blocked audit row, which names the collision; detecting
+        # the split itself would need a Beets read this seam deliberately
+        # does not take.
+        return DispatchOutcome(
+            success=False,
+            message=validation.merge.detail,
+        )
 
     files: list[DownloadFile] = []
     if source_username:

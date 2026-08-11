@@ -22,6 +22,7 @@ from lib.pipeline_db._shared import (
     REQUEST_STATUS_PROCESSING,
     AddRequestInput,
     MbidCollisionError,
+    MergeRekeyCollision,
     RequestSpectralStateUpdate,
     SupersedeRaceError,
     _escape_like_pattern,
@@ -1891,6 +1892,71 @@ class _RequestsMixin(_PipelineDBBase):
         return row is not None
 
 
+    def merge_rekey_collision(
+        self,
+        request_id: int,
+        *,
+        old_release_id: str,
+        new_release_id: str,
+    ) -> MergeRekeyCollision:
+        """Read what already occupies the survivor, before the library moves.
+
+        The two worlds in which :meth:`update_request_release_for_merge`
+        raises a ``UniqueViolation`` — a rival request already at the
+        survivor, and an evidence row already at
+        ``(survivor, snapshot_fingerprint)`` — are
+        both plain reads, so the merge seam asks first and never retags the
+        shared Beets library for a rekey that is already refused. Those two
+        are the whole of this pre-check, and deliberately so: the write's
+        other refusals (the identity compare-and-set, the frozen ``replaced``
+        guard, and both claim arms) are ``rowcount = 0`` misses describing a
+        world the next attempt re-derives, while these two persist until an
+        operator resolves them.
+
+        This is the ordering fix for the split state: retagging and THEN
+        discovering the refusal leaves the installed album filed under the
+        survivor while the request still names the merged-away id, and the
+        collision that refused the write is still there on the next attempt —
+        which this pre-check refuses before the library is read at all, so
+        nothing repairs that.
+
+        Deliberately NOT the authority — the write re-decides both conditions
+        atomically under the row lock. A rival that appears between this read
+        and that write is the residual, which the caller records and fails
+        closed on.
+
+        The rival query is ``mb_release_id = new AND id <> request_id`` with no
+        status filter, because ``album_requests.mb_release_id`` is globally
+        UNIQUE (migration 001): a frozen ``replaced`` audit ancestor collides
+        exactly like a live request does.
+        """
+        cur = self._execute(
+            "SELECT id FROM album_requests "
+            "WHERE mb_release_id = %s AND id <> %s "
+            "ORDER BY id LIMIT 1",
+            (new_release_id, request_id),
+        )
+        rival_row = cur.fetchone()
+        cur = self._execute(
+            "SELECT moving.snapshot_fingerprint AS snapshot_fingerprint "
+            "FROM album_quality_evidence AS moving "
+            "JOIN album_quality_evidence AS held "
+            "  ON held.mb_release_id = %s "
+            " AND held.snapshot_fingerprint = moving.snapshot_fingerprint "
+            "WHERE moving.mb_release_id = %s "
+            "ORDER BY moving.snapshot_fingerprint",
+            (new_release_id, old_release_id),
+        )
+        return MergeRekeyCollision(
+            rival_request_id=(
+                None if rival_row is None else int(rival_row["id"])
+            ),
+            colliding_fingerprints=tuple(
+                str(row["snapshot_fingerprint"]) for row in cur.fetchall()
+            ),
+        )
+
+
     def update_request_release_for_merge(
         self,
         request_id: int,
@@ -1914,11 +1980,37 @@ class _RequestsMixin(_PipelineDBBase):
         * ``mb_release_id = %s`` — a compare-and-set on the identity being
           moved. A row somebody else already rekeyed, superseded, or pointed
           elsewhere is left alone.
-        * ``status = 'processing'`` + ``active_automation_import_job_id = %s``
-          — the exact owner fence every processing write owes
-          (``.claude/rules/pipeline-db.md``). It also excludes the frozen
-          ``replaced`` status by construction: a frozen audit ancestor is
-          never ``processing``.
+        * **the caller still holds the import claim it took.** There are
+          exactly two, and this fence is each claim's own request predicate
+          copied verbatim, so "still claimed" means the same thing here as it
+          did at claim time:
+
+          - ``claim_automation_import_job_under_lock`` — ``status =
+            'processing'`` and ``active_automation_import_job_id = %s``. That
+            pointer IS ownership (invariant 10), and it excludes the frozen
+            ``replaced`` status by construction: a frozen audit ancestor is
+            never ``processing``.
+          - ``claim_force_import_job_under_lock`` — ``status NOT IN
+            ('processing', 'replaced')``, no automation owner attached, and
+            the named ``force_import`` job ``running`` against this request.
+            A force import runs on a ``wanted`` / ``imported`` /
+            ``unsearchable`` / ``downloading`` row under ``IMPORT(request_id)``
+            and CANNOT take the ``processing`` pointer: migration 066's
+            owner-equivalence CHECK and its partial unique index reserve that
+            for one active ``automation_import`` job. Before #1080 the force
+            lane could therefore never follow a merge — it met the merged-away
+            release at the apply-time comparison inside ``import_one.py``
+            instead, which has no redirect concept.
+
+          A YouTube rescue job matches neither arm and never rekeys.
+
+        Admitting the force claim here is an operator decision, not an
+        inference from the automation arm:
+
+        Authority: "force import is supposed to be exactly the same as anything
+        else just with beets distance over-ridden, so please don't diverge and
+        recreate any pathways." —
+        https://github.com/abl030/cratedigger/issues/1080
 
         **The evidence moves with the row, in the same transaction.**
         ``album_quality_evidence`` is content-addressed by
@@ -1974,13 +2066,32 @@ class _RequestsMixin(_PipelineDBBase):
                         "UPDATE album_requests "
                         "SET mb_release_id = %s, updated_at = %s "
                         "WHERE id = %s AND mb_release_id = %s "
-                        "AND status = 'processing' "
-                        "AND active_automation_import_job_id = %s",
+                        # The frozen-ancestor guard is its own top-level term,
+                        # never a branch of the claim disjunction below: a
+                        # ``replaced`` row is out of scope for BOTH claims,
+                        # and stating it once keeps that unconditional.
+                        "AND status <> 'replaced' "
+                        "AND ("
+                        "  (status = 'processing'"
+                        "   AND active_automation_import_job_id = %s)"
+                        "  OR ("
+                        "    status <> 'processing'"
+                        "    AND active_automation_import_job_id IS NULL"
+                        "    AND EXISTS ("
+                        "      SELECT 1 FROM import_jobs j"
+                        "      WHERE j.id = %s"
+                        "        AND j.request_id = album_requests.id"
+                        "        AND j.job_type = 'force_import'"
+                        "        AND j.status = 'running'"
+                        "    )"
+                        "  )"
+                        ")",
                         (
                             new_release_id,
                             now,
                             request_id,
                             old_release_id,
+                            expected_import_job_id,
                             expected_import_job_id,
                         ),
                     )

@@ -445,6 +445,63 @@ class BadAudioHashRow:
 
 
 @dataclass(frozen=True)
+class MergeRekeyCollision:
+    """What already occupies the merge survivor, read before anything moves.
+
+    ``update_request_release_for_merge`` has exactly two refusals that raise a
+    ``UniqueViolation``: another request already holds the survivor
+    (``UNIQUE(mb_release_id)``), and an evidence row already exists at
+    ``(survivor, snapshot_fingerprint)`` for a fingerprint the rekey would
+    move (``UNIQUE (mb_release_id, snapshot_fingerprint)``). Both are plain
+    reads, so the merge seam asks BEFORE it retags the shared Beets library:
+    discovering a refusal after the library has moved leaves the installed
+    album at the survivor and the request at the merged-away id, which nothing
+    repairs. Its remaining refusals — the identity compare-and-set, the frozen
+    ``replaced`` guard, and both claim arms — write nothing and return False
+    on a ``rowcount = 0`` miss instead, and describe a world the next attempt
+    re-derives, so they are deliberately outside this pre-check.
+
+    This is a pre-check, not the authority. The write re-decides both
+    conditions atomically; a rival that appears in between is the residual the
+    seam records and fails closed on.
+
+    ``@dataclass`` rather than ``msgspec.Struct``: it never crosses JSON, only
+    PostgreSQL to Python (``.claude/rules/code-quality.md`` § wire-boundary
+    types).
+    """
+
+    #: Another ``album_requests`` row already at the survivor. Any row counts:
+    #: ``album_requests.mb_release_id`` is globally UNIQUE, so a frozen
+    #: ``replaced`` audit ancestor collides exactly like a live request does.
+    rival_request_id: int | None = None
+    #: Snapshot fingerprints present at BOTH release ids. Each one is two
+    #: measurements of the same bytes, and choosing between them is an
+    #: unowned quality decision.
+    colliding_fingerprints: tuple[str, ...] = ()
+
+    @property
+    def blocked(self) -> bool:
+        return (
+            self.rival_request_id is not None
+            or bool(self.colliding_fingerprints)
+        )
+
+    def detail(self) -> str:
+        """Operator-facing reason, or ``""`` when nothing collides."""
+        reasons: list[str] = []
+        if self.rival_request_id is not None:
+            reasons.append(
+                f"request {self.rival_request_id} already holds it"
+            )
+        if self.colliding_fingerprints:
+            reasons.append(
+                "evidence already exists at the survivor for snapshot "
+                + ", ".join(self.colliding_fingerprints)
+            )
+        return "; ".join(reasons)
+
+
+@dataclass(frozen=True)
 class AddRequestInput:
     """Typed payload for inserting one ``album_requests`` row.
 

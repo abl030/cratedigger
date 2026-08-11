@@ -48,9 +48,18 @@ Four properties are load-bearing:
   identity, or raises, is a failure — never "the album is not held". Reading it
   as absence would authorize a rekey that manufactures a duplicate pressing.
 
-Nothing here is durable. A failure leaves the library and the request exactly
-as they were, and the next sweep re-derives the same world (invariant 11 —
-broken worlds surface and restart; nothing is parked).
+Nothing here is durable. A failure of THIS module leaves the library and the
+request exactly as they were, and the next sweep re-derives the same world
+(invariant 11 — broken worlds surface and restart; nothing is parked).
+
+That is a statement about the retag, NOT about the composite. A successful
+``retagged`` outcome IS durable — the library has moved — and the caller's
+subsequent rekey can still be refused, leaving the installed album at the
+survivor and the request at the merged-away id. That composite is the caller's
+to prevent and record, and ``lib/download_validation.py`` does both: it reads
+the survivor's occupants before asking for a retag, and audits the residual
+race (:data:`lib.download_validation.MERGE_REKEY_BLOCKED` and
+``MergeRekeyOutcome.split_identity``).
 """
 
 from __future__ import annotations
@@ -60,7 +69,7 @@ import re
 import subprocess as sp
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Final, Literal, Protocol
+from typing import TYPE_CHECKING, Final, Literal, Protocol
 
 from lib.beets_db import (
     CurrentBeetsAmbiguous,
@@ -69,6 +78,9 @@ from lib.beets_db import (
     CurrentBeetsUnique,
 )
 from lib.release_identity import ReleaseIdentity
+
+if TYPE_CHECKING:
+    from lib.config import CratediggerConfig
 
 log = logging.getLogger("cratedigger")
 
@@ -143,6 +155,24 @@ class BeetsRetagResult:
 type MbsyncFn = Callable[[str], MbsyncRun]
 
 type SubprocessRunFn = Callable[..., sp.CompletedProcess[bytes]]
+
+
+class MergeRetagFn(Protocol):
+    """Exact injection contract for the one-album library retag.
+
+    Declared here rather than at a call site because BOTH import lanes that
+    can follow a MusicBrainz merge inject it: the automation validation seam
+    and the force-import dispatch entry point (#1080). One contract, so the
+    two callers cannot drift into two shapes.
+    """
+
+    def __call__(
+        self,
+        cfg: CratediggerConfig,
+        *,
+        old_identity: ReleaseIdentity,
+        new_identity: ReleaseIdentity,
+    ) -> BeetsRetagResult: ...
 
 
 class CurrentReleaseResolver(Protocol):

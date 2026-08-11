@@ -1017,9 +1017,48 @@ cleanup both write it, preserving the action, reason, decision, stage chain,
 and frozen candidate/current evidence snapshots. Recents History renders this
 audit as display-only metadata alongside the original Beets rejection.
 
-After manual review, force-import bypasses the distance check. The request
+After manual review, force-import overrides the distance check. The request
 handler or CLI command validates the row/path synchronously, then enqueues a
 `force_import` job. `cratedigger-importer` runs the actual beets mutation.
+
+**Force import is the same path as any other import, with the Beets distance
+overridden — nothing else about it is special-cased** (#1080). It runs the
+same exact-release validation the automation lane runs
+(`lib/download_validation.py::validate_release_with_merge_redirect`), handing
+it `lib/beets.py::FORCE_IMPORT_DISTANCE_THRESHOLD` instead of
+`beets_distance_threshold`; `harness/import_one.py` under `--force` raises
+its apply-time `max_distance` to that same number. Two consequences:
+
+- A request whose MusicBrainz release was merged away is rescued by whichever
+  lane reaches it first. Before #1080 force skipped validation entirely and
+  met the merged-away release at
+  `harness/import_one.py::_find_target_candidate`,
+  which has no redirect concept, so it rejected `mbid_missing` forever
+  (live: `download_log` 39846 versus the automation lane's 39802 on request
+  346). The merge rekey's fence therefore admits the force lane's claim —
+  a `running` `force_import` job on a request with no automation owner that
+  is neither `processing` nor `replaced` — alongside the automation owner
+  pointer.
+- The validation result is **identity resolution for force, never a verdict**.
+  Force exists to import despite the validation verdict, so nothing branches
+  on `valid`: an `extra_tracks` / `no_choose_match` / `validation_error`
+  result still reaches the Beets launch exactly as it did before. The one
+  exception is not a verdict either: if the seam retagged the installed album
+  onto the survivor and the rekey was then refused (the race the pre-check
+  cannot close), force refuses to launch, because the id the row still names
+  is no longer where the library filed that album. The refusal is recorded as
+  a `download_log` row with `outcome='failed'`, and the request keeps whatever
+  runnable status it had.
+- A rekey the seam refuses BEFORE touching the library — the survivor is
+  already held by another request, or already carries an evidence row at the
+  fingerprint being moved — also writes a `download_log` row with
+  `outcome='failed'` naming the collision, and force then launches exactly as
+  it did before #1080. That audit is the only durable record of the world:
+  the collision persists until an operator resolves it, so every later force
+  attempt would otherwise repeat a bare `mbid_missing` with no reason
+  attached. One row per execution that reaches the branch (one per force
+  action, one per completed-download validation); it is deliberately not
+  deduplicated.
 
 **Path resolution**: old entries stored relative paths
 (`failed_imports/Foo - Bar`); new entries under `wrong_matches/` store absolute
