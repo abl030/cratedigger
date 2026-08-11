@@ -307,7 +307,15 @@ function renderWrongMatchExplorer(data) {
         ? 'No audio files were found before exploration was truncated.'
         : 'No audio files found in this folder.';
     const emptyColour = unreadableCount > 0 ? '#d9a441' : '#666';
-    return `${summary}${partialNotice}<div style="color:${emptyColour};font-size:0.78em;padding:8px 0;">${emptyText}</div>`;
+    // An unreadable folder is a world the operator can REPAIR (fix the
+    // mode, remount the share). Without a Retry the only way to see the
+    // repair was a full page reload, because the panel caches its loaded
+    // state \u2014 the pre-fix error path at least offered one (issue #1063).
+    const retryId = Number(data?.download_log_id);
+    const retry = (unreadableCount > 0 && Number.isFinite(retryId))
+      ? ` <button class="p-btn" style="margin-left:6px;" onclick="event.stopPropagation(); window.reloadWrongMatchExplorer(${retryId})">Retry</button>`
+      : '';
+    return `${summary}${partialNotice}<div style="color:${emptyColour};font-size:0.78em;padding:8px 0;">${emptyText}${retry}</div>`;
   }
 
   let html = `
@@ -361,7 +369,15 @@ async function ensureWrongMatchExplorer(logId) {
       throw new Error(data?.error || data?.message || 'Explorer load failed');
     }
     mount.innerHTML = renderWrongMatchExplorer(data);
-    _entryExplorerState.set(logId, 'loaded');
+    // Only a COMPLETE listing is worth caching. An unavailable one
+    // describes a broken world that the operator is expected to go and
+    // fix; caching it would make reopening the disclosure short-circuit
+    // on the stale answer until the whole page is reloaded.
+    if (data.status === 'ok') {
+      _entryExplorerState.set(logId, 'loaded');
+    } else {
+      _entryExplorerState.delete(logId);
+    }
   } catch (e) {
     _entryExplorerState.delete(logId);
     // A whole-root refusal answers 503 with the server's own reason

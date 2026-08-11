@@ -242,6 +242,28 @@ class _FolderScan:
     read_error: str | None = None
 
 
+def _refusal_text(path: str, exc: OSError) -> str | None:
+    """What to report for one failed path syscall, or ``None`` if it proved.
+
+    The single owner of that question for every site in this module that
+    can record a read refusal — the walk's ``onerror``, the per-file
+    ``stat``, and the tag read. ``None`` means the errno established a
+    FACT about the name rather than failing to observe it: ``ENOENT`` and
+    ``ENOTDIR`` say the file is genuinely not there (a vanished file, a
+    dangling symlink), and issue #1063's rule cuts both ways —
+    laundering a proven absence into a refusal is the same lie told
+    backwards. It reaches the operator as an amber ``· incomplete
+    manifest`` badge over a manifest that is complete.
+
+    Everything else is the storage failing to answer, and travels as a
+    refusal. Classification is :func:`classify_path_errno` +
+    :func:`refusal_is_indeterminate`, exactly as everywhere else.
+    """
+    if refusal_is_indeterminate(classify_path_errno(exc)) is not True:
+        return None
+    return f"{path}: {exc.strerror}"
+
+
 def _audio_files_under(folder: str) -> _FolderScan:
     """Return audio files under ``folder`` plus any refusal that hid some.
 
@@ -256,7 +278,11 @@ def _audio_files_under(folder: str) -> _FolderScan:
     refusals: list[str] = []
 
     def _record(exc: OSError) -> None:
-        refusals.append(f"{exc.filename or folder}: {exc.strerror}")
+        # A directory that VANISHED between enumeration and descent is
+        # not a directory we were refused.
+        refusal = _refusal_text(str(exc.filename or folder), exc)
+        if refusal is not None:
+            refusals.append(refusal)
 
     for root, _dirs, files in os.walk(folder, onerror=_record):
         for f in files:
@@ -305,20 +331,18 @@ def _fingerprint_file(path: str) -> _FileRead:
     try:
         item = _item_from_path(path)
     except Exception as exc:  # noqa: BLE001 — beets raises a mediafile mess
-        refused = indeterminate_os_refusal(exc)
+        refused = indeterminate_os_refusal(exc, subject=path)
         if refused is not None:
             log.warning(
                 "beets_distance: tag read REFUSED for %s: %s", path, refused)
-            return _FileRead(refusal=f"{path}: {refused.strerror}")
+            return _FileRead(refusal=_refusal_text(path, refused))
         log.warning("beets_distance: tag read failed for %s: %s", path, exc)
         return _FileRead()
 
     try:
         st = os.stat(path)
     except OSError as exc:
-        if refusal_is_indeterminate(classify_path_errno(exc)) is True:
-            return _FileRead(refusal=f"{path}: {exc.strerror}")
-        return _FileRead()
+        return _FileRead(refusal=_refusal_text(path, exc))
 
     # Beets Item exposes tag fields as attributes (LightFlavoredDict).
     return _FileRead(fingerprint=_AudioFileFingerprint(
@@ -366,10 +390,13 @@ def _read_folder_fingerprints(
         try:
             st = os.stat(path)
         except OSError as exc:
-            # Same rule one level down: a file we could not stat is not a
-            # file that is not there.
-            if read_error is None:
-                read_error = f"{path}: {exc.strerror}"
+            # Same rule one level down, in BOTH directions: a file we
+            # could not stat is not a file that is not there — and a file
+            # the errno proves is gone (a dangling symlink, a file
+            # unlinked after the walk listed it) is not a refusal.
+            refusal = _refusal_text(path, exc)
+            if refusal is not None and read_error is None:
+                read_error = refusal
             continue
         cached: _AudioFileFingerprint | None = None
         if cache is not None:

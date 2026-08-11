@@ -273,10 +273,9 @@ def refusal_is_indeterminate(code: FsAuthorityCode) -> bool | None:
             return False
 
 
-_REFUSAL_CHAIN_MAX_DEPTH = 16
-
-
-def indeterminate_os_refusal(exc: BaseException) -> OSError | None:
+def indeterminate_os_refusal(
+    exc: BaseException, *, subject: str,
+) -> OSError | None:
     """Find the storage refusal hiding inside a third-party exception.
 
     Tag readers convert an ``OSError`` into their own vocabulary before
@@ -285,7 +284,8 @@ def indeterminate_os_refusal(exc: BaseException) -> OSError | None:
     as ``ReadError`` — so ``except OSError`` never fires and an EACCES
     file is indistinguishable from a corrupt one. The originating error
     survives on the explicit ``__cause__`` / implicit ``__context__``
-    chain; this walks it and returns the first ``OSError`` whose errno
+    chain; this walks it and returns the first ``OSError`` that both
+    names ``subject`` and carries an errno
     :func:`classify_path_errno` + :func:`refusal_is_indeterminate` call a
     world failure (issue #1063).
 
@@ -294,21 +294,41 @@ def indeterminate_os_refusal(exc: BaseException) -> OSError | None:
     garbage" is a fact ABOUT the file, and reporting it as a refusal
     would re-launder the very distinction this module exists to keep.
 
-    The walk is bounded and cycle-guarded: an exception chain is
-    attacker-influenced data in exactly the same way a path is.
+    ``subject`` is REQUIRED, and the match is on the errno's own
+    ``filename``. Python sets ``__context__`` implicitly to whatever
+    exception is being handled anywhere up the stack, so a caller that
+    reads a corrupt file from inside an ``except OSError:`` block finds
+    that unrelated error on the chain — and reporting it produces a
+    refusal message with the wrong errno and someone else's filename.
+    A refusal is a claim about ONE file; an error that does not name
+    that file is not evidence for it. Every refusal this deployment
+    really produces carries its filename (mutagen's ``PermissionError``
+    does; ``tests/test_beets_distance.py``'s
+    ``test_real_refusal_carries_its_filename`` pins that against the
+    installed stack, so an upgrade that stopped attaching it fails loudly
+    rather than degrading every refusal into ``no_audio``).
+
+    Termination is the ``seen`` set, not a depth cap: each step either
+    stops or records a new exception object, and the chain is finite. A
+    cap would have to choose a direction to fail in, and truncating the
+    walk fails toward "no refusal found" — the ``no_audio`` side, which
+    is the #1063-violating one.
     """
     seen: set[int] = set()
     current: BaseException | None = exc
-    for _ in range(_REFUSAL_CHAIN_MAX_DEPTH):
-        if current is None or id(current) in seen:
-            break
+    while current is not None and id(current) not in seen:
         seen.add(id(current))
         if (
             isinstance(current, OSError)
+            and subject in (current.filename, current.filename2)
             and refusal_is_indeterminate(classify_path_errno(current)) is True
         ):
             return current
-        current = current.__cause__ or current.__context__
+        # ``raise X from None`` means the author explicitly disowned the
+        # context; honour that rather than mining it for attribution.
+        current = current.__cause__ or (
+            None if current.__suppress_context__ else current.__context__
+        )
     return None
 
 

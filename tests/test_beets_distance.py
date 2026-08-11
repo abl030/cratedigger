@@ -15,6 +15,7 @@ number on a second call (mtime-stable).
 
 from __future__ import annotations
 
+import errno
 import os
 import shutil
 import tempfile
@@ -429,6 +430,92 @@ class TestComputeBeetsDistanceOutcomes(unittest.TestCase):
         self.assertNotEqual(result.outcome, "no_audio")
         assert result.error_message is not None
         self.assertIn("could not read the contents", result.error_message)
+
+    def test_a_proven_absence_is_not_reported_as_a_refusal(self) -> None:
+        """ENOENT is the one errno that EARNS a definitive negative.
+
+        A dangling symlink is listed by the walk and answers ENOENT on
+        ``stat``: the file is provably gone. Recording that as a refusal
+        reaches the operator as an amber ``· incomplete manifest`` badge
+        on the Replace picker — over a manifest that is complete. Issue
+        #1063's rule cuts both ways.
+        """
+        root = self.enterContext(tempfile.TemporaryDirectory())
+        album = os.path.join(root, "wrong_matches", "Album")
+        os.makedirs(album)
+        shutil.copy(FIXTURE_FLAC, os.path.join(album, "01 - one.flac"))
+        os.symlink(os.path.join(album, "nothing-here.flac"),
+                   os.path.join(album, "02 - dangling.flac"))
+        result = self._compute_over(album)
+        self.assertEqual(result.outcome, "ok")
+        self.assertIsNone(result.partial_read)
+        self.assertEqual(result.total_local_tracks, 1)
+
+    def test_only_proven_absences_is_no_audio_not_unavailable(self) -> None:
+        """A folder holding one dangling name WAS observed and read.
+
+        ``folder_unavailable`` (503 / exit 5) means the folder could not
+        be observed; that would be false here, and the CLI doc this
+        series wrote says so.
+        """
+        root = self.enterContext(tempfile.TemporaryDirectory())
+        album = os.path.join(root, "wrong_matches", "Album")
+        os.makedirs(album)
+        os.symlink(os.path.join(album, "nothing-here.flac"),
+                   os.path.join(album, "01 - dangling.flac"))
+        result = self._compute_over(album)
+        self.assertEqual(result.outcome, "no_audio")
+        self.assertIsNone(result.partial_read)
+
+    def test_refusal_attribution_survives_an_ambient_os_error(self) -> None:
+        """A refusal names ONE file; an unrelated error is not evidence.
+
+        Python sets ``__context__`` implicitly to whatever exception is
+        being handled anywhere up the stack, so reading a corrupt file
+        from inside an ``except OSError:`` block put that unrelated error
+        on the chain — and the walk reported a refusal with the wrong
+        errno and someone else's filename.
+        """
+        root = self.enterContext(tempfile.TemporaryDirectory())
+        album = os.path.join(root, "wrong_matches", "Album")
+        os.makedirs(album)
+        shutil.copy(FIXTURE_FLAC, os.path.join(album, "01 - one.flac"))
+        with open(os.path.join(album, "02 - garbage.flac"), "wb") as handle:
+            handle.write(b"not a flac at all" * 8)
+        try:
+            raise PermissionError(13, "Permission denied", "/elsewhere.flac")
+        except OSError:
+            result = self._compute_over(album)
+        self.assertEqual(result.outcome, "ok")
+        self.assertIsNone(result.partial_read)
+
+    def test_real_refusal_carries_its_filename(self) -> None:
+        """Rule C: the attribution guard depends on a fact of the stack.
+
+        ``indeterminate_os_refusal`` only accepts an ``OSError`` that
+        names the file. That is safe because the installed
+        mutagen/mediafile/beets stack really does attach ``filename`` to
+        the originating error — pinned here so a future upgrade that
+        stopped doing it fails loudly instead of silently degrading every
+        refusal into ``no_audio``.
+        """
+        from lib.beets_distance import _item_from_path
+        from lib.fs_authority import indeterminate_os_refusal
+
+        root = self.enterContext(tempfile.TemporaryDirectory())
+        locked = os.path.join(root, "locked.flac")
+        shutil.copy(FIXTURE_FLAC, locked)
+        os.chmod(locked, 0o000)
+        self.addCleanup(os.chmod, locked, 0o600)
+        with self.assertRaises(Exception) as caught:
+            _item_from_path(locked)
+        found = indeterminate_os_refusal(caught.exception, subject=locked)
+        assert found is not None
+        self.assertEqual(found.filename, locked)
+        self.assertEqual(found.errno, errno.EACCES)
+        # …and the same chain read for a DIFFERENT subject is not evidence.
+        self.assertIsNone(indeterminate_os_refusal(
+            caught.exception, subject=os.path.join(root, "other.flac")))
 
     def test_unparseable_file_is_not_reported_as_a_refusal(self) -> None:
         """Must still work: a corrupt tag block is a fact about the file.

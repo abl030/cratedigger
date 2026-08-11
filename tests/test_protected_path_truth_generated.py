@@ -581,6 +581,14 @@ ENTRY_WORLDS: tuple[str, ...] = (
     "readable_other",
     "unreadable_file",
     "unreadable_dir",
+    # A dangling symlink: enumerated by the scan, PROVEN to hold nothing.
+    # The explorer already gets this right — it classifies every refusal
+    # through ``classify_path_errno``, and ENOENT/ELOOP are not
+    # indeterminate — but no world could produce it, so the "refused
+    # nothing" half of every clause below was unproven. That is the same
+    # gap the fifth review found in ``DISTANCE_FILE_WORLDS``, where the
+    # branch was NOT already correct.
+    "vanished",
 )
 
 
@@ -617,6 +625,11 @@ def build_explorer_world(
                 handle.write(b"\x00" * 32)
             os.chmod(path, 0o000)
             unreadable.append(path)
+        elif world == "vanished":
+            os.symlink(
+                os.path.join(album, f"{index:02d} gone.mp3"),
+                os.path.join(album, f"{index:02d} dangling.mp3"),
+            )
         else:
             path = os.path.join(album, f"{index:02d} locked-dir")
             os.makedirs(path)
@@ -710,6 +723,9 @@ class TestExplorerRefusalHonestyGenerated(unittest.TestCase):
     @example(worlds=["unreadable_file", "unreadable_file", "unreadable_dir"])
     @example(worlds=["readable_audio", "unreadable_file"])
     @example(worlds=["readable_audio"])
+    @example(worlds=["vanished"])
+    @example(worlds=["readable_audio", "vanished"])
+    @example(worlds=["vanished", "unreadable_file"])
     @example(worlds=[])
     @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
     @given(worlds=st.lists(
@@ -890,6 +906,8 @@ class TestExplorerReachesTheOperatorGenerated(unittest.TestCase):
     @example(worlds=["readable_audio", "unreadable_file"])
     @example(worlds=["readable_other", "unreadable_file"])
     @example(worlds=["readable_audio"])
+    @example(worlds=["vanished"])
+    @example(worlds=["readable_audio", "vanished"])
     @example(worlds=[])
     @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
     @given(worlds=st.lists(
@@ -1011,6 +1029,13 @@ class TestExplorerReachesTheOperatorGenerated(unittest.TestCase):
 DISTANCE_FILE_WORLDS: tuple[str, ...] = (
     "readable",
     "refused",
+    # A dangling symlink: the walk LISTS the name, ``os.stat`` answers
+    # ENOENT. The file is PROVEN not to be there — the one errno that
+    # earns a definitive negative. Without this world the "refused
+    # nothing yet claimed partial_read" clause below could not fire, and
+    # the delta shipped a proven absence rendered as an amber
+    # "incomplete manifest" badge over a complete manifest.
+    "absent",
     "unparseable",
 )
 
@@ -1048,6 +1073,11 @@ def assert_distance_read_is_honest(
             f"worlds {list(worlds)} refused every file yet reported "
             f"outcome={outcome!r}"
         )
+    if not refused and readable == 0 and outcome != "no_audio":
+        raise AssertionError(
+            f"worlds {list(worlds)} were fully OBSERVED and held no readable "
+            f"audio, which no_audio states exactly; got outcome={outcome!r}"
+        )
     if refused and readable and partial_read is None:
         raise AssertionError(
             f"worlds {list(worlds)} computed a distance over "
@@ -1058,7 +1088,8 @@ def assert_distance_read_is_honest(
         raise AssertionError(
             f"worlds {list(worlds)} refused nothing yet claimed "
             f"partial_read={partial_read!r} — an unparseable file is a fact "
-            "about the file, not a refusal"
+            "ABOUT the file and a proven absence is a fact about the name; "
+            "neither is the storage refusing to answer"
         )
     if outcome == "ok" and total_local_tracks != readable:
         raise AssertionError(
@@ -1111,6 +1142,9 @@ class TestDistanceReadRefusalGenerated(unittest.TestCase):
     @example(worlds=["readable", "unparseable"])
     @example(worlds=["readable"])
     @example(worlds=["unparseable"])
+    @example(worlds=["readable", "absent"])
+    @example(worlds=["absent"])
+    @example(worlds=["absent", "refused"])
     @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
     @given(worlds=st.lists(
         st.sampled_from(DISTANCE_FILE_WORLDS), min_size=1, max_size=3,
@@ -1130,6 +1164,11 @@ class TestDistanceReadRefusalGenerated(unittest.TestCase):
                 if world == "unparseable":
                     with open(path, "wb") as handle:
                         handle.write(b"not a flac at all" * 8)
+                    continue
+                if world == "absent":
+                    # Listed by the walk, ENOENT on stat: proven absent.
+                    os.symlink(os.path.join(album, f"{index:02d} gone.flac"),
+                               path)
                     continue
                 shutil.copy(self.FIXTURE_FLAC, path)
                 if world == "refused":
@@ -1185,10 +1224,37 @@ class TestDistanceReadRefusalGenerated(unittest.TestCase):
                 worlds=["readable", "unparseable"], outcome="ok",
                 partial_read="x: bad tags", total_local_tracks=1,
             )
-        # 4. A complete read must pass.
+        # 3b. The SAME mirror image from the world the fifth review
+        #     found: a PROVEN absence (ENOENT on a dangling symlink)
+        #     reported as a read refusal, which the picker then paints as
+        #     "· incomplete manifest" over a complete manifest.
+        with self.assertRaises(AssertionError):
+            assert_distance_read_is_honest(
+                worlds=["readable", "absent"], outcome="ok",
+                partial_read="…/02 dangling.flac: No such file or directory",
+                total_local_tracks=1,
+            )
+        # 3c. …and the same absence turning the whole folder into a
+        #     retryable world failure instead of the definitive negative
+        #     it actually established.
+        with self.assertRaises(AssertionError):
+            assert_distance_read_is_honest(
+                worlds=["absent"], outcome="folder_unavailable",
+                partial_read=None, total_local_tracks=None,
+            )
+        # 4. A complete read must pass — including one whose only
+        #    non-audio outcome was positively established.
         assert_distance_read_is_honest(
             worlds=["readable"], outcome="ok",
             partial_read=None, total_local_tracks=1,
+        )
+        assert_distance_read_is_honest(
+            worlds=["readable", "absent"], outcome="ok",
+            partial_read=None, total_local_tracks=1,
+        )
+        assert_distance_read_is_honest(
+            worlds=["absent"], outcome="no_audio",
+            partial_read=None, total_local_tracks=None,
         )
         # 5. The badge checker, both directions.
         with self.assertRaises(AssertionError):

@@ -1155,8 +1155,9 @@ console.log('maybeLoadWrongMatchExplorer() renders the honest copy for a refused
     if (id === 'toast') return dom.toast;
     return elements.get(id) || null;
   };
-  globalThis.fetch = async () => ({
-    ok: true,
+  const calls = [];
+  globalThis.fetch = async (url) => ({
+    ok: (calls.push(String(url)), true),
     status: 200,
     json: async () => ({
       status: 'unavailable',
@@ -1189,6 +1190,17 @@ console.log('maybeLoadWrongMatchExplorer() renders the honest copy for a refused
     'an unreadable folder is never presented as an empty one');
   assert(mount.innerHTML.includes('Permission denied'),
     'the refusal reason is shown');
+  // An unreadable folder is a world the operator can REPAIR, so the panel
+  // owes a Retry and must not cache the answer — otherwise the only way
+  // to see a fixed permission is a full page reload (issue #1063).
+  assert(mount.innerHTML.includes('Retry'),
+    'an unavailable listing offers a retry');
+  assert(mount.innerHTML.includes('window.reloadWrongMatchExplorer(200)'),
+    'the retry re-reads THIS entry');
+
+  await __test__.maybeLoadWrongMatchExplorer(200, { open: true });
+  assertEqual(calls.length, 2,
+    'reopening after an unavailable listing re-fetches instead of caching');
 }
 
 console.log('maybeLoadWrongMatchExplorer() surfaces a 503 refusal reason instead of swallowing it');
