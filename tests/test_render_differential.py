@@ -27,6 +27,7 @@ from lib.quality import (
     TargetQualityContract,
 )
 from scripts.render_differential import (
+    _EXPLORER_WATCHED,
     DEFAULT_TARGET_SPEC,
     ClassifyRenderTarget,
     DiffReport,
@@ -543,17 +544,27 @@ class TestWrongMatchExplorerRenderTargetIsTheProductionPath(unittest.TestCase):
         self.assertEqual(rendered.id, 909)
         self.assertEqual(rendered.fields["status"], expected["status"])
         self.assertEqual(
-            rendered.fields["unreadable_entry_count"],
-            expected["unreadable_entry_count"])
-        self.assertEqual(
             rendered.fields["unreadable_reason"],
             expected["unreadable_reason"])
-        self.assertEqual(rendered.fields["partial"], expected["partial"])
+        self.assertEqual(
+            rendered.fields["failed_path"], expected["failed_path"])
+        self.assertEqual(rendered.fields["files"], expected["files"])
+        # ``unreadable_entry_count`` and ``partial`` are provably
+        # numeric/boolean (``WrongMatchExplorerPayload``), so they are
+        # UNWATCHED and never reach ``rendered.fields`` — assert the
+        # underlying fact directly against the real production payload
+        # instead of through the differential's watched projection.
+        self.assertEqual(expected["unreadable_entry_count"], 1)
+        self.assertEqual(expected["partial"], True)
         # The load-bearing fact this whole issue is about: a refusal is
         # counted and honestly worded, never silently dropped.
-        self.assertEqual(rendered.fields["unreadable_entry_count"], 1)
         assert isinstance(rendered.fields["unreadable_reason"], str)
         self.assertIn("may be transient", rendered.fields["unreadable_reason"])
+        # Blocker 3: the field set is exactly what the Struct DERIVES,
+        # not a hand-picked subset — the old 5-key hand-pick hid 10 keys,
+        # including ``files``/``failed_path``, from every future
+        # differential run against this target.
+        self.assertEqual(set(rendered.fields), set(_EXPLORER_WATCHED))
 
     def test_a_missing_folder_renders_as_its_own_error_shape(self) -> None:
         from scripts.render_differential import WrongMatchExplorerRenderTarget
