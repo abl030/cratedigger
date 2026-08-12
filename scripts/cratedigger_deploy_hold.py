@@ -1606,7 +1606,31 @@ def abort_hold(backend: DeployHoldBackend) -> None:
             )
         backend.unmark_manual_hold_owned()
 
-    _clear_owned_inhibitors(backend)
+    # #1078 BLOCKER F2: at prepared-controlled/main-timer-open, the manual
+    # hold is already unowned (prepare_controlled released it), so the block
+    # above never runs -- but an owned YouTube inhibitor can still be the
+    # only thing stopping cratedigger-youtube-ingest. Removing a
+    # ConditionPathExists inhibitor does not start a stopped Type=simple
+    # unit; finish_release's own release-then-resume shape only works
+    # because it is the LAST inhibitor released, immediately before a
+    # metadata_gate("resume-if-clear") that starts every remaining guarded
+    # unit. abort has no such following resume, so it must restart and prove
+    # each service its own inhibitor release unblocks, exactly like the
+    # manual-hold branch does for GATE_STOPPED_UNITS, before disowning it.
+    owned_inhibited_services = backend.owned_inhibitor_units()
+    for service in owned_inhibited_services:
+        if not backend.inhibitor_is_owned(service):
+            raise DeployHoldError(
+                f"refusing to remove unowned producer inhibitor: {service}"
+            )
+        if backend.inhibitor_exists(service):
+            backend.remove_start_inhibitor(service)
+    if owned_inhibited_services:
+        for service in owned_inhibited_services:
+            backend.start_unit(service)
+        _wait_controlled_workers_active(backend, owned_inhibited_services)
+        for service in owned_inhibited_services:
+            backend.unmark_inhibitor_owned(service)
 
     owned_timers = backend.owned_link_units()
     for timer in owned_timers:

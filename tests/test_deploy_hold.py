@@ -1136,6 +1136,11 @@ class TestAbortHold(unittest.TestCase):
         self.assertEqual(backend.inhibitor_files, set())
         for timer in TIMER_UNITS:
             self.assertEqual(backend.unit_state(timer).active_state, "active")
+        # #1078 BLOCKER F2: prepare_controlled already unmarked the manual
+        # hold at this phase, so only the owned YouTube inhibitor was ever
+        # blocking it -- removing the inhibitor alone does not start a
+        # stopped Type=simple unit.
+        self.assertEqual(backend.unit_state(YOUTUBE_SERVICE).active_state, "active")
 
     def test_abort_from_main_timer_open_restores_ordinary_operation(self) -> None:
         backend = FakeDeployHoldBackend()
@@ -1149,6 +1154,8 @@ class TestAbortHold(unittest.TestCase):
         self.assertEqual(backend.owned_links, set())
         for timer in TIMER_UNITS:
             self.assertEqual(backend.unit_state(timer).active_state, "active")
+        # #1078 BLOCKER F2
+        self.assertEqual(backend.unit_state(YOUTUBE_SERVICE).active_state, "active")
 
     def test_abort_from_complete_pending_restores_ordinary_operation(self) -> None:
         backend = FakeDeployHoldBackend()
