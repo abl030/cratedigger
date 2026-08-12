@@ -2098,6 +2098,8 @@ console.log('triageButtonPresentation() derives the toolbar shape from state + c
     ['cancelled, nonzero count', 'cancelled', 2, { cleanupDisabled: false, cleanupLabel: 'Cleanup Wrong Matches (2)', stopDisabled: true, stopLabel: 'Stop' }],
     ['failed, nonzero count', 'failed', 4, { cleanupDisabled: false, cleanupLabel: 'Cleanup Wrong Matches (4)', stopDisabled: true, stopLabel: 'Stop' }],
     ['idle, nonzero count', 'idle', 1, { cleanupDisabled: false, cleanupLabel: 'Cleanup Wrong Matches (1)', stopDisabled: true, stopLabel: 'Stop' }],
+    ['unknown (status fetch + retry both failed), nonzero count', 'unknown', 3, { cleanupDisabled: true, cleanupLabel: 'Cleanup Wrong Matches (status unknown)', stopDisabled: false, stopLabel: 'Stop' }],
+    ['unknown, zero count', 'unknown', 0, { cleanupDisabled: true, cleanupLabel: 'Cleanup Wrong Matches (status unknown)', stopDisabled: false, stopLabel: 'Stop' }],
   ];
   for (const [desc, state, count, expected] of CASES) {
     assertDeepEqual(__test__.triageButtonPresentation(state, count), expected, desc);
@@ -2163,14 +2165,24 @@ console.log('loadWrongMatches() discovers an already-running sweep on initial lo
   invalidateWrongMatches();
   const realSetTimeout = globalThis.setTimeout;
   globalThis.setTimeout = (fn) => { fn(); return 0; };
-  let statusCalls = 0;
+  // Issue #1106 F6: loadWrongMatches() now derives TWICE on a fresh
+  // load — once BEFORE the `_loaded` short-circuit (so a tab switch
+  // re-derives without a full re-fetch) and once after rendering. Both
+  // see the SAME `started_at`, so the follower each one tries to attach
+  // dedupes to exactly one active poller (issue #1106 F5) regardless of
+  // which wins the race. Stay 'running' for the ENTIRE loadWrongMatches()
+  // call (a boolean flip, not a call-count threshold — the exact
+  // interleaving of the two derive calls against the dangling follower's
+  // own poll loop is not something a test should have to predict), then
+  // terminate deliberately afterward so the winning follower settles
+  // before this test block ends.
+  let forceTerminal = false;
   globalThis.fetch = async (url) => {
     if (url === '/api/wrong-matches') {
       return { ok: true, status: 200, json: async () => wrongMatchesData() };
     }
     if (url === '/api/wrong-matches/triage/status') {
-      statusCalls += 1;
-      if (statusCalls === 1) {
+      if (!forceTerminal) {
         return {
           ok: true, status: 200,
           json: async () => ({
@@ -2196,7 +2208,179 @@ console.log('loadWrongMatches() discovers an already-running sweep on initial lo
   await __test__.loadWrongMatches();
   assertEqual(dom.stopBtn.disabled, false, 'a reload that discovers a running sweep enables Stop');
   assertEqual(dom.cleanupBtn.disabled, true, 'a reload that discovers a running sweep disables Cleanup');
-  await flushMicrotasks();
+  forceTerminal = true;
+  await flushMicrotasks(100);
+  globalThis.setTimeout = realSetTimeout;
+}
+
+console.log('a NEW sweep discovered while an OLDER one\'s terminal handling is still unwinding gets its own follower, not stranded (#1106 F5)');
+{
+  installStorage();
+  const dom = installDom();
+  __test__.renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (fn) => { fn(); return 0; };
+
+  const STARTED_A = '2026-08-12T00:00:00+00:00';
+  const STARTED_B = '2026-08-12T01:00:00+00:00';
+  // A boolean state machine, not a call-count threshold: the exact
+  // number of fetches A's poll loop makes before it is told to
+  // terminate is not something a test should have to predict. Once
+  // told, the FIRST subsequent status call answers A terminal; EVERY
+  // call after that answers B running — covering both A's own poll
+  // loop exiting AND the render-time derive (inside A's terminal
+  // refresh) that discovers B, without needing to distinguish which
+  // logical caller is asking.
+  let tellATeminate = false;
+  let aTerminalConsumed = false;
+  let tellBTerminate = false;
+  globalThis.fetch = async (url) => {
+    if (url === '/api/wrong-matches') {
+      return { ok: true, status: 200, json: async () => wrongMatchesData() };
+    }
+    if (url !== '/api/wrong-matches/triage/status') {
+      throw new Error(`unexpected fetch: ${url}`);
+    }
+    if (!tellATeminate) {
+      return {
+        ok: true, status: 200,
+        json: async () => ({
+          state: 'running', started_at: STARTED_A,
+          finished_at: null, error: null, summary: null,
+        }),
+      };
+    }
+    if (!aTerminalConsumed) {
+      aTerminalConsumed = true;
+      return {
+        ok: true, status: 200,
+        json: async () => ({
+          state: 'completed', started_at: STARTED_A,
+          finished_at: '2026-08-12T00:05:00+00:00', error: null,
+          summary: { processed: 3, deleted: 2 },
+        }),
+      };
+    }
+    if (!tellBTerminate) {
+      return {
+        ok: true, status: 200,
+        json: async () => ({
+          state: 'running', started_at: STARTED_B,
+          finished_at: null, error: null, summary: null,
+        }),
+      };
+    }
+    return {
+      ok: true, status: 200,
+      json: async () => ({
+        state: 'failed', started_at: STARTED_B,
+        finished_at: '2026-08-12T01:05:00+00:00',
+        error: 'sweep B blew up', summary: null,
+      }),
+    };
+  };
+
+  await __test__.refreshWrongMatches();
+  assertEqual(dom.stopBtn.disabled, false, 'discovering sweep A running enables Stop');
+
+  // Let A's follower reach its poll loop, then tell it to terminate —
+  // its OWN terminal handling (toast, refresh, re-derive) is what
+  // discovers sweep B, entirely inside the dangling follower chain the
+  // test above never has to await directly.
+  await flushMicrotasks(50);
+  tellATeminate = true;
+  await flushMicrotasks(50);
+  assertEqual(dom.stopBtn.disabled, false,
+    'sweep B, discovered while A\'s terminal handling was still unwinding, still shows Stop enabled — not stranded');
+
+  // Let B's follower reach its poll loop, then terminate it too.
+  tellBTerminate = true;
+  await flushMicrotasks(50);
+  assertEqual(dom.stopBtn.disabled, true, 'sweep B reaching a terminal state disables Stop again');
+  assert(dom.toast.textContent.includes('sweep B blew up'),
+    'sweep B\'s own terminal outcome reached the toast — proving it was actually followed to completion, not silently dropped');
+  globalThis.setTimeout = realSetTimeout;
+}
+
+console.log('a status fetch that fails once retries after ~3s and recovers (#1106 F4)');
+{
+  installStorage();
+  const dom = installDom();
+  __test__.renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (fn) => { fn(); return 0; };
+  let statusCalls = 0;
+  // Stays 'running' until explicitly told otherwise — a boolean flag,
+  // not a call-count threshold: once the retry succeeds, the follower
+  // it kicks off (fire-and-forget) keeps polling and would otherwise
+  // race an exact-count assertion against however many extra loop
+  // iterations flushMicrotasks happens to unwind.
+  let stayRunning = true;
+  globalThis.fetch = async (url) => {
+    if (url === '/api/wrong-matches') {
+      return { ok: true, status: 200, json: async () => wrongMatchesData() };
+    }
+    if (url === '/api/wrong-matches/triage/status') {
+      statusCalls += 1;
+      if (statusCalls === 1) {
+        throw new Error('network down');
+      }
+      if (stayRunning) {
+        return {
+          ok: true, status: 200,
+          json: async () => ({
+            state: 'running', started_at: '2026-08-12T00:00:00+00:00',
+            finished_at: null, error: null, summary: null,
+          }),
+        };
+      }
+      return {
+        ok: true, status: 200,
+        json: async () => ({
+          state: 'failed', started_at: '2026-08-12T00:00:00+00:00',
+          finished_at: '2026-08-12T00:01:00+00:00',
+          error: 'generated test termination', summary: null,
+        }),
+      };
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+
+  await __test__.refreshWrongMatches();
+  assertEqual(dom.stopBtn.disabled, true,
+    'the failed first attempt leaves the safe default painted, not a stale enabled state');
+  await flushMicrotasks(30);
+  assert(statusCalls >= 2, 'the bounded retry fired at least once');
+  assertEqual(dom.stopBtn.disabled, false, 'the retry succeeded and discovered the running sweep');
+  assertEqual(dom.cleanupBtn.disabled, true, 'Cleanup reflects the recovered running state');
+  stayRunning = false;
+  await flushMicrotasks(50);
+  globalThis.setTimeout = realSetTimeout;
+}
+
+console.log('a status fetch that fails twice (initial + retry) paints the conservative unknown shape (#1106 F4)');
+{
+  installStorage();
+  const dom = installDom();
+  __test__.renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (fn) => { fn(); return 0; };
+  globalThis.fetch = async (url) => {
+    if (url === '/api/wrong-matches') {
+      return { ok: true, status: 200, json: async () => wrongMatchesData() };
+    }
+    if (url === '/api/wrong-matches/triage/status') {
+      throw new Error('network down');
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+
+  await __test__.refreshWrongMatches();
+  await flushMicrotasks(50);
+  assertEqual(dom.cleanupBtn.disabled, true,
+    'Cleanup disables when the status genuinely cannot be determined — cannot verify it is safe to start another sweep');
+  assertEqual(dom.stopBtn.disabled, false,
+    'Stop enables — harmless now that an unarmed cancel with nothing actually running is a pure no-op (#1106 F3)');
   globalThis.setTimeout = realSetTimeout;
 }
 

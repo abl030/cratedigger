@@ -8,13 +8,22 @@ returns immediately; the UI — and, since issue #1063,
 summary. Issue #1083 added ``cancel()``: it sets a per-sweep
 ``CancellationToken`` that ``cleanup_all_wrong_matches`` checks between
 rows (never mid-delete), so a still-running sweep can be stopped instead
-of merely detached from. Issue #1106 made that cancel STICKY: a cancel
-arriving while ``start()`` has not yet flipped the state to RUNNING (the
-CLI's own ``Ctrl-C`` handler racing its still-in-flight start POST) is
-recorded as a pending cancel and consumed by the next ``start()``
-admitted within ``PENDING_CANCEL_WINDOW_SECONDS`` — that sweep is still
-admitted (never a refusal), but its token is cancelled before any row
-runs, so it terminates ``cancelled`` with zero rows processed.
+of merely detached from. Issue #1106 made that cancel STICKY, but only
+when explicitly ARMED: a cancel arriving while ``start()`` has not yet
+flipped the state to RUNNING is recorded as a pending cancel ONLY when
+the caller passes ``arm_pending=True`` — reserved for the CLI's own
+``Ctrl-C`` handler, which is specifically racing its own still-in-flight
+start POST. Every other caller (the web UI's Stop button, the standalone
+``wrong-match-triage-cancel`` command) defaults unarmed: a cancel with
+nothing running is a pure #1083 no-op and never affects a sweep it did
+not itself observe running — an armed cancel that DID arm is consumed by
+the next ``start()`` admitted within ``PENDING_CANCEL_WINDOW_SECONDS``;
+that sweep is still admitted (never a refusal), but its token is
+cancelled before any row runs, so it terminates ``cancelled`` with zero
+rows processed. Every ARMED cancel refreshes the pending timestamp
+(latest-wins) — review round 1 (F1) found that a first-wins slot lets a
+later, genuinely-in-window armed cancel be silently dropped once an
+earlier one had gone stale-but-uncleared.
 
 The sweep thread gets its OWN pipeline-DB connection from ``db_factory``
 — psycopg2 connections must not be shared between the handler thread and
@@ -147,7 +156,9 @@ class TriageRunner:
         with self._lock:
             return self._status_locked()
 
-    def cancel(self, reason: str = "operator_requested") -> TriageStatusSnapshot:
+    def cancel(
+        self, reason: str = "operator_requested", *, arm_pending: bool = False,
+    ) -> TriageStatusSnapshot:
         """Request cancellation of the in-flight sweep, if any.
 
         Not an error when idle or already finished (#1083 invariant): a
@@ -156,22 +167,29 @@ class TriageRunner:
         same snapshot ``status()`` would — never a 409. Cancellation of
         a RUNNING sweep is observed between rows inside the cleanup
         service, never mid-delete, so this can only ever stop the NEXT
-        row, not the one in flight.
+        row, not the one in flight. This branch is UNCONDITIONAL,
+        unaffected by ``arm_pending``.
 
-        A cancel that lands while nothing is RUNNING (idle, or between
-        two sweeps) is STICKY (#1106): it is recorded as a pending
-        cancel, first-cancel-wins if one is already pending, and
-        ``start()`` consumes it if admitted within
-        ``PENDING_CANCEL_WINDOW_SECONDS``. This is what makes the CLI's
-        Ctrl-C-races-its-own-start-POST window safe — without it, that
-        cancel would silently no-op and the sweep would run to
-        completion unstoppable by that invocation.
+        A cancel that lands while nothing is RUNNING only arms a sticky
+        pending cancel (#1106) when ``arm_pending=True`` (#1106 F3) —
+        reserved for the CLI's own ``Ctrl-C`` handler, which is
+        specifically racing its own still-in-flight start POST. Every
+        other caller defaults unarmed and is a pure #1083 no-op here: it
+        must never affect a sweep it did not itself observe running (a
+        Stop click on a sweep that just finished, or the documented
+        ``wrong-match-triage-cancel`` recovery sequence, must not
+        silently pre-cancel the NEXT, unrelated sweep). An armed cancel
+        ALWAYS overwrites the pending timestamp — latest-wins, never
+        first-wins (#1106 F1): a stale, already-armed-but-unconsumed
+        slot must not block a later, genuinely-in-window armed cancel
+        from being recorded. ``start()`` consumes a non-expired pending
+        cancel if admitted within ``PENDING_CANCEL_WINDOW_SECONDS``.
         """
         with self._lock:
             token = self._token
             if token is not None and self._state == STATE_RUNNING:
                 token.cancel(reason)
-            elif self._pending_cancel_at is None:
+            elif arm_pending:
                 self._pending_cancel_at = self._now_fn()
                 self._pending_cancel_reason = reason
             return self._status_locked()

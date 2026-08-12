@@ -2013,6 +2013,47 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         self.assertEqual(data["state"], "completed")
         self.assertEqual(data["summary"]["deleted"], 2)
 
+    def test_armed_cancel_before_start_stops_the_sweep_with_zero_rows(
+        self,
+    ) -> None:
+        """Issue #1106 F3/F8: the outermost-adapter proof that
+        ``{"arm_pending": true}`` actually wires through the real HTTP
+        body → pydantic → ``TriageRunner.cancel()`` boundary. The
+        runner-level pins in ``tests/test_web_triage_runner.py`` cover
+        the sticky-cancel mechanism itself; this proves the route
+        exposes it."""
+        from lib.wrong_match_cleanup_service import WrongMatchCleanupSummary
+
+        runner = _fresh_triage_runner(self)
+
+        def cleanup_fn(db, *, confirm_all_wrong_matches, cancellation_token=None):
+            assert cancellation_token is not None
+            if cancellation_token.cancelled:
+                return WrongMatchCleanupSummary(processed=0, deleted=0, cancelled=True)
+            return WrongMatchCleanupSummary(processed=3, deleted=2, cancelled=False)
+
+        with patch(
+            "web.routes.imports.cleanup_all_wrong_matches",
+            side_effect=cleanup_fn,
+        ):
+            status, data = self._post(
+                "/api/wrong-matches/triage/cancel", {"arm_pending": True},
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(data["state"], "idle")
+
+            status, data = self._post(
+                "/api/wrong-matches/triage",
+                {"confirm_all_wrong_matches": True},
+            )
+            self.assertEqual(status, 202)
+            runner.join(timeout=5)
+
+        status, data = self._get("/api/wrong-matches/triage/status")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["state"], "cancelled")
+        self.assertEqual(data["summary"]["processed"], 0)
+
     def test_groups_in_beets_still_shown(self):
         """Wrong matches still appear when the release is already in the library."""
         status, data = self._get("/api/wrong-matches")

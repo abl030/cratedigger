@@ -1063,20 +1063,40 @@ def get_wrong_match_triage_status(
     h._json(_triage_runner.status())
 
 
+class WrongMatchTriageCancelRequest(BaseModel):
+    """Whether this cancel may ARM the sticky pending-cancel slot when
+    nothing is currently running (issue #1106 F3).
+
+    Only the CLI's own ``Ctrl-C`` handler
+    (``scripts/pipeline_cli/wrong_match.py::cmd_wrong_match_triage``) sets
+    this true — it is specifically racing its OWN still-in-flight start
+    POST. Every other caller (the web UI's Stop button, the standalone
+    ``wrong-match-triage-cancel`` command) defaults false: an unarmed
+    cancel with nothing running is a pure #1083 no-op and must never
+    affect a sweep it did not itself observe running.
+    """
+
+    arm_pending: bool = False
+
+
 def post_wrong_match_triage_cancel(
     h: RouteHandler, body: dict[str, object],
 ) -> None:
     """Request cancellation of the in-flight bulk triage sweep (issue #1083).
 
-    No confirmation body is needed — cancellation only ever stops
-    destructive work in progress, it never starts any. Always 200: a
-    cancel with no sweep running, and one racing a sweep that is already
-    recording its own terminal state, both just return the current
-    ``status()`` snapshot rather than a 409 (there is nothing "wrong" in
-    either case). The CLI's ``Ctrl-C`` handler and the web UI's Stop
-    button are the two callers, over the exact same route.
+    No confirmation is needed — cancellation only ever stops destructive
+    work in progress, it never starts any. Always 200: a cancel with no
+    sweep running, and one racing a sweep that is already recording its
+    own terminal state, both just return the current ``status()``
+    snapshot rather than a 409 (there is nothing "wrong" in either
+    case). The CLI's ``Ctrl-C`` handler and the web UI's Stop button are
+    the two callers, over the exact same route; only the former sends
+    ``arm_pending: true`` (issue #1106 F3).
     """
-    h._json(_triage_runner.cancel())
+    req_body = parse_body(h, body, WrongMatchTriageCancelRequest)
+    if req_body is None:
+        return
+    h._json(_triage_runner.cancel(arm_pending=req_body.arm_pending))
 
 
 ROUTES: list[RouteRegistration] = [
@@ -1141,7 +1161,11 @@ ROUTES: list[RouteRegistration] = [
         "Request cancellation of the in-flight bulk triage sweep, if "
         "any (issue #1083). Always 200 — a cancel with nothing running "
         "or one racing a sweep's own completion both just return the "
-        "current status snapshot, never a 409.",
+        "current status snapshot, never a 409. Optional "
+        "{\"arm_pending\": true} (issue #1106) arms a sticky pending "
+        "cancel that pre-cancels the very next sweep start admitted "
+        "within a short window — reserved for the CLI's own Ctrl-C "
+        "handler; omitted/false is a pure no-op when nothing is running.",
         classified=True,
     ),
 ]

@@ -438,6 +438,11 @@ async function ensureWrongMatchExplorer(logId) {
  * Load and display wrong-match rejections from failed_imports.
  */
 export async function loadWrongMatches() {
+  // #1106 F6: derive the toolbar's state on EVERY call, even when the
+  // cached queue is not re-fetched below -- a tab switch must still
+  // reflect a sweep started elsewhere (the CLI, another tab) without
+  // requiring a manual Refresh first.
+  await _deriveTriageButtonState();
   if (_loaded) return;
   const el = document.getElementById('wrong-matches-content');
   if (!el) return;
@@ -877,7 +882,12 @@ function updateWrongMatchesSummary() {
   if (!_lastData || !Array.isArray(_lastData.groups) || !_lastEl) return;
   const counts = wrongMatchCounts(_lastData.groups);
   if (counts.groups === 0) {
-    _lastEl.innerHTML = '<div style="color:#888;padding:12px;">No wrong matches in failed_imports.</div>';
+    // Route through the full renderer so the toolbar (including Stop)
+    // survives draining the LAST group via surgical removal, not just
+    // a full page re-render (issue #1106 F7) -- then re-derive its
+    // state off the server in case a sweep is running concurrently.
+    renderWrongMatches(_lastData, _lastEl);
+    void _deriveTriageButtonState();
     return;
   }
   const summary = document.getElementById('wrong-matches-summary');
@@ -978,12 +988,13 @@ function renderWrongMatches(data, el) {
   _entryExplorerState.clear();
   /** @type {any[]} */
   const groups = (data.groups || []).filter((/** @type {any} */ g) => (g.pending_count || 0) > 0);
-  if (groups.length === 0) {
-    el.innerHTML = '<div style="color:#888;padding:12px;">No wrong matches in failed_imports.</div>';
-    return;
-  }
-
   const counts = wrongMatchCounts(groups);
+  // The toolbar (including Stop) is ALWAYS rendered, even at zero
+  // pending entries (issue #1106 F7) -- a mid-sweep Refresh that drains
+  // the queue to empty must not lose the Stop control while a sweep
+  // (started elsewhere) is still running against rows this pane no
+  // longer shows. Cleanup is already disabled at zero entries; Stop's
+  // enablement is derived by the caller (`_deriveTriageButtonState`).
   let html = `
     <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin:8px 0;">
       <div id="wrong-matches-summary" style="color:#888;">${counts.groups} release${counts.groups !== 1 ? 's' : ''} · ${counts.entries} candidate${counts.entries !== 1 ? 's' : ''} pending review</div>
@@ -994,7 +1005,9 @@ function renderWrongMatches(data, el) {
       </div>
     </div>`;
 
-  html += groups.map(renderGroup).join('');
+  html += groups.length === 0
+    ? '<div style="color:#888;padding:12px;">No wrong matches in failed_imports.</div>'
+    : groups.map(renderGroup).join('');
   el.innerHTML = html;
 }
 
@@ -1829,8 +1842,13 @@ function _currentWrongMatchEntryCount() {
  * Node-testable without a DOM (issue #1106) — the DOM-mutating
  * `_applyTriageButtonState` below applies exactly this shape via fresh
  * `getElementById` lookups, never a node captured at an earlier point.
+ * `'unknown'` is the conservative shape after a status fetch AND its
+ * one bounded retry both fail (issue #1106 F4): Cleanup disables
+ * (nothing here can verify it is safe to start another sweep) and Stop
+ * enables (harmless — an unarmed cancel with nothing actually running
+ * is a pure no-op, issue #1106 F3).
  * @param {string} state - `/api/wrong-matches/triage/status`'s `state`,
- *   or any non-`'running'` value to mean "not running"
+ *   `'unknown'`, or any other value to mean "not running"
  * @param {number} entryCount
  * @returns {{cleanupDisabled: boolean, cleanupLabel: string, stopDisabled: boolean, stopLabel: string}}
  */
@@ -1839,6 +1857,14 @@ export function triageButtonPresentation(state, entryCount) {
     return {
       cleanupDisabled: true,
       cleanupLabel: 'Cleaning...',
+      stopDisabled: false,
+      stopLabel: 'Stop',
+    };
+  }
+  if (state === 'unknown') {
+    return {
+      cleanupDisabled: true,
+      cleanupLabel: 'Cleanup Wrong Matches (status unknown)',
       stopDisabled: false,
       stopLabel: 'Stop',
     };
@@ -1874,7 +1900,60 @@ function _applyTriageButtonState(state) {
   }
 }
 
-let _triagePollInFlight = false;
+/**
+ * `started_at` of the sweep currently owned by an active follower, or
+ * `null` when nothing is being followed (issue #1106 F5). Keyed on
+ * `started_at` rather than a bare boolean: a boolean stays "true" for
+ * the WHOLE terminal chain (poll -> toast -> refresh -> re-derive), so
+ * a genuinely NEW sweep discovered while an OLDER chain's refresh is
+ * still unwinding got no follower at all under the boolean design —
+ * silently stranding "Cleaning..." forever. Keying on the value means a
+ * different `started_at` always claims its own follower, and a stale
+ * response belonging to an already-superseded sweep can never win
+ * against whichever follower currently owns the CURRENT one.
+ * @type {string | null}
+ */
+let _triageFollowedStartedAt = null;
+
+/**
+ * Claim exclusive ownership of following one sweep. `startedAt == null`
+ * (the caller could not determine it — a transient fetch failure on the
+ * very first check) always claims without registering, a best-effort
+ * degradation for an edge case rare enough that a possible duplicate
+ * follower is an acceptable trade against under-following a real sweep.
+ * @param {string | null} startedAt
+ * @returns {boolean}
+ */
+function _claimTriageFollow(startedAt) {
+  if (startedAt != null && startedAt === _triageFollowedStartedAt) return false;
+  if (startedAt != null) _triageFollowedStartedAt = startedAt;
+  return true;
+}
+
+/**
+ * @param {string | null} startedAt
+ */
+function _releaseTriageFollow(startedAt) {
+  if (startedAt != null && _triageFollowedStartedAt === startedAt) {
+    _triageFollowedStartedAt = null;
+  }
+}
+
+/**
+ * Fetch `/api/wrong-matches/triage/status` once. Never throws — returns
+ * `undefined` on any transport/parse failure so callers can branch on
+ * "could not determine" without their own try/catch.
+ * @returns {Promise<{state: string, started_at: string|null, summary: Object|null, error: string|null}|undefined>}
+ */
+async function _fetchTriageStatus() {
+  try {
+    const r = await fetch(`${API}/api/wrong-matches/triage/status`);
+    if (!r.ok) return undefined;
+    return await r.json();
+  } catch (_e) {
+    return undefined;
+  }
+}
 
 /**
  * Apply the shared terminal handling for a background triage sweep once
@@ -1916,22 +1995,69 @@ async function _applyTriageTerminalState(status) {
 }
 
 /**
- * Poll the background sweep to completion and apply the shared terminal
- * handling. No-ops if another poll is already in flight — the
- * render-time attach path can otherwise race the click path that
- * already started one (issue #1106); either way there is only ever one
- * sweep for either poller to follow.
+ * Poll one sweep to completion and apply the shared terminal handling,
+ * exclusively owning it via `_claimTriageFollow` (issue #1106 F5).
+ * @param {{state: string, started_at: string|null, summary: Object|null, error: string|null}} [knownStatus]
+ *   an already-fetched RUNNING status, when the caller has one (the
+ *   render-time derive always does, from its own status fetch);
+ *   omitted for the click path, which fetches it itself so it too can
+ *   determine `started_at` and claim ownership.
  * @returns {Promise<void>}
  */
-async function _followTriageSweepToCompletion() {
-  if (_triagePollInFlight) return;
-  _triagePollInFlight = true;
+async function _followTriageSweepToCompletion(knownStatus) {
+  const status = knownStatus ?? await _fetchTriageStatus();
+  const startedAt = status && typeof status.started_at === 'string'
+    ? status.started_at : null;
+  if (!_claimTriageFollow(startedAt)) return;
   try {
-    const status = await pollTriageStatus();
-    await _applyTriageTerminalState(status);
+    const finalStatus = status && status.state !== 'running'
+      ? status
+      : await pollTriageStatus();
+    await _applyTriageTerminalState(finalStatus);
   } finally {
-    _triagePollInFlight = false;
+    _releaseTriageFollow(startedAt);
   }
+}
+
+/**
+ * Apply whatever the server reported for the triage status: a
+ * `running` sweep enables Stop, disables Cleanup, and ATTACHES a poll
+ * — fire-and-forget, since a sweep can run for up to an hour and the
+ * caller must not block on it — that lands on the exact same terminal
+ * handling the click path uses, with no confirm dialog. Any other
+ * status just derives the idle shape off the CURRENT candidate count.
+ * @param {{state: string, started_at: string|null, summary: Object|null, error: string|null}} status
+ */
+function _applyTriageStatus(status) {
+  if (status.state === 'running') {
+    _applyTriageButtonState('running');
+    void _followTriageSweepToCompletion(status);
+    return;
+  }
+  _applyTriageButtonState('idle');
+}
+
+/**
+ * One bounded (~3s) background retry after a failed status fetch,
+ * fire-and-forget so the caller (an awaited render-time derive) never
+ * blocks on it (issue #1106 F4). Without this, a single transient
+ * failure (a 502 while a sweep is genuinely running) stranded the
+ * toolbar in whatever shape the initial render painted — Cleanup
+ * enabled, Stop disabled — recoverable only by a manual Refresh,
+ * exactly the reachability bug this issue exists to fix. If the retry
+ * ALSO fails, paint the conservative `'unknown'` shape instead of
+ * leaving the stale one.
+ * @returns {Promise<void>}
+ */
+async function _retryTriageStatusOnce() {
+  if (!_triageCleanupBtn() && !_triageStopBtn()) return;
+  await new Promise((resolve) => setTimeout(resolve, 3000));
+  const status = await _fetchTriageStatus();
+  if (status === undefined) {
+    _applyTriageButtonState('unknown');
+    return;
+  }
+  _applyTriageStatus(status);
 }
 
 /**
@@ -1939,32 +2065,18 @@ async function _followTriageSweepToCompletion() {
  * #1106) — never from whichever tab happened to click Cleanup. Called,
  * and awaited, from every place that (re)renders the Wrong Matches pane
  * (`loadWrongMatches`, `_refreshWrongMatches`, `rerenderWrongMatches`).
- * A `running` sweep enables Stop, disables Cleanup, and ATTACHES a poll
- * — fire-and-forget, since a sweep can run for up to an hour and the
- * caller must not block on it — that lands on the exact same terminal
- * handling the click path uses, with no confirm dialog. Any other
- * status just derives the idle shape off the CURRENT candidate count.
  * No-ops (no fetch at all) when the toolbar itself was not rendered —
- * an empty queue renders no buttons to reflect anything.
+ * only possible before the very first render.
  * @returns {Promise<void>}
  */
 async function _deriveTriageButtonState() {
   if (!_triageCleanupBtn() && !_triageStopBtn()) return;
-  try {
-    const r = await fetch(`${API}/api/wrong-matches/triage/status`);
-    if (!r.ok) return;
-    const status = await r.json();
-    if (status && status.state === 'running') {
-      _applyTriageButtonState('running');
-      void _followTriageSweepToCompletion();
-      return;
-    }
-    _applyTriageButtonState('idle');
-  } catch (_e) {
-    // Transient fetch failure — leave the safe default already painted
-    // by the toolbar's initial markup (Stop disabled, Cleanup off the
-    // count that render used).
+  const status = await _fetchTriageStatus();
+  if (status === undefined) {
+    void _retryTriageStatusOnce();
+    return;
   }
+  _applyTriageStatus(status);
 }
 
 /**
