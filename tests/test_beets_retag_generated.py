@@ -32,10 +32,13 @@ G4  Both sides held never returns a ready outcome. Two installed albums that
     MusicBrainz now calls one release is the operator's decision.
 G5  Over every certified item-count EQUIVALENCE CLASS, the REAL composed
     ``retag_merged_album`` behaves correctly — the property patrolling the
-    T6/T7 pins. No fake in this repository models a real subprocess
-    mutating a real library, which is exactly how the predecessor
-    primitive's total inability to follow a release-only merge (#1087)
-    survived implementation, review, and the whole suite. The domain is
+    T6/T7 pins. #1075 DID ship a real-subprocess test
+    (``TestRealMbsyncMovesIdentityNotFiles``), so a real subprocess is not
+    what was missing; its fixture modelled a RECORDING-PRESERVING merge, so
+    the predecessor primitive's item-to-track mapping matched and the merge
+    it cannot actually follow — a RELEASE-ONLY one — never ran. The lesson
+    this property enforces: a real subprocess is necessary, not sufficient;
+    it must run over a world shaped like the failure. The domain is
     finite and CERTIFIED, not sampled: ``ITEM_COUNTS`` in
     ``tests/test_beets_retag.py`` is one representative per genuine
     equivalence class (0 items — the empty-topology fail-closed branch,
@@ -232,8 +235,11 @@ def check_both_held_is_never_ready(
 CARDINALITIES = st.sampled_from([(), (7,), (7, 8)])
 
 #: What one ``beet modify`` invocation does. ``returncode`` is present
-#: precisely because it must not decide anything: the command prints "No
-#: changes to make." and skips a query that matches nothing, still exit 0.
+#: precisely because it must not decide anything: a query matching nothing
+#: exits 1 (``UserError``), but a query that MATCHES and produces no field
+#: change still prints "No changes to make." and exits 0 — and either way,
+#: an exit code read against a shared SQLite file another process can
+#: concurrently mutate is not itself evidence of the end state.
 MODIFY_RESULTS = st.sampled_from(["exit_0", "exit_1", "raises_timeout", "raises_oserror"])
 
 #: What the library looks like AFTER modify ran — including the worlds

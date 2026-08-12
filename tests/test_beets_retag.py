@@ -895,9 +895,11 @@ def check_real_modify_retag_moved_every_identity(
     ``modify`` at all; see :func:`check_real_modify_retag_refuses_empty_topology`.
 
     Module level so the known-bad mutant test can call it directly — this is
-    exactly the composition #1075 never exercised: every prior test injected
-    the retag runner, so a real subprocess never proved it could move a real
-    id over a world shaped like the failing production merge (T6).
+    exactly the composition #1075 never exercised: its real-subprocess test
+    (``TestRealMbsyncMovesIdentityNotFiles``) ran over a world shaped like a
+    RECORDING-PRESERVING merge, so it never proved the primitive could move
+    an id over a world shaped like the RELEASE-ONLY merge that actually
+    occurs in production (T6).
 
     The relocation loop below is honest about its own limit: ``-M`` is
     belt-and-braces (see :data:`lib.beets_retag.RETAG_NOMOVE_FLAG`), not
