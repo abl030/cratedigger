@@ -123,10 +123,11 @@ _INHIBITOR_MARKER_PREFIX = "owned-inhibitor-"
 _INVOCATION_FILE = "ordinary-invocation"
 _INVOCATION_RE = re.compile(r"[0-9a-f]{32}")
 # Bounds every ``_drain_services`` call whose unit set includes
-# ``cratedigger-unfindable.service`` (review round 2, R2): ``_verify_
-# authoritative_hold`` (:1194), ``_drain_producers_then_hold`` (:1418,
-# :1421), ``recover_held``'s cold-start branch (:1499), and
-# ``open_main_timer`` (:1766) -- verified individually against
+# ``cratedigger-unfindable.service`` (review round 2, R2 -- line numbers
+# re-verified against the tree merged with issue #1100's fake-gate-model
+# PR): ``_verify_authoritative_hold`` (:1258), ``_drain_producers_then_
+# hold`` (:1485, :1491), ``recover_held``'s cold-start branch (:1572),
+# and ``open_main_timer`` (:1845) -- verified individually against
 # ``SERVICE_UNITS`` / ``TIMER_DRIVEN_PRODUCER_UNITS`` / ``PRODUCER_
 # SERVICE_UNITS``, which all include ``UNFINDABLE_SERVICE``. Must exceed
 # the longest BOUNDED run among the units it drains, or an
@@ -144,9 +145,9 @@ _INVOCATION_RE = re.compile(r"[0-9a-f]{32}")
 # against. 21600.0 (6h) keeps a 1h margin over it. Resize alongside any
 # future change to that unit's ``TimeoutStartSec``.
 _PRODUCER_DRAIN_TIMEOUT_SECONDS = 21600.0
-# Bounds ``_wait_controlled_workers_active`` (:1289 -- all four call
-# sites: :1662/:1692 from ``abort_hold``, :1734/:1743 from
-# ``prepare_controlled``) and the main+YouTube drain at :1744
+# Bounds ``_wait_controlled_workers_active`` (:1341 -- all four call
+# sites: :1738/:1768 from ``abort_hold``, :1810/:1819 from
+# ``prepare_controlled``) and the main+YouTube drain at :1820
 # (``prepare_controlled``, ``_drain_services(backend, (MAIN_SERVICE,
 # YOUTUBE_SERVICE))``). Neither unit set this constant bounds ever
 # contains ``cratedigger-unfindable.service``, so it keeps the pre-
