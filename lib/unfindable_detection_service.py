@@ -60,6 +60,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Protocol
 
+from lib.search_exec import SearchSubmitError
+
 if TYPE_CHECKING:
     from lib.pipeline_db.rows import AlbumRequestRow
 
@@ -114,6 +116,27 @@ SEARCH_LOG_WINDOW_DAYS: int = 30
 # probe candidates per run; cohort members not picked up this run roll
 # over to the next daily run.
 DEFAULT_BATCH_SIZE: int = 100
+
+# Bounded submit-retry for the probe's slskd search (issue #1090). A
+# 2026-08-12 run lost 50/100 probes to a ~3s burst of 409 Conflict from
+# POST /searches: slskd's Soulseek connection reset, slskd reconnected,
+# and while sitting in ``Connected, LoggingIn`` Soulseek.NET's
+# ``SearchAsync`` guard threw -- mapped by slskd to 409. Hardcoded by
+# design (R12-style internal tuning, not an operator knob) -- see
+# ``lib.search_exec.SearchSubmitRetryPolicy`` for the exact retry
+# contract (409 only; never widens to 429 rate-limiting).
+PROBE_SUBMIT_RETRY_MAX_ATTEMPTS: int = 3
+PROBE_SUBMIT_RETRY_BACKOFF_S: tuple[float, ...] = (2.0, 5.0, 10.0)
+
+# Circuit breaker (issue #1090): after this many CONSECUTIVE submit-
+# failure outcomes (a probe whose slskd submit exhausted its retry
+# budget -- see ``_is_submit_failure``), ``categorise_due_batch`` stops
+# consuming candidates and ends the run early. This is the multi-minute-
+# outage case the bounded per-probe retry alone cannot absorb. Candidates
+# never attempted are left byte-untouched and excluded from the batch's
+# processed count -- they roll into the next daily run via the normal
+# oldest-probe-first ordering (nothing is parked; invariant 11).
+CIRCUIT_BREAKER_CONSECUTIVE_SUBMIT_FAILURES: int = 3
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +258,51 @@ class UnfindableServiceResult:
     probe_match_count: int | None = None
     reason: str | None = None
     error_message: str | None = None
+
+
+@dataclass(frozen=True)
+class UnfindableBatchResult:
+    """Outcome of one ``categorise_due_batch`` run (issue #1090).
+
+    ``results`` covers only the candidates actually ATTEMPTED. When the
+    circuit breaker trips (``breaker_tripped=True``), later candidates are
+    excluded from ``results`` entirely — not represented as
+    ``RESULT_PROBE_FAILED`` placeholders — because a candidate the run
+    never touched left its row byte-untouched (invariant 11: nothing is
+    parked; it simply rolls into the next daily run via the normal
+    oldest-probe-first ordering).
+
+    ``candidates_considered`` is the full due-cohort size the DB returned
+    for this run (before any breaker truncation), so
+    ``candidates_considered - len(results)`` is exactly the count of rows
+    left untouched.
+    """
+
+    results: list[UnfindableServiceResult]
+    candidates_considered: int
+    breaker_tripped: bool = False
+
+
+# The exact prefix ``categorise_request`` writes into ``error_message`` for
+# a submit-phase failure: ``f"{type(exc).__name__}: {exc}"`` where ``exc``
+# is (or wraps) a ``lib.search_exec.SearchSubmitError``. Derived from the
+# real class (not hand-typed) so the two can't drift.
+_SUBMIT_FAILURE_ERROR_PREFIX = f"{SearchSubmitError.__name__}:"
+
+
+def _is_submit_failure(result: UnfindableServiceResult) -> bool:
+    """True when a ``RESULT_PROBE_FAILED`` outcome was caused by a slskd
+    search-submit rejection that exhausted its own bounded retry budget
+    (``SearchSubmitError``), as opposed to some other probe failure mode
+    (a degraded harvest, a DB error, ...). Only submit failures drive the
+    ``categorise_due_batch`` circuit breaker — an unrelated one-off
+    failure on a single row must not stop the whole batch.
+    """
+    return (
+        result.outcome == RESULT_PROBE_FAILED
+        and result.error_message is not None
+        and result.error_message.startswith(_SUBMIT_FAILURE_ERROR_PREFIX)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -447,11 +515,21 @@ def run_artist_probe(
     records it via ``db.record_search_id`` BEFORE the submit — the daily
     unattended timer is exactly the kind of process a kill can hit
     mid-search, and a probe search that leaks is otherwise invisible
-    (there's no per-request row watching it).
+    (there's no per-request row watching it). A retried submit (issue
+    #1090) mints and ledgers ANOTHER fresh id per attempt via the same
+    path — see ``lib.search_exec.SearchSubmitRetryPolicy``.
+
+    Bounded submit retry (issue #1090): a transient slskd 409 on the
+    initial submit is retried up to ``PROBE_SUBMIT_RETRY_MAX_ATTEMPTS``
+    times with ``PROBE_SUBMIT_RETRY_BACKOFF_S`` backoff, advisedly
+    shortened by a ``GET /api/v0/server`` readiness re-check between
+    attempts. Only HTTP 409 is retried; any other submit failure raises
+    immediately, unchanged from pre-#1090 behaviour.
 
     Exception contract:
-      * A submit failure or a harvest transport error propagates; the caller
-        (the service) records ``RESULT_PROBE_FAILED``.
+      * A submit failure (after exhausting the retry budget) or a harvest
+        transport error propagates; the caller (the service) records
+        ``RESULT_PROBE_FAILED``.
       * A *degraded* execution — the #212 watchdog cancelled the search, or a
         ``searches.state`` poll raised and the loop fell back to a best-effort
         harvest — raises :class:`ProbeDegradedError`. This restores the
@@ -463,11 +541,24 @@ def run_artist_probe(
       * A failed cleanup ``delete`` is swallowed and never fails the probe.
 
     ``poll_sleep`` / ``clock`` are injected for test determinism (forwarded to
-    ``execute_search`` as ``sleep_fn`` / ``clock_fn``); production omits them.
+    ``execute_search`` as ``sleep_fn`` / ``clock_fn``; the retry backoff
+    sleeps through the same ``poll_sleep`` seam); production omits them.
     """
     import uuid
 
-    from lib.search_exec import execute_search
+    from lib.search_exec import SearchSubmitRetryPolicy, execute_search
+
+    def _mint_and_ledger_retry_id() -> str:
+        new_id = str(uuid.uuid4())
+        db.record_search_id(new_id, purpose="artist_probe", request_id=request_id)
+        return new_id
+
+    def _server_ready() -> bool:
+        try:
+            state = slskd_client.server.state()
+        except Exception:  # noqa: BLE001 - advisory probe never blocks the retry
+            return False
+        return bool(state.is_connected and state.is_logged_in)
 
     search_id = str(uuid.uuid4())
     db.record_search_id(search_id, purpose="artist_probe", request_id=request_id)
@@ -485,6 +576,12 @@ def run_artist_probe(
         delete=delete_after,
         sleep_fn=poll_sleep,
         clock_fn=clock,
+        submit_retry=SearchSubmitRetryPolicy(
+            mint_ledgered_search_id=_mint_and_ledger_retry_id,
+            max_attempts=PROBE_SUBMIT_RETRY_MAX_ATTEMPTS,
+            backoff_s=PROBE_SUBMIT_RETRY_BACKOFF_S,
+            server_ready=_server_ready,
+        ),
     )
     if exec_result.watchdog_fired or exec_result.state_poll_error:
         raise ProbeDegradedError(
@@ -720,7 +817,7 @@ class UnfindableDetectionService:
         self,
         *,
         limit: int = DEFAULT_BATCH_SIZE,
-    ) -> list[UnfindableServiceResult]:
+    ) -> UnfindableBatchResult:
         """Process the K oldest cohort members and return per-row results.
 
         Cohort definition: requests with status ``wanted`` whose
@@ -728,12 +825,25 @@ class UnfindableDetectionService:
         ``PROBE_INTERVAL_DAYS``. The DB query picks ``limit`` rows
         ordered by oldest probe first; rows not picked roll over to
         the next daily run.
+
+        Circuit breaker (issue #1090): after
+        ``CIRCUIT_BREAKER_CONSECUTIVE_SUBMIT_FAILURES`` consecutive submit-
+        failure outcomes (see ``_is_submit_failure`` — a probe whose slskd
+        submit exhausted its own bounded retry, NOT an unrelated one-off
+        probe failure), the batch stops early. This absorbs a multi-minute
+        slskd outage the per-probe retry alone cannot: candidates never
+        attempted are left byte-untouched (no write of any kind) and
+        excluded from ``UnfindableBatchResult.results`` — they simply roll
+        into the next daily run via the normal ordering. Nothing is parked
+        on any request row.
         """
         candidates = self.db.list_unfindable_probe_candidates(
             limit=int(limit),
             probe_interval_days=PROBE_INTERVAL_DAYS,
         )
         results: list[UnfindableServiceResult] = []
+        consecutive_submit_failures = 0
+        breaker_tripped = False
         for cand in candidates:
             rid = int(cand["id"])
             try:
@@ -753,7 +863,26 @@ class UnfindableDetectionService:
                     error_message=f"{type(exc).__name__}: {exc}",
                 )
             results.append(result)
-        return results
+            if _is_submit_failure(result):
+                consecutive_submit_failures += 1
+            else:
+                consecutive_submit_failures = 0
+            if (consecutive_submit_failures
+                    >= CIRCUIT_BREAKER_CONSECUTIVE_SUBMIT_FAILURES):
+                logger.error(
+                    "unfindable_detection: circuit breaker tripped after "
+                    "%d consecutive slskd submit failures; stopping this "
+                    "batch early (%d/%d candidates attempted)",
+                    consecutive_submit_failures, len(results),
+                    len(candidates),
+                )
+                breaker_tripped = True
+                break
+        return UnfindableBatchResult(
+            results=results,
+            candidates_considered=len(candidates),
+            breaker_tripped=breaker_tripped,
+        )
 
     # ---------- internal ----------
 
@@ -812,8 +941,11 @@ __all__ = (
     "CATEGORY_ARTIST_ABSENT",
     "CATEGORY_ONE_TRACK_STRUCTURAL",
     "CATEGORY_WRONG_PRESSING_AVAILABLE",
+    "CIRCUIT_BREAKER_CONSECUTIVE_SUBMIT_FAILURES",
     "DEFAULT_BATCH_SIZE",
     "PROBE_INTERVAL_DAYS",
+    "PROBE_SUBMIT_RETRY_BACKOFF_S",
+    "PROBE_SUBMIT_RETRY_MAX_ATTEMPTS",
     "REQUIRED_LOW_PROBES",
     "REQUIRED_ZERO_FIND_CYCLES",
     "RESULT_CATEGORISED",
@@ -827,6 +959,7 @@ __all__ = (
     "WRONG_PRESSING_MIN_HITS",
     "ArtistProbeResult",
     "ProbeDegradedError",
+    "UnfindableBatchResult",
     "UnfindableCategorisation",
     "UnfindableDetectionService",
     "UnfindableInputs",
