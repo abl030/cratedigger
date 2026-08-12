@@ -58,11 +58,33 @@ class TestBeetsConfigContract(unittest.TestCase):
         self.assertEqual(
             {
                 "musicbrainz": contract.musicbrainz,
-                "mbsync": contract.mbsync,
                 "permissions": contract.permissions,
                 "inline": contract.inline,
             },
             dict.fromkeys(REQUIRED_PLUGINS, True),
+        )
+        # mbsync is no longer required (#1087: the retag primitive is now
+        # `beet modify`), but it stays observationally reported because the
+        # deployed baseline configuration keeps it active for the operator.
+        self.assertTrue(contract.mbsync)
+
+    def test_a_deployment_missing_mbsync_still_passes(self):
+        """#1087 — mbsync dropped out of REQUIRED_PLUGINS; must-still-work."""
+        self.world.unseal()
+        self.world._write_main_config(
+            plugins=[
+                plugin for plugin in BASELINE_PLUGINS if plugin != "mbsync"
+            ],
+        )
+        self.world._seal("importer")
+
+        report = check_beets_config(self.world.cfg(), role="importer")
+
+        self.assertTrue(report.ok, report.hard_failures)
+        self.assertFalse(report.plugin_contract.mbsync)
+        self.assertNotIn(
+            "mbsync_plugin_missing",
+            [finding.code for finding in report.hard_failures],
         )
 
     def test_each_runtime_authority_is_required_independently(self):
@@ -286,11 +308,6 @@ class TestBeetsConfigContract(unittest.TestCase):
                 "missing musicbrainz",
                 {"plugins": ["mbsync", "discogs", "inline", "permissions"]},
                 "musicbrainz_plugin_missing",
-            ),
-            (
-                "missing mbsync",
-                {"plugins": ["musicbrainz", "discogs", "inline", "permissions"]},
-                "mbsync_plugin_missing",
             ),
             (
                 "unavailable configured plugin",

@@ -44,7 +44,7 @@ M7  **Both RELEASE advisory locks are held across the retag and the rekey.**
     The retag mutates two release identities at once, and
     ``lib/destructive_release_service.py`` fences Beets mutation per release
     from OTHER processes (web routes, ``pipeline-cli destructive``). An
-    operator Bad Rip resolving "the one album at the survivor" mid-``mbsync``
+    operator Bad Rip resolving "the one album at the survivor" mid-retag
     could otherwise bind to the album we just retagged onto that id.
     Contention is a typed non-ready outcome, never a wait.
 M8  **The library and the request never disagree about which release this
@@ -102,7 +102,7 @@ from lib.beets_retag import (
     RETAG_NOT_HELD,
     RETAG_READY_OUTCOMES,
     BeetsRetagResult,
-    MbsyncRun,
+    ModifyRetagRun,
     RetagOutcome,
     retag_merged_album,
 )
@@ -285,16 +285,16 @@ def real_retag_over(
 
     The seam's guard and the retag's own decision are the two halves that must
     agree, so the DICE pin drives the production retag rather than a stub —
-    ``mbsync`` is the only thing standing in, and it mutates the fake library
-    exactly as the real command mutates the real one.
+    ``beet modify`` is the only thing standing in, and it mutates the fake
+    library exactly as the real command mutates the real one.
     """
 
-    def run_mbsync(query: str) -> MbsyncRun:
-        del query
+    def run_modify(query: str, assignment: str) -> ModifyRetagRun:
+        del query, assignment
         if moves:
             beets.set_album_ids_for_release(MERGED, [])
             beets.set_album_ids_for_release(SURVIVOR, [7])
-        return MbsyncRun(returncode=0, stdout="", stderr="")
+        return ModifyRetagRun(returncode=0, stdout="", stderr="")
 
     def retag(
         cfg: CratediggerConfig,
@@ -307,7 +307,7 @@ def real_retag_over(
             beets,
             old_identity=old_identity,
             new_identity=new_identity,
-            run_mbsync=run_mbsync,
+            run_modify=run_modify,
         )
 
     return retag
@@ -502,7 +502,7 @@ class TestMergeRedirectBranches(unittest.TestCase):
     def test_a_non_ready_retag_never_moves_the_row(self) -> None:
         """M1/M3 — gate on READY membership, never on ``!= failed``."""
         non_ready: tuple[tuple[RetagOutcome, str], ...] = (
-            (RETAG_FAILED, "mbsync exited 0, but the library did not move"),
+            (RETAG_FAILED, "beet modify exited 0, but the library did not move"),
             (RETAG_AMBIGUOUS, "library holds both sides of the merge"),
         )
         for outcome_name, detail in non_ready:
@@ -572,7 +572,7 @@ class TestMergeRedirectBranches(unittest.TestCase):
         self.assertFalse(outcome.library_moved)
         self.assertFalse(outcome.split_identity)
         self.assertIn("999", outcome.detail)
-        # M8: the installed album is exactly where it was — ``mbsync`` never
+        # M8: the installed album is exactly where it was — the retag never
         # ran, so there is no split identity to repair.
         self.assertEqual(beets.get_all_album_ids_for_release(MERGED), [7])
         self.assertEqual(beets.get_all_album_ids_for_release(SURVIVOR), [])
@@ -664,8 +664,8 @@ class TestMergeRedirectBranches(unittest.TestCase):
             old_identity: ReleaseIdentity,
             new_identity: ReleaseIdentity,
         ) -> BeetsRetagResult:
-            # The rival appears while ``mbsync`` is running — the exact window
-            # the pre-check cannot cover.
+            # The rival appears while the retag is running — the exact
+            # window the pre-check cannot cover.
             self.world.db.seed_request(make_request_row(
                 id=999,
                 mb_release_id=SURVIVOR,
@@ -1212,7 +1212,7 @@ class TestMergeRedirectAtTheValidationSeam(unittest.TestCase):
     def test_a_library_that_does_not_move_leaves_the_row_at_the_old_id(
         self,
     ) -> None:
-        """M1/M3 — mbsync exits 0 and changes nothing: no rekey, no parking."""
+        """M1/M3 — modify exits 0 and changes nothing: no rekey, no parking."""
         beets = FakeBeetsDB()
         beets.set_album_ids_for_release(MERGED, [7])
         beets.set_album_ids_for_release(SURVIVOR, [])

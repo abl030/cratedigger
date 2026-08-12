@@ -602,7 +602,7 @@ class TestForceRefusesToLaunchAtASplitIdentity(unittest.TestCase):
     """F5 — a moved library and an unmoved request never reach Beets.
 
     The residual the pre-check cannot cover: the survivor is claimed while
-    ``mbsync`` runs, so the installed album ends up at the survivor and the
+    the retag runs, so the installed album ends up at the survivor and the
     request still names the merged-away id. Launching Beets at that id would
     hand the operator the pre-#1080 ``mbid_missing`` while their library had
     silently moved — and Beets would flag no duplicate, because duplicate

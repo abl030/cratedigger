@@ -49,20 +49,73 @@ Cratedigger has exactly three Beets mutation lanes:
    same-release duplicate replacement.
 2. An explicitly operator-authorized library deletion resolves one exact Beets
    album primary key and drives the exact-album delete child.
-3. The import-time MusicBrainz merge retag runs `beet mbsync -M` under an
-   anchored `mb_albumid::^<old-id>$` query (`lib/beets_retag.py`), from inside
-   whichever importer lane holds the request's exact import claim — the
-   automation processing owner, or a claimed force-import job (#1080).
+3. The import-time MusicBrainz merge retag runs `beet modify -a -M -W -y`
+   under an anchored `mb_albumid::^<old-id>\Z` query and a `mb_albumid=<new-id>`
+   assignment (`lib/beets_retag.py`), from inside whichever importer lane
+   holds the request's exact import claim — the automation processing owner,
+   or a claimed force-import job (#1080). Issue #1087 replaced the original
+   `beet mbsync -M` primitive: `mbsync` maps library items onto a fetched
+   release's tracks by recording id, which a release-only merge (MusicBrainz
+   merges the release but not the underlying recordings) does not preserve —
+   so it silently retagged nothing on the common case. `beet modify` sets one
+   field by query; it needs no candidate mapping and makes no network call.
 
 Lane 3 is deliberately the narrowest of the three, and every clause is
 load-bearing:
 
-- **Identity only, never layout.** `-M` (`--nomove`) is mandatory. `mbsync`
-  otherwise honours `import.move` — which the config contract pins to `yes` —
-  and relocates the album whenever the merge changes a path component, minting
-  new Jellyfin item identities (identity is a hash of the path), risking the
-  documented Plex album-split footgun, and pruning the vacated directory's
-  `clutter`, which includes the `cratedigger.json` verified-lossless sidecar.
+- **`-a` targets Albums, not Items.** `Album.try_sync(inherit=True)` (the
+  default) fans every inheritable fixed attribute — `mb_albumid` is one — out
+  to every item and stores it. Drop `-a` and the query matches ITEMS instead:
+  each item's own `mb_albumid` moves while the ALBUM row's does not, leaving
+  the library split into disagreeing identity fields.
+- **Identity only, never a tag write, never layout.** `-M` (`--nomove`) and
+  `-W` (`--nowrite`) are mandatory; `modify` otherwise honours `import.move` /
+  `import.write`, which the config contract pins to `yes`. `-W` is the one
+  that matters today: without it `modify` calls `item.try_write()` on every
+  matched file — a WRITE, not the retag's one DB transaction, so a partial
+  failure across N files could leave some files re-tagged and some not
+  while the DB already reports the retag landed as one unit. That is the
+  divergence `-W` closes: a fully successful write would actually leave
+  disk and DB agreeing, but the guard has no way to tell "fully succeeded"
+  from "landed on disk 2 files out of 3" — so it stays DB-only and the
+  effect stays exactly one `Album.store()` transaction: it lands or it
+  doesn't. `-M` is belt-and-braces rather than something reachable right
+  now: `mb_albumid` is in no path template (`$albumartist`, `$year`,
+  `$album`, and the `%aunique` disambiguator all derive from other
+  fields), so retagging it alone cannot itself relocate a file under the
+  current path configuration. It stays because `modify -a` with `-M`
+  dropped would relocate the album on any FUTURE config that makes
+  `mb_albumid` path-relevant — minting new Jellyfin item identities
+  (identity is a hash of the path), risking the documented Plex
+  album-split footgun, and pruning the vacated directory's `clutter`,
+  which includes the `cratedigger.json` verified-lossless sidecar — and
+  there is no cost to keeping the flag now.
+
+  **The accepted residual of `-W` is not merely dormant — it can actively
+  revert.** After a successful retag the beets DB holds the survivor while
+  every installed file's tags still name the merged-away id. If the import
+  that follows never lands, that gap persists; `beet update` normally
+  leaves it alone, because it skips any item whose on-disk mtime has not
+  advanced past what the DB recorded (`beets/ui/commands/update.py`). But
+  the moment ANYTHING advances one track's mtime — an operator `beet
+  write`, an unrelated tag edit, an art embed, a restore, a storage
+  migration that recopies the file — a subsequent `beet update` re-reads
+  that file's stale `mb_albumid` into the item row, and `update_items`
+  then copies `first_item[key]` back onto the ALBUM row for every
+  `Album.item_keys` field, `mb_albumid` included
+  (`beets/ui/commands/update.py`). The album can therefore revert to the
+  merged-away id while the pipeline's request row still names the
+  survivor. Nothing re-derives that split — the merge branch only fires on
+  a fresh `mbid_not_found`, and the request already believes it holds the
+  survivor — so the next import at the survivor id finds no duplicate,
+  lands a SECOND album, and `get_album_info` misses so the quality
+  decision routes through `import_no_exist`, silently skipping the
+  downgrade guard. `-w` would not close this either — a partial write
+  across N files leaves the identical class of drift, just narrower — so
+  `-W` stays; the mitigation is visibility, not a different flag. Every
+  successful retag records the divergence in its outcome detail
+  (`lib/beets_retag.py`) so an operator can find "DB identity moved, file
+  tags did not" in the audit trail rather than never knowing.
 - **One album.** The regex is anchored, so it can only name albums filed under
   exactly the merged-away release id.
 - **Only on `mbid_not_found`, only under an exact import claim**, and only
@@ -157,11 +210,13 @@ Each top-level application performs intrinsic exactly-once startup admission in
 a fresh Beets configuration context. Hard failures include a missing or
 incompatible runtime, mismatched database/root/state/interpreter, mutable
 non-secret config, invalid state capability, unsafe import/path policy, an
-inactive required plugin (`musicbrainz`, `mbsync`, `permissions`, `inline`), or
-a missing, multiple, wrong, or non-token-only designated secret include. A
-deployment without `mbsync` cannot follow a MusicBrainz release merge on the
-library side, and merged requests would simply never converge with no error
-anywhere — so the contract refuses to start instead. Approved
+inactive required plugin (`musicbrainz`, `permissions`, `inline`), or a
+missing, multiple, wrong, or non-token-only designated secret include. The
+merge retag (`lib/beets_retag.py`) needs no plugin — since #1087 it runs
+`beet modify`, which makes no network call and needs no candidate mapping —
+so `mbsync` is no longer in this required set; it stays active in the
+deployed configuration for the operator's own manual use, and is still
+reported observationally (`BeetsPluginContract.mbsync`). Approved
 MusicBrainz endpoint drift is warning-only. The checker rejects only named
 harness conflicts: active `convert.auto` or `convert.auto_keep` is unsafe, while
 intentional metadata/artwork hooks such as `fetchart`, `embedart`, `scrub`,
@@ -246,7 +301,7 @@ plugins: musicbrainz mbsync discogs fetchart embedart lyrics lastgenre scrub inf
 | Plugin | Purpose | Auto? |
 |--------|---------|-------|
 | `musicbrainz` | MB lookups (REQUIRED — without it, 0 candidates) | — |
-| `mbsync` | `beet mbsync` command — refetches an album by its stored `mb_albumid`, follows a MusicBrainz merge redirect, and rewrites the ID (REQUIRED — it is the only library-side way to follow a release merge). Cratedigger invokes it at exactly one album, `mb_albumid::^<old-id>$`, from the merge sweep — never library-wide | — |
+| `mbsync` | `beet mbsync` command — refetches an album by its stored `mb_albumid`, follows a MusicBrainz merge redirect, and rewrites the ID. Not required by Cratedigger since #1087 (the merge retag now runs `beet modify`, `lib/beets_retag.py`) — kept active for the operator's own manual use | — |
 | `discogs` | Discogs lookups (fallback for obscure releases) | — |
 | `fetchart` | Downloads cover art from CAA/iTunes/Amazon | Yes |
 | `embedart` | Embeds cover art into audio file tags | Yes |
