@@ -51,7 +51,14 @@ from tests.helpers import (
 PRODUCER_LANES = ("slskd", "youtube_staging", "private_processing")
 REJECTION_CLASSES: dict[str, tuple[str, ...]] = {
     "high_distance": ("wrong_matches",),
-    "spectral_reject": ("failed_imports", "bad_files"),
+    # The `bad_files` sub-routing (issue #1077, D3) is gone — audio_corrupt
+    # and spectral_reject were its only two consumers, and neither reaches
+    # this curated mover with a produced failed_path in production any more
+    # (audio_corrupt bans + deletes outright at the media-readiness lane
+    # this test drives; spectral_reject was never quarantined at all,
+    # cleaned up immediately). spectral_reject now shares the plain
+    # `failed_imports/` bucket with every other folder/integrity reject.
+    "spectral_reject": ("failed_imports",),
     "bad_audio_hash": ("failed_imports",),
     "nested_layout": ("failed_imports",),
     "empty_fileset": ("failed_imports",),
