@@ -917,10 +917,16 @@ _NOT_EMPTY_COPY = "NOT evidence that the folder is empty"
 #: sentence naming that — deliberately NOT "temporarily unavailable" or
 #: any other wording that promises a retry will succeed (review round 1):
 #: the 503 bucket also carries the unclassified residual code, which is
-#: a data mismatch a retry cannot clear, not a disk hiccup. Distinct from
-#: ``_REFUSAL_COPY`` (also "could not be read", but that constant names
-#: the PER-ENTRY world-failure wording) so the two assertions below are
-#: not accidentally checking the same substring twice.
+#: a data mismatch a retry cannot clear, not a disk hiccup.
+#:
+#: This constant and ``_REFUSAL_COPY`` are BOTH substrings of the fixed
+#: 503 LEAD sentence alone ("...could not be read — the storage refused
+#: or failed; this may be temporary."), so checking for them proves
+#: nothing about whether the server's own ``reason`` text reached the
+#: DOM at all (review round 2) — a browser that silently dropped
+#: ``serverMessage`` would still satisfy both. The test below therefore
+#: also asserts a substring unique to the PRODUCER's exception text
+#: (never present in the hardcoded lead sentence) to close that gap.
 _WHOLE_ROOT_UNAVAILABLE_LOAD_COPY = "may be temporary"
 
 #: Entry kinds refused for a WORLD reason (EACCES) vs a CONTAINMENT
@@ -1114,6 +1120,15 @@ class TestExplorerReachesTheOperatorGenerated(unittest.TestCase):
         html = self._render({"error": reason}, 503)
         self.assertIn(_WHOLE_ROOT_UNAVAILABLE_LOAD_COPY, html)
         self.assertIn(_REFUSAL_COPY, html)
+        # Review round 2: both checks above are ALSO satisfied by the
+        # hardcoded 503 lead sentence alone, so neither proves the
+        # producer's OWN reason text reached the DOM — a browser that
+        # silently dropped ``serverMessage`` would still pass them. Assert
+        # a substring that exists ONLY in the real exception (never in
+        # ``wrongMatchExplorerFailureCopy``'s fixed wording) to close that
+        # gap and make this genuinely a Rule C pin.
+        self.assertIn("Permission denied", reason)
+        self.assertIn("Permission denied", html)
         self.assertIn("Retry", html)
 
     def test_known_bad_browser_checker_trips(self) -> None:

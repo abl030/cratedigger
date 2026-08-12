@@ -182,8 +182,12 @@ def _classify_wrong_match_refusal(code: FsAuthorityCode) -> _WrongMatchRefusalVe
     open) and :func:`resolve_wrong_match_stream_file` (the single-file
     stream resolve) ask, so the two sites cannot drift on "what does this
     errno mean" the way they did before issue #1099. Composed ONLY from
-    ``lib.fs_authority``'s three existing owner predicates — never a new
-    errno/code set of its own:
+    two of ``lib.fs_authority``'s existing owner predicates (clauses 1-2
+    below) — never a new errno/code set of its own. A third,
+    :func:`refusal_is_indeterminate`, is not called: its own
+    True/False split already collapses to a single verdict here (clause
+    3), so this function states that collapse directly rather than
+    calling a predicate only to discard the distinction it draws:
 
     1. :func:`errno_proves_absence` — a POSITIVE proof the name holds
        nothing (``missing``, ``not_a_directory``) → ``"not_found"``

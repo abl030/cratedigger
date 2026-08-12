@@ -604,8 +604,9 @@ depends on.
   itself, not one entry inside it) also splits into three verdicts, via the
   single `web/wrong_match_file_service.py::_classify_wrong_match_refusal`
   function that both the whole-root open and the single-file stream resolve
-  share (issue #1099; before this, EVERY non-absence refusal of either was
-  reported as 404 "not found"):
+  share (issue #1099; before this, every CONTAINMENT refusal, and the
+  unclassified residual, of either was reported as 404 "not found" — the
+  pre-existing world-failure codes already routed to 503 at both sites):
   - **404** — the name is definitively absent (`missing`/`not_a_directory`).
     This also covers a symlink, socket, FIFO, or plain file used AS the root
     itself: every directory-open primitive this module uses always opens
@@ -617,13 +618,15 @@ depends on.
     `not_regular_file`, `untrusted_ownership`): the name may well exist, the
     server simply refuses to read it. At this exact whole-root granularity
     only `path_escape` is actually reachable today — from an ordinary,
-    unnormalised configured root with a TRAILING SLASH (`lib.config` never
-    strips one), which makes `open_directory_path`'s own `_parts()` check
-    reject the root's trailing empty path component. `untrusted_ownership`
-    is a real declared `FsAuthorityCode` member but is never raised at this
-    granularity: `open_configured_quarantine_directory` has no ownership
-    check (only `lib.fs_authority._assert_private_parent`, used by the
-    sibling private-processing-root open, raises it).
+    unnormalised configured root (`lib.config` never strips or validates
+    one) that hands `open_directory_path`'s own `_parts()` check a
+    ``""``/``"."``/``".."`` path component, e.g. a TRAILING SLASH (an empty
+    final component) but equally a stray `//`, `/./`, or `/../` anywhere in
+    the value. `untrusted_ownership` is a real declared `FsAuthorityCode`
+    member but is never raised at this granularity:
+    `open_configured_quarantine_directory` has no ownership check (only
+    `lib.fs_authority._assert_private_parent`, used by the sibling
+    private-processing-root open, raises it).
   - **503** — either a genuine, potentially-retryable world failure
     (`open_failed`/`read_failed`/`write_failed`, e.g. EACCES/EIO/ESTALE) or
     an unclassified residual code (`unspecified` — e.g. a `failed_path`
