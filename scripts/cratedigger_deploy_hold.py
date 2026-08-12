@@ -145,14 +145,19 @@ def _is_json_object(value: object) -> TypeGuard[dict[str, object]]:
     return isinstance(value, dict)
 
 
-def _guarded_units_line(units: tuple[str, ...]) -> str:
-    """Build the metadata gate's exact ``guarded_units=(...)`` shell literal."""
-    return "guarded_units=(" + " ".join(units) + ")"
+def _units_line(prefix: str, units: tuple[str, ...]) -> str:
+    """Build the metadata gate's exact ``<prefix>=(...)`` shell literal."""
+    return f"{prefix}=(" + " ".join(units) + ")"
 
 
-def _resume_units_line(units: tuple[str, ...]) -> str:
-    """Build the metadata gate's exact ``resume_units=(...)`` shell literal."""
-    return "resume_units=(" + " ".join(units) + ")"
+# Composed once at import time -- not inside verify_controlled_start_contract
+# -- so these are the literal module-level names that method consumes, and a
+# future mis-wire (e.g. building the guarded line from GATE_RESUME_UNITS) is
+# a fact a plain byte-identity pin can catch directly, rather than a
+# call-site composition only observable by actually running
+# verify_controlled_start_contract (the VM check or a live acquire).
+GATE_GUARDED_LINE = _units_line("guarded_units", GATE_GUARDED_UNITS)
+GATE_RESUME_LINE = _units_line("resume_units", GATE_RESUME_UNITS)
 
 
 @dataclass(frozen=True)
@@ -310,11 +315,9 @@ class RealSystemdBackend:
                 )
 
         gate_source = Path(gate_paths.pop()).read_text(encoding="utf-8")
-        expected_guarded = _guarded_units_line(GATE_GUARDED_UNITS)
-        expected_resume = _resume_units_line(GATE_RESUME_UNITS)
         if (
-            gate_source.splitlines().count(expected_guarded) != 1
-            or gate_source.splitlines().count(expected_resume) != 1
+            gate_source.splitlines().count(GATE_GUARDED_LINE) != 1
+            or gate_source.splitlines().count(GATE_RESUME_LINE) != 1
         ):
             raise DeployHoldError(
                 "metadata-gate guarded/resume unit contract is not the "

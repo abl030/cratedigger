@@ -557,7 +557,15 @@ class TestRecoverHeldWaitsOutActiveTimerDrivenProducers(unittest.TestCase):
     @given(
         release_phase=st.integers(min_value=1, max_value=3),
         producer=st.sampled_from(_PRODUCERS_THE_GATE_DOES_NOT_GUARD),
-        running_ticks=st.integers(min_value=0, max_value=4),
+        # min_value=2, not 0: measured, a wrongly-reaped producer (the gate
+        # zaps it instead of the drain waiting it out) still needs exactly 1
+        # poll to reach two stable samples, and the legitimate wait is
+        # running_ticks + 2 -- so running_ticks 0 or 1 both satisfy
+        # assert_recovery_waited_out_the_producer's `waited >= running_ticks`
+        # even in the reaped world (1 >= 0, 1 >= 1) and cannot discriminate.
+        # 2 is the smallest value where the reaped baseline (1) and the
+        # legitimate wait (4) diverge under that assertion.
+        running_ticks=st.integers(min_value=2, max_value=4),
     )
     @example(release_phase=1, producer=UNFINDABLE_SERVICE, running_ticks=3)
     @example(release_phase=3, producer=WATCHDOG_SERVICE, running_ticks=0)

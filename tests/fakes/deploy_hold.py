@@ -31,19 +31,6 @@ from scripts.cratedigger_deploy_hold import (
 # the gate hold ever asks to stop) behind 429 green targets.
 _ALWAYS_ON_DAEMONS = (WEB_SERVICE, IMPORTER_SERVICE, PREVIEW_SERVICE, YOUTUBE_SERVICE)
 
-# The metadata gate's own guarded set is exactly GATE_GUARDED_UNITS in
-# scripts/cratedigger_deploy_hold.py -- the same tuple
-# verify_controlled_start_contract's expected_guarded is built from, so this
-# fake's "hold manual" model can never drift from the real gate contract the
-# way it once did (issue #1100 item 1): omitting cratedigger.timer, and
-# deriving from GATE_STOPPED_UNITS -- a constant #1078 explicitly
-# re-documented as "what abort_hold restarts", not "what the gate stops".
-# cratedigger-unfindable.service and the watchdog are NOT guarded, so a real
-# "hold manual" never touches them; stopping every SERVICE_UNITS member here
-# (as this fake once did, pre-#1078) is more permissive than production in
-# exactly the shape test-fidelity.md Rule B forbids.
-_METADATA_GATE_GUARDED_UNITS = GATE_GUARDED_UNITS
-
 
 class FakeDeployHoldBackend:
     """Model exact units, jobs, control links, and the runtime receipt."""
@@ -291,7 +278,34 @@ class FakeDeployHoldBackend:
         self.events.append(("metadata-gate", command))
         if command == "hold manual":
             self.manual_hold = True
-            for unit in _METADATA_GATE_GUARDED_UNITS:
+            # Iterate GATE_GUARDED_UNITS directly -- not a module-local
+            # alias -- the same tuple verify_controlled_start_contract's
+            # expected_guarded is built from, so there is one fewer symbol
+            # a future edit could quietly redefine independently of the
+            # real gate contract (issue #1100 item 1: this fake once
+            # omitted cratedigger.timer here, derived instead from
+            # GATE_STOPPED_UNITS -- a constant #1078 explicitly
+            # re-documented as "what abort_hold restarts", not "what the
+            # gate stops"). Removing the alias narrows, but does not by
+            # itself close, that drift: a planted mutant proved a
+            # hardcoded tuple substituted directly into this loop (bypassing
+            # GATE_GUARDED_UNITS entirely, alias or not) still passes every
+            # acquire_hold/recover_held/prepare_controlled test unchanged,
+            # because every current production call path masks and stops
+            # the timers before ever taking the gate hold -- so
+            # cratedigger.timer is never "active" at this moment through any
+            # real call chain, alias or no alias. What actually kills that
+            # mutant is TestFakeGateHoldModelsTheRealGuardedSet in
+            # tests/test_deploy_hold.py, which drives this method directly
+            # with cratedigger.timer forced active first (bypassing the
+            # call-chain masking that makes it unobservable everywhere
+            # else) and asserts this loop stops it.
+            # cratedigger-unfindable.service and the watchdog are NOT
+            # guarded, so a real "hold manual" never touches them; stopping
+            # every SERVICE_UNITS member here (as this fake once did,
+            # pre-#1078) is more permissive than production in exactly the
+            # shape test-fidelity.md Rule B forbids.
+            for unit in GATE_GUARDED_UNITS:
                 state = self.unit_states[unit]
                 if state.active_state == "active":
                     self.unit_states[unit] = UnitState(

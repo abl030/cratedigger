@@ -19,7 +19,9 @@ import scripts.cratedigger_deploy_hold as deploy_hold_module
 from scripts.cratedigger_deploy_hold import (
     CONTROL_DIR,
     CONTROLLED_WORKER_UNITS,
+    GATE_GUARDED_LINE,
     GATE_GUARDED_UNITS,
+    GATE_RESUME_LINE,
     GATE_RESUME_UNITS,
     GATE_STOPPED_UNITS,
     MAIN_SERVICE,
@@ -1327,8 +1329,15 @@ class TestAbortHold(unittest.TestCase):
 
 class TestGateGuardModelDerivation(unittest.TestCase):
     """#1100 item 1: the gate's guarded/resume sets are named constants, and
-    verify_controlled_start_contract's expected literals are built from
-    them -- byte-identical to the hardcoded strings they replace.
+    GATE_GUARDED_LINE/GATE_RESUME_LINE -- the exact module-level values
+    verify_controlled_start_contract compares against the live gate config,
+    not a re-composition of them -- are byte-identical to the hardcoded
+    strings they replace. Pinning the bare names (not calling _units_line
+    again from the test with test-chosen arguments) is what would catch a
+    future call-site mis-wire (e.g. building the guarded line from
+    GATE_RESUME_UNITS): that composition now happens exactly once, at
+    import time, so there is nothing left for verify_controlled_start_contract
+    to get wrong independently of what this test already pinned.
     """
 
     def test_guarded_units_includes_the_main_timer_and_service(self) -> None:
@@ -1340,18 +1349,48 @@ class TestGateGuardModelDerivation(unittest.TestCase):
         self,
     ) -> None:
         self.assertEqual(
-            deploy_hold_module._guarded_units_line(GATE_GUARDED_UNITS),
+            GATE_GUARDED_LINE,
             "guarded_units=(cratedigger.timer cratedigger.service "
             "cratedigger-web.service cratedigger-importer.service "
             "cratedigger-import-preview-worker.service "
             "cratedigger-youtube-ingest.service)",
         )
         self.assertEqual(
-            deploy_hold_module._resume_units_line(GATE_RESUME_UNITS),
+            GATE_RESUME_LINE,
             "resume_units=(cratedigger.service cratedigger.timer "
             "cratedigger-web.service cratedigger-importer.service "
             "cratedigger-import-preview-worker.service "
             "cratedigger-youtube-ingest.service)",
+        )
+
+
+class TestFakeGateHoldModelsTheRealGuardedSet(unittest.TestCase):
+    """#1100 item 1, closed against the real fault: FakeDeployHoldBackend's
+    ``metadata_gate("hold manual")`` must stop every ``GATE_GUARDED_UNITS``
+    member, including ``cratedigger.timer``.
+
+    Driving this through ``acquire_hold``/``recover_held``/``prepare_controlled``
+    cannot prove it: every current production call path masks and stops the
+    timers before ever taking the gate hold, so ``cratedigger.timer`` is
+    never "active" at the moment "hold manual" fires through any real call
+    chain -- a planted mutant confirmed a hardcoded pre-#1100
+    ``(MAIN_SERVICE, *GATE_STOPPED_UNITS)`` iterated set (omitting the timer)
+    survives every one of those tests unchanged. Driving the fake's own
+    method directly, with the timer forced active first, is what makes the
+    omission observable and kills that mutant.
+    """
+
+    def test_hold_manual_stops_an_active_main_timer(self) -> None:
+        backend = FakeDeployHoldBackend()
+        backend.unit_states[MAIN_TIMER] = UnitState(
+            load_state="loaded", active_state="active", sub_state="waiting",
+        )
+
+        backend.metadata_gate("hold manual")
+
+        self.assertEqual(
+            backend.unit_state(MAIN_TIMER),
+            UnitState(load_state="loaded", active_state="inactive", sub_state="dead"),
         )
 
 
@@ -1384,9 +1423,20 @@ class TestRecoverHeldWaitsOutAnActiveTimerDrivenProducer(unittest.TestCase):
         self.assertFalse(backend.manual_hold)
 
         # A genuinely active timer-driven producer at the exact moment this
-        # recovery is invoked -- e.g. a still-running cycle from the window
-        # right before its own timer's mask took effect (stopping the timer
-        # does not kill an already-launched invocation).
+        # recovery is invoked -- NOT a "timer fired right before its own
+        # mask took effect" story: that is impossible this late.
+        # prepare_controlled's own _verify_authoritative_hold already
+        # re-proved every timer masked and every SERVICE_UNITS member
+        # stably inactive before PHASE_PREPARED_CONTROLLED was ever reached.
+        # The producible route is a manual `systemctl start
+        # cratedigger-unfindable.service` (or the watchdog) during the
+        # deploy window: masking a timer blocks only that timer's own
+        # trigger, never a direct start of the service it drives, and
+        # neither service carries a START_INHIBITORS entry the way main and
+        # YouTube do. _drain_producers_then_hold's own docstring documents
+        # the identical mechanism -- a timer mask blocking only its own
+        # trigger, not a manual `systemctl start` of the service -- for
+        # cratedigger.service in that function's own pre-hold window.
         backend.unit_states[UNFINDABLE_SERVICE] = UnitState(
             load_state="loaded", active_state="active", sub_state="running",
         )
@@ -1396,8 +1446,14 @@ class TestRecoverHeldWaitsOutAnActiveTimerDrivenProducer(unittest.TestCase):
         recover_held(backend)
 
         backend.assert_default_held()
-        # The drain waited it out -- at least 3 polls to exhaust
-        # running_samples, plus 2 more for the stability requirement.
+        # The drain waited it out. Measured mechanism for this 3-tick
+        # countdown: 3 sleeps decrement running_samples to 0, a 4th sleep is
+        # the one that actually reaps the unit to inactive/dead once the
+        # countdown is exhausted, and a 5th intervening sleep is needed to
+        # reach the two-consecutive-stable-samples requirement (5 total).
+        # The assertion only requires >= 3 -- comfortably below that
+        # measured total, so it stays robust to exact-count drift in the
+        # fake's stability bookkeeping.
         self.assertGreaterEqual(backend.sleep_calls - sleep_calls_before, 3)
 
 
