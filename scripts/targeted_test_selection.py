@@ -23,6 +23,24 @@ ROUTE_NEIGHBOURS = (
     "tests.test_pydantic_route_audit",
     "tests.test_js_payload_contract_audit",
 )
+WEB_TEST_HARNESS_NEIGHBOURS = (
+    *ROUTE_NEIGHBOURS,
+    "tests.web.test_server_endpoints",
+)
+STRUCTURAL_AUDIT_NEIGHBOURS = (
+    "tests.test_deploy_pin_script",
+    "tests.test_ffmpeg_audio_map_audit",
+    "tests.test_js_ast_audits",
+    "tests.test_js_payload_contract_audit",
+    "tests.test_js_window_bindings",
+)
+WORLD_MODEL_NEIGHBOURS = (
+    "tests.test_world_census_seeds",
+    "tests.test_world_model_burst",
+    "tests.test_world_model_coordinator",
+    "tests.test_parallel_test_runner",
+    "tests.test_hypothesis_profile_audit",
+)
 
 EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
     "pyrightconfig.json": (
@@ -48,6 +66,88 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
     ),
     "scripts/test.sh": (
         "tests.test_targeted_test_selection",
+    ),
+    # Shared tests/ infrastructure (issue #1081): none of these are
+    # discoverable test modules themselves, so each needs an explicit
+    # mapping to the test(s) that actually exercise it. tests/fakes/,
+    # tests/web/, tests/structural_audits/, and tests/world_model/ are
+    # covered by prefix rules below instead of listed file-by-file here.
+    "tests/audio_fixtures.py": (
+        "tests.test_conversion_e2e",
+        "tests.test_media_readiness",
+    ),
+    "tests/beets_config_startup_support.py": (
+        "tests.test_beets_config_startup",
+        "tests.test_beets_config_startup_entrypoints",
+    ),
+    "tests/beets_world.py": (
+        "tests.test_beets_world_config",
+        "tests.test_destructive_authority",
+        "tests.test_harness_beets2_contract",
+    ),
+    "tests/conftest.py": (
+        "tests.test_parallel_test_runner",
+        "tests.test_pipeline_db",
+    ),
+    "tests/_docs_reference_audit.py": (
+        "tests.test_docs_audit",
+    ),
+    "tests/ephemeral_slskd.py": (
+        # No test drives EphemeralSlskd directly today — its only consumer
+        # is the dev benchmarking script scripts/bench_parallel_search.py,
+        # which has no dedicated test of its own either. Nearest existing
+        # benchmarking-tooling test, kept until real coverage exists.
+        "tests.test_bench_artist_cold",
+    ),
+    "tests/finite_domain.py": (
+        "tests.test_finite_domain",
+    ),
+    "tests/finite_domain_metadata.py": (
+        "tests.test_finite_domain",
+    ),
+    "tests/fixtures/build_cd_rip_proof_fixture.py": (
+        "tests.test_cd_rip_js_fixture",
+    ),
+    "tests/harness_test_support.py": (
+        "tests.test_harness_test_support",
+    ),
+    "tests/helpers.py": (
+        "tests.test_quality_decisions",
+        "tests.test_dispatch_core",
+        "tests.test_integration_slices",
+    ),
+    "tests/_hypothesis_profiles.py": (
+        "tests.test_hypothesis_profile_audit",
+    ),
+    "tests/__init__.py": (
+        "tests.test_util",
+        "tests.test_beets_config_startup",
+    ),
+    "tests/_lambda_audit.py": (
+        "tests.test_lambda_audit",
+    ),
+    "tests/_mock_audit_scanner.py": (
+        "tests.test_mock_audit",
+    ),
+    "tests/node_jsonl_worker.py": (
+        "tests.test_node_jsonl_worker",
+        "tests.test_generated_node_worker_audit",
+    ),
+    "tests/read_projection_registry.py": (
+        "tests.test_pipeline_db",
+        "tests.test_read_projection_audit",
+    ),
+    "tests/ruff_lsp_worker.py": (
+        "tests.test_ruff_lsp_worker",
+    ),
+    "tests/_tests_typing_ratchet_baseline.py": (
+        "tests.test_typing_ratchet",
+    ),
+    "tests/_typing_ratchet_baseline.py": (
+        "tests.test_typing_ratchet",
+    ),
+    "tests/_typing_ratchet_scanner.py": (
+        "tests.test_typing_ratchet",
     ),
 }
 
@@ -79,7 +179,18 @@ def _paired_module(module: str, repo_root: Path) -> str | None:
 
 
 def _path_module(path: PurePosixPath) -> str | None:
+    """Return the dotted module name, but only for a discoverable test module.
+
+    A shared test-infrastructure file (basename not ``test_*.py``) is not a
+    runnable unittest target — the parallel runner's ``discover_test_modules``
+    only ever finds ``test*.py`` files, so emitting a selector for anything
+    else produces an ``unknown test selector`` crash deep in the runner
+    (issue #1081). Shared infrastructure gets its selectors from
+    ``EXACT_PATH_NEIGHBOURS`` / prefix rules instead.
+    """
     if path.suffix != ".py" or not path.parts:
+        return None
+    if not path.stem.startswith("test"):
         return None
     parts = (*path.parts[:-1], path.stem)
     if any(not part.isidentifier() for part in parts):
@@ -131,6 +242,12 @@ def _changed_path_neighbours(
         neighbours.extend((*PIPELINE_DB_NEIGHBOURS, "tests.test_migrator"))
     if relative_path.startswith("tests/fakes/"):
         neighbours.append("tests.test_fakes")
+    if relative_path.startswith("tests/web/"):
+        neighbours.extend(WEB_TEST_HARNESS_NEIGHBOURS)
+    if relative_path.startswith("tests/structural_audits/"):
+        neighbours.extend(STRUCTURAL_AUDIT_NEIGHBOURS)
+    if relative_path.startswith("tests/world_model/"):
+        neighbours.extend(WORLD_MODEL_NEIGHBOURS)
     if relative_path.startswith("web/routes/"):
         neighbours.extend(ROUTE_NEIGHBOURS)
         route_test = f"tests.web.test_routes_{path.stem}"
@@ -150,6 +267,19 @@ def _changed_path_neighbours(
                 "tests.test_quality_classification",
                 "tests.test_quality_generated",
             )
+        )
+    if path.suffix == ".py" and path.parts[:1] == ("tests",) and not neighbours:
+        # A non-test .py file under tests/ with no direct self-selector, no
+        # EXACT_PATH_NEIGHBOURS entry, and no matching prefix rule is shared
+        # test infrastructure nobody has mapped to a consuming test. Silently
+        # dropping it under-selects — the more dangerous failure for a test
+        # selector, since the run reports green having exercised nothing
+        # relevant to the change (issue #1081). Fail closed and name the
+        # file so whoever touches it adds the mapping.
+        raise ValueError(
+            f"unmapped shared test module: {relative_path} — add an "
+            "EXACT_PATH_NEIGHBOURS entry or a prefix rule for it in "
+            "scripts/targeted_test_selection.py"
         )
     return tuple(neighbours)
 
