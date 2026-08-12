@@ -20,9 +20,11 @@ import os
 import shutil
 import tempfile
 import unittest
+import unittest.mock
 
 import music_tag
 
+import lib.beets_distance as beets_distance_module
 from lib.beets_distance import (
     BeetsDistanceCache,
     BeetsDistanceResult,
@@ -516,13 +518,92 @@ class TestComputeBeetsDistanceOutcomes(unittest.TestCase):
         self.assertEqual(result.total_local_tracks, 1)
         self.assertTrue(result.partial_read_is_containment)
 
-    def _mid_read_refusal(self, album: str, name: str) -> None:
-        """Plant a file that OPENS fine and answers EIO on every read.
+    def test_a_fifo_is_refused_never_opened(self) -> None:
+        """Blocker 2 of the #1086 review: a FIFO named ``*.flac`` must
+        never reach beets' ``open()``.
 
-        The deployment's live refusal shape (nested virtiofs
-        EIO/ESTALE), reproduced without a flaky mount.
+        A FIFO with no writer on the other end BLOCKS FOREVER on
+        ``open()`` for reading — this module has no ``O_NONBLOCK`` lever
+        the way the explorer's ``open_regular_relative`` does. The
+        ``lstat`` guard (:func:`lib.beets_distance._lstat_admit_regular_file`)
+        refuses it via ``S_ISREG`` BEFORE any read is attempted, so this
+        test completing AT ALL — never mind quickly — is the assertion;
+        before the fix this call never returned.
         """
-        os.symlink("/proc/self/mem", os.path.join(album, name))
+        root = self.enterContext(tempfile.TemporaryDirectory())
+        album = os.path.join(root, "wrong_matches", "Album")
+        os.makedirs(album)
+        shutil.copy(FIXTURE_FLAC, os.path.join(album, "01 - one.flac"))
+        os.mkfifo(os.path.join(album, "02 - pipe.flac"))
+        result = self._compute_over(album)
+        self.assertEqual(result.outcome, "ok")
+        assert result.partial_read is not None
+        self.assertIn("02 - pipe.flac", result.partial_read)
+        self.assertIn("not a regular file", result.partial_read)
+        self.assertEqual(result.total_local_tracks, 1)
+        self.assertTrue(result.partial_read_is_containment)
+
+    def test_a_folder_of_only_a_fifo_is_unavailable_not_no_audio(self) -> None:
+        """The mirror image: a lone FIFO must not read as an empty folder.
+
+        Before the fix, a FIFO answered ``no_audio`` only by luck of
+        hanging forever rather than ever reaching that outcome; this
+        pins the correct HONEST outcome once the guard refuses it.
+        """
+        root = self.enterContext(tempfile.TemporaryDirectory())
+        album = os.path.join(root, "wrong_matches", "Album")
+        os.makedirs(album)
+        os.mkfifo(os.path.join(album, "01 - pipe.flac"))
+        result = self._compute_over(album)
+        self.assertEqual(result.outcome, "folder_unavailable")
+        self.assertIsNone(result.partial_read)
+
+    def _mid_read_refusal(self, album: str, name: str) -> None:
+        """Plant a REGULAR file whose beets tag-read answers EIO mid-read.
+
+        The deployment's live refusal shape (nested virtiofs EIO/ESTALE:
+        ``open()`` succeeds, the read fails, and only the read-time
+        errno is attached — no filename anywhere on the chain).
+        Pre-#1086 this was reproduced with a symlink to
+        ``/proc/self/mem``: ``os.stat`` followed the link and beets read
+        the pseudo-file for real. The ``lstat`` guard added by #1086 now
+        refuses ANY symlink before beets ever sees the path, so that
+        shortcut would silently test the SYMLINK refusal instead of the
+        mid-read one it was named for — the exact drift this fix closes
+        (issue #1086 review, "ALSO FIX").
+
+        This reproduces the real shape on an ORDINARY, non-symlink NAME
+        inside ``album`` (passes the ``lstat`` guard cleanly), while the
+        actual mid-read producer stays a REAL symlink to
+        ``/proc/self/mem`` — planted OUTSIDE ``album`` (a sibling of it,
+        never enumerated by the walk) under the SAME name, so mutagen's
+        format sniffing sees the identical ``.flac`` extension and
+        reaches the same EIO deep in FLAC parsing. The
+        ``_item_from_path_fn`` leaf seam — the same seam production
+        binds to upstream ``beets.library.Item.from_path`` — redirects
+        reads of the in-album placeholder to that real external
+        producer, for THIS one path only; every OTHER path still goes
+        through the unmodified real function. The exception that
+        surfaces is therefore still genuinely third-party (real beets,
+        real mediafile, real mutagen) and reached the same way it always
+        was, just no longer via a symlink the lstat guard would refuse
+        first.
+        """
+        path = os.path.join(album, name)
+        with open(path, "wb"):
+            pass
+        mid_read_producer = os.path.join(
+            os.path.dirname(album), f"_mid_read_producer_{name}")
+        os.symlink("/proc/self/mem", mid_read_producer)
+        real_item_from_path_fn = beets_distance_module._item_from_path_fn
+
+        def _redirect(candidate: str):
+            if candidate == path:
+                return real_item_from_path_fn(mid_read_producer)
+            return real_item_from_path_fn(candidate)
+
+        self.enterContext(unittest.mock.patch.object(
+            beets_distance_module, "_item_from_path_fn", new=_redirect))
 
     def test_a_mid_read_refusal_is_never_no_audio(self) -> None:
         """The live shape: errno and filename on DIFFERENT chain links.
@@ -554,6 +635,9 @@ class TestComputeBeetsDistanceOutcomes(unittest.TestCase):
         assert result.partial_read is not None
         self.assertIn("02 - sick-mount.flac", result.partial_read)
         self.assertEqual(result.total_local_tracks, 1)
+        # Structured fact, not merely worded text: the mid-read EIO is a
+        # WORLD failure, never a containment decision (issue #1086).
+        self.assertFalse(result.partial_read_is_containment)
 
     def test_a_walk_refusal_and_a_walk_absence_are_told_apart(self) -> None:
         """The third refusal site: ``os.walk``'s ``onerror``.

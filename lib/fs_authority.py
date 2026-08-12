@@ -250,8 +250,8 @@ def errno_proves_absence(code: FsAuthorityCode) -> bool:
     "proved absent". A consumer deciding "is this name provably empty"
     must ask THIS function.
 
-    Three functions call it today — ``lib.beets_distance._refusal_text``
-    (and its sibling ``lib.beets_distance._lstat_refusing_symlink``),
+    Three functions call it today — ``lib.beets_distance._refusal``
+    (and its sibling ``lib.beets_distance._lstat_admit_regular_file``),
     :func:`os_refusal_in_chain`, and the Wrong Matches explorer's
     per-entry loop in ``web/wrong_match_file_service.py`` — and
     :func:`observe_directory` reaches the same verdict by reading
@@ -305,9 +305,9 @@ def unreadable_reason_text(
             )
         case "not_regular_file":
             return (
-                "this is not a regular file (a socket or device node), "
-                "refused rather than opened (containment, not a world "
-                "failure)"
+                "this is not a regular file (a socket, FIFO or device "
+                "node), refused rather than opened (containment, not a "
+                "world failure)"
             )
         case "path_escape" | "untrusted_ownership":
             return "refused by the containment boundary, not a world failure"
@@ -318,6 +318,30 @@ def unreadable_reason_text(
             raise ValueError(
                 f"{code!r} proves absence; it has no unreadable-reason text"
             )
+
+
+def is_containment_refusal(code: FsAuthorityCode) -> bool:
+    """Is this refusal a CONTAINMENT decision, never a world failure?
+
+    The exact family :func:`unreadable_reason_text` words as "containment,
+    not a world failure" — kept as its own predicate so every consumer
+    that needs to BRANCH on the kind (not just describe it in prose) asks
+    the same question the wording already answers, rather than
+    re-deriving a narrower copy of this set at each call site. Two
+    consumers do today: ``lib.beets_distance._Refusal.is_containment``
+    (the ``BeetsDistanceResult.partial_read_is_containment`` wire field)
+    and the Wrong Matches explorer's per-entry loop
+    (``unreadable_is_containment``) — both need the SAME classification
+    so a symlink or FIFO refuses identically, structurally, on both ends
+    of one request (issue #1086).
+
+    ``missing`` and ``not_a_directory`` PROVE absence and are never asked
+    here either, for the same reason :func:`unreadable_reason_text`
+    raises on them: every caller has already excluded
+    :func:`errno_proves_absence`.
+    """
+    return code in ("unsafe_symlink", "not_regular_file",
+                    "path_escape", "untrusted_ownership")
 
 
 def refusal_is_indeterminate(code: FsAuthorityCode) -> bool | None:

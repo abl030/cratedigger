@@ -603,8 +603,17 @@ depends on.
   permanent containment decision (#1086). Beets reads audio files by path, so
   `lib/beets_distance.py` closes the matching containment gap with an
   `lstat` guard that refuses every symlink — a loop, a dangling target, or a
-  valid target outside the quarantine root — before the path ever reaches
-  beets, the same posture the file explorer already held with `O_NOFOLLOW`.
+  valid target outside the quarantine root — AND every non-regular name (a
+  FIFO, socket, or device node; a `*.flac` FIFO with no writer would
+  otherwise block `open()` forever, since this module has no `O_NONBLOCK`
+  lever) before the path ever reaches beets, the same posture the file
+  explorer already held per FILE entry with `O_NOFOLLOW` plus its own
+  `S_ISREG` check. A symlinked SUBDIRECTORY gets the equivalent refusal at
+  the walk level, not only a symlinked file. This is a per-file/per-entry
+  posture only: `compute_beets_distance` still resolves the folder itself
+  (`failed_path`) via `observe_directory` → `os.stat`, which follows a
+  symlinked parent component and performs no quarantine-root containment
+  check on it — a gap that predates this guard and is out of scope here.
 - **Wrong Matches cleanup** — one top-level action runs over the full Wrong
   Matches queue. It consumes existing evidence only, deletes force-mode
   confident cleanup-eligible rejects, and leaves would-import, uncertain,

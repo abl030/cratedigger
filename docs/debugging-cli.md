@@ -213,19 +213,24 @@ inside socket authorization, never credentials.
   private tree), MID-READ (the EIO/ESTALE this deployment's nested virtiofs
   produces on an already-open descriptor — the two carry different evidence,
   and only the second occurs on the live mount), or via the `lstat` guard
-  that refuses every symlink BEFORE beets ever touches the path — a symlink
-  loop, a symlink to a real file outside the quarantine root, and a dangling
-  symlink are ALL refused identically, whatever they point to (#1086; before
-  this guard a dangling symlink read as a proven absence only because
-  `os.stat` followed it into `ENOENT`, and a symlink to a real external file
-  was silently followed and fingerprinted). The rule still runs both ways: a
-  name the errno PROVES is gone (`ENOENT`/`ENOTDIR` on a name that is not
-  itself a symlink — e.g. a file unlinked after the walk listed it) is not a
-  refusal, does not set `partial_read`, and leaves a folder holding only such
-  names as `no_audio`, because that folder was observed and read. A socket or
-  driverless device node proves nothing absent and therefore counts as a
-  refusal too — that matches what the Wrong Matches file explorer reports for
-  the same on-disk entry (both ends ask `lib.fs_authority.errno_proves_absence`).
+  that refuses every symlink AND every non-regular name (a FIFO, socket, or
+  device node) BEFORE beets ever touches the path — a symlink loop, a
+  symlink to a real file outside the quarantine root, and a dangling symlink
+  are ALL refused identically, whatever they point to (#1086; before this
+  guard a dangling symlink read as a proven absence only because `os.stat`
+  followed it into `ENOENT`, a symlink to a real external file was silently
+  followed and fingerprinted, and a `*.flac` FIFO with no writer hung the
+  request thread forever rather than being refused). A symlinked
+  SUBDIRECTORY gets the same refusal at the walk level, not only a symlinked
+  file: `os.walk` silently declines to descend into one, so it is refused
+  explicitly rather than reported as zero audio files. The rule still runs
+  both ways: a name the errno PROVES is gone (`ENOENT`/`ENOTDIR` on a name
+  that is not itself a symlink — e.g. a file unlinked after the walk listed
+  it) is not a refusal, does not set `partial_read`, and leaves a folder
+  holding only such names as `no_audio`, because that folder was observed
+  and read. That matches what the Wrong Matches file explorer reports for
+  the same on-disk entry (both ends ask
+  `lib.fs_authority.errno_proves_absence`).
 - `pipeline-cli disk-coverage` — Compare active pipeline rows with Beets library coverage.
 - `pipeline-cli force-import` — Queue a rejected download for the importer lane.
 - `pipeline-cli import-job-recovery show` — Show read-only exact evidence for one import job.

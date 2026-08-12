@@ -892,7 +892,16 @@ async function handle(operation, payload) {
 
 #: The copy the panel owes an operator whose listing is incomplete.
 _LOAD_FAILURE_COPY = "Failed to load file explorer"
+#: A WORLD-FAILURE per-entry refusal, and the whole-root 503 envelope
+#: (``web/wrong_match_file_service.py``'s own "Wrong-match files could
+#: not be read: …") both still use this exact phrase.
 _REFUSAL_COPY = "could not be read"
+#: A CONTAINMENT per-entry refusal (symlink/socket/FIFO/device node)
+#: gets its OWN lead sentence (issue #1086 review) — it must never say
+#: "could not be read", the wording a world failure a retry might clear
+#: owns. ``assert_browser_told_the_truth`` accepts either as evidence the
+#: browser disclosed a refusal.
+_CONTAINMENT_REFUSAL_COPY = "refused (not read)"
 _NOT_EMPTY_COPY = "NOT evidence that the folder is empty"
 
 
@@ -920,7 +929,7 @@ def assert_browser_told_the_truth(
             f"status={payload.get('status')!r} payload the browser rejected "
             "as a load failure"
         )
-    if refused and _REFUSAL_COPY not in html:
+    if refused and _REFUSAL_COPY not in html and _CONTAINMENT_REFUSAL_COPY not in html:
         raise AssertionError(
             f"worlds {list(worlds)} refused {refused} entries and the "
             "browser never said so"
@@ -930,7 +939,11 @@ def assert_browser_told_the_truth(
             f"worlds {list(worlds)} rendered an intact-but-unreadable folder "
             "without denying it is empty"
         )
-    if not refused and (_REFUSAL_COPY in html or _NOT_EMPTY_COPY in html):
+    if not refused and (
+        _REFUSAL_COPY in html
+        or _CONTAINMENT_REFUSAL_COPY in html
+        or _NOT_EMPTY_COPY in html
+    ):
         raise AssertionError(
             f"worlds {list(worlds)} refused nothing yet the browser claimed "
             "an incomplete listing"
@@ -1527,6 +1540,16 @@ AGREEMENT_ENTRY_KINDS: tuple[str, ...] = (
     "refused_eacces",
     "refused_symlink_external",
     "refused_socket",
+    # Blocker 1 of the #1086 review: a symlink to a DIRECTORY, not a
+    # symlink to a file. ``os.walk(followlinks=False)`` classifies it
+    # into ``dirs`` and simply declines to descend — no ``onerror``
+    # fires, because listing the PARENT succeeded — so this kind was
+    # invisible to ``lib.beets_distance`` entirely before the walk-level
+    # guard, while the explorer already refused it via
+    # ``O_NOFOLLOW``/ELOOP. Without that guard this kind alone would make
+    # ``distance_saw_refusal`` False while ``explorer_saw_refusal`` is
+    # True — exactly the disagreement this property exists to catch.
+    "symlink_to_directory",
 )
 
 
@@ -1555,6 +1578,19 @@ def _build_agreement_world(
             # The containment gap itself: a REAL, readable file outside
             # the album folder entirely.
             os.symlink(fixture_flac, path)
+        elif kind == "symlink_to_directory":
+            # An external, REAL directory holding a real readable track —
+            # populated (not empty) so an unfixed regression shows up as
+            # a silently-counted extra readable file, not merely a
+            # missing refusal.
+            external_dir = os.path.join(
+                os.path.dirname(os.path.dirname(album)),
+                f"ext-dir-{index}",
+            )
+            os.makedirs(external_dir, exist_ok=True)
+            shutil.copy(
+                fixture_flac, os.path.join(external_dir, "hidden.flac"))
+            os.symlink(external_dir, path)
         else:  # refused_socket
             sock = socket.socket(socket.AF_UNIX)
             try:
@@ -1644,11 +1680,14 @@ class TestExplorerAndDistanceAgreeGenerated(unittest.TestCase):
     @example(kinds=["refused_eacces"])
     @example(kinds=["refused_symlink_external"])
     @example(kinds=["refused_socket"])
+    @example(kinds=["symlink_to_directory"])
     @example(kinds=["readable", "refused_eacces"])
     @example(kinds=["readable", "refused_symlink_external"])
     @example(kinds=["readable", "refused_socket"])
+    @example(kinds=["readable", "symlink_to_directory"])
     @example(kinds=[
         "refused_eacces", "refused_symlink_external", "refused_socket",
+        "symlink_to_directory",
     ])
     @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
     @given(kinds=st.lists(

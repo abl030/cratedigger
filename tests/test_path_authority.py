@@ -30,6 +30,7 @@ from lib.fs_authority import (
     SharedDownloadRootError,
     classify_path_errno,
     errno_proves_absence,
+    is_containment_refusal,
     open_configured_quarantine_directory,
     open_directory_path,
     open_private_child_directory,
@@ -348,7 +349,7 @@ class TestUnreadableEntryCountingAndReasonText(unittest.TestCase):
         self.assertEqual(exc.code, "not_regular_file")
         self.assertFalse(errno_proves_absence(exc.code))
         text = unreadable_reason_text(exc.code, errno_symbol=exc.errno_symbol)
-        self.assertIn("socket or device node", text)
+        self.assertIn("socket, FIFO or device node", text)
         self.assertNotIn("may be transient", text)
 
     def test_enodev_is_counted_as_containment_not_a_world_failure(self) -> None:
@@ -364,7 +365,7 @@ class TestUnreadableEntryCountingAndReasonText(unittest.TestCase):
         self.assertEqual(code, "not_regular_file")
         self.assertFalse(errno_proves_absence(code))
         text = unreadable_reason_text(code)
-        self.assertIn("socket or device node", text)
+        self.assertIn("socket, FIFO or device node", text)
         self.assertNotIn("may be transient", text)
 
     def test_enoent_proves_absence_and_is_never_counted(self) -> None:
@@ -424,6 +425,42 @@ class TestUnreadableEntryCountingAndReasonText(unittest.TestCase):
                         old_gate, new_gate,
                         f"{code!r} must be where the two predicates diverge",
                     )
+
+    def test_is_containment_refusal_partitions_every_declared_code(self) -> None:
+        """The exact family :func:`unreadable_reason_text` words as
+        "containment, not a world failure" — the shared predicate two
+        consumers (``lib.beets_distance._Refusal.is_containment`` and
+        the Wrong Matches explorer's ``unreadable_is_containment``) both
+        ask instead of re-deriving a narrower copy (issue #1086). Every
+        declared code is checked, so a new code added to the
+        ``FsAuthorityCode`` Literal without updating this predicate
+        fails a subTest instead of silently inheriting the wrong side.
+        """
+        containment_codes = {
+            "unsafe_symlink", "not_regular_file",
+            "path_escape", "untrusted_ownership",
+        }
+        for code in get_args(FsAuthorityCode):
+            with self.subTest(code=code):
+                self.assertEqual(
+                    is_containment_refusal(code), code in containment_codes)
+
+    def test_known_bad_is_containment_refusal_is_caught(self) -> None:
+        """A mutant calling every non-absence code containment must be
+        distinguishable from the real predicate on a genuine world
+        failure — EACCES/EIO/ESTALE must never be reported as a
+        containment decision."""
+        def _bad_is_containment_refusal(code: FsAuthorityCode) -> bool:
+            return not errno_proves_absence(code)
+
+        for code in ("open_failed", "read_failed", "write_failed"):
+            with self.subTest(code=code):
+                self.assertNotEqual(
+                    _bad_is_containment_refusal(code),
+                    is_containment_refusal(code),
+                    f"the known-bad predicate must diverge from the real "
+                    f"one on {code!r}",
+                )
 
 
 class TestPrivateProcessingAuthority(unittest.TestCase):

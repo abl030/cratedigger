@@ -72,6 +72,7 @@ from lib.fs_authority import (
     classify_path_errno,
     errno_proves_absence,
     errno_symbol,
+    is_containment_refusal,
     os_refusal_in_chain,
     unreadable_reason_text,
 )
@@ -280,7 +281,7 @@ def _refusal(path: str, exc: OSError) -> _Refusal | None:
 
     The single owner of that question for every site in this module that
     can record a read refusal — the walk's ``onerror`` and
-    :func:`_lstat_refusing_symlink`. ``None`` means the errno POSITIVELY
+    :func:`_lstat_admit_regular_file`. ``None`` means the errno POSITIVELY
     established that the name holds nothing (``ENOENT``: a vanished
     file; ``ENOTDIR``: a path component that turned out not to be a
     directory), and issue #1063's rule cuts both ways — laundering a
@@ -305,28 +306,49 @@ def _refusal(path: str, exc: OSError) -> _Refusal | None:
         return None
     return _Refusal(
         text=f"{path}: {unreadable_reason_text(code, errno_symbol=errno_symbol(exc))}",
-        is_containment=code in ("unsafe_symlink", "not_regular_file"),
+        is_containment=is_containment_refusal(code),
     )
 
 
-def _lstat_refusing_symlink(path: str) -> tuple[os.stat_result | None, _Refusal | None]:
-    """``lstat`` a candidate path, refusing — never following — a symlink.
+def _lstat_admit_regular_file(
+    path: str,
+) -> tuple[os.stat_result | None, _Refusal | None]:
+    """``lstat`` a candidate path, admitting ONLY a plain regular file.
 
     Beets reads audio files by PATH; there is no open-flag lever here
-    like the explorer's ``O_NOFOLLOW``. This is that same containment
-    posture built from ``lstat``: inspect the name itself, never the
-    thing it points at, and refuse BEFORE beets (or anything else in
-    this module) ever touches the path. A symlink is refused whatever it
-    points to — present, absent, or somewhere outside the quarantine
-    root entirely — so this module and the explorer now agree BY
-    CONSTRUCTION instead of being separately taught the same answer
-    (issue #1086). Before this guard, a dangling symlink read as
-    ``absent`` here only because ``os.stat`` followed it into ``ENOENT``;
-    a symlink to a real file outside the root was silently followed and
-    fingerprinted, which is the containment gap this guard closes.
+    like the explorer's ``O_NOFOLLOW`` + ``S_ISREG`` pair
+    (``open_regular_relative``). This is that same containment posture
+    built from ``lstat`` alone: inspect the name itself, never the thing
+    it points at or opens into, and refuse BEFORE beets (or anything
+    else in this module) ever touches the path.
+
+    Two refusals share this one guard, both containment — not storage —
+    decisions:
+
+    * A symlink is refused whatever it points to — present, absent, or
+      somewhere outside the quarantine root entirely — so this module
+      and the explorer agree BY CONSTRUCTION instead of being
+      separately taught the same answer (issue #1086). Before this
+      guard, a dangling symlink read as ``absent`` here only because
+      ``os.stat`` followed it into ``ENOENT``; a symlink to a real file
+      outside the root was silently followed and fingerprinted, which
+      is the containment gap the symlink half of this guard closes.
+    * Anything that is not a regular file is refused too — a FIFO most
+      urgently: ``open()`` on a FIFO with no writer BLOCKS FOREVER, and
+      this module has no ``O_NONBLOCK`` lever the way
+      ``open_regular_relative`` does, so a ``*.flac`` named pipe planted
+      in a Wrong Matches folder would wedge the request thread
+      permanently rather than merely mis-answer it. A Unix-domain socket
+      already happened to work — ``open()`` on one answers ``ENXIO``
+      immediately and :func:`os_refusal_in_chain` recovers it — but that
+      was an accident of *this specific* special-file kind, not a
+      guarantee, and a device node with a driver would have been read
+      as audio. Checking ``S_ISREG`` here closes the whole class the
+      same way the symlink check closes ELOOP, deterministically and
+      before any read is attempted (issue #1086 review, blocker 2).
 
     Returns ``(stat_result, None)`` when ``path`` is safe to read, or
-    ``(None, refusal)`` when it is a symlink or the ``lstat`` itself
+    ``(None, refusal)`` when it is refused or the ``lstat`` itself
     failed. The returned ``stat_result`` doubles as the file's mtime/size
     for the caller's cache key: ``lstat`` and ``stat`` agree on those
     fields for any name this function did not refuse.
@@ -340,6 +362,11 @@ def _lstat_refusing_symlink(path: str) -> tuple[os.stat_result | None, _Refusal 
             text=f"{path}: {unreadable_reason_text('unsafe_symlink')}",
             is_containment=True,
         )
+    if not stat.S_ISREG(info.st_mode):
+        return None, _Refusal(
+            text=f"{path}: {unreadable_reason_text('not_regular_file')}",
+            is_containment=True,
+        )
     return info, None
 
 
@@ -350,6 +377,19 @@ def _audio_files_under(folder: str) -> _FolderScan:
     insensitive but stable ordering makes the cache key stable, the
     test assertions stable, and the per-track distance breakdown
     consistent across runs.
+
+    ``os.walk(followlinks=False)`` classifies a symlink-to-directory
+    into ``dirs`` and simply declines to descend — no ``onerror`` fires,
+    because listing the PARENT succeeded. Left alone, that is a silent
+    "audio files under here" answer of zero for a name the explorer
+    refuses with ELOOP (``open_regular_relative`` → ``unsafe_symlink``),
+    so a folder holding ONLY a symlinked subdirectory read as
+    ``no_audio`` (HTTP 410 "gone" / CLI exit 4) — issue #1063 verbatim,
+    on the one entry kind :func:`_lstat_admit_regular_file` cannot see,
+    because that guard only ever runs over already-enumerated FILE
+    paths (:data:`_FolderScan.paths`), never over ``dirs``. Refusing it
+    HERE, during the walk, is what makes this module and the explorer
+    agree by construction over every entry kind, not just files.
     """
     from lib.measurement import AUDIO_EXTS
 
@@ -363,7 +403,19 @@ def _audio_files_under(folder: str) -> _FolderScan:
         if refusal is not None:
             refusals.append(refusal)
 
-    for root, _dirs, files in os.walk(folder, onerror=_record):
+    for root, dirs, files in os.walk(folder, onerror=_record):
+        for d in dirs:
+            full = os.path.join(root, d)
+            if os.path.islink(full):
+                # A symlink-to-directory: os.walk will not descend into
+                # it (``followlinks=False``), and unlike a refused FILE
+                # that lands in ``files``, it never reaches any per-file
+                # loop this module owns — refuse it right here or it is
+                # simply never seen (issue #1086 review, blocker 1).
+                refusals.append(_Refusal(
+                    text=f"{full}: {unreadable_reason_text('unsafe_symlink')}",
+                    is_containment=True,
+                ))
         for f in files:
             ext = f.rsplit(".", 1)[-1].lower() if "." in f else ""
             if ext in AUDIO_EXTS:
@@ -407,15 +459,16 @@ def _fingerprint_file(path: str) -> _FileRead:
     produced ``no_audio`` (HTTP 410 "gone") off an intact album. That is
     issue #1063 verbatim, one layer down.
 
-    The :func:`_lstat_refusing_symlink` guard runs FIRST, before beets
+    The :func:`_lstat_admit_regular_file` guard runs FIRST, before beets
     ever sees ``path``: beets reads by path and would otherwise follow a
-    symlink straight past this module's containment boundary (issue
-    #1086) — the explorer refuses the same name with ``O_NOFOLLOW``, and
-    this must refuse it too, before any read is attempted.
+    symlink straight past this module's containment boundary, or block
+    forever opening a FIFO with no writer (issue #1086) — the explorer
+    refuses the same name with ``O_NOFOLLOW`` plus an ``S_ISREG`` check,
+    and this must refuse it too, before any read is attempted.
     """
-    st, symlink_refusal = _lstat_refusing_symlink(path)
+    st, lstat_refusal = _lstat_admit_regular_file(path)
     if st is None:
-        return _FileRead(refusal=symlink_refusal)
+        return _FileRead(refusal=lstat_refusal)
 
     try:
         item = _item_from_path(path)
@@ -471,15 +524,16 @@ def _read_folder_fingerprints(
     read_error = scan.read_error
     fps: list[_AudioFileFingerprint] = []
     for path in scan.paths:
-        # ``lstat``, not ``stat``: a symlink is refused here, before the
-        # cache lookup and before ``_fingerprint_file`` ever hands the
-        # path to beets (issue #1086). For any name this does NOT refuse,
-        # ``lstat`` and ``stat`` report the same mtime/size, so the cache
-        # key below is unaffected.
-        st, symlink_refusal = _lstat_refusing_symlink(path)
+        # ``lstat``, not ``stat``: a symlink or non-regular name is
+        # refused here, before the cache lookup and before
+        # ``_fingerprint_file`` ever hands the path to beets (issue
+        # #1086). For any name this does NOT refuse, ``lstat`` and
+        # ``stat`` report the same mtime/size, so the cache key below is
+        # unaffected.
+        st, lstat_refusal = _lstat_admit_regular_file(path)
         if st is None:
-            if symlink_refusal is not None and read_error is None:
-                read_error = symlink_refusal
+            if lstat_refusal is not None and read_error is None:
+                read_error = lstat_refusal
             continue
         cached: _AudioFileFingerprint | None = None
         if cache is not None:
