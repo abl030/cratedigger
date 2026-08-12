@@ -295,6 +295,24 @@ class BeetsContractWorld:
         self.library_root = self.root / "library"
         self.library_db = self.root / "library.db"
         self.state_file = self.state_dir / "state.pickle"
+        # Startup write-probe required paths (issue #1085). Ordinary
+        # Cratedigger-owned/externally-provisioned directories, NOT part of
+        # the externally owned Beets authority the role-scoped seal/unseal
+        # machinery below governs -- every entrypoint's `main()` now probes
+        # these before its first application effect, so every world this
+        # fixture builds needs them real and writable by default. Dedicated
+        # startup-write-probe tests break exactly one at a time.
+        # Nested under runtime_dir (not a bare root sibling): matches
+        # production's own default relationship (processing_dir defaults to
+        # ``<var_dir>/processing``) and keeps every one of these inside the
+        # tree ~180 rejection tests already snapshot via
+        # ``tests.beets_config_startup_support._snapshot_runtime_tree``, so
+        # an accidental write during a REJECTED admission would be caught
+        # there rather than silently escaping the comparison (issue #1085
+        # review round 2).
+        self.slskd_download_dir = self.runtime_dir / "slskd-download"
+        self.processing_dir = self.runtime_dir / "processing"
+        self.beets_staging_dir = self.runtime_dir / "staging"
         for path in (
             self.contract_dir,
             self.runtime_dir,
@@ -302,8 +320,29 @@ class BeetsContractWorld:
             self.secret_dir,
             self.state_dir,
             self.library_root,
+            self.slskd_download_dir,
+            self.processing_dir,
+            self.beets_staging_dir,
         ):
             path.mkdir()
+        # The private processing tree's own strict contract
+        # (lib.fs_authority._assert_private_parent / open_private_child_directory):
+        # every ancestor down to processing_dir, INCLUDING runtime_dir
+        # itself now that processing_dir is nested under it, must carry no
+        # group/other-write bit, and processing_dir plus its albums/preview
+        # children must be exactly 0700 and owned by this process. Plain
+        # mkdir() leaves runtime_dir at the ambient umask's default (0775
+        # under a collaborative umask 002), which _assert_private_parent
+        # correctly refuses as "group/other writable" -- strip that
+        # explicitly rather than relying on the ambient umask.
+        os.chmod(self.runtime_dir, 0o755)
+        os.chmod(self.processing_dir, 0o700)
+        albums_dir = self.processing_dir / "albums"
+        preview_dir = self.processing_dir / "preview"
+        albums_dir.mkdir()
+        preview_dir.mkdir()
+        os.chmod(albums_dir, 0o700)
+        os.chmod(preview_dir, 0o700)
         from beets.library import Library
 
         library = Library(str(self.library_db), str(self.library_root))
@@ -363,6 +402,17 @@ class BeetsContractWorld:
         parser = configparser.RawConfigParser()
         parser["Beets"] = values
         parser["MusicBrainz"] = {"api_base": musicbrainz_api_base}
+        # Startup write-probe required paths (issue #1085) -- fixed, real,
+        # writable-by-default directories every entrypoint's `main()` now
+        # probes before its first application effect. Not part of the
+        # `**overrides` kwarg mechanism: no existing caller overrides these,
+        # and dedicated startup-write-probe tests break the real directories
+        # directly rather than repointing the config at missing ones.
+        parser["Slskd"] = {"download_dir": str(self.slskd_download_dir)}
+        parser["Paths"] = {"processing_dir": str(self.processing_dir)}
+        parser["Beets Validation"] = {
+            "staging_dir": str(self.beets_staging_dir),
+        }
         with self.runtime_config.open("w", encoding="utf-8") as handle:
             parser.write(handle)
 

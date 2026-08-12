@@ -162,6 +162,11 @@ in
       # Raw API key, one line, readable by the cratedigger user. Same value
       # slskd itself was given above.
       apiKeyFile = "/var/lib/secrets/slskd-api-key";
+      # Must already exist and be usable by the cratedigger identity before
+      # the first switch: every application unit proves it at startup and
+      # refuses to start otherwise (docs/nixos-module.md "Startup write-
+      # probe"). No Cratedigger tmpfiles rule creates it -- it is either
+      # created by services.slskd itself (as above) or provisioned by you.
       downloadDir = "/srv/music/slskd-downloads";
     };
     # Private high-capacity processing belongs beneath a root-owned parent,
@@ -191,7 +196,11 @@ in
     beets.runtime.expectedSecretInclude = beetsSecretInclude;
     beets.runtime.readinessUnits = [ "beets-runtime-ready.service" ];
     beets.validation = {
-      stagingDir = "/srv/music/incoming";        # validated albums stage here
+      # Validated albums stage here. Also gated by the startup write-probe
+      # (must already exist before the first switch) whenever validation
+      # is enabled -- see the downloadDir comment above; the tmpfiles rule
+      # below is what actually provisions it in this example.
+      stagingDir = "/srv/music/incoming";
       trackingFile = "/srv/music/beets-validated.jsonl";
     };
 
