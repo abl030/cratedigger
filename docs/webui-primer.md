@@ -646,13 +646,27 @@ depends on.
   evidence only, deletes force-mode confident cleanup-eligible rejects, and
   leaves would-import, uncertain, missing-evidence, stale-evidence,
   active-job, and missing-path candidates for review. A second "Stop"
-  control sits beside it, enabled while the sweep started from that
-  browser session is running (issue #1083; a CLI-started sweep, another
-  tab, or a mid-sweep refresh leaves it disabled — see #1106):
-  clicking it posts `/api/wrong-matches/triage/cancel` — the same route the
-  CLI's `Ctrl-C` handler uses — and cancellation lands between rows, never
-  mid-delete, so a row already in flight always finishes. A completed sweep
-  shows its summary as an ordinary toast; a stopped one shows a distinct
+  control sits beside it. Both toolbar buttons are looked up by element id
+  at every mutation, never held as a node captured at click time, and on
+  EVERY render of the pane (initial load, an explicit Refresh, a threshold
+  slider re-render) the frontend fetches
+  `GET /api/wrong-matches/triage/status` and derives the buttons' state
+  from the server's answer rather than this tab's memory of it (issue
+  #1106, closing the #1083 gap where Stop was only ever enabled inside the
+  click handler that happened to start the sweep). When the status is
+  `running` — because this tab's own click started it, because a mid-sweep
+  Refresh or a page reload just discovered one already running, or because
+  it was started from the CLI or another browser tab — Cleanup disables,
+  Stop enables, and the tab ATTACHES a poll with no confirm dialog; that
+  poll runs the exact same terminal handling described below as the click
+  path that actually started the sweep. Clicking Stop posts
+  `/api/wrong-matches/triage/cancel` — the same route the CLI's `Ctrl-C`
+  handler uses — and cancellation lands between rows, never mid-delete, so
+  a row already in flight always finishes; a cancel that beats the
+  server's own `start()` (the CLI's `Ctrl-C` racing its still-in-flight
+  start POST) is sticky and stops the sweep as soon as it is admitted,
+  processing zero rows (issue #1106). A completed sweep shows its summary
+  as an ordinary toast; a stopped one shows a distinct
   `Cleanup stopped — ...` toast reporting exactly what ran before the stop,
   and the pane refreshes either way. A failed Stop request itself toasts
   `Stop request failed` and re-enables the button.

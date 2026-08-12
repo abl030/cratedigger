@@ -450,6 +450,7 @@ export async function loadWrongMatches() {
     const data = await r.json();
     _loaded = true;
     renderWrongMatches(data, el);
+    await _deriveTriageButtonState();
   } catch (e) {
     el.innerHTML = '<div style="color:#f66;">Failed to load wrong matches</div>';
   }
@@ -534,7 +535,13 @@ function deleteUnmatchedOnConverge() {
 }
 
 function rerenderWrongMatches() {
-  if (_lastData && _lastEl) renderWrongMatches(_lastData, _lastEl);
+  if (_lastData && _lastEl) {
+    renderWrongMatches(_lastData, _lastEl);
+    // Fire-and-forget: this path runs off a plain (non-async) threshold
+    // input handler, and a slider nudge is low-stakes enough that it
+    // does not need to block on the derive.
+    void _deriveTriageButtonState();
+  }
 }
 
 /**
@@ -982,8 +989,8 @@ function renderWrongMatches(data, el) {
       <div id="wrong-matches-summary" style="color:#888;">${counts.groups} release${counts.groups !== 1 ? 's' : ''} · ${counts.entries} candidate${counts.entries !== 1 ? 's' : ''} pending review</div>
       <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
         <button id="wm-refresh-btn" class="p-btn" style="border-color:#888;color:#888;" onclick="event.stopPropagation(); window.refreshWrongMatches(this)" title="Refetch the queue from the server">Refresh</button>
-        <button id="wm-bulk-triage-btn" class="p-btn delete" ${counts.entries === 0 ? 'disabled' : ''} onclick="event.stopPropagation(); window.bulkTriageWrongMatches(this)">Cleanup Wrong Matches (${counts.entries})</button>
-        <button id="wm-bulk-triage-stop-btn" class="p-btn" style="border-color:#888;color:#888;" disabled onclick="event.stopPropagation(); window.stopWrongMatchTriage(this)" title="Stop the running cleanup sweep after its current row">Stop</button>
+        <button id="wm-bulk-triage-btn" class="p-btn delete" ${counts.entries === 0 ? 'disabled' : ''} onclick="event.stopPropagation(); window.bulkTriageWrongMatches()">Cleanup Wrong Matches (${counts.entries})</button>
+        <button id="wm-bulk-triage-stop-btn" class="p-btn" style="border-color:#888;color:#888;" disabled onclick="event.stopPropagation(); window.stopWrongMatchTriage()" title="Stop the running cleanup sweep after its current row">Stop</button>
       </div>
     </div>`;
 
@@ -1441,6 +1448,7 @@ async function _refreshWrongMatches() {
       const fresh = await fetchRes.json();
       renderWrongMatches(fresh, el);
       _loaded = true;
+      await _deriveTriageButtonState();
     }
   } catch (_refreshErr) {
     // Cache stays invalidated; next tab switch retries.
@@ -1549,6 +1557,7 @@ export const __test__ = {
   formatEntryEvidence,
   greenEntries,
   isConvergeGreen,
+  loadWrongMatches,
   maybeLoadWrongMatchExplorer,
   normalizeThreshold,
   refreshWrongMatches,
@@ -1564,6 +1573,7 @@ export const __test__ = {
   stopWrongMatchTriage,
   thresholdForGroup,
   toggleWrongMatchEntry,
+  triageButtonPresentation,
 };
 
 /**
@@ -1786,10 +1796,182 @@ export async function deleteWrongMatchGroup(requestId, btn) {
 }
 
 /**
- * Run evidence-only cleanup over the full Wrong Matches queue.
- * @param {HTMLButtonElement} btn
+ * @returns {HTMLButtonElement | null}
  */
-export async function bulkTriageWrongMatches(btn) {
+function _triageCleanupBtn() {
+  return /** @type {HTMLButtonElement | null} */ (
+    document.getElementById('wm-bulk-triage-btn'));
+}
+
+/**
+ * @returns {HTMLButtonElement | null}
+ */
+function _triageStopBtn() {
+  return /** @type {HTMLButtonElement | null} */ (
+    document.getElementById('wm-bulk-triage-stop-btn'));
+}
+
+/**
+ * How many Wrong Matches candidates are currently visible — drives the
+ * idle Cleanup button's label/enablement off the CURRENT queue, not
+ * whatever count was on screen when a sweep started (issue #1106: a
+ * mid-sweep Refresh can change it before the sweep finishes).
+ * @returns {number}
+ */
+function _currentWrongMatchEntryCount() {
+  const groups = _lastData && Array.isArray(_lastData.groups) ? _lastData.groups : [];
+  return wrongMatchCounts(groups).entries;
+}
+
+/**
+ * Pure derivation of the triage toolbar's button shape from the sweep's
+ * server-reported state and how many candidates are currently visible.
+ * Node-testable without a DOM (issue #1106) — the DOM-mutating
+ * `_applyTriageButtonState` below applies exactly this shape via fresh
+ * `getElementById` lookups, never a node captured at an earlier point.
+ * @param {string} state - `/api/wrong-matches/triage/status`'s `state`,
+ *   or any non-`'running'` value to mean "not running"
+ * @param {number} entryCount
+ * @returns {{cleanupDisabled: boolean, cleanupLabel: string, stopDisabled: boolean, stopLabel: string}}
+ */
+export function triageButtonPresentation(state, entryCount) {
+  if (state === 'running') {
+    return {
+      cleanupDisabled: true,
+      cleanupLabel: 'Cleaning...',
+      stopDisabled: false,
+      stopLabel: 'Stop',
+    };
+  }
+  return {
+    cleanupDisabled: entryCount === 0,
+    cleanupLabel: `Cleanup Wrong Matches (${entryCount})`,
+    stopDisabled: true,
+    stopLabel: 'Stop',
+  };
+}
+
+/**
+ * Apply `triageButtonPresentation(state, ...)` to whatever is CURRENTLY
+ * registered under the toolbar button ids — looked up fresh every call,
+ * never a node captured at click time or render time (issue #1106: a
+ * mid-sweep re-render replaces the pane's innerHTML and detaches any
+ * previously-captured node, which is exactly how the Stop button used to
+ * get stranded disabled while a sweep kept running underneath it).
+ * @param {string} state
+ */
+function _applyTriageButtonState(state) {
+  const presentation = triageButtonPresentation(state, _currentWrongMatchEntryCount());
+  const cleanupBtn = _triageCleanupBtn();
+  if (cleanupBtn) {
+    cleanupBtn.disabled = presentation.cleanupDisabled;
+    cleanupBtn.textContent = presentation.cleanupLabel;
+  }
+  const stopBtn = _triageStopBtn();
+  if (stopBtn) {
+    stopBtn.disabled = presentation.stopDisabled;
+    stopBtn.textContent = presentation.stopLabel;
+  }
+}
+
+let _triagePollInFlight = false;
+
+/**
+ * Apply the shared terminal handling for a background triage sweep once
+ * it leaves the running state: restores both toolbar buttons, toasts
+ * the outcome, and (except on failure, where there is nothing new to
+ * fetch) refreshes the pane. Used by both the click path
+ * (`bulkTriageWrongMatches`, which started the sweep) and the
+ * render-time attach path (`_deriveTriageButtonState`, which discovered
+ * a sweep already running — issue #1106) so both land in exactly the
+ * same place.
+ * @param {{state: string, summary: Object|null, error: string|null}|null} status
+ * @returns {Promise<void>}
+ */
+async function _applyTriageTerminalState(status) {
+  _applyTriageButtonState('idle');
+  if (status && status.state === 'completed') {
+    toast(cleanupSummaryToast(status.summary || {}));
+    invalidateWrongMatches();
+    await _refreshWrongMatches();
+    return;
+  }
+  if (status && status.state === 'cancelled') {
+    // Issue #1083: the operator hit Stop. summary still holds exactly
+    // what ran before the stop — say so distinctly from completion.
+    toast(`Cleanup stopped — ${cleanupSummaryToast(status.summary || {})}`);
+    invalidateWrongMatches();
+    await _refreshWrongMatches();
+    return;
+  }
+  if (status && status.state === 'idle') {
+    // The web service restarted mid-sweep and lost the in-memory status.
+    // Deletions already performed are durable — refresh to show them.
+    toast('Sweep status lost (web service restarted) — queue may be partially cleaned', true);
+    invalidateWrongMatches();
+    await _refreshWrongMatches();
+    return;
+  }
+  toast((status && status.error) || 'Cleanup sweep failed', true);
+}
+
+/**
+ * Poll the background sweep to completion and apply the shared terminal
+ * handling. No-ops if another poll is already in flight — the
+ * render-time attach path can otherwise race the click path that
+ * already started one (issue #1106); either way there is only ever one
+ * sweep for either poller to follow.
+ * @returns {Promise<void>}
+ */
+async function _followTriageSweepToCompletion() {
+  if (_triagePollInFlight) return;
+  _triagePollInFlight = true;
+  try {
+    const status = await pollTriageStatus();
+    await _applyTriageTerminalState(status);
+  } finally {
+    _triagePollInFlight = false;
+  }
+}
+
+/**
+ * Derive the triage toolbar's button state from the server (issue
+ * #1106) — never from whichever tab happened to click Cleanup. Called,
+ * and awaited, from every place that (re)renders the Wrong Matches pane
+ * (`loadWrongMatches`, `_refreshWrongMatches`, `rerenderWrongMatches`).
+ * A `running` sweep enables Stop, disables Cleanup, and ATTACHES a poll
+ * — fire-and-forget, since a sweep can run for up to an hour and the
+ * caller must not block on it — that lands on the exact same terminal
+ * handling the click path uses, with no confirm dialog. Any other
+ * status just derives the idle shape off the CURRENT candidate count.
+ * No-ops (no fetch at all) when the toolbar itself was not rendered —
+ * an empty queue renders no buttons to reflect anything.
+ * @returns {Promise<void>}
+ */
+async function _deriveTriageButtonState() {
+  if (!_triageCleanupBtn() && !_triageStopBtn()) return;
+  try {
+    const r = await fetch(`${API}/api/wrong-matches/triage/status`);
+    if (!r.ok) return;
+    const status = await r.json();
+    if (status && status.state === 'running') {
+      _applyTriageButtonState('running');
+      void _followTriageSweepToCompletion();
+      return;
+    }
+    _applyTriageButtonState('idle');
+  } catch (_e) {
+    // Transient fetch failure — leave the safe default already painted
+    // by the toolbar's initial markup (Stop disabled, Cleanup off the
+    // count that render used).
+  }
+}
+
+/**
+ * Run evidence-only cleanup over the full Wrong Matches queue.
+ * @returns {Promise<void>}
+ */
+export async function bulkTriageWrongMatches() {
   const groups = _lastData && Array.isArray(_lastData.groups) ? _lastData.groups : [];
   const counts = wrongMatchCounts(groups);
   if (counts.entries === 0) {
@@ -1798,22 +1980,7 @@ export async function bulkTriageWrongMatches(btn) {
   }
   if (!confirm(`Process all ${counts.entries} Wrong Matches candidates?\nOnly force-mode confident rejects will be deleted.`)) return;
 
-  const stopBtn = /** @type {HTMLButtonElement|null} */ (
-    document.getElementById('wm-bulk-triage-stop-btn'));
-  btn.disabled = true;
-  btn.textContent = 'Cleaning...';
-  if (stopBtn) {
-    stopBtn.disabled = false;
-    stopBtn.textContent = 'Stop';
-  }
-  const restore = () => {
-    btn.disabled = false;
-    btn.textContent = `Cleanup Wrong Matches (${counts.entries})`;
-    if (stopBtn) {
-      stopBtn.disabled = true;
-      stopBtn.textContent = 'Stop';
-    }
-  };
+  _applyTriageButtonState('running');
   try {
     const r = await fetch(`${API}/api/wrong-matches/triage`, {
       method: 'POST',
@@ -1822,42 +1989,15 @@ export async function bulkTriageWrongMatches(btn) {
     });
     const data = await r.json();
     // 202 = sweep started; 409 = one is already running. Either way a
-    // sweep is in flight server-side, so poll for its result.
+    // sweep is in flight server-side, so follow it to completion.
     if (r.status !== 202 && r.status !== 409) {
-      restore();
+      _applyTriageButtonState('idle');
       toast(data.error || data.message || 'Cleanup failed', true);
       return;
     }
-    const status = await pollTriageStatus();
-    if (status && status.state === 'completed') {
-      restore();
-      toast(cleanupSummaryToast(status.summary || {}));
-      invalidateWrongMatches();
-      await _refreshWrongMatches();
-      return;
-    }
-    if (status && status.state === 'cancelled') {
-      // Issue #1083: the operator hit Stop. summary still holds exactly
-      // what ran before the stop — say so distinctly from completion.
-      restore();
-      toast(`Cleanup stopped — ${cleanupSummaryToast(status.summary || {})}`);
-      invalidateWrongMatches();
-      await _refreshWrongMatches();
-      return;
-    }
-    if (status && status.state === 'idle') {
-      // The web service restarted mid-sweep and lost the in-memory status.
-      // Deletions already performed are durable — refresh to show them.
-      restore();
-      toast('Sweep status lost (web service restarted) — queue may be partially cleaned', true);
-      invalidateWrongMatches();
-      await _refreshWrongMatches();
-      return;
-    }
-    restore();
-    toast((status && status.error) || 'Cleanup sweep failed', true);
+    await _followTriageSweepToCompletion();
   } catch (_e) {
-    restore();
+    _applyTriageButtonState('idle');
     toast('Cleanup request failed', true);
   }
 }
@@ -1865,15 +2005,19 @@ export async function bulkTriageWrongMatches(btn) {
 /**
  * Request cancellation of the in-flight bulk triage sweep (issue #1083).
  * Not an error, and never toasted as one, when nothing is running or the
- * sweep already finished — the poll loop inside bulkTriageWrongMatches
- * renders whatever terminal state actually lands. This button lives in
- * the browser deliberately: the panic scenario ("something is deleting
- * the wrong things, stop it") happens while watching this exact screen.
- * @param {HTMLButtonElement} btn
+ * sweep already finished — whichever poll loop is following the sweep
+ * (the click path or the render-time attach, issue #1106) renders
+ * whatever terminal state actually lands. This button lives in the
+ * browser deliberately: the panic scenario ("something is deleting the
+ * wrong things, stop it") happens while watching this exact screen.
+ * @returns {Promise<void>}
  */
-export async function stopWrongMatchTriage(btn) {
-  btn.disabled = true;
-  btn.textContent = 'Stopping...';
+export async function stopWrongMatchTriage() {
+  const stopBtn = _triageStopBtn();
+  if (stopBtn) {
+    stopBtn.disabled = true;
+    stopBtn.textContent = 'Stopping...';
+  }
   try {
     const r = await fetch(`${API}/api/wrong-matches/triage/cancel`, {
       method: 'POST',
@@ -1882,17 +2026,24 @@ export async function stopWrongMatchTriage(btn) {
     });
     if (!r.ok) {
       toast('Stop request failed', true);
-      btn.disabled = false;
-      btn.textContent = 'Stop';
+      const failedStopBtn = _triageStopBtn();
+      if (failedStopBtn) {
+        failedStopBtn.disabled = false;
+        failedStopBtn.textContent = 'Stop';
+      }
       return;
     }
     // Success: leave the button disabled/"Stopping..." — the in-flight
-    // poll loop in bulkTriageWrongMatches restores both buttons once the
-    // sweep reaches a terminal state.
+    // poll loop (started either by the click that began the sweep, or
+    // by the render-time attach — issue #1106) restores both buttons
+    // once the sweep reaches a terminal state.
   } catch (_e) {
     toast('Stop request failed', true);
-    btn.disabled = false;
-    btn.textContent = 'Stop';
+    const failedStopBtn = _triageStopBtn();
+    if (failedStopBtn) {
+      failedStopBtn.disabled = false;
+      failedStopBtn.textContent = 'Stop';
+    }
   }
 }
 

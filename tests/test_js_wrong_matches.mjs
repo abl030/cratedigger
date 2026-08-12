@@ -6,6 +6,7 @@
 import {
   __test__,
   forceImportWrongMatch,
+  invalidateWrongMatches,
 } from '../web/js/wrong-matches.js';
 import { esc } from '../web/js/util.js';
 
@@ -81,6 +82,20 @@ function fakeElement(initial = {}) {
 }
 
 /**
+ * Drain pending microtasks. Used after a call that kicks off a
+ * fire-and-forget background chain (the render-time triage attach —
+ * issue #1106) so a test can let it settle to a terminal state before
+ * the next test block reassigns `globalThis.fetch` — an un-drained
+ * chain would otherwise keep polling into a LATER test's mock.
+ * @param {number} [times]
+ */
+async function flushMicrotasks(times = 30) {
+  for (let i = 0; i < times; i += 1) {
+    await Promise.resolve();
+  }
+}
+
+/**
  * `installDom()` always wires `wrong-matches-content` and `toast`; the
  * returned `elements` Map is an open registry a test can `.set(id, el)`
  * BEFORE exercising code that looks up an id `installDom` doesn't know
@@ -95,15 +110,20 @@ function installDom() {
     className: '',
     style: { display: 'none' },
   };
-  // A plain object stand-in for the Stop button (issue #1083) — real
-  // production code re-fetches it by id each time bulkTriageWrongMatches
-  // runs, exactly like the browser's live DOM. Registered in the open
-  // element map (issue #1086) so any id a test needs can be seeded the
-  // same way rather than adding another special case here.
+  // Plain object stand-ins for the triage toolbar buttons (issues #1083 /
+  // #1106) — real production code re-fetches BOTH by id at every
+  // mutation point, never a node captured once at click or render time,
+  // because a mid-sweep re-render (Refresh, tab switch, a page reload
+  // discovering an already-running sweep) replaces the pane's innerHTML
+  // and detaches any previously-captured node. Registered in the open
+  // element map (issue #1086) so a test can `.set()` a DIFFERENT object
+  // under the same id to simulate exactly that detachment.
+  const cleanupBtn = { id: 'wm-bulk-triage-btn', disabled: false, textContent: 'Cleanup Wrong Matches (0)', style: {} };
   const stopBtn = { id: 'wm-bulk-triage-stop-btn', disabled: true, textContent: 'Stop' };
   const elements = new Map([
     ['wrong-matches-content', wrongMatches],
     ['toast', toast],
+    ['wm-bulk-triage-btn', cleanupBtn],
     ['wm-bulk-triage-stop-btn', stopBtn],
   ]);
   globalThis.document = {
@@ -115,7 +135,7 @@ function installDom() {
     fn();
     return 0;
   };
-  return { wrongMatches, toast, elements, stopBtn };
+  return { wrongMatches, toast, elements, stopBtn, cleanupBtn };
 }
 
 function wrongMatchesData() {
@@ -641,7 +661,6 @@ console.log('bulkTriageWrongMatches() posts full-queue confirmation and refreshe
     }
     throw new Error(`unexpected fetch: ${url}`);
   };
-  const btn = { disabled: false, textContent: 'Cleanup Wrong Matches (3)', style: {} };
   // The Stop button is enabled the moment the sweep starts (before the
   // first status poll even fires) and disabled again once it's done.
   let stopBtnEnabledDuringSweep = null;
@@ -652,10 +671,15 @@ console.log('bulkTriageWrongMatches() posts full-queue confirmation and refreshe
     }
     return realFetch(url, options);
   };
-  await __test__.bulkTriageWrongMatches(btn);
+  // #1106: both toolbar buttons are looked up by id at mutation time,
+  // never held as a captured node — bulkTriageWrongMatches() no longer
+  // takes a button argument at all.
+  await __test__.bulkTriageWrongMatches();
   assert(stopBtnEnabledDuringSweep, 'Stop button is enabled while the sweep runs');
   assertEqual(dom.stopBtn.disabled, true, 'Stop button is disabled again once the sweep completes');
   assertEqual(dom.stopBtn.textContent, 'Stop', 'Stop button label is restored');
+  assertEqual(dom.cleanupBtn.disabled, true, 'Cleanup button is disabled again once the queue is empty');
+  assertEqual(dom.cleanupBtn.textContent, 'Cleanup Wrong Matches (0)', 'Cleanup label reflects the post-refresh count');
   assertEqual(calls[0].url, '/api/wrong-matches/triage', 'posts to cleanup endpoint');
   assertDeepEqual(
     JSON.parse(calls[0].options.body),
@@ -710,9 +734,8 @@ console.log('bulkTriageWrongMatches() handles a restart-lost sweep as partial, n
     }
     throw new Error(`unexpected fetch: ${url}`);
   };
-  const btn = { disabled: true, textContent: 'Cleaning...', style: {} };
-  await __test__.bulkTriageWrongMatches(btn);
-  assertEqual(btn.disabled, false, 'restart-lost sweep restores button enabled');
+  await __test__.bulkTriageWrongMatches();
+  assertEqual(dom.cleanupBtn.disabled, true, 'restart-lost sweep leaves Cleanup disabled (queue is empty post-refresh)');
   assert(dom.toast.textContent.includes('status lost'), 'restart-lost sweep explains the lost status');
   assert(!dom.toast.textContent.includes('failed'), 'restart-lost sweep is not reported as failed');
   assert(dom.wrongMatches.innerHTML.includes('No wrong matches'), 'restart-lost sweep still refreshes the pane');
@@ -774,9 +797,8 @@ console.log('bulkTriageWrongMatches() reports a cancelled sweep distinctly from 
     }
     throw new Error(`unexpected fetch: ${url}`);
   };
-  const btn = { disabled: true, textContent: 'Cleaning...', style: {} };
-  await __test__.bulkTriageWrongMatches(btn);
-  assertEqual(btn.disabled, false, 'cancelled sweep restores button enabled');
+  await __test__.bulkTriageWrongMatches();
+  assertEqual(dom.cleanupBtn.disabled, true, 'cancelled sweep leaves Cleanup disabled (queue is empty post-refresh)');
   assertEqual(dom.stopBtn.disabled, true, 'Stop button is disabled once the sweep reaches a terminal state');
   assert(dom.toast.textContent.includes('stopped'), 'cancelled sweep says "stopped", not "completed"');
   assert(dom.toast.textContent.includes('Deleted 1 candidate'), 'cancelled sweep still reports what ran');
@@ -788,19 +810,19 @@ console.log('bulkTriageWrongMatches() reports a cancelled sweep distinctly from 
 console.log('stopWrongMatchTriage() posts to the cancel endpoint and stays disabled on success');
 {
   installStorage();
-  installDom();
+  const dom = installDom();
   const calls = [];
   globalThis.fetch = async (url, options = {}) => {
     calls.push({ url, options });
     return { ok: true, status: 200, json: async () => ({ state: 'running' }) };
   };
-  const btn = { disabled: false, textContent: 'Stop' };
-  await __test__.stopWrongMatchTriage(btn);
+  // #1106: no button argument — always the currently-registered node.
+  await __test__.stopWrongMatchTriage();
   assertEqual(calls.length, 1, 'posts exactly one cancel request');
   assertEqual(calls[0].url, '/api/wrong-matches/triage/cancel', 'posts to the canonical cancel route');
   assertEqual(calls[0].options.method, 'POST', 'cancel is a POST');
-  assertEqual(btn.disabled, true, 'button stays disabled after a successful cancel request');
-  assertEqual(btn.textContent, 'Stopping...', 'button shows the in-flight stopping state');
+  assertEqual(dom.stopBtn.disabled, true, 'button stays disabled after a successful cancel request');
+  assertEqual(dom.stopBtn.textContent, 'Stopping...', 'button shows the in-flight stopping state');
 }
 
 console.log('stopWrongMatchTriage() re-enables the button when the request itself fails');
@@ -810,11 +832,37 @@ console.log('stopWrongMatchTriage() re-enables the button when the request itsel
   globalThis.fetch = async () => {
     throw new Error('network down');
   };
-  const btn = { disabled: false, textContent: 'Stop' };
-  await __test__.stopWrongMatchTriage(btn);
-  assertEqual(btn.disabled, false, 'a failed cancel request restores the button enabled');
-  assertEqual(btn.textContent, 'Stop', 'a failed cancel request restores the button label');
+  await __test__.stopWrongMatchTriage();
+  assertEqual(dom.stopBtn.disabled, false, 'a failed cancel request restores the button enabled');
+  assertEqual(dom.stopBtn.textContent, 'Stop', 'a failed cancel request restores the button label');
   assert(dom.toast.textContent.includes('Stop request failed'), 'a failed cancel request is toasted');
+}
+
+console.log('stopWrongMatchTriage() mutates the CURRENTLY registered Stop node, never a node captured earlier (#1106)');
+{
+  installStorage();
+  const dom = installDom();
+  // Simulate a mid-sweep re-render replacing the pane's innerHTML: a
+  // BRAND NEW Stop node takes over the same id, and the original
+  // installDom() node is now detached — exactly what happened to
+  // bulkTriageWrongMatches()'s old `restore()` closure before this fix.
+  // Both nodes start identical (disabled: false) so a diverging value
+  // after the call can only mean one of them was actually mutated.
+  const staleStopBtn = dom.stopBtn;
+  staleStopBtn.disabled = false;
+  const freshStopBtn = { id: 'wm-bulk-triage-stop-btn', disabled: false, textContent: 'Stop' };
+  dom.elements.set('wm-bulk-triage-stop-btn', freshStopBtn);
+  globalThis.fetch = async (url) => {
+    if (url === '/api/wrong-matches/triage/cancel') {
+      return { ok: true, status: 200, json: async () => ({ state: 'running' }) };
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+  await __test__.stopWrongMatchTriage();
+  assertEqual(freshStopBtn.disabled, true, 'the currently-registered node is mutated');
+  assertEqual(freshStopBtn.textContent, 'Stopping...', 'the currently-registered node shows the in-flight label');
+  assertEqual(staleStopBtn.disabled, false, 'a node registered before the swap is left untouched');
+  assertEqual(staleStopBtn.textContent, 'Stop', 'a node registered before the swap is left untouched');
 }
 
 console.log('bulkTriageWrongMatches() surfaces a failed sweep and restores the button');
@@ -849,10 +897,9 @@ console.log('bulkTriageWrongMatches() surfaces a failed sweep and restores the b
     }
     throw new Error(`unexpected fetch: ${url}`);
   };
-  const btn = { disabled: true, textContent: 'Cleaning...', style: {} };
-  await __test__.bulkTriageWrongMatches(btn);
-  assertEqual(btn.disabled, false, 'failed sweep restores button enabled');
-  assertEqual(btn.textContent, 'Cleanup Wrong Matches (3)', 'failed sweep restores button text');
+  await __test__.bulkTriageWrongMatches();
+  assertEqual(dom.cleanupBtn.disabled, false, 'failed sweep restores button enabled');
+  assertEqual(dom.cleanupBtn.textContent, 'Cleanup Wrong Matches (3)', 'failed sweep restores button text off the still-current count');
   assert(dom.toast.textContent.includes('sweep blew up'), 'failed sweep toasts the error');
   assertEqual(dom.toast.className, 'toast error', 'failed sweep shows error toast');
   globalThis.setTimeout = realSetTimeout;
@@ -2039,6 +2086,118 @@ console.log('removeWrongMatchEntry() keeps the group Delete All button actionabl
   assertEqual(groupBtn.disabled, true,
     'zero actionable candidates remain, so the group button disables — '
     + 'the item-2 dead end, reached through the per-entry delete path');
+}
+
+console.log('triageButtonPresentation() derives the toolbar shape from state + count (issue #1106)');
+{
+  const CASES = [
+    ['running, nonzero count', 'running', 3, { cleanupDisabled: true, cleanupLabel: 'Cleaning...', stopDisabled: false, stopLabel: 'Stop' }],
+    ['running, zero count', 'running', 0, { cleanupDisabled: true, cleanupLabel: 'Cleaning...', stopDisabled: false, stopLabel: 'Stop' }],
+    ['completed, nonzero count', 'completed', 5, { cleanupDisabled: false, cleanupLabel: 'Cleanup Wrong Matches (5)', stopDisabled: true, stopLabel: 'Stop' }],
+    ['completed, zero count', 'completed', 0, { cleanupDisabled: true, cleanupLabel: 'Cleanup Wrong Matches (0)', stopDisabled: true, stopLabel: 'Stop' }],
+    ['cancelled, nonzero count', 'cancelled', 2, { cleanupDisabled: false, cleanupLabel: 'Cleanup Wrong Matches (2)', stopDisabled: true, stopLabel: 'Stop' }],
+    ['failed, nonzero count', 'failed', 4, { cleanupDisabled: false, cleanupLabel: 'Cleanup Wrong Matches (4)', stopDisabled: true, stopLabel: 'Stop' }],
+    ['idle, nonzero count', 'idle', 1, { cleanupDisabled: false, cleanupLabel: 'Cleanup Wrong Matches (1)', stopDisabled: true, stopLabel: 'Stop' }],
+  ];
+  for (const [desc, state, count, expected] of CASES) {
+    assertDeepEqual(__test__.triageButtonPresentation(state, count), expected, desc);
+  }
+}
+
+console.log('refreshWrongMatches() discovers an already-running sweep and enables Stop without a confirm dialog (#1106)');
+{
+  installStorage();
+  const dom = installDom();
+  __test__.renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
+  let confirmCalls = 0;
+  globalThis.confirm = () => { confirmCalls += 1; return true; };
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (fn) => { fn(); return 0; };
+  let statusCalls = 0;
+  globalThis.fetch = async (url) => {
+    if (url === '/api/wrong-matches') {
+      return { ok: true, status: 200, json: async () => wrongMatchesData() };
+    }
+    if (url === '/api/wrong-matches/triage/status') {
+      statusCalls += 1;
+      if (statusCalls === 1) {
+        // Discovered on the render-time derive: a sweep is already
+        // running — started from the CLI, another tab, or a previous
+        // page load this tab never saw.
+        return {
+          ok: true, status: 200,
+          json: async () => ({
+            state: 'running', started_at: '2026-08-12T00:00:00+00:00',
+            finished_at: null, error: null, summary: null,
+          }),
+        };
+      }
+      // Terminate the attached poll quickly so it does not leak into a
+      // later test's fetch mock.
+      return {
+        ok: true, status: 200,
+        json: async () => ({
+          state: 'failed', started_at: '2026-08-12T00:00:00+00:00',
+          finished_at: '2026-08-12T00:01:00+00:00',
+          error: 'generated test termination', summary: null,
+        }),
+      };
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+  const refreshBtn = { disabled: false, textContent: 'Refresh' };
+  await __test__.refreshWrongMatches(refreshBtn);
+  assertEqual(dom.stopBtn.disabled, false, 'discovering a running sweep on refresh enables Stop');
+  assertEqual(dom.cleanupBtn.disabled, true, 'discovering a running sweep on refresh disables Cleanup');
+  assertEqual(confirmCalls, 0, 'no confirm dialog is shown for a sweep this tab did not start');
+  await flushMicrotasks();
+  globalThis.setTimeout = realSetTimeout;
+}
+
+console.log('loadWrongMatches() discovers an already-running sweep on initial load/reload and enables Stop (#1106)');
+{
+  installStorage();
+  const dom = installDom();
+  // loadWrongMatches() short-circuits on its own module-scoped `_loaded`
+  // cache, which an earlier test in this file may have already set.
+  invalidateWrongMatches();
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (fn) => { fn(); return 0; };
+  let statusCalls = 0;
+  globalThis.fetch = async (url) => {
+    if (url === '/api/wrong-matches') {
+      return { ok: true, status: 200, json: async () => wrongMatchesData() };
+    }
+    if (url === '/api/wrong-matches/triage/status') {
+      statusCalls += 1;
+      if (statusCalls === 1) {
+        return {
+          ok: true, status: 200,
+          json: async () => ({
+            state: 'running', started_at: '2026-08-12T00:00:00+00:00',
+            finished_at: null, error: null, summary: null,
+          }),
+        };
+      }
+      return {
+        ok: true, status: 200,
+        json: async () => ({
+          state: 'failed', started_at: '2026-08-12T00:00:00+00:00',
+          finished_at: '2026-08-12T00:01:00+00:00',
+          error: 'generated test termination', summary: null,
+        }),
+      };
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+  // loadWrongMatches() caches on a module-scoped `_loaded` flag, so this
+  // must stay the only call to it in this file — a second call would
+  // silently no-op against the flag this one sets.
+  await __test__.loadWrongMatches();
+  assertEqual(dom.stopBtn.disabled, false, 'a reload that discovers a running sweep enables Stop');
+  assertEqual(dom.cleanupBtn.disabled, true, 'a reload that discovers a running sweep disables Cleanup');
+  await flushMicrotasks();
+  globalThis.setTimeout = realSetTimeout;
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

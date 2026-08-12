@@ -8,7 +8,13 @@ returns immediately; the UI — and, since issue #1063,
 summary. Issue #1083 added ``cancel()``: it sets a per-sweep
 ``CancellationToken`` that ``cleanup_all_wrong_matches`` checks between
 rows (never mid-delete), so a still-running sweep can be stopped instead
-of merely detached from.
+of merely detached from. Issue #1106 made that cancel STICKY: a cancel
+arriving while ``start()`` has not yet flipped the state to RUNNING (the
+CLI's own ``Ctrl-C`` handler racing its still-in-flight start POST) is
+recorded as a pending cancel and consumed by the next ``start()``
+admitted within ``PENDING_CANCEL_WINDOW_SECONDS`` — that sweep is still
+admitted (never a refusal), but its token is cancelled before any row
+runs, so it terminates ``cancelled`` with zero rows processed.
 
 The sweep thread gets its OWN pipeline-DB connection from ``db_factory``
 — psycopg2 connections must not be shared between the handler thread and
@@ -25,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Protocol, TypedDict
@@ -33,6 +40,17 @@ from lib.import_execution import CancellationToken
 from lib.wrong_match_cleanup_service import WrongMatchCleanupSummary
 
 logger = logging.getLogger("cratedigger")
+
+# Bounded consume window for a cancel recorded while no sweep is running
+# (#1106). This exists ONLY to cover the CLI's own Ctrl-C racing its
+# still-in-flight start POST -- a window of ordinary HTTP request-handling
+# latency (milliseconds), not minutes. Ten seconds is generous slack above
+# that (a contended lock or a GC pause on the request thread is still
+# covered) while staying far short of the sweep's own multi-minute
+# runtime, and short enough that an operator's cancel of an
+# ALREADY-FINISHED sweep does not silently poison whatever they start
+# next, unrelated, minutes later.
+PENDING_CANCEL_WINDOW_SECONDS = 10.0
 
 
 class _ClosableDB(Protocol):
@@ -71,7 +89,7 @@ class TriageStatusSnapshot(TypedDict):
 class TriageRunner:
     """Owns at most one background bulk-triage sweep at a time."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, now_fn: Callable[[], float] = time.monotonic) -> None:
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._state: str = STATE_IDLE
@@ -80,6 +98,12 @@ class TriageRunner:
         self._started_at: str | None = None
         self._finished_at: str | None = None
         self._token: CancellationToken | None = None
+        # #1106 sticky cancel: kwarg-DI seam over the wall clock so tests
+        # control the pending-cancel window deterministically. Production
+        # never passes this; the default is the real monotonic clock.
+        self._now_fn = now_fn
+        self._pending_cancel_at: float | None = None
+        self._pending_cancel_reason: str | None = None
 
     def start(
         self,
@@ -91,7 +115,10 @@ class TriageRunner:
 
         Returns False (and starts nothing) when a sweep is already
         running. ``db_factory`` is called ON the sweep thread so the
-        connection is created and used by one thread only.
+        connection is created and used by one thread only. When a
+        pending cancel (#1106) is still within its window, the sweep is
+        still admitted (still True, still starts a thread) but its
+        token is pre-cancelled before ``cleanup_fn`` ever runs.
         """
         with self._lock:
             if self._state == STATE_RUNNING:
@@ -102,6 +129,9 @@ class TriageRunner:
             self._started_at = _utcnow_iso()
             self._finished_at = None
             token = CancellationToken()
+            pending_reason = self._consume_pending_cancel_locked()
+            if pending_reason is not None:
+                token.cancel(pending_reason)
             self._token = token
             self._thread = threading.Thread(
                 target=self._run,
@@ -123,16 +153,44 @@ class TriageRunner:
         Not an error when idle or already finished (#1083 invariant): a
         cancel with nothing running, and a cancel racing a sweep that is
         about to record its own terminal state, both just return the
-        same snapshot ``status()`` would — never a 409. Cancellation
-        itself is observed between rows inside the cleanup service, never
-        mid-delete, so this can only ever stop the NEXT row, not the one
-        in flight.
+        same snapshot ``status()`` would — never a 409. Cancellation of
+        a RUNNING sweep is observed between rows inside the cleanup
+        service, never mid-delete, so this can only ever stop the NEXT
+        row, not the one in flight.
+
+        A cancel that lands while nothing is RUNNING (idle, or between
+        two sweeps) is STICKY (#1106): it is recorded as a pending
+        cancel, first-cancel-wins if one is already pending, and
+        ``start()`` consumes it if admitted within
+        ``PENDING_CANCEL_WINDOW_SECONDS``. This is what makes the CLI's
+        Ctrl-C-races-its-own-start-POST window safe — without it, that
+        cancel would silently no-op and the sweep would run to
+        completion unstoppable by that invocation.
         """
         with self._lock:
             token = self._token
             if token is not None and self._state == STATE_RUNNING:
                 token.cancel(reason)
+            elif self._pending_cancel_at is None:
+                self._pending_cancel_at = self._now_fn()
+                self._pending_cancel_reason = reason
             return self._status_locked()
+
+    def _consume_pending_cancel_locked(self) -> str | None:
+        """Caller already holds ``self._lock``. A pending cancel does not
+        survive past this call either way: it is cleared unconditionally,
+        and its reason is returned only when it is still within
+        ``PENDING_CANCEL_WINDOW_SECONDS`` -- an expired one is discarded
+        and constrains nothing."""
+        pending_at = self._pending_cancel_at
+        reason = self._pending_cancel_reason
+        self._pending_cancel_at = None
+        self._pending_cancel_reason = None
+        if pending_at is None:
+            return None
+        if self._now_fn() - pending_at > PENDING_CANCEL_WINDOW_SECONDS:
+            return None
+        return reason
 
     def _status_locked(self) -> TriageStatusSnapshot:
         """Build the status snapshot; caller already holds ``self._lock``."""

@@ -188,7 +188,16 @@ final state is `cancelled`, distinct from `completed` and `failed`, and its
 `summary` reports exactly what ran before the stop — nothing already deleted
 is rolled back. A cancel that races a sweep which is already finishing, or one
 sent with no sweep running, both just return the current status; neither is an
-error. A second Ctrl-C while the CLI is still waiting for that final status
+error. A cancel served while the CLI's OWN start POST is still in flight —
+before the server's `start()` has even flipped the sweep to `running` — used
+to silently no-op and let that sweep run unstoppable by this invocation; it
+is now STICKY (issue #1106): the runner records it server-side and the very
+next `start()` admitted within a bounded (order-of-ten-second) window
+consumes it, still admitted (still 202/`running`) but pre-cancelled before
+any row runs, so it lands `cancelled` with zero rows processed. A cancel of
+an already-finished sweep that nothing starts again within that window is
+just discarded once it expires — it does not poison whatever gets started
+next, unrelated, later. A second Ctrl-C while the CLI is still waiting for that final status
 falls through to the ordinary uncaught `KeyboardInterrupt` and detaches the
 terminal — the sweep (and any cancel already in flight) keeps running
 server-side regardless. Its `--json` output is the STATUS envelope (`state`,

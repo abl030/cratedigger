@@ -10,6 +10,7 @@ from unittest.mock import patch
 from lib.import_execution import CancellationToken
 from lib.wrong_match_cleanup_service import WrongMatchCleanupSummary
 from web.triage_runner import (
+    PENDING_CANCEL_WINDOW_SECONDS,
     STATE_CANCELLED,
     STATE_COMPLETED,
     STATE_FAILED,
@@ -27,6 +28,20 @@ class _ClosableDB:
 
     def close(self) -> None:
         self.closed += 1
+
+
+class _FakeClock:
+    """Deterministic stand-in for ``TriageRunner``'s ``now_fn`` kwarg-DI
+    seam (production default ``time.monotonic``) — issue #1106."""
+
+    def __init__(self, start: float = 0.0) -> None:
+        self.value = start
+
+    def __call__(self) -> float:
+        return self.value
+
+    def advance(self, delta: float) -> None:
+        self.value += delta
 
 
 class TriageRunnerTest(unittest.TestCase):
@@ -299,6 +314,151 @@ class TriageRunnerCancellationTest(unittest.TestCase):
         result = self.runner.cancel("operator_stop")
         self.assertEqual(result["state"], STATE_COMPLETED)
         self.assertIsNone(result["error"])
+
+
+class TriageRunnerStickyCancelTest(unittest.TestCase):
+    """Issue #1106: a cancel that arrives before ``start()`` has flipped
+    the state to RUNNING — the CLI's ``Ctrl-C`` racing its own
+    still-in-flight start POST — must not be silently lost.
+
+    Invariant: an acknowledged cancel is never lost -- it cancels the
+    running sweep, or cancels the next start() admitted within
+    ``PENDING_CANCEL_WINDOW_SECONDS``, or expires having cancelled
+    nothing; a start() admitted while a non-expired pending cancel
+    exists never processes a row.
+    """
+
+    def setUp(self) -> None:
+        self.clock = _FakeClock()
+        self.runner = TriageRunner(now_fn=self.clock)
+        self.db = _ClosableDB()
+
+    def _factory(self):
+        return self.db
+
+    @staticmethod
+    def _cleanup_fn(db, *, confirm_all_wrong_matches, cancellation_token=None):
+        """Mirrors ``cleanup_all_wrong_matches``'s own contract: check
+        the token BEFORE touching the first row, never mid-row."""
+        assert cancellation_token is not None
+        if cancellation_token.cancelled:
+            return WrongMatchCleanupSummary(processed=0, deleted=0, cancelled=True)
+        return WrongMatchCleanupSummary(processed=3, deleted=2, cancelled=False)
+
+    def test_cancel_while_idle_is_consumed_by_the_immediately_following_start(
+        self,
+    ) -> None:
+        """The exact CLI race: Ctrl-C posts cancel while the start POST
+        is still in flight, and the cancel is served first. The next
+        start() must still be stopped -- admitted (still 202/True), but
+        pre-cancelled before any row runs."""
+        result = self.runner.cancel("ctrl_c_race")
+        self.assertEqual(result["state"], STATE_IDLE)
+
+        started = self.runner.start(
+            db_factory=self._factory, cleanup_fn=self._cleanup_fn,
+        )
+        self.assertTrue(started, "a start() admitted within the window is "
+                                  "still admitted, never refused")
+        self.runner.join(timeout=5)
+
+        status = self.runner.status()
+        self.assertEqual(status["state"], STATE_CANCELLED)
+        summary = status["summary"]
+        assert isinstance(summary, dict)
+        self.assertEqual(summary["processed"], 0,
+                          "a pre-cancelled sweep must never process a row")
+        self.assertTrue(summary["cancelled"])
+
+    def test_pending_cancel_within_the_window_stops_a_start_seconds_later(
+        self,
+    ) -> None:
+        """Not just an instantaneous race -- any start() admitted before
+        the window elapses is stopped."""
+        self.runner.cancel("ctrl_c_race")
+        self.clock.advance(PENDING_CANCEL_WINDOW_SECONDS / 2)
+
+        self.assertTrue(self.runner.start(
+            db_factory=self._factory, cleanup_fn=self._cleanup_fn,
+        ))
+        self.runner.join(timeout=5)
+
+        status = self.runner.status()
+        self.assertEqual(status["state"], STATE_CANCELLED)
+        summary = status["summary"]
+        assert isinstance(summary, dict)
+        self.assertEqual(summary["processed"], 0)
+
+    def test_pending_cancel_expires_and_does_not_poison_a_later_start(
+        self,
+    ) -> None:
+        """An operator's cancel of an ALREADY-finished sweep must not
+        silently sabotage whatever they start minutes later."""
+        self.runner.cancel("stale_operator_click")
+        self.clock.advance(PENDING_CANCEL_WINDOW_SECONDS + 1.0)
+
+        self.assertTrue(self.runner.start(
+            db_factory=self._factory, cleanup_fn=self._cleanup_fn,
+        ))
+        self.runner.join(timeout=5)
+
+        status = self.runner.status()
+        self.assertEqual(status["state"], STATE_COMPLETED)
+        summary = status["summary"]
+        assert isinstance(summary, dict)
+        self.assertEqual(summary["processed"], 3)
+        self.assertFalse(summary["cancelled"])
+
+    def test_expired_pending_cancel_does_not_swallow_a_later_genuine_cancel(
+        self,
+    ) -> None:
+        """Fault-injection find (#1106 review, generated property): a
+        mutant that left an EXPIRED pending cancel's timestamp in place
+        (instead of clearing it) made the first-cancel-wins guard in
+        ``cancel()`` see the stale slot as still occupied, silently
+        swallowing a second, genuinely-in-window cancel -- so the
+        following start() ran unstopped. Deterministic pin for the
+        shrunk world the generated property found."""
+        self.runner.cancel("first_stale_cancel")
+        self.clock.advance(PENDING_CANCEL_WINDOW_SECONDS + 1.0)
+        self.assertTrue(self.runner.start(
+            db_factory=self._factory, cleanup_fn=self._cleanup_fn,
+        ))
+        self.runner.join(timeout=5)
+        self.assertEqual(self.runner.status()["state"], STATE_COMPLETED,
+                          "the first cancel expired -- this start runs")
+
+        self.runner.cancel("second_genuine_cancel")
+        self.assertTrue(self.runner.start(
+            db_factory=self._factory, cleanup_fn=self._cleanup_fn,
+        ))
+        self.runner.join(timeout=5)
+        status = self.runner.status()
+        self.assertEqual(status["state"], STATE_CANCELLED,
+                          "the second cancel must still stop this start")
+        summary = status["summary"]
+        assert isinstance(summary, dict)
+        self.assertEqual(summary["processed"], 0)
+
+    def test_pending_cancel_is_consumed_at_most_once(self) -> None:
+        """A single cancel() only ever stops ONE start() -- it must not
+        leak forward and poison a second, later sweep too."""
+        self.runner.cancel("ctrl_c_race")
+        self.assertTrue(self.runner.start(
+            db_factory=self._factory, cleanup_fn=self._cleanup_fn,
+        ))
+        self.runner.join(timeout=5)
+        self.assertEqual(self.runner.status()["state"], STATE_CANCELLED)
+
+        self.assertTrue(self.runner.start(
+            db_factory=self._factory, cleanup_fn=self._cleanup_fn,
+        ))
+        self.runner.join(timeout=5)
+        status = self.runner.status()
+        self.assertEqual(status["state"], STATE_COMPLETED)
+        summary = status["summary"]
+        assert isinstance(summary, dict)
+        self.assertEqual(summary["processed"], 3)
 
 
 if __name__ == "__main__":
