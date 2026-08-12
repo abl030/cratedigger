@@ -610,11 +610,18 @@ inhibitors, timer masks), restarts what that ownership implies it stopped,
 and removes the receipt -- returning to ordinary, unheld operation. It is
 safe from every known receipt phase and never touches an object it did not
 own; it is the one command in this module you run to walk away from a hold
-rather than advance or re-prove it. It does NOT cover a host reboot: the
-receipt lives on `/run` tmpfs and does not survive one, so neither `abort`
-nor `recover-held` has anything to act on afterward. #1096 tracks the wider
-receipt-durability gap this exposes for `prepare_controlled`'s persistent
-YouTube start inhibitor specifically. See
+rather than advance or re-prove it.
+
+`abort` also survives a host reboot (#1096). The receipt under `/run` does
+not survive one, but the manual gate hold and the producer start inhibitors
+under `/var/lib/cratedigger-metadata-gate` are real disk state and can
+outlive it, each carrying its own persistent sibling ownership marker. Run
+`abort` with no receipt present exactly as above -- it adopts exactly the
+objects its persistent markers own, restarts and proves active whatever they
+blocked, then clears the markers, ending at ordinary operation. With no
+receipt and no persistent marker at all (an ordinary clean boot), `abort`
+still refuses. `recover-held` still requires a receipt -- the reboot recovery
+path is always `abort` followed by a fresh `acquire`. See
 `docs/solutions/deployment/authoritative-systemd-deploy-holds.md`.
 
 ## Database migrations

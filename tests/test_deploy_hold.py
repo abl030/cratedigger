@@ -49,6 +49,7 @@ from scripts.cratedigger_deploy_hold import (
     _drain_services,
     _ensure_owned_control_mask,
     _ensure_owned_manual_hold,
+    _ensure_owned_start_inhibitor,
     _wait_automation_queue_drained,
     abort_hold,
     acquire_hold,
@@ -1325,6 +1326,293 @@ class TestAbortHold(unittest.TestCase):
 
         self.assertTrue(backend.manual_hold)
         self.assertFalse(backend.receipt)
+
+
+class TestReceiptlessAbortAdoptsPersistentMarkers(unittest.TestCase):
+    """#1096: persistent ownership markers survive a reboot; a receiptless
+    abort adopts exactly the objects they mark, restoring ordinary unheld
+    operation with no dead end. Options 1+4 per issue comment
+    5266609958 -- option 2 (persistent receipt) and option 3 (ownership
+    encoded in the object's own content) are rejected.
+    """
+
+    def test_reboot_at_prepared_controlled_abort_adopts_and_restores_ordinary_operation(
+        self,
+    ) -> None:
+        """Pin (a): the phase the module-vm.nix first deploy-hold scenario
+        reaches at prepare-controlled. prepare_controlled already released
+        the manual hold (and its persistent marker) before writing this
+        phase, so only the YouTube inhibitor -- and its new persistent
+        sibling marker -- survive the reboot.
+        """
+        backend = FakeDeployHoldBackend()
+        acquire_hold(backend)
+        prepare_controlled(backend)
+        self.assertEqual(backend.persistent_inhibitor_markers, {YOUTUBE_SERVICE})
+        self.assertFalse(backend.persistent_manual_marker)
+
+        backend.reboot()
+
+        self.assertFalse(backend.receipt_exists())
+        self.assertTrue(backend.persistent_inhibitor_marker_exists(YOUTUBE_SERVICE))
+        self.assertIn(YOUTUBE_SERVICE, backend.inhibitor_files)
+        self.assertEqual(backend.unit_state(YOUTUBE_SERVICE).active_state, "inactive")
+
+        abort_hold(backend)
+
+        self.assertFalse(backend.receipt_exists())
+        self.assertFalse(backend.retired_receipt_exists())
+        self.assertEqual(backend.owned_inhibitors, set())
+        self.assertEqual(backend.inhibitor_files, set())
+        self.assertEqual(backend.persistent_inhibitor_markers, set())
+        self.assertFalse(backend.persistent_manual_marker)
+        self.assertFalse(backend.manual_hold)
+        for timer in TIMER_UNITS:
+            self.assertEqual(backend.unit_state(timer).active_state, "active")
+        for service in (*CONTROLLED_WORKER_UNITS, YOUTUBE_SERVICE):
+            self.assertEqual(backend.unit_state(service).active_state, "active")
+
+    def test_reboot_at_held_abort_adopts_the_manual_hold_and_restores_ordinary_operation(
+        self,
+    ) -> None:
+        """Any post-HELD phase is exposed, not only prepare-controlled
+        onward: a reboot right after acquire reaches HELD leaves the manual
+        hold -- not yet released -- as the surviving persistent object.
+        """
+        backend = FakeDeployHoldBackend()
+        acquire_hold(backend)
+        self.assertTrue(backend.persistent_manual_marker)
+        self.assertEqual(backend.persistent_inhibitor_markers, set())
+
+        backend.reboot()
+
+        self.assertFalse(backend.receipt_exists())
+        self.assertTrue(backend.persistent_manual_marker_exists())
+        self.assertTrue(backend.manual_hold)
+
+        abort_hold(backend)
+
+        self.assertFalse(backend.persistent_manual_marker)
+        self.assertFalse(backend.manual_hold)
+        self.assertFalse(backend.receipt_exists())
+        for service in (*CONTROLLED_WORKER_UNITS, YOUTUBE_SERVICE):
+            self.assertEqual(backend.unit_state(service).active_state, "active")
+        for timer in TIMER_UNITS:
+            self.assertEqual(backend.unit_state(timer).active_state, "active")
+
+    def test_clean_boot_abort_refuses_nothing_owned(self) -> None:
+        """Pin (b): a clean boot with no prior deploy hold must never turn
+        into a mass restart."""
+        backend = FakeDeployHoldBackend()
+
+        with self.assertRaisesRegex(
+            DeployHoldError,
+            "no persistent ownership markers exist to adopt",
+        ):
+            abort_hold(backend)
+
+        self.assertEqual(backend.started_units, [])
+
+    def test_receiptless_abort_refuses_a_foreign_unmarked_inhibitor(self) -> None:
+        """Pin (c): an unmarked object present alongside a marked one is
+        refused loudly, and nothing -- marked or foreign -- is touched."""
+        backend = FakeDeployHoldBackend(
+            inhibitor_files={YOUTUBE_SERVICE, MAIN_SERVICE},
+            persistent_inhibitor_markers={YOUTUBE_SERVICE},
+        )
+
+        with self.assertRaises(DeployHoldError) as caught:
+            abort_hold(backend)
+        self.assertEqual(
+            str(caught.exception),
+            f"unowned producer inhibitor exists for {MAIN_SERVICE}",
+        )
+
+        self.assertEqual(backend.inhibitor_files, {YOUTUBE_SERVICE, MAIN_SERVICE})
+        self.assertEqual(backend.persistent_inhibitor_markers, {YOUTUBE_SERVICE})
+        self.assertEqual(backend.started_units, [])
+
+    def test_receiptless_abort_cleans_an_orphan_marker_whose_object_is_absent(
+        self,
+    ) -> None:
+        """Pin (d): crashed between the marker write and the inhibitor's
+        own creation -- the object never actually came to exist."""
+        backend = FakeDeployHoldBackend(
+            persistent_inhibitor_markers={YOUTUBE_SERVICE},
+        )
+        backend.unit_states[YOUTUBE_SERVICE] = UnitState(
+            load_state="loaded", active_state="inactive", sub_state="dead",
+        )
+        self.assertNotIn(YOUTUBE_SERVICE, backend.inhibitor_files)
+
+        abort_hold(backend)
+
+        self.assertEqual(backend.persistent_inhibitor_markers, set())
+        self.assertEqual(backend.unit_state(YOUTUBE_SERVICE).active_state, "active")
+        self.assertIn(YOUTUBE_SERVICE, backend.started_units)
+
+    def test_reboot_plus_our_marker_plus_a_foreign_hold_fails_loudly_then_rerun_finishes(
+        self,
+    ) -> None:
+        """Pin (e): a foreign hold blocks adoption exactly like it blocks a
+        receipt-owned abort; every marker is retained so a rerun after the
+        operator clears the foreign hold finishes the job."""
+        backend = FakeDeployHoldBackend()
+        acquire_hold(backend)
+        prepare_controlled(backend)
+        backend.reboot()
+        backend.other_metadata_holds.add("discogs-import")
+
+        with self.assertRaisesRegex(
+            DeployHoldError, "foreign metadata gate holds block abort",
+        ):
+            abort_hold(backend)
+
+        self.assertEqual(backend.persistent_inhibitor_markers, {YOUTUBE_SERVICE})
+        self.assertEqual(backend.inhibitor_files, {YOUTUBE_SERVICE})
+        self.assertEqual(backend.started_units, [])
+
+        backend.other_metadata_holds.discard("discogs-import")
+        abort_hold(backend)
+
+        self.assertEqual(backend.persistent_inhibitor_markers, set())
+        self.assertEqual(backend.inhibitor_files, set())
+        self.assertEqual(backend.unit_state(YOUTUBE_SERVICE).active_state, "active")
+
+    def test_acquire_refuses_a_marked_manual_hold_and_points_to_abort(self) -> None:
+        backend = FakeDeployHoldBackend(
+            manual_hold=True, persistent_manual_marker=True,
+        )
+
+        with self.assertRaisesRegex(DeployHoldError, "run 'abort'"):
+            acquire_hold(backend)
+
+    def test_acquire_refuses_an_unmarked_manual_hold_with_the_original_message(
+        self,
+    ) -> None:
+        backend = FakeDeployHoldBackend(manual_hold=True)
+
+        with self.assertRaises(DeployHoldError) as caught:
+            acquire_hold(backend)
+        self.assertEqual(
+            str(caught.exception), "unowned manual hold already exists",
+        )
+
+    def test_acquire_refuses_a_marked_inhibitor_and_points_to_abort(self) -> None:
+        backend = FakeDeployHoldBackend(
+            inhibitor_files={YOUTUBE_SERVICE},
+            persistent_inhibitor_markers={YOUTUBE_SERVICE},
+        )
+
+        with self.assertRaisesRegex(DeployHoldError, "run 'abort'"):
+            acquire_hold(backend)
+
+    def test_acquire_refuses_an_unmarked_inhibitor_with_the_original_message(
+        self,
+    ) -> None:
+        backend = FakeDeployHoldBackend(inhibitor_files={YOUTUBE_SERVICE})
+
+        with self.assertRaises(DeployHoldError) as caught:
+            acquire_hold(backend)
+        self.assertEqual(
+            str(caught.exception),
+            f"unowned producer inhibitor already exists for {YOUTUBE_SERVICE}",
+        )
+
+    def test_mark_manual_hold_owned_persists_the_marker_before_the_tmpfs_marker(
+        self,
+    ) -> None:
+        backend = FakeDeployHoldBackend()
+
+        backend.mark_manual_hold_owned()
+
+        self.assertEqual(
+            [event[0] for event in backend.events],
+            ["persist-own-manual", "own-manual"],
+        )
+
+    def test_ensure_owned_manual_hold_persists_the_marker_before_taking_the_gate(
+        self,
+    ) -> None:
+        """Fault-injection qualified: swapping mark_manual_hold_owned() and
+        the metadata_gate('hold manual') call in _ensure_owned_manual_hold
+        makes this fail (verified by hand; #1096 report)."""
+        backend = FakeDeployHoldBackend()
+
+        _ensure_owned_manual_hold(backend)
+
+        self.assertEqual(
+            list(backend.events),
+            [
+                ("persist-own-manual",),
+                ("own-manual",),
+                ("metadata-gate", "hold manual"),
+            ],
+        )
+
+    def test_ensure_owned_start_inhibitor_persists_the_marker_before_creating_the_object(
+        self,
+    ) -> None:
+        """Fault-injection qualified: swapping mark_inhibitor_owned() and
+        create_start_inhibitor() in _ensure_owned_start_inhibitor makes this
+        fail (verified by hand; #1096 report)."""
+        backend = FakeDeployHoldBackend()
+
+        _ensure_owned_start_inhibitor(backend, YOUTUBE_SERVICE)
+
+        self.assertEqual(
+            list(backend.events),
+            [
+                ("persist-own-inhibitor", YOUTUBE_SERVICE),
+                ("own-inhibitor", YOUTUBE_SERVICE),
+                ("inhibitor-create", YOUTUBE_SERVICE),
+            ],
+        )
+
+    def test_adoption_removes_the_persistent_inhibitor_marker_only_after_restart_is_proven(
+        self,
+    ) -> None:
+        backend = FakeDeployHoldBackend(
+            inhibitor_files={YOUTUBE_SERVICE},
+            persistent_inhibitor_markers={YOUTUBE_SERVICE},
+        )
+        backend.unit_states[YOUTUBE_SERVICE] = UnitState(
+            load_state="loaded", active_state="inactive", sub_state="dead",
+        )
+
+        abort_hold(backend)
+
+        kinds = list(backend.events)
+        remove_index = kinds.index(("inhibitor-remove", YOUTUBE_SERVICE))
+        start_index = kinds.index(("start", YOUTUBE_SERVICE))
+        disown_index = kinds.index(("persist-disown-inhibitor", YOUTUBE_SERVICE))
+        self.assertLess(remove_index, start_index)
+        self.assertLess(start_index, disown_index)
+
+    def test_adoption_removes_the_persistent_manual_marker_only_after_release_and_restart_are_proven(
+        self,
+    ) -> None:
+        backend = FakeDeployHoldBackend(
+            manual_hold=True, persistent_manual_marker=True,
+        )
+        for service in GATE_STOPPED_UNITS:
+            backend.unit_states[service] = UnitState(
+                load_state="loaded", active_state="inactive", sub_state="dead",
+            )
+
+        abort_hold(backend)
+
+        kinds = list(backend.events)
+        release_index = kinds.index(("metadata-gate", "release manual"))
+        disown_index = kinds.index(("persist-disown-manual",))
+        self.assertLess(release_index, disown_index)
+        start_indices = [
+            index
+            for index, event in enumerate(kinds)
+            if event[0] == "start" and event[1] in GATE_STOPPED_UNITS
+        ]
+        self.assertTrue(start_indices)
+        self.assertLess(max(start_indices), disown_index)
 
 
 class TestGateGuardModelDerivation(unittest.TestCase):

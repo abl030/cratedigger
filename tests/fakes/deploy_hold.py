@@ -50,6 +50,8 @@ class FakeDeployHoldBackend:
         interrupt_receipt_publication: bool = False,
         interrupt_receipt_retirement: bool = False,
         queue_drain_after_calls: int | None = None,
+        persistent_manual_marker: bool = False,
+        persistent_inhibitor_markers: set[str] | None = None,
     ) -> None:
         self.manual_hold = manual_hold
         self.other_metadata_holds = set(metadata_holds or set())
@@ -64,6 +66,11 @@ class FakeDeployHoldBackend:
         self.inhibitor_files = set(inhibitor_files or set())
         self.interrupt_receipt_publication = interrupt_receipt_publication
         self.interrupt_receipt_retirement = interrupt_receipt_retirement
+        # Persistent siblings of the manual hold / producer inhibitors
+        # (#1096): unlike every other field above, these survive reboot()
+        # below -- they model /var/lib/cratedigger-metadata-gate, not /run.
+        self.persistent_manual_marker = persistent_manual_marker
+        self.persistent_inhibitor_markers = set(persistent_inhibitor_markers or set())
         # Models the causal claim behind #1078's reorder: the automation
         # queue only drains while the importer or preview worker is still
         # running. `active_automation_jobs`/`dirty_downloading_rows` latch to
@@ -205,15 +212,30 @@ class FakeDeployHoldBackend:
         self.events.append(("phase", phase))
 
     def mark_manual_hold_owned(self) -> None:
+        # Persistent marker first, mirroring RealSystemdBackend: it must
+        # exist before the manual hold object itself does (#1096).
+        self.write_persistent_manual_marker()
         self.owned_manual_hold = True
         self.events.append(("own-manual",))
 
     def unmark_manual_hold_owned(self) -> None:
+        self.remove_persistent_manual_marker()
         self.owned_manual_hold = False
         self.events.append(("disown-manual",))
 
     def manual_hold_is_owned(self) -> bool:
         return self.owned_manual_hold
+
+    def persistent_manual_marker_exists(self) -> bool:
+        return self.persistent_manual_marker
+
+    def write_persistent_manual_marker(self) -> None:
+        self.persistent_manual_marker = True
+        self.events.append(("persist-own-manual",))
+
+    def remove_persistent_manual_marker(self) -> None:
+        self.persistent_manual_marker = False
+        self.events.append(("persist-disown-manual",))
 
     def mark_link_owned(self, timer: str) -> None:
         self.owned_links.add(timer)
@@ -232,10 +254,12 @@ class FakeDeployHoldBackend:
     def mark_inhibitor_owned(self, service: str) -> None:
         if service not in START_INHIBITORS:
             raise AssertionError(f"unexpected inhibitor service: {service}")
+        self.write_persistent_inhibitor_marker(service)
         self.owned_inhibitors.add(service)
         self.events.append(("own-inhibitor", service))
 
     def unmark_inhibitor_owned(self, service: str) -> None:
+        self.remove_persistent_inhibitor_marker(service)
         self.owned_inhibitors.remove(service)
         self.events.append(("disown-inhibitor", service))
 
@@ -244,6 +268,19 @@ class FakeDeployHoldBackend:
 
     def owned_inhibitor_units(self) -> tuple[str, ...]:
         return tuple(sorted(self.owned_inhibitors))
+
+    def persistent_inhibitor_marker_exists(self, service: str) -> bool:
+        return service in self.persistent_inhibitor_markers
+
+    def write_persistent_inhibitor_marker(self, service: str) -> None:
+        if service not in START_INHIBITORS:
+            raise AssertionError(f"unexpected inhibitor service: {service}")
+        self.persistent_inhibitor_markers.add(service)
+        self.events.append(("persist-own-inhibitor", service))
+
+    def remove_persistent_inhibitor_marker(self, service: str) -> None:
+        self.persistent_inhibitor_markers.discard(service)
+        self.events.append(("persist-disown-inhibitor", service))
 
     def inhibitor_exists(self, service: str) -> bool:
         return service in self.inhibitor_files
@@ -419,6 +456,80 @@ class FakeDeployHoldBackend:
                 sub_state="dead",
             )
             del self.running_samples[unit]
+
+    def reboot(self) -> None:
+        """Model a real host reboot: wipe tmpfs, retain persistent state.
+
+        Clears the receipt, phase, every tmpfs ownership marker (manual
+        hold, control links, inhibitors), and the ordinary-invocation
+        marker -- all ``/run``, all gone, exactly like a crash+restart
+        clears the module-vm.nix test VM's tmpfs root. RETAINS the manual
+        hold / inhibitor objects themselves, their sibling persistent
+        markers, and every other metadata-gate hold file -- all
+        ``/var/lib``, all durable (#1096).
+
+        Unit states reset to post-boot reality rather than merely
+        preserving whatever they were before the reboot: a fresh boot
+        starts every unit from its own systemd wantedBy/Condition wiring,
+        not from a snapshot of what was running a moment before the crash.
+        A gate-guarded unit (``GATE_GUARDED_UNITS``) stays condition-blocked
+        if the persistent manual hold or its own persistent inhibitor is
+        still present; every other always-on daemon resumes; timer-driven
+        oneshots and the timers themselves come up idle/active exactly as
+        they do on an ordinary first boot.
+        """
+        self.receipt = False
+        self.staging_receipt = False
+        self.phase = None
+        self.owned_links.clear()
+        self.owned_inhibitors.clear()
+        self.owned_manual_hold = False
+        self.ordinary_invocation = None
+        self.control_links.clear()
+        self.jobs.clear()
+        self.running_samples.clear()
+        self.cancelled_jobs.clear()
+        self.started_units.clear()
+        self.failed_services.clear()
+        self.events.append(("reboot",))
+
+        def blocked(service: str) -> bool:
+            if service not in GATE_GUARDED_UNITS:
+                return False
+            if self.manual_hold:
+                return True
+            return service in START_INHIBITORS and service in self.inhibitor_files
+
+        self.unit_states = {
+            **{
+                timer: UnitState(
+                    load_state="loaded",
+                    active_state="active",
+                    sub_state="waiting",
+                )
+                for timer in TIMER_UNITS
+            },
+            **{
+                service: UnitState(
+                    load_state="loaded",
+                    active_state=(
+                        "inactive"
+                        if blocked(service)
+                        else "active"
+                        if service in _ALWAYS_ON_DAEMONS
+                        else "inactive"
+                    ),
+                    sub_state=(
+                        "dead"
+                        if blocked(service)
+                        else "running"
+                        if service in _ALWAYS_ON_DAEMONS
+                        else "dead"
+                    ),
+                )
+                for service in SERVICE_UNITS
+            },
+        }
 
     def assert_default_held(self) -> None:
         assert self.phase == PHASE_HELD

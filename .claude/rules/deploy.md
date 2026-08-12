@@ -80,15 +80,33 @@
   exit-0 no-op) before that object is disowned, so an interrupted retry
   never sees "nothing owned" while the underlying unit is still down. It is
   safe from every known receipt phase and never touches an object it did not
-  own. It does NOT cover a host reboot — the receipt lives on `/run` tmpfs
-  and does not survive one, leaving nothing for `abort` or `recover-held` to
-  act on; #1096 tracks the wider receipt-durability gap this exposes for
-  `prepare_controlled`'s persistent YouTube start inhibitor. `recover-held`
-  remains the tool for re-establishing the strict boundary after a failed
-  *release* phase; it does not get you out of a hold that should never have
-  been acquired in the first place. Do not remove
-  `/run/cratedigger-deploy-hold` or its `system.control` links by hand —
-  `abort` is the documented alternative.
+  own. **A host reboot clears `/run` — the receipt and every tmpfs
+  ownership marker — but the manual gate hold and the producer start
+  inhibitors under `/var/lib/cratedigger-metadata-gate` are real disk state
+  and can outlive the receipt that took them (#1096).** Each carries its own
+  persistent sibling marker (`deploy-hold-owned-manual`,
+  `deploy-hold-owned-inhibit-<unit>`), written before the object itself and
+  removed only after it, so a receiptless `abort` proves which surviving
+  objects are ours and adopts exactly those — releasing/removing them,
+  restarting and proving active whatever they blocked, then clearing the
+  markers — ending at the same ordinary, unheld operation every other path
+  through `abort` reaches. It never re-establishes a receipt or a phase:
+  after a reboot there is nothing to recover TO, only ordinary operation to
+  restore. A foreign hold or an unmarked inhibitor is refused exactly as it
+  is under a live receipt, with every marker retained for a rerun once the
+  conflict clears; with no receipt and no persistent marker at all — an
+  ordinary clean boot — `abort` still refuses, so a boot with no prior
+  deploy hold can never turn into a mass restart. `acquire`'s own refusal
+  for an object carrying one of these markers names `abort` as the way out.
+  `recover-held` remains the tool for re-establishing the strict boundary
+  after a failed *release* phase when the receipt survives; it still
+  requires a receipt (the phase knowledge a reboot destroys is exactly what
+  it exists to resume) and does not get you out of a hold that should never
+  have been acquired in the first place, or out of a reboot — the supported
+  reboot recovery is always `abort` followed by a fresh `acquire`. Do not
+  remove `/run/cratedigger-deploy-hold`, its `system.control` links, or the
+  persistent markers under `/var/lib/cratedigger-metadata-gate` by hand —
+  `abort` is the documented alternative for all of them.
 - Always derive the active cratedigger wrapper from `systemctl show cratedigger.service --property=ExecStart --value`, extract its exact `*-source` path from the wrapper, and verify the unique source string there; never glob historical store generations, which can produce a false positive. For module changes, inspect `systemctl cat cratedigger.service` and the wrapper's exact immutable `--config` store path.
 - Before deploying changes to `nix/module.nix`, run the VM check: `nix build .#checks.x86_64-linux.moduleVm`.
 - **Every `nix flake update nixpkgs` in cratedigger must re-run the real-beets drift gate** (`tests/test_harness_beets2_contract.py` inside the re-pinned shell, plus the full suite): the repository lock is Cratedigger's last verified standalone reference snapshot. `scripts/daily_flake_update.sh` updates only that node. `scripts/daily_beets_tip_update.sh` separately updates only the checks-only tip node under the same state lock; neither runner supplies the deployment-owned Beets runtime package.

@@ -78,8 +78,9 @@ temporary start inhibitor: masking already blocks a fresh *timer* trigger
 `cratedigger.service` directly via the gate's `resume_units` regardless of
 the timer's mask state), and YouTube is not being waited on in this window
 at all, so there is no persistent `/var/lib` artifact to orphan if the host
-reboots mid-window (see `abort`, below, for the reboot boundary this module
-actually has).
+reboots mid-window at all -- unlike the manual hold and producer inhibitors
+taken later, which do persist and are exactly what `abort`'s reboot recovery
+below adopts.
 
 Taking the gate hold before draining the queue is exactly the pre-#1078 bug:
 the hold's external tool stops the importer and preview workers, which are
@@ -153,17 +154,56 @@ stranded partway through acquisition while the host stayed up. Before #1078
 the only documented answer was "do not remove the receipt by hand," with
 nothing offered instead.
 
-**`abort` does NOT cover a host reboot.** The receipt under `/run` and the
-timer control-links under `/run/systemd/system.control` are both tmpfs and do
-not survive one; a reboot leaves nothing for `abort` (or `recover-held`) to
-act on, because there is no receipt left proving what this deployment ever
-owned. #1078's own producer-drain-before-hold window keeps no receipt-owned
-object on persistent storage, so it does not widen that exposure. The same
-asymmetry already existed for `prepare_controlled`'s YouTube start inhibitor
-(persistent, owned only across `prepared-controlled`/`main-timer-open`)
-before this change; making the receipt (or its ownership markers) durable
-across a reboot is a separate, wider redesign of this module's authority
-model, tracked as #1096 -- not something `abort` attempts.
+**`abort` survives a host reboot too (#1096).** The receipt under `/run` and
+the timer control-links under `/run/systemd/system.control` are both tmpfs
+and do not survive one -- but the manual gate hold and the producer start
+inhibitors under `/var/lib/cratedigger-metadata-gate` are real disk state and
+can outlive the receipt that took them. #1078's own producer-drain-before-hold
+window keeps no receipt-owned object on persistent storage, so it does not
+widen that exposure; the exposure that remains is exactly `prepare_controlled`'s
+YouTube start inhibitor (persistent, owned across `prepared-controlled`/
+`main-timer-open`) and, for a reboot at or after `PHASE_HELD` before
+`prepare_controlled` releases it, the manual hold itself.
+
+The fix is a persistent sibling marker beside each of those two owned-object
+classes -- `deploy-hold-owned-manual` and `deploy-hold-owned-inhibit-<unit>`,
+both directly in `/var/lib/cratedigger-metadata-gate` (never inside `holds/`,
+which the gate reads as hold *reasons*). `mark_manual_hold_owned()` /
+`mark_inhibitor_owned()` write the persistent marker before the object itself
+is ever created, so an object without its marker is provably foreign;
+`unmark_manual_hold_owned()` / `unmark_inhibitor_owned()` remove it only after
+the object is already gone. While a receipt exists it remains the sole
+authority -- these persistent markers are consulted only when no receipt (live
+or retired) exists, which is exactly the shape a reboot leaves behind.
+
+A receiptless `abort` (`_adopt_persistent_markers_or_refuse`) reads exactly
+those markers: with none present at all -- an ordinary clean boot with no
+prior deploy hold -- it refuses precisely like it always has, so a boot can
+never turn into a mass restart. With one or more present, it proves no
+unmarked (foreign) object or foreign metadata-gate hold conflicts before
+touching anything, then adopts exactly the marked objects -- releasing the
+manual hold and/or removing the marked inhibitors, restarting and proving
+active whatever they blocked (reusing the identical restart-then-disown shape
+the receipt-owned branches below already use, including for an orphan marker
+whose object was never actually created because the crash landed between the
+marker write and the object's own creation -- starting an already-running or
+never-actually-blocked unit is an idempotent no-op), then clearing the
+markers -- ending at the same ordinary, unheld operation every other path
+through `abort` reaches. It never re-establishes a receipt or a phase: after
+a reboot there is nothing to recover TO, only ordinary operation to restore.
+`acquire`'s own refusal for an object carrying one of these markers now names
+`abort` as the way out (distinct from its refusal for a genuinely unmarked,
+foreign object, which still refuses with no such pointer). `recover-held`
+still requires a receipt -- the phase knowledge a reboot destroys is exactly
+what it exists to resume -- so the supported reboot recovery is always
+`abort` followed by a fresh `acquire`.
+
+Rejected alternatives (issue comment
+[5266609958](https://github.com/abl030/cratedigger/issues/1096#issuecomment-5266609958)):
+moving the whole receipt to `/var/lib` (the tmpfs receipt's reboot-clears-
+stale-state property is deliberate), and encoding ownership in the inhibitor
+file's own content (the inhibitor's content is a format the external gate
+tool reads; changing it is a wider, riskier change than a sibling marker).
 
 Every ownership class this receipt could hold -- the manual gate hold, every
 owned producer-start inhibitor, every owned timer control-link mask -- is

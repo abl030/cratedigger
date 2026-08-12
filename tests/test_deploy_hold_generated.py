@@ -12,6 +12,7 @@ import tests._hypothesis_profiles  # noqa: F401
 from scripts.cratedigger_deploy_hold import (
     CONTROLLED_WORKER_UNITS,
     GATE_GUARDED_UNITS,
+    GATE_STOPPED_UNITS,
     IMPORTER_SERVICE,
     MAIN_SERVICE,
     MAIN_TIMER,
@@ -21,6 +22,7 @@ from scripts.cratedigger_deploy_hold import (
     PHASE_MAIN_TIMER_OPEN,
     PHASE_PREPARED_CONTROLLED,
     SERVICE_UNITS,
+    START_INHIBITORS,
     TIMER_DRIVEN_PRODUCER_UNITS,
     TIMER_UNITS,
     UNFINDABLE_SERVICE,
@@ -43,6 +45,49 @@ from scripts.cratedigger_deploy_hold import (
     recover_held,
 )
 from tests.fakes.deploy_hold import FakeDeployHoldBackend
+
+
+def assert_ordinary_operation(backend: FakeDeployHoldBackend) -> None:
+    """#1096: the ownership postcondition every reboot-recovery path must
+    reach -- no receipt (live or retired), no owned or persistent ownership
+    marker of any kind, no active or persistent hold/inhibitor object, and
+    every timer restored.
+
+    Deliberately does NOT assert every service unit is active: whether a
+    given unit is genuinely running afterward depends on which restart
+    guarantee the recovery path in play actually makes (abort/adoption
+    restart exactly what THEY owned -- see
+    ``TestNoInterruptionPointIsUnrecoverable``, which asserts that
+    precisely, phase by phase). A unit neither abort nor adoption ever
+    owned going in (for example YouTube ingest at PHASE_COMPLETE_PENDING,
+    whose restart is ``finish_release``'s own resume-if-clear reliance, a
+    pre-existing mechanism this fake does not model and #1096 does not
+    touch) is correctly out of scope for this checker.
+    """
+    if backend.receipt_exists():
+        raise AssertionError("a receipt remains after recovery")
+    if backend.retired_receipt_exists():
+        raise AssertionError("a retired receipt remains after recovery")
+    if backend.owned_link_units():
+        raise AssertionError(
+            f"owned timer links remain: {backend.owned_link_units()!r}"
+        )
+    if backend.manual_hold_is_owned() or backend.manual_hold:
+        raise AssertionError("the manual hold remains owned or active")
+    if backend.owned_inhibitor_units() or backend.inhibitor_files:
+        raise AssertionError("a producer inhibitor remains owned or present")
+    if backend.persistent_manual_marker_exists():
+        raise AssertionError("a persistent manual-hold marker remains")
+    for service in START_INHIBITORS:
+        if backend.persistent_inhibitor_marker_exists(service):
+            raise AssertionError(
+                f"a persistent inhibitor marker remains: {service}"
+            )
+    for timer in TIMER_UNITS:
+        state = backend.unit_state(timer)
+        if state.load_state != "loaded" or state.active_state != "active":
+            raise AssertionError(f"timer {timer} is not restored: {state}")
+
 
 _KNOWN_PHASES = (
     PHASE_ACQUIRING,
@@ -705,6 +750,96 @@ class TestHoldInvariantCheckersKnownBad(unittest.TestCase):
                 backend, sleep_calls_before=8, minimum_wait_ticks=5,
             )
 
+    # #1096 assert_ordinary_operation: per-clause known-bad self-tests. Each
+    # starts from a fresh FakeDeployHoldBackend() -- itself asserted clean
+    # first -- and violates exactly ONE clause while every earlier clause in
+    # the checker's own evaluation order stays satisfied, per
+    # code-quality.md's "known-bad self-test, per CLAUSE" contract.
+
+    def test_ordinary_operation_checker_accepts_a_fresh_backend(self) -> None:
+        assert_ordinary_operation(FakeDeployHoldBackend())
+
+    def test_ordinary_operation_checker_rejects_a_remaining_receipt(self) -> None:
+        backend = FakeDeployHoldBackend()
+        backend.receipt = True
+
+        with self.assertRaisesRegex(
+            AssertionError, "a receipt remains after recovery",
+        ):
+            assert_ordinary_operation(backend)
+
+    def test_ordinary_operation_checker_rejects_a_remaining_retired_receipt(
+        self,
+    ) -> None:
+        backend = FakeDeployHoldBackend()
+        backend.retired_receipt = True
+
+        with self.assertRaisesRegex(
+            AssertionError, "a retired receipt remains after recovery",
+        ):
+            assert_ordinary_operation(backend)
+
+    def test_ordinary_operation_checker_rejects_a_remaining_owned_link(self) -> None:
+        backend = FakeDeployHoldBackend()
+        backend.owned_links.add(MAIN_TIMER)
+
+        with self.assertRaisesRegex(AssertionError, "owned timer links remain"):
+            assert_ordinary_operation(backend)
+
+    def test_ordinary_operation_checker_rejects_a_remaining_manual_hold(
+        self,
+    ) -> None:
+        backend = FakeDeployHoldBackend()
+        backend.manual_hold = True
+
+        with self.assertRaisesRegex(
+            AssertionError, "the manual hold remains owned or active",
+        ):
+            assert_ordinary_operation(backend)
+
+    def test_ordinary_operation_checker_rejects_a_remaining_inhibitor(self) -> None:
+        backend = FakeDeployHoldBackend()
+        backend.inhibitor_files.add(YOUTUBE_SERVICE)
+
+        with self.assertRaisesRegex(
+            AssertionError, "a producer inhibitor remains owned or present",
+        ):
+            assert_ordinary_operation(backend)
+
+    def test_ordinary_operation_checker_rejects_a_remaining_persistent_manual_marker(
+        self,
+    ) -> None:
+        backend = FakeDeployHoldBackend()
+        backend.persistent_manual_marker = True
+
+        with self.assertRaisesRegex(
+            AssertionError, "a persistent manual-hold marker remains",
+        ):
+            assert_ordinary_operation(backend)
+
+    def test_ordinary_operation_checker_rejects_a_remaining_persistent_inhibitor_marker(
+        self,
+    ) -> None:
+        backend = FakeDeployHoldBackend()
+        backend.persistent_inhibitor_markers.add(YOUTUBE_SERVICE)
+
+        with self.assertRaisesRegex(
+            AssertionError,
+            f"a persistent inhibitor marker remains: {YOUTUBE_SERVICE}",
+        ):
+            assert_ordinary_operation(backend)
+
+    def test_ordinary_operation_checker_rejects_an_unrestored_timer(self) -> None:
+        backend = FakeDeployHoldBackend()
+        backend.unit_states[MAIN_TIMER] = UnitState(
+            load_state="masked", active_state="inactive", sub_state="dead",
+        )
+
+        with self.assertRaisesRegex(
+            AssertionError, f"timer {MAIN_TIMER} is not restored",
+        ):
+            assert_ordinary_operation(backend)
+
 
 def _assert_fully_reversed(backend: FakeDeployHoldBackend) -> None:
     """The #1078 invariant: abort leaves zero owned objects, no receipt."""
@@ -974,6 +1109,125 @@ class TestAbortNeverTouchesAnUnownedObject(unittest.TestCase):
 
         with self.assertRaisesRegex(AssertionError, "did not own"):
             _assert_unowned_manual_hold_untouched(backend)
+
+
+def _drive_to_interruption_point(backend: FakeDeployHoldBackend, point: int) -> None:
+    """The full acquire -> prepare-controlled -> open-main-timer ->
+    finish-release -> complete lifecycle, stopped after ``point`` steps.
+
+    0: nothing acquired. 1: PHASE_HELD. 2: PHASE_PREPARED_CONTROLLED.
+    3: PHASE_MAIN_TIMER_OPEN. 4: PHASE_COMPLETE_PENDING. 5: fully released
+    (no receipt at all, same as never having acquired -- included for a
+    uniform domain rather than as a distinct recoverable shape).
+    """
+    if point >= 1:
+        acquire_hold(backend)
+    if point >= 2:
+        prepare_controlled(backend)
+    if point >= 3:
+        open_main_timer(backend)
+    if point >= 4:
+        finish_release(backend, "b" * 32)
+    if point >= 5:
+        complete_release(backend, "b" * 32)
+
+
+class TestNoInterruptionPointIsUnrecoverable(unittest.TestCase):
+    """#1096 generated property: over (interruption point x reboot-or-not)
+    across the full acquire -> prepare-controlled -> open-main-timer ->
+    finish-release -> complete lifecycle, no world is unrecoverable -- the
+    documented command sequence (``abort``, or -- when the receipt survives
+    a no-reboot interruption -- ``recover_held``, whose own reachability to
+    HELD from every phase is already an existing generated property this
+    one does not re-derive) reaches ordinary unheld operation with no
+    unowned-object dead end.
+
+    Every one of the 6 x 2 = 12 worlds in this domain is pinned as an
+    ``@example`` -- this is a small, fully enumerated space, not one that
+    needs random search to cover.
+    """
+
+    @given(
+        point=st.integers(min_value=0, max_value=5),
+        reboot=st.booleans(),
+    )
+    @example(point=0, reboot=False)
+    @example(point=0, reboot=True)
+    @example(point=1, reboot=False)
+    @example(point=1, reboot=True)
+    @example(point=2, reboot=False)
+    @example(point=2, reboot=True)
+    @example(point=3, reboot=False)
+    @example(point=3, reboot=True)
+    @example(point=4, reboot=False)
+    @example(point=4, reboot=True)
+    @example(point=5, reboot=False)
+    @example(point=5, reboot=True)
+    def test_every_interruption_point_recovers_to_ordinary_operation(
+        self,
+        point: int,
+        reboot: bool,
+    ) -> None:
+        backend = FakeDeployHoldBackend()
+        _drive_to_interruption_point(backend, point)
+        if reboot:
+            backend.reboot()
+
+        # The exact restart guarantee whichever branch below makes: abort
+        # (receipt-owned or receiptless-adopted) restarts precisely what IT
+        # owned going in, proven active by construction
+        # (_wait_controlled_workers_active) before this function returns.
+        # This does not assert every unit is active regardless of phase --
+        # a unit neither abort nor adoption ever owned (for example YouTube
+        # ingest at PHASE_COMPLETE_PENDING, whose restart is
+        # finish_release's own resume-if-clear reliance) is out of scope
+        # here, exactly as the existing deterministic TestAbortHold pins
+        # already scope it per phase.
+        expect_restarted: set[str] = set()
+
+        if backend.receipt_exists():
+            # The receipt survived (no reboot): #1078's own property
+            # (TestFailedAcquireIsReversibleByAbort) already proves abort
+            # fully reverses every interrupted-acquire shape, and the
+            # deterministic TestAbortHold pins cover every later phase --
+            # restated here only as part of the unified point x reboot
+            # sweep, not as new coverage of that direction.
+            if backend.manual_hold_is_owned():
+                expect_restarted |= set(GATE_STOPPED_UNITS)
+            expect_restarted |= set(backend.owned_inhibitor_units())
+            abort_hold(backend)
+        else:
+            manual_marked = backend.persistent_manual_marker_exists()
+            inhibited_marked = tuple(
+                service
+                for service in START_INHIBITORS
+                if backend.persistent_inhibitor_marker_exists(service)
+            )
+            if manual_marked or inhibited_marked:
+                # #1096: the reboot exposure -- receipt gone, persistent
+                # marker(s) survived. abort adopts.
+                if manual_marked:
+                    expect_restarted |= set(GATE_STOPPED_UNITS)
+                expect_restarted |= set(inhibited_marked)
+                abort_hold(backend)
+            else:
+                # Nothing persistent survived: a clean boot (point 0), or a
+                # reboot after every persistent object was already released
+                # (point 4/5, both reached before any reboot could matter).
+                # abort correctly refuses, and the state was already
+                # ordinary before it was ever called.
+                with self.assertRaises(DeployHoldError):
+                    abort_hold(backend)
+
+        assert_ordinary_operation(backend)
+        for service in expect_restarted:
+            state = backend.unit_state(service)
+            self.assertEqual(
+                (state.active_state, state.sub_state),
+                ("active", "running"),
+                f"{service} was owned going into recovery but is not "
+                f"stably active afterward: {state}",
+            )
 
 
 if __name__ == "__main__":
