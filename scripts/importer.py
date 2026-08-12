@@ -17,8 +17,6 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-import msgspec
-
 from lib import transitions
 from lib.beets_startup import BeetsStartupError, enforce_beets_startup
 from lib.config import (
@@ -33,7 +31,6 @@ from lib.dispatch import (
 )
 from lib.dispatch.types import (
     PostCommitCleanup,
-    PostCommitQuarantineAudit,
 )
 from lib.download_processing import (
     Completed,
@@ -140,16 +137,6 @@ def _job_result(outcome: DispatchOutcome) -> dict[str, Any]:
     }
 
 
-class _PostCommitCleanupDB(Protocol):
-    """Narrow persistence seam used after the terminal transaction."""
-
-    def record_post_commit_quarantine(
-        self,
-        log_id: int,
-        audit: PostCommitQuarantineAudit,
-    ) -> bool: ...
-
-
 class _AutomationCleanupDB(
     AutomationOwnerCheckpointDB,
     OwnerProcessingCleanupDB,
@@ -207,10 +194,7 @@ class _StartupRecoveryDB(
 
 
 def _run_post_commit_cleanup(
-    db: _PostCommitCleanupDB,
     outcome: DispatchOutcome,
-    *,
-    download_log_id: int | None = None,
 ) -> dict[str, object] | None:
     """Run narrow convergence only after terminal acknowledgement."""
     plan = outcome.post_commit_cleanup
@@ -218,44 +202,6 @@ def _run_post_commit_cleanup(
         return None
 
     details: dict[str, object] = {}
-    if plan.audio_quarantine_source_path is not None:
-        if download_log_id is None:
-            details["audio_quarantine"] = {
-                "source_path": plan.audio_quarantine_source_path,
-                "moved": False,
-                "error": (
-                    "terminal download_log id unavailable; source retained "
-                    "at staging"
-                ),
-            }
-        else:
-            from lib.dispatch.quarantine import (
-                quarantine_corrupt_audio_source,
-            )
-
-            audit = quarantine_corrupt_audio_source(
-                source_path=plan.audio_quarantine_source_path,
-                quarantine_root=plan.audio_quarantine_root or "",
-            )
-            audit_payload = msgspec.to_builtins(audit)
-            assert isinstance(audit_payload, dict)
-            try:
-                audit_persisted = db.record_post_commit_quarantine(
-                    download_log_id,
-                    audit,
-                )
-            except Exception as exc:
-                logger.exception(
-                    "Failed to persist post-commit audio quarantine audit"
-                )
-                audit_payload["audit_persisted"] = False
-                audit_payload["audit_error"] = (
-                    f"{type(exc).__name__}: {exc}"
-                )[:1024]
-            else:
-                audit_payload["audit_persisted"] = audit_persisted
-            details["audio_quarantine"] = audit_payload
-
     if plan.duplicate_guard_source_path is not None:
         try:
             from lib.duplicate_remove_guard import (
@@ -286,7 +232,15 @@ def _run_post_commit_cleanup(
         try:
             from lib.dispatch.helpers import _cleanup_staged_dir
 
-            _cleanup_staged_dir(plan.staged_path)
+            # Issue #1077, R3-3: this is the third real caller of
+            # ``_cleanup_staged_dir`` and the one furthest from ``cfg`` —
+            # the guard has to travel through the ``PostCommitCleanup``
+            # plan itself (``staged_path_protected_parent``) since this
+            # function only ever receives ``outcome: DispatchOutcome``.
+            _cleanup_staged_dir(
+                plan.staged_path,
+                protected_parent=plan.staged_path_protected_parent,
+            )
             details["staged_path"] = {
                 "path": plan.staged_path,
                 "success": True,
@@ -325,46 +279,10 @@ def _automation_cleanup_intent(
     manifest = canonical.source_manifest
     manifest_hash = canonical.source_manifest_hash
 
-    if (
-        plan is not None
-        and plan.audio_quarantine_source_path is not None
-    ):
-        if os.path.abspath(plan.audio_quarantine_source_path) != source_path:
-            raise RuntimeError(
-                "audio quarantine plan does not name the canonical owner path"
-            )
-        # Same precondition as the canonical producer
-        # (``quarantine_corrupt_audio_source``), which refuses a blank or
-        # absent root rather than moving anything. Here the intent is
-        # journaled as an immutable, unamendable plan, so an unusable root
-        # must be refused BEFORE it is written: resolving "" would silently
-        # name a destination under the importer's working directory.
-        configured_root = plan.audio_quarantine_root or ""
-        quarantine_root = (
-            os.path.abspath(configured_root) if configured_root else ""
-        )
-        if not quarantine_root or not os.path.isdir(quarantine_root):
-            raise RuntimeError(
-                "configured audio quarantine root is missing or not a "
-                "directory"
-            )
-        base = os.path.join(
-            quarantine_root,
-            "failed_imports",
-            "bad_files",
-            os.path.basename(source_path),
-        )
-        destination = _select_missing_destination(base, separator="_")
-        return CleanupJournalIntent(
-            action=PROCESSING_CLEANUP_QUARANTINE_SOURCE,
-            source_path=source_path,
-            source_manifest=manifest,
-            source_manifest_hash=manifest_hash,
-            destination_path=destination,
-            destination_manifest=manifest,
-            destination_manifest_hash=manifest_hash,
-            selected_destination_path=destination,
-        )
+    # No audio-corrupt quarantine branch here (issue #1077, D3): a bad rip's
+    # owned canonical folder is deleted outright, so it falls straight
+    # through to the plan-free ``canonical`` intent below (REMOVE_SOURCE),
+    # exactly like every other reject that carries no retargeting plan.
 
     if (
         plan is not None
@@ -525,23 +443,45 @@ def _cleanup_failed_force_import(
     if force_payload is None:
         return None
     download_log_id, failed_path_hint = force_payload
-    cleanup_plan = outcome.post_commit_cleanup
-    if (
-        cleanup_plan is not None
-        and cleanup_plan.audio_quarantine_source_path is not None
-    ):
-        # Corrupt candidates are archival evidence. The post-commit
-        # quarantine either moved the source or left it in place and recorded
-        # why; both states must bypass Wrong Matches deletion.
-        return {
-            "success": True,
-            "download_log_id": download_log_id,
-            "failed_path_hint": failed_path_hint,
-            "outcome": "skipped_archival_audio_quarantine",
-            "skipped": True,
-            "dispatch_code": outcome.code,
-            "dispatch_message": outcome.message,
-        }
+    if outcome.post_commit_wrong_match_scenario == "audio_corrupt":
+        # Bad rips are ban + delete, never preserved (issue #1077, D3): the
+        # peer is already denylisted by ``dispatch_action("audio_corrupt")``.
+        # ``staged_path`` in the dispatch-level post-commit plan names the
+        # disposable force action copy, not this ORIGINAL Wrong Matches
+        # source — delete it here, reusing the same source-deletion helper
+        # the successful-force-import (D7) and cleanup-reducer paths use
+        # (no new teardown machinery, CLAUDE.md invariant 7).
+        # ``clear_missing=True`` (issue #1077, R3-2 — corrects round-2's
+        # false premise). ``clear_missing`` is NEVER consulted for an
+        # unobservable path: ``cleanup_wrong_match_source`` short-circuits
+        # at the indeterminate-observation check
+        # (``lib/wrong_matches.py``) and returns with nothing cleared,
+        # BEFORE ``clear_missing`` is ever read — an unreadable folder
+        # already can't clear its pointer here, regardless of this flag.
+        # ``clear_missing`` only governs a DETERMINATE absence (the path
+        # was positively proven gone, or vanished between resolve and
+        # delete). This force-failure IS an explicit operator action
+        # completing (the operator chose this exact candidate to force-
+        # import; the terminal audio_corrupt failure is the answer), so a
+        # proven-gone source must clear its pointer here rather than
+        # leaving a phantom row the worklist can never act on again
+        # (``wrong_match_row_is_visible`` never consults the filesystem).
+        # Only the autonomous reducer (``lib.wrong_match_cleanup_service``)
+        # keeps ``False`` — a quality decision second-guessing its own
+        # read, not an operator's completed action.
+        from lib.wrong_matches import cleanup_wrong_match_source
+
+        result = cleanup_wrong_match_source(
+            db,
+            download_log_id,
+            failed_path_hint=failed_path_hint,
+            clear_missing=True,
+        )
+        payload = result.to_dict()
+        payload["outcome"] = "deleted_operator_force_source"
+        payload["dispatch_code"] = outcome.code
+        payload["dispatch_message"] = outcome.message
+        return payload
     # The original force/quarantine directory is operator authority and audit
     # evidence. Dispatch consumes only the private action copy; cleanup of the
     # raw source requires a distinct operator action, never a quality result.
@@ -560,23 +500,46 @@ def _dismiss_successful_force_import(
     db: PipelineDB,
     job: ImportJob,
 ) -> dict[str, object] | None:
-    """Remove a successfully imported source from Wrong Matches, never disk.
+    """Consume a successfully imported source's Wrong Matches folder.
 
-    This runs only after the terminal acknowledgement.  The raw quarantine
-    directory remains operator evidence; the dismissed pointers only stop it
-    appearing as an actionable Wrong Matches entry.
+    This runs only after the terminal acknowledgement. Force-import success
+    completes the operator's own explicit action (issue #1077, D7): the
+    quarantine folder is deleted, not merely dismissed from the actionable
+    list, reusing the same source-deletion helper the cleanup reducer uses
+    (``lib.wrong_match_cleanup_service.cleanup_wrong_match``). Failure keeps
+    ``preserved_operator_force_source`` (``_cleanup_failed_force_import``)
+    exactly as-is.
     """
     force_payload = _force_job_wrong_match_payload(job)
     if force_payload is None:
         return None
     download_log_id, failed_path_hint = force_payload
     try:
-        from lib.wrong_matches import dismiss_wrong_match_source
+        from lib.wrong_matches import cleanup_wrong_match_source
 
-        return dismiss_wrong_match_source(
+        # ``clear_missing=True`` (the library default, stated explicitly
+        # here for clarity) — matches the D3 force-failure path above,
+        # both now the OPPOSITE of the autonomous reducer's own override
+        # (issue #1077, R3-2, correcting round-2's false premise).
+        # ``clear_missing`` is never even reached for an unobservable path
+        # — ``cleanup_wrong_match_source`` short-circuits at the
+        # indeterminate-observation check and returns with nothing
+        # cleared regardless of this flag (see
+        # ``lib/wrong_matches.py::cleanup_wrong_match_source``). It only
+        # governs a DETERMINATE absence: force-import already succeeded,
+        # so a proven-gone source folder must clear its pointer here — a
+        # dead pointer left visible would be the stranded-phantom state,
+        # an already-imported row that looks stuck in the queue forever,
+        # not a safety net (``wrong_match_row_is_visible`` never consults
+        # the filesystem). Only the autonomous reducer
+        # (``lib.wrong_match_cleanup_service``) keeps ``False`` — a
+        # quality decision second-guessing its own read, not an
+        # operator's completed action.
+        return cleanup_wrong_match_source(
             db,
             download_log_id,
             failed_path_hint=failed_path_hint,
+            clear_missing=True,
         ).to_dict()
     except Exception as exc:
         logger.exception(
@@ -1051,17 +1014,16 @@ def _cleanup_committed_wrong_match_rejection(
     cleanup_wrong_match_fn: Callable[..., object] | None = None,
 ) -> None:
     """Run Wrong Matches convergence only after the terminal bundle commits."""
-    from lib.wrong_match_policy import rejection_scenario_is_wrong_match_candidate
+    from lib.wrong_match_policy import (
+        rejection_scenario_is_delete_eligible,
+        rejection_scenario_is_wrong_match_candidate,
+    )
 
-    cleanup_plan = outcome.post_commit_cleanup
-    archival_quarantine = (
-        cleanup_plan is not None
-        and cleanup_plan.audio_quarantine_source_path is not None
-    )
-    wrong_match_candidate = rejection_scenario_is_wrong_match_candidate(
-        outcome.post_commit_wrong_match_scenario
-    )
-    if not archival_quarantine and not wrong_match_candidate:
+    scenario = outcome.post_commit_wrong_match_scenario
+    if not rejection_scenario_is_wrong_match_candidate(scenario):
+        # Bad rips and every other folder/audio-integrity or quality-only
+        # reject were never quarantined (issue #1077, D3): there is no
+        # worklist row to link evidence to or hand to the reducer.
         return
     try:
         evidence_id = db.get_import_job_candidate_evidence_id(job.id)
@@ -1071,11 +1033,11 @@ def _cleanup_committed_wrong_match_rejection(
                 evidence_id,
                 direct_attribution=True,
             )
-        if archival_quarantine:
-            # The source is now protected archival evidence, whether
-            # quarantine moved it or failed closed at the original path.
-            # Never hand either location to the independent Wrong Matches
-            # deletion reducer.
+        if not rejection_scenario_is_delete_eligible(scenario):
+            # World failures with a reviewable folder, and every unknown or
+            # novel scenario string, are kept + banned + visible (issue
+            # #1077, D1/D4/D6): the evaluate-and-possibly-delete reducer
+            # never even looks at them.
             return
         if cleanup_wrong_match_fn is None:
             from lib.wrong_match_cleanup_service import cleanup_wrong_match
@@ -1753,11 +1715,7 @@ def process_claimed_job(
                 ))
             )
             terminal_job = terminal.job
-            post_commit_cleanup = _run_post_commit_cleanup(
-                db,
-                outcome,
-                download_log_id=terminal.download_log_id,
-            )
+            post_commit_cleanup = _run_post_commit_cleanup(outcome)
             if post_commit_cleanup is not None:
                 merged = db.merge_import_job_result(
                     job.id,
@@ -1844,11 +1802,7 @@ def process_claimed_job(
             ))
         )
         terminal_job = terminal.job
-        post_commit_cleanup = _run_post_commit_cleanup(
-            db,
-            outcome,
-            download_log_id=terminal.download_log_id,
-        )
+        post_commit_cleanup = _run_post_commit_cleanup(outcome)
         if post_commit_cleanup is not None:
             merged = db.merge_import_job_result(
                 job.id,
@@ -1882,7 +1836,7 @@ def process_claimed_job(
     if failed is None:
         return None
     terminal_job = failed
-    post_commit_cleanup = _run_post_commit_cleanup(db, outcome)
+    post_commit_cleanup = _run_post_commit_cleanup(outcome)
     if post_commit_cleanup is not None:
         merged = db.merge_import_job_result(
             job.id,

@@ -139,6 +139,11 @@ _LEAF_SEAM_PATTERNS = [
     # contract is covered separately; generated writer properties patch the
     # move while exercising the real rejection and cleanup orchestration.
     re.compile(r"^lib\.download_rejection\.move_failed_import_curated$"),
+    # audio_corrupt's outright-delete helper: a thin ``shutil.rmtree`` /
+    # ``os.rmdir`` wrapper (issue #1077, F4) — patching it to raise is the
+    # most direct way to prove a failed delete never blocks the rejection
+    # record, without reaching into the filesystem itself.
+    re.compile(r"^lib\.download_rejection\._cleanup_staged_dir$"),
     # builtins / stdlib
     re.compile(r"^builtins\."),
     re.compile(r"\.print$"),

@@ -71,6 +71,7 @@ from web.routes._server_access import _server
 from web.routes.pipeline import _serialize_import_job
 from web.triage_runner import TriageRunner
 from web.wrong_match_file_service import (
+    WrongMatchSourceRefused,
     WrongMatchSourceUnavailable,
     build_wrong_match_explorer,
     resolve_wrong_match_stream_file,
@@ -540,6 +541,12 @@ def get_wrong_match_explorer(h: RouteHandler, params: dict[str, list[str]]) -> N
         # Refused observation: retryable world failure, never "not found".
         h._error(str(exc), 503)
         return
+    except WrongMatchSourceRefused as exc:
+        # Containment decision (issue #1099): the name may exist, we
+        # refuse to read it. Neither a definitive absence (404) nor a
+        # retryable world failure (503) — a semantic violation (422).
+        h._error(str(exc), 422)
+        return
     except FileNotFoundError as exc:
         h._error(str(exc), 404)
         return
@@ -601,6 +608,11 @@ def get_wrong_match_audio(
         return
     except WrongMatchSourceUnavailable as exc:
         h._error(str(exc), 503)
+        return
+    except WrongMatchSourceRefused as exc:
+        # Containment decision (issue #1099): same 422 verdict as the
+        # explorer, for the identical reason.
+        h._error(str(exc), 422)
         return
     except FileNotFoundError as exc:
         h._error(str(exc), 404)

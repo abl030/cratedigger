@@ -29,6 +29,7 @@ docs/generated-testing.md.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import unittest
 from dataclasses import dataclass
@@ -186,11 +187,64 @@ def assert_write_ahead_holds(world: EnqueueWorld, order: list[str], db: FakePipe
         )
 
 
+# Decisive-arm pins (issue #1094 per-clause proof). The suite tier draws
+# owned worlds in roughly one example of five and owned+accepted worlds in
+# 7 of 150, so the arms that decide who may CANCEL a stranger's transfer
+# rested on a handful of derandomized draws that any edit to this property
+# reshuffles. Each world below is producible by ``enqueue_worlds``; the
+# names say which clause it makes decisive.
+_OWNED_ACCEPTED_MULTIFILE = EnqueueWorld(
+    filenames=(_FILENAMES[0], _FILENAMES[1]),
+    username=_USERNAMES[0],
+    request_id=4242,
+    attempt_fp="fp-decisive",
+    has_download_ownership=True,
+    enqueue_outcome="accepted",
+)
+_OWNED_REJECTED = EnqueueWorld(
+    filenames=(_FILENAMES[0], _FILENAMES[2]),
+    username=_USERNAMES[1],
+    request_id=4243,
+    attempt_fp="fp-rejected",
+    has_download_ownership=True,
+    enqueue_outcome="rejected",
+)
+_OWNED_UNKNOWN = EnqueueWorld(
+    filenames=(_FILENAMES[3],),
+    username=_USERNAMES[2],
+    request_id=4244,
+    attempt_fp=None,
+    has_download_ownership=True,
+    enqueue_outcome="unknown",
+)
+_UNOWNED_WRITER_WITHOUT_REQUEST = EnqueueWorld(
+    filenames=(_FILENAMES[4],),
+    username=_USERNAMES[0],
+    request_id=None,
+    attempt_fp="fp-unowned",
+    has_download_ownership=True,
+    enqueue_outcome="accepted",
+)
+_UNOWNED_REQUEST_WITHOUT_WRITER = EnqueueWorld(
+    filenames=(_FILENAMES[0],),
+    username=_USERNAMES[1],
+    request_id=4245,
+    attempt_fp=None,
+    has_download_ownership=False,
+    enqueue_outcome="accepted",
+)
+
+
 class TestGeneratedTransferLedgerWriteAhead(unittest.TestCase):
     """T1 property: write-ahead ownership over generated enqueue worlds,
     including rejected and unknown POST outcomes."""
 
     @given(world=enqueue_worlds())
+    @example(world=_OWNED_ACCEPTED_MULTIFILE)
+    @example(world=_OWNED_REJECTED)
+    @example(world=_OWNED_UNKNOWN)
+    @example(world=_UNOWNED_WRITER_WITHOUT_REQUEST)
+    @example(world=_UNOWNED_REQUEST_WITHOUT_WRITER)
     def test_write_ahead_holds_across_worlds(self, world):
         order, db = _run_enqueue(world)
         assert_write_ahead_holds(world, order, db)
@@ -223,6 +277,15 @@ def prune_worlds(draw) -> tuple[LedgerPruneRow, ...]:
         age_seconds = draw(st.one_of(
             st.just(_RETENTION_SECONDS),
             st.integers(min_value=0, max_value=400 * 24 * 60 * 60),
+            # Third branch (issue #1094): the two branches above put a row
+            # strictly PAST the cutoff -- the only state in which the prune
+            # policy decides anything at all -- in 14 of 151 suite-tier
+            # worlds, because Hypothesis' integer generation is biased
+            # toward small values. Without it the accepted/active
+            # protection arm ran in 2 worlds, one of them the @example pin.
+            st.integers(
+                min_value=_RETENTION_SECONDS + 1,
+                max_value=400 * 24 * 60 * 60),
         ))
         rows.append(LedgerPruneRow(
             request_id=i + 1,
@@ -301,98 +364,167 @@ class TestGeneratedTransferLedgerPrune(unittest.TestCase):
         assert_prune_matches_oracle(rows, survivors_after)
 
 
-class TestTransferLedgerCheckersTripOnViolations(unittest.TestCase):
-    """Known-bad self-tests: each checker must trip on a planted
-    violating world/state."""
+def _exactly(message: str) -> str:
+    """Anchor a clause's COMPLETE message.
 
-    def test_write_ahead_checker_trips_when_post_precedes_ledger(self):
-        world = EnqueueWorld(
+    A bare substring proves only that *something* raised: every clause in
+    ``assert_write_ahead_holds`` raises ``AssertionError``, and a
+    short-circuiting checker evaluates them in order, so a self-test whose
+    world violates two clauses silently proves the earlier one while going
+    on advertising the later one in its name (docs/generated-testing.md
+    "Per-clause proof").
+    """
+    return "^" + re.escape(message) + "$"
+
+
+class TestTransferLedgerCheckersTripOnViolations(unittest.TestCase):
+    """Known-bad self-tests: each checker clause must trip on a planted
+    violating world/state, and must trip with ITS OWN message.
+
+    Every clause of ``assert_write_ahead_holds`` and
+    ``assert_prune_matches_oracle`` owns at least one row below, and each
+    world makes exactly that clause's condition true while every earlier
+    clause in the same function passes.
+    """
+
+    def test_write_ahead_clause_trips_with_its_own_message(self):
+        owned_single = EnqueueWorld(
             filenames=("a.flac",), username="p0", request_id=1,
             attempt_fp=None, has_download_ownership=True,
             enqueue_outcome="accepted")
-        db = FakePipelineDB()
-        with self.assertRaises(AssertionError):
-            assert_write_ahead_holds(world, ["post:1", "ledger:1"], db)
-
-    def test_write_ahead_checker_trips_when_a_file_is_unledgered(self):
-        world = EnqueueWorld(
+        owned_pair = EnqueueWorld(
             filenames=("a.flac", "b.flac"), username="p0", request_id=1,
             attempt_fp=None, has_download_ownership=True,
             enqueue_outcome="accepted")
-        db = FakePipelineDB()
-        db.record_transfer_enqueue([
-            TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
-        ])
-        with self.assertRaises(AssertionError):
-            assert_write_ahead_holds(world, ["ledger:1", "post:2"], db)
-
-    def test_write_ahead_checker_trips_on_unowned_world_with_a_row(self):
-        world = EnqueueWorld(
+        unowned = EnqueueWorld(
             filenames=("a.flac",), username="p0", request_id=None,
             attempt_fp=None, has_download_ownership=False,
             enqueue_outcome="accepted")
-        db = FakePipelineDB()
-        db.record_transfer_enqueue([
-            TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
-        ])
-        with self.assertRaises(AssertionError):
-            assert_write_ahead_holds(world, ["post:1"], db)
-
-    def test_write_ahead_checker_trips_when_failed_post_is_confirmed(self):
-        world = EnqueueWorld(
+        fingerprinted = EnqueueWorld(
+            filenames=("a.flac",), username="p0", request_id=1,
+            attempt_fp="fp1", has_download_ownership=True,
+            enqueue_outcome="accepted")
+        unknown_post = EnqueueWorld(
             filenames=("a.flac",), username="p0", request_id=1,
             attempt_fp=None, has_download_ownership=True,
             enqueue_outcome="unknown")
-        db = FakePipelineDB()
-        db.record_transfer_enqueue([
-            TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
-        ])
-        db.confirm_transfer_enqueue("p0", "a.flac")
-        with self.assertRaisesRegex(AssertionError, "destructive ownership"):
-            assert_write_ahead_holds(world, ["ledger:1", "post:1"], db)
-
-    def test_write_ahead_checker_trips_when_rejected_post_is_confirmed(self):
-        world = EnqueueWorld(
+        rejected_post = EnqueueWorld(
             filenames=("a.flac",), username="p0", request_id=1,
             attempt_fp=None, has_download_ownership=True,
             enqueue_outcome="rejected")
-        db = FakePipelineDB()
-        db.record_transfer_enqueue([
-            TransferLedgerRow(request_id=1, username="p0", filename="a.flac"),
-        ])
-        db.confirm_transfer_enqueue("p0", "a.flac")
-        with self.assertRaisesRegex(AssertionError, "destructive ownership"):
-            assert_write_ahead_holds(world, ["ledger:1", "post:1"], db)
+        row_a = TransferLedgerRow(
+            request_id=1, username="p0", filename="a.flac")
+        unfingerprinted = TransferLedgerRow(
+            request_id=1, username="p0", filename="a.flac",
+            attempt_fingerprint=None)
 
-    def test_prune_checker_trips_when_an_expected_survivor_is_missing(self):
-        rows = (LedgerPruneRow(
-            request_id=1,
-            age_seconds=200 * 24 * 60 * 60,
-            request_status="wanted",
-            accepted=True,
-        ),)
-        with self.assertRaises(AssertionError):
-            assert_prune_matches_oracle(rows, survivors_after=set())
+        cases: tuple[
+            tuple[str, EnqueueWorld, list[str], list[TransferLedgerRow],
+                  bool, str],
+            ...,
+        ] = (
+            # (clause, world, order, seeded rows, confirm rows?, expected)
+            (
+                "L1 the enqueue POST was never issued",
+                owned_single, [], [], False,
+                _exactly(
+                    f"enqueue POST was never issued for {owned_single!r}"),
+            ),
+            (
+                "L2 an un-owned world wrote ledger rows",
+                unowned, ["post:1"], [row_a], False,
+                _exactly(
+                    "un-owned world wrote ledger rows it shouldn't have: "
+                    f"{[row_a]!r}"),
+            ),
+            (
+                "L3 an owned world never wrote a ledger row",
+                owned_single, ["post:1"], [], False,
+                _exactly(
+                    f"owned world never wrote a ledger row: {owned_single!r}"),
+            ),
+            (
+                "L4 the ledger write did not precede the POST",
+                owned_single, ["post:1", "ledger:1"], [row_a], True,
+                _exactly(
+                    "ledger write did not precede the POST: "
+                    f"order={['post:1', 'ledger:1']!r}"),
+            ),
+            (
+                "L5 an enqueued file was never ledgered",
+                owned_pair, ["ledger:1", "post:2"], [row_a], True,
+                # Prefix anchor: the tail interpolates two set reprs, whose
+                # iteration order is not stable across interpreter runs.
+                "^ledgered filenames ",
+            ),
+            (
+                "L6 the attempt fingerprint drifted at the boundary",
+                fingerprinted, ["ledger:1", "post:1"], [unfingerprinted], True,
+                _exactly(
+                    f"attempt_fingerprint drifted: {unfingerprinted!r} vs "
+                    f"{'fp1'!r}"),
+            ),
+            (
+                "L7a an UNKNOWN POST was promoted to destructive ownership",
+                unknown_post, ["ledger:1", "post:1"], [row_a], True,
+                "^destructive ownership ",
+            ),
+            (
+                "L7b a REJECTED POST was promoted to destructive ownership",
+                rejected_post, ["ledger:1", "post:1"], [row_a], True,
+                "^destructive ownership ",
+            ),
+        )
 
-    def test_prune_checker_trips_when_old_pending_active_row_survives(self):
-        rows = (LedgerPruneRow(
-            request_id=1,
-            age_seconds=200 * 24 * 60 * 60,
-            request_status="downloading",
-            accepted=False,
-        ),)
-        with self.assertRaises(AssertionError):
-            assert_prune_matches_oracle(rows, survivors_after={1})
+        for clause, world, order, rows, confirm, expected in cases:
+            with self.subTest(clause=clause):
+                db = FakePipelineDB()
+                if rows:
+                    db.record_transfer_enqueue(list(rows))
+                if confirm:
+                    for row in rows:
+                        db.confirm_transfer_enqueue(row.username, row.filename)
+                with self.assertRaisesRegex(AssertionError, expected):
+                    assert_write_ahead_holds(world, order, db)
 
-    def test_prune_checker_trips_when_exact_boundary_row_is_missing(self):
-        rows = (LedgerPruneRow(
-            request_id=1,
-            age_seconds=_RETENTION_SECONDS,
-            request_status=None,
-            accepted=False,
-        ),)
-        with self.assertRaises(AssertionError):
-            assert_prune_matches_oracle(rows, survivors_after=set())
+    def test_prune_clause_trips_with_its_own_message(self):
+        cases = (
+            (
+                "an accepted row for an active request was pruned",
+                (LedgerPruneRow(
+                    request_id=1,
+                    age_seconds=200 * 24 * 60 * 60,
+                    request_status="wanted",
+                    accepted=True,
+                ),),
+                set[int](),
+            ),
+            (
+                "an old PENDING row for an active request survived",
+                (LedgerPruneRow(
+                    request_id=1,
+                    age_seconds=200 * 24 * 60 * 60,
+                    request_status="downloading",
+                    accepted=False,
+                ),),
+                {1},
+            ),
+            (
+                "the exact retention boundary row was pruned",
+                (LedgerPruneRow(
+                    request_id=1,
+                    age_seconds=_RETENTION_SECONDS,
+                    request_status=None,
+                    accepted=False,
+                ),),
+                set[int](),
+            ),
+        )
+        for clause, rows, survivors_after in cases:
+            # Prefix anchor: the tail interpolates two set reprs.
+            with self.subTest(clause=clause), self.assertRaisesRegex(
+                    AssertionError, "^prune survivors diverged: "):
+                assert_prune_matches_oracle(rows, survivors_after)
 
 
 if __name__ == "__main__":

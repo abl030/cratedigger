@@ -1023,11 +1023,9 @@ def dispatch_import_core(
                         quality_ranks=(
                             cfg.quality_ranks if cfg is not None else None
                         ),
-                        audio_quarantine_root=_processing_quarantine_root(
-                            path,
-                            beets_cfg,
+                        processing_dir=(
+                            cfg.processing_dir if cfg is not None else None
                         ),
-                        preserve_corrupt_source=force,
                     )
                 quality_evidence_action_file = _write_quality_evidence_action_file(
                     candidate=evidence_gate.candidate,
@@ -1541,6 +1539,20 @@ def dispatch_import_core(
         post_commit_cleanup=(
             PostCommitCleanup(
                 staged_path=post_commit_staged_path,
+                # Issue #1077, R4-1 (round-4 review): a force job's success
+                # path is ``<processing_dir>/albums/force-action-<id>`` — a
+                # direct child of the shared albums root, reaching
+                # ``_run_post_commit_cleanup`` the same as the reject path's
+                # deferred plan. Without this guard the empty-parent prune
+                # there could ``rmdir`` the Nix-provisioned root right out
+                # from under every other request, shielded today only by
+                # the lock-shard side effect (see the R3-3 guard on the
+                # reject path for the same reasoning).
+                staged_path_protected_parent=(
+                    processing_albums_dir(cfg.processing_dir)
+                    if post_commit_staged_path is not None and cfg is not None
+                    else None
+                ),
                 duplicate_guard_source_path=post_commit_duplicate_guard_path,
                 duplicate_guard_staging_dir=(
                     post_commit_duplicate_guard_staging_dir

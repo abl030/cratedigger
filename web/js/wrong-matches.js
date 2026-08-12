@@ -1,6 +1,6 @@
 // @ts-check
 import { API, toast } from './state.js';
-import { esc, externalReleaseUrl, sourceLabel } from './util.js';
+import { esc, externalReleaseUrl, sourceLabel, wrongMatchExplorerFailureCopy } from './util.js';
 import { renderReplaceButton } from './release_actions.js';
 import {
   handleProcessingLockedConflict,
@@ -401,8 +401,11 @@ async function ensureWrongMatchExplorer(logId) {
 
   _entryExplorerState.set(logId, 'loading');
   mount.innerHTML = '<div style="color:#666;font-size:0.78em;padding:8px 0;">Loading file explorer…</div>';
+  /** @type {number|undefined} */
+  let status;
   try {
     const r = await fetch(`${API}/api/wrong-matches/explorer?download_log_id=${encodeURIComponent(String(logId))}`);
+    status = r.status;
     const data = await r.json();
     // ``unavailable`` is a 200 payload the server DELIBERATELY builds:
     // nothing readable plus recorded refusals. It is the honest listing,
@@ -426,11 +429,29 @@ async function ensureWrongMatchExplorer(logId) {
     }
   } catch (e) {
     _entryExplorerState.delete(logId);
-    // A whole-root refusal answers 503 with the server's own reason
-    // (``Wrong-match files could not be read: … (EACCES)``). Dropping it
-    // told the operator nothing at all about a world that needs fixing.
-    const detail = (e instanceof Error && e.message) ? ` ${esc(e.message)}` : '';
-    mount.innerHTML = `<div style="color:#f88;font-size:0.78em;padding:8px 0;">Failed to load file explorer.${detail} <button class="p-btn" style="margin-left:6px;" onclick="event.stopPropagation(); window.reloadWrongMatchExplorer(${logId})">Retry</button></div>`;
+    // Issue #1099: the whole-root refusal reaching this catch answers
+    // 404, 422, or 503 — a definitive absence, a containment DECISION a
+    // retry can never satisfy, or a retryable world failure — and this
+    // block used to say "Failed to load file explorer" for all three
+    // alike. ``wrongMatchExplorerFailureCopy`` is the one pure function
+    // that turns the status into honest, status-specific copy; the
+    // server's own reason (``Wrong-match files could not be read: …
+    // (EACCES)``) still rides along as detail.
+    const serverMessage = (e instanceof Error && e.message) ? e.message : '';
+    const copy = wrongMatchExplorerFailureCopy(status, serverMessage);
+    // The Retry button follows the SAME #1086 doctrine the per-entry
+    // notice already applies inside a 200 payload: offer Retry only
+    // where retrying could plausibly change the answer. A 422 is a
+    // containment DECISION — re-fetching the same name answers the
+    // same refusal every time — so it gets no Retry; 404/503/unknown
+    // all stay retryable (a genuinely-missing folder can reappear, a
+    // world failure can clear, and an unrecognised failure shape
+    // should not silently strand the operator with no way to reload).
+    const retryAllowed = status !== 422;
+    const retryButton = retryAllowed
+      ? ` <button class="p-btn" style="margin-left:6px;" onclick="event.stopPropagation(); window.reloadWrongMatchExplorer(${logId})">Retry</button>`
+      : '';
+    mount.innerHTML = `<div style="color:#f88;font-size:0.78em;padding:8px 0;">${esc(copy)}${retryButton}</div>`;
   }
 }
 

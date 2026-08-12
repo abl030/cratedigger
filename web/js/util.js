@@ -481,3 +481,45 @@ export function isExternalAuthInterruption(response) {
   if (response.status === 401) return true;
   return response.redirected === true;
 }
+
+/**
+ * Status-honest lead copy for a failed Wrong Matches file-explorer load.
+ *
+ * `web/js/wrong-matches.js`'s `ensureWrongMatchExplorer` used to say
+ * "Failed to load file explorer" for every non-ok response, whatever the
+ * server's HTTP status actually meant. But the server (issue #1099,
+ * `web/wrong_match_file_service.py::_classify_wrong_match_refusal`)
+ * distinguishes three DIFFERENT verdicts behind that one catch block: a
+ * 404 is a definitive absence, a 503 is a retryable world failure that
+ * proved nothing, and a 422 is a containment DECISION a retry can never
+ * satisfy. Collapsing all three into one generic sentence is the same
+ * category error #1063/#1086 fixed at the payload level, one layer up —
+ * a correct status code behind copy that lies about what happened.
+ *
+ * @param {number|null|undefined} status - HTTP status of the failed fetch, if known
+ * @param {string|null|undefined} serverMessage - the server's own `error`/`message` field, if any
+ * @returns {string}
+ */
+export function wrongMatchExplorerFailureCopy(status, serverMessage) {
+  const detail = serverMessage ? ` ${serverMessage}` : '';
+  if (status === 404) {
+    return `This wrong-match folder could not be located.${detail}`;
+  }
+  if (status === 422) {
+    // Never say "not found" here: the name may well exist — the server
+    // refused to read it on containment grounds, and retrying will not
+    // change that answer.
+    return `This wrong-match folder was refused by a containment decision — retrying will not help.${detail}`;
+  }
+  if (status === 503) {
+    // Deliberately does NOT promise transience: this bucket also carries
+    // an unclassified residual refusal (`unspecified` — e.g. a
+    // `failed_path` lexically outside every configured quarantine root),
+    // which is not a disk hiccup that a retry will clear — it is a data
+    // mismatch that stays wrong until an operator fixes it. "May be
+    // temporary" is honest about BOTH members of the bucket; "a retry
+    // may succeed" would overclaim for the second one.
+    return `This wrong-match folder could not be read — the storage refused or failed; this may be temporary.${detail}`;
+  }
+  return `Failed to load file explorer.${detail}`;
+}
