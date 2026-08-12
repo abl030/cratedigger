@@ -1076,9 +1076,11 @@ class TestImportOperationFenceChecker(unittest.TestCase):
                         active_automation_import_job_id=7,
                     ),
                 ),
-                f"{IMPORT_JOB_AUTOMATION} ambiguous Beets operation parked at "
-                "'recovery_required' — CLAUDE.md invariant 11 forbids a state "
-                "whose only exit is an operator command",
+                (
+                    f"{IMPORT_JOB_AUTOMATION} ambiguous Beets operation "
+                    "parked at 'recovery_required' — CLAUDE.md invariant 11 "
+                    "forbids a state whose only exit is an operator command"
+                ),
             ),
             (
                 "4 an ambiguous operation left a non-terminal queue status",
@@ -1090,8 +1092,10 @@ class TestImportOperationFenceChecker(unittest.TestCase):
                     replay_claimed=False,
                     db=self._db(),
                 ),
-                f"{IMPORT_JOB_FORCE} ambiguous Beets operation left job status "
-                "'queued', want 'failed'",
+                (
+                    f"{IMPORT_JOB_FORCE} ambiguous Beets operation left job "
+                    "status 'queued', want 'failed'"
+                ),
             ),
             (
                 "5 the terminalized ambiguous job became claimable again",
@@ -1118,8 +1122,11 @@ class TestImportOperationFenceChecker(unittest.TestCase):
                         active_automation_import_job_id=7,
                     ),
                 ),
-                "automation self-heal left request status 'processing', want "
-                "'wanted' — the request must go back into the search pool",
+                (
+                    "automation self-heal left request status 'processing', "
+                    "want 'wanted' — the request must go back into the "
+                    "search pool"
+                ),
             ),
             (
                 "7 automation self-heal left its owner pointer attached",
@@ -1146,8 +1153,10 @@ class TestImportOperationFenceChecker(unittest.TestCase):
                     replay_claimed=False,
                     db=self._db(status="wanted"),
                 ),
-                "automation self-heal recorded no world-failure audit row "
-                f"carrying {_WORLD_FAILURE_AUDIT_PREFIX!r}",
+                (
+                    "automation self-heal recorded no world-failure audit "
+                    f"row carrying {_WORLD_FAILURE_AUDIT_PREFIX!r}"
+                ),
             ),
             (
                 "8b the newest audit row carries no world-failure label",
@@ -1159,8 +1168,10 @@ class TestImportOperationFenceChecker(unittest.TestCase):
                     replay_claimed=False,
                     db=self._db_with_linked_audit(status="wanted"),
                 ),
-                "automation self-heal recorded no world-failure audit row "
-                f"carrying {_WORLD_FAILURE_AUDIT_PREFIX!r}",
+                (
+                    "automation self-heal recorded no world-failure audit "
+                    f"row carrying {_WORLD_FAILURE_AUDIT_PREFIX!r}"
+                ),
             ),
             (
                 "9 a force job mutated the caller's request lifecycle",
@@ -1172,9 +1183,11 @@ class TestImportOperationFenceChecker(unittest.TestCase):
                     replay_claimed=False,
                     db=self._db_with_linked_audit(status="unsearchable"),
                 ),
-                f"{IMPORT_JOB_FORCE} ambiguous operation changed request "
-                "status to 'unsearchable'; force/YouTube own no request "
-                "lifecycle to self-heal",
+                (
+                    f"{IMPORT_JOB_FORCE} ambiguous operation changed request "
+                    "status to 'unsearchable'; force/YouTube own no request "
+                    "lifecycle to self-heal"
+                ),
             ),
             (
                 "10a a terminal force job surfaced nothing in Recents",
@@ -1202,9 +1215,10 @@ class TestImportOperationFenceChecker(unittest.TestCase):
             ),
         ]
         for clause, invoke, message in cases:
-            with self.subTest(clause=clause):
-                with self.assertRaisesRegex(AssertionError, _exact(message)):
-                    invoke()
+            with self.subTest(clause=clause), self.assertRaisesRegex(
+                AssertionError, _exact(message),
+            ):
+                invoke()
 
     def test_operation_fence_accepts_its_two_early_returns(self) -> None:
         """Must-still-work: the checker's non-violating worlds stay silent."""
@@ -1248,8 +1262,10 @@ class TestImportOperationFenceChecker(unittest.TestCase):
             (
                 "14 a retryable force recovery destroyed its own retry input",
                 False, "queued", False,
-                "retryable force recovery deleted the action copy it still "
-                "needs",
+                (
+                    "retryable force recovery deleted the action copy it "
+                    "still needs"
+                ),
             ),
         ]
         for clause, launched, final_status, exists, message in cases:
@@ -1429,9 +1445,10 @@ class TestImportOperationFenceChecker(unittest.TestCase):
             ),
         ]
         for clause, invoke, message in cases:
-            with self.subTest(clause=clause):
-                with self.assertRaisesRegex(AssertionError, _exact(message)):
-                    invoke()
+            with self.subTest(clause=clause), self.assertRaisesRegex(
+                AssertionError, _exact(message),
+            ):
+                invoke()
 
     def test_non_automation_lifecycle_accepts_the_driven_worlds(self) -> None:
         """Must-still-work: an undisturbed driven failure passes every clause."""
