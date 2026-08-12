@@ -545,7 +545,7 @@ function renderUnfindableCard(unfindable) {
         <div class="metric-row"><span>Breaker tripped</span><strong class="${latest ? breakerClass : 'metric-muted'}">${latest ? (latest.breaker_tripped ? 'yes' : 'no') : 'n/a'}</strong></div>
       </div>
       <table class="dashboard-table">
-        <thead><tr><th>Run</th><th>Attempted</th><th>Categorised</th><th>Downgraded</th><th>No change</th><th>Probe failed</th><th>Breaker</th></tr></thead>
+        <thead><tr><th>Run</th><th>Probes</th><th>Categorised</th><th>Downgraded</th><th>No change</th><th>Probe failed</th><th>Breaker</th></tr></thead>
         <tbody>
           ${runs.map(r => `
             <tr>

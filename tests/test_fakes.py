@@ -4547,6 +4547,40 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
             [900, 686],
         )
 
+    def test_record_unfindable_run_metrics_rejects_non_partitioning_counts(
+        self,
+    ):
+        """Mirror of unfindable_run_metrics_partition_check (migration
+        077, #1112 review round 2 R5) -- the six RESULT_* outcome counts
+        must sum to candidates_processed exactly."""
+        import psycopg2.errors
+        db = FakePipelineDB()
+        with self.assertRaises(psycopg2.errors.CheckViolation):
+            db.record_unfindable_run_metrics(
+                cohort_total=10, due_backlog_at_start=5,
+                batch_limit=5, candidates_processed=5, probes_attempted=5,
+                breaker_tripped=False, duration_seconds=1.0,
+                categorised_count=1, no_change_count=1,  # sums to 2, not 5
+            )
+
+    def test_record_unfindable_run_metrics_rejects_wrong_probes_attempted(
+        self,
+    ):
+        """Mirror of unfindable_run_metrics_probes_attempted_check
+        (migration 077, #1112 review round 2 R5) -- probes_attempted
+        must equal candidates_processed minus not_due_count minus
+        request_not_found_count."""
+        import psycopg2.errors
+        db = FakePipelineDB()
+        with self.assertRaises(psycopg2.errors.CheckViolation):
+            db.record_unfindable_run_metrics(
+                cohort_total=10, due_backlog_at_start=5,
+                batch_limit=5, candidates_processed=5,
+                probes_attempted=5,  # should be 5 - 0 - 2 = 3
+                breaker_tripped=False, duration_seconds=1.0,
+                no_change_count=3, request_not_found_count=2,
+            )
+
     def test_import_job_preview_methods_mirror_core_lifecycle(self):
         from lib.import_queue import IMPORT_JOB_FORCE
 

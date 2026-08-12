@@ -327,10 +327,12 @@ def _is_submit_failure(result: UnfindableServiceResult) -> bool:
     non-transient rejections like a 429 or an empty ``artist_name`` guard
     failure; three such rows sorting to the head of every future batch
     — since a failed probe never advances ``last_artist_probe_at`` —
-    would trip the breaker at 3/240 forever, dropping cohort drain to
-    0/day). Only a budget-exhausted retryable-409 is a genuine transient
-    slskd-connectivity signal; an unrelated one-off or deterministic
-    failure on a single row must not stop the whole batch.
+    would trip the breaker at 3 consecutive (of the then-K=100 batch,
+    before ``DEFAULT_BATCH_SIZE`` was raised to 240 in issue #1112)
+    forever, dropping cohort drain to 0/day). Only a budget-exhausted
+    retryable-409 is a genuine transient slskd-connectivity signal; an
+    unrelated one-off or deterministic failure on a single row must not
+    stop the whole batch.
     """
     return (
         result.outcome == RESULT_PROBE_FAILED

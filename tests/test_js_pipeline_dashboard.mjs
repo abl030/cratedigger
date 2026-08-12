@@ -241,6 +241,8 @@ console.log('renderUnfindableCard() shows latest-run facts, outcome breakdown, a
         downgraded_count: 1,
         no_change_count: 0,
         probe_failed_count: 77,
+        not_due_count: 0,
+        request_not_found_count: 3,
         breaker_tripped: true,
       },
       {
@@ -254,14 +256,16 @@ console.log('renderUnfindableCard() shows latest-run facts, outcome breakdown, a
         downgraded_count: 1,
         no_change_count: 210,
         probe_failed_count: 24,
+        not_due_count: 0,
+        request_not_found_count: 0,
         breaker_tripped: false,
       },
     ],
     backlog_trend: {
       current_backlog: 686,
       series: [
-        {sampled_at: '2026-08-11T00:10:00+00:00', due_backlog_at_start: 900, probes_attempted: 240},
-        {sampled_at: '2026-08-12T00:10:00+00:00', due_backlog_at_start: 686, probes_attempted: 81},
+        {sampled_at: '2026-08-11T00:10:00+00:00', due_backlog_at_start: 900, candidates_processed: 240},
+        {sampled_at: '2026-08-12T00:10:00+00:00', due_backlog_at_start: 686, candidates_processed: 84},
       ],
     },
   });

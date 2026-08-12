@@ -17,6 +17,8 @@ import conftest  # noqa: F401 - starts and migrates isolated PostgreSQL
 
 import scripts.cratedigger_deploy_hold as deploy_hold_module
 from scripts.cratedigger_deploy_hold import (
+    _DRAIN_TIMEOUT_SECONDS,
+    _PRODUCER_DRAIN_TIMEOUT_SECONDS,
     CONTROL_DIR,
     CONTROLLED_WORKER_UNITS,
     GATE_STOPPED_UNITS,
@@ -76,7 +78,10 @@ def _acquire_hold_pre_1078_order(backend: DeployHoldBackend) -> None:
     backend.daemon_reload()
     backend.stop_units(TIMER_UNITS)
     _ensure_owned_manual_hold(backend)
-    _drain_services(backend, SERVICE_UNITS)
+    _drain_services(
+        backend, SERVICE_UNITS,
+        timeout_seconds=_PRODUCER_DRAIN_TIMEOUT_SECONDS,
+    )
     _assert_clean_old_lifecycle(backend)
     backend.write_phase(PHASE_HELD)
 
@@ -97,10 +102,16 @@ def _drain_producers_then_hold_pre_must_fix_1(backend: DeployHoldBackend) -> Non
         _ensure_owned_control_mask(backend, timer)
     backend.daemon_reload()
     backend.stop_units(TIMER_UNITS)
-    _drain_services(backend, PRODUCER_SERVICE_UNITS)
+    _drain_services(
+        backend, PRODUCER_SERVICE_UNITS,
+        timeout_seconds=_PRODUCER_DRAIN_TIMEOUT_SECONDS,
+    )
     _wait_automation_queue_drained(backend)
     _ensure_owned_manual_hold(backend)
-    _drain_services(backend, GATE_STOPPED_UNITS)
+    _drain_services(
+        backend, GATE_STOPPED_UNITS,
+        timeout_seconds=_DRAIN_TIMEOUT_SECONDS,
+    )
 
 
 class _PostgresLifecyclePreflightBackend(RealSystemdBackend):
@@ -675,9 +686,10 @@ class TestKnownBadPre1078AcquireOrder(unittest.TestCase):
 
         # No timeout patch needed: the fake's clock advances by the real
         # requested duration per sleep() call and its sleep is instant, so
-        # the unpatched production _DRAIN_TIMEOUT_SECONDS/1s-poll bound
-        # (21600s as of issue #1112) runs here in 21600 fast Python loop
-        # iterations at the exact bound production uses.
+        # the unpatched production _PRODUCER_DRAIN_TIMEOUT_SECONDS/1s-poll
+        # bound (21600s -- PRODUCER_SERVICE_UNITS includes cratedigger-
+        # unfindable, issue #1112 review round 2) runs here in 21600 fast
+        # Python loop iterations at the exact bound production uses.
         with self.assertRaisesRegex(
             DeployHoldError,
             "timed out waiting for exact services to become stably "

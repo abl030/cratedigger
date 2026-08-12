@@ -6853,6 +6853,39 @@ class FakePipelineDB:
         not_due_count: int = 0,
         request_not_found_count: int = 0,
     ) -> int:
+        partition_sum = (
+            categorised_count + downgraded_count + no_change_count
+            + probe_failed_count + not_due_count + request_not_found_count
+        )
+        if partition_sum != candidates_processed:
+            # Mirror unfindable_run_metrics_partition_check (migration
+            # 077, #1112 review round 2 R5) -- a fake that accepts any
+            # combination shipped a row production rejects (#146-style
+            # fake-mirrors-CHECK precedent).
+            import psycopg2.errors
+
+            raise psycopg2.errors.CheckViolation(
+                'new row for relation "unfindable_run_metrics" violates '
+                'check constraint '
+                '"unfindable_run_metrics_partition_check" '
+                f'(sum={partition_sum}, '
+                f'candidates_processed={candidates_processed})'
+            )
+        expected_probes_attempted = (
+            candidates_processed - not_due_count - request_not_found_count
+        )
+        if probes_attempted != expected_probes_attempted:
+            # Mirror unfindable_run_metrics_probes_attempted_check
+            # (migration 077, #1112 review round 2 R5).
+            import psycopg2.errors
+
+            raise psycopg2.errors.CheckViolation(
+                'new row for relation "unfindable_run_metrics" violates '
+                'check constraint '
+                '"unfindable_run_metrics_probes_attempted_check" '
+                f'(probes_attempted={probes_attempted}, '
+                f'expected={expected_probes_attempted})'
+            )
         row = UnfindableRunMetricsRow(
             id=len(self.unfindable_run_metrics) + 1,
             created_at=_utcnow(),
@@ -6895,7 +6928,7 @@ class FakePipelineDB:
             {
                 "sampled_at": r["created_at"],
                 "due_backlog_at_start": r["due_backlog_at_start"],
-                "probes_attempted": r["probes_attempted"],
+                "candidates_processed": r["candidates_processed"],
             }
             for r in chronological
         ]

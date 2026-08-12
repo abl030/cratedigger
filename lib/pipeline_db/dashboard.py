@@ -265,7 +265,11 @@ class _DashboardMixin(_PipelineDBBase):
             {
                 "sampled_at": r["created_at"],
                 "due_backlog_at_start": r["due_backlog_at_start"],
-                "probes_attempted": r["probes_attempted"],
+                # candidates_processed, not probes_attempted (review round
+                # 2, R nit): the truer per-run capacity number -- every
+                # candidate the batch actually touched, not just the
+                # subset that fired a probe.
+                "candidates_processed": r["candidates_processed"],
             }
             for r in chronological
         ]

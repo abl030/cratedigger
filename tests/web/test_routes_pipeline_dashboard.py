@@ -39,7 +39,7 @@ class TestPipelineDashboardRouteContracts(_FakeDbWebServerCase):
         "current_backlog", "latest_sample_at", "series",
     }
     DASHBOARD_UNFINDABLE_BACKLOG_TREND_POINT_FIELDS: ClassVar = {
-        "sampled_at", "due_backlog_at_start", "probes_attempted",
+        "sampled_at", "due_backlog_at_start", "candidates_processed",
     }
     DASHBOARD_SEARCH_WINDOW_FIELDS: ClassVar = {
         "label", "hours", "searches", "distinct_requests",

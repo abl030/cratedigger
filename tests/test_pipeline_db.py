@@ -5697,7 +5697,7 @@ class TestPipelineDashboardMetrics(unittest.TestCase):
             [900, 686],
         )
         self.assertEqual(
-            [pt["probes_attempted"] for pt in trend["series"]],
+            [pt["candidates_processed"] for pt in trend["series"]],
             [240, 90],
         )
 
@@ -13778,12 +13778,19 @@ class TestUnfindableDetectionPipelineDB(unittest.TestCase):
         skip assertion)."""
         db = make_db()
 
+        # candidates_processed (243) = categorised(11) + downgraded(2) +
+        # no_change(190) + probe_failed(34) + not_due(1) +
+        # request_not_found(5); probes_attempted (237) = candidates_processed
+        # - not_due(1) - request_not_found(5). Migration 077's two CHECK
+        # constraints (#1112 review round 2, R5) enforce both arithmetically
+        # -- a fixture that violates either now fails INSERT, not just the
+        # partition-invariant prose three lines away.
         kwargs: _RecordUnfindableRunMetricsKwargs = {
             "cohort_total": 1301,
             "due_backlog_at_start": 686,
             "batch_limit": 240,
-            "candidates_processed": 246,
-            "probes_attempted": 240,
+            "candidates_processed": 243,
+            "probes_attempted": 237,
             "categorised_count": 11,
             "downgraded_count": 2,
             "no_change_count": 190,
@@ -13839,11 +13846,52 @@ class TestUnfindableDetectionPipelineDB(unittest.TestCase):
                 cohort_total=100, due_backlog_at_start=100,
                 batch_limit=240, candidates_processed=probes,
                 probes_attempted=probes,
+                # no_change_count=probes satisfies migration 077's
+                # partition CHECK (the six outcome counts must sum to
+                # candidates_processed) with every other count at its
+                # zero default.
+                no_change_count=probes,
                 breaker_tripped=False, duration_seconds=1.0,
             )
 
         rows = db.get_unfindable_run_metrics(limit=10)
         self.assertEqual([r["probes_attempted"] for r in rows], [30, 20, 10])
+
+    def test_record_unfindable_run_metrics_rejects_non_partitioning_counts(
+        self,
+    ) -> None:
+        """unfindable_run_metrics_partition_check (migration 077, #1112
+        review round 2 R5): the six RESULT_* outcome counts must sum to
+        candidates_processed exactly, DB-enforced."""
+        from psycopg2.errors import CheckViolation
+
+        db = make_db()
+        with self.assertRaises(CheckViolation):
+            db.record_unfindable_run_metrics(
+                cohort_total=10, due_backlog_at_start=5,
+                batch_limit=5, candidates_processed=5, probes_attempted=5,
+                breaker_tripped=False, duration_seconds=1.0,
+                categorised_count=1, no_change_count=1,  # sums to 2, not 5
+            )
+
+    def test_record_unfindable_run_metrics_rejects_wrong_probes_attempted(
+        self,
+    ) -> None:
+        """unfindable_run_metrics_probes_attempted_check (migration 077,
+        #1112 review round 2 R5): probes_attempted must equal
+        candidates_processed minus not_due_count minus
+        request_not_found_count, DB-enforced."""
+        from psycopg2.errors import CheckViolation
+
+        db = make_db()
+        with self.assertRaises(CheckViolation):
+            db.record_unfindable_run_metrics(
+                cohort_total=10, due_backlog_at_start=5,
+                batch_limit=5, candidates_processed=5,
+                probes_attempted=5,  # should be 5 - 0 - 2 = 3
+                breaker_tripped=False, duration_seconds=1.0,
+                no_change_count=3, request_not_found_count=2,
+            )
 
 
 @requires_postgres

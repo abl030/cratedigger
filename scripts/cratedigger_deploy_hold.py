@@ -96,16 +96,41 @@ _LINK_MARKER_PREFIX = "owned-link-"
 _INHIBITOR_MARKER_PREFIX = "owned-inhibitor-"
 _INVOCATION_FILE = "ordinary-invocation"
 _INVOCATION_RE = re.compile(r"[0-9a-f]{32}")
-# Bounds the pre-hold drain of TIMER_DRIVEN_PRODUCER_UNITS (main,
-# unfindable, watchdog) -- must exceed the longest of those units'
-# TimeoutStartSec, or an acquire launched while that unit is mid-run times
-# out here with a misleading DeployHoldError instead of just waiting for
-# it to finish. cratedigger-unfindable.service is currently the long pole
-# at TimeoutStartSec="5h" (nix/module.nix, issue #1112 item 1); 21600.0
-# (6h) keeps a 1h margin above it. Resize this alongside any future change
-# to that unit's TimeoutStartSec (or a new TIMER_DRIVEN_PRODUCER_UNITS
-# member with a longer cap).
-_DRAIN_TIMEOUT_SECONDS = 21600.0
+# Bounds every ``_drain_services`` call whose unit set includes
+# ``cratedigger-unfindable.service`` (review round 2, R2): ``_verify_
+# authoritative_hold`` (:1194), ``_drain_producers_then_hold`` (:1418,
+# :1421), ``recover_held``'s cold-start branch (:1499), and
+# ``open_main_timer`` (:1766) -- verified individually against
+# ``SERVICE_UNITS`` / ``TIMER_DRIVEN_PRODUCER_UNITS`` / ``PRODUCER_
+# SERVICE_UNITS``, which all include ``UNFINDABLE_SERVICE``. Must exceed
+# the longest BOUNDED run among the units it drains, or an
+# acquire/verify/recover launched while that run is mid-flight times out
+# here with a misleading ``DeployHoldError`` instead of just waiting for
+# it to finish. That is deliberately NOT "the longest of these units'
+# TimeoutStartSec" (round 1's wrong framing, R1): the watchdog service
+# (``cratedigger-metadata-gate-watchdog.service``) has
+# ``TimeoutStartUSec=infinity`` -- no start timeout at all -- and is
+# nixosconfig-owned, so its shape cannot be cited from this repo (see the
+# ``TIMER_DRIVEN_PRODUCER_UNITS`` comment above); ``cratedigger.service``
+# caps at 1h. ``cratedigger-unfindable.service`` at ``TimeoutStartSec=
+# "5h"`` (nix/module.nix, issue #1112 item 1) is the only member with a
+# materially long bounded run, so it is what this constant is sized
+# against. 21600.0 (6h) keeps a 1h margin over it. Resize alongside any
+# future change to that unit's ``TimeoutStartSec``.
+_PRODUCER_DRAIN_TIMEOUT_SECONDS = 21600.0
+# Bounds ``_wait_controlled_workers_active`` (:1289 -- all four call
+# sites: :1662/:1692 from ``abort_hold``, :1734/:1743 from
+# ``prepare_controlled``) and the main+YouTube drain at :1744
+# (``prepare_controlled``, ``_drain_services(backend, (MAIN_SERVICE,
+# YOUTUBE_SERVICE))``). Neither unit set this constant bounds ever
+# contains ``cratedigger-unfindable.service``, so it keeps the pre-
+# #1112 value (2h) rather than following ``_PRODUCER_DRAIN_TIMEOUT_
+# SECONDS`` up to 6h (round 2, R2). This matters most for
+# ``abort_hold``, which calls ``_wait_controlled_workers_active`` TWICE
+# on its worst-case path -- silently tripling that budget to 6h would
+# have tripled abort's worst-case hang on a crash-looping controlled
+# worker, an unrelated and unintended regression.
+_DRAIN_TIMEOUT_SECONDS = 7200.0
 _POLL_SECONDS = 1.0
 _STABLE_SAMPLES = 2
 # The automation queue drains while the importer/preview controlled workers
@@ -113,9 +138,8 @@ _STABLE_SAMPLES = 2
 # drain. 30 minutes matches the bound the deploy skill already uses for the
 # analogous "wait for the triggered nixos-upgrade invocation" step, and a
 # genuinely stuck queue should surface quickly rather than hold the deploy
-# for the full _DRAIN_TIMEOUT_SECONDS service-drain budget. Polling is a
-# live pipeline-cli subprocess round trip, so it uses its own, coarser
-# cadence.
+# for the full multi-hour service-drain budget. Polling is a live
+# pipeline-cli subprocess round trip, so it uses its own, coarser cadence.
 _QUEUE_DRAIN_TIMEOUT_SECONDS = 1800.0
 _QUEUE_POLL_SECONDS = 5.0
 
@@ -1109,8 +1133,18 @@ def _assert_load_states(
 def _drain_services(
     backend: DeployHoldBackend,
     services: tuple[str, ...],
+    *,
+    timeout_seconds: float,
 ) -> None:
-    deadline = backend.monotonic() + _DRAIN_TIMEOUT_SECONDS
+    """Drain ``services`` to stably inactive and job-free.
+
+    ``timeout_seconds`` is deliberately required, not defaulted: callers
+    whose unit set includes ``cratedigger-unfindable.service`` pass
+    ``_PRODUCER_DRAIN_TIMEOUT_SECONDS``; every other caller passes
+    ``_DRAIN_TIMEOUT_SECONDS`` (review round 2, R2) -- see both
+    constants' definitions for the exact call-site list each one bounds.
+    """
+    deadline = backend.monotonic() + timeout_seconds
     stable_samples = 0
     while backend.monotonic() < deadline:
         safe = True
@@ -1191,7 +1225,10 @@ def _verify_authoritative_hold(backend: DeployHoldBackend) -> None:
     backend.daemon_reload()
     _assert_load_states(backend, masked=TIMER_UNITS, loaded=())
     backend.stop_units(TIMER_UNITS)
-    _drain_services(backend, SERVICE_UNITS)
+    _drain_services(
+        backend, SERVICE_UNITS,
+        timeout_seconds=_PRODUCER_DRAIN_TIMEOUT_SECONDS,
+    )
     _assert_no_start_inhibitors(backend)
 
 
@@ -1415,10 +1452,16 @@ def _drain_producers_then_hold(backend: DeployHoldBackend) -> None:
     (the first drain already proved them inactive) but free: nothing
     between the two drains restarts them.
     """
-    _drain_services(backend, TIMER_DRIVEN_PRODUCER_UNITS)
+    _drain_services(
+        backend, TIMER_DRIVEN_PRODUCER_UNITS,
+        timeout_seconds=_PRODUCER_DRAIN_TIMEOUT_SECONDS,
+    )
     _wait_automation_queue_drained(backend)
     _ensure_owned_manual_hold(backend)
-    _drain_services(backend, SERVICE_UNITS)
+    _drain_services(
+        backend, SERVICE_UNITS,
+        timeout_seconds=_PRODUCER_DRAIN_TIMEOUT_SECONDS,
+    )
 
 
 def acquire_hold(backend: DeployHoldBackend) -> None:
@@ -1496,7 +1539,10 @@ def recover_held(backend: DeployHoldBackend) -> None:
         # cycle has legitimately moved on, so re-proving it could only brick a
         # recovery that exists to restore safety.
         _ensure_owned_manual_hold(backend)
-        _drain_services(backend, SERVICE_UNITS)
+        _drain_services(
+            backend, SERVICE_UNITS,
+            timeout_seconds=_PRODUCER_DRAIN_TIMEOUT_SECONDS,
+        )
         _clear_owned_inhibitors(backend)
     # Clear a previously captured ordinary-successor identity only once the
     # branch above has actually re-proven the full HELD boundary -- not
@@ -1741,7 +1787,10 @@ def prepare_controlled(backend: DeployHoldBackend) -> None:
     backend.daemon_reload()
     _assert_load_states(backend, masked=TIMER_UNITS, loaded=())
     _wait_controlled_workers_active(backend)
-    _drain_services(backend, (MAIN_SERVICE, YOUTUBE_SERVICE))
+    _drain_services(
+        backend, (MAIN_SERVICE, YOUTUBE_SERVICE),
+        timeout_seconds=_DRAIN_TIMEOUT_SECONDS,
+    )
     _release_owned_inhibitor(backend, MAIN_SERVICE)
     backend.start_unit(MAIN_SERVICE)
     backend.write_phase(PHASE_PREPARED_CONTROLLED)
@@ -1763,7 +1812,10 @@ def open_main_timer(backend: DeployHoldBackend) -> None:
     if backend.manual_hold_is_owned() or backend.manual_hold_active():
         raise DeployHoldError("manual hold still exists before main-timer release")
     _assert_owned_links(backend, TIMER_UNITS)
-    _drain_services(backend, PRODUCER_SERVICE_UNITS)
+    _drain_services(
+        backend, PRODUCER_SERVICE_UNITS,
+        timeout_seconds=_PRODUCER_DRAIN_TIMEOUT_SECONDS,
+    )
     _release_owned_link(backend, MAIN_TIMER)
     backend.daemon_reload()
     _assert_load_states(

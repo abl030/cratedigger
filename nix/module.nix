@@ -2476,16 +2476,18 @@ in {
         #
         # Recomputed for DEFAULT_BATCH_SIZE=240 (issue #1112 item 1,
         # 2026-08-12; was 100/"2h"). Live per-probe wall time over the
-        # last five daily runs (journalctl, 2026-08-08..12): 59.2s,
-        # 56.0s, 52.5s, 43.1s -- all healthy -- and 27.6s on 2026-08-12,
-        # which is NOT nominal: that run was the #1090 409-storm (50
-        # probe_failed), and a failed probe fails fast without a full
-        # search cycle, so it understates true per-probe cost and is
-        # excluded. Healthy nominal is ~52-59s/probe -> a K=240 batch
-        # costs ~3.5-4h. 5h keeps ~1.25x headroom over that range --
-        # comparable to the headroom the prior 2h/~98min pairing held --
-        # while still surfacing genuinely stuck runs well inside the 24h
-        # daily cadence.
+        # last five daily runs (journalctl, 2026-08-08..12): 2026-08-08
+        # 59.2s, 2026-08-09 56.0s, 2026-08-10 52.5s -- clean, healthy runs
+        # -- versus 2026-08-11 43.1s (23/100 probe_failed) and 2026-08-12
+        # 27.6s (the #1090 409-storm, 50/100 probe_failed), both partially
+        # or fully degraded by this comment's own criterion: a failed
+        # probe fails fast without a full search cycle, so more failures
+        # pull the average down and understate true per-probe cost.
+        # Excluding both degraded runs, healthy nominal is ~52-59s/probe
+        # -> a K=240 batch costs ~3.5-4h. 5h keeps ~1.25x headroom over
+        # that range -- comparable to the headroom the prior 2h/~98min
+        # pairing held -- while still surfacing genuinely stuck runs well
+        # inside the 24h daily cadence.
         TimeoutStartSec = "5h";
       };
     };

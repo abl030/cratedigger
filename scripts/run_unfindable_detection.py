@@ -22,18 +22,20 @@ distinct from the pre-existing config/schema abort (``EXIT_CONFIG_ABORT``)
 returned before any work runs. See ``_process_batch``.
 
 Run-metrics telemetry (issue #1112): every batch pass that actually
-starts -- a fully classified run AND a breaker-tripped one -- writes one
-``unfindable_run_metrics`` row via ``PipelineDB.record_unfindable_run_metrics``
-so the web dashboard can show run health without scraping journal logs.
-A run that aborts before any probe (``EXIT_CONFIG_ABORT`` -- missing
-slskd config or a behind/missing schema) writes NOTHING: there is no
-cohort/backlog reading to report, and a behind schema may not even have
-the table yet. The write is non-fatal (review round 1 F10): a DB error
-on the telemetry insert is logged and swallowed, never turned into a
-failed unit for a run that otherwise classified cleanly. Accepted
-residual: a SIGTERM/OOM-killed run leaves no row, indistinguishable
-here from the timer never firing -- the systemd unit's own
-failure/inactive state is the operator's signal for that case.
+starts -- a fully classified run AND a breaker-tripped one -- attempts
+one ``unfindable_run_metrics`` write via
+``PipelineDB.record_unfindable_run_metrics`` so the web dashboard can
+show run health without scraping journal logs. A run that aborts before
+any probe (``EXIT_CONFIG_ABORT`` -- missing slskd config or a
+behind/missing schema) writes NOTHING: there is no cohort/backlog
+reading to report, and a behind schema may not even have the table yet.
+The write is non-fatal (review round 1 F10): a DB error on the
+telemetry insert is logged and swallowed rather than retried or
+propagated, never turned into a failed unit for a run that otherwise
+classified cleanly -- so one attempted write does not guarantee one
+persisted row. Accepted residual: a SIGTERM/OOM-killed run leaves no
+row, indistinguishable here from the timer never firing -- the systemd
+unit's own failure/inactive state is the operator's signal for that case.
 
 The script is intentionally narrow: it does not import any
 cursor-mutating PipelineDB methods, plan-service module, or
@@ -197,17 +199,19 @@ def _process_batch(
     nothing); this function only decides the process exit code, it never
     marks or parks any request.
 
-    Writes exactly one ``unfindable_run_metrics`` row per call —
+    Attempts exactly one ``unfindable_run_metrics`` write per call —
     including a breaker-tripped call — via
     ``db.record_unfindable_run_metrics``. A failed/partial run is
     exactly the signal an operator needs to see on the dashboard. The
     write itself is non-fatal to the run (issue #1112 review F10): a DB
-    hiccup on the telemetry insert is logged and swallowed, never turned
-    into a failed unit for a run that otherwise classified cleanly.
-    Accepted residual: a run that is SIGTERM'd/OOM-killed before reaching
-    this point leaves no row at all, indistinguishable here from the
-    timer simply never firing — the systemd unit's own failure/inactive
-    state is the operator's signal for that case, not this table.
+    hiccup on the telemetry insert is logged and swallowed rather than
+    retried or propagated, so it never turns a run that otherwise
+    classified cleanly into a failed unit — but it also means that one
+    call does not guarantee one persisted row. Accepted residual: a run
+    that is SIGTERM'd/OOM-killed before reaching this point leaves no
+    row at all, indistinguishable here from the timer simply never
+    firing — the systemd unit's own failure/inactive state is the
+    operator's signal for that case, not this table.
     """
     started = time.monotonic()
     batch: UnfindableBatchResult = service.categorise_due_batch(limit=int(limit))
