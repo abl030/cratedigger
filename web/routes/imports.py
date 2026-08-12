@@ -1076,6 +1076,8 @@ class WrongMatchTriageCancelRequest(BaseModel):
     affect a sweep it did not itself observe running.
     """
 
+    model_config = ConfigDict(strict=True, extra="forbid")
+
     arm_pending: bool = False
 
 

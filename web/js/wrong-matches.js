@@ -1558,6 +1558,9 @@ export const __test__ = {
   pollImportJob: _pollImportJob,
   actionableDeleteEntries,
   bulkTriageWrongMatches,
+  claimTriageFollow: _claimTriageFollow,
+  releaseTriageFollow: _releaseTriageFollow,
+  retryTriageStatusOnce: _retryTriageStatusOnce,
   cleanupSummaryToast,
   convergeRequestBody,
   convergeWrongMatches,
@@ -1902,15 +1905,22 @@ function _applyTriageButtonState(state) {
 
 /**
  * `started_at` of the sweep currently owned by an active follower, or
- * `null` when nothing is being followed (issue #1106 F5). Keyed on
+ * `null` when nothing is being followed (issue #1106 F5/N3). Keyed on
  * `started_at` rather than a bare boolean: a boolean stays "true" for
  * the WHOLE terminal chain (poll -> toast -> refresh -> re-derive), so
  * a genuinely NEW sweep discovered while an OLDER chain's refresh is
  * still unwinding got no follower at all under the boolean design —
- * silently stranding "Cleaning..." forever. Keying on the value means a
- * different `started_at` always claims its own follower, and a stale
- * response belonging to an already-superseded sweep can never win
- * against whichever follower currently owns the CURRENT one.
+ * silently stranding "Cleaning..." forever. A claim is refused (not
+ * blindly overwritten) when its value is the one already held, OR
+ * lexicographically OLDER than it (ISO-8601 strings compare
+ * correctly this way) — otherwise an out-of-order/delayed response
+ * describing an already-superseded sweep could steal the slot from
+ * the follower that owns the CURRENT one and produce duplicate
+ * terminal toasts/refreshes for the same sweep. This only guards the
+ * CLAIM; `_followTriageSweepToCompletion` separately verifies its own
+ * claimed value against the final status before acting on it, since
+ * the slot can still move on to a genuinely newer sweep while a poll
+ * is in flight.
  * @type {string | null}
  */
 let _triageFollowedStartedAt = null;
@@ -1925,8 +1935,11 @@ let _triageFollowedStartedAt = null;
  * @returns {boolean}
  */
 function _claimTriageFollow(startedAt) {
-  if (startedAt != null && startedAt === _triageFollowedStartedAt) return false;
-  if (startedAt != null) _triageFollowedStartedAt = startedAt;
+  if (startedAt == null) return true;
+  if (_triageFollowedStartedAt != null && startedAt <= _triageFollowedStartedAt) {
+    return false;
+  }
+  _triageFollowedStartedAt = startedAt;
   return true;
 }
 
@@ -1996,7 +2009,14 @@ async function _applyTriageTerminalState(status) {
 
 /**
  * Poll one sweep to completion and apply the shared terminal handling,
- * exclusively owning it via `_claimTriageFollow` (issue #1106 F5).
+ * exclusively owning it via `_claimTriageFollow` (issue #1106 F5/N3).
+ * Before acting on the poll's result, verifies it actually describes
+ * the SAME sweep this call claimed — `_claimTriageFollow` only refuses
+ * an incoming claim that is stale relative to the slot; it does not
+ * freeze the slot for the lifetime of this poll, so a genuinely newer
+ * sweep can still take over while `pollTriageStatus()` is in flight. A
+ * result naming a different `started_at` is silently skipped here —
+ * whichever follower legitimately owns that sweep will report it.
  * @param {{state: string, started_at: string|null, summary: Object|null, error: string|null}} [knownStatus]
  *   an already-fetched RUNNING status, when the caller has one (the
  *   render-time derive always does, from its own status fetch);
@@ -2013,7 +2033,12 @@ async function _followTriageSweepToCompletion(knownStatus) {
     const finalStatus = status && status.state !== 'running'
       ? status
       : await pollTriageStatus();
-    await _applyTriageTerminalState(finalStatus);
+    const mismatch = startedAt != null && finalStatus
+      && typeof finalStatus.started_at === 'string'
+      && finalStatus.started_at !== startedAt;
+    if (!mismatch) {
+      await _applyTriageTerminalState(finalStatus);
+    }
   } finally {
     _releaseTriageFollow(startedAt);
   }
@@ -2038,6 +2063,18 @@ function _applyTriageStatus(status) {
 }
 
 /**
+ * Guards `_retryTriageStatusOnce` to at most one in-flight retry at a
+ * time (issue #1106 N7b). Without this, several renders failing their
+ * OWN initial status fetch in close succession (`loadWrongMatches`'s
+ * two derive calls under one transient blip, a Refresh racing a tab
+ * switch, …) would each schedule their own independent ~3s timer and
+ * fetch, wasting N redundant requests and risking the toolbar
+ * flickering between whichever result resolves last.
+ * @type {boolean}
+ */
+let _triageRetryInFlight = false;
+
+/**
  * One bounded (~3s) background retry after a failed status fetch,
  * fire-and-forget so the caller (an awaited render-time derive) never
  * blocks on it (issue #1106 F4). Without this, a single transient
@@ -2047,17 +2084,35 @@ function _applyTriageStatus(status) {
  * exactly the reachability bug this issue exists to fix. If the retry
  * ALSO fails, paint the conservative `'unknown'` shape instead of
  * leaving the stale one.
+ *
+ * The toolbar is deliberately left unpainted (whatever the initial
+ * render's static markup already shows) for the ~3s before this retry
+ * fires (issue #1106 N7a) — accepted as benign: the worst case is an
+ * operator clicking Cleanup during that window while a sweep is
+ * actually running, which 409s, and the click path already treats a
+ * 409 exactly like a 202 (follow the sweep that is in flight either
+ * way), so the window self-corrects rather than mis-starting anything.
  * @returns {Promise<void>}
  */
 async function _retryTriageStatusOnce() {
+  if (_triageRetryInFlight) return;
   if (!_triageCleanupBtn() && !_triageStopBtn()) return;
-  await new Promise((resolve) => setTimeout(resolve, 3000));
-  const status = await _fetchTriageStatus();
-  if (status === undefined) {
-    _applyTriageButtonState('unknown');
-    return;
+  _triageRetryInFlight = true;
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+    const status = await _fetchTriageStatus();
+    // #1106 N5: `== null` catches BOTH a transport/parse failure
+    // (`undefined`, from `_fetchTriageStatus`) and a literal JSON
+    // `null` body (a malformed-but-successfully-parsed response) --
+    // either way there is nothing safe to read `.state` off of.
+    if (status == null) {
+      _applyTriageButtonState('unknown');
+      return;
+    }
+    _applyTriageStatus(status);
+  } finally {
+    _triageRetryInFlight = false;
   }
-  _applyTriageStatus(status);
 }
 
 /**
@@ -2072,7 +2127,13 @@ async function _retryTriageStatusOnce() {
 async function _deriveTriageButtonState() {
   if (!_triageCleanupBtn() && !_triageStopBtn()) return;
   const status = await _fetchTriageStatus();
-  if (status === undefined) {
+  // #1106 N5: `== null` catches BOTH a transport/parse failure
+  // (`undefined`) and a literal JSON `null` body -- a malformed
+  // payload must degrade to the retry/unknown path, not throw an
+  // uncaught rejection out of this (unawaited-by-try-block, since F6)
+  // call and abort the caller entirely (`loadWrongMatches()` would
+  // never even reach its own queue fetch).
+  if (status == null) {
     void _retryTriageStatusOnce();
     return;
   }
@@ -2145,10 +2206,23 @@ export async function stopWrongMatchTriage() {
       }
       return;
     }
-    // Success: leave the button disabled/"Stopping..." — the in-flight
-    // poll loop (started either by the click that began the sweep, or
-    // by the render-time attach — issue #1106) restores both buttons
-    // once the sweep reaches a terminal state.
+    // Success: normally, leave the button disabled/"Stopping..." — the
+    // in-flight poll loop (started either by the click that began the
+    // sweep, or by the render-time attach — issue #1106) restores both
+    // buttons once the sweep reaches a terminal state. But if NOTHING
+    // is currently being followed (issue #1106 N7c) -- the toolbar can
+    // be in the conservative 'unknown' shape, where neither the initial
+    // status check nor its one retry ever actually observed 'running',
+    // so no follower was ever attached -- there is nothing left to
+    // restore this button, and it would stay stuck on "Stopping..."
+    // forever. Schedule one fresh derive to cover exactly that gap; a
+    // follower that IS already attached owns the correct terminal
+    // handling for this exact sweep and is left alone (re-deriving on
+    // top of it would just flicker the button while cancellation is
+    // still being observed between rows, not fix anything).
+    if (_triageFollowedStartedAt === null) {
+      void _deriveTriageButtonState();
+    }
   } catch (_e) {
     toast('Stop request failed', true);
     const failedStopBtn = _triageStopBtn();

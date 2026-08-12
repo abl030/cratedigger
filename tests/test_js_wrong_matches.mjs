@@ -811,18 +811,36 @@ console.log('stopWrongMatchTriage() posts to the cancel endpoint and stays disab
 {
   installStorage();
   const dom = installDom();
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (fn) => { fn(); return 0; };
   const calls = [];
   globalThis.fetch = async (url, options = {}) => {
     calls.push({ url, options });
-    return { ok: true, status: 200, json: async () => ({ state: 'running' }) };
+    if (url === '/api/wrong-matches/triage/cancel') {
+      return { ok: true, status: 200, json: async () => ({ state: 'running' }) };
+    }
+    // #1106 N7c: with nothing currently followed, a successful cancel
+    // schedules one fresh derive -- answer it as already terminal so
+    // the dangling follow attempt settles immediately.
+    return {
+      ok: true, status: 200,
+      json: async () => ({
+        state: 'cancelled', started_at: '2026-06-11T00:00:00+00:00',
+        finished_at: '2026-06-11T00:01:00+00:00', error: null,
+        summary: { processed: 1, deleted: 1, cancelled: true },
+      }),
+    };
   };
   // #1106: no button argument — always the currently-registered node.
   await __test__.stopWrongMatchTriage();
-  assertEqual(calls.length, 1, 'posts exactly one cancel request');
   assertEqual(calls[0].url, '/api/wrong-matches/triage/cancel', 'posts to the canonical cancel route');
   assertEqual(calls[0].options.method, 'POST', 'cancel is a POST');
   assertEqual(dom.stopBtn.disabled, true, 'button stays disabled after a successful cancel request');
   assertEqual(dom.stopBtn.textContent, 'Stopping...', 'button shows the in-flight stopping state');
+  assert(calls.some(call => call.url === '/api/wrong-matches/triage/status'),
+    'N7c: with no follower attached, a successful cancel also schedules a fresh derive so the button is not stranded');
+  await flushMicrotasks(50);
+  globalThis.setTimeout = realSetTimeout;
 }
 
 console.log('stopWrongMatchTriage() re-enables the button when the request itself fails');
@@ -842,6 +860,8 @@ console.log('stopWrongMatchTriage() mutates the CURRENTLY registered Stop node, 
 {
   installStorage();
   const dom = installDom();
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (fn) => { fn(); return 0; };
   // Simulate a mid-sweep re-render replacing the pane's innerHTML: a
   // BRAND NEW Stop node takes over the same id, and the original
   // installDom() node is now detached — exactly what happened to
@@ -856,13 +876,24 @@ console.log('stopWrongMatchTriage() mutates the CURRENTLY registered Stop node, 
     if (url === '/api/wrong-matches/triage/cancel') {
       return { ok: true, status: 200, json: async () => ({ state: 'running' }) };
     }
-    throw new Error(`unexpected fetch: ${url}`);
+    // #1106 N7c: a successful cancel with nothing followed schedules a
+    // fresh derive -- answer it so the dangling attempt settles.
+    return {
+      ok: true, status: 200,
+      json: async () => ({
+        state: 'cancelled', started_at: '2026-06-11T00:00:00+00:00',
+        finished_at: '2026-06-11T00:01:00+00:00', error: null,
+        summary: { processed: 1, deleted: 1, cancelled: true },
+      }),
+    };
   };
   await __test__.stopWrongMatchTriage();
   assertEqual(freshStopBtn.disabled, true, 'the currently-registered node is mutated');
   assertEqual(freshStopBtn.textContent, 'Stopping...', 'the currently-registered node shows the in-flight label');
   assertEqual(staleStopBtn.disabled, false, 'a node registered before the swap is left untouched');
   assertEqual(staleStopBtn.textContent, 'Stop', 'a node registered before the swap is left untouched');
+  await flushMicrotasks(50);
+  globalThis.setTimeout = realSetTimeout;
 }
 
 console.log('bulkTriageWrongMatches() surfaces a failed sweep and restores the button');
@@ -2381,6 +2412,147 @@ console.log('a status fetch that fails twice (initial + retry) paints the conser
     'Cleanup disables when the status genuinely cannot be determined — cannot verify it is safe to start another sweep');
   assertEqual(dom.stopBtn.disabled, false,
     'Stop enables — harmless now that an unarmed cancel with nothing actually running is a pure no-op (#1106 F3)');
+  globalThis.setTimeout = realSetTimeout;
+}
+
+console.log('claimTriageFollow()/releaseTriageFollow() refuse a claim for an OLDER started_at, never steal the slot (#1106 N3)');
+{
+  const EARLIER = '2026-08-12T00:00:00+00:00';
+  const LATER = '2026-08-12T02:00:00+00:00';
+  const EVEN_LATER = '2026-08-12T03:00:00+00:00';
+
+  assertEqual(__test__.claimTriageFollow(LATER), true,
+    'the first claim for a value succeeds (nothing held yet)');
+  assertEqual(__test__.claimTriageFollow(EARLIER), false,
+    'a claim for a value OLDER than the held one is refused — it must not steal the slot');
+  assertEqual(__test__.claimTriageFollow(LATER), false,
+    'a claim for the ALREADY-held value is refused (already claimed)');
+  assertEqual(__test__.claimTriageFollow(EVEN_LATER), true,
+    'a claim for a genuinely NEWER value is allowed to take over');
+  __test__.releaseTriageFollow(LATER);
+  assertEqual(__test__.claimTriageFollow(EVEN_LATER), false,
+    'releasing a value that is NOT currently held is a no-op — the real holder keeps the slot');
+  __test__.releaseTriageFollow(EVEN_LATER);
+  assertEqual(__test__.claimTriageFollow(EARLIER), true,
+    'the slot is free again once the value actually held is released');
+  // Leave the module-level slot clean for later tests in this file.
+  __test__.releaseTriageFollow(EARLIER);
+}
+
+console.log('a follower skips terminal handling when its poll result names a DIFFERENT sweep than the one it claimed (#1106 N3)');
+{
+  installStorage();
+  const dom = installDom();
+  __test__.renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (fn) => { fn(); return 0; };
+
+  const CLAIMED = '2026-08-12T00:00:00+00:00';
+  const DIFFERENT = '2026-08-12T05:00:00+00:00';
+  let statusCalls = 0;
+  globalThis.fetch = async (url) => {
+    if (url === '/api/wrong-matches') {
+      return { ok: true, status: 200, json: async () => wrongMatchesData() };
+    }
+    if (url === '/api/wrong-matches/triage/status') {
+      statusCalls += 1;
+      if (statusCalls === 1) {
+        return {
+          ok: true, status: 200,
+          json: async () => ({
+            state: 'running', started_at: CLAIMED,
+            finished_at: null, error: null, summary: null,
+          }),
+        };
+      }
+      // The poll's own next check reports a DIFFERENT sweep's terminal
+      // state entirely -- the world moved on to a newer sweep while
+      // this follower's poll was in flight. It must not misattribute
+      // this result to the sweep it originally claimed.
+      return {
+        ok: true, status: 200,
+        json: async () => ({
+          state: 'failed', started_at: DIFFERENT,
+          finished_at: '2026-08-12T05:05:00+00:00',
+          error: 'the DIFFERENT sweep genuinely failed', summary: null,
+        }),
+      };
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+
+  await __test__.refreshWrongMatches();
+  await flushMicrotasks(50);
+  assert(
+    !dom.toast.textContent.includes('the DIFFERENT sweep genuinely failed'),
+    'a poll result naming a different started_at is never toasted as this follower\'s own outcome',
+  );
+  globalThis.setTimeout = realSetTimeout;
+}
+
+console.log('a literal-null status body degrades instead of aborting loadWrongMatches() before its own queue fetch (#1106 N5)');
+{
+  installStorage();
+  const dom = installDom();
+  // loadWrongMatches() short-circuits on its own module-scoped
+  // `_loaded` cache, which an earlier test may have already set.
+  invalidateWrongMatches();
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (fn) => { fn(); return 0; };
+  let queueFetched = false;
+  globalThis.fetch = async (url) => {
+    if (url === '/api/wrong-matches') {
+      queueFetched = true;
+      return { ok: true, status: 200, json: async () => wrongMatchesData() };
+    }
+    if (url === '/api/wrong-matches/triage/status') {
+      // A malformed-but-successfully-parsed response: literal JSON
+      // null, not a fetch/parse failure -- distinct from `undefined`.
+      return { ok: true, status: 200, json: async () => null };
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+
+  await __test__.loadWrongMatches();
+
+  assert(queueFetched,
+    'a null status body does not stop loadWrongMatches() from reaching its own queue fetch (issue #1106 N5)');
+  assert(dom.wrongMatches.innerHTML.includes('Scott Walker'),
+    'the pane actually rendered the fetched queue data, proving the try block ran to completion');
+  await flushMicrotasks(60);
+  globalThis.setTimeout = realSetTimeout;
+}
+
+console.log('_retryTriageStatusOnce() is single-flight — a second concurrent call is a no-op (#1106 N7b)');
+{
+  installStorage();
+  installDom();
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (fn) => { fn(); return 0; };
+  let statusCalls = 0;
+  globalThis.fetch = async (url) => {
+    if (url === '/api/wrong-matches/triage/status') {
+      statusCalls += 1;
+      return {
+        ok: true, status: 200,
+        json: async () => ({
+          state: 'idle', started_at: null, finished_at: null,
+          error: null, summary: null,
+        }),
+      };
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+
+  // Two concurrent retry attempts -- without the single-flight guard,
+  // both would independently sleep and fetch, doubling the request
+  // count for no benefit.
+  const first = __test__.retryTriageStatusOnce();
+  const second = __test__.retryTriageStatusOnce();
+  await Promise.all([first, second]);
+
+  assertEqual(statusCalls, 1,
+    'only ONE retry actually performs its status fetch -- the concurrent second call is a no-op');
   globalThis.setTimeout = realSetTimeout;
 }
 

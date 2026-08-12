@@ -50,15 +50,31 @@ from lib.wrong_match_cleanup_service import WrongMatchCleanupSummary
 
 logger = logging.getLogger("cratedigger")
 
-# Bounded consume window for a cancel recorded while no sweep is running
-# (#1106). This exists ONLY to cover the CLI's own Ctrl-C racing its
-# still-in-flight start POST -- a window of ordinary HTTP request-handling
-# latency (milliseconds), not minutes. Ten seconds is generous slack above
-# that (a contended lock or a GC pause on the request thread is still
-# covered) while staying far short of the sweep's own multi-minute
-# runtime, and short enough that an operator's cancel of an
-# ALREADY-FINISHED sweep does not silently poison whatever they start
-# next, unrelated, minutes later.
+# Bounded consume window for an ARMED cancel recorded while no sweep is
+# running (#1106). Only the CLI's own Ctrl-C handler ever arms
+# (#1106 F3) -- an unarmed cancel (the web UI's Stop button, the
+# standalone wrong-match-triage-cancel command) never touches this
+# window at all, so the ALREADY-FINISHED-sweep hazard the window used
+# to be justified against no longer applies to those callers; the arm
+# gate itself is what removed it, not the window's length.
+#
+# What the window still bounds, now that only one caller can ever arm:
+# the CLI's Ctrl-C can land not just while its OWN start POST is still
+# in flight (milliseconds), but also in the up-to-~2s gap between the
+# sweep finishing server-side and the CLI's own poll loop next
+# observing that (`_TRIAGE_POLL_INTERVAL_SECONDS`) -- Ctrl-C during
+# that gap is caught by the exact same handler and sends the exact
+# same armed cancel, even though nothing is running anymore. Ten
+# seconds is generous slack above that (a contended lock or a GC pause
+# on the request thread is still covered) while staying far short of
+# the sweep's own multi-minute runtime. The residual: a fresh
+# `wrong-match-triage --apply` re-run within the window lands
+# pre-cancelled -- but VISIBLY (state `cancelled`, zero rows
+# processed, exit 5), never silently, so the operator sees exactly
+# what happened and can just run it again once the window has passed.
+# Repeated armed cancels DO slide this window forward (latest-wins,
+# #1106 F1) -- bounded in practice, since only the CLI ever arms and
+# its own retry-on-failure logic sends at most two POSTs per Ctrl-C.
 PENDING_CANCEL_WINDOW_SECONDS = 10.0
 
 
