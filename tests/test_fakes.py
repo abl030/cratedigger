@@ -3104,6 +3104,61 @@ class TestFakeSlskdSearches(unittest.TestCase):
         self.assertEqual(slskd.searches.state(sid)["state"], "Completed")
         self.assertEqual(slskd.searches.search_responses(sid), [])
 
+    def test_search_text_error_sequence_raises_then_succeeds(self):
+        """Issue #1090: a per-call error sequence lets a test drive
+        "fails N times, then succeeds" without ``search_text_error``
+        poisoning every subsequent call."""
+        slskd = FakeSlskdAPI()
+        slskd.searches.search_text_error_sequence = [
+            RuntimeError("first call fails"),
+            None,
+        ]
+        with self.assertRaises(RuntimeError):
+            slskd.searches.search_text(searchText="x", responseLimit=1000)
+        # Second call: sequence entry is None -- succeeds normally.
+        result = slskd.searches.search_text(searchText="x", responseLimit=1000)
+        self.assertIn("id", result)
+        self.assertEqual(len(slskd.searches.search_text_calls), 2)
+
+    def test_search_text_error_sequence_exhausted_falls_back_to_error(self):
+        """Once the sequence is exhausted, ``search_text_error`` (if set)
+        resumes poisoning every call -- the sequence is a prefix override,
+        not a replacement for the blanket-error knob."""
+        slskd = FakeSlskdAPI()
+        slskd.searches.search_text_error_sequence = [None]
+        slskd.searches.search_text_error = RuntimeError("blanket failure")
+        # First call consumes the sequence's lone None -- succeeds.
+        slskd.searches.search_text(searchText="x", responseLimit=1000)
+        # Sequence now empty -- falls back to search_text_error.
+        with self.assertRaises(RuntimeError):
+            slskd.searches.search_text(searchText="x", responseLimit=1000)
+
+
+class TestFakeSlskdServer(unittest.TestCase):
+    """Self-test for the FakeSlskdServer stub introduced for issue #1090."""
+
+    def test_defaults_to_ready(self):
+        from lib.slskd_client import SlskdServerState
+        slskd = FakeSlskdAPI()
+        state = slskd.server.state()
+        self.assertIsInstance(state, SlskdServerState)
+        self.assertTrue(state.is_connected)
+        self.assertTrue(state.is_logged_in)
+        self.assertEqual(slskd.server.state_calls, 1)
+
+    def test_set_ready_reports_reconnect_window(self):
+        slskd = FakeSlskdAPI()
+        slskd.server.set_ready(is_connected=True, is_logged_in=False)
+        state = slskd.server.state()
+        self.assertTrue(state.is_connected)
+        self.assertFalse(state.is_logged_in)
+
+    def test_state_error_propagates(self):
+        slskd = FakeSlskdAPI()
+        slskd.server.state_error = RuntimeError("server endpoint down")
+        with self.assertRaises(RuntimeError):
+            slskd.server.state()
+
 
 class TestFakeYTMusic(unittest.TestCase):
     """Self-test for the FakeYTMusic stub (U5).
