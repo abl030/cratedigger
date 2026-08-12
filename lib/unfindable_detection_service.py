@@ -251,6 +251,16 @@ class UnfindableServiceResult:
       detection job continues with the next cohort member.
     - ``RESULT_NOT_DUE`` — request's probe is still within
       ``PROBE_INTERVAL_DAYS``; skipped without firing slskd.
+
+    ``submit_retry_exhausted`` (issue #1090 BLOCKING-1) is a typed
+    discriminator on a ``RESULT_PROBE_FAILED`` outcome: True ONLY when the
+    probe's slskd submit raised ``SearchSubmitError`` with
+    ``retry_exhausted=True`` — a retryable 409 that persisted through the
+    FULL retry budget, i.e. a genuine TRANSIENT slskd-connectivity signal.
+    False for every other failure (a 429, a 400, an empty ``artist_name``,
+    a degraded harvest, a DB error, ...) — those are DETERMINISTIC per-row
+    conditions that will recur identically on every future run and must
+    never accumulate toward the batch's circuit breaker (``_is_submit_failure``).
     """
 
     outcome: str
@@ -260,6 +270,7 @@ class UnfindableServiceResult:
     probe_match_count: int | None = None
     reason: str | None = None
     error_message: str | None = None
+    submit_retry_exhausted: bool = False
 
 
 @dataclass(frozen=True)
@@ -285,26 +296,26 @@ class UnfindableBatchResult:
     breaker_tripped: bool = False
 
 
-# The exact prefix ``categorise_request`` writes into ``error_message`` for
-# a submit-phase failure: ``f"{type(exc).__name__}: {exc}"`` where ``exc``
-# is (or wraps) a ``lib.search_exec.SearchSubmitError``. Derived from the
-# real class (not hand-typed) so the two can't drift.
-_SUBMIT_FAILURE_ERROR_PREFIX = f"{SearchSubmitError.__name__}:"
-
-
 def _is_submit_failure(result: UnfindableServiceResult) -> bool:
-    """True when a ``RESULT_PROBE_FAILED`` outcome was caused by a slskd
-    search-submit rejection (``SearchSubmitError`` -- raised either after
-    exhausting the probe's bounded 409-retry budget, or immediately for a
-    non-retryable submit failure), as opposed to some other probe failure
-    mode (a degraded harvest, a DB error, ...). Only submit failures drive
-    the ``categorise_due_batch`` circuit breaker — an unrelated one-off
+    """True when a ``RESULT_PROBE_FAILED`` outcome should count toward the
+    ``categorise_due_batch`` circuit breaker (issue #1090 BLOCKING-1).
+
+    Reads the TYPED ``submit_retry_exhausted`` discriminator, never a
+    formatted ``error_message`` string prefix — reconstructing failure
+    classification from ``str(exc)`` is exactly the fragile shape this
+    field replaces (round 1 of review: the prior string-prefix match
+    counted EVERY ``SearchSubmitError``, including deterministic
+    non-transient rejections like a 429 or an empty ``artist_name`` guard
+    failure; three such rows sorting to the head of every future batch
+    — since a failed probe never advances ``last_artist_probe_at`` —
+    would trip the breaker at 3/100 forever, dropping cohort drain to
+    0/day). Only a budget-exhausted retryable-409 is a genuine transient
+    slskd-connectivity signal; an unrelated one-off or deterministic
     failure on a single row must not stop the whole batch.
     """
     return (
         result.outcome == RESULT_PROBE_FAILED
-        and result.error_message is not None
-        and result.error_message.startswith(_SUBMIT_FAILURE_ERROR_PREFIX)
+        and result.submit_retry_exhausted
     )
 
 
@@ -542,11 +553,25 @@ def run_artist_probe(
         watchdog-cancelled search that happened to harvest a high count is
         treated as failed — categorisation fidelity over an extra data point.)
       * A failed cleanup ``delete`` is swallowed and never fails the probe.
+      * An empty ``artist_name`` (issue #1090 BLOCKING-1) raises
+        ``ValueError`` BEFORE any ledger write or POST — mirrors
+        ``cratedigger.py::_submit_plan_search``'s ``if not query`` guard.
+        A NULL/blank ``artist_name`` would otherwise submit a blank slskd
+        search every day forever; this is a plain (non-``SearchSubmitError``)
+        exception, so it never counts toward the circuit breaker (a
+        deterministic per-row condition, not a transient one) — the
+        service still records it as a zero-write ``RESULT_PROBE_FAILED``.
 
     ``poll_sleep`` / ``clock`` are injected for test determinism (forwarded to
     ``execute_search`` as ``sleep_fn`` / ``clock_fn``; the retry backoff
     sleeps through the same ``poll_sleep`` seam); production omits them.
     """
+    if not artist_name:
+        raise ValueError(
+            f"empty artist_name for request {request_id!r}; refusing to "
+            "submit a blank slskd search"
+        )
+
     import uuid
 
     from lib.search_exec import SearchSubmitRetryPolicy, execute_search
@@ -745,6 +770,14 @@ class UnfindableDetectionService:
                 request_id=request_id,
                 previous_category=previous,
                 error_message=f"{type(exc).__name__}: {exc}",
+                # Typed discriminator (issue #1090 BLOCKING-1): only a
+                # SearchSubmitError that exhausted the 409-retry budget is
+                # a transient slskd-connectivity signal worth counting
+                # toward the batch's circuit breaker. See
+                # UnfindableServiceResult.submit_retry_exhausted.
+                submit_retry_exhausted=(
+                    isinstance(exc, SearchSubmitError) and exc.retry_exhausted
+                ),
             )
 
         self.db.record_artist_probe(

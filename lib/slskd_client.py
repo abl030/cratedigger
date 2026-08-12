@@ -40,6 +40,17 @@ logger = logging.getLogger("cratedigger")
 SLSKD_HTTP_POOL_ADMIN_SLACK = 4
 SLSKD_HTTP_TIMEOUT_S = 120.0
 
+# Dedicated short timeout for the server-readiness reader (issue #1090
+# NON-BLOCKING-4). This endpoint is consulted as an ADVISORY pre-retry
+# check inside a bounded submit-retry loop (see
+# lib.search_exec.SearchSubmitRetryPolicy.server_ready); inheriting the
+# main client's full timeout (SLSKD_HTTP_TIMEOUT_S, e.g. 30s for the
+# unfindable-detection client) would let one hung /server GET add up to
+# that much latency PER retry -- multiple minutes across a batch of
+# retried candidates. A few seconds bounds the worst case while still
+# giving slskd time to answer under normal load.
+SLSKD_SERVER_READINESS_TIMEOUT_S = 5.0
+
 
 # === Event wire types (msgspec Structs per code-quality § wire-boundary) ===
 
@@ -365,13 +376,14 @@ class SlskdClient:
         *,
         params: dict[str, Any] | None = None,
         json_body: Any | None = None,
+        timeout: float | None = None,
     ) -> requests.Response:
         response = self._session.request(
             method,
             self.api_url + path,
             params=params,
             json=json_body,
-            timeout=self._timeout,
+            timeout=timeout if timeout is not None else self._timeout,
         )
         if not response.ok:
             # Consume the body BEFORE raising: returns the pooled
@@ -557,7 +569,8 @@ class SlskdServerApi:
         self._client = client
 
     def state(self) -> SlskdServerState:
-        response = self._client._request("GET", "/server")
+        response = self._client._request(
+            "GET", "/server", timeout=SLSKD_SERVER_READINESS_TIMEOUT_S)
         return msgspec.convert(response.json(), type=SlskdServerState)
 
 

@@ -936,24 +936,47 @@ oneshot's exit code gave no signal that half the batch went unclassified.
 - **`lib.slskd_client.SlskdServerApi.state()`** (`GET /api/v0/server`) —
   typed reader for `isConnected` / `isLoggedIn`, mirroring the field
   usage the module's own `slskdHealthCheck` script already relies on.
+  Uses its own short dedicated timeout (`SLSKD_SERVER_READINESS_TIMEOUT_S`,
+  a few seconds), NOT the main HTTP client's full timeout — a hung
+  `/server` must not add tens of seconds per retry.
 - **`lib.search_exec.execute_search(..., submit_retry=SearchSubmitRetryPolicy(...))`**
   — an OPTIONAL bounded retry for a submit-phase 409 (3 attempts,
-  2s/5s/10s backoff, advisedly shortened by the server-readiness reader
-  between attempts). Default `submit_retry=None` is byte-identical to
+  2s/5s/10s backoff, advisedly FLOORED — never zeroed — by the
+  server-readiness reader between attempts, so a wrongly-"ready" reading
+  degrades to "retried sooner" rather than "3 POSTs within
+  milliseconds"). Default `submit_retry=None` is byte-identical to
   pre-#1090 behaviour — only the unfindable probe opts in; the main
   pipeline's search call sites are unchanged. Each retry mints and
   ledgers its own fresh search id BEFORE the retried POST (issue #576
   I2's write-ahead invariant, applied per attempt).
+- **`SearchSubmitError.retry_exhausted: bool`** — a TYPED discriminator,
+  True only when a retryable 409 persisted through the full retry
+  budget. Every other submit failure (a 429, a 400, a network error, or
+  any submit with no retry policy) is a DETERMINISTIC per-row condition
+  that will recur identically on every future run and must NOT count as
+  a transient-outage signal. `run_artist_probe` also refuses to submit
+  at all for an empty/NULL `artist_name` (mirrors
+  `cratedigger.py::_submit_plan_search`'s `if not query` guard) — a
+  plain `ValueError`, never `SearchSubmitError`.
 - **`UnfindableDetectionService.categorise_due_batch`** — a circuit
-  breaker: after 3 CONSECUTIVE submit-failure outcomes (a probe whose
-  own retry budget exhausted — not an unrelated one-off probe failure),
-  the batch stops early. Untouched candidates are excluded from the
-  batch's processed count and left completely byte-untouched; they roll
-  into the next daily run via the normal oldest-probe-first ordering.
-  Nothing is parked on any request row.
+  breaker: after 3 CONSECUTIVE submit-failure outcomes where
+  `submit_retry_exhausted` is True (review round 1 fix — reading the
+  typed field, not reconstructing classification from a formatted
+  `error_message` string prefix), the batch stops early. A deterministic
+  per-row rejection (a 429, an empty `artist_name`, ...) never trips the
+  breaker, however many candidates hit it, and never removes rows from
+  the rest of the batch — the pre-fix version counted every
+  `SearchSubmitError` regardless of cause, so three rows that
+  deterministically fail the same way (permanently NULL
+  `last_artist_probe_at`, so permanently first in every future
+  `NULLS FIRST` batch) would have tripped the breaker at 3/N forever,
+  dropping cohort drain to 0/day. Untouched candidates are excluded from
+  the batch's processed count and left completely byte-untouched; they
+  roll into the next daily run via the normal oldest-probe-first
+  ordering. Nothing is parked on any request row.
 - **`scripts/run_unfindable_detection.py`** — the oneshot now returns
   `EXIT_INCOMPLETE_RUN` (3) when the circuit breaker tripped, distinct
-  from the pre-existing `2` (missing config / behind-schema abort,
+  from `EXIT_CONFIG_ABORT` (2, missing config / behind-schema abort,
   returned before any work runs) and `0` (fully classified run).
   `systemctl status` shows `cratedigger-unfindable.service` as *failed*
   for an incomplete run — the daily timer still fires the next cycle
@@ -972,12 +995,13 @@ ssh doc2 'sudo journalctl -u cratedigger-unfindable.service --since "1 day ago" 
 - Exit `3` (`EXIT_INCOMPLETE_RUN`) — `unfindable_detection: INCOMPLETE
   run — circuit breaker tripped after repeated slskd submit failures;
   attempted=M/N outcomes=...; K candidate(s) were never touched this run
-  and roll into the next daily run` — a sustained slskd outage mid-run.
-  `systemctl status` reports the unit as failed; no operator action is
-  required — the next daily timer fire picks up the untouched tail via
-  the normal cadence.
-- Exit `2` — pre-existing missing-config / behind-schema abort (no probe
-  work attempted at all).
+  and roll into the next daily run` — a sustained slskd outage mid-run
+  (every one of the last 3+ attempted candidates exhausted its own
+  409-retry budget). `systemctl status` reports the unit as failed; no
+  operator action is required — the next daily timer fire picks up the
+  untouched tail via the normal cadence.
+- Exit `2` (`EXIT_CONFIG_ABORT`) — pre-existing missing-config /
+  behind-schema abort (no probe work attempted at all).
 
 Explicitly out of scope for this fix: `DEFAULT_BATCH_SIZE` is unchanged
 (an operator batch-size tuning decision, not this fix's call to make),

@@ -18,8 +18,8 @@ Run-health / exit code (issue #1090): a fully classified run returns
 ``0``. When ``categorise_due_batch``'s circuit breaker trips (a
 sustained run of slskd search-submit failures), the process returns
 ``EXIT_INCOMPLETE_RUN`` so systemd reports the unit as failed --
-distinct from the pre-existing config/schema abort (``2``) returned
-before any work runs. See ``_process_batch``.
+distinct from the pre-existing config/schema abort (``EXIT_CONFIG_ABORT``)
+returned before any work runs. See ``_process_batch``.
 
 The script is intentionally narrow: it does not import any
 cursor-mutating PipelineDB methods, plan-service module, or
@@ -57,14 +57,20 @@ from lib.unfindable_detection_service import (
 
 logger = logging.getLogger("cratedigger-unfindable")
 
-# Distinct from the pre-existing exit code 2 (missing config / behind-
-# schema abort, before any work runs). Issue #1090: the run attempted
-# work but the circuit breaker stopped it early after a sustained slskd
-# submit outage -- systemd shows the unit FAILED (surfacing the
-# incomplete run distinctly from a fully classified one) while the daily
-# timer still fires next cycle and nothing is parked on any request row
-# (invariant 11) -- untouched candidates simply roll forward via the
-# normal oldest-probe-first ordering.
+# Missing slskd config or a behind/missing DB schema -- returned directly
+# from main() before any probe work runs. Pre-existing behaviour; named
+# (issue #1090 NIT-8) so both abort sites share one producer and
+# EXIT_INCOMPLETE_RUN's distinctness from it is a constant comparison, not
+# a hand-typed literal.
+EXIT_CONFIG_ABORT = 2
+
+# Distinct from EXIT_CONFIG_ABORT. Issue #1090: the run attempted work but
+# the circuit breaker stopped it early after a sustained slskd submit
+# outage -- systemd shows the unit FAILED (surfacing the incomplete run
+# distinctly from a fully classified one) while the daily timer still
+# fires next cycle and nothing is parked on any request row (invariant
+# 11) -- untouched candidates simply roll forward via the normal
+# oldest-probe-first ordering.
 EXIT_INCOMPLETE_RUN = 3
 
 
@@ -196,7 +202,7 @@ def main() -> int:
             cfg.slskd_host_url,
             "present" if cfg.resolved_slskd_api_key() else "missing",
         )
-        return 2
+        return EXIT_CONFIG_ABORT
 
     # Fail-loud schema gate. cratedigger-unfindable.service uses Wants=, not
     # Requires=, on cratedigger-db-migrate.service (nix/module.nix) -- see
@@ -211,7 +217,7 @@ def main() -> int:
             "first.",
             exc.missing_versions,
         )
-        return 2
+        return EXIT_CONFIG_ABORT
 
     db = PipelineDB(args.dsn)
     try:

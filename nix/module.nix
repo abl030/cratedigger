@@ -2464,8 +2464,17 @@ in {
         Environment = "PIPELINE_DB_DSN=${pipelineDsn}";
         ExecStart = "${unfindableDetectionPkg}/bin/cratedigger-unfindable";
         WorkingDirectory = cfg.stateDir;
-        # Generous cap: a 100-row batch over a slow slskd is roughly
-        # 100 × ~30s = 50 min worst case. 2h gives headroom while
+        # Generous cap. Each candidate is bounded by roughly a ~30s
+        # baseline search cycle plus, on a 409 (issue #1090), up to 2
+        # submit retries -- each retry's own bounded backoff (<=5s,
+        # PROBE_SUBMIT_RETRY_BACKOFF_S) plus a short dedicated server-
+        # readiness timeout (SLSKD_SERVER_READINESS_TIMEOUT_S, a few
+        # seconds, NOT this client's full HTTP timeout) -- worst case
+        # comfortably under 60s/candidate. A sustained outage doesn't run
+        # the full 100-row batch anyway: the circuit breaker stops it
+        # after 3 consecutive submit failures. 2h retains generous
+        # headroom over the ~100min ceiling for a 100-row batch of
+        # individually-retried (not breaker-tripped) candidates, while
         # still surfacing genuinely stuck runs.
         TimeoutStartSec = "2h";
       };
