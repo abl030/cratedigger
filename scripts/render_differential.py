@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import dataclasses
 import importlib
 import os
 import sys
@@ -296,6 +297,146 @@ class ClassifyRenderTarget:
             fields=project_output_fields(
                 item, _CLASSIFIED_WATCHED, _CLASSIFIED_UNWATCHED),
         )
+
+
+class WrongMatchExplorerPayload(msgspec.Struct, frozen=True):
+    """The exact wire shape ``build_wrong_match_explorer`` returns.
+
+    Exists ONLY so :func:`watched_field_names` / :func:`unwatched_field_names`
+    can derive — fail CLOSED — which of its 16 keys may carry
+    operator-visible text, the same way ``ClassifiedEntry`` drives
+    :class:`ClassifyRenderTarget`. Before this Struct existed,
+    :class:`WrongMatchExplorerRenderTarget` hand-picked 5 of the 15 keys
+    the production function returned at the time, which earned a real
+    (if narrow) receipt for THIS change — the four fields this diff
+    could move were inside the hand-picked five — but proved nothing for
+    the next explorer presentation change: 10 of the 15 keys, including
+    ``files`` (per-track filenames and tags) and ``failed_path``, were
+    neither watched nor checked, and nulling any of them on the live
+    corpus would have reported zero changed rows (issue #1086 review,
+    blocker 3). Keep this in lockstep with the production return dict in
+    ``web.wrong_match_file_service.build_wrong_match_explorer`` — a
+    field added there and not here silently drops out of every future
+    differential rather than failing loudly, because ``project_output_fields``
+    only iterates the fields THIS Struct declares.
+    """
+
+    status: str
+    download_log_id: int
+    failed_path: str
+    folder_name: str
+    source_dirs: list[str]
+    audio_file_count: int
+    other_file_count: int
+    partial: bool
+    truncated_reason: str | None
+    unreadable_entry_count: int
+    unreadable_reason: str | None
+    unreadable_is_containment: bool | None
+    scanned_file_count: int
+    scanned_bytes: int
+    ordered_by: str
+    files: list[dict[str, object]]
+
+
+_EXPLORER_WATCHED = watched_field_names(WrongMatchExplorerPayload)
+_EXPLORER_UNWATCHED = unwatched_field_names(WrongMatchExplorerPayload)
+
+
+class WrongMatchExplorerRenderTarget:
+    """Render one ``download_log`` row through the REAL Wrong Matches
+    file explorer (``web.wrong_match_file_service.build_wrong_match_explorer``).
+
+    Unlike :class:`ClassifyRenderTarget`, corpus rows here carry only the
+    two fields the explorer actually reads (``id``, ``validation_result``)
+    — the explorer's OUTPUT depends on live filesystem state at render
+    time, not stored DB columns. That is still a meaningful Rule D
+    differential: the runbook's two renders (base ref, current tree) run
+    back-to-back against the SAME disk state, so any difference isolates
+    the CODE change, not a change in what is on disk between runs.
+
+    Uses the real runtime config by default
+    (:func:`lib.config.read_runtime_config`, the exact resolution
+    ``build_wrong_match_explorer`` falls back to in production). Set
+    ``CRATEDIGGER_QUARANTINE_SLSKD_DIR`` / ``CRATEDIGGER_QUARANTINE_STAGING_DIR``
+    / ``CRATEDIGGER_QUARANTINE_PROCESSING_DIR`` to override with the
+    installation's real quarantine roots when running the differential
+    from a host without the deployed immutable config file — never
+    hardcoded here, so this target stays installation-agnostic.
+    """
+
+    def prepare(self, rows: Iterable[Mapping[str, object]]) -> None:
+        """Cross-row projection: none — each folder is independent."""
+
+    def render(self, row: Mapping[str, object]) -> RenderedRow:
+        from web.wrong_match_file_service import (
+            WrongMatchSourceUnavailable,
+            build_wrong_match_explorer,
+        )
+
+        row_id = row.get("id")
+        if not isinstance(row_id, int) or isinstance(row_id, bool):
+            raise RenderDifferentialError(
+                f"corpus row has no integer id: {row_id!r}")
+        try:
+            payload = build_wrong_match_explorer(
+                download_log_id=row_id, entry=row, cfg=self._cfg())
+        except (WrongMatchSourceUnavailable, FileNotFoundError) as exc:
+            # A whole-root refusal/not-found is not a 200 payload — record
+            # it as its own comparable shape rather than losing the row.
+            # Only the WATCHED fields need a value here (unwatched ones
+            # are never read by ``project_output_fields``), but every
+            # watched field must be present or the projection fails
+            # closed on a "missing watched field" error instead of
+            # silently under-reporting this row.
+            return RenderedRow(id=row_id, fields=project_output_fields(
+                {
+                    "status": "error",
+                    "failed_path": "",
+                    "folder_name": "",
+                    "source_dirs": [],
+                    "truncated_reason": None,
+                    "unreadable_reason": str(exc),
+                    "ordered_by": "",
+                    "files": [],
+                },
+                _EXPLORER_WATCHED, _EXPLORER_UNWATCHED,
+            ))
+        return RenderedRow(
+            id=row_id,
+            fields=project_output_fields(
+                payload, _EXPLORER_WATCHED, _EXPLORER_UNWATCHED),
+        )
+
+    @staticmethod
+    def _cfg() -> object:
+        # ``CratediggerConfig(slskd_download_dir=..., ...)`` — constructing
+        # from a SUBSET of fields — is the exact parallel-construction
+        # shape ``.claude/rules/code-quality.md`` § "No Parallel Code
+        # Paths" forbids: every field this target does NOT override
+        # (MB/Discogs endpoints, Beets DB path, …) would silently reset to
+        # the dataclass default instead of the real deployed value.
+        # ``dataclasses.replace`` over the real
+        # :func:`lib.config.read_runtime_config` keeps every field this
+        # target does not care about, and still lets a host without the
+        # deployed immutable config file override just the quarantine
+        # roots via the three env vars.
+        from lib.config import read_runtime_config
+
+        base = read_runtime_config()
+        overrides: dict[str, str] = {}
+        slskd = os.environ.get("CRATEDIGGER_QUARANTINE_SLSKD_DIR")
+        staging = os.environ.get("CRATEDIGGER_QUARANTINE_STAGING_DIR")
+        processing = os.environ.get("CRATEDIGGER_QUARANTINE_PROCESSING_DIR")
+        if slskd:
+            overrides["slskd_download_dir"] = slskd
+        if staging:
+            overrides["beets_staging_dir"] = staging
+        if processing:
+            overrides["processing_dir"] = processing
+        if not overrides:
+            return base
+        return dataclasses.replace(base, **overrides)
 
 
 class _CallableTarget:

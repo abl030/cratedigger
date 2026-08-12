@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import logging
 import os
+import stat
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -82,7 +83,10 @@ from lib.fs_authority import (
     DirectoryObservation,
     classify_path_errno,
     errno_proves_absence,
+    errno_symbol,
+    is_containment_refusal,
     os_refusal_in_chain,
+    unreadable_reason_text,
 )
 from lib.validation_envelope import decode_validation_envelope
 
@@ -141,6 +145,18 @@ class BeetsDistanceResult(msgspec.Struct, kw_only=True):
     A distance computed over an incomplete manifest is a misleading
     number on a decision surface, so the refusal travels with the
     otherwise-``ok`` result instead of being discarded (issue #1063).
+    """
+    partial_read_is_containment: bool | None = None
+    """``True`` when ``partial_read`` is a CONTAINMENT refusal (a symlink
+    or a socket/device node), ``False`` for an ordinary storage refusal,
+    ``None`` when ``partial_read`` itself is ``None``.
+
+    A structured discriminator, not a substring of ``partial_read`` to
+    grep for: the message is human diagnostics and free to change (same
+    rule as ``FilesystemAuthorityError.code``, issue #868), and consumers
+    — the Replace-picker badge — must branch on a stable field so the
+    ELOOP-vs-EACCES distinction the message carries is not just present
+    in the payload but SAFE to render distinctly (issue #1086).
     """
     # Latency observability — useful in tests + the eventual UI.
     duration_ms: int | None = None
@@ -243,6 +259,24 @@ class SyntheticItem(msgspec.Struct, kw_only=True):
 
 
 @dataclass(frozen=True)
+class _Refusal:
+    """One "we did not read this" fact, plus WHY, structurally.
+
+    ``is_containment`` is the same fact :func:`unreadable_reason_text`
+    already worded into ``text`` — kept as its own field, not re-derived
+    by parsing ``text``, so every internal hop (the walk's ``onerror``,
+    the ``lstat`` guard, the tag-read exception path) and the eventual
+    wire field (``BeetsDistanceResult.partial_read_is_containment``)
+    carry the SAME structured fact the way :class:`FilesystemAuthorityError`
+    carries ``code`` instead of making callers sniff a message (issue
+    #868's rule, applied one layer down for issue #1086).
+    """
+
+    text: str
+    is_containment: bool
+
+
+@dataclass(frozen=True)
 class _FolderScan:
     """What the walk found AND whether it was allowed to look.
 
@@ -253,20 +287,21 @@ class _FolderScan:
     """
 
     paths: tuple[str, ...]
-    read_error: str | None = None
+    read_error: _Refusal | None = None
 
 
-def _refusal_text(path: str, exc: OSError) -> str | None:
+def _refusal(path: str, exc: OSError) -> _Refusal | None:
     """What to report for one failed path syscall, or ``None`` if it proved.
 
     The single owner of that question for every site in this module that
-    can record a read refusal — the walk's ``onerror``, the per-file
-    ``stat``, and the tag read. ``None`` means the errno POSITIVELY
-    established that the name holds nothing (``ENOENT``, ``ENOTDIR``: a
-    vanished file, a dangling symlink), and issue #1063's rule cuts both
-    ways — laundering a proven absence into a refusal is the same lie
-    told backwards. It reaches the operator as an amber ``· incomplete
-    manifest`` badge over a manifest that is complete.
+    can record a read refusal — the walk's ``onerror`` and
+    :func:`_lstat_admit_regular_file`. ``None`` means the errno POSITIVELY
+    established that the name holds nothing (``ENOENT``: a vanished
+    file; ``ENOTDIR``: a path component that turned out not to be a
+    directory), and issue #1063's rule cuts both ways — laundering a
+    proven absence into a refusal is the same lie told backwards. It
+    reaches the operator as an amber ``· incomplete manifest`` badge
+    over a manifest that is complete.
 
     The predicate is :func:`errno_proves_absence`, NOT
     ``refusal_is_indeterminate(...) is not True``. The latter asks
@@ -276,11 +311,77 @@ def _refusal_text(path: str, exc: OSError) -> str | None:
     while :func:`observe_directory` called the same errno indeterminate
     for the folder, so the two ends of one request disagreed about the
     same symlink. Everything that is not a proven absence travels as a
-    refusal.
+    refusal, described HONESTLY by :func:`unreadable_reason_text` — a
+    containment refusal is worded as the containment decision it is,
+    never as a flaky disk (issue #1086).
     """
-    if errno_proves_absence(classify_path_errno(exc)):
+    code = classify_path_errno(exc)
+    if errno_proves_absence(code):
         return None
-    return f"{path}: {exc.strerror}"
+    return _Refusal(
+        text=f"{path}: {unreadable_reason_text(code, errno_symbol=errno_symbol(exc))}",
+        is_containment=is_containment_refusal(code),
+    )
+
+
+def _lstat_admit_regular_file(
+    path: str,
+) -> tuple[os.stat_result | None, _Refusal | None]:
+    """``lstat`` a candidate path, admitting ONLY a plain regular file.
+
+    Beets reads audio files by PATH; there is no open-flag lever here
+    like the explorer's ``O_NOFOLLOW`` + ``S_ISREG`` pair
+    (``open_regular_relative``). This is that same containment posture
+    built from ``lstat`` alone: inspect the name itself, never the thing
+    it points at or opens into, and refuse BEFORE beets (or anything
+    else in this module) ever touches the path.
+
+    Two refusals share this one guard, both containment — not storage —
+    decisions:
+
+    * A symlink is refused whatever it points to — present, absent, or
+      somewhere outside the quarantine root entirely — so this module
+      and the explorer agree BY CONSTRUCTION instead of being
+      separately taught the same answer (issue #1086). Before this
+      guard, a dangling symlink read as ``absent`` here only because
+      ``os.stat`` followed it into ``ENOENT``; a symlink to a real file
+      outside the root was silently followed and fingerprinted, which
+      is the containment gap the symlink half of this guard closes.
+    * Anything that is not a regular file is refused too — a FIFO most
+      urgently: ``open()`` on a FIFO with no writer BLOCKS FOREVER, and
+      this module has no ``O_NONBLOCK`` lever the way
+      ``open_regular_relative`` does, so a ``*.flac`` named pipe planted
+      in a Wrong Matches folder would wedge the request thread
+      permanently rather than merely mis-answer it. A Unix-domain socket
+      already happened to work — ``open()`` on one answers ``ENXIO``
+      immediately and :func:`os_refusal_in_chain` recovers it — but that
+      was an accident of *this specific* special-file kind, not a
+      guarantee, and a device node with a driver would have been read
+      as audio. Checking ``S_ISREG`` here closes the whole class the
+      same way the symlink check closes ELOOP, deterministically and
+      before any read is attempted (issue #1086 review, blocker 2).
+
+    Returns ``(stat_result, None)`` when ``path`` is safe to read, or
+    ``(None, refusal)`` when it is refused or the ``lstat`` itself
+    failed. The returned ``stat_result`` doubles as the file's mtime/size
+    for the caller's cache key: ``lstat`` and ``stat`` agree on those
+    fields for any name this function did not refuse.
+    """
+    try:
+        info = os.lstat(path)
+    except OSError as exc:
+        return None, _refusal(path, exc)
+    if stat.S_ISLNK(info.st_mode):
+        return None, _Refusal(
+            text=f"{path}: {unreadable_reason_text('unsafe_symlink')}",
+            is_containment=True,
+        )
+    if not stat.S_ISREG(info.st_mode):
+        return None, _Refusal(
+            text=f"{path}: {unreadable_reason_text('not_regular_file')}",
+            is_containment=True,
+        )
+    return info, None
 
 
 def _audio_files_under(folder: str) -> _FolderScan:
@@ -290,20 +391,60 @@ def _audio_files_under(folder: str) -> _FolderScan:
     insensitive but stable ordering makes the cache key stable, the
     test assertions stable, and the per-track distance breakdown
     consistent across runs.
+
+    ``os.walk(followlinks=False)`` classifies a symlink-to-directory
+    into ``dirs`` and simply declines to descend — no ``onerror`` fires,
+    because listing the PARENT succeeded. Left alone, that is a silent
+    "audio files under here" answer of zero for a name the explorer
+    refuses with ELOOP (``open_regular_relative`` → ``unsafe_symlink``),
+    so a folder holding ONLY a symlinked subdirectory read as
+    ``no_audio`` (HTTP 410 "gone" / CLI exit 4) — issue #1063 verbatim,
+    on the one entry kind :func:`_lstat_admit_regular_file` cannot see,
+    because that guard only ever runs over already-enumerated FILE
+    paths (:data:`_FolderScan.paths`), never over ``dirs``. Refusing it
+    HERE, during the walk, is what makes this module and the explorer
+    agree by construction over every entry kind THIS MODULE considers —
+    an audio-extensioned file, or a directory. A refused entry with a
+    NON-audio name (a ``cover.jpg`` that is itself a symlink, socket,
+    FIFO, or EACCES-locked) is invisible here by construction, the same
+    way an unreadable ``.txt`` sidecar always was: ``ext in AUDIO_EXTS``
+    below never looks at it, so it never reaches ``_record`` or the
+    per-file loop either. The explorer counts it (every non-directory
+    entry, any extension) and reports the folder ``partial``; this
+    module's ``partial_read`` stays scoped to the files a beets distance
+    computation actually reads. That is a residual, DELIBERATE asymmetry
+    between the two surfaces' purposes — not a category error like the
+    ones issue #1086 fixes — and ``_build_agreement_world`` in
+    ``tests/test_protected_path_truth_generated.py`` names it the same
+    way by construction (every AGREEMENT_ENTRY_KINDS fixture uses an
+    audio-extensioned name so both producers look at the SAME
+    population).
     """
     from lib.measurement import AUDIO_EXTS
 
     out: list[str] = []
-    refusals: list[str] = []
+    refusals: list[_Refusal] = []
 
     def _record(exc: OSError) -> None:
         # A directory that VANISHED between enumeration and descent is
         # not a directory we were refused.
-        refusal = _refusal_text(str(exc.filename or folder), exc)
+        refusal = _refusal(str(exc.filename or folder), exc)
         if refusal is not None:
             refusals.append(refusal)
 
-    for root, _dirs, files in os.walk(folder, onerror=_record):
+    for root, dirs, files in os.walk(folder, onerror=_record):
+        for d in dirs:
+            full = os.path.join(root, d)
+            if os.path.islink(full):
+                # A symlink-to-directory: os.walk will not descend into
+                # it (``followlinks=False``), and unlike a refused FILE
+                # that lands in ``files``, it never reaches any per-file
+                # loop this module owns — refuse it right here or it is
+                # simply never seen (issue #1086 review, blocker 1).
+                refusals.append(_Refusal(
+                    text=f"{full}: {unreadable_reason_text('unsafe_symlink')}",
+                    is_containment=True,
+                ))
         for f in files:
             ext = f.rsplit(".", 1)[-1].lower() if "." in f else ""
             if ext in AUDIO_EXTS:
@@ -326,7 +467,7 @@ class _FileRead:
     """
 
     fingerprint: _AudioFileFingerprint | None = None
-    refusal: str | None = None
+    refusal: _Refusal | None = None
 
 
 def _fingerprint_file(path: str) -> _FileRead:
@@ -337,7 +478,7 @@ def _fingerprint_file(path: str) -> _FileRead:
     fail the whole picker query.
 
     A refused read is a different fact and comes back as ``refusal``.
-    Neither ``os.walk``'s ``onerror`` nor the ``os.stat`` above it sees
+    Neither ``os.walk``'s ``onerror`` nor the ``lstat`` guard below sees
     it: a mode-0000 file stats perfectly well and is listed by the walk,
     and the ESTALE/EIO this deployment's nested virtiofs really produces
     fires mid-read. mediafile then converts the ``OSError`` into its own
@@ -346,7 +487,18 @@ def _fingerprint_file(path: str) -> _FileRead:
     left an incomplete manifest unflagged and, with EVERY file refused,
     produced ``no_audio`` (HTTP 410 "gone") off an intact album. That is
     issue #1063 verbatim, one layer down.
+
+    The :func:`_lstat_admit_regular_file` guard runs FIRST, before beets
+    ever sees ``path``: beets reads by path and would otherwise follow a
+    symlink straight past this module's containment boundary, or block
+    forever opening a FIFO with no writer (issue #1086) — the explorer
+    refuses the same name with ``O_NOFOLLOW`` plus an ``S_ISREG`` check,
+    and this must refuse it too, before any read is attempted.
     """
+    st, lstat_refusal = _lstat_admit_regular_file(path)
+    if st is None:
+        return _FileRead(refusal=lstat_refusal)
+
     try:
         item = _item_from_path(path)
     except Exception as exc:  # noqa: BLE001 — beets raises a mediafile mess
@@ -354,14 +506,9 @@ def _fingerprint_file(path: str) -> _FileRead:
         if refused is not None:
             log.warning(
                 "beets_distance: tag read REFUSED for %s: %s", path, refused)
-            return _FileRead(refusal=_refusal_text(path, refused))
+            return _FileRead(refusal=_refusal(path, refused))
         log.warning("beets_distance: tag read failed for %s: %s", path, exc)
         return _FileRead()
-
-    try:
-        st = os.stat(path)
-    except OSError as exc:
-        return _FileRead(refusal=_refusal_text(path, exc))
 
     # Beets Item exposes tag fields as attributes (LightFlavoredDict).
     return _FileRead(fingerprint=_AudioFileFingerprint(
@@ -387,7 +534,7 @@ class _FolderFingerprints:
     """Fingerprints plus the first refusal that stopped us reading more."""
 
     fingerprints: tuple[_AudioFileFingerprint, ...]
-    read_error: str | None = None
+    read_error: _Refusal | None = None
 
 
 def _read_folder_fingerprints(
@@ -406,16 +553,16 @@ def _read_folder_fingerprints(
     read_error = scan.read_error
     fps: list[_AudioFileFingerprint] = []
     for path in scan.paths:
-        try:
-            st = os.stat(path)
-        except OSError as exc:
-            # Same rule one level down, in BOTH directions: a file we
-            # could not stat is not a file that is not there — and a file
-            # the errno proves is gone (a dangling symlink, a file
-            # unlinked after the walk listed it) is not a refusal.
-            refusal = _refusal_text(path, exc)
-            if refusal is not None and read_error is None:
-                read_error = refusal
+        # ``lstat``, not ``stat``: a symlink or non-regular name is
+        # refused here, before the cache lookup and before
+        # ``_fingerprint_file`` ever hands the path to beets (issue
+        # #1086). For any name this does NOT refuse, ``lstat`` and
+        # ``stat`` report the same mtime/size, so the cache key below is
+        # unaffected.
+        st, lstat_refusal = _lstat_admit_regular_file(path)
+        if st is None:
+            if lstat_refusal is not None and read_error is None:
+                read_error = lstat_refusal
             continue
         cached: _AudioFileFingerprint | None = None
         if cache is not None:
@@ -823,6 +970,7 @@ def compute_beets_distance(
     resolved: str | None = None
     fingerprint_count: int | None = None
     partial_read: str | None = None
+    partial_read_is_containment: bool | None = None
     if items_override is not None:
         items = _build_items_from_synthetic(items_override)
     else:
@@ -882,7 +1030,7 @@ def compute_beets_distance(
                 "folder_unavailable",
                 error=(
                     f"could not read the contents of {resolved}: "
-                    f"{scan.read_error}"
+                    f"{scan.read_error.text}"
                 ),
                 download_log_id=download_log_id,
                 request_id=request_id,
@@ -906,7 +1054,9 @@ def compute_beets_distance(
             )
         # Some files read, some refused: the number below is computed over
         # an INCOMPLETE manifest, so it ships with that fact attached.
-        partial_read = scan.read_error
+        if scan.read_error is not None:
+            partial_read = scan.read_error.text
+            partial_read_is_containment = scan.read_error.is_containment
         fingerprint_count = len(fingerprints)
         items = _build_items(fingerprints)
 
@@ -961,6 +1111,7 @@ def compute_beets_distance(
         candidate_mbid=mbid,
         folder_path=resolved,
         partial_read=partial_read,
+        partial_read_is_containment=partial_read_is_containment,
         started=started,
     )
 
@@ -983,6 +1134,7 @@ def _result(
     folder_path: str | None = None,
     error: str | None = None,
     partial_read: str | None = None,
+    partial_read_is_containment: bool | None = None,
     started: float,
 ) -> BeetsDistanceResult:
     return BeetsDistanceResult(
@@ -1002,5 +1154,6 @@ def _result(
         folder_path=folder_path,
         error_message=error,
         partial_read=partial_read,
+        partial_read_is_containment=partial_read_is_containment,
         duration_ms=int((time.monotonic() - started) * 1000),
     )
