@@ -23,9 +23,33 @@ ROUTE_NEIGHBOURS = (
     "tests.test_pydantic_route_audit",
     "tests.test_js_payload_contract_audit",
 )
+# Every tests/web/*.py module that actually imports tests/web/_harness.py
+# (verified by grep, 2026-08 review round). tests.web.test_routes_health is
+# the one real exception — it needs no fake DB. Do NOT pad this with
+# ROUTE_NEIGHBOURS' static audits (test_pydantic_route_audit,
+# test_js_payload_contract_audit): those scan web/routes/*.py, never import
+# _harness, and listing them here would look like coverage without being any.
 WEB_TEST_HARNESS_NEIGHBOURS = (
-    *ROUTE_NEIGHBOURS,
+    "tests.web.test_request_security",
+    "tests.web.test_route_audit",
+    "tests.web.test_routes_beets_distance",
+    "tests.web.test_routes_browse",
+    "tests.web.test_routes_imports",
+    "tests.web.test_routes_labels",
+    "tests.web.test_routes_library",
+    "tests.web.test_routes_long_tail",
+    "tests.web.test_routes_pipeline",
+    "tests.web.test_routes_pipeline_dashboard",
+    "tests.web.test_routes_pipeline_mutations",
+    "tests.web.test_routes_release_identity",
+    "tests.web.test_routes_search_plan",
+    "tests.web.test_routes_triage",
+    "tests.web.test_routes_world_audit",
+    "tests.web.test_routes_youtube",
+    "tests.web.test_server_cache",
     "tests.web.test_server_endpoints",
+    "tests.web.test_server_threading",
+    "tests.web.test_static_assets",
 )
 STRUCTURAL_AUDIT_NEIGHBOURS = (
     "tests.test_deploy_pin_script",
@@ -40,6 +64,17 @@ WORLD_MODEL_NEIGHBOURS = (
     "tests.test_world_model_coordinator",
     "tests.test_parallel_test_runner",
     "tests.test_hypothesis_profile_audit",
+    # tests.world_model.state_machine is the ONLY target that actually
+    # imports and drives support.py/state_machine.py/mirror_harness.py — the
+    # five modules above only assert command strings, test-id strings, or
+    # census_seeds in isolation (verified 2026-08 review round). It is
+    # deliberately excluded from unittest's own test*.py discovery glob and
+    # added back by complete_test_modules(); ~18s wall per selection
+    # (measured) because it drives real dispatch_import_core/BeetsDB/
+    # ban_source rules against a fresh ephemeral PostgreSQL + Beets. That
+    # cost is the honest price of actually covering this file — a cheaper
+    # neighbour set would be fake coverage.
+    "tests.world_model.state_machine",
 )
 
 EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
@@ -72,6 +107,52 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
     # mapping to the test(s) that actually exercise it. tests/fakes/,
     # tests/web/, tests/structural_audits/, and tests/world_model/ are
     # covered by prefix rules below instead of listed file-by-file here.
+    # Sorted by path (ASCII, so underscore-prefixed entries sort first).
+    "tests/__init__.py": (
+        # Sets the ambient BEETSDIR default + writes the suite's minimal
+        # config.yaml. tests.test_util's TestBeetsSubprocessEnv exhaustively
+        # patches BEETSDIR itself for every case, so it never exercises this
+        # file's ambient default. These are real callers of
+        # beets_subprocess_env() that rely on the inherited default without
+        # patching it first.
+        "tests.test_beets_validation",
+        "tests.test_dispatch_from_db",
+        "tests.test_beets_retag",
+        "tests.test_run_beets_harness_script",
+        "tests.test_beets_config_startup",
+    ),
+    "tests/_docs_reference_audit.py": (
+        "tests.test_docs_audit",
+    ),
+    "tests/_hypothesis_profiles.py": (
+        # test_hypothesis_profile_audit is a pure AST audit (ast, os,
+        # unittest, dataclasses only) — it checks that OTHER modules import
+        # this one, never this module's own semantic content (max_examples,
+        # deadline, tier selection). test_parallel_test_runner actually
+        # imports the module and exercises assert_hypothesis_deadlines_disabled
+        # against it; test_import_result_legacy_generated is a real, cheap
+        # @given test that runs under whatever tier this module loads, so a
+        # collapsed max_examples or a re-enabled deadline changes its
+        # observable behavior.
+        "tests.test_hypothesis_profile_audit",
+        "tests.test_parallel_test_runner",
+        "tests.test_import_result_legacy_generated",
+    ),
+    "tests/_lambda_audit.py": (
+        "tests.test_lambda_audit",
+    ),
+    "tests/_mock_audit_scanner.py": (
+        "tests.test_mock_audit",
+    ),
+    "tests/_tests_typing_ratchet_baseline.py": (
+        "tests.test_typing_ratchet",
+    ),
+    "tests/_typing_ratchet_baseline.py": (
+        "tests.test_typing_ratchet",
+    ),
+    "tests/_typing_ratchet_scanner.py": (
+        "tests.test_typing_ratchet",
+    ),
     "tests/audio_fixtures.py": (
         "tests.test_conversion_e2e",
         "tests.test_media_readiness",
@@ -88,16 +169,6 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
     "tests/conftest.py": (
         "tests.test_parallel_test_runner",
         "tests.test_pipeline_db",
-    ),
-    "tests/_docs_reference_audit.py": (
-        "tests.test_docs_audit",
-    ),
-    "tests/ephemeral_slskd.py": (
-        # No test drives EphemeralSlskd directly today — its only consumer
-        # is the dev benchmarking script scripts/bench_parallel_search.py,
-        # which has no dedicated test of its own either. Nearest existing
-        # benchmarking-tooling test, kept until real coverage exists.
-        "tests.test_bench_artist_cold",
     ),
     "tests/finite_domain.py": (
         "tests.test_finite_domain",
@@ -116,19 +187,6 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_dispatch_core",
         "tests.test_integration_slices",
     ),
-    "tests/_hypothesis_profiles.py": (
-        "tests.test_hypothesis_profile_audit",
-    ),
-    "tests/__init__.py": (
-        "tests.test_util",
-        "tests.test_beets_config_startup",
-    ),
-    "tests/_lambda_audit.py": (
-        "tests.test_lambda_audit",
-    ),
-    "tests/_mock_audit_scanner.py": (
-        "tests.test_mock_audit",
-    ),
     "tests/node_jsonl_worker.py": (
         "tests.test_node_jsonl_worker",
         "tests.test_generated_node_worker_audit",
@@ -140,14 +198,22 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
     "tests/ruff_lsp_worker.py": (
         "tests.test_ruff_lsp_worker",
     ),
-    "tests/_tests_typing_ratchet_baseline.py": (
-        "tests.test_typing_ratchet",
-    ),
-    "tests/_typing_ratchet_baseline.py": (
-        "tests.test_typing_ratchet",
-    ),
-    "tests/_typing_ratchet_scanner.py": (
-        "tests.test_typing_ratchet",
+}
+
+#: Shared tests/ modules with NO real consuming test today — an admitted,
+#: named gap, not a silent under-selection. A change to one of these
+#: selects only the ambient gates; _changed_path_neighbours deliberately
+#: does not fail closed on them (unlike a truly unmapped module), and the
+#: tree-walking pin in tests/test_targeted_test_selection.py asserts the
+#: absence of a real neighbour explicitly rather than accepting it by
+#: omission. Do not add an entry here to silence the fail-closed check —
+#: only for a module genuinely reviewed and found to have no consumer.
+SHARED_MODULES_WITHOUT_COVERAGE: dict[str, str] = {
+    "tests/ephemeral_slskd.py": (
+        "No test drives EphemeralSlskd directly. Its only consumer is the "
+        "dev benchmarking script scripts/bench_parallel_search.py, which "
+        "has no dedicated test of its own either (2026-08 review round, "
+        "issue #1081)."
     ),
 }
 
@@ -268,18 +334,27 @@ def _changed_path_neighbours(
                 "tests.test_quality_generated",
             )
         )
-    if path.suffix == ".py" and path.parts[:1] == ("tests",) and not neighbours:
+    if (
+        path.suffix == ".py"
+        and path.parts[:1] == ("tests",)
+        and not neighbours
+        and relative_path not in SHARED_MODULES_WITHOUT_COVERAGE
+    ):
         # A non-test .py file under tests/ with no direct self-selector, no
-        # EXACT_PATH_NEIGHBOURS entry, and no matching prefix rule is shared
-        # test infrastructure nobody has mapped to a consuming test. Silently
-        # dropping it under-selects — the more dangerous failure for a test
-        # selector, since the run reports green having exercised nothing
-        # relevant to the change (issue #1081). Fail closed and name the
-        # file so whoever touches it adds the mapping.
+        # EXACT_PATH_NEIGHBOURS entry, no matching prefix rule, and no
+        # SHARED_MODULES_WITHOUT_COVERAGE registration is shared test
+        # infrastructure that is neither mapped to a consuming test nor
+        # admitted as uncovered. Silently dropping it under-selects — the
+        # more dangerous failure for a test selector, since the run reports
+        # green having exercised nothing relevant to the change (issue
+        # #1081). Fail closed and name the file so whoever touches it either
+        # adds the mapping or, if truly uncovered, registers it in
+        # SHARED_MODULES_WITHOUT_COVERAGE with a one-line rationale.
         raise ValueError(
             f"unmapped shared test module: {relative_path} — add an "
             "EXACT_PATH_NEIGHBOURS entry or a prefix rule for it in "
-            "scripts/targeted_test_selection.py"
+            "scripts/targeted_test_selection.py, or register it in "
+            "SHARED_MODULES_WITHOUT_COVERAGE if it genuinely has none"
         )
     return tuple(neighbours)
 

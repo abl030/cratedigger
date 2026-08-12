@@ -2,20 +2,35 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import unittest
 from pathlib import Path
 
-from scripts.run_python_tests import discover_test_modules, select_test_targets
+from scripts.run_python_tests import (
+    _parser as _run_python_tests_parser,
+)
+from scripts.run_python_tests import (
+    complete_test_modules,
+    discover_test_modules,
+    select_test_targets,
+)
 from scripts.run_targeted_tests import targeted_phases
 from scripts.targeted_test_selection import (
     ALWAYS_AMBIENT_TESTS,
+    EXACT_PATH_NEIGHBOURS,
+    SHARED_MODULES_WITHOUT_COVERAGE,
+    _changed_path_neighbours,
     ambient_test_modules,
     assert_selection_complete,
     expand_test_selection,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+#: The runner's own --pattern default (scripts/run_python_tests.py), sourced
+#: rather than duplicated so this pin can never silently drift from what
+#: discover_test_modules actually uses in production.
+_DISCOVERY_PATTERN = _run_python_tests_parser().get_default("pattern")
 
 
 class TestTargetedTestSelection(unittest.TestCase):
@@ -129,27 +144,47 @@ class TestTargetedTestSelection(unittest.TestCase):
 
         Walks tests/ (not hard-listed) so a newly added shared module fails
         this test until scripts/targeted_test_selection.py maps it — the
-        self-maintaining contract issue #1081 requires. Scoped to tests/
-        itself (never REPO_ROOT) so a REPO_ROOT that is itself a
-        `.claude/worktrees/` checkout is never crawled: the filter below
-        checks the path RELATIVE to REPO_ROOT (never the absolute path,
-        which always contains `.claude/worktrees/...` from a worktree
-        session) — see #520/#543 for the prior REPO_ROOT-walk incidents.
+        self-maintaining contract issue #1081 requires. The walk is rooted
+        at REPO_ROOT/"tests" itself (never REPO_ROOT), so `.claude/worktrees/`
+        stale checkouts — siblings of tests/, not descendants — are
+        structurally unreachable; no runtime filter is needed to prove it
+        (see #520/#543 for the prior REPO_ROOT-walk incidents that DID walk
+        from REPO_ROOT and needed one).
+
+        Uses complete_test_modules(), the same set main() resolves against —
+        not discover_test_modules() alone — because
+        tests.world_model.state_machine is deliberately excluded from the
+        test*.py discovery glob and added back only by complete_test_modules().
+        A bare discover_test_modules() set would make this pin reject the one
+        honest neighbour that actually exercises tests/world_model/support.py.
         """
-        modules = discover_test_modules(REPO_ROOT / "tests", REPO_ROOT, "test*.py")
+        modules = complete_test_modules(
+            discover_test_modules(REPO_ROOT / "tests", REPO_ROOT, _DISCOVERY_PATTERN),
+            REPO_ROOT,
+        )
         tests_root = REPO_ROOT / "tests"
         shared_paths = sorted(
-            path
-            for path in tests_root.rglob("*.py")
-            if ".claude" not in path.relative_to(tests_root).parts
-            and "__pycache__" not in path.relative_to(tests_root).parts
-            and not path.name.startswith("test")
+            path for path in tests_root.rglob("*.py") if not path.name.startswith("test")
         )
         self.assertTrue(shared_paths, "expected shared tests/ modules to exist")
 
         for path in shared_paths:
             relative = path.relative_to(REPO_ROOT).as_posix()
             with self.subTest(path=relative):
+                if relative in SHARED_MODULES_WITHOUT_COVERAGE:
+                    # Admitted gap, not silent under-selection: registered by
+                    # name with a rationale (MUST FIX 7, #1081 review round).
+                    # Assert the absence explicitly rather than accepting it
+                    # by omission — a future real mapping added here without
+                    # also removing the registry entry would go unnoticed.
+                    self.assertEqual(
+                        _changed_path_neighbours(relative, REPO_ROOT),
+                        (),
+                        f"{relative} is registered as uncovered but now "
+                        "has a real neighbour — remove it from "
+                        "SHARED_MODULES_WITHOUT_COVERAGE",
+                    )
+                    continue
                 selection = expand_test_selection(
                     (),
                     changed_paths=(relative,),
@@ -162,6 +197,20 @@ class TestTargetedTestSelection(unittest.TestCase):
                 # that needs an expensive discovery-manifest subprocess per
                 # hotspot module, irrelevant here.
                 select_test_targets(modules, selection, hotspot_policies={})
+
+    def test_exact_path_neighbour_keys_still_exist_on_disk(self) -> None:
+        """Reverse direction of the tree-walking pin: no stale mapping keys.
+
+        A file deleted or renamed out from under an EXACT_PATH_NEIGHBOURS /
+        SHARED_MODULES_WITHOUT_COVERAGE entry leaves a dead key that nothing
+        else catches — the forward walk only ever visits real files.
+        """
+        for key in (*EXACT_PATH_NEIGHBOURS, *SHARED_MODULES_WITHOUT_COVERAGE):
+            with self.subTest(key=key):
+                self.assertTrue(
+                    (REPO_ROOT / key).is_file(),
+                    f"mapping key does not exist on disk: {key}",
+                )
 
     def test_unmapped_shared_test_module_fails_closed_with_the_file_name(
         self,
@@ -228,6 +277,25 @@ class TestTargetedSuiteWiring(unittest.TestCase):
         must not die on selector resolution — PR #1075's exact failure mode,
         where js/pyright/ruff/vulture all pass and the python phase exits 1
         before any test runs.
+
+        CRATEDIGGER_TEST_JOBS=1 pins the nested runner to one worker.
+        worker_environment() unconditionally pops TEST_DB_DSN so every
+        persistent worker bootstraps its own ephemeral PostgreSQL — at the
+        default worker count (half the host's CPUs, capped at 12) that is up
+        to 12 nested clusters spun up inside one already-parallel outer suite
+        target: the same class of scheduler-contention flake fixed by
+        widening the sp.run timeout in
+        tests/test_beets_destructive_configs_generated.py elsewhere in this
+        PR. Forcing one worker keeps this a real end-to-end subprocess run
+        of the actual entrypoint without adding a second flake of the same
+        kind.
+
+        A failure here may duplicate an unrelated ambient audit's own
+        failure reported elsewhere in the outer suite — expand_test_selection
+        always appends every ambient audit, so this real subprocess reruns
+        all of them too. That is the accepted cost of driving the real
+        entrypoint rather than a hand-picked subset; the tail-truncated
+        detail below keeps the duplicate report short.
         """
         selectors = expand_test_selection(
             (),
@@ -240,17 +308,15 @@ class TestTargetedSuiteWiring(unittest.TestCase):
         completed = subprocess.run(
             python_phase.command,
             cwd=REPO_ROOT,
+            env={**os.environ, "CRATEDIGGER_TEST_JOBS": "1"},
             capture_output=True,
             text=True,
             timeout=180,
             check=False,
         )
 
-        self.assertEqual(
-            completed.returncode,
-            0,
-            completed.stdout + completed.stderr,
-        )
+        detail = (completed.stdout + completed.stderr)[-4000:]
+        self.assertEqual(completed.returncode, 0, detail)
 
 
 if __name__ == "__main__":

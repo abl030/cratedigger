@@ -409,8 +409,15 @@ def exercise_real_beets_world(
         child_env = {**os.environ, "BEETSDIR": str(child_config)}
         # This is a hang backstop, not an assertion — under the parallel
         # Hypothesis scheduler it once timed out at 30s (FlakyFailure) then
-        # passed on retry and in isolation (13.7s). 120s gives real headroom
-        # against scheduler contention without being a load-aware cap.
+        # passed on retry and in isolation (13.7s). 120s is not large
+        # headroom: measured worst case under 60-way oversubscription is
+        # ~45s, so 120s is only ~2.6x that, not a generous multiple. There is
+        # no per-target timeout in scripts/run_python_tests.py or
+        # scripts/fuzz_burst.sh, so a genuine hang regression here (not a
+        # scheduler-contention flake) now costs up to 18x120s in the suite
+        # (9 PROFILES x 2 sources) and roughly 96x120s in a fuzz burst before
+        # it is caught — this bound is a real ceiling on that cost, not free
+        # insurance.
         child = sp.run(
             [sys.executable, str(REPO / "harness" / "delete_album.py")],
             input=msgspec.json.encode(request),
