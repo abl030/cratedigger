@@ -8,6 +8,8 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from contextlib import closing, redirect_stderr, redirect_stdout
 from datetime import UTC, datetime
@@ -1336,6 +1338,91 @@ class TestCmdWrongMatchTriage(_FakeDbWebServerCase):
             )
 
         self.assertEqual(rc, 4)
+
+    def test_sigint_during_poll_cancels_through_the_socket_not_directly(self):
+        """Issue #1083: Ctrl-C during the poll must route cancellation
+        through the exact same canonical route the web UI's Stop button
+        posts to — no direct call, no direct-DB fallback. Simulated the
+        same way the youtube-ingest worker's SIGINT test does: the
+        collaborator raises ``KeyboardInterrupt`` directly rather than
+        racing a real OS signal delivery."""
+        import web.routes.imports as imports_routes
+        from lib.wrong_match_cleanup_service import WrongMatchCleanupSummary
+
+        self.db.seed_request(make_request_row(id=1))
+        entered = threading.Event()
+
+        def slow_cleanup(db, *, confirm_all_wrong_matches, cancellation_token=None):
+            entered.set()
+            assert cancellation_token is not None
+            deadline = time.monotonic() + 5
+            while (
+                not cancellation_token.cancelled
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
+            return WrongMatchCleanupSummary(
+                processed=0, cancelled=cancellation_token.cancelled,
+            )
+
+        args = argparse.Namespace(
+            apply=True, json=True, api_endpoint=TcpApiEndpoint(self.base),
+        )
+        stdout = io.StringIO()
+        interrupted = {"done": False}
+
+        def sleep_then_interrupt(_seconds):
+            if not interrupted["done"]:
+                if entered.wait(timeout=5):
+                    interrupted["done"] = True
+                    raise KeyboardInterrupt
+                return
+            time.sleep(0.01)
+
+        with patch.object(
+            imports_routes, "cleanup_all_wrong_matches", slow_cleanup,
+        ), redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+            rc = pipeline_cli.cmd_wrong_match_triage(
+                None, args, sleep=sleep_then_interrupt,
+            )
+            imports_routes._triage_runner.join(timeout=5)
+
+        self.assertEqual(rc, 5)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["state"], "cancelled")
+        self.assertIsNone(payload["error"])
+        self.assertTrue(payload["summary"]["cancelled"])
+
+    def test_cancelled_sweep_reports_distinctly_from_completed_in_text(self):
+        """The human-readable renderer says CANCELLED, never FAILED, and
+        still prints exactly what the summary says ran."""
+        import web.routes.imports as imports_routes
+        from lib.wrong_match_cleanup_service import WrongMatchCleanupSummary
+
+        self.db.seed_request(make_request_row(id=1))
+
+        def cancelled_cleanup(db, *, confirm_all_wrong_matches, cancellation_token=None):
+            return WrongMatchCleanupSummary(
+                processed=1, deleted=1, cancelled=True,
+            )
+
+        args = argparse.Namespace(
+            apply=True, json=False, api_endpoint=TcpApiEndpoint(self.base),
+        )
+        stdout = io.StringIO()
+        with patch.object(
+            imports_routes, "cleanup_all_wrong_matches", cancelled_cleanup,
+        ), redirect_stdout(stdout):
+            rc = pipeline_cli.cmd_wrong_match_triage(
+                None, args, sleep=lambda _seconds: None,
+            )
+            imports_routes._triage_runner.join(timeout=5)
+
+        self.assertEqual(rc, 5)
+        output = stdout.getvalue()
+        self.assertIn("CANCELLED", output)
+        self.assertIn("deleted: 1", output)
+        self.assertNotIn("FAILED", output)
 
 
 class TestCmdWrongMatchDelete(_FakeDbWebServerCase):

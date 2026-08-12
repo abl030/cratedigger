@@ -13,10 +13,12 @@ from unittest.mock import patch
 
 import msgspec
 
+from lib import wrong_match_cleanup_service
 from lib.import_evidence import (
     ActionEvidenceProvenance,
     CurrentEvidenceActionResult,
 )
+from lib.import_execution import CancellationToken
 from lib.import_preview import (
     PREVIEW_VERDICT_EVIDENCE_READY,
     PREVIEW_VERDICT_MEASUREMENT_FAILED,
@@ -212,6 +214,20 @@ def _log_wrong_match(
     )
 
 
+def _patch_current_evidence_helper(fn=None):
+    """The ONE ``MULTILINE_PATCH_BASELINE``-counted occurrence
+    (``tests/_mock_audit_scanner.py``) of patching
+    ``load_current_evidence_for_action`` directly — every caller that
+    needs to control current (installed-Beets) evidence reuses this
+    function instead of writing a second ``patch(...)`` call, which
+    would grow the ratchet. ``fn`` defaults to "Beets has no album for
+    this MBID"."""
+    return patch(
+        "lib.wrong_match_cleanup_service.load_current_evidence_for_action",
+        side_effect=fn if fn is not None else (lambda *_a, **_kw: None),
+    )
+
+
 class WrongMatchCleanupServiceTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp()
@@ -224,9 +240,8 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
         # Default: Beets has no album for this MBID. Individual tests override
         # via self._set_current_evidence_helper(...) to drive specific branches.
         self._current_evidence_helper = lambda *_args, **_kwargs: None
-        helper_patch = patch(
-            "lib.wrong_match_cleanup_service.load_current_evidence_for_action",
-            side_effect=lambda *a, **kw: self._current_evidence_helper(*a, **kw),
+        helper_patch = _patch_current_evidence_helper(
+            lambda *a, **kw: self._current_evidence_helper(*a, **kw),
         )
         self.addCleanup(helper_patch.stop)
         self.mock_current_evidence_helper = helper_patch.start()
@@ -1301,7 +1316,7 @@ class TestSummaryOutcomeContract(unittest.TestCase):
 
         count_fields = (
             set(WrongMatchCleanupSummary.__struct_fields__)
-            - {"processed", "results"}
+            - {"processed", "results", "cancelled"}
         )
         self.assertEqual(set(OUTCOME_KEYS), count_fields)
 
@@ -1338,6 +1353,185 @@ class TestSummaryOutcomeContract(unittest.TestCase):
         self.assertEqual(summary.processed, 2)
         self.assertEqual(summary.deleted, 1)
         self.assertEqual(summary.results, tuple(results))
+
+
+class TestCancellation(unittest.TestCase):
+    """Issue #1083 — deterministic pins per stop point.
+
+    Reuse the token, not the raise: ``cleanup_all_wrong_matches`` reads
+    ``cancellation_token.cancelled`` as a plain boolean and breaks
+    between rows; it never calls ``raise_if_cancelled()``. A generated
+    property patrolling the "never a partially-deleted directory"
+    invariant over arbitrary queues lives in
+    ``tests/test_wrong_match_cleanup_service_generated.py``.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp()
+        self.db = FakePipelineDB()
+        self.db.seed_request(make_request_row(
+            id=1, status="wanted", mb_release_id="mbid-1",
+        ))
+        helper_patch = _patch_current_evidence_helper()
+        self.addCleanup(helper_patch.stop)
+        helper_patch.start()
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _confident_reject_row(self, name: str) -> tuple[str, int]:
+        """A row whose candidate is a guaranteed confident_reject —
+        deterministic deletion with no dependency on current evidence."""
+        source = _make_source(self.tmp, name)
+        log_id = _log_wrong_match(self.db, 1, source)
+        self.db.set_download_log_candidate_evidence(
+            log_id,
+            _store_evidence(
+                self.db,
+                _evidence(
+                    source,
+                    mb_release_id=f"mbid-{name}",
+                    matched_bad_audio_hash=True,
+                ),
+            ),
+        )
+        return source, log_id
+
+    def test_cancel_before_first_row_processes_nothing(self) -> None:
+        source, _log_id = self._confident_reject_row("before-first")
+        token = CancellationToken()
+        token.cancel("operator_stop")
+
+        summary = cleanup_all_wrong_matches(
+            self.db, confirm_all_wrong_matches=True, cfg=_cfg(),
+            cancellation_token=token,
+        )
+
+        self.assertTrue(summary.cancelled)
+        self.assertEqual(summary.processed, 0)
+        self.assertEqual(summary.results, ())
+        self.assertTrue(os.path.isdir(source))
+        # Nothing ran, so nothing was audited either.
+        self.assertNotIn(
+            "wrong_match_triage",
+            self.db.download_logs[-1].validation_result,
+        )
+
+    def test_cancel_mid_queue_stops_after_the_current_row(self) -> None:
+        sources_by_id: dict[int, str] = {}
+        for name in ("mid-1", "mid-2", "mid-3"):
+            source, log_id = self._confident_reject_row(name)
+            sources_by_id[log_id] = source
+        # Don't assume queue order -- ask the real projection, exactly
+        # like the service does, and cancel after whichever row it
+        # processes first.
+        ordered_ids = [
+            row["download_log_id"] for row in self.db.get_wrong_matches()
+        ]
+        self.assertEqual(len(ordered_ids), 3)
+        first_id, second_id, third_id = ordered_ids
+        token = CancellationToken()
+        real_cleanup_wrong_match = wrong_match_cleanup_service.cleanup_wrong_match
+
+        def cancel_after_first(db, download_log_id, **kwargs):
+            result = real_cleanup_wrong_match(db, download_log_id, **kwargs)
+            if download_log_id == first_id:
+                token.cancel("operator_stop")
+            return result
+
+        with patch(
+            "lib.wrong_match_cleanup_service.cleanup_wrong_match",
+            side_effect=cancel_after_first,
+        ):
+            summary = cleanup_all_wrong_matches(
+                self.db, confirm_all_wrong_matches=True, cfg=_cfg(),
+                cancellation_token=token,
+            )
+
+        self.assertTrue(summary.cancelled)
+        self.assertEqual(summary.processed, 1)
+        self.assertEqual(len(summary.results), 1)
+        self.assertEqual(summary.results[0].download_log_id, first_id)
+        self.assertEqual(summary.deleted, 1)
+        # Exactly the row before the stop was deleted and audited; the
+        # rest are untouched -- the partial summary is never discarded.
+        self.assertFalse(os.path.exists(sources_by_id[first_id]))
+        self.assertTrue(os.path.isdir(sources_by_id[second_id]))
+        self.assertTrue(os.path.isdir(sources_by_id[third_id]))
+        audited = {row.id: row for row in self.db.download_logs}
+        self.assertIn(
+            "wrong_match_triage", audited[first_id].validation_result)
+        self.assertNotIn(
+            "wrong_match_triage", audited[second_id].validation_result)
+        self.assertNotIn(
+            "wrong_match_triage", audited[third_id].validation_result)
+
+    def test_cancel_after_last_row_reports_full_completion_not_cancelled(
+        self,
+    ) -> None:
+        """Cancelling exactly as the last row finishes leaves nothing for
+        the loop to stop -- it never re-checks the token once iteration
+        is over, so the summary reports the honest complete run rather
+        than claiming a cancellation it never observed."""
+        sources_by_id: dict[int, str] = {}
+        for name in ("last-1", "last-2"):
+            source, log_id = self._confident_reject_row(name)
+            sources_by_id[log_id] = source
+        ordered_ids = [
+            row["download_log_id"] for row in self.db.get_wrong_matches()
+        ]
+        self.assertEqual(len(ordered_ids), 2)
+        last_id = ordered_ids[-1]
+        token = CancellationToken()
+        real_cleanup_wrong_match = wrong_match_cleanup_service.cleanup_wrong_match
+
+        def cancel_after_last(db, download_log_id, **kwargs):
+            result = real_cleanup_wrong_match(db, download_log_id, **kwargs)
+            if download_log_id == last_id:
+                token.cancel("operator_stop")
+            return result
+
+        with patch(
+            "lib.wrong_match_cleanup_service.cleanup_wrong_match",
+            side_effect=cancel_after_last,
+        ):
+            summary = cleanup_all_wrong_matches(
+                self.db, confirm_all_wrong_matches=True, cfg=_cfg(),
+                cancellation_token=token,
+            )
+
+        self.assertFalse(summary.cancelled)
+        self.assertEqual(summary.processed, 2)
+        self.assertEqual(summary.deleted, 2)
+        for source in sources_by_id.values():
+            self.assertFalse(os.path.exists(source))
+        # The request landed on the token -- it was just too late to stop
+        # anything, which is exactly the race this pin proves is safe.
+        self.assertTrue(token.cancelled)
+
+    def test_cancel_requires_a_break_not_a_raise(self) -> None:
+        """Fault-injection guard (code-quality.md): a cancellation path
+        that raises instead of breaking would unwind out of
+        ``cleanup_all_wrong_matches`` before it can return a summary at
+        all, losing the partial ``results`` list this issue exists to
+        preserve. Proving the function returns a real, populated summary
+        under an already-cancelled token is the regression guard for
+        that trap."""
+        source, _log_id = self._confident_reject_row("no-raise")
+        token = CancellationToken()
+        token.cancel("operator_stop")
+
+        # No assertRaises here on purpose: the whole point is that this
+        # call must return normally. If a future change reused the raise
+        # (``raise_if_cancelled()``) instead of the token's plain boolean,
+        # this call would raise ``ExecutionCancelled`` and the test would
+        # fail loudly with that traceback, not swallow it.
+        summary = cleanup_all_wrong_matches(
+            self.db, confirm_all_wrong_matches=True, cfg=_cfg(),
+            cancellation_token=token,
+        )
+        self.assertTrue(summary.cancelled)
+        self.assertTrue(os.path.isdir(source))
 
 
 if __name__ == "__main__":

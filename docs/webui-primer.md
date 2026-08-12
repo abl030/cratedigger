@@ -101,6 +101,8 @@ depends on.
 | `/api/wrong-matches/audio` | GET | Stream an individual wrong-match audio file with byte-range support |
 | `/api/wrong-matches/converge` | POST | Queue every wrong-match candidate within a release's loosen threshold and delete the rest |
 | `/api/wrong-matches/triage` | POST | Evidence-only full-queue Wrong Matches cleanup; requires `{"confirm_all_wrong_matches": true}` |
+| `/api/wrong-matches/triage/status` | GET | Poll the background sweep's state (`idle`/`running`/`completed`/`cancelled`/`failed`) and summary |
+| `/api/wrong-matches/triage/cancel` | POST | Request cancellation of the in-flight sweep, if any; never 409 — same route the CLI's `Ctrl-C` handler and the UI's Stop button both use (#1083) |
 | `/api/import-preview` | POST | Strict path-free preview: nested typed `values` or a positive `download_log_id`. `pipeline-cli import-preview --download-log-id` relays this route (its `failed_path` is under the private processing tree, #1063); the CLI-only `--path` mode keeps the explicit-path inspector off the HTTP surface (CD-SEC-03). |
 | `/api/import-jobs` | GET | List recent import queue jobs |
 | `/api/import-jobs/timeline` | GET | List active queued/running/recovery-required import jobs in importer order, with server-classified display fields |

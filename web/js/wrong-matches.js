@@ -925,6 +925,7 @@ function renderWrongMatches(data, el) {
       <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
         <button id="wm-refresh-btn" class="p-btn" style="border-color:#888;color:#888;" onclick="event.stopPropagation(); window.refreshWrongMatches(this)" title="Refetch the queue from the server">Refresh</button>
         <button id="wm-bulk-triage-btn" class="p-btn delete" ${counts.entries === 0 ? 'disabled' : ''} onclick="event.stopPropagation(); window.bulkTriageWrongMatches(this)">Cleanup Wrong Matches (${counts.entries})</button>
+        <button id="wm-bulk-triage-stop-btn" class="p-btn" style="border-color:#888;color:#888;" disabled onclick="event.stopPropagation(); window.stopWrongMatchTriage(this)" title="Stop the running cleanup sweep after its current row">Stop</button>
       </div>
     </div>`;
 
@@ -1497,6 +1498,7 @@ export const __test__ = {
   renderWrongMatchExplorer,
   renderWrongMatches,
   setWrongMatchConvergeThreshold,
+  stopWrongMatchTriage,
   thresholdForGroup,
   toggleWrongMatchEntry,
 };
@@ -1721,11 +1723,21 @@ export async function bulkTriageWrongMatches(btn) {
   }
   if (!confirm(`Process all ${counts.entries} Wrong Matches candidates?\nOnly force-mode confident rejects will be deleted.`)) return;
 
+  const stopBtn = /** @type {HTMLButtonElement|null} */ (
+    document.getElementById('wm-bulk-triage-stop-btn'));
   btn.disabled = true;
   btn.textContent = 'Cleaning...';
+  if (stopBtn) {
+    stopBtn.disabled = false;
+    stopBtn.textContent = 'Stop';
+  }
   const restore = () => {
     btn.disabled = false;
     btn.textContent = `Cleanup Wrong Matches (${counts.entries})`;
+    if (stopBtn) {
+      stopBtn.disabled = true;
+      stopBtn.textContent = 'Stop';
+    }
   };
   try {
     const r = await fetch(`${API}/api/wrong-matches/triage`, {
@@ -1749,6 +1761,15 @@ export async function bulkTriageWrongMatches(btn) {
       await _refreshWrongMatches();
       return;
     }
+    if (status && status.state === 'cancelled') {
+      // Issue #1083: the operator hit Stop. summary still holds exactly
+      // what ran before the stop — say so distinctly from completion.
+      restore();
+      toast(`Cleanup stopped — ${cleanupSummaryToast(status.summary || {})}`);
+      invalidateWrongMatches();
+      await _refreshWrongMatches();
+      return;
+    }
     if (status && status.state === 'idle') {
       // The web service restarted mid-sweep and lost the in-memory status.
       // Deletions already performed are durable — refresh to show them.
@@ -1763,6 +1784,40 @@ export async function bulkTriageWrongMatches(btn) {
   } catch (_e) {
     restore();
     toast('Cleanup request failed', true);
+  }
+}
+
+/**
+ * Request cancellation of the in-flight bulk triage sweep (issue #1083).
+ * Not an error, and never toasted as one, when nothing is running or the
+ * sweep already finished — the poll loop inside bulkTriageWrongMatches
+ * renders whatever terminal state actually lands. This button lives in
+ * the browser deliberately: the panic scenario ("something is deleting
+ * the wrong things, stop it") happens while watching this exact screen.
+ * @param {HTMLButtonElement} btn
+ */
+export async function stopWrongMatchTriage(btn) {
+  btn.disabled = true;
+  btn.textContent = 'Stopping...';
+  try {
+    const r = await fetch(`${API}/api/wrong-matches/triage/cancel`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({}),
+    });
+    if (!r.ok) {
+      toast('Stop request failed', true);
+      btn.disabled = false;
+      btn.textContent = 'Stop';
+      return;
+    }
+    // Success: leave the button disabled/"Stopping..." — the in-flight
+    // poll loop in bulkTriageWrongMatches restores both buttons once the
+    // sweep reaches a terminal state.
+  } catch (_e) {
+    toast('Stop request failed', true);
+    btn.disabled = false;
+    btn.textContent = 'Stop';
   }
 }
 

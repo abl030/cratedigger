@@ -91,6 +91,6 @@ TYPING_RATCHET_BASELINE: dict[str, dict[str, int]] = {
     "web/overlay.py": {"any": 2},
     "web/routes/_pydantic.py": {"any": 4},
     "web/routes/imports.py": {"any": 2},
-    "web/triage_runner.py": {"any": 8},
+    "web/triage_runner.py": {"any": 6},
     "web/wrong_match_file_service.py": {"any": 7},
 }

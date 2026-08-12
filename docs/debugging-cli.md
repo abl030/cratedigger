@@ -173,16 +173,25 @@ the canonical background sweep and then follows
 the whole summary; the sweep itself is deliberately unbounded, and a few
 consecutive failed status polls are retried before the follow gives up.
 
-⚠ **`wrong-match-triage` cannot be cancelled from the CLI.** The sweep runs on
-a background thread inside `cratedigger-web`; the command only follows it.
-Ctrl-C (or any other way of killing the CLI) detaches the operator from a
-destructive whole-queue delete that keeps running server-side, and
-`TriageRunner` exposes no abort. To stop a sweep you must restart
-`cratedigger-web`, which loses the in-memory status while leaving every
-deletion already performed durable. Its `--json` output is the STATUS
-envelope (`state`, `started_at`, `finished_at`, `summary`, `error`), not the
-bare summary the in-process command printed; the counts live under
-`summary`.
+**`wrong-match-triage` can be cancelled with Ctrl-C (issue #1083).** The sweep
+runs on a background thread inside `cratedigger-web`; the command only follows
+it — so Ctrl-C is caught and turned into one `POST
+/api/wrong-matches/triage/cancel`, the exact same route the web UI's Stop
+button uses, then the CLI keeps following `/api/wrong-matches/triage/status`
+to print whatever terminal state actually lands. There is no direct call and
+no direct-DB fallback. Cancellation is observed BETWEEN rows inside
+`cleanup_all_wrong_matches`, never mid-delete, so a row already in flight when
+you hit Ctrl-C always finishes normally; only the next row is skipped. The
+final state is `cancelled`, distinct from `completed` and `failed`, and its
+`summary` reports exactly what ran before the stop — nothing already deleted
+is rolled back. A cancel that races a sweep which is already finishing, or one
+sent with no sweep running, both just return the current status; neither is an
+error. A second Ctrl-C while the CLI is still waiting for that final status
+falls through to the ordinary uncaught `KeyboardInterrupt` and detaches the
+terminal — the sweep (and any cancel already in flight) keeps running
+server-side regardless. Its `--json` output is the STATUS envelope (`state`,
+`started_at`, `finished_at`, `summary`, `error`), not the bare summary the
+in-process command printed; the counts live under `summary`.
 
 Locally generated transport/protocol failures (including a missing or
 unreachable socket, malformed development origins, redirects, or non-object

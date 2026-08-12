@@ -15,7 +15,7 @@ import { toggleLongTailDetail, toggleLongTailPeers, checkYoutube, pickYoutubeRes
 import { checkYoutubeRescue } from './youtube_rescue_control.js';
 import { toggleLibDetail, toggleReleaseLibDetail, banSource, setLibQuality, upgradeAlbum, setIntent, confirmDeleteBeets, executeBeetsDeletion } from './library.js';
 import { disambRemove } from './analysis.js';
-import { loadWrongMatches, toggleWrongMatchGroup, toggleWrongMatchEntry, reloadWrongMatchExplorer, maybeLoadWrongMatchExplorer, refreshWrongMatches, forceImportWrongMatch, deleteWrongMatch, deleteWrongMatchGroup, bulkTriageWrongMatches, convergeWrongMatches, setWrongMatchConvergeThreshold, toggleWrongMatchesReplacedFilter } from './wrong-matches.js';
+import { loadWrongMatches, toggleWrongMatchGroup, toggleWrongMatchEntry, reloadWrongMatchExplorer, maybeLoadWrongMatchExplorer, refreshWrongMatches, forceImportWrongMatch, deleteWrongMatch, deleteWrongMatchGroup, bulkTriageWrongMatches, stopWrongMatchTriage, convergeWrongMatches, setWrongMatchConvergeThreshold, toggleWrongMatchesReplacedFilter } from './wrong-matches.js';
 import { openLabelDetail, openLabelDetailFromList, closeLabelDetail, onLabelFilterChange, onLabelYearFilterInput, toggleLabelIncludeSublabels, goToLabelPage } from './labels.js';
 import { toggleSearchPlanSummary, openSearchPlanDetail, closeSearchPlanDetail, searchPlanRegenerate, searchPlanAdvance, searchPlanLoadOlder, searchPlanRefreshDetail, searchPlanSubmitAdvance, searchPlanCancelAdvance } from './search_plan.js';
 import { openReplacePicker } from './replace_picker.js';
@@ -217,6 +217,7 @@ Object.assign(window, {
   deleteWrongMatch,
   deleteWrongMatchGroup,
   bulkTriageWrongMatches,
+  stopWrongMatchTriage,
   convergeWrongMatches,
   setWrongMatchConvergeThreshold,
   openLabelDetail,

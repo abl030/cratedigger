@@ -24,6 +24,8 @@ from scripts.pipeline_cli.api_mutations import (
     TIMEOUT_GROUP_DELETE_SECONDS,
     TIMEOUT_SOURCE_DELETE_SECONDS,
     _ApiMutation,
+    _post,
+    poll_to_completion,
     relay_polled,
     relay_rendered,
     render_api_error,
@@ -92,6 +94,12 @@ def _render_wrong_match_triage(status: int, payload: dict[str, object]) -> None:
         else:
             render_api_error(status, payload)
         return
+    if payload.get("state") == "cancelled":
+        # Issue #1083: the operator (or the browser's Stop button) cut
+        # the sweep short. ``summary`` still holds exactly what ran
+        # before the stop — say so distinctly from a full completion.
+        print("  Wrong Matches sweep CANCELLED — reporting what ran "
+              "before the stop:")
     results = summary.get("results")
     if is_object_list(results):
         for result in results:
@@ -119,6 +127,12 @@ def _triage_exit_code(payload: dict[str, object]) -> int:
     return 5
 
 
+def _triage_status_mutation() -> _ApiMutation:
+    return _ApiMutation(
+        path="/api/wrong-matches/triage/status", body={}, method="GET",
+    )
+
+
 def cmd_wrong_match_triage(
     _db: object,
     args: argparse.Namespace,
@@ -130,6 +144,15 @@ def cmd_wrong_match_triage(
     Starts the canonical background sweep and follows its status route to
     completion, so the operator still gets the whole summary and exit 0
     while the deletions happen under the service identity (issue #1063).
+
+    ``Ctrl-C`` used to stop the sweep directly, back when it ran
+    in-process. Now it only detaches the CLI from a sweep that keeps
+    running — UNLESS we catch it here and request cancellation through
+    the exact same canonical route the web UI's Stop button posts to
+    (issue #1083). No direct call, no direct-DB fallback: the deletions
+    happen under the service identity over the permissioned socket
+    either way (issue #1063), and cancellation is just one more request
+    over that same path.
     """
     if not args.apply:
         print(
@@ -139,23 +162,41 @@ def cmd_wrong_match_triage(
         )
         return 2
 
-    return relay_polled(
-        args.api_endpoint,
-        _ApiMutation(
-            path="/api/wrong-matches/triage",
-            body={"confirm_all_wrong_matches": True},
-        ),
-        _ApiMutation(
-            path="/api/wrong-matches/triage/status",
-            body={},
-            method="GET",
-        ),
-        is_complete=_triage_is_complete,
-        render=_render_wrong_match_triage,
-        json_output=args.json,
-        completed_exit_code=_triage_exit_code,
-        sleep=sleep,
-    )
+    status_request = _triage_status_mutation()
+    try:
+        return relay_polled(
+            args.api_endpoint,
+            _ApiMutation(
+                path="/api/wrong-matches/triage",
+                body={"confirm_all_wrong_matches": True},
+            ),
+            status_request,
+            is_complete=_triage_is_complete,
+            render=_render_wrong_match_triage,
+            json_output=args.json,
+            completed_exit_code=_triage_exit_code,
+            sleep=sleep,
+        )
+    except KeyboardInterrupt:
+        print(
+            "\n  Stopping the sweep — waiting for the current row to "
+            "finish...",
+            file=sys.stderr,
+        )
+        _post(
+            args.api_endpoint,
+            _ApiMutation(path="/api/wrong-matches/triage/cancel", body={}),
+            report_failure=False,
+        )
+        return poll_to_completion(
+            args.api_endpoint,
+            status_request,
+            is_complete=_triage_is_complete,
+            render=_render_wrong_match_triage,
+            json_output=args.json,
+            completed_exit_code=_triage_exit_code,
+            sleep=sleep,
+        )
 
 
 def cmd_wrong_match_delete(_db: object, args: argparse.Namespace) -> int:
