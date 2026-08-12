@@ -416,19 +416,25 @@ and metadata-gate-watchdog timers plus every metadata-gate-guarded service. It
 records only the control links, manual hold, and main/YouTube start inhibitors
 it created.
 
-`acquire` masks and stops the three timers, then drains the producers (main,
-unfindable, watchdog, YouTube ingest) and waits — bounded, separately from the
-overall service-drain timeout — for the still-running importer/preview to
-empty the automation queue, **before** taking the metadata-gate manual hold
-that stops the controlled workers (#1078). Taking the hold first would stop
-the very workers that drain the queue, deadlocking against the old-lifecycle
-preflight below. `active_automation_jobs`/`dirty_downloading_rows` drain this
-way; `recovery_required_jobs`/`malformed_enqueued_at_rows` are anomalies
-nothing drains, so they still fail immediately once the hold is taken.
-`cratedigger-youtube-ingest` has no timer and an operator can start
-`cratedigger.service` by hand, so `acquire` owns a temporary start inhibitor
-for both across the whole drain-and-wait window, releasing it once the gate
-hold is active.
+`acquire` masks and stops the three timers, then drains the timer-driven
+producers (main, unfindable, watchdog — `TIMER_DRIVEN_PRODUCER_UNITS`) and
+waits — bounded, separately from the overall service-drain timeout — for the
+still-running importer/preview to empty the automation queue, **before**
+taking the metadata-gate manual hold that stops the controlled workers
+(#1078). Taking the hold first would stop the very workers that drain the
+queue, deadlocking against the old-lifecycle preflight below.
+`active_automation_jobs`/`dirty_downloading_rows` drain this way;
+`recovery_required_jobs`/`malformed_enqueued_at_rows` are anomalies nothing
+drains, so they still fail immediately once the hold is taken.
+`cratedigger-youtube-ingest` has no timer, so nothing before the gate hold
+ever asks it to stop — it is deliberately NOT drained in this pre-hold phase
+(draining it there would wait the full service-drain timeout for nothing).
+The pre-hold window owns no start inhibitor at all: masking already blocks
+the timer trigger, but it does not block an operator manually starting
+`cratedigger.service` by hand, so once the gate hold is taken, `acquire`
+re-drains every unit it knows about (`SERVICE_UNITS`, not just the ones the
+gate itself stopped) to catch that before reaching HELD, right before the
+migration this hold gates.
 
 Run the reviewed helper on doc2 through Python stdin so the pre-switch host does
 not need this revision deployed already:
