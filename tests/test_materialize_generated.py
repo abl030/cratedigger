@@ -43,6 +43,7 @@ docs/generated-testing.md.
 
 import hashlib
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -145,14 +146,32 @@ class TestFingerprintProperties(unittest.TestCase):
 # Property 1b — canonical_processing_path suffix + the r2 truncation guard
 # ============================================================================
 
-_LONG_UNICODE_TEXT = st.text(
-    alphabet=st.characters(blacklist_categories=("Cs",), max_codepoint=0x2FFFF),
-    max_size=300,
+# ``max_size=300`` alone never reached the guard it was written for: over a
+# whole gating run the longest basename this property ever built was 97 of
+# the 255 bytes ``assert_canonical_basename_bounded`` caps (issue #1094
+# per-clause audit — 0/150 examples within 158 bytes of the limit), so
+# ``canonical_processing_path``'s truncation branch never executed and
+# deleting it outright changed nothing. Half the draws are now explicitly
+# near-limit, and the decisive boundary worlds are pinned below.
+_ANY_UNICODE = st.characters(blacklist_categories=("Cs",), max_codepoint=0x2FFFF)
+_NEAR_LIMIT_UNICODE_TEXT = st.text(
+    alphabet=_ANY_UNICODE, min_size=100, max_size=300,
+)
+_LONG_UNICODE_TEXT = st.one_of(
+    st.text(alphabet=_ANY_UNICODE, max_size=300),
+    _NEAR_LIMIT_UNICODE_TEXT,
 )
 _SHORT_UNICODE_TEXT = st.text(
-    alphabet=st.characters(blacklist_categories=("Cs",), max_codepoint=0x2FFFF),
-    max_size=12,
+    alphabet=_ANY_UNICODE, max_size=12,
 )
+# ``"x" * 240 - ()`` sanitizes to 246 bytes: over the 244-byte base budget
+# the 11-byte `` [<fp>]`` suffix leaves, so the truncation branch runs and
+# the published basename lands exactly on the 255-byte cap. Its 238-byte
+# sibling lands on the same cap WITHOUT truncating — the two sides of the
+# boundary the clause legislates.
+_TRUNCATING_BASE = "x" * 240
+_EXACT_LIMIT_BASE = "y" * 238
+_ONE_PAIR: list[tuple[str, str]] = [("peer0", "peer0\\Music\\01 Track.flac")]
 
 
 def assert_canonical_basename_bounded(basename: str, fp: str) -> None:
@@ -188,6 +207,10 @@ class TestCanonicalPathProperties(unittest.TestCase):
 
     @given(artist=_LONG_UNICODE_TEXT, title=_LONG_UNICODE_TEXT,
            year=_SHORT_UNICODE_TEXT, pairs=_fp_pairs_nonempty_strategy)
+    @example(artist=_TRUNCATING_BASE, title="", year="", pairs=_ONE_PAIR)
+    @example(artist=_EXACT_LIMIT_BASE, title="", year="", pairs=_ONE_PAIR)
+    @example(artist="漢" * 120, title="Ünïcödé" * 20, year="2026",
+             pairs=_ONE_PAIR)
     def test_suffix_present_and_bounded_when_fingerprinted(
             self, artist, title, year, pairs):
         fp = attempt_fingerprint(pairs)
@@ -198,6 +221,8 @@ class TestCanonicalPathProperties(unittest.TestCase):
 
     @given(artist=_LONG_UNICODE_TEXT, title=_LONG_UNICODE_TEXT,
            year=_SHORT_UNICODE_TEXT)
+    @example(artist=_TRUNCATING_BASE, title="", year="")
+    @example(artist="漢" * 120, title="Ünïcödé" * 20, year="2026")
     def test_no_suffix_when_fingerprint_empty(self, artist, title, year):
         path = canonical_processing_path(
             artist=artist, title=title, year=year,
@@ -372,59 +397,120 @@ class TestMaterializeAttemptIsolation(unittest.TestCase):
 # ============================================================================
 # Property 3 — known-bad self-tests for the invariant checkers
 # ============================================================================
+#
+# Per-clause proof (issue #1094, docs/generated-testing.md § "Per-clause
+# proof"): each clause gets the minimal world that makes ITS condition
+# true while every earlier clause in the same function passes, and asserts
+# that clause's own message anchored end to end. ``assert_canonical_
+# basename_bounded`` and ``assert_resume_stability`` each own two clauses;
+# a bare ``assertRaises`` could not tell which of the two answered.
+
+
+def _exactly(message: str) -> str:
+    """Anchor one clause's complete message for ``assertRaisesRegex``."""
+    return f"^{re.escape(message)}$"
+
 
 class TestMaterializeCheckersTripOnViolations(unittest.TestCase):
-    """Known-bad self-tests: every checker above must trip on a planted
-    violation of the invariant it claims to enforce."""
+    """Known-bad self-tests: every CLAUSE above must trip on a planted
+    violation of the invariant it claims to enforce, with its own message."""
 
-    def test_fingerprint_equal_checker_trips_on_divergence(self):
-        with self.assertRaises(AssertionError):
+    def test_fingerprint_equal_clause_names_both_digests(self):
+        with self.assertRaisesRegex(AssertionError, _exactly(
+                "test: fingerprints diverged: 'aaaa1111' != 'bbbb2222'")):
             assert_fingerprint_equal("aaaa1111", "bbbb2222", context="test")
 
-    def test_fingerprints_distinct_checker_trips_on_collision(self):
-        with self.assertRaises(AssertionError):
+    def test_fingerprints_distinct_clause_names_the_colliding_sets(self):
+        with self.assertRaisesRegex(AssertionError, _exactly(
+                "different pair sets collided on fingerprint 'cafe1234': "
+                "a=[('peer0', 'a.flac')] b=[('peer1', 'b.flac')]")):
             assert_fingerprints_distinct(
                 "cafe1234", "cafe1234",
                 [("peer0", "a.flac")], [("peer1", "b.flac")])
 
-    def test_canonical_basename_bounded_checker_trips_on_missing_suffix(self):
-        with self.assertRaises(AssertionError):
-            assert_canonical_basename_bounded("Artist - Title (2020)", "abcd1234")
-
-    def test_canonical_basename_bounded_checker_trips_on_overlength(self):
+    def test_each_canonical_basename_clause_fires_on_its_own_world(self):
         overlong = ("x" * 250) + " [abcd1234]"
-        with self.assertRaises(AssertionError):
-            assert_canonical_basename_bounded(overlong, "abcd1234")
+        cases = (
+            (
+                "1: the fingerprint suffix is absent",
+                "Artist - Title (2020)",
+                "basename 'Artist - Title (2020)' does not end with "
+                "fingerprint suffix ' [abcd1234]'",
+            ),
+            (
+                # The suffix IS present here, so clause 1 passes and only
+                # the byte cap can answer — the PR #560 r2 truncation guard.
+                "2: suffixed, but over the 255-byte ext4 cap",
+                overlong,
+                f"basename {overlong!r} is {len(overlong.encode('utf-8'))} "
+                "bytes, exceeds the 255-byte ext4 filename cap",
+            ),
+        )
+        for clause, basename, message in cases:
+            with self.subTest(clause=clause):
+                with self.assertRaisesRegex(AssertionError, _exactly(message)):
+                    assert_canonical_basename_bounded(basename, "abcd1234")
 
-    def test_no_suffix_checker_trips_on_mismatch(self):
-        with self.assertRaises(AssertionError):
+    def test_a_basename_exactly_on_the_cap_passes_every_clause(self):
+        """The must-still-work control: 255 bytes is legal, 256 is not."""
+        at_cap = ("z" * 244) + " [abcd1234]"
+        self.assertEqual(len(at_cap.encode("utf-8")), 255)
+        assert_canonical_basename_bounded(at_cap, "abcd1234")
+
+    def test_no_suffix_clause_names_the_expected_bare_name(self):
+        with self.assertRaisesRegex(AssertionError, _exactly(
+                "basename 'Artist - Title (2020) [abcd1234]' != expected bare "
+                "name 'Artist - Title (2020)' when attempt_fingerprint is "
+                "empty")):
             assert_no_suffix_when_fp_empty(
                 "Artist - Title (2020) [abcd1234]", "Artist - Title (2020)")
 
-    def test_folder_contents_checker_trips_on_missing_file(self):
-        with self.assertRaises(AssertionError):
-            assert_folder_contents_match_manifest(
-                frozenset(), frozenset({"01 Track.flac"}), label="attempt B")
-
-    def test_folder_contents_checker_trips_on_extra_file(self):
-        with self.assertRaises(AssertionError):
-            assert_folder_contents_match_manifest(
+    def test_folder_contents_clause_names_the_exact_divergence(self):
+        cases = (
+            (
+                "a manifest file never landed",
+                frozenset(),
+                "attempt B: folder contents diverged from its manifest "
+                "(missing=['01 Track.flac'] extra=[])",
+            ),
+            (
+                "another attempt's file blended in (the #550 shape)",
                 frozenset({"01 Track.flac", "alien-track.flac"}),
-                frozenset({"01 Track.flac"}), label="attempt B")
+                "attempt B: folder contents diverged from its manifest "
+                "(missing=[] extra=['alien-track.flac'])",
+            ),
+        )
+        for label, actual, message in cases:
+            with self.subTest(world=label):
+                with self.assertRaisesRegex(AssertionError, _exactly(message)):
+                    assert_folder_contents_match_manifest(
+                        actual, frozenset({"01 Track.flac"}), label="attempt B")
 
-    def test_resume_stability_checker_trips_when_identical_manifests_diverge(self):
-        with self.assertRaises(AssertionError):
-            assert_resume_stability(
+    def test_each_resume_stability_clause_fires_on_its_own_world(self):
+        cases = (
+            (
+                "1: identical manifests split across two folders",
                 "/tmp/downloads/Album [aaaa1111]",
                 "/tmp/downloads/Album [bbbb2222]",
-                manifests_equal=True)
-
-    def test_resume_stability_checker_trips_when_different_manifests_collide(self):
-        with self.assertRaises(AssertionError):
-            assert_resume_stability(
+                True,
+                "identical manifests produced different canonical folders "
+                "(resume stability broken): '/tmp/downloads/Album [aaaa1111]' "
+                "!= '/tmp/downloads/Album [bbbb2222]'",
+            ),
+            (
+                "2: different manifests collapsed onto one folder",
                 "/tmp/downloads/Album [aaaa1111]",
                 "/tmp/downloads/Album [aaaa1111]",
-                manifests_equal=False)
+                False,
+                "different manifests collided on the same canonical folder: "
+                "'/tmp/downloads/Album [aaaa1111]'",
+            ),
+        )
+        for clause, path_a, path_b, manifests_equal, message in cases:
+            with self.subTest(clause=clause):
+                with self.assertRaisesRegex(AssertionError, _exactly(message)):
+                    assert_resume_stability(
+                        path_a, path_b, manifests_equal=manifests_equal)
 
 
 if __name__ == "__main__":

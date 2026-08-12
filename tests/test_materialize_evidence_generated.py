@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import errno
 import os
+import re
 import socket
 import tempfile
 import unittest
@@ -582,21 +583,17 @@ class TestGeneratedMaterializeFailureReasons(unittest.TestCase):
             finally:
                 built.close()
 
-            self.assertIsInstance(result, MaterializeFailed)
-            assert isinstance(result, MaterializeFailed)
-            assert_reason_partition_invariant(
-                reason=result.reason,
-                repeated_reason=result.reason,
-                expected_family=_WORLD_FAMILIES[world],
-                errno_symbol=(
-                    "EACCES" if _WORLD_FAMILIES[world] == "storage" else None
-                ),
-            )
-            self.assertEqual(result.reason, _WORLD_REASONS[world])
             # Nothing was published, and no transaction directory leaked:
             # a refused materialize owes the same artifact contract as a
             # successful one, checked by the shared publication proof.
-            self.assertFalse(os.path.isdir(canonical))
+            #
+            # It runs FIRST on purpose. Clause ordering masks ACROSS
+            # checkers, not just within one (issue #1094): a preceding
+            # ``assertIsInstance`` answered for this checker's result-type
+            # clause on every world, and a preceding
+            # ``assertFalse(isdir(canonical))`` answered for its
+            # destination-manifest clause, so neither could ever be
+            # attributed to the checker that legislates it.
             assert_publication_invariant(
                 result=result,
                 source_exists=built.source_present(),
@@ -611,6 +608,17 @@ class TestGeneratedMaterializeFailureReasons(unittest.TestCase):
                 name_max=os.pathconf(albums_root, "PC_NAME_MAX"),
                 allowed_result_types=(MaterializeFailed,),
             )
+            assert isinstance(result, MaterializeFailed)
+            assert_reason_partition_invariant(
+                reason=result.reason,
+                repeated_reason=result.reason,
+                expected_family=_WORLD_FAMILIES[world],
+                errno_symbol=(
+                    "EACCES" if _WORLD_FAMILIES[world] == "storage" else None
+                ),
+            )
+            self.assertEqual(result.reason, _WORLD_REASONS[world])
+            self.assertFalse(os.path.isdir(canonical))
 
     @given(
         world=st.sampled_from(_FAILING_WORLDS),
@@ -673,104 +681,188 @@ class TestGeneratedMaterializeFailureReasons(unittest.TestCase):
 # ============================================================================
 
 
+# Per-clause proof (issue #1094, docs/generated-testing.md § "Per-clause
+# proof"). ``assert_reason_partition_invariant`` short-circuits through
+# SEVEN clauses and ``assert_leg_attribution_invariant`` through two; a
+# bare ``assertRaises(AssertionError)`` cannot tell which one answered, so
+# a world that violates three of them advertises coverage for all three
+# while only ever exercising the first. Each clause below gets the minimal
+# world that makes ITS condition true while every EARLIER clause passes,
+# and asserts that clause's own message anchored end to end.
+
+
+def _exactly(message: str) -> str:
+    """Anchor one clause's complete message for ``assertRaisesRegex``."""
+    return f"^{re.escape(message)}$"
+
+
 class TestMaterializeEvidenceCheckersTripOnViolations(unittest.TestCase):
-    def test_partition_checker_rejects_a_storage_errno_called_containment(self) -> None:
-        with self.assertRaises(AssertionError):
-            assert_reason_partition_invariant(
-                reason=REASON_UNSAFE_SOURCE_PATH,
-                repeated_reason=REASON_UNSAFE_SOURCE_PATH,
-                expected_family="storage",
-                errno_symbol="ESTALE",
-            )
+    def test_every_partition_clause_fires_on_its_own_world(self) -> None:
+        storage_reason = f"{REASON_SOURCE_OPEN_FAILED_PREFIX}ESTALE"
+        cases = (
+            (
+                "1: the reason was not stable across two calls",
+                {"reason": REASON_UNSAFE_SOURCE_PATH,
+                 "repeated_reason": REASON_EVENT_PATH_GONE_FROM_DISK,
+                 "expected_family": "containment", "errno_symbol": None},
+                "reason was not stable across calls: 'unsafe_source_path' vs "
+                "'event_path_gone_from_disk'",
+            ),
+            (
+                "2: a colon the retired split derivation would truncate",
+                {"reason": "unsafe_source_path: /peer/track.mp3",
+                 "repeated_reason": "unsafe_source_path: /peer/track.mp3",
+                 "expected_family": "containment", "errno_symbol": None},
+                "reason 'unsafe_source_path: /peer/track.mp3' contains a "
+                "colon — the retired ``str(exc).split(':', 1)[0]`` "
+                "derivation would truncate it",
+            ),
+            (
+                "3: a reason belonging to no known family",
+                {"reason": "something_new", "repeated_reason": "something_new",
+                 "expected_family": "containment", "errno_symbol": None},
+                "reason 'something_new' belongs to no known family",
+            ),
+            (
+                "4: a storage errno filed under the containment noun",
+                {"reason": REASON_UNSAFE_SOURCE_PATH,
+                 "repeated_reason": REASON_UNSAFE_SOURCE_PATH,
+                 "expected_family": "storage", "errno_symbol": "ESTALE"},
+                "reason 'unsafe_source_path' is family 'containment', "
+                "expected 'storage'",
+            ),
+            (
+                "4: the mirror image — a containment called storage",
+                {"reason": storage_reason, "repeated_reason": storage_reason,
+                 "expected_family": "containment", "errno_symbol": "ESTALE"},
+                "reason 'source_open_failed_ESTALE' is family 'storage', "
+                "expected 'containment'",
+            ),
+            (
+                # The generated I2b property found this one: a subject that
+                # answers its containment noun for an UNCLASSIFIED refusal
+                # manufactures a security finding out of not knowing.
+                "4: ignorance dressed as a containment finding",
+                {"reason": REASON_UNSAFE_SOURCE_PATH,
+                 "repeated_reason": REASON_UNSAFE_SOURCE_PATH,
+                 "expected_family": "unclassified", "errno_symbol": None},
+                "reason 'unsafe_source_path' is family 'containment', "
+                "expected 'unclassified'",
+            ),
+            (
+                # Clause 5 is reachable in production: an ``errno_symbol``
+                # helper that answers None still yields a ``*_UNKNOWN``
+                # storage reason, and the caller then has no errno to pass.
+                "5: a storage reason carrying no errno symbol at all",
+                {"reason": storage_reason, "repeated_reason": storage_reason,
+                 "expected_family": "storage", "errno_symbol": None},
+                "a storage reason must carry an errno symbol",
+            ),
+            (
+                "6: a storage reason that lost its errno on the way out",
+                {"reason": f"{REASON_SOURCE_OPEN_FAILED_PREFIX}UNKNOWN",
+                 "repeated_reason":
+                     f"{REASON_SOURCE_OPEN_FAILED_PREFIX}UNKNOWN",
+                 "expected_family": "storage", "errno_symbol": "ESTALE"},
+                "storage reason 'source_open_failed_UNKNOWN' lost its errno "
+                "'ESTALE'",
+            ),
+            (
+                # Clause 7 is the converse of 5: a containment verdict is
+                # never built from an errno, so a classifier that started
+                # attaching one to every refusal is caught here.
+                "7: a non-storage reason built from an errno",
+                {"reason": REASON_UNSAFE_SOURCE_PATH,
+                 "repeated_reason": REASON_UNSAFE_SOURCE_PATH,
+                 "expected_family": "containment", "errno_symbol": "ESTALE"},
+                "non-storage reason 'unsafe_source_path' was built from "
+                "errno 'ESTALE'",
+            ),
+        )
+        for clause, kwargs, message in cases:
+            with self.subTest(clause=clause):
+                with self.assertRaisesRegex(AssertionError, _exactly(message)):
+                    assert_reason_partition_invariant(**kwargs)
 
-    def test_partition_checker_rejects_a_containment_called_storage(self) -> None:
-        with self.assertRaises(AssertionError):
-            assert_reason_partition_invariant(
-                reason=f"{REASON_SOURCE_OPEN_FAILED_PREFIX}ESTALE",
-                repeated_reason=f"{REASON_SOURCE_OPEN_FAILED_PREFIX}ESTALE",
-                expected_family="containment",
-                errno_symbol="ESTALE",
-            )
+    def test_a_correctly_named_refusal_passes_every_partition_clause(self) -> None:
+        """The must-still-work control for all seven clauses at once."""
+        for reason, family, symbol in (
+            (REASON_UNSAFE_SOURCE_PATH, "containment", None),
+            (REASON_EVENT_PATH_GONE_FROM_DISK, "missing", None),
+            (f"{REASON_SOURCE_OPEN_FAILED_PREFIX}ESTALE", "storage", "ESTALE"),
+            (REASON_SLSKD_ROOT_REFUSED, "unclassified", None),
+            (REASON_EVENT_PATH_NEVER_STAMPED, "never_stamped", None),
+        ):
+            with self.subTest(reason=reason):
+                assert_reason_partition_invariant(
+                    reason=reason, repeated_reason=reason,
+                    expected_family=family, errno_symbol=symbol,
+                )
 
-    def test_partition_checker_rejects_a_colon_bearing_reason(self) -> None:
-        with self.assertRaises(AssertionError):
-            assert_reason_partition_invariant(
-                reason="unsafe_source_path: /peer/track.mp3",
-                repeated_reason="unsafe_source_path: /peer/track.mp3",
-                expected_family="containment",
-                errno_symbol=None,
-            )
-
-    def test_partition_checker_rejects_an_unstable_reason(self) -> None:
-        with self.assertRaises(AssertionError):
-            assert_reason_partition_invariant(
-                reason=REASON_UNSAFE_SOURCE_PATH,
-                repeated_reason=REASON_EVENT_PATH_GONE_FROM_DISK,
-                expected_family="containment",
-                errno_symbol=None,
-            )
-
-    def test_partition_checker_rejects_a_storage_reason_without_its_errno(self) -> None:
-        with self.assertRaises(AssertionError):
-            assert_reason_partition_invariant(
-                reason=f"{REASON_SOURCE_OPEN_FAILED_PREFIX}UNKNOWN",
-                repeated_reason=f"{REASON_SOURCE_OPEN_FAILED_PREFIX}UNKNOWN",
-                expected_family="storage",
-                errno_symbol="ESTALE",
-            )
-
-    def test_leg_checker_rejects_a_root_refusal_blamed_on_one_file(self) -> None:
-        """The exact D1 defect: the share refused, but the reason names a
-        file's event stamp."""
-        with self.assertRaises(AssertionError):
-            assert_leg_attribution_invariant(
-                leg="root",
-                raised=SharedDownloadRootError.wrapping(
-                    FilesystemAuthorityError("gone", code="missing"),
-                ),
-                reason=REASON_EVENT_PATH_GONE_FROM_DISK,
-            )
-
-    def test_leg_checker_rejects_an_untyped_root_refusal(self) -> None:
-        with self.assertRaises(AssertionError):
-            assert_leg_attribution_invariant(
-                leg="root",
-                raised=FilesystemAuthorityError("gone", code="missing"),
-                reason=REASON_SLSKD_ROOT_MISSING,
-            )
-
-    def test_leg_checker_rejects_one_file_escalated_to_the_share(self) -> None:
-        with self.assertRaises(AssertionError):
-            assert_leg_attribution_invariant(
-                leg="descendant",
-                raised=FilesystemAuthorityError("gone", code="missing"),
-                reason=REASON_SLSKD_ROOT_MISSING,
-            )
-
-    def test_partition_checker_rejects_ignorance_dressed_as_containment(self) -> None:
-        """The generated I2b property found this one: a subject that answers
-        its containment noun for an UNCLASSIFIED refusal manufactures a
-        security finding out of not knowing."""
+    def test_unclassified_reasons_are_their_own_family(self) -> None:
+        """No subject's "we could not classify this" noun may be read as a
+        containment finding."""
         for reason in _UNCLASSIFIED_REASONS:
             self.assertEqual(reason_family(reason), "unclassified")
             self.assertNotIn(reason, _CONTAINMENT_REASONS)
-        with self.assertRaises(AssertionError):
-            assert_reason_partition_invariant(
-                reason=REASON_UNSAFE_SOURCE_PATH,
-                repeated_reason=REASON_UNSAFE_SOURCE_PATH,
-                expected_family="unclassified",
-                errno_symbol=None,
-            )
-
-    def test_family_bucketing_rejects_an_unknown_reason(self) -> None:
         self.assertEqual(reason_family("something_new"), "other")
-        with self.assertRaises(AssertionError):
-            assert_reason_partition_invariant(
-                reason="something_new",
-                repeated_reason="something_new",
-                expected_family="containment",
-                errno_symbol=None,
-            )
+
+    def test_every_leg_attribution_clause_fires_on_its_own_world(self) -> None:
+        typed = SharedDownloadRootError.wrapping(
+            FilesystemAuthorityError("gone", code="missing"),
+        )
+        untyped = FilesystemAuthorityError("gone", code="missing")
+        cases = (
+            (
+                "1: the share refused but arrived untyped",
+                {"leg": "root", "raised": untyped,
+                 "reason": REASON_SLSKD_ROOT_MISSING},
+                "root leg raised FilesystemAuthorityError: attribution is "
+                "inverted or absent",
+            ),
+            (
+                "1: the inverse — one file's refusal typed as the share's",
+                {"leg": "descendant", "raised": typed,
+                 "reason": REASON_SLSKD_ROOT_MISSING},
+                "descendant leg raised SharedDownloadRootError: attribution "
+                "is inverted or absent",
+            ),
+            (
+                # The exact D1 defect: the share refused, but the reason
+                # names one file's event stamp.
+                "2: a root refusal blamed on one file's event stamp",
+                {"leg": "root", "raised": typed,
+                 "reason": REASON_EVENT_PATH_GONE_FROM_DISK},
+                "root leg produced reason 'event_path_gone_from_disk', which "
+                "names the file — wrong subject",
+            ),
+            (
+                "2: one file's refusal escalated to the whole share",
+                {"leg": "descendant", "raised": untyped,
+                 "reason": REASON_SLSKD_ROOT_MISSING},
+                "descendant leg produced reason 'slskd_root_missing', which "
+                "names the share — wrong subject",
+            ),
+        )
+        for clause, kwargs, message in cases:
+            with self.subTest(clause=clause):
+                with self.assertRaisesRegex(AssertionError, _exactly(message)):
+                    assert_leg_attribution_invariant(**kwargs)
+
+    def test_a_correctly_attributed_leg_passes_every_clause(self) -> None:
+        """The must-still-work control: both legs, named right."""
+        assert_leg_attribution_invariant(
+            leg="root",
+            raised=SharedDownloadRootError.wrapping(
+                FilesystemAuthorityError("gone", code="missing"),
+            ),
+            reason=REASON_SLSKD_ROOT_MISSING,
+        )
+        assert_leg_attribution_invariant(
+            leg="descendant",
+            raised=FilesystemAuthorityError("gone", code="missing"),
+            reason=REASON_EVENT_PATH_GONE_FROM_DISK,
+        )
 
 
 # ============================================================================
@@ -939,28 +1031,86 @@ class TestGeneratedCopyPhaseSubjects(unittest.TestCase):
             finally:
                 built.close()
 
-    def test_checker_trips_on_the_defect_that_shipped(self) -> None:
-        self.assertIsNotNone(check_copy_failure_names_its_subject(
-            "source", "ESTALE", REASON_PRIVATE_MATERIALIZE_FAILED))
-        self.assertIsNotNone(check_copy_failure_names_its_subject(
-            "destination", "ENOSPC", REASON_PRIVATE_MATERIALIZE_FAILED))
-        self.assertIsNotNone(check_copy_failure_names_its_subject(
-            "source", "ESTALE",
-            f"{REASON_PROCESSING_WRITE_FAILED_PREFIX}ESTALE"))
-        # The verb matters as much as the subject: an open failure is not
-        # what a mid-copy read did.
-        self.assertIsNotNone(check_copy_failure_names_its_subject(
-            "source", "ESTALE",
-            f"{REASON_SOURCE_OPEN_FAILED_PREFIX}ESTALE"))
-        self.assertIsNotNone(check_copy_failure_names_its_subject(
-            "destination", "ENOSPC",
-            f"{REASON_PROCESSING_OPEN_FAILED_PREFIX}ENOSPC"))
-        self.assertIsNotNone(check_copy_failure_names_its_subject(
-            "source", "ESTALE",
-            f"{REASON_SOURCE_READ_FAILED_PREFIX}EIO"))
+    def test_every_copy_subject_clause_returns_its_own_violation(self) -> None:
+        """``check_copy_failure_names_its_subject`` accumulates nothing — it
+        returns the FIRST violation it finds, so each of its four clauses
+        owes a world where the earlier three are satisfied, and the exact
+        string it returns is the whole diagnosis."""
+        cases = (
+            (
+                "1: the defect that shipped — collapsed with no errno",
+                "source", "ESTALE", REASON_PRIVATE_MATERIALIZE_FAILED,
+                "source failure collapsed into 'private_materialize_failed' "
+                "with no errno",
+            ),
+            (
+                "1: the same collapse on the destination side",
+                "destination", "ENOSPC", REASON_PRIVATE_MATERIALIZE_FAILED,
+                "destination failure collapsed into "
+                "'private_materialize_failed' with no errno",
+            ),
+            (
+                "2: our own tree blamed for the share's read failure",
+                "source", "ESTALE",
+                f"{REASON_PROCESSING_WRITE_FAILED_PREFIX}ESTALE",
+                "source failure named the wrong subject or verb: "
+                "'processing_write_failed_ESTALE'",
+            ),
+            (
+                # The verb matters as much as the subject: an open failure
+                # is not what a mid-copy read did.
+                "2: right subject, wrong verb (open, not read)",
+                "source", "ESTALE",
+                f"{REASON_SOURCE_OPEN_FAILED_PREFIX}ESTALE",
+                "source failure named the wrong subject or verb: "
+                "'source_open_failed_ESTALE'",
+            ),
+            (
+                "2: right subject, wrong verb on the destination side",
+                "destination", "ENOSPC",
+                f"{REASON_PROCESSING_OPEN_FAILED_PREFIX}ENOSPC",
+                "destination failure named the wrong subject or verb: "
+                "'processing_open_failed_ENOSPC'",
+            ),
+            (
+                # Clause 3 needs a reason that is neither the collapsed
+                # string nor one of the three named-wrong prefixes: a THIRD
+                # subject's vocabulary. Reached in production by a copy
+                # handler that reaches for the shared-root mapper.
+                "3: a third subject's noun entirely",
+                "source", "ESTALE", REASON_SLSKD_ROOT_MISSING,
+                "source failure did not name its subject: "
+                "'slskd_root_missing'",
+            ),
+            (
+                "3: the same third subject on the destination side",
+                "destination", "ENOSPC", REASON_SLSKD_ROOT_MISSING,
+                "destination failure did not name its subject: "
+                "'slskd_root_missing'",
+            ),
+            (
+                "4: right subject and verb, wrong errno",
+                "source", "ESTALE", f"{REASON_SOURCE_READ_FAILED_PREFIX}EIO",
+                "source failure lost its errno: 'source_read_failed_EIO' "
+                "(want ESTALE)",
+            ),
+        )
+        for clause, subject, errno_name, reason, message in cases:
+            with self.subTest(clause=clause):
+                self.assertEqual(
+                    check_copy_failure_names_its_subject(
+                        subject, errno_name, reason),
+                    message,
+                )
+
+    def test_a_correctly_named_copy_failure_passes_every_clause(self) -> None:
+        """The must-still-work control for all four clauses."""
         self.assertIsNone(check_copy_failure_names_its_subject(
             "source", "ESTALE",
             f"{REASON_SOURCE_READ_FAILED_PREFIX}ESTALE"))
+        self.assertIsNone(check_copy_failure_names_its_subject(
+            "destination", "ENOSPC",
+            f"{REASON_PROCESSING_WRITE_FAILED_PREFIX}ENOSPC"))
 
 
 if __name__ == "__main__":
