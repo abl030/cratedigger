@@ -32,7 +32,9 @@ _beets_mocks["beets.ui"].get_replacements = None
 _beets_mocks["beets.importer.session"].ImportSession = type(
     "ImportSession", (object,), {"resolve_duplicate": lambda *_args: None},
 )
-_beets_mocks["beets.importer.tasks"].ImportTask = type("ImportTask", (object,), {})
+_beets_mocks["beets.importer.tasks"].ImportTask = type(
+    "ImportTask", (object,), {"cur_artist": None, "cur_album": None},
+)
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 with isolated_beets_harness(_beets_mocks) as beets_harness:

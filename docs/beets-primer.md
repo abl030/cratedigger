@@ -43,6 +43,29 @@ final release. These checks do not establish live-catalog upgrade or downgrade
 safety. LRCLIB and unrelated external plugin behaviour are deployment-owned
 configuration, outside the compatibility promise.
 
+`harness/beets_compat.py` (`CAPABILITIES`) is the one place an upstream era is
+ever decided, always by attribute presence, never `__version__`. Alongside the
+existing duplicate-resolution-hook and Library-construction eras, it detects a
+**task-metadata era**: unreleased upstream PR #6681 removed
+`ImportTask.cur_artist`/`cur_album` in favour of a cached `ImportTask.source`
+property (a `Source` NamedTuple exposing `.artist`/`.name`), and in the SAME
+change re-signatured `beets.autotag.distance()` from `(items, album_info,
+item_info_pairs)` to `(likelies, album_info, item_info_pairs,
+unmatched_count)`. `beets_compat.task_description(task)` is the harness's one
+accessor for both eras; `lib/beets_distance.py`'s standalone distance
+computation (the Replace picker + YouTube resolver) reuses the SAME detected
+era rather than probing `distance()`'s shape a second time. Both/neither
+attribute present fails closed. The admitted production package remains
+pre-#6681 (`cur_artist`/`cur_album`, the 3-arg `distance()`); the modern era is
+exercised only by the `beets-tip` checks above. One older-release wrinkle the
+cheap `hasattr(ImportTask, "cur_artist")` class-level check alone cannot see:
+v2.1.0/v2.2.0 assign `cur_artist`/`cur_album` only inside `ImportTask.__init__`,
+never as a class attribute (v2.3.0 added the class-level declaration), so the
+detector falls back to a throwaway probe instance — `BaseImportTask.__init__`
+is pure attribute assignment across the whole supported range — only when the
+cheap check finds neither attribute. The 19-leg `beetsStableCandidate` matrix
+is what caught this.
+
 Cratedigger has exactly three Beets mutation lanes:
 
 1. The serial importer worker drives the JSON harness for admitted imports and
