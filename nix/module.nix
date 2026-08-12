@@ -2452,8 +2452,14 @@ in {
         # lock, so it must not clear that lock while a cycle is active. It
         # gates on slskd reachability when the operator has health-check enabled
         # and hits slskd just as much as the main loop does, so a slskd
-        # outage should fail the unit fast rather than write garbage
-        # probe-failed rows for every cohort member.
+        # outage that's already down BEFORE the run starts fails the unit
+        # fast here rather than launching a doomed run. An outage that
+        # starts MID-RUN (issue #1090: a burst of transient 409s from a
+        # reconnecting slskd silently discarded half a cohort while the
+        # unit still exited 0) is NOT this check's job — the oneshot's own
+        # bounded per-probe submit retry and circuit breaker handle that,
+        # and the unit itself fails (non-zero exit) when the breaker trips
+        # so an in-run outage is visible the same way a pre-run one is.
         ExecStartPre = lib.optional cfg.healthCheck.enable "+${slskdHealthCheck}";
         Environment = "PIPELINE_DB_DSN=${pipelineDsn}";
         ExecStart = "${unfindableDetectionPkg}/bin/cratedigger-unfindable";

@@ -903,3 +903,84 @@ fix added a new `data_quality:status=<status>` filter form
 fixtures across `test_triage_service.py`, `test_pipeline_cli.py`,
 `test_web_server.py` to production shape. Confirmed live on
 2026-05-26 against the real cohort of 75 stuck requests.
+
+---
+
+## Post-iteration-2 hardening — submit resilience (issue #1090)
+
+Not part of the original iteration-2 (R18-R28) scope above; documented
+here because it changes `cratedigger-unfindable.service`'s run-health
+and exit-code contract from what PR3 shipped.
+
+### Root cause
+
+The 2026-08-12 run processed 100 requests but recorded 50 `probe_failed`
+outcomes while still exiting 0. 49 of the 50 failures were HTTP 409
+Conflict from `POST /api/v0/searches` in a ~3-second burst: slskd's
+underlying Soulseek connection reset, slskd reconnected, and while it sat
+in `Connected, LoggingIn` Soulseek.NET's `SearchAsync` guard threw —
+mapped by slskd's `SearchesController` to 409. This is NOT slskd's rate
+limiter (`SearchRequestLimiter` returns 429, never 409, and is never
+retried by this fix). The 50th failure was the existing #212 no-progress
+watchdog firing — correct, pre-existing behaviour, unrelated to the fix.
+
+The conservative rule already held: a failed probe writes NOTHING
+(`last_artist_probe_at` / match count / `unfindable_category` are all
+preserved) and a failed row re-enters the head of the next daily batch
+(`ORDER BY last_artist_probe_at NULLS FIRST`). The defect was purely that
+a transient submit rejection consumed a cohort slot for the day, and the
+oneshot's exit code gave no signal that half the batch went unclassified.
+
+### Fix
+
+- **`lib.slskd_client.SlskdServerApi.state()`** (`GET /api/v0/server`) —
+  typed reader for `isConnected` / `isLoggedIn`, mirroring the field
+  usage the module's own `slskdHealthCheck` script already relies on.
+- **`lib.search_exec.execute_search(..., submit_retry=SearchSubmitRetryPolicy(...))`**
+  — an OPTIONAL bounded retry for a submit-phase 409 (3 attempts,
+  2s/5s/10s backoff, advisedly shortened by the server-readiness reader
+  between attempts). Default `submit_retry=None` is byte-identical to
+  pre-#1090 behaviour — only the unfindable probe opts in; the main
+  pipeline's search call sites are unchanged. Each retry mints and
+  ledgers its own fresh search id BEFORE the retried POST (issue #576
+  I2's write-ahead invariant, applied per attempt).
+- **`UnfindableDetectionService.categorise_due_batch`** — a circuit
+  breaker: after 3 CONSECUTIVE submit-failure outcomes (a probe whose
+  own retry budget exhausted — not an unrelated one-off probe failure),
+  the batch stops early. Untouched candidates are excluded from the
+  batch's processed count and left completely byte-untouched; they roll
+  into the next daily run via the normal oldest-probe-first ordering.
+  Nothing is parked on any request row.
+- **`scripts/run_unfindable_detection.py`** — the oneshot now returns
+  `EXIT_INCOMPLETE_RUN` (3) when the circuit breaker tripped, distinct
+  from the pre-existing `2` (missing config / behind-schema abort,
+  returned before any work runs) and `0` (fully classified run).
+  `systemctl status` shows `cratedigger-unfindable.service` as *failed*
+  for an incomplete run — the daily timer still fires the next cycle
+  regardless (invariant 11: nothing is parked).
+
+### Operator-facing run-health contract
+
+```bash
+ssh doc2 'sudo systemctl status cratedigger-unfindable.service'
+ssh doc2 'sudo journalctl -u cratedigger-unfindable.service --since "1 day ago" \
+  | grep -E "circuit breaker|INCOMPLETE|unfindable_detection: complete"'
+```
+
+- Exit `0` — `unfindable_detection: complete; processed=N/N outcomes=...`
+  — the whole due batch was attempted this run.
+- Exit `3` (`EXIT_INCOMPLETE_RUN`) — `unfindable_detection: INCOMPLETE
+  run — circuit breaker tripped after repeated slskd submit failures;
+  attempted=M/N outcomes=...; K candidate(s) were never touched this run
+  and roll into the next daily run` — a sustained slskd outage mid-run.
+  `systemctl status` reports the unit as failed; no operator action is
+  required — the next daily timer fire picks up the untouched tail via
+  the normal cadence.
+- Exit `2` — pre-existing missing-config / behind-schema abort (no probe
+  work attempted at all).
+
+Explicitly out of scope for this fix: `DEFAULT_BATCH_SIZE` is unchanged
+(an operator batch-size tuning decision, not this fix's call to make),
+and no advisory lock or systemd ordering was added against the main
+`cratedigger.service` cycle — that would erode the R20 systemd-level
+separation PR3's section above documents.
