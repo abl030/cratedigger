@@ -157,6 +157,15 @@ Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blo
   a single-point mutant immediately proved was the load-bearing half).
   Subagent implementation briefs state the pair requirement verbatim and
   never offer a deterministic-only alternative.
+- **A regression pin added to resolve a review finding is accepted only
+  with planted-mutant evidence in both directions** — the pin must fail on
+  the defect and pass on the fix, proven with an actual planted mutant, not
+  asserted from reading the pin. Earned three times in the #1088/#1090
+  series, none caught by the suite: a pin whose fixture raised
+  `RuntimeError` where only `AttributeError` distinguishes fixed from
+  defective code (inert against the exact mutant it named); a test whose
+  name promised a True-case assertion its body never made; and an
+  exit-code distinctness test comparing a constant to a hand-typed literal.
 - **Never property-test the test machinery.** Hypothesis and
   `test_*_generated.py` are reserved for production behavior and
   production-facing operator tools. Test runners and schedulers, suite and
@@ -245,7 +254,13 @@ Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blo
   budget miss (pin the decisive world as an `@example`). The driver is an
   operator/agent one-shot — never committed (`scope.md`); record the kill
   matrix in the issue/PR. Canonical run: issue #548, 2026-07-08 — 13
-  mutants, incl. reverting fix `6cf26a4`, led to PR #555.
+  mutants, incl. reverting fix `6cf26a4`, led to PR #555. **Injection must
+  cover every site the diff adds, named individually — a killed mutant at
+  one site does not qualify any other.** Lesson (#1110): the implementer
+  honestly reported "verified against revert", true of `renderConvergeControls`
+  alone; mutants at the three `deleteWrongMatchGroup` restore paths and at
+  `removeWrongMatchEntry` survived every JS assertion, and one recreated the
+  very dead end the PR existed to remove.
 
 ### Generated-test performance is a coverage contract
 
@@ -679,6 +694,13 @@ rationale; never allowlist a pure decision.
   - A symlink does not widen grep scope: `grep -r` and `rg` both skip symlinks
     during recursive traversal, so `AGENTS.md` never matches on `CLAUDE.md`'s
     content without an explicit `-R`/`-L`. Do not rely on one for coverage.
+- **Correction commits are high-risk sites for new false claims.** A round
+  that fixes a reviewer finding writes with the highest confidence and gets
+  the least scrutiny — exactly backwards. The final review round must
+  specifically re-read every claim (comment, docstring, PR prose) the
+  correction commits themselves added. Earned four times in one batch
+  (#1101, #1102, #1107, #1110); each false claim was caught only by the
+  NEXT independent read, never by the round that wrote it.
 - Fix everything it finds before committing. This is not optional.
 
 ## Commits & PRs
