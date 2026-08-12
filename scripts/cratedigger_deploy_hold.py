@@ -68,12 +68,38 @@ SERVICE_UNITS = (*PRODUCER_SERVICE_UNITS, *CONTROLLED_WORKER_UNITS)
 TIMER_DRIVEN_PRODUCER_UNITS = (MAIN_SERVICE, UNFINDABLE_SERVICE, WATCHDOG_SERVICE)
 # The units abort_hold explicitly starts and proves stably active when it
 # releases the receipt-owned manual gate hold -- not "everything the gate
-# hold actually stops": cratedigger.service is also gate-guarded (it is in
-# the metadata gate's guarded_units/resume_units alongside these four), but
-# abort never restarts it here directly. It comes back either through the
-# timer once its control-link mask is released later in the same function,
-# or directly via that same resume-if-clear call's resume_units.
+# hold actually stops": cratedigger.timer and cratedigger.service are also
+# gate-guarded (both are in GATE_GUARDED_UNITS/GATE_RESUME_UNITS below,
+# alongside these four), but abort never restarts either here directly. The
+# service comes back either through the timer once its control-link mask is
+# released later in the same function, or directly via that same
+# resume-if-clear call's resume_units; the timer itself comes back only
+# through its own control-link release.
 GATE_STOPPED_UNITS = (YOUTUBE_SERVICE, *CONTROLLED_WORKER_UNITS)
+# The metadata gate's own complete guarded/resume unit sets --
+# verify_controlled_start_contract's expected_guarded/expected_resume, below,
+# are built from these two tuples word-for-word, so they are the single
+# source of truth for "what the gate actually guards": cratedigger.timer and
+# cratedigger.service, plus the three controlled workers and YouTube ingest.
+# GATE_STOPPED_UNITS above is a narrower, different-purpose set (what
+# abort_hold explicitly restarts) and must never be used to derive "what the
+# gate guards" -- that conflation was issue #1100 item 1.
+GATE_GUARDED_UNITS = (
+    MAIN_TIMER,
+    MAIN_SERVICE,
+    WEB_SERVICE,
+    IMPORTER_SERVICE,
+    PREVIEW_SERVICE,
+    YOUTUBE_SERVICE,
+)
+GATE_RESUME_UNITS = (
+    MAIN_SERVICE,
+    MAIN_TIMER,
+    WEB_SERVICE,
+    IMPORTER_SERVICE,
+    PREVIEW_SERVICE,
+    YOUTUBE_SERVICE,
+)
 
 MAIN_START_INHIBITOR = METADATA_GATE_STATE_DIR / f"inhibit-{MAIN_SERVICE}"
 YOUTUBE_START_INHIBITOR = METADATA_GATE_STATE_DIR / f"inhibit-{YOUTUBE_SERVICE}"
@@ -117,6 +143,21 @@ class DeployHoldError(RuntimeError):
 def _is_json_object(value: object) -> TypeGuard[dict[str, object]]:
     """Narrow decoded JSON without adding non-stdlib deploy dependencies."""
     return isinstance(value, dict)
+
+
+def _units_line(prefix: str, units: tuple[str, ...]) -> str:
+    """Build the metadata gate's exact ``<prefix>=(...)`` shell literal."""
+    return f"{prefix}=(" + " ".join(units) + ")"
+
+
+# Composed once at import time -- not inside verify_controlled_start_contract
+# -- so these are the literal module-level names that method consumes, and a
+# future mis-wire (e.g. building the guarded line from GATE_RESUME_UNITS) is
+# a fact a plain byte-identity pin can catch directly, rather than a
+# call-site composition only observable by actually running
+# verify_controlled_start_contract (the VM check or a live acquire).
+GATE_GUARDED_LINE = _units_line("guarded_units", GATE_GUARDED_UNITS)
+GATE_RESUME_LINE = _units_line("resume_units", GATE_RESUME_UNITS)
 
 
 @dataclass(frozen=True)
@@ -274,21 +315,9 @@ class RealSystemdBackend:
                 )
 
         gate_source = Path(gate_paths.pop()).read_text(encoding="utf-8")
-        expected_guarded = (
-            "guarded_units=(cratedigger.timer cratedigger.service "
-            "cratedigger-web.service cratedigger-importer.service "
-            "cratedigger-import-preview-worker.service "
-            "cratedigger-youtube-ingest.service)"
-        )
-        expected_resume = (
-            "resume_units=(cratedigger.service cratedigger.timer "
-            "cratedigger-web.service cratedigger-importer.service "
-            "cratedigger-import-preview-worker.service "
-            "cratedigger-youtube-ingest.service)"
-        )
         if (
-            gate_source.splitlines().count(expected_guarded) != 1
-            or gate_source.splitlines().count(expected_resume) != 1
+            gate_source.splitlines().count(GATE_GUARDED_LINE) != 1
+            or gate_source.splitlines().count(GATE_RESUME_LINE) != 1
         ):
             raise DeployHoldError(
                 "metadata-gate guarded/resume unit contract is not the "

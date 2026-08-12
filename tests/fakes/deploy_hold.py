@@ -6,7 +6,7 @@ from collections.abc import Iterable
 
 from scripts.cratedigger_deploy_hold import (
     CONTROL_DIR,
-    GATE_STOPPED_UNITS,
+    GATE_GUARDED_UNITS,
     IMPORTER_SERVICE,
     MAIN_SERVICE,
     PHASE_HELD,
@@ -30,15 +30,6 @@ from scripts.cratedigger_deploy_hold import (
 # service-drain timeout waiting for YouTube ingest, which nothing before
 # the gate hold ever asks to stop) behind 429 green targets.
 _ALWAYS_ON_DAEMONS = (WEB_SERVICE, IMPORTER_SERVICE, PREVIEW_SERVICE, YOUTUBE_SERVICE)
-
-# The metadata gate's own guarded_units (verify_controlled_start_contract's
-# expected_guarded) is cratedigger.timer/.service plus the three controlled
-# workers plus YouTube ingest -- cratedigger-unfindable.service and the
-# watchdog are NOT guarded, so a real "hold manual" never touches them.
-# Stopping every SERVICE_UNITS member here (as this fake once did) is more
-# permissive than production in exactly the shape test-fidelity.md Rule B
-# forbids.
-_METADATA_GATE_GUARDED_SERVICES = (MAIN_SERVICE, *GATE_STOPPED_UNITS)
 
 
 class FakeDeployHoldBackend:
@@ -287,10 +278,17 @@ class FakeDeployHoldBackend:
         self.events.append(("metadata-gate", command))
         if command == "hold manual":
             self.manual_hold = True
-            for service in _METADATA_GATE_GUARDED_SERVICES:
-                state = self.unit_states[service]
+            # Iterate GATE_GUARDED_UNITS directly, not a module-local alias
+            # (#1100 item 1 -- this fake once silently drifted from the
+            # gate's real guarded set). Timer/main.service fidelity here is
+            # proven by TestFakeGateHoldModelsTheRealGuardedSet in
+            # tests/test_deploy_hold.py, not by acquire/recover/prepare
+            # tests; stopping a wider set is the test-fidelity.md Rule B
+            # smell this once was.
+            for unit in GATE_GUARDED_UNITS:
+                state = self.unit_states[unit]
                 if state.active_state == "active":
-                    self.unit_states[service] = UnitState(
+                    self.unit_states[unit] = UnitState(
                         load_state=state.load_state,
                         active_state="inactive",
                         sub_state="dead",

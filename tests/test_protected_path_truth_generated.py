@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import itertools
 import os
+import re
 import shutil
 import socket
 import stat
@@ -82,6 +83,17 @@ WORLDS: tuple[str, ...] = (
     "delete_race",
     "delete_error",
 )
+
+def _exactly(message: str) -> str:
+    """Anchor one clause's message so no SIBLING clause can satisfy it.
+
+    Every checker below short-circuits on the first violated clause, so a
+    bare ``assertRaises(AssertionError)`` — or a substring — is satisfied
+    by whichever clause happens to fire, while the test's name goes on
+    advertising a different one (issue #1094).
+    """
+    return "^" + re.escape(message) + "$"
+
 
 #: Worlds in which the folder's fate is POSITIVELY known: it was deleted,
 #: or it was proven not to be there. Only these may clear the pointer.
@@ -202,11 +214,26 @@ def _restore(source: SeededWrongMatch) -> None:
 
 
 class TestProtectedPathTruthGenerated(unittest.TestCase):
+    # Every world is pinned, not just the five the #1063 defect lived in.
+    # Measured during the #1094 clause audit: at suite tier this property
+    # runs 15 examples — the five pins plus ONE generated example per
+    # world, because Hypothesis exhausts a 10-element ``sampled_from``.
+    # So ``unsafe_root`` and ``active_job``, the two worlds that catch a
+    # pointer cleared with NO positive evidence (removing the unsafe-path
+    # guard, and going blind to an active import job — both real deletion
+    # authority), each ran exactly once, by exhaustion alone. Pinning them
+    # makes that coverage explicit and shuffle-proof rather than a
+    # property of today's domain size.
     @example(world="unreadable_parent")
     @example(world="unreadable_album")
     @example(world="delete_error")
     @example(world="genuinely_missing")
     @example(world="present")
+    @example(world="not_a_directory")
+    @example(world="unsafe_root")
+    @example(world="active_job")
+    @example(world="lock_contended")
+    @example(world="delete_race")
     @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
     @given(world=st.sampled_from(WORLDS))
     def test_pointer_survives_every_world_it_was_not_proven_in(
@@ -248,7 +275,11 @@ class TestProtectedPathTruthGenerated(unittest.TestCase):
         )
         # The exact live defect: an unreadable world reported as deleted
         # with the pointer cleared.
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(AssertionError, _exactly(
+            "world='unreadable_parent' cleared the pointer without positive "
+            "evidence (outcome='deleted', path_missing=True, "
+            "deleted_path=None)",
+        )):
             pointer_cleared_iff_positively_known(
                 world="unreadable_parent",
                 result=laundered,
@@ -256,7 +287,10 @@ class TestProtectedPathTruthGenerated(unittest.TestCase):
                 folder_present=True,
             )
         # A refusal that keeps the pointer but still calls itself deleted.
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(AssertionError, _exactly(
+            "world='unreadable_parent' reported 'deleted' for an observation "
+            "that was refused",
+        )):
             pointer_cleared_iff_positively_known(
                 world="unreadable_parent",
                 result=laundered,
@@ -264,7 +298,10 @@ class TestProtectedPathTruthGenerated(unittest.TestCase):
                 folder_present=True,
             )
         # A deletion that claims a path it did not remove.
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(AssertionError, _exactly(
+            "world='present' reported deleted_path='/kept' while the folder "
+            "is still on disk",
+        )):
             pointer_cleared_iff_positively_known(
                 world="present",
                 result=WrongMatchDeleteResult(
@@ -279,7 +316,10 @@ class TestProtectedPathTruthGenerated(unittest.TestCase):
             )
         # Fail-closed in the other direction: refusing to clear a
         # positively-known absence would strand the operator's queue.
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(AssertionError, _exactly(
+            "world='genuinely_missing' refused to clear a positively-known "
+            "pointer (outcome='skipped_path_unavailable')",
+        )):
             pointer_cleared_iff_positively_known(
                 world="genuinely_missing",
                 result=WrongMatchDeleteResult(
@@ -289,9 +329,14 @@ class TestProtectedPathTruthGenerated(unittest.TestCase):
                 rows_remaining=1,
                 folder_present=False,
             )
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(AssertionError, _exactly(
+            "world='unreadable_parent' produced presence='absent'; a refused "
+            "probe must never be reported as absence",
+        )):
             observation_never_launders_a_refusal("/definitely/not/there", "unreadable_parent")
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(AssertionError, _exactly(
+            "a genuinely missing path must be positively absent",
+        )):
             observation_never_launders_a_refusal(
                 tempfile.gettempdir(), "genuinely_missing")
 
@@ -537,26 +582,37 @@ class TestCandidateAggregationGenerated(unittest.TestCase):
         # Mutant A/B shape: a refusal anywhere in the sequence laundered
         # into absence, whichever end it sat at.
         for worlds in (["absent", "unreadable"], ["unreadable", "absent"]):
-            with self.assertRaises(AssertionError):
+            with self.assertRaisesRegex(AssertionError, _exactly(
+                f"mutant: candidates {worlds} aggregated to 'absent', "
+                "expected 'indeterminate' — a refused probe was laundered "
+                "into absence",
+            )):
                 assert_aggregate_obeys_the_refusal_rule(
                     aggregator="mutant", worlds=worlds,
                     observation=absent, expected_path=None,
                 )
         # Fail-closed in the other direction: a present candidate must not
         # be downgraded to a refusal.
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(AssertionError, _exactly(
+            "mutant: candidates ['unreadable', 'present'] aggregated to "
+            "'indeterminate', expected 'present'",
+        )):
             assert_aggregate_obeys_the_refusal_rule(
                 aggregator="mutant", worlds=["unreadable", "present"],
                 observation=refused, expected_path="/a",
             )
         # The wrong present candidate.
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(AssertionError, _exactly(
+            "mutant: resolved '/a', expected the FIRST present candidate '/b'",
+        )):
             assert_aggregate_obeys_the_refusal_rule(
                 aggregator="mutant", worlds=["present"],
                 observation=present, expected_path="/b",
             )
         # A non-present aggregate must not carry a path.
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(AssertionError, _exactly(
+            "mutant: reported a path '/a' for a 'absent' aggregate",
+        )):
             assert_aggregate_obeys_the_refusal_rule(
                 aggregator="mutant", worlds=["absent"],
                 observation=DirectoryObservation(
@@ -791,20 +847,28 @@ class TestExplorerRefusalHonestyGenerated(unittest.TestCase):
             "unreadable_reason": None,
             "files": [],
         }
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(AssertionError, _exactly(
+            "worlds ['unreadable_file', 'unreadable_file', 'unreadable_dir'] "
+            "recorded 0 refusals, expected 3",
+        )):
             assert_explorer_listing_is_honest(
                 worlds=["unreadable_file", "unreadable_file", "unreadable_dir"],
                 payload=pre_fix,
             )
         # Counted but still presented as a confident empty folder.
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(AssertionError, _exactly(
+            "worlds ['unreadable_file'] claimed an intact folder is empty "
+            "(status='ok', audio_file_count=0)",
+        )):
             assert_explorer_listing_is_honest(
                 worlds=["unreadable_file"],
                 payload={**pre_fix, "unreadable_entry_count": 1,
                          "partial": True, "unreadable_reason": "x: denied"},
             )
         # Counted, flagged, but no reason named.
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(AssertionError, _exactly(
+            "worlds ['unreadable_file'] recorded refusals without naming one",
+        )):
             assert_explorer_listing_is_honest(
                 worlds=["unreadable_file"],
                 payload={**pre_fix, "unreadable_entry_count": 1,
@@ -818,7 +882,9 @@ class TestExplorerRefusalHonestyGenerated(unittest.TestCase):
         # listing) is exactly the pre-#1086 defect for this world: it is
         # what ``if refusal_is_indeterminate(exc.code) is True:`` produces
         # for ``unsafe_symlink`` (``False``), silently dropping the entry.
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(AssertionError, _exactly(
+            "worlds ['vanished'] recorded 0 refusals, expected 1",
+        )):
             assert_explorer_listing_is_honest(
                 worlds=["vanished"], payload=pre_fix,
             )
@@ -895,6 +961,17 @@ _LOAD_FAILURE_COPY = "Failed to load file explorer"
 #: A WORLD-FAILURE per-entry refusal, and the whole-root 503 envelope
 #: (``web/wrong_match_file_service.py``'s own "Wrong-match files could
 #: not be read: …") both still use this exact phrase.
+#:
+#: Measured in the #1094 clause audit: the panel also ECHOES the server's
+#: ``unreadable_reason``, and for a world-failure code that server text is
+#: itself ``unreadable_reason_text("open_failed", …)`` = "could not be
+#: read, may be transient (EACCES)". So this constant is satisfied by the
+#: echoed reason as well as by the browser's own lead sentence — a mutant
+#: that reworded BOTH of the browser's world-failure strings survived the
+#: whole property, and only reworded-plus-reason-dropped was killed. The
+#: clause below therefore legislates "the operator was told", not "the
+#: browser said it in its own words", which is the right invariant for a
+#: decision surface but is not what a reader would assume from its name.
 _REFUSAL_COPY = "could not be read"
 #: A CONTAINMENT per-entry refusal (symlink/socket/FIFO/device node)
 #: gets its OWN lead sentence (issue #1086 review) — it must never say
@@ -910,6 +987,24 @@ _REFUSAL_COPY = "could not be read"
 #: docstring states).
 _CONTAINMENT_REFUSAL_COPY = "refused (not read)"
 _NOT_EMPTY_COPY = "NOT evidence that the folder is empty"
+#: Issue #1099 — the whole-root LOAD-FAILURE catch (as opposed to the
+#: per-entry copy above, which lives inside a 200 payload) now answers
+#: status-honest copy instead of the generic ``_LOAD_FAILURE_COPY``
+#: sentence for every non-ok status. A whole-root 503 gets its own lead
+#: sentence naming that — deliberately NOT "temporarily unavailable" or
+#: any other wording that promises a retry will succeed (review round 1):
+#: the 503 bucket also carries the unclassified residual code, which is
+#: a data mismatch a retry cannot clear, not a disk hiccup.
+#:
+#: This constant and ``_REFUSAL_COPY`` are BOTH substrings of the fixed
+#: 503 LEAD sentence alone ("...could not be read — the storage refused
+#: or failed; this may be temporary."), so checking for them proves
+#: nothing about whether the server's own ``reason`` text reached the
+#: DOM at all (review round 2) — a browser that silently dropped
+#: ``serverMessage`` would still satisfy both. The test below therefore
+#: also asserts a substring unique to the PRODUCER's exception text
+#: (never present in the hardcoded lead sentence) to close that gap.
+_WHOLE_ROOT_UNAVAILABLE_LOAD_COPY = "may be temporary"
 
 #: Entry kinds refused for a WORLD reason (EACCES) vs a CONTAINMENT
 #: reason (a symlink or a special file) — the same split
@@ -1080,7 +1175,8 @@ class TestExplorerReachesTheOperatorGenerated(unittest.TestCase):
         a 200 payload. The route answers ``h._error(str(exc), 503)``, and
         the browser used to discard the message entirely — leaving an
         operator with a bare "Failed to load" over a world that needs
-        fixing.
+        fixing. Issue #1099: the browser now says something status-honest
+        instead of the old one-size-fits-all sentence.
         """
         db = FakePipelineDB()
         with tempfile.TemporaryDirectory() as root:
@@ -1099,8 +1195,17 @@ class TestExplorerReachesTheOperatorGenerated(unittest.TestCase):
         # Exactly the envelope ``web/routes/imports.py`` writes for it.
         reason = str(caught.exception)
         html = self._render({"error": reason}, 503)
-        self.assertIn(_LOAD_FAILURE_COPY, html)
+        self.assertIn(_WHOLE_ROOT_UNAVAILABLE_LOAD_COPY, html)
         self.assertIn(_REFUSAL_COPY, html)
+        # Review round 2: both checks above are ALSO satisfied by the
+        # hardcoded 503 lead sentence alone, so neither proves the
+        # producer's OWN reason text reached the DOM — a browser that
+        # silently dropped ``serverMessage`` would still pass them. Assert
+        # a substring that exists ONLY in the real exception (never in
+        # ``wrongMatchExplorerFailureCopy``'s fixed wording) to close that
+        # gap and make this genuinely a Rule C pin.
+        self.assertIn("Permission denied", reason)
+        self.assertIn("Permission denied", html)
         self.assertIn("Retry", html)
 
     def test_known_bad_browser_checker_trips(self) -> None:
@@ -1108,21 +1213,31 @@ class TestExplorerReachesTheOperatorGenerated(unittest.TestCase):
         unavailable = {"status": "unavailable", "unreadable_entry_count": 1}
         # 1. The shipped defect: a renderable payload rejected as a load
         #    failure.
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(AssertionError, _exactly(
+            "worlds ['unreadable_file'] produced a renderable "
+            "status='unavailable' payload the browser rejected as a load "
+            "failure",
+        )):
             assert_browser_told_the_truth(
                 worlds=["unreadable_file"],
                 payload=unavailable,
                 html="<div>Failed to load file explorer. <button>Retry</button></div>",
             )
         # 2. Rendered, but silent about the refusal.
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(AssertionError, _exactly(
+            "worlds ['unreadable_file']: the first refusal is a WORLD FAILURE "
+            "and the browser never said 'could not be read'",
+        )):
             assert_browser_told_the_truth(
                 worlds=["unreadable_file"],
                 payload=unavailable,
                 html="<div>No audio files found in this folder.</div>",
             )
         # 3. Named the refusal but still let "empty" stand.
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(AssertionError, _exactly(
+            "worlds ['unreadable_file'] rendered an intact-but-unreadable "
+            "folder without denying it is empty",
+        )):
             assert_browser_told_the_truth(
                 worlds=["unreadable_file"],
                 payload=unavailable,
@@ -1130,7 +1245,10 @@ class TestExplorerReachesTheOperatorGenerated(unittest.TestCase):
             )
         # 4. Must still work in the other direction: an ordinary complete
         #    listing may not claim an incomplete one.
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(AssertionError, _exactly(
+            "worlds ['readable_audio'] refused nothing yet the browser "
+            "claimed an incomplete listing",
+        )):
             assert_browser_told_the_truth(
                 worlds=["readable_audio"],
                 payload={"status": "ok", "unreadable_entry_count": 0},
@@ -1140,17 +1258,31 @@ class TestExplorerReachesTheOperatorGenerated(unittest.TestCase):
         #     #1086: an entry declined on containment grounds must be
         #     rendered as a refusal, not silently reported "ok" and empty
         #     — the shape ``refusal_is_indeterminate`` produced pre-fix.
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(AssertionError, _exactly(
+            "worlds ['vanished']: the first refusal is a CONTAINMENT decision "
+            "and the browser never said 'refused (not read)'",
+        )):
             assert_browser_told_the_truth(
                 worlds=["vanished"],
                 payload={"status": "ok", "unreadable_entry_count": 0},
                 html="<div>No audio files found in this folder.</div>",
             )
-        # 4c. The exact blocker-1 shape from the #1086 review: the browser
-        #     correctly disclosed the refusal, but with the WORLD-FAILURE
-        #     wording for what is actually a CONTAINMENT decision — the
-        #     old permissive "either copy" check accepted this.
-        with self.assertRaises(AssertionError):
+        # 4c. The exact blocker-1 shape from the #1086 review: a CONTAINMENT
+        #     refusal rendered with the WORLD-FAILURE wording, which the old
+        #     permissive "either copy" check accepted.
+        #
+        #     This render carries ONLY the world-failure wording — which is
+        #     what the pre-fix browser really produced, since both its lead
+        #     sentence and its empty-state paragraph were unconditional — so
+        #     the clause that fires is "the browser never said the
+        #     containment wording", not the exclusivity clause. The #1094
+        #     audit found this pin anchored on a clause it does not reach;
+        #     the exclusivity clause is proven, over a render carrying BOTH
+        #     wordings, by ``TestBrowserClauseProof``.
+        with self.assertRaisesRegex(AssertionError, _exactly(
+            "worlds ['vanished']: the first refusal is a CONTAINMENT decision "
+            "and the browser never said 'refused (not read)'",
+        )):
             assert_browser_told_the_truth(
                 worlds=["vanished"],
                 payload={"status": "unavailable", "unreadable_entry_count": 1},
@@ -1161,8 +1293,16 @@ class TestExplorerReachesTheOperatorGenerated(unittest.TestCase):
             )
         # 4d. The mirror mutant: a WORLD-FAILURE refusal rendered with the
         #     containment wording, implying a security decision over an
-        #     ordinary EACCES a retry could clear.
-        with self.assertRaises(AssertionError):
+        #     ordinary EACCES a retry could clear. This render carries ONLY
+        #     the containment wording, so the clause that actually fires is
+        #     the "never disclosed" one, not the exclusivity one — the
+        #     anchor below says so. The exclusivity clauses in BOTH
+        #     directions are proven, over a render carrying both wordings,
+        #     by ``TestBrowserClauseProof`` (issue #1094).
+        with self.assertRaisesRegex(AssertionError, _exactly(
+            "worlds ['unreadable_file']: the first refusal is a WORLD FAILURE "
+            "and the browser never said 'could not be read'",
+        )):
             assert_browser_told_the_truth(
                 worlds=["unreadable_file"],
                 payload={"status": "unavailable", "unreadable_entry_count": 1},
@@ -1342,7 +1482,19 @@ def assert_badge_shows_the_incompleteness(
     partial_read_is_containment: bool | None = None,
     text: str,
 ) -> None:
-    """The pressing-row badge is the operator's decision surface."""
+    """The pressing-row badge is the operator's decision surface.
+
+    Every clause here is guarded by ``text`` being non-empty, and
+    ``formatDistanceBadge`` returns ``''`` for any result whose
+    ``distance`` is not a number — i.e. for every outcome except ``ok``.
+    So on a folder that was refused outright this checker is a NO-OP by
+    construction, and the honesty of THAT outcome is
+    ``assert_distance_read_is_honest``'s job, not this one. Measured in
+    the #1094 clause audit: 169 calls at suite tier, 120 of them no-ops,
+    with 10 complete-read, 15 world-failure-partial and 24
+    containment-partial calls carrying real badge text — so every clause
+    below is exercised, but only by the ``ok``-outcome worlds.
+    """
     marked = _INCOMPLETE_BADGE_COPY in text
     if partial_read is not None and text and not marked:
         raise AssertionError(
@@ -1512,19 +1664,30 @@ class TestDistanceReadRefusalGenerated(unittest.TestCase):
     def test_known_bad_distance_checkers_trip(self) -> None:
         """Both checkers must fail on the exact pre-fix behaviour."""
         # 1. Every file refused, reported as "there is no audio here".
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(AssertionError, _exactly(
+            "worlds ['refused'] reported no_audio — a definitive negative — "
+            "for audio the storage refused to show",
+        )):
             assert_distance_read_is_honest(
                 worlds=["refused"], outcome="no_audio",
                 partial_read=None, total_local_tracks=None,
             )
         # 2. Partial manifest scored with no flag.
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(AssertionError, _exactly(
+            "worlds ['readable', 'refused'] computed a distance over 1 of 2 "
+            "files without flagging the incomplete manifest",
+        )):
             assert_distance_read_is_honest(
                 worlds=["readable", "refused"], outcome="ok",
                 partial_read=None, total_local_tracks=1,
             )
         # 3. The mirror image: a corrupt file claimed as a refusal.
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(AssertionError, _exactly(
+            "worlds ['readable', 'unparseable'] refused nothing yet claimed "
+            "partial_read='x: bad tags' — an unparseable file is a fact ABOUT "
+            "the file and a proven absence is a fact about the name; neither "
+            "is the storage refusing to answer",
+        )):
             assert_distance_read_is_honest(
                 worlds=["readable", "unparseable"], outcome="ok",
                 partial_read="x: bad tags", total_local_tracks=1,
@@ -1536,7 +1699,11 @@ class TestDistanceReadRefusalGenerated(unittest.TestCase):
         #     prevent. Before this delta a dangling symlink WAS reported
         #     this way (``os.stat`` followed it into ENOENT); this pin
         #     guards against that regressing.
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(AssertionError, _exactly(
+            "worlds ['readable', 'refused_symlink_dangling'] computed a "
+            "distance over 1 of 2 files without flagging the incomplete "
+            "manifest",
+        )):
             assert_distance_read_is_honest(
                 worlds=["readable", "refused_symlink_dangling"],
                 outcome="ok", partial_read=None, total_local_tracks=1,
@@ -1544,7 +1711,10 @@ class TestDistanceReadRefusalGenerated(unittest.TestCase):
         # 3c. …and the same false absence turning a folder holding only a
         #     symlink into ``no_audio`` (a definitive negative) instead
         #     of the ``folder_unavailable`` a refusal actually earns.
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(AssertionError, _exactly(
+            "worlds ['refused_symlink_external'] reported no_audio — a "
+            "definitive negative — for audio the storage refused to show",
+        )):
             assert_distance_read_is_honest(
                 worlds=["refused_symlink_external"], outcome="no_audio",
                 partial_read=None, total_local_tracks=None,
@@ -1573,11 +1743,18 @@ class TestDistanceReadRefusalGenerated(unittest.TestCase):
             total_local_tracks=1,
         )
         # 5. The badge checker, both directions.
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(AssertionError, _exactly(
+            "badge 'best 0.07 (1/2)' presented a distance computed over an "
+            "incomplete manifest ('x: Permission denied') as an ordinary "
+            "score",
+        )):
             assert_badge_shows_the_incompleteness(
                 partial_read="x: Permission denied", text="best 0.07 (1/2)",
             )
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(AssertionError, _exactly(
+            "badge 'best 0.07 (2/2) · incomplete manifest' claimed an "
+            "incomplete manifest for a complete read",
+        )):
             assert_badge_shows_the_incompleteness(
                 partial_read=None,
                 text="best 0.07 (2/2) · incomplete manifest",
@@ -1592,13 +1769,21 @@ class TestDistanceReadRefusalGenerated(unittest.TestCase):
         #     world-failure wording (or vice versa) is exactly the
         #     "correct string, invisible/mislabeled distinction" defect
         #     this series keeps finding.
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(AssertionError, _exactly(
+            "badge 'best 0.07 (1/2) · incomplete manifest (may be transient)' "
+            "did not visibly say 'refused: symlink or special file' for "
+            "partial_read_is_containment=True",
+        )):
             assert_badge_shows_the_incompleteness(
                 partial_read="x: symlink refused",
                 partial_read_is_containment=True,
                 text="best 0.07 (1/2) · incomplete manifest (may be transient)",
             )
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(AssertionError, _exactly(
+            "badge 'best 0.07 (1/2) · incomplete manifest (refused: symlink "
+            "or special file)' did not visibly say 'may be transient' for "
+            "partial_read_is_containment=False",
+        )):
             assert_badge_shows_the_incompleteness(
                 partial_read="x: Permission denied",
                 partial_read_is_containment=False,
@@ -1844,7 +2029,10 @@ class TestExplorerAndDistanceAgreeGenerated(unittest.TestCase):
         from lib.beets_distance import BeetsDistanceResult
 
         # Explorer saw a refusal the distance path did not.
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(AssertionError, _exactly(
+            "kinds ['readable', 'refused_eacces']: distance partial_read=None "
+            "disagrees with 1 refused entry",
+        )):
             assert_explorer_and_distance_agree(
                 kinds=["readable", "refused_eacces"],
                 explorer_payload={
@@ -1854,8 +2042,15 @@ class TestExplorerAndDistanceAgreeGenerated(unittest.TestCase):
                     outcome="ok", total_local_tracks=1, partial_read=None,
                 ),
             )
-        # Distance path saw a refusal the explorer's count missed.
-        with self.assertRaises(AssertionError):
+        # Distance path saw a refusal the explorer's count missed. The
+        # clause that catches it is the explorer-count one: it pins the
+        # explorer to the fixture's own refusal count, which is what makes
+        # the two-ends comparison below a corollary for every non-empty
+        # world (issue #1094 clause audit).
+        with self.assertRaisesRegex(AssertionError, _exactly(
+            "kinds ['readable', 'refused_symlink_external']: explorer counted "
+            "0 unreadable entries, expected 1",
+        )):
             assert_explorer_and_distance_agree(
                 kinds=["readable", "refused_symlink_external"],
                 explorer_payload={
@@ -1868,7 +2063,10 @@ class TestExplorerAndDistanceAgreeGenerated(unittest.TestCase):
             )
         # Every candidate refused, but distance claims a definitive
         # negative instead of the unavailable folder it actually is.
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(AssertionError, _exactly(
+            "kinds ['refused_socket']: every candidate was refused, expected "
+            "outcome=folder_unavailable, got 'no_audio'",
+        )):
             assert_explorer_and_distance_agree(
                 kinds=["refused_socket"],
                 explorer_payload={
@@ -1901,3 +2099,579 @@ class TestExplorerAndDistanceAgreeGenerated(unittest.TestCase):
                 partial_read=None,
             ),
         )
+
+
+# ---------------------------------------------------------------------------
+# Per-clause proof (issue #1094).
+#
+# Every checker above short-circuits on the first violated clause, so a
+# self-test whose world violates several only ever exercises the first one
+# while its NAME goes on advertising the rest. The tables below name, for
+# each clause, the minimal world that makes THAT clause's condition true
+# while every EARLIER clause in the same function passes, and assert the
+# clause's own message anchored end to end — a bare
+# ``assertRaises(AssertionError)``, or a substring, is satisfied by a
+# SIBLING clause and proves nothing about the one the test is named for.
+#
+# These tables are TEST MACHINERY: deterministic only, never generated
+# (`.claude/rules/code-quality.md` § "Never property-test the test
+# machinery").
+# ---------------------------------------------------------------------------
+
+
+def _explorer_payload(**overrides: object) -> dict[str, object]:
+    """A complete, honest explorer payload, before a clause-specific edit."""
+    payload: dict[str, object] = {
+        "status": "ok",
+        "audio_file_count": 0,
+        "other_file_count": 0,
+        "partial": False,
+        "truncated_reason": None,
+        "unreadable_entry_count": 0,
+        "unreadable_reason": None,
+        "files": [],
+    }
+    payload.update(overrides)
+    return payload
+
+
+class TestPointerClauseProof(unittest.TestCase):
+    """Each clause of ``pointer_cleared_iff_positively_known``, alone."""
+
+    def test_every_clause_fires_with_its_own_message(self) -> None:
+        cases: list[
+            tuple[str, str, WrongMatchDeleteResult, int, bool, str]
+        ] = [
+            (
+                "cleared-without-evidence",
+                "unsafe_root",
+                WrongMatchDeleteResult(
+                    download_log_id=1,
+                    outcome=OUTCOME_DELETED,
+                    success=True,
+                    cleared_rows=1,
+                ),
+                0, False,
+                ("world='unsafe_root' cleared the pointer without positive "
+                 "evidence (outcome='deleted', path_missing=False, "
+                 "deleted_path=None)"),
+            ),
+            (
+                "refused-to-clear-known-absence",
+                "present",
+                WrongMatchDeleteResult(
+                    download_log_id=1, outcome=OUTCOME_DELETE_FAILED),
+                1, True,
+                ("world='present' refused to clear a positively-known pointer "
+                 "(outcome='delete_failed')"),
+            ),
+            (
+                "deleted-path-still-on-disk",
+                "present",
+                WrongMatchDeleteResult(
+                    download_log_id=1,
+                    outcome=OUTCOME_DELETED,
+                    success=True,
+                    deleted_path="/kept",
+                    cleared_rows=1,
+                ),
+                0, True,
+                ("world='present' reported deleted_path='/kept' while the "
+                 "folder is still on disk"),
+            ),
+            (
+                "refused-observation-wrong-outcome",
+                "unreadable_parent",
+                WrongMatchDeleteResult(
+                    download_log_id=1, outcome=OUTCOME_DELETE_FAILED),
+                1, True,
+                ("world='unreadable_parent' reported 'delete_failed' for an "
+                 "observation that was refused"),
+            ),
+            (
+                "refused-observation-claimed-absence",
+                "unreadable_parent",
+                WrongMatchDeleteResult(
+                    download_log_id=1,
+                    outcome=OUTCOME_SKIPPED_PATH_UNAVAILABLE,
+                    path_missing=True,
+                ),
+                1, True,
+                ("world='unreadable_parent' claimed absence or deletion it "
+                 "never proved"),
+            ),
+            (
+                "refused-observation-claimed-success",
+                "unreadable_parent",
+                WrongMatchDeleteResult(
+                    download_log_id=1,
+                    outcome=OUTCOME_SKIPPED_PATH_UNAVAILABLE,
+                    success=True,
+                ),
+                1, True,
+                ("world='unreadable_parent' reported success for a refused "
+                 "observation"),
+            ),
+        ]
+        for clause, world, result, rows, present, message in cases:
+            with self.subTest(clause=clause), self.assertRaisesRegex(
+                AssertionError, _exactly(message),
+            ):
+                pointer_cleared_iff_positively_known(
+                    world=world,
+                    result=result,
+                    rows_remaining=rows,
+                    folder_present=present,
+                )
+
+    def test_observation_clauses_fire_with_their_own_messages(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            missing = os.path.join(root, "not-there")
+            with self.assertRaisesRegex(AssertionError, _exactly(
+                "world='unreadable_parent' produced presence='absent'; a "
+                "refused probe must never be reported as absence",
+            )):
+                observation_never_launders_a_refusal(
+                    missing, "unreadable_parent")
+            with self.assertRaisesRegex(AssertionError, _exactly(
+                "a genuinely missing path must be positively absent",
+            )):
+                observation_never_launders_a_refusal(root, "genuinely_missing")
+
+
+class TestAggregateClauseProof(unittest.TestCase):
+    """Each clause of ``assert_aggregate_obeys_the_refusal_rule``, alone."""
+
+    def test_every_clause_fires_with_its_own_message(self) -> None:
+        cases: list[
+            tuple[str, list[str], DirectoryObservation, str | None, str]
+        ] = [
+            (
+                "refusal-laundered-into-absence",
+                ["absent", "unreadable"],
+                DirectoryObservation(presence="absent", code="missing"),
+                None,
+                ("probe: candidates ['absent', 'unreadable'] aggregated to "
+                "'absent', expected 'indeterminate' — a refused probe was "
+                "laundered into absence"),
+            ),
+            (
+                "present-downgraded-to-refusal",
+                ["unreadable", "present"],
+                DirectoryObservation(
+                    presence="indeterminate", code="open_failed",
+                    errno_symbol="EACCES"),
+                "/a",
+                ("probe: candidates ['unreadable', 'present'] aggregated to "
+                "'indeterminate', expected 'present'"),
+            ),
+            (
+                "wrong-present-candidate",
+                ["present", "present"],
+                DirectoryObservation(presence="present", path="/b"),
+                "/a",
+                ("probe: resolved '/b', expected the FIRST present candidate "
+                "'/a'"),
+            ),
+            (
+                "absent-aggregate-carries-a-path",
+                ["absent"],
+                DirectoryObservation(
+                    presence="absent", path="/a", code="missing"),
+                None,
+                "probe: reported a path '/a' for a 'absent' aggregate",
+            ),
+            (
+                "indeterminate-aggregate-carries-a-path",
+                ["unreadable"],
+                DirectoryObservation(
+                    presence="indeterminate", path="/a", code="open_failed",
+                    errno_symbol="EACCES"),
+                None,
+                "probe: reported a path '/a' for a 'indeterminate' aggregate",
+            ),
+        ]
+        for clause, worlds, observation, expected_path, message in cases:
+            with self.subTest(clause=clause), self.assertRaisesRegex(
+                AssertionError, _exactly(message),
+            ):
+                assert_aggregate_obeys_the_refusal_rule(
+                    aggregator="probe",
+                    worlds=worlds,
+                    observation=observation,
+                    expected_path=expected_path,
+                )
+
+
+class TestExplorerListingClauseProof(unittest.TestCase):
+    """Each clause of ``assert_explorer_listing_is_honest``, alone."""
+
+    def test_every_clause_fires_with_its_own_message(self) -> None:
+        cases: list[tuple[str, list[str], dict[str, object], str]] = [
+            (
+                "refusal-count-mismatch",
+                ["unreadable_file"],
+                _explorer_payload(),
+                "worlds ['unreadable_file'] recorded 0 refusals, expected 1",
+            ),
+            (
+                "refusals-hidden-behind-complete-listing",
+                ["unreadable_file"],
+                _explorer_payload(unreadable_entry_count=1),
+                ("worlds ['unreadable_file'] hid 1 refused entries behind a "
+                "complete-looking listing"),
+            ),
+            (
+                "partial-claimed-with-nothing-missing",
+                ["readable_audio"],
+                _explorer_payload(partial=True, audio_file_count=1),
+                ("worlds ['readable_audio'] reported a partial listing with "
+                "nothing truncated and nothing refused"),
+            ),
+            (
+                "refusal-without-a-reason",
+                ["unreadable_file"],
+                _explorer_payload(unreadable_entry_count=1, partial=True),
+                ("worlds ['unreadable_file'] recorded refusals without naming "
+                "one"),
+            ),
+            (
+                "intact-folder-called-empty",
+                ["unreadable_file"],
+                _explorer_payload(
+                    unreadable_entry_count=1, partial=True,
+                    unreadable_reason="00 locked.mp3: denied"),
+                ("worlds ['unreadable_file'] claimed an intact folder is empty "
+                "(status='ok', audio_file_count=0)"),
+            ),
+            (
+                "unavailable-with-nothing-refused",
+                ["readable_audio"],
+                _explorer_payload(status="unavailable", audio_file_count=1),
+                ("worlds ['readable_audio'] refused nothing yet reported "
+                "status='unavailable'"),
+            ),
+            (
+                "audio-count-mismatch",
+                ["readable_audio"],
+                _explorer_payload(),
+                "worlds ['readable_audio'] listed 0 audio files, expected 1",
+            ),
+        ]
+        for clause, worlds, payload, message in cases:
+            with self.subTest(clause=clause), self.assertRaisesRegex(
+                AssertionError, _exactly(message),
+            ):
+                assert_explorer_listing_is_honest(
+                    worlds=worlds, payload=payload)
+
+
+class TestBrowserClauseProof(unittest.TestCase):
+    """Each clause of ``assert_browser_told_the_truth``, alone."""
+
+    _UNAVAILABLE: ClassVar[dict[str, object]] = {
+        "status": "unavailable", "unreadable_entry_count": 1}
+    _OK: ClassVar[dict[str, object]] = {
+        "status": "ok", "unreadable_entry_count": 0}
+    #: One render carrying BOTH wordings — the only shape that reaches the
+    #: two EXCLUSIVITY clauses, whichever kind the first refusal is.
+    _BOTH_WORDINGS = (
+        "<div>1 entry could not be read; it was refused (not read) as a "
+        "containment decision. This is NOT evidence that the folder is "
+        "empty.</div>"
+    )
+
+    def test_every_clause_fires_with_its_own_message(self) -> None:
+        cases: list[tuple[str, list[str], dict[str, object], str, str]] = [
+            (
+                "renderable-payload-rejected-as-load-failure",
+                ["unreadable_file"],
+                self._UNAVAILABLE,
+                ("<div>Failed to load file explorer. "
+                "<button>Retry</button></div>"),
+                ("worlds ['unreadable_file'] produced a renderable "
+                "status='unavailable' payload the browser rejected as a load "
+                "failure"),
+            ),
+            (
+                "world-failure-never-disclosed",
+                ["unreadable_file"],
+                self._UNAVAILABLE,
+                "<div>No audio files found in this folder.</div>",
+                ("worlds ['unreadable_file']: the first refusal is a WORLD "
+                "FAILURE and the browser never said 'could not be read'"),
+            ),
+            (
+                "world-failure-worded-as-containment",
+                ["unreadable_file"],
+                self._UNAVAILABLE,
+                self._BOTH_WORDINGS,
+                ("worlds ['unreadable_file']: the first refusal is a WORLD "
+                "FAILURE but the browser used the containment wording "
+                "'refused (not read)' — that wording must be reserved for a "
+                "symlink/socket/FIFO/device-node refusal"),
+            ),
+            (
+                "containment-never-disclosed",
+                ["vanished"],
+                self._UNAVAILABLE,
+                "<div>No audio files found in this folder.</div>",
+                ("worlds ['vanished']: the first refusal is a CONTAINMENT "
+                "decision and the browser never said 'refused (not read)'"),
+            ),
+            (
+                "containment-worded-as-world-failure",
+                ["vanished"],
+                self._UNAVAILABLE,
+                self._BOTH_WORDINGS,
+                ("worlds ['vanished']: the first refusal is a CONTAINMENT "
+                "decision but the browser used the world-failure wording "
+                "'could not be read' — a retry can never satisfy a "
+                "containment refusal"),
+            ),
+            (
+                "unreadable-folder-left-looking-empty",
+                ["unreadable_file"],
+                self._UNAVAILABLE,
+                "<div>1 entry could not be read.</div>",
+                ("worlds ['unreadable_file'] rendered an intact-but-unreadable "
+                "folder without denying it is empty"),
+            ),
+            (
+                "complete-listing-claimed-incomplete",
+                ["readable_audio"],
+                self._OK,
+                "<div>1 entry could not be read</div>",
+                ("worlds ['readable_audio'] refused nothing yet the browser "
+                "claimed an incomplete listing"),
+            ),
+        ]
+        for clause, worlds, payload, html, message in cases:
+            with self.subTest(clause=clause), self.assertRaisesRegex(
+                AssertionError, _exactly(message),
+            ):
+                assert_browser_told_the_truth(
+                    worlds=worlds, payload=payload, html=html)
+
+
+class TestDistanceClauseProof(unittest.TestCase):
+    """Each clause of the two distance checkers, alone."""
+
+    def test_every_read_clause_fires_with_its_own_message(self) -> None:
+        cases: list[
+            tuple[str, list[str], str, str | None, int | None, str]
+        ] = [
+            (
+                "all-refused-called-no-audio",
+                ["refused"], "no_audio", None, None,
+                ("worlds ['refused'] reported no_audio — a definitive negative "
+                "— for audio the storage refused to show"),
+            ),
+            (
+                "all-refused-called-something-else",
+                ["refused"], "folder_missing", None, None,
+                ("worlds ['refused'] refused every file yet reported "
+                "outcome='folder_missing'"),
+            ),
+            (
+                "fully-observed-empty-not-called-no-audio",
+                ["unparseable"], "folder_unavailable", None, None,
+                ("worlds ['unparseable'] were fully OBSERVED and held no "
+                "readable audio, which no_audio states exactly; got "
+                "outcome='folder_unavailable'"),
+            ),
+            (
+                "partial-manifest-not-flagged",
+                ["readable", "refused"], "ok", None, 1,
+                ("worlds ['readable', 'refused'] computed a distance over 1 of "
+                "2 files without flagging the incomplete manifest"),
+            ),
+            (
+                "complete-manifest-claimed-partial",
+                ["readable"], "ok", "00 track.flac: bad tags", 1,
+                ("worlds ['readable'] refused nothing yet claimed "
+                "partial_read='00 track.flac: bad tags' — an unparseable file "
+                "is a fact ABOUT the file and a proven absence is a fact "
+                "about the name; neither is the storage refusing to answer"),
+            ),
+            (
+                "scored-more-tracks-than-it-read",
+                ["readable"], "ok", None, 2,
+                ("worlds ['readable'] scored 2 local tracks, expected the 1 it "
+                "could actually read"),
+            ),
+        ]
+        for clause, worlds, outcome, partial, total, message in cases:
+            with self.subTest(clause=clause), self.assertRaisesRegex(
+                AssertionError, _exactly(message),
+            ):
+                assert_distance_read_is_honest(
+                    worlds=worlds,
+                    outcome=outcome,
+                    partial_read=partial,
+                    total_local_tracks=total,
+                )
+
+    def test_every_badge_clause_fires_with_its_own_message(self) -> None:
+        cases: list[tuple[str, str | None, bool | None, str, str]] = [
+            (
+                "partial-read-presented-as-an-ordinary-score",
+                "x: Permission denied", False, "best 0.07 (1/2)",
+                ("badge 'best 0.07 (1/2)' presented a distance computed over "
+                "an incomplete manifest ('x: Permission denied') as an "
+                "ordinary score"),
+            ),
+            (
+                "complete-read-marked-incomplete",
+                None, None, "best 0.07 (2/2) · incomplete manifest",
+                ("badge 'best 0.07 (2/2) · incomplete manifest' claimed an "
+                "incomplete manifest for a complete read"),
+            ),
+            (
+                "containment-kind-invisible",
+                "x: symlink refused", True,
+                "best 0.07 (1/2) · incomplete manifest",
+                ("badge 'best 0.07 (1/2) · incomplete manifest' did not "
+                "visibly say 'refused: symlink or special file' for "
+                "partial_read_is_containment=True"),
+            ),
+            (
+                "world-failure-kind-invisible",
+                "x: Permission denied", False,
+                "best 0.07 (1/2) · incomplete manifest",
+                ("badge 'best 0.07 (1/2) · incomplete manifest' did not "
+                "visibly say 'may be transient' for "
+                "partial_read_is_containment=False"),
+            ),
+            (
+                "containment-badge-also-says-transient",
+                "x: symlink refused", True,
+                ("best 0.07 (1/2) · incomplete manifest "
+                "(refused: symlink or special file, may be transient)"),
+                ("badge 'best 0.07 (1/2) · incomplete manifest (refused: "
+                "symlink or special file, may be transient)' said 'may be "
+                "transient', the OTHER kind's wording"),
+            ),
+            (
+                "world-failure-badge-also-says-containment",
+                "x: Permission denied", False,
+                ("best 0.07 (1/2) · incomplete manifest "
+                "(may be transient, refused: symlink or special file)"),
+                ("badge 'best 0.07 (1/2) · incomplete manifest (may be "
+                "transient, refused: symlink or special file)' said "
+                "'refused: symlink or special file', the OTHER kind's wording"),
+            ),
+        ]
+        for clause, partial, containment, text, message in cases:
+            with self.subTest(clause=clause), self.assertRaisesRegex(
+                AssertionError, _exactly(message),
+            ):
+                assert_badge_shows_the_incompleteness(
+                    partial_read=partial,
+                    partial_read_is_containment=containment,
+                    text=text,
+                )
+
+
+class TestAgreementClauseProof(unittest.TestCase):
+    """Each clause of ``assert_explorer_and_distance_agree``, alone."""
+
+    def test_every_clause_fires_with_its_own_message(self) -> None:
+        from lib.beets_distance import BeetsDistanceResult
+
+        cases: list[tuple[str, list[str], dict[str, object], object, str]] = [
+            (
+                # The bare type guard carries no message of its own, so the
+                # EMPTY anchor is what proves this clause fired and not a
+                # later one, every one of which has text.
+                "not-a-distance-result",
+                ["readable"],
+                {"unreadable_entry_count": 0, "audio_file_count": 1},
+                {"outcome": "ok"},
+                "",
+            ),
+            (
+                "explorer-refusal-count-mismatch",
+                ["readable", "refused_eacces"],
+                {"unreadable_entry_count": 0, "audio_file_count": 1},
+                BeetsDistanceResult(
+                    outcome="ok", total_local_tracks=1,
+                    partial_read="01 track.flac: could not be read"),
+                ("kinds ['readable', 'refused_eacces']: explorer counted 0 "
+                "unreadable entries, expected 1"),
+            ),
+            (
+                "explorer-audio-count-mismatch",
+                ["readable", "refused_eacces"],
+                {"unreadable_entry_count": 1, "audio_file_count": 2},
+                BeetsDistanceResult(
+                    outcome="ok", total_local_tracks=1,
+                    partial_read="01 track.flac: could not be read"),
+                ("kinds ['readable', 'refused_eacces']: explorer listed 2 "
+                "audio files, expected 1 readable"),
+            ),
+            (
+                "distance-not-ok-despite-readable-files",
+                ["readable"],
+                {"unreadable_entry_count": 0, "audio_file_count": 1},
+                BeetsDistanceResult(
+                    outcome="no_audio", total_local_tracks=None,
+                    partial_read=None),
+                ("kinds ['readable']: distance reported outcome='no_audio' "
+                "despite 1 readable file(s)"),
+            ),
+            (
+                "distance-track-count-mismatch",
+                ["readable"],
+                {"unreadable_entry_count": 0, "audio_file_count": 1},
+                BeetsDistanceResult(
+                    outcome="ok", total_local_tracks=2, partial_read=None),
+                ("kinds ['readable']: distance scored 2 local tracks, expected "
+                "the 1 it could actually read"),
+            ),
+            (
+                "distance-partial-read-disagrees-with-the-fixture",
+                ["readable", "refused_eacces"],
+                {"unreadable_entry_count": 1, "audio_file_count": 1},
+                BeetsDistanceResult(
+                    outcome="ok", total_local_tracks=1, partial_read=None),
+                ("kinds ['readable', 'refused_eacces']: distance "
+                "partial_read=None disagrees with 1 refused entry"),
+            ),
+            (
+                "all-refused-not-called-folder-unavailable",
+                ["refused_socket"],
+                {"unreadable_entry_count": 1, "audio_file_count": 0},
+                BeetsDistanceResult(
+                    outcome="no_audio", total_local_tracks=None,
+                    partial_read=None),
+                ("kinds ['refused_socket']: every candidate was refused, "
+                "expected outcome=folder_unavailable, got 'no_audio'"),
+            ),
+            (
+                # The two ends disagreeing is this checker's headline clause,
+                # and the EMPTY folder is the only world that reaches it: for
+                # every non-empty world the earlier per-end clauses already
+                # pin BOTH ends to the fixture, so their agreement follows as
+                # a corollary rather than as an independent check. Recorded in
+                # the #1094 audit; the clause stays because it is the sentence
+                # the invariant is written in.
+                "ends-disagree",
+                [],
+                {"unreadable_entry_count": 0, "audio_file_count": 0},
+                BeetsDistanceResult(
+                    outcome="folder_unavailable", total_local_tracks=None,
+                    partial_read=None),
+                ("kinds []: explorer refusal=False disagrees with distance "
+                "refusal=True for the SAME folder"),
+            ),
+        ]
+        for clause, kinds, payload, distance, message in cases:
+            with self.subTest(clause=clause), self.assertRaisesRegex(
+                AssertionError, _exactly(message),
+            ):
+                assert_explorer_and_distance_agree(
+                    kinds=kinds,
+                    explorer_payload=payload,
+                    distance_result=distance,
+                )

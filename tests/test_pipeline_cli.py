@@ -1380,8 +1380,22 @@ class TestCmdWrongMatchTriage(_FakeDbWebServerCase):
                 return
             time.sleep(0.01)
 
+        real_post = pipeline_cli_wrong_match._post
+        captured_bodies: list[object] = []
+
+        def recording_post(endpoint, mutation, *, timeout_seconds=15.0,
+                            report_failure=True):
+            if mutation.path == "/api/wrong-matches/triage/cancel":
+                captured_bodies.append(mutation.body)
+            return real_post(
+                endpoint, mutation, timeout_seconds=timeout_seconds,
+                report_failure=report_failure,
+            )
+
         with patch.object(
             imports_routes, "cleanup_all_wrong_matches", slow_cleanup,
+        ), patch.object(
+            pipeline_cli_wrong_match, "_post", recording_post,
         ), redirect_stdout(stdout), redirect_stderr(io.StringIO()):
             rc = pipeline_cli.cmd_wrong_match_triage(
                 None, args, sleep=sleep_then_interrupt,
@@ -1393,6 +1407,10 @@ class TestCmdWrongMatchTriage(_FakeDbWebServerCase):
         self.assertEqual(payload["state"], "cancelled")
         self.assertIsNone(payload["error"])
         self.assertTrue(payload["summary"]["cancelled"])
+        # #1106 N1: the Ctrl-C handler is specifically racing its OWN
+        # start POST, so it is the one caller that must arm the sticky
+        # pending cancel -- stripping this must turn the test red.
+        self.assertEqual(captured_bodies, [{"arm_pending": True}])
 
     def test_sigint_cancel_post_retries_once_before_giving_up(self):
         """Issue #1083 review: a failed cancel POST must not be silently
@@ -1420,11 +1438,13 @@ class TestCmdWrongMatchTriage(_FakeDbWebServerCase):
 
         real_post = pipeline_cli_wrong_match._post
         calls = {"n": 0}
+        captured_bodies: list[object] = []
 
         def flaky_cancel_post(endpoint, mutation, *, timeout_seconds=15.0,
                               report_failure=True):
             if mutation.path == "/api/wrong-matches/triage/cancel":
                 calls["n"] += 1
+                captured_bodies.append(mutation.body)
                 if calls["n"] == 1:
                     return None
             return real_post(
@@ -1463,6 +1483,12 @@ class TestCmdWrongMatchTriage(_FakeDbWebServerCase):
         self.assertTrue(payload["summary"]["cancelled"])
         self.assertEqual(calls["n"], 2)
         self.assertNotIn("Stop request failed", stderr.getvalue())
+        # #1106 N1: both the failed first attempt and the successful
+        # retry must arm the pending slot -- this is the CLI's own
+        # start-POST race, not a generic Stop click.
+        self.assertEqual(
+            captured_bodies, [{"arm_pending": True}, {"arm_pending": True}],
+        )
 
     def test_sigint_cancel_post_failure_is_reported_when_retry_also_fails(self):
         """Both cancel attempts fail (dropped socket both times): the CLI
@@ -1483,9 +1509,12 @@ class TestCmdWrongMatchTriage(_FakeDbWebServerCase):
                 processed=1, deleted=1, cancelled=False,
             )
 
+        captured_bodies: list[object] = []
+
         def always_fail_cancel_post(endpoint, mutation, *, timeout_seconds=15.0,
                                     report_failure=True):
             assert mutation.path == "/api/wrong-matches/triage/cancel"
+            captured_bodies.append(mutation.body)
 
         args = argparse.Namespace(
             apply=True, json=False, api_endpoint=TcpApiEndpoint(self.base),
@@ -1516,6 +1545,10 @@ class TestCmdWrongMatchTriage(_FakeDbWebServerCase):
         self.assertIn("Stop request failed", stderr.getvalue())
         self.assertIn("total: 1", stdout.getvalue())
         self.assertEqual(rc, 0)
+        # #1106 N1: both attempts (initial + retry) must arm.
+        self.assertEqual(
+            captured_bodies, [{"arm_pending": True}, {"arm_pending": True}],
+        )
 
     def test_cancelled_sweep_reports_distinctly_from_completed_in_text(self):
         """The human-readable renderer says CANCELLED, never FAILED, and
@@ -1568,6 +1601,32 @@ class TestCmdWrongMatchTriageCancel(_FakeDbWebServerCase):
 
         self.assertEqual(rc, 0)
         self.assertEqual(json.loads(stdout.getvalue())["state"], "idle")
+
+    def test_cancel_body_stays_unarmed(self) -> None:
+        """#1106 N1: this command has no start POST of its own to race,
+        so it must never send `arm_pending` — arming here would risk
+        pre-cancelling a LATER, unrelated sweep the operator has not
+        even started. Body-level pin: adding `arm_pending` here must
+        turn this test red."""
+        real_post = api_mutations._post
+        captured_bodies: list[object] = []
+
+        def recording_post(endpoint, mutation, *, timeout_seconds=15.0,
+                            report_failure=True):
+            if mutation.path == "/api/wrong-matches/triage/cancel":
+                captured_bodies.append(mutation.body)
+            return real_post(
+                endpoint, mutation, timeout_seconds=timeout_seconds,
+                report_failure=report_failure,
+            )
+
+        args = argparse.Namespace(api_endpoint=TcpApiEndpoint(self.base))
+        with patch.object(api_mutations, "_post", recording_post), \
+                redirect_stdout(io.StringIO()):
+            rc = pipeline_cli.cmd_wrong_match_triage_cancel(None, args)
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(captured_bodies, [{}])
 
     def test_cancel_stops_a_running_sweep_through_the_real_route(self) -> None:
         import web.routes.imports as imports_routes

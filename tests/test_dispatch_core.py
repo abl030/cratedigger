@@ -353,7 +353,14 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         self.assertTrue(r["result"].success)
         self.assertEqual(r["db"].request(42)["status"], "imported")
 
-    def test_audio_corrupt_automation_uses_beets_staging_quarantine_root(self):
+    def test_audio_corrupt_automation_uses_staged_path_cleanup(self):
+        """Bad rips no longer select a quarantine root (issue #1077, D3).
+
+        ``audio_corrupt`` now disposes of its disposable staged source
+        exactly like every other auto-import reject: a generic
+        ``PostCommitCleanup(staged_path=...)`` plan, not a special
+        quarantine-root selection.
+        """
         r = self._dispatch(
             candidate_kwargs={"audio_corrupt": True},
             beets_staging_dir="/configured/staging",
@@ -362,16 +369,22 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
         )
         cleanup = r["result"].post_commit_cleanup
         assert cleanup is not None
-        self.assertEqual(cleanup.audio_quarantine_root, "/configured/staging")
-        self.assertNotEqual(cleanup.audio_quarantine_root, "/configured/slskd")
+        self.assertEqual(cleanup.staged_path, r["path"])
 
-    def test_audio_corrupt_dispatch_composes_atomic_staging_quarantine(self):
+    def test_audio_corrupt_dispatch_deletes_source_outright(self):
+        """Bad rips ban + delete, never quarantine (issue #1077, D3).
+
+        No post-commit plan retargets the canonical owner path any more, so
+        the automation processing cleanup falls through to its plan-free
+        default (``canonical_source_cleanup_intent``), which removes the
+        whole tree in place — no destination, no ``failed_imports/bad_files``
+        folder.
+        """
         with tempfile.TemporaryDirectory() as root:
             incoming = os.path.join(root, "Incoming")
             auto_import = os.path.join(incoming, "auto-import")
             slskd = os.path.join(root, "slskd")
             os.makedirs(auto_import)
-            os.makedirs(os.path.join(incoming, "failed_imports"))
             os.makedirs(slskd)
             observed: dict[str, object] = {}
             def post_dispatch(
@@ -396,25 +409,25 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             assert completed_job is not None
             receipt = (completed_job.result or {})["processing_cleanup"]
             assert isinstance(receipt, dict)
-            target = receipt["selected_destination_path"]
-            assert isinstance(target, str)
+            self.assertEqual(receipt["action"], "remove_source_tree")
+            self.assertIsNone(receipt["selected_destination_path"])
             self.assertFalse(os.path.exists(source))
-            self.assertTrue(target.startswith(os.path.join(incoming, "failed_imports", "bad_files")))
-            self.assertFalse(target.startswith(slskd))
-            self.assertTrue(os.path.exists(os.path.join(target, "Disc 1", "01.flac")))
-            self.assertTrue(os.path.exists(os.path.join(target, "cover.jpg")))
+            self.assertFalse(
+                os.path.isdir(os.path.join(incoming, "failed_imports"))
+            )
             self.assertEqual(receipt["outcome"], "completed")
             audit = msgspec.json.decode(
                 dispatched["db"].download_logs[-1].validation_result or "{}",
             )
             self.assertEqual(audit["processing_cleanup"], receipt)
 
-    def test_audio_corrupt_processing_owner_quarantines_on_its_own_root(self):
+    def test_audio_corrupt_processing_owner_deletes_in_place(self):
+        """Deletion never needs another root — there is nothing to rename to."""
         with tempfile.TemporaryDirectory() as root:
             processing = os.path.join(root, "private-processing")
             albums = os.path.join(processing, "albums")
             incoming = os.path.join(root, "Incoming")
-            os.makedirs(os.path.join(albums, "failed_imports"))
+            os.makedirs(albums)
             os.makedirs(incoming)
             observed: dict[str, object] = {}
 
@@ -442,19 +455,11 @@ class TestDispatchCoreOrchestration(unittest.TestCase):
             assert completed_job is not None
             receipt = (completed_job.result or {})["processing_cleanup"]
             assert isinstance(receipt, dict)
-            target = receipt["selected_destination_path"]
-            assert isinstance(target, str)
-            self.assertTrue(target.startswith(os.path.join(
-                albums,
-                "failed_imports",
-                "bad_files",
-            )))
-            self.assertFalse(target.startswith(incoming))
+            self.assertEqual(receipt["action"], "remove_source_tree")
+            self.assertIsNone(receipt["selected_destination_path"])
             self.assertFalse(os.path.exists(source))
-            self.assertTrue(os.path.exists(os.path.join(target, "01.flac")))
-            self.assertEqual(
-                os.stat(albums).st_dev,
-                os.stat(target).st_dev,
+            self.assertFalse(
+                os.path.isdir(os.path.join(albums, "failed_imports"))
             )
 
     def test_successful_import_creates_one_log_row(self):

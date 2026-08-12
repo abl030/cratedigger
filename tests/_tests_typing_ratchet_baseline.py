@@ -82,7 +82,7 @@ TESTS_TYPING_RATCHET_BASELINE: dict[str, dict[str, int]] = {
     "tests/test_peer_cache.py": {"any": 9},
     "tests/test_pin_retention_generated.py": {"type_ignore": 2},
     "tests/test_pipeline_cli.py": {"any": 27, "cast": 19},
-    "tests/test_pipeline_db.py": {"any": 32, "cast": 23},
+    "tests/test_pipeline_db.py": {"any": 32, "cast": 22},
     "tests/test_pipeline_db_column_contract.py": {"cast": 4},
     "tests/test_preview_failure_evidence_generated.py": {"any": 13, "cast": 5},
     "tests/test_quality_decisions.py": {"any": 5, "type_ignore": 1},

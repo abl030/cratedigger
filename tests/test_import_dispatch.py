@@ -7,7 +7,6 @@ TestTargetFormat*) exercise the surviving auto-import seam in
 Pure function tests (TestPopulateDlInfo*, TestCleanupStagedDir) test in/out.
 """
 import configparser
-import errno
 import inspect
 import json
 import os
@@ -920,250 +919,127 @@ class TestCleanupStagedDir(unittest.TestCase):
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_realpath_protects_a_protected_parent_reached_via_symlink(self):
+        """Issue #1077, R3-3 (round-3 review): the guard compared
+        ``os.path.abspath`` on both sides, which does not resolve
+        symlinks. A ``dest`` reached through a symlinked path component
+        would compare unequal to the canonical ``protected_parent`` even
+        though they name the SAME directory on disk — silently defeating
+        the guard and letting it ``rmdir`` the shared root anyway.
+        Switched to ``os.path.realpath`` on both sides so this world is
+        correctly recognized as protected."""
+        from lib.dispatch import _cleanup_staged_dir
+        tmpdir = tempfile.mkdtemp()
+        try:
+            real_albums = os.path.join(tmpdir, "real_albums")
+            os.makedirs(real_albums)
+            staged = os.path.join(real_albums, "Album")
+            os.makedirs(staged)
+            symlinked_albums = os.path.join(tmpdir, "albums_link")
+            os.symlink(real_albums, symlinked_albums)
+            dest_via_symlink = os.path.join(symlinked_albums, "Album")
 
-class TestAudioCorruptPostCommitQuarantine(unittest.TestCase):
-    def test_moves_source_to_standard_bad_files_and_persists_exact_audit(self):
-        from lib.dispatch.types import DispatchOutcome, PostCommitCleanup
-        from scripts.importer import _run_post_commit_cleanup
+            _cleanup_staged_dir(dest_via_symlink, protected_parent=real_albums)
 
-        with tempfile.TemporaryDirectory() as parent:
-            staging = os.path.join(parent, "incoming", "Artist - Album")
-            download_root = os.path.join(parent, "slskd")
-            os.makedirs(staging)
-            os.makedirs(download_root)
-            with open(os.path.join(staging, "01.flac"), "wb") as handle:
-                handle.write(b"corrupt audio")
-
-            db = FakePipelineDB()
-            log_id = db.log_download(
-                request_id=835,
-                outcome="rejected",
-                validation_result=json.dumps({"scenario": "audio_corrupt"}),
-            )
-            outcome = DispatchOutcome(
-                success=False,
-                message="audio_corrupt",
-                post_commit_cleanup=PostCommitCleanup(
-                    audio_quarantine_source_path=staging,
-                    audio_quarantine_root=download_root,
-                ),
-            )
-
-            result = _run_post_commit_cleanup(
-                db,
-                outcome,
-                download_log_id=log_id,
-            )
-
-            assert result is not None
-            audit = result["audio_quarantine"]
-            assert isinstance(audit, dict)
-            target = audit["quarantine_path"]
-            assert isinstance(target, str)
-            self.assertTrue(audit["moved"])
-            self.assertTrue(audit["audit_persisted"])
-            self.assertFalse(os.path.exists(staging))
-            self.assertTrue(os.path.exists(os.path.join(target, "01.flac")))
-            self.assertEqual(
-                os.path.dirname(target),
-                os.path.join(download_root, "failed_imports", "bad_files"),
-            )
-            persisted = msgspec.json.decode(
-                db.download_logs[0].validation_result,
-            )
-            self.assertEqual(persisted["failed_path"], target)
-            self.assertEqual(
-                persisted["post_commit_quarantine"]["source_path"],
-                staging,
-            )
-
-    def test_atomic_move_failure_retains_complete_source_and_exact_audit(self):
-        from lib.dispatch.types import DispatchOutcome, PostCommitCleanup
-        from scripts.importer import _run_post_commit_cleanup
-
-        with tempfile.TemporaryDirectory() as parent:
-            staging = os.path.join(parent, "incoming", "Artist - Album")
-            download_root = os.path.join(parent, "slskd")
-            os.makedirs(os.path.join(staging, "Disc 1"))
-            os.makedirs(download_root)
-            track = os.path.join(staging, "Disc 1", "01.flac")
-            cover = os.path.join(staging, "cover.jpg")
-            with open(track, "wb") as handle:
-                handle.write(b"corrupt audio")
-            with open(cover, "wb") as handle:
-                handle.write(b"cover")
-
-            db = FakePipelineDB()
-            log_id = db.log_download(
-                request_id=835,
-                outcome="rejected",
-                validation_result=json.dumps({"scenario": "audio_corrupt"}),
-            )
-            outcome = DispatchOutcome(
-                success=False,
-                message="audio_corrupt",
-                post_commit_cleanup=PostCommitCleanup(
-                    audio_quarantine_source_path=staging,
-                    audio_quarantine_root=download_root,
-                ),
-            )
-
-            with patch(
-                "lib.import_manifest.os.rename",
-                side_effect=OSError(errno.EXDEV, "Invalid cross-device link"),
-            ):
-                result = _run_post_commit_cleanup(
-                    db,
-                    outcome,
-                    download_log_id=log_id,
-                )
-
-            assert result is not None
-            audit = result["audio_quarantine"]
-            assert isinstance(audit, dict)
-            self.assertFalse(audit["moved"])
-            self.assertEqual(audit["source_path"], staging)
-            self.assertIsNone(audit["quarantine_path"])
-            self.assertTrue(os.path.exists(track))
-            self.assertTrue(os.path.exists(cover))
-            self.assertFalse(os.path.exists(os.path.join(
-                download_root, "failed_imports", "bad_files", "Artist - Album",
-            )))
-            persisted = msgspec.json.decode(
-                db.download_logs[0].validation_result,
-            )
-            self.assertEqual(persisted["failed_path"], staging)
-            self.assertEqual(
-                persisted["post_commit_quarantine"]["source_path"],
-                staging,
-            )
-
-    def test_quarantine_failure_retains_and_audits_staged_source(self):
-        from lib.dispatch.types import DispatchOutcome, PostCommitCleanup
-        from scripts.importer import _run_post_commit_cleanup
-
-        with tempfile.TemporaryDirectory() as parent:
-            staging = os.path.join(parent, "incoming", "Artist - Album")
-            os.makedirs(staging)
-            track = os.path.join(staging, "01.flac")
-            with open(track, "wb") as handle:
-                handle.write(b"corrupt audio")
-
-            db = FakePipelineDB()
-            log_id = db.log_download(
-                request_id=835,
-                outcome="rejected",
-                validation_result=json.dumps({"scenario": "audio_corrupt"}),
-            )
-            outcome = DispatchOutcome(
-                success=False,
-                message="audio_corrupt",
-                post_commit_cleanup=PostCommitCleanup(
-                    audio_quarantine_source_path=staging,
-                    audio_quarantine_root=os.path.join(parent, "missing-root"),
-                ),
-            )
-
-            result = _run_post_commit_cleanup(
-                db,
-                outcome,
-                download_log_id=log_id,
-            )
-
-            assert result is not None
-            audit = result["audio_quarantine"]
-            assert isinstance(audit, dict)
-            self.assertFalse(audit["moved"])
-            self.assertTrue(os.path.exists(track))
-            self.assertIn(staging, db.get_retained_failure_paths())
-
-    def test_post_commit_evidence_link_failure_cannot_escape_or_delete_archive(
-        self,
-    ):
-        from lib.dispatch.types import DispatchOutcome, PostCommitCleanup
-        from lib.import_queue import IMPORT_JOB_FORCE
-        from scripts.importer import (
-            _cleanup_committed_wrong_match_rejection,
-            _run_post_commit_cleanup,
-        )
-
-        with tempfile.TemporaryDirectory() as parent:
-            source = os.path.join(parent, "wrong_matches", "Artist - Album")
-            download_root = os.path.join(parent, "slskd")
-            os.makedirs(source)
-            os.makedirs(download_root)
-            with open(os.path.join(source, "01.flac"), "wb") as handle:
-                handle.write(b"corrupt audio")
-
-            db = FakePipelineDB()
-            db.seed_request(make_request_row(
-                id=835,
-                status="unsearchable",
-                mb_release_id="test-mbid",
-            ))
-            log_id = db.log_download(
-                request_id=835,
-                outcome="rejected",
-                validation_result=json.dumps({"scenario": "audio_corrupt"}),
-                staged_path=source,
-            )
-            job = db.enqueue_import_job(
-                IMPORT_JOB_FORCE,
-                request_id=835,
-                payload={
-                    "download_log_id": log_id,
-                    "failed_path": source,
-                },
-            )
-            outcome = DispatchOutcome(
-                success=False,
-                message="audio_corrupt",
-                post_commit_wrong_match_scenario="audio_corrupt",
-                post_commit_cleanup=PostCommitCleanup(
-                    audio_quarantine_source_path=source,
-                    audio_quarantine_root=download_root,
-                ),
-            )
-            cleanup_result = _run_post_commit_cleanup(
-                db,
-                outcome,
-                download_log_id=log_id,
-            )
-            assert cleanup_result is not None
-            quarantine = cleanup_result["audio_quarantine"]
-            assert isinstance(quarantine, dict)
-            target = quarantine["quarantine_path"]
-            assert isinstance(target, str)
-
-            cleanup_wrong_match = MagicMock()
-            with patch.object(
-                db,
-                "get_import_job_candidate_evidence_id",
-                side_effect=RuntimeError("transient post-commit DB failure"),
-            ), patch(
-                "scripts.importer.logger.exception",
-            ) as log_exception:
-                _cleanup_committed_wrong_match_rejection(
-                    db,  # pyright: ignore[reportArgumentType]
-                    job,
-                    log_id,
-                    outcome,
-                    cleanup_wrong_match_fn=cleanup_wrong_match,
-                )
-
-            log_exception.assert_called_once()
-            cleanup_wrong_match.assert_not_called()
-            self.assertTrue(os.path.exists(os.path.join(target, "01.flac")))
-            persisted = msgspec.json.decode(
-                db.download_logs[-1].validation_result,
-            )
-            self.assertEqual(persisted["failed_path"], target)
+            self.assertFalse(os.path.exists(staged))
             self.assertTrue(
-                persisted["post_commit_quarantine"]["moved"],
+                os.path.isdir(real_albums),
+                "the protected root must survive even when dest was "
+                "reached through a symlinked path component",
             )
-            self.assertNotIn("wrong_match_triage", persisted)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
-    def test_force_corrupt_source_is_quarantined_and_never_deleted(self):
+
+class TestRunPostCommitCleanupProtectedParent(unittest.TestCase):
+    """Issue #1077, R3-3 (round-3 review; docstring corrected R4-3): the
+    importer's deferred post-commit cleanup
+    (``scripts.importer._run_post_commit_cleanup``) is the THIRD real
+    caller of ``_cleanup_staged_dir`` and the furthest from ``cfg`` —
+    reached only through the ``PostCommitCleanup`` plan a caller built
+    earlier and handed across the queue-owner boundary. Every
+    ``is_automation`` branch in ``process_claimed_job`` returns before
+    reaching this call site (the journaled ``_complete_automation_
+    processing_cleanup`` lane owns automation cleanup instead) — the real
+    motivating scenario is a FORCE job's success plan, whose
+    ``staged_path`` (``R4-1``) is
+    ``<processing_dir>/albums/force-action-<id>``, a direct child of the
+    same shared root. Before this fix it called
+    ``_cleanup_staged_dir(plan.staged_path)`` with no guard at all, so a
+    successful force import whose ``staged_path`` was the last remaining
+    canonical album under that root could ``rmdir`` the shared,
+    Nix-provisioned ``<processing_dir>/albums/`` root right out from under
+    every other request. This proves the guard now travels end to end: the
+    plan carries ``staged_path_protected_parent``, and the real
+    (unpatched) ``_cleanup_staged_dir`` honours it."""
+
+    def test_post_commit_cleanup_never_removes_the_processing_albums_root(self):
+        from lib.dispatch.types import DispatchOutcome, PostCommitCleanup
+        from lib.processing_paths import processing_albums_dir
+        from scripts.importer import _run_post_commit_cleanup
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            processing_dir = os.path.join(tmpdir, "processing")
+            albums_root = processing_albums_dir(processing_dir)
+            staged_path = os.path.join(albums_root, "Artist - Album")
+            os.makedirs(staged_path)
+            with open(os.path.join(staged_path, "01.flac"), "wb") as handle:
+                handle.write(b"imported audio")
+
+            outcome = DispatchOutcome(
+                success=True,
+                message="imported",
+                post_commit_cleanup=PostCommitCleanup(
+                    staged_path=staged_path,
+                    staged_path_protected_parent=albums_root,
+                ),
+            )
+
+            details = _run_post_commit_cleanup(outcome)
+
+            assert details is not None
+            staged_path_detail = details["staged_path"]
+            assert isinstance(staged_path_detail, dict)
+            self.assertTrue(staged_path_detail["success"])
+            self.assertFalse(os.path.exists(staged_path))
+            self.assertTrue(
+                os.path.isdir(albums_root),
+                "the shared processing albums root must survive even "
+                "though it is now empty — it is a Nix-provisioned root, "
+                "not a disposable per-artist directory",
+            )
+            self.assertEqual(os.listdir(albums_root), [])
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class TestAudioCorruptBanAndDelete(unittest.TestCase):
+    """Bad rips are ban + delete, never quarantined (issue #1077, D3).
+
+    Equivalence note: this class replaces the retired
+    ``TestAudioCorruptPostCommitQuarantine``. Its three lowest-level tests
+    (atomic cross-device move failure, missing quarantine root) covered
+    ``lib.dispatch.quarantine.quarantine_corrupt_audio_source`` and
+    ``PostCommitCleanup.audio_quarantine_source_path`` — both deleted with
+    this PR, since ``_run_post_commit_cleanup`` no longer has any
+    audio-specific branch (audio_corrupt now reuses the plain
+    ``staged_path`` cleanup exercised end to end by
+    ``tests.test_dispatch_core.TestDispatchCoreOrchestration``'s
+    ``test_audio_corrupt_*`` tests, real journaled REMOVE_SOURCE included).
+    The atomic-rename-never-falls-back-to-copy safety property those tests
+    also covered lives on in ``move_failed_import_whole`` itself (now Lane
+    B's whole-folder mover, D4) — see ``tests/test_import_manifest.py``.
+    The evidence-link-failure-survives-cleanly property is now covered
+    parametrically (including ``audio_corrupt``) by
+    ``TestGeneratedDeleteIneligibleScenarioIsolation`` in
+    ``tests/test_dispatch_outcomes_generated.py``.
+    """
+
+    def test_force_corrupt_source_is_banned_and_deleted(self):
+        """D3 + D8: a force-import audio_corrupt reject bans the peer and
+        deletes the ORIGINAL Wrong Matches source — not the disposable
+        force action copy dispatch itself touches."""
         from lib.dispatch import _reject_import_from_evidence_decision
         from lib.dispatch.types import ImportAttemptResult
         from lib.import_queue import IMPORT_JOB_FORCE
@@ -1173,10 +1049,12 @@ class TestAudioCorruptPostCommitQuarantine(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as parent:
             source = os.path.join(parent, "wrong_matches", "Artist - Album")
-            download_root = os.path.join(parent, "slskd")
+            action_copy = os.path.join(parent, "action-copy")
             os.makedirs(source)
-            os.makedirs(download_root)
+            os.makedirs(action_copy)
             with open(os.path.join(source, "01.flac"), "wb") as handle:
+                handle.write(b"corrupt audio")
+            with open(os.path.join(action_copy, "01.flac"), "wb") as handle:
                 handle.write(b"corrupt audio")
 
             db = FakePipelineDB()
@@ -1204,8 +1082,8 @@ class TestAudioCorruptPostCommitQuarantine(unittest.TestCase):
             )
             candidate = make_album_quality_evidence(
                 mb_release_id="test-mbid",
-                source_path=source,
-                files=snapshot_audio_files(source),
+                source_path=action_copy,
+                files=snapshot_audio_files(action_copy),
                 measurement=AudioQualityMeasurement(
                     min_bitrate_kbps=900,
                     avg_bitrate_kbps=900,
@@ -1233,7 +1111,7 @@ class TestAudioCorruptPostCommitQuarantine(unittest.TestCase):
             )
             db.mark_import_job_preview_importable(
                 queued.id,
-                preview_result={"ready": True},
+                preview_result={"ready": True, "action_path": action_copy},
             )
             claimed = claim_next_import_job(db, worker_id="force-corrupt")
             assert claimed is not None
@@ -1257,20 +1135,24 @@ class TestAudioCorruptPostCommitQuarantine(unittest.TestCase):
                 detail="decoder rejected source",
                 requeue_on_failure=False,
                 validation_result=None,
-                staged_path=source,
+                staged_path=action_copy,
                 scenario="force_import",
                 files=[],
                 source_path_cleanup_scenario="force_import",
                 cooled_down_users=None,
                 import_job_id=claimed.id,
                 source_download_log_id=original_log_id,
-                audio_quarantine_root=download_root,
             )
             self.assertEqual(
                 outcome.post_commit_wrong_match_scenario,
                 "audio_corrupt",
             )
 
+            # No mocking needed for the force action-copy reclaim:
+            # `read_runtime_config()` soft-fails to a default config with no
+            # env var set, and `_cleanup_terminal_force_action` catches
+            # `FilesystemAuthorityError`/any exception internally — this
+            # test asserts the Wrong Matches source deletion, not that leaf.
             completed = process_claimed_job(
                 db,  # pyright: ignore[reportArgumentType]
                 claimed,
@@ -1280,36 +1162,21 @@ class TestAudioCorruptPostCommitQuarantine(unittest.TestCase):
             assert completed is not None and completed.result is not None
             cleanup = completed.result["cleanup"]
             assert isinstance(cleanup, dict)
-            self.assertEqual(
-                cleanup["outcome"],
-                "skipped_archival_audio_quarantine",
-            )
-            quarantine = completed.result["post_commit_cleanup"][
-                "audio_quarantine"
-            ]
-            assert isinstance(quarantine, dict)
-            target = quarantine["quarantine_path"]
-            assert isinstance(target, str)
+            self.assertTrue(cleanup["success"])
+            self.assertEqual(cleanup["deleted_path"], os.path.abspath(source))
+            # The ORIGINAL Wrong Matches source is gone; the request is
+            # denylisted (`action.denylist` for the ``audio_corrupt``
+            # decision), and no post-commit archival concept survives.
             self.assertFalse(os.path.exists(source))
-            self.assertTrue(os.path.exists(os.path.join(target, "01.flac")))
             self.assertEqual(
-                os.path.dirname(target),
-                os.path.join(download_root, "failed_imports", "bad_files"),
+                [entry.username for entry in db.denylist],
+                ["bad-peer"],
             )
             terminal_log = db.download_logs[-1]
-            self.assertEqual(
-                terminal_log.candidate_evidence_id,
-                persisted_candidate.id,
-            )
             terminal_audit = msgspec.json.decode(
                 terminal_log.validation_result,
             )
-            self.assertEqual(terminal_audit["failed_path"], target)
-            self.assertEqual(
-                terminal_audit["post_commit_quarantine"]["source_path"],
-                source,
-            )
-            self.assertNotIn("wrong_match_triage", terminal_audit)
+            self.assertNotIn("post_commit_quarantine", terminal_audit)
             self.assertEqual(db.request(835)["status"], "unsearchable")
 
 
@@ -1746,6 +1613,9 @@ class TestRejectImportFromEvidenceDecisionCallerLifecycle(unittest.TestCase):
         pending: bool = False,
         search_filetype_override: str | None = None,
         initial_status: str = "downloading",
+        processing_dir: str | None = None,
+        capture_cleanup_call: dict[str, object] | None = None,
+        capture_post_commit_cleanup: dict[str, object] | None = None,
     ):
         from lib.dispatch import _reject_import_from_evidence_decision
         from lib.dispatch.types import ImportAttemptResult
@@ -1782,7 +1652,7 @@ class TestRejectImportFromEvidenceDecisionCallerLifecycle(unittest.TestCase):
                     "failed_path": "/tmp/cratedigger-caller-lifecycle-test",
                 },
             ).id
-        with patch_dispatch_externals():
+        with patch_dispatch_externals() as ext:
             outcome = _reject_import_from_evidence_decision(
                 db=db,  # type: ignore[arg-type]
                 request_id=42,
@@ -1799,7 +1669,13 @@ class TestRejectImportFromEvidenceDecisionCallerLifecycle(unittest.TestCase):
                 source_path_cleanup_scenario=decision,
                 cooled_down_users=None,
                 import_job_id=import_job_id,
+                processing_dir=processing_dir,
             )
+            if capture_cleanup_call is not None and ext.cleanup.call_args is not None:
+                capture_cleanup_call["args"] = ext.cleanup.call_args.args
+                capture_cleanup_call["kwargs"] = ext.cleanup.call_args.kwargs
+            if capture_post_commit_cleanup is not None:
+                capture_post_commit_cleanup["value"] = outcome.post_commit_cleanup
         if pending:
             self.assertIsNotNone(outcome.terminal_outcome)
             assert outcome.terminal_outcome is not None
@@ -1896,6 +1772,85 @@ class TestRejectImportFromEvidenceDecisionCallerLifecycle(unittest.TestCase):
         self.assertEqual(db.download_logs[-1].outcome, "rejected")
         self.assertEqual(db.denylist, [])
         self.assertEqual(db.download_logs[-1].outcome, "rejected")
+
+    def test_processing_dir_threads_the_protected_parent_guard(self) -> None:
+        """Issue #1077, R3-3 (round-3 review): the synchronous cleanup
+        branch inside ``_reject_import_from_evidence_decision`` is one of
+        the two unguarded ``_cleanup_staged_dir`` call sites the reviewer
+        found — this one fires on every quality reject whose
+        ``staged_path`` is a canonical processing album. Proves the
+        function computes ``protected_parent`` from ``processing_dir`` and
+        actually passes it through to ``_cleanup_staged_dir`` — a seam
+        assertion on the SAME mocked cleanup call the shared ``_reject``
+        helper (and every other test in this class) already exercises, so
+        this reuses that call site's existing ``# type: ignore[arg-type]``
+        rather than adding a new one (tests/test_typing_ratchet.py's
+        escape-hatch ratchet is frozen, only-decrease). The real
+        (unpatched) ``_cleanup_staged_dir`` honouring this guard is proven
+        separately by ``TestCleanupStagedDir.
+        test_realpath_protects_a_protected_parent_reached_via_symlink``."""
+        from lib.processing_paths import processing_albums_dir
+
+        capture: dict[str, object] = {}
+        processing_dir = "/tmp/cratedigger-r3-3-processing-dir"
+        self._reject(
+            decision="bad_audio_hash",
+            requeue_on_failure=True,
+            processing_dir=processing_dir,
+            capture_cleanup_call=capture,
+        )
+
+        kwargs = capture.get("kwargs")
+        assert isinstance(kwargs, dict)
+        self.assertEqual(
+            kwargs.get("protected_parent"),
+            processing_albums_dir(processing_dir),
+        )
+
+    def test_no_processing_dir_passes_no_protected_parent(self) -> None:
+        """Must-still-work control: without a ``processing_dir`` (the
+        non-canonical staged lane), the guard stays ``None`` rather than
+        inventing a spurious protected root."""
+        capture: dict[str, object] = {}
+        self._reject(
+            decision="bad_audio_hash",
+            requeue_on_failure=True,
+            capture_cleanup_call=capture,
+        )
+
+        kwargs = capture.get("kwargs")
+        assert isinstance(kwargs, dict)
+        self.assertIsNone(kwargs.get("protected_parent"))
+
+    def test_deferred_plan_also_carries_the_protected_parent_guard(self) -> None:
+        """Issue #1077, R4-3 (round-4 review): the SYNC branch's guard
+        (``test_processing_dir_threads_the_protected_parent_guard`` above)
+        does not prove the DEFERRED branch (``import_job_id is not None``)
+        also carries it — ``PostCommitCleanup(staged_path=staged_path,
+        staged_path_protected_parent=protected_parent)`` is a second,
+        independent assignment (``lib/dispatch/outcome_actions.py``) that
+        could silently regress to dropping the field without either sync
+        test noticing. Drives the ``pending=True`` (force job) path and
+        asserts directly on the returned ``PostCommitCleanup``."""
+        from lib.dispatch.types import PostCommitCleanup
+        from lib.processing_paths import processing_albums_dir
+
+        processing_dir = "/tmp/cratedigger-r4-3-processing-dir"
+        capture: dict[str, object] = {}
+        self._reject(
+            decision="bad_audio_hash",
+            requeue_on_failure=False,
+            pending=True,
+            processing_dir=processing_dir,
+            capture_post_commit_cleanup=capture,
+        )
+
+        plan = capture.get("value")
+        assert isinstance(plan, PostCommitCleanup)
+        self.assertEqual(
+            plan.staged_path_protected_parent,
+            processing_albums_dir(processing_dir),
+        )
 
 
 class TestHaveAnalysisErrorAbort(unittest.TestCase):
@@ -2367,6 +2322,18 @@ class TestDispatchImport(unittest.TestCase):
         cleanup = r["outcome"].post_commit_cleanup
         assert cleanup is not None
         self.assertIsNotNone(cleanup.staged_path)
+        # Issue #1077, R4-1 (round-4 review): the SUCCESS-path plan must
+        # carry the same ``staged_path_protected_parent`` guard as the
+        # reject path's plan (R3-3) — before this fix a successful force
+        # job's ``staged_path`` (``<processing_dir>/albums/
+        # force-action-<id>``, a direct child of the shared albums root)
+        # reached ``_run_post_commit_cleanup`` completely unguarded.
+        from lib.processing_paths import processing_albums_dir
+
+        self.assertEqual(
+            cleanup.staged_path_protected_parent,
+            processing_albums_dir(_full_dispatch_config().processing_dir),
+        )
         r["mock_gate"].assert_called_once()
 
     def test_import_with_bad_extensions_logs_error_and_persists_jsonb(self):
