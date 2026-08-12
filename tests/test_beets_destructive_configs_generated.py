@@ -407,12 +407,33 @@ def exercise_real_beets_world(
             library_root=str(child_root),
         )
         child_env = {**os.environ, "BEETSDIR": str(child_config)}
+        # This is a hang backstop, not an assertion — under the parallel
+        # Hypothesis scheduler it once timed out at 30s (FlakyFailure) then
+        # passed on retry and in isolation (13.7s); 120s has no verified
+        # safety margin beyond that single observed run, so treat it as a
+        # bound on cost, not a generous cushion. There is no per-target
+        # timeout in scripts/run_python_tests.py or scripts/fuzz_burst.sh, so
+        # a genuine hang in this exact sp.run call (not scheduler contention)
+        # is caught only after up to 83x120s in the deterministic suite —
+        # every call site of exercise_real_beets_world(): 18 @given examples
+        # + 3 pinned @example cases in
+        # test_real_pinned_beets_common_config_worlds, 2 direct calls in
+        # test_invariant_rejects_stdout_prefix_and_false_completion, and 60
+        # generated test_common_config_p*_t*_* methods (10 PROFILES x 3
+        # track counts x 2 sources). A fuzz burst costs proportionally more,
+        # not less: this module is in HOTSPOT_SHARD_POLICIES, so
+        # build_fuzz_targets schedules the @given property AND separate
+        # method-batch pin targets covering every deterministic test above —
+        # each batch is its own process, so exercise_real_beets_world()'s
+        # @cache does not dedupe repeated (profile, track_count, source)
+        # calls across them. No exact multiple is asserted here; see the
+        # commit message for why one keeps turning out wrong.
         child = sp.run(
             [sys.executable, str(REPO / "harness" / "delete_album.py")],
             input=msgspec.json.encode(request),
             capture_output=True,
             env=child_env,
-            timeout=30,
+            timeout=120,
             check=False,
         )
         outcome = msgspec.json.decode(child.stdout, type=BeetsDeleteOutcome)
