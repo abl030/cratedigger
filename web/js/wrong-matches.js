@@ -333,7 +333,9 @@ function renderWrongMatchExplorer(data) {
   }
   if (files.length === 0) {
     const emptyText = unreadableCount > 0
-      ? 'The server could not read this folder\u2019s contents, so no listing is available. This is NOT evidence that the folder is empty.'
+      ? (unreadableIsContainment
+          ? 'This folder\u2019s contents were refused (not read) as a containment decision, so no listing is available. This is NOT evidence that the folder is empty.'
+          : 'This folder\u2019s contents could not be read, so no listing is available. This is NOT evidence that the folder is empty.')
       : partial
         ? 'No audio files were found before exploration was truncated.'
         : 'No audio files found in this folder.';

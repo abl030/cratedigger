@@ -389,7 +389,22 @@ def _audio_files_under(folder: str) -> _FolderScan:
     because that guard only ever runs over already-enumerated FILE
     paths (:data:`_FolderScan.paths`), never over ``dirs``. Refusing it
     HERE, during the walk, is what makes this module and the explorer
-    agree by construction over every entry kind, not just files.
+    agree by construction over every entry kind THIS MODULE considers —
+    an audio-extensioned file, or a directory. A refused entry with a
+    NON-audio name (a ``cover.jpg`` that is itself a symlink, socket,
+    FIFO, or EACCES-locked) is invisible here by construction, the same
+    way an unreadable ``.txt`` sidecar always was: ``ext in AUDIO_EXTS``
+    below never looks at it, so it never reaches ``_record`` or the
+    per-file loop either. The explorer counts it (every non-directory
+    entry, any extension) and reports the folder ``partial``; this
+    module's ``partial_read`` stays scoped to the files a beets distance
+    computation actually reads. That is a residual, DELIBERATE asymmetry
+    between the two surfaces' purposes — not a category error like the
+    ones issue #1086 fixes — and ``_build_agreement_world`` in
+    ``tests/test_protected_path_truth_generated.py`` names it the same
+    way by construction (every AGREEMENT_ENTRY_KINDS fixture uses an
+    audio-extensioned name so both producers look at the SAME
+    population).
     """
     from lib.measurement import AUDIO_EXTS
 

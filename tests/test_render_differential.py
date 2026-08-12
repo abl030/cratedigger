@@ -27,6 +27,7 @@ from lib.quality import (
     TargetQualityContract,
 )
 from scripts.render_differential import (
+    _EXPLORER_UNWATCHED,
     _EXPLORER_WATCHED,
     DEFAULT_TARGET_SPEC,
     ClassifyRenderTarget,
@@ -565,6 +566,24 @@ class TestWrongMatchExplorerRenderTargetIsTheProductionPath(unittest.TestCase):
         # including ``files``/``failed_path``, from every future
         # differential run against this target.
         self.assertEqual(set(rendered.fields), set(_EXPLORER_WATCHED))
+        # "Also fix" (#1086 review, round 2): ``WrongMatchExplorerPayload``
+        # is a SEPARATE declaration from the production return dict, kept
+        # in sync only by convention — its own module docstring admits a
+        # key added to ``build_wrong_match_explorer`` and not here
+        # silently drops out of every future differential rather than
+        # failing loudly, because ``project_output_fields`` only ever
+        # iterates the fields THIS Struct declares. Close that gap here:
+        # the real production function's key set must equal the Struct's
+        # full declared field set (watched + unwatched together), so a
+        # key added to one and not the other fails this assertion instead
+        # of silently escaping every future watched-set derivation.
+        self.assertEqual(
+            set(expected.keys()),
+            set(_EXPLORER_WATCHED) | set(_EXPLORER_UNWATCHED),
+            "build_wrong_match_explorer's real return-dict keys have "
+            "drifted from WrongMatchExplorerPayload's declared fields — "
+            "update the Struct to match",
+        )
 
     def test_a_missing_folder_renders_as_its_own_error_shape(self) -> None:
         from scripts.render_differential import WrongMatchExplorerRenderTarget

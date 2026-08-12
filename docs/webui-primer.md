@@ -580,12 +580,18 @@ depends on.
   (symlink/socket) reads "refused ... out of the quarantine root", never
   worded like a transient world failure. `web/js/wrong-matches.js` renders both `ok` and
   `unavailable` payloads; a refusal of the whole root is a 503 whose reason is
-  shown next to the Retry button. **Any listing that recorded a refusal —
+  shown next to the Retry button. **Every listing that recorded a refusal —
   `unavailable`, or a PARTIAL `ok` listing that read some files and was refused
-  others — carries a Retry on its refusal notice and is deliberately NOT
-  cached**: the operator is expected to go and fix the permission, and only a
-  listing with nothing left to repair is worth remembering for the rest of the
-  page session. A listing that was truncated by a LIMIT and recorded no
+  others — is deliberately NOT cached**, so reopening the panel always
+  re-fetches rather than short-circuiting on a stale answer. Only a
+  WORLD-FAILURE refusal (EACCES/EIO/ESTALE/…) also carries a Retry button on
+  its notice: the operator is expected to go and fix the permission, and a
+  plain reload might just see the fix. A CONTAINMENT refusal (a symlink,
+  socket, FIFO or device node) carries no Retry — re-fetching the same name
+  answers the same refusal every time, whatever `unavailable`/`ok` status it
+  arrives under; nothing short of the operator physically replacing the entry
+  changes it, and that is a filesystem action, not a button click (#1086). A
+  listing that was truncated by a LIMIT and recorded no
   refusals stays cached, because retrying hits the same limit; one that was
   both truncated and refused is still evicted, since the refusal half is
   repairable.

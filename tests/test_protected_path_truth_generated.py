@@ -899,10 +899,47 @@ _REFUSAL_COPY = "could not be read"
 #: A CONTAINMENT per-entry refusal (symlink/socket/FIFO/device node)
 #: gets its OWN lead sentence (issue #1086 review) — it must never say
 #: "could not be read", the wording a world failure a retry might clear
-#: owns. ``assert_browser_told_the_truth`` accepts either as evidence the
-#: browser disclosed a refusal.
+#: owns. ``assert_browser_told_the_truth`` enforces this as EXCLUSIVITY,
+#: not "either is acceptable": whichever kind the FIRST refused entry in
+#: ``worlds`` actually is, that copy must appear and the OTHER copy must
+#: not. A permissive "either" check would pass a browser that always used
+#: the wrong wording for one of the two kinds — exactly the shape of the
+#: #1086 review's blocker 1 (the empty-state paragraph used
+#: ``_REFUSAL_COPY`` unconditionally, so a containment world satisfied
+#: the old OR-check while still failing the doctrine this constant's own
+#: docstring states).
 _CONTAINMENT_REFUSAL_COPY = "refused (not read)"
 _NOT_EMPTY_COPY = "NOT evidence that the folder is empty"
+
+#: Entry kinds refused for a WORLD reason (EACCES) vs a CONTAINMENT
+#: reason (a symlink or a special file) — the same split
+#: ``build_explorer_world`` documents at each kind's definition.
+_WORLD_FAILURE_ENTRY_WORLDS: frozenset[str] = frozenset(
+    {"unreadable_file", "unreadable_dir"})
+_CONTAINMENT_ENTRY_WORLDS: frozenset[str] = frozenset(
+    {"vanished", "unreadable_special"})
+
+
+def _first_refusal_kind(worlds: Sequence[str]) -> str | None:
+    """Which kind the FIRST refused entry in ``worlds`` actually is.
+
+    Both the explorer and ``lib.beets_distance`` report only the FIRST
+    refusal they hit — ``unreadable_reason``/``unreadable_is_containment``
+    name one entry, not every one. ``build_explorer_world`` names each
+    entry ``f"{index:02d} ..."`` in ``worlds`` order, and the real
+    explorer's ``scan_directory`` sorts names before its per-entry loop
+    (``names.sort()``), so the zero-padded index makes the real per-entry
+    SCAN order equal to ``worlds`` list order — this function can
+    therefore predict, from the world list alone, which kind the browser
+    will actually be told about. Returns ``None`` when nothing in
+    ``worlds`` is a refusal.
+    """
+    for world in worlds:
+        if world in _WORLD_FAILURE_ENTRY_WORLDS:
+            return "world_failure"
+        if world in _CONTAINMENT_ENTRY_WORLDS:
+            return "containment"
+    return None
 
 
 def assert_browser_told_the_truth(
@@ -929,11 +966,34 @@ def assert_browser_told_the_truth(
             f"status={payload.get('status')!r} payload the browser rejected "
             "as a load failure"
         )
-    if refused and _REFUSAL_COPY not in html and _CONTAINMENT_REFUSAL_COPY not in html:
-        raise AssertionError(
-            f"worlds {list(worlds)} refused {refused} entries and the "
-            "browser never said so"
-        )
+    kind = _first_refusal_kind(worlds)
+    if kind == "world_failure":
+        if _REFUSAL_COPY not in html:
+            raise AssertionError(
+                f"worlds {list(worlds)}: the first refusal is a WORLD "
+                f"FAILURE and the browser never said {_REFUSAL_COPY!r}"
+            )
+        if _CONTAINMENT_REFUSAL_COPY in html:
+            raise AssertionError(
+                f"worlds {list(worlds)}: the first refusal is a WORLD "
+                f"FAILURE but the browser used the containment wording "
+                f"{_CONTAINMENT_REFUSAL_COPY!r} — that wording must be "
+                "reserved for a symlink/socket/FIFO/device-node refusal"
+            )
+    elif kind == "containment":
+        if _CONTAINMENT_REFUSAL_COPY not in html:
+            raise AssertionError(
+                f"worlds {list(worlds)}: the first refusal is a "
+                f"CONTAINMENT decision and the browser never said "
+                f"{_CONTAINMENT_REFUSAL_COPY!r}"
+            )
+        if _REFUSAL_COPY in html:
+            raise AssertionError(
+                f"worlds {list(worlds)}: the first refusal is a "
+                f"CONTAINMENT decision but the browser used the "
+                f"world-failure wording {_REFUSAL_COPY!r} — a retry can "
+                "never satisfy a containment refusal"
+            )
     if refused and readable == 0 and _NOT_EMPTY_COPY not in html:
         raise AssertionError(
             f"worlds {list(worlds)} rendered an intact-but-unreadable folder "
@@ -1086,8 +1146,43 @@ class TestExplorerReachesTheOperatorGenerated(unittest.TestCase):
                 payload={"status": "ok", "unreadable_entry_count": 0},
                 html="<div>No audio files found in this folder.</div>",
             )
+        # 4c. The exact blocker-1 shape from the #1086 review: the browser
+        #     correctly disclosed the refusal, but with the WORLD-FAILURE
+        #     wording for what is actually a CONTAINMENT decision — the
+        #     old permissive "either copy" check accepted this.
+        with self.assertRaises(AssertionError):
+            assert_browser_told_the_truth(
+                worlds=["vanished"],
+                payload={"status": "unavailable", "unreadable_entry_count": 1},
+                html=(
+                    "<div>1 entry could not be read. This is NOT evidence "
+                    "that the folder is empty.</div>"
+                ),
+            )
+        # 4d. The mirror mutant: a WORLD-FAILURE refusal rendered with the
+        #     containment wording, implying a security decision over an
+        #     ordinary EACCES a retry could clear.
+        with self.assertRaises(AssertionError):
+            assert_browser_told_the_truth(
+                worlds=["unreadable_file"],
+                payload={"status": "unavailable", "unreadable_entry_count": 1},
+                html=(
+                    "<div>1 entry was refused (not read) as a containment "
+                    "decision. This is NOT evidence that the folder is "
+                    "empty.</div>"
+                ),
+            )
         assert_browser_told_the_truth(
             worlds=["vanished"],
+            payload={"status": "unavailable", "unreadable_entry_count": 1},
+            html=(
+                "<div>1 entry was refused (not read) as a containment "
+                "decision. This is NOT evidence that the folder is "
+                "empty.</div>"
+            ),
+        )
+        assert_browser_told_the_truth(
+            worlds=["unreadable_file"],
             payload={"status": "unavailable", "unreadable_entry_count": 1},
             html=(
                 "<div>1 entry could not be read. This is NOT evidence "
