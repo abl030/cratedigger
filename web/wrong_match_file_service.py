@@ -22,7 +22,6 @@ from lib.fs_authority import (
     is_containment_refusal,
     open_configured_quarantine_directory,
     open_regular_relative,
-    refusal_is_indeterminate,
     unreadable_reason_text,
 )
 from lib.json_narrow import (
@@ -194,22 +193,24 @@ def _classify_wrong_match_refusal(code: FsAuthorityCode) -> _WrongMatchRefusalVe
        ``untrusted_ownership``) → ``"refused"`` (422): the name may well
        exist, we simply refuse to read it. Follows the #1084 precedent
        (``OUTCOME_SKIPPED_UNSAFE_PATH`` → 422 on the delete path).
-    3. Else :func:`refusal_is_indeterminate` — a genuine world failure
-       (``open_failed``, ``read_failed``, ``write_failed``) →
-       ``"unavailable"`` (503): retryable, we learned nothing.
-    4. Any residual code (``unspecified`` today, or a future
-       :data:`FsAuthorityCode` this function has not been taught about)
-       also answers ``"unavailable"``: an unclassifiable refusal must
-       never make a definitive claim of absence or containment — non-
-       claim is the fail-safe side, matching
+    3. Every remaining code answers ``"unavailable"`` (503) — a genuine,
+       retryable world failure (``open_failed``, ``read_failed``,
+       ``write_failed``, where :func:`refusal_is_indeterminate` is
+       ``True``) and an unclassified residual (``unspecified`` today, or
+       a future :data:`FsAuthorityCode` this function has not been
+       taught about) DELIBERATELY share this verdict: an unclassifiable
+       refusal must never make a definitive claim of absence or
+       containment, so non-claim is the fail-safe side for both, matching
        :func:`refusal_is_indeterminate`'s own falsy-fallthrough doctrine.
+       This is not a gap — the exhaustive table in
+       ``tests/test_wrong_match_file_service.py`` pins every declared
+       code individually, so a future code that SHOULD split out of this
+       bucket fails that table, not silently inherits it.
     """
     if errno_proves_absence(code):
         return "not_found"
     if is_containment_refusal(code):
         return "refused"
-    if refusal_is_indeterminate(code) is True:
-        return "unavailable"
     return "unavailable"
 
 
@@ -239,7 +240,7 @@ def _opened_wrong_match_root(
                 f"{failed_path or '<missing>'} ({exc})",
             ) from exc
         raise FileNotFoundError(
-            f"Wrong-match files not found or unauthorized: {failed_path or '<missing>'}",
+            f"Wrong-match files not found: {failed_path or '<missing>'}",
         ) from exc
 
 

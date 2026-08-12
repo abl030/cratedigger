@@ -1481,15 +1481,25 @@ console.log('maybeLoadWrongMatchExplorer() surfaces a 503 refusal reason instead
   // sentence instead of the old one-size-fits-all "Failed to load file
   // explorer" — the operator still needs to know this IS a failure and
   // that it's the retryable-world-failure kind, not a containment refusal.
-  assert(mount.innerHTML.includes('temporarily unavailable'),
-    'a real transport/authority failure still reads as a retryable failure');
+  // Review round 1: the wording must not PROMISE transience — the 503
+  // bucket also carries the unclassified residual code, which is not a
+  // disk hiccup a retry will clear.
   assert(mount.innerHTML.includes('could not be read'),
-    'the server’s own reason reaches the operator');
+    'a real transport/authority failure still reads as a failure');
+  assert(mount.innerHTML.includes('may be temporary'),
+    '503 copy hedges rather than promising a retry will succeed');
+  assert(!mount.innerHTML.includes('a retry may succeed'),
+    '503 copy must not overclaim transience for the residual bucket');
+  // "could not be read" alone is now ambiguous — the LEAD copy itself
+  // contains that phrase — so assert something unique to the server's
+  // OWN detail text to prove it still rides along, not just the lead.
+  assert(mount.innerHTML.includes('Permission denied'),
+    'the server’s own reason still reaches the operator as detail');
   assert(mount.innerHTML.includes('Retry'),
-    'the retry affordance survives');
+    'the retry affordance survives — a 503 can plausibly clear');
 }
 
-console.log('maybeLoadWrongMatchExplorer() surfaces a whole-root 422 refusal, never as "not found" (issue #1099)');
+console.log('maybeLoadWrongMatchExplorer() surfaces a whole-root 422 refusal, never as "not found", with no Retry (issue #1099)');
 {
   installStorage();
   const dom = installDom();
@@ -1516,8 +1526,11 @@ console.log('maybeLoadWrongMatchExplorer() surfaces a whole-root 422 refusal, ne
     'a whole-root containment refusal names itself as a refusal');
   assert(!mount.innerHTML.toLowerCase().includes('not found'),
     'a containment refusal must never read as a definitive absence');
-  assert(mount.innerHTML.includes('Retry'),
-    'the retry affordance is still offered by this catch (unconditional per #1099)');
+  // Review round 1: the #1086 doctrine ("containment carries no Retry")
+  // applies here too — re-fetching the same name answers the same
+  // refusal every time, so offering Retry would be a dead end.
+  assert(!mount.innerHTML.includes('Retry'),
+    'a containment refusal offers no Retry — retrying can never help');
 }
 
 console.log('maybeLoadWrongMatchExplorer() treats a PARTIAL listing as repairable too');

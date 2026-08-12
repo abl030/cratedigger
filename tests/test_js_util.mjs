@@ -2061,8 +2061,8 @@ console.log('long_tail_console.js console persistence (#398 / #481 item 1)');
   assertEqual(wrongMatchExplorerFailureCopy(404, null),
     'This wrong-match folder could not be located.',
     '404 with no server detail appends nothing extra');
-  assertEqual(wrongMatchExplorerFailureCopy(404, 'Wrong-match files not found or unauthorized: /x'),
-    'This wrong-match folder could not be located. Wrong-match files not found or unauthorized: /x',
+  assertEqual(wrongMatchExplorerFailureCopy(404, 'Wrong-match files not found: /x'),
+    'This wrong-match folder could not be located. Wrong-match files not found: /x',
     '404 appends the server detail');
 
   const refused = wrongMatchExplorerFailureCopy(422, null);
@@ -2071,12 +2071,21 @@ console.log('long_tail_console.js console persistence (#398 / #481 item 1)');
   assert(!refused.toLowerCase().includes('not found'),
     '422 copy must never say "not found" — the name may well exist');
 
+  // Review round 1: the 503 bucket also carries the unclassified
+  // residual code (a `failed_path` lexically outside every configured
+  // quarantine root, for example) — a data mismatch, not a disk hiccup
+  // — so the copy must not PROMISE a retry will succeed.
   const unavailable = wrongMatchExplorerFailureCopy(503, null);
-  assert(unavailable.toLowerCase().includes('unavailable')
-    || unavailable.toLowerCase().includes('retry'),
-    '503 gets a retryable/unavailable-family lead sentence');
-  assert(!unavailable.toLowerCase().includes('refused'),
-    '503 must not borrow the containment wording — a retry can help here');
+  assert(unavailable.toLowerCase().includes('could not be read'),
+    '503 gets its own lead sentence (world-failure + residual family)');
+  assert(!unavailable.toLowerCase().includes('a retry may succeed')
+    && !unavailable.toLowerCase().includes('temporarily unavailable'),
+    '503 copy must not overclaim transience for the residual bucket');
+  // "the storage refused or failed" uses "refused" in its ordinary
+  // English sense (a generic storage-layer non-answer) — the ban is on
+  // the SPECIFIC 422 containment phrase, not the bare word.
+  assert(!unavailable.toLowerCase().includes('containment decision'),
+    '503 must not borrow the specific containment-decision wording');
 
   assertEqual(wrongMatchExplorerFailureCopy(200, null),
     'Failed to load file explorer.',

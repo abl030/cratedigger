@@ -237,6 +237,22 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
     ),
     "tests/web/__init__.py": WEB_TEST_HARNESS_NEIGHBOURS,
     "tests/web/_harness.py": WEB_TEST_HARNESS_NEIGHBOURS,
+    # Production web/*.py files whose real coverage lives under a test
+    # module name ``_direct_test_candidates`` cannot derive (neither
+    # tests.test_web_<stem> nor tests.web.test_<stem> exists on disk for
+    # these). Without an explicit entry, a solo change to one of these
+    # selects only the ambient audits — issue #1099 review found this
+    # exact gap for wrong_match_file_service.py, whose real coverage is
+    # spread across a dedicated classifier unit test, the route contract
+    # tests, two generated composition/fuzz modules, and the render
+    # differential's own render-target tests.
+    "web/wrong_match_file_service.py": (
+        "tests.test_wrong_match_file_service",
+        "tests.web.test_routes_imports",
+        "tests.test_path_authority_generated",
+        "tests.test_protected_path_truth_generated",
+        "tests.test_render_differential",
+    ),
 }
 
 #: Shared tests/ modules with NO real consuming test today — an admitted,

@@ -512,7 +512,14 @@ export function wrongMatchExplorerFailureCopy(status, serverMessage) {
     return `This wrong-match folder was refused by a containment decision — retrying will not help.${detail}`;
   }
   if (status === 503) {
-    return `This wrong-match folder is temporarily unavailable — a retry may succeed.${detail}`;
+    // Deliberately does NOT promise transience: this bucket also carries
+    // an unclassified residual refusal (`unspecified` — e.g. a
+    // `failed_path` lexically outside every configured quarantine root),
+    // which is not a disk hiccup that a retry will clear — it is a data
+    // mismatch that stays wrong until an operator fixes it. "May be
+    // temporary" is honest about BOTH members of the bucket; "a retry
+    // may succeed" would overclaim for the second one.
+    return `This wrong-match folder could not be read — the storage refused or failed; this may be temporary.${detail}`;
   }
   return `Failed to load file explorer.${detail}`;
 }

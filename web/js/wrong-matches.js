@@ -436,13 +436,22 @@ async function ensureWrongMatchExplorer(logId) {
     // alike. ``wrongMatchExplorerFailureCopy`` is the one pure function
     // that turns the status into honest, status-specific copy; the
     // server's own reason (``Wrong-match files could not be read: …
-    // (EACCES)``) still rides along as detail. The Retry button stays
-    // unconditional here — unlike the per-entry containment case inside
-    // a 200 payload, this is the load-failure path itself, and the
-    // operator's next click is what re-fetches.
+    // (EACCES)``) still rides along as detail.
     const serverMessage = (e instanceof Error && e.message) ? e.message : '';
     const copy = wrongMatchExplorerFailureCopy(status, serverMessage);
-    mount.innerHTML = `<div style="color:#f88;font-size:0.78em;padding:8px 0;">${esc(copy)} <button class="p-btn" style="margin-left:6px;" onclick="event.stopPropagation(); window.reloadWrongMatchExplorer(${logId})">Retry</button></div>`;
+    // The Retry button follows the SAME #1086 doctrine the per-entry
+    // notice already applies inside a 200 payload: offer Retry only
+    // where retrying could plausibly change the answer. A 422 is a
+    // containment DECISION — re-fetching the same name answers the
+    // same refusal every time — so it gets no Retry; 404/503/unknown
+    // all stay retryable (a genuinely-missing folder can reappear, a
+    // world failure can clear, and an unrecognised failure shape
+    // should not silently strand the operator with no way to reload).
+    const retryAllowed = status !== 422;
+    const retryButton = retryAllowed
+      ? ` <button class="p-btn" style="margin-left:6px;" onclick="event.stopPropagation(); window.reloadWrongMatchExplorer(${logId})">Retry</button>`
+      : '';
+    mount.innerHTML = `<div style="color:#f88;font-size:0.78em;padding:8px 0;">${esc(copy)}${retryButton}</div>`;
   }
 }
 

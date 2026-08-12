@@ -913,9 +913,15 @@ _NOT_EMPTY_COPY = "NOT evidence that the folder is empty"
 #: Issue #1099 — the whole-root LOAD-FAILURE catch (as opposed to the
 #: per-entry copy above, which lives inside a 200 payload) now answers
 #: status-honest copy instead of the generic ``_LOAD_FAILURE_COPY``
-#: sentence for every non-ok status. A whole-root 503 (a retryable world
-#: failure) gets its own lead sentence naming that.
-_WHOLE_ROOT_UNAVAILABLE_LOAD_COPY = "temporarily unavailable"
+#: sentence for every non-ok status. A whole-root 503 gets its own lead
+#: sentence naming that — deliberately NOT "temporarily unavailable" or
+#: any other wording that promises a retry will succeed (review round 1):
+#: the 503 bucket also carries the unclassified residual code, which is
+#: a data mismatch a retry cannot clear, not a disk hiccup. Distinct from
+#: ``_REFUSAL_COPY`` (also "could not be read", but that constant names
+#: the PER-ENTRY world-failure wording) so the two assertions below are
+#: not accidentally checking the same substring twice.
+_WHOLE_ROOT_UNAVAILABLE_LOAD_COPY = "may be temporary"
 
 #: Entry kinds refused for a WORLD reason (EACCES) vs a CONTAINMENT
 #: reason (a symlink or a special file) — the same split
