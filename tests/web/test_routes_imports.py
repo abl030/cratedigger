@@ -2145,6 +2145,68 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         self.assertEqual(status, 200)
         self.assertEqual(data["state"], "idle")
 
+    def test_cancel_body_rejects_coercion_and_extra_fields(self) -> None:
+        """Issue #1106 N2: ``arm_pending`` must be a strict bool and
+        unknown fields must be rejected, matching this file's own
+        neighbors (``ImportPreviewValuesRequest`` /
+        ``ImportPreviewRequest``, ``ConfigDict(strict=True,
+        extra="forbid")``). Without ``strict=True``, 1/"true"/"on"
+        would all silently coerce to ``True``."""
+        _fresh_triage_runner(self)
+        rejected_payloads = (
+            {"arm_pending": 1},
+            {"arm_pending": "true"},
+            {"arm_pending": "on"},
+            {"arm_pending": True, "unexpected": "field"},
+        )
+        for payload in rejected_payloads:
+            with self.subTest(payload=payload):
+                status, data = self._post(
+                    "/api/wrong-matches/triage/cancel", payload,
+                )
+                self.assertEqual(status, 400)
+                self.assertIn("error", data)
+
+    def test_default_unarmed_cancel_before_start_does_not_poison_the_sweep(
+        self,
+    ) -> None:
+        """Issue #1106 N6: the DEFAULT (``arm_pending`` omitted) must
+        NOT arm -- a cancel with an empty body while nothing is
+        running, followed by a start, must run to completion over
+        every row. Pinned at the route adapter: flipping
+        ``WrongMatchTriageCancelRequest.arm_pending``'s default to
+        True must turn this test red."""
+        from lib.wrong_match_cleanup_service import WrongMatchCleanupSummary
+
+        runner = _fresh_triage_runner(self)
+
+        def cleanup_fn(db, *, confirm_all_wrong_matches, cancellation_token=None):
+            assert cancellation_token is not None
+            if cancellation_token.cancelled:
+                return WrongMatchCleanupSummary(processed=0, deleted=0, cancelled=True)
+            return WrongMatchCleanupSummary(processed=3, deleted=2, cancelled=False)
+
+        with patch(
+            "web.routes.imports.cleanup_all_wrong_matches",
+            side_effect=cleanup_fn,
+        ):
+            status, data = self._post("/api/wrong-matches/triage/cancel", {})
+            self.assertEqual(status, 200)
+            self.assertEqual(data["state"], "idle")
+
+            status, data = self._post(
+                "/api/wrong-matches/triage",
+                {"confirm_all_wrong_matches": True},
+            )
+            self.assertEqual(status, 202)
+            runner.join(timeout=5)
+
+        status, data = self._get("/api/wrong-matches/triage/status")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["state"], "completed")
+        self.assertEqual(data["summary"]["processed"], 3)
+        self.assertFalse(data["summary"]["cancelled"])
+
     def test_cancel_racing_a_finishing_sweep_is_not_a_conflict(self) -> None:
         """A cancel that lands after the sweep already recorded its own
         completion is not an error — the route never answers 409 here."""
@@ -2167,6 +2229,47 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         self.assertEqual(status, 200)
         self.assertEqual(data["state"], "completed")
         self.assertEqual(data["summary"]["deleted"], 2)
+
+    def test_armed_cancel_before_start_stops_the_sweep_with_zero_rows(
+        self,
+    ) -> None:
+        """Issue #1106 F3/F8: the outermost-adapter proof that
+        ``{"arm_pending": true}`` actually wires through the real HTTP
+        body → pydantic → ``TriageRunner.cancel()`` boundary. The
+        runner-level pins in ``tests/test_web_triage_runner.py`` cover
+        the sticky-cancel mechanism itself; this proves the route
+        exposes it."""
+        from lib.wrong_match_cleanup_service import WrongMatchCleanupSummary
+
+        runner = _fresh_triage_runner(self)
+
+        def cleanup_fn(db, *, confirm_all_wrong_matches, cancellation_token=None):
+            assert cancellation_token is not None
+            if cancellation_token.cancelled:
+                return WrongMatchCleanupSummary(processed=0, deleted=0, cancelled=True)
+            return WrongMatchCleanupSummary(processed=3, deleted=2, cancelled=False)
+
+        with patch(
+            "web.routes.imports.cleanup_all_wrong_matches",
+            side_effect=cleanup_fn,
+        ):
+            status, data = self._post(
+                "/api/wrong-matches/triage/cancel", {"arm_pending": True},
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(data["state"], "idle")
+
+            status, data = self._post(
+                "/api/wrong-matches/triage",
+                {"confirm_all_wrong_matches": True},
+            )
+            self.assertEqual(status, 202)
+            runner.join(timeout=5)
+
+        status, data = self._get("/api/wrong-matches/triage/status")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["state"], "cancelled")
+        self.assertEqual(data["summary"]["processed"], 0)
 
     def test_groups_in_beets_still_shown(self):
         """Wrong matches still appear when the release is already in the library."""

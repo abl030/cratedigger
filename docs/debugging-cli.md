@@ -188,7 +188,24 @@ final state is `cancelled`, distinct from `completed` and `failed`, and its
 `summary` reports exactly what ran before the stop — nothing already deleted
 is rolled back. A cancel that races a sweep which is already finishing, or one
 sent with no sweep running, both just return the current status; neither is an
-error. A second Ctrl-C while the CLI is still waiting for that final status
+error. A cancel served while the CLI's OWN start POST is still in flight —
+before the server's `start()` has even flipped the sweep to `running` — used
+to silently no-op and let that sweep run unstoppable by this invocation; it
+is now STICKY (issue #1106), but only because this handler is the ONE
+caller that sends `{"arm_pending": true}` on the cancel POST — every other
+caller (the web UI's Stop button, `wrong-match-triage-cancel` below) stays
+unarmed and is a pure no-op here, on purpose (see the next paragraph). An
+armed cancel is recorded server-side, and the very next `start()` admitted
+within a bounded (order-of-ten-second) window consumes it — still admitted
+(still 202/`running`) but pre-cancelled before any row runs, so it lands
+`cancelled` with zero rows processed. Every armed cancel REFRESHES that
+recorded timestamp (latest-wins, not first-wins — review round 1 found a
+first-wins slot lets a later, genuinely-in-window cancel be silently
+dropped once an earlier one had gone stale-but-unconsumed), and any
+`start()` clears it whether consumed or expired, so a cancel of an
+already-finished sweep that nothing starts again within the window just
+expires — it does not poison whatever gets started next, unrelated, later.
+A second Ctrl-C while the CLI is still waiting for that final status
 falls through to the ordinary uncaught `KeyboardInterrupt` and detaches the
 terminal — the sweep (and any cancel already in flight) keeps running
 server-side regardless. Its `--json` output is the STATUS envelope (`state`,
@@ -210,7 +227,11 @@ on reconnect just 409s against the still-running sweep (issue #1083 review).
 the Ctrl-C handler and the web UI's Stop button use, called directly with no
 polling of its own — run it, then a separate `wrong-match-triage --apply` (or
 the status route) picks up the terminal state. Always exits 0: the route
-itself never refuses, whether or not a sweep happens to be running.
+itself never refuses, whether or not a sweep happens to be running. It sends
+NO `arm_pending` (defaults false, issue #1106): it has no start POST of its
+own to race, so it must stay a pure no-op when nothing is running — arming
+here would risk the fresh `wrong-match-triage --apply` this sequence
+recommends next landing pre-cancelled before it ever processes a row.
 
 Locally generated transport/protocol failures (including a missing or
 unreachable socket, malformed development origins, redirects, or non-object
