@@ -2118,26 +2118,97 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             self.assertIsNotNone(album.import_folder)
             self.assertFalse(os.path.exists(album.import_folder or ""))
 
-    def test_audio_corrupt_delete_failure_still_records_rejection(self):
-        """Issue #1077, F4: a failed/partial delete must never block the
-        rejection record — invariant 11 ("broken worlds surface and
-        restart; nothing is parked"). Before this fix, an uncaught delete
-        exception propagated straight out of ``_handle_rejected_result``:
-        no download_log row, no denylist entry, no requeue, and the
-        request stayed wherever it was before the delete — the opposite
-        of restart-on-failure. Pinned both ways: delete succeeds records
-        the rejection (the must-still-work control), delete fails midway
-        records it identically."""
+    def test_audio_corrupt_delete_never_removes_the_processing_albums_root(self):
+        """Issue #1077, "smalls" (round-2 review): ``_cleanup_staged_dir``'s
+        empty-parent prune was written for the nested slskd download-dir
+        layout (``Artist/Album/``), where removing an empty ``Artist/``
+        after its last album is desired. A canonical processing album is a
+        FLAT child of the shared ``<processing_dir>/albums/`` root
+        (CLAUDE.md invariant 9), so that root IS the "parent" once the last
+        album deletes — and the Nix-provisioned, 0700 root that
+        ``open_private_child_directory`` refuses to recreate would be
+        ``rmdir``'d right along with it if it ever happened to be empty.
+        Today that's shielded only by lock-shard files never being
+        unlinked — an incidental side effect, not a guard. This proves the
+        real guard: the shared root survives even when it is the ONLY
+        album and ends up genuinely empty."""
+        from lib.config import CratediggerConfig
         from lib.download_rejection import _handle_rejected_result
         from lib.quality import ValidationResult
         from lib.staged_album import StagedAlbum
 
-        def _run(*, delete_raises: bool):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            processing_dir = _private_processing_dir(tmpdir)
+            albums_root = os.path.join(processing_dir, "albums")
+            current_path = os.path.join(albums_root, "Artist - Album")
+            os.makedirs(current_path)
+            with open(os.path.join(current_path, "01.flac"), "wb") as handle:
+                handle.write(b"corrupt bytes")
+
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=555, status="downloading", mb_release_id="test-mbid-555",
+            ))
+            cfg = CratediggerConfig(processing_dir=processing_dir)
+            ctx = make_ctx_with_fake_db(db, cfg=cfg)
+            album = make_grab_list_entry(
+                files=[make_download_file(username="peer555")],
+                artist="Artist", title="Album",
+                mb_release_id="test-mbid-555", db_request_id=555,
+                db_source="request",
+            )
+            result = ValidationResult(
+                valid=False, distance=None, scenario="audio_corrupt",
+                detail="garbled",
+            )
+            staged_album = StagedAlbum(current_path=current_path, request_id=555)
+
+            _handle_rejected_result(album, result, staged_album, ctx)
+
+            self.assertFalse(os.path.exists(current_path))
+            self.assertTrue(
+                os.path.isdir(albums_root),
+                "the shared processing albums root must survive even "
+                "though it is now empty — it is a Nix-provisioned root, "
+                "not a disposable per-artist directory",
+            )
+            self.assertEqual(os.listdir(albums_root), [])
+
+    def test_audio_corrupt_delete_failure_still_records_rejection(self):
+        """Issue #1077, F4: a failed delete must never block the rejection
+        record — invariant 11 ("broken worlds surface and restart; nothing
+        is parked"). Before this fix, an uncaught delete exception
+        propagated straight out of ``_handle_rejected_result``: no
+        download_log row, no denylist entry, no requeue, and the request
+        stayed wherever it was before the delete — the opposite of
+        restart-on-failure. Pinned three ways: delete succeeds records the
+        rejection (the must-still-work control); delete fails before
+        touching anything records it identically; delete fails PARTWAY
+        through a real ``shutil.rmtree`` walk (round-2 review: one file
+        genuinely removed for real, then a raise — not just a full-
+        function mock standing in for "partial") records it identically
+        too — a partial delete is not a special case."""
+        from lib.download_rejection import _handle_rejected_result
+        from lib.quality import ValidationResult
+        from lib.staged_album import StagedAlbum
+
+        def _fail_after_removing_one_file(path: str) -> None:
+            # A REAL partial ``shutil.rmtree`` failure: one file genuinely
+            # gone before the walk raises, proving the "midway" claim
+            # rather than asserting it from a full-function mock.
+            first = os.path.join(path, "01.flac")
+            if os.path.exists(first):
+                os.remove(first)
+            raise OSError("simulated mid-delete failure")
+
+        def _run(*, mode: str):
             with tempfile.TemporaryDirectory() as tmpdir:
                 current_path = os.path.join(tmpdir, "Artist - Album")
                 os.makedirs(current_path)
                 with open(os.path.join(current_path, "01.flac"), "wb") as handle:
                     handle.write(b"corrupt bytes")
+                with open(os.path.join(current_path, "02.flac"), "wb") as handle:
+                    handle.write(b"corrupt bytes too")
 
                 db = FakePipelineDB()
                 db.seed_request(make_request_row(
@@ -2156,10 +2227,18 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
                 )
                 staged_album = StagedAlbum(current_path=current_path, request_id=99)
 
-                if delete_raises:
+                if mode == "raises_immediately":
                     with patch(
                         "lib.download_rejection._cleanup_staged_dir",
                         side_effect=OSError("simulated delete failure"),
+                    ):
+                        outcome = _handle_rejected_result(
+                            album, result, staged_album, ctx,
+                        )
+                elif mode == "raises_midway":
+                    with patch(
+                        "lib.dispatch.helpers.shutil.rmtree",
+                        side_effect=_fail_after_removing_one_file,
                     ):
                         outcome = _handle_rejected_result(
                             album, result, staged_album, ctx,
@@ -2175,21 +2254,100 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
                 # exit — checking the caller-visible ``current_path`` after
                 # ``_run`` returns would always report "gone".
                 folder_survives = os.path.exists(current_path)
-                return source, outcome, folder_survives
+                one_file_really_removed = mode == "raises_midway" and not (
+                    os.path.exists(os.path.join(current_path, "01.flac"))
+                )
+                return source, outcome, folder_survives, one_file_really_removed
 
-        for delete_raises in (False, True):
-            with self.subTest(delete_raises=delete_raises):
-                source, outcome, folder_survives = _run(delete_raises=delete_raises)
+        for mode in ("success", "raises_immediately", "raises_midway"):
+            with self.subTest(mode=mode):
+                source, outcome, folder_survives, one_file_really_removed = (
+                    _run(mode=mode)
+                )
                 self.assertFalse(outcome.success)
                 self.assertEqual(len(source.reject_and_requeue_calls), 1)
                 rejected = source.reject_and_requeue_calls[0]["bv_result"]
                 self.assertEqual(rejected.scenario, "audio_corrupt")
                 self.assertIsNone(rejected.failed_path)
                 self.assertEqual(rejected.denylisted_users, ["peer99"])
-                # The delete genuinely failed in the ``delete_raises`` case
-                # — the folder is still there — but that must never be why
+                # The delete genuinely failed for both non-success modes —
+                # the folder is still there — but that must never be why
                 # the record above is missing.
-                self.assertEqual(folder_survives, delete_raises)
+                self.assertEqual(folder_survives, mode != "success")
+                if mode == "raises_midway":
+                    self.assertTrue(
+                        one_file_really_removed,
+                        "the partial-delete fixture must actually remove "
+                        "something for real, or this isn't pinning a "
+                        "mid-walk failure at all",
+                    )
+
+    def test_benign_non_audio_sidecar_never_strands_the_rejection(self):
+        """Issue #1077, B1 (round-2 review blocker): the reviewer's exact
+        reproduction, driven through the real Lane A entry point. A benign
+        non-audio subdirectory (e.g. a ``Scans/`` sidecar) with an exactly-
+        matching audio manifest used to trip the leftover check AFTER the
+        curated move — files move but the empty directory skeleton they
+        left behind doesn't — raising post-mutation, outside the rollback
+        block. That used to strand the album in ``wrong_matches/`` with
+        zero download_log rows, zero denylist writes, and no requeue: the
+        exact invisible-quarantine pathology this issue exists to kill, and
+        a regression vs main. The move must complete with no raise, the
+        rejection record (row + ban + requeue) must land, and the sidecar's
+        own contents must end up under the wrong_matches destination too."""
+        from lib.download_rejection import _handle_rejected_result
+        from lib.quality import ValidationResult
+        from lib.staged_album import StagedAlbum
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            current_path = os.path.join(tmpdir, "Artist - Album")
+            os.makedirs(current_path)
+            with open(os.path.join(current_path, "01.flac"), "wb") as handle:
+                handle.write(b"audio bytes")
+            scans_dir = os.path.join(current_path, "Scans")
+            os.makedirs(scans_dir)
+            with open(os.path.join(scans_dir, "front.jpg"), "wb") as handle:
+                handle.write(b"scan bytes")
+
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=321, status="downloading", mb_release_id="test-mbid-321",
+            ))
+            ctx = make_ctx_with_fake_db(db)
+            album = make_grab_list_entry(
+                files=[make_download_file(
+                    username="peer321", filename="01.flac", file_dir="",
+                )],
+                artist="Artist", title="Album",
+                mb_release_id="test-mbid-321", db_request_id=321,
+                db_source="request",
+            )
+            result = ValidationResult(
+                valid=False, distance=0.4, scenario="high_distance",
+                detail="too far",
+            )
+            staged_album = StagedAlbum(current_path=current_path, request_id=321)
+
+            # Must not raise.
+            outcome = _handle_rejected_result(album, result, staged_album, ctx)
+
+            source = ctx.pipeline_db_source
+            assert isinstance(source, FakePipelineDBSource)
+            self.assertFalse(outcome.success)
+            self.assertEqual(len(source.reject_and_requeue_calls), 1)
+            rejected = source.reject_and_requeue_calls[0]["bv_result"]
+            self.assertEqual(rejected.scenario, "high_distance")
+            self.assertIsNotNone(rejected.failed_path)
+            assert rejected.failed_path is not None
+            self.assertEqual(rejected.denylisted_users, ["peer321"])
+            # A benign sidecar-only world is not an anomaly — no spurious
+            # note in the persisted detail.
+            self.assertNotIn("swept into", rejected.detail or "")
+            self.assertTrue(
+                os.path.exists(os.path.join(rejected.failed_path, "01.flac")))
+            self.assertTrue(os.path.exists(
+                os.path.join(rejected.failed_path, "Scans", "front.jpg")))
+            self.assertFalse(os.path.exists(current_path))
 
     def test_multi_audio_non_flac_never_reaches_beets_validation(self):
         import subprocess

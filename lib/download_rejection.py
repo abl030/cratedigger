@@ -15,11 +15,12 @@ from lib.dispatch.helpers import _cleanup_staged_dir
 from lib.grab_list import GrabListEntry
 from lib.import_execution import CancellationToken, ExecutionCancelled
 from lib.import_manifest import (
+    CuratedMoveResult,
     move_failed_import_curated,
     move_failed_import_whole,
     tracked_audio_paths_for_downloads,
 )
-from lib.processing_paths import source_dirs_for_album
+from lib.processing_paths import processing_albums_dir, source_dirs_for_album
 from lib.quality import ValidationResult, rejection_backfill_override
 from lib.release_identity import normalize_release_id
 from lib.staged_album import StagedAlbum
@@ -48,7 +49,7 @@ def _move_failed_import_curated_cancellable(
     allowed_audio: list[str],
     scenario: str | None,
     cancellation_token: CancellationToken | None,
-) -> str | None:
+) -> CuratedMoveResult | None:
     if cancellation_token is None:
         return move_failed_import_curated(
             path,
@@ -81,6 +82,7 @@ def _move_failed_import_whole_cancellable(
 def _delete_rejected_source_cancellable(
     path: str,
     *,
+    processing_dir: str,
     cancellation_token: CancellationToken | None,
 ) -> None:
     """Destroy a rejected candidate's source outright — no quarantine.
@@ -88,9 +90,18 @@ def _delete_rejected_source_cancellable(
     Reuses the existing staged-dir teardown helper (issue #1077, D3): bad
     rips have no salvage value for operator review, so nothing is moved into
     ``wrong_matches/`` or ``failed_imports/`` and no worklist row is created.
+
+    ``path`` is a canonical processing album — a direct, flat child of
+    ``<processing_dir>/albums/`` (CLAUDE.md invariant 9) — so its parent IS
+    that shared root. ``protected_parent`` (issue #1077, "smalls" round-2
+    review) stops ``_cleanup_staged_dir``'s empty-parent prune from ever
+    removing it: a real guard, not the incidental protection of lock-shard
+    files that happen to never be unlinked.
     """
     _checkpoint(cancellation_token)
-    _cleanup_staged_dir(path)
+    _cleanup_staged_dir(
+        path, protected_parent=processing_albums_dir(processing_dir),
+    )
 
 
 def _run_post_rejection_wrong_match_cleanup(
@@ -348,6 +359,7 @@ def _handle_rejected_result(
         try:
             _delete_rejected_source_cancellable(
                 staged_album.current_path,
+                processing_dir=ctx.cfg.processing_dir,
                 cancellation_token=cancellation_token,
             )
         except ExecutionCancelled:
@@ -362,12 +374,25 @@ def _handle_rejected_result(
             )
         bv_result.failed_path = None
     else:
-        bv_result.failed_path = _move_failed_import_curated_cancellable(
+        move_result = _move_failed_import_curated_cancellable(
             staged_album.current_path,
             allowed_audio=tracked_audio_paths_for_downloads(album_data.files),
             scenario=bv_result.scenario,
             cancellation_token=cancellation_token,
         )
+        bv_result.failed_path = (
+            move_result.target_path if move_result is not None else None
+        )
+        # Issue #1077, B1: a curated move that had to sweep unexpected
+        # residue into the destination folds that anomaly into the
+        # persisted detail — it surfaces to the operator in Recents, never
+        # as a stack trace, and the rejection record below is written
+        # exactly as normal regardless.
+        if move_result is not None and move_result.anomaly:
+            bv_result.detail = (
+                f"{bv_result.detail} | {move_result.anomaly}"
+                if bv_result.detail else move_result.anomaly
+            )
     _checkpoint(cancellation_token)
     log_validation_result(album_data, bv_result, ctx.cfg)
     # The YouTube staging lane deliberately reconstructs a manifest with blank

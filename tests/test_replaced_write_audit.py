@@ -123,21 +123,18 @@ _REVIEWED_DYNAMIC_SQL_CALLS: dict[tuple[str, int, str], str] = {
     ),
     ("lib/pipeline_db/download_log.py", 848, "e0154e89026dc8ef"): (
         "validation key is selected from a closed server-owned vocabulary "
-        "(issue #835, issue #829 PR4 and the source-semantic proof gate "
-        "shifted this line only; issue #1077 F2's column removal above "
-        "shifted this line only)"
+        "(issue #835, issue #829 PR4, the source-semantic proof gate, and "
+        "issue #1077 F2's column removal above each shifted this line only)"
     ),
     ("lib/pipeline_db/download_log.py", 866, "13517e08e7db52f3"): (
         "validation key is closed vocabulary and IN list is value placeholders "
-        "(issue #835, issue #829 PR4 and the source-semantic proof gate "
-        "shifted this line only; issue #1077 F2's column removal above "
-        "shifted this line only)"
+        "(issue #835, issue #829 PR4, the source-semantic proof gate, and "
+        "issue #1077 F2's column removal above each shifted this line only)"
     ),
     ("lib/pipeline_db/download_log.py", 883, "d87a36ba1d1768e7"): (
         "JSON path key is selected from a closed server-owned vocabulary "
-        "(issue #835, issue #829 PR4 and the source-semantic proof gate "
-        "shifted this line only; issue #1077 F2's column removal above "
-        "shifted this line only)"
+        "(issue #835, issue #829 PR4, the source-semantic proof gate, and "
+        "issue #1077 F2's column removal above each shifted this line only)"
     ),
     ("lib/pipeline_db/import_jobs.py", 560, "ecf3d1844c67f653"): (
         "optional job filter is a fixed literal WHERE clause"

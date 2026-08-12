@@ -52,43 +52,101 @@ class TestImportManifest(unittest.TestCase):
             open(os.path.join(source, "bonus.opus"), "wb").close()
             open(os.path.join(source, "cover.jpg"), "wb").close()
 
-            failed_path = move_failed_import_curated(
+            result = move_failed_import_curated(
                 source,
                 allowed_audio=["01.flac", "bonus.opus"],
                 scenario="high_distance",
             )
 
-            self.assertIsNotNone(failed_path)
-            assert failed_path is not None
+            self.assertIsNotNone(result)
+            assert result is not None
+            self.assertIsNone(result.anomaly)
             self.assertEqual(
-                failed_path,
+                result.target_path,
                 os.path.join(parent, "wrong_matches", "Album"),
             )
-            self.assertTrue(os.path.exists(os.path.join(failed_path, "01.flac")))
-            self.assertTrue(os.path.exists(os.path.join(failed_path, "cover.jpg")))
-            self.assertTrue(os.path.exists(os.path.join(failed_path, "bonus.opus")))
+            self.assertTrue(
+                os.path.exists(os.path.join(result.target_path, "01.flac")))
+            self.assertTrue(
+                os.path.exists(os.path.join(result.target_path, "cover.jpg")))
+            self.assertTrue(
+                os.path.exists(os.path.join(result.target_path, "bonus.opus")))
 
-    def test_curated_failed_import_raises_loudly_on_unexpected_leftovers(self):
-        """Issue #1077, Extra 2: a caller that passes an ``allowed_audio``
-        set narrower than what is actually on disk used to fall back to a
-        silent second quarantine destination
-        (``failed_imports/untracked_audio/``) that violated "kept implies
-        visible" (D1) by construction. That path is unreachable from any
-        real production caller (the pre-beets manifest guard already proves
-        an exact match), so it now fails loudly instead — a future
-        regression of that precondition gets investigated, not hidden."""
+    def test_curated_failed_import_prunes_benign_empty_directory_skeleton(self):
+        """Issue #1077, B1 (round-2 review blocker): the move loop relocates
+        FILES via ``os.walk`` but never removes the directory skeletons it
+        walked through. A benign non-audio ``Scans/`` subdirectory with an
+        otherwise-exact audio manifest — the reviewer's exact reproduction
+        against the real Lane A entry point — used to trip the leftover
+        check on an EMPTY shell and raise post-mutation, even though
+        nothing untracked actually survived. It must complete cleanly with
+        no anomaly, and the sidecar's own contents move to the destination
+        too."""
+        with tempfile.TemporaryDirectory() as parent:
+            source = os.path.join(parent, "Album")
+            os.mkdir(source)
+            open(os.path.join(source, "01.flac"), "wb").close()
+            scans_dir = os.path.join(source, "Scans")
+            os.mkdir(scans_dir)
+            open(os.path.join(scans_dir, "front.jpg"), "wb").close()
+
+            result = move_failed_import_curated(
+                source,
+                allowed_audio=["01.flac"],
+                scenario="high_distance",
+            )
+
+            self.assertIsNotNone(result)
+            assert result is not None
+            self.assertIsNone(result.anomaly)
+            self.assertEqual(
+                result.target_path,
+                os.path.join(parent, "wrong_matches", "Album"),
+            )
+            self.assertTrue(
+                os.path.exists(os.path.join(result.target_path, "01.flac")))
+            self.assertTrue(os.path.exists(
+                os.path.join(result.target_path, "Scans", "front.jpg")))
+            self.assertFalse(os.path.exists(source))
+
+    def test_curated_failed_import_sweeps_genuine_residue_instead_of_raising(self):
+        """Issue #1077, B1 (round-2 review blocker): even genuinely
+        unexpected leftover content — a caller passing an ``allowed_audio``
+        set narrower than what is actually on disk — must never raise
+        post-mutation. Before this fix, a raise here left zero
+        download_log rows, zero denylist writes, no requeue, and the album
+        stranded in ``wrong_matches/`` with no DB row: the exact invisible-
+        quarantine pathology this issue kills. Now it sweeps the residue
+        into the SAME destination and records an anomaly the caller folds
+        into the persisted detail — never a stack trace."""
         with tempfile.TemporaryDirectory() as parent:
             source = os.path.join(parent, "Album")
             os.mkdir(source)
             open(os.path.join(source, "01.flac"), "wb").close()
             open(os.path.join(source, "bonus.opus"), "wb").close()
 
-            with self.assertRaisesRegex(RuntimeError, "untracked files"):
-                move_failed_import_curated(
-                    source,
-                    allowed_audio=["01.flac"],
-                    scenario="high_distance",
-                )
+            result = move_failed_import_curated(
+                source,
+                allowed_audio=["01.flac"],
+                scenario="high_distance",
+            )
+
+            self.assertIsNotNone(result)
+            assert result is not None
+            self.assertIsNotNone(result.anomaly)
+            assert result.anomaly is not None
+            self.assertIn("swept into", result.anomaly)
+            self.assertEqual(
+                result.target_path,
+                os.path.join(parent, "wrong_matches", "Album"),
+            )
+            # Kept implies visible (D1): everything lands under the SAME
+            # destination, nothing split outside it.
+            self.assertTrue(
+                os.path.exists(os.path.join(result.target_path, "01.flac")))
+            self.assertTrue(os.path.exists(
+                os.path.join(result.target_path, "bonus.opus")))
+            self.assertFalse(os.path.exists(source))
 
     def test_integrity_rejection_lands_in_wrong_matches_quarantine(self):
         """Issue #1077, F1: ``_allocate_target`` no longer branches on
@@ -101,14 +159,15 @@ class TestImportManifest(unittest.TestCase):
             os.mkdir(source)
             open(os.path.join(source, "01.flac"), "wb").close()
 
-            failed_path = move_failed_import_curated(
+            result = move_failed_import_curated(
                 source,
                 allowed_audio=["01.flac"],
                 scenario="bad_audio_hash",
             )
 
+            assert result is not None
             self.assertEqual(
-                failed_path,
+                result.target_path,
                 os.path.join(parent, "wrong_matches", "Album"),
             )
 
@@ -126,14 +185,15 @@ class TestImportManifest(unittest.TestCase):
             os.mkdir(source)
             open(os.path.join(source, "01.flac"), "wb").close()
 
-            failed_path = move_failed_import_curated(
+            result = move_failed_import_curated(
                 source,
                 allowed_audio=["01.flac"],
                 scenario="spectral_reject",
             )
 
+            assert result is not None
             self.assertEqual(
-                failed_path,
+                result.target_path,
                 os.path.join(parent, "wrong_matches", "Album"),
             )
 

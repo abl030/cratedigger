@@ -443,9 +443,14 @@ def _cleanup_failed_force_import(
         # source — delete it here, reusing the same source-deletion helper
         # the successful-force-import (D7) and cleanup-reducer paths use
         # (no new teardown machinery, CLAUDE.md invariant 7).
-        # ``clear_missing=False`` matches the reducer's own deliberate
-        # default (issue #1077, F6): a path we could not observe must never
-        # clear a live pointer off an intact folder — issue #1063.
+        # ``cleanup_wrong_match_source``'s ``clear_missing`` DEFAULTS to
+        # True; explicit ``False`` here (issue #1077, B2) matches the
+        # cleanup reducer's own explicit override, not the library
+        # default. This is an AUTONOMOUS quality observation
+        # (audio_corrupt), not an operator's own explicit action —
+        # issue #1063's lesson governs: a path we could not observe must
+        # never clear a live pointer off an intact folder, since "missing"
+        # here can mean "transiently unreadable," not "gone."
         from lib.wrong_matches import cleanup_wrong_match_source
 
         result = cleanup_wrong_match_source(
@@ -494,14 +499,23 @@ def _dismiss_successful_force_import(
     try:
         from lib.wrong_matches import cleanup_wrong_match_source
 
-        # ``clear_missing=False`` matches the reducer's own deliberate
-        # default (issue #1077, F6): a path we could not observe must never
-        # clear a live pointer off an intact folder — issue #1063.
+        # ``clear_missing=True`` (the library default, stated explicitly
+        # here for clarity) — the OPPOSITE of the reducer's and the D3
+        # force-failure path's override (issue #1077, B2). This is the
+        # operator's OWN explicit action completing: force-import already
+        # succeeded, so the row must leave the worklist even if its source
+        # folder happens to be unobservable at this exact moment. A dead
+        # pointer left visible here is the stranded-phantom state — an
+        # already-imported row that looks stuck in the queue forever — not
+        # a safety net. Issue #1063's "don't clear on an unobserved path"
+        # caution is about AUTONOMOUS quality decisions second-guessing a
+        # transient read failure, not about honoring a completed operator
+        # action.
         return cleanup_wrong_match_source(
             db,
             download_log_id,
             failed_path_hint=failed_path_hint,
-            clear_missing=False,
+            clear_missing=True,
         ).to_dict()
     except Exception as exc:
         logger.exception(

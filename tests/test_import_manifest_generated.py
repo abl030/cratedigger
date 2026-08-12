@@ -434,14 +434,14 @@ class TestGeneratedRejectionDestination(unittest.TestCase):
             os.mkdir(source)
             _write_relative(source, "01.flac")
 
-            failed_path = move_failed_import_curated(
+            result = move_failed_import_curated(
                 source,
                 allowed_audio=["01.flac"],
                 scenario=scenario,
             )
 
-            assert failed_path is not None
-            assert_rejection_destination(scenario, failed_path)
+            assert result is not None
+            assert_rejection_destination(scenario, result.target_path)
 
 
 # ============================================================================

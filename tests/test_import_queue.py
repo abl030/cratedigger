@@ -72,6 +72,7 @@ from tests.fakes import FakeBeetsDB, FakePipelineDB
 from tests.helpers import (
     claim_next_import_job,
     claim_next_import_preview_job,
+    finalize_claimed_dispatch,
     handoff_automation_owner,
     hermetic_beets_config_defaults,
     make_album_quality_evidence,
@@ -1182,6 +1183,58 @@ class TestImporterWorker(unittest.TestCase):
                 os.path.abspath(source),
             )
             self.assertTrue(result["force_action_cleanup"]["removed"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_acknowledged_force_success_clears_the_pointer_even_when_the_source_is_unobservable(
+        self,
+    ) -> None:
+        """Issue #1077, B2 (round-2 review): D7 success dismissal must use
+        ``clear_missing=True`` — the OPPOSITE of the reducer's and the D3
+        force-failure path's ``clear_missing=False``. This is the
+        operator's OWN explicit action completing: force-import already
+        succeeded, so the Wrong Matches row must leave the worklist even if
+        its ORIGINAL source folder is unobservable at dismissal time (e.g.
+        already gone by some other path). Leaving the pointer visible here
+        would be the stranded-phantom state — an already-imported row that
+        looks permanently stuck in the queue — not a safety net; issue
+        #1063's "don't clear on an unobserved path" caution is about
+        autonomous quality decisions second-guessing a transient read
+        failure, not about honoring a completed operator action.
+        """
+        db = FakePipelineDB()
+        root = tempfile.mkdtemp()
+        try:
+            # Never created on disk — genuinely absent, not merely
+            # unreadable, so ``cleanup_wrong_match_source`` observes
+            # ``path_missing=True`` and the ``clear_missing`` value is what
+            # decides whether the pointer survives.
+            missing_source = os.path.join(root, "failed_imports", "Album")
+            log_id = self._log_wrong_match(db, failed_path=missing_source)
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(log_id),
+                payload=force_import_payload(
+                    download_log_id=log_id,
+                    failed_path=missing_source,
+                ),
+            )
+            self._mark_importable(db, job)
+            claimed = claim_next_import_job(db, worker_id="worker")
+            assert claimed is not None
+
+            updated = finalize_claimed_dispatch(
+                db, claimed, DispatchOutcome(True, "imported"),
+            )
+
+            assert updated is not None
+            self.assertEqual(updated.status, "completed")
+            self.assertEqual(db.get_wrong_matches(), [])
+            result = self._result(updated)
+            self.assertTrue(result["wrong_match_dismissal"]["success"])
+            self.assertTrue(result["wrong_match_dismissal"]["path_missing"])
+            self.assertEqual(result["wrong_match_dismissal"]["cleared_rows"], 1)
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

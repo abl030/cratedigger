@@ -386,8 +386,12 @@ Audio-integrity failures split at the evidence boundary:
   fix remains readable and disk-reaper-protected
   (`get_retained_failure_paths`'s `post_commit_quarantine` audit-key check),
   and `wrong_match_row_is_visible` still excludes those rows by
-  `terminal_import_decision`/evidence `audio_corrupt` flag. See
-  `docs/rejection-routing.md` for the full routing table.
+  `terminal_import_decision` alone — the decision that actually rejected
+  the candidate, not an incidental `audio_corrupt` flag on linked
+  candidate evidence attached to something else that rejected for an
+  unrelated reason (issue #1077, F2: that evidence-flag clause used to
+  ALSO hide a kept row rejected for a different scenario, and was
+  removed). See `docs/rejection-routing.md` for the full routing table.
 - Permissions, changed/vanished paths, unavailable/interrupted FFmpeg, and
   persistence failures are `measurement_failed`. Their typed report lives in
   the preview/job validation payload, they never write a denylist, and the

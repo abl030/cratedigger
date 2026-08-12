@@ -665,14 +665,14 @@ class TestNamingTheScenarioDoesNotMoveTheDownload(unittest.TestCase):
         track = os.path.join(album_dir, "01 - Track.mp3")
         with open(track, "w", encoding="utf-8") as handle:
             handle.write("audio")
-        target = move_failed_import_curated(
+        result = move_failed_import_curated(
             album_dir,
             allowed_audio=["01 - Track.mp3"],
             scenario=scenario,
             quarantine_root=os.path.join(root, "quarantine"),
         )
-        assert target is not None
-        return target
+        assert result is not None
+        return result.target_path
 
     def test_both_named_scenarios_land_where_the_unnamed_one_did(self):
         """``None`` and both new names are Wrong Matches candidates, so the
