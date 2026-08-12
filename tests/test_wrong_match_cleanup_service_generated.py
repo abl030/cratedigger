@@ -24,10 +24,23 @@ production entry points:
   sleep — the cancel is observably concurrent with the row's in-flight
   delete, not merely "before" or "after" it. Production never reads the
   token again once a row starts, so every generated example in this arm
-  still finds the row fully deleted; the known-bad self-test below
-  plants the ONE regression this arm exists to catch — a checkpoint
-  moved INSIDE the per-row delete — at the real ``shutil.rmtree`` leaf
-  edge, and proves the property fails.
+  still finds the row fully deleted.
+
+  This proves exactly ONE claim, not the general class of "a checkpoint
+  moved inside the per-row delete": cancellation delivered AT THE
+  INSTANT ``shutil.rmtree`` is entered does not produce a partial
+  directory. The harness can only synchronize a race at that one call
+  site — a checkpoint that runs BEFORE ``shutil.rmtree`` is ever
+  reached (for example a per-file removal loop that only calls
+  ``shutil.rmtree`` once it has already finished, or been interrupted)
+  is invisible to this arm's handshake and can still leave a partial
+  directory undetected. The known-bad self-test below plants a
+  mid-delete checkpoint AT that one instant this harness controls and
+  proves the property fails there; it is not evidence the property
+  catches every mid-delete-checkpoint shape. The wider gap — patrolling
+  cancellation delivered at arbitrary points inside a row, not just at
+  ``shutil.rmtree`` entry — is real test engineering tracked separately
+  (issue #1095), deliberately not attempted here.
 """
 
 from __future__ import annotations
@@ -114,6 +127,14 @@ def _cancel_while_row_is_in_flight(
     real_rmtree = shutil.rmtree
     started = threading.Event()
     may_proceed = threading.Event()
+    _HARNESS_STALL = (
+        "harness stall in _cancel_while_row_is_in_flight ({who}): the "
+        "{what} within 5s. This names a TEST synchronization timeout, "
+        "not a production failure -- 60 concurrent runs (60 more under "
+        "120 CPU burners) never reproduced it, so treat this as the "
+        "harness wedging (or the wait budget genuinely no longer being "
+        "enough), not evidence against the code under test."
+    )
 
     def wrapped_rmtree(path: str) -> None:
         # Production only ever calls ``shutil.rmtree(resolved_path)`` --
@@ -125,7 +146,10 @@ def _cancel_while_row_is_in_flight(
             real_rmtree(path)
             return
         started.set()
-        may_proceed.wait(timeout=5)
+        assert may_proceed.wait(timeout=5), _HARNESS_STALL.format(
+            who="wrapped_rmtree",
+            what="canceller thread never landed its cancel",
+        )
         if not mutant:
             real_rmtree(path)
             return
@@ -140,15 +164,27 @@ def _cancel_while_row_is_in_flight(
         os.rmdir(path)
 
     def canceller() -> None:
-        started.wait(timeout=5)
+        # Runs on a background thread -- an ``assert`` raised here
+        # would never reach the test runner (bare thread exceptions are
+        # swallowed), so this only RECORDS the wait's outcome into
+        # ``landed``; the actual assertion happens after ``join()``
+        # below, back on the test's own thread. Still cancels and
+        # unblocks ``wrapped_rmtree`` even after a stall, so a
+        # slow-but-not-dead target row doesn't hang the sweep forever.
+        landed[0] = started.wait(timeout=5)
         token.cancel("generated-stop-mid-row")
         may_proceed.set()
 
+    landed: list[bool] = [False]
     thread = threading.Thread(target=canceller, daemon=True)
     thread.start()
     with patch("lib.wrong_matches.shutil.rmtree", side_effect=wrapped_rmtree):
         yield
     thread.join(timeout=5)
+    assert landed[0], _HARNESS_STALL.format(
+        who="canceller",
+        what="target row's delete never reached shutil.rmtree",
+    )
 
 
 def _run_cancellation_sweep(
@@ -343,23 +379,42 @@ class TestCheckerRejectsPartialDeleteState(unittest.TestCase):
     def test_checkpoint_moved_inside_the_per_row_delete_trips_the_property(
         self,
     ) -> None:
-        """A regression that threads the cancellation token into the
-        per-row delete itself -- checking between individual file
-        removals instead of only between rows, the exact shape issue
-        #1083 warns against -- must trip the PROPERTY, driven through
-        the real production entry points
+        """Known-bad self-test for the CHECKER, not a production-mutant
+        kill. The mid-delete checkpoint is planted as THIS test's own
+        stand-in at the exact ``shutil.rmtree`` call the harness already
+        controls (``mid_row_mutant=True`` inside
+        ``_cancel_while_row_is_in_flight``) -- it is driven through the
+        real production entry points
         (``cleanup_all_wrong_matches`` -> ``cleanup_wrong_match`` ->
-        ``cleanup_wrong_match_source``) with a genuine concurrent race
-        at the real ``shutil.rmtree`` leaf edge, not a hand-written
-        violating world (test-fidelity Rule C)."""
+        ``cleanup_wrong_match_source``) up to that call, with a genuine
+        concurrent race, per test-fidelity Rule C (a producible world,
+        not a hand-written violation). That is narrower than "the
+        property catches a mid-delete-checkpoint regression": swapping
+        in the SAME file-by-file loop as a real edit to
+        ``lib/wrong_matches.py`` (removing the ``shutil.rmtree`` call
+        this harness hooks, so the loop runs and finishes BEFORE
+        ``shutil.rmtree`` is ever reached) makes the harness's
+        synchronization miss the race entirely -- the property still
+        fails on that real mutant, but via the cancelled/processed
+        mismatch in ``assert_cancellation_never_leaves_partial_delete``,
+        never via ``_partial_deletion_violations``, and only once both
+        handshake waits in ``_cancel_while_row_is_in_flight`` time out.
+        ``_partial_deletion_violations`` — the checker this whole module
+        is named for — has only ever been observed to trip here and on
+        the hand-planted directory in
+        ``test_checker_flags_a_directory_missing_only_some_of_its_files``
+        above, never on an actual production-code mutant reached end to
+        end. See the module docstring and issue #1095 for the real gap
+        this leaves."""
         _summary, violations = _run_cancellation_sweep(
             count=3, cancel_after=1, mid_row_race=True, mid_row_mutant=True,
         )
 
         self.assertTrue(
             violations,
-            "property failed to detect a directory partially deleted by "
-            "a checkpoint moved inside the per-row delete",
+            "known-bad self-test's own stand-in mutant failed to trip "
+            "the checker -- see the docstring above for what this "
+            "test does and does not prove",
         )
 
 
