@@ -3,12 +3,20 @@
 The state machine drives the production-parity database commands and services
 for the whole bounded lifecycle:
 
-``wanted -> downloading -> processing -> {wanted, imported}``
+``wanted -> downloading -> processing -> wanted``
 
 It deliberately interleaves stale A/B download witnesses, exact and wrong job
 IDs, preview/import execution death, automatic world-failure recovery, and
 operator invalidators. A small independent oracle checks the ownership
 predicate, handoff witness, and terminal all-or-none shape.
+
+Known gap (#1094 per-clause audit): the machine has no successful-acceptance
+rule, so ``imported`` is unreachable and ``requeue_imported`` never fires. The
+terminal edge exercised here is the world-failure one, via
+``recover_dead_import`` — which IS a real terminal transaction (cleanup
+receipt consumed, audit, job outcome, request released), and is what makes
+``_assert_terminal_all_or_none`` live. Reaching ``imported`` needs a dispatch
+acceptance lane this module does not model.
 
 Profiles, promotion policy, and fault-injection qualification:
 ``docs/generated-testing.md``.
@@ -18,6 +26,7 @@ from __future__ import annotations
 
 import copy
 import os
+import re
 import unittest
 from collections.abc import Mapping
 from contextlib import contextmanager
@@ -67,6 +76,37 @@ _WITNESS_A = "2026-07-29T00:00:00+00:00"
 _WITNESS_B = "2026-07-29T00:00:01+00:00"
 _WITNESSES = (_WITNESS_A, _WITNESS_B)
 _CANONICAL_PATH = "/tmp/cratedigger-generated-processing-owner-898"
+
+# --- clause vocabulary (per-clause proof, #1094) ---------------------------
+# Every checker clause in this module carries its own message so a self-test
+# can name the world that fires it and anchor on that clause alone. The
+# historical ``assert_or_raise("generated lifecycle assertion failed")``
+# collapsed twenty-nine distinct lifecycle assertions onto one string, which
+# made per-clause attribution impossible for the whole state machine.
+CLAUSE_LOCK_MISS_STATE = "lock miss created execution state"
+CLAUSE_NO_PROGRESS = "did not progress after contention cleared"
+CLAUSE_UNPINNED_LOCK = "generated IMPORT lock used an unpinned session"
+CLAUSE_UNEXPECTED_LOCK = "unexpected generated advisory lock"
+CLAUSE_PARTIAL_TERMINAL = "partial terminal bundle"
+CLAUSE_FORCE_FENCE = (
+    "owned request admitted stale force execution state or effects"
+)
+CLAUSE_CANDIDATE_REFUSED = "exact preview owner rejected candidate evidence"
+CLAUSE_STALE_FORCE_PREVIEW = "stale force preview crossed owner fence"
+CLAUSE_STALE_FORCE_IMPORT = "stale force import crossed owner fence"
+CLAUSE_MISS_REACHED_PREVIEW = "lock miss reached force preview"
+CLAUSE_MISS_REACHED_IMPORT = "lock miss reached force import"
+
+
+def _exact_clause(message: str) -> str:
+    """Anchor a whole clause message so no sibling clause can satisfy it."""
+    return "^" + re.escape(message) + "$"
+
+
+def _clause_prefix(prefix: str) -> str:
+    """Anchor a clause whose tail carries generated values."""
+    return "^" + re.escape(prefix)
+
 
 LifecycleStatus = Literal[
     "wanted",
@@ -127,6 +167,25 @@ def _claim_progress_facts(
     )
 
 
+def _assert_lock_miss_is_zero_state(
+    *,
+    lane: ClaimLane,
+    before: _ClaimProgressFacts,
+    after_miss: _ClaimProgressFacts,
+) -> None:
+    """The zero-state half, callable per poll so the clause owns attribution.
+
+    #1094: the property re-checked this with a bare ``assertEqual`` inside its
+    miss loop, which fired before the composite checker was ever reached — so
+    a real claim-before-lock mutant was reported as an anonymous dict diff and
+    the clause it violated could never be named.
+    """
+    if after_miss != before:
+        raise AssertionError(
+            f"{lane} {CLAUSE_LOCK_MISS_STATE}: {after_miss!r}"
+        )
+
+
 def _assert_lock_miss_then_progress(
     *,
     lane: ClaimLane,
@@ -135,10 +194,11 @@ def _assert_lock_miss_then_progress(
     after_progress: _ClaimProgressFacts,
 ) -> None:
     """A transient IMPORT miss creates no claim and the next poll advances."""
-    if after_miss != before:
-        raise AssertionError(
-            f"{lane} lock miss created execution state: {after_miss!r}"
-        )
+    _assert_lock_miss_is_zero_state(
+        lane=lane,
+        before=before,
+        after_miss=after_miss,
+    )
     if lane == "preview":
         progressed = (
             after_progress.preview_attempts == before.preview_attempts + 1
@@ -148,8 +208,7 @@ def _assert_lock_miss_then_progress(
         progressed = after_progress.attempts == before.attempts + 1
     if not progressed:
         raise AssertionError(
-            f"{lane} did not progress after contention cleared: "
-            f"{after_progress!r}"
+            f"{lane} {CLAUSE_NO_PROGRESS}: {after_progress!r}"
         )
 
 
@@ -184,10 +243,10 @@ class _GeneratedStageSession:
         from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_IMPORT
 
         if not self.pinned:
-            raise AssertionError("generated IMPORT lock used an unpinned session")
+            raise AssertionError(CLAUSE_UNPINNED_LOCK)
         if namespace != ADVISORY_LOCK_NAMESPACE_IMPORT or key != _REQUEST_ID:
             raise AssertionError(
-                f"unexpected generated advisory lock {(namespace, key)!r}"
+                f"{CLAUSE_UNEXPECTED_LOCK} {(namespace, key)!r}"
             )
         yield self.acquire
 
@@ -321,6 +380,31 @@ def _exact_processing_owner(
     )
 
 
+def _terminal_facts(db: FakePipelineDB, job_id: int) -> _TerminalFacts:
+    """Read the four durable facts one terminal transaction must co-commit.
+
+    Invariant 10: the terminal transaction consumes the cleanup receipt and
+    writes audit/policy/job outcome, clearing owner and state last. Reading
+    them independently of the command that writes them is what makes the
+    all-or-none shape falsifiable.
+    """
+    request = db.request(_REQUEST_ID)
+    job = db.get_import_job(job_id)
+    return _TerminalFacts(
+        request_released=(
+            request.get("status") != "processing"
+            and request.get("active_automation_import_job_id") is None
+        ),
+        audit_present=bool(db.download_logs),
+        job_terminal=(
+            job is not None and job.status not in IMPORT_JOB_ACTIVE_STATUSES
+        ),
+        cleanup_consumed=(
+            (job_id, _REQUEST_ID) not in db._processing_cleanup_journals
+        ),
+    )
+
+
 def _assert_terminal_all_or_none(
     before: _TerminalFacts,
     after: _TerminalFacts,
@@ -329,7 +413,7 @@ def _assert_terminal_all_or_none(
     if after == before:
         return
     if after != _TerminalFacts(True, True, True, True):
-        raise AssertionError(f"partial terminal bundle: {after!r}")
+        raise AssertionError(f"{CLAUSE_PARTIAL_TERMINAL}: {after!r}")
 
 
 
@@ -358,9 +442,7 @@ def _assert_force_owner_fence(
     effect_count: int,
 ) -> None:
     if after != before or effect_count:
-        raise AssertionError(
-            "owned request admitted stale force execution state or effects"
-        )
+        raise AssertionError(CLAUSE_FORCE_FENCE)
 
 
 def _database_snapshot(db: FakePipelineDB) -> object:
@@ -397,7 +479,7 @@ def _seed_candidate(
         persisted.id,
         expected_execution_lease=execution_lease,
     ):
-        raise AssertionError("exact preview owner rejected candidate evidence")
+        raise AssertionError(CLAUSE_CANDIDATE_REFUSED)
 
 
 def _new_owner_db(
@@ -458,11 +540,14 @@ class ProcessingLifecycleMachine(RuleBasedStateMachine):
     @precondition(lambda self: self.oracle.status == "wanted")
     @rule(witness=st.sampled_from(_WITNESSES))
     def begin_download(self, witness: str) -> None:
-        self.assert_or_raise(self.db.set_downloading(
-            _REQUEST_ID,
-            _active_state(witness).to_json(),
-            expected_status="wanted",
-        ))
+        self.assert_or_raise(
+            self.db.set_downloading(
+                _REQUEST_ID,
+                _active_state(witness).to_json(),
+                expected_status="wanted",
+            ),
+            "wanted request refused its own download start",
+        )
         self.oracle.status = "downloading"
         self.oracle.witness = witness
 
@@ -483,15 +568,24 @@ class ProcessingLifecycleMachine(RuleBasedStateMachine):
             message="generated lifecycle handoff",
         )
         if expected:
-            self.assert_or_raise(result.committed and result.job is not None)
+            self.assert_or_raise(
+                result.committed and result.job is not None,
+                "exact download witness did not mint the processing owner",
+            )
             assert result.job is not None
             self.oracle.status = "processing"
             self.oracle.stage = "preview_waiting"
             self.oracle.owner_job_id = result.job.id
             self.generation += 1
         else:
-            self.assert_or_raise(result.outcome == "witness_mismatch")
-            self.assert_or_raise(_database_snapshot(self.db) == before)
+            self.assert_or_raise(
+                result.outcome == "witness_mismatch",
+                "stale download witness was not refused as a mismatch",
+            )
+            self.assert_or_raise(
+                _database_snapshot(self.db) == before,
+                "refused handoff still mutated the database",
+            )
 
     @precondition(
         lambda self: self.oracle.stage == "preview_waiting"
@@ -508,7 +602,8 @@ class ProcessingLifecycleMachine(RuleBasedStateMachine):
         claimed = claim_next_import_preview_job(self.db, worker_id="generated-preview",
         execution_lease=lease,)
         self.assert_or_raise(
-            claimed is not None and claimed.id == self.oracle.owner_job_id
+            claimed is not None and claimed.id == self.oracle.owner_job_id,
+            "preview claim did not select the exact owner job",
         )
         self.oracle.preview_lease = lease
         self.oracle.stage = "preview_running"
@@ -544,12 +639,21 @@ class ProcessingLifecycleMachine(RuleBasedStateMachine):
             expected_execution_lease=supplied,
         )
         if exact_lease:
-            self.assert_or_raise(result is not None)
+            self.assert_or_raise(
+                result is not None,
+                "exact preview lease could not complete its own preview",
+            )
             self.oracle.preview_lease = None
             self.oracle.stage = "preview_ready"
         else:
-            self.assert_or_raise(result is None)
-            self.assert_or_raise(_database_snapshot(self.db) == before)
+            self.assert_or_raise(
+                result is None,
+                "stale preview lease completed the owner's preview",
+            )
+            self.assert_or_raise(
+                _database_snapshot(self.db) == before,
+                "stale preview lease mutated the database",
+            )
 
     @precondition(
         lambda self: self.oracle.stage == "preview_running"
@@ -565,7 +669,8 @@ class ProcessingLifecycleMachine(RuleBasedStateMachine):
             liveness_probe=_ChangedBootProbe(),
         )
         self.assert_or_raise(
-            [job.id for job in recovered] == [self.oracle.owner_job_id]
+            [job.id for job in recovered] == [self.oracle.owner_job_id],
+            "dead preview recovery did not requeue exactly the owner job",
         )
         self.oracle.preview_lease = None
         self.oracle.stage = "preview_waiting"
@@ -585,7 +690,8 @@ class ProcessingLifecycleMachine(RuleBasedStateMachine):
         claimed = claim_next_import_job(self.db, worker_id="generated-import",
         execution_lease=lease,)
         self.assert_or_raise(
-            claimed is not None and claimed.id == self.oracle.owner_job_id
+            claimed is not None and claimed.id == self.oracle.owner_job_id,
+            "import claim did not select the exact owner job",
         )
         self.oracle.import_lease = lease
         self.oracle.stage = "import_running"
@@ -629,11 +735,20 @@ class ProcessingLifecycleMachine(RuleBasedStateMachine):
             expected_execution_lease=lease,
         )
         if authority == "exact":
-            self.assert_or_raise(result is not None)
+            self.assert_or_raise(
+                result is not None,
+                "exact owner authority could not authorize its own launch",
+            )
             self.oracle.launched = True
         else:
-            self.assert_or_raise(result is None)
-            self.assert_or_raise(_database_snapshot(self.db) == before)
+            self.assert_or_raise(
+                result is None,
+                f"{authority} authority authorized a beets launch",
+            )
+            self.assert_or_raise(
+                _database_snapshot(self.db) == before,
+                f"{authority} launch attempt mutated the database",
+            )
 
     @precondition(
         lambda self: self.oracle.stage == "import_running"
@@ -658,17 +773,39 @@ class ProcessingLifecycleMachine(RuleBasedStateMachine):
                 beets_pid=child.pid,
                 beets_start_ticks=child.start_ticks,
             )
-            self.assert_or_raise(recorded is not None)
+            self.assert_or_raise(
+                recorded is not None,
+                "exact import lease could not record its own beets child",
+            )
             self.oracle.import_lease = replace(
                 self.oracle.import_lease,
                 beets=child,
             )
+        # A launched owner's recovery IS the terminal transaction: it consumes
+        # the cleanup receipt and writes audit, job outcome, and the request
+        # release together. Before #1094 this was the module's only terminal
+        # write and ``_assert_terminal_all_or_none`` had no caller but its own
+        # known-bad self-test, so the all-or-none half of invariant 10 was
+        # unpatrolled here despite the module docstring claiming it.
+        owner_job_id = self.oracle.owner_job_id
+        terminal_before = _terminal_facts(self.db, owner_job_id)
         recovered = importer.recover_abandoned_automation_owners(
             self.db,
             liveness_probe=_ChangedBootProbe(),
         )
+        # Order matters (#1094): the persisted-facts checker runs FIRST. The
+        # returned-list assertion also rejects a partially committed terminal
+        # world, so putting it first attributed every partial bundle to the
+        # wrong clause and left ``_assert_terminal_all_or_none`` unable to
+        # fire. These two checkers are independent, so reordering the CALLS
+        # (never the clauses inside a checker) is the legitimate fix.
+        _assert_terminal_all_or_none(
+            terminal_before,
+            _terminal_facts(self.db, owner_job_id),
+        )
         self.assert_or_raise(
-            [job.id for job in recovered] == [self.oracle.owner_job_id]
+            [job.id for job in recovered] == [self.oracle.owner_job_id],
+            "dead import recovery did not release exactly the owner job",
         )
         self.oracle.status = "wanted"
         self.oracle.stage = "none"
@@ -696,14 +833,19 @@ class ProcessingLifecycleMachine(RuleBasedStateMachine):
                 ),
             )
         self.assert_or_raise(
-            isinstance(result, transitions.TransitionConflict)
+            isinstance(result, transitions.TransitionConflict),
+            f"operator {action} was admitted against an owned request",
         )
         assert isinstance(result, transitions.TransitionConflict)
         self.assert_or_raise(
             result.kind
-            == transitions.TransitionConflictKind.processing_locked
+            == transitions.TransitionConflictKind.processing_locked,
+            f"operator {action} refusal was not processing_locked",
         )
-        self.assert_or_raise(_database_snapshot(self.db) == before)
+        self.assert_or_raise(
+            _database_snapshot(self.db) == before,
+            f"refused operator {action} mutated the database",
+        )
 
     @precondition(
         lambda self: self.oracle.status == "processing"
@@ -755,8 +897,14 @@ class ProcessingLifecycleMachine(RuleBasedStateMachine):
                 source_path=_CANONICAL_PATH,
                 expected_execution_lease=lease,
             )
-        self.assert_or_raise(result is None or result is False)
-        self.assert_or_raise(_database_snapshot(self.db) == before)
+        self.assert_or_raise(
+            result is None or result is False,
+            f"wrong job id advanced the owner command {command}",
+        )
+        self.assert_or_raise(
+            _database_snapshot(self.db) == before,
+            f"wrong job id command {command} mutated the database",
+        )
 
     @precondition(lambda self: self.oracle.status == "imported")
     @rule()
@@ -769,32 +917,44 @@ class ProcessingLifecycleMachine(RuleBasedStateMachine):
             ),
         )
         self.assert_or_raise(
-            isinstance(result, transitions.TransitionApplied)
+            isinstance(result, transitions.TransitionApplied),
+            "imported request refused an unowned operator requeue",
         )
         self.oracle.status = "wanted"
 
     @invariant()
     def exact_owner_and_stage_match_oracle(self) -> None:
         request = self.db.request(_REQUEST_ID)
-        self.assert_or_raise(request["status"] == self.oracle.status)
+        self.assert_or_raise(
+            request["status"] == self.oracle.status,
+            "request status drifted from the lifecycle oracle",
+        )
         self.assert_or_raise(
             _exact_processing_owner(
                 request,
                 self.oracle.owner_job_id or -1,
             )
-            == (self.oracle.owner_job_id is not None)
+            == (self.oracle.owner_job_id is not None),
+            "processing status and exact owner pointer came apart",
         )
         if self.oracle.witness is None:
             self.assert_or_raise(
-                request.get("active_download_state") is None
+                request.get("active_download_state") is None,
+                "released request kept an active download state",
             )
         else:
             state = ActiveDownloadState.from_raw(
                 request["active_download_state"]
             )
-            self.assert_or_raise(state.enqueued_at == self.oracle.witness)
+            self.assert_or_raise(
+                state.enqueued_at == self.oracle.witness,
+                "download witness changed under the owner",
+            )
             if self.oracle.status == "processing":
-                self.assert_or_raise(state.current_path == _CANONICAL_PATH)
+                self.assert_or_raise(
+                    state.current_path == _CANONICAL_PATH,
+                    "owned request lost its canonical processing path",
+                )
         active = [
             job
             for job in self.db.list_import_jobs(limit=100)
@@ -802,10 +962,14 @@ class ProcessingLifecycleMachine(RuleBasedStateMachine):
             and job.status in IMPORT_JOB_ACTIVE_STATUSES
         ]
         if self.oracle.owner_job_id is None:
-            self.assert_or_raise(not active)
+            self.assert_or_raise(
+                not active,
+                "unowned request still has an active automation job",
+            )
             return
         self.assert_or_raise(
-            [job.id for job in active] == [self.oracle.owner_job_id]
+            [job.id for job in active] == [self.oracle.owner_job_id],
+            "owned request does not have exactly one active job",
         )
         job = self._current_job()
         assert job is not None
@@ -822,13 +986,20 @@ class ProcessingLifecycleMachine(RuleBasedStateMachine):
             ),
         }[self.oracle.stage]
         self.assert_or_raise(
-            (job.status, job.preview_status) == expected_stage
+            (job.status, job.preview_status) == expected_stage,
+            "owner job stage drifted from the lifecycle oracle",
         )
 
     @staticmethod
-    def assert_or_raise(condition: bool) -> None:
+    def assert_or_raise(condition: bool, message: str) -> None:
+        """Raise the caller's own clause message, never a shared one.
+
+        #1094: a single shared message across twenty-nine assertions makes
+        per-clause attribution impossible — every failure reads the same and
+        no self-test can name which invariant broke.
+        """
         if not condition:
-            raise AssertionError("generated lifecycle assertion failed")
+            raise AssertionError(message)
 
 
 class TestProcessingLifecycleGenerated(unittest.TestCase):
@@ -924,6 +1095,10 @@ class TestProcessingLifecycleGenerated(unittest.TestCase):
         misses=st.integers(min_value=1, max_value=4),
     )
     @example(lane="import", misses=2)
+    # #1094 Q3/Q4: the preview lane is the arm that kills the claim-before-lock,
+    # unpinned-session, and wrong-lock-key mutants. Pinned so an edit to this
+    # body cannot reshuffle it out of the gating tier.
+    @example(lane="preview", misses=1)
     def test_transient_stage_lock_contention_stays_claimable(
         self,
         lane: ClaimLane,
@@ -971,7 +1146,11 @@ class TestProcessingLifecycleGenerated(unittest.TestCase):
                     execution_lease_factory=lambda **_kwargs: lease,
                 )
             self.assertIsNone(result)
-            self.assertEqual(_claim_progress_facts(db, job_id), before)
+            _assert_lock_miss_is_zero_state(
+                lane=lane,
+                before=before,
+                after_miss=_claim_progress_facts(db, job_id),
+            )
 
         after_miss = _claim_progress_facts(db, job_id)
         if lane == "preview":
@@ -1079,14 +1258,14 @@ class TestProcessingLifecycleGenerated(unittest.TestCase):
             **_kwargs: object,
         ) -> ImportPreviewResult:
             effects.append("preview")
-            raise AssertionError("stale force preview crossed owner fence")
+            raise AssertionError(CLAUSE_STALE_FORCE_PREVIEW)
 
         def forbidden_import(
             *_args: object,
             **_kwargs: object,
         ) -> DispatchOutcome:
             effects.append("import")
-            raise AssertionError("stale force import crossed owner fence")
+            raise AssertionError(CLAUSE_STALE_FORCE_IMPORT)
 
         for poll in range(polls):
             if lane == "preview":
@@ -1151,6 +1330,12 @@ class TestProcessingLifecycleGenerated(unittest.TestCase):
                 preview_result={"verdict": "evidence_ready"},
             ))
         before = _claim_progress_facts(db, force_job.id)
+        # #1094 Q2: raising from the stub is NOT sufficient signal —
+        # ``importer.run_once`` deliberately catches an executor crash and
+        # records it as a failed job (invariant 11: nothing is parked), so the
+        # clause message never reaches the operator. The recorded effect is
+        # what makes a fence breach attributable either way.
+        effects: list[str] = []
 
         def no_systemd(**_kwargs: object) -> Never:
             raise ValueError("generated force worker has no systemd lease")
@@ -1159,13 +1344,15 @@ class TestProcessingLifecycleGenerated(unittest.TestCase):
             *_args: object,
             **_kwargs: object,
         ) -> ImportPreviewResult:
-            raise AssertionError("lock miss reached force preview")
+            effects.append(CLAUSE_MISS_REACHED_PREVIEW)
+            raise AssertionError(CLAUSE_MISS_REACHED_PREVIEW)
 
         def forbidden_import(
             *_args: object,
             **_kwargs: object,
         ) -> DispatchOutcome:
-            raise AssertionError("lock miss reached force import")
+            effects.append(CLAUSE_MISS_REACHED_IMPORT)
+            raise AssertionError(CLAUSE_MISS_REACHED_IMPORT)
 
         if lane == "preview":
             result = import_preview_worker.run_once(
@@ -1190,6 +1377,7 @@ class TestProcessingLifecycleGenerated(unittest.TestCase):
                 execute_fn=forbidden_import,
             )
         self.assertIsNone(result)
+        self.assertEqual(effects, [])
         self.assertEqual(_claim_progress_facts(db, force_job.id), before)
 
         if request_changed:
@@ -1281,15 +1469,129 @@ class TestProcessingLifecycleGenerated(unittest.TestCase):
         ))
 
     def test_known_bad_split_terminal_bundle_is_detected(self) -> None:
+        """Q1 for the partial-terminal clause, one row per dropped fact."""
         before = _TerminalFacts(False, False, False, False)
-        mutant = _TerminalFacts(
-            request_released=True,
-            audit_present=True,
-            job_terminal=False,
-            cleanup_consumed=False,
+        complete = _TerminalFacts(True, True, True, True)
+        for field in (
+            "request_released",
+            "audit_present",
+            "job_terminal",
+            "cleanup_consumed",
+        ):
+            mutant = replace(complete, **{field: False})
+            with (
+                self.subTest(dropped=field),
+                self.assertRaisesRegex(
+                    AssertionError,
+                    _clause_prefix(CLAUSE_PARTIAL_TERMINAL),
+                ),
+            ):
+                _assert_terminal_all_or_none(before, mutant)
+
+    def test_terminal_checker_admits_invisible_and_complete_writes(
+        self,
+    ) -> None:
+        """Must-still-work: an untouched world and a full bundle both pass."""
+        before = _TerminalFacts(False, False, False, True)
+        _assert_terminal_all_or_none(before, before)
+        _assert_terminal_all_or_none(
+            before,
+            _TerminalFacts(True, True, True, True),
         )
-        with self.assertRaisesRegex(AssertionError, "partial terminal bundle"):
-            _assert_terminal_all_or_none(before, mutant)
+
+    def test_generated_stage_session_lock_clauses_have_named_worlds(
+        self,
+    ) -> None:
+        """Q1 for both in-world advisory-lock clauses.
+
+        These legislate the production ordering the workers must follow: the
+        owner session is pinned BEFORE the IMPORT lock is taken, and the lock
+        is keyed on ``IMPORT(request_id)`` exactly.
+        """
+        from lib.pipeline_db import ADVISORY_LOCK_NAMESPACE_IMPORT
+
+        db, _job_id = _new_owner_db()
+        session = _GeneratedStageSession(db, acquire=True)
+
+        with (
+            self.assertRaisesRegex(
+                AssertionError,
+                _exact_clause(CLAUSE_UNPINNED_LOCK),
+            ),
+            session.advisory_lock(
+                ADVISORY_LOCK_NAMESPACE_IMPORT,
+                _REQUEST_ID,
+            ),
+        ):
+            pass
+
+        session.pinned = True
+        for namespace, key in (
+            (ADVISORY_LOCK_NAMESPACE_IMPORT + 1, _REQUEST_ID),
+            (ADVISORY_LOCK_NAMESPACE_IMPORT, _REQUEST_ID + 1),
+        ):
+            with (
+                self.subTest(namespace=namespace, key=key),
+                self.assertRaisesRegex(
+                    AssertionError,
+                    _clause_prefix(CLAUSE_UNEXPECTED_LOCK),
+                ),
+                session.advisory_lock(namespace, key),
+            ):
+                pass
+
+        # Must still work: the exact pinned IMPORT(request_id) lock is admitted.
+        with session.advisory_lock(
+            ADVISORY_LOCK_NAMESPACE_IMPORT,
+            _REQUEST_ID,
+        ) as acquired:
+            self.assertTrue(acquired)
+
+    def test_candidate_evidence_clause_has_a_named_world(self) -> None:
+        """Q1: only the exact preview lease may attach candidate evidence."""
+        db, job_id = _new_owner_db()
+        lease = _execution_lease("preview", job_id, 1)
+        self.assertIsNotNone(claim_next_import_preview_job(
+            db,
+            worker_id="generated-preview",
+            execution_lease=lease,
+        ))
+        with self.assertRaisesRegex(
+            AssertionError,
+            _exact_clause(CLAUSE_CANDIDATE_REFUSED),
+        ):
+            _seed_candidate(
+                db,
+                job_id=job_id,
+                execution_lease=replace(
+                    lease,
+                    invocation_id="stale-preview-invocation",
+                ),
+            )
+        # Must still work: the exact lease is admitted.
+        _seed_candidate(db, job_id=job_id, execution_lease=lease)
+
+    def test_assert_or_raise_reports_its_callers_own_clause(self) -> None:
+        """Q1 for the state machine's assertion site.
+
+        Before #1094 every one of its call sites raised the same string, so a
+        failing lifecycle rule could not be attributed to the invariant it
+        broke and no self-test could name one.
+        """
+        for message in (
+            "exact download witness did not mint the processing owner",
+            "processing status and exact owner pointer came apart",
+            "owned request lost its canonical processing path",
+        ):
+            with (
+                self.subTest(message),
+                self.assertRaisesRegex(
+                    AssertionError,
+                    _exact_clause(message),
+                ),
+            ):
+                ProcessingLifecycleMachine.assert_or_raise(False, message)
+        ProcessingLifecycleMachine.assert_or_raise(True, "never raised")
 
 
     def test_known_bad_claim_before_lock_is_detected(self) -> None:
@@ -1333,7 +1635,7 @@ class TestProcessingLifecycleGenerated(unittest.TestCase):
                 self.subTest(lane=lane),
                 self.assertRaisesRegex(
                     AssertionError,
-                    f"{lane} lock miss created execution state",
+                    _clause_prefix(f"{lane} {CLAUSE_LOCK_MISS_STATE}"),
                 ),
             ):
                 _assert_lock_miss_then_progress(
@@ -1342,6 +1644,86 @@ class TestProcessingLifecycleGenerated(unittest.TestCase):
                     after_miss=mutant,
                     after_progress=mutant,
                 )
+
+    def test_known_bad_stuck_after_contention_is_detected(self) -> None:
+        """Q1 for the second clause: the miss was clean but nothing advanced.
+
+        This clause had no self-test at all before #1094 — the sibling above
+        short-circuits, so a world violating both only ever exercised the
+        first one while the test name advertised the pair. Every row here
+        passes the first clause (``after_miss == before``) and then fails to
+        progress, which is the never-parked half of invariant 11: a transient
+        IMPORT lock miss must cost nothing AND must still be claimable.
+        """
+        cases: tuple[tuple[ClaimLane, _ClaimProgressFacts], ...] = (
+            (
+                "preview",
+                _ClaimProgressFacts(
+                    status="queued",
+                    preview_status=IMPORT_JOB_PREVIEW_WAITING,
+                    attempts=0,
+                    preview_attempts=0,
+                ),
+            ),
+            (
+                "import",
+                _ClaimProgressFacts(
+                    status="queued",
+                    preview_status=IMPORT_JOB_PREVIEW_EVIDENCE_READY,
+                    attempts=0,
+                    preview_attempts=1,
+                ),
+            ),
+        )
+        for lane, before in cases:
+            with (
+                self.subTest(lane=lane),
+                self.assertRaisesRegex(
+                    AssertionError,
+                    _clause_prefix(f"{lane} {CLAUSE_NO_PROGRESS}"),
+                ),
+            ):
+                _assert_lock_miss_then_progress(
+                    lane=lane,
+                    before=before,
+                    after_miss=before,
+                    after_progress=before,
+                )
+
+    def test_lock_miss_checker_admits_a_clean_miss_then_progress(self) -> None:
+        """Must-still-work: neither clause fires on the correct sequence."""
+        preview_before = _ClaimProgressFacts(
+            status="queued",
+            preview_status=IMPORT_JOB_PREVIEW_WAITING,
+            attempts=0,
+            preview_attempts=0,
+        )
+        _assert_lock_miss_then_progress(
+            lane="preview",
+            before=preview_before,
+            after_miss=preview_before,
+            after_progress=replace(
+                preview_before,
+                preview_status=IMPORT_JOB_PREVIEW_RUNNING,
+                preview_attempts=1,
+            ),
+        )
+        import_before = _ClaimProgressFacts(
+            status="queued",
+            preview_status=IMPORT_JOB_PREVIEW_EVIDENCE_READY,
+            attempts=0,
+            preview_attempts=1,
+        )
+        _assert_lock_miss_then_progress(
+            lane="import",
+            before=import_before,
+            after_miss=import_before,
+            after_progress=replace(
+                import_before,
+                status="running",
+                attempts=1,
+            ),
+        )
 
     def test_known_bad_force_claim_after_owner_handoff_is_detected(self) -> None:
         before = _ClaimProgressFacts(
@@ -1355,15 +1737,25 @@ class TestProcessingLifecycleGenerated(unittest.TestCase):
             preview_status=IMPORT_JOB_PREVIEW_RUNNING,
             preview_attempts=1,
         )
-        with self.assertRaisesRegex(
-            AssertionError,
-            "owned request admitted stale force",
+        for description, after, effect_count in (
+            ("claim state advanced", mutant, 0),
+            ("worker effect executed", before, 1),
+            ("both", mutant, 1),
         ):
-            _assert_force_owner_fence(
-                before,
-                mutant,
-                effect_count=1,
-            )
+            with (
+                self.subTest(description),
+                self.assertRaisesRegex(
+                    AssertionError,
+                    _exact_clause(CLAUSE_FORCE_FENCE),
+                ),
+            ):
+                _assert_force_owner_fence(
+                    before,
+                    after,
+                    effect_count=effect_count,
+                )
+        # Must still work: an untouched force job with no effects is admitted.
+        _assert_force_owner_fence(before, before, effect_count=0)
 
 
 TestProcessingLifecycleMachine = ProcessingLifecycleMachine.TestCase
