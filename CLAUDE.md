@@ -189,7 +189,11 @@ Use `scripts/test.sh` for normal development validation. It adds the selected
 test's deterministic/generated sibling, tests adjacent to changed production
 surfaces, every repository audit and ratchet, JavaScript checks, both Pyright
 contracts, Ruff, and Vulture to one failure bundle. Use direct `unittest` only
-to debug an isolated failure, not as local convergence evidence.
+to debug an isolated failure, not as local convergence evidence. Exit code 2
+with no phase output at all means a changed shared `tests/**.py` module has no
+mapping in `scripts/targeted_test_selection.py` — map it there (or record it
+in `SHARED_MODULES_WITHOUT_COVERAGE` if it genuinely has no consuming test),
+not a failure in your change.
 
 Direct runs are development feedback; before independent-review handoff, use
 the `check` skill on the converged, clean, committed tree for the one
