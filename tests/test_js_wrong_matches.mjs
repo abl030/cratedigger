@@ -61,6 +61,33 @@ function installStorage() {
   return values;
 }
 
+/**
+ * A minimal stand-in DOM element: `textContent`/`disabled`/`style`, a
+ * `remove()` that just flags itself, and whatever fields the caller wants
+ * to seed. Shared by every test that needs `document.getElementById` to
+ * resolve a specific button/badge id (issue #1086 review blocker 2).
+ * @param {Object} [initial]
+ * @returns {any}
+ */
+function fakeElement(initial = {}) {
+  return {
+    textContent: '',
+    disabled: false,
+    style: {},
+    removed: false,
+    remove() { this.removed = true; },
+    ...initial,
+  };
+}
+
+/**
+ * `installDom()` always wires `wrong-matches-content` and `toast`; the
+ * returned `elements` Map is an open registry a test can `.set(id, el)`
+ * BEFORE exercising code that looks up an id `installDom` doesn't know
+ * about by default (`wm-delete-group-btn-<id>`, `wm-entry-card-<id>`,
+ * `wm-release-<id>`, …) — a shared extension point, not a one-off inline
+ * `getElementById` override per test.
+ */
 function installDom() {
   const wrongMatches = { innerHTML: '' };
   const toast = {
@@ -70,21 +97,25 @@ function installDom() {
   };
   // A plain object stand-in for the Stop button (issue #1083) — real
   // production code re-fetches it by id each time bulkTriageWrongMatches
-  // runs, exactly like the browser's live DOM.
+  // runs, exactly like the browser's live DOM. Registered in the open
+  // element map (issue #1086) so any id a test needs can be seeded the
+  // same way rather than adding another special case here.
   const stopBtn = { id: 'wm-bulk-triage-stop-btn', disabled: true, textContent: 'Stop' };
+  const elements = new Map([
+    ['wrong-matches-content', wrongMatches],
+    ['toast', toast],
+    ['wm-bulk-triage-stop-btn', stopBtn],
+  ]);
   globalThis.document = {
     getElementById(id) {
-      if (id === 'wrong-matches-content') return wrongMatches;
-      if (id === 'toast') return toast;
-      if (id === 'wm-bulk-triage-stop-btn') return stopBtn;
-      return null;
+      return elements.has(id) ? elements.get(id) : null;
     },
   };
   globalThis.setTimeout = (fn) => {
     fn();
     return 0;
   };
-  return { wrongMatches, toast, stopBtn };
+  return { wrongMatches, toast, elements, stopBtn };
 }
 
 function wrongMatchesData() {
@@ -1801,8 +1832,11 @@ console.log('a partial group delete asks for attention and re-renders');
           processed: 2,
           deleted: 1,
           cleared_missing: 0,
-          skipped: 1,
-          errors: 1,
+          // Issue #1086 item 3: the unavailable candidate is its own
+          // bucket now, not double-counted into skipped AND errors.
+          unavailable: 1,
+          skipped: 0,
+          errors: 0,
           remaining: 1,
           results: [
             { download_log_id: 1, success: true },
@@ -1822,6 +1856,13 @@ console.log('a partial group delete asks for attention and re-renders');
 
   assert(dom.toast.textContent.includes('Deleted 1 folder'),
     'the toast still credits the folder that really went');
+  assert(dom.toast.textContent.includes('unavailable 1'),
+    'the toast surfaces the unavailable bucket by name');
+  assert(!dom.toast.textContent.includes('skipped'),
+    'an unavailable candidate is not ALSO reported as skipped');
+  assert(!dom.toast.textContent.includes('errors'),
+    'an unavailable candidate is not ALSO reported as an error — that was '
+    + 'the double count issue #1086 item 3 fixes');
   assert(dom.toast.textContent.includes('1 left'),
     'the toast says work remains');
   assert(dom.toast.className.includes('error'),
@@ -1829,6 +1870,175 @@ console.log('a partial group delete asks for attention and re-renders');
   assert(calls.some(call => call.url === '/api/wrong-matches'),
     'a partial outcome re-renders from the server instead of leaving a '
     + 'stale group strip');
+}
+
+console.log('Delete All reflects actionable candidates, never a dead end (issue #1086 item 2)');
+{
+  installStorage();
+  const dom = installDom();
+
+  // A fully available group keeps today's plain label and stays enabled —
+  // the common case must not regress just because unavailability exists.
+  __test__.renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
+  assert(dom.wrongMatches.innerHTML.includes('Delete All (3)'),
+    'a fully available group keeps the plain label');
+  assert(!/id="wm-delete-group-btn-42"[^>]*disabled/.test(dom.wrongMatches.innerHTML),
+    'a fully available group stays enabled');
+
+  // A partially unavailable group relabels with the actionable count and
+  // stays enabled — a partial group is still the right action to take.
+  const partial = JSON.parse(JSON.stringify(wrongMatchesData()));
+  partial.groups[0].entries[0].path_unavailable = true;
+  __test__.renderWrongMatches(partial, dom.wrongMatches);
+  assert(dom.wrongMatches.innerHTML.includes('Delete All (2 of 3)'),
+    'a partially unavailable group shows the actionable count');
+  assert(!/id="wm-delete-group-btn-42"[^>]*disabled/.test(dom.wrongMatches.innerHTML),
+    'a partially unavailable group stays enabled');
+
+  // A group with ZERO actionable candidates is a dead end today: the
+  // server truthfully refuses (503, nothing destroyed) and the operator
+  // gets an error toast instead of a control that told them up front.
+  const dead = JSON.parse(JSON.stringify(wrongMatchesData()));
+  for (const entry of dead.groups[0].entries) entry.path_unavailable = true;
+  __test__.renderWrongMatches(dead, dom.wrongMatches);
+  assert(dom.wrongMatches.innerHTML.includes('Delete All (0 of 3)'),
+    'a fully unavailable group names zero actionable candidates');
+  assert(/id="wm-delete-group-btn-42"[^>]*disabled/.test(dom.wrongMatches.innerHTML),
+    'a fully unavailable group disables Delete All instead of a dead-end 503');
+
+  assertEqual(__test__.deleteAllButtonLabel(3, 3), 'Delete All (3)',
+    'a fully actionable group keeps the plain label');
+  assertEqual(__test__.deleteAllButtonLabel(2, 3), 'Delete All (2 of 3)',
+    'a partially actionable group shows X of N');
+  assertEqual(__test__.deleteAllButtonLabel(0, 2), 'Delete All (0 of 2)',
+    'zero actionable candidates still names the total');
+  assertEqual(
+    __test__.actionableDeleteEntries({ entries: [
+      { download_log_id: 1 },
+      { download_log_id: 2, path_unavailable: true },
+    ] }).length,
+    1,
+    'actionableDeleteEntries excludes unavailable candidates',
+  );
+}
+
+console.log('deleteWrongMatchGroup() restores the actionable-aware label on every failure path (issue #1086 review blocker 2)');
+{
+  // renderConvergeControls computes the label from FRESH render data; the
+  // three restore paths below instead fall back to a value captured once
+  // at the top of deleteWrongMatchGroup, before the request. Each one
+  // hard-coded a bare `Delete All (${count})` — reverting any of them
+  // loses the actionable-of-total distinction the button exists to show
+  // and silently re-enables the item-2 dead end.
+  function partiallyUnavailableGroup() {
+    const data = JSON.parse(JSON.stringify(wrongMatchesData()));
+    data.groups[0].entries[0].path_unavailable = true; // 2 of 3 actionable
+    return data;
+  }
+
+  installStorage();
+  global.confirm = () => true;
+
+  // Path A: a non-2xx but "summarised" response that is neither `status:
+  // 'ok'` nor `remaining: 0` takes the partial-outcome restore branch.
+  {
+    const dom = installDom();
+    __test__.renderWrongMatches(partiallyUnavailableGroup(), dom.wrongMatches);
+    global.fetch = async (url) => {
+      if (url === '/api/wrong-matches/delete-group') {
+        return {
+          ok: false, status: 503,
+          json: async () => ({ status: 'partial', deleted: 1, remaining: 1 }),
+        };
+      }
+      return { ok: true, json: async () => ({ groups: [] }) };
+    };
+    const btn = { disabled: false, textContent: 'Delete All (2 of 3)', style: {} };
+    await __test__.deleteWrongMatchGroup(42, btn);
+    assertEqual(btn.textContent, 'Delete All (2 of 3)',
+      'the partial-outcome restore path keeps the actionable-aware label');
+    assertEqual(btn.disabled, false,
+      'the partial-outcome restore path leaves a partially actionable group enabled');
+  }
+
+  // Path B: a response with no numeric `deleted` (not "summarised") takes
+  // the plain-error restore branch.
+  {
+    const dom = installDom();
+    __test__.renderWrongMatches(partiallyUnavailableGroup(), dom.wrongMatches);
+    global.fetch = async () => ({
+      ok: false, json: async () => ({ error: 'cleanup_lock_unavailable' }),
+    });
+    const btn = { disabled: false, textContent: 'Delete All (2 of 3)', style: {} };
+    await __test__.deleteWrongMatchGroup(42, btn);
+    assertEqual(btn.textContent, 'Delete All (2 of 3)',
+      'the unsummarised-error restore path keeps the actionable-aware label');
+    assertEqual(btn.disabled, false,
+      'the unsummarised-error restore path leaves a partially actionable group enabled');
+  }
+
+  // Path C: the fetch itself throws — the exception restore branch.
+  {
+    const dom = installDom();
+    __test__.renderWrongMatches(partiallyUnavailableGroup(), dom.wrongMatches);
+    global.fetch = async () => { throw new Error('network down'); };
+    const btn = { disabled: false, textContent: 'Delete All (2 of 3)', style: {} };
+    await __test__.deleteWrongMatchGroup(42, btn);
+    assertEqual(btn.textContent, 'Delete All (2 of 3)',
+      'the fetch-exception restore path keeps the actionable-aware label');
+    assertEqual(btn.disabled, false,
+      'the fetch-exception restore path leaves a partially actionable group enabled');
+  }
+
+  // Must still work: a group with ZERO actionable candidates stays
+  // disabled after a failed request too, not just on the first render.
+  {
+    const dom = installDom();
+    const dead = JSON.parse(JSON.stringify(wrongMatchesData()));
+    for (const entry of dead.groups[0].entries) entry.path_unavailable = true;
+    __test__.renderWrongMatches(dead, dom.wrongMatches);
+    global.fetch = async () => { throw new Error('network down'); };
+    const btn = { disabled: false, textContent: 'Delete All (0 of 3)', style: {} };
+    await __test__.deleteWrongMatchGroup(42, btn);
+    assertEqual(btn.disabled, true,
+      'a fully unavailable group stays disabled after a failed request too');
+  }
+}
+
+console.log('removeWrongMatchEntry() keeps the group Delete All button actionable-aware (issue #1086 review blocker 2)');
+{
+  // Unlike the restore paths above, this update runs on a SUCCESSFUL
+  // single-candidate delete: the group button must still reflect the
+  // remaining actionable count, not a bare `Delete All (${remaining})`.
+  installStorage();
+  const dom = installDom();
+  const data = wrongMatchesData();
+  data.groups[0].entries[1].path_unavailable = true; // logId 101 stays unavailable
+  __test__.renderWrongMatches(data, dom.wrongMatches);
+
+  const groupBtn = fakeElement({ textContent: 'Delete All (2 of 3)' });
+  dom.elements.set('wm-delete-group-btn-42', groupBtn);
+  dom.elements.set('wm-entry-card-100', fakeElement());
+
+  // Remove the AVAILABLE candidate (id 100): 2 candidates remain, only one
+  // (id 102) actionable.
+  __test__.removeWrongMatchEntry(100);
+
+  assertEqual(groupBtn.textContent, 'Delete All (1 of 2)',
+    'removing an available candidate updates the group button to the new '
+    + 'actionable-of-total count, not a bare N');
+  assertEqual(groupBtn.disabled, false,
+    'one actionable candidate remains, so the group button stays enabled');
+
+  // Must still work: removing the LAST actionable candidate disables it.
+  dom.elements.set('wm-entry-card-102', fakeElement());
+  __test__.removeWrongMatchEntry(102);
+
+  assertEqual(groupBtn.textContent, 'Delete All (0 of 1)',
+    'removing the last actionable candidate updates the count to zero');
+  assertEqual(groupBtn.disabled, true,
+    'zero actionable candidates remain, so the group button disables — '
+    + 'the item-2 dead end, reached through the per-entry delete path');
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

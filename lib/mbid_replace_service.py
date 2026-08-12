@@ -1023,6 +1023,7 @@ class MbidReplaceService:
                         f"wrong-matches cleanup did not complete: "
                         f"{wm_summary.errors} errors, "
                         f"{wm_summary.skipped} skipped, "
+                        f"{wm_summary.unavailable} unavailable, "
                         f"{wm_summary.remaining} remaining"
                     )
             except Exception as exc:  # noqa: BLE001 - boundary converts or isolates collaborator failures

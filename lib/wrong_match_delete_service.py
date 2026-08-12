@@ -113,13 +113,53 @@ class WrongMatchDeleteSummary(msgspec.Struct, frozen=True):
     Pointer-only clears over a proven-absent folder are counted in
     ``cleared_missing`` instead. ``deleted`` headlines the operator's
     toast, and calling a folder we never touched "deleted" is exactly the
-    overclaim issue #1063 removed from the single-delete path.
+    overclaim issue #1063 removed from the single-delete path. Gated on
+    ``success`` and ``deleted_path`` alone — NOT on ``cleared_rows`` (issue
+    #1086 review): a folder can really be gone while its own pointer-clear
+    affected zero rows (a concurrent alias sweep already cleared it), and
+    that candidate's folder fact is still "deleted", not "counted nowhere".
+    ``cleared`` below reports the pointer-row count separately.
     """
     cleared_missing: int
     deleted_paths: int
     cleared: int
+    unavailable: int
+    """Candidates refused with :data:`OUTCOME_SKIPPED_PATH_UNAVAILABLE`.
+
+    Split out of both ``skipped`` and ``errors`` (issue #1086 item 3): that
+    outcome sets a ``WrongMatchDeleteResult`` with ``skipped=True`` AND a
+    non-``None`` ``error`` (the unavailable reason doubles as the error
+    text), so counting ``skipped`` and ``errors`` independently landed one
+    candidate in both totals — the toast read ``deleted 1 · skipped 1 ·
+    errors 1`` for two real outcomes, not three. "Unavailable" is precisely
+    the fact #1084 exists to keep distinct from both "skipped" (an
+    operator/policy decision) and "failed" (a genuine delete error): the
+    server never learned whether the folder is even there, so lumping it
+    into either bucket loses that distinction. ``skipped_unsafe_path`` sets
+    the identical ``skipped=True`` + non-``None`` ``error`` shape and is a
+    DIFFERENT double-count of the same pre-existing convention, but it does
+    NOT join this bucket — the path there WAS positively observed and
+    refused on containment grounds, which is nothing like "could not be
+    observed". It is fixed by no longer also counting toward ``errors``
+    (see ``errors`` below), keeping it in ``skipped`` alone.
+    """
     skipped: int
+    """Refused for a reason OTHER than path-unavailable.
+
+    ``result.skipped`` is ``True`` and ``result.outcome`` is not
+    ``OUTCOME_SKIPPED_PATH_UNAVAILABLE`` — active-job holds, lock
+    contention, an invalid/vanished row, and (issue #1086) the unsafe-path
+    refusal, which used to double-count into ``errors`` too.
+    """
     errors: int
+    """A genuine delete failure: never also ``skipped`` (issue #1086).
+
+    ``skipped`` and ``errors`` are disjoint by construction — a refused
+    candidate (unavailable or otherwise skipped) is not also a delete
+    failure, and every candidate in ``results`` lands in exactly one of
+    ``deleted`` / ``cleared_missing`` / ``unavailable`` / ``skipped`` /
+    ``errors``.
+    """
     remaining: int
     group_empty: bool
     results: tuple[WrongMatchDeleteResult, ...]
@@ -183,32 +223,51 @@ def delete_wrong_match_group(
         results.append(delete_wrong_match(db, log_id, require_visible=True))
 
     remaining = _remaining_visible_count(db, request_id)
+    # The folder fact is `deleted_path`/`path_missing` alone — `cleared_rows`
+    # is a SEPARATE pointer-row count (already reported via `cleared` below)
+    # and gating on it here dropped a candidate whose folder really went
+    # (or was proven gone) but whose own pointer-clear affected zero rows
+    # (e.g. a concurrent alias sweep already cleared it): success=True,
+    # cleared_rows=0, into no bucket at all. The toast then computed
+    # deleted=0 and reported "Deleted nothing" over a folder that was
+    # actually gone (issue #1086 review blocker 1).
     deleted = sum(
         1 for result in results
-        if result.success and result.cleared_rows and result.deleted_path
+        if result.success and result.deleted_path
     )
     cleared_missing = sum(
         1 for result in results
-        if result.success and result.cleared_rows and result.path_missing
+        if result.success and result.path_missing
     )
     deleted_paths = sum(1 for result in results if result.deleted_path)
     cleared = sum(result.cleared_rows for result in results)
-    skipped = sum(1 for result in results if result.skipped)
+    # Three disjoint buckets, in that order, so every candidate lands in
+    # exactly one (issue #1086 item 3): unavailable is carved out of both
+    # skipped and errors FIRST, then skipped excludes it, then errors
+    # excludes anything skipped (including skipped_unsafe_path, which used
+    # to double-count into errors the same way path_unavailable did).
+    unavailable = sum(
+        1 for result in results
+        if result.outcome == OUTCOME_SKIPPED_PATH_UNAVAILABLE
+    )
+    skipped = sum(
+        1 for result in results
+        if result.skipped and result.outcome != OUTCOME_SKIPPED_PATH_UNAVAILABLE
+    )
     errors = sum(
         1
         for result in results
-        if result.error or result.outcome == OUTCOME_DELETE_FAILED
+        if not result.skipped
+        and (result.error or result.outcome == OUTCOME_DELETE_FAILED)
     )
     success = (
         (not results and remaining == 0)
-        or (errors == 0 and skipped == 0 and remaining == 0)
+        or (errors == 0 and skipped == 0 and unavailable == 0 and remaining == 0)
     )
     outcome = _group_outcome(
         processed=len(results),
         success=success,
         errors=errors,
-        skipped=skipped,
-        remaining=remaining,
     )
     return WrongMatchDeleteSummary(
         request_id=request_id,
@@ -219,6 +278,7 @@ def delete_wrong_match_group(
         cleared_missing=cleared_missing,
         deleted_paths=deleted_paths,
         cleared=cleared,
+        unavailable=unavailable,
         skipped=skipped,
         errors=errors,
         remaining=remaining,
@@ -241,6 +301,7 @@ def _delete_wrong_match(
         return _result(
             download_log_id,
             OUTCOME_SKIPPED_INVALID_ROW,
+            skipped=True,
             reason="download_log_missing",
         )
     request_id_raw = entry.get("request_id")
@@ -253,6 +314,7 @@ def _delete_wrong_match(
             OUTCOME_SKIPPED_INVALID_ROW,
             request_id=request_id,
             entry_found=True,
+            skipped=True,
             reason="failed_path_missing",
         )
 
@@ -480,15 +542,22 @@ def _group_outcome(
     processed: int,
     success: bool,
     errors: int,
-    skipped: int,
-    remaining: int,
 ) -> str:
+    """Not-``success`` always means SOMETHING outstanding by construction.
+
+    ``success`` is only ``False`` when either ``errors``, ``skipped``,
+    ``unavailable``, or ``remaining`` is nonzero (see the formula above this
+    function's one caller). Once ``success`` and ``errors`` are both ruled
+    out, the remaining three facts are irrelevant to the return value —
+    whichever of them is nonzero, the answer is the same PARTIAL outcome —
+    so this function no longer takes them as parameters (issue #1086
+    review: the prior two-branch shape returned the identical value on
+    both paths, which is dead code, not a real distinction).
+    """
     if success:
         return GROUP_OUTCOME_DELETED if processed else GROUP_OUTCOME_EMPTY
     if errors:
         return GROUP_OUTCOME_FAILED
-    if skipped or remaining:
-        return GROUP_OUTCOME_PARTIAL
     return GROUP_OUTCOME_PARTIAL
 
 

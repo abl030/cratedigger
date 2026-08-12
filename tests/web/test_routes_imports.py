@@ -183,7 +183,12 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         # toast stops calling a folder we never touched "deleted".
         # ``web/js/wrong-matches.js`` reads this to say so.
         "cleared_missing",
-        "deleted_paths", "cleared", "skipped", "errors", "remaining",
+        "deleted_paths", "cleared",
+        # Issue #1086 item 3 — split out of both ``skipped`` and ``errors``
+        # so a candidate the server could not even observe stops
+        # double-counting into both totals.
+        "unavailable",
+        "skipped", "errors", "remaining",
         "group_empty", "results",
     }
     TRIAGE_STATUS_REQUIRED_FIELDS: ClassVar = {
@@ -414,6 +419,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
             cleared_missing=0,
             deleted_paths=2,
             cleared=2,
+            unavailable=0,
             skipped=0,
             errors=0,
             remaining=0,
@@ -1859,6 +1865,7 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
             cleared_missing=0,
             deleted_paths=0,
             cleared=0,
+            unavailable=0,
             skipped=1,
             errors=0,
             remaining=1,
