@@ -87,7 +87,15 @@ class TestImportManifest(unittest.TestCase):
                 os.path.join(parent, "failed_imports", "Album"),
             )
 
-    def test_spectral_rejection_stays_in_failed_imports_bad_files(self):
+    def test_spectral_rejection_stays_in_plain_failed_imports(self):
+        """Issue #1077, D3: the ``bad_files`` sub-routing is gone —
+        ``_BAD_FILE_SCENARIOS`` was audio_corrupt's and spectral_reject's
+        only consumer, and neither ever reaches this curated mover in
+        production any more (audio_corrupt bans + deletes outright;
+        spectral_reject was never quarantined, only immediately cleaned
+        up). This pins the pure function's current behavior for the
+        historical scenario string: same plain ``failed_imports/`` bucket
+        every other excluded scenario gets."""
         with tempfile.TemporaryDirectory() as parent:
             source = os.path.join(parent, "Album")
             os.mkdir(source)
@@ -101,7 +109,7 @@ class TestImportManifest(unittest.TestCase):
 
             self.assertEqual(
                 failed_path,
-                os.path.join(parent, "failed_imports", "bad_files", "Album"),
+                os.path.join(parent, "failed_imports", "Album"),
             )
 
     def test_download_manifest_uses_staged_filenames(self):

@@ -21,7 +21,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("cratedigger")
 
-_BAD_FILE_SCENARIOS = frozenset({"audio_corrupt", "spectral_reject"})
 _LEFTOVER_QUARANTINE_DIR = "untracked_audio"
 MutationCheckpoint = Callable[[], None]
 
@@ -141,8 +140,6 @@ def _allocate_target(
         else "failed_imports"
     )
     quarantine_dir = os.path.join(parent_dir, quarantine_dir_name)
-    if scenario in _BAD_FILE_SCENARIOS:
-        quarantine_dir = os.path.join(quarantine_dir, "bad_files")
     _makedirs(
         quarantine_dir,
         exist_ok=True,
@@ -388,16 +385,20 @@ def move_failed_import_curated(
 def move_failed_import_whole(
     src_path: str,
     *,
-    scenario: str,
-    quarantine_root: str,
+    scenario: str | None = None,
+    quarantine_root: str | None = None,
+    before_mutation: MutationCheckpoint | None = None,
 ) -> str | None:
     """Atomically retain one complete rejected source directory.
 
-    Unlike curated Wrong Matches moves, corrupt-audio quarantine has no
-    untracked-file distinction: the complete source is audit evidence. A
-    directory rename is therefore both simpler and safer. ``os.rename`` never
-    falls back to a cross-filesystem copy, so failure leaves the authoritative
-    source untouched instead of creating a split retained state.
+    Unlike curated Wrong Matches moves, this has no untracked-file
+    distinction: the complete source, including anything outside the
+    downloaded manifest, moves as one unit — the reviewable folder must be
+    what was actually rejected (issue #1077, D4: world failures with a
+    reviewable folder move whole, not curated). A directory rename is
+    therefore both simpler and safer. ``os.rename`` never falls back to a
+    cross-filesystem copy, so failure leaves the authoritative source
+    untouched instead of creating a split retained state.
     """
     src_path = os.path.abspath(src_path)
     if not os.path.isdir(src_path):
@@ -406,7 +407,10 @@ def move_failed_import_whole(
         src_path,
         scenario=scenario,
         quarantine_root=quarantine_root,
+        before_mutation=before_mutation,
     )
+    if before_mutation is not None:
+        before_mutation()
     os.rename(src_path, target_path)
     logger.info("Complete rejected import moved to: %s", target_path)
     return target_path

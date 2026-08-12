@@ -59,13 +59,15 @@ measurement itself failed and cannot blame the peer.
 Preview persists completed content facts in
 `album_quality_evidence.audio_validation`, then the importer alone decides via
 `full_pipeline_decision_from_evidence`. Corrupt audio follows the standard
-denylist plus `failed_imports/bad_files` quarantine path and resumes searching.
-Request-owned processing keeps that quarantine beneath the same private
-processing root, so the exact-owner cleanup journal can atomically rename the
-complete source directory before terminal acknowledgement even when Incoming
-is another filesystem. Other importer lanes retain their configured staging
-quarantine. The quarantine plan excludes both post-import Wrong Matches
-deletion passes.
+denylist and, since issue #1077 (D3), **deletes the source outright — never
+quarantined**. A bad rip has no salvage value for operator review: for
+request-owned processing the exact-owner cleanup journal's plan-free default
+(`canonical_source_cleanup_intent`) removes the whole owned canonical tree
+in place; a force-import failure on this decision deletes the ORIGINAL Wrong
+Matches source via `lib.wrong_matches.cleanup_wrong_match_source` (the same
+helper the cleanup reducer uses), not the disposable private action copy.
+No `failed_path` is ever recorded, so the row never reaches the Wrong
+Matches worklist and the independent cleanup reducer never sees it either.
 A `measurement_failed` attempt writes no denylist and its
 retained source path is protected from the disk reaper. Diagnostics are capped
 at 16 files and 2 KiB per normalized stderr excerpt; success carries no

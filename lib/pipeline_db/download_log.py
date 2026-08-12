@@ -9,7 +9,6 @@ import psycopg2.extras
 
 from lib.beets_db import exact_release_identity_matches
 from lib.convergence_service import normalize_contributor_usernames
-from lib.dispatch.types import PostCommitQuarantineAudit
 from lib.pipeline_db._shared import (
     CANDIDATE_EVIDENCE_PREFIX,
     CURRENT_EVIDENCE_PREFIX,
@@ -218,12 +217,13 @@ class _DownloadLogMixin(_PipelineDBBase):
         audit evidence, not an ordinary abandoned download, and the disk
         reaper must never remove it.
 
-        A post-commit corrupt-audio quarantine audit is also retained.  This is
-        redundant after a successful move into ``failed_imports/`` but
-        load-bearing if the move failed and the only copy remains at staging.
-        There is intentionally no age or request-status filter: the persisted
-        terminal audit row is the retention authority for as long as it
-        exists.
+        A post-commit corrupt-audio quarantine audit is also retained. No
+        current writer produces this key (issue #1077, D3: bad rips are now
+        ban + delete, never quarantined), but historical rows from before
+        that fix still carry it, and a retained folder must stay protected
+        for as long as its audit row exists. There is intentionally no age
+        or request-status filter: the persisted terminal audit row is the
+        retention authority for as long as it exists.
         """
         cur = self._execute(
             """
@@ -242,39 +242,6 @@ class _DownloadLogMixin(_PipelineDBBase):
             """,
         )
         return {str(row["retained_path"]) for row in cur.fetchall()}
-
-    def record_post_commit_quarantine(
-        self,
-        log_id: int,
-        audit: PostCommitQuarantineAudit,
-    ) -> bool:
-        """Attach the exact retained source/move result to one terminal row."""
-        failed_path = audit.quarantine_path or audit.source_path
-        cur = self._execute(
-            """
-            UPDATE download_log
-            SET validation_result = (
-                CASE
-                    WHEN jsonb_typeof(validation_result) = 'object'
-                    THEN validation_result
-                    ELSE '{}'::jsonb
-                END
-                || jsonb_build_object(
-                    'post_commit_quarantine',
-                    %s::jsonb
-                )
-                || jsonb_build_object('failed_path', %s::text)
-            )
-            WHERE id = %s
-            """,
-            (
-                msgspec.json.encode(audit).decode(),
-                failed_path,
-                log_id,
-            ),
-        )
-        self.conn.commit()
-        return cur.rowcount > 0
 
     def get_download_log_counts(self) -> DownloadLogCounts:
         """One-query aggregate: download_log totals plus found-search

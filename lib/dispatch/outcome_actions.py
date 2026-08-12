@@ -81,8 +81,6 @@ def _reject_import_from_evidence_decision(
     import_job_id: int | None = None,
     source_download_log_id: int | None = None,
     quality_ranks: QualityRankConfig | None = None,
-    audio_quarantine_root: str | None = None,
-    preserve_corrupt_source: bool = False,
 ) -> DispatchOutcome:
     """Record a persisted-evidence rejection before beets can mutate files.
 
@@ -193,32 +191,18 @@ def _reject_import_from_evidence_decision(
                 ):
                     cooled_down_users.add(username)
     cleanup_plan: PostCommitCleanup | None = None
-    if action.cleanup and decision == "audio_corrupt" and not preserve_corrupt_source:
-        # Corrupt audio is retained for audit in every caller mode. Force
-        # imports deliberately do not satisfy ``_should_cleanup_path`` until
-        # they succeed, because ordinary force cleanup deletes the reviewed
-        # Wrong Matches source. Quarantine is a separate, archival ownership
-        # transfer and must not inherit that destructive gate. A force action
-        # copy is different: it is disposable private processing state, and
-        # the queue owner reclaims it after acknowledgement instead of moving
-        # it into the operator's protected quarantine tree.
-        if import_job_id is not None:
-            cleanup_plan = PostCommitCleanup(
-                audio_quarantine_source_path=staged_path,
-                audio_quarantine_root=audio_quarantine_root,
-            )
-        else:
-            from lib.dispatch.quarantine import (
-                quarantine_corrupt_audio_source,
-            )
-
-            audit = quarantine_corrupt_audio_source(
-                source_path=staged_path,
-                quarantine_root=audio_quarantine_root or "",
-            )
-            if isinstance(terminal_outcome, int):
-                db.record_post_commit_quarantine(terminal_outcome, audit)
-    elif action.cleanup and _should_cleanup_path(
+    # Bad rips are ban + delete, never quarantined (issue #1077, D3): a
+    # corrupt candidate has no salvage value for operator review, so
+    # ``audio_corrupt`` no longer branches specially here — it disposes of
+    # its disposable staged source exactly like every other auto-import
+    # reject (the automation lane's journaled processor cleanup then
+    # removes the owned canonical folder outright, since no post-commit
+    # plan overrides its plan-free default). Force imports leave their
+    # disposable action copy for ``_cleanup_terminal_force_action``
+    # (``scripts/importer.py``); the force lane's ORIGINAL Wrong Matches
+    # source is a distinct path this helper never sees, deleted by
+    # ``_cleanup_failed_force_import`` after the terminal commit.
+    if action.cleanup and _should_cleanup_path(
         source_path_cleanup_scenario,
         action,
     ):

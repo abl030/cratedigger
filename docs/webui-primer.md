@@ -257,8 +257,12 @@ depends on.
 - **Wrong Matches tab** — the obsolete Complete-folder/manual-import page is gone;
   the tab now opens straight into Wrong Matches. Import actions queue work and
   poll `import_jobs`, so long beets imports do not block the web request.
-  Failed queued force-imports remove the reviewed wrong-match source from the
-  actionable list while preserving the failed job/download audit.
+  A successful queued force-import deletes the reviewed wrong-match source
+  (issue #1077, D7 — completing the operator's own explicit action) and
+  clears it from the actionable list. A failed force-import on the
+  `audio_corrupt` decision also deletes it (D3: bad rips are never
+  preserved); every other failure preserves the source and the actionable
+  list entry exactly as-is, alongside the failed job/download audit.
 - **Recents Acquisition + Imports subviews** — Recents has History,
   Acquisition, and Imports subviews. Acquisition combines downloading and
   processing requests with the separate active YouTube-rescue feed; it does

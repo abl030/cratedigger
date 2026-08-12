@@ -1023,11 +1023,6 @@ def dispatch_import_core(
                         quality_ranks=(
                             cfg.quality_ranks if cfg is not None else None
                         ),
-                        audio_quarantine_root=_processing_quarantine_root(
-                            path,
-                            beets_cfg,
-                        ),
-                        preserve_corrupt_source=force,
                     )
                 quality_evidence_action_file = _write_quality_evidence_action_file(
                     candidate=evidence_gate.candidate,

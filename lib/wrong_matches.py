@@ -102,35 +102,6 @@ class WrongMatchCleanupResult:
         }
 
 
-@dataclass(frozen=True)
-class WrongMatchDismissResult:
-    download_log_id: int
-    entry_found: bool
-    request_id: int | None = None
-    raw_failed_path: str | None = None
-    failed_path_hint: str | None = None
-    resolved_path: str | None = None
-    cleared_rows: int = 0
-    error: str | None = None
-
-    @property
-    def success(self) -> bool:
-        return self.entry_found and self.error is None
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "download_log_id": self.download_log_id,
-            "entry_found": self.entry_found,
-            "request_id": self.request_id,
-            "raw_failed_path": self.raw_failed_path,
-            "failed_path_hint": self.failed_path_hint,
-            "resolved_path": self.resolved_path,
-            "cleared_rows": self.cleared_rows,
-            "error": self.error,
-            "success": self.success,
-        }
-
-
 def validation_failed_path(raw: Any) -> str | None:
     return decode_validation_envelope(raw).failed_path or None
 
@@ -248,55 +219,6 @@ def _equivalent_failed_path_aliases(
         ):
             aliases.append(raw_path)
     return aliases
-
-
-def dismiss_wrong_match_source(
-    db: WrongMatchSourceDB,
-    download_log_id: int,
-    *,
-    failed_path_hint: str | None = None,
-) -> WrongMatchDismissResult:
-    """Clear one wrong-match source from review without deleting its files.
-
-    Converge queues the selected folder for import. The importer still needs
-    the source path from the job payload, so this helper only removes the DB
-    pointers that make the folder appear actionable in Wrong Matches.
-    """
-    _entry, request_id, raw_path = _wrong_match_entry_parts(db, download_log_id)
-    if _entry is None:
-        return WrongMatchDismissResult(
-            download_log_id=download_log_id,
-            entry_found=False,
-            failed_path_hint=failed_path_hint,
-            error=f"Download log entry {download_log_id} not found",
-        )
-
-    candidates = _path_candidates(failed_path_hint, raw_path)
-    # Dismissal is an explicit operator intent to stop reviewing a row; it
-    # deletes nothing and therefore claims nothing about the filesystem.
-    # An unreadable source is not a reason to keep the row in the queue.
-    observation, candidates = _observed_candidates(candidates)
-    resolved_path = observation.path
-    candidates = _path_candidates(
-        *candidates,
-        *_equivalent_failed_path_aliases(db, request_id, resolved_path),
-    )
-
-    cleared_rows = 0
-    if request_id is not None:
-        cleared_rows = int(db.clear_wrong_match_paths(request_id, candidates))
-    elif raw_path:
-        cleared_rows = 1 if db.clear_wrong_match_path(download_log_id) else 0
-
-    return WrongMatchDismissResult(
-        download_log_id=download_log_id,
-        entry_found=True,
-        request_id=request_id,
-        raw_failed_path=raw_path,
-        failed_path_hint=failed_path_hint,
-        resolved_path=resolved_path,
-        cleared_rows=cleared_rows,
-    )
 
 
 def cleanup_wrong_match_source(

@@ -35,7 +35,6 @@ if TYPE_CHECKING:
         ConvergenceSignal,
         StopConvergedSearchResult,
     )
-    from lib.dispatch.types import PostCommitQuarantineAudit
     from lib.pipeline_db import (
         AlbumRequestRow,
         DownloadLogWithEvidenceRow,
@@ -5305,29 +5304,6 @@ class FakePipelineDB:
             ):
                 retained.add(raw["failed_path"])
         return retained
-
-    def record_post_commit_quarantine(
-        self,
-        log_id: int,
-        audit: PostCommitQuarantineAudit,
-    ) -> bool:
-        for row in self.download_logs:
-            if row.id != log_id:
-                continue
-            raw = row.validation_result
-            if isinstance(raw, (str, bytes)):
-                try:
-                    raw = msgspec.json.decode(raw)
-                except msgspec.DecodeError:
-                    raw = None
-            payload = dict(raw) if isinstance(raw, dict) else {}
-            payload["post_commit_quarantine"] = msgspec.to_builtins(audit)
-            payload["failed_path"] = (
-                audit.quarantine_path or audit.source_path
-            )
-            row.validation_result = msgspec.json.encode(payload).decode()
-            return True
-        return False
 
     def clear_on_disk_quality_fields(self, request_id: int) -> None:
         self.clear_on_disk_quality_fields_calls.append(request_id)

@@ -249,78 +249,17 @@ class TestWrongMatchCleanup(unittest.TestCase):
         finally:
             shutil.rmtree(source, ignore_errors=True)
 
-    def test_dismiss_clears_pointer_without_deleting_directory(self):
-        from lib.wrong_matches import dismiss_wrong_match_source
-
-        db = self._make_db()
-        root, source = make_failed_import_source()
-        try:
-            with open(os.path.join(source, "01.mp3"), "wb") as f:
-                f.write(b"audio")
-            log_id = self._log_rejected(db, failed_path=source)
-
-            result = dismiss_wrong_match_source(db, log_id)
-
-            self.assertTrue(result.success)
-            self.assertEqual(result.cleared_rows, 1)
-            self.assertEqual(result.resolved_path, os.path.abspath(source))
-            self.assertTrue(os.path.isdir(source))
-            self.assertEqual(db.get_wrong_matches(), [])
-        finally:
-            shutil.rmtree(root, ignore_errors=True)
-
-    def test_dismiss_clears_relative_and_absolute_duplicate_rows(self):
-        from lib.wrong_matches import dismiss_wrong_match_source
-
-        db = self._make_db()
-        root, source = make_failed_import_source()
-        try:
-            raw_path = "failed_imports/Artist - Album"
-            original_id = self._log_rejected(
-                db, failed_path=raw_path, username="old")
-            self._log_rejected(
-                db, failed_path=os.path.abspath(source), username="new")
-
-            result = dismiss_wrong_match_source(
-                db, original_id, failed_path_hint=source)
-
-            self.assertTrue(result.success)
-            self.assertEqual(result.cleared_rows, 2)
-            self.assertTrue(os.path.isdir(source))
-            self.assertEqual(db.get_wrong_matches(), [])
-        finally:
-            shutil.rmtree(root, ignore_errors=True)
-
-    def test_dismiss_missing_directory_still_clears_stale_pointer(self):
-        from lib.wrong_matches import dismiss_wrong_match_source
-
-        db = self._make_db()
-        root, source = make_failed_import_source()
-        try:
-            shutil.rmtree(source)
-            log_id = self._log_rejected(db, failed_path=source)
-
-            result = dismiss_wrong_match_source(db, log_id)
-
-            self.assertTrue(result.success)
-            self.assertIsNone(result.resolved_path)
-            self.assertEqual(result.cleared_rows, 1)
-            self.assertEqual(db.get_wrong_matches(), [])
-        finally:
-            shutil.rmtree(root, ignore_errors=True)
-
-    def test_dismiss_missing_entry_reports_failure(self):
-        from lib.wrong_matches import dismiss_wrong_match_source
-
-        db = self._make_db()
-
-        result = dismiss_wrong_match_source(db, 99999)
-
-        self.assertFalse(result.success)
-        self.assertFalse(result.entry_found)
-        self.assertEqual(result.cleared_rows, 0)
-        self.assertIn("99999", result.error or "")
-
+    # `dismiss_wrong_match_source` (clear pointers, never delete) is gone —
+    # its only production caller, `scripts/importer.py::_dismiss_successful_
+    # force_import`, now calls `cleanup_wrong_match_source` instead (issue
+    # #1077, D7: force-import success consumes its source folder rather than
+    # merely dismissing it from the actionable list). The DB-pointer-clearing
+    # behaviour these tests covered — relative/absolute duplicate rows, a
+    # missing directory, a missing entry — is still exercised by
+    # `cleanup_wrong_match_source`'s own tests above (which additionally
+    # assert the file deletion), and D7's dedicated pin/property in
+    # `tests/test_wrong_match_post_commit_generated.py` drives
+    # `_dismiss_successful_force_import` itself end to end.
 
 class TestWrongMatchDeleteService(unittest.TestCase):
     def _make_db(self) -> FakePipelineDB:

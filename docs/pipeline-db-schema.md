@@ -362,25 +362,32 @@ Historical interrupted request auto-import cleanup rows use
 `error_message`. Current exact-owner processing no longer writes this scenario;
 the old rows remain readable interruption evidence rather than source
 rejections, denylist decisions, wrong matches, or bad-audio evidence.
+`abandoned_auto_import` is registered HISTORICAL (no current writer) in
+`tests/test_wrong_match_scenario_producer_audit.py`, whose only reader is a
+`WHERE … <> 'abandoned_auto_import'` exclusion at `lib/pipeline_db/misc.py:262`.
 
 Audio-integrity failures split at the evidence boundary:
 
 - Stable readable bytes that the strict audio-only FFmpeg policy cannot fully
   decode become `audio_corrupt` content evidence. The importer remains the
   only decision owner: it rejects through
-  `full_pipeline_decision_from_evidence`, deny-lists the source peer, and
-  archives the retained source as part of terminal convergence. Exact-owner request
-  imports move under
-  `<processing_dir>/albums/failed_imports/bad_files/` while ownership is still
-  attached; keeping source and destination beneath the same private root makes
-  the journaled archival transfer one atomic rename regardless of where
-  Incoming is mounted. The cleanup receipt is consumed by the terminal
-  transaction. Sources outside private processing, such as YouTube imports,
-  retain their configured
-  `<beets_staging_dir>/failed_imports/bad_files/` quarantine; private
-  force-import action copies use the processing-local path. Once an archival
-  move is planned, neither force-source cleanup nor the independent Wrong
-  Matches convergence reducer receives either retained path.
+  `full_pipeline_decision_from_evidence`, deny-lists the source peer, and —
+  since issue #1077 (D3) — **deletes the source outright**. A bad rip has no
+  salvage value for operator review, so it is never quarantined: for an
+  exact-owner request import, the automation processing cleanup's plan-free
+  default (`canonical_source_cleanup_intent`) removes the whole owned
+  canonical tree in place, journaled exactly like any other disposable
+  auto-import source; a force-import failure on this decision deletes the
+  ORIGINAL Wrong Matches source via the same helper the cleanup reducer uses
+  (`lib.wrong_matches.cleanup_wrong_match_source`), not the disposable
+  private action copy dispatch itself touches. No `failed_path` is ever
+  recorded, so the row never appears in the Wrong Matches worklist. The
+  historical `failed_imports/bad_files/` quarantine cohort from before this
+  fix remains readable and disk-reaper-protected
+  (`get_retained_failure_paths`'s `post_commit_quarantine` audit-key check),
+  and `wrong_match_row_is_visible` still excludes those rows by
+  `terminal_import_decision`/evidence `audio_corrupt` flag. See
+  `docs/rejection-routing.md` for the full routing table.
 - Permissions, changed/vanished paths, unavailable/interrupted FFmpeg, and
   persistence failures are `measurement_failed`. Their typed report lives in
   the preview/job validation payload, they never write a denylist, and the
@@ -970,13 +977,30 @@ evidence, stale evidence, active-job, and missing-path rows stay actionable for
 manual review or converge.
 
 Wrong Matches is a candidate/pressing-identity review surface, not a general
-failed-import bucket. Folder/audio-integrity fact rejects (`audio_corrupt`,
-`bad_audio_hash`, `nested_layout`, `empty_fileset`, `mixed_source`) and the
-quality-only `spectral_reject` scenario are excluded from both the visible
-queue and its automatic cleanup and remain under `failed_imports/`. SQL, the
-test fake, and post-rejection cleanup all consume the neutral taxonomy in
+failed-import bucket. Two distinct predicates govern it, kept deliberately
+separate (issue #1077, D1/D6): **worklist visibility**
+(`rejection_scenario_is_wrong_match_candidate`) is a small exclusion set —
+folder/audio-integrity fact rejects (`audio_corrupt`, `bad_audio_hash`,
+`nested_layout`, `empty_fileset`, `mixed_source`) and the quality-only
+`spectral_reject` scenario are excluded, and none of them quarantine with a
+reviewable folder any more (`audio_corrupt` bans and deletes outright; the
+other four and `spectral_reject` were never quarantined in the first place —
+they clean up immediately as disposable processing state). **Cleanup-lane
+admission** (`rejection_scenario_is_delete_eligible`) is a separate, narrower
+explicit allowlist — exactly `extra_tracks`, `high_distance`,
+`mbid_not_found`, `no_choose_match` may reach the reducer
+(`lib.wrong_match_cleanup_service.cleanup_wrong_match`) at all. World
+failures with a reviewable folder (`untracked_audio`,
+`request_missing_mbid`, `request_missing_request_id`) are kept, banned, and
+shown, but the reducer never even looks at them — nor does any unknown or
+novel scenario string, nor `None`. Kept ⟺ its contributing peers are
+denylisted; kept ⟹ visible in the worklist. SQL, the test fake, and
+post-rejection cleanup all consume the neutral taxonomy in
 `lib/wrong_match_policy.py`; a new non-match rejection scenario must be
-classified there once rather than copied into each adapter.
+classified there once rather than copied into each adapter, and
+`tests/test_wrong_match_scenario_producer_audit.py` fails closed on any
+scenario a producer spells but nobody classified. Full routing table,
+producer-by-producer: `docs/rejection-routing.md`.
 
 The quarantine lifecycle view surfaces unreferenced album folders in both
 protected roots. It also continues to account for legacy Wrong Matches rows
@@ -1068,11 +1092,11 @@ paths. Force-import resolves relative paths against
 Wrong Matches Converge is a web triage layer on top of the same queue. The UI
 defaults each release to a `180` milli-distance loosen threshold, marks
 candidate rows green when `validation_result.distance <= 0.180`, then posts to
-`/api/wrong-matches/converge`. Green rows are enqueued as `force_import` jobs
-and dismissed from the actionable Wrong Matches list without deleting their
-folders; the queued job still owns the source path. When Converge runs,
-non-green rows for that release are deleted from disk and cleared from the
-review list.
+`/api/wrong-matches/converge`. Green rows are enqueued as `force_import` jobs;
+the queued job still owns the source path until it terminates. When Converge
+runs, non-green rows for that release are deleted from disk and cleared from
+the review list immediately (unrelated to the force-import terminal handling
+below — see `lib.wrong_match_delete_service`).
 
 1. Look up `download_log` entry by ID via `get_download_log_entry()` → extract `failed_path` from `validation_result` JSONB.
 2. Resolve path (handle both relative and absolute) → verify files still exist.
@@ -1080,7 +1104,20 @@ review list.
 4. Enqueue `import_jobs(job_type='force_import')` with a dedupe key for the `download_log` row.
 5. `cratedigger-importer` claims the job and calls the existing dispatch path, including `import_one.py --force` (sets `max_distance=999` — everything else runs normally: conversion, spectral, quality comparison).
 6. The worker marks the job `completed` or `failed`; the import internals still write `download_log` and `album_requests` outcomes.
-7. If a queued force-import fails with a terminal, non-deferred pipeline rejection, the worker deletes the reviewed source directory and clears the actionable `failed_path` pointer from the original wrong-match row plus duplicate rejected rows for the same request/path. The failed job and `download_log` audit rows remain.
+7. **Force-import success consumes its source** (issue #1077, D7): the worker
+   deletes the reviewed source directory and clears the actionable
+   `failed_path` pointer — completing the operator's own explicit action —
+   via `lib.wrong_matches.cleanup_wrong_match_source`, the same helper the
+   cleanup reducer uses. **Failure on the `audio_corrupt` decision** also
+   deletes the source (D3: bad rips are never preserved). **Failure on
+   every other decision** preserves the source exactly as-is
+   (`"preserved_operator_force_source"`) — the original force/quarantine
+   directory is operator authority and audit evidence; cleanup of the raw
+   source requires a distinct operator action, never a quality result. This
+   reverses the mid-July "dismiss but preserve" regression, which had
+   stranded 64 of 90 wrong-match-sourced force imports as invisible disk
+   folders (verified live 2026-08-12) by preserving on both outcomes. The
+   failed job and `download_log` audit rows always remain regardless.
 
 ```bash
 pipeline_cli.py force-import <download_log_id>

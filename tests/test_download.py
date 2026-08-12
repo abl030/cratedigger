@@ -234,6 +234,59 @@ class TestPostRejectionWrongMatchTriage(unittest.TestCase):
 
         cleanup.assert_not_called()
 
+    def test_skips_every_scenario_outside_the_delete_eligible_allowlist(self):
+        """Issue #1077, D6: the cleanup lane is an allowlist, not a
+        fail-open exclusion set. World failures with a reviewable folder,
+        every unknown/novel scenario string, and ``None`` are never
+        delete-eligible — the reducer is never even consulted for them."""
+        from lib.download_rejection import _run_post_rejection_wrong_match_cleanup
+
+        db = FakePipelineDB()
+        ctx = make_ctx_with_fake_db(db)
+
+        ineligible_scenarios = (
+            None,
+            "untracked_audio",
+            "request_missing_mbid",
+            "request_missing_request_id",
+            "validation_error",
+            "strong_match",
+            "a-brand-new-scenario-nobody-has-classified-yet",
+            "",
+        )
+        with patch("lib.wrong_match_cleanup_service.cleanup_wrong_match") as cleanup:
+            for scenario in ineligible_scenarios:
+                with self.subTest(scenario=scenario):
+                    result = _run_post_rejection_wrong_match_cleanup(
+                        ctx,
+                        123,
+                        scenario=scenario,
+                    )
+                    self.assertIsNone(result)
+
+        cleanup.assert_not_called()
+
+    def test_admits_every_delete_eligible_scenario(self):
+        """The positive half of D6: exactly the allowlist reaches cleanup."""
+        from lib.download_rejection import _run_post_rejection_wrong_match_cleanup
+        from lib.wrong_match_policy import DELETE_ELIGIBLE_REJECTION_SCENARIOS
+
+        db = FakePipelineDB()
+        ctx = make_ctx_with_fake_db(db)
+
+        with patch("lib.wrong_match_cleanup_service.cleanup_wrong_match") as cleanup:
+            for scenario in sorted(DELETE_ELIGIBLE_REJECTION_SCENARIOS):
+                with self.subTest(scenario=scenario):
+                    _run_post_rejection_wrong_match_cleanup(
+                        ctx,
+                        123,
+                        scenario=scenario,
+                    )
+
+        self.assertEqual(
+            cleanup.call_count, len(DELETE_ELIGIBLE_REJECTION_SCENARIOS),
+        )
+
     def test_rejected_download_handler_triggers_triage_after_logging(self):
         import tempfile
 
@@ -1999,6 +2052,13 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             rejected = source_db.reject_and_requeue_calls[0]["bv_result"]
             self.assertEqual(rejected.scenario, "audio_corrupt")
             self.assertEqual(rejected.denylisted_users, ["user1"])
+            # Issue #1077, D3: bad rips are ban + delete, never quarantined.
+            # No failed_path means no Wrong Matches worklist row; the
+            # canonical processing folder this materialized into is gone
+            # outright, not moved to failed_imports/bad_files.
+            self.assertIsNone(rejected.failed_path)
+            self.assertIsNotNone(album.import_folder)
+            self.assertFalse(os.path.exists(album.import_folder or ""))
 
     def test_multi_audio_non_flac_never_reaches_beets_validation(self):
         import subprocess
@@ -2532,6 +2592,12 @@ class TestHandleValidResultMissingMbid(unittest.TestCase):
         # a real distance (0.05) — that measurement must survive, not get
         # nulled or replaced.
         self.assertEqual(db.download_logs[0].beets_distance, 0.05)
+        # Issue #1077, D1/D4: Lane B is a world failure with a reviewable
+        # folder — kept + banned + shown, not silently re-fetchable.
+        self.assertEqual([entry.username for entry in db.denylist], ["user1"])
+        visible = db.get_wrong_matches()
+        self.assertEqual(len(visible), 1)
+        self.assertEqual(visible[0]["soulseek_username"], "user1")
 
     def test_measured_perfect_zero_distance_is_preserved_not_nulled(self):
         """A genuinely measured 0.0 (perfect match) must persist as 0.0,

@@ -1131,8 +1131,14 @@ class TestImporterWorker(unittest.TestCase):
             ),
         ))
 
-    def test_acknowledged_force_success_dismisses_only_wrong_match_pointer(self):
-        """#853: success clears review state, not the operator's raw bytes."""
+    def test_acknowledged_force_success_deletes_wrong_match_source(self):
+        """#1077 D7: force-import success consumes its source folder.
+
+        Completing the operator's own explicit action deletes the ORIGINAL
+        Wrong Matches folder, not just its review-state pointer — reversing
+        the mid-July "dismiss but preserve" regression (#853's docstring
+        described that behavior; D7 supersedes it).
+        """
         from scripts import importer
 
         db = FakePipelineDB()
@@ -1166,12 +1172,15 @@ class TestImporterWorker(unittest.TestCase):
 
             assert updated is not None
             self.assertEqual(updated.status, "completed")
-            with open(os.path.join(source, "01.mp3"), "rb") as handle:
-                self.assertEqual(handle.read(), raw_bytes)
+            self.assertFalse(os.path.exists(source))
             self.assertEqual(db.get_wrong_matches(), [])
             self.assertFalse(os.path.exists(action_path))
             result = self._result(updated)
             self.assertTrue(result["wrong_match_dismissal"]["success"])
+            self.assertEqual(
+                result["wrong_match_dismissal"]["deleted_path"],
+                os.path.abspath(source),
+            )
             self.assertTrue(result["force_action_cleanup"]["removed"])
         finally:
             shutil.rmtree(root, ignore_errors=True)
@@ -1389,8 +1398,14 @@ class TestImporterWorker(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
-    def test_corrupt_force_action_is_reclaimed_without_protected_quarantine_copy(self):
-        """#853: corrupt force bytes stay private; raw Wrong Match stays intact."""
+    def test_corrupt_force_action_bans_and_deletes_wrong_match_source(self):
+        """#1077 D3: a force-import audio_corrupt reject bans + deletes.
+
+        Bad rips have no salvage value for operator review: the ORIGINAL
+        Wrong Matches source is deleted outright (not preserved as
+        "archival evidence" — that branch is retired), and the peer is
+        denylisted by ``dispatch_action("audio_corrupt")``.
+        """
         from scripts import importer
 
         db = FakePipelineDB()
@@ -1435,18 +1450,23 @@ class TestImporterWorker(unittest.TestCase):
 
             assert updated is not None
             self.assertEqual(updated.status, "failed")
-            with open(os.path.join(source, "01.mp3"), "rb") as handle:
-                self.assertEqual(handle.read(), raw_bytes)
-            self.assertTrue(os.path.isdir(source))
-            self.assertEqual(len(db.get_wrong_matches()), 1)
+            self.assertFalse(os.path.exists(source))
+            self.assertEqual(db.get_wrong_matches(), [])
             self.assertFalse(os.path.exists(action_path))
             self.assertFalse(os.path.exists(os.path.join(
                 self._force_cfg.slskd_download_dir, "failed_imports", "bad_files",
             )))
+            self.assertEqual(
+                [entry.username for entry in db.denylist],
+                ["alice"],
+            )
             result = self._result(updated)
             self.assertNotIn("post_commit_cleanup", result)
             self.assertEqual(
-                result["cleanup"]["outcome"], "preserved_operator_force_source",
+                result["cleanup"]["outcome"], "deleted_operator_force_source",
+            )
+            self.assertEqual(
+                result["cleanup"]["deleted_path"], os.path.abspath(source),
             )
             self.assertTrue(result["force_action_cleanup"]["removed"])
         finally:
@@ -7792,38 +7812,6 @@ def terminal_stage_fault_violation(
     )
 
 
-def quarantine_intent_violation(
-    *,
-    configured_root: str,
-    refused: bool,
-    destination_path: str | None,
-) -> str | None:
-    """Return why one cleanup-intent quarantine root broke invariant 2."""
-    usable = bool(configured_root) and os.path.isdir(configured_root)
-    if not usable:
-        if refused:
-            return None
-        return (
-            f"unusable quarantine root {configured_root!r} was journalled "
-            f"with destination {destination_path!r}"
-        )
-    if refused:
-        return f"usable quarantine root {configured_root!r} was refused"
-    if destination_path is None:
-        return f"usable quarantine root {configured_root!r} named no destination"
-    bucket = os.path.join(
-        os.path.abspath(configured_root), "failed_imports", "bad_files",
-    )
-    if destination_path != bucket and not destination_path.startswith(
-        bucket + os.sep
-    ):
-        return (
-            f"destination {destination_path!r} escaped the configured "
-            f"quarantine bucket {bucket!r}"
-        )
-    return None
-
-
 class _TerminalBoundaryFaultDB(FakePipelineDB):
     """Fake whose terminal write fails at its first durable boundary.
 
@@ -8262,163 +8250,6 @@ class TestAutomationTerminalStageFaultRouting(unittest.TestCase):
         )
         self.assertIsNone(violation, violation)
 
-
-class TestAutomationCleanupQuarantineRoot(unittest.TestCase):
-    """Invariant 2 — an unusable quarantine root is refused, never journalled."""
-
-    def _source_dir(self) -> str:
-        path = tempfile.mkdtemp(prefix="cratedigger-quarantine-source-")
-        with open(os.path.join(path, "01.flac"), "wb") as handle:
-            handle.write(b"corrupt candidate fixture")
-        self.addCleanup(shutil.rmtree, path, ignore_errors=True)
-        return path
-
-    def _plan(self, source: str, root: str | None):
-        from lib.dispatch.types import PostCommitCleanup
-
-        return PostCommitCleanup(
-            audio_quarantine_source_path=source,
-            audio_quarantine_root=root,
-        )
-
-    def test_unconfigured_staging_dir_is_refused_before_any_journal(
-        self,
-    ) -> None:
-        """The blank root comes from the producer, not from a test literal."""
-        from scripts import importer
-
-        # lib/dispatch/core.py threads beets_staging_dir straight into the
-        # plan, and lib/config.py defaults it to "".
-        blank_root = CratediggerConfig().beets_staging_dir
-        self.assertEqual(blank_root, "")
-        source = self._source_dir()
-
-        with self.assertRaises(RuntimeError) as caught:
-            importer._automation_cleanup_intent(
-                source_path=source,
-                plan=self._plan(source, blank_root),
-            )
-
-        self.assertIn("quarantine root", str(caught.exception))
-
-    def test_missing_quarantine_root_directory_is_refused(self) -> None:
-        """Mirror of quarantine_corrupt_audio_source's isdir precondition."""
-        from scripts import importer
-
-        source = self._source_dir()
-        missing = os.path.join(source, "does-not-exist")
-
-        with self.assertRaises(RuntimeError) as caught:
-            importer._automation_cleanup_intent(
-                source_path=source,
-                plan=self._plan(source, missing),
-            )
-
-        self.assertIn("quarantine root", str(caught.exception))
-
-    def test_refused_root_never_reaches_the_immutable_journal(self) -> None:
-        """The refusal happens before the intent is persisted."""
-        from lib.dispatch import DispatchOutcome
-        from scripts import importer
-
-        db = FakePipelineDB()
-        canonical = terminal_stage_canonical_dir(self)
-        claimed, lease = launch_automation_owner(
-            db,
-            canonical,
-            capture_completion=False,
-        )
-        outcome = DispatchOutcome(
-            success=False,
-            message="Corrupt audio",
-            post_commit_cleanup=self._plan(
-                canonical,
-                CratediggerConfig().beets_staging_dir,
-            ),
-        )
-        token = CancellationToken()
-
-        with (
-            db._pin_owner_session(token) as owner_session_identity,
-            self.assertRaises(RuntimeError),
-        ):
-            importer._complete_automation_processing_cleanup(
-                db,
-                claimed,
-                outcome,
-                execution_lease=lease,
-                cancellation_token=token,
-                owner_session_identity=owner_session_identity,
-            )
-
-        self.assertIsNone(db.get_processing_cleanup_journal(
-            request_id=42,
-            job_id=claimed.id,
-        ))
-        self.assertTrue(os.path.isdir(canonical))
-
-    def test_configured_root_still_selects_a_destination_under_it(self) -> None:
-        """Must-still-work: a real configured root keeps quarantining."""
-        from scripts import importer
-
-        source = self._source_dir()
-        root = tempfile.mkdtemp(prefix="cratedigger-quarantine-root-")
-        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
-
-        intent = importer._automation_cleanup_intent(
-            source_path=source,
-            plan=self._plan(source, root),
-        )
-
-        assert intent.destination_path is not None
-        self.assertIsNone(quarantine_intent_violation(
-            configured_root=root,
-            refused=False,
-            destination_path=intent.destination_path,
-        ))
-        self.assertFalse(
-            intent.destination_path.startswith(os.getcwd() + os.sep)
-            and not root.startswith(os.getcwd() + os.sep)
-        )
-
-    @given(root_kind=st.integers(min_value=0, max_value=4))
-    def test_generated_only_a_usable_root_produces_a_destination(
-        self,
-        root_kind: int,
-    ) -> None:
-        """Property: invariant 2 holds across every configured-root shape."""
-        from scripts import importer
-
-        source = self._source_dir()
-        usable_root = tempfile.mkdtemp(prefix="cratedigger-quarantine-root-")
-        self.addCleanup(shutil.rmtree, usable_root, ignore_errors=True)
-        roots: tuple[str | None, ...] = (
-            None,
-            "",
-            "   ",
-            os.path.join(usable_root, "missing"),
-            usable_root,
-        )
-        root = roots[root_kind]
-
-        refused = False
-        destination: str | None = None
-        try:
-            intent = importer._automation_cleanup_intent(
-                source_path=source,
-                plan=self._plan(source, root),
-            )
-        except RuntimeError:
-            refused = True
-        else:
-            destination = intent.destination_path
-
-        violation = quarantine_intent_violation(
-            configured_root=root or "",
-            refused=refused,
-            destination_path=destination,
-        )
-        self.assertIsNone(violation, violation)
 
 
 # Every distinct world-failure class the automation branch of
@@ -9334,33 +9165,3 @@ class TestTerminalStageInvariantCheckersTripOnViolations(unittest.TestCase):
         assert violation is not None
         self.assertIn("released the owner", violation)
 
-    def test_cwd_derived_destination_is_reported(self) -> None:
-        violation = quarantine_intent_violation(
-            configured_root="",
-            refused=False,
-            destination_path=os.path.join(
-                os.getcwd(), "failed_imports", "bad_files", "Album",
-            ),
-        )
-        assert violation is not None
-        self.assertIn("was journalled", violation)
-
-    def test_refusing_a_usable_root_is_reported(self) -> None:
-        with tempfile.TemporaryDirectory() as root:
-            violation = quarantine_intent_violation(
-                configured_root=root,
-                refused=True,
-                destination_path=None,
-            )
-            assert violation is not None
-            self.assertIn("was refused", violation)
-
-    def test_destination_outside_the_configured_root_is_reported(self) -> None:
-        with tempfile.TemporaryDirectory() as root:
-            violation = quarantine_intent_violation(
-                configured_root=root,
-                refused=False,
-                destination_path="/elsewhere/failed_imports/bad_files/Album",
-            )
-            assert violation is not None
-            self.assertIn("escaped the configured", violation)
