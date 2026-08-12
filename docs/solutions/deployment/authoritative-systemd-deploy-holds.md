@@ -59,8 +59,14 @@ three controlled workers. The drain that proves this happened is
 `SERVICE_UNITS` (every unit the module knows about), not the narrower
 `GATE_STOPPED_UNITS`: `cratedigger.service` is itself gate-guarded, so the
 hold should already have stopped it if it was running, but nothing before
-that re-verified it for main specifically -- the one unit this module never
-protects with a start inhibitor (#1078 BLOCKER F3). YouTube is
+that re-verified it for main specifically. This pre-hold window is the one
+place this module ever leaves `cratedigger.service` without a start
+inhibitor -- `prepare_controlled` establishes one for its own post-release
+window, precisely because a manual start or a foreign hold's
+`resume-if-clear` would otherwise start main there too. Here, the timer
+mask alone does not cover either: it blocks only the timer trigger, not a
+manual `systemctl start` or an unrelated hold's `resume-if-clear` (#1078
+BLOCKER F3). YouTube is
 `Type=simple`, `wantedBy=multi-user.target`, `Restart=on-failure`, with no
 timer at all -- an always-on daemon nothing before the gate hold ever asks to
 stop. Draining it pre-hold (the original #1078 fix's mistake) waits the full

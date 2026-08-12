@@ -563,8 +563,9 @@ class TestAcquireAuthoritativeHold(unittest.TestCase):
         })
         # #1078 MUST FIX 5: the pre-hold window owns no start inhibitor at
         # all -- nothing is waited on for YouTube pre-hold, and masking
-        # already blocks a new main-cycle trigger -- so a reboot here
-        # leaves no persistent /var/lib artifact to orphan.
+        # already blocks a fresh timer trigger (though not an unrelated
+        # hold's resume-if-clear) -- so a reboot here leaves no persistent
+        # /var/lib artifact to orphan.
         self.assertEqual(backend.owned_inhibitor_units(), ())
         self.assertEqual(backend.inhibitor_files, set())
 
@@ -886,11 +887,11 @@ class TestStagedRelease(unittest.TestCase):
     def test_recovery_from_complete_pending_preserves_the_captured_successor_on_failure(
         self,
     ) -> None:
-        """A recover-held that fails mid-branch must not destroy the
-        captured ordinary successor -- otherwise a retried complete_release
-        can never finish with the original identity and the whole release
-        has to be redone, even though recovery itself never got anywhere
-        near re-establishing HELD.
+        """A recover-held that fails mid-branch must not destroy state
+        before the boundary it belongs to is re-proven -- forward hygiene,
+        not a live escape hatch: complete_release is refused anyway here
+        (the manual hold is already re-owned by the time _clear_owned_inhibitors
+        fails), so nothing downstream reads the preserved marker today.
         """
         prepare_controlled(self.backend)
         open_main_timer(self.backend)

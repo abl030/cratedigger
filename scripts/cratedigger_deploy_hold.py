@@ -1390,14 +1390,20 @@ def _drain_producers_then_hold(backend: DeployHoldBackend) -> None:
     explicitly restarts). ``cratedigger.service`` is itself gate-guarded, so
     the hold should already have stopped it if it was running -- exactly as
     it stops web/preview/importer/YouTube -- but nothing before this
-    verified that for main specifically, the one unit this module does not
-    protect with a start inhibitor at any point. Without re-checking it
-    here, acquire could reach HELD with a main cycle still active if it was
-    started (by hand, or any other trigger) during the queue-drain wait
-    above -- and the migration runs between ``acquire`` and ``verify-held``
-    (#1078 BLOCKER F3). Re-verifying the three timer-driven producers here
-    too is redundant in the ordinary case (the first drain already proved
-    them inactive) but free: nothing between the two drains restarts them.
+    verified that for main specifically. This pre-hold window is the one
+    place this module ever leaves ``cratedigger.service`` without a start
+    inhibitor -- ``prepare_controlled`` establishes one for its own
+    post-release window, precisely because a manual start or a foreign
+    hold's ``resume-if-clear`` would otherwise start main there too. Here,
+    the timer mask alone does not cover either: it blocks only the timer
+    trigger, not a manual ``systemctl start`` or an unrelated hold's
+    ``resume-if-clear``. Without re-checking it here, acquire could reach
+    HELD with a main cycle still active if it was started that way during
+    the queue-drain wait above -- and the migration runs between
+    ``acquire`` and ``verify-held`` (#1078 BLOCKER F3). Re-verifying the
+    three timer-driven producers here too is redundant in the ordinary case
+    (the first drain already proved them inactive) but free: nothing
+    between the two drains restarts them.
     """
     _drain_services(backend, TIMER_DRIVEN_PRODUCER_UNITS)
     _wait_automation_queue_drained(backend)
@@ -1482,16 +1488,21 @@ def recover_held(backend: DeployHoldBackend) -> None:
         _ensure_owned_manual_hold(backend)
         _drain_services(backend, SERVICE_UNITS)
         _clear_owned_inhibitors(backend)
-    # Only clear a previously captured ordinary-successor identity once the
-    # branch above has actually re-proven the full HELD boundary -- clearing
-    # it up front (this function's prior shape) destroyed a complete-pending
-    # receipt's captured successor even when the branch itself failed partway
-    # and never reached HELD, leaving complete_release's read_ordinary_invocation()
-    # with nothing to compare against and forcing the whole release to be
-    # redone. write_ordinary_invocation's replace=False is why some clear is
-    # still needed here at all: a later finish_release, redone from a fresh
-    # HELD boundary, must be able to write a new marker without tripping over
-    # a stale one this recovery leaves behind.
+    # Clear a previously captured ordinary-successor identity only once the
+    # branch above has actually re-proven the full HELD boundary -- not
+    # unconditionally up front (this function's prior shape). This is
+    # forward hygiene, not a live escape hatch: a recover_held that fails
+    # mid-branch already re-masks every timer (_mask_and_stop_timers runs
+    # unconditionally, above, before this branch) and, in the else branch,
+    # may already own the manual hold again, so complete_release is refused
+    # by its own manual-hold/owned-link checks regardless of whether the
+    # marker survives -- no reachable command consumes it today. Clearing
+    # early just destroyed state before the boundary it belongs to was
+    # re-proven, for no operator-visible benefit. write_ordinary_invocation's
+    # replace=False is why some clear is still needed here at all: a later
+    # finish_release, redone from a fresh HELD boundary, must be able to
+    # write a new marker without tripping over a stale one this recovery
+    # leaves behind.
     backend.clear_ordinary_invocation()
     backend.write_phase(PHASE_HELD)
 
