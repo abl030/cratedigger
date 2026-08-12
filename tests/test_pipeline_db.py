@@ -18,7 +18,7 @@ from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar, TypedDict, cast
 from unittest.mock import patch
 
 import msgspec
@@ -94,6 +94,7 @@ def make_db():
         "album_quality_evidence",
         "peer_observations",
         "cycle_metrics",
+        "unfindable_run_metrics",
         "bad_audio_hashes",
         "processing_cleanup_journal",
         "import_jobs",
@@ -153,6 +154,7 @@ class TestMakeDbIsolation(unittest.TestCase):
                 "album_quality_evidence",
                 "peer_observations",
                 "cycle_metrics",
+                "unfindable_run_metrics",
                 "bad_audio_hashes",
                 "processing_cleanup_journal",
                 "import_jobs",
@@ -902,6 +904,7 @@ class TestSchemaCreation(unittest.TestCase):
         self.assertIn("user_cooldowns", table_names)
         self.assertIn("import_jobs", table_names)
         self.assertIn("cycle_metrics", table_names)
+        self.assertIn("unfindable_run_metrics", table_names)
         self.assertIn("peer_observations", table_names)
         # Migration 039 dropped the peer/dir combo experiment (#227).
         self.assertNotIn("peer_dir_observations", table_names)
@@ -5639,6 +5642,57 @@ class TestPipelineDashboardMetrics(unittest.TestCase):
         self.assertEqual(heavy[0]["fanout_waves"], 3)
         self.assertEqual(heavy[0]["browse_time_s"], 12.5)
         self.assertEqual(metrics["cycles"]["outliers"][0]["cycle_total_s"], 900.0)
+
+    def test_dashboard_unfindable_block_empty_then_populated(self):
+        """The dashboard's ``unfindable`` block renders sanely with no
+        rows (honest empty state, #1112) and surfaces recent runs +
+        backlog trend newest-first once runs exist."""
+        empty_metrics = self.db.get_pipeline_dashboard_metrics()
+        empty_unfindable = empty_metrics["unfindable"]
+        self.assertEqual(empty_unfindable["recent_runs"], [])
+        self.assertEqual(empty_unfindable["backlog_trend"], {
+            "current_backlog": None,
+            "latest_sample_at": None,
+            "series": [],
+        })
+
+        self.db.record_unfindable_run_metrics(
+            cohort_total=1301, due_backlog_at_start=900,
+            batch_limit=240, candidates_processed=240, probes_attempted=240,
+            categorised_count=5, downgraded_count=1, no_change_count=210,
+            probe_failed_count=24, breaker_tripped=False,
+            duration_seconds=6900.0,
+        )
+        self.db.record_unfindable_run_metrics(
+            cohort_total=1301, due_backlog_at_start=686,
+            batch_limit=240, candidates_processed=90, probes_attempted=90,
+            probe_failed_count=90, breaker_tripped=True,
+            duration_seconds=1800.0,
+        )
+
+        metrics = self.db.get_pipeline_dashboard_metrics()
+        unfindable = metrics["unfindable"]
+        recent = unfindable["recent_runs"]
+        self.assertEqual(len(recent), 2)
+        # Newest first.
+        self.assertEqual(recent[0]["due_backlog_at_start"], 686)
+        self.assertTrue(recent[0]["breaker_tripped"])
+        self.assertEqual(recent[1]["due_backlog_at_start"], 900)
+        self.assertFalse(recent[1]["breaker_tripped"])
+        self.assertIsInstance(recent[0]["created_at"], str)
+
+        trend = unfindable["backlog_trend"]
+        self.assertEqual(trend["current_backlog"], 686)
+        self.assertEqual(trend["latest_sample_at"], recent[0]["created_at"])
+        # Chronological (oldest first) — the inverse of recent_runs.
+        self.assertEqual(
+            [pt["due_backlog_at_start"] for pt in trend["series"]],
+            [900, 686],
+        )
+        self.assertEqual(
+            [pt["candidates_processed"] for pt in trend["series"]],
+            [240, 90],
+        )
 
     def test_cycle_rows_select_recent_and_24_hour_slowest_cycles(self):
         now = datetime.now(UTC)
@@ -13451,6 +13505,28 @@ class TestMarkImportedWithRescue(unittest.TestCase):
         self.assertEqual(retried["prior_unfindable_category"], "artist_absent")
 
 
+class _RecordUnfindableRunMetricsKwargs(TypedDict):
+    """Exact kwarg shape of ``PipelineDB.record_unfindable_run_metrics``
+    (#1112) -- lets the Rule A round-trip test build ONE typed dict, pass
+    it as ``**kwargs`` to the writer, then loop over the SAME dict for
+    every assertion (F6, review round 1) with full pyright coverage on
+    both the call and the loop."""
+
+    cohort_total: int
+    due_backlog_at_start: int
+    batch_limit: int
+    candidates_processed: int
+    probes_attempted: int
+    categorised_count: int
+    downgraded_count: int
+    no_change_count: int
+    probe_failed_count: int
+    not_due_count: int
+    request_not_found_count: int
+    breaker_tripped: bool
+    duration_seconds: float
+
+
 @requires_postgres
 class TestUnfindableDetectionPipelineDB(unittest.TestCase):
     """U13: real-PG round-trip coverage for the 4 detection writers.
@@ -13683,6 +13759,131 @@ class TestUnfindableDetectionPipelineDB(unittest.TestCase):
         self.assertEqual(sig.zero_find_cycles, 3)
         # One wrong-pressing hit (cycle 0).
         self.assertEqual(sig.wrong_pressing_hits, 1)
+
+    # ---- record_unfindable_run_metrics (#1112) ----
+
+    def test_record_unfindable_run_metrics_round_trip_preserves_every_field(
+        self,
+    ) -> None:
+        """Every kwarg passed to the writer reads back via the getter
+        (Rule A, canonical loop form -- a 15th column can't silently
+        skip assertion)."""
+        db = make_db()
+
+        # candidates_processed (243) = categorised(11) + downgraded(2) +
+        # no_change(190) + probe_failed(34) + not_due(1) +
+        # request_not_found(5); probes_attempted (237) = candidates_processed
+        # - not_due(1) - request_not_found(5). Migration 077's two CHECK
+        # constraints (#1112 review round 2, R5) enforce both arithmetically
+        # -- a fixture that violates either now fails INSERT, not just the
+        # partition-invariant prose three lines away.
+        kwargs: _RecordUnfindableRunMetricsKwargs = {
+            "cohort_total": 1301,
+            "due_backlog_at_start": 686,
+            "batch_limit": 240,
+            "candidates_processed": 243,
+            "probes_attempted": 237,
+            "categorised_count": 11,
+            "downgraded_count": 2,
+            "no_change_count": 190,
+            "probe_failed_count": 34,
+            "not_due_count": 1,
+            "request_not_found_count": 5,
+            "breaker_tripped": False,
+            "duration_seconds": 6961.5,
+        }
+        new_id = db.record_unfindable_run_metrics(**kwargs)
+
+        rows = db.get_unfindable_run_metrics(limit=5)
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["id"], new_id)
+        self.assertIsInstance(row["created_at"], datetime)
+        for key, value in kwargs.items():
+            self.assertEqual(
+                row[key], value, f"field {key} was dropped at the PG boundary")
+
+    def test_record_unfindable_run_metrics_defaults_outcome_counts_to_zero(
+        self,
+    ) -> None:
+        """A breaker-tripped run before any outcome is recorded still
+        writes a valid row -- the six outcome counts default to 0."""
+        db = make_db()
+
+        db.record_unfindable_run_metrics(
+            cohort_total=50,
+            due_backlog_at_start=50,
+            batch_limit=240,
+            candidates_processed=0,
+            probes_attempted=0,
+            breaker_tripped=True,
+            duration_seconds=3.2,
+        )
+
+        row = db.get_unfindable_run_metrics(limit=1)[0]
+        self.assertEqual(row["candidates_processed"], 0)
+        self.assertEqual(row["probes_attempted"], 0)
+        self.assertTrue(row["breaker_tripped"])
+        for key in (
+            "categorised_count", "downgraded_count", "no_change_count",
+            "probe_failed_count", "not_due_count",
+            "request_not_found_count",
+        ):
+            self.assertEqual(row[key], 0, key)
+
+    def test_get_unfindable_run_metrics_orders_newest_first(self) -> None:
+        db = make_db()
+        for probes in (10, 20, 30):
+            db.record_unfindable_run_metrics(
+                cohort_total=100, due_backlog_at_start=100,
+                batch_limit=240, candidates_processed=probes,
+                probes_attempted=probes,
+                # no_change_count=probes satisfies migration 077's
+                # partition CHECK (the six outcome counts must sum to
+                # candidates_processed) with every other count at its
+                # zero default.
+                no_change_count=probes,
+                breaker_tripped=False, duration_seconds=1.0,
+            )
+
+        rows = db.get_unfindable_run_metrics(limit=10)
+        self.assertEqual([r["probes_attempted"] for r in rows], [30, 20, 10])
+
+    def test_record_unfindable_run_metrics_rejects_non_partitioning_counts(
+        self,
+    ) -> None:
+        """unfindable_run_metrics_partition_check (migration 077, #1112
+        review round 2 R5): the six RESULT_* outcome counts must sum to
+        candidates_processed exactly, DB-enforced."""
+        from psycopg2.errors import CheckViolation
+
+        db = make_db()
+        with self.assertRaises(CheckViolation):
+            db.record_unfindable_run_metrics(
+                cohort_total=10, due_backlog_at_start=5,
+                batch_limit=5, candidates_processed=5, probes_attempted=5,
+                breaker_tripped=False, duration_seconds=1.0,
+                categorised_count=1, no_change_count=1,  # sums to 2, not 5
+            )
+
+    def test_record_unfindable_run_metrics_rejects_wrong_probes_attempted(
+        self,
+    ) -> None:
+        """unfindable_run_metrics_probes_attempted_check (migration 077,
+        #1112 review round 2 R5): probes_attempted must equal
+        candidates_processed minus not_due_count minus
+        request_not_found_count, DB-enforced."""
+        from psycopg2.errors import CheckViolation
+
+        db = make_db()
+        with self.assertRaises(CheckViolation):
+            db.record_unfindable_run_metrics(
+                cohort_total=10, due_backlog_at_start=5,
+                batch_limit=5, candidates_processed=5,
+                probes_attempted=5,  # should be 5 - 0 - 2 = 3
+                breaker_tripped=False, duration_seconds=1.0,
+                no_change_count=3, request_not_found_count=2,
+            )
 
 
 @requires_postgres
@@ -14792,6 +14993,12 @@ class TestDashboardFakeParity(unittest.TestCase):
             wanted_total=10,
         )
         db.record_peer_observations(["peer-a", "peer-b"])
+        db.record_unfindable_run_metrics(
+            cohort_total=10, due_backlog_at_start=5,
+            batch_limit=5, candidates_processed=5, probes_attempted=5,
+            breaker_tripped=False, duration_seconds=12.5,
+            categorised_count=1, no_change_count=4,
+        )
 
     @classmethod
     def _shape(cls, value: Any) -> Any:

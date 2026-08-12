@@ -1,11 +1,12 @@
 """Deterministic tests for the unfindable-detection oneshot's run-health
-exit code (issue #1090).
+exit code (issue #1090) and run-metrics telemetry (issue #1112).
 
 ``main()`` wires a real ``PipelineDB``/``SlskdClient`` from runtime
 config — not worth mocking end-to-end for a process exit-code contract.
 ``_process_batch`` is the extracted, directly testable seam: given an
-already-constructed ``UnfindableDetectionService``, it drives one
-due-batch pass, logs per-row outcomes, and returns the process exit
+already-constructed ``UnfindableDetectionService`` and its ``db``, it
+drives one due-batch pass, logs per-row outcomes, records one
+``unfindable_run_metrics`` row (#1112), and returns the process exit
 code. This module drives the REAL production service against
 ``FakePipelineDB`` + ``FakeSlskdAPI`` and pins the two exit-code
 branches: a fully classified run (0) vs. an incomplete run where the
@@ -62,7 +63,10 @@ class TestProcessBatchExitCode(unittest.TestCase):
 
         svc = UnfindableDetectionService(
             self.db, self.slskd, probe_runner=_probe)
-        exit_code = _process_batch(svc, limit=10)
+        exit_code = _process_batch(
+            svc, self.db, limit=10,
+            cohort_total=1, due_backlog_at_start=1,
+        )
         self.assertEqual(exit_code, 0)
 
     def test_breaker_tripped_run_returns_distinct_exit_code(self) -> None:
@@ -78,7 +82,10 @@ class TestProcessBatchExitCode(unittest.TestCase):
         svc = UnfindableDetectionService(
             self.db, self.slskd, probe_runner=_always_submit_failure,
         )
-        exit_code = _process_batch(svc, limit=10)
+        exit_code = _process_batch(
+            svc, self.db, limit=10,
+            cohort_total=5, due_backlog_at_start=5,
+        )
         self.assertEqual(exit_code, EXIT_INCOMPLETE_RUN)
         self.assertNotEqual(exit_code, 0)
 
@@ -90,6 +97,122 @@ class TestProcessBatchExitCode(unittest.TestCase):
         self.assertNotEqual(EXIT_INCOMPLETE_RUN, EXIT_CONFIG_ABORT)
         self.assertNotEqual(EXIT_INCOMPLETE_RUN, 0)
         self.assertNotEqual(EXIT_CONFIG_ABORT, 0)
+
+
+class TestProcessBatchRunMetrics(unittest.TestCase):
+    """Issue #1112: every ``_process_batch`` call writes exactly one
+    ``unfindable_run_metrics`` row -- for both a fully classified run
+    and a breaker-tripped (incomplete) one."""
+
+    def setUp(self) -> None:
+        self.db = FakePipelineDB()
+        self.slskd = FakeSlskdAPI()
+
+    def test_fully_classified_run_records_one_metrics_row_with_outcomes(
+        self,
+    ) -> None:
+        _seed_wanted_request(self.db, artist_name="Fine Artist")
+        _seed_wanted_request(self.db, artist_name="Solo Artist")
+
+        def _probe(
+            _client: object, *, artist_name: str, **_kw: object,
+        ) -> ArtistProbeResult:
+            return ArtistProbeResult(match_count=50, artist_observed=True)
+
+        svc = UnfindableDetectionService(
+            self.db, self.slskd, probe_runner=_probe)
+        exit_code = _process_batch(
+            svc, self.db, limit=10,
+            cohort_total=2, due_backlog_at_start=2,
+        )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(self.db.unfindable_run_metrics), 1)
+        row = self.db.unfindable_run_metrics[0]
+        self.assertEqual(row["cohort_total"], 2)
+        self.assertEqual(row["due_backlog_at_start"], 2)
+        self.assertEqual(row["batch_limit"], 10)
+        self.assertEqual(row["candidates_processed"], 2)
+        self.assertEqual(row["probes_attempted"], 2)
+        self.assertFalse(row["breaker_tripped"])
+        self.assertGreaterEqual(row["duration_seconds"], 0.0)
+        # Both requests matched — neither categorised nor downgraded.
+        self.assertEqual(row["no_change_count"], 2)
+        self.assertEqual(row["categorised_count"], 0)
+        self.assertEqual(row["probe_failed_count"], 0)
+
+    def test_breaker_tripped_run_still_records_a_metrics_row(self) -> None:
+        """A partial/failed run is exactly what the operator needs to
+        see on the dashboard — the metrics write is unconditional."""
+        for i in range(5):
+            _seed_wanted_request(self.db, artist_name=f"Artist{i}")
+
+        def _always_submit_failure(
+            _client: object, *, artist_name: str, **_kw: object,
+        ) -> ArtistProbeResult:
+            raise SearchSubmitError(
+                "simulated sustained slskd outage", retry_exhausted=True)
+
+        svc = UnfindableDetectionService(
+            self.db, self.slskd, probe_runner=_always_submit_failure,
+        )
+        exit_code = _process_batch(
+            svc, self.db, limit=10,
+            cohort_total=5, due_backlog_at_start=5,
+        )
+
+        self.assertEqual(exit_code, EXIT_INCOMPLETE_RUN)
+        self.assertEqual(len(self.db.unfindable_run_metrics), 1)
+        row = self.db.unfindable_run_metrics[0]
+        self.assertTrue(row["breaker_tripped"])
+        # Circuit breaker trips after 3 consecutive submit failures —
+        # fewer than all 5 candidates were attempted.
+        self.assertEqual(row["candidates_processed"], 3)
+        self.assertEqual(row["probes_attempted"], 3)
+        self.assertEqual(row["probe_failed_count"], 3)
+        self.assertEqual(row["cohort_total"], 5)
+        self.assertEqual(row["due_backlog_at_start"], 5)
+
+    def test_probes_attempted_excludes_request_not_found(self) -> None:
+        """F7 (#1112): ``candidates_processed`` counts every attempted
+        candidate; ``probes_attempted`` excludes ``RESULT_REQUEST_NOT_FOUND``
+        (and ``RESULT_NOT_DUE``, which ``categorise_due_batch``'s due-
+        filtered candidate list structurally cannot produce) -- outcomes
+        decided before any probe fires.
+
+        Simulates the TOCTOU race directly: request B is already in the
+        due-candidate list (drawn once, up front, by ``categorise_due_batch``)
+        when request A's probe callback deletes it out from under the
+        batch -- exactly what a concurrent operator/rescue action racing
+        the daily run looks like from the fake's point of view.
+        """
+        # Artist A seeded first -> lower id -> sorts first in
+        # list_unfindable_probe_candidates' NULLS-FIRST, id-ascending
+        # order, so its probe callback fires before Artist B's.
+        _seed_wanted_request(self.db, artist_name="Artist A")
+        rid_b = _seed_wanted_request(self.db, artist_name="Artist B")
+
+        def _probe(
+            _client: object, *, artist_name: str, **_kw: object,
+        ) -> ArtistProbeResult:
+            if artist_name == "Artist A":
+                del self.db._requests[rid_b]
+            return ArtistProbeResult(match_count=50, artist_observed=True)
+
+        svc = UnfindableDetectionService(self.db, self.slskd, probe_runner=_probe)
+        exit_code = _process_batch(
+            svc, self.db, limit=10,
+            cohort_total=2, due_backlog_at_start=2,
+        )
+
+        self.assertEqual(exit_code, 0)
+        row = self.db.unfindable_run_metrics[0]
+        self.assertEqual(row["candidates_processed"], 2)
+        self.assertEqual(row["not_due_count"], 0)
+        self.assertEqual(row["request_not_found_count"], 1)
+        # 2 processed - 0 not_due - 1 request_not_found = 1 real probe
+        # (Artist A's) -- Artist B's vanished row never reached slskd.
+        self.assertEqual(row["probes_attempted"], 1)
 
 
 if __name__ == "__main__":

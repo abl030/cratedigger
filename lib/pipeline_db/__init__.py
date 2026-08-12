@@ -95,6 +95,10 @@ from lib.pipeline_db.cleanup_journal import (
     ProcessingCleanupJournalRow,
     cleanup_journal_row,
 )
+from lib.pipeline_db.dashboard import (
+    UnfindableRunMetricsPresentation,
+    UnfindableRunMetricsRow,
+)
 from lib.pipeline_db.download_log import (
     DOWNLOAD_LOG_OUTCOMES,
     DownloadLogCounts,
@@ -212,6 +216,8 @@ __all__ = [
     "SearchPlanStatsGroup",
     "SupersedeRaceError",
     "TransferLedgerRow",
+    "UnfindableRunMetricsPresentation",
+    "UnfindableRunMetricsRow",
     "WantedReconciliationCandidate",
     "WrongMatchCandidateRow",
     "YoutubeInFlightError",

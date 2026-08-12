@@ -1,7 +1,7 @@
 """Pipeline dashboard metrics, cycle telemetry, peer roster counters."""
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, TypedDict
 
 from lib.pipeline_db._core import _PipelineDBBase
 from lib.pipeline_db._shared import (
@@ -14,6 +14,54 @@ from lib.pipeline_db._shared import (
     _peer_hash,
     pg_execute_values,
 )
+
+
+class UnfindableRunMetricsRow(TypedDict):
+    """One ``unfindable_run_metrics`` row (#1112), raw column values.
+
+    ``candidates_processed`` is every attempted candidate -- the six
+    ``*_count`` fields partition it exactly. ``probes_attempted`` is the
+    narrower subset that actually fired a Soulseek search: it excludes
+    ``not_due_count`` and ``request_not_found_count``, decided before any
+    probe (review round 1, F7).
+    """
+
+    id: int
+    created_at: datetime
+    cohort_total: int
+    due_backlog_at_start: int
+    batch_limit: int
+    candidates_processed: int
+    probes_attempted: int
+    categorised_count: int
+    downgraded_count: int
+    no_change_count: int
+    probe_failed_count: int
+    not_due_count: int
+    request_not_found_count: int
+    breaker_tripped: bool
+    duration_seconds: float
+
+
+class UnfindableRunMetricsPresentation(TypedDict):
+    """JSON-safe rendering of one ``UnfindableRunMetricsRow`` for the
+    dashboard payload (``created_at`` isoformatted)."""
+
+    id: int
+    created_at: str | None
+    cohort_total: int
+    due_backlog_at_start: int
+    batch_limit: int
+    candidates_processed: int
+    probes_attempted: int
+    categorised_count: int
+    downgraded_count: int
+    no_change_count: int
+    probe_failed_count: int
+    not_due_count: int
+    request_not_found_count: int
+    breaker_tripped: bool
+    duration_seconds: float
 
 
 class _DashboardMixin(_PipelineDBBase):
@@ -90,6 +138,174 @@ class _DashboardMixin(_PipelineDBBase):
         """, (list(DASHBOARD_WANTED_BACKLOG_STATUSES),))
         row = cur.fetchone()
         return int((row.get("wanted_total") if row else None) or 0)
+
+
+    # -- Unfindable-detection run telemetry (#1112) --------------------------
+
+    def record_unfindable_run_metrics(
+        self,
+        *,
+        cohort_total: int,
+        due_backlog_at_start: int,
+        batch_limit: int,
+        candidates_processed: int,
+        probes_attempted: int,
+        breaker_tripped: bool,
+        duration_seconds: float,
+        categorised_count: int = 0,
+        downgraded_count: int = 0,
+        no_change_count: int = 0,
+        probe_failed_count: int = 0,
+        not_due_count: int = 0,
+        request_not_found_count: int = 0,
+    ) -> int:
+        """Persist one completed ``cratedigger-unfindable.service`` run.
+
+        Mirrors ``record_cycle_metrics``: one compact row per run so the
+        dashboard can show run health without scraping journal logs.
+        Written for both a fully classified run AND a breaker-tripped
+        (incomplete) run -- a failed/partial run is exactly the signal an
+        operator needs to see (issue #1112). NOT written for a run that
+        aborts before any probe work starts (missing slskd config, or a
+        behind/missing DB schema) -- there is no cohort/backlog reading to
+        report yet, and a behind schema may not even have this table.
+
+        The six ``*_count`` fields are one column per
+        ``lib.unfindable_detection_service.RESULT_*`` outcome constant --
+        the exact taxonomy ``categorise_due_batch`` can return for an
+        attempted candidate -- and partition ``candidates_processed``
+        exactly. ``probes_attempted`` is the narrower subset that
+        actually fired a Soulseek search (review round 1, F7): the
+        caller derives it as
+        ``candidates_processed - not_due_count - request_not_found_count``.
+        """
+        cur = self._execute("""
+            INSERT INTO unfindable_run_metrics (
+                cohort_total, due_backlog_at_start, batch_limit,
+                candidates_processed, probes_attempted, categorised_count,
+                downgraded_count, no_change_count, probe_failed_count,
+                not_due_count, request_not_found_count, breaker_tripped,
+                duration_seconds
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+        """, (
+            cohort_total, due_backlog_at_start, batch_limit,
+            candidates_processed, probes_attempted, categorised_count,
+            downgraded_count, no_change_count, probe_failed_count,
+            not_due_count, request_not_found_count, breaker_tripped,
+            duration_seconds,
+        ))
+        row = cur.fetchone()
+        self.conn.commit()
+        assert row is not None, "INSERT RETURNING should always return a row"
+        return int(row["id"])
+
+
+    def get_unfindable_run_metrics(
+        self, *, limit: int = 30,
+    ) -> list[UnfindableRunMetricsRow]:
+        """Return the most recent unfindable-detection run rows, newest
+        first. Raw column values (real ``datetime``/``bool``) -- the
+        dashboard's ``_dashboard_unfindable`` serializes these to the
+        JSON-safe envelope; this is the Rule A round-trip surface."""
+        cur = self._execute("""
+            SELECT id, created_at, cohort_total, due_backlog_at_start,
+                   batch_limit, candidates_processed, probes_attempted,
+                   categorised_count, downgraded_count, no_change_count,
+                   probe_failed_count, not_due_count,
+                   request_not_found_count, breaker_tripped,
+                   duration_seconds
+            FROM unfindable_run_metrics
+            ORDER BY created_at DESC, id DESC
+            LIMIT %s
+        """, (int(limit),))
+        return [
+            UnfindableRunMetricsRow(
+                id=int(r["id"]),
+                created_at=r["created_at"],
+                cohort_total=int(r["cohort_total"]),
+                due_backlog_at_start=int(r["due_backlog_at_start"]),
+                batch_limit=int(r["batch_limit"]),
+                candidates_processed=int(r["candidates_processed"]),
+                probes_attempted=int(r["probes_attempted"]),
+                categorised_count=int(r["categorised_count"]),
+                downgraded_count=int(r["downgraded_count"]),
+                no_change_count=int(r["no_change_count"]),
+                probe_failed_count=int(r["probe_failed_count"]),
+                not_due_count=int(r["not_due_count"]),
+                request_not_found_count=int(r["request_not_found_count"]),
+                breaker_tripped=bool(r["breaker_tripped"]),
+                duration_seconds=float(r["duration_seconds"]),
+            )
+            for r in cur.fetchall()
+        ]
+
+
+    def _dashboard_unfindable(
+        self,
+    ) -> dict[str, list[UnfindableRunMetricsPresentation] | dict[str, object]]:
+        """Recent unfindable-detection run health + backlog trend (#1112).
+
+        ``recent_runs`` gives latest-run-first operator facts (when,
+        attempted, per-outcome counts, breaker). ``backlog_trend`` is the
+        due-backlog/probes series across those same runs, shaped like the
+        ``_dashboard_wanted_trend`` idiom (a ``current_*`` snapshot, a
+        ``latest_sample_at``, and a chronological ``series``) but at the
+        daily run grain rather than a live-computed window/ETA — the
+        detection job fires once a day, so there is no "last 6h" signal
+        to bucket.
+        """
+        rows = [
+            self._serialize_unfindable_run_row(r)
+            for r in self.get_unfindable_run_metrics(limit=14)
+        ]
+        chronological = list(reversed(rows))
+        series: list[dict[str, object]] = [
+            {
+                "sampled_at": r["created_at"],
+                "due_backlog_at_start": r["due_backlog_at_start"],
+                # candidates_processed, not probes_attempted (review round
+                # 2, R nit): the truer per-run capacity number -- every
+                # candidate the batch actually touched, not just the
+                # subset that fired a probe.
+                "candidates_processed": r["candidates_processed"],
+            }
+            for r in chronological
+        ]
+        latest = rows[0] if rows else None
+        return {
+            "recent_runs": rows,
+            "backlog_trend": {
+                "current_backlog": (
+                    latest["due_backlog_at_start"] if latest else None
+                ),
+                "latest_sample_at": latest["created_at"] if latest else None,
+                "series": series,
+            },
+        }
+
+
+    def _serialize_unfindable_run_row(
+        self, row: UnfindableRunMetricsRow,
+    ) -> UnfindableRunMetricsPresentation:
+        return UnfindableRunMetricsPresentation(
+            id=row["id"],
+            created_at=_isoformat_or_none(row["created_at"]),
+            cohort_total=row["cohort_total"],
+            due_backlog_at_start=row["due_backlog_at_start"],
+            batch_limit=row["batch_limit"],
+            candidates_processed=row["candidates_processed"],
+            probes_attempted=row["probes_attempted"],
+            categorised_count=row["categorised_count"],
+            downgraded_count=row["downgraded_count"],
+            no_change_count=row["no_change_count"],
+            probe_failed_count=row["probe_failed_count"],
+            not_due_count=row["not_due_count"],
+            request_not_found_count=row["request_not_found_count"],
+            breaker_tripped=row["breaker_tripped"],
+            duration_seconds=row["duration_seconds"],
+        )
 
 
     def record_peer_observations(
@@ -278,6 +494,7 @@ class _DashboardMixin(_PipelineDBBase):
             "coverage": self._dashboard_coverage(),
             "peers": peers,
             "plan_readiness": plan_readiness,
+            "unfindable": self._dashboard_unfindable(),
         }
 
 

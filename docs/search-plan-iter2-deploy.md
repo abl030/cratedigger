@@ -748,9 +748,12 @@ distribution:
 | `one_track_structural` | 3 |
 
 (The `one_track_structural` rows were already seeded by migration 033;
-the run re-asserted them.) The detection unit runs K=100 rows per
-batch on its daily timer with a weekly per-request cadence target —
-full cohort coverage takes ~9 days at this rate.
+the run re-asserted them.) The detection unit ran K=100 rows per batch
+on its daily timer at this point, with a weekly per-request cadence
+target — full cohort coverage took ~9 days at this rate. (Batch size is
+a config fact, not a procedure — this is now stale: `DEFAULT_BATCH_SIZE`
+was raised 100 → 240 in issue #1112 once the cohort outgrew K=100's
+throughput; see `lib/unfindable_detection_service.py`.)
 
 Verify the categorisation surfaced:
 
@@ -781,10 +784,12 @@ the `RandomizedDelaySec=30min` jitter.
   only gets a `failure_class` when its cursor wraps under PR3 code.
   Rows with very long plans wrap less often; expect a slow ramp to
   full coverage over the first ~24h.
-- **Detection cohort coverage takes ~9 days.** K=100/day × ~830
-  wanted requests + weekly per-request cadence → first complete
-  sweep finishes in ~9 days. Cohort distribution numbers stabilise
-  after that.
+- **Detection cohort coverage took ~9 days at PR3 deploy.** K=100/day ×
+  ~830 wanted requests + weekly per-request cadence → first complete
+  sweep finished in ~9 days. Cohort distribution numbers stabilise
+  after that. (Stale as a current figure: `DEFAULT_BATCH_SIZE` is now
+  240, raised in issue #1112 because the cohort had grown past what
+  K=100 could clear inside the cadence window.)
 - **Rescue-capture is forward-only.** Requests imported before PR3
   deploy that were categorised at the time do NOT retroactively
   populate `rescued_at` — the importer success path only captures
