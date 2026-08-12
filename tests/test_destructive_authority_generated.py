@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import logging
 import os
+import re
 import subprocess as sp
 import tempfile
 import unittest
@@ -866,6 +867,28 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
         )
         self.assertEqual(isinstance(result, BanSourceSuccess), should_succeed)
 
+    # The PG-partial arm needs reached_mutation AND purge_pipeline AND a
+    # current pipeline id AND the purge fault — a corner the suite tier's
+    # derandomized budget never draws, so the clause is pinned rather than
+    # left to fuzz entropy. Without this the pg_partial law is unmeasured on
+    # every gating run (#1094 review B1).
+    @example(
+        mb_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        discogs_id="12856590",
+        invalid_id="invalid:provider",
+        sentinel="0",
+        album_shape="mb",
+        seed_mb_pipeline=True,
+        seed_discogs_pipeline=False,
+        release_confirmation="same",
+        pipeline_confirmation="same",
+        lock_failure="none",
+        job_race=False,
+        purge_pipeline=True,
+        file_payloads=[b"mb-track"],
+        sidecar=False,
+        purge_fault=True,
+    )
     @example(
         mb_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
         discogs_id="12856590",
@@ -1166,6 +1189,9 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
                 self.assertIsNone(beets.get_album_detail(7))
                 self.assertTrue(all(not path.exists() for path in track_paths))
                 self.assertFalse(sidecar_path.exists())
+                # Unknown bytes survive a success too, not only a PG partial.
+                self.assertTrue(unknown_path.exists())
+                self.assertEqual(unknown_path.read_bytes(), b"booklet")
                 for request_id in (41, 42):
                     should_be_deleted = (
                         purge_pipeline and request_id == current_pipeline_id
@@ -1789,7 +1815,9 @@ class TestDestructiveAuthorityCheckerKnownBad(unittest.TestCase):
         for name, initial, final in clauses:
             with self.subTest(clause=name), self.assertRaisesRegex(
                 AssertionError,
-                rf"^bad rip changed searchability: {initial!r} -> {final!r}; ",
+                "^" + re.escape(
+                    f"bad rip changed searchability: {initial!r} -> {final!r}; ",
+                ),
             ):
                 assert_ban_searchability_preserved(
                     initial_status=initial, final_status=final,
@@ -1902,7 +1930,8 @@ class TestDestructiveAuthorityCheckerKnownBad(unittest.TestCase):
             self._FAIL_CLOSED_CLAUSES
         ):
             with self.subTest(clause=name), self.assertRaisesRegex(
-                AssertionError, rf"^enumeration failure {tail}$",
+                AssertionError,
+                "^" + re.escape(f"enumeration failure {tail}") + "$",
             ):
                 assert_enumeration_failure_fails_closed(
                     completed=completed,
@@ -1916,7 +1945,8 @@ class TestDestructiveAuthorityCheckerKnownBad(unittest.TestCase):
             self._FAIL_CLOSED_CLAUSES
         ):
             with self.subTest(clause=name), self.assertRaisesRegex(
-                AssertionError, rf"^presence-probe failure {tail}$",
+                AssertionError,
+                "^" + re.escape(f"presence-probe failure {tail}") + "$",
             ):
                 assert_presence_probe_failure_fails_closed(
                     completed=completed,

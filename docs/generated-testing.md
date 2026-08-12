@@ -66,7 +66,8 @@ one session): **invariant → probe → generated harness → shrink → fix**.
    world space, the invariant as a checker, real entry points, stubs only
    at allowlisted leaf seams. Hypothesis finds and shrinks the repro.
 4. RED → fix → GREEN in one PR: shrunk world pinned, invariant permanent,
-   must-still-work guard, known-bad self-test.
+   must-still-work guard, and a message-asserting known-bad self-test for
+   every clause of the checker (§ "Per-clause proof").
 5. When in doubt, plant a mutant reverting the fix — the property must
    kill it.
 
@@ -207,7 +208,7 @@ source scanner.
 | `tests/test_processing_owner_commands_generated.py`, `tests/test_import_execution_generated.py`, `tests/test_processing_cancellation_generated.py` | exact-owner DB commands, the shared execution-liveness decider, and real staged-tree/subprocess cancellation seams | every preview/import claim, evidence bind, heartbeat, path/launch mutation, and recovery action needs the request's exact owner, exact stage, and exact lease; changed boot or complete same-boot absence can prove death, while missing/contradictory/probe-error observations stay unknown; once pinned-session cancellation is observed, no later file move/remove or child process mutation starts. Owner-blind, heartbeat-only, PID-only, reconnecting, and preflight-only cancellation mutants qualify the independent checkers |
 | `tests/test_cleanup_journal_generated.py`, `tests/test_processing_cleanup_generated.py` | real PostgreSQL journal owner/revision commands plus the real dirfd/no-follow cleanup executor over generated filesystem manifests | wrong owner or revision is zero-write; exact remove/quarantine/no-op uses one persisted source/destination manifest and collision-selected target, checkpoints every idempotent mutation, safely creates only the immediate journaled quarantine parent, resumes every boundary, and completes only with a typed receipt. Owner-blind, revision-blind, path-inference, allowlisted-debris, replace-existing, unsafe-parent, and receipt-free mutants are rejected |
 | `tests/test_processing_visibility_generated.py`, `tests/test_operator_invalidation_generated.py` | production owner projection/status sets and canonical direct-delete/force/generic transition services | `processing_owner` exists iff the request is processing and must match the recorded pointer; acquisition/backlog include processing while transfer-ledger ownership does not; every processing owner rejects direct delete, force enqueue, and generic mutation with the same exact-owner conflict and unchanged request/files/audit. Latest-job projection, transfer-status broadening, and owner-blind deletion mutants qualify the checkers |
-| `tests/test_destructive_authority_generated.py` | `ban_source`, Replace, and `delete_release_from_library` authority worlds plus pinned-Beets delete-manifest worlds varying source identity conflicts, track/art/sidecar presence, unknown bytes, no-op removers, partial I/O/enumeration faults, strict presence-probe faults at every progress phase, lost subprocess/protocol acknowledgements, and arbitrary child stdout prefixes/suffixes | every authority rejection is zero mutation; Replace rejects conflicting nonempty MB/Discogs source identities before lookup, locking, or Beets access; confirmed success leaves every owned target and Beets/PG authority absent while preserving unknown bytes; cleanup, enumeration, and presence-probe failures retain Beets/PG authority and never notify; ban-source reports completion iff the exact release is absent; PG partial is explicitly album-gone/pipeline-present; every ambiguous child acknowledgement remains incomplete regardless of metadata state, preserves PG, skips notification, and retains operator recovery context; a child response is valid only when stdout is exactly one canonical typed frame. Every checker clause owns one named known-bad world that satisfies each earlier clause and asserts that clause's own message, and each clause is separately qualified by a production mutant driven through the real path: Replace fail-open (outcome, typed reason, mutated state, boundary reached), a delete aimed at a stale album id, missing or ambiguous cardinality reaching a mutation, ambiguous success without a mutation, false ban completion, searchability drift, stdout contamination, unknown-content sweep, survived-owned-path success, metadata removed before files, acknowledgement promotion, purge or notification on an incomplete delete, lost recovery context, and an injected pipeline-purge fault that makes the PG-partial arm reachable. The one deliberately unreachable clause is the unknown-outcome fall-through, which is fail-closed legislation against a future caller |
+| `tests/test_destructive_authority_generated.py` | `ban_source`, Replace, and `delete_release_from_library` authority worlds plus pinned-Beets delete-manifest worlds varying source identity conflicts, track/art/sidecar presence, unknown bytes, no-op removers, partial I/O/enumeration faults, strict presence-probe faults at every progress phase, lost subprocess/protocol acknowledgements, and arbitrary child stdout prefixes/suffixes | every authority rejection is zero mutation; Replace rejects conflicting nonempty MB/Discogs source identities before lookup, locking, or Beets access; confirmed success leaves every owned target and Beets/PG authority absent while preserving unknown bytes; cleanup, enumeration, and presence-probe failures retain Beets/PG authority and never notify; ban-source reports completion iff the exact release is absent; PG partial is explicitly album-gone/pipeline-present; every ambiguous child acknowledgement remains incomplete regardless of metadata state, preserves PG, skips notification, and retains operator recovery context; a child response is valid only when stdout is exactly one canonical typed frame. Every checker clause owns one named known-bad world that satisfies each earlier clause and asserts that clause's own message, and the clause set is qualified by 20 production mutants driven through the real path, covering 27 of the 28 clauses: Replace fail-open (outcome, typed reason, mutated state, boundary reached), a delete aimed at a stale album id, missing or ambiguous cardinality reaching a mutation, ambiguous success without a mutation, false ban completion, searchability drift, stdout contamination, unknown-content sweep, survived-owned-path success, metadata removed before files, acknowledgement promotion, purge or notification on an incomplete delete, lost recovery context, and an injected pipeline-purge fault that makes the PG-partial arm reachable — pinned as an `@example`, since the suite tier's derandomized budget never draws that corner and the arm was otherwise measured only under fuzz entropy. The one deliberately unreachable clause is the unknown-outcome fall-through, which is fail-closed legislation against a future caller |
 | `tests/test_beets_destructive_configs_generated.py` | real pinned Beets through the production `ban_source → current exact-release resolver → pinned exact-delete child` chain and the child directly; independently generated minimal/production plugin base, placeholder/readable/unreadable/invalid-UTF-8 secret mode, `importsource`, playlist, missing-plugin and include-level plugin override, MusicBrainz/Discogs identity, and 1/2/12-track axes | every valid configuration removes exactly the target metadata and owned files; invalid encoding, unreadable includes, and effectively configured missing plugins fail before mutation; separately owned import sources plus sibling album/item/file bytes survive; exact-delete stdout is one canonical typed frame even under Python/raw-fd diagnostics. The deterministic matrix executes 54 core cells; the generated property executes 18 real subprocess compositions in the suite and 96 fresh compositions in the randomized fuzz tier, with known-bad stdout contamination and false-completion self-tests |
 | `tests/test_library_delete_notifiers_generated.py` | `notify_library_delete` targeting and observation across generated Plex filesystem ancestry and Jellyfin lookup/refresh worlds | Plex submissions always target the nearest existing ancestor inside the configured Beets root, never the deleted or an out-of-root path; Jellyfin targets an exact former-path item when observable and otherwise falls back to the configured library, reports `submitted` only after exact-item absence is observed, and contains lookup/refresh failures as warnings without escaping the completed delete boundary. Planted deleted/out-of-root targets, stale 2xx success, wrong-target, hidden-failure, and escaping-exception mutants qualify the checkers |
 | `tests/test_jellyfin_refresh_generated.py` | the real `trigger_jellyfin_scan` entry point with only `urllib` replaced at the network leaf | every generated imported album maps to one exact Jellyfin-visible path in a `POST /Library/Media/Updated` body, with POST/token/JSON/timeout intact and no collection refresh or broad fallback; transport/HTTP/runtime failures stay inside the best-effort notifier boundary |
@@ -221,7 +222,9 @@ source scanner.
 
 Every reusable invariant checker also carries **known-bad self-tests** proving
 it trips on a planted violating decision — the RED/GREEN guarantee that the
-harness detects what it claims to. Modules such as
+harness detects what it claims to. One self-test per checker is not enough:
+each **clause** owes its own world, asserting that clause's own message, per
+§ "Per-clause proof". Modules such as
 `tests/test_jellyfin_refresh_generated.py` that assert the property directly
 do not add a second checker layer to self-test.
 
@@ -822,7 +825,16 @@ that makes the condition true through the real code path, run the module's
 generated properties, and record KILLED or SURVIVED. Revert every mutant
 before you finish; a left-behind mutant is the worst outcome this procedure
 can produce. Target one module at a time —
-`python3 scripts/run_fuzz_tests.py <module> --jobs N`.
+`nix-shell --run "python3 scripts/run_fuzz_tests.py <module> --jobs N"`.
+
+**Record which tier killed it.** A mutant that dies only under `fuzz` is not
+killed for gating purposes: `suite` is `derandomize=True`, so a world the
+deterministic budget misses is missed on every machine, forever. Pin that
+world as an `@example` and re-measure. The #1094 first pass shipped this
+defect and caught it in review: a widened `pg_partial` arm ran 9 times in
+500 fuzz examples and **0** times in the suite tier, leaving a real
+production fail-open mutant alive through the full suite and the final gate
+until an `@example` pinned it.
 
 **A survivor is not a licence to delete.** The default remedy is to widen
 the strategy until the world is producible. A guard over a shared namespace
@@ -833,15 +845,22 @@ may still be correct. Three dispositions, and the PR must say which applies:
 
 - **widen** — the world is producible and the strategy was too narrow. This
   is the #1063 shape and the expected outcome.
-- **fail-closed legislation** — the world cannot occur today but the clause
-  refuses an unrecognised input rather than passing it. Keep it and say
-  why. `assert_quarantine_verdict_is_earned` in
-  `tests/test_path_authority_generated.py` is the pattern: it raises on a
-  world it has no rule for, because a checker that silently passes input it
-  has no rule for is unfalsifiable for exactly the cases most likely to be
-  new.
+- **fail-closed legislation** — no production caller can reach the world, and
+  the clause exists so that a future one fails loudly instead of passing
+  silently. Its only legitimate caller is its own Q1 world. Keep it and say
+  why. Two shapes recur: a checker refusing an input it has no rule for
+  (`assert_quarantine_verdict_is_earned` in
+  `tests/test_path_authority_generated.py`, and the unknown-outcome
+  fall-through in `assert_delete_postcondition`), and a clause whose world
+  the platform forbids before production can build it — the NAME_MAX artifact
+  clause there, where the kernel raises `ENAMETOOLONG` at `mkdir` so an
+  over-length name can never be listed back. Both are unreachable for a
+  reason outside the strategy's control, which is what separates them from a
+  survivor you should have widened.
 - **decoration** — the world is impossible by construction (type-impossible,
-  not merely unreached). Delete the clause.
+  not merely unreached) *and* the clause guards nothing a future writer could
+  reintroduce. Delete it. This is the rarest of the three; prefer the two
+  above unless you can name why no future caller could ever want the guard.
 
 **Prefer accumulating checkers in new code.** A checker that returns
 `list[str]` violations evaluates every clause, so ordering cannot mask one
@@ -852,10 +871,12 @@ are the structural cause of the masking above. This is a preference for new
 checkers, not a licence for a blanket rewrite sweep: convert an existing
 chain only where an audit shows ordering actually hides a clause.
 
-**Scope and limits.** The standing rule is that a PR touching a generated
-module audits that module's clauses as part of the change; a prioritised
-sweep of the modules guarding the most expensive invariants runs separately,
-scoped module by module. The audit examines test machinery, so its own
+**Scope and limits.** The standing rule is that a PR **adding or changing a
+checker clause** audits that checker's clauses as part of the change — not
+any PR that merely touches a generated module, which would trigger on adding
+one `@example` and earn quiet non-compliance. A prioritised sweep of the
+modules guarding the most expensive invariants runs separately, scoped module
+by module. The audit examines test machinery, so its own
 artifacts are deterministic-only — never schedule a generated audit of the
 audit. Do not build a scanner that infers clause reachability from source
 (`.claude/rules/code-quality.md` § "Semantic source scanners are
@@ -941,8 +962,10 @@ may still patrol nothing; only review and mutant-kill counts show that.
   generator would have skipped. If a state is truly impossible, fail-closed
   handling of it is itself the invariant.
 - Invariant checkers are module-level functions so a known-bad self-test
-  can prove each one trips. Every checker owes one — a property that has
-  never failed anything is unfalsifiable until proven otherwise.
+  can prove each one trips. Every *clause* owes one, asserting that clause's
+  own message — a property that has never failed anything is unfalsifiable
+  until proven otherwise, and a checker with eight `raise` sites and one
+  self-test has proven one clause (§ "Per-clause proof").
 - Import `tests._hypothesis_profiles` for the side effect **above the first
   `class`/`def`** — that is what wires the module into the suite/fuzz tiers,
   and both `tests/test_hypothesis_profile_audit.py` and the suite runner's

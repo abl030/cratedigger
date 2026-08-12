@@ -226,9 +226,12 @@ Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blo
   checkers prefer an accumulating `list[str]` of violations over a
   short-circuiting `raise` chain: every clause evaluates, so ordering
   cannot mask one (`mode_selection_violations` in
-  `tests/test_web_auth_mode_generated.py`). **Standing scope:** a PR
-  touching a generated module audits that module's clauses as part of the
-  change, and records the kill matrix in the PR. The audit examines test
+  `tests/test_web_auth_mode_generated.py`). **Record which tier killed the
+  mutant:** `suite` is `derandomize=True`, so a mutant that dies only under
+  `fuzz` is not killed for gating purposes — pin that world as an
+  `@example` and re-measure. **Standing scope:** a PR adding or changing a
+  checker clause audits that checker's clauses as part of the change, and
+  records the kill matrix in the PR. The audit examines test
   machinery, so its artifacts are deterministic-only, and its evidence is a
   named world plus a killed mutant — never a scanner inferring reachability
   from source (issue #1094). Procedure: `docs/generated-testing.md`
