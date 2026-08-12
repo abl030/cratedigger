@@ -23,6 +23,7 @@ import msgspec
 import requests
 
 from lib.slskd_client import (
+    SLSKD_SERVER_READINESS_TIMEOUT_S,
     DownloadDirectory,
     DownloadUser,
     SlskdClient,
@@ -502,6 +503,39 @@ class TestApplicationEndpoint(SlskdClientTestCase):
 
 class TestServerEndpoint(SlskdClientTestCase):
     """``GET /api/v0/server`` readiness reader (issue #1090)."""
+
+    def test_state_uses_short_dedicated_timeout(self):
+        """NON-BLOCKING-4: the readiness GET must NOT inherit the client's
+        full HTTP timeout (120s default, 30s for the unfindable-detection
+        client) -- a hung /server would otherwise add up to that much
+        latency PER submit retry. Seam test on ``_client._request`` (our
+        own typed method, not ``requests.Session.request``'s stub) so the
+        replacement's signature matches exactly."""
+        self.set_fixture(
+            "GET", "/server", {"isConnected": True, "isLoggedIn": True})
+        captured: dict[str, float | None] = {}
+        original_request = self.client._request
+
+        def _capture(
+            method: str,
+            path: str,
+            *,
+            params: dict[str, object] | None = None,
+            json_body: object | None = None,
+            timeout: float | None = None,
+        ) -> requests.Response:
+            captured["timeout"] = timeout
+            return original_request(
+                method, path, params=params, json_body=json_body,
+                timeout=timeout,
+            )
+
+        self.client._request = _capture
+
+        self.client.server.state()
+
+        self.assertEqual(captured["timeout"], SLSKD_SERVER_READINESS_TIMEOUT_S)
+        self.assertNotEqual(captured["timeout"], self.client._timeout)
 
     def test_state_decodes_connected_and_logged_in(self):
         self.set_fixture(

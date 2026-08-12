@@ -21,7 +21,11 @@ from lib.unfindable_detection_service import (
     ArtistProbeResult,
     UnfindableDetectionService,
 )
-from scripts.run_unfindable_detection import EXIT_INCOMPLETE_RUN, _process_batch
+from scripts.run_unfindable_detection import (
+    EXIT_CONFIG_ABORT,
+    EXIT_INCOMPLETE_RUN,
+    _process_batch,
+)
 from tests.fakes import FakePipelineDB, FakeSlskdAPI
 
 
@@ -68,7 +72,8 @@ class TestProcessBatchExitCode(unittest.TestCase):
         def _always_submit_failure(
             _client: object, *, artist_name: str, **_kw: object,
         ) -> ArtistProbeResult:
-            raise SearchSubmitError("simulated sustained slskd outage")
+            raise SearchSubmitError(
+                "simulated sustained slskd outage", retry_exhausted=True)
 
         svc = UnfindableDetectionService(
             self.db, self.slskd, probe_runner=_always_submit_failure,
@@ -78,12 +83,13 @@ class TestProcessBatchExitCode(unittest.TestCase):
         self.assertNotEqual(exit_code, 0)
 
     def test_exit_codes_are_distinct_from_config_schema_abort(self) -> None:
-        """``EXIT_INCOMPLETE_RUN`` must not collide with the pre-existing
-        config/schema abort exit code (2, returned directly by
-        ``main()`` before any work runs) -- two distinguishable failure
-        classes need two distinguishable codes."""
-        self.assertNotEqual(EXIT_INCOMPLETE_RUN, 2)
+        """``EXIT_INCOMPLETE_RUN`` must not collide with
+        ``EXIT_CONFIG_ABORT`` (returned directly by ``main()`` before any
+        work runs) -- two distinguishable failure classes need two
+        distinguishable, producer-derived codes (issue #1090 NIT-8)."""
+        self.assertNotEqual(EXIT_INCOMPLETE_RUN, EXIT_CONFIG_ABORT)
         self.assertNotEqual(EXIT_INCOMPLETE_RUN, 0)
+        self.assertNotEqual(EXIT_CONFIG_ABORT, 0)
 
 
 if __name__ == "__main__":
