@@ -1692,7 +1692,7 @@ class TestGeneratedArchivalQuarantineIsolation(unittest.TestCase):
 class TestInvariantCheckersTripOnViolations(unittest.TestCase):
     """Known-bad self-tests: prove the harness detects what it claims to.
 
-    Per-clause proof (#1094): every ``raise AssertionError`` above owns a
+    Per-clause proof (#1094): every checker raise site above owns a
     world here that makes THAT clause's condition true while every earlier
     clause in the same function passes, and asserts that clause's own
     message. A bare ``assertRaises`` would let a short-circuiting checker
