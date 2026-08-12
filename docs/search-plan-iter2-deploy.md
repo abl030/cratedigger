@@ -1013,3 +1013,20 @@ Explicitly out of scope for this fix: `DEFAULT_BATCH_SIZE` is unchanged
 and no advisory lock or systemd ordering was added against the main
 `cratedigger.service` cycle — that would erode the R20 systemd-level
 separation PR3's section above documents.
+
+**Update (issue #1112):** "only the unfindable probe opts in; the main
+pipeline's search call sites are unchanged" (above) described the state as
+of this fix, not the final state. #1112 folded `cratedigger.py::
+_submit_plan_search`'s own pre-existing bespoke 409+429 submit-retry loop
+onto this same `SearchSubmitRetryPolicy` mechanism instead of leaving it as
+a second, drifted copy — `lib.search_exec.submit_search_with_retry` now
+owns the submit-with-retry operation exactly once, with each caller
+supplying its own policy (`retryable_statuses`, `backoff_s`,
+`max_attempts`). The unfindable probe's policy is unchanged: still 409-only,
+still the same 3-attempt/2s-5s/server-readiness-floored shape, so
+`SearchSubmitError.retry_exhausted` and this section's circuit-breaker
+description remain exactly accurate for the probe. The main pipeline's
+widened policy (409+429, 6 attempts, 1/2/4/8/8s, no readiness probe) has no
+circuit breaker downstream — `_submit_plan_search` never reads
+`retry_exhausted`, it only returns `None` on any submission failure exactly
+as before.

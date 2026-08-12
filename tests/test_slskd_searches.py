@@ -407,6 +407,125 @@ class TestSubmitPlanSearchWriteAheadOrdering(unittest.TestCase):
         # The successful (final) attempt's id is what's returned.
         self.assertEqual(result[0], attempts[-1])
 
+    def test_429_is_also_retried_not_just_409(self):
+        """Issue #1112: the main pipeline's widened policy
+        (``cratedigger.PLAN_SEARCH_SUBMIT_RETRYABLE_STATUSES``) retries
+        BOTH 409 and 429 -- only 409 had dedicated coverage pre-#1112 even
+        though the pre-#1112 bespoke loop already retried both. This kills
+        a mutant that drops 429 from the widened set."""
+        from album_source import AlbumRecord, MediaRecord, ReleaseRecord
+
+        db = FakePipelineDB()
+        slskd = FakeSlskdAPI()
+        slskd.searches.search_text_error_by_query["Artist Album"] = [
+            make_requests_http_error("rate limited", status_code=429),
+        ]
+
+        media = [MediaRecord(medium_number=1, medium_format="CD", track_count=1)]
+        release = ReleaseRecord(
+            id=-9, foreign_release_id="mbid", title="Album", track_count=1,
+            medium_count=1, format="CD", media=media, monitored=True,
+            country=["US"], status="Official",
+        )
+        album = AlbumRecord(
+            id=-9, title="Album", release_date="1999-01-01T00:00:00Z",
+            artist_id=0, artist_name="Artist", foreign_artist_id="",
+            releases=[release], db_request_id=9, db_source="request",
+            db_mb_release_id="mbid", db_search_filetype_override=None,
+            db_target_format=None,
+        )
+
+        import time as _time
+        real_sleep = _time.sleep
+        _time.sleep = lambda _s: None
+        try:
+            result = cratedigger._submit_plan_search(
+                album, "Artist Album", "default", _cfg(), slskd, db)
+        finally:
+            _time.sleep = real_sleep
+
+        assert result is not None
+        self.assertEqual(len(slskd.searches.search_text_calls), 2)
+
+    def test_exhausts_full_six_attempt_budget_with_exact_backoff(self):
+        """Pins the #1112 consolidation's PRESERVE-EXACTLY contract: 6
+        attempts total (5 retries), 1/2/4/8/8s backoff -- unchanged from
+        the pre-#1112 bespoke loop. A persistent 409 across the whole
+        budget returns ``None`` (never raises) after exactly 6 POSTs and
+        exactly these 5 sleeps. Kills a mutant that shrinks the attempt
+        budget or alters the backoff schedule."""
+        from album_source import AlbumRecord, MediaRecord, ReleaseRecord
+
+        db = FakePipelineDB()
+        slskd = FakeSlskdAPI()
+        slskd.searches.search_text_error = make_requests_http_error(
+            "conflict", status_code=409)
+
+        media = [MediaRecord(medium_number=1, medium_format="CD", track_count=1)]
+        release = ReleaseRecord(
+            id=-10, foreign_release_id="mbid", title="Album", track_count=1,
+            medium_count=1, format="CD", media=media, monitored=True,
+            country=["US"], status="Official",
+        )
+        album = AlbumRecord(
+            id=-10, title="Album", release_date="1999-01-01T00:00:00Z",
+            artist_id=0, artist_name="Artist", foreign_artist_id="",
+            releases=[release], db_request_id=10, db_source="request",
+            db_mb_release_id="mbid", db_search_filetype_override=None,
+            db_target_format=None,
+        )
+
+        sleeps: list[float] = []
+        import time as _time
+        real_sleep = _time.sleep
+        _time.sleep = sleeps.append
+        try:
+            result = cratedigger._submit_plan_search(
+                album, "Artist Album", "default", _cfg(), slskd, db)
+        finally:
+            _time.sleep = real_sleep
+
+        self.assertIsNone(result)
+        self.assertEqual(len(slskd.searches.search_text_calls), 6)
+        self.assertEqual(sleeps, [1.0, 2.0, 4.0, 8.0, 8.0])
+        # Every attempt (including the last, non-retried one) ledgers its
+        # own fresh id -- write-ahead holds even on the exhausted path.
+        self.assertEqual(len(db.record_search_id_calls), 6)
+
+    def test_non_retryable_status_returns_none_after_one_attempt(self):
+        """A status outside the widened ``{409, 429}`` set (e.g. 500) is
+        NOT retried -- returns ``None`` after exactly one POST, consuming
+        none of the 6-attempt budget. Kills a mutant that widens
+        ``PLAN_SEARCH_SUBMIT_RETRYABLE_STATUSES`` past its intended pair,
+        or one that drops the retryable-status check entirely."""
+        from album_source import AlbumRecord, MediaRecord, ReleaseRecord
+
+        db = FakePipelineDB()
+        slskd = FakeSlskdAPI()
+        slskd.searches.search_text_error = make_requests_http_error(
+            "server error", status_code=500)
+
+        media = [MediaRecord(medium_number=1, medium_format="CD", track_count=1)]
+        release = ReleaseRecord(
+            id=-11, foreign_release_id="mbid", title="Album", track_count=1,
+            medium_count=1, format="CD", media=media, monitored=True,
+            country=["US"], status="Official",
+        )
+        album = AlbumRecord(
+            id=-11, title="Album", release_date="1999-01-01T00:00:00Z",
+            artist_id=0, artist_name="Artist", foreign_artist_id="",
+            releases=[release], db_request_id=11, db_source="request",
+            db_mb_release_id="mbid", db_search_filetype_override=None,
+            db_target_format=None,
+        )
+
+        result = cratedigger._submit_plan_search(
+            album, "Artist Album", "default", _cfg(), slskd, db)
+
+        self.assertIsNone(result)
+        self.assertEqual(len(slskd.searches.search_text_calls), 1)
+        self.assertEqual(len(db.record_search_id_calls), 1)
+
 
 class TestSearchForAlbumWriteAheadOrdering(unittest.TestCase):
     """I2 pin for the serial fallback path: search_for_album ledgers the

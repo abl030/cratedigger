@@ -239,6 +239,7 @@ class TestExecuteSearchSubmitRetry(unittest.TestCase):
         server_ready: Callable[[], bool] | None = None,
         max_attempts: int = 3,
         backoff_s: tuple[float, ...] = (2.0, 5.0),
+        retryable_statuses: frozenset[int] = frozenset({409}),
     ) -> SearchSubmitRetryPolicy:
         ids = iter(f"retry-{i}" for i in range(1, 100))
 
@@ -253,13 +254,14 @@ class TestExecuteSearchSubmitRetry(unittest.TestCase):
             max_attempts=max_attempts,
             backoff_s=backoff_s,
             server_ready=server_ready,
+            retryable_statuses=retryable_statuses,
         )
 
     def test_409_then_success_retries_once(self):
         """A 409, then a clean submit — succeeds on attempt 2, no
         SearchSubmitError raised."""
         api = FakeSlskdAPI()
-        api.searches.search_text_error_sequence = [
+        api.searches.search_text_error_by_query["q"] = [
             make_requests_http_error("conflict", status_code=409),
         ]
         api.searches.add_search(
@@ -366,7 +368,7 @@ class TestExecuteSearchSubmitRetry(unittest.TestCase):
         within milliseconds". The retry loop's own bounded budget, not
         the readiness probe, remains the load-bearing mechanism."""
         api = FakeSlskdAPI()
-        api.searches.search_text_error_sequence = [
+        api.searches.search_text_error_by_query["q"] = [
             make_requests_http_error("conflict", status_code=409),
         ]
         api.searches.add_search(
@@ -391,7 +393,7 @@ class TestExecuteSearchSubmitRetry(unittest.TestCase):
         """A raising readiness probe never blocks the retry -- it just
         loses its "shorten the wait" benefit for that attempt."""
         api = FakeSlskdAPI()
-        api.searches.search_text_error_sequence = [
+        api.searches.search_text_error_by_query["q"] = [
             make_requests_http_error("conflict", status_code=409),
         ]
         api.searches.add_search(
@@ -414,7 +416,7 @@ class TestExecuteSearchSubmitRetry(unittest.TestCase):
 
     def test_backoff_schedule_repeats_last_entry_past_its_length(self):
         api = FakeSlskdAPI()
-        api.searches.search_text_error_sequence = [
+        api.searches.search_text_error_by_query["q"] = [
             make_requests_http_error("conflict", status_code=409),
             make_requests_http_error("conflict", status_code=409),
         ]
@@ -431,6 +433,33 @@ class TestExecuteSearchSubmitRetry(unittest.TestCase):
             submit_retry=self._policy(max_attempts=3, backoff_s=(2.0,)),
         )
         self.assertEqual([s for s in sleeps if s >= 1.0], [2.0, 2.0])
+
+    def test_widened_retryable_statuses_retries_a_non_409_status(self):
+        """Issue #1112: ``retryable_statuses`` is no longer hardcoded to
+        ``{409}`` -- a policy that widens it (e.g. the main pipeline's
+        409+429 policy, ``cratedigger.PLAN_SEARCH_SUBMIT_RETRYABLE_STATUSES``)
+        retries ANY configured status, including a bare 429 that the
+        unfindable probe's own (unwidened) policy would never retry (see
+        ``test_429_is_not_retried_by_this_policy`` above)."""
+        api = FakeSlskdAPI()
+        api.searches.search_text_error_by_query["q"] = [
+            make_requests_http_error("rate limited", status_code=429),
+        ]
+        api.searches.add_search(
+            search_id="retry-1", state="Completed", responses=[])
+        minted: list[str] = []
+        result = execute_search(
+            api,
+            submit_kwargs={"id": "initial-id", "searchText": "q",
+                           "responseLimit": 100},
+            delete=False, clock_fn=_FakeClock(), sleep_fn=_noop_sleep,
+            submit_retry=self._policy(
+                minted_ids=minted, retryable_statuses=frozenset({409, 429}),
+            ),
+        )
+        self.assertEqual(len(api.searches.search_text_calls), 2)
+        self.assertEqual(minted, ["retry-1"])
+        self.assertEqual(result.response_count_terminal, 0)
 
     def test_retry_exhausted_flag_false_for_immediate_429(self):
         """Issue #1090 BLOCKING-1: SearchSubmitError.retry_exhausted is
@@ -483,7 +512,7 @@ class TestExecuteSearchSubmitRetry(unittest.TestCase):
         real cause, so a deterministic 429 landing on the last attempt
         would wrongly count toward the circuit breaker forever."""
         api = FakeSlskdAPI()
-        api.searches.search_text_error_sequence = [
+        api.searches.search_text_error_by_query["q"] = [
             make_requests_http_error("conflict", status_code=409),
             make_requests_http_error("conflict", status_code=409),
             make_requests_http_error("rate limited", status_code=429),
@@ -522,7 +551,7 @@ class TestExecuteSearchSubmitRetry(unittest.TestCase):
         contract and mirroring cratedigger.py::_submit_plan_search's
         identical carve-out."""
         api = FakeSlskdAPI()
-        api.searches.search_text_error_sequence = [
+        api.searches.search_text_error_by_query["q"] = [
             make_requests_http_error("conflict", status_code=409),
         ]
 

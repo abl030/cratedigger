@@ -372,7 +372,7 @@ class TestRunArtistProbe(unittest.TestCase):
         mints + ledgers its OWN fresh search id (write-ahead invariant,
         per attempt -- issue #576 I2)."""
         slskd = FakeSlskdAPI()
-        slskd.searches.search_text_error_sequence = [
+        slskd.searches.search_text_error_by_query["Russian Winters"] = [
             make_requests_http_error("conflict", status_code=409),
         ]
         # The retry (the first NON-raising call) gets this fixed id so

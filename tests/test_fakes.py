@@ -3104,35 +3104,6 @@ class TestFakeSlskdSearches(unittest.TestCase):
         self.assertEqual(slskd.searches.state(sid)["state"], "Completed")
         self.assertEqual(slskd.searches.search_responses(sid), [])
 
-    def test_search_text_error_sequence_raises_then_succeeds(self):
-        """Issue #1090: a per-call error sequence lets a test drive
-        "fails N times, then succeeds" without ``search_text_error``
-        poisoning every subsequent call."""
-        slskd = FakeSlskdAPI()
-        slskd.searches.search_text_error_sequence = [
-            RuntimeError("first call fails"),
-            None,
-        ]
-        with self.assertRaises(RuntimeError):
-            slskd.searches.search_text(searchText="x", responseLimit=1000)
-        # Second call: sequence entry is None -- succeeds normally.
-        result = slskd.searches.search_text(searchText="x", responseLimit=1000)
-        self.assertIn("id", result)
-        self.assertEqual(len(slskd.searches.search_text_calls), 2)
-
-    def test_search_text_error_sequence_exhausted_falls_back_to_error(self):
-        """Once the sequence is exhausted, ``search_text_error`` (if set)
-        resumes poisoning every call -- the sequence is a prefix override,
-        not a replacement for the blanket-error knob."""
-        slskd = FakeSlskdAPI()
-        slskd.searches.search_text_error_sequence = [None]
-        slskd.searches.search_text_error = RuntimeError("blanket failure")
-        # First call consumes the sequence's lone None -- succeeds.
-        slskd.searches.search_text(searchText="x", responseLimit=1000)
-        # Sequence now empty -- falls back to search_text_error.
-        with self.assertRaises(RuntimeError):
-            slskd.searches.search_text(searchText="x", responseLimit=1000)
-
     def test_search_text_error_by_query_targets_exact_searchtext(self):
         """Issue #1090 NIT-9: per-searchText keyed injection is
         independent of call order/count across OTHER distinct
@@ -3156,19 +3127,36 @@ class TestFakeSlskdSearches(unittest.TestCase):
             slskd.searches.search_text(searchText="Artist B", responseLimit=1000)
         self.assertEqual(str(caught_b.exception), "B always fails")
 
-    def test_search_text_error_by_query_takes_priority_over_flat_sequence(self):
+    def test_search_text_error_by_query_takes_priority_over_blanket_error(self):
+        """Issue #1112: with the flat-FIFO ``search_text_error_sequence``
+        mechanism removed, the by-query queue is the only per-call
+        injection left besides the blanket ``search_text_error`` poison --
+        confirm it still wins when both are configured for the same
+        query."""
         slskd = FakeSlskdAPI()
         slskd.searches.search_text_error_by_query["Artist A"] = [
             RuntimeError("keyed error"),
         ]
-        slskd.searches.search_text_error_sequence = [
-            RuntimeError("flat sequence error"),
-        ]
+        slskd.searches.search_text_error = RuntimeError("blanket error")
         with self.assertRaises(RuntimeError) as caught:
             slskd.searches.search_text(searchText="Artist A", responseLimit=1000)
         self.assertEqual(str(caught.exception), "keyed error")
-        # The flat sequence entry was never consumed.
-        self.assertEqual(len(slskd.searches.search_text_error_sequence), 1)
+
+    def test_search_text_error_by_query_exhausted_falls_back_to_blanket_error(
+        self,
+    ):
+        """Once a query's own queue is exhausted, ``search_text_error``
+        (if set) resumes poisoning THAT query's later calls -- the
+        per-query queue is a prefix override, not a replacement for the
+        blanket-error knob."""
+        slskd = FakeSlskdAPI()
+        slskd.searches.search_text_error_by_query["Artist A"] = [None]
+        slskd.searches.search_text_error = RuntimeError("blanket failure")
+        # First call consumes the queue's lone None -- succeeds.
+        slskd.searches.search_text(searchText="Artist A", responseLimit=1000)
+        # Queue now empty -- falls back to search_text_error.
+        with self.assertRaises(RuntimeError):
+            slskd.searches.search_text(searchText="Artist A", responseLimit=1000)
 
 
 class TestFakeSlskdServer(unittest.TestCase):

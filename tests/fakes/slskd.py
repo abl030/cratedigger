@@ -192,23 +192,20 @@ class FakeSlskdSearches:
         self.stop_calls: list[Any] = []
         self.get_all_calls: int = 0
         self.search_text_error: Exception | None = None
-        # Per-call error sequence (issue #1090): consumed front-first, one
-        # entry per ``search_text`` call — ``None`` means "succeed
-        # normally on this call", an ``Exception`` means "raise this on
-        # this call". Lets a test drive "409, then 409, then success"
-        # without ``search_text_error`` poisoning every subsequent call.
-        # Falls back to ``search_text_error`` (unchanged, poisons every
-        # call) once the sequence is exhausted or left unset.
-        self.search_text_error_sequence: list[Exception | None] = []
         # Per-searchText-keyed error queue (issue #1090 NIT-9): consumed
         # front-first PER DISTINCT ``searchText`` value, independent of
-        # overall call order/count. Preferred over
-        # ``search_text_error_sequence`` when a generated world has
-        # multiple candidates whose call counts vary (a candidate that
-        # never submits at all -- e.g. an empty-artist_name guard --
-        # would silently desynchronise a single flat FIFO from the
-        # candidate it was meant to target). Checked BEFORE
-        # ``search_text_error_sequence``.
+        # overall call order/count. This is the ONLY per-call injection
+        # mechanism besides the blanket ``search_text_error`` poison
+        # above — issue #1112 removed the third (flat-FIFO,
+        # ``search_text_error_sequence``) mechanism that used to sit
+        # between them: consumed front-first across ALL ``search_text``
+        # calls regardless of query, which silently desynchronised from
+        # its intended candidate whenever per-candidate POST counts
+        # varied (a candidate that never submits at all -- e.g. an
+        # empty-artist_name guard -- would shift every later candidate's
+        # queue entry onto the wrong call). Keying by query removes that
+        # failure mode outright: a candidate's queue is only ever
+        # consumed by ITS OWN calls.
         self.search_text_error_by_query: dict[str, list[Exception | None]] = {}
         # Per-search override: id -> Exception. Raised from stop() / state()
         # for that search id. Used to drive the "stop() raises" / "state()
@@ -292,10 +289,6 @@ class FakeSlskdSearches:
         by_query = self.search_text_error_by_query.get(text)
         if by_query:
             next_error = by_query.pop(0)
-            if next_error is not None:
-                raise next_error
-        elif self.search_text_error_sequence:
-            next_error = self.search_text_error_sequence.pop(0)
             if next_error is not None:
                 raise next_error
         elif self.search_text_error is not None:
