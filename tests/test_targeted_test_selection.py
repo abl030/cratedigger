@@ -198,6 +198,40 @@ class TestTargetedTestSelection(unittest.TestCase):
                 # hotspot module, irrelevant here.
                 select_test_targets(modules, selection, hotspot_policies={})
 
+    def test_shared_fakes_map_to_their_real_consumers_not_only_test_fakes(
+        self,
+    ) -> None:
+        """Regression pin for issue #1081 review round 2, MUST FIX 2.
+
+        The tests/fakes/ prefix rule alone maps every fake to
+        tests.test_fakes, but five fakes are neither imported by
+        tests/test_fakes.py nor re-exported by tests/fakes/__init__.py —
+        tests.test_fakes never loads them. tests/fakes/deploy_hold.py is the
+        live instance: another agent was editing it while this regression
+        shipped, and the prefix rule alone would have selected a test that
+        never loads it.
+        """
+        selected = expand_test_selection(
+            (),
+            changed_paths=("tests/fakes/deploy_hold.py",),
+            repo_root=REPO_ROOT,
+        )
+
+        self.assertIn("tests.test_fakes", selected)
+        self.assertIn("tests.test_deploy_hold", selected)
+        self.assertIn("tests.test_deploy_hold_generated", selected)
+
+    def test_registered_coverage_gaps_carry_a_non_empty_rationale(self) -> None:
+        """MUST FIX 6 part 2 (#1081 review round 2): a registration without a
+        reason is indistinguishable from a lazy bypass.
+        """
+        for path, rationale in SHARED_MODULES_WITHOUT_COVERAGE.items():
+            with self.subTest(path=path):
+                self.assertTrue(
+                    rationale.strip(),
+                    f"{path} is registered with an empty rationale",
+                )
+
     def test_exact_path_neighbour_keys_still_exist_on_disk(self) -> None:
         """Reverse direction of the tree-walking pin: no stale mapping keys.
 
@@ -278,7 +312,7 @@ class TestTargetedSuiteWiring(unittest.TestCase):
         where js/pyright/ruff/vulture all pass and the python phase exits 1
         before any test runs.
 
-        CRATEDIGGER_TEST_JOBS=1 pins the nested runner to one worker.
+        CRATEDIGGER_TEST_JOBS=4 caps the nested runner's worker count.
         worker_environment() unconditionally pops TEST_DB_DSN so every
         persistent worker bootstraps its own ephemeral PostgreSQL — at the
         default worker count (half the host's CPUs, capped at 12) that is up
@@ -286,9 +320,14 @@ class TestTargetedSuiteWiring(unittest.TestCase):
         target: the same class of scheduler-contention flake fixed by
         widening the sp.run timeout in
         tests/test_beets_destructive_configs_generated.py elsewhere in this
-        PR. Forcing one worker keeps this a real end-to-end subprocess run
-        of the actual entrypoint without adding a second flake of the same
-        kind.
+        PR. An earlier version of this pin pinned CRATEDIGGER_TEST_JOBS=1,
+        which traded that speculative flake for a measured one: on this host,
+        JOBS=1 measured 123.5s under 2x CPU oversubscription against a 180s
+        bound (~1.45x headroom), while JOBS=4 measured 46.1s (comparable to
+        the unbounded-worker 39.4s). JOBS=4 plus a 300s bound keeps this a
+        real end-to-end subprocess run of the actual entrypoint with real
+        margin in both directions, without the full nested-cluster count of
+        an unbounded run.
 
         A failure here may duplicate an unrelated ambient audit's own
         failure reported elsewhere in the outer suite — expand_test_selection
@@ -308,10 +347,10 @@ class TestTargetedSuiteWiring(unittest.TestCase):
         completed = subprocess.run(
             python_phase.command,
             cwd=REPO_ROOT,
-            env={**os.environ, "CRATEDIGGER_TEST_JOBS": "1"},
+            env={**os.environ, "CRATEDIGGER_TEST_JOBS": "4"},
             capture_output=True,
             text=True,
-            timeout=180,
+            timeout=300,
             check=False,
         )
 

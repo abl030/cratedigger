@@ -409,15 +409,20 @@ def exercise_real_beets_world(
         child_env = {**os.environ, "BEETSDIR": str(child_config)}
         # This is a hang backstop, not an assertion — under the parallel
         # Hypothesis scheduler it once timed out at 30s (FlakyFailure) then
-        # passed on retry and in isolation (13.7s). 120s is not large
-        # headroom: measured worst case under 60-way oversubscription is
-        # ~45s, so 120s is only ~2.6x that, not a generous multiple. There is
-        # no per-target timeout in scripts/run_python_tests.py or
-        # scripts/fuzz_burst.sh, so a genuine hang regression here (not a
-        # scheduler-contention flake) now costs up to 18x120s in the suite
-        # (9 PROFILES x 2 sources) and roughly 96x120s in a fuzz burst before
-        # it is caught — this bound is a real ceiling on that cost, not free
-        # insurance.
+        # passed on retry and in isolation (13.7s); 120s has no verified
+        # safety margin beyond that single observed run, so treat it as a
+        # bound on cost, not a generous cushion. There is no per-target
+        # timeout in scripts/run_python_tests.py or scripts/fuzz_burst.sh, so
+        # a genuine hang in this exact sp.run call (not scheduler contention)
+        # is caught only after up to 83x120s in the deterministic suite —
+        # every call site of exercise_real_beets_world(): 18 @given examples
+        # + 3 pinned @example cases in
+        # test_real_pinned_beets_common_config_worlds, 2 direct calls in
+        # test_invariant_rejects_stdout_prefix_and_false_completion, and 60
+        # generated test_common_config_p*_t*_* methods (10 PROFILES x 3
+        # track counts x 2 sources) — and up to 96x120s in a fuzz burst
+        # (scripts/run_fuzz_tests.py discovers @given properties only, so
+        # only the @given test's max_examples=96 counts there).
         child = sp.run(
             [sys.executable, str(REPO / "harness" / "delete_album.py")],
             input=msgspec.json.encode(request),

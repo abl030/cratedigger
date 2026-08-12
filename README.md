@@ -198,10 +198,11 @@ ratchet. It also runs JavaScript, both Pyright contracts, Ruff, and Vulture in
 the same aggregate failure bundle. With no selector it derives targets from the
 working-tree diff. A changed shared `tests/**.py` module (a fake, helper, or
 other non-`test_*.py` file) with no registered mapping in
-`scripts/targeted_test_selection.py` fails closed before any phase runs, JS and
-Pyright included — see that module's `EXACT_PATH_NEIGHBOURS` /
-`SHARED_MODULES_WITHOUT_COVERAGE` for the mapping and the admitted-gap
-registry. `run_tests.sh` remains the one canonical complete suite.
+`scripts/targeted_test_selection.py` fails closed with exit code 2 before any
+phase runs, JS and Pyright included — see that module's
+`EXACT_PATH_NEIGHBOURS` / `SHARED_MODULES_WITHOUT_COVERAGE` for the mapping
+and the admitted-gap registry. `run_tests.sh` remains the one canonical
+complete suite.
 `run_final_gate.sh` runs that exact suite on a clean commit and adds a receipt;
 it does not select different checks. CI does not enforce this local workflow.
 
