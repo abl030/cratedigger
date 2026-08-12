@@ -8,9 +8,11 @@ and symlink targets: only the same descriptor-rooted regular file is readable.
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 import unittest
 from collections.abc import Callable
+from functools import partial
 from itertools import product
 
 from hypothesis import example, given
@@ -377,13 +379,60 @@ def _private_world() -> tuple[tempfile.TemporaryDirectory[str], str, str, Crated
     return parent, source, processing, cfg
 
 
+def _publish_race_winner(destination_state: str) -> Callable[[int, str], None]:
+    """Build a competing writer that publishes first, under our own lock.
+
+    ``_materialize_processing_dir`` only leaves an unpublished transaction
+    directory behind when its ``renameat2(RENAME_NOREPLACE)`` loses, so this
+    is the only shape that can prove the transaction is reclaimed.
+    """
+    name = "track.mp3" if destination_state == "race_exact" else "foreign.mp3"
+    payload = b"existing" if destination_state == "race_exact" else b"foreign"
+
+    def win_the_publish(albums_fd: int, destination: str) -> None:
+        os.mkdir(destination, 0o700, dir_fd=albums_fd)
+        winner_fd = os.open(
+            destination,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+            dir_fd=albums_fd,
+        )
+        try:
+            written = os.open(
+                name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+                0o600,
+                dir_fd=winner_fd,
+            )
+            try:
+                os.write(written, payload)
+            finally:
+                os.close(written)
+        finally:
+            os.close(winner_fd)
+
+    return win_the_publish
+
+
 class TestGeneratedMaterializePublication(unittest.TestCase):
     @given(
         canonical_bytes=st.integers(min_value=23, max_value=255),
-        destination_state=st.sampled_from(("absent", "empty", "complete", "incomplete")),
+        destination_state=st.sampled_from((
+            "absent",
+            "empty",
+            "complete",
+            "incomplete",
+            # A writer that bypassed this process's shard lock wins between
+            # our preflight and our publish. Only these two states create a
+            # real unpublished transaction directory, so they are the only
+            # worlds that can prove it is reclaimed (issue #1094).
+            "race_exact",
+            "race_foreign",
+        )),
     )
     @example(canonical_bytes=255, destination_state="absent")
     @example(canonical_bytes=255, destination_state="empty")
+    @example(canonical_bytes=255, destination_state="race_exact")
+    @example(canonical_bytes=255, destination_state="race_foreign")
     def test_real_materialization_never_overwrites_or_reorders_source_deletion(
         self,
         canonical_bytes: int,
@@ -410,7 +459,7 @@ class TestGeneratedMaterializePublication(unittest.TestCase):
             album = make_grab_list_entry(files=[file], artist=artist, title="T", year="2020")
             canonical = canonical_folder_for_row(album, processing_albums_dir(processing))
             self.assertEqual(len(os.path.basename(canonical).encode()), canonical_bytes)
-            if destination_state != "absent":
+            if destination_state in ("empty", "complete", "incomplete"):
                 os.mkdir(canonical)
                 if destination_state == "complete":
                     with open(os.path.join(canonical, "track.mp3"), "wb") as handle:
@@ -421,6 +470,11 @@ class TestGeneratedMaterializePublication(unittest.TestCase):
             staged = StagedAlbum.from_entry(album, default_path=canonical)
             result = _materialize_processing_dir(
                 album, staged, make_ctx_with_fake_db(FakePipelineDB(), cfg=cfg),
+                before_publish=(
+                    _publish_race_winner(destination_state)
+                    if destination_state.startswith("race_")
+                    else None
+                ),
             )
             albums = processing_albums_dir(processing)
             if destination_state == "absent":
@@ -429,7 +483,7 @@ class TestGeneratedMaterializePublication(unittest.TestCase):
                 expected_source_exists = False
                 expected_names = {"track.mp3"}
                 expected_bytes = b"audio"
-            elif destination_state == "complete":
+            elif destination_state in ("complete", "race_exact"):
                 # Existing exact manifests converge without a second source
                 # unlink: they may already be owned by an earlier attempt.
                 expected_result_type = Materialized
@@ -441,7 +495,11 @@ class TestGeneratedMaterializePublication(unittest.TestCase):
                 expected_result_type = MaterializeGuarded
                 expected_detail = "incomplete_or_unsafe_canonical"
                 expected_source_exists = True
-                expected_names = {"foreign.mp3"} if destination_state == "incomplete" else set()
+                expected_names = (
+                    {"foreign.mp3"}
+                    if destination_state in ("incomplete", "race_foreign")
+                    else set()
+                )
                 expected_bytes = None
             assert_generated_publication_invariant(
                 result=result,
@@ -491,6 +549,58 @@ class TestGeneratedMaterializePublication(unittest.TestCase):
                 expected_names={"track.mp3"},
                 artifact_names=artifacts,
                 name_max=os.pathconf(processing_albums_dir(processing), "PC_NAME_MAX"),
+            )
+
+    def test_real_lock_shards_stay_bounded_across_many_albums(self) -> None:
+        """One album per world can never exceed the shard ceiling.
+
+        The bound is a property of the ACCUMULATED ``albums/`` root, so it
+        is only observable once many distinct canonical names have taken
+        their locks in the same private tree (issue #1094).
+        """
+        album_count = 300
+        parent, source, processing, cfg = _private_world()
+        albums = processing_albums_dir(processing)
+        with parent:
+            result: object = None
+            canonical = albums
+            for index in range(album_count):
+                source_path = os.path.join(source, f"track-{index}.mp3")
+                with open(source_path, "wb") as handle:
+                    handle.write(b"audio")
+                file = DownloadFile(
+                    filename=f"peer\\\\track-{index}.mp3", username="peer",
+                    id=str(index), file_dir="peer", size=5,
+                )
+                file.local_path = source_path
+                album = make_grab_list_entry(
+                    files=[file], artist="Artist", title=f"Album {index}",
+                    year="2020",
+                )
+                canonical = canonical_folder_for_row(album, albums)
+                result = _materialize_processing_dir(
+                    album,
+                    StagedAlbum.from_entry(album, default_path=canonical),
+                    make_ctx_with_fake_db(FakePipelineDB(), cfg=cfg),
+                )
+            artifacts = os.listdir(albums)
+            self.assertEqual(
+                len([name for name in artifacts if not name.startswith(".")]),
+                album_count,
+                "every generated album must have published its own folder",
+            )
+            assert_generated_publication_invariant(
+                result=result,
+                expected_result_type=Materialized,
+                expected_detail=None,
+                source_exists=os.path.exists(
+                    os.path.join(source, f"track-{album_count - 1}.mp3"),
+                ),
+                expected_source_exists=False,
+                destination_names=set(os.listdir(canonical)),
+                expected_names={f"track-{album_count - 1}.mp3"},
+                artifact_names=artifacts,
+                name_max=os.pathconf(albums, "PC_NAME_MAX"),
             )
 
 
@@ -989,100 +1099,570 @@ class TestGeneratedPublicationResultTypeGate(unittest.TestCase):
                 )
 
 
+def _publication_world(
+    *,
+    result: object = None,
+    expected_result_type: type[Materialized | MaterializeGuarded] = Materialized,
+    expected_detail: str | None = None,
+    source_exists: bool = False,
+    expected_source_exists: bool = False,
+    destination_names: set[str] | None = None,
+    expected_names: set[str] | None = None,
+    artifact_names: list[str] | None = None,
+    name_max: int = 255,
+) -> None:
+    """Drive the publication checker; only the overridden facts lie."""
+    assert_generated_publication_invariant(
+        result=Materialized() if result is None else result,
+        expected_result_type=expected_result_type,
+        expected_detail=expected_detail,
+        source_exists=source_exists,
+        expected_source_exists=expected_source_exists,
+        destination_names=(
+            {"track.mp3"} if destination_names is None else destination_names
+        ),
+        expected_names={"track.mp3"} if expected_names is None else expected_names,
+        artifact_names=(
+            [".materialize-lock-shard-ab"]
+            if artifact_names is None
+            else artifact_names
+        ),
+        name_max=name_max,
+    )
+
+
+def _preview_world(
+    *,
+    succeeded: bool = True,
+    preview_children: list[str] | None = None,
+    copied_bytes: int = 5,
+    expected_bytes: int = 5,
+    lock_path: str = __file__,
+) -> None:
+    """Drive the preview checker; only the overridden facts lie."""
+    assert_generated_preview_invariant(
+        succeeded=succeeded,
+        preview_children=[] if preview_children is None else preview_children,
+        copied_bytes=copied_bytes,
+        expected_bytes=expected_bytes,
+        lock_path=lock_path,
+    )
+
+
+def _explorer_world(
+    *,
+    entry_count: int = 1,
+    entry_cap: int = 3,
+    partial_result: object = False,
+    truncated_reason: object = None,
+    files: object = None,
+    other_file_count: object = 0,
+    scanned_file_count: object = 1,
+    scanned_bytes: object = 5,
+    expected_audio_paths: list[str] | None = None,
+    expected_other_file_count: int = 0,
+    expected_scanned_file_count: int = 1,
+    expected_scanned_bytes: int = 5,
+) -> None:
+    """Drive the explorer checker; only the overridden facts lie."""
+    assert_explorer_entry_invariant(
+        entry_count=entry_count,
+        entry_cap=entry_cap,
+        payload={
+            "partial": partial_result,
+            "truncated_reason": truncated_reason,
+            "files": (
+                [{"relative_path": "01-audio.mp3"}] if files is None else files
+            ),
+            "other_file_count": other_file_count,
+            "scanned_file_count": scanned_file_count,
+            "scanned_bytes": scanned_bytes,
+        },
+        expected_audio_paths=(
+            ["01-audio.mp3"]
+            if expected_audio_paths is None
+            else expected_audio_paths
+        ),
+        expected_other_file_count=expected_other_file_count,
+        expected_scanned_file_count=expected_scanned_file_count,
+        expected_scanned_bytes=expected_scanned_bytes,
+    )
+
+
+_ACTION_ROOT = "/processing/albums"
+_ACTION_COPY = "/processing/albums/force-action-7"
+_DB_QUARANTINE = "/Incoming/auto-import/Database/failed_imports/Album"
+_PAYLOAD_QUARANTINE = "/elsewhere/manual/failed_imports/Album"
+
+
+def _force_world(
+    *,
+    lookup_path: str = _ACTION_COPY,
+    lookup_bytes: bytes = b"database",
+    expected_db_bytes: bytes = b"database",
+    preview_children: list[str] | None = None,
+) -> None:
+    """Drive the force front-gate checker; only the overrides lie."""
+    assert_force_front_gate_invariant(
+        lookup_path=lookup_path,
+        db_failed_path=_DB_QUARANTINE,
+        payload_failed_path=_PAYLOAD_QUARANTINE,
+        lookup_bytes=lookup_bytes,
+        expected_db_bytes=expected_db_bytes,
+        snapshot_root=_ACTION_ROOT,
+        preview_children=[] if preview_children is None else preview_children,
+    )
+
+
+def _relocation_world(
+    *,
+    result: object = None,
+    source_exists: bool = True,
+    replacement_has_canonical: bool = False,
+) -> None:
+    """Drive the relocation checker; only the overridden facts lie."""
+    assert_generated_relocation_invariant(
+        result=(
+            MaterializeGuarded(detail="processing_root_relocated")
+            if result is None
+            else result
+        ),
+        source_exists=source_exists,
+        replacement_has_canonical=replacement_has_canonical,
+    )
+
+
 class TestPathAuthorityProofCheckers(unittest.TestCase):
-    """Known-bad proof checks: every invariant checker must reject a lie."""
+    """Known-bad proof checks: EVERY clause of every checker rejects a lie.
 
-    def test_result_type_gate_trips_when_the_default_admits_a_refusal(
-        self,
+    A checker raises at its FIRST failing clause, so one world violating
+    several clauses proves only that first one — the shape issue #1094
+    exists to remove. Each row below plants exactly one clause, on a world
+    where every earlier clause passes, and asserts that clause's own
+    message.
+    """
+
+    def _assert_each_clause(
+        self, cases: tuple[tuple[str, str, Callable[[], None]], ...],
     ) -> None:
-        with self.assertRaises(AssertionError):
-            assert_result_type_gate(
-                accepted=True, result_kind="failed", allowed_kinds=None,
-            )
+        for clause, message, plant in cases:
+            with (
+                self.subTest(clause=clause),
+                self.assertRaisesRegex(AssertionError, re.escape(message)),
+            ):
+                plant()
 
-    def test_result_type_gate_trips_when_an_allowed_kind_is_refused(
-        self,
-    ) -> None:
-        with self.assertRaises(AssertionError):
-            assert_result_type_gate(
-                accepted=False,
-                result_kind="failed",
-                allowed_kinds=frozenset({"failed"}),
-            )
+    def test_honest_worlds_pass_every_checker(self) -> None:
+        """The base worlds the clause rows perturb must themselves pass."""
+        _publication_world()
+        _preview_world()
+        _explorer_world()
+        _explorer_world(
+            entry_count=4,
+            partial_result=True,
+            truncated_reason="entry_limit",
+            scanned_file_count=1,
+        )
+        _force_world()
+        _relocation_world()
+        assert_result_type_gate(
+            accepted=True, result_kind="materialized", allowed_kinds=None,
+        )
+        assert_quarantine_verdict_is_earned(
+            world="outside",
+            code="unspecified",
+            message="path is outside configured quarantine roots",
+        )
 
-    def test_publication_checker_rejects_overwrite_source_loss(self) -> None:
-        with self.assertRaises(AssertionError):
-            assert_generated_publication_invariant(
-                result=Materialized(),
-                expected_result_type=MaterializeGuarded,
-                expected_detail="incomplete_or_unsafe_canonical",
-                source_exists=True, expected_source_exists=True,
-                destination_names={"foreign.mp3"}, expected_names={"track.mp3"},
-                artifact_names=[".materialize-tmp-leaked"], name_max=255,
-            )
+    def test_result_type_gate_rejects_every_lie(self) -> None:
+        self._assert_each_clause((
+            (
+                "default admits a refusal",
+                (
+                    "materialize result 'failed' was accepted against allowed "
+                    "kinds ['guarded', 'materialized']"
+                ),
+                partial(
+                    assert_result_type_gate,
+                    accepted=True, result_kind="failed", allowed_kinds=None,
+                ),
+            ),
+            (
+                "default refuses a publication",
+                (
+                    "materialize result 'materialized' was rejected against "
+                    "allowed kinds ['guarded', 'materialized']"
+                ),
+                partial(
+                    assert_result_type_gate,
+                    accepted=False,
+                    result_kind="materialized",
+                    allowed_kinds=None,
+                ),
+            ),
+            (
+                "explicit tuple refuses its own kind",
+                (
+                    "materialize result 'failed' was rejected against allowed "
+                    "kinds ['failed']"
+                ),
+                partial(
+                    assert_result_type_gate,
+                    accepted=False,
+                    result_kind="failed",
+                    allowed_kinds=frozenset({"failed"}),
+                ),
+            ),
+            (
+                "explicit tuple admits an excluded kind",
+                (
+                    "materialize result 'failed' was accepted against allowed "
+                    "kinds ['materialized']"
+                ),
+                partial(
+                    assert_result_type_gate,
+                    accepted=True,
+                    result_kind="failed",
+                    allowed_kinds=frozenset({"materialized"}),
+                ),
+            ),
+        ))
 
-    def test_preview_checker_rejects_residue(self) -> None:
-        with self.assertRaises(AssertionError):
-            assert_generated_preview_invariant(
-                succeeded=False, preview_children=["preview-leaked"], copied_bytes=0,
-                expected_bytes=0, lock_path=__file__,
-            )
+    def test_publication_checker_rejects_every_clause(self) -> None:
+        self._assert_each_clause((
+            (
+                "result type",
+                "materialize result was MaterializeFailed, expected Materialized",
+                partial(
+                    _publication_world,
+                    result=MaterializeFailed(reason="slskd_root_missing"),
+                ),
+            ),
+            (
+                "guard detail",
+                (
+                    "guard detail was 'published_manifest_mismatch', expected "
+                    "'incomplete_or_unsafe_canonical'"
+                ),
+                partial(
+                    _publication_world,
+                    result=MaterializeGuarded(detail="published_manifest_mismatch"),
+                    expected_result_type=MaterializeGuarded,
+                    expected_detail="incomplete_or_unsafe_canonical",
+                    source_exists=True,
+                    expected_source_exists=True,
+                ),
+            ),
+            (
+                "source deletion ordering",
+                "source deletion ordering was violated",
+                partial(
+                    _publication_world,
+                    source_exists=True, expected_source_exists=False,
+                ),
+            ),
+            (
+                "destination overwritten",
+                "canonical destination was overwritten or incomplete",
+                partial(_publication_world, destination_names={"foreign.mp3"}),
+            ),
+            (
+                "artifact over NAME_MAX",
+                "a materialize artifact exceeds NAME_MAX",
+                partial(_publication_world, artifact_names=["a" * 256]),
+            ),
+            (
+                "unpublished transaction survived",
+                "an unpublished materialize temp survived",
+                partial(
+                    _publication_world,
+                    artifact_names=[".materialize-tmp-0011223344-abcd"],
+                ),
+            ),
+            (
+                "unbounded lock name",
+                "materialize lock is not a bounded shard lock",
+                partial(
+                    _publication_world,
+                    artifact_names=[".materialize-lock-Artist Album 2020"],
+                ),
+            ),
+            (
+                "more than 256 shards",
+                "materialize used more than 256 lock shards",
+                partial(
+                    _publication_world,
+                    artifact_names=[
+                        f".materialize-lock-shard-{index:04x}"
+                        for index in range(257)
+                    ],
+                ),
+            ),
+        ))
 
-    def test_explorer_checker_rejects_truncation_at_exact_cap(self) -> None:
-        with self.assertRaises(AssertionError):
-            assert_explorer_entry_invariant(
-                entry_count=3,
-                entry_cap=3,
-                payload={
-                    "partial": True,
-                    "truncated_reason": "entry_limit",
-                    "scanned_file_count": 0,
-                    "other_file_count": 0,
-                    "scanned_bytes": 0,
-                    "files": [],
-                },
-                expected_audio_paths=[],
-                expected_other_file_count=0,
-                expected_scanned_file_count=0,
-                expected_scanned_bytes=0,
-            )
+    def test_preview_checker_rejects_every_clause(self) -> None:
+        self._assert_each_clause((
+            (
+                "lock outside its stable private root",
+                "preview lock escaped its stable private root",
+                partial(_preview_world, lock_path=f"{__file__}.absent"),
+            ),
+            (
+                "failed copy left residue",
+                "failed preview copy left a snapshot behind",
+                partial(
+                    _preview_world,
+                    succeeded=False, preview_children=["preview-leaked"],
+                ),
+            ),
+            (
+                "short copy",
+                "preview copy bytes diverged from the source manifest",
+                partial(_preview_world, copied_bytes=4, expected_bytes=5),
+            ),
+        ))
 
-    def test_force_checker_rejects_payload_path(self) -> None:
-        with self.assertRaises(AssertionError):
-            assert_force_front_gate_invariant(
-                lookup_path="/payload", db_failed_path="/db", payload_failed_path="/payload",
-                lookup_bytes=b"payload",
-                expected_db_bytes=b"database",
-                snapshot_root="/preview", preview_children=[],
-            )
+    def test_explorer_checker_rejects_every_clause(self) -> None:
+        truncated = "at-cap explorer result was truncated"
+        complete = "over-budget explorer result was presented as complete"
+        self._assert_each_clause((
+            (
+                "at cap but flagged partial",
+                truncated,
+                partial(_explorer_world, entry_count=3, partial_result=True),
+            ),
+            (
+                "at cap but carries a truncation reason",
+                truncated,
+                partial(
+                    _explorer_world, entry_count=3, truncated_reason="entry_limit",
+                ),
+            ),
+            (
+                "complete files not a list",
+                "explorer files were not a list",
+                partial(
+                    _explorer_world, files=({"relative_path": "01-audio.mp3"},),
+                ),
+            ),
+            (
+                "complete audio paths inexact",
+                "complete explorer audio paths were not exact",
+                partial(_explorer_world, expected_audio_paths=["02-audio.mp3"]),
+            ),
+            (
+                "complete other-file count inexact",
+                "complete explorer other-file count was not exact",
+                partial(_explorer_world, other_file_count=1),
+            ),
+            (
+                "complete scanned-file count inexact",
+                "complete explorer scanned-file count was not exact",
+                partial(_explorer_world, scanned_file_count=2),
+            ),
+            (
+                "complete scanned-byte count inexact",
+                "complete explorer scanned-byte count was not exact",
+                partial(_explorer_world, scanned_bytes=9),
+            ),
+            (
+                "over cap presented as complete",
+                complete,
+                partial(_explorer_world, entry_count=4),
+            ),
+            (
+                "over cap truncated for the wrong reason",
+                complete,
+                partial(
+                    _explorer_world,
+                    entry_count=4,
+                    partial_result=True,
+                    truncated_reason="depth_limit",
+                ),
+            ),
+            (
+                "truncated scanned count not an integer",
+                "explorer did not return an integer scanned_file_count",
+                partial(
+                    _explorer_world,
+                    entry_count=4,
+                    partial_result=True,
+                    truncated_reason="entry_limit",
+                    scanned_file_count="1",
+                ),
+            ),
+            (
+                "truncated scan exceeded the entry budget",
+                "explorer scanned more regular files than its entry budget",
+                partial(
+                    _explorer_world,
+                    entry_count=4,
+                    partial_result=True,
+                    truncated_reason="entry_limit",
+                    scanned_file_count=4,
+                ),
+            ),
+            (
+                "truncated output exceeded its scanned files",
+                "truncated explorer output exceeded its scanned-file budget",
+                partial(
+                    _explorer_world,
+                    entry_count=4,
+                    partial_result=True,
+                    truncated_reason="entry_limit",
+                    scanned_file_count=1,
+                    files=[
+                        {"relative_path": "01-audio.mp3"},
+                        {"relative_path": "02-audio.mp3"},
+                    ],
+                ),
+            ),
+            (
+                "truncated files not a list",
+                "truncated explorer output exceeded its scanned-file budget",
+                partial(
+                    _explorer_world,
+                    entry_count=4,
+                    partial_result=True,
+                    truncated_reason="entry_limit",
+                    scanned_file_count=1,
+                    files=({"relative_path": "01-audio.mp3"},),
+                ),
+            ),
+        ))
 
-    def test_relocation_checker_rejects_replacement_commit(self) -> None:
-        with self.assertRaises(AssertionError):
-            assert_generated_relocation_invariant(
-                result=MaterializeGuarded(detail="processing_root_relocated"),
-                source_exists=True, replacement_has_canonical=True,
-            )
+    def test_force_checker_rejects_every_clause(self) -> None:
+        unisolated = "force evidence lookup consumed an unisolated path"
+        self._assert_each_clause((
+            (
+                "lookup read the payload path",
+                unisolated,
+                partial(
+                    _force_world,
+                    lookup_path=_PAYLOAD_QUARANTINE, lookup_bytes=b"payload",
+                ),
+            ),
+            (
+                "lookup read the DB quarantine path",
+                unisolated,
+                partial(_force_world, lookup_path=_DB_QUARANTINE),
+            ),
+            (
+                "lookup escaped the action root",
+                "force evidence lookup escaped private action root",
+                partial(
+                    _force_world, lookup_path="/processing/preview/preview-abc",
+                ),
+            ),
+            (
+                "lookup held foreign bytes",
+                "force evidence lookup did not contain DB-authorized bytes",
+                partial(_force_world, lookup_bytes=b"payload"),
+            ),
+            (
+                "private snapshot leaked",
+                "force front gate leaked its private snapshot",
+                partial(_force_world, preview_children=["preview-abc"]),
+            ),
+        ))
 
-    def test_quarantine_verdict_checker_rejects_a_laundered_refusal(self) -> None:
-        with self.assertRaises(AssertionError):
-            assert_quarantine_verdict_is_earned(
-                world="unreadable_root",
-                code="unspecified",
-                message="path is outside configured quarantine roots",
-            )
-        with self.assertRaises(AssertionError):
-            assert_quarantine_verdict_is_earned(
-                world="absent",
-                code="unspecified",
-                message="path is outside configured quarantine roots",
-            )
-        with self.assertRaises(AssertionError):
-            assert_quarantine_verdict_is_earned(
-                world="outside", code="missing", message="gone")
-        # Fails closed on a world it has no rule for (issue #1063 F5).
-        with self.assertRaises(AssertionError):
-            assert_quarantine_verdict_is_earned(
-                world="brand_new_world", code="missing", message="gone")
+    def test_relocation_checker_rejects_every_clause(self) -> None:
+        unguarded = "root relocation did not produce the guarded result"
+        lost = "root relocation lost source bytes or wrote replacement root"
+        self._assert_each_clause((
+            (
+                "relocation published instead of guarding",
+                unguarded,
+                partial(_relocation_world, result=Materialized()),
+            ),
+            (
+                "relocation guarded for another reason",
+                unguarded,
+                partial(
+                    _relocation_world,
+                    result=MaterializeGuarded(
+                        detail="incomplete_or_unsafe_canonical",
+                    ),
+                ),
+            ),
+            (
+                "relocation lost the source bytes",
+                lost,
+                partial(_relocation_world, source_exists=False),
+            ),
+            (
+                "relocation wrote the replacement root",
+                lost,
+                partial(_relocation_world, replacement_has_canonical=True),
+            ),
+        ))
+
+    def test_quarantine_verdict_checker_rejects_every_clause(self) -> None:
+        containment = "path is outside configured quarantine roots"
+        laundered = (
+            "was refused with a containment verdict the resolver never evaluated"
+        )
+        self._assert_each_clause((
+            # Fails closed on a world it has no rule for (issue #1063 F5).
+            (
+                "unclassified world",
+                "world='brand_new_world' has no verdict rule",
+                partial(
+                    assert_quarantine_verdict_is_earned,
+                    world="brand_new_world", code="missing", message="gone",
+                ),
+            ),
+            (
+                "uncontained path refused without the containment verdict",
+                "an uncontained path was refused as 'unspecified': gone",
+                partial(
+                    assert_quarantine_verdict_is_earned,
+                    world="outside", code="unspecified", message="gone",
+                ),
+            ),
+            (
+                "uncontained path refused as missing",
+                f"an uncontained path was refused as 'missing': {containment}",
+                partial(
+                    assert_quarantine_verdict_is_earned,
+                    world="outside", code="missing", message=containment,
+                ),
+            ),
+            (
+                "unreadable root laundered into a containment verdict",
+                f"world='unreadable_root' {laundered}",
+                partial(
+                    assert_quarantine_verdict_is_earned,
+                    world="unreadable_root",
+                    code="unspecified",
+                    message=containment,
+                ),
+            ),
+            (
+                "absent name laundered into a containment verdict",
+                f"world='absent' {laundered}",
+                partial(
+                    assert_quarantine_verdict_is_earned,
+                    world="absent", code="unspecified", message=containment,
+                ),
+            ),
+            (
+                "unreadable root refused as something other than storage",
+                "an unreadable root was refused as 'missing', not a storage failure",
+                partial(
+                    assert_quarantine_verdict_is_earned,
+                    world="unreadable_root", code="missing", message="gone",
+                ),
+            ),
+            (
+                "absent name refused as something other than missing",
+                "an absent candidate was refused as 'open_failed', not missing",
+                partial(
+                    assert_quarantine_verdict_is_earned,
+                    world="absent", code="open_failed", message="boom",
+                ),
+            ),
+        ))
 
 
 #: The worlds that reach a refusal and therefore owe a verdict rule. The
