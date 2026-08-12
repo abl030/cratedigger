@@ -206,24 +206,40 @@ and hooks — is in `.claude/rules/code-quality.md` § "Test execution, evidence
 and hooks".
 
 **The shared host's test RAM root is a fixed-size tmpfs with no other admission
-control, so `bash scripts/run_tests.sh` admits one canonical suite at a time**
-(issue #1111): it takes an advisory lock scoped to the runtime tmpfs before
-running any phase, reaps check bundles nothing can still be writing, and
-checks headroom — all before creating its own bundle. A second
-concurrently-launched canonical suite waits, bounded, printing what it is
-waiting for, instead of colliding with the first one's roughly a dozen
-ephemeral PostgreSQL clusters; insufficient headroom fails the whole suite
-once, immediately, with that one reason rather than tripping deep into a run
-after earlier phases already passed. `scripts/test.sh` targeted runs
-deliberately do NOT go through this admission gate — gating every dev-loop
-iteration behind a lock shared with full suite runs would serialize
-interactive work for no benefit, since a targeted subset spawns far fewer
-PostgreSQL workers than the full suite's own "python" phase. Mid-run, a
-target whose worker legitimately failed
-because the RAM root was exhausted (never inferred from log text — measured
-free bytes at the moment the failure was caught) collapses into ONE named
-`test RAM root exhausted` failure-index entry instead of reading as N
-unrelated test failures.
+control, so every `run_suite` invocation admits one at a time** (issue #1111):
+before running any phase, it takes an advisory lock scoped to the runtime
+tmpfs, reaps stale scratch directories nothing can still be writing, and
+checks headroom — all before creating its own bundle. This applies to the
+canonical suite (`bash scripts/run_tests.sh`) AND to `scripts/test.sh`
+targeted runs (`scripts/run_targeted_tests.py` calls the identical
+`run_suite`, with no override, so it resolves the same shared root and
+contends for the same lock) — #1111's own incident record includes a
+`scripts/test.sh` collision, and excluding targeted runs would have left that
+exact incident unprotected. What IS excluded is the `nix-shell` shellHook
+level: gating every interactive shell entry would serialize dev shells that
+never call `run_suite` at all. A second concurrently-launched `run_suite`
+call waits, bounded, printing what it is waiting for (including the current
+holder's pid when available) instead of colliding with the first one's
+roughly a dozen ephemeral PostgreSQL clusters; insufficient headroom fails
+the whole suite once, immediately, with that one reason rather than tripping
+deep into a run after earlier phases already passed. The shellHook's own
+entry-time headroom check (`scripts/test_tmpfs.sh`) defers to `run_suite`'s
+post-lock check for both entry points above — `scripts/test.sh` and
+`scripts/run_final_gate.sh` each set `CRATEDIGGER_SUITE_OWNS_HEADROOM=1`
+before their own `nix-shell` invocation — so a contended second run queues on
+the lock instead of dying at shell entry with the old unnamed message; a
+plain interactive `nix-shell` entry is unaffected. Mid-run, a target whose worker
+legitimately failed because the RAM root was exhausted (never inferred from
+log text — measured free bytes at the moment the failure was caught)
+collapses into ONE named `test RAM root exhausted` failure-index entry
+instead of reading as N unrelated test failures; that measurement uses the
+SAME configured floor (`CRATEDIGGER_TEST_RAM_MIN_BYTES`, 1 GiB default) the
+suite itself refuses to start below — a genuine exhaustion whose measured
+moment happens to read above that floor still shows as an ordinary failure
+(a known miss, never a false green: nothing here ever hides a real defect,
+only relabels ones it can prove are environmental). `scripts/fuzz_burst.sh`
+and `scripts/run_world_model_burst.py` remain outside this gate entirely —
+a known, stated residual, not a hidden gap.
 
 ## Shared AI surfaces
 

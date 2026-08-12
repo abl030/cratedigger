@@ -40,6 +40,7 @@ from scripts.run_test_suite import (
     TEST_RAM_ROOT_EXHAUSTED,
     CheckFailureMarker,
     CheckMetricsMarker,
+    _default_min_headroom_bytes,
 )
 
 ExcInfo = (
@@ -1114,6 +1115,7 @@ def _classify_target_infrastructure_failure(
     exc: Exception,
     *,
     available_bytes: Callable[[], int | None] = _measure_tempdir_available_bytes,
+    minimum_bytes: int | None = None,
 ) -> TargetInfrastructureFailure:
     """Classify a worker's own crash by measuring free bytes right now.
 
@@ -1123,9 +1125,30 @@ def _classify_target_infrastructure_failure(
     starved tmpfs produces). Measured, not parsed — the same honest
     "check bytes at failure time" the running-test classifier already uses
     (`_classify_test_infrastructure_error`), never a scan of `exc`'s text.
+
+    The floor is the SAME configured minimum ``run_suite``'s own startup
+    precondition enforces (``CRATEDIGGER_TEST_RAM_MIN_BYTES``, 1 GiB
+    default) — not the running-test classifier's much lower internal
+    ``_MIN_VALID_TEMP_HEADROOM_BYTES`` (64 MiB), which is intentionally
+    unchanged. Below the suite's own floor is by definition the unsupported
+    regime, since ``run_suite`` refuses to even start there; a worker crash
+    measured in the 64 MiB-1 GiB band is real exhaustion this classifier
+    would otherwise miss (issue #1111 review:
+    ``tests/test_decision_corpus_export.py``'s nested nix-shell subprocesses
+    genuinely fail in that band mid-run, and used to read as an ordinary
+    failure).
+
+    Residual, stated honestly: this can still MISS a genuine exhaustion
+    event whose measured moment happened to read comfortably above the
+    floor (a sudden large write between this check and the crash) — that
+    failure reads as an ordinary worker failure, the same as it always did.
+    It can never fold a genuine code defect INTO this bucket and hide it:
+    nothing here suppresses a failure, only relabels ones it can prove are
+    environmental.
     """
     available = available_bytes()
-    disk_full = available is not None and available < _MIN_VALID_TEMP_HEADROOM_BYTES
+    floor = minimum_bytes if minimum_bytes is not None else _default_min_headroom_bytes()
+    disk_full = available is not None and available < floor
     detail = f"{type(exc).__name__}: {exc}"
     if disk_full:
         detail = f"temporary filesystem has {available} bytes free; {detail}"

@@ -17,6 +17,7 @@ from pathlib import Path
 
 import msgspec
 
+from scripts.run_python_tests import TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE
 from scripts.run_test_suite import (
     FAILURE_MARKER_PREFIX,
     TEST_RAM_ROOT_EXHAUSTED,
@@ -25,8 +26,10 @@ from scripts.run_test_suite import (
     PhaseSpec,
     RamRootExhaustedError,
     SuiteAdmissionTimeout,
+    _check_suite_headroom,
     _default_min_headroom_bytes,
     _default_phases,
+    _read_lock_holder_identity,
     acquire_suite_admission,
     admission_lock_path,
     dirty_state_fingerprint,
@@ -429,6 +432,62 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
         self.assertIn("first: unused variable", terminal)
         self.assertIn("second: unused function", terminal)
 
+    def test_ram_root_exhausted_exit_code_is_not_an_ordinary_python_failure_code(
+        self,
+    ) -> None:
+        """Issue #1111 review M4(a): TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE must
+        stay outside the "python" phase's declared failure_exit_codes, or
+        run_test_suite.py's generic phase-state derivation would route it to
+        an ordinary "failed" instead of "infrastructure-failure"."""
+        python_phase = next(
+            phase for phase in _default_phases() if phase.name == "python"
+        )
+
+        self.assertNotIn(
+            TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE, python_phase.failure_exit_codes
+        )
+
+    def test_pure_ram_root_exhaustion_promotes_the_suite_to_infrastructure_failure(
+        self,
+    ) -> None:
+        """Issue #1111 review M4(b): a "python" phase that emits the
+        collapsed ram-root marker and exits TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE
+        must promote the whole suite to infrastructure-failure (exit 2), not
+        an ordinary failed (exit 1) — made permanent from the review's own
+        probe."""
+        marker = msgspec.json.encode(
+            CheckFailureMarker(
+                identity=TEST_RAM_ROOT_EXHAUSTED,
+                owner="",
+                detail=(
+                    "1 target(s)/test(s) failed while the shared test RAM "
+                    "root was exhausted"
+                ),
+                test_ids=("tests.test_alpha",),
+            )
+        ).decode()
+        phases = (
+            PhaseSpec(
+                "python",
+                _python_command(
+                    f"{FAILURE_MARKER_PREFIX}{marker}",
+                    TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE,
+                ),
+                "python3 scripts/run_python_tests.py",
+                "python",
+            ),
+        )
+
+        result, _terminal = self._run(phases)
+        summary = decode_summary(result.bundle / "summary.json")
+
+        self.assertEqual(result.exit_code, 2)
+        self.assertEqual(summary.state, "infrastructure-failure")
+        self.assertEqual(summary.phases[0].state, "infrastructure-failure")
+        self.assertEqual(
+            summary.phases[0].failures[0].identity, TEST_RAM_ROOT_EXHAUSTED
+        )
+
 
 class SuiteAdmissionTestCase(unittest.TestCase):
     """Direct contracts for the exclusive suite-runner admission lock (#1111)."""
@@ -519,6 +578,71 @@ class SuiteAdmissionTestCase(unittest.TestCase):
 
         self.assertEqual(stream.getvalue(), "")
 
+    def test_waiter_reports_the_real_holders_identity(self) -> None:
+        """Issue #1111 review m9: a waiter's progress message names the
+        actual current holder (pid + start ticks), read from what
+        acquire_suite_admission itself writes on acquisition — not just a
+        generic "another canonical suite" with no identity, matching
+        run_final_gate.sh's own helper/gate pid+start-ticks precedent."""
+        holder_ready = threading.Event()
+        release_holder = threading.Event()
+
+        def _hold() -> None:
+            with acquire_suite_admission(self.runtime, stream=io.StringIO()):
+                holder_ready.set()
+                release_holder.wait(5.0)
+
+        holder_thread = threading.Thread(target=_hold)
+        holder_thread.start()
+        try:
+            self.assertTrue(holder_ready.wait(5.0), "holder never acquired")
+            stream = io.StringIO()
+            with (
+                self.assertRaises(SuiteAdmissionTimeout),
+                acquire_suite_admission(
+                    self.runtime,
+                    stream=stream,
+                    timeout_seconds=0.2,
+                    poll_seconds=0.02,
+                    progress_interval_seconds=0.05,
+                ),
+            ):
+                raise AssertionError("must not run while contended")
+            # threading shares one process pid; this proves the wiring reads
+            # what the real holder wrote, not a hand-typed placeholder.
+            self.assertIn(f"pid {os.getpid()}", stream.getvalue())
+            self.assertIn("start ticks", stream.getvalue())
+        finally:
+            release_holder.set()
+            holder_thread.join(timeout=5.0)
+
+    def test_read_lock_holder_identity_rejects_malformed_content(self) -> None:
+        lock_path = admission_lock_path(self.runtime)
+        CASES = (
+            ("missing file", None),
+            ("empty", ""),
+            ("only a pid", "12345"),
+            ("three fields", "12345 6789 extra"),
+            ("non-digit pid", "abc 6789"),
+            ("non-digit ticks", "12345 abc"),
+        )
+        for desc, content in CASES:
+            with self.subTest(desc=desc):
+                if content is not None:
+                    lock_path.write_text(content)
+                elif lock_path.exists():
+                    lock_path.unlink()
+
+                self.assertIsNone(_read_lock_holder_identity(lock_path))
+
+    def test_read_lock_holder_identity_parses_well_formed_content(self) -> None:
+        lock_path = admission_lock_path(self.runtime)
+        lock_path.write_text("12345 6789\n")
+
+        self.assertEqual(
+            _read_lock_holder_identity(lock_path), "pid 12345, start ticks 6789"
+        )
+
 
 class StaleCheckBundleReapTestCase(unittest.TestCase):
     """Contracts for admission-time cleanup of stale check bundles (#1111)."""
@@ -573,23 +697,7 @@ class StaleCheckBundleReapTestCase(unittest.TestCase):
         self.assertEqual(reaped, ())
         self.assertTrue(fresh.exists())
 
-    def test_never_reaps_the_excluded_bundle_even_if_it_is_old(self) -> None:
-        now = time.time()
-        current = self._bundle(
-            "cratedigger-checks.current", age_seconds=999, now=now
-        )
-
-        reaped = reap_stale_check_bundles(
-            self.runtime,
-            exclude=current,
-            max_age_seconds=100,
-            reference_time=now,
-        )
-
-        self.assertEqual(reaped, ())
-        self.assertTrue(current.exists())
-
-    def test_ignores_directories_that_are_not_check_bundles(self) -> None:
+    def test_ignores_directories_matching_no_reapable_prefix(self) -> None:
         now = time.time()
         unrelated = self.runtime / "cratedigger-tests.unrelated"
         unrelated.mkdir(mode=0o700)
@@ -604,6 +712,46 @@ class StaleCheckBundleReapTestCase(unittest.TestCase):
 
         self.assertEqual(reaped, ())
         self.assertTrue(unrelated.exists())
+
+    def _leaked_test_scaffold(
+        self, name: str, *, age_seconds: float, now: float
+    ) -> Path:
+        """A directory shaped like a killed test process's own leaked
+        tempfile.mkdtemp fixture — no summary.json, just the bare dir."""
+        scaffold = self.runtime / name
+        scaffold.mkdir(mode=0o700)
+        stamp = now - age_seconds
+        os.utime(scaffold, (stamp, stamp))
+        return scaffold
+
+    def test_reaps_stale_test_scaffolding_prefixes_too(self) -> None:
+        """Issue #1111 review m8: a killed test process (SIGKILL, OOM)
+        leaks its tests/test_suite_coordinator.py fixture directory before
+        tearDown can remove it — those prefixes must also age out."""
+        now = time.time()
+        stale = tuple(
+            self._leaked_test_scaffold(name, age_seconds=999, now=now)
+            for name in (
+                "cratedigger-suite-test-leaked",
+                "cratedigger-admission-test-leaked",
+                "cratedigger-reap-test-leaked",
+                "cratedigger-headroom-test-leaked",
+            )
+        )
+        fresh = self._leaked_test_scaffold(
+            "cratedigger-suite-test-current", age_seconds=1, now=now
+        )
+
+        reaped = reap_stale_check_bundles(
+            self.runtime,
+            max_age_seconds=100,
+            reference_time=now,
+        )
+
+        self.assertEqual(set(reaped), set(stale))
+        for path in stale:
+            self.assertFalse(path.exists())
+        self.assertTrue(fresh.exists())
 
 
 class SuiteHeadroomPreconditionTestCase(unittest.TestCase):
@@ -681,6 +829,27 @@ class SuiteHeadroomPreconditionTestCase(unittest.TestCase):
                 os.environ.pop("CRATEDIGGER_TEST_RAM_MIN_BYTES", None)
             else:
                 os.environ["CRATEDIGGER_TEST_RAM_MIN_BYTES"] = original
+
+    def test_headroom_check_honors_the_ram_root_override(self) -> None:
+        """Issue #1111 review m10: CRATEDIGGER_TEST_RAM_ROOT must be measured
+        the same way scripts/test_tmpfs.sh's own shell-entry guard measures
+        it — not silently ignored in favour of the passed-in runtime_dir."""
+        other = Path(
+            tempfile.mkdtemp(dir=self.runtime.parent, prefix="cratedigger-other-root-")
+        )
+        original = os.environ.pop("CRATEDIGGER_TEST_RAM_ROOT", None)
+        try:
+            os.environ["CRATEDIGGER_TEST_RAM_ROOT"] = str(self.runtime)
+            with self.assertRaises(RamRootExhaustedError) as caught:
+                _check_suite_headroom(other, minimum_bytes=1 << 62)
+            self.assertIn(str(self.runtime), str(caught.exception))
+            self.assertNotIn(str(other), str(caught.exception))
+        finally:
+            shutil.rmtree(other, ignore_errors=True)
+            if original is None:
+                os.environ.pop("CRATEDIGGER_TEST_RAM_ROOT", None)
+            else:
+                os.environ["CRATEDIGGER_TEST_RAM_ROOT"] = original
 
 
 class JsCheckHelperTestCase(unittest.TestCase):

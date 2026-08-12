@@ -159,6 +159,44 @@ class TestWorkerCrashClassification(unittest.TestCase):
 
         self.assertFalse(failure.disk_full)
 
+    def test_default_floor_is_the_configured_one_gib_minimum_not_64mib(
+        self,
+    ) -> None:
+        """Issue #1111 review M3: 100 MiB free is BELOW run_suite's own
+        configured 1 GiB startup floor (CRATEDIGGER_TEST_RAM_MIN_BYTES) —
+        real exhaustion the suite would refuse to even start under — but
+        was ABOVE the old internal _MIN_VALID_TEMP_HEADROOM_BYTES (64 MiB),
+        so it used to read as an ordinary worker failure. tests/test_
+        decision_corpus_export.py's nested nix-shell subprocesses genuinely
+        fail in exactly this band mid-run.
+        """
+        original = os.environ.pop("CRATEDIGGER_TEST_RAM_MIN_BYTES", None)
+        try:
+            os.environ.pop("CRATEDIGGER_TEST_RAM_MIN_BYTES", None)
+            failure = _classify_target_infrastructure_failure(
+                _target("tests.test_alpha"),
+                RuntimeError("target subprocess exited 1: traceback"),
+                available_bytes=lambda: 100 * 1024 * 1024,
+            )
+        finally:
+            if original is not None:
+                os.environ["CRATEDIGGER_TEST_RAM_MIN_BYTES"] = original
+
+        self.assertTrue(failure.disk_full)
+        self.assertIn("104857600 bytes free", failure.detail)
+
+    def test_explicit_minimum_bytes_overrides_the_configured_default(
+        self,
+    ) -> None:
+        failure = _classify_target_infrastructure_failure(
+            _target("tests.test_alpha"),
+            RuntimeError("boom"),
+            available_bytes=lambda: 100 * 1024 * 1024,
+            minimum_bytes=10 * 1024 * 1024,
+        )
+
+        self.assertFalse(failure.disk_full)
+
 
 class TestCollapseDiskFullFailures(unittest.TestCase):
     """Issue #1111 item 2: N disk-full-classified failures fold into ONE

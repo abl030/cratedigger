@@ -57,9 +57,18 @@ def low_headroom_environment(
     inherited_tmpdir: str,
     minimum_bytes: int,
 ) -> dict[str, str]:
-    """Force the helper's real default tmpfs root below the headroom gate."""
+    """Force the helper's real default tmpfs root below the headroom gate.
+
+    Explicitly clears CRATEDIGGER_SUITE_OWNS_HEADROOM: when this test suite
+    itself runs via scripts/test.sh or run_final_gate.sh, THAT wrapper sets
+    the var in the ambient environment for its whole nix-shell invocation
+    (issue #1111 review M2), so a naive dict(os.environ) copy here would
+    silently inherit the skip and defeat the very refusal this fixture
+    exists to force.
+    """
     env = dict(os.environ)
     env.pop("CRATEDIGGER_TEST_RAM_ROOT", None)
+    env.pop("CRATEDIGGER_SUITE_OWNS_HEADROOM", None)
     env["TMPDIR"] = inherited_tmpdir
     env["CRATEDIGGER_TEST_RAM_MIN_BYTES"] = str(minimum_bytes)
     return env
@@ -120,6 +129,54 @@ class TestTmpfsSetup(unittest.TestCase):
             runtime_dir=runtime_dir,
             minimum_bytes=LOW_HEADROOM_MINIMUM_BYTES,
         )
+
+    def test_suite_owns_headroom_skips_only_the_free_bytes_refusal(self) -> None:
+        """Issue #1111 review M2: scripts/test.sh and run_final_gate.sh set
+        CRATEDIGGER_SUITE_OWNS_HEADROOM=1 before their own nix-shell
+        invocation so run_suite()'s own post-lock headroom precondition is
+        the single enforcement point for suite runs — this proves the skip
+        applies to the free-bytes check specifically (setup still runs,
+        allocating a real TMPDIR) rather than disabling the guard wholesale.
+        """
+        env = low_headroom_environment(
+            inherited_tmpdir="/tmp/cratedigger-inherited-tmpdir",
+            minimum_bytes=LOW_HEADROOM_MINIMUM_BYTES,
+        )
+        env["CRATEDIGGER_SUITE_OWNS_HEADROOM"] = "1"
+
+        completed = run_tmpfs_setup_and_print_tmpdir(env=env)
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        selected = Path(completed.stdout)
+        self.assertEqual(selected.parent, Path(tmpfs_runtime_root()))
+        self.assertTrue(selected.name.startswith("cratedigger-tests."))
+        self.assertFalse(selected.exists())
+
+    def test_suite_owns_headroom_does_not_skip_the_other_safety_checks(self) -> None:
+        """The skip is scoped to the free-bytes refusal only — a world-
+        writable ancestor is still refused even with the env var set."""
+        completed = subprocess.run(
+            [
+                "bash",
+                "-c",
+                'source "$1"; setup_cratedigger_test_tmpfs',
+                "bash",
+                str(TMPFS_SETUP),
+            ],
+            cwd=REPO_ROOT,
+            env={
+                **os.environ,
+                "CRATEDIGGER_TEST_RAM_ROOT": "/dev/shm",
+                "CRATEDIGGER_TEST_RAM_MIN_BYTES": "0",
+                "CRATEDIGGER_SUITE_OWNS_HEADROOM": "1",
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("replaceable ancestor", completed.stderr)
 
     def test_active_tmpdir_has_private_ancestry(self) -> None:
         current = Path(tempfile.gettempdir()).resolve()

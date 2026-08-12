@@ -171,6 +171,29 @@ class FinalGateReceiptTestCase(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("missing its suite bundle path", result.stderr)
 
+    def test_passing_receipt_whose_bundle_directory_was_reaped_is_rejected(self) -> None:
+        """Issue #1111 review m5: a receipt's own `terminal`/`bundle` FILE
+        surviving is not evidence the bundle DIRECTORY it names still
+        exists — admission-time reaping can remove an idle one. `status`
+        must fail visibly rather than silently report `pass` over evidence
+        that is gone."""
+        process = self._launch()
+        receipt = self._receipt_from(process)
+        process.communicate(timeout=10)
+        shutil.rmtree(self.bundle)
+
+        result = subprocess.run(
+            [str(HELPER), "status", str(receipt)],
+            cwd=self.repo.name,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no longer exists", result.stderr)
+        self.assertIn(str(self.bundle), result.stderr)
+
     def test_active_detached_recovery_requires_the_exact_live_process_identity(self) -> None:
         process = self._launch(mode="sleep")
         receipt = self._receipt_from(process)

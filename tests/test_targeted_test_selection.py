@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
+import select
+import shutil
 import subprocess
+import sys
+import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -16,6 +22,7 @@ from scripts.run_python_tests import (
     select_test_targets,
 )
 from scripts.run_targeted_tests import targeted_phases
+from scripts.run_test_suite import admission_lock_path
 from scripts.targeted_test_selection import (
     ALWAYS_AMBIENT_TESTS,
     EXACT_PATH_NEIGHBOURS,
@@ -344,6 +351,77 @@ class TestTargetedSuiteWiring(unittest.TestCase):
         self.assertIn("scripts/run_targeted_tests.py", source)
         self.assertIn('"$@"', source)
         self.assertNotIn("python3 -m unittest discover", source)
+
+    def test_targeted_runner_takes_the_same_suite_admission_lock(self) -> None:
+        """Issue #1111 review B1: scripts/test.sh targeted runs DO
+        participate in run_suite's admission lock — they are NOT excluded
+        the way an interactive nix-shell entry is. run_targeted_tests.py
+        calls run_suite() with no runtime_dir override, so it resolves the
+        SAME shared root and contends for the SAME lockfile as the canonical
+        suite; #1111's own incident record includes a scripts/test.sh
+        BrokenProcessPool collision, which is exactly what this admission
+        gate exists to prevent.
+
+        Proven end-to-end against the real entry point (not a reconstruction
+        of what it "should" do): hold the lock in an isolated runtime dir,
+        launch the real run_targeted_tests.py against that same dir via
+        XDG_RUNTIME_DIR, and require its own "waiting for admission" message
+        to name that exact lockfile before it is killed — a later change
+        that silently routes targeted runs around admission fails this pin.
+        """
+        shared = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"))
+        self.assertTrue(shared.is_dir(), "private runtime tmpfs is required")
+        isolated = Path(
+            tempfile.mkdtemp(dir=shared, prefix="cratedigger-targeted-admission-test-")
+        )
+        lock_path = admission_lock_path(isolated)
+        held = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(held, fcntl.LOCK_EX)
+        process: subprocess.Popen[bytes] | None = None
+        try:
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(REPO_ROOT / "scripts" / "run_targeted_tests.py"),
+                    "tests.test_typing_ratchet",
+                ],
+                cwd=REPO_ROOT,
+                env={**os.environ, "XDG_RUNTIME_DIR": str(isolated)},
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            assert process.stdout is not None
+            fd = process.stdout.fileno()
+            buffer = b""
+            deadline = time.monotonic() + 30.0
+            saw_waiting = False
+            while time.monotonic() < deadline:
+                remaining = max(0.0, deadline - time.monotonic())
+                ready, _write, _err = select.select([fd], [], [], min(1.0, remaining))
+                if not ready:
+                    continue
+                chunk = os.read(fd, 4096)
+                if not chunk:
+                    break
+                buffer += chunk
+                if b"waiting for admission" in buffer and str(lock_path).encode() in buffer:
+                    saw_waiting = True
+                    break
+
+            self.assertTrue(
+                saw_waiting,
+                "run_targeted_tests.py never reported waiting for admission "
+                f"on {lock_path}; captured output: {buffer.decode(errors='replace')}",
+            )
+        finally:
+            if process is not None:
+                process.kill()
+                process.wait(timeout=10)
+                if process.stdout is not None:
+                    process.stdout.close()
+            fcntl.flock(held, fcntl.LOCK_UN)
+            os.close(held)
+            shutil.rmtree(isolated, ignore_errors=True)
 
     def test_python_phase_completes_for_a_diff_touching_shared_fakes(self) -> None:
         """End-to-end pin for issue #1081: a real diff touching tests/fakes/*.py

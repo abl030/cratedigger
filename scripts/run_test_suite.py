@@ -255,12 +255,20 @@ DEFAULT_ADMISSION_PROGRESS_INTERVAL_SECONDS = 30.0
 DEFAULT_MIN_HEADROOM_BYTES = 1_073_741_824
 
 #: A completed check bundle survives at least this long before admission-time
-#: reaping may remove it, so the documented "reuse that receipt before push"
-#: workflow (CLAUDE.md "Running tests") keeps working within one ordinary
-#: session. Reaping only ever runs while holding the admission lock
-#: exclusively, so anything found here already predates this run regardless
-#: of age; the age gate exists purely to protect near-term reuse, not to
-#: prove liveness.
+#: reaping may remove it. This protects the bundle's DETAILED EVIDENCE (the
+#: per-phase logs and summary.md a run_final_gate.sh receipt points at), not
+#: receipt reuse itself: `run_final_gate.sh status` only confirms the
+#: receipt's own `terminal` and `bundle` FILE exist (a path string) — a
+#: `pass` receipt's verdict outlives its bundle regardless of this floor.
+#: `status_receipt` separately stats the bundle path and fails visibly when
+#: it is gone (issue #1111 review). The floor's real job is keeping that
+#: detailed evidence around for one ordinary session (CLAUDE.md "Running
+#: tests"), not proving the receipt itself is still trustworthy. Reaping
+#: only ever runs from `run_suite` while holding the admission lock
+#: exclusively, so any bundle another `run_suite` call created predates this
+#: run regardless of age — see the narrower claim in
+#: `reap_stale_check_bundles` below; the age gate exists purely to protect
+#: near-term evidence, not to prove liveness.
 DEFAULT_STALE_BUNDLE_MAX_AGE_SECONDS = 4 * 60 * 60
 
 #: The one named identity every RAM-root-exhaustion signal uses, at suite
@@ -283,6 +291,50 @@ def admission_lock_path(runtime: Path) -> Path:
     return runtime / ".cratedigger-test-admission.lock"
 
 
+def _proc_start_ticks(pid: int) -> str | None:
+    """Field 22 of /proc/<pid>/stat — mirrors run_final_gate.sh's proc_start_ticks."""
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return None
+    close = raw.rfind(")")
+    if close == -1:
+        return None
+    fields = raw[close + 2 :].split()
+    if len(fields) < 20:
+        return None
+    return fields[19]
+
+
+def _write_lock_holder_identity(descriptor: int) -> None:
+    """Best-effort holder identity a waiter's progress message can read.
+
+    Mirrors run_final_gate.sh's own pid+start-ticks identity precedent
+    (helper_pid/helper_start_ticks, gate_pid/gate_start_ticks): a bare pid is
+    ambiguous across process reuse, start ticks disambiguate it.
+    """
+    ticks = _proc_start_ticks(os.getpid()) or "0"
+    payload = f"{os.getpid()} {ticks}\n".encode()
+    try:
+        os.ftruncate(descriptor, 0)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        os.write(descriptor, payload)
+    except OSError:
+        pass
+
+
+def _read_lock_holder_identity(lock_path: Path) -> str | None:
+    """Best-effort description of whoever currently holds the lock."""
+    try:
+        content = lock_path.read_text().strip()
+    except OSError:
+        return None
+    parts = content.split()
+    if len(parts) != 2 or not all(part.isdigit() for part in parts):
+        return None
+    return f"pid {parts[0]}, start ticks {parts[1]}"
+
+
 @contextmanager
 def acquire_suite_admission(
     runtime: Path,
@@ -292,13 +344,24 @@ def acquire_suite_admission(
     poll_seconds: float = DEFAULT_ADMISSION_POLL_SECONDS,
     progress_interval_seconds: float = DEFAULT_ADMISSION_PROGRESS_INTERVAL_SECONDS,
 ) -> Generator[None]:
-    """Serialize canonical suite runs sharing one fixed-size test RAM root.
+    """Serialize every ``run_suite`` invocation sharing one fixed-size test RAM root.
 
-    Scoped to the suite-runner level (this module) — never to every
-    ``nix-shell`` entry, which would serialize interactive dev shells and
-    targeted ``scripts/test.sh`` runs too (issue #1111 explicitly rejects
-    that). A second concurrently-launched canonical suite waits here,
-    bounded, reporting what it is waiting for, instead of colliding with the
+    Scoped to the suite-runner level (this module's ``run_suite``) — never to
+    every ``nix-shell`` entry, which would also serialize interactive dev
+    shells that never call ``run_suite`` at all.
+
+    Targeted runs DO take this same lock: ``scripts/test.sh`` ->
+    ``scripts/run_targeted_tests.py`` -> this same ``run_suite``, with no
+    ``runtime_dir`` override, so it resolves the identical shared root and
+    contends for the identical lockfile as the canonical suite. This is
+    deliberate, not an oversight — issue #1111's own incident record
+    includes a ``scripts/test.sh`` run hitting ``BrokenProcessPool`` at host
+    load ~46, the canonical suite itself is only a couple of minutes on this
+    host, and the reap-safety argument in ``reap_stale_check_bundles`` below
+    depends on every caller of this function serializing through it. A
+    second concurrently-launched ``run_suite`` call — canonical or targeted —
+    waits here, bounded, reporting what it is waiting for (including the
+    current holder's identity when available), instead of colliding with the
     first one's roughly a dozen ephemeral PostgreSQL clusters.
     """
     lock_path = admission_lock_path(runtime)
@@ -321,8 +384,10 @@ def acquire_suite_admission(
                         "another canonical suite run"
                     ) from None
                 if not reported or now >= next_progress:
+                    holder = _read_lock_holder_identity(lock_path)
+                    holder_note = f" ({holder})" if holder else ""
                     stream.write(
-                        "waiting for admission: another canonical suite "
+                        f"waiting for admission: another canonical suite{holder_note} "
                         f"holds the test RAM root ({lock_path}); "
                         f"{deadline - now:.0f}s left before timeout\n"
                     )
@@ -330,6 +395,7 @@ def acquire_suite_admission(
                     reported = True
                     next_progress = now + progress_interval_seconds
                 time.sleep(min(poll_seconds, max(0.0, deadline - now)))
+        _write_lock_holder_identity(descriptor)
         if reported:
             stream.write(f"admission acquired: exclusive lock on {lock_path}\n")
             stream.flush()
@@ -354,28 +420,54 @@ def _bundle_last_activity(bundle: Path) -> float:
         return 0.0
 
 
+#: Directory-name prefixes the reaper protects the shared runtime tmpfs from
+#: leaking forever: ``run_suite``'s own check bundles, plus this test-infra
+#: change's own per-test scratch directories (``tests/test_suite_coordinator.py``)
+#: — a killed test process (SIGKILL, OOM) leaks its ``tempfile.mkdtemp``
+#: fixture before ``tearDown`` can remove it, in the exact directory this PR
+#: exists to keep clean. Age-gated the same way as check bundles; a fresh
+#: fixture belonging to a currently-running test is never touched.
+_REAPABLE_PREFIXES = (
+    "cratedigger-checks.",
+    "cratedigger-suite-test-",
+    "cratedigger-admission-test-",
+    "cratedigger-reap-test-",
+    "cratedigger-headroom-test-",
+)
+
+
 def reap_stale_check_bundles(
     runtime: Path,
     *,
-    exclude: Path | None = None,
     max_age_seconds: float = DEFAULT_STALE_BUNDLE_MAX_AGE_SECONDS,
     reference_time: float | None = None,
 ) -> tuple[Path, ...]:
-    """Best-effort cleanup of check bundles nothing can still be writing.
+    """Best-effort cleanup of scratch directories nothing can still be writing.
 
-    Only ever called while holding ``acquire_suite_admission`` exclusively
-    (issue #1111 item 1), so every ``cratedigger-checks.*`` directory found
-    here — including one a crashed prior holder left mid-run — predates this
-    run; no other live suite can be concurrently writing a new one under the
-    same lock. The age gate is the sole safety valve, protecting the
-    documented same-session "reuse that receipt" workflow rather than
-    reaping evidence someone still wants.
+    Only ever called from ``run_suite``, before it creates its own bundle,
+    while holding ``acquire_suite_admission`` exclusively (issue #1111 item
+    1). That guarantees every ``cratedigger-checks.*`` directory belonging to
+    ANOTHER ``run_suite`` invocation — including one a crashed prior holder
+    left mid-run — predates this run: no other ``run_suite`` call can be
+    concurrently writing a new one under the same lock. It does not cover
+    every possible creator of a matched prefix: a test fixture can (and
+    does — ``tests/test_final_gate_receipt.py``) construct a
+    ``cratedigger-checks.*`` directory directly, entirely outside
+    ``run_suite``. The age gate is what actually protects those, not lock
+    exclusivity, which is also why it covers this PR's own test-scaffolding
+    prefixes above — a killed test process can leak one with no
+    ``run_suite`` involved at all.
     """
     reference = reference_time if reference_time is not None else time.time()
     reaped: list[Path] = []
-    for candidate in sorted(runtime.glob("cratedigger-checks.*")):
-        if exclude is not None and candidate == exclude:
-            continue
+    candidates = sorted(
+        {
+            candidate
+            for prefix in _REAPABLE_PREFIXES
+            for candidate in runtime.glob(f"{prefix}*")
+        }
+    )
+    for candidate in candidates:
         try:
             info = candidate.lstat()
         except OSError:
@@ -412,11 +504,17 @@ def _default_min_headroom_bytes() -> int:
 
 
 def _check_suite_headroom(runtime: Path, *, minimum_bytes: int) -> None:
-    """Fail the whole suite once, immediately — never mid-run (issue #1111)."""
-    available = shutil.disk_usage(runtime).free
+    """Fail the whole suite once, immediately — never mid-run (issue #1111).
+
+    Measures the same root scripts/test_tmpfs.sh's shell-entry guard does:
+    ``CRATEDIGGER_TEST_RAM_ROOT`` when an operator has overridden it, else
+    the validated ``runtime`` this suite was actually admitted under.
+    """
+    target = Path(os.environ.get("CRATEDIGGER_TEST_RAM_ROOT") or runtime)
+    available = shutil.disk_usage(target).free
     if available < minimum_bytes:
         raise RamRootExhaustedError(
-            f"{TEST_RAM_ROOT_EXHAUSTED}: {runtime} has {available} bytes "
+            f"{TEST_RAM_ROOT_EXHAUSTED}: {target} has {available} bytes "
             f"free, needs {minimum_bytes}"
         )
 
