@@ -1590,6 +1590,324 @@ pkgs.testers.nixosTest {
     assert runtime_config.startswith("/nix/store/"), runtime_config
     machine.succeed(f"test -f {runtime_config}")
     machine.fail(f"runuser -u cratedigger -- sh -c 'printf x >> {runtime_config}'")
+
+    # #1098: the deploy-hold scenario above never gets the controlled
+    # workers running -- every app unit stays behind the synthetic
+    # first-boot config hold the whole time -- so it cannot exercise
+    # abort's real restart proof or its foreign-hold refusal. The four
+    # workers are genuinely active right now (started just above); reuse
+    # that live world to drive a genuinely incomplete acquire, then abort
+    # against it.
+    #
+    # A dirty old-lifecycle preflight (one automation_import job stuck in
+    # recovery_required) is the mechanism: recovery_required is an anomaly
+    # _wait_automation_queue_drained never drains, so acquire short-circuits
+    # straight past the queue-drain wait to _assert_clean_old_lifecycle and
+    # fails there -- after it has already taken the hold -- leaving the
+    # receipt in PHASE_ACQUIRING with the manual hold owned and the four
+    # gate-stopped units down, exactly the world abort exists to escape.
+    #
+    # The synthetic metadata-gate fixture (metadataGateTool, above) only
+    # records the hold marker file; unlike the real deployment-owned gate
+    # tool it never stops already-running units. Stop the four controlled
+    # workers directly so acquire's own drain proves them inactive quickly,
+    # instead of timing out waiting for a stop nothing in this fixture ever
+    # performs. Two consequences of that divergence carry through the rest
+    # of this scenario: (1) the SERVICE_UNITS drain inside acquire observes
+    # a test-arranged down-state, not one the real gate tool produced, so
+    # this scenario is not evidence that a real "hold manual" call itself
+    # stops running units -- only that acquire/abort correctly wait for and
+    # verify whatever state the units are actually in; (2) below,
+    # "resume-if-clear" is only ever proven CALLED and reporting clean
+    # (exit 0, no holds left) -- the synthetic tool's resume-if-clear is
+    # purely an emptiness check on holds/ and never itself starts a unit,
+    # so this scenario proves nothing about whether the real gate's
+    # resume-if-clear actually restarts cratedigger.service via its
+    # resume_units list.
+    machine.succeed(
+        "systemctl stop cratedigger-web.service cratedigger-importer.service "
+        "cratedigger-import-preview-worker.service "
+        "cratedigger-youtube-ingest.service"
+    )
+
+    # Seed the anomaly only now that the importer is stopped.
+    # recover_abandoned_automation_owners (scripts/importer.py, run at
+    # importer startup and every AUTOMATION_RECOVERY_REPROBE_INTERVAL_SECONDS
+    # = 300s) converges any leaseless recovery_required automation_import
+    # job on its own -- "never_claimed" is its exact death proof -- so a
+    # live importer races this seed and can silently recover it away before
+    # acquire ever observes it. Seeding after the stop above removes that
+    # race entirely. It also means this dirty-preflight shape is
+    # deterministic only while the importer stays stopped, not forever:
+    # once abort restarts it later in this scenario, the same sweep would
+    # converge a fresh copy of this shape on its own, which is why cleanup
+    # below drops the row instead of leaving it for the sweep to find.
+    #
+    # Multiple semicolon-separated statements in one `psql -c` invocation
+    # already share a single implicit Postgres transaction (the simple-query
+    # protocol wraps them), so migration 066's deferred owner-integrity
+    # constraint triggers -- which only check at COMMIT -- see the fully
+    # seeded, self-consistent end state here regardless of the explicit
+    # BEGIN/COMMIT below. That BEGIN/COMMIT documents the intent and guards
+    # against a future edit accidentally splitting this SQL across separate
+    # `-c` invocations, each its own connection and transaction: that was
+    # this scenario's actual first-draft bug -- seeding the job and its
+    # owning request as three separate `psql -c` calls tripped
+    # `enforce_complete_processing_owner` on the intermediate,
+    # single-statement-committed state every time (verified against a
+    # throwaway ephemeral-PG instance before writing this).
+    abort_vm_seed_mbid = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+    machine.succeed(
+        "sudo -u postgres psql cratedigger -At -c \""
+        "BEGIN; "
+        "INSERT INTO album_requests "
+        "(mb_release_id, artist_name, album_title, source, status) VALUES "
+        f"('{abort_vm_seed_mbid}', 'VM Abort Artist', 'VM Abort Album', "
+        "'request', 'wanted'); "
+        "INSERT INTO import_jobs "
+        "(job_type, status, request_id, payload, preview_status) "
+        "SELECT 'automation_import', 'recovery_required', id, "
+        "'{}'::jsonb, 'waiting' FROM album_requests "
+        f"WHERE mb_release_id = '{abort_vm_seed_mbid}'; "
+        "UPDATE album_requests SET status = 'processing', "
+        "active_automation_import_job_id = (SELECT id FROM import_jobs "
+        "WHERE request_id = (SELECT id FROM album_requests WHERE "
+        f"mb_release_id = '{abort_vm_seed_mbid}')) "
+        f"WHERE mb_release_id = '{abort_vm_seed_mbid}'; "
+        "COMMIT;\""
+    )
+    abort_vm_request_id = machine.succeed(
+        "sudo -u postgres psql cratedigger -At -c \""
+        f"SELECT id FROM album_requests WHERE mb_release_id = "
+        f"'{abort_vm_seed_mbid}'\""
+    ).strip()
+    abort_vm_job_id = machine.succeed(
+        "sudo -u postgres psql cratedigger -At -c \""
+        f"SELECT id FROM import_jobs WHERE request_id = "
+        f"{abort_vm_request_id}\""
+    ).strip()
+
+    abort_acquire_status, abort_acquire_output = machine.execute(
+        "timeout 120 cratedigger-deploy-hold acquire 2>&1"
+    )
+    assert abort_acquire_status != 0, abort_acquire_output
+    assert (
+        "old lifecycle is not clean for migration" in abort_acquire_output
+    ), abort_acquire_output
+
+    # Intermediate world: the receipt exists in PHASE_ACQUIRING, owning an
+    # active manual hold, with all four gate-stopped units down.
+    machine.succeed("test -e /run/cratedigger-deploy-hold")
+    abort_phase = machine.succeed(
+        "cat /run/cratedigger-deploy-hold/phase"
+    ).strip()
+    assert abort_phase == "acquiring", abort_phase
+    machine.succeed("test -f /run/cratedigger-deploy-hold/owned-manual-hold")
+    machine.succeed("test -f /var/lib/cratedigger-metadata-gate/holds/manual")
+    for timer in (
+        "cratedigger.timer",
+        "cratedigger-unfindable.timer",
+        "cratedigger-metadata-gate-watchdog.timer",
+    ):
+        machine.succeed(
+            f"test -f /run/cratedigger-deploy-hold/owned-link-{timer}"
+        )
+    for service in (
+        "cratedigger-web.service",
+        "cratedigger-importer.service",
+        "cratedigger-import-preview-worker.service",
+        "cratedigger-youtube-ingest.service",
+    ):
+        state = machine.succeed(
+            f"systemctl show {service} --property=ActiveState --value"
+        ).strip()
+        assert state == "inactive", (service, state)
+
+    # #1078 MUST FIX 4 -- validate-before-mutate: a foreign gate hold (the
+    # 2026-08-02 discogs-import outage shape) is refused by
+    # _validate_no_unowned_deploy_hold_conflicts before abort mutates
+    # anything at all, so every owned object is untouched by construction,
+    # not merely "restored" after a partial attempt. This is a narrower,
+    # different invariant than the issue's "fails partway leaves ownership
+    # intact" contract -- proven below by fault injection -- because this
+    # block never gets far enough to touch ownership in the first place.
+    machine.succeed(
+        "touch /var/lib/cratedigger-metadata-gate/holds/discogs-import"
+    )
+
+    # The reason this needed real systemd at all: "a systemctl start that a
+    # gate-guarded unit's ExecCondition silently skips still returns
+    # success". Prove that silent no-op directly, independent of abort --
+    # cratedigger-web.service is one of metadataGateServiceNames, so its
+    # ExecCondition (start-check) fails while the foreign hold sits in
+    # holds/, and a condition failure is a skipped start, not a job
+    # failure: systemctl still exits 0 while the unit never activates.
+    machine.succeed("systemctl start cratedigger-web.service")
+    web_state_under_foreign_hold = machine.succeed(
+        "systemctl show cratedigger-web.service --property=ActiveState --value"
+    ).strip()
+    assert web_state_under_foreign_hold != "active", web_state_under_foreign_hold
+
+    # Issue requirement 2 -- abort with a foreign gate hold present fails
+    # loudly rather than exiting 0 with workers still down.
+    foreign_abort_status, foreign_abort_output = machine.execute(
+        "timeout 60 cratedigger-deploy-hold abort 2>&1"
+    )
+    assert foreign_abort_status != 0, foreign_abort_output
+    assert (
+        "foreign metadata gate holds block abort" in foreign_abort_output
+    ), foreign_abort_output
+    machine.succeed("test -e /run/cratedigger-deploy-hold")
+    machine.succeed("test -f /run/cratedigger-deploy-hold/owned-manual-hold")
+    machine.succeed("test -f /var/lib/cratedigger-metadata-gate/holds/manual")
+    for timer in (
+        "cratedigger.timer",
+        "cratedigger-unfindable.timer",
+        "cratedigger-metadata-gate-watchdog.timer",
+    ):
+        machine.succeed(
+            f"test -f /run/cratedigger-deploy-hold/owned-link-{timer}"
+        )
+    for service in (
+        "cratedigger-web.service",
+        "cratedigger-importer.service",
+        "cratedigger-import-preview-worker.service",
+        "cratedigger-youtube-ingest.service",
+    ):
+        state = machine.succeed(
+            f"systemctl show {service} --property=ActiveState --value"
+        ).strip()
+        assert state == "inactive", (service, state)
+
+    machine.succeed(
+        "rm /var/lib/cratedigger-metadata-gate/holds/discogs-import"
+    )
+
+    # Issue requirement 3 -- abort that fails partway leaves ownership
+    # intact, the #1078 disown-before-restart hazard this module fixed.
+    # Break the preview worker's real ExecStart (not web -- web is fronted
+    # by cratedigger-web.socket, module.nix:2294-2326, a different restart
+    # shape from the other three) so abort_hold's manual-hold branch gets
+    # genuinely partway through: it releases the manual gate hold, starts
+    # all four GATE_STOPPED_UNITS (web/importer/youtube come up for real;
+    # preview flaps forever against /bin/false), then blocks inside
+    # _wait_controlled_workers_active waiting for preview to stabilize --
+    # which it never will. A bounded `timeout` SIGTERMs abort mid-wait,
+    # after the hold was released but before unmark_manual_hold_owned()
+    # (the last step of that branch) ever runs. This is the one world that
+    # discriminates both mutants review found: delete the
+    # _wait_controlled_workers_active call and abort exits 0 well inside
+    # the bound with preview still down; move unmark_manual_hold_owned()
+    # ahead of the restart proof and the owned-manual-hold marker is gone
+    # by the time the kill lands, instead of surviving it.
+    machine.succeed(
+        "install -d /run/systemd/system/"
+        "cratedigger-import-preview-worker.service.d"
+    )
+    machine.succeed(
+        "printf '[Service]\\nExecStart=\\n"
+        "ExecStart=/run/current-system/sw/bin/false\\n' > "
+        "/run/systemd/system/cratedigger-import-preview-worker.service.d/"
+        "fail.conf"
+    )
+    machine.succeed("systemctl daemon-reload")
+    partial_abort_status, partial_abort_output = machine.execute(
+        "timeout 20 cratedigger-deploy-hold abort 2>&1"
+    )
+    assert partial_abort_status != 0, partial_abort_output
+    machine.succeed(
+        "test ! -e /var/lib/cratedigger-metadata-gate/holds/manual"
+    )
+    machine.succeed("test -e /run/cratedigger-deploy-hold")
+    machine.succeed("test -f /run/cratedigger-deploy-hold/owned-manual-hold")
+    partial_abort_phase = machine.succeed(
+        "cat /run/cratedigger-deploy-hold/phase"
+    ).strip()
+    assert partial_abort_phase == "acquiring", partial_abort_phase
+    for timer in (
+        "cratedigger.timer",
+        "cratedigger-unfindable.timer",
+        "cratedigger-metadata-gate-watchdog.timer",
+    ):
+        machine.succeed(
+            f"test -f /run/cratedigger-deploy-hold/owned-link-{timer}"
+        )
+
+    machine.succeed(
+        "rm -r /run/systemd/system/"
+        "cratedigger-import-preview-worker.service.d"
+    )
+    machine.succeed("systemctl daemon-reload")
+    machine.succeed(
+        # 20s of Restart=on-failure flapping against /bin/false can trip
+        # the unit's own start-rate limit; clear it before trusting a fresh
+        # start below.
+        "systemctl reset-failed cratedigger-import-preview-worker.service"
+    )
+
+    # The rerun genuinely finishes the job the fault-injected abort above
+    # left partway through -- the ownership it preserved is what makes this
+    # retry possible.
+    machine.succeed("timeout 120 cratedigger-deploy-hold abort")
+
+    # Issue requirement 1 -- ordinary operation is genuinely restored, not
+    # merely reported restored. abort_hold only returns after its own
+    # _wait_controlled_workers_active / _assert_load_states proofs, so an
+    # immediate read proves genuine restoration without tolerating an early
+    # return the way wait_for_unit's polling would.
+    for service in (
+        "cratedigger-web.service",
+        "cratedigger-importer.service",
+        "cratedigger-import-preview-worker.service",
+        "cratedigger-youtube-ingest.service",
+    ):
+        state = machine.succeed(
+            f"systemctl show {service} --property=ActiveState --value"
+        ).strip()
+        assert state == "active", (service, state)
+    for timer in (
+        "cratedigger.timer",
+        "cratedigger-unfindable.timer",
+        "cratedigger-metadata-gate-watchdog.timer",
+    ):
+        state = machine.succeed(
+            f"systemctl show {timer} --property=ActiveState --value"
+        ).strip()
+        assert state == "active", (timer, state)
+    machine.succeed("cratedigger-metadata-gate start-check")
+    machine.succeed("test ! -e /run/cratedigger-deploy-hold")
+    machine.succeed(
+        "test ! -e /var/lib/cratedigger-metadata-gate/"
+        "inhibit-cratedigger.service"
+    )
+    machine.succeed(
+        "test ! -e /var/lib/cratedigger-metadata-gate/"
+        "inhibit-cratedigger-youtube-ingest.service"
+    )
+    machine.succeed(
+        "test ! -e /var/lib/cratedigger-metadata-gate/holds/manual"
+    )
+    for timer in (
+        "cratedigger.timer",
+        "cratedigger-unfindable.timer",
+        "cratedigger-metadata-gate-watchdog.timer",
+    ):
+        machine.succeed(f"test ! -e /run/systemd/system.control/{timer}")
+
+    # Cleanup: drop the seeded anomaly in one explicit transaction (see the
+    # seeding comment above for why one multi-statement `-c` invocation is
+    # both sufficient and how this scenario's first draft got it wrong).
+    machine.succeed(
+        "sudo -u postgres psql cratedigger -At -c \""
+        "BEGIN; "
+        "UPDATE album_requests SET status = 'wanted', "
+        "active_automation_import_job_id = NULL "
+        f"WHERE id = {abort_vm_request_id}; "
+        f"DELETE FROM import_jobs WHERE id = {abort_vm_job_id}; "
+        f"DELETE FROM album_requests WHERE id = {abort_vm_request_id}; "
+        "COMMIT;\""
+    )
+
     # CD-SEC-04: the four long-running services which process untrusted
     # network/media input share a portable hardening baseline, while each
     # retains only the writable roots its real workflow needs.  This checks

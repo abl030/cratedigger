@@ -11,6 +11,7 @@ from hypothesis import strategies as st
 import tests._hypothesis_profiles  # noqa: F401
 from scripts.cratedigger_deploy_hold import (
     CONTROLLED_WORKER_UNITS,
+    GATE_GUARDED_UNITS,
     IMPORTER_SERVICE,
     MAIN_SERVICE,
     MAIN_TIMER,
@@ -20,7 +21,10 @@ from scripts.cratedigger_deploy_hold import (
     PHASE_MAIN_TIMER_OPEN,
     PHASE_PREPARED_CONTROLLED,
     SERVICE_UNITS,
+    TIMER_DRIVEN_PRODUCER_UNITS,
     TIMER_UNITS,
+    UNFINDABLE_SERVICE,
+    WATCHDOG_SERVICE,
     WATCHDOG_TIMER,
     YOUTUBE_SERVICE,
     DeployHoldBackend,
@@ -158,6 +162,46 @@ def assert_no_unproven_promotion(
         raise AssertionError(
             "recovery promoted an unproven acquiring receipt to the held "
             "boundary"
+        )
+
+
+# TIMER_DRIVEN_PRODUCER_UNITS members the metadata gate has never guarded --
+# a hardcoded set, NOT derived from GATE_GUARDED_UNITS, so a future
+# regression that wrongly widens the gate's guarded set is still exercised
+# by TestRecoverHeldWaitsOutActiveTimerDrivenProducers rather than silently
+# narrowing what that property draws from (#1100 item 2). The disjointness
+# from GATE_GUARDED_UNITS is itself pinned in
+# TestProducersTheGateDoesNotGuard below.
+_PRODUCERS_THE_GATE_DOES_NOT_GUARD = (UNFINDABLE_SERVICE, WATCHDOG_SERVICE)
+
+
+def assert_recovery_waited_out_the_producer(
+    backend: FakeDeployHoldBackend,
+    *,
+    sleep_calls_before: int,
+    minimum_wait_ticks: int,
+) -> None:
+    """The post-hold SERVICE_UNITS drain -- never the gate hold -- is what
+    reaps a still-active timer-driven producer that ``recover_held``'s
+    non-acquiring else branch meets (#1100 item 2).
+
+    Unlike ``acquire_hold``'s acquiring branch (``_drain_producers_then_hold``,
+    which always drains ``TIMER_DRIVEN_PRODUCER_UNITS`` before ever taking the
+    gate hold), the else branch takes the hold with no producer drain first.
+    Production is still correct: ``_PRODUCERS_THE_GATE_DOES_NOT_GUARD``
+    members are never in the gate's own guarded set (``GATE_GUARDED_UNITS``),
+    so the gate hold cannot stop them -- only the post-hold
+    ``_drain_services(SERVICE_UNITS)`` call, which already runs
+    unconditionally, can. A gate that silently (and wrongly) reaped one
+    instead would let recovery finish in far fewer polls than the producer's
+    own ``running_samples`` countdown requires.
+    """
+    waited = backend.sleep_calls - sleep_calls_before
+    if waited < minimum_wait_ticks:
+        raise AssertionError(
+            "recovery did not wait out the active timer-driven producer -- "
+            f"only {waited} poll(s) for a {minimum_wait_ticks}-tick "
+            "producer (gate silently reaped it instead?)"
         )
 
 
@@ -493,6 +537,72 @@ class TestGeneratedHoldLifecycle(unittest.TestCase):
         )
 
 
+class TestProducersTheGateDoesNotGuard(unittest.TestCase):
+    def test_unfindable_and_watchdog_are_exactly_the_ungoverned_producers(
+        self,
+    ) -> None:
+        self.assertEqual(
+            set(TIMER_DRIVEN_PRODUCER_UNITS) - set(GATE_GUARDED_UNITS),
+            set(_PRODUCERS_THE_GATE_DOES_NOT_GUARD),
+        )
+
+
+class TestRecoverHeldWaitsOutActiveTimerDrivenProducers(unittest.TestCase):
+    """#1100 item 2 property: patrols the world
+    ``_drain_producers_then_hold`` cannot reach -- ``recover_held``'s
+    non-acquiring else branch, invoked while a ``TIMER_DRIVEN_PRODUCER_UNITS``
+    member the gate does not guard is genuinely still active.
+    """
+
+    @given(
+        release_phase=st.integers(min_value=1, max_value=3),
+        producer=st.sampled_from(_PRODUCERS_THE_GATE_DOES_NOT_GUARD),
+        # min_value=2, not 0: measured, a wrongly-reaped producer (the gate
+        # zaps it instead of the drain waiting it out) still needs exactly 1
+        # poll to reach two stable samples, and the legitimate wait is
+        # running_ticks + 2 -- so running_ticks 0 or 1 both satisfy
+        # assert_recovery_waited_out_the_producer's `waited >= running_ticks`
+        # even in the reaped world (1 >= 0, 1 >= 1) and cannot discriminate.
+        # 2 is the smallest value where the reaped baseline (1) and the
+        # legitimate wait (4) diverge under that assertion.
+        running_ticks=st.integers(min_value=2, max_value=4),
+    )
+    @example(release_phase=1, producer=UNFINDABLE_SERVICE, running_ticks=3)
+    # running_ticks=0: kept as a phase-3 non-wait coverage pin for assert_held_invariants.
+    @example(release_phase=3, producer=WATCHDOG_SERVICE, running_ticks=0)
+    def test_recover_held_else_branch_waits_out_an_active_producer(
+        self,
+        release_phase: int,
+        producer: str,
+        running_ticks: int,
+    ) -> None:
+        backend = FakeDeployHoldBackend()
+        acquire_hold(backend)
+        prepare_controlled(backend)
+        if release_phase >= 2:
+            open_main_timer(backend)
+        if release_phase >= 3:
+            finish_release(backend, "a" * 32)
+
+        # Injected AFTER reaching the release phase: recover_held observes
+        # live systemd state that a fresh acquire's own pre-hold drain does
+        # not control once HELD has already been reached once.
+        backend.unit_states[producer] = UnitState(
+            load_state="loaded", active_state="active", sub_state="running",
+        )
+        backend.running_samples[producer] = running_ticks
+        sleep_calls_before = backend.sleep_calls
+
+        recover_held(backend)
+
+        assert_held_invariants(backend)
+        assert_recovery_waited_out_the_producer(
+            backend,
+            sleep_calls_before=sleep_calls_before,
+            minimum_wait_ticks=running_ticks,
+        )
+
+
 class TestHoldInvariantCheckersKnownBad(unittest.TestCase):
     def test_held_checker_rejects_low_precedence_or_service_mask(self) -> None:
         backend = FakeDeployHoldBackend()
@@ -579,6 +689,21 @@ class TestHoldInvariantCheckersKnownBad(unittest.TestCase):
 
         with self.assertRaises(AssertionError):
             assert_release_invariants(backend, "a" * 32)
+
+    def test_producer_wait_checker_rejects_a_too_fast_recovery(self) -> None:
+        """#1100 item 2: a recovery that reports far fewer polls than the
+        producer's own countdown required looks exactly like a gate that
+        silently (and wrongly) reaped a unit it does not actually guard.
+        """
+        backend = FakeDeployHoldBackend()
+        backend.sleep_calls = 9
+
+        with self.assertRaisesRegex(
+            AssertionError, "did not wait out the active timer-driven producer",
+        ):
+            assert_recovery_waited_out_the_producer(
+                backend, sleep_calls_before=8, minimum_wait_ticks=5,
+            )
 
 
 def _assert_fully_reversed(backend: FakeDeployHoldBackend) -> None:

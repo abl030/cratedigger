@@ -259,8 +259,12 @@ depends on.
 - **Wrong Matches tab** — the obsolete Complete-folder/manual-import page is gone;
   the tab now opens straight into Wrong Matches. Import actions queue work and
   poll `import_jobs`, so long beets imports do not block the web request.
-  Failed queued force-imports remove the reviewed wrong-match source from the
-  actionable list while preserving the failed job/download audit.
+  A successful queued force-import deletes the reviewed wrong-match source
+  (issue #1077, D7 — completing the operator's own explicit action) and
+  clears it from the actionable list. A failed force-import on the
+  `audio_corrupt` decision also deletes it (D3: bad rips are never
+  preserved); every other failure preserves the source and the actionable
+  list entry exactly as-is, alongside the failed job/download audit.
 - **Recents Acquisition + Imports subviews** — Recents has History,
   Acquisition, and Imports subviews. Acquisition combines downloading and
   processing requests with the separate active YouTube-rescue feed; it does
@@ -600,22 +604,69 @@ depends on.
   EACCES/EIO refusal, each with its own honest reason: a containment refusal
   (symlink/socket) reads "refused ... out of the quarantine root", never
   worded like a transient world failure. `web/js/wrong-matches.js` renders both `ok` and
-  `unavailable` payloads; a refusal of the whole root is a 503 whose reason is
-  shown next to the Retry button. **Every listing that recorded a refusal —
+  `unavailable` payloads; a refusal of the WHOLE root (the folder open
+  itself, not one entry inside it) also splits into three verdicts, via the
+  single `web/wrong_match_file_service.py::_classify_wrong_match_refusal`
+  function that both the whole-root open and the single-file stream resolve
+  share (issue #1099; before this, every CONTAINMENT refusal, and the
+  unclassified residual, of either was reported as 404 "not found" — the
+  pre-existing world-failure codes already routed to 503 at both sites):
+  - **404** — the name is definitively absent (`missing`/`not_a_directory`).
+    This also covers a symlink, socket, FIFO, or plain file used AS the root
+    itself: every directory-open primitive this module uses always opens
+    with `O_DIRECTORY`, and the kernel answers ENOTDIR (`not_a_directory`,
+    an ABSENCE code) rather than a containment errno for any non-directory
+    name under `O_DIRECTORY` — there genuinely is no directory at that
+    name, so 404 is correct here, not a gap.
+  - **422** — a containment DECISION (`path_escape`, `unsafe_symlink`,
+    `not_regular_file`, `untrusted_ownership`): the name may well exist, the
+    server simply refuses to read it. At this exact whole-root granularity
+    only `path_escape` is actually reachable today — from an ordinary,
+    unnormalised configured root (`lib.config` never strips or validates
+    one) that hands `open_directory_path`'s own `_parts()` check a
+    ``""``/``"."``/``".."`` path component, e.g. a TRAILING SLASH (an empty
+    final component) but equally a stray `//`, `/./`, or `/../` anywhere in
+    the value. `untrusted_ownership` is a real declared `FsAuthorityCode`
+    member but is never raised at this granularity:
+    `open_configured_quarantine_directory` has no ownership check (only
+    `lib.fs_authority._assert_private_parent`, used by the sibling
+    private-processing-root open, raises it).
+  - **503** — either a genuine, potentially-retryable world failure
+    (`open_failed`/`read_failed`/`write_failed`, e.g. EACCES/EIO/ESTALE) or
+    an unclassified residual code (`unspecified` — e.g. a `failed_path`
+    lexically outside every configured quarantine root). The two share a
+    verdict deliberately: an unclassifiable refusal must never make a
+    definitive claim of absence or containment.
+
+  The browser's load-failure catch turns each status into its own honest
+  lead sentence via the pure `wrongMatchExplorerFailureCopy` function in
+  `web/js/util.js` — never "not found" for a 422, and the 503 wording
+  deliberately does NOT promise a retry will succeed (the residual code in
+  that bucket is a data mismatch, not a disk hiccup); before this fix every
+  non-ok status showed the identical generic "Failed to load file explorer."
+  **Every listing that recorded a refusal —
   `unavailable`, or a PARTIAL `ok` listing that read some files and was refused
   others — is deliberately NOT cached**, so reopening the panel always
-  re-fetches rather than short-circuiting on a stale answer. Only a
-  WORLD-FAILURE refusal (EACCES/EIO/ESTALE/…) also carries a Retry button on
-  its notice: the operator is expected to go and fix the permission, and a
-  plain reload might just see the fix. A CONTAINMENT refusal (a symlink,
-  socket, FIFO or device node) carries no Retry — re-fetching the same name
-  answers the same refusal every time, whatever `unavailable`/`ok` status it
-  arrives under; nothing short of the operator physically replacing the entry
-  changes it, and that is a filesystem action, not a button click (#1086). A
-  listing that was truncated by a LIMIT and recorded no
-  refusals stays cached, because retrying hits the same limit; one that was
-  both truncated and refused is still evicted, since the refusal half is
-  repairable.
+  re-fetches rather than short-circuiting on a stale answer. The Retry
+  button follows one doctrine across BOTH the per-entry notice (inside a
+  200 payload) and the whole-root load-failure catch: offer Retry only
+  where retrying could plausibly change the answer. Per-entry, a
+  WORLD-FAILURE refusal (EACCES/EIO/ESTALE/…) carries a Retry — the
+  operator is expected to go and fix the permission, and a plain reload
+  might just see the fix — while a CONTAINMENT refusal (a symlink, socket,
+  FIFO or device node) carries none, since re-fetching the same name
+  answers the same refusal every time (#1086). The whole-root catch
+  applies the identical rule keyed on STATUS instead of the per-entry
+  discriminator: 404/503/an unrecognised status keep the Retry button (a
+  genuinely-missing folder can reappear, a world failure can clear, and an
+  unrecognised failure shape must not silently strand the operator with no
+  way to reload), a 422 offers none — nothing short of the operator
+  physically replacing the entry changes a containment decision, and that
+  is a filesystem action, not a button click (#1099). A listing that was
+  truncated by a LIMIT and
+  recorded no refusals stays cached, because retrying hits the same limit;
+  one that was both truncated and refused is still evicted, since the
+  refusal half is repairable.
 - **Replace picker distance badge** — each pressing row carries the best
   beets-distance against the request's Wrong Matches folders. When the service
   was refused part of a folder, the response's `partial_read` is set and the
@@ -656,9 +707,16 @@ depends on.
   `Cleanup stopped — ...` toast reporting exactly what ran before the stop,
   and the pane refreshes either way. A failed Stop request itself toasts
   `Stop request failed` and re-enables the button.
-- **Wrong Matches history** — old rows with
-  `download_log.validation_result.wrong_match_triage` still render their
-  historical chip/detail in Recents. New cleanup does not write that blob.
+- **Wrong Matches history** — rows evaluated by the cleanup reducer
+  (`lib.wrong_match_cleanup_service.cleanup_wrong_match`, individual or bulk)
+  render their chip/detail in Recents from
+  `download_log.validation_result.wrong_match_triage`, the reducer's ONLY
+  writer. Rejection scenarios outside the cleanup-lane-admission allowlist
+  (`extra_tracks` / `high_distance` / `mbid_not_found` / `no_choose_match` —
+  D6, `docs/rejection-routing.md`) never reach the reducer, so they never get
+  this block — they still render, just with no triage chip, which is correct
+  for that whole cohort and not a missing-data bug. `recents.js`/`history.js`
+  render the `wrong_match_triage_*` fields conditionally on presence.
 
 ## Dev Server Workflows
 

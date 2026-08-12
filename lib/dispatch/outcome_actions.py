@@ -37,6 +37,7 @@ from lib.dispatch.types import (
     ImportAttemptResult,
     PostCommitCleanup,
 )
+from lib.processing_paths import processing_albums_dir
 from lib.quality import (
     DownloadInfo,
     QualityRankConfig,
@@ -81,8 +82,7 @@ def _reject_import_from_evidence_decision(
     import_job_id: int | None = None,
     source_download_log_id: int | None = None,
     quality_ranks: QualityRankConfig | None = None,
-    audio_quarantine_root: str | None = None,
-    preserve_corrupt_source: bool = False,
+    processing_dir: str | None = None,
 ) -> DispatchOutcome:
     """Record a persisted-evidence rejection before beets can mutate files.
 
@@ -193,39 +193,41 @@ def _reject_import_from_evidence_decision(
                 ):
                     cooled_down_users.add(username)
     cleanup_plan: PostCommitCleanup | None = None
-    if action.cleanup and decision == "audio_corrupt" and not preserve_corrupt_source:
-        # Corrupt audio is retained for audit in every caller mode. Force
-        # imports deliberately do not satisfy ``_should_cleanup_path`` until
-        # they succeed, because ordinary force cleanup deletes the reviewed
-        # Wrong Matches source. Quarantine is a separate, archival ownership
-        # transfer and must not inherit that destructive gate. A force action
-        # copy is different: it is disposable private processing state, and
-        # the queue owner reclaims it after acknowledgement instead of moving
-        # it into the operator's protected quarantine tree.
-        if import_job_id is not None:
-            cleanup_plan = PostCommitCleanup(
-                audio_quarantine_source_path=staged_path,
-                audio_quarantine_root=audio_quarantine_root,
-            )
-        else:
-            from lib.dispatch.quarantine import (
-                quarantine_corrupt_audio_source,
-            )
-
-            audit = quarantine_corrupt_audio_source(
-                source_path=staged_path,
-                quarantine_root=audio_quarantine_root or "",
-            )
-            if isinstance(terminal_outcome, int):
-                db.record_post_commit_quarantine(terminal_outcome, audit)
-    elif action.cleanup and _should_cleanup_path(
+    # Bad rips are ban + delete, never quarantined (issue #1077, D3): a
+    # corrupt candidate has no salvage value for operator review, so
+    # ``audio_corrupt`` no longer branches specially here — it disposes of
+    # its disposable staged source exactly like every other auto-import
+    # reject (the automation lane's journaled processor cleanup then
+    # removes the owned canonical folder outright, since no post-commit
+    # plan overrides its plan-free default). Force imports leave their
+    # disposable action copy for ``_cleanup_terminal_force_action``
+    # (``scripts/importer.py``); the force lane's ORIGINAL Wrong Matches
+    # source is a distinct path this helper never sees, deleted by
+    # ``_cleanup_failed_force_import`` after the terminal commit.
+    if action.cleanup and _should_cleanup_path(
         source_path_cleanup_scenario,
         action,
     ):
+        # Issue #1077, R3-3: this reject path's ``staged_path`` can be the
+        # canonical processing album directly under
+        # ``<processing_dir>/albums/`` — the same Nix-provisioned root
+        # ``_cleanup_staged_dir``'s empty-parent prune must never remove.
+        # Guard both the synchronous cleanup here AND the deferred
+        # post-commit plan the same way; the deferred branch has no other
+        # way to carry the guard across the boundary to
+        # ``scripts/importer.py::_run_post_commit_cleanup``.
+        protected_parent = (
+            processing_albums_dir(processing_dir)
+            if processing_dir is not None
+            else None
+        )
         if import_job_id is not None:
-            cleanup_plan = PostCommitCleanup(staged_path=staged_path)
+            cleanup_plan = PostCommitCleanup(
+                staged_path=staged_path,
+                staged_path_protected_parent=protected_parent,
+            )
         else:
-            _cleanup_staged_dir(staged_path)
+            _cleanup_staged_dir(staged_path, protected_parent=protected_parent)
     return DispatchOutcome(
         success=False,
         message=f"Rejected by persisted quality evidence: {decision}",

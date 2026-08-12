@@ -11,19 +11,25 @@ from lib.dispatch import (
     _build_download_info,
     _record_rejection_and_maybe_requeue,
 )
+from lib.dispatch.helpers import _cleanup_staged_dir
 from lib.grab_list import GrabListEntry
 from lib.import_execution import CancellationToken, ExecutionCancelled
 from lib.import_manifest import (
+    CuratedMoveResult,
     move_failed_import_curated,
+    move_failed_import_whole,
     tracked_audio_paths_for_downloads,
 )
-from lib.processing_paths import source_dirs_for_album
+from lib.processing_paths import processing_albums_dir, source_dirs_for_album
 from lib.quality import ValidationResult, rejection_backfill_override
 from lib.release_identity import normalize_release_id
 from lib.staged_album import StagedAlbum
-from lib.terminal_outcomes import PendingImportTerminalOutcome
+from lib.terminal_outcomes import PendingImportTerminalOutcome, TerminalDenylist
 from lib.util import log_validation_result
-from lib.wrong_match_policy import rejection_scenario_is_wrong_match_candidate
+from lib.wrong_match_policy import (
+    rejection_scenario_is_delete_eligible,
+    rejection_scenario_is_wrong_match_candidate,
+)
 
 if TYPE_CHECKING:
     from lib.context import CratediggerContext
@@ -43,7 +49,7 @@ def _move_failed_import_curated_cancellable(
     allowed_audio: list[str],
     scenario: str | None,
     cancellation_token: CancellationToken | None,
-) -> str | None:
+) -> CuratedMoveResult | None:
     if cancellation_token is None:
         return move_failed_import_curated(
             path,
@@ -58,6 +64,46 @@ def _move_failed_import_curated_cancellable(
     )
 
 
+def _move_failed_import_whole_cancellable(
+    path: str,
+    *,
+    scenario: str | None,
+    cancellation_token: CancellationToken | None,
+) -> str | None:
+    if cancellation_token is None:
+        return move_failed_import_whole(path, scenario=scenario)
+    return move_failed_import_whole(
+        path,
+        scenario=scenario,
+        before_mutation=cancellation_token.raise_if_cancelled,
+    )
+
+
+def _delete_rejected_source_cancellable(
+    path: str,
+    *,
+    processing_dir: str,
+    cancellation_token: CancellationToken | None,
+) -> None:
+    """Destroy a rejected candidate's source outright — no quarantine.
+
+    Reuses the existing staged-dir teardown helper (issue #1077, D3): bad
+    rips have no salvage value for operator review, so nothing is moved into
+    ``wrong_matches/`` or ``failed_imports/`` and no worklist row is created.
+
+    ``path`` is a canonical processing album — a direct, flat child of
+    ``<processing_dir>/albums/`` (CLAUDE.md invariant 9) — so its parent IS
+    that shared root. ``protected_parent`` (issue #1077, "smalls" round-2
+    review) stops ``_cleanup_staged_dir``'s empty-parent prune from ever
+    removing it: a real guard, not the incidental protection of lock-shard
+    files that happen to never be unlinked.
+    """
+    _checkpoint(cancellation_token)
+    _cleanup_staged_dir(
+        path, protected_parent=processing_albums_dir(processing_dir),
+    )
+
+
 def _run_post_rejection_wrong_match_cleanup(
     ctx: CratediggerContext,
     download_log_id: object,
@@ -67,14 +113,26 @@ def _run_post_rejection_wrong_match_cleanup(
     contributor_usernames: Iterable[str] = (),
     cancellation_token: CancellationToken | None = None,
 ) -> Any:
-    """Evaluate newly-created Wrong Matches rows through importer cleanup."""
+    """Link candidate evidence for every visible row, then run the reducer
+    only for delete-eligible scenarios.
+
+    Issue #1077, F3/F8: evidence-linking must happen for every worklist-
+    visible row, not just the delete-eligible subset — a kept, banned,
+    visible row (e.g. ``untracked_audio``) still needs its candidate
+    evidence FK set so the worklist card renders the candidate's own
+    measurement, even though the reducer never evaluates it for deletion.
+    Mirrors ``scripts/importer.py::_cleanup_committed_wrong_match_rejection``'s
+    two-stage gate: outer gate is worklist visibility (a row to link evidence
+    to even exists), inner gate is delete-eligibility (the reducer may act).
+    """
     if not isinstance(download_log_id, int) or isinstance(download_log_id, bool):
         return None
     if not rejection_scenario_is_wrong_match_candidate(scenario):
+        # Bad rips and every other folder/audio-integrity or quality-only
+        # reject were never quarantined (issue #1077, D3): there is no
+        # worklist row to link evidence to or hand to the reducer.
         return None
     try:
-        from lib.wrong_match_cleanup_service import cleanup_wrong_match
-
         _checkpoint(cancellation_token)
         db = ctx.pipeline_db_source._get_db()
         if import_job_id is not None:
@@ -86,6 +144,15 @@ def _run_post_rejection_wrong_match_cleanup(
                     direct_attribution=True,
                     contributor_usernames=tuple(contributor_usernames),
                 )
+        if not rejection_scenario_is_delete_eligible(scenario):
+            # World failures with a reviewable folder, and every unknown or
+            # novel scenario string, are kept + banned + visible (issue
+            # #1077, D1/D4/D6): the evaluate-and-possibly-delete reducer
+            # never even looks at them.
+            return None
+
+        from lib.wrong_match_cleanup_service import cleanup_wrong_match
+
         result = cleanup_wrong_match(
             db,
             download_log_id,
@@ -182,19 +249,26 @@ def _reject_request_auto_import(
         error=error,
     )
     failed_result.source_dirs = source_dirs_for_album(album_data)
+    # World failures (issue #1077, D4): the operator reviews the WHOLE folder
+    # exactly as rejected, including anything outside the download manifest —
+    # the curated move used elsewhere (``move_failed_import_curated``) drops
+    # anything outside ``allowed_audio``, which is exactly the files that
+    # caused an ``untracked_audio`` rejection in the first place.
+    usernames = {file.username for file in album_data.files if file.username}
+    failed_result.denylisted_users = sorted(usernames)
     _checkpoint(cancellation_token)
-    failed_result.failed_path = _move_failed_import_curated_cancellable(
+    failed_result.failed_path = _move_failed_import_whole_cancellable(
         staged_album.current_path,
-        allowed_audio=tracked_audio_paths_for_downloads(album_data.files),
         scenario=failed_result.scenario,
         cancellation_token=cancellation_token,
     )
     _checkpoint(cancellation_token)
     logger.error(
-        "AUTO-IMPORT REJECTED: %s - %s — %s",
+        "AUTO-IMPORT REJECTED: %s - %s — %s | denylisted users: %s",
         album_data.artist,
         album_data.title,
         detail,
+        ", ".join(sorted(usernames)),
     )
     log_validation_result(album_data, failed_result, ctx.cfg)
 
@@ -221,17 +295,32 @@ def _reject_request_auto_import(
         requeue=True,
         import_job_id=owned_import_job_id,
     )
+    # World failures with a reviewable folder are kept + banned + shown
+    # (issue #1077, D1/D4): denylist the contributing peers exactly like the
+    # candidate-match reject lane does, so the pipeline never re-fetches the
+    # identical copy while it sits in the worklist.
+    denylist_reason = f"auto-import world failure: {failed_result.scenario}"
     if isinstance(persisted, PendingImportTerminalOutcome):
+        persisted = persisted.append_denylists(*(
+            TerminalDenylist(username, denylist_reason, apply_cooldown=True)
+            for username in sorted(usernames)
+        ))
         return DispatchOutcome(
             success=False,
             message=detail,
             terminal_outcome=persisted,
             post_commit_wrong_match_scenario=failed_result.scenario,
         )
+    for username in usernames:
+        db.add_denylist(request_id, username, denylist_reason)
+        if db.check_and_apply_cooldown(username):
+            ctx.cooled_down_users.add(username)
     _run_post_rejection_wrong_match_cleanup(
         ctx,
         persisted,
         scenario=failed_result.scenario,
+        import_job_id=import_job_id,
+        contributor_usernames=usernames,
         cancellation_token=cancellation_token,
     )
     return DispatchOutcome(success=False, message=detail)
@@ -249,12 +338,61 @@ def _handle_rejected_result(
     """Handle a rejected beets validation result."""
     bv_result.source_dirs = source_dirs_for_album(album_data)
     _checkpoint(cancellation_token)
-    bv_result.failed_path = _move_failed_import_curated_cancellable(
-        staged_album.current_path,
-        allowed_audio=tracked_audio_paths_for_downloads(album_data.files),
-        scenario=bv_result.scenario,
-        cancellation_token=cancellation_token,
-    )
+    if bv_result.scenario == "audio_corrupt":
+        # Bad rips are ban + delete, never quarantined (issue #1077, D3): a
+        # corrupt candidate has no salvage value for operator review. This is
+        # the only scenario reaching this function that names it — the
+        # pre-beets media-readiness check is its sole producer
+        # (``lib/download_processing.py``); ordinary beets-validation
+        # rejects never name it, and keep the curated quarantine move below.
+        #
+        # Issue #1077, F4: the delete is attempted, but its outcome never
+        # gates the record below. A failed/partial delete (permission error,
+        # a file vanishing mid-rmtree, ...) must still produce the audit
+        # row, ban the contributing peer, and requeue the request — invariant
+        # 11 ("broken worlds surface and restart; nothing is parked"). Before
+        # this fix an uncaught delete exception propagated out of this
+        # function entirely: no download_log row, no denylist entry, no
+        # requeue, and the request was left wherever it was before the
+        # delete — the opposite of restart-on-failure. Cancellation is a
+        # distinct interruption, not a delete failure, and still propagates.
+        try:
+            _delete_rejected_source_cancellable(
+                staged_album.current_path,
+                processing_dir=ctx.cfg.processing_dir,
+                cancellation_token=cancellation_token,
+            )
+        except ExecutionCancelled:
+            raise
+        except Exception:
+            logger.exception(
+                "AUDIO-CORRUPT DELETE FAILED: %s - %s path=%s — recording "
+                "the rejection and requeuing regardless",
+                album_data.artist,
+                album_data.title,
+                staged_album.current_path,
+            )
+        bv_result.failed_path = None
+    else:
+        move_result = _move_failed_import_curated_cancellable(
+            staged_album.current_path,
+            allowed_audio=tracked_audio_paths_for_downloads(album_data.files),
+            scenario=bv_result.scenario,
+            cancellation_token=cancellation_token,
+        )
+        bv_result.failed_path = (
+            move_result.target_path if move_result is not None else None
+        )
+        # Issue #1077, B1: a curated move that had to sweep unexpected
+        # residue into the destination folds that anomaly into the
+        # persisted detail — it surfaces to the operator in Recents, never
+        # as a stack trace, and the rejection record below is written
+        # exactly as normal regardless.
+        if move_result is not None and move_result.anomaly:
+            bv_result.detail = (
+                f"{bv_result.detail} | {move_result.anomaly}"
+                if bv_result.detail else move_result.anomaly
+            )
     _checkpoint(cancellation_token)
     log_validation_result(album_data, bv_result, ctx.cfg)
     # The YouTube staging lane deliberately reconstructs a manifest with blank

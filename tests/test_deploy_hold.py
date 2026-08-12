@@ -21,6 +21,10 @@ from scripts.cratedigger_deploy_hold import (
     _PRODUCER_DRAIN_TIMEOUT_SECONDS,
     CONTROL_DIR,
     CONTROLLED_WORKER_UNITS,
+    GATE_GUARDED_LINE,
+    GATE_GUARDED_UNITS,
+    GATE_RESUME_LINE,
+    GATE_RESUME_UNITS,
     GATE_STOPPED_UNITS,
     MAIN_SERVICE,
     MAIN_TIMER,
@@ -34,6 +38,7 @@ from scripts.cratedigger_deploy_hold import (
     SERVICE_UNITS,
     START_INHIBITORS,
     TIMER_UNITS,
+    UNFINDABLE_SERVICE,
     WATCHDOG_TIMER,
     YOUTUBE_SERVICE,
     DeployHoldBackend,
@@ -1333,6 +1338,157 @@ class TestAbortHold(unittest.TestCase):
 
         self.assertTrue(backend.manual_hold)
         self.assertFalse(backend.receipt)
+
+
+class TestGateGuardModelDerivation(unittest.TestCase):
+    """#1100 item 1: the gate's guarded/resume sets are named constants, and
+    GATE_GUARDED_LINE/GATE_RESUME_LINE -- the exact module-level values
+    verify_controlled_start_contract compares against the live gate config,
+    not a re-composition of them -- are byte-identical to the hardcoded
+    strings they replace. Pinning the bare names (not calling _units_line
+    again from the test with test-chosen arguments) is what would catch a
+    future call-site mis-wire (e.g. building the guarded line from
+    GATE_RESUME_UNITS): that one composition now happens exactly once, at
+    import time, so there is nothing left for verify_controlled_start_contract
+    to get wrong about those two literals independently of what this test
+    already pinned. That scope is narrow, not the whole method: the
+    condition-path presence counts, the ExecCondition path regex, the
+    shared-gate-path uniqueness check, the controlled-worker
+    inhibitor-absence check, and the splitlines().count() == 1 comparison
+    itself have no unit coverage here -- only `nix build
+    .#checks.x86_64-linux.moduleVm` and a live acquire exercise those.
+    """
+
+    def test_guarded_units_includes_the_main_timer_and_service(self) -> None:
+        self.assertIn(MAIN_TIMER, GATE_GUARDED_UNITS)
+        self.assertIn(MAIN_SERVICE, GATE_GUARDED_UNITS)
+        self.assertEqual(set(GATE_GUARDED_UNITS), set(GATE_RESUME_UNITS))
+
+    def test_expected_guarded_and_resume_lines_are_byte_identical_to_the_original_literal(
+        self,
+    ) -> None:
+        self.assertEqual(
+            GATE_GUARDED_LINE,
+            "guarded_units=(cratedigger.timer cratedigger.service "
+            "cratedigger-web.service cratedigger-importer.service "
+            "cratedigger-import-preview-worker.service "
+            "cratedigger-youtube-ingest.service)",
+        )
+        self.assertEqual(
+            GATE_RESUME_LINE,
+            "resume_units=(cratedigger.service cratedigger.timer "
+            "cratedigger-web.service cratedigger-importer.service "
+            "cratedigger-import-preview-worker.service "
+            "cratedigger-youtube-ingest.service)",
+        )
+
+
+class TestFakeGateHoldModelsTheRealGuardedSet(unittest.TestCase):
+    """#1100 item 1, closed against the real fault: FakeDeployHoldBackend's
+    ``metadata_gate("hold manual")`` must stop every ``GATE_GUARDED_UNITS``
+    member the existing acquire/recover/prepare_controlled suite does not
+    already prove on its own.
+
+    The four always-on daemons (web, preview, importer, YouTube) default to
+    active in this fake (``_ALWAYS_ON_DAEMONS`` -- the real world every
+    acquire meets), so dropping any of them from the guarded loop is already
+    self-caught: they would stay active past "hold manual," and the
+    post-hold ``SERVICE_UNITS`` drain that follows in every existing
+    acquire/recover test would then time out waiting for them, failing that
+    test on its own. ``cratedigger.timer`` and ``cratedigger.service`` are
+    the two members that suite does NOT cover: every current production
+    call path masks and stops the timers before ever taking the gate hold,
+    and this fake defaults ``cratedigger.service`` to inactive at
+    construction, so neither is ever active at "hold manual" time through
+    any real call chain -- two independently planted mutants, each dropping
+    one of these two units from the fake's guarded loop while keeping the
+    other, each survived every one of those tests unchanged. Driving the
+    fake's own method directly, with both forced active first, is what
+    makes either omission observable.
+    """
+
+    def test_hold_manual_stops_an_active_main_timer_and_service(self) -> None:
+        backend = FakeDeployHoldBackend()
+        backend.unit_states[MAIN_TIMER] = UnitState(
+            load_state="loaded", active_state="active", sub_state="waiting",
+        )
+        backend.unit_states[MAIN_SERVICE] = UnitState(
+            load_state="loaded", active_state="active", sub_state="running",
+        )
+
+        backend.metadata_gate("hold manual")
+
+        self.assertEqual(
+            backend.unit_state(MAIN_TIMER),
+            UnitState(load_state="loaded", active_state="inactive", sub_state="dead"),
+        )
+        self.assertEqual(
+            backend.unit_state(MAIN_SERVICE),
+            UnitState(load_state="loaded", active_state="inactive", sub_state="dead"),
+        )
+
+
+class TestRecoverHeldWaitsOutAnActiveTimerDrivenProducer(unittest.TestCase):
+    """#1100 item 2.
+
+    recover_held's non-acquiring else branch (any phase from PHASE_HELD
+    onward) re-establishes the manual gate hold with NO producer drain
+    before it -- unlike acquire_hold's acquiring branch, which always drains
+    TIMER_DRIVEN_PRODUCER_UNITS first (_drain_producers_then_hold). Production
+    is still correct there: cratedigger-unfindable.service and the watchdog
+    are bounded oneshots the gate does not guard (GATE_GUARDED_UNITS), so the
+    post-hold SERVICE_UNITS drain that already runs unconditionally is what
+    waits a still-running one out. Nothing pinned that before this.
+    """
+
+    def test_recover_held_from_prepared_controlled_waits_out_a_running_unfindable_cycle(
+        self,
+    ) -> None:
+        # UNFINDABLE_SERVICE is never gate-guarded -- the gate hold literally
+        # cannot reap it, so only the drain below can.
+        self.assertNotIn(UNFINDABLE_SERVICE, GATE_GUARDED_UNITS)
+
+        backend = FakeDeployHoldBackend()
+        acquire_hold(backend)
+        prepare_controlled(backend)
+        self.assertEqual(backend.phase, PHASE_PREPARED_CONTROLLED)
+        # prepare_controlled released the manual hold -- recover_held's else
+        # branch is about to re-take it.
+        self.assertFalse(backend.manual_hold)
+
+        # A genuinely active timer-driven producer at the exact moment this
+        # recovery is invoked -- NOT a "timer fired right before its own
+        # mask took effect" story: that is impossible this late.
+        # prepare_controlled's own _verify_authoritative_hold already
+        # re-proved every timer masked and every SERVICE_UNITS member
+        # stably inactive before PHASE_PREPARED_CONTROLLED was ever reached.
+        # The producible route is a manual `systemctl start
+        # cratedigger-unfindable.service` (or the watchdog) during the
+        # deploy window: masking a timer blocks only that timer's own
+        # trigger, never a direct start of the service it drives, and
+        # neither service carries a START_INHIBITORS entry the way main and
+        # YouTube do. _drain_producers_then_hold's own docstring documents
+        # the identical mechanism -- a timer mask blocking only its own
+        # trigger, not a manual `systemctl start` of the service -- for
+        # cratedigger.service in that function's own pre-hold window.
+        backend.unit_states[UNFINDABLE_SERVICE] = UnitState(
+            load_state="loaded", active_state="active", sub_state="running",
+        )
+        backend.running_samples[UNFINDABLE_SERVICE] = 3
+        sleep_calls_before = backend.sleep_calls
+
+        recover_held(backend)
+
+        backend.assert_default_held()
+        # The drain waited it out. Measured mechanism for this 3-tick
+        # countdown: 3 sleeps decrement running_samples to 0, a 4th sleep is
+        # the one that actually reaps the unit to inactive/dead once the
+        # countdown is exhausted, and a 5th intervening sleep is needed to
+        # reach the two-consecutive-stable-samples requirement (5 total).
+        # The assertion only requires >= 3 -- comfortably below that
+        # measured total, so it stays robust to exact-count drift in the
+        # fake's stability bookkeeping.
+        self.assertGreaterEqual(backend.sleep_calls - sleep_calls_before, 3)
 
 
 class TestFixedAuthoritySurface(unittest.TestCase):

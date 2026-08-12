@@ -403,7 +403,6 @@ class WrongMatchCandidateRow(TypedDict):
     evidence_min_bitrate: int | None
     evidence_avg_bitrate: int | None
     evidence_verified_lossless: bool | None
-    candidate_audio_corrupt: bool | None
     terminal_import_decision: str | None
     request_status: str
     request_min_bitrate: int | None

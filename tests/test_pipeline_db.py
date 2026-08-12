@@ -42,7 +42,6 @@ from lib.import_queue import (
     ImportJob,
     force_import_payload,
 )
-from lib.json_narrow import json_dict
 from lib.pipeline_db import (
     JELLYFIN_PIN_STATUSES,
     PLEX_PIN_STATUSES,
@@ -4292,38 +4291,32 @@ class TestDownloadLog(unittest.TestCase):
             {retained},
         )
 
-    def test_post_commit_quarantine_audit_round_trips_on_exact_terminal_row(self):
-        from lib.dispatch.types import PostCommitQuarantineAudit
+    def test_get_retained_failure_paths_protects_historical_quarantine_audit(self):
+        """``post_commit_quarantine`` has no current writer.
 
+        Issue #1077, D3: ``audio_corrupt`` is ban + delete, never
+        quarantined, so nothing in production writes this key any more.
+        Historical rows quarantined before that fix still carry it, and the
+        disk reaper must keep honouring it for as long as the audit row
+        exists — simulate one directly via SQL rather than the deleted
+        writer method.
+        """
         log_id = self.db.log_download(
             request_id=self.req_id,
             outcome="rejected",
             validation_result=json.dumps({"scenario": "audio_corrupt"}),
         )
         target = "/mnt/music/slskd/failed_imports/bad_files/Album"
-        audit = PostCommitQuarantineAudit(
-            source_path="/mnt/music/incoming/Album",
-            quarantine_path=target,
-            moved=True,
-        )
-
-        self.assertTrue(
-            self.db.record_post_commit_quarantine(log_id, audit)
-        )
-
-        row = self.db._execute(
+        self.db._execute(
             """
-            SELECT validation_result
-            FROM download_log
+            UPDATE download_log
+            SET validation_result = validation_result
+                || jsonb_build_object('post_commit_quarantine', %s::jsonb)
+                || jsonb_build_object('failed_path', %s::text)
             WHERE id = %s
             """,
-            (log_id,),
-        ).fetchone()
-        assert row is not None
-        payload = cast(dict, row["validation_result"])
-        self.assertEqual(payload["failed_path"], target)
-        quarantine = json_dict(payload["post_commit_quarantine"])
-        self.assertEqual(quarantine["moved"], True)
+            (json.dumps({"moved": True}), target, log_id),
+        )
         self.assertEqual(
             self.db.get_retained_failure_paths(),
             {target},
@@ -10335,8 +10328,14 @@ class TestGetWrongMatches(unittest.TestCase):
         self.assertEqual(reloaded.measurement.was_converted_from, "flac")
 
     def test_terminal_audio_corrupt_retained_auto_import_is_not_wrong_match(self):
-        """#867: terminal evidence outranks an earlier strong match envelope."""
-        from lib.dispatch.types import PostCommitQuarantineAudit
+        """#867: terminal evidence outranks an earlier strong match envelope.
+
+        The historical ``post_commit_quarantine`` audit key has no current
+        writer (issue #1077, D3: ``audio_corrupt`` is ban + delete, never
+        quarantined) — this row's exclusion from Wrong Matches rests
+        entirely on ``import_result->>'decision'``, exactly as it does for a
+        freshly ban+deleted row with no quarantine folder at all.
+        """
         corrupt_log_id = self.db.log_download(
             request_id=self.req1, soulseek_username="corrupt-peer", outcome="rejected",
             validation_result=json.dumps({"scenario": "strong_match", "distance": 0.1247,
@@ -10353,13 +10352,6 @@ class TestGetWrongMatches(unittest.TestCase):
         )
         assert persisted is not None and persisted.id is not None
         self.db.set_download_log_candidate_evidence(corrupt_log_id, persisted.id)
-        self.assertTrue(self.db.record_post_commit_quarantine(
-            corrupt_log_id,
-            PostCommitQuarantineAudit(
-                source_path="/Incoming/auto-import/Corrupt", moved=False,
-                error="OSError: [Errno 18] Invalid cross-device link",
-            ),
-        ))
         self._log_rejected(self.req2, "legitimate-peer", "/failed/Pressing", "high_distance")
 
         rows = self.db.get_wrong_matches()

@@ -29,10 +29,11 @@ Three properties:
    no embedded backslashes) so the oracle can be computed directly from what
    the test wrote to disk instead of re-deriving ``_safe_relpath``'s
    normalization rules.
-3. **Rejection destination** — candidate/pressing failures route to
-   ``wrong_matches/`` while integrity and quality failures remain under
-   ``failed_imports/``; every routed Wrong Match path remains accepted by the
-   existing cleanup safety boundary.
+3. **Rejection destination** — every scenario this curated mover ever sees,
+   known (delete-eligible or excluded) or an arbitrary novel string, routes
+   to the single ``wrong_matches/`` root (issue #1077, D1/D3/D6: the
+   historical ``failed_imports`` split has no producer left); every routed
+   path remains accepted by the existing cleanup safety boundary.
 
 Profiles and promotion policy: tests/_hypothesis_profiles.py and
 docs/generated-testing.md.
@@ -67,10 +68,7 @@ from lib.import_manifest import (
 )
 from lib.quality import ActiveDownloadState
 from lib.staged_album import StagedAlbum
-from lib.wrong_match_policy import (
-    WRONG_MATCH_EXCLUDED_REJECTION_SCENARIOS,
-    rejection_scenario_is_wrong_match_candidate,
-)
+from lib.wrong_match_policy import WRONG_MATCH_EXCLUDED_REJECTION_SCENARIOS
 from lib.wrong_matches import unsafe_failed_import_path_reason
 from tests.helpers import make_grab_list_entry, make_request_row
 
@@ -401,17 +399,19 @@ def assert_rejection_destination(
     scenario: str | None,
     failed_path: str,
 ) -> None:
-    """Rejected candidates and genuine failures occupy distinct roots."""
+    """Every scenario this mover ever sees lands under the single Wrong
+    Matches quarantine root (issue #1077, D1/D3/D6): the historical
+    ``failed_imports`` (non-``bad_files``) branch for excluded scenarios had
+    no producer left once ``audio_corrupt`` moved to ban+delete, so there is
+    no second destination left to route to — kept holds by construction.
+    """
     parts = os.path.normpath(failed_path).split(os.sep)
-    is_wrong_match = rejection_scenario_is_wrong_match_candidate(scenario)
-    expected = "wrong_matches" if is_wrong_match else "failed_imports"
-    unexpected = "failed_imports" if is_wrong_match else "wrong_matches"
-    if expected not in parts or unexpected in parts:
+    if "wrong_matches" not in parts or "failed_imports" in parts:
         raise AssertionError(
             f"scenario={scenario!r} routed to {failed_path!r}; "
-            f"expected root {expected!r}"
+            "expected root 'wrong_matches'"
         )
-    if is_wrong_match and unsafe_failed_import_path_reason(failed_path) is not None:
+    if unsafe_failed_import_path_reason(failed_path) is not None:
         raise AssertionError(
             f"wrong-match cleanup rejected its routed path: {failed_path!r}"
         )
@@ -421,10 +421,7 @@ def assert_rejection_destination(
 def rejection_scenarios(draw) -> str | None:
     if draw(st.booleans()):
         return draw(st.sampled_from(_PINNED_REJECTION_SCENARIOS))
-    candidate = draw(st.text(min_size=1, max_size=40))
-    if candidate in WRONG_MATCH_EXCLUDED_REJECTION_SCENARIOS:
-        return "high_distance"
-    return candidate
+    return draw(st.text(min_size=1, max_size=40))
 
 
 class TestGeneratedRejectionDestination(unittest.TestCase):
@@ -437,14 +434,14 @@ class TestGeneratedRejectionDestination(unittest.TestCase):
             os.mkdir(source)
             _write_relative(source, "01.flac")
 
-            failed_path = move_failed_import_curated(
+            result = move_failed_import_curated(
                 source,
                 allowed_audio=["01.flac"],
                 scenario=scenario,
             )
 
-            assert failed_path is not None
-            assert_rejection_destination(scenario, failed_path)
+            assert result is not None
+            assert_rejection_destination(scenario, result.target_path)
 
 
 # ============================================================================
