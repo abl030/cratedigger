@@ -65,6 +65,7 @@ import contextlib
 import datetime
 import io
 import os
+import re
 import sys
 import unittest
 from collections.abc import Callable, Sequence
@@ -621,14 +622,49 @@ class TestVerdictTierProperties(unittest.TestCase):
         interpret_spectral_cliff("lossless", spectral_grade="likely_transcode"),
         "likely_transcode", None, None,
     ))
+    @example(world=(
+        # The tier-4 band: the ultrasonic leg DENIES and nothing else
+        # fires. Pinned rather than left to the strategy because
+        # ``derandomize=True`` seeds from the test function's digest, so
+        # editing this body reshuffles the whole example sequence — the
+        # arm ran 4 times in 150 examples before issue #1094's audit
+        # touched the body and 0 times after, silently taking the
+        # ladder's NO_ULTRASONIC branch out of the deterministic tier.
+        interpret_spectral_cliff("lossless", spectral_grade="genuine"),
+        "genuine",
+        ultrasonic_proof_leg(
+            deficit_db=61.0,
+            spectral_measurement_version=2,
+            decode_path=SPECTRAL_DECODE_PATH_SOX_NATIVE,
+            preserved_source_spectral=False,
+        ),
+        None,
+    ))
+    @example(world=(
+        # A DENYING lattice leg, pinned for the same reason: it is the
+        # only world in which a leg can fire, and the fired-legs-subset
+        # clause is the only guard that sees it.
+        interpret_spectral_cliff("aac", spectral_grade="genuine"),
+        "genuine",
+        None,
+        aac_lattice_proof_leg(AacLatticeCapture(
+            modal_count=4, scored_tracks=6, max_z=9.0)),
+    ))
     @given(world=_verdict_worlds())
     def test_tier_and_legs_hold(self, world) -> None:
         spectral, grade, ultra, lattice = world
         verdict = album_proof_verdict(
             spectral=spectral, spectral_grade=grade,
             ultrasonic_leg=ultra, aac_lattice_leg=lattice)
-        check_tier_follows_fired_legs(verdict)
+        # The reserved-tier guard runs FIRST deliberately (issue #1094's
+        # per-clause audit). ``check_tier_follows_fired_legs`` re-derives
+        # the ladder, and that re-derivation only ever expects a
+        # PRODUCIBLE tier — so run before it, no world that emits tier 2,
+        # 3 or an unknown number can ever reach the reserved-tier clauses.
+        # Both orders kill the same mutants; this one attributes each kill
+        # to the clause that actually legislates it.
         check_reserved_ceiling_tiers_unused(verdict)
+        check_tier_follows_fired_legs(verdict)
         check_audit_only_codec_has_no_spectral_finding(
             verdict, spectral.codec_family)
         statement = proof_tier_statement(verdict)
@@ -650,6 +686,30 @@ class TestVerdictTierProperties(unittest.TestCase):
         "spectral_measurement_version": 2,
         "aac_lattice": None,
     })
+    @example(facts={
+        # The ONLY tier-4 world these columns see. ``_evidence_facts``
+        # must clear four independent gates at once for the ultrasonic
+        # leg to DENY through ``album_ultrasonic_proof_leg`` — v2+
+        # measurement, a non-NULL deficit at or above 59.5 dB, an
+        # all-sox-native container set, and no cliff or lattice firing —
+        # and in the deterministic ``suite`` tier it never did: the leg
+        # adjudicated 6 times in 150 examples and denied 0 of them, so
+        # the NO_ULTRASONIC band of the ladder ran through the flat
+        # columns and the render adapter exactly never (issue #1094 Q3).
+        "spectral_grade": "genuine",
+        "spectral_bitrate_kbps": None,
+        "cliff_hz": None,
+        "codec_family": "lossless",
+        "format": "FLAC",
+        "storage_format": "FLAC",
+        "filetype_band": "flac",
+        "spectral_subject": "installed",
+        "was_converted_from": None,
+        "container_labels": [".flac"],
+        "ultrasonic_deficit_db": 61.0,
+        "spectral_measurement_version": 2,
+        "aac_lattice": None,
+    })
     @given(facts=_evidence_facts())
     def test_render_path_and_cli_agree(self, facts) -> None:
         """V4 over any world: one album, one verdict, every surface."""
@@ -662,8 +722,10 @@ class TestVerdictTierProperties(unittest.TestCase):
             proof_gate_projection(_row_aliases_from_facts(facts)),
             facts_verdict,
         )
-        check_tier_follows_fired_legs(facts_verdict)
+        # Reserved-tier guard first, for the reason given in
+        # ``test_tier_and_legs_hold``.
         check_reserved_ceiling_tiers_unused(facts_verdict)
+        check_tier_follows_fired_legs(facts_verdict)
         statement = proof_tier_statement(facts_verdict)
         check_statement_does_not_widen_the_claim(statement)
         check_untested_album_is_not_a_clearance(facts_verdict, statement)
@@ -794,8 +856,21 @@ class TestVerdictTierProperties(unittest.TestCase):
         )
 
 
+def _exactly(message: str) -> str:
+    """A pattern matching one clause's whole message and nothing else."""
+    return f"^{re.escape(message)}$"
+
+
 class TestInvariantCheckersTripOnViolations(unittest.TestCase):
-    """Every checker owes a planted violation proving it can fail."""
+    """Every CLAUSE owes a planted violation naming its own message.
+
+    Per-clause proof, issue #1094 (``docs/generated-testing.md`` § "Per-clause
+    proof"). Each world below makes exactly ONE clause's condition true while
+    every earlier clause in the same checker passes, and asserts that clause's
+    own message — a bare ``assertRaises(AssertionError)`` over a world that
+    violates several clauses only ever exercises the first, because these are
+    short-circuiting ``raise`` chains.
+    """
 
     def _verdict(self, **overrides) -> AlbumProofVerdict:
         base = AlbumProofVerdict(
@@ -806,92 +881,207 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         )
         return replace(base, **overrides)
 
-    def test_tier_checker_trips_on_a_mismatched_ladder(self):
-        with self.assertRaises(AssertionError):
-            check_tier_follows_fired_legs(
+    def test_tier_checker_clauses_each_trip(self):
+        """V1's two clauses: the ladder, then the fired-subset rule."""
+        cases = (
+            (
+                "ladder mismatch against the injected resolver",
                 self._verdict(
                     fired_legs=(PROOF_LEG_NO_ULTRASONIC,),
                     evaluated_legs=(PROOF_LEG_NO_ULTRASONIC,),
                 ),
-                tier_of=lambda _fired: PROOF_TIER_DETECTED,
-            )
+                {"tier_of": lambda _fired: PROOF_TIER_DETECTED},
+                ("tier 5 does not follow fired legs ('no_ultrasonic',) "
+                 "(expected 1)"),
+            ),
+            (
+                # The world mutant M1 reaches through production: collapse
+                # the ladder's NO_ULTRASONIC branch into NO_FINDING.
+                "ladder mismatch against the real severity bands",
+                self._verdict(
+                    fired_legs=(PROOF_LEG_NO_ULTRASONIC,),
+                    evaluated_legs=(PROOF_LEG_NO_ULTRASONIC,),
+                ),
+                {},
+                ("tier 5 does not follow fired legs ('no_ultrasonic',) "
+                 "(expected 4)"),
+            ),
+            (
+                # Ladder-consistent, so the first clause passes and the
+                # subset clause is the one under test.
+                "a leg fired without ever being evaluated",
+                self._verdict(
+                    tier=PROOF_TIER_DETECTED,
+                    fired_legs=(PROOF_LEG_AAC_LATTICE,),
+                    evaluated_legs=(),
+                ),
+                {},
+                ("fired legs ('aac_lattice',) are not a subset of evaluated "
+                 "legs ()"),
+            ),
+        )
+        for desc, verdict, kwargs, message in cases:
+            with self.subTest(desc=desc), self.assertRaisesRegex(
+                AssertionError, _exactly(message)
+            ):
+                check_tier_follows_fired_legs(verdict, **kwargs)
 
-    def test_tier_checker_trips_when_a_leg_fired_without_being_evaluated(self):
-        with self.assertRaises(AssertionError):
-            check_tier_follows_fired_legs(self._verdict(
-                tier=PROOF_TIER_DETECTED,
-                fired_legs=(PROOF_LEG_AAC_LATTICE,),
-                evaluated_legs=(),
-            ))
+    def test_reserved_tier_checker_clauses_each_trip(self):
+        """V2's two clauses: the reserved band, then any unknown number."""
+        reserved = (
+            "is reserved for the ceiling leg production does not measure, "
+            "and has no operator copy"
+        )
+        cases = (
+            ("ceiling + no-ultrasonic", PROOF_TIER_CEILING_AND_NO_ULTRASONIC,
+             f"tier 2 {reserved}"),
+            ("ceiling only", PROOF_TIER_CEILING_ONLY, f"tier 3 {reserved}"),
+            # 7 is outside the reserved pair, so the first clause passes
+            # and the producible-set clause is the one under test.
+            ("a tier number no ladder produces", 7,
+             "tier 7 is not a producible tier"),
+        )
+        for desc, tier, message in cases:
+            with self.subTest(desc=desc), self.assertRaisesRegex(
+                AssertionError, _exactly(message)
+            ):
+                check_reserved_ceiling_tiers_unused(self._verdict(tier=tier))
 
-    def test_reserved_tier_checker_trips(self):
-        with self.assertRaises(AssertionError):
-            check_reserved_ceiling_tiers_unused(
-                self._verdict(tier=PROOF_TIER_CEILING_ONLY))
-        with self.assertRaises(AssertionError):
-            check_reserved_ceiling_tiers_unused(self._verdict(tier=7))
-
-    def test_audit_only_checker_trips_on_an_aac_accusation(self):
-        with self.assertRaises(AssertionError):
-            check_audit_only_codec_has_no_spectral_finding(
-                self._verdict(spectral_accusation_admissible=True), "aac")
-        with self.assertRaises(AssertionError):
-            check_audit_only_codec_has_no_spectral_finding(
+    def test_audit_only_checker_clauses_each_trip(self):
+        """V3's three clauses: admissible, fired, then merely evaluated."""
+        cases = (
+            (
+                "an audit-only family admitting an accusation",
+                self._verdict(spectral_accusation_admissible=True),
+                "aac",
+                "codec family 'aac' must never admit a transcode accusation",
+            ),
+            (
+                "an unresolved family admitting an accusation",
+                self._verdict(spectral_accusation_admissible=True),
+                None,
+                "codec family None must never admit a transcode accusation",
+            ),
+            (
+                # Inadmissible, so the first clause passes; the cliff leg
+                # is in ``fired`` anyway, which is the second.
+                "the cliff leg fired on an audit-only family",
                 self._verdict(
                     tier=PROOF_TIER_DETECTED,
                     fired_legs=(PROOF_LEG_IN_WINDOW_CLIFF,),
                     evaluated_legs=(PROOF_LEG_IN_WINDOW_CLIFF,),
                 ),
                 "opus",
-            )
+                "codec family 'opus' fired the in-window cliff leg",
+            ),
+            (
+                # Inadmissible AND unfired, so both earlier clauses pass.
+                # This is the fail-open mutant M7 reaches through
+                # production: an album the cliff leg never ran on reads as
+                # one it ran on and cleared.
+                "the cliff leg counted as evaluated on an audit-only family",
+                self._verdict(fired_legs=()),
+                "opus",
+                ("codec family 'opus' counted the cliff leg as evaluated "
+                 "— an untested album must never read as a cleared one"),
+            ),
+        )
+        for desc, verdict, family, message in cases:
+            with self.subTest(desc=desc), self.assertRaisesRegex(
+                AssertionError, _exactly(message)
+            ):
+                check_audit_only_codec_has_no_spectral_finding(verdict, family)
 
     def test_surface_agreement_checker_trips(self):
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+            AssertionError,
+            "^pipeline-cli and the render path disagree about one album: "
+            r"AlbumProofVerdict\(tier=5",
+        ):
             check_surfaces_agree(
                 self._verdict(), self._verdict(tier=PROOF_TIER_DETECTED))
 
-    def test_accusation_agreement_checker_trips_on_a_split_surface(self):
-        with self.assertRaises(AssertionError):
+    def test_accusation_agreement_checker_clauses_each_trip(self):
+        """V7's two clauses: no surfaces at all, then a split pair."""
+        with self.subTest(desc="no surfaces supplied"), self.assertRaisesRegex(
+            AssertionError, _exactly("no surfaces supplied to compare")
+        ):
+            check_accusation_flags_agree([])
+        with self.subTest(desc="a split pair"), self.assertRaisesRegex(
+            AssertionError,
+            _exactly(
+                "long-tail console and Recents disagree about one album: "
+                "AccusationFlags(admissible=True, withheld=None) vs "
+                "AccusationFlags(admissible=False, "
+                "withheld='audit_only_codec')"
+            ),
+        ):
             check_accusation_flags_agree([
                 ("Recents", AccusationFlags(
                     admissible=False,
                     withheld=ACCUSATION_WITHHELD_AUDIT_ONLY_CODEC)),
                 ("long-tail console", AccusationFlags(admissible=True)),
             ])
-        with self.assertRaises(AssertionError):
-            check_accusation_flags_agree([])
 
-    def test_withheld_reason_checker_trips_on_a_fabricated_codec_claim(self):
-        # The Rule C failure this checker exists for: describing native
-        # encoder rolloff on a row where no encoder was ever resolved.
-        with self.assertRaises(AssertionError):
-            check_withheld_reason_matches_the_world(
-                AccusationFlags(
-                    admissible=False,
-                    withheld=ACCUSATION_WITHHELD_AUDIT_ONLY_CODEC),
-                None,
-            )
-        with self.assertRaises(AssertionError):
-            check_withheld_reason_matches_the_world(
-                AccusationFlags(
-                    admissible=False,
-                    withheld=ACCUSATION_WITHHELD_CODEC_UNRESOLVED),
-                "aac",
-            )
-        with self.assertRaises(AssertionError):
-            check_withheld_reason_matches_the_world(
+    def test_withheld_reason_checker_clauses_each_trip(self):
+        """V7's three clauses, in the order the checker evaluates them."""
+        cases = (
+            (
+                "a reason withheld from a grade that was admitted",
                 AccusationFlags(
                     admissible=True,
                     withheld=ACCUSATION_WITHHELD_AUDIT_ONLY_CODEC),
                 "aac",
-            )
+                ("withheld reason 'audit_only_codec' on an admissible "
+                 "grade (True)"),
+            ),
+            (
+                # ``None`` is not ``False``: a reason on a row with no
+                # accusation to withhold is the same clause.
+                "a reason on a grade that could not accuse at all",
+                AccusationFlags(
+                    withheld=ACCUSATION_WITHHELD_CODEC_UNRESOLVED),
+                None,
+                ("withheld reason 'codec_unresolved' on an admissible "
+                 "grade (None)"),
+            ),
+            (
+                # The Rule C failure this checker exists for: describing
+                # native encoder rolloff on a row where no encoder was
+                # ever resolved.
+                "a codec claim on a row where no codec resolved",
+                AccusationFlags(
+                    admissible=False,
+                    withheld=ACCUSATION_WITHHELD_AUDIT_ONLY_CODEC),
+                None,
+                ("reason 'audit_only_codec' describes a codec, but none "
+                 "resolved"),
+            ),
+            (
+                "the unresolved reason on a row whose codec resolved",
+                AccusationFlags(
+                    admissible=False,
+                    withheld=ACCUSATION_WITHHELD_CODEC_UNRESOLVED),
+                "aac",
+                "reason 'codec_unresolved' on a resolved 'aac' album",
+            ),
+        )
+        for desc, pair, family, message in cases:
+            with self.subTest(desc=desc), self.assertRaisesRegex(
+                AssertionError, _exactly(message)
+            ):
+                check_withheld_reason_matches_the_world(pair, family)
 
-    def test_attribution_checker_trips_on_an_ungated_cli_read(self) -> None:
-        """Known-bad: the pre-fix CLI read, planted as an explicit decoy.
+    def test_attribution_checker_clauses_each_trip(self) -> None:
+        """V8's two clauses: the surfaces split, then both agree and lie.
 
-        The decoy is the shipped line — print the generation whenever a
-        proof object exists — so the checker is proved against the real
-        divergence rather than a hypothetical one.
+        The first decoy is the shipped line — print the generation whenever
+        a proof object exists — so the checker is proved against the real
+        divergence rather than a hypothetical one. The second needs no
+        decoy at all: both real surfaces answer through the one production
+        rule, and the planted violation is an expectation they contradict,
+        which is the "agreed, and both wrong" world the split clause
+        cannot see.
         """
         from lib.quality import verified_lossless_generation_label
 
@@ -901,18 +1091,54 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
                 print(f"      verified lossless {side}: proved by "
                       f"{verified_lossless_generation_label(proof.classifier)}")
 
-        evidence = _proof_evidence(
+        legacy = _proof_evidence(
             lineage=1,
             provenance=EVIDENCE_PROVENANCE_MEASURED,
             classifier="spectral_verified_lossless",
         )
-        self.assertTrue(cli_states_a_proof(evidence, printer=ungated))
-        self.assertFalse(recents_states_a_proof(evidence))
-        with self.assertRaisesRegex(AssertionError, "while Recents says"):
+        self.assertTrue(cli_states_a_proof(legacy, printer=ungated))
+        self.assertFalse(recents_states_a_proof(legacy))
+        with self.subTest(desc="one surface ungated"), self.assertRaisesRegex(
+            AssertionError,
+            _exactly("pipeline-cli says proved=True while Recents says "
+                     "proved=False for the same album"),
+        ):
             check_proof_attribution_agrees(
-                cli_states_a_proof(evidence, printer=ungated),
-                recents_states_a_proof(evidence),
+                cli_states_a_proof(legacy, printer=ungated),
+                recents_states_a_proof(legacy),
                 attributable=False,
+            )
+
+        # Both surfaces agree — the split clause passes — and the world
+        # says they are wrong. Mutant M17 reaches this through production
+        # by widening the ONE shared rule
+        # (``evidence_is_source_semantic``), which moves both surfaces at
+        # once and is therefore invisible to the clause above.
+        current = _proof_evidence(
+            lineage=4,
+            provenance=EVIDENCE_PROVENANCE_MEASURED,
+            classifier="spectral_verified_lossless_v4",
+        )
+        agreed = cli_states_a_proof(current)
+        self.assertTrue(agreed)
+        self.assertEqual(agreed, recents_states_a_proof(current))
+        with self.subTest(desc="an unearned proof"), self.assertRaisesRegex(
+            AssertionError,
+            _exactly("surfaces say proved=True for an album whose proof "
+                     "is attributable=False"),
+        ):
+            check_proof_attribution_agrees(
+                agreed, recents_states_a_proof(current), attributable=False,
+            )
+        withheld = cli_states_a_proof(legacy)
+        self.assertFalse(withheld)
+        with self.subTest(desc="an earned proof withheld"), self.assertRaisesRegex(
+            AssertionError,
+            _exactly("surfaces say proved=False for an album whose proof "
+                     "is attributable=True"),
+        ):
+            check_proof_attribution_agrees(
+                withheld, recents_states_a_proof(legacy), attributable=True,
             )
 
     def test_projection_checker_trips_on_a_lineage_gated_read(self):
@@ -945,29 +1171,86 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         row = _row_aliases_from_facts(facts)
         lineage_gated = dict(row)
         lineage_gated["_evidence_format"] = lineage_gated["source_format"]
-        with self.assertRaises(AssertionError):
+        # The expected half comes from the producer, never a copy literal
+        # (``.claude/rules/test-fidelity.md`` Rule C).
+        expected = (
+            verdict.tier, proof_tier_statement(verdict),
+            list(verdict.fired_legs),
+        )
+        with self.assertRaisesRegex(
+            AssertionError,
+            _exactly(
+                "the render adapter projected a different verdict than the "
+                f"derivation produced: (None, None, []) vs {expected}"
+            ),
+        ):
             check_projection_matches_verdict(
                 proof_gate_projection(lineage_gated), verdict)
         # …and the real adapter over the real row agrees with the verdict.
         check_projection_matches_verdict(proof_gate_projection(row), verdict)
 
     def test_projection_checker_trips_on_a_drifted_reduction(self):
-        with self.assertRaises(AssertionError):
-            check_projection_matches_verdict(
-                ProofGateProjection(),
-                self._verdict(evaluated_legs=(PROOF_LEG_IN_WINDOW_CLIFF,)),
-            )
+        verdict = self._verdict(evaluated_legs=(PROOF_LEG_IN_WINDOW_CLIFF,))
+        expected = (
+            verdict.tier, proof_tier_statement(verdict),
+            list(verdict.fired_legs),
+        )
+        with self.assertRaisesRegex(
+            AssertionError,
+            _exactly(
+                "the render adapter projected a different verdict than the "
+                f"derivation produced: (None, None, []) vs {expected}"
+            ),
+        ):
+            check_projection_matches_verdict(ProofGateProjection(), verdict)
 
-    def test_claim_checker_trips_on_widened_copy(self):
-        with self.assertRaises(AssertionError):
-            check_statement_does_not_widen_the_claim(
-                "Verified lossless: guaranteed bit-perfect")
+    def test_claim_checker_trips_on_every_widening_token(self):
+        """V5's one clause, once per token, so none of them is decoration.
+
+        ``guaranteed`` is deliberately expected to be NAMED as
+        ``guarantee``: it is a superstring of an earlier entry, so the
+        clause fires on the shorter one first. The entry is redundant
+        rather than wrong, and pinning that here stops a future reader
+        from "fixing" the list on a guess.
+        """
+        cases = (
+            ("Tier statement: bit-perfect copy", "bit-perfect"),
+            ("Tier statement: bit perfect copy", "bit perfect"),
+            ("Tier statement: bit-faithful to its source", "bit-faithful"),
+            ("Tier statement: bit faithful to its source", "bit faithful"),
+            ("Tier statement: we guarantee the source", "guarantee"),
+            ("Tier statement: guaranteed clean", "guarantee"),
+            ("Tier statement: certain to be a genuine rip", "certain"),
+            ("Tier statement: probably fake", "probably fake"),
+            ("Tier statement: definitely lossy in origin", "definitely"),
+            ("Tier statement: proven lossless", "proven lossless"),
+            ("Tier statement: an authentic pressing", "authentic"),
+        )
+        self.assertEqual(
+            {token for _statement, token in cases} | {"guaranteed"},
+            set(_CLAIM_WIDENING_TOKENS),
+            "every widening token owes a statement that reaches it",
+        )
+        for statement, token in cases:
+            with self.subTest(token=token), self.assertRaisesRegex(
+                AssertionError,
+                _exactly(f"tier statement {statement!r} widens the claim "
+                         f"via {token!r}"),
+            ):
+                check_statement_does_not_widen_the_claim(statement)
 
     def test_clearance_checker_trips_on_an_untested_album(self):
-        with self.assertRaises(AssertionError):
+        # The clearance sentence comes from the producer, so the pin
+        # cannot outlive the copy it claims to reject (Rule C).
+        clearance = proof_tier_statement(
+            self._verdict(evaluated_legs=(PROOF_LEG_IN_WINDOW_CLIFF,)))
+        with self.assertRaisesRegex(
+            AssertionError,
+            _exactly(f"verdict with no evaluated leg rendered {clearance!r}, "
+                     "which reads as a clearance nothing tested for"),
+        ):
             check_untested_album_is_not_a_clearance(
-                self._verdict(evaluated_legs=()),
-                "No evidence of lossy origin from the tests that ran")
+                self._verdict(evaluated_legs=()), clearance)
 
 
 if __name__ == "__main__":

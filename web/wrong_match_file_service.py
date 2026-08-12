@@ -17,9 +17,12 @@ from lib.fs_authority import (
     FilesystemAuthorityError,
     HeldDirectory,
     OpenedRegularFile,
+    errno_proves_absence,
+    is_containment_refusal,
     open_configured_quarantine_directory,
     open_regular_relative,
     refusal_is_indeterminate,
+    unreadable_reason_text,
 )
 from lib.json_narrow import (
     is_object_list as _is_object_list,
@@ -458,6 +461,17 @@ def build_wrong_match_explorer(
     truncated_reason: str | None = None
     unreadable_entry_count = 0
     unreadable_reason: str | None = None
+    # Structured discriminator alongside ``unreadable_reason`` — the same
+    # "what do we call it" / "should the JS branch differ" split
+    # ``BeetsDistanceResult.partial_read_is_containment`` makes on the
+    # distance side (issue #1086). ``True`` for the first recorded
+    # refusal that was a containment DECISION (a symlink, socket, FIFO or
+    # device node), ``False`` for an ordinary world failure, ``None``
+    # when nothing was refused. The frontend needs this to stop offering
+    # a Retry that re-fetching can never satisfy for a containment
+    # refusal, and to stop leading with wording that implies the world
+    # might just clear up.
+    unreadable_is_containment: bool | None = None
     with _opened_wrong_match_root(entry, cfg=cfg) as (validation_result, root):
         root_fd = root.fd
         def scan_directory(directory_fd: int, relative_dir: str, depth: int) -> None:
@@ -465,6 +479,7 @@ def build_wrong_match_explorer(
             nonlocal entries_seen, other_file_count, scanned_bytes
             nonlocal scanned_file_count, truncated_reason
             nonlocal unreadable_entry_count, unreadable_reason
+            nonlocal unreadable_is_containment
             try:
                 names: list[str] = []
                 with os.scandir(directory_fd) as entries:
@@ -513,10 +528,34 @@ def build_wrong_match_explorer(
                         # these silently let an intact album render as a
                         # confident empty folder — the panel the operator
                         # reads before deciding to delete (issue #1063).
-                        if refusal_is_indeterminate(exc.code) is True:
+                        #
+                        # The gate is ``errno_proves_absence``, NOT
+                        # ``refusal_is_indeterminate(...) is True``. The
+                        # latter answers "is this retryable", a different
+                        # question from "did we learn this entry isn't
+                        # there" — and answers ``False`` for a symlink loop,
+                        # a socket, and a driverless device node, none of
+                        # which prove anything is absent. Keying off it
+                        # silently dropped ``ELOOP``/``ENXIO``/``ENODEV``
+                        # here while the beets-distance path (which asks
+                        # ``errno_proves_absence``) reported the same folder
+                        # as incomplete (issue #1086).
+                        if not errno_proves_absence(exc.code):
                             unreadable_entry_count += 1
                             if unreadable_reason is None:
-                                unreadable_reason = f"{relative}: {exc}"
+                                # Honest per-code copy: a symlink/special-file
+                                # refusal is a containment decision, not a
+                                # world failure, and must not be worded like
+                                # one (issue #1086 part 2).
+                                unreadable_reason = (
+                                    f"{relative}: "
+                                    f"{unreadable_reason_text(exc.code, errno_symbol=exc.errno_symbol)}"
+                                )
+                                # Structured, not string-sniffed (same rule
+                                # as ``BeetsDistanceResult.partial_read_is_containment``):
+                                # the frontend must branch on THIS, never on
+                                # ``unreadable_reason`` text.
+                                unreadable_is_containment = is_containment_refusal(exc.code)
                         continue
                     try:
                         info = opened.stat_result
@@ -581,6 +620,12 @@ def build_wrong_match_explorer(
         "truncated_reason": truncated_reason,
         "unreadable_entry_count": unreadable_entry_count,
         "unreadable_reason": unreadable_reason,
+        # Structured discriminator, same rule as
+        # ``BeetsDistanceResult.partial_read_is_containment``: ``True``
+        # for a containment refusal (symlink/socket/FIFO/device node),
+        # ``False`` for an ordinary world failure, ``None`` when nothing
+        # was refused (issue #1086).
+        "unreadable_is_containment": unreadable_is_containment,
         "scanned_file_count": scanned_file_count,
         "scanned_bytes": scanned_bytes,
         "ordered_by": ordered_by,

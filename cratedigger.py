@@ -502,8 +502,14 @@ def _submit_plan_search(
     logger.info(f"Submitting search: {query} "
                 f"(from '{artist_name} - {album_title}', variant={strategy_tag})")
 
-    # Retry on 429 (rate limit) or 409 (semaphore busy) with backoff.
-    # slskd has SemaphoreSlim(1,1) — 409 means another search is still being submitted.
+    # Retry on 429 (rate limit) or 409 with backoff. Prose-only correction
+    # (issue #1090 NON-BLOCKING-3, root-caused against slskd's real
+    # source): 409 here is NOT slskd's SemaphoreSlim(1,1) submission lock
+    # -- SearchesController maps InvalidOperationException to 409, which
+    # Soulseek.NET's SearchAsync guard throws while slskd is mid-reconnect
+    # (Connected, LoggingIn), not a submission-lock contention signal.
+    # slskd's real rate limiter (SearchRequestLimiter) is what emits 429.
+    # Behaviour here is UNCHANGED by that correction.
     for attempt in range(6):
         search_id = str(uuid.uuid4())
         # A DB failure here deliberately propagates (write-ahead: no POST

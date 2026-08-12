@@ -304,6 +304,63 @@ def relay_rendered(
     return _exit_code(result.status, exit_overrides)
 
 
+def poll_to_completion(
+    endpoint: ApiEndpoint,
+    status_request: _ApiMutation,
+    *,
+    is_complete: Callable[[dict[str, object]], bool],
+    render: ApiRenderer,
+    json_output: bool,
+    completed_exit_code: Callable[[dict[str, object]], int],
+    poll_timeout_seconds: float = TIMEOUT_POLL_SECONDS,
+    poll_interval_seconds: float = _TRIAGE_POLL_INTERVAL_SECONDS,
+    max_consecutive_poll_failures: int = _TRIAGE_POLL_MAX_CONSECUTIVE_FAILURES,
+    sleep: Callable[[float], None] = time.sleep,
+) -> int:
+    """Follow an already-started async route's status to a terminal state.
+
+    Split out of ``relay_polled`` (issue #1083) so a caller that catches
+    ``KeyboardInterrupt`` mid-poll — to send a cancel through the same
+    canonical route the web UI's Stop button uses — can resume following
+    the SAME status route afterward without re-issuing the start
+    mutation (which would either restart nothing useful or 409 against a
+    sweep that is already stopping).
+    """
+    consecutive_failures = 0
+    while True:
+        sleep(poll_interval_seconds)
+        # Only the attempt that gives up reports: retried blips would
+        # otherwise print up to five structured failures for one recovery.
+        final_attempt = (
+            consecutive_failures + 1 >= max_consecutive_poll_failures
+        )
+        polled = _post(
+            endpoint,
+            status_request,
+            timeout_seconds=poll_timeout_seconds,
+            report_failure=final_attempt,
+        )
+        payload = None if polled is None else _decode(polled, report=final_attempt)
+        if polled is None or payload is None:
+            consecutive_failures += 1
+            if consecutive_failures >= max_consecutive_poll_failures:
+                return 5
+            continue
+        consecutive_failures = 0
+        if not 200 <= polled.status < 300:
+            if json_output:
+                print(json.dumps(payload, indent=2, sort_keys=True))
+            else:
+                render(polled.status, payload)
+            return _exit_code(polled.status)
+        if is_complete(payload):
+            if json_output:
+                print(json.dumps(payload, indent=2, sort_keys=True))
+            else:
+                render(polled.status, payload)
+            return completed_exit_code(payload)
+
+
 def relay_polled(
     endpoint: ApiEndpoint,
     start: _ApiMutation,
@@ -342,39 +399,18 @@ def relay_polled(
             render(started.status, start_payload)
         return _exit_code(started.status)
 
-    consecutive_failures = 0
-    while True:
-        sleep(poll_interval_seconds)
-        # Only the attempt that gives up reports: retried blips would
-        # otherwise print up to five structured failures for one recovery.
-        final_attempt = (
-            consecutive_failures + 1 >= max_consecutive_poll_failures
-        )
-        polled = _post(
-            endpoint,
-            status_request,
-            timeout_seconds=poll_timeout_seconds,
-            report_failure=final_attempt,
-        )
-        payload = None if polled is None else _decode(polled, report=final_attempt)
-        if polled is None or payload is None:
-            consecutive_failures += 1
-            if consecutive_failures >= max_consecutive_poll_failures:
-                return 5
-            continue
-        consecutive_failures = 0
-        if not 200 <= polled.status < 300:
-            if json_output:
-                print(json.dumps(payload, indent=2, sort_keys=True))
-            else:
-                render(polled.status, payload)
-            return _exit_code(polled.status)
-        if is_complete(payload):
-            if json_output:
-                print(json.dumps(payload, indent=2, sort_keys=True))
-            else:
-                render(polled.status, payload)
-            return completed_exit_code(payload)
+    return poll_to_completion(
+        endpoint,
+        status_request,
+        is_complete=is_complete,
+        render=render,
+        json_output=json_output,
+        completed_exit_code=completed_exit_code,
+        poll_timeout_seconds=poll_timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+        max_consecutive_poll_failures=max_consecutive_poll_failures,
+        sleep=sleep,
+    )
 
 
 def render_api_error(status: int, payload: Mapping[str, object]) -> None:

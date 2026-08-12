@@ -272,6 +272,13 @@ function renderWrongMatchExplorer(data) {
     ? data.unreadable_entry_count : 0;
   const unreadableReason = typeof data?.unreadable_reason === 'string'
     ? data.unreadable_reason : '';
+  // Structured, not string-sniffed (same rule as
+  // `partial_read_is_containment` on the Replace picker): `true` only
+  // when the SERVER classified the refusal as a containment decision —
+  // a symlink, socket, FIFO or device node — never derived by matching
+  // words in `unreadableReason`, which is free-text diagnostics (issue
+  // #1086).
+  const unreadableIsContainment = data?.unreadable_is_containment === true;
   const truncatedReason = typeof data?.truncated_reason === 'string' ? data.truncated_reason.replace(/_/g, ' ') : 'limit';
   // Two different reasons a listing is incomplete, and they must not be
   // told as one: a LIMIT stopped us, or the server was REFUSED. Issue
@@ -280,18 +287,32 @@ function renderWrongMatchExplorer(data) {
   const truncatedNotice = data?.truncated_reason
     ? `<div style="color:#e5a84b;font-size:0.76em;margin:6px 0;">Partial explorer result: ${esc(truncatedReason)} reached.</div>`
     : '';
-  // A refused listing describes a world the operator can REPAIR (fix the
-  // mode, remount the share), so the notice carries its own Retry. It
-  // rides on the NOTICE, not on the empty-state branch: a PARTIAL listing
-  // — some files read, some refused — renders the notice above a real
-  // track list and is exactly as repairable, but it answers
-  // ``status: "ok"`` and so never reached the empty branch (issue #1063).
+  // A WORLD-FAILURE refusal (EACCES, EIO, ESTALE, …) describes a state
+  // the operator can REPAIR (fix the mode, remount the share) and a
+  // plain reload might just see the fix, so the notice carries its own
+  // Retry. It rides on the NOTICE, not on the empty-state branch: a
+  // PARTIAL listing — some files read, some refused — renders the
+  // notice above a real track list and is exactly as repairable, but it
+  // answers ``status: "ok"`` and so never reached the empty branch
+  // (issue #1063). A CONTAINMENT refusal (a symlink, socket, FIFO or
+  // device node) gets no Retry: re-fetching the same name answers the
+  // same refusal every time — nothing short of the operator physically
+  // replacing the entry changes it, and that is a filesystem action, not
+  // a button click (issue #1086).
   const retryId = Number(data?.download_log_id);
-  const retry = Number.isFinite(retryId)
+  const retry = (Number.isFinite(retryId) && !unreadableIsContainment)
     ? ` <button class="p-btn" style="margin-left:6px;" onclick="event.stopPropagation(); window.reloadWrongMatchExplorer(${retryId})">Retry</button>`
     : '';
+  // The LEAD sentence must not say "could not be read" for a containment
+  // refusal — that phrasing implies a disk/permission problem a retry
+  // might clear, which is exactly the wording a security decision must
+  // never get (issue #1086 review). The containment/world distinction
+  // was previously visible ONLY in the parenthetical reason text.
+  const unreadableLead = unreadableIsContainment
+    ? `${unreadableCount} entr${unreadableCount === 1 ? 'y was' : 'ies were'} refused (not read) as a containment decision`
+    : `${unreadableCount} entr${unreadableCount === 1 ? 'y' : 'ies'} could not be read`;
   const unreadableNotice = unreadableCount > 0
-    ? `<div style="color:#d9a441;font-size:0.76em;margin:6px 0;">${unreadableCount} entr${unreadableCount === 1 ? 'y' : 'ies'} could not be read — this listing is incomplete and nothing here is confirmed missing.${unreadableReason ? ` (${esc(unreadableReason)})` : ''}${retry}</div>`
+    ? `<div style="color:#d9a441;font-size:0.76em;margin:6px 0;">${unreadableLead} — this listing is incomplete and nothing here is confirmed missing.${unreadableReason ? ` (${esc(unreadableReason)})` : ''}${retry}</div>`
     : '';
   const partialNotice = `${truncatedNotice}${unreadableNotice}`;
   let summary = '';
@@ -312,7 +333,9 @@ function renderWrongMatchExplorer(data) {
   }
   if (files.length === 0) {
     const emptyText = unreadableCount > 0
-      ? 'The server could not read this folder\u2019s contents, so no listing is available. This is NOT evidence that the folder is empty.'
+      ? (unreadableIsContainment
+          ? 'This folder\u2019s contents were refused (not read) as a containment decision, so no listing is available. This is NOT evidence that the folder is empty.'
+          : 'This folder\u2019s contents could not be read, so no listing is available. This is NOT evidence that the folder is empty.')
       : partial
         ? 'No audio files were found before exploration was truncated.'
         : 'No audio files found in this folder.';
@@ -559,6 +582,35 @@ function greenEntries(group, thresholdMilli) {
   return (group.entries || []).filter((/** @type {any} */ entry) => (
     isConvergeGreen(entry, thresholdMilli)
   ));
+}
+
+/**
+ * Candidates the group "Delete All" action can actually act on right now.
+ *
+ * Mirrors the converge button beside it (issue #1086 item 2): a candidate
+ * whose source folder the server could not read is not deletable, so it is
+ * excluded from the actionable count the same way it is excluded from
+ * `greenEntries`. A group can be PARTIALLY unavailable — the button must
+ * stay usable for the rest — so this only disables the action when NONE
+ * of the group's candidates are actionable.
+ * @param {any} group
+ * @returns {any[]}
+ */
+function actionableDeleteEntries(group) {
+  return (group.entries || []).filter((/** @type {any} */ entry) => (
+    !entryPathUnavailable(entry)
+  ));
+}
+
+/**
+ * @param {number} actionableCount
+ * @param {number} totalCount
+ * @returns {string}
+ */
+function deleteAllButtonLabel(actionableCount, totalCount) {
+  return actionableCount === totalCount
+    ? `Delete All (${totalCount})`
+    : `Delete All (${actionableCount} of ${totalCount})`;
 }
 
 /**
@@ -882,8 +934,14 @@ function removeWrongMatchEntry(logId) {
       if (release) release.setAttribute('data-pending-count', String(remaining));
       const badge = release ? release.querySelector('.badge-library') : null;
       if (badge) badge.textContent = `${remaining} candidate${remaining !== 1 ? 's' : ''}`;
-      const groupDeleteBtn = document.getElementById(`wm-delete-group-btn-${owningGroup.request_id}`);
-      if (groupDeleteBtn) groupDeleteBtn.textContent = `Delete All (${remaining})`;
+      const groupDeleteBtn = /** @type {HTMLButtonElement | null} */ (
+        document.getElementById(`wm-delete-group-btn-${owningGroup.request_id}`)
+      );
+      if (groupDeleteBtn) {
+        const actionableCount = actionableDeleteEntries(owningGroup).length;
+        groupDeleteBtn.textContent = deleteAllButtonLabel(actionableCount, remaining);
+        groupDeleteBtn.disabled = actionableCount === 0;
+      }
       updateWrongMatchesSummary();
     }
   } else {
@@ -925,6 +983,7 @@ function renderWrongMatches(data, el) {
       <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
         <button id="wm-refresh-btn" class="p-btn" style="border-color:#888;color:#888;" onclick="event.stopPropagation(); window.refreshWrongMatches(this)" title="Refetch the queue from the server">Refresh</button>
         <button id="wm-bulk-triage-btn" class="p-btn delete" ${counts.entries === 0 ? 'disabled' : ''} onclick="event.stopPropagation(); window.bulkTriageWrongMatches(this)">Cleanup Wrong Matches (${counts.entries})</button>
+        <button id="wm-bulk-triage-stop-btn" class="p-btn" style="border-color:#888;color:#888;" disabled onclick="event.stopPropagation(); window.stopWrongMatchTriage(this)" title="Stop the running cleanup sweep after its current row">Stop</button>
       </div>
     </div>`;
 
@@ -1124,6 +1183,9 @@ function renderConvergeControls(g, count, thresholdMilli) {
   const greenCount = greenEntries(g, thresholdMilli).length;
   const disabled = greenCount === 0;
   const label = convergeButtonLabel(greenCount);
+  const actionableCount = actionableDeleteEntries(g).length;
+  const deleteDisabled = actionableCount === 0;
+  const deleteLabel = deleteAllButtonLabel(actionableCount, count);
   return `
     <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin:4px 0 0 0;padding:6px 8px;background:#151515;border:1px solid #242424;border-radius:4px;">
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
@@ -1134,7 +1196,7 @@ function renderConvergeControls(g, count, thresholdMilli) {
         <span id="wm-green-count-${g.request_id}" class="badge" style="${greenCountStyle(greenCount)}">${greenCountLabel(greenCount)}</span>
       </div>
       <div style="display:flex;align-items:center;gap:6px;">
-        <button id="wm-delete-group-btn-${g.request_id}" class="p-btn delete" onclick="event.stopPropagation(); window.deleteWrongMatchGroup(${g.request_id}, this)">Delete All (${count})</button>
+        <button id="wm-delete-group-btn-${g.request_id}" class="p-btn delete" ${deleteDisabled ? 'disabled' : ''} onclick="event.stopPropagation(); window.deleteWrongMatchGroup(${g.request_id}, this)">${deleteLabel}</button>
         <button id="wm-converge-btn-${g.request_id}" class="p-btn" style="border-color:#6a9;color:#6a9;" ${disabled ? 'disabled' : ''} onclick="event.stopPropagation(); window.convergeWrongMatches(${g.request_id}, this)">${label}</button>
         ${renderReplaceButton({
           mode: 'standard',
@@ -1473,10 +1535,12 @@ export const __test__ = {
   EXPLORER_RENDERABLE_STATUSES,
   explorerListingIsRepairable,
   pollImportJob: _pollImportJob,
+  actionableDeleteEntries,
   bulkTriageWrongMatches,
   cleanupSummaryToast,
   convergeRequestBody,
   convergeWrongMatches,
+  deleteAllButtonLabel,
   deleteWrongMatch,
   deleteWrongMatchGroup,
   deleteUnmatchedOnConverge,
@@ -1497,6 +1561,7 @@ export const __test__ = {
   renderWrongMatchExplorer,
   renderWrongMatches,
   setWrongMatchConvergeThreshold,
+  stopWrongMatchTriage,
   thresholdForGroup,
   toggleWrongMatchEntry,
 };
@@ -1644,6 +1709,11 @@ export async function deleteWrongMatchGroup(requestId, btn) {
   const group = ((_lastData && Array.isArray(_lastData.groups)) ? _lastData.groups : [])
     .find((/** @type {any} */ g) => Number(g.request_id) === Number(requestId));
   const count = group ? (group.pending_count || (group.entries ? group.entries.length : 0)) : 0;
+  // The pre-request actionable count (issue #1086 item 2): a failed
+  // request restores the button to whatever it looked like before the
+  // click, not a plain "Delete All (N)" that lies about a still-unavailable
+  // candidate.
+  const actionableCount = group ? actionableDeleteEntries(group).length : count;
   if (!confirm(`Delete all ${count} wrong-match candidate source folders for this release?`)) return;
 
   btn.disabled = true;
@@ -1668,6 +1738,13 @@ export async function deleteWrongMatchGroup(requestId, btn) {
       const clearedMissing = Number(data.cleared_missing) || 0;
       const cleared = clearedMissing
         ? ` · cleared ${clearedMissing} already-missing` : '';
+      // "unavailable" is its own bucket, never folded into skipped or
+      // errors (issue #1086 item 3): a source the server could not even
+      // observe is neither a policy skip nor a genuine delete failure, and
+      // counting it into both used to read `skipped 1 · errors 1` for one
+      // real outcome.
+      const unavailableCount = Number(data.unavailable) || 0;
+      const unavailable = unavailableCount ? ` · unavailable ${unavailableCount}` : '';
       const skipped = data.skipped ? ` · skipped ${data.skipped}` : '';
       const errors = data.errors ? ` · errors ${data.errors}` : '';
       const remaining = data.remaining ? ` · ${data.remaining} left` : '';
@@ -1678,8 +1755,8 @@ export async function deleteWrongMatchGroup(requestId, btn) {
       const incomplete = Boolean(data.errors) || Boolean(data.remaining);
       toast(
         failed
-          ? `Deleted nothing${skipped}${errors}${remaining}`
-          : `Deleted ${deleted} folder${deleted === 1 ? '' : 's'}${cleared}${skipped}${errors}${remaining}`,
+          ? `Deleted nothing${skipped}${unavailable}${errors}${remaining}`
+          : `Deleted ${deleted} folder${deleted === 1 ? '' : 's'}${cleared}${skipped}${unavailable}${errors}${remaining}`,
         failed || incomplete,
       );
       invalidateWrongMatches();
@@ -1691,19 +1768,19 @@ export async function deleteWrongMatchGroup(requestId, btn) {
         // — "Delete All (2)" and "1 green" over the ONE unavailable
         // candidate that survived, which is the client/server green
         // disagreement all over again (issue #1063 F-review).
-        btn.disabled = false;
-        btn.textContent = `Delete All (${count})`;
+        btn.disabled = actionableCount === 0;
+        btn.textContent = deleteAllButtonLabel(actionableCount, count);
         await _refreshWrongMatches();
       }
     } else {
-      btn.disabled = false;
-      btn.textContent = `Delete All (${count})`;
+      btn.disabled = actionableCount === 0;
+      btn.textContent = deleteAllButtonLabel(actionableCount, count);
       invalidateWrongMatches();
       toast(data.error || data.message || 'Delete all failed', true);
     }
   } catch (_e) {
-    btn.disabled = false;
-    btn.textContent = `Delete All (${count})`;
+    btn.disabled = actionableCount === 0;
+    btn.textContent = deleteAllButtonLabel(actionableCount, count);
     toast('Delete all request failed', true);
   }
 }
@@ -1721,11 +1798,21 @@ export async function bulkTriageWrongMatches(btn) {
   }
   if (!confirm(`Process all ${counts.entries} Wrong Matches candidates?\nOnly force-mode confident rejects will be deleted.`)) return;
 
+  const stopBtn = /** @type {HTMLButtonElement|null} */ (
+    document.getElementById('wm-bulk-triage-stop-btn'));
   btn.disabled = true;
   btn.textContent = 'Cleaning...';
+  if (stopBtn) {
+    stopBtn.disabled = false;
+    stopBtn.textContent = 'Stop';
+  }
   const restore = () => {
     btn.disabled = false;
     btn.textContent = `Cleanup Wrong Matches (${counts.entries})`;
+    if (stopBtn) {
+      stopBtn.disabled = true;
+      stopBtn.textContent = 'Stop';
+    }
   };
   try {
     const r = await fetch(`${API}/api/wrong-matches/triage`, {
@@ -1749,6 +1836,15 @@ export async function bulkTriageWrongMatches(btn) {
       await _refreshWrongMatches();
       return;
     }
+    if (status && status.state === 'cancelled') {
+      // Issue #1083: the operator hit Stop. summary still holds exactly
+      // what ran before the stop — say so distinctly from completion.
+      restore();
+      toast(`Cleanup stopped — ${cleanupSummaryToast(status.summary || {})}`);
+      invalidateWrongMatches();
+      await _refreshWrongMatches();
+      return;
+    }
     if (status && status.state === 'idle') {
       // The web service restarted mid-sweep and lost the in-memory status.
       // Deletions already performed are durable — refresh to show them.
@@ -1763,6 +1859,40 @@ export async function bulkTriageWrongMatches(btn) {
   } catch (_e) {
     restore();
     toast('Cleanup request failed', true);
+  }
+}
+
+/**
+ * Request cancellation of the in-flight bulk triage sweep (issue #1083).
+ * Not an error, and never toasted as one, when nothing is running or the
+ * sweep already finished — the poll loop inside bulkTriageWrongMatches
+ * renders whatever terminal state actually lands. This button lives in
+ * the browser deliberately: the panic scenario ("something is deleting
+ * the wrong things, stop it") happens while watching this exact screen.
+ * @param {HTMLButtonElement} btn
+ */
+export async function stopWrongMatchTriage(btn) {
+  btn.disabled = true;
+  btn.textContent = 'Stopping...';
+  try {
+    const r = await fetch(`${API}/api/wrong-matches/triage/cancel`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({}),
+    });
+    if (!r.ok) {
+      toast('Stop request failed', true);
+      btn.disabled = false;
+      btn.textContent = 'Stop';
+      return;
+    }
+    // Success: leave the button disabled/"Stopping..." — the in-flight
+    // poll loop in bulkTriageWrongMatches restores both buttons once the
+    // sweep reaches a terminal state.
+  } catch (_e) {
+    toast('Stop request failed', true);
+    btn.disabled = false;
+    btn.textContent = 'Stop';
   }
 }
 

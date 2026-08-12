@@ -101,6 +101,8 @@ depends on.
 | `/api/wrong-matches/audio` | GET | Stream an individual wrong-match audio file with byte-range support |
 | `/api/wrong-matches/converge` | POST | Queue every wrong-match candidate within a release's loosen threshold and delete the rest |
 | `/api/wrong-matches/triage` | POST | Evidence-only full-queue Wrong Matches cleanup; requires `{"confirm_all_wrong_matches": true}` |
+| `/api/wrong-matches/triage/status` | GET | Poll the background sweep's state (`idle`/`running`/`completed`/`cancelled`/`failed`) and summary |
+| `/api/wrong-matches/triage/cancel` | POST | Request cancellation of the in-flight sweep, if any; never 409 — same route the CLI's `Ctrl-C` handler and the UI's Stop button both use (#1083) |
 | `/api/import-preview` | POST | Strict path-free preview: nested typed `values` or a positive `download_log_id`. `pipeline-cli import-preview --download-log-id` relays this route (its `failed_path` is under the private processing tree, #1063); the CLI-only `--path` mode keeps the explicit-path inspector off the HTTP surface (CD-SEC-03). |
 | `/api/import-jobs` | GET | List recent import queue jobs |
 | `/api/import-jobs/timeline` | GET | List active queued/running/recovery-required import jobs in importer order, with server-classified display fields |
@@ -532,6 +534,25 @@ depends on.
   such a row was silently dropped from the payload, hiding the broken world
   from the only surface that could report it. A folder proven absent still
   leaves the list as before.
+- **Wrong Matches group Delete All** — like Converge, the group Delete All
+  button is gated on what it can actually act on (issue #1086 item 2): it
+  relabels `Delete All (X of N)` when some (but not all) candidates in the
+  group are unavailable, and disables outright only when the actionable
+  count is zero — a partially unavailable group is still the right thing to
+  act on, so only a fully dead-end group is blocked before the operator hits
+  a truthful 503. A fully available group keeps the plain `Delete All (N)`
+  label.
+- **Wrong Matches group delete summary** — the delete-group response and
+  toast split a candidate the server could not even observe into its own
+  `unavailable` count, distinct from both `skipped` and `errors` (issue
+  #1086 item 3). Before this fix `OUTCOME_SKIPPED_PATH_UNAVAILABLE` set both
+  fields on the same result, so the toast could read `deleted 1 · skipped 1
+  · errors 1` for two real outcomes; it now reads `deleted 1 · unavailable
+  1`. The unsafe-path refusal (`skipped_unsafe_path`) shares the same
+  pre-existing double-counting shape and is fixed the same way, but stays in
+  `skipped` rather than joining `unavailable` — that path WAS positively
+  observed and refused on containment grounds, unlike a folder the server
+  never got to look at.
 - **Wrong Matches evidence provenance** — candidate rows keep the downloaded
   source codec, configured target contract, and temporary V0 probe separate.
   A lossless candidate destined for Opus therefore reads `FLAC → OPUS 128
@@ -576,29 +597,69 @@ depends on.
   permitted to read are counted and named, and when nothing was readable the
   route answers 200 with `status: "unavailable"` and the panel says the folder
   is unreadable rather than empty — explicitly "this is NOT evidence that the
-  folder is empty". `web/js/wrong-matches.js` renders both `ok` and
+  folder is empty". The counted/uncounted decision asks
+  `lib.fs_authority.errno_proves_absence`, not whether the refusal is
+  retryable (#1086) — so a symlink the server refuses to follow, and a socket
+  or driverless device node it refuses to open, are counted the same as an
+  EACCES/EIO refusal, each with its own honest reason: a containment refusal
+  (symlink/socket) reads "refused ... out of the quarantine root", never
+  worded like a transient world failure. `web/js/wrong-matches.js` renders both `ok` and
   `unavailable` payloads; a refusal of the whole root is a 503 whose reason is
-  shown next to the Retry button. **Any listing that recorded a refusal —
+  shown next to the Retry button. **Every listing that recorded a refusal —
   `unavailable`, or a PARTIAL `ok` listing that read some files and was refused
-  others — carries a Retry on its refusal notice and is deliberately NOT
-  cached**: the operator is expected to go and fix the permission, and only a
-  listing with nothing left to repair is worth remembering for the rest of the
-  page session. A listing that was truncated by a LIMIT and recorded no
+  others — is deliberately NOT cached**, so reopening the panel always
+  re-fetches rather than short-circuiting on a stale answer. Only a
+  WORLD-FAILURE refusal (EACCES/EIO/ESTALE/…) also carries a Retry button on
+  its notice: the operator is expected to go and fix the permission, and a
+  plain reload might just see the fix. A CONTAINMENT refusal (a symlink,
+  socket, FIFO or device node) carries no Retry — re-fetching the same name
+  answers the same refusal every time, whatever `unavailable`/`ok` status it
+  arrives under; nothing short of the operator physically replacing the entry
+  changes it, and that is a filesystem action, not a button click (#1086). A
+  listing that was truncated by a LIMIT and recorded no
   refusals stays cached, because retrying hits the same limit; one that was
   both truncated and refused is still evicted, since the refusal half is
   repairable.
 - **Replace picker distance badge** — each pressing row carries the best
   beets-distance against the request's Wrong Matches folders. When the service
   was refused part of a folder, the response's `partial_read` is set and the
-  badge reads `best 0.07 (6/12) · incomplete manifest` in amber, with the
-  refusal on hover (#1063). A distance is a per-track average, so scoring an
-  incomplete manifest as a plain number misinforms the one surface where the
-  operator picks a pressing.
-- **Wrong Matches cleanup** — one top-level action runs over the full Wrong
-  Matches queue. It consumes existing evidence only, deletes force-mode
-  confident cleanup-eligible rejects, and leaves would-import, uncertain,
-  missing-evidence, stale-evidence, active-job, and missing-path candidates for
-  review. The result is shown as a summary toast and the pane refreshes.
+  badge reads `best 0.07 (6/12) · incomplete manifest (…)` in amber, with the
+  full refusal text on hover (#1063). A distance is a per-track average, so
+  scoring an incomplete manifest as a plain number misinforms the one surface
+  where the operator picks a pressing. The parenthetical is a VISIBLE,
+  structured qualifier — `may be transient` or `refused: symlink or special
+  file`, driven off the wire's `partial_read_is_containment` boolean, never
+  parsed from the free-text reason — so the operator does not need to hover
+  to learn whether the incompleteness is a retryable world failure or a
+  permanent containment decision (#1086). Beets reads audio files by path, so
+  `lib/beets_distance.py` closes the matching containment gap with an
+  `lstat` guard that refuses every symlink — a loop, a dangling target, or a
+  valid target outside the quarantine root — AND every non-regular name (a
+  FIFO, socket, or device node; a `*.flac` FIFO with no writer would
+  otherwise block `open()` forever, since this module has no `O_NONBLOCK`
+  lever) before the path ever reaches beets, the same posture the file
+  explorer already held per FILE entry with `O_NOFOLLOW` plus its own
+  `S_ISREG` check. A symlinked SUBDIRECTORY gets the equivalent refusal at
+  the walk level, not only a symlinked file. This is a per-file/per-entry
+  posture only: `compute_beets_distance` still resolves the folder itself
+  (`failed_path`) via `observe_directory` → `os.stat`, which follows a
+  symlinked parent component and performs no quarantine-root containment
+  check on it — a gap that predates this guard and is out of scope here.
+- **Wrong Matches cleanup** — the "Cleanup Wrong Matches" action runs over
+  the full Wrong Matches queue on a background thread. It consumes existing
+  evidence only, deletes force-mode confident cleanup-eligible rejects, and
+  leaves would-import, uncertain, missing-evidence, stale-evidence,
+  active-job, and missing-path candidates for review. A second "Stop"
+  control sits beside it, enabled while the sweep started from that
+  browser session is running (issue #1083; a CLI-started sweep, another
+  tab, or a mid-sweep refresh leaves it disabled — see #1106):
+  clicking it posts `/api/wrong-matches/triage/cancel` — the same route the
+  CLI's `Ctrl-C` handler uses — and cancellation lands between rows, never
+  mid-delete, so a row already in flight always finishes. A completed sweep
+  shows its summary as an ordinary toast; a stopped one shows a distinct
+  `Cleanup stopped — ...` toast reporting exactly what ran before the stop,
+  and the pane refreshes either way. A failed Stop request itself toasts
+  `Stop request failed` and re-enables the button.
 - **Wrong Matches history** — rows evaluated by the cleanup reducer
   (`lib.wrong_match_cleanup_service.cleanup_wrong_match`, individual or bulk)
   render their chip/detail in Recents from

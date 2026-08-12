@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import logging
 import os
+import re
 import subprocess as sp
 import tempfile
 import unittest
@@ -38,6 +39,7 @@ from lib.destructive_release_service import (
     BanSourceSuccess,
     DeleteBeetsAmbiguous,
     DeleteIncomplete,
+    DeletePipelinePurgeFailure,
     DeleteRequest,
     DeleteSuccess,
     ban_source,
@@ -49,6 +51,7 @@ from lib.mbid_replace_service import (
     RESULT_REPLACED,
     RESULT_WRONG_STATE,
     MbidReplaceService,
+    ReplaceResult,
 )
 from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_IMPORT,
@@ -322,6 +325,18 @@ def _authoritative_release(
     return discogs_id
 
 
+class _PurgePipelineFaultDB(FakePipelineDB):
+    """PostgreSQL blip at the pipeline purge boundary.
+
+    The fault is injected at the external database edge, so production's
+    own purge-failure branch runs and returns the explicit PG-partial
+    result rather than a fabricated one.
+    """
+
+    def delete_request(self, request_id: int) -> bool:
+        raise OSError("generated pipeline purge fault")
+
+
 def _configure_lock_world(
     db: FakePipelineDB,
     *,
@@ -414,6 +429,9 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
                 preserved_paths=(),
             )
 
+        scans: list[str | None] = []
+        request_before: object = None
+
         if action == "ban":
             with patch(
                 "lib.destructive_release_service.hash_audio_content",
@@ -426,8 +444,6 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
                     beets_delete_fn=exact_delete,
                 )
             destructive_result = isinstance(result, BanSourceSuccess)
-            if authority == "ambiguous":
-                self.assertIsInstance(result, BanSourceBeetsAmbiguous)
         elif action == "delete":
             result = delete_release_from_library(
                 pipeline_db=db,
@@ -437,8 +453,6 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
                 notify_fn=lambda _path: (),
             )
             destructive_result = isinstance(result, DeleteSuccess)
-            if authority == "ambiguous":
-                self.assertIsInstance(result, DeleteBeetsAmbiguous)
         else:
             target_release_id = (
                 "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
@@ -449,7 +463,6 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
                 if source == "musicbrainz" else "7654321"
             )
             db.request(41)["mb_release_group_id"] = target_group_id
-            scans: list[str | None] = []
 
             target = {
                 "id": target_release_id,
@@ -472,7 +485,7 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
                 search_plan_service=MagicMock(),
                 beets_delete_fn=exact_delete,
             )
-            before = db.request(41).copy()
+            request_before = db.request(41).copy()
             with (
                 patch(
                     "lib.mbid_replace_service.trigger_plex_scan",
@@ -492,12 +505,32 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
                     target_mb_release_id=target_release_id,
                 )
             destructive_result = result.outcome == RESULT_REPLACED
+
+        # The checker is the invariant, so it is evaluated before every
+        # supplementary assertion below. Under the reverse order a typed-result
+        # assertion shadows the clause that owns the same world: a production
+        # mutant returning BanSourceSuccess for an ambiguous album cardinality
+        # dies on assertIsInstance and never reaches the "reported destructive
+        # success" clause.
+        assert_fresh_destructive_authority(
+            authority=authority,
+            beets_delete_album_ids=tuple(delete_album_ids),
+            expected_album_id=(album_id if authority == "unique" else None),
+            destructive_result=destructive_result,
+        )
+
+        if action == "ban" and authority == "ambiguous":
+            self.assertIsInstance(result, BanSourceBeetsAmbiguous)
+        elif action == "delete" and authority == "ambiguous":
+            self.assertIsInstance(result, DeleteBeetsAmbiguous)
+        elif action == "replace":
+            assert isinstance(result, ReplaceResult)
             if authority == "ambiguous":
                 self.assertEqual(
                     result.reason,
                     REPLACE_REASON_CURRENT_BEETS_AMBIGUOUS,
                 )
-                self.assertEqual(db.request(41), before)
+                self.assertEqual(db.request(41), request_before)
                 self.assertEqual(scans, [])
             elif authority == "unique":
                 self.assertEqual(
@@ -509,13 +542,6 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
                 )
             else:
                 self.assertEqual(scans, [None, None])
-
-        assert_fresh_destructive_authority(
-            authority=authority,
-            beets_delete_album_ids=tuple(delete_album_ids),
-            expected_album_id=(album_id if authority == "unique" else None),
-            destructive_result=destructive_result,
-        )
 
     @example(
         mb_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
@@ -841,6 +867,11 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
         )
         self.assertEqual(isinstance(result, BanSourceSuccess), should_succeed)
 
+    # The PG-partial arm needs reached_mutation AND purge_pipeline AND a
+    # current pipeline id AND the purge fault — a corner the suite tier's
+    # derandomized budget never draws, so the clause is pinned rather than
+    # left to fuzz entropy. Without this the pg_partial law is unmeasured on
+    # every gating run (#1094 review B1).
     @example(
         mb_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
         discogs_id="12856590",
@@ -856,6 +887,24 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
         purge_pipeline=True,
         file_payloads=[b"mb-track"],
         sidecar=False,
+        purge_fault=True,
+    )
+    @example(
+        mb_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        discogs_id="12856590",
+        invalid_id="invalid:provider",
+        sentinel="0",
+        album_shape="mb",
+        seed_mb_pipeline=True,
+        seed_discogs_pipeline=False,
+        release_confirmation="same",
+        pipeline_confirmation="same",
+        lock_failure="none",
+        job_race=False,
+        purge_pipeline=True,
+        file_payloads=[b"mb-track"],
+        sidecar=False,
+        purge_fault=False,
     )
     @example(
         mb_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
@@ -872,6 +921,7 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
         purge_pipeline=False,
         file_payloads=[b"sentinel-track"],
         sidecar=False,
+        purge_fault=False,
     )
     @example(
         mb_id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
@@ -888,6 +938,7 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
         purge_pipeline=False,
         file_payloads=[b"discogs-track"],
         sidecar=True,
+        purge_fault=False,
     )
     @given(
         mb_id=MB_RELEASE_IDS,
@@ -904,6 +955,7 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
         purge_pipeline=st.booleans(),
         file_payloads=st.lists(st.binary(max_size=32), max_size=3),
         sidecar=st.booleans(),
+        purge_fault=st.booleans(),
     )
     def test_library_delete_authority_across_identity_and_filesystem_worlds(
         self,
@@ -921,8 +973,9 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
         purge_pipeline: bool,
         file_payloads: list[bytes],
         sidecar: bool,
+        purge_fault: bool,
     ) -> None:
-        db = FakePipelineDB()
+        db = _PurgePipelineFaultDB() if purge_fault else FakePipelineDB()
         if seed_mb_pipeline:
             db.seed_request(make_request_row(
                 id=41, status="imported", mb_release_id=mb_id,
@@ -991,6 +1044,11 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
             sidecar_path = album_dir / "cover.jpg"
             if sidecar:
                 sidecar_path.write_bytes(b"cover")
+            # Unknown content is never in the owned manifest, so the
+            # PG-partial law below measures preservation instead of
+            # asserting it from a literal.
+            unknown_path = album_dir / "booklet.pdf"
+            unknown_path.write_bytes(b"booklet")
 
             beets = FakeBeetsDB()
             beets.set_album_detail(7, {
@@ -1040,18 +1098,23 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
                 filesystem_root=root,
             )
 
-            result = delete_release_from_library(
-                pipeline_db=db,
-                beets_db=beets,
-                request=DeleteRequest(
-                    album_id=7,
-                    purge_pipeline=purge_pipeline,
-                    expected_pipeline_id=expected_pipeline,
-                    expected_release_id=expected_release,
-                ),
-                beets_delete_fn=beets_delete,
-                notify_fn=lambda _path: (),
-            )
+            previous_disable = logging.root.manager.disable
+            logging.disable(logging.CRITICAL)
+            try:
+                result = delete_release_from_library(
+                    pipeline_db=db,
+                    beets_db=beets,
+                    request=DeleteRequest(
+                        album_id=7,
+                        purge_pipeline=purge_pipeline,
+                        expected_pipeline_id=expected_pipeline,
+                        expected_release_id=expected_release,
+                    ),
+                    beets_delete_fn=beets_delete,
+                    notify_fn=lambda _path: (),
+                )
+            finally:
+                logging.disable(previous_disable)
 
             after = snapshot_state(
                 db,
@@ -1061,10 +1124,13 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
                 filesystem_root=root,
             )
             succeeded = isinstance(result, DeleteSuccess)
+            purge_failed = isinstance(result, DeletePipelinePurgeFailure)
+            # A purge failure is an explicit partial, not a rejection: the
+            # Beets and filesystem mutations already happened.
             assert_rejection_preserved_state(
                 before,
                 after,
-                rejected=not succeeded,
+                rejected=not succeeded and not purge_failed,
             )
             confirmation_ok = (
                 release_confirmation != "different"
@@ -1084,18 +1150,48 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
                 )
             )
             job_ok = current_pipeline_id is None or not job_race
-            should_succeed = (
+            reached_mutation = (
                 authoritative_release is not None
                 and bool(file_payloads)
                 and confirmation_ok
                 and locks_ok
                 and job_ok
             )
-            self.assertEqual(succeeded, should_succeed)
+            purge_attempted = (
+                reached_mutation
+                and purge_pipeline
+                and current_pipeline_id is not None
+            )
+            # The PG-partial law is evaluated before the outcome bookkeeping
+            # below so no supplementary assertion can shadow its clauses.
+            if purge_failed:
+                assert current_pipeline_id is not None
+                assert_delete_postcondition(
+                    outcome="pg_partial",
+                    owned_paths_present=(
+                        any(path.exists() for path in track_paths)
+                        or sidecar_path.exists()
+                    ),
+                    unknown_bytes_preserved=(
+                        unknown_path.exists()
+                        and unknown_path.read_bytes() == b"booklet"
+                    ),
+                    beets_album_present=beets.get_album_detail(7) is not None,
+                    pipeline_present=(
+                        db.get_request(current_pipeline_id) is not None
+                    ),
+                )
+            self.assertEqual(purge_failed, purge_fault and purge_attempted)
+            self.assertEqual(
+                succeeded, reached_mutation and not purge_failed,
+            )
             if succeeded:
                 self.assertIsNone(beets.get_album_detail(7))
                 self.assertTrue(all(not path.exists() for path in track_paths))
                 self.assertFalse(sidecar_path.exists())
+                # Unknown bytes survive a success too, not only a PG partial.
+                self.assertTrue(unknown_path.exists())
+                self.assertEqual(unknown_path.read_bytes(), b"booklet")
                 for request_id in (41, 42):
                     should_be_deleted = (
                         purge_pipeline and request_id == current_pipeline_id
@@ -1602,65 +1698,262 @@ class TestGeneratedDestructiveAuthority(unittest.TestCase):
 
 
 class TestDestructiveAuthorityCheckerKnownBad(unittest.TestCase):
-    def test_replace_conflict_checker_kills_each_fail_open_mutant(self) -> None:
-        mutants: tuple[tuple[str, str | None, bool, bool], ...] = (
+    """One named world per checker clause, pinned to that clause's message.
+
+    Every checker raises at its first failing clause, so a world that
+    violates two clauses only ever proves the earlier one. Each row below
+    satisfies every earlier clause of its checker and asserts the exact
+    message of the clause it names.
+    """
+
+    _FAIL_CLOSED_CLAUSES: tuple[tuple[str, bool, bool, bool, int, str], ...] = (
+        ("reported_success", True, True, True, 0, "was reported as success"),
+        ("beets_authority_removed", False, False, True, 0,
+         "removed Beets authority"),
+        ("pipeline_authority_purged", False, True, False, 0,
+         "purged pipeline authority"),
+        ("media_servers_notified", False, True, True, 1,
+         "notified media servers"),
+    )
+
+    def test_replace_conflict_checker_kills_each_clause(self) -> None:
+        clauses: tuple[tuple[str, str, str | None, bool, bool, str], ...] = (
             (
+                "outcome_not_rejected",
                 RESULT_REPLACED, REPLACE_REASON_SOURCE_IDENTITY_INVALID,
                 True, False,
+                r"^Replace identity conflict was not rejected$",
             ),
-            (RESULT_WRONG_STATE, None, True, False),
             (
+                "typed_reason_lost",
+                RESULT_WRONG_STATE, None, True, False,
+                r"^Replace identity conflict lost its typed reason$",
+            ),
+            (
+                "pipeline_state_mutated",
                 RESULT_WRONG_STATE, REPLACE_REASON_SOURCE_IDENTITY_INVALID,
                 False, False,
+                r"^Replace identity conflict mutated pipeline state$",
             ),
             (
+                "mutation_authority_reached",
                 RESULT_WRONG_STATE, REPLACE_REASON_SOURCE_IDENTITY_INVALID,
                 True, True,
+                r"^Replace identity conflict reached mutation authority$",
             ),
         )
-        for outcome, reason, state_preserved, boundary_reached in mutants:
-            with self.subTest(
-                outcome=outcome,
-                reason=reason,
-                state_preserved=state_preserved,
-                boundary_reached=boundary_reached,
-            ), self.assertRaises(AssertionError):
+        for name, outcome, reason, preserved, reached, message in clauses:
+            with self.subTest(clause=name), self.assertRaisesRegex(
+                AssertionError, message,
+            ):
                 assert_replace_identity_conflict_fails_closed(
                     outcome=outcome,
                     reason=reason,
-                    state_preserved=state_preserved,
-                    authority_boundary_reached=boundary_reached,
+                    state_preserved=preserved,
+                    authority_boundary_reached=reached,
                 )
 
-    def test_fresh_authority_checker_kills_cardinality_and_target_mutants(
-        self,
-    ) -> None:
-        mutants: tuple[
-            tuple[str, tuple[int, ...], int | None, bool], ...
+    def test_fresh_authority_checker_kills_each_clause(self) -> None:
+        clauses: tuple[
+            tuple[str, str, tuple[int, ...], int | None, bool, str], ...
         ] = (
-            ("ambiguous", (7,), None, False),
-            ("missing", (7,), None, False),
-            ("unique", (8,), 7, True),
-            ("ambiguous", (), None, True),
+            (
+                "unique_deleted_a_different_album",
+                "unique", (8,), 7, True,
+                r"^unique authority did not target its exact album id$",
+            ),
+            (
+                "ambiguous_reached_a_mutation",
+                "ambiguous", (7,), None, False,
+                r"^ambiguous authority reached a Beets mutation$",
+            ),
+            (
+                "missing_reached_a_mutation",
+                "missing", (7,), None, False,
+                r"^missing authority reached a Beets mutation$",
+            ),
+            (
+                "ambiguous_reported_success_without_mutating",
+                "ambiguous", (), None, True,
+                r"^ambiguous authority reported destructive success$",
+            ),
         )
-        for authority, album_ids, expected_album_id, destructive in mutants:
-            with self.subTest(
-                authority=authority,
-                album_ids=album_ids,
-            ), self.assertRaises(AssertionError):
+        for name, authority, album_ids, expected, result, message in clauses:
+            with self.subTest(clause=name), self.assertRaisesRegex(
+                AssertionError, message,
+            ):
                 assert_fresh_destructive_authority(
                     authority=authority,
                     beets_delete_album_ids=album_ids,
-                    expected_album_id=expected_album_id,
-                    destructive_result=destructive,
+                    expected_album_id=expected,
+                    destructive_result=result,
                 )
 
-    def test_ban_searchability_checker_kills_resume_mutant(self) -> None:
-        with self.assertRaisesRegex(AssertionError, "changed searchability"):
-            assert_ban_searchability_preserved(
-                initial_status="unsearchable",
-                final_status="wanted",
-            )
+    def test_ban_completion_checker_kills_both_directions(self) -> None:
+        message = r"^ban completion did not match exact-release absence$"
+        for completed, absent_after in ((True, False), (False, True)):
+            with self.subTest(
+                completed=completed, absent_after=absent_after,
+            ), self.assertRaisesRegex(AssertionError, message):
+                assert_ban_completion_truth(
+                    completed=completed, absent_after=absent_after,
+                )
+
+    def test_protocol_checker_kills_both_directions(self) -> None:
+        message = r"^delete protocol accepted a non-canonical frame$"
+        for accepted, canonical in ((True, False), (False, True)):
+            with self.subTest(
+                accepted=accepted, canonical=canonical,
+            ), self.assertRaisesRegex(AssertionError, message):
+                assert_protocol_truth(accepted=accepted, canonical=canonical)
+
+    def test_ban_searchability_checker_kills_both_directions(self) -> None:
+        clauses = (
+            ("resumed_an_operator_search_stop", "unsearchable", "wanted"),
+            ("stopped_a_searching_request", "imported", "unsearchable"),
+        )
+        for name, initial, final in clauses:
+            with self.subTest(clause=name), self.assertRaisesRegex(
+                AssertionError,
+                "^" + re.escape(
+                    f"bad rip changed searchability: {initial!r} -> {final!r}; ",
+                ),
+            ):
+                assert_ban_searchability_preserved(
+                    initial_status=initial, final_status=final,
+                )
+
+    def test_delete_postcondition_checker_kills_each_clause(self) -> None:
+        # (name, outcome, owned_paths, unknown_ok, beets_album, pipeline)
+        clauses: tuple[
+            tuple[str, str, bool, bool, bool, bool, str], ...
+        ] = (
+            (
+                "unknown_content_swept", "success",
+                False, False, False, False,
+                r"^unknown content was deleted or changed$",
+            ),
+            (
+                "success_left_owned_paths", "success",
+                True, True, False, False,
+                r"^success postcondition is incomplete$",
+            ),
+            (
+                "success_left_beets_album", "success",
+                False, True, True, False,
+                r"^success postcondition is incomplete$",
+            ),
+            (
+                "success_left_pipeline_row", "success",
+                False, True, False, True,
+                r"^success postcondition is incomplete$",
+            ),
+            (
+                "cleanup_failure_lost_beets_retry", "cleanup_failure",
+                True, True, False, True,
+                r"^cleanup failure lost retry authority$",
+            ),
+            (
+                "cleanup_failure_lost_pipeline_retry", "cleanup_failure",
+                True, True, True, False,
+                r"^cleanup failure lost retry authority$",
+            ),
+            (
+                "pg_partial_left_owned_paths", "pg_partial",
+                True, True, False, True,
+                r"^PG partial state is not explicit$",
+            ),
+            (
+                "pg_partial_left_beets_album", "pg_partial",
+                False, True, True, True,
+                r"^PG partial state is not explicit$",
+            ),
+            (
+                "pg_partial_purged_pipeline", "pg_partial",
+                False, True, False, False,
+                r"^PG partial state is not explicit$",
+            ),
+            (
+                # Fail-closed legislation: a caller cannot introduce an
+                # outcome the law does not decide.
+                "unrecognised_outcome", "reverted",
+                False, True, False, False,
+                r"^unknown outcome reverted$",
+            ),
+        )
+        for (
+            name, outcome, owned, unknown_ok, beets_album, pipeline, message,
+        ) in clauses:
+            with self.subTest(clause=name), self.assertRaisesRegex(
+                AssertionError, message,
+            ):
+                assert_delete_postcondition(
+                    outcome=outcome,
+                    owned_paths_present=owned,
+                    unknown_bytes_preserved=unknown_ok,
+                    beets_album_present=beets_album,
+                    pipeline_present=pipeline,
+                )
+
+    def test_ack_checker_kills_each_clause(self) -> None:
+        clauses: tuple[tuple[str, bool, bool, int, bool, str], ...] = (
+            (
+                "lost_ack_promoted_to_success", True, True, 0, True,
+                r"^ambiguous delete acknowledgement was promoted$",
+            ),
+            (
+                "pipeline_authority_purged", False, False, 0, True,
+                r"^ambiguous delete purged pipeline authority$",
+            ),
+            (
+                "media_servers_notified", False, True, 1, True,
+                r"^ambiguous delete notified media servers$",
+            ),
+            (
+                "operator_recovery_context_lost", False, True, 0, False,
+                r"^ambiguous delete lost operator recovery context$",
+            ),
+        )
+        for name, completed, pipeline, notified, context, message in clauses:
+            with self.subTest(clause=name), self.assertRaisesRegex(
+                AssertionError, message,
+            ):
+                assert_ambiguous_delete_fails_closed(
+                    completed=completed,
+                    pipeline_present=pipeline,
+                    notification_count=notified,
+                    context_retained=context,
+                )
+
+    def test_enumeration_checker_kills_each_clause(self) -> None:
+        for name, completed, beets, pipeline, notified, tail in (
+            self._FAIL_CLOSED_CLAUSES
+        ):
+            with self.subTest(clause=name), self.assertRaisesRegex(
+                AssertionError,
+                "^" + re.escape(f"enumeration failure {tail}") + "$",
+            ):
+                assert_enumeration_failure_fails_closed(
+                    completed=completed,
+                    beets_present=beets,
+                    pipeline_present=pipeline,
+                    notification_count=notified,
+                )
+
+    def test_presence_probe_checker_kills_each_clause(self) -> None:
+        for name, completed, beets, pipeline, notified, tail in (
+            self._FAIL_CLOSED_CLAUSES
+        ):
+            with self.subTest(clause=name), self.assertRaisesRegex(
+                AssertionError,
+                "^" + re.escape(f"presence-probe failure {tail}") + "$",
+            ):
+                assert_presence_probe_failure_fails_closed(
+                    completed=completed,
+                    beets_present=beets,
+                    pipeline_present=pipeline,
+                    notification_count=notified,
+                )
 
     def test_checker_trips_on_fault_injected_production_mutation(self) -> None:
         class FaultInjectingPipelineDB(FakePipelineDB):
@@ -1705,134 +1998,6 @@ class TestDestructiveAuthorityCheckerKnownBad(unittest.TestCase):
         after = snapshot_state(db, beets, request_ids=(41,), album_id=7)
         with self.assertRaisesRegex(AssertionError, "mutated owned state"):
             assert_rejection_preserved_state(before, after, rejected=True)
-
-    def test_delete_checker_kills_each_contract_mutant(self) -> None:
-        mutants = {
-            "omitted_art": {
-                "outcome": "success", "owned_paths_present": True,
-                "unknown_bytes_preserved": True, "beets_album_present": False,
-                "pipeline_present": False},
-            "omitted_sidecar": {
-                "outcome": "success", "owned_paths_present": True,
-                "unknown_bytes_preserved": True, "beets_album_present": False,
-                "pipeline_present": False},
-            "noop_success": {
-                "outcome": "success", "owned_paths_present": True,
-                "unknown_bytes_preserved": True, "beets_album_present": False,
-                "pipeline_present": False},
-            "unknown_overdelete": {
-                "outcome": "success", "owned_paths_present": False,
-                "unknown_bytes_preserved": False, "beets_album_present": False,
-                "pipeline_present": False},
-            "early_beets_delete": {
-                "outcome": "cleanup_failure", "owned_paths_present": True,
-                "unknown_bytes_preserved": True, "beets_album_present": False,
-                "pipeline_present": True},
-            "early_pg_delete": {
-                "outcome": "cleanup_failure", "owned_paths_present": True,
-                "unknown_bytes_preserved": True, "beets_album_present": True,
-                "pipeline_present": False},
-        }
-        for name, world in mutants.items():
-            with self.subTest(mutant=name), self.assertRaises(AssertionError):
-                assert_delete_postcondition(
-                    outcome=str(world["outcome"]),
-                    owned_paths_present=bool(world["owned_paths_present"]),
-                    unknown_bytes_preserved=bool(world["unknown_bytes_preserved"]),
-                    beets_album_present=bool(world["beets_album_present"]),
-                    pipeline_present=bool(world["pipeline_present"]),
-                )
-
-    def test_ack_checker_kills_each_fail_closed_mutant(self) -> None:
-        mutants = {
-            "metadata_absence_promoted": {
-                "completed": True, "pipeline_present": True,
-                "notification_count": 0, "context_retained": True,
-            },
-            "pipeline_purged": {
-                "completed": False, "pipeline_present": False,
-                "notification_count": 0, "context_retained": True,
-            },
-            "media_notified": {
-                "completed": False, "pipeline_present": True,
-                "notification_count": 1, "context_retained": True,
-            },
-            "operator_context_lost": {
-                "completed": False, "pipeline_present": True,
-                "notification_count": 0, "context_retained": False,
-            },
-        }
-        for name, world in mutants.items():
-            with self.subTest(mutant=name), self.assertRaises(AssertionError):
-                assert_ambiguous_delete_fails_closed(
-                    completed=bool(world["completed"]),
-                    pipeline_present=bool(world["pipeline_present"]),
-                    notification_count=int(world["notification_count"]),
-                    context_retained=bool(world["context_retained"]),
-                )
-
-    def test_ban_and_protocol_checkers_kill_historical_mutants(self) -> None:
-        with self.assertRaisesRegex(AssertionError, "exact-release absence"):
-            assert_ban_completion_truth(completed=True, absent_after=False)
-        with self.assertRaisesRegex(AssertionError, "non-canonical frame"):
-            assert_protocol_truth(accepted=True, canonical=False)
-
-    def test_enumeration_checker_kills_each_fail_closed_mutant(self) -> None:
-        mutants = {
-            "reported_success": {
-                "completed": True, "beets_present": True,
-                "pipeline_present": True, "notification_count": 0,
-            },
-            "beets_removed": {
-                "completed": False, "beets_present": False,
-                "pipeline_present": True, "notification_count": 0,
-            },
-            "pipeline_purged": {
-                "completed": False, "beets_present": True,
-                "pipeline_present": False, "notification_count": 0,
-            },
-            "media_notified": {
-                "completed": False, "beets_present": True,
-                "pipeline_present": True, "notification_count": 1,
-            },
-        }
-        for name, world in mutants.items():
-            with self.subTest(mutant=name), self.assertRaises(AssertionError):
-                assert_enumeration_failure_fails_closed(
-                    completed=bool(world["completed"]),
-                    beets_present=bool(world["beets_present"]),
-                    pipeline_present=bool(world["pipeline_present"]),
-                    notification_count=int(world["notification_count"]),
-                )
-
-    def test_presence_probe_checker_kills_each_fail_closed_mutant(self) -> None:
-        mutants = {
-            "reported_success": {
-                "completed": True, "beets_present": True,
-                "pipeline_present": True, "notification_count": 0,
-            },
-            "beets_removed": {
-                "completed": False, "beets_present": False,
-                "pipeline_present": True, "notification_count": 0,
-            },
-            "pipeline_purged": {
-                "completed": False, "beets_present": True,
-                "pipeline_present": False, "notification_count": 0,
-            },
-            "media_notified": {
-                "completed": False, "beets_present": True,
-                "pipeline_present": True, "notification_count": 1,
-            },
-        }
-        for name, world in mutants.items():
-            with self.subTest(mutant=name), self.assertRaises(AssertionError):
-                assert_presence_probe_failure_fails_closed(
-                    completed=bool(world["completed"]),
-                    beets_present=bool(world["beets_present"]),
-                    pipeline_present=bool(world["pipeline_present"]),
-                    notification_count=int(world["notification_count"]),
-                )
-
 
 if __name__ == "__main__":
     unittest.main()

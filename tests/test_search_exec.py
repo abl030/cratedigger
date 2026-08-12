@@ -34,15 +34,18 @@ contracts, which lived in ``test_search_watchdog.py`` /
 from __future__ import annotations
 
 import unittest
+from collections.abc import Callable
 from typing import Any
 
 from lib import search_exec
 from lib.search_exec import (
     SearchExecutionResult,
     SearchSubmitError,
+    SearchSubmitRetryPolicy,
     execute_search,
 )
 from tests.fakes import FakeSlskdAPI, FakeSlskdSearches
+from tests.helpers import make_requests_http_error
 
 
 def _noop_sleep(_s: float) -> None:
@@ -220,6 +223,329 @@ class TestExecuteSearchSubmitSeam(unittest.TestCase):
         )
         self.assertEqual(result.response_count_terminal, 812)
         self.assertEqual(len(result.responses), 1)
+
+
+# ---------------------------------------------------------------------------
+# Bounded submit retry (issue #1090) — transient slskd 409 on submit.
+# ---------------------------------------------------------------------------
+
+
+class TestExecuteSearchSubmitRetry(unittest.TestCase):
+
+    def _policy(
+        self,
+        *,
+        minted_ids: list[str] | None = None,
+        server_ready: Callable[[], bool] | None = None,
+        max_attempts: int = 3,
+        backoff_s: tuple[float, ...] = (2.0, 5.0),
+    ) -> SearchSubmitRetryPolicy:
+        ids = iter(f"retry-{i}" for i in range(1, 100))
+
+        def _mint() -> str:
+            new_id = next(ids)
+            if minted_ids is not None:
+                minted_ids.append(new_id)
+            return new_id
+
+        return SearchSubmitRetryPolicy(
+            mint_ledgered_search_id=_mint,
+            max_attempts=max_attempts,
+            backoff_s=backoff_s,
+            server_ready=server_ready,
+        )
+
+    def test_409_then_success_retries_once(self):
+        """A 409, then a clean submit — succeeds on attempt 2, no
+        SearchSubmitError raised."""
+        api = FakeSlskdAPI()
+        api.searches.search_text_error_sequence = [
+            make_requests_http_error("conflict", status_code=409),
+        ]
+        api.searches.add_search(
+            search_id="retry-1", state="Completed",
+            responses=[{"username": "u", "files": []}], response_count=1,
+        )
+        minted: list[str] = []
+        sleeps: list[float] = []
+        result = execute_search(
+            api,
+            submit_kwargs={"id": "initial-id", "searchText": "q",
+                           "responseLimit": 100},
+            delete=False, clock_fn=_FakeClock(),
+            sleep_fn=sleeps.append,
+            submit_retry=self._policy(minted_ids=minted),
+        )
+        self.assertEqual(len(api.searches.search_text_calls), 2)
+        # First attempt used the caller's id; the retry used the minted one.
+        self.assertEqual(
+            api.searches.search_text_calls[0].kwargs["id"], "initial-id")
+        self.assertEqual(
+            api.searches.search_text_calls[1].kwargs["id"], "retry-1")
+        self.assertEqual(minted, ["retry-1"])
+        self.assertEqual(result.response_count_terminal, 1)
+        # Default readiness is unset (None) -- backoff is honoured. Isolate
+        # backoff-magnitude sleeps (>=1.0) from the unrelated #242
+        # settle-poll sleep (0.2s) every completed search always issues.
+        self.assertEqual([s for s in sleeps if s >= 1.0], [2.0])
+
+    def test_409_past_retry_budget_raises_search_submit_error(self):
+        """409 on every attempt up to max_attempts -- exhausts the
+        budget and raises SearchSubmitError; no poll/harvest runs."""
+        api = FakeSlskdAPI()
+        api.searches.search_text_error = make_requests_http_error(
+            "conflict", status_code=409)
+        minted: list[str] = []
+        with self.assertRaises(SearchSubmitError):
+            execute_search(
+                api,
+                submit_kwargs={"id": "initial-id", "searchText": "q",
+                               "responseLimit": 100},
+                delete=False, clock_fn=_FakeClock(), sleep_fn=_noop_sleep,
+                submit_retry=self._policy(minted_ids=minted, max_attempts=3),
+            )
+        self.assertEqual(len(api.searches.search_text_calls), 3)
+        self.assertEqual(api.searches.state_calls, [])
+        # Two retries -> two minted ids (attempt 1 uses the caller's id).
+        self.assertEqual(minted, ["retry-1", "retry-2"])
+
+    def test_non_409_exception_is_not_retried(self):
+        """A non-409 submit failure (network error, 500, ...) raises
+        immediately -- the retry budget is reserved for the identified
+        transient failure mode only."""
+        api = FakeSlskdAPI()
+        api.searches.search_text_error = RuntimeError("connection reset")
+        minted: list[str] = []
+        with self.assertRaises(SearchSubmitError):
+            execute_search(
+                api,
+                submit_kwargs={"id": "initial-id", "searchText": "q",
+                               "responseLimit": 100},
+                delete=False, clock_fn=_FakeClock(), sleep_fn=_noop_sleep,
+                submit_retry=self._policy(minted_ids=minted),
+            )
+        self.assertEqual(len(api.searches.search_text_calls), 1)
+        self.assertEqual(minted, [])
+
+    def test_429_is_not_retried_by_this_policy(self):
+        """429 (slskd's real rate-limit response) is a DIFFERENT failure
+        mode from the 409 this policy targets -- never retried here."""
+        api = FakeSlskdAPI()
+        api.searches.search_text_error = make_requests_http_error(
+            "rate limited", status_code=429)
+        with self.assertRaises(SearchSubmitError):
+            execute_search(
+                api,
+                submit_kwargs={"id": "initial-id", "searchText": "q",
+                               "responseLimit": 100},
+                delete=False, clock_fn=_FakeClock(), sleep_fn=_noop_sleep,
+                submit_retry=self._policy(),
+            )
+        self.assertEqual(len(api.searches.search_text_calls), 1)
+
+    def test_policy_none_submits_exactly_once_on_409(self):
+        """Default (``submit_retry=None``) is byte-identical to pre-#1090
+        behaviour -- no retry, even on a 409."""
+        api = FakeSlskdAPI()
+        api.searches.search_text_error = make_requests_http_error(
+            "conflict", status_code=409)
+        with self.assertRaises(SearchSubmitError):
+            execute_search(
+                api,
+                submit_kwargs={"id": "initial-id", "searchText": "q",
+                               "responseLimit": 100},
+                delete=False, clock_fn=_FakeClock(), sleep_fn=_noop_sleep,
+            )
+        self.assertEqual(len(api.searches.search_text_calls), 1)
+
+    def test_server_ready_true_floors_backoff_sleep_not_zero(self):
+        """Issue #1090 NON-BLOCKING-3: a truthy readiness probe FLOORS the
+        wait to SUBMIT_RETRY_READY_FLOOR_S, never collapses it to zero --
+        a wrongly-ready reading (the probe races the actual reconnect)
+        must degrade to "retried sooner", not "retried instantly, 3 POSTs
+        within milliseconds". The retry loop's own bounded budget, not
+        the readiness probe, remains the load-bearing mechanism."""
+        api = FakeSlskdAPI()
+        api.searches.search_text_error_sequence = [
+            make_requests_http_error("conflict", status_code=409),
+        ]
+        api.searches.add_search(
+            search_id="retry-1", state="Completed", responses=[],
+            response_count=0,
+        )
+        sleeps: list[float] = []
+        execute_search(
+            api,
+            submit_kwargs={"id": "initial-id", "searchText": "q",
+                           "responseLimit": 100},
+            delete=False, clock_fn=_FakeClock(), sleep_fn=sleeps.append,
+            submit_retry=self._policy(server_ready=lambda: True),
+        )
+        # Floored to SUBMIT_RETRY_READY_FLOOR_S (0.5s), NOT zero, and well
+        # under the full first-retry backoff (2.0s, the default policy).
+        self.assertEqual(sleeps[0], search_exec.SUBMIT_RETRY_READY_FLOOR_S)
+        self.assertGreater(sleeps[0], 0.0)
+        self.assertLess(sleeps[0], 2.0)
+
+    def test_server_ready_raising_falls_back_to_fixed_backoff(self):
+        """A raising readiness probe never blocks the retry -- it just
+        loses its "shorten the wait" benefit for that attempt."""
+        api = FakeSlskdAPI()
+        api.searches.search_text_error_sequence = [
+            make_requests_http_error("conflict", status_code=409),
+        ]
+        api.searches.add_search(
+            search_id="retry-1", state="Completed", responses=[],
+            response_count=0,
+        )
+
+        def _boom() -> bool:
+            raise RuntimeError("server endpoint unreachable")
+
+        sleeps: list[float] = []
+        execute_search(
+            api,
+            submit_kwargs={"id": "initial-id", "searchText": "q",
+                           "responseLimit": 100},
+            delete=False, clock_fn=_FakeClock(), sleep_fn=sleeps.append,
+            submit_retry=self._policy(server_ready=_boom),
+        )
+        self.assertEqual([s for s in sleeps if s >= 1.0], [2.0])
+
+    def test_backoff_schedule_repeats_last_entry_past_its_length(self):
+        api = FakeSlskdAPI()
+        api.searches.search_text_error_sequence = [
+            make_requests_http_error("conflict", status_code=409),
+            make_requests_http_error("conflict", status_code=409),
+        ]
+        api.searches.add_search(
+            search_id="retry-2", state="Completed", responses=[],
+            response_count=0,
+        )
+        sleeps: list[float] = []
+        execute_search(
+            api,
+            submit_kwargs={"id": "initial-id", "searchText": "q",
+                           "responseLimit": 100},
+            delete=False, clock_fn=_FakeClock(), sleep_fn=sleeps.append,
+            submit_retry=self._policy(max_attempts=3, backoff_s=(2.0,)),
+        )
+        self.assertEqual([s for s in sleeps if s >= 1.0], [2.0, 2.0])
+
+    def test_retry_exhausted_flag_false_for_immediate_429(self):
+        """Issue #1090 BLOCKING-1: SearchSubmitError.retry_exhausted is
+        False for a non-retryable failure (a 429 here) even though it
+        also raises SearchSubmitError -- a 429 is never retried at all,
+        so there is no budget to exhaust."""
+        api = FakeSlskdAPI()
+        api.searches.search_text_error = make_requests_http_error(
+            "rate limited", status_code=429)
+        with self.assertRaises(SearchSubmitError) as caught:
+            execute_search(
+                api,
+                submit_kwargs={"id": "initial-id", "searchText": "q",
+                               "responseLimit": 100},
+                delete=False, clock_fn=_FakeClock(), sleep_fn=_noop_sleep,
+                submit_retry=self._policy(),
+            )
+        self.assertFalse(caught.exception.retry_exhausted)
+        self.assertEqual(len(api.searches.search_text_calls), 1)
+
+    def test_retry_exhausted_flag_true_when_409_survives_full_budget(self):
+        """Issue #1090 review round 2 (F1): the TRUE case this class of
+        test was named for but never actually asserted -- a retryable 409
+        on EVERY attempt through the full budget must set
+        retry_exhausted=True."""
+        api = FakeSlskdAPI()
+        api.searches.search_text_error = make_requests_http_error(
+            "conflict", status_code=409)
+        with self.assertRaises(SearchSubmitError) as caught:
+            execute_search(
+                api,
+                submit_kwargs={"id": "initial-id", "searchText": "q",
+                               "responseLimit": 100},
+                delete=False, clock_fn=_FakeClock(), sleep_fn=_noop_sleep,
+                submit_retry=self._policy(),
+            )
+        self.assertTrue(caught.exception.retry_exhausted)
+        self.assertEqual(len(api.searches.search_text_calls), 3)
+
+    def test_retry_exhausted_flag_false_when_final_attempt_is_429_not_409(
+        self,
+    ):
+        """Issue #1090 review round 2 (F1): 409, 409, then a 429 on the
+        FINAL attempt -- retry_exhausted must be False, because the
+        attempt that actually exhausted the budget was NOT a retryable
+        409. This is the world that kills the mutant
+        `retry_exhausted=(submit_retry is not None and is_last_attempt)`
+        (dropping the is_retryable_409 term): that mutant sets True for
+        ANY exhausted-budget raise regardless of the final attempt's
+        real cause, so a deterministic 429 landing on the last attempt
+        would wrongly count toward the circuit breaker forever."""
+        api = FakeSlskdAPI()
+        api.searches.search_text_error_sequence = [
+            make_requests_http_error("conflict", status_code=409),
+            make_requests_http_error("conflict", status_code=409),
+            make_requests_http_error("rate limited", status_code=429),
+        ]
+        with self.assertRaises(SearchSubmitError) as caught:
+            execute_search(
+                api,
+                submit_kwargs={"id": "initial-id", "searchText": "q",
+                               "responseLimit": 100},
+                delete=False, clock_fn=_FakeClock(), sleep_fn=_noop_sleep,
+                submit_retry=self._policy(),
+            )
+        self.assertFalse(caught.exception.retry_exhausted)
+        self.assertEqual(len(api.searches.search_text_calls), 3)
+
+    def test_retry_exhausted_flag_false_when_no_policy_supplied(self):
+        """A 409 with no ``submit_retry`` policy raises SearchSubmitError
+        with retry_exhausted=False -- there was no budget to exhaust."""
+        api = FakeSlskdAPI()
+        api.searches.search_text_error = make_requests_http_error(
+            "conflict", status_code=409)
+        with self.assertRaises(SearchSubmitError) as caught:
+            execute_search(
+                api,
+                submit_kwargs={"id": "initial-id", "searchText": "q",
+                               "responseLimit": 100},
+                delete=False, clock_fn=_FakeClock(), sleep_fn=_noop_sleep,
+            )
+        self.assertFalse(caught.exception.retry_exhausted)
+
+    def test_mint_ledgered_search_id_db_error_propagates_unwrapped(self):
+        """Issue #1090 NIT-7: a DB failure while minting a retry id
+        propagates UNWRAPPED (not as SearchSubmitError) -- the write-
+        ahead ledger's "DB-down is cycle-fatal, never silently
+        swallowed" contract, documented on execute_search's exception
+        contract and mirroring cratedigger.py::_submit_plan_search's
+        identical carve-out."""
+        api = FakeSlskdAPI()
+        api.searches.search_text_error_sequence = [
+            make_requests_http_error("conflict", status_code=409),
+        ]
+
+        def _boom_mint() -> str:
+            raise RuntimeError("pipeline DB connection lost")
+
+        policy = self._policy()
+        policy = SearchSubmitRetryPolicy(
+            mint_ledgered_search_id=_boom_mint,
+            max_attempts=policy.max_attempts,
+            backoff_s=policy.backoff_s,
+            server_ready=policy.server_ready,
+        )
+        with self.assertRaises(RuntimeError) as caught:
+            execute_search(
+                api,
+                submit_kwargs={"id": "initial-id", "searchText": "q",
+                               "responseLimit": 100},
+                delete=False, clock_fn=_FakeClock(), sleep_fn=_noop_sleep,
+                submit_retry=policy,
+            )
+        self.assertEqual(str(caught.exception), "pipeline DB connection lost")
+        self.assertNotIsInstance(caught.exception, SearchSubmitError)
 
 
 # ---------------------------------------------------------------------------

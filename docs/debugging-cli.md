@@ -24,7 +24,8 @@ The installed wrapper has two independent authority shapes:
 
 - `pipeline-delete`, `set-quality`, `upgrade`, `wrong-match-converge`,
   `resolve-rg`, `wrong-match-delete`, `wrong-match-delete-group`,
-  `wrong-match-triage`, `replace`, `force-import`, `beets-distance`, and
+  `wrong-match-triage`, `wrong-match-triage-cancel`, `replace`,
+  `force-import`, `beets-distance`, and
   `import-preview --download-log-id` connect to
   `/run/cratedigger-web/web.sock`. The caller must be a
   member of `services.cratedigger.web.accessGroup` (default
@@ -134,7 +135,8 @@ remains after a purge failure.
 
 `pipeline-delete`, `set-quality`, `upgrade`, `wrong-match-converge`,
 `resolve-rg`, `wrong-match-delete`, `wrong-match-delete-group`,
-`wrong-match-triage`, `replace`, `force-import`, `beets-distance`, and
+`wrong-match-triage`, `wrong-match-triage-cancel`, `replace`,
+`force-import`, `beets-distance`, and
 `import-preview --download-log-id` call the canonical web route over the
 module-owned Unix socket.
 The installed Nix wrapper selects that socket while constructing the parser:
@@ -173,16 +175,42 @@ the canonical background sweep and then follows
 the whole summary; the sweep itself is deliberately unbounded, and a few
 consecutive failed status polls are retried before the follow gives up.
 
-⚠ **`wrong-match-triage` cannot be cancelled from the CLI.** The sweep runs on
-a background thread inside `cratedigger-web`; the command only follows it.
-Ctrl-C (or any other way of killing the CLI) detaches the operator from a
-destructive whole-queue delete that keeps running server-side, and
-`TriageRunner` exposes no abort. To stop a sweep you must restart
-`cratedigger-web`, which loses the in-memory status while leaving every
-deletion already performed durable. Its `--json` output is the STATUS
-envelope (`state`, `started_at`, `finished_at`, `summary`, `error`), not the
-bare summary the in-process command printed; the counts live under
-`summary`.
+**`wrong-match-triage` can be cancelled with Ctrl-C (issue #1083).** The sweep
+runs on a background thread inside `cratedigger-web`; the command only follows
+it — so Ctrl-C is caught and turned into one `POST
+/api/wrong-matches/triage/cancel`, the exact same route the web UI's Stop
+button uses, then the CLI keeps following `/api/wrong-matches/triage/status`
+to print whatever terminal state actually lands. There is no direct call and
+no direct-DB fallback. Cancellation is observed BETWEEN rows inside
+`cleanup_all_wrong_matches`, never mid-delete, so a row already in flight when
+you hit Ctrl-C always finishes normally; only the next row is skipped. The
+final state is `cancelled`, distinct from `completed` and `failed`, and its
+`summary` reports exactly what ran before the stop — nothing already deleted
+is rolled back. A cancel that races a sweep which is already finishing, or one
+sent with no sweep running, both just return the current status; neither is an
+error. A second Ctrl-C while the CLI is still waiting for that final status
+falls through to the ordinary uncaught `KeyboardInterrupt` and detaches the
+terminal — the sweep (and any cancel already in flight) keeps running
+server-side regardless. Its `--json` output is the STATUS envelope (`state`,
+`started_at`, `finished_at`, `summary`, `error`), not the bare summary the
+in-process command printed; the counts live under `summary`. A cancel POST
+that fails outright (refused socket, timeout, or a route-level 500) gets one
+retry before the CLI gives up and says so on stderr, then still falls through
+to following the sweep's status — a swallowed failure would otherwise have
+the CLI claim it stopped the sweep while the whole remaining queue kept
+deleting underneath it.
+
+**`wrong-match-triage-cancel` reaches the same cancel route directly, with no
+attached sweep to poll.** `Ctrl-C` only helps when an operator is still
+attached to the terminal that started the sweep; a sweep started over SSH
+whose connection then drops (SIGHUP, not `KeyboardInterrupt`) keeps running
+with nothing left to catch a signal, and a fresh `wrong-match-triage --apply`
+on reconnect just 409s against the still-running sweep (issue #1083 review).
+`wrong-match-triage-cancel` is the same `POST /api/wrong-matches/triage/cancel`
+the Ctrl-C handler and the web UI's Stop button use, called directly with no
+polling of its own — run it, then a separate `wrong-match-triage --apply` (or
+the status route) picks up the terminal state. Always exits 0: the route
+itself never refuses, whether or not a sweep happens to be running.
 
 Locally generated transport/protocol failures (including a missing or
 unreachable socket, malformed development origins, redirects, or non-object
@@ -201,20 +229,36 @@ inside socket authorization, never credentials.
   release. A folder that could not be observed or read reports
   `folder_unavailable` (exit 5), never `folder_missing`/`no_audio`. When only
   PART of the folder could be read, the outcome stays `ok` and the render
-  prints a `PARTIAL READ` block naming the refusal: the distance is real but it
-  was computed over fewer local tracks than the album holds (#1063). A refusal
-  counts whether it fires when the file is OPENED (EACCES on the private tree)
-  or MID-READ (the EIO/ESTALE this deployment's nested virtiofs produces on an
-  already-open descriptor) — the two carry different evidence, and only the
-  second occurs on the live mount. The rule runs both ways: a name the errno
-  PROVES is gone (`ENOENT`/`ENOTDIR` — a dangling symlink, a file unlinked
-  after the walk listed it) is not a refusal, does not set `partial_read`, and
-  leaves a folder holding only such names as `no_audio`, because that folder
-  was observed and read. A symlink loop, a socket or a driverless device node
-  proves nothing absent and therefore counts as a refusal. For a symlink loop
-  that matches what `observe_directory` reports for the same name; a socket or
-  device node never reaches it, because `observe_directory` stats rather than
-  opens and calls a successful stat of a non-directory `absent`.
+  prints a `PARTIAL READ` block naming the refusal, with honest per-reason
+  wording (#1086): a world failure (EACCES/EIO/ESTALE/etc.) reads "could not
+  be read, may be transient"; a containment refusal (a symlink or a
+  socket/device node) reads "refused rather than followed/opened" and is
+  never worded like a flaky disk. Either way the distance is real but it was
+  computed over fewer local tracks than the album holds (#1063). The wire
+  response also carries a structured `partial_read_is_containment` boolean
+  for consumers that need to branch on the kind rather than the free text.
+  A refusal counts whether it fires when the file is OPENED (EACCES on the
+  private tree), MID-READ (the EIO/ESTALE this deployment's nested virtiofs
+  produces on an already-open descriptor — the two carry different evidence,
+  and only the second occurs on the live mount), or via the `lstat` guard
+  that refuses every symlink AND every non-regular name (a FIFO, socket, or
+  device node) BEFORE beets ever touches the path — a symlink loop, a
+  symlink to a real file outside the quarantine root, and a dangling symlink
+  are ALL refused identically, whatever they point to (#1086; before this
+  guard a dangling symlink read as a proven absence only because `os.stat`
+  followed it into `ENOENT`, a symlink to a real external file was silently
+  followed and fingerprinted, and a `*.flac` FIFO with no writer hung the
+  request thread forever rather than being refused). A symlinked
+  SUBDIRECTORY gets the same refusal at the walk level, not only a symlinked
+  file: `os.walk` silently declines to descend into one, so it is refused
+  explicitly rather than reported as zero audio files. The rule still runs
+  both ways: a name the errno PROVES is gone (`ENOENT`/`ENOTDIR` on a name
+  that is not itself a symlink — e.g. a file unlinked after the walk listed
+  it) is not a refusal, does not set `partial_read`, and leaves a folder
+  holding only such names as `no_audio`, because that folder was observed
+  and read. That matches what the Wrong Matches file explorer reports for
+  the same on-disk entry (both ends ask
+  `lib.fs_authority.errno_proves_absence`).
 - `pipeline-cli disk-coverage` — Compare active pipeline rows with Beets library coverage.
 - `pipeline-cli force-import` — Queue a rejected download for the importer lane.
 - `pipeline-cli import-job-recovery show` — Show read-only exact evidence for one import job.
@@ -264,6 +308,7 @@ inside socket authorization, never credentials.
 - `pipeline-cli wrong-match-converge` — Converge one Wrong Matches request through its canonical web route.
 - `pipeline-cli wrong-match-delete-group` — Delete visible Wrong Matches folders for one request.
 - `pipeline-cli wrong-match-triage` — Converge the full Wrong Matches queue using persisted evidence.
+- `pipeline-cli wrong-match-triage-cancel` — Request cancellation of the in-flight Wrong Matches triage sweep, if any.
 - `pipeline-cli youtube-album` — Resolve a release to the YouTube Music album
   matrix directly through the shared resolver service; accepts
   `<identifier> [--refresh] [--watch-url YOUTUBE_URL] [--json]`, with human-readable output by default

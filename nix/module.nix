@@ -2452,14 +2452,29 @@ in {
         # lock, so it must not clear that lock while a cycle is active. It
         # gates on slskd reachability when the operator has health-check enabled
         # and hits slskd just as much as the main loop does, so a slskd
-        # outage should fail the unit fast rather than write garbage
-        # probe-failed rows for every cohort member.
+        # outage that's already down BEFORE the run starts fails the unit
+        # fast here rather than launching a doomed run. An outage that
+        # starts MID-RUN (issue #1090: a burst of transient 409s from a
+        # reconnecting slskd silently discarded half a cohort while the
+        # unit still exited 0) is NOT this check's job — the oneshot's own
+        # bounded per-probe submit retry and circuit breaker handle that,
+        # and the unit itself fails (non-zero exit) when the breaker trips
+        # so an in-run outage is visible the same way a pre-run one is.
         ExecStartPre = lib.optional cfg.healthCheck.enable "+${slskdHealthCheck}";
         Environment = "PIPELINE_DB_DSN=${pipelineDsn}";
         ExecStart = "${unfindableDetectionPkg}/bin/cratedigger-unfindable";
         WorkingDirectory = cfg.stateDir;
-        # Generous cap: a 100-row batch over a slow slskd is roughly
-        # 100 × ~30s = 50 min worst case. 2h gives headroom while
+        # Generous cap. Each candidate is bounded by roughly a ~30s
+        # baseline search cycle plus, on a 409 (issue #1090), up to 2
+        # submit retries -- each retry's own bounded backoff (<=5s,
+        # PROBE_SUBMIT_RETRY_BACKOFF_S) plus a short dedicated server-
+        # readiness timeout (SLSKD_SERVER_READINESS_TIMEOUT_S, a few
+        # seconds, NOT this client's full HTTP timeout) -- worst case
+        # comfortably under 60s/candidate. A sustained outage doesn't run
+        # the full 100-row batch anyway: the circuit breaker stops it
+        # after 3 consecutive submit failures. 2h retains generous
+        # headroom over the ~100min ceiling for a 100-row batch of
+        # individually-retried (not breaker-tripped) candidates, while
         # still surfacing genuinely stuck runs.
         TimeoutStartSec = "2h";
       };

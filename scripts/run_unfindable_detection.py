@@ -14,6 +14,13 @@ outcomes are logged as structured INFO lines so operators can grep
 ``journalctl -u cratedigger-unfindable`` for "categorised" /
 "downgraded" / "probe_failed".
 
+Run-health / exit code (issue #1090): a fully classified run returns
+``0``. When ``categorise_due_batch``'s circuit breaker trips (a
+sustained run of slskd search-submit failures), the process returns
+``EXIT_INCOMPLETE_RUN`` so systemd reports the unit as failed --
+distinct from the pre-existing config/schema abort (``EXIT_CONFIG_ABORT``)
+returned before any work runs. See ``_process_batch``.
+
 The script is intentionally narrow: it does not import any
 cursor-mutating PipelineDB methods, plan-service module, or
 search-execution module. The R20 AST guard test enforces that on
@@ -43,11 +50,28 @@ from lib.unfindable_detection_service import (
     RESULT_NOT_DUE,
     RESULT_PROBE_FAILED,
     RESULT_REQUEST_NOT_FOUND,
+    UnfindableBatchResult,
     UnfindableDetectionService,
     UnfindableServiceResult,
 )
 
 logger = logging.getLogger("cratedigger-unfindable")
+
+# Missing slskd config or a behind/missing DB schema -- returned directly
+# from main() before any probe work runs. Pre-existing behaviour; named
+# (issue #1090 NIT-8) so both abort sites share one producer and
+# EXIT_INCOMPLETE_RUN's distinctness from it is a constant comparison, not
+# a hand-typed literal.
+EXIT_CONFIG_ABORT = 2
+
+# Distinct from EXIT_CONFIG_ABORT. Issue #1090: the run attempted work but
+# the circuit breaker stopped it early after a sustained slskd submit
+# outage -- systemd shows the unit FAILED (surfacing the incomplete run
+# distinctly from a fully classified one) while the daily timer still
+# fires next cycle and nothing is parked on any request row (invariant
+# 11) -- untouched candidates simply roll forward via the normal
+# oldest-probe-first ordering.
+EXIT_INCOMPLETE_RUN = 3
 
 
 def _build_slskd_client(cfg: CratediggerConfig) -> SlskdClient:
@@ -70,6 +94,79 @@ def _summarise(results: list[UnfindableServiceResult]) -> dict[str, int]:
     for r in results:
         counts[r.outcome] = counts.get(r.outcome, 0) + 1
     return counts
+
+
+def _log_row_outcome(r: UnfindableServiceResult) -> None:
+    if r.outcome == RESULT_CATEGORISED:
+        logger.info(
+            "categorised request=%s prev=%r new=%r "
+            "probe_match_count=%s reason=%r",
+            r.request_id, r.previous_category,
+            r.new_category, r.probe_match_count, r.reason,
+        )
+    elif r.outcome == RESULT_DOWNGRADED:
+        logger.info(
+            "downgraded request=%s prev=%r "
+            "probe_match_count=%s",
+            r.request_id, r.previous_category,
+            r.probe_match_count,
+        )
+    elif r.outcome == RESULT_NO_CHANGE:
+        logger.info(
+            "no_change request=%s probe_match_count=%s",
+            r.request_id, r.probe_match_count,
+        )
+    elif r.outcome == RESULT_PROBE_FAILED:
+        logger.warning(
+            "probe_failed request=%s error=%r",
+            r.request_id, r.error_message,
+        )
+    elif r.outcome == RESULT_NOT_DUE:
+        # Should never come back from the batch path — the candidate
+        # list already filtered by cadence. Log if it does so the
+        # operator notices the drift.
+        logger.debug(
+            "not_due (unexpected from batch) request=%s", r.request_id,
+        )
+    elif r.outcome == RESULT_REQUEST_NOT_FOUND:
+        logger.warning(
+            "request_not_found request=%s (race with operator?)",
+            r.request_id,
+        )
+
+
+def _process_batch(service: UnfindableDetectionService, *, limit: int) -> int:
+    """Run one due-batch pass, log per-row + summary, return the process
+    exit code (issue #1090).
+
+    Returns 0 for a fully classified run. Returns ``EXIT_INCOMPLETE_RUN``
+    when ``UnfindableBatchResult.breaker_tripped`` is True — the circuit
+    breaker stopped the batch early after a sustained run of slskd
+    submit failures. Either way, every row actually attempted already
+    followed the conservative write rule (a probe-failed outcome writes
+    nothing); this function only decides the process exit code, it never
+    marks or parks any request.
+    """
+    batch: UnfindableBatchResult = service.categorise_due_batch(limit=int(limit))
+    counts = _summarise(batch.results)
+    for r in batch.results:
+        _log_row_outcome(r)
+    if batch.breaker_tripped:
+        untouched = batch.candidates_considered - len(batch.results)
+        logger.error(
+            "unfindable_detection: INCOMPLETE run — circuit breaker "
+            "tripped after repeated slskd submit failures; attempted=%d/"
+            "%d outcomes=%s; %d candidate(s) were never touched this run "
+            "and roll into the next daily run",
+            len(batch.results), batch.candidates_considered, counts,
+            untouched,
+        )
+        return EXIT_INCOMPLETE_RUN
+    logger.info(
+        "unfindable_detection: complete; processed=%d/%d outcomes=%s",
+        len(batch.results), batch.candidates_considered, counts,
+    )
+    return 0
 
 
 def main() -> int:
@@ -105,7 +202,7 @@ def main() -> int:
             cfg.slskd_host_url,
             "present" if cfg.resolved_slskd_api_key() else "missing",
         )
-        return 2
+        return EXIT_CONFIG_ABORT
 
     # Fail-loud schema gate. cratedigger-unfindable.service uses Wants=, not
     # Requires=, on cratedigger-db-migrate.service (nix/module.nix) -- see
@@ -120,7 +217,7 @@ def main() -> int:
             "first.",
             exc.missing_versions,
         )
-        return 2
+        return EXIT_CONFIG_ABORT
 
     db = PipelineDB(args.dsn)
     try:
@@ -145,52 +242,7 @@ def main() -> int:
             "unfindable_detection: backlog due_count=%d batch_limit=%d",
             len(backlog), int(args.limit),
         )
-        results = service.categorise_due_batch(limit=int(args.limit))
-        counts = _summarise(results)
-        # Log per-row outcomes at INFO so journalctl grep is fruitful.
-        for r in results:
-            if r.outcome == RESULT_CATEGORISED:
-                logger.info(
-                    "categorised request=%s prev=%r new=%r "
-                    "probe_match_count=%s reason=%r",
-                    r.request_id, r.previous_category,
-                    r.new_category, r.probe_match_count, r.reason,
-                )
-            elif r.outcome == RESULT_DOWNGRADED:
-                logger.info(
-                    "downgraded request=%s prev=%r "
-                    "probe_match_count=%s",
-                    r.request_id, r.previous_category,
-                    r.probe_match_count,
-                )
-            elif r.outcome == RESULT_NO_CHANGE:
-                logger.info(
-                    "no_change request=%s probe_match_count=%s",
-                    r.request_id, r.probe_match_count,
-                )
-            elif r.outcome == RESULT_PROBE_FAILED:
-                logger.warning(
-                    "probe_failed request=%s error=%r",
-                    r.request_id, r.error_message,
-                )
-            elif r.outcome == RESULT_NOT_DUE:
-                # Should never come back from the batch path — the
-                # candidate list already filtered by cadence. Log if
-                # it does so the operator notices the drift.
-                logger.debug(
-                    "not_due (unexpected from batch) request=%s",
-                    r.request_id,
-                )
-            elif r.outcome == RESULT_REQUEST_NOT_FOUND:
-                logger.warning(
-                    "request_not_found request=%s (race with operator?)",
-                    r.request_id,
-                )
-        logger.info(
-            "unfindable_detection: complete; processed=%d outcomes=%s",
-            len(results), counts,
-        )
-        return 0
+        return _process_batch(service, limit=int(args.limit))
     finally:
         db.close()
 
