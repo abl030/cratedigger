@@ -121,7 +121,7 @@ class TestBeetsCompatTaskMetadataEra(TestCase):
             ),
             self.assertRaisesRegex(
                 beets_compat.BeetsCapabilityError,
-                "ImportTask metadata access is ambiguous"),
+                "ImportTask metadata access is ambiguous.*an unexpected upstream shape"),
         ):
             beets_compat._load_capabilities()
 
@@ -133,7 +133,7 @@ class TestBeetsCompatTaskMetadataEra(TestCase):
             ),
             self.assertRaisesRegex(
                 beets_compat.BeetsCapabilityError,
-                "ImportTask metadata access is ambiguous"),
+                "ImportTask metadata access is ambiguous.*an unrecognised upstream release"),
         ):
             beets_compat._load_capabilities()
 
@@ -191,7 +191,7 @@ class TestBeetsCompatTaskMetadataEra(TestCase):
             ),
             self.assertRaisesRegex(
                 beets_compat.BeetsCapabilityError,
-                "ImportTask metadata access is ambiguous"),
+                "ImportTask metadata access is ambiguous.*an unrecognised upstream release"),
         ):
             beets_compat._load_capabilities()
 
@@ -227,16 +227,28 @@ class TestBeetsCompatTaskDescription(TestCase):
             self.assertEqual(beets_compat.task_description(task), ("", ""))
 
     def test_a_raising_source_property_propagates_not_swallowed(self) -> None:
-        """A raising ``source`` property must propagate, not swallow to ``("", "")`` (#1088 review finding 6)."""
+        """A raising ``source`` property must propagate, not swallow to ``("", "")`` (#1088 review round 2 finding 1).
+
+        ``AttributeError`` specifically: it's the one exception a 3-arg
+        ``getattr(obj, name, default)`` catches and converts into the
+        default, and it's the realistic trigger — beets' real
+        ``dbcore.db.Model.__getattr__`` (``LibModel``'s base) raises
+        exactly this for an absent field, reachable from inside
+        ``Source.from_items`` -> ``get_most_common_tags``'s per-field
+        ``item.get(...)`` calls. A ``RuntimeError`` fixture here would NOT
+        distinguish the fixed 2-arg ``getattr`` from the old 3-arg
+        ``getattr(..., None)`` — both let a non-``AttributeError`` through
+        unchanged, so that fixture proved nothing.
+        """
         class _ExplodingSource:
             @property
             def source(self) -> object:
-                raise RuntimeError("Source.from_items blew up")
+                raise AttributeError("no such field 'mb_albumid'")
 
         modern = dataclasses.replace(beets_compat.CAPABILITIES, task_metadata_era="modern")
         with (
             patch.object(beets_compat, "CAPABILITIES", modern),
-            self.assertRaisesRegex(RuntimeError, "Source.from_items blew up"),
+            self.assertRaisesRegex(AttributeError, "no such field"),
         ):
             beets_compat.task_description(_ExplodingSource())
 

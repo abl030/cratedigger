@@ -880,6 +880,14 @@ class TestBeetsDistanceIntegrationSlice(unittest.TestCase):
             self.assertEqual(r.matched_tracks, 2)
             self.assertEqual(r.total_local_tracks, 2)
             self.assertEqual(r.total_mb_tracks, 2)
+            # A wrong unmatched_count (e.g. len(items) instead of
+            # len(extra_items)) is a plausible modern-branch adaptation bug
+            # the <0.5 bar alone doesn't catch on this 2-track fixture (a
+            # wrong count of 2 only pushes distance to ~0.107 — issue #1088
+            # review round 2 finding 3). This is era-neutral: 0 extra items
+            # means 0 unmatched_tracks penalty on either call shape.
+            assert r.components is not None
+            self.assertEqual(r.components.get("unmatched_tracks", 0.0), 0.0)
             assert r.duration_ms is not None
             # First-read latency: tag IO + beets fit. Generous ceiling
             # so the test doesn't flake on slow CI; the cached-fast-path

@@ -49,9 +49,10 @@ existing duplicate-resolution-hook and Library-construction eras, it detects a
 **task-metadata era**: unreleased upstream PR #6681 removed
 `ImportTask.cur_artist`/`cur_album` in favour of a cached `ImportTask.source`
 property (a `Source` NamedTuple exposing `.artist`/`.name`), and in the SAME
-change re-signatured `beets.autotag.distance()` from `(items, album_info,
-item_info_pairs)` to `(likelies, album_info, item_info_pairs,
-unmatched_count)`. `beets_compat.task_description(task)` is the harness's one
+change re-signatured `beets.autotag.distance()` from
+`(items, album_info, item_info_pairs)` to
+`(likelies, album_info, item_info_pairs, unmatched_count)`.
+`beets_compat.task_description(task)` is the harness's one
 accessor for both eras; `lib/beets_distance.py`'s standalone distance
 computation (the Replace picker + YouTube resolver) reuses the SAME detected
 era rather than probing `distance()`'s shape a second time. Both/neither
@@ -59,9 +60,10 @@ attribute present fails closed. The admitted production package remains
 pre-#6681 (`cur_artist`/`cur_album`, the 3-arg `distance()`); the modern era is
 exercised only by the `beets-tip` checks above — `task_description` through the
 harness `choose_match`/`resolve_duplicate` contract assertions, and the modern
-branch of `_beets_match_distance` through `tests.test_beets_distance.
-TestBeetsDistanceIntegrationSlice`, which the tip leg of the shared `contract`
-function in `flake.nix` runs in addition to the harness contract tests (the
+branch of `_beets_match_distance` through
+`tests.test_beets_distance.TestBeetsDistanceIntegrationSlice`, which the tip
+leg of the shared `contract` function in `flake.nix` runs in addition to the
+harness contract tests (the
 19-leg historical matrix does not run it — those releases were never a target
 of `lib/beets_distance.py`). One older-release wrinkle the
 cheap `hasattr(ImportTask, "cur_artist")` class-level check alone cannot see:
