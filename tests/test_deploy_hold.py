@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import stat
 import sys
+import tempfile
 import unittest
 from collections.abc import Mapping
 from pathlib import Path
@@ -1327,6 +1329,97 @@ class TestAbortHold(unittest.TestCase):
         self.assertTrue(backend.manual_hold)
         self.assertFalse(backend.receipt)
 
+    def test_abort_owning_the_main_inhibitor_does_not_hang_on_the_oneshot(
+        self,
+    ) -> None:
+        """#1096 correction round, M1 mirror: a receipt can own MAIN_SERVICE's
+        own inhibitor too -- interrupted mid prepare_controlled, after both
+        inhibitors are created but before prepare_controlled's own
+        ``_release_owned_inhibitor(MAIN_SERVICE)`` runs near the end of that
+        function. MAIN_SERVICE is Type=oneshot -- it runs one cycle and
+        exits, so waiting for it to become active/running (as the pre-fix
+        code did for every owned inhibitor without exception) hangs for the
+        full drain timeout, every time.
+        """
+        backend = FakeDeployHoldBackend()
+        backend.create_receipt()
+        backend.write_phase(PHASE_HELD)
+        backend.mark_inhibitor_owned(MAIN_SERVICE)
+        backend.create_start_inhibitor(MAIN_SERVICE)
+        backend.mark_inhibitor_owned(YOUTUBE_SERVICE)
+        backend.create_start_inhibitor(YOUTUBE_SERVICE)
+        backend.unit_states[YOUTUBE_SERVICE] = UnitState(
+            load_state="loaded", active_state="inactive", sub_state="dead",
+        )
+
+        abort_hold(backend)
+
+        self.assertEqual(backend.owned_inhibitors, set())
+        self.assertEqual(backend.inhibitor_files, set())
+        self.assertEqual(backend.unit_state(YOUTUBE_SERVICE).active_state, "active")
+        self.assertIn(MAIN_SERVICE, backend.started_units)
+        self.assertFalse(backend.receipt)
+
+    def test_abort_owning_manual_hold_and_youtube_inhibitor_together_does_not_hang(
+        self,
+    ) -> None:
+        """#1096 correction round, M2 mirror: the manual hold and an
+        inhibitor can be owned together -- interrupted mid
+        prepare_controlled, after both inhibitors are created but before
+        the manual hold is released. Releasing the hold and starting
+        GATE_STOPPED_UNITS (which includes YouTube) before YouTube's own
+        inhibitor is removed silently skips its start (still condition-
+        blocked) and hangs the restart-verification wait forever.
+        """
+        backend = FakeDeployHoldBackend(manual_hold=True)
+        backend.create_receipt()
+        backend.write_phase(PHASE_HELD)
+        backend.mark_manual_hold_owned()
+        backend.mark_inhibitor_owned(YOUTUBE_SERVICE)
+        backend.create_start_inhibitor(YOUTUBE_SERVICE)
+        for service in GATE_STOPPED_UNITS:
+            backend.unit_states[service] = UnitState(
+                load_state="loaded", active_state="inactive", sub_state="dead",
+            )
+
+        abort_hold(backend)
+
+        self.assertFalse(backend.owned_manual_hold)
+        self.assertFalse(backend.manual_hold)
+        self.assertEqual(backend.owned_inhibitors, set())
+        self.assertEqual(backend.inhibitor_files, set())
+        for service in GATE_STOPPED_UNITS:
+            self.assertEqual(backend.unit_state(service).active_state, "active")
+        self.assertFalse(backend.receipt)
+
+    def test_abort_refuses_a_foreign_hold_coincidentally_named_manual(
+        self,
+    ) -> None:
+        """#1096 correction round, S1 mirror: a hold reason coincidentally
+        named "manual" that this receipt does NOT own is exactly as
+        foreign as any other reason -- every gate-guarded unit's start
+        condition requires the ENTIRE holds directory empty, not just that
+        no reason other than "manual" is present. Refusing before any
+        mutation is what keeps abort's own "a refusal never leaves the
+        boundary half torn down" contract true.
+        """
+        backend = FakeDeployHoldBackend(manual_hold=True)
+        backend.create_receipt()
+        backend.write_phase(PHASE_HELD)
+        backend.mark_inhibitor_owned(YOUTUBE_SERVICE)
+        backend.create_start_inhibitor(YOUTUBE_SERVICE)
+
+        with self.assertRaisesRegex(
+            DeployHoldError, "foreign metadata gate holds block abort",
+        ):
+            abort_hold(backend)
+
+        self.assertEqual(backend.inhibitor_files, {YOUTUBE_SERVICE})
+        self.assertEqual(backend.owned_inhibitors, {YOUTUBE_SERVICE})
+        self.assertTrue(backend.manual_hold)
+        self.assertTrue(backend.receipt)
+        self.assertEqual(backend.started_units, [])
+
 
 class TestReceiptlessAbortAdoptsPersistentMarkers(unittest.TestCase):
     """#1096: persistent ownership markers survive a reboot; a receiptless
@@ -1450,6 +1543,35 @@ class TestReceiptlessAbortAdoptsPersistentMarkers(unittest.TestCase):
         self.assertEqual(backend.persistent_inhibitor_markers, set())
         self.assertEqual(backend.unit_state(YOUTUBE_SERVICE).active_state, "active")
         self.assertIn(YOUTUBE_SERVICE, backend.started_units)
+
+    def test_retired_receipt_plus_an_unrelated_orphan_marker_takes_two_runs(
+        self,
+    ) -> None:
+        """#1096 correction round, N6: a wholly unrelated, earlier orphan
+        persistent marker can coexist with an interrupted retirement from a
+        SEPARATE, later receipt. The first abort finishes only the
+        retirement it owns; the marker is untouched. The second abort --
+        now hitting neither a receipt nor a retired one -- reaches
+        receiptless adoption on its own. Two runs, not a dead end.
+        """
+        backend = FakeDeployHoldBackend(
+            persistent_inhibitor_markers={YOUTUBE_SERVICE},
+        )
+        backend.unit_states[YOUTUBE_SERVICE] = UnitState(
+            load_state="loaded", active_state="inactive", sub_state="dead",
+        )
+        backend.retired_receipt = True
+
+        abort_hold(backend)
+
+        self.assertFalse(backend.retired_receipt)
+        self.assertEqual(backend.persistent_inhibitor_markers, {YOUTUBE_SERVICE})
+        self.assertEqual(backend.unit_state(YOUTUBE_SERVICE).active_state, "inactive")
+
+        abort_hold(backend)
+
+        self.assertEqual(backend.persistent_inhibitor_markers, set())
+        self.assertEqual(backend.unit_state(YOUTUBE_SERVICE).active_state, "active")
 
     def test_reboot_plus_our_marker_plus_a_foreign_hold_fails_loudly_then_rerun_finishes(
         self,
@@ -1613,6 +1735,92 @@ class TestReceiptlessAbortAdoptsPersistentMarkers(unittest.TestCase):
         ]
         self.assertTrue(start_indices)
         self.assertLess(max(start_indices), disown_index)
+
+    def test_main_and_youtube_marked_together_abort_adopts_without_hanging(
+        self,
+    ) -> None:
+        """#1096 correction round, M1: MAIN_SERVICE can be marked too --
+        reachable from a reboot mid prepare_controlled, after both
+        inhibitors are created but before prepare_controlled releases
+        MAIN's own again near the end of that function. MAIN_SERVICE is
+        Type=oneshot -- it runs one cycle and exits, never reaching
+        active/running -- so a restart-verification wait that includes it
+        (the pre-fix shape) hangs for the full drain timeout every time,
+        having already deleted both inhibitor files.
+        """
+        backend = FakeDeployHoldBackend(
+            inhibitor_files={MAIN_SERVICE, YOUTUBE_SERVICE},
+            persistent_inhibitor_markers={MAIN_SERVICE, YOUTUBE_SERVICE},
+        )
+        backend.unit_states[YOUTUBE_SERVICE] = UnitState(
+            load_state="loaded", active_state="inactive", sub_state="dead",
+        )
+
+        abort_hold(backend)
+
+        self.assertEqual(backend.persistent_inhibitor_markers, set())
+        self.assertEqual(backend.inhibitor_files, set())
+        self.assertEqual(backend.unit_state(YOUTUBE_SERVICE).active_state, "active")
+        self.assertIn(MAIN_SERVICE, backend.started_units)
+        self.assertIn(YOUTUBE_SERVICE, backend.started_units)
+
+    def test_manual_and_youtube_marked_together_abort_adopts_without_hanging(
+        self,
+    ) -> None:
+        """#1096 correction round, M2: the manual hold and an inhibitor can
+        be marked together -- reachable from a reboot mid
+        prepare_controlled, after both inhibitors are created but before
+        the manual hold is released. Releasing the hold and starting
+        GATE_STOPPED_UNITS (which includes YouTube) before YouTube's own
+        inhibitor is removed (the pre-fix shape) silently skips its start
+        and hangs the proof forever.
+        """
+        backend = FakeDeployHoldBackend(
+            manual_hold=True,
+            persistent_manual_marker=True,
+            inhibitor_files={YOUTUBE_SERVICE},
+            persistent_inhibitor_markers={YOUTUBE_SERVICE},
+        )
+        for service in GATE_STOPPED_UNITS:
+            backend.unit_states[service] = UnitState(
+                load_state="loaded", active_state="inactive", sub_state="dead",
+            )
+
+        abort_hold(backend)
+
+        self.assertFalse(backend.persistent_manual_marker)
+        self.assertFalse(backend.manual_hold)
+        self.assertEqual(backend.persistent_inhibitor_markers, set())
+        self.assertEqual(backend.inhibitor_files, set())
+        for service in GATE_STOPPED_UNITS:
+            self.assertEqual(backend.unit_state(service).active_state, "active")
+
+    def test_foreign_manual_hold_blocks_receiptless_adoption_before_any_mutation(
+        self,
+    ) -> None:
+        """#1096 correction round, S1: a hold reason coincidentally named
+        "manual" that we do NOT hold the persistent marker for is exactly
+        as foreign as any other reason -- every gate-guarded unit's start
+        condition requires the ENTIRE holds directory empty, not just that
+        no reason other than "manual" is present. Refusing here, before any
+        mutation, is what keeps this module's "a refusal leaves every
+        marker and object exactly as found" contract true.
+        """
+        backend = FakeDeployHoldBackend(
+            manual_hold=True,  # foreign: no persistent_manual_marker
+            inhibitor_files={YOUTUBE_SERVICE},
+            persistent_inhibitor_markers={YOUTUBE_SERVICE},
+        )
+
+        with self.assertRaisesRegex(
+            DeployHoldError, "foreign metadata gate holds block abort",
+        ):
+            abort_hold(backend)
+
+        self.assertEqual(backend.inhibitor_files, {YOUTUBE_SERVICE})
+        self.assertEqual(backend.persistent_inhibitor_markers, {YOUTUBE_SERVICE})
+        self.assertTrue(backend.manual_hold)
+        self.assertEqual(backend.started_units, [])
 
 
 class TestGateGuardModelDerivation(unittest.TestCase):
@@ -1802,6 +2010,156 @@ class TestFixedAuthoritySurface(unittest.TestCase):
         self.assertNotRegex(
             strict_hold,
             r"(?m)^\s*(?:sudo\s+)?systemctl\s+mask\b",
+        )
+
+
+class TestRealSystemdBackendMarkerLifecycle(unittest.TestCase):
+    """#1096 correction round, S2: a tmpdir-backed RealSystemdBackend proves
+    the REAL filesystem marker write/remove logic -- not merely the fake's
+    event-log model of it -- creates and then deletes the real persistent
+    sibling marker file. Nothing else in the Python suite drives
+    RealSystemdBackend's own marker file operations at all; before this,
+    only the VM leg did, so a mutant dropping the persistent-marker removal
+    call from ``unmark_inhibitor_owned`` / ``unmark_manual_hold_owned``
+    passed the entire Python suite.
+
+    Every ownership check in ``RealSystemdBackend`` requires root
+    ownership in production, compared against the module constant
+    ``_ROOT_UID`` rather than a bare literal -- patched here to the test
+    process's own uid so the SAME validation logic runs against a real
+    tmpdir without requiring the test runner itself to run as root.
+    """
+
+    def _make_backend(self) -> tuple[RealSystemdBackend, Path]:
+        tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        state_dir = tmp / "deploy-hold"
+        metadata_gate_dir = tmp / "metadata-gate"
+        state_dir.mkdir()
+        os.chmod(state_dir, 0o700)
+        metadata_gate_dir.mkdir()
+        os.chmod(metadata_gate_dir, 0o700)
+        self.enterContext(
+            mock.patch.object(deploy_hold_module, "STATE_DIR", state_dir)
+        )
+        self.enterContext(
+            mock.patch.object(
+                deploy_hold_module, "METADATA_GATE_STATE_DIR", metadata_gate_dir,
+            )
+        )
+        self.enterContext(
+            mock.patch.object(deploy_hold_module, "_ROOT_UID", os.getuid())
+        )
+        return RealSystemdBackend(), metadata_gate_dir
+
+    def test_mark_and_unmark_manual_hold_round_trips_the_real_persistent_marker(
+        self,
+    ) -> None:
+        backend, metadata_gate_dir = self._make_backend()
+        marker_path = metadata_gate_dir / "deploy-hold-owned-manual"
+        self.assertFalse(marker_path.exists())
+
+        backend.mark_manual_hold_owned()
+
+        self.assertTrue(marker_path.is_file())
+        self.assertEqual(marker_path.read_text(encoding="utf-8"), "manual\n")
+        self.assertEqual(stat.S_IMODE(marker_path.stat().st_mode), 0o600)
+        self.assertTrue(backend.persistent_manual_marker_exists())
+
+        backend.unmark_manual_hold_owned()
+
+        self.assertFalse(marker_path.exists())
+        self.assertFalse(backend.persistent_manual_marker_exists())
+
+    def test_mark_and_unmark_inhibitor_round_trips_the_real_persistent_marker(
+        self,
+    ) -> None:
+        backend, metadata_gate_dir = self._make_backend()
+        marker_path = (
+            metadata_gate_dir / f"deploy-hold-owned-inhibit-{YOUTUBE_SERVICE}"
+        )
+        self.assertFalse(marker_path.exists())
+
+        backend.mark_inhibitor_owned(YOUTUBE_SERVICE)
+
+        self.assertTrue(marker_path.is_file())
+        self.assertEqual(
+            marker_path.read_text(encoding="utf-8"), f"{YOUTUBE_SERVICE}\n",
+        )
+        self.assertEqual(stat.S_IMODE(marker_path.stat().st_mode), 0o600)
+        self.assertTrue(backend.persistent_inhibitor_marker_exists(YOUTUBE_SERVICE))
+
+        backend.unmark_inhibitor_owned(YOUTUBE_SERVICE)
+
+        self.assertFalse(marker_path.exists())
+        self.assertFalse(backend.persistent_inhibitor_marker_exists(YOUTUBE_SERVICE))
+
+    def test_mark_manual_hold_owned_persists_the_marker_before_the_tmpfs_marker_on_the_real_backend(
+        self,
+    ) -> None:
+        """#1096 correction round, S2: the fake-driven ordering pins in
+        TestReceiptlessAbortAdoptsPersistentMarkers only prove ordering
+        through the fake's own event list -- nothing in the rest of the
+        suite drives RealSystemdBackend's own two `os.open` calls, so a
+        mutant swapping their order inside `mark_manual_hold_owned` passed
+        the entire Python suite. Spies on the real `os.open` calls
+        (patching the same `os` module `mark_manual_hold_owned` itself
+        imports and calls through) to observe the ACTUAL write order.
+        """
+        backend, metadata_gate_dir = self._make_backend()
+        persistent_marker_path = metadata_gate_dir / "deploy-hold-owned-manual"
+        real_open = os.open
+        opened_paths: list[str] = []
+
+        def spying_open(path: object, *args: object, **kwargs: object) -> int:
+            opened_paths.append(os.fspath(path))  # type: ignore[arg-type]
+            return real_open(path, *args, **kwargs)  # type: ignore[arg-type]
+
+        with mock.patch.object(deploy_hold_module.os, "open", spying_open):
+            backend.mark_manual_hold_owned()
+
+        persistent_index = opened_paths.index(str(persistent_marker_path))
+        tmpfs_marker_index = next(
+            index
+            for index, path in enumerate(opened_paths)
+            if path.endswith("/owned-manual-hold")
+        )
+        self.assertLess(
+            persistent_index,
+            tmpfs_marker_index,
+            f"persistent marker was not opened before the tmpfs marker: "
+            f"{opened_paths!r}",
+        )
+
+    def test_mark_inhibitor_owned_persists_the_marker_before_the_tmpfs_marker_on_the_real_backend(
+        self,
+    ) -> None:
+        """#1096 correction round, S2 (inhibitor mirror of the manual-hold
+        real-backend ordering test above)."""
+        backend, metadata_gate_dir = self._make_backend()
+        persistent_marker_path = (
+            metadata_gate_dir / f"deploy-hold-owned-inhibit-{YOUTUBE_SERVICE}"
+        )
+        real_open = os.open
+        opened_paths: list[str] = []
+
+        def spying_open(path: object, *args: object, **kwargs: object) -> int:
+            opened_paths.append(os.fspath(path))  # type: ignore[arg-type]
+            return real_open(path, *args, **kwargs)  # type: ignore[arg-type]
+
+        with mock.patch.object(deploy_hold_module.os, "open", spying_open):
+            backend.mark_inhibitor_owned(YOUTUBE_SERVICE)
+
+        persistent_index = opened_paths.index(str(persistent_marker_path))
+        tmpfs_marker_index = next(
+            index
+            for index, path in enumerate(opened_paths)
+            if path.endswith(f"/owned-inhibitor-{YOUTUBE_SERVICE}")
+        )
+        self.assertLess(
+            persistent_index,
+            tmpfs_marker_index,
+            f"persistent marker was not opened before the tmpfs marker: "
+            f"{opened_paths!r}",
         )
 
 

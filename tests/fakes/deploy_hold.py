@@ -384,6 +384,29 @@ class FakeDeployHoldBackend:
         self.events.append(("start", unit))
         self.started_units.append(unit)
         state = self.unit_states[unit]
+        if (state.active_state, state.sub_state) == ("active", "running"):
+            # Real systemd: a start job against an already-active unit is a
+            # no-op -- it does not re-evaluate ExecCondition or re-run
+            # ExecStart. Modeled explicitly rather than falling through to
+            # the branches below, which would be harmless here but is not
+            # what production actually does.
+            return
+        # Real systemd: ConditionPathExists/ExecCondition is evaluated on
+        # every start attempt. A gate-guarded unit's condition fails while
+        # any metadata-gate hold is active (module-vm.nix's
+        # metadataGateStartCheck checks the WHOLE holds directory is empty,
+        # not just that no foreign reason exists); main/YouTube additionally
+        # each fail while their own producer inhibitor file exists. Either
+        # failure is a condition SKIP, not a job failure: systemctl still
+        # exits 0, but the unit's state is untouched (#1096 correction
+        # round -- this fidelity gap is what let the M1/M2 ordering bugs in
+        # _adopt_persistent_markers_or_refuse and abort_hold ship green).
+        blocked = (unit in START_INHIBITORS and unit in self.inhibitor_files) or (
+            unit in GATE_GUARDED_UNITS
+            and (self.manual_hold or self.other_metadata_holds)
+        )
+        if blocked:
+            return
         if unit == MAIN_SERVICE:
             # The PR1 verifier lives outside this state machine. Deterministic
             # hold tests model that verified completion before open-main-timer.
@@ -458,15 +481,20 @@ class FakeDeployHoldBackend:
             del self.running_samples[unit]
 
     def reboot(self) -> None:
-        """Model a real host reboot: wipe tmpfs, retain persistent state.
+        """Model a real, graceful host reboot: wipe tmpfs, retain
+        persistent state durably.
 
         Clears the receipt, phase, every tmpfs ownership marker (manual
         hold, control links, inhibitors), and the ordinary-invocation
-        marker -- all ``/run``, all gone, exactly like a crash+restart
-        clears the module-vm.nix test VM's tmpfs root. RETAINS the manual
-        hold / inhibitor objects themselves, their sibling persistent
-        markers, and every other metadata-gate hold file -- all
-        ``/var/lib``, all durable (#1096).
+        marker -- all ``/run``, all gone, exactly like a graceful reboot
+        clears the module-vm.nix test VM's tmpfs root
+        (``machine.shutdown()`` there, deliberately not ``machine.crash()``:
+        an abrupt power failure can leave a very recent ``/var/lib``
+        ``unlink()`` non-durable under ordinary ext4 write-back caching --
+        a real but entirely separate crash-consistency concern this fake
+        does not model). RETAINS the manual hold / inhibitor objects
+        themselves, their sibling persistent markers, and every other
+        metadata-gate hold file -- all ``/var/lib``, all durable (#1096).
 
         Unit states reset to post-boot reality rather than merely
         preserving whatever they were before the reboot: a fresh boot

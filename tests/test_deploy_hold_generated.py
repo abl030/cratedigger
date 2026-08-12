@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import unittest
 from itertools import product
+from typing import NamedTuple
 
 from hypothesis import example, given
 from hypothesis import strategies as st
@@ -35,7 +36,9 @@ from scripts.cratedigger_deploy_hold import (
     LifecyclePreflight,
     UnitState,
     _clear_owned_inhibitors,
+    _ensure_owned_start_inhibitor,
     _release_owned_link,
+    _verify_authoritative_hold,
     abort_hold,
     acquire_hold,
     complete_release,
@@ -45,6 +48,7 @@ from scripts.cratedigger_deploy_hold import (
     recover_held,
 )
 from tests.fakes.deploy_hold import FakeDeployHoldBackend
+from tests.finite_domain import finite_generated_domain
 
 
 def assert_ordinary_operation(backend: FakeDeployHoldBackend) -> None:
@@ -63,6 +67,21 @@ def assert_ordinary_operation(backend: FakeDeployHoldBackend) -> None:
     whose restart is ``finish_release``'s own resume-if-clear reliance, a
     pre-existing mechanism this fake does not model and #1096 does not
     touch) is correctly out of scope for this checker.
+
+    Honesty about which clauses carry weight in which world (#1096
+    correction round, N3): in every ``reboot=True`` world the caller drives
+    through ``backend.reboot()``, the receipt/retired-receipt/owned-link
+    clauses are ALREADY guaranteed true by ``reboot()`` itself -- it
+    unconditionally clears the receipt, phase, and every owned tmpfs
+    marker -- before ``abort`` is ever called. Those three clauses are
+    real evidence in the ``reboot=False`` worlds (where they depend on
+    ``abort`` actually clearing them) but pass trivially in every
+    ``reboot=True`` world regardless of whether adoption ran correctly.
+    Only the persistent-marker, manual-hold, and inhibitor clauses --
+    plus, in the ``reboot=True`` worlds, the ``expect_restarted`` /
+    ``expect_attempted_only`` assertions the caller makes separately --
+    depend on ``_adopt_persistent_markers_or_refuse`` and therefore carry
+    real weight there.
     """
     if backend.receipt_exists():
         raise AssertionError("a receipt remains after recovery")
@@ -797,9 +816,37 @@ class TestHoldInvariantCheckersKnownBad(unittest.TestCase):
         ):
             assert_ordinary_operation(backend)
 
+    def test_ordinary_operation_checker_rejects_an_owned_but_inactive_manual_hold(
+        self,
+    ) -> None:
+        """#1096 correction round, N4: the OTHER side of the ``or`` -- owned
+        without the underlying object being active (an incomplete unmark)
+        -- must also trip, not only the active-but-unowned side above."""
+        backend = FakeDeployHoldBackend()
+        backend.owned_manual_hold = True
+
+        with self.assertRaisesRegex(
+            AssertionError, "the manual hold remains owned or active",
+        ):
+            assert_ordinary_operation(backend)
+
     def test_ordinary_operation_checker_rejects_a_remaining_inhibitor(self) -> None:
         backend = FakeDeployHoldBackend()
         backend.inhibitor_files.add(YOUTUBE_SERVICE)
+
+        with self.assertRaisesRegex(
+            AssertionError, "a producer inhibitor remains owned or present",
+        ):
+            assert_ordinary_operation(backend)
+
+    def test_ordinary_operation_checker_rejects_an_owned_but_absent_inhibitor(
+        self,
+    ) -> None:
+        """#1096 correction round, N4: the OTHER side of the ``or`` --
+        owned without the file being present (an incomplete unmark) --
+        must also trip, not only the present-but-unowned side above."""
+        backend = FakeDeployHoldBackend()
+        backend.owned_inhibitors.add(YOUTUBE_SERVICE)
 
         with self.assertRaisesRegex(
             AssertionError, "a producer inhibitor remains owned or present",
@@ -829,10 +876,44 @@ class TestHoldInvariantCheckersKnownBad(unittest.TestCase):
         ):
             assert_ordinary_operation(backend)
 
-    def test_ordinary_operation_checker_rejects_an_unrestored_timer(self) -> None:
+    def test_ordinary_operation_checker_rejects_a_masked_and_inactive_timer(
+        self,
+    ) -> None:
         backend = FakeDeployHoldBackend()
         backend.unit_states[MAIN_TIMER] = UnitState(
             load_state="masked", active_state="inactive", sub_state="dead",
+        )
+
+        with self.assertRaisesRegex(
+            AssertionError, f"timer {MAIN_TIMER} is not restored",
+        ):
+            assert_ordinary_operation(backend)
+
+    def test_ordinary_operation_checker_rejects_a_masked_but_active_timer(
+        self,
+    ) -> None:
+        """#1096 correction round, N4: the load_state side of the ``or``
+        alone -- active_state is otherwise correct -- must also trip, not
+        only the both-wrong world above."""
+        backend = FakeDeployHoldBackend()
+        backend.unit_states[MAIN_TIMER] = UnitState(
+            load_state="masked", active_state="active", sub_state="waiting",
+        )
+
+        with self.assertRaisesRegex(
+            AssertionError, f"timer {MAIN_TIMER} is not restored",
+        ):
+            assert_ordinary_operation(backend)
+
+    def test_ordinary_operation_checker_rejects_a_loaded_but_inactive_timer(
+        self,
+    ) -> None:
+        """#1096 correction round, N4: the active_state side of the ``or``
+        alone -- load_state is otherwise correct -- must also trip, not
+        only the both-wrong world above."""
+        backend = FakeDeployHoldBackend()
+        backend.unit_states[MAIN_TIMER] = UnitState(
+            load_state="loaded", active_state="inactive", sub_state="dead",
         )
 
         with self.assertRaisesRegex(
@@ -1111,25 +1192,90 @@ class TestAbortNeverTouchesAnUnownedObject(unittest.TestCase):
             _assert_unowned_manual_hold_untouched(backend)
 
 
-def _drive_to_interruption_point(backend: FakeDeployHoldBackend, point: int) -> None:
-    """The full acquire -> prepare-controlled -> open-main-timer ->
-    finish-release -> complete lifecycle, stopped after ``point`` steps.
+_POINT_NOTHING = "nothing"
+_POINT_HELD = "held"
+_POINT_MID_PREPARE_INHIBITORS_CREATED = "mid_prepare_inhibitors_created"
+_POINT_MID_PREPARE_MANUAL_RELEASED = "mid_prepare_manual_released"
+_POINT_PREPARED_CONTROLLED = "prepared_controlled"
+_POINT_MAIN_TIMER_OPEN = "main_timer_open"
+_POINT_COMPLETE_PENDING = "complete_pending"
+_POINT_COMPLETE = "complete"
 
-    0: nothing acquired. 1: PHASE_HELD. 2: PHASE_PREPARED_CONTROLLED.
-    3: PHASE_MAIN_TIMER_OPEN. 4: PHASE_COMPLETE_PENDING. 5: fully released
-    (no receipt at all, same as never having acquired -- included for a
-    uniform domain rather than as a distinct recoverable shape).
+# #1096 correction round: the two MID_PREPARE points are the marker-present
+# windows M1/M2 named -- reachable only mid prepare_controlled, never at a
+# phase boundary the original six-point domain could express.
+# MID_PREPARE_INHIBITORS_CREATED is the M2 window (manual hold owned AND
+# both inhibitors owned together); MID_PREPARE_MANUAL_RELEASED is the M1
+# window (both inhibitors -- including MAIN_SERVICE's -- still owned after
+# the manual hold is already released).
+_INTERRUPTION_POINTS = (
+    _POINT_NOTHING,
+    _POINT_HELD,
+    _POINT_MID_PREPARE_INHIBITORS_CREATED,
+    _POINT_MID_PREPARE_MANUAL_RELEASED,
+    _POINT_PREPARED_CONTROLLED,
+    _POINT_MAIN_TIMER_OPEN,
+    _POINT_COMPLETE_PENDING,
+    _POINT_COMPLETE,
+)
+_INTERRUPTION_POINT_COUNT = len(_INTERRUPTION_POINTS)
+_INTERRUPTION_WORLD_COUNT = _INTERRUPTION_POINT_COUNT * 2  # x reboot-or-not
+
+
+def _verify_interruption_point_domain() -> None:
+    if len(set(_INTERRUPTION_POINTS)) != _INTERRUPTION_POINT_COUNT:
+        raise AssertionError("interruption points must be unique")
+
+
+def _drive_to_interruption_point(backend: FakeDeployHoldBackend, point: str) -> None:
+    """The full acquire -> prepare-controlled -> open-main-timer ->
+    finish-release -> complete lifecycle, stopped at ``point``.
+
+    The two MID_PREPARE points replicate prepare_controlled's own first
+    steps directly, calling the identical production sub-functions it
+    calls (``_verify_authoritative_hold``, ``_ensure_owned_start_inhibitor``,
+    the same ``metadata_gate``/``unmark_manual_hold_owned``/``start_unit``
+    calls) -- never a hand-simulated shortcut -- then returns before ever
+    calling the full ``prepare_controlled``, so points at or after
+    PREPARED_CONTROLLED call the full production functions with no
+    redundant double-invocation.
     """
-    if point >= 1:
-        acquire_hold(backend)
-    if point >= 2:
-        prepare_controlled(backend)
-    if point >= 3:
-        open_main_timer(backend)
-    if point >= 4:
-        finish_release(backend, "b" * 32)
-    if point >= 5:
-        complete_release(backend, "b" * 32)
+    if point == _POINT_NOTHING:
+        return
+
+    acquire_hold(backend)
+    if point == _POINT_HELD:
+        return
+
+    if point in (
+        _POINT_MID_PREPARE_INHIBITORS_CREATED,
+        _POINT_MID_PREPARE_MANUAL_RELEASED,
+    ):
+        _verify_authoritative_hold(backend)
+        for service in START_INHIBITORS:
+            _ensure_owned_start_inhibitor(backend, service)
+        if point == _POINT_MID_PREPARE_INHIBITORS_CREATED:
+            return
+        backend.metadata_gate("release manual")
+        if backend.manual_hold_active():
+            raise DeployHoldError(
+                "metadata gate did not release the owned manual hold"
+            )
+        backend.unmark_manual_hold_owned()
+        for service in CONTROLLED_WORKER_UNITS:
+            backend.start_unit(service)
+        return  # _POINT_MID_PREPARE_MANUAL_RELEASED
+
+    prepare_controlled(backend)
+    if point == _POINT_PREPARED_CONTROLLED:
+        return
+    open_main_timer(backend)
+    if point == _POINT_MAIN_TIMER_OPEN:
+        return
+    finish_release(backend, "b" * 32)
+    if point == _POINT_COMPLETE_PENDING:
+        return
+    complete_release(backend, "b" * 32)
 
 
 class TestNoInterruptionPointIsUnrecoverable(unittest.TestCase):
@@ -1142,30 +1288,38 @@ class TestNoInterruptionPointIsUnrecoverable(unittest.TestCase):
     one does not re-derive) reaches ordinary unheld operation with no
     unowned-object dead end.
 
-    Every one of the 6 x 2 = 12 worlds in this domain is pinned as an
-    ``@example`` -- this is a small, fully enumerated space, not one that
-    needs random search to cover.
+    Every one of the 8 x 2 = 16 worlds in this domain is pinned as an
+    ``@example`` and certified as the fully enumerated space via
+    ``finite_generated_domain`` -- not asserted from a docstring claim.
     """
 
+    @finite_generated_domain(
+        cardinality=_INTERRUPTION_WORLD_COUNT,
+        verify=_verify_interruption_point_domain,
+    )
     @given(
-        point=st.integers(min_value=0, max_value=5),
+        point=st.sampled_from(_INTERRUPTION_POINTS),
         reboot=st.booleans(),
     )
-    @example(point=0, reboot=False)
-    @example(point=0, reboot=True)
-    @example(point=1, reboot=False)
-    @example(point=1, reboot=True)
-    @example(point=2, reboot=False)
-    @example(point=2, reboot=True)
-    @example(point=3, reboot=False)
-    @example(point=3, reboot=True)
-    @example(point=4, reboot=False)
-    @example(point=4, reboot=True)
-    @example(point=5, reboot=False)
-    @example(point=5, reboot=True)
+    @example(point=_POINT_NOTHING, reboot=False)
+    @example(point=_POINT_NOTHING, reboot=True)
+    @example(point=_POINT_HELD, reboot=False)
+    @example(point=_POINT_HELD, reboot=True)
+    @example(point=_POINT_MID_PREPARE_INHIBITORS_CREATED, reboot=False)
+    @example(point=_POINT_MID_PREPARE_INHIBITORS_CREATED, reboot=True)
+    @example(point=_POINT_MID_PREPARE_MANUAL_RELEASED, reboot=False)
+    @example(point=_POINT_MID_PREPARE_MANUAL_RELEASED, reboot=True)
+    @example(point=_POINT_PREPARED_CONTROLLED, reboot=False)
+    @example(point=_POINT_PREPARED_CONTROLLED, reboot=True)
+    @example(point=_POINT_MAIN_TIMER_OPEN, reboot=False)
+    @example(point=_POINT_MAIN_TIMER_OPEN, reboot=True)
+    @example(point=_POINT_COMPLETE_PENDING, reboot=False)
+    @example(point=_POINT_COMPLETE_PENDING, reboot=True)
+    @example(point=_POINT_COMPLETE, reboot=False)
+    @example(point=_POINT_COMPLETE, reboot=True)
     def test_every_interruption_point_recovers_to_ordinary_operation(
         self,
-        point: int,
+        point: str,
         reboot: bool,
     ) -> None:
         backend = FakeDeployHoldBackend()
@@ -1176,14 +1330,18 @@ class TestNoInterruptionPointIsUnrecoverable(unittest.TestCase):
         # The exact restart guarantee whichever branch below makes: abort
         # (receipt-owned or receiptless-adopted) restarts precisely what IT
         # owned going in, proven active by construction
-        # (_wait_controlled_workers_active) before this function returns.
-        # This does not assert every unit is active regardless of phase --
-        # a unit neither abort nor adoption ever owned (for example YouTube
+        # (_wait_controlled_workers_active) before this function returns --
+        # except MAIN_SERVICE, which is Type=oneshot and can never satisfy
+        # that proof (#1096 correction round, M1): it is only ever proven
+        # attempted (present in started_units), never active/running. This
+        # does not assert every unit is active regardless of phase -- a
+        # unit neither abort nor adoption ever owned (for example YouTube
         # ingest at PHASE_COMPLETE_PENDING, whose restart is
         # finish_release's own resume-if-clear reliance) is out of scope
         # here, exactly as the existing deterministic TestAbortHold pins
         # already scope it per phase.
         expect_restarted: set[str] = set()
+        expect_attempted_only: set[str] = set()
 
         if backend.receipt_exists():
             # The receipt survived (no reboot): #1078's own property
@@ -1194,7 +1352,10 @@ class TestNoInterruptionPointIsUnrecoverable(unittest.TestCase):
             # sweep, not as new coverage of that direction.
             if backend.manual_hold_is_owned():
                 expect_restarted |= set(GATE_STOPPED_UNITS)
-            expect_restarted |= set(backend.owned_inhibitor_units())
+            owned_inhibited = set(backend.owned_inhibitor_units())
+            expect_restarted |= owned_inhibited - {MAIN_SERVICE}
+            if MAIN_SERVICE in owned_inhibited:
+                expect_attempted_only.add(MAIN_SERVICE)
             abort_hold(backend)
         else:
             manual_marked = backend.persistent_manual_marker_exists()
@@ -1208,7 +1369,9 @@ class TestNoInterruptionPointIsUnrecoverable(unittest.TestCase):
                 # marker(s) survived. abort adopts.
                 if manual_marked:
                     expect_restarted |= set(GATE_STOPPED_UNITS)
-                expect_restarted |= set(inhibited_marked)
+                expect_restarted |= set(inhibited_marked) - {MAIN_SERVICE}
+                if MAIN_SERVICE in inhibited_marked:
+                    expect_attempted_only.add(MAIN_SERVICE)
                 abort_hold(backend)
             else:
                 # Nothing persistent survived: a clean boot (point 0), or a
@@ -1228,6 +1391,116 @@ class TestNoInterruptionPointIsUnrecoverable(unittest.TestCase):
                 f"{service} was owned going into recovery but is not "
                 f"stably active afterward: {state}",
             )
+        for service in expect_attempted_only:
+            self.assertIn(
+                service,
+                backend.started_units,
+                f"{service} was owned going into recovery but was never "
+                "attempted",
+            )
+
+
+class ForeignObjectWorld(NamedTuple):
+    """One combination of our own marked objects and a foreign object
+    receiptless adoption must never touch.
+
+    ``manual_marked`` and ``foreign_hold_reason == "manual"`` are mutually
+    exclusive by construction: there is exactly one ``manual``-named hold
+    file, so it cannot simultaneously be ours (marked) and foreign --
+    ``_verify_foreign_object_world_domain`` proves no world in the fixed
+    list breaks that.
+    """
+
+    manual_marked: bool
+    inhibited_marked: tuple[str, ...]
+    foreign_inhibitor_service: str | None
+    foreign_hold_reason: str | None
+
+
+_FOREIGN_OBJECT_WORLDS = (
+    # Pin (c)'s shape: an unmarked (foreign) inhibitor file alongside a
+    # marked one.
+    ForeignObjectWorld(False, (YOUTUBE_SERVICE,), MAIN_SERVICE, None),
+    # S1's exact shape: a hold reason coincidentally named "manual" that we
+    # do not hold the persistent marker for, alongside a marked inhibitor.
+    ForeignObjectWorld(False, (YOUTUBE_SERVICE,), None, "manual"),
+    # A genuinely foreign-named hold (e.g. the monthly discogs-import
+    # hold) alongside a marked inhibitor.
+    ForeignObjectWorld(False, (YOUTUBE_SERVICE,), None, "discogs-import"),
+    # A marked manual hold with no marked inhibitor, but an unmarked
+    # (foreign) MAIN_SERVICE inhibitor file happens to exist too.
+    ForeignObjectWorld(True, (), MAIN_SERVICE, None),
+)
+_FOREIGN_OBJECT_WORLD_COUNT = 4
+
+
+def _verify_foreign_object_world_domain() -> None:
+    if len(_FOREIGN_OBJECT_WORLDS) != _FOREIGN_OBJECT_WORLD_COUNT:
+        raise AssertionError(
+            f"foreign-object domain must hold {_FOREIGN_OBJECT_WORLD_COUNT} "
+            f"worlds, found {len(_FOREIGN_OBJECT_WORLDS)}"
+        )
+    if len(set(_FOREIGN_OBJECT_WORLDS)) != _FOREIGN_OBJECT_WORLD_COUNT:
+        raise AssertionError("foreign-object domain worlds must be unique")
+    for world in _FOREIGN_OBJECT_WORLDS:
+        if world.manual_marked and world.foreign_hold_reason == "manual":
+            raise AssertionError(
+                f"impossible world: {world!r} marks the manual hold as "
+                "ours while also naming it foreign"
+            )
+
+
+class TestForeignObjectRefusesReceiptlessAdoption(unittest.TestCase):
+    """#1096 correction round: a foreign object -- one our persistent
+    markers do not name -- must refuse loudly and leave every marker and
+    object untouched, whether it is an unmarked inhibitor file (pin (c)) or
+    a same-named-but-unmarked metadata gate hold (S1). Only deterministic
+    pins covered this direction before; this sweeps the small, fully
+    enumerated combination of which of our own objects are marked against
+    which foreign object appears.
+    """
+
+    @finite_generated_domain(
+        cardinality=_FOREIGN_OBJECT_WORLD_COUNT,
+        verify=_verify_foreign_object_world_domain,
+    )
+    @given(world=st.sampled_from(_FOREIGN_OBJECT_WORLDS))
+    @example(world=_FOREIGN_OBJECT_WORLDS[0])
+    @example(world=_FOREIGN_OBJECT_WORLDS[1])
+    @example(world=_FOREIGN_OBJECT_WORLDS[2])
+    @example(world=_FOREIGN_OBJECT_WORLDS[3])
+    def test_foreign_object_refuses_before_any_mutation(
+        self, world: ForeignObjectWorld,
+    ) -> None:
+        backend = FakeDeployHoldBackend(
+            manual_hold=world.manual_marked or world.foreign_hold_reason == "manual",
+            metadata_holds=(
+                {world.foreign_hold_reason}
+                if world.foreign_hold_reason and world.foreign_hold_reason != "manual"
+                else set()
+            ),
+            persistent_manual_marker=world.manual_marked,
+            inhibitor_files=set(world.inhibited_marked)
+            | ({world.foreign_inhibitor_service} if world.foreign_inhibitor_service else set()),
+            persistent_inhibitor_markers=set(world.inhibited_marked),
+        )
+        before_inhibitor_files = set(backend.inhibitor_files)
+        before_persistent_inhibitor_markers = set(backend.persistent_inhibitor_markers)
+        before_manual_hold = backend.manual_hold
+        before_persistent_manual_marker = backend.persistent_manual_marker
+
+        with self.assertRaises(DeployHoldError):
+            abort_hold(backend)
+
+        self.assertEqual(backend.inhibitor_files, before_inhibitor_files)
+        self.assertEqual(
+            backend.persistent_inhibitor_markers, before_persistent_inhibitor_markers,
+        )
+        self.assertEqual(backend.manual_hold, before_manual_hold)
+        self.assertEqual(
+            backend.persistent_manual_marker, before_persistent_manual_marker,
+        )
+        self.assertEqual(backend.started_units, [])
 
 
 if __name__ == "__main__":
