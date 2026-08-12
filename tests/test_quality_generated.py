@@ -27,6 +27,7 @@ Full usage guide: docs/generated-testing.md.
 """
 
 import os
+import re
 import sys
 import unittest
 from collections.abc import Callable
@@ -251,6 +252,20 @@ def assert_post_import_action_matches(
         raise AssertionError(
             f"post-import mapping drift for {decision}: {actual!r} != {expected!r}"
         )
+
+
+def assert_search_override_is_a_string(raw_override: object) -> str | None:
+    """The gate's search override crosses the transition as a string or None.
+
+    A module function rather than an inline narrowing guard so the known-bad
+    self-test can call it directly (docs/generated-testing.md § "Per-clause
+    proof").
+    """
+    if raw_override is not None and not isinstance(raw_override, str):
+        raise AssertionError(
+            f"quality gate wrote a non-string override: {raw_override!r}"
+        )
+    return raw_override
 
 
 def assert_quality_decision_failure_reopens_full_tier(
@@ -1042,6 +1057,32 @@ def assert_counterfactual_is_the_deferred_stage2(
         )
 
 
+def assert_carve_out_lever_is_stage2_inert(
+    decision: dict[str, object],
+    levered: dict[str, object],
+    *,
+    context: str = "",
+) -> None:
+    """The Stage-1 carve-out lever disables the short-circuit and nothing else.
+
+    Qualifies the counterfactual reference used by
+    ``assert_counterfactual_is_the_deferred_stage2``: over worlds where Stage
+    1 does not short-circuit anyway, the levered and unlevered runs must reach
+    the same Stage-2 decision and the same basis.
+    """
+    if (
+        decision["stage2_import"] != levered["stage2_import"]
+        or decision["comparison_basis"] != levered["comparison_basis"]
+    ):
+        raise AssertionError(
+            "the Stage-1 carve-out lever moved Stage 2: "
+            f"{decision['stage2_import']!r}/{decision['comparison_basis']!r} "
+            f"vs {levered['stage2_import']!r}/"
+            f"{levered['comparison_basis']!r}"
+            + (f" [{context}]" if context else "")
+        )
+
+
 def assert_counterfactual_reported_exactly_when_stage1_short_circuits(
     decision: dict[str, object],
     *,
@@ -1259,6 +1300,22 @@ def assert_basis_consistent(result: SimResult) -> None:
     if branch == "transcode_rank_regression" and verdict != "worse":
         raise AssertionError(
             f"transcode rank regression must be worse: {basis!r}")
+
+
+_COMPARED_STAGE2_DECISIONS = (
+    "import", "downgrade", "transcode_upgrade", "transcode_downgrade",
+)
+
+
+def assert_measured_decision_carries_basis(result: SimResult) -> None:
+    """A measured decision against an existing album always explains itself."""
+    if (
+        result.stage2_import in _COMPARED_STAGE2_DECISIONS
+        and result.comparison_basis is None
+    ):
+        raise AssertionError(
+            f"measured decision {result.stage2_import!r} against an "
+            f"existing album lost its comparison basis: {result!r}")
 
 
 def assert_basis_metrics_truthful(
@@ -2091,14 +2148,9 @@ class TestGeneratedSimulatorInvariants(unittest.TestCase):
                 )
                 self.assertIsNotNone(plan)
                 assert plan is not None
-                raw_override = plan.transition.fields.get(
-                    "search_filetype_override",
+                raw_override = assert_search_override_is_a_string(
+                    plan.transition.fields.get("search_filetype_override"),
                 )
-                if raw_override is not None and not isinstance(raw_override, str):
-                    raise AssertionError(
-                        "quality gate wrote a non-string override: "
-                        f"{raw_override!r}"
-                    )
                 assert_post_import_action_matches(
                     decision=decision,
                     status=plan.transition.target_status,
@@ -2555,17 +2607,11 @@ class TestGeneratedSimulatorInvariants(unittest.TestCase):
         """
         decision = _stage_parity_decision(world)
         assume(decision["stage1_spectral"] != "reject")
-        levered = _stage_parity_deferred_decision(world)
-        if (
-            decision["stage2_import"] != levered["stage2_import"]
-            or decision["comparison_basis"] != levered["comparison_basis"]
-        ):
-            raise AssertionError(
-                "the Stage-1 carve-out lever moved Stage 2: "
-                f"{decision['stage2_import']!r}/{decision['comparison_basis']!r} "
-                f"vs {levered['stage2_import']!r}/"
-                f"{levered['comparison_basis']!r} [{world!r}]"
-            )
+        assert_carve_out_lever_is_stage2_inert(
+            decision,
+            _stage_parity_deferred_decision(world),
+            context=repr(world),
+        )
 
     @given(world=inadmissible_spectral_pair_worlds())
     @example(world=_PINNED_INADMISSIBLE_WORLDS[0])
@@ -2689,18 +2735,7 @@ class TestGeneratedSimulatorInvariants(unittest.TestCase):
     def test_measured_decisions_with_existing_carry_basis(
             self, album, download):
         result = simulate(album, download)
-        if (
-            result.stage2_import in (
-                "import",
-                "downgrade",
-                "transcode_upgrade",
-                "transcode_downgrade",
-            )
-            and result.comparison_basis is None
-        ):
-            raise AssertionError(
-                f"measured decision {result.stage2_import!r} against an "
-                    f"existing album lost its comparison basis: {result!r}")
+        assert_measured_decision_carries_basis(result)
         assert_basis_consistent(result)
 
 
@@ -3360,7 +3395,14 @@ _VALID_VERDICTS = ("confident_reject", "would_import", "uncertain")
 
 
 def assert_classification_coherent(
-    decision: dict, expected_early_exit_key: str | None) -> None:
+    decision: dict,
+    expected_early_exit_key: str | None,
+    *,
+    classify_fn: Callable[
+        [dict[str, object]], tuple[str, bool, str | None]
+    ] = classify_full_pipeline_decision,
+    name_fn: Callable[[dict[str, object]], str] = evidence_decision_name,
+) -> None:
     """The classification layer (cleanup eligibility + dispatch decision
     name) must be coherent with the decision dict it classifies.
 
@@ -3368,9 +3410,17 @@ def assert_classification_coherent(
     ``classify_full_pipeline_decision`` / ``evidence_decision_name``
     (which gate wrong-match folder cleanup) were the one decision-policy
     layer no generated test reached.
+
+    Three of the clauses below key on what the classifiers RETURN, not on the
+    decision dict, and today's production pair cannot return those shapes at
+    all — an unknown verdict, a falsy dispatch name, or ``cleanup_eligible``
+    decoupled from ``confident_reject``. They are the fail-closed half of the
+    checker, so the classifiers are kwarg-injected (house DI seam) and the
+    known-bad self-test drives them with a planted classifier rather than
+    asserting the clauses in prose.
     """
-    verdict, cleanup_eligible, reason = classify_full_pipeline_decision(decision)
-    name = evidence_decision_name(decision)
+    verdict, cleanup_eligible, reason = classify_fn(decision)
+    name = name_fn(decision)
     if verdict not in _VALID_VERDICTS:
         raise AssertionError(f"unknown classification verdict: {verdict!r}")
     if not name or not isinstance(name, str):
@@ -3550,6 +3600,18 @@ def _planted_bad_import(
         backfill_override=None,
         search_filetype_override_after=None,
     )
+
+
+def _ill_typed_sim_result(field: str, value: object) -> SimResult:
+    """A ``SimResult`` whose runtime type for one field violates its annotation.
+
+    The totality clauses of ``assert_decision_is_definitive`` exist for exactly
+    the values the annotations forbid, so their world can only be built by
+    going around the frozen dataclass rather than through it.
+    """
+    result = _planted_bad_import()
+    object.__setattr__(result, field, value)
+    return result
 
 
 class TestInadmissiblePairDomainIsWhatItClaims(unittest.TestCase):
@@ -6347,18 +6409,41 @@ class TestStoredFormatCheckerSelfTests(unittest.TestCase):
 class TestInvariantCheckersTripOnViolations(unittest.TestCase):
     """Known-bad self-tests: prove the harness detects what it claims to."""
 
-    def test_definitive_checker_trips_on_bogus_status(self):
-        bad = SimResult(
+    def test_definitive_checker_trips_on_every_clause(self):
+        """All four totality clauses, each proven by its own message.
+
+        The three type clauses short-circuit ahead of the status clause, so a
+        single bogus world only ever proved the one it reached.
+        """
+        bogus_status = SimResult(
             imported=False, keep_searching=False, denylisted=False,
             final_status=None, stage0_spectral_gate=None,
             stage1_spectral=None, stage2_import=None,
             stage3_quality_gate=None, backfill_override=None,
             search_filetype_override_after=None)
-        with self.assertRaises(AssertionError):
-            assert_decision_is_definitive(bad)
+        for label, bad, expected in (
+            ("imported", _ill_typed_sim_result("imported", "yes"),
+             r"^imported is not bool: 'yes'$"),
+            ("keep_searching", _ill_typed_sim_result("keep_searching", "no"),
+             r"^keep_searching is not bool: 'no'$"),
+            ("denylisted", _ill_typed_sim_result("denylisted", 1),
+             r"^denylisted is not bool: 1$"),
+            ("final_status", bogus_status,
+             (r"^auto-mode decision must end imported/wanted, "
+              r"got final_status=None$")),
+            ("final_status_value",
+             replace(_planted_bad_import(), final_status="processing"),
+             (r"^auto-mode decision must end imported/wanted, "
+              r"got final_status='processing'$")),
+        ):
+            with self.subTest(clause=label), self.assertRaisesRegex(
+                    AssertionError, expected):
+                assert_decision_is_definitive(bad)
 
     def test_verified_lossless_checker_trips_on_import(self):
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+                AssertionError,
+                r"^lossy candidate imported over raw verified-lossless FLAC: "):
             assert_lossy_not_imported_over_verified_lossless(
                 _planted_bad_import())
 
@@ -6387,34 +6472,133 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             ),
             current_verified_lossless_proof=False,
         )
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+                AssertionError,
+                r"^proof-bearing HAVE was automatically replaced$"):
             assert_verified_lossless_proof_locks_candidate(mutant)
 
-    def test_evidence_proof_lock_checker_trips_on_integrity_reject(self):
-        with self.assertRaises(AssertionError):
-            assert_evidence_proof_lock_preserves_imported({
-                "stage2_import": None,
-                "final_status": "wanted",
-                "imported": False,
-                "denylisted": True,
-                "keep_searching": True,
-                "preimport_audio": "reject_corrupt",
-                "preimport_bad_hash": None,
-                "preimport_nested": None,
-                "preimport_empty_fileset": None,
-                "preimport_mixed_source": None,
-            })
+    def test_proof_lock_checker_trips_on_every_clause(self):
+        """Each proof-lock clause proven from a real proof-locked decision.
+
+        The baseline is what ``simulate`` really produces under a current
+        proof, so every planted violation below mutates a shape production
+        emits rather than a hand-written one (Rule C).
+        """
+        locked = simulate(
+            AlbumState(
+                "proof_locked", 245, False, "genuine", None, True, None,
+                existing_format="FLAC", avg_bitrate=245),
+            DownloadScenario(
+                "candidate", is_flac=False, min_bitrate=320, is_cbr=True,
+                avg_bitrate=320, new_format="MP3"),
+            current_verified_lossless_proof=True)
+        assert_verified_lossless_proof_locks_candidate(locked)
+        for label, bad, expected in (
+            ("replaced", replace(locked, imported=True),
+             r"^proof-bearing HAVE was automatically replaced$"),
+            ("missed_lock", replace(locked, stage2_import="import"),
+             r"^proof-bearing HAVE missed verified_lossless_locked: 'import'$"),
+            ("not_terminal", replace(locked, final_status="wanted"),
+             (r"^proof lock did not preserve terminal imported state: "
+              r"status='wanted', keep=False$")),
+            ("keep_searching", replace(locked, keep_searching=True),
+             (r"^proof lock did not preserve terminal imported state: "
+              r"status='imported', keep=True$")),
+            ("punished", replace(locked, denylisted=True),
+             r"^proof lock punished the candidate source$"),
+        ):
+            with self.subTest(clause=label), self.assertRaisesRegex(
+                    AssertionError, expected):
+                assert_verified_lossless_proof_locks_candidate(bad)
+
+    def _evidence_proof_locked_decision(self, **overrides: object) -> dict:
+        """A real proof-locked evidence decision, optionally corrupted."""
+        current = build_parity_current_evidence(
+            min_bitrate=128, avg_bitrate=128, format="Opus")
+        assert current is not None
+        decision = full_pipeline_decision_from_evidence(
+            build_parity_candidate_evidence(
+                is_flac=False, min_bitrate=245, is_cbr=False),
+            msgspec.structs.replace(
+                current,
+                verified_lossless_proof=VerifiedLosslessProof(
+                    provenance="measured",
+                    source="generated",
+                    classifier="generated",
+                ),
+            ),
+        )
+        assert decision["stage2_import"] == "verified_lossless_locked"
+        decision.update(overrides)
+        return decision
+
+    def test_evidence_proof_lock_checker_trips_on_every_clause(self):
+        """Each evidence proof-lock clause proven by its own message."""
+        clean = self._evidence_proof_locked_decision()
+        assert_evidence_proof_lock_preserves_imported(clean)
+        for label, overrides, expected in (
+            ("missed_lock", {"stage2_import": "import"},
+             r"^evidence proof lock missed: 'import'$"),
+            ("lost_have", {"final_status": "wanted"},
+             r"^evidence proof lock did not preserve the installed HAVE$"),
+            ("replaced", {"imported": True},
+             r"^evidence proof lock did not preserve the installed HAVE$"),
+            ("punished", {"denylisted": True},
+             r"^evidence proof lock reopened or punished source$"),
+            ("reopened", {"keep_searching": True},
+             r"^evidence proof lock reopened or punished source$"),
+            ("leaked_reject", {"preimport_audio": "reject_corrupt"},
+             (r"^evidence proof lock leaked candidate reject "
+              r"preimport_audio='reject_corrupt'$")),
+        ):
+            with self.subTest(clause=label), self.assertRaisesRegex(
+                    AssertionError, expected):
+                assert_evidence_proof_lock_preserves_imported(
+                    self._evidence_proof_locked_decision(**overrides))
 
     def test_downgrade_checker_trips_on_accept(self):
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+                AssertionError,
+                r"^obvious lower-rank lossy candidate accepted: "):
             assert_obvious_downgrade_not_accepted(_planted_bad_import())
 
-    def test_unverified_lossy_checker_trips_on_terminal_import(self):
-        with self.assertRaises(AssertionError):
-            assert_unverified_lossy_never_terminal(_planted_bad_import())
+    def test_unverified_lossy_checker_trips_on_every_clause(self):
+        """All four retained-inventory clauses, from a real retained world."""
+        retained = simulate(
+            _FRESH_ALBUM,
+            DownloadScenario(
+                "usable_lossy", is_flac=False, min_bitrate=245, is_cbr=False,
+                is_vbr=True, avg_bitrate=245, new_format="MP3"))
+        assert_unverified_lossy_never_terminal(retained)
+        for label, bad, expected in (
+            ("not_retained", replace(retained, imported=False),
+             r"^usable lossy first copy was not retained: "),
+            ("terminal_accept",
+             replace(retained, stage3_quality_gate="accept"),
+             r"^unverified lossy copy was accepted terminally: "),
+            ("stopped_searching",
+             replace(retained, final_status="imported", keep_searching=False),
+             r"^unverified lossy copy stopped searching: "),
+            ("not_denylisted", replace(retained, denylisted=False),
+             r"^retained lossy source was not denylisted: "),
+        ):
+            with self.subTest(clause=label), self.assertRaisesRegex(
+                    AssertionError, expected):
+                assert_unverified_lossy_never_terminal(bad)
+
+    def test_search_override_checker_trips_on_a_non_string(self):
+        self.assertIsNone(assert_search_override_is_a_string(None))
+        self.assertEqual(assert_search_override_is_a_string("lossless"),
+                         "lossless")
+        with self.assertRaisesRegex(
+                AssertionError,
+                r"^quality gate wrote a non-string override: 7$"):
+            assert_search_override_is_a_string(7)
 
     def test_proof_backed_target_checker_trips_on_transcode_routing(self):
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+                AssertionError,
+                r"^proof-backed configured target was not terminal: "):
             assert_proof_backed_target_uses_terminal_gate({
                 "stage2_import": "transcode_upgrade",
                 "stage3_quality_gate": "accept",
@@ -6437,11 +6621,18 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
                 "denylist": True,
                 **overrides,
             }
-            with self.subTest(field=field), self.assertRaises(AssertionError):
+            with self.subTest(field=field), self.assertRaisesRegex(
+                    AssertionError,
+                    r"^post-import mapping drift for requeue_upgrade: "):
                 assert_post_import_action_matches(**kwargs)
 
-    def test_quality_failure_checker_trips_on_terminal_acceptance(self):
+    def test_quality_failure_checker_trips_on_both_clauses(self):
         from lib import transitions
+
+        with self.assertRaisesRegex(
+                AssertionError,
+                r"^quality decision failure returned no recovery plan$"):
+            assert_quality_decision_failure_reopens_full_tier(None)
 
         bad = QualityGatePlan(
             transition=transitions.RequestTransition.to_imported(
@@ -6449,11 +6640,17 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             ),
             successful_terminal_acceptance=True,
         )
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+                AssertionError,
+                r"^quality decision failure did not reopen full tiers: "):
             assert_quality_decision_failure_reopens_full_tier(bad)
 
     def test_affirmative_verification_checker_trips_on_absent_evidence(self):
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+                AssertionError,
+                r"^verified lossless minted without affirmative spectral "
+                r"evidence: grade=None, probe_kind='lossless_source_v0', "
+                r"avg=300, min=250$"):
             assert_verified_lossless_has_affirmative_evidence(
                 True,
                 spectral_grade=None,
@@ -6464,7 +6661,11 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
 
     def test_strictly_lower_spectral_checker_trips_on_violations(self):
         # Planted tie-reject (the Mark DeNardo bug): equal floor rejected.
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+                AssertionError,
+                r"^spectral 128 vs 128 \(grade=suspect\) is a tie or upgrade "
+                r"but was rejected at Stage 1 instead of deferring to Stage 2: "
+                r"'reject'$"):
             assert_only_strictly_lower_spectral_rejects(
                 "reject",
                 grade="suspect",
@@ -6472,7 +6673,10 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
                 existing_spectral=128,
             )
         # Planted strictly-lower non-reject: worse content that failed to reject.
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+                AssertionError,
+                r"^strictly-lower spectral 96 < 128 \(grade=likely_transcode\) "
+                r"must reject at Stage 1, got 'import'$"):
             assert_only_strictly_lower_spectral_rejects(
                 "import",
                 grade="likely_transcode",
@@ -6480,23 +6684,34 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
                 existing_spectral=128,
             )
 
-    def test_existing_override_noop_checker_trips_on_divergence(self):
+    def test_existing_override_noop_checker_trips_on_both_clauses(self):
         # Planted phantom upgrade (the Deerhunter bug): applying the existing-
-        # side spectral override flips the verdict from equivalent to better.
-        with self.assertRaises(AssertionError):
+        # side spectral override flips the Stage-2 decision.
+        with self.assertRaisesRegex(
+                AssertionError,
+                r"^existing-side spectral override changed the Stage-2 "
+                r"decision under a shared spectral clamp: 'import' "
+                r"\(override\) vs 'downgrade' \(none\)$"):
             assert_existing_override_noop_under_shared_clamp(
                 {"stage2_import": "import",
                  "comparison_basis": {"verdict": "better"}},
                 {"stage2_import": "downgrade",
                  "comparison_basis": {"verdict": "equivalent"}},
             )
-        # A stage2-only divergence must also trip (verdict alone is not enough).
-        with self.assertRaises(AssertionError):
+        # The verdict clause, which the decision clause short-circuits past:
+        # the two runs agree on the decision and disagree on WHY. Both of the
+        # worlds this self-test used to carry moved ``stage2_import``, so the
+        # verdict clause had no proof at all.
+        with self.assertRaisesRegex(
+                AssertionError,
+                r"^existing-side spectral override changed the comparison "
+                r"verdict under a shared spectral clamp: 'better' "
+                r"\(override\) vs 'equivalent' \(none\)$"):
             assert_existing_override_noop_under_shared_clamp(
                 {"stage2_import": "import",
                  "comparison_basis": {"verdict": "better"}},
-                {"stage2_import": "downgrade",
-                 "comparison_basis": {"verdict": "better"}},
+                {"stage2_import": "import",
+                 "comparison_basis": {"verdict": "equivalent"}},
             )
         # An invariant (identical) pair must NOT trip.
         assert_existing_override_noop_under_shared_clamp(
@@ -6511,7 +6726,11 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         reject alongside a planted Stage-2 "better" must trip the checker;
         every other verdict pairing (including a real reject-vs-worse
         agreement) must NOT."""
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+                AssertionError,
+                r"^Stage 1 rejected a candidate Stage 2 scores as an upgrade: "
+                r"stage1='reject' stage2\.verdict='better' "
+                r"stage2\.branch='spectral_tiebreak'$"):
             assert_stage1_never_contradicts_stage2(
                 "reject",
                 QualityComparisonBasis(
@@ -6580,9 +6799,36 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             ("keep_searching", False),
             ("imported", True),
         ):
-            with self.subTest(field=field), self.assertRaises(AssertionError):
+            with self.subTest(field=field), self.assertRaisesRegex(
+                    AssertionError,
+                    r"^Stage-2 state leaked onto a Stage-1 reject decision: "
+                    + re.escape(f"{field}={leaked!r}")):
                 assert_stage1_reject_leaks_no_stage2_state(
                     self._stage1_reject_decision(**{field: leaked}))
+
+    def test_carve_out_lever_checker_trips_on_a_moved_stage_2(self):
+        """Issue #829 Phase 5 PR2d: the lever-inertness clause, proven.
+
+        Extracted from the property body so it can be driven directly — the
+        baseline is a real deferring decision and its real levered twin.
+        """
+        world = replace(_STAGE1_REJECT_COUNTERFACTUAL_WORLD, new_spectral=192)
+        decision = _stage_parity_decision(world)
+        levered = _stage_parity_deferred_decision(world)
+        assert decision["stage1_spectral"] != "reject", repr(decision)
+        assert_carve_out_lever_is_stage2_inert(decision, levered)
+        for label, moved in (
+            ("stage2_import", {"stage2_import": "planted_other_decision"}),
+            ("comparison_basis",
+             {"comparison_basis": {"verdict": "planted_other_verdict"}}),
+        ):
+            planted = dict(levered)
+            planted.update(moved)
+            assert planted[label] != decision[label], repr(decision)
+            with self.subTest(field=label), self.assertRaisesRegex(
+                    AssertionError,
+                    r"^the Stage-1 carve-out lever moved Stage 2: "):
+                assert_carve_out_lever_is_stage2_inert(decision, planted)
 
     def test_counterfactual_truth_checker_trips_on_a_fabricated_value(self):
         """Issue #829 Phase 5 PR2d known-bad self-test: a counterfactual that
@@ -6601,7 +6847,10 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             planted = dict(short_circuited)
             planted[field] = fabricated
             with self.subTest(field=field, value=fabricated), \
-                    self.assertRaises(AssertionError):
+                    self.assertRaisesRegex(
+                        AssertionError,
+                        r"^the reported Stage-2 counterfactual is not what "
+                        r"Stage 2 decides: " + re.escape(f"{field}=")):
                 assert_counterfactual_is_the_deferred_stage2(planted, deferred)
 
     def test_counterfactual_reporting_checker_trips_on_all_three_violations(self):
@@ -6616,13 +6865,20 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
 
         dropped = dict(deferring)
         del dropped["comparison_basis_if_stage1_deferred"]
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+                AssertionError,
+                r"^decision dict is missing audit keys "
+                r"\['comparison_basis_if_stage1_deferred'\]$"):
             assert_counterfactual_reported_exactly_when_stage1_short_circuits(
                 dropped)
 
         doubled = dict(deferring)
         doubled["stage2_import_if_stage1_deferred"] = "downgrade"
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+                AssertionError,
+                r"^a Stage-2 counterfactual was reported alongside a real "
+                r"Stage-2 decision: "
+                r"stage2_import_if_stage1_deferred='downgrade'$"):
             assert_counterfactual_reported_exactly_when_stage1_short_circuits(
                 doubled)
 
@@ -6636,7 +6892,10 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             short_circuited)
         silent = dict(short_circuited)
         silent["stage2_import_if_stage1_deferred"] = None
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+                AssertionError,
+                r"^Stage 1 short-circuited but reported no Stage-2 "
+                r"counterfactual at all"):
             assert_counterfactual_reported_exactly_when_stage1_short_circuits(
                 silent)
 
@@ -6647,13 +6906,19 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         HAVE ranked ``transparent`` on its 320 container while its own
         cliff-derived class of 128 ranks ``acceptable``.
         """
-        with self.assertRaises(AssertionError) as caught:
+        with self.assertRaisesRegex(
+                AssertionError,
+                r"^the installed copy was ranked above its own spectral class: "
+                r"existing_rank='transparent' but its class alone ranks "
+                r"'acceptable' — neither the symmetric clamp nor the one-sided "
+                r"override represented it by its real content$"):
             assert_have_is_represented_by_its_own_class(
                 "transparent", "acceptable")
-        self.assertIn("ranked above its own spectral class",
-                      str(caught.exception))
         # One tier over is still a violation.
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+                AssertionError,
+                r"^the installed copy was ranked above its own spectral class: "
+                r"existing_rank='good'"):
             assert_have_is_represented_by_its_own_class("good", "acceptable")
         # Equal is the normal clamped/overridden case, and BELOW the class
         # is fine too — the raw metric can be the tighter of the two.
@@ -6664,20 +6929,30 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
     def test_inadmissible_existing_class_checker_trips(self):
         """Issue #829 PR2c known-bad self-test — both clauses trip."""
         # Clause 1: a Stage-1 rejection built on an inadmissible pair.
-        with self.assertRaises(AssertionError) as caught:
+        with self.assertRaisesRegex(
+                AssertionError,
+                r"^Stage 1 rejected on a spectral comparison Stage 2 is not "
+                r"permitted to make: the two spectral classes are not "
+                r"comparable, so the existing side contributes no class at "
+                r"all$"):
             assert_stage1_ignores_inadmissible_existing_spectral(
                 "reject", "import_no_exist")
-        self.assertIn("not permitted to make", str(caught.exception))
         # Clause 2: the silent direction — no rejection, but the withheld
         # evidence still moved the verdict.
-        with self.assertRaises(AssertionError) as caught:
+        with self.assertRaisesRegex(
+                AssertionError,
+                r"^an inadmissible existing-side spectral class changed the "
+                r"Stage 1 verdict: 'import_upgrade' \(evidence present\) vs "
+                r"'import_no_exist' \(evidence withheld\)$"):
             assert_stage1_ignores_inadmissible_existing_spectral(
                 "import_upgrade", "import_no_exist")
-        self.assertIn("changed the Stage 1 verdict", str(caught.exception))
         # A rejection trips even when the withheld run rejects too — a
         # mutant that fabricates a class from nothing must not slip through
         # the equality clause.
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+                AssertionError,
+                r"^Stage 1 rejected on a spectral comparison Stage 2 is not "
+                r"permitted to make: "):
             assert_stage1_ignores_inadmissible_existing_spectral(
                 "reject", "reject")
         # Invariant worlds must NOT trip, including the gate-skipped shape.
@@ -6686,21 +6961,34 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         assert_stage1_ignores_inadmissible_existing_spectral("import", "import")
         assert_stage1_ignores_inadmissible_existing_spectral(None, None)
 
-    def test_unmapped_codec_checker_trips_on_terminal_narrowing(self):
-        bad = SimResult(
-            imported=True,
-            keep_searching=False,
-            denylisted=False,
-            final_status="imported",
-            stage0_spectral_gate="skip_vbr_high",
-            stage1_spectral=None,
-            stage2_import="import",
-            stage3_quality_gate="accept",
-            backfill_override=None,
-            search_filetype_override_after="lossless",
-        )
-        with self.assertRaises(AssertionError):
-            assert_unmapped_first_copy_stays_searchable(bad)
+    def test_unmapped_codec_checker_trips_on_every_clause(self):
+        """All four retained-without-a-ceiling clauses, from a real world."""
+        retained = simulate(
+            _FRESH_ALBUM,
+            DownloadScenario(
+                name="generated_unmapped_codec", is_flac=False,
+                min_bitrate=192, is_cbr=True, is_vbr=False, avg_bitrate=192,
+                spectral_grade=None, new_format="zzz"))
+        assert_unmapped_first_copy_stays_searchable(retained)
+        for label, bad, expected in (
+            ("not_imported", replace(retained, imported=False),
+             r"^unmapped first copy was not retained: "),
+            ("not_stage2_import",
+             replace(retained, stage2_import="downgrade"),
+             r"^unmapped first copy was not retained: "),
+            ("terminal",
+             replace(retained, final_status="imported", keep_searching=False),
+             r"^unmapped first copy became terminal: "),
+            ("claimed_ceiling",
+             replace(retained, stage3_quality_gate="accept"),
+             r"^unmapped first copy claimed a quality ceiling: "),
+            ("narrowed",
+             replace(retained, search_filetype_override_after="lossless"),
+             r"^unmapped first copy narrowed to lossless: "),
+        ):
+            with self.subTest(clause=label), self.assertRaisesRegex(
+                    AssertionError, expected):
+                assert_unmapped_first_copy_stays_searchable(bad)
 
     def test_classification_checker_trips_on_bad_verdict(self):
         # A dict claiming both imported and a reject-stage decision would
@@ -6710,7 +6998,10 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             "stage2_import": "downgrade",
             "stage3_quality_gate": None,
         }
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+                AssertionError,
+                r"^imported decision classified as \('confident_reject', "
+                r"cleanup_eligible=True\)$"):
             assert_classification_coherent(bad, None)
 
     def test_classification_checker_trips_on_misnamed_fact(self):
@@ -6720,8 +7011,79 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             "preimport_audio": "reject_nested",  # planted wrong value
             "imported": False,
         }
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+                AssertionError,
+                r"^integrity fact audio_corrupt classified as "
+                r"\('uncertain', False, 'unknown'\)$"):
             assert_classification_coherent(bad, "preimport_audio")
+
+    def test_classification_checker_trips_on_a_fact_named_for_dispatch(self):
+        """The name clause, which the classification clause short-circuits past.
+
+        Both facts are really present, so ``classify_full_pipeline_decision``
+        answers with the higher-priority ``nested_layout`` while
+        ``evidence_decision_name`` answers ``audio_corrupt`` — the two
+        production functions disagreeing about the same dict.
+        """
+        both = {
+            "preimport_nested": "reject_nested",
+            "preimport_audio": "reject_corrupt",
+            "imported": False,
+        }
+        with self.assertRaisesRegex(
+                AssertionError,
+                r"^integrity fact nested_layout named 'audio_corrupt' for "
+                r"dispatch$"):
+            assert_classification_coherent(both, "preimport_nested")
+
+    def test_classification_checker_trips_on_a_planted_classifier(self):
+        """The three clauses keyed on what the classifiers RETURN.
+
+        No decision dict can reach them: ``classify_full_pipeline_decision``
+        only ever returns one of three verdicts and only ever pairs
+        ``cleanup_eligible=True`` with ``confident_reject``, and
+        ``evidence_decision_name`` is typed ``str`` and never returns an empty
+        one. They are fail-closed legislation over the classifier pair, so the
+        world that fires them is a planted classifier, injected through the
+        checker's own kwarg seam rather than patched.
+        """
+        clean = {"imported": True, "stage2_import": "import"}
+        assert_classification_coherent(clean, None)
+
+        with self.assertRaisesRegex(
+                AssertionError, r"^unknown classification verdict: 'vibes'$"):
+            assert_classification_coherent(
+                clean, None,
+                classify_fn=lambda _decision: ("vibes", False, None))
+
+        with self.assertRaisesRegex(
+                AssertionError, r"^evidence_decision_name returned ''$"):
+            assert_classification_coherent(
+                clean, None, name_fn=lambda _decision: "")
+
+        with self.assertRaisesRegex(
+                AssertionError,
+                r"^cleanup_eligible without confident_reject: "
+                r"'would_import'/'import'$"):
+            assert_classification_coherent(
+                clean, None,
+                classify_fn=lambda _decision: ("would_import", True, "import"))
+
+    def test_integrity_fact_builder_refuses_an_unknown_fact(self):
+        """The generated taxonomy's own fall-through, proven.
+
+        ``_INTEGRITY_FACTS`` drives the strategy; a fact added there and not
+        here must fail loudly rather than silently return a clean candidate.
+        """
+        candidate = build_parity_candidate_evidence(
+            is_flac=False, min_bitrate=245, is_cbr=False)
+        for fact in _INTEGRITY_FACTS:
+            with self.subTest(fact=fact):
+                self.assertIsNotNone(_with_integrity_fact(candidate, fact))
+        with self.assertRaisesRegex(
+                AssertionError,
+                r"^unknown generated integrity fact: not_a_real_fact$"):
+            _with_integrity_fact(candidate, "not_a_real_fact")
 
     def _planted_basis(self, **overrides):
         basis = {
@@ -6745,24 +7107,66 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             backfill_override=None, search_filetype_override_after=None,
             comparison_basis=basis)
 
-    def test_basis_checker_trips_on_lost_basis(self):
-        with self.assertRaises(AssertionError):
-            assert_basis_consistent(self._result_with_basis("downgrade", None))
+    def test_basis_checker_trips_on_every_clause(self):
+        """All ten basis clauses, each proven by its own message.
 
-    def test_basis_checker_trips_on_verdict_contradiction(self):
-        bad = self._planted_basis(verdict="worse")
-        with self.assertRaises(AssertionError):
-            assert_basis_consistent(self._result_with_basis("import", bad))
+        The checker raises rather than accumulating, so the four clauses that
+        used to have a self-test only ever proved the four they reached first;
+        the remaining six were unfalsified.
+        """
+        for label, stage2, basis, expected in (
+            ("lost_basis", "downgrade", None,
+             r"^stage2='downgrade' requires a comparison but lost its basis$"),
+            ("non_compared", "verified_lossless_locked", self._planted_basis(),
+             (r"^basis present on non-compared stage2 "
+              r"'verified_lossless_locked'$")),
+            ("transcode_first", "transcode_first", self._planted_basis(),
+             r"^basis present on non-compared stage2 'transcode_first'$"),
+            ("unknown_branch", "import", self._planted_basis(branch="vibes"),
+             r"^unknown basis branch: 'vibes'$"),
+            ("malformed_metric", "import",
+             self._planted_basis(new_metric="p95"),
+             r"^malformed basis metrics: "),
+            ("import_contradiction", "import",
+             self._planted_basis(verdict="worse"),
+             r"^import decision contradicts basis verdict: "),
+            ("reject_contradiction", "downgrade",
+             self._planted_basis(verdict="better"),
+             r"^reject decision contradicts basis verdict: "),
+            ("reject_claims_bypass", "downgrade",
+             self._planted_basis(verdict="worse",
+                                 verified_lossless_bypass=True),
+             r"^reject decision claims a verified-lossless bypass: "),
+            ("rank_branch_equal_ranks", "import",
+             self._planted_basis(existing_rank="transparent"),
+             r"^rank branch with equal ranks: "),
+            ("same_rank_branch_differing_ranks", "import",
+             self._planted_basis(branch="metric_tiebreak"),
+             r"^same-rank branch with differing ranks: "),
+            ("transcode_regression_not_worse", "import",
+             self._planted_basis(branch="transcode_rank_regression"),
+             r"^transcode rank regression must be worse: "),
+        ):
+            with self.subTest(clause=label), self.assertRaisesRegex(
+                    AssertionError, expected):
+                assert_basis_consistent(
+                    self._result_with_basis(stage2, basis))
 
-    def test_basis_checker_trips_on_rank_incoherence(self):
-        bad = self._planted_basis(existing_rank="transparent")
-        with self.assertRaises(AssertionError):
-            assert_basis_consistent(self._result_with_basis("import", bad))
-
-    def test_basis_checker_trips_on_unknown_branch(self):
-        bad = self._planted_basis(branch="vibes")
-        with self.assertRaises(AssertionError):
-            assert_basis_consistent(self._result_with_basis("import", bad))
+    def test_measured_decision_basis_checker_trips_on_a_lost_basis(self):
+        """The extracted per-property clause, proven directly."""
+        compared = simulate(
+            AlbumState("transparent_mp3", 320, True, None, None, False, None,
+                       existing_format="MP3", avg_bitrate=320),
+            DownloadScenario("candidate", is_flac=False, min_bitrate=192,
+                             is_cbr=True, avg_bitrate=192, new_format="MP3"))
+        assert compared.comparison_basis is not None, repr(compared)
+        assert_measured_decision_carries_basis(compared)
+        with self.assertRaisesRegex(
+                AssertionError,
+                r"^measured decision 'downgrade' against an existing album "
+                r"lost its comparison basis: "):
+            assert_measured_decision_carries_basis(
+                replace(compared, comparison_basis=None))
 
     def test_metric_truthfulness_trips_on_fabricated_flac_avg(self):
         # The dl 36660 shape: a FLAC-source world whose basis claims the
@@ -6778,7 +7182,9 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             new_metric="avg", new_value_kbps=216,
             branch="cross_family_same_rank", verdict="equivalent",
             new_rank="transparent", existing_rank="transparent")
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+                AssertionError,
+                r"^candidate basis claims 'avg' but the world measured none: "):
             assert_basis_metrics_truthful(
                 album, download, self._result_with_basis("downgrade", bad))
 
@@ -6790,7 +7196,9 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             "planted", is_flac=False, min_bitrate=200, is_cbr=False,
             avg_bitrate=245)
         bad = self._planted_basis(existing_metric="avg")
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+                AssertionError,
+                r"^existing basis claims 'avg' but the album measured none: "):
             assert_basis_metrics_truthful(
                 album, download, self._result_with_basis("import", bad))
 
@@ -6802,7 +7210,9 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             "planted", is_flac=False, min_bitrate=200, is_cbr=False,
             avg_bitrate=245)
         bad = self._planted_basis(new_metric="median")
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+                AssertionError,
+                r"^median never crosses the flat interface: "):
             assert_basis_metrics_truthful(
                 album, download, self._result_with_basis("import", bad))
 
@@ -6826,7 +7236,11 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         evidence_result = {field: getattr(sim, field) for field in _PARITY_FIELDS}
         evidence_result["stage2_import"] = "downgrade"
         evidence_result["imported"] = False
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+                AssertionError,
+                r"^decision twins diverged on the same world:\n"
+                r"  imported: simulator=True evidence=False\n"
+                r"  stage2_import: simulator='import' evidence='downgrade'$"):
             assert_twins_agree(sim, evidence_result)
 
     def test_hypothesis_harness_detects_planted_bad_decider(self):
@@ -6841,7 +7255,9 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             assert_lossy_not_imported_over_verified_lossless(
                 _planted_bad_import(album, download))
 
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+                AssertionError,
+                r"lossy candidate imported over raw verified-lossless FLAC: "):
             prop()
 
 
