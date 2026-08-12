@@ -1456,7 +1456,6 @@ def recover_held(backend: DeployHoldBackend) -> None:
     if phase not in known_phases:
         raise DeployHoldError(f"cannot recover unknown phase: {phase!r}")
     _mask_and_stop_timers(backend)
-    backend.clear_ordinary_invocation()
     if phase == PHASE_ACQUIRING:
         # An acquiring receipt has never reached HELD, so recovery must
         # re-prove exactly what acquire_hold proves, in the same
@@ -1483,6 +1482,17 @@ def recover_held(backend: DeployHoldBackend) -> None:
         _ensure_owned_manual_hold(backend)
         _drain_services(backend, SERVICE_UNITS)
         _clear_owned_inhibitors(backend)
+    # Only clear a previously captured ordinary-successor identity once the
+    # branch above has actually re-proven the full HELD boundary -- clearing
+    # it up front (this function's prior shape) destroyed a complete-pending
+    # receipt's captured successor even when the branch itself failed partway
+    # and never reached HELD, leaving complete_release's read_ordinary_invocation()
+    # with nothing to compare against and forcing the whole release to be
+    # redone. write_ordinary_invocation's replace=False is why some clear is
+    # still needed here at all: a later finish_release, redone from a fresh
+    # HELD boundary, must be able to write a new marker without tripping over
+    # a stale one this recovery leaves behind.
+    backend.clear_ordinary_invocation()
     backend.write_phase(PHASE_HELD)
 
 

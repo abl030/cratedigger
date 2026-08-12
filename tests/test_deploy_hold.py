@@ -883,6 +883,31 @@ class TestStagedRelease(unittest.TestCase):
             {timer: "/dev/null" for timer in TIMER_UNITS},
         )
 
+    def test_recovery_from_complete_pending_preserves_the_captured_successor_on_failure(
+        self,
+    ) -> None:
+        """A recover-held that fails mid-branch must not destroy the
+        captured ordinary successor -- otherwise a retried complete_release
+        can never finish with the original identity and the whole release
+        has to be redone, even though recovery itself never got anywhere
+        near re-establishing HELD.
+        """
+        prepare_controlled(self.backend)
+        open_main_timer(self.backend)
+        finish_release(self.backend, INVOCATION)
+        self.assertEqual(self.backend.ordinary_invocation, INVOCATION)
+        # _clear_owned_inhibitors is the LAST step of the else branch, so an
+        # unowned inhibitor here fails recovery only after
+        # _ensure_owned_manual_hold and the SERVICE_UNITS drain already ran.
+        self.backend.inhibitor_files.add(MAIN_SERVICE)
+
+        with self.assertRaisesRegex(DeployHoldError, "unowned producer inhibitor"):
+            recover_held(self.backend)
+
+        self.assertEqual(self.backend.phase, PHASE_COMPLETE_PENDING)
+        self.assertEqual(self.backend.ordinary_invocation, INVOCATION)
+        self.assertEqual(self.backend.read_ordinary_invocation(), INVOCATION)
+
     def test_invocation_id_must_be_exact_systemd_shape(self) -> None:
         prepare_controlled(self.backend)
         open_main_timer(self.backend)
