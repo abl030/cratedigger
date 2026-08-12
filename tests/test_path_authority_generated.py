@@ -286,13 +286,35 @@ def assert_explorer_entry_invariant(
     expected_other_file_count: int,
     expected_scanned_file_count: int,
     expected_scanned_bytes: int,
+    expected_unreadable_count: int = 0,
 ) -> None:
-    """Explorer limits are inclusive and complete through the exact cap."""
+    """Explorer limits are inclusive and complete through the exact cap.
+
+    ``expected_unreadable_count`` covers a REFUSED entry that has nothing
+    to do with the cap — a FIFO answers ``not_regular_file`` at open and
+    is counted since issue #1086 (previously silently dropped). An
+    at-cap listing holding one is honestly ``partial`` for THAT reason,
+    never a truncation reason: the two causes of an incomplete listing
+    stay distinguishable (``truncated_reason`` is LIMITS only).
+    """
     partial = payload["partial"]
     reason = payload["truncated_reason"]
     if entry_count <= entry_cap:
-        if partial is not False or reason is not None:
+        if expected_unreadable_count:
+            if partial is not True or reason is not None:
+                raise AssertionError(
+                    "an at-cap listing with a refused (non-cap) entry was "
+                    "not honestly flagged partial"
+                )
+            if payload.get("unreadable_entry_count") != expected_unreadable_count:
+                raise AssertionError(
+                    "unreadable_entry_count did not match the refused "
+                    "(non-cap) entries"
+                )
+        elif partial is not False or reason is not None:
             raise AssertionError("at-cap explorer result was truncated")
+        # The refusal above changes ``partial``, never what was actually
+        # read: the readable portion must still be exact either way.
         files = payload["files"]
         if not isinstance(files, list):
             raise AssertionError("explorer files were not a list")
@@ -684,6 +706,10 @@ class TestGeneratedWrongMatchExplorerBounds(unittest.TestCase):
                 expected_other_file_count=sum(kind == "other" for kind in kinds),
                 expected_scanned_file_count=expected_regular_count,
                 expected_scanned_bytes=5 * expected_regular_count,
+                # A FIFO answers ``not_regular_file`` at open — a
+                # containment refusal counted since issue #1086, not a
+                # cap-truncation reason.
+                expected_unreadable_count=sum(kind == "fifo" for kind in kinds),
             )
 
 

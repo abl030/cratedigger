@@ -572,7 +572,13 @@ depends on.
   permitted to read are counted and named, and when nothing was readable the
   route answers 200 with `status: "unavailable"` and the panel says the folder
   is unreadable rather than empty — explicitly "this is NOT evidence that the
-  folder is empty". `web/js/wrong-matches.js` renders both `ok` and
+  folder is empty". The counted/uncounted decision asks
+  `lib.fs_authority.errno_proves_absence`, not whether the refusal is
+  retryable (#1086) — so a symlink the server refuses to follow, and a socket
+  or driverless device node it refuses to open, are counted the same as an
+  EACCES/EIO refusal, each with its own honest reason: a containment refusal
+  (symlink/socket) reads "refused ... out of the quarantine root", never
+  worded like a transient world failure. `web/js/wrong-matches.js` renders both `ok` and
   `unavailable` payloads; a refusal of the whole root is a 503 whose reason is
   shown next to the Retry button. **Any listing that recorded a refusal —
   `unavailable`, or a PARTIAL `ok` listing that read some files and was refused
@@ -586,10 +592,19 @@ depends on.
 - **Replace picker distance badge** — each pressing row carries the best
   beets-distance against the request's Wrong Matches folders. When the service
   was refused part of a folder, the response's `partial_read` is set and the
-  badge reads `best 0.07 (6/12) · incomplete manifest` in amber, with the
-  refusal on hover (#1063). A distance is a per-track average, so scoring an
-  incomplete manifest as a plain number misinforms the one surface where the
-  operator picks a pressing.
+  badge reads `best 0.07 (6/12) · incomplete manifest (…)` in amber, with the
+  full refusal text on hover (#1063). A distance is a per-track average, so
+  scoring an incomplete manifest as a plain number misinforms the one surface
+  where the operator picks a pressing. The parenthetical is a VISIBLE,
+  structured qualifier — `may be transient` or `refused: symlink or special
+  file`, driven off the wire's `partial_read_is_containment` boolean, never
+  parsed from the free-text reason — so the operator does not need to hover
+  to learn whether the incompleteness is a retryable world failure or a
+  permanent containment decision (#1086). Beets reads audio files by path, so
+  `lib/beets_distance.py` closes the matching containment gap with an
+  `lstat` guard that refuses every symlink — a loop, a dangling target, or a
+  valid target outside the quarantine root — before the path ever reaches
+  beets, the same posture the file explorer already held with `O_NOFOLLOW`.
 - **Wrong Matches cleanup** — one top-level action runs over the full Wrong
   Matches queue. It consumes existing evidence only, deletes force-mode
   confident cleanup-eligible rejects, and leaves would-import, uncertain,

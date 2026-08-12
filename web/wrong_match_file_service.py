@@ -17,9 +17,11 @@ from lib.fs_authority import (
     FilesystemAuthorityError,
     HeldDirectory,
     OpenedRegularFile,
+    errno_proves_absence,
     open_configured_quarantine_directory,
     open_regular_relative,
     refusal_is_indeterminate,
+    unreadable_reason_text,
 )
 from lib.json_narrow import (
     is_object_list as _is_object_list,
@@ -513,10 +515,29 @@ def build_wrong_match_explorer(
                         # these silently let an intact album render as a
                         # confident empty folder — the panel the operator
                         # reads before deciding to delete (issue #1063).
-                        if refusal_is_indeterminate(exc.code) is True:
+                        #
+                        # The gate is ``errno_proves_absence``, NOT
+                        # ``refusal_is_indeterminate(...) is True``. The
+                        # latter answers "is this retryable", a different
+                        # question from "did we learn this entry isn't
+                        # there" — and answers ``False`` for a symlink loop,
+                        # a socket, and a driverless device node, none of
+                        # which prove anything is absent. Keying off it
+                        # silently dropped ``ELOOP``/``ENXIO``/``ENODEV``
+                        # here while the beets-distance path (which asks
+                        # ``errno_proves_absence``) reported the same folder
+                        # as incomplete (issue #1086).
+                        if not errno_proves_absence(exc.code):
                             unreadable_entry_count += 1
                             if unreadable_reason is None:
-                                unreadable_reason = f"{relative}: {exc}"
+                                # Honest per-code copy: a symlink/special-file
+                                # refusal is a containment decision, not a
+                                # world failure, and must not be worded like
+                                # one (issue #1086 part 2).
+                                unreadable_reason = (
+                                    f"{relative}: "
+                                    f"{unreadable_reason_text(exc.code, errno_symbol=exc.errno_symbol)}"
+                                )
                         continue
                     try:
                         info = opened.stat_result

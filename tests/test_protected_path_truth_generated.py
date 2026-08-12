@@ -20,6 +20,7 @@ from __future__ import annotations
 import itertools
 import os
 import shutil
+import socket
 import stat
 import tempfile
 import unittest
@@ -33,7 +34,7 @@ from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.config import CratediggerConfig
-from lib.fs_authority import DirectoryObservation
+from lib.fs_authority import DirectoryObservation, unreadable_reason_text
 from lib.util import observe_failed_path
 from lib.wrong_match_cleanup_service import (
     _observe_first_existing as _cleanup_observe_first_existing,
@@ -589,14 +590,20 @@ ENTRY_WORLDS: tuple[str, ...] = (
     # ``unsafe_symlink``** — the identical code it would get for a
     # symlink pointing at a perfectly readable file. That is correct
     # issue #868 containment policy (a symlink is not authority,
-    # whatever it points at), and the entry is right to be excluded from
-    # the refusal count.
+    # whatever it points at).
     #
-    # The world earns its place regardless: it is the only one in this
-    # set that produces an entry the scan enumerates and then declines,
-    # so it is the only one that exercises the "refused NOTHING" half of
-    # every clause below against a non-empty directory.
+    # Before issue #1086 the entry was silently excluded from the
+    # refusal count — the exact category error the issue fixes:
+    # ``refusal_is_indeterminate("unsafe_symlink")`` answers ``False``
+    # (a containment verdict, not a world failure) and the old gate
+    # asked that question instead of ``errno_proves_absence``. It is
+    # now a COUNTED, honestly-worded containment refusal, same as the
+    # explorer's other refused worlds below.
     "vanished",
+    # A Unix-domain socket: refused via ENXIO before ``S_ISREG`` even
+    # runs (issue #868's ``not_regular_file``). The other silently-
+    # dropped code the #1086 predicate swap fixes, alongside ELOOP.
+    "unreadable_special",
 )
 
 
@@ -635,11 +642,20 @@ def build_explorer_world(
             unreadable.append(path)
         elif world == "vanished":
             # Enumerated, then declined as a symlink (ELOOP under
-            # ``O_NOFOLLOW``) — never read, never counted as refused.
+            # ``O_NOFOLLOW``) — counted as a refusal since issue #1086.
             os.symlink(
                 os.path.join(album, f"{index:02d} gone.mp3"),
                 os.path.join(album, f"{index:02d} dangling.mp3"),
             )
+        elif world == "unreadable_special":
+            # A Unix-domain socket: ``O_NOFOLLOW`` answers ENXIO before a
+            # descriptor exists (issue #868's ``not_regular_file``), and
+            # that refusal is counted since issue #1086 too.
+            sock = socket.socket(socket.AF_UNIX)
+            try:
+                sock.bind(os.path.join(album, f"{index:02d} weird.mp3"))
+            finally:
+                sock.close()
         else:
             path = os.path.join(album, f"{index:02d} locked-dir")
             os.makedirs(path)
@@ -682,7 +698,12 @@ def assert_explorer_listing_is_honest(
     )
     refused = sum(
         1 for world in worlds
-        if world in ("unreadable_file", "unreadable_dir")
+        if world in (
+            "unreadable_file", "unreadable_dir",
+            # Containment refusals (issue #1086): neither proves absence,
+            # so both count the same as an ordinary storage refusal.
+            "vanished", "unreadable_special",
+        )
     )
     unreadable_count = payload.get("unreadable_entry_count")
     if unreadable_count != refused:
@@ -789,24 +810,30 @@ class TestExplorerRefusalHonestyGenerated(unittest.TestCase):
                 payload={**pre_fix, "unreadable_entry_count": 1,
                          "partial": True, "status": "unavailable"},
             )
-        # The ``vanished`` world's own mutant: an entry the scan
-        # enumerated and then declined on CONTAINMENT grounds (ELOOP ->
-        # ``unsafe_symlink``, per issue #868 — not ENOENT; ``O_NOFOLLOW``
-        # never reaches the target), counted as one the storage refused
-        # us. That is what ``if refusal_is_indeterminate(exc.code) is
-        # True:`` → ``if True:`` produces in
-        # ``build_wrong_match_explorer``, and no other world in
-        # ``ENTRY_WORLDS`` can reach it.
+        # The ``vanished`` world's own mutant, post-#1086: an entry the
+        # scan enumerated and then declined on CONTAINMENT grounds (ELOOP
+        # -> ``unsafe_symlink``, per issue #868 — not ENOENT;
+        # ``O_NOFOLLOW`` never reaches the target) must now be COUNTED.
+        # The old ``pre_fix`` shape (0 refusals, a confident "ok" empty
+        # listing) is exactly the pre-#1086 defect for this world: it is
+        # what ``if refusal_is_indeterminate(exc.code) is True:`` produces
+        # for ``unsafe_symlink`` (``False``), silently dropping the entry.
         with self.assertRaises(AssertionError):
             assert_explorer_listing_is_honest(
-                worlds=["vanished"],
-                payload={**pre_fix, "unreadable_entry_count": 1,
-                         "partial": True, "status": "unavailable",
-                         "unreadable_reason": "02 dangling.mp3: ELOOP"},
+                worlds=["vanished"], payload=pre_fix,
             )
-        # Must still work: the honest answer for that same world.
+        # Must still work: the honest answer is a counted, honestly-worded
+        # containment refusal — no other world in ``ENTRY_WORLDS`` reaches
+        # ``unsafe_symlink``.
         assert_explorer_listing_is_honest(
-            worlds=["vanished"], payload=pre_fix,
+            worlds=["vanished"],
+            payload={
+                **pre_fix, "unreadable_entry_count": 1,
+                "partial": True, "status": "unavailable",
+                "unreadable_reason": (
+                    f"02 dangling.mp3: {unreadable_reason_text('unsafe_symlink')}"
+                ),
+            },
         )
         # Fail-closed the other way: an honest complete listing must pass.
         assert_explorer_listing_is_honest(
@@ -882,7 +909,10 @@ def assert_browser_told_the_truth(
     )
     refused = sum(
         1 for world in worlds
-        if world in ("unreadable_file", "unreadable_dir")
+        if world in (
+            "unreadable_file", "unreadable_dir",
+            "vanished", "unreadable_special",
+        )
     )
     if _LOAD_FAILURE_COPY in html:
         raise AssertionError(
@@ -1033,19 +1063,23 @@ class TestExplorerReachesTheOperatorGenerated(unittest.TestCase):
                 payload={"status": "ok", "unreadable_entry_count": 0},
                 html="<div>1 entry could not be read</div>",
             )
-        # 4b. The ``vanished`` world's own mutant, at the browser: an
-        #     entry declined on containment grounds, rendered to the
-        #     operator as one the storage refused to show.
+        # 4b. The ``vanished`` world's own mutant, at the browser, post-
+        #     #1086: an entry declined on containment grounds must be
+        #     rendered as a refusal, not silently reported "ok" and empty
+        #     — the shape ``refusal_is_indeterminate`` produced pre-fix.
         with self.assertRaises(AssertionError):
             assert_browser_told_the_truth(
                 worlds=["vanished"],
-                payload={"status": "unavailable", "unreadable_entry_count": 1},
-                html="<div>1 entry could not be read</div>",
+                payload={"status": "ok", "unreadable_entry_count": 0},
+                html="<div>No audio files found in this folder.</div>",
             )
         assert_browser_told_the_truth(
             worlds=["vanished"],
-            payload={"status": "ok", "unreadable_entry_count": 0},
-            html="<div>No audio files found in this folder.</div>",
+            payload={"status": "unavailable", "unreadable_entry_count": 1},
+            html=(
+                "<div>1 entry could not be read. This is NOT evidence "
+                "that the folder is empty.</div>"
+            ),
         )
         assert_browser_told_the_truth(
             worlds=["readable_audio"],
@@ -1077,38 +1111,45 @@ DISTANCE_FILE_WORLDS: tuple[str, ...] = (
     # deployment really runs on, and the world whose absence hid a defect
     # through a pin, a property and six reviews. ``FileIO.read`` attaches
     # no filename, so the errno and the filename land on DIFFERENT links
-    # of the wrapped chain and no single link carries both.
+    # of the wrapped chain and no single link carries both. Constructed
+    # via a symlink to ``/proc/self/mem`` — which, post-#1086, the
+    # ``lstat`` guard now refuses BEFORE that mid-read is ever attempted.
+    # The world still belongs to the ``refused`` bucket (same outcome,
+    # earlier gate), and the module-level pin
+    # (``test_both_real_refusal_producers_are_found_and_attributed`` in
+    # ``tests/test_beets_distance.py``) independently proves
+    # ``os_refusal_in_chain`` still finds a GENUINE mid-read EIO when a
+    # caller reaches it on a non-symlink descriptor.
     "refused_mid_read",
     # EACCES on a SUBDIRECTORY, which fails in ``os.walk``'s ``onerror``
     # rather than on a file. That is the third of the three sites
     # ``_refusal_text`` owns, and the sweep for this round found it was
     # the one no world could reach.
     "refused_dir",
-    # ELOOP. Its whole point is that ``refusal_is_indeterminate`` answers
-    # ``False`` for it — a containment verdict, not a sick mount — while
-    # ``errno_proves_absence`` also answers ``False``, because a loop
-    # proves nothing about what the name holds. Without this world the
-    # ``_refusal_text`` predicate could be reverted to the pre-delta
-    # ``refusal_is_indeterminate(...) is not True`` and the property
-    # would patrol nothing: only the deterministic pin killed it.
+    # A SELF-REFERENCING symlink. ``lstat`` never dereferences, so it
+    # never even reaches the ELOOP a following ``stat`` would raise — it
+    # sees "this name is a symlink" via ``S_ISLNK`` and refuses on the
+    # spot (issue #1086's containment guard). Kept apart from
+    # ``refused_symlink_dangling``/``refused_symlink_external`` only to
+    # document that a loop, a dangling target, and a valid target
+    # outside the root are ALL refused the identical way — none is
+    # special-cased.
     "refused_symlink_loop",
-    # A dangling symlink: the walk LISTS the name, ``os.stat`` answers
-    # ENOENT. The file is PROVEN not to be there — the one errno that
-    # earns a definitive negative.
-    #
-    # Deliberate asymmetry worth knowing: the SAME on-disk shape is
-    # ``vanished`` in ``ENTRY_WORLDS`` above and resolves differently
-    # there. This path stats, and ``os.stat`` FOLLOWS the link to find
-    # ENOENT; the explorer opens with ``O_NOFOLLOW`` and stops at the
-    # link itself with ELOOP. Both are correct for what they do, and
-    # neither counts the entry as a refusal — but only this one may call
-    # it proven absent.
-    #
-    # Without this world the "refused
-    # nothing yet claimed partial_read" clause below could not fire, and
-    # the delta shipped a proven absence rendered as an amber
-    # "incomplete manifest" badge over a complete manifest.
-    "absent",
+    # A dangling symlink: the walk LISTS the name; before #1086,
+    # ``os.stat`` FOLLOWED it to find ENOENT (a proven absence). The
+    # ``lstat`` guard never follows, so it never discovers the target is
+    # gone — it refuses the symlink itself, same as any other. This
+    # dissolves the asymmetry the issue names: the SAME on-disk shape is
+    # ``vanished`` in ``ENTRY_WORLDS`` above, and now BOTH ends refuse it
+    # for the identical reason (a symlink, ``O_NOFOLLOW``/``lstat``,
+    # never dereferenced) instead of separately reaching the same answer.
+    "refused_symlink_dangling",
+    # The containment gap named in the issue, made concrete: a symlink
+    # to a REAL, READABLE file OUTSIDE the album folder entirely (the
+    # shared FLAC fixture). Before the guard this was silently followed
+    # and fingerprinted as if it were the album's own track — the
+    # security-relevant half of "both ends agree by construction".
+    "refused_symlink_external",
     "unparseable",
 )
 
@@ -1144,7 +1185,8 @@ def assert_distance_read_is_honest(
         1 for world in worlds
         if world in (
             "refused", "refused_mid_read", "refused_dir",
-            "refused_symlink_loop",
+            "refused_symlink_loop", "refused_symlink_dangling",
+            "refused_symlink_external",
         )
     )
     if refused and readable == 0 and outcome == "no_audio":
@@ -1182,8 +1224,15 @@ def assert_distance_read_is_honest(
         )
 
 
+_CONTAINMENT_QUALIFIER = "refused: symlink or special file"
+_WORLD_FAILURE_QUALIFIER = "may be transient"
+
+
 def assert_badge_shows_the_incompleteness(
-    *, partial_read: str | None, text: str,
+    *,
+    partial_read: str | None,
+    partial_read_is_containment: bool | None = None,
+    text: str,
 ) -> None:
     """The pressing-row badge is the operator's decision surface."""
     marked = _INCOMPLETE_BADGE_COPY in text
@@ -1196,6 +1245,29 @@ def assert_badge_shows_the_incompleteness(
         raise AssertionError(
             f"badge {text!r} claimed an incomplete manifest for a complete read"
         )
+    # Issue #1086: the KIND of incompleteness must be VISIBLE in the
+    # badge text itself, not just present in a hover-only title — a
+    # containment refusal (a symlink/socket) must never read like an
+    # ordinary transient storage failure, or vice versa.
+    if partial_read is not None and text:
+        expected_qualifier = (
+            _CONTAINMENT_QUALIFIER if partial_read_is_containment
+            else _WORLD_FAILURE_QUALIFIER
+        )
+        wrong_qualifier = (
+            _WORLD_FAILURE_QUALIFIER if partial_read_is_containment
+            else _CONTAINMENT_QUALIFIER
+        )
+        if expected_qualifier not in text:
+            raise AssertionError(
+                f"badge {text!r} did not visibly say {expected_qualifier!r} "
+                f"for partial_read_is_containment={partial_read_is_containment!r}"
+            )
+        if wrong_qualifier in text:
+            raise AssertionError(
+                f"badge {text!r} said {wrong_qualifier!r}, the OTHER kind's "
+                "wording"
+            )
 
 
 class TestDistanceReadRefusalGenerated(unittest.TestCase):
@@ -1226,17 +1298,19 @@ class TestDistanceReadRefusalGenerated(unittest.TestCase):
     @example(worlds=["readable", "unparseable"])
     @example(worlds=["readable"])
     @example(worlds=["unparseable"])
-    @example(worlds=["readable", "absent"])
-    @example(worlds=["absent"])
-    @example(worlds=["absent", "refused"])
+    @example(worlds=["readable", "refused_symlink_dangling"])
+    @example(worlds=["refused_symlink_dangling"])
+    @example(worlds=["refused_symlink_dangling", "refused"])
     @example(worlds=["refused_mid_read"])
     @example(worlds=["readable", "refused_mid_read"])
-    @example(worlds=["refused_mid_read", "absent"])
+    @example(worlds=["refused_mid_read", "refused_symlink_dangling"])
     @example(worlds=["refused_mid_read", "unparseable"])
     @example(worlds=["refused_dir"])
     @example(worlds=["readable", "refused_dir"])
     @example(worlds=["refused_symlink_loop"])
     @example(worlds=["readable", "refused_symlink_loop"])
+    @example(worlds=["refused_symlink_external"])
+    @example(worlds=["readable", "refused_symlink_external"])
     @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
     @given(worlds=st.lists(
         st.sampled_from(DISTANCE_FILE_WORLDS), min_size=1, max_size=3,
@@ -1257,15 +1331,25 @@ class TestDistanceReadRefusalGenerated(unittest.TestCase):
                     with open(path, "wb") as handle:
                         handle.write(b"not a flac at all" * 8)
                     continue
-                if world == "absent":
-                    # Listed by the walk, ENOENT on stat: proven absent.
+                if world == "refused_symlink_dangling":
+                    # Listed by the walk; ``lstat`` sees a symlink and
+                    # refuses without ever discovering the target is gone
+                    # (issue #1086 — no longer a proven absence).
                     os.symlink(os.path.join(album, f"{index:02d} gone.flac"),
                                path)
+                    continue
+                if world == "refused_symlink_external":
+                    # A symlink to a REAL, readable file OUTSIDE the
+                    # album: the containment gap the issue names. Refused
+                    # the same way, never followed.
+                    os.symlink(self.FIXTURE_FLAC, path)
                     continue
                 if world == "refused_mid_read":
                     # Opens and stats fine; every read answers EIO. The
                     # deployment's real virtiofs shape, no flaky mount
-                    # required.
+                    # required. Constructed via a symlink, so post-#1086
+                    # this is now refused at the ``lstat`` guard rather
+                    # than at the mid-read — see the world's docstring.
                     os.symlink("/proc/self/mem", path)
                     continue
                 if world == "refused_dir":
@@ -1277,7 +1361,9 @@ class TestDistanceReadRefusalGenerated(unittest.TestCase):
                     locked.append(subdir)
                     continue
                 if world == "refused_symlink_loop":
-                    # ELOOP: proves nothing about what the name holds.
+                    # A self-referencing symlink: ``lstat`` never
+                    # dereferences, so it never reaches the ELOOP a
+                    # following ``stat`` would raise.
                     os.symlink(path, path)
                     continue
                 shutil.copy(self.FIXTURE_FLAC, path)
@@ -1311,6 +1397,7 @@ class TestDistanceReadRefusalGenerated(unittest.TestCase):
         # …and through the outermost real adapter the operator meets it in.
         assert_badge_shows_the_incompleteness(
             partial_read=result.partial_read,
+            partial_read_is_containment=result.partial_read_is_containment,
             text=self._badge_text(result),
         )
 
@@ -1334,22 +1421,24 @@ class TestDistanceReadRefusalGenerated(unittest.TestCase):
                 worlds=["readable", "unparseable"], outcome="ok",
                 partial_read="x: bad tags", total_local_tracks=1,
             )
-        # 3b. The SAME mirror image from the world the fifth review
-        #     found: a PROVEN absence (ENOENT on a dangling symlink)
-        #     reported as a read refusal, which the picker then paints as
-        #     "· incomplete manifest" over a complete manifest.
+        # 3b. Issue #1086's regression shape: a symlink refusal (a
+        #     dangling target, a self-loop, or a valid target outside the
+        #     root) reported as a proven absence — the exact category
+        #     error the ``lstat`` guard and the predicate swap exist to
+        #     prevent. Before this delta a dangling symlink WAS reported
+        #     this way (``os.stat`` followed it into ENOENT); this pin
+        #     guards against that regressing.
         with self.assertRaises(AssertionError):
             assert_distance_read_is_honest(
-                worlds=["readable", "absent"], outcome="ok",
-                partial_read="…/02 dangling.flac: No such file or directory",
-                total_local_tracks=1,
+                worlds=["readable", "refused_symlink_dangling"],
+                outcome="ok", partial_read=None, total_local_tracks=1,
             )
-        # 3c. …and the same absence turning the whole folder into a
-        #     retryable world failure instead of the definitive negative
-        #     it actually established.
+        # 3c. …and the same false absence turning a folder holding only a
+        #     symlink into ``no_audio`` (a definitive negative) instead
+        #     of the ``folder_unavailable`` a refusal actually earns.
         with self.assertRaises(AssertionError):
             assert_distance_read_is_honest(
-                worlds=["absent"], outcome="folder_unavailable",
+                worlds=["refused_symlink_external"], outcome="no_audio",
                 partial_read=None, total_local_tracks=None,
             )
         # 4. A complete read must pass — including one whose only
@@ -1358,13 +1447,22 @@ class TestDistanceReadRefusalGenerated(unittest.TestCase):
             worlds=["readable"], outcome="ok",
             partial_read=None, total_local_tracks=1,
         )
+        # Must still work: every symlink flavour — a loop, a dangling
+        # target, and a valid target outside the root — is honestly a
+        # REFUSAL, never a proven absence (issue #1086).
         assert_distance_read_is_honest(
-            worlds=["readable", "absent"], outcome="ok",
-            partial_read=None, total_local_tracks=1,
+            worlds=["readable", "refused_symlink_dangling"], outcome="ok",
+            partial_read="02 track.flac: symlink refused",
+            total_local_tracks=1,
         )
         assert_distance_read_is_honest(
-            worlds=["absent"], outcome="no_audio",
+            worlds=["refused_symlink_dangling"], outcome="folder_unavailable",
             partial_read=None, total_local_tracks=None,
+        )
+        assert_distance_read_is_honest(
+            worlds=["readable", "refused_symlink_external"], outcome="ok",
+            partial_read="02 track.flac: symlink refused",
+            total_local_tracks=1,
         )
         # 5. The badge checker, both directions.
         with self.assertRaises(AssertionError):
@@ -1378,5 +1476,294 @@ class TestDistanceReadRefusalGenerated(unittest.TestCase):
             )
         assert_badge_shows_the_incompleteness(
             partial_read="x: Permission denied",
-            text="best 0.07 (1/2) · incomplete manifest",
+            partial_read_is_containment=False,
+            text="best 0.07 (1/2) · incomplete manifest (may be transient)",
+        )
+        # 5b. Issue #1086: the KIND must be VISIBLE, not merely present in
+        #     ``partial_read``. A containment refusal rendered with the
+        #     world-failure wording (or vice versa) is exactly the
+        #     "correct string, invisible/mislabeled distinction" defect
+        #     this series keeps finding.
+        with self.assertRaises(AssertionError):
+            assert_badge_shows_the_incompleteness(
+                partial_read="x: symlink refused",
+                partial_read_is_containment=True,
+                text="best 0.07 (1/2) · incomplete manifest (may be transient)",
+            )
+        with self.assertRaises(AssertionError):
+            assert_badge_shows_the_incompleteness(
+                partial_read="x: Permission denied",
+                partial_read_is_containment=False,
+                text=(
+                    "best 0.07 (1/2) · incomplete manifest "
+                    "(refused: symlink or special file)"
+                ),
+            )
+        assert_badge_shows_the_incompleteness(
+            partial_read="x: symlink refused",
+            partial_read_is_containment=True,
+            text=(
+                "best 0.07 (1/2) · incomplete manifest "
+                "(refused: symlink or special file)"
+            ),
+        )
+
+
+# ---------------------------------------------------------------------------
+# The composed property issue #1086 asks for directly: for a MIX of
+# readable/refused entries under ONE real folder, the explorer's per-entry
+# count (``web/wrong_match_file_service.py``) and the distance path's
+# per-file read (``lib/beets_distance.py``) reach the SAME verdict about
+# the SAME entries. Neither module-scope test above proves this — each
+# drives its OWN producer over its OWN world set, so a divergence in HOW
+# MANY entries or WHICH kinds count as refused would pass both suites
+# while the two surfaces of one request told the operator different
+# stories about the same folder — exactly the shape of the bug this
+# issue fixes (ELOOP/ENXIO counted at one end, dropped at the other).
+# ---------------------------------------------------------------------------
+
+AGREEMENT_ENTRY_KINDS: tuple[str, ...] = (
+    "readable",
+    "refused_eacces",
+    "refused_symlink_external",
+    "refused_socket",
+)
+
+
+def _build_agreement_world(
+    album: str, kinds: Sequence[str], *, fixture_flac: str,
+) -> list[str]:
+    """Materialize one real folder shared by both producers.
+
+    Every entry uses a ``.flac`` name so BOTH consumers look at the same
+    population: the explorer counts every non-directory entry regardless
+    of extension, but ``lib.beets_distance`` only ever considers
+    ``AUDIO_EXTS`` files — a non-audio unreadable entry would make the
+    two counts incomparable by construction, not by defect. Returns the
+    paths a caller must ``chmod`` back before the temp dir can be removed.
+    """
+    locked: list[str] = []
+    for index, kind in enumerate(kinds):
+        path = os.path.join(album, f"{index:02d} track.flac")
+        if kind == "readable":
+            shutil.copy(fixture_flac, path)
+        elif kind == "refused_eacces":
+            shutil.copy(fixture_flac, path)
+            os.chmod(path, 0o000)
+            locked.append(path)
+        elif kind == "refused_symlink_external":
+            # The containment gap itself: a REAL, readable file outside
+            # the album folder entirely.
+            os.symlink(fixture_flac, path)
+        else:  # refused_socket
+            sock = socket.socket(socket.AF_UNIX)
+            try:
+                sock.bind(path)
+            finally:
+                sock.close()
+    return locked
+
+
+def assert_explorer_and_distance_agree(
+    *,
+    kinds: Sequence[str],
+    explorer_payload: Mapping[str, object],
+    distance_result: object,
+) -> None:
+    """The one invariant: both real producers agree about one real folder."""
+    from lib.beets_distance import BeetsDistanceResult
+    assert isinstance(distance_result, BeetsDistanceResult)
+
+    readable = sum(1 for kind in kinds if kind == "readable")
+    refused = len(kinds) - readable
+
+    explorer_unreadable = explorer_payload.get("unreadable_entry_count")
+    if explorer_unreadable != refused:
+        raise AssertionError(
+            f"kinds {list(kinds)}: explorer counted {explorer_unreadable} "
+            f"unreadable entries, expected {refused}"
+        )
+    explorer_audio = explorer_payload.get("audio_file_count")
+    if explorer_audio != readable:
+        raise AssertionError(
+            f"kinds {list(kinds)}: explorer listed {explorer_audio} audio "
+            f"files, expected {readable} readable"
+        )
+
+    if readable > 0:
+        if distance_result.outcome != "ok":
+            raise AssertionError(
+                f"kinds {list(kinds)}: distance reported "
+                f"outcome={distance_result.outcome!r} despite {readable} "
+                "readable file(s)"
+            )
+        if distance_result.total_local_tracks != readable:
+            raise AssertionError(
+                f"kinds {list(kinds)}: distance scored "
+                f"{distance_result.total_local_tracks!r} local tracks, "
+                f"expected the {readable} it could actually read"
+            )
+        if (refused > 0) != (distance_result.partial_read is not None):
+            raise AssertionError(
+                f"kinds {list(kinds)}: distance partial_read="
+                f"{distance_result.partial_read!r} disagrees with "
+                f"{refused} refused entr{'y' if refused == 1 else 'ies'}"
+            )
+    else:
+        if distance_result.outcome != "folder_unavailable":
+            raise AssertionError(
+                f"kinds {list(kinds)}: every candidate was refused, "
+                f"expected outcome=folder_unavailable, got "
+                f"{distance_result.outcome!r}"
+            )
+
+    # The load-bearing agreement: both ends detected SOME refusal, or
+    # neither did — never one seeing a refusal the other missed.
+    explorer_saw_refusal = bool(explorer_unreadable)
+    distance_saw_refusal = (
+        distance_result.partial_read is not None
+        or distance_result.outcome == "folder_unavailable"
+    )
+    if explorer_saw_refusal != distance_saw_refusal:
+        raise AssertionError(
+            f"kinds {list(kinds)}: explorer refusal={explorer_saw_refusal} "
+            f"disagrees with distance refusal={distance_saw_refusal} for "
+            "the SAME folder"
+        )
+
+
+class TestExplorerAndDistanceAgreeGenerated(unittest.TestCase):
+    """Real ``build_wrong_match_explorer`` + real ``compute_beets_distance``
+    over the SAME on-disk folder must reach the same counted/refused
+    verdict — the widest-boundary composition issue #1086 names."""
+
+    FIXTURE_FLAC: ClassVar[str] = os.path.join(
+        os.path.dirname(__file__), "fixtures", "audio_hash", "sine_440.flac")
+
+    @example(kinds=["readable"])
+    @example(kinds=["refused_eacces"])
+    @example(kinds=["refused_symlink_external"])
+    @example(kinds=["refused_socket"])
+    @example(kinds=["readable", "refused_eacces"])
+    @example(kinds=["readable", "refused_symlink_external"])
+    @example(kinds=["readable", "refused_socket"])
+    @example(kinds=[
+        "refused_eacces", "refused_symlink_external", "refused_socket",
+    ])
+    @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
+    @given(kinds=st.lists(
+        st.sampled_from(AGREEMENT_ENTRY_KINDS), min_size=1, max_size=4,
+    ))
+    def test_explorer_and_distance_agree_on_the_same_folder(
+        self, kinds: list[str],
+    ) -> None:
+        from lib.beets_distance import compute_beets_distance
+        from tests.test_beets_distance import _ok_mb_release, _present, _StubPDB
+
+        db = FakePipelineDB()
+        with tempfile.TemporaryDirectory() as root:
+            db.seed_request(make_request_row(id=1, mb_release_id="mbid-1"))
+            album = os.path.join(root, "failed_imports", "Album")
+            os.makedirs(album)
+            locked = _build_agreement_world(
+                album, kinds, fixture_flac=self.FIXTURE_FLAC)
+            log_id = db.log_download(
+                1, outcome="rejected",
+                validation_result={"failed_path": album},
+            )
+            entry = db.get_download_log_entry(log_id)
+            assert entry is not None
+            cfg = CratediggerConfig(
+                slskd_download_dir=root,
+                beets_staging_dir=os.path.join(root, "staging"),
+                processing_dir=os.path.join(root, "processing"),
+            )
+            try:
+                explorer_payload = build_wrong_match_explorer(
+                    download_log_id=log_id, entry=entry, cfg=cfg,
+                )
+                pdb = _StubPDB(
+                    download_log_entry={
+                        "id": log_id, "request_id": 1,
+                        "validation_result": {"failed_path": album},
+                    },
+                    request={"id": 1, "mb_release_group_id": "rg-shared"},
+                )
+                distance_result = compute_beets_distance(
+                    log_id, "rel-x",
+                    pdb=pdb,
+                    mb_get_release=lambda mbid: _ok_mb_release(mbid=mbid),
+                    observe_failed_path=_present,
+                )
+            finally:
+                for path in locked:
+                    os.chmod(path, 0o600)
+
+        assert_explorer_and_distance_agree(
+            kinds=kinds,
+            explorer_payload=explorer_payload,
+            distance_result=distance_result,
+        )
+
+    def test_known_bad_agreement_checker_trips(self) -> None:
+        """The checker must fail on a planted DISAGREEMENT between ends."""
+        from lib.beets_distance import BeetsDistanceResult
+
+        # Explorer saw a refusal the distance path did not.
+        with self.assertRaises(AssertionError):
+            assert_explorer_and_distance_agree(
+                kinds=["readable", "refused_eacces"],
+                explorer_payload={
+                    "unreadable_entry_count": 1, "audio_file_count": 1,
+                },
+                distance_result=BeetsDistanceResult(
+                    outcome="ok", total_local_tracks=1, partial_read=None,
+                ),
+            )
+        # Distance path saw a refusal the explorer's count missed.
+        with self.assertRaises(AssertionError):
+            assert_explorer_and_distance_agree(
+                kinds=["readable", "refused_symlink_external"],
+                explorer_payload={
+                    "unreadable_entry_count": 0, "audio_file_count": 2,
+                },
+                distance_result=BeetsDistanceResult(
+                    outcome="ok", total_local_tracks=1,
+                    partial_read="02 track.flac: symlink refused",
+                ),
+            )
+        # Every candidate refused, but distance claims a definitive
+        # negative instead of the unavailable folder it actually is.
+        with self.assertRaises(AssertionError):
+            assert_explorer_and_distance_agree(
+                kinds=["refused_socket"],
+                explorer_payload={
+                    "unreadable_entry_count": 1, "audio_file_count": 0,
+                },
+                distance_result=BeetsDistanceResult(
+                    outcome="no_audio", total_local_tracks=None,
+                    partial_read=None,
+                ),
+            )
+        # Must still work: honest agreement passes both directions.
+        assert_explorer_and_distance_agree(
+            kinds=["readable", "refused_eacces"],
+            explorer_payload={
+                "unreadable_entry_count": 1, "audio_file_count": 1,
+            },
+            distance_result=BeetsDistanceResult(
+                outcome="ok", total_local_tracks=1,
+                partial_read="01 track.flac: could not be read, may be "
+                "transient (EACCES)",
+            ),
+        )
+        assert_explorer_and_distance_agree(
+            kinds=["refused_socket"],
+            explorer_payload={
+                "unreadable_entry_count": 1, "audio_file_count": 0,
+            },
+            distance_result=BeetsDistanceResult(
+                outcome="folder_unavailable", total_local_tracks=None,
+                partial_read=None,
+            ),
         )

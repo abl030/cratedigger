@@ -298,6 +298,77 @@ class ClassifyRenderTarget:
         )
 
 
+class WrongMatchExplorerRenderTarget:
+    """Render one ``download_log`` row through the REAL Wrong Matches
+    file explorer (``web.wrong_match_file_service.build_wrong_match_explorer``).
+
+    Unlike :class:`ClassifyRenderTarget`, corpus rows here carry only the
+    two fields the explorer actually reads (``id``, ``validation_result``)
+    — the explorer's OUTPUT depends on live filesystem state at render
+    time, not stored DB columns. That is still a meaningful Rule D
+    differential: the runbook's two renders (base ref, current tree) run
+    back-to-back against the SAME disk state, so any difference isolates
+    the CODE change, not a change in what is on disk between runs.
+
+    Uses the real runtime config by default
+    (:func:`lib.config.read_runtime_config`, the exact resolution
+    ``build_wrong_match_explorer`` falls back to in production). Set
+    ``CRATEDIGGER_QUARANTINE_SLSKD_DIR`` / ``CRATEDIGGER_QUARANTINE_STAGING_DIR``
+    / ``CRATEDIGGER_QUARANTINE_PROCESSING_DIR`` to override with the
+    installation's real quarantine roots when running the differential
+    from a host without the deployed immutable config file — never
+    hardcoded here, so this target stays installation-agnostic.
+    """
+
+    def prepare(self, rows: Iterable[Mapping[str, object]]) -> None:
+        """Cross-row projection: none — each folder is independent."""
+
+    def render(self, row: Mapping[str, object]) -> RenderedRow:
+        from web.wrong_match_file_service import (
+            WrongMatchSourceUnavailable,
+            build_wrong_match_explorer,
+        )
+
+        row_id = row.get("id")
+        if not isinstance(row_id, int) or isinstance(row_id, bool):
+            raise RenderDifferentialError(
+                f"corpus row has no integer id: {row_id!r}")
+        try:
+            payload = build_wrong_match_explorer(
+                download_log_id=row_id, entry=row, cfg=self._cfg())
+        except (WrongMatchSourceUnavailable, FileNotFoundError) as exc:
+            # A whole-root refusal/not-found is not a 200 payload — record
+            # it as its own comparable shape rather than losing the row.
+            return RenderedRow(id=row_id, fields={
+                "status": "error",
+                "unreadable_entry_count": None,
+                "unreadable_reason": str(exc),
+                "partial": None,
+                "truncated_reason": None,
+            })
+        return RenderedRow(id=row_id, fields={
+            "status": payload.get("status"),
+            "unreadable_entry_count": payload.get("unreadable_entry_count"),
+            "unreadable_reason": payload.get("unreadable_reason"),
+            "partial": payload.get("partial"),
+            "truncated_reason": payload.get("truncated_reason"),
+        })
+
+    @staticmethod
+    def _cfg() -> object | None:
+        slskd = os.environ.get("CRATEDIGGER_QUARANTINE_SLSKD_DIR")
+        staging = os.environ.get("CRATEDIGGER_QUARANTINE_STAGING_DIR")
+        processing = os.environ.get("CRATEDIGGER_QUARANTINE_PROCESSING_DIR")
+        if not (slskd or staging or processing):
+            return None
+        from lib.config import CratediggerConfig
+        return CratediggerConfig(
+            slskd_download_dir=slskd or "",
+            beets_staging_dir=staging or "",
+            processing_dir=processing or "",
+        )
+
+
 class _CallableTarget:
     """Adapter so ``--target module:function`` can stay a plain function."""
 

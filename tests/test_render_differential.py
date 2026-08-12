@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import unittest
+import unittest.mock
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -481,6 +482,116 @@ class TestClassifyRenderTargetIsTheProductionPath(unittest.TestCase):
     def test_boolean_id_fails_closed(self) -> None:
         with self.assertRaises(RenderDifferentialError):
             _render_one(_download_log_row(id=True))
+
+
+class TestWrongMatchExplorerRenderTargetIsTheProductionPath(unittest.TestCase):
+    """Issue #1086: the Wrong Matches explorer's OWN render target.
+
+    Unlike :class:`ClassifyRenderTarget`, this target's output depends on
+    LIVE filesystem state rather than stored columns — proportionate
+    coverage here is: the target's fields match calling
+    ``build_wrong_match_explorer`` directly over the SAME real folder,
+    the error branch is reached honestly, and the row-id contract fails
+    closed the same way every other target does.
+    """
+
+    def _quarantine_env(self, processing_dir: str) -> dict[str, str]:
+        return {
+            "CRATEDIGGER_QUARANTINE_SLSKD_DIR": "",
+            "CRATEDIGGER_QUARANTINE_STAGING_DIR": "",
+            "CRATEDIGGER_QUARANTINE_PROCESSING_DIR": processing_dir,
+        }
+
+    def test_rendered_fields_match_the_real_explorer_for_a_refused_entry(
+        self,
+    ) -> None:
+        from scripts.render_differential import WrongMatchExplorerRenderTarget
+        from web.wrong_match_file_service import build_wrong_match_explorer
+
+        with TemporaryDirectory() as root:
+            processing_dir = os.path.join(root, "processing")
+            album = os.path.join(
+                processing_dir, "albums", "wrong_matches", "Album")
+            os.makedirs(album)
+            readable = os.path.join(album, "01 - Readable.mp3")
+            with open(readable, "wb") as handle:
+                handle.write(b"\x00" * 16)
+            locked = os.path.join(album, "02 - Locked.mp3")
+            with open(locked, "wb") as handle:
+                handle.write(b"\x00" * 16)
+            os.chmod(locked, 0o000)
+            try:
+                row = {
+                    "id": 909,
+                    "validation_result": json.dumps({"failed_path": album}),
+                }
+                with unittest.mock.patch.dict(
+                    os.environ, self._quarantine_env(processing_dir),
+                    clear=False,
+                ):
+                    target = WrongMatchExplorerRenderTarget()
+                    target.prepare([row])
+                    rendered = target.render(row)
+                    from lib.config import CratediggerConfig
+                    expected = build_wrong_match_explorer(
+                        download_log_id=909, entry=row,
+                        cfg=CratediggerConfig(processing_dir=processing_dir),
+                    )
+            finally:
+                os.chmod(locked, 0o600)
+
+        self.assertEqual(rendered.id, 909)
+        self.assertEqual(rendered.fields["status"], expected["status"])
+        self.assertEqual(
+            rendered.fields["unreadable_entry_count"],
+            expected["unreadable_entry_count"])
+        self.assertEqual(
+            rendered.fields["unreadable_reason"],
+            expected["unreadable_reason"])
+        self.assertEqual(rendered.fields["partial"], expected["partial"])
+        # The load-bearing fact this whole issue is about: a refusal is
+        # counted and honestly worded, never silently dropped.
+        self.assertEqual(rendered.fields["unreadable_entry_count"], 1)
+        assert isinstance(rendered.fields["unreadable_reason"], str)
+        self.assertIn("may be transient", rendered.fields["unreadable_reason"])
+
+    def test_a_missing_folder_renders_as_its_own_error_shape(self) -> None:
+        from scripts.render_differential import WrongMatchExplorerRenderTarget
+
+        with TemporaryDirectory() as root:
+            processing_dir = os.path.join(root, "processing")
+            os.makedirs(os.path.join(processing_dir, "albums"))
+            row = {
+                "id": 910,
+                "validation_result": json.dumps({
+                    "failed_path": os.path.join(
+                        processing_dir, "albums", "wrong_matches", "Gone"),
+                }),
+            }
+            with unittest.mock.patch.dict(
+                os.environ, self._quarantine_env(processing_dir),
+                clear=False,
+            ):
+                target = WrongMatchExplorerRenderTarget()
+                target.prepare([row])
+                rendered = target.render(row)
+        self.assertEqual(rendered.id, 910)
+        self.assertEqual(rendered.fields["status"], "error")
+        assert isinstance(rendered.fields["unreadable_reason"], str)
+        self.assertIn("not found", rendered.fields["unreadable_reason"])
+
+    def test_row_without_an_integer_id_fails_closed(self) -> None:
+        from scripts.render_differential import WrongMatchExplorerRenderTarget
+
+        target = WrongMatchExplorerRenderTarget()
+        with self.assertRaises(RenderDifferentialError):
+            target.render({"id": "909", "validation_result": "{}"})
+
+    def test_dotted_spec_resolves_this_target(self) -> None:
+        target = load_render_target(
+            "scripts.render_differential:WrongMatchExplorerRenderTarget")
+        from scripts.render_differential import WrongMatchExplorerRenderTarget
+        self.assertIsInstance(target, WrongMatchExplorerRenderTarget)
 
 
 class TestSummarizeRenderDiff(unittest.TestCase):

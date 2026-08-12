@@ -406,15 +406,21 @@ class TestComputeBeetsDistanceOutcomes(unittest.TestCase):
         result. Before the fix, ``_fingerprint_file`` swallowed the
         refusal (mediafile converts the ``OSError`` into its own
         ``UnreadableFileError``), so a distance computed over half an
-        album shipped as a plain number (issue #1063).
+        album shipped as a plain number (issue #1063). The reason text
+        is now honest per code (issue #1086): EACCES is a world failure
+        that "may be transient", never worded like a security decision.
         """
         album = self._refused_tag_read_world(("02 - two.flac",))
         result = self._compute_over(album)
         self.assertEqual(result.outcome, "ok")
         assert result.partial_read is not None
         self.assertIn("02 - two.flac", result.partial_read)
-        self.assertIn("Permission denied", result.partial_read)
+        self.assertIn("may be transient", result.partial_read)
+        self.assertIn("EACCES", result.partial_read)
         self.assertEqual(result.total_local_tracks, 1)
+        # A world failure, not a containment decision — the structured
+        # discriminator the Replace-picker badge branches on (#1086).
+        self.assertFalse(result.partial_read_is_containment)
 
     def test_every_tag_read_refused_is_not_no_audio(self) -> None:
         """ALL files refused is the #1063 defect verbatim, one layer down.
@@ -431,14 +437,20 @@ class TestComputeBeetsDistanceOutcomes(unittest.TestCase):
         assert result.error_message is not None
         self.assertIn("could not read the contents", result.error_message)
 
-    def test_a_proven_absence_is_not_reported_as_a_refusal(self) -> None:
-        """ENOENT is the one errno that EARNS a definitive negative.
+    def test_a_dangling_symlink_is_now_a_refusal_not_a_proven_absence(self) -> None:
+        """Issue #1086 dissolves an asymmetry instead of papering over it.
 
-        A dangling symlink is listed by the walk and answers ENOENT on
-        ``stat``: the file is provably gone. Recording that as a refusal
-        reaches the operator as an amber ``· incomplete manifest`` badge
-        on the Replace picker — over a manifest that is complete. Issue
-        #1063's rule cuts both ways.
+        Before this delta, a dangling symlink read as ``absent`` here
+        ONLY because ``os.stat`` FOLLOWED it into ENOENT, while the
+        explorer's ``O_NOFOLLOW`` posture stopped at the link itself
+        with ELOOP and never discovered the target was gone — both
+        "correct" for their own posture, but the two ends of one request
+        disagreed about the same on-disk shape.
+        ``lib.beets_distance._lstat_refusing_symlink`` gives this module
+        the SAME posture as the explorer: it never follows, so it never
+        discovers the dangling target either. It sees "this name is a
+        symlink" and refuses it — exactly like a symlink to a real file
+        — which is what makes both ends agree BY CONSTRUCTION.
         """
         root = self.enterContext(tempfile.TemporaryDirectory())
         album = os.path.join(root, "wrong_matches", "Album")
@@ -448,15 +460,24 @@ class TestComputeBeetsDistanceOutcomes(unittest.TestCase):
                    os.path.join(album, "02 - dangling.flac"))
         result = self._compute_over(album)
         self.assertEqual(result.outcome, "ok")
-        self.assertIsNone(result.partial_read)
+        assert result.partial_read is not None
+        self.assertIn("02 - dangling.flac", result.partial_read)
+        self.assertIn("symlink", result.partial_read)
         self.assertEqual(result.total_local_tracks, 1)
+        # Structured, not string-sniffed: a containment decision, never
+        # worded like a transient world failure (issue #1086).
+        self.assertTrue(result.partial_read_is_containment)
 
-    def test_only_proven_absences_is_no_audio_not_unavailable(self) -> None:
-        """A folder holding one dangling name WAS observed and read.
+    def test_a_folder_of_only_dangling_symlinks_is_unavailable_not_no_audio(
+        self,
+    ) -> None:
+        """The mirror image, post-#1086: every candidate refused, none absent.
 
-        ``folder_unavailable`` (503 / exit 5) means the folder could not
-        be observed; that would be false here, and the CLI doc this
-        series wrote says so.
+        Before this delta a lone dangling symlink reported ``no_audio``
+        (the file was "proven gone"). It is now a refused symlink like
+        any other, so the folder is UNAVAILABLE — issue #1063's rule
+        (never report a refusal as a definitive negative) one layer
+        down, over the exact world that used to evade it.
         """
         root = self.enterContext(tempfile.TemporaryDirectory())
         album = os.path.join(root, "wrong_matches", "Album")
@@ -464,8 +485,36 @@ class TestComputeBeetsDistanceOutcomes(unittest.TestCase):
         os.symlink(os.path.join(album, "nothing-here.flac"),
                    os.path.join(album, "01 - dangling.flac"))
         result = self._compute_over(album)
-        self.assertEqual(result.outcome, "no_audio")
+        self.assertEqual(result.outcome, "folder_unavailable")
         self.assertIsNone(result.partial_read)
+
+    def test_a_symlink_to_a_real_file_outside_the_root_is_refused(self) -> None:
+        """The containment gap itself: a VALID target is never followed.
+
+        Before the ``lstat`` guard, ``os.stat`` FOLLOWED a symlink that
+        pointed at a perfectly real, readable file outside the
+        quarantine root — the fixture FLAC lives outside ``album``
+        entirely — and the file was silently fingerprinted as if it were
+        one of the album's own tracks. This is the exact scenario the
+        issue names: "the Replace picker's distance can be computed over
+        a file whose target lies outside the quarantine root". The guard
+        refuses the NAME before ever asking what it points to, so a
+        valid, readable target changes nothing.
+        """
+        root = self.enterContext(tempfile.TemporaryDirectory())
+        album = os.path.join(root, "wrong_matches", "Album")
+        os.makedirs(album)
+        shutil.copy(FIXTURE_FLAC, os.path.join(album, "01 - one.flac"))
+        os.symlink(FIXTURE_FLAC, os.path.join(album, "02 - outside.flac"))
+        result = self._compute_over(album)
+        self.assertEqual(result.outcome, "ok")
+        assert result.partial_read is not None
+        self.assertIn("02 - outside.flac", result.partial_read)
+        self.assertIn("symlink", result.partial_read)
+        # The load-bearing assertion: only the ONE real album track was
+        # ever fingerprinted, never the symlink's external target.
+        self.assertEqual(result.total_local_tracks, 1)
+        self.assertTrue(result.partial_read_is_containment)
 
     def _mid_read_refusal(self, album: str, name: str) -> None:
         """Plant a file that OPENS fine and answers EIO on every read.

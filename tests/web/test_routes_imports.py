@@ -1551,7 +1551,11 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         # The two reasons a listing is incomplete stay distinguishable.
         self.assertIsNone(data["truncated_reason"])
         self.assertEqual(data["unreadable_entry_count"], 3)
-        self.assertIn("Permission denied", data["unreadable_reason"])
+        # Honest per-reason copy (issue #1086): EACCES is a world failure,
+        # worded as one — never the raw OS string, and never the wording
+        # a containment refusal (a symlink, a socket) owns instead.
+        self.assertIn("may be transient", data["unreadable_reason"])
+        self.assertIn("EACCES", data["unreadable_reason"])
 
     def test_readable_entries_alongside_unreadable_ones_are_still_listed(self):
         """A partial listing is served, and says it is partial."""
