@@ -50,6 +50,17 @@ logger = logging.getLogger("cratedigger.search_exec")
 # into two sharing the same untyped boundary, so this collects the token
 # count behind one definition per shape rather than letting it grow with the
 # number of call sites).
+#
+# Honest accounting (#1112 review MINOR-3): this is a token-count trick, not
+# a debt reduction — sharing three ``Any`` occurrences behind these aliases
+# lowers the #765 ratchet's LEXICAL count (which counts NAME-token
+# occurrences of ``Any``, not distinct escape-hatch sites) without making
+# any of `slskd_client` / a search id / a raw request-or-response body
+# actually typed. The real fix is #468's Protocol-based retyping of
+# `lib.slskd_client.SlskdClient` (and its test doubles); until that lands,
+# the baseline understates how much of this module's surface is still
+# untyped, and that's acknowledged here rather than hidden behind a lower
+# number.
 _SlskdClient = Any  # mirrors lib.slskd_client.SlskdClient / FakeSlskdAPI
 _SlskdSearchId = Any  # whatever id shape slskd's own response carries
 _SlskdJson = dict[str, Any]  # a raw slskd request/response JSON object
@@ -449,11 +460,18 @@ def execute_search(
     callers omit them.
 
     ``submit_retry`` (issue #1090) is an OPTIONAL bounded retry for a
-    transient slskd search-submit 409 — see :class:`SearchSubmitRetryPolicy`.
-    Defaults to ``None``, which submits exactly once (byte-identical
-    pre-#1090 behaviour); only the unfindable probe opts in today. Ignored
-    entirely in pre-submitted mode (``search_id`` given) — there is no
-    submit phase to retry.
+    transient slskd search-submit failure — see
+    :class:`SearchSubmitRetryPolicy`. Which statuses are retried is entirely
+    per-policy (``retryable_statuses``, issue #1112), not hardcoded to 409:
+    the unfindable probe's own policy keeps the original 409-only shape. The
+    main pipeline shares this SAME retry mechanism too, but via
+    ``submit_search_with_retry`` called directly — its own submit step never
+    runs poll/harvest, so it never calls ``execute_search`` at all (see this
+    module's header). Defaults to ``None`` HERE, which submits exactly once
+    through this function (byte-identical pre-#1090 behaviour); only the
+    unfindable probe passes a policy to this specific parameter today.
+    Ignored entirely in pre-submitted mode (``search_id`` given) — there is
+    no submit phase to retry.
     """
     clock = clock_fn or time.monotonic
     sleep = sleep_fn or time.sleep

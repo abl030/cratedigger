@@ -552,10 +552,23 @@ def _submit_plan_search(
                 retryable_statuses=PLAN_SEARCH_SUBMIT_RETRYABLE_STATUSES,
             ),
         )
-    except SearchSubmitError:
+        # A malformed 2xx body (accepted, but missing "id") is classified
+        # exactly like a submission failure -- the pre-#1112 bespoke loop
+        # evaluated this subscript INSIDE its try/except too, so a KeyError
+        # here fell into the same generic handler as an HTTP failure. This
+        # must stay INSIDE the try (post-#1112 review MAJOR-1): a bare
+        # KeyError/TypeError escaping _submit_plan_search propagates to the
+        # parallel pipeline's owner path, which aborts the ENTIRE cycle's
+        # search phase for every other in-flight album, not just this one.
+        return (submitted["id"], query, album_id, strategy_tag)
+    except (SearchSubmitError, KeyError, TypeError):
+        # Narrower than a blanket ``except Exception`` on purpose: a DB
+        # failure raised by ``_mint_and_ledger_id`` during a retry (called
+        # from inside submit_search_with_retry, which lives in this same
+        # try) must still propagate UNWRAPPED -- DB-down is cycle-fatal,
+        # never silently swallowed here.
         logger.exception(f"Failed to submit search via SLSKD: {query}")
         return None
-    return (submitted["id"], query, album_id, strategy_tag)
 
 
 def _collect_search_results(

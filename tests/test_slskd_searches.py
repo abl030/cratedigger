@@ -26,6 +26,7 @@ import unittest
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from unittest.mock import patch
 
 import cratedigger
 from lib.config import CratediggerConfig
@@ -435,14 +436,9 @@ class TestSubmitPlanSearchWriteAheadOrdering(unittest.TestCase):
             db_target_format=None,
         )
 
-        import time as _time
-        real_sleep = _time.sleep
-        _time.sleep = lambda _s: None
-        try:
+        with patch("time.sleep"):
             result = cratedigger._submit_plan_search(
                 album, "Artist Album", "default", _cfg(), slskd, db)
-        finally:
-            _time.sleep = real_sleep
 
         assert result is not None
         self.assertEqual(len(slskd.searches.search_text_calls), 2)
@@ -476,14 +472,9 @@ class TestSubmitPlanSearchWriteAheadOrdering(unittest.TestCase):
         )
 
         sleeps: list[float] = []
-        import time as _time
-        real_sleep = _time.sleep
-        _time.sleep = sleeps.append
-        try:
+        with patch("time.sleep", sleeps.append):
             result = cratedigger._submit_plan_search(
                 album, "Artist Album", "default", _cfg(), slskd, db)
-        finally:
-            _time.sleep = real_sleep
 
         self.assertIsNone(result)
         self.assertEqual(len(slskd.searches.search_text_calls), 6)
@@ -525,6 +516,89 @@ class TestSubmitPlanSearchWriteAheadOrdering(unittest.TestCase):
         self.assertIsNone(result)
         self.assertEqual(len(slskd.searches.search_text_calls), 1)
         self.assertEqual(len(db.record_search_id_calls), 1)
+
+    def test_malformed_response_body_returns_none_without_raising(self):
+        """Post-#1112 review MAJOR-1: a malformed 2xx submit response body
+        (e.g. missing ``id``) must be treated exactly like a submission
+        failure -- log, return ``None``, non-consuming. The pre-#1112
+        bespoke loop evaluated ``search["id"]`` INSIDE its try/except, so a
+        KeyError there was caught by the generic ``except Exception:``
+        branch. The #1112 consolidation regressed this: ``submitted["id"]``
+        moved OUTSIDE the ``except SearchSubmitError:`` block, so a
+        malformed body now raises an unhandled KeyError straight out of
+        ``_submit_plan_search`` -- which the parallel pipeline's owner path
+        (``_search_and_queue_parallel``) converts into
+        ``FindDownloadOwnerPathError`` and aborts the ENTIRE cycle's search
+        phase for every other album in flight, not just this one."""
+        from album_source import AlbumRecord, MediaRecord, ReleaseRecord
+
+        db = FakePipelineDB()
+        slskd = FakeSlskdAPI()
+        # A real 2xx response body missing the "id" key -- slskd accepted
+        # the search but the response shape our code depends on is absent.
+        slskd.searches.search_text = lambda **_kwargs: {}
+
+        media = [MediaRecord(medium_number=1, medium_format="CD", track_count=1)]
+        release = ReleaseRecord(
+            id=-13, foreign_release_id="mbid", title="Album", track_count=1,
+            medium_count=1, format="CD", media=media, monitored=True,
+            country=["US"], status="Official",
+        )
+        album = AlbumRecord(
+            id=-13, title="Album", release_date="1999-01-01T00:00:00Z",
+            artist_id=0, artist_name="Artist", foreign_artist_id="",
+            releases=[release], db_request_id=13, db_source="request",
+            db_mb_release_id="mbid", db_search_filetype_override=None,
+            db_target_format=None,
+        )
+
+        result = cratedigger._submit_plan_search(
+            album, "Artist Album", "default", _cfg(), slskd, db)
+
+        self.assertIsNone(result)
+
+    def test_retry_mint_db_failure_still_propagates_unwrapped(self):
+        """Guard for the MAJOR-1 fix above: narrowing the except clause to
+        ``(SearchSubmitError, KeyError, TypeError)`` must NOT also start
+        swallowing a DB failure raised while minting a retry id -- that
+        stays cycle-fatal (write-ahead ledger's "DB-down is cycle-fatal,
+        never silently swallowed" contract), exactly as before the fix."""
+        from album_source import AlbumRecord, MediaRecord, ReleaseRecord
+
+        db = FakePipelineDB()
+        slskd = FakeSlskdAPI()
+        slskd.searches.search_text_error_by_query["Artist Album"] = [
+            make_requests_http_error("conflict", status_code=409),
+        ]
+        real_record = db.record_search_id
+        calls = {"n": 0}
+
+        def _flaky_record(search_id, purpose, request_id):
+            calls["n"] += 1
+            if calls["n"] == 2:  # fails on the first RETRY's ledger write
+                raise RuntimeError("pipeline DB connection lost")
+            return real_record(search_id, purpose, request_id)
+
+        db.record_search_id = _flaky_record
+
+        media = [MediaRecord(medium_number=1, medium_format="CD", track_count=1)]
+        release = ReleaseRecord(
+            id=-14, foreign_release_id="mbid", title="Album", track_count=1,
+            medium_count=1, format="CD", media=media, monitored=True,
+            country=["US"], status="Official",
+        )
+        album = AlbumRecord(
+            id=-14, title="Album", release_date="1999-01-01T00:00:00Z",
+            artist_id=0, artist_name="Artist", foreign_artist_id="",
+            releases=[release], db_request_id=14, db_source="request",
+            db_mb_release_id="mbid", db_search_filetype_override=None,
+            db_target_format=None,
+        )
+
+        with self.assertRaises(RuntimeError) as caught:
+            cratedigger._submit_plan_search(
+                album, "Artist Album", "default", _cfg(), slskd, db)
+        self.assertEqual(str(caught.exception), "pipeline DB connection lost")
 
 
 class TestSearchForAlbumWriteAheadOrdering(unittest.TestCase):
