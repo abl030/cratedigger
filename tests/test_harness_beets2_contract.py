@@ -118,10 +118,29 @@ print("REAL_DUPLICATE_LOOKUP_OK")
 
 sess = h.HarnessImportSession.__new__(h.HarnessImportSession)
 
-class _Task:
-    paths = [b"/incoming/x"]
-    cur_artist = "A"
-    cur_album = "B"
+# The stub must carry whichever attribute the loaded Beets' ImportTask
+# metadata era actually reads (issue #1088: upstream PR #6681 replaced
+# ``cur_artist``/``cur_album`` with a cached ``source`` property) — a
+# hand-typed ``cur_artist`` alone would silently stop exercising
+# ``_duplicate_decision``'s real attribute read the moment tip ships.
+if h.beets_compat.CAPABILITIES.task_metadata_era == "modern":
+    from beets.autotag import Source
+    from beets.util import Likelies
+
+    class _Task:
+        paths = [b"/incoming/x"]
+        # The real NamedTuple, not a SimpleNamespace stand-in (Rule B
+        # fidelity) — task_description only reads .artist/.name; the other
+        # fields are untested here and get minimal type-valid values.
+        source = Source(
+            type="album", artist="A", name="B", data=Likelies({}),
+            items=[], id="", id_consensus=True,
+        )
+else:
+    class _Task:
+        paths = [b"/incoming/x"]
+        cur_artist = "A"
+        cur_album = "B"
 
 sent = []
 h._send = lambda m: sent.append(m)
@@ -146,6 +165,10 @@ else:
     h.HarnessImportSession.resolve_duplicate(sess, task, [])
     assert task.should_remove_duplicates is False
 assert sent and sent[0]["type"] == "resolve_duplicate", sent[:1]
+# Non-empty in BOTH eras: proves _duplicate_decision's message building
+# actually read the era's real attribute rather than defaulting silently.
+assert sent[0]["cur_artist"] == "A", sent[0]
+assert sent[0]["cur_album"] == "B", sent[0]
 print("CONTRACT_OK beets=%s era=%s" % (__import__("beets").__version__, report["era"]))
 
 # --- Breakage #3 (issue #570): beets' AlbumInfo.MEDIA_FIELD_MAP maps
@@ -304,6 +327,14 @@ import os
 import subprocess
 import tempfile
 
+from tests.harness_test_support import (
+    CANDIDATE_INJECTION_ALBUM,
+    CANDIDATE_INJECTION_ALBUM_ID,
+    CANDIDATE_INJECTION_ARTIST,
+    read_candidate_injection_receipt,
+    write_candidate_injection_sitecustomize,
+)
+
 
 def recursive_manifest(root):
     entries = []
@@ -349,25 +380,11 @@ with tempfile.TemporaryDirectory(prefix="cratedigger-pretend-purity-") as root:
     # depending on the public MusicBrainz service. sitecustomize is limited
     # to this subprocess: it supplies one structurally valid provider result,
     # leaving Beets' importer, distance calculation, and protocol intact.
+    # The receipt is the only proof of that — site.execsitecustomize
+    # swallows any exception raised while installing the seam.
     shim = os.path.join(root, "shim")
-    os.makedirs(shim)
-    with open(os.path.join(shim, "sitecustomize.py"), "w", encoding="utf-8") as handle:
-        handle.write("""\\
-from beets.autotag import mb
-from beets.autotag.hooks import AlbumInfo, TrackInfo
-
-def match_album(artist, album, tracks, extra_tags):
-    return [AlbumInfo(
-        album="Purity Album", artist="Purity Artist",
-        album_id="11111111-2222-3333-4444-555555555555",
-        tracks=[TrackInfo(
-            title="Source", artist="Purity Artist",
-            track_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", index=1,
-        )],
-    )]
-
-mb.match_album = match_album
-""")
+    receipt = os.path.join(root, "candidate-injection-receipt.json")
+    write_candidate_injection_sitecustomize(shim, receipt)
     env = {
         **os.environ,
         "BEETSDIR": beetsdir,
@@ -391,6 +408,18 @@ mb.match_album = match_album
         transcript.append(message)
         if message["type"] == "choose_match":
             saw_choose_match = True
+            # The undeniable assertion (issue #1088): a broken shim reaches
+            # this branch too (Beets still offers the choose_match task,
+            # just with zero candidates) — candidate_count == 1 and the
+            # exact injected album_id are the only proof a real candidate
+            # arrived. cur_artist/cur_album come from the LOCAL file tags
+            # (task_description), not the injected candidate, so they are
+            # populated regardless of the shim — checked here anyway as a
+            # must-still-work companion to the candidate assertions.
+            assert message["candidate_count"] == 1, message
+            assert message["candidates"][0]["album_id"] == CANDIDATE_INJECTION_ALBUM_ID, message
+            assert message["cur_artist"] == CANDIDATE_INJECTION_ARTIST, message
+            assert message["cur_album"] == CANDIDATE_INJECTION_ALBUM, message
             proc.stdin.write(json.dumps({"action": "skip"}) + "\n")
             proc.stdin.flush()
         elif message["type"] == "session_end":
@@ -400,6 +429,7 @@ mb.match_album = match_album
     assert returncode == 0, (returncode, transcript, stderr)
     assert saw_choose_match, transcript
     assert saw_session_end, transcript
+    read_candidate_injection_receipt(receipt)
     after = recursive_manifest(source)
     assert after == before, (before, after)
     print("PRETEND_SOURCE_PURITY_OK")
@@ -686,22 +716,18 @@ before_library = manifest(library)
 before_source = manifest(source)
 before_state = state.read_bytes()
 before_database = database.read_bytes()
-shim = source.parent / "matrix-shim"
-shim.mkdir(exist_ok=True)
-(shim / "sitecustomize.py").write_text("""\\
-from beets.autotag import mb
-from beets.autotag.hooks import AlbumInfo, TrackInfo
-def match_album(artist, album, tracks, extra_tags):
-    return [AlbumInfo(album="Matrix Album", artist="Matrix Artist", album_id="11111111-2222-3333-4444-555555555555", tracks=[TrackInfo(title="Matrix State", artist="Matrix Artist", track_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", index=1)])]
-mb.match_album = match_album
-""", encoding="utf-8")
+# NOTE: no candidate-injection sitecustomize here (unlike the pretend-purity
+# contract above). `-A`/`--noautotag` makes beets' ImportSession skip
+# lookup_candidates()/user_query() entirely in favour of import_asis()
+# (beets/importer/session.py) — a provider-candidate shim would never be
+# invoked. A prior revision carried a dead `beets.autotag.mb` shim here
+# for exactly that reason (issue #1088); it matched no live behaviour on
+# ANY Beets era, so it is removed rather than rehabilitated — this now
+# matches the sibling `_EXTERNAL_STATEFILE_CONTRACT` above, which never
+# had one.
 proc = subprocess.run(
     [sys.executable, "-m", "beets", "import", "-A", "-q", "--nocopy", "--nowrite", str(source)],
-    env={
-        **os.environ,
-        "BEETSDIR": cfg.beets_config_dir,
-        "PYTHONPATH": str(shim) + os.pathsep + os.environ.get("PYTHONPATH", ""),
-    },
+    env={**os.environ, "BEETSDIR": cfg.beets_config_dir},
     text=True,
     capture_output=True,
     check=False,

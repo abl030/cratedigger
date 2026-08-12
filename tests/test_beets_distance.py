@@ -15,6 +15,7 @@ number on a second call (mtime-stable).
 
 from __future__ import annotations
 
+import dataclasses
 import errno
 import os
 import shutil
@@ -1012,6 +1013,14 @@ class TestBeetsDistanceIntegrationSlice(unittest.TestCase):
             self.assertEqual(r.matched_tracks, 2)
             self.assertEqual(r.total_local_tracks, 2)
             self.assertEqual(r.total_mb_tracks, 2)
+            # A wrong unmatched_count (e.g. len(items) instead of
+            # len(extra_items)) is a plausible modern-branch adaptation bug
+            # the <0.5 bar alone doesn't catch on this 2-track fixture (a
+            # wrong count of 2 only pushes distance to ~0.107 — issue #1088
+            # review round 2 finding 3). This is era-neutral: 0 extra items
+            # means 0 unmatched_tracks penalty on either call shape.
+            assert r.components is not None
+            self.assertEqual(r.components.get("unmatched_tracks", 0.0), 0.0)
             assert r.duration_ms is not None
             # First-read latency: tag IO + beets fit. Generous ceiling
             # so the test doesn't flake on slow CI; the cached-fast-path
@@ -1086,6 +1095,86 @@ class TestBeetsDistanceIntegrationSlice(unittest.TestCase):
             # Round-trip back to a struct of the same shape.
             r2 = msgspec.json.decode(blob, type=BeetsDistanceResult)
             self.assertEqual(r2.distance, r.distance)
+
+
+class TestBeetsMatchDistanceEraAdaptation(unittest.TestCase):
+    """``_beets_match_distance`` calls beets' ``distance()`` with the exact
+    argument shape each ``task_metadata_era`` requires (issue #1088)."""
+
+    @staticmethod
+    def _dummy_distance_inputs():
+        """Minimal, correctly-typed (not semantically meaningful) beets
+        objects — only the CALL SHAPE is under test here, but they must be
+        real ``Item``/``AlbumInfo``/``TrackInfo`` instances to keep this
+        seam test itself pyright-clean against ``_beets_match_distance``'s
+        real signature."""
+        from beets import library
+        from beets.autotag import hooks
+
+        items = [library.Item()]
+        album_info = hooks.AlbumInfo(tracks=[], album="X", artist="Y", album_id="Z")
+        mapping = [(library.Item(), hooks.TrackInfo(title="T", artist="Y", index=1))]
+        extra_items = [library.Item(), library.Item()]
+        return items, album_info, mapping, extra_items
+
+    def test_legacy_era_calls_the_three_arg_shape(self) -> None:
+        from unittest import mock
+
+        from harness import beets_compat
+        from lib import beets_distance as bd
+
+        items, album_info, mapping, extra_items = self._dummy_distance_inputs()
+        calls: list[tuple[object, ...]] = []
+
+        def fake_distance(*args: object) -> str:
+            calls.append(args)
+            return "sentinel-distance"
+
+        legacy_caps = dataclasses.replace(
+            beets_compat.CAPABILITIES, task_metadata_era="legacy")
+        with (
+            mock.patch.object(beets_compat, "CAPABILITIES", legacy_caps),
+            mock.patch.object(bd, "_beets_distance_fn", fake_distance),
+        ):
+            result = bd._beets_match_distance(items, album_info, mapping, extra_items)
+
+        self.assertEqual(result, "sentinel-distance")
+        self.assertEqual(calls, [(items, album_info, mapping)])
+
+    def test_modern_era_calls_the_four_arg_likelies_shape(self) -> None:
+        from unittest import mock
+
+        from harness import beets_compat
+        from lib import beets_distance as bd
+
+        items, album_info, mapping, extra_items = self._dummy_distance_inputs()
+        distance_calls: list[tuple[object, ...]] = []
+        likelies_calls: list[object] = []
+
+        def fake_get_most_common_tags(passed_items: object) -> str:
+            likelies_calls.append(passed_items)
+            return "sentinel-likelies"
+
+        def fake_distance(*args: object) -> str:
+            distance_calls.append(args)
+            return "sentinel-distance"
+
+        modern_caps = dataclasses.replace(
+            beets_compat.CAPABILITIES, task_metadata_era="modern")
+        with (
+            mock.patch.object(beets_compat, "CAPABILITIES", modern_caps),
+            mock.patch.object(bd, "_beets_distance_fn", fake_distance),
+            mock.patch.object(bd, "_get_most_common_tags", fake_get_most_common_tags),
+        ):
+            result = bd._beets_match_distance(items, album_info, mapping, extra_items)
+
+        self.assertEqual(result, "sentinel-distance")
+        self.assertEqual(likelies_calls, [items])
+        # unmatched_count is len(extra_items) — the exact upstream call-site
+        # shape (beets/autotag/match.py: distance(source.data, info,
+        # item_info_pairs, len(extra_items))), not len(items) or a track count.
+        self.assertEqual(
+            distance_calls, [("sentinel-likelies", album_info, mapping, 2)])
 
 
 # ============================================================================

@@ -9,7 +9,7 @@ import unittest
 from types import ModuleType
 from unittest.mock import MagicMock, patch
 
-from tests.harness_test_support import isolated_beets_harness
+from tests.harness_test_support import isolated_beets_harness, legacy_import_task_stub
 
 
 def _mock_modules():
@@ -32,7 +32,7 @@ def _mock_modules():
     modules["beets.importer.session"].ImportSession = type(
         "ImportSession", (object,), {"resolve_duplicate": lambda *_args: None},
     )
-    modules["beets.importer.tasks"].ImportTask = type("ImportTask", (object,), {})
+    modules["beets.importer.tasks"].ImportTask = legacy_import_task_stub()
     return modules
 
 
@@ -66,7 +66,7 @@ class TestIsolatedBeetsHarness(unittest.TestCase):
         script = textwrap.dedent("""
             import sys
             from unittest.mock import MagicMock
-            from tests.harness_test_support import isolated_beets_harness
+            from tests.harness_test_support import isolated_beets_harness, legacy_import_task_stub
 
             def modules():
                 result = {
@@ -83,7 +83,7 @@ class TestIsolatedBeetsHarness(unittest.TestCase):
                 result["beets.importer.session"].ImportSession = type(
                     "ImportSession", (object,), {"resolve_duplicate": lambda *_: None},
                 )
-                result["beets.importer.tasks"].ImportTask = type("ImportTask", (object,), {})
+                result["beets.importer.tasks"].ImportTask = legacy_import_task_stub()
                 return result
 
             assert "harness" not in sys.modules

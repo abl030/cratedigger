@@ -95,9 +95,16 @@ function installDom() {
     className: '',
     style: { display: 'none' },
   };
+  // A plain object stand-in for the Stop button (issue #1083) — real
+  // production code re-fetches it by id each time bulkTriageWrongMatches
+  // runs, exactly like the browser's live DOM. Registered in the open
+  // element map (issue #1086) so any id a test needs can be seeded the
+  // same way rather than adding another special case here.
+  const stopBtn = { id: 'wm-bulk-triage-stop-btn', disabled: true, textContent: 'Stop' };
   const elements = new Map([
     ['wrong-matches-content', wrongMatches],
     ['toast', toast],
+    ['wm-bulk-triage-stop-btn', stopBtn],
   ]);
   globalThis.document = {
     getElementById(id) {
@@ -108,7 +115,7 @@ function installDom() {
     fn();
     return 0;
   };
-  return { wrongMatches, toast, elements };
+  return { wrongMatches, toast, elements, stopBtn };
 }
 
 function wrongMatchesData() {
@@ -635,7 +642,20 @@ console.log('bulkTriageWrongMatches() posts full-queue confirmation and refreshe
     throw new Error(`unexpected fetch: ${url}`);
   };
   const btn = { disabled: false, textContent: 'Cleanup Wrong Matches (3)', style: {} };
+  // The Stop button is enabled the moment the sweep starts (before the
+  // first status poll even fires) and disabled again once it's done.
+  let stopBtnEnabledDuringSweep = null;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    if (stopBtnEnabledDuringSweep === null) {
+      stopBtnEnabledDuringSweep = dom.stopBtn.disabled === false;
+    }
+    return realFetch(url, options);
+  };
   await __test__.bulkTriageWrongMatches(btn);
+  assert(stopBtnEnabledDuringSweep, 'Stop button is enabled while the sweep runs');
+  assertEqual(dom.stopBtn.disabled, true, 'Stop button is disabled again once the sweep completes');
+  assertEqual(dom.stopBtn.textContent, 'Stop', 'Stop button label is restored');
   assertEqual(calls[0].url, '/api/wrong-matches/triage', 'posts to cleanup endpoint');
   assertDeepEqual(
     JSON.parse(calls[0].options.body),
@@ -697,6 +717,104 @@ console.log('bulkTriageWrongMatches() handles a restart-lost sweep as partial, n
   assert(!dom.toast.textContent.includes('failed'), 'restart-lost sweep is not reported as failed');
   assert(dom.wrongMatches.innerHTML.includes('No wrong matches'), 'restart-lost sweep still refreshes the pane');
   globalThis.setTimeout = realSetTimeout;
+}
+
+console.log('bulkTriageWrongMatches() reports a cancelled sweep distinctly from completion (issue #1083)');
+{
+  installStorage();
+  const dom = installDom();
+  const data = wrongMatchesData();
+  __test__.renderWrongMatches(data, dom.wrongMatches);
+  globalThis.confirm = () => true;
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (fn) => { fn(); return 0; };
+  globalThis.fetch = async (url, _options = {}) => {
+    if (url === '/api/wrong-matches/triage') {
+      return {
+        ok: true,
+        status: 202,
+        json: async () => ({ status: 'started', state: 'running' }),
+      };
+    }
+    if (url === '/api/wrong-matches/triage/status') {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          state: 'cancelled',
+          started_at: '2026-06-11T00:00:00+00:00',
+          finished_at: '2026-06-11T00:01:00+00:00',
+          error: null,
+          summary: {
+            processed: 1,
+            deleted: 1,
+            kept_would_import: 0,
+            kept_uncertain: 0,
+            skipped_candidate_evidence_missing: 0,
+            skipped_candidate_evidence_stale: 0,
+            skipped_current_evidence_missing: 0,
+            skipped_current_evidence_stale: 0,
+            skipped_active_job: 0,
+            skipped_invalid_row: 0,
+            skipped_missing_path: 0,
+            skipped_operational: 0,
+            delete_failed: 0,
+            results: [],
+            cancelled: true,
+          },
+        }),
+      };
+    }
+    if (url === '/api/wrong-matches') {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ groups: [] }),
+      };
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+  const btn = { disabled: true, textContent: 'Cleaning...', style: {} };
+  await __test__.bulkTriageWrongMatches(btn);
+  assertEqual(btn.disabled, false, 'cancelled sweep restores button enabled');
+  assertEqual(dom.stopBtn.disabled, true, 'Stop button is disabled once the sweep reaches a terminal state');
+  assert(dom.toast.textContent.includes('stopped'), 'cancelled sweep says "stopped", not "completed"');
+  assert(dom.toast.textContent.includes('Deleted 1 candidate'), 'cancelled sweep still reports what ran');
+  assertEqual(dom.toast.className, 'toast', 'cancelled sweep is not toasted as an error');
+  assert(dom.wrongMatches.innerHTML.includes('No wrong matches'), 'cancelled sweep still refreshes the pane');
+  globalThis.setTimeout = realSetTimeout;
+}
+
+console.log('stopWrongMatchTriage() posts to the cancel endpoint and stays disabled on success');
+{
+  installStorage();
+  installDom();
+  const calls = [];
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url, options });
+    return { ok: true, status: 200, json: async () => ({ state: 'running' }) };
+  };
+  const btn = { disabled: false, textContent: 'Stop' };
+  await __test__.stopWrongMatchTriage(btn);
+  assertEqual(calls.length, 1, 'posts exactly one cancel request');
+  assertEqual(calls[0].url, '/api/wrong-matches/triage/cancel', 'posts to the canonical cancel route');
+  assertEqual(calls[0].options.method, 'POST', 'cancel is a POST');
+  assertEqual(btn.disabled, true, 'button stays disabled after a successful cancel request');
+  assertEqual(btn.textContent, 'Stopping...', 'button shows the in-flight stopping state');
+}
+
+console.log('stopWrongMatchTriage() re-enables the button when the request itself fails');
+{
+  installStorage();
+  const dom = installDom();
+  globalThis.fetch = async () => {
+    throw new Error('network down');
+  };
+  const btn = { disabled: false, textContent: 'Stop' };
+  await __test__.stopWrongMatchTriage(btn);
+  assertEqual(btn.disabled, false, 'a failed cancel request restores the button enabled');
+  assertEqual(btn.textContent, 'Stop', 'a failed cancel request restores the button label');
+  assert(dom.toast.textContent.includes('Stop request failed'), 'a failed cancel request is toasted');
 }
 
 console.log('bulkTriageWrongMatches() surfaces a failed sweep and restores the button');

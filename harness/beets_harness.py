@@ -572,12 +572,13 @@ class HarnessImportSession(ImportSession):
         for i, c in enumerate(candidates):
             assert isinstance(c, AlbumMatch)
             serialized_candidates.append(_serialize_album_candidate(i, c))
+        cur_artist, cur_album = beets_compat.task_description(task)
         msg: dict[str, object] = {
             "type": "choose_match",
             "task_id": task_id,
             "path": _path_str(task.paths[0]) if task.paths else "",
-            "cur_artist": task.cur_artist or "",
-            "cur_album": task.cur_album or "",
+            "cur_artist": cur_artist,
+            "cur_album": cur_album,
             "item_count": len(task.items),
             "items": [_serialize_item(item) for item in task.items],
             "recommendation": task.rec.name if task.rec else "none",
@@ -604,11 +605,12 @@ class HarnessImportSession(ImportSession):
         for i, c in enumerate(candidates):
             assert isinstance(c, TrackMatch)
             serialized_candidates.append(_serialize_track_candidate(i, c))
+        cur_artist, _cur_album = beets_compat.task_description(task)
         msg: dict[str, object] = {
             "type": "choose_item",
             "task_id": task_id,
             "path": _path_str(task.paths[0]) if task.paths else "",
-            "cur_artist": getattr(task, "cur_artist", "") or "",
+            "cur_artist": cur_artist,
             "cur_title": getattr(getattr(task, "item", None), "title", "") if hasattr(task, "item") else "",
             "item": (
                 _serialize_item(getattr(task, "item"))  # noqa: B009 - Beets adds it dynamically
@@ -679,11 +681,12 @@ class HarnessImportSession(ImportSession):
     ) -> str:
         """Ask the controller once; API-era hooks only adapt this result."""
         duplicate_candidates = [_serialize_duplicate_album(dup) for dup in found_duplicates]
+        cur_artist, cur_album = beets_compat.task_description(task)
         msg: dict[str, object] = {
             "type": "resolve_duplicate",
             "path": _path_str(task.paths[0]) if task.paths else "",
-            "cur_artist": task.cur_artist or "",
-            "cur_album": task.cur_album or "",
+            "cur_artist": cur_artist,
+            "cur_album": cur_album,
             "duplicate_count": len(found_duplicates),
             "duplicate_mbids": [c["mb_albumid"] for c in duplicate_candidates],
             "duplicate_album_ids": [c["beets_album_id"] for c in duplicate_candidates],

@@ -1063,6 +1063,22 @@ def get_wrong_match_triage_status(
     h._json(_triage_runner.status())
 
 
+def post_wrong_match_triage_cancel(
+    h: RouteHandler, body: dict[str, object],
+) -> None:
+    """Request cancellation of the in-flight bulk triage sweep (issue #1083).
+
+    No confirmation body is needed — cancellation only ever stops
+    destructive work in progress, it never starts any. Always 200: a
+    cancel with no sweep running, and one racing a sweep that is already
+    recording its own terminal state, both just return the current
+    ``status()`` snapshot rather than a 409 (there is nothing "wrong" in
+    either case). The CLI's ``Ctrl-C`` handler and the web UI's Stop
+    button are the two callers, over the exact same route.
+    """
+    h._json(_triage_runner.cancel())
+
+
 ROUTES: list[RouteRegistration] = [
     route(
         "GET", "/api/wrong-matches", get_wrong_matches,
@@ -1117,6 +1133,15 @@ ROUTES: list[RouteRegistration] = [
         "Start the full Wrong Matches cleanup sweep on a background "
         "thread (DESTRUCTIVE); requires confirm_all_wrong_matches=true. "
         "Returns 202 immediately; poll /api/wrong-matches/triage/status.",
+        classified=True,
+    ),
+    route(
+        "POST", "/api/wrong-matches/triage/cancel",
+        post_wrong_match_triage_cancel,
+        "Request cancellation of the in-flight bulk triage sweep, if "
+        "any (issue #1083). Always 200 — a cancel with nothing running "
+        "or one racing a sweep's own completion both just return the "
+        "current status snapshot, never a 409.",
         classified=True,
     ),
 ]
