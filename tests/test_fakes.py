@@ -3133,6 +3133,43 @@ class TestFakeSlskdSearches(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             slskd.searches.search_text(searchText="x", responseLimit=1000)
 
+    def test_search_text_error_by_query_targets_exact_searchtext(self):
+        """Issue #1090 NIT-9: per-searchText keyed injection is
+        independent of call order/count across OTHER distinct
+        searchText values -- a candidate that never calls search_text at
+        all (e.g. an empty-artist_name guard) cannot desynchronise a
+        keyed queue meant for a different candidate's text."""
+        slskd = FakeSlskdAPI()
+        slskd.searches.search_text_error_by_query["Artist A"] = [
+            RuntimeError("A fails once"), None,
+        ]
+        slskd.searches.search_text_error_by_query["Artist B"] = [
+            RuntimeError("B always fails"),
+        ]
+        # B's queue is untouched by A's calls.
+        with self.assertRaises(RuntimeError) as caught_a1:
+            slskd.searches.search_text(searchText="Artist A", responseLimit=1000)
+        self.assertEqual(str(caught_a1.exception), "A fails once")
+        result = slskd.searches.search_text(searchText="Artist A", responseLimit=1000)
+        self.assertIn("id", result)
+        with self.assertRaises(RuntimeError) as caught_b:
+            slskd.searches.search_text(searchText="Artist B", responseLimit=1000)
+        self.assertEqual(str(caught_b.exception), "B always fails")
+
+    def test_search_text_error_by_query_takes_priority_over_flat_sequence(self):
+        slskd = FakeSlskdAPI()
+        slskd.searches.search_text_error_by_query["Artist A"] = [
+            RuntimeError("keyed error"),
+        ]
+        slskd.searches.search_text_error_sequence = [
+            RuntimeError("flat sequence error"),
+        ]
+        with self.assertRaises(RuntimeError) as caught:
+            slskd.searches.search_text(searchText="Artist A", responseLimit=1000)
+        self.assertEqual(str(caught.exception), "keyed error")
+        # The flat sequence entry was never consumed.
+        self.assertEqual(len(slskd.searches.search_text_error_sequence), 1)
+
 
 class TestFakeSlskdServer(unittest.TestCase):
     """Self-test for the FakeSlskdServer stub introduced for issue #1090."""

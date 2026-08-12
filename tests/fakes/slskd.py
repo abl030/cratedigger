@@ -200,6 +200,16 @@ class FakeSlskdSearches:
         # Falls back to ``search_text_error`` (unchanged, poisons every
         # call) once the sequence is exhausted or left unset.
         self.search_text_error_sequence: list[Exception | None] = []
+        # Per-searchText-keyed error queue (issue #1090 NIT-9): consumed
+        # front-first PER DISTINCT ``searchText`` value, independent of
+        # overall call order/count. Preferred over
+        # ``search_text_error_sequence`` when a generated world has
+        # multiple candidates whose call counts vary (a candidate that
+        # never submits at all -- e.g. an empty-artist_name guard --
+        # would silently desynchronise a single flat FIFO from the
+        # candidate it was meant to target). Checked BEFORE
+        # ``search_text_error_sequence``.
+        self.search_text_error_by_query: dict[str, list[Exception | None]] = {}
         # Per-search override: id -> Exception. Raised from stop() / state()
         # for that search id. Used to drive the "stop() raises" / "state()
         # raises" branches without poisoning every search.
@@ -279,7 +289,12 @@ class FakeSlskdSearches:
         text = kwargs.pop("searchText", "")
         self.search_text_calls.append(
             SearchTextCall(search_text=text, kwargs=copy.deepcopy(kwargs)))
-        if self.search_text_error_sequence:
+        by_query = self.search_text_error_by_query.get(text)
+        if by_query:
+            next_error = by_query.pop(0)
+            if next_error is not None:
+                raise next_error
+        elif self.search_text_error_sequence:
             next_error = self.search_text_error_sequence.pop(0)
             if next_error is not None:
                 raise next_error
