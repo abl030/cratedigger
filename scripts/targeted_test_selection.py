@@ -253,6 +253,24 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
         "tests.test_protected_path_truth_generated",
         "tests.test_render_differential",
     ),
+    # cratedigger.py is a single top-level file (``len(path.parts) == 1``),
+    # so ``_direct_test_candidates`` looks for ``tests.test_cratedigger`` —
+    # which does not exist; the module's behavior is split across dozens of
+    # test files instead (test_slskd_searches.py, test_integration_slices.py,
+    # test_search_max_inflight.py, ...). Without an explicit entry a solo
+    # cratedigger.py change selects ZERO behavior modules, only ambient
+    # audits. This is not a claim of full coverage — it closes the specific
+    # gap issue #1112 review exposed: ``_submit_plan_search``'s strongest
+    # pins (write-ahead ledger ordering, the exact 6-attempt/1-2-4-8-8s
+    # budget, the widened 409+429 retryable-status set, the malformed-
+    # response-body containment fix) live in test_slskd_searches.py, and
+    # test_search_exec.py pins the shared ``submit_search_with_retry``
+    # policy shape ``_submit_plan_search``'s own policy construction
+    # depends on.
+    "cratedigger.py": (
+        "tests.test_slskd_searches",
+        "tests.test_search_exec",
+    ),
 }
 
 #: Shared tests/ modules with NO real consuming test today — an admitted,

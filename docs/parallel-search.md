@@ -139,7 +139,7 @@ With 16 albums where each search takes 30-60s, this cuts search time from ~8-16 
 
 ### How it works
 
-- **`_submit_plan_search(...)`** -- Sequential. Submits one persisted-plan search to slskd and retries transient submission contention with backoff.
+- **`_submit_plan_search(...)`** -- Sequential. Submits one persisted-plan search to slskd; retries transient submission contention (409, 429) with backoff via `lib.search_exec.submit_search_with_retry` (issue #1112 — the same shared mechanism the unfindable probe's `SearchSubmitRetryPolicy` uses, issue #1090, configured here with this call site's own 6-attempt/1-2-4-8-8s/409+429 policy).
 - **`_collect_search_results(search_id, ...)`** -- Parallel. Sleeps 5s, polls search state, fetches responses, builds `SearchResult` dataclass.
 - **`_search_and_queue_parallel(albums)`** -- Orchestrator. Submits all, then collects all via `ThreadPoolExecutor`, processes results as they arrive.
 - **`_merge_search_result(result)`** -- Main-thread only. Merges into `search_cache` and `user_upload_speed`.
