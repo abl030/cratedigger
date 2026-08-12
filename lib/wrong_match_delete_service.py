@@ -113,7 +113,12 @@ class WrongMatchDeleteSummary(msgspec.Struct, frozen=True):
     Pointer-only clears over a proven-absent folder are counted in
     ``cleared_missing`` instead. ``deleted`` headlines the operator's
     toast, and calling a folder we never touched "deleted" is exactly the
-    overclaim issue #1063 removed from the single-delete path.
+    overclaim issue #1063 removed from the single-delete path. Gated on
+    ``success`` and ``deleted_path`` alone — NOT on ``cleared_rows`` (issue
+    #1086 review): a folder can really be gone while its own pointer-clear
+    affected zero rows (a concurrent alias sweep already cleared it), and
+    that candidate's folder fact is still "deleted", not "counted nowhere".
+    ``cleared`` below reports the pointer-row count separately.
     """
     cleared_missing: int
     deleted_paths: int
@@ -143,8 +148,8 @@ class WrongMatchDeleteSummary(msgspec.Struct, frozen=True):
 
     ``result.skipped`` is ``True`` and ``result.outcome`` is not
     ``OUTCOME_SKIPPED_PATH_UNAVAILABLE`` — active-job holds, lock
-    contention, and (issue #1086) the unsafe-path refusal, which used to
-    double-count into ``errors`` too.
+    contention, an invalid/vanished row, and (issue #1086) the unsafe-path
+    refusal, which used to double-count into ``errors`` too.
     """
     errors: int
     """A genuine delete failure: never also ``skipped`` (issue #1086).
@@ -218,13 +223,21 @@ def delete_wrong_match_group(
         results.append(delete_wrong_match(db, log_id, require_visible=True))
 
     remaining = _remaining_visible_count(db, request_id)
+    # The folder fact is `deleted_path`/`path_missing` alone — `cleared_rows`
+    # is a SEPARATE pointer-row count (already reported via `cleared` below)
+    # and gating on it here dropped a candidate whose folder really went
+    # (or was proven gone) but whose own pointer-clear affected zero rows
+    # (e.g. a concurrent alias sweep already cleared it): success=True,
+    # cleared_rows=0, into no bucket at all. The toast then computed
+    # deleted=0 and reported "Deleted nothing" over a folder that was
+    # actually gone (issue #1086 review blocker 1).
     deleted = sum(
         1 for result in results
-        if result.success and result.cleared_rows and result.deleted_path
+        if result.success and result.deleted_path
     )
     cleared_missing = sum(
         1 for result in results
-        if result.success and result.cleared_rows and result.path_missing
+        if result.success and result.path_missing
     )
     deleted_paths = sum(1 for result in results if result.deleted_path)
     cleared = sum(result.cleared_rows for result in results)
@@ -255,9 +268,6 @@ def delete_wrong_match_group(
         processed=len(results),
         success=success,
         errors=errors,
-        skipped=skipped,
-        unavailable=unavailable,
-        remaining=remaining,
     )
     return WrongMatchDeleteSummary(
         request_id=request_id,
@@ -291,6 +301,7 @@ def _delete_wrong_match(
         return _result(
             download_log_id,
             OUTCOME_SKIPPED_INVALID_ROW,
+            skipped=True,
             reason="download_log_missing",
         )
     request_id_raw = entry.get("request_id")
@@ -303,6 +314,7 @@ def _delete_wrong_match(
             OUTCOME_SKIPPED_INVALID_ROW,
             request_id=request_id,
             entry_found=True,
+            skipped=True,
             reason="failed_path_missing",
         )
 
@@ -530,16 +542,22 @@ def _group_outcome(
     processed: int,
     success: bool,
     errors: int,
-    skipped: int,
-    unavailable: int,
-    remaining: int,
 ) -> str:
+    """Not-``success`` always means SOMETHING outstanding by construction.
+
+    ``success`` is only ``False`` when either ``errors``, ``skipped``,
+    ``unavailable``, or ``remaining`` is nonzero (see the formula above this
+    function's one caller). Once ``success`` and ``errors`` are both ruled
+    out, the remaining three facts are irrelevant to the return value —
+    whichever of them is nonzero, the answer is the same PARTIAL outcome —
+    so this function no longer takes them as parameters (issue #1086
+    review: the prior two-branch shape returned the identical value on
+    both paths, which is dead code, not a real distinction).
+    """
     if success:
         return GROUP_OUTCOME_DELETED if processed else GROUP_OUTCOME_EMPTY
     if errors:
         return GROUP_OUTCOME_FAILED
-    if skipped or unavailable or remaining:
-        return GROUP_OUTCOME_PARTIAL
     return GROUP_OUTCOME_PARTIAL
 
 

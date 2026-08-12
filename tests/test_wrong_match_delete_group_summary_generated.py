@@ -32,6 +32,7 @@ import shutil
 import tempfile
 import unittest
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
@@ -46,6 +47,9 @@ from lib.wrong_match_delete_service import (
 from tests.fakes import FakePipelineDB
 from tests.helpers import SeededWrongMatch, seed_visible_wrong_match
 
+if TYPE_CHECKING:
+    from lib.pipeline_db.rows import DownloadLogWithEvidenceRow
+
 #: One real quarantine candidate per named world, all reachable end-to-end
 #: through ``delete_wrong_match_group``. Deliberately excludes
 #: "lock_contended" (covered on its own in
@@ -53,6 +57,16 @@ from tests.helpers import SeededWrongMatch, seed_visible_wrong_match
 #: advisory-lock stub is a single DB-wide flag, not a per-candidate one, so
 #: composing it with other worlds in the same group would fail every OTHER
 #: candidate's lock too — an artifact of the fake, not of this invariant.
+#:
+#: "invalid_row" is NOT the same producer as "download_log_missing" for
+#: FakePipelineDB's OWN reasons: the fake's ``get_wrong_matches()`` drops a
+#: falsy ``failed_path`` before the row is ever visible, so
+#: ``_delete_wrong_match``'s ``failed_path_missing`` branch is unreachable
+#: through this fake (issue #1095 tracks the drift from the real SQL, which
+#: only filters ``IS NOT NULL`` and so would let ``""`` survive). This world
+#: instead reaches the OTHER ``OUTCOME_SKIPPED_INVALID_ROW`` producer,
+#: ``download_log_missing``: the row is listed, then its own entry lookup
+#: returns ``None`` — the exact race the early-return guards against.
 WORLDS: tuple[str, ...] = (
     "present",
     "genuinely_missing",
@@ -61,6 +75,7 @@ WORLDS: tuple[str, ...] = (
     "unsafe_root",
     "active_job",
     "delete_error",
+    "invalid_row",
 )
 
 #: The bucket each world's real outcome must land in.
@@ -72,11 +87,41 @@ BUCKET_BY_WORLD: dict[str, str] = {
     "unsafe_root": "skipped",
     "active_job": "skipped",
     "delete_error": "errors",
+    "invalid_row": "skipped",
 }
 
 BUCKETS: tuple[str, ...] = (
     "deleted", "cleared_missing", "unavailable", "skipped", "errors",
 )
+
+
+class _VanishingEntryDB(FakePipelineDB):
+    """A ``FakePipelineDB`` that can make ONE entry disappear from lookup.
+
+    ``delete_wrong_match_group`` lists a row via ``get_wrong_matches()``,
+    then (per candidate) calls ``get_download_log_entry(log_id)`` to fetch
+    it again. In production these two reads can race — the row is deleted
+    between them — and ``_delete_wrong_match`` guards that exact race with
+    its ``download_log_missing`` early return. The plain fake has no seam
+    for it because its two reads never naturally disagree; this subclass
+    manufactures the one entry this module's WORLDS list needs, without
+    touching ``get_wrong_matches()`` (the row stays listed, matching the
+    real race).
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        # A set, not a single id: a group can compose more than one
+        # "invalid_row" candidate (the generated property samples with
+        # repeats), and every one of them must vanish independently.
+        self.vanished_log_ids: set[int] = set()
+
+    def get_download_log_entry(
+        self, log_id: int,
+    ) -> DownloadLogWithEvidenceRow | None:
+        if log_id in self.vanished_log_ids:
+            return None
+        return super().get_download_log_entry(log_id)
 
 
 def _build_candidate(
@@ -110,6 +155,9 @@ def _build_candidate(
                 "failed_path": source.path,
             },
         )
+    elif world == "invalid_row":
+        assert isinstance(db, _VanishingEntryDB)
+        db.vanished_log_ids.add(source.download_log_id)
     return source
 
 
@@ -171,7 +219,7 @@ class TestGroupSummaryBucketsPinned(unittest.TestCase):
 
     def test_each_reachable_outcome_lands_in_exactly_one_bucket(self) -> None:
         worlds = list(WORLDS)
-        db = FakePipelineDB()
+        db = _VanishingEntryDB()
         sources: list[SeededWrongMatch] = []
         with tempfile.TemporaryDirectory() as root:
             try:
@@ -186,8 +234,8 @@ class TestGroupSummaryBucketsPinned(unittest.TestCase):
         self.assertEqual(summary.unavailable, 1, summary)
         # unreadable_album + delete_error: both genuine delete failures.
         self.assertEqual(summary.errors, 2, summary)
-        # unsafe_root + active_job: both refused, neither an error.
-        self.assertEqual(summary.skipped, 2, summary)
+        # unsafe_root + active_job + invalid_row: all refused, none an error.
+        self.assertEqual(summary.skipped, 3, summary)
         self.assertEqual(
             summary.deleted + summary.cleared_missing + summary.unavailable
             + summary.skipped + summary.errors,
@@ -202,17 +250,20 @@ class TestGroupSummaryBucketsGenerated(unittest.TestCase):
 
     @example(worlds=["unreadable_parent"])
     @example(worlds=["unsafe_root"])
+    @example(worlds=["invalid_row"])
+    @example(worlds=["invalid_row", "invalid_row"])
     @example(worlds=["present", "unreadable_parent"])
     @example(worlds=["unreadable_parent", "unreadable_album"])
     @example(worlds=["unreadable_parent", "unsafe_root"])
     @example(worlds=["unsafe_root", "unreadable_album"])
+    @example(worlds=["invalid_row", "unreadable_parent"])
     @example(worlds=list(WORLDS))
     @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
     @given(worlds=st.lists(st.sampled_from(WORLDS), min_size=1, max_size=3))
     def test_every_candidate_lands_in_exactly_one_bucket(
         self, worlds: list[str],
     ) -> None:
-        db = FakePipelineDB()
+        db = _VanishingEntryDB()
         sources: list[SeededWrongMatch] = []
         with tempfile.TemporaryDirectory() as root:
             try:
