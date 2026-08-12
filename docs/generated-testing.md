@@ -836,6 +836,37 @@ defect and caught it in review: a widened `pg_partial` arm ran 9 times in
 production fail-open mutant alive through the full suite and the final gate
 until an `@example` pinned it.
 
+**Editing a property body reshuffles its worlds — re-measure afterwards.**
+`derandomize=True` seeds from the test function's own digest, so *any* edit
+to a property's body changes the entire example sequence it draws. This is
+not limited to widening a strategy: adding an assertion, renaming a local,
+or reordering two statements can silently drop a decisive world out of the
+gating tier. Measured during the #1094 second pass: a `tier4_only` world ran
+**4 / 150** before the audit touched that property and **0 / 150** after,
+removing a real ladder branch from every gating run — the round-one defect
+arriving through a door nobody was watching. So after editing a property,
+count how often each decisive arm actually executes under the default
+profile, and pin any arm that reaches zero. Instrument by wrapping the
+checker at the module attribute in a throwaway script; do not commit it.
+
+**Clause ordering masks across checkers, not just within one.** A property
+that calls checker A then checker B hides every clause of B that A also
+rejects. In the same pass, `check_reserved_ceiling_tiers_unused` could never
+fire: `check_tier_follows_fired_legs` ran first and re-derived the ladder,
+so both reserved-tier mutants died on the *earlier checker's* message. The
+fix is to order independent checker calls so each clause is attributed to
+the checker that legislates it — which is a different operation from
+reordering clauses inside one checker, and unlike that one it is legitimate.
+
+**Count clauses by hand, not by one grep.** `grep -c "raise AssertionError"`
+is a starting point, not an inventory: clauses are also written as bare
+`assert cond, "message"`, and accumulating checkers append to a list instead
+of raising. The #1094 second pass found a module whose real clause count was
+34 against a grepped 26 — nine `assert x, msg` clauses and one `raise` that
+belonged to an in-world stub rather than a checker. Derive the inventory from
+the checker functions themselves and say so when your count disagrees with
+the brief.
+
 **A survivor is not a licence to delete.** The default remedy is to widen
 the strategy until the world is producible. A guard over a shared namespace
 legislates for every *other* writer of that namespace, present and future

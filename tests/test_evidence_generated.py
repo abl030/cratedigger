@@ -18,10 +18,19 @@ Profiles and promotion policy: tests/_hypothesis_profiles.py and
 docs/generated-testing.md. The exact minimized cases from the original
 RED run are committed in tests/test_import_evidence.py; the ``@example``
 pin below keeps the original failing shape replaying here forever.
+
+Every clause of every checker here carries a known-bad world that names
+that clause's own message (issue #1094, docs/generated-testing.md
+§ "Per-clause proof"). Two checkers accumulate their violations instead of
+raising on the first — the two-axis carry checker and the integrity
+precedence checker — because the audit found clauses whose only reachable
+world already trips an earlier one, which under a raise chain left them
+unfalsifiable rather than satisfied.
 """
 
 import configparser
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -33,6 +42,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import msgspec
 from hypothesis import example, given
 from hypothesis import strategies as st
 
@@ -50,6 +60,7 @@ from lib.quality import (
     AlbumQualityEvidence,
     AlbumQualityV0Metric,
     AudioQualityMeasurement,
+    EvidenceProvenance,
     EvidenceSubject,
     SpectralAnalysisDetail,
     VerifiedLosslessProof,
@@ -570,6 +581,20 @@ _BLANK_LOSSLESS_NO_SCALAR_WORLD = BlankPathWorld(
     request_has_v0_scalar=False,
 )
 
+# The must-still-work arm, pinned by the issue #1094 per-clause audit: a
+# complete real-path row that is not converted-from-lossless is the only
+# world in which "must load as authoritative" can fire. It ran 21 times in
+# the 152-example suite tier; the pin keeps that decisive world reachable
+# no matter how the strategy is later reshaped.
+_REAL_PATH_COMPLETE_WORLD = BlankPathWorld(
+    source_path_kind="real",
+    spectral_grade=None,
+    min_bitrate=186,
+    avg_bitrate=194,
+    was_converted_from=None,
+    request_has_v0_scalar=False,
+)
+
 
 class TestGeneratedBlankSourcePath(unittest.TestCase):
     """Action-loader invariants over generated source_path worlds."""
@@ -577,6 +602,7 @@ class TestGeneratedBlankSourcePath(unittest.TestCase):
     @given(world=blank_path_worlds())
     @example(world=_FRENCH_QUARTER_WORLD)
     @example(world=_BLANK_LOSSLESS_NO_SCALAR_WORLD)
+    @example(world=_REAL_PATH_COMPLETE_WORLD)
     def test_blank_source_path_is_never_authoritative(self, world):
         current_status, available, result_source_path = (
             _run_blank_path_world(world)
@@ -591,42 +617,72 @@ class TestGeneratedBlankSourcePath(unittest.TestCase):
 
 
 class TestBlankPathCheckerTripsOnViolations(unittest.TestCase):
-    """Known-bad self-tests for the blank-path invariant checker."""
+    """Per-clause known-bad worlds for the blank-path checker (issue #1094).
 
-    def test_trips_on_loaded_blank_path(self):
-        with self.assertRaises(AssertionError):
-            assert_blank_path_outcome(
-                source_path_kind="blank", requires_lossless_v0=False,
-                current_status="loaded",
-                available=True, result_source_path="")
+    Each world makes exactly one clause's condition true while every earlier
+    clause passes, and names that clause's own message.
+    """
 
-    def test_trips_on_fail_closed_instead_of_rebuild(self):
-        with self.assertRaises(AssertionError):
-            assert_blank_path_outcome(
-                source_path_kind="blank", requires_lossless_v0=False,
-                current_status="failed",
-                available=False, result_source_path=None)
+    # (description, source_path_kind, requires_lossless_v0, current_status,
+    #  available, result_source_path, message)
+    CASES: tuple[
+        tuple[str, str, bool, str, bool, str | None, str], ...
+    ] = (
+        (
+            "real path that did not load",
+            "real", False, "backfilled", True, "/library/album",
+            ("complete current evidence with a real source_path must load as "
+             "authoritative (got backfilled)"),
+        ),
+        (
+            "blank path loaded as authority",
+            "blank", False, "loaded", False, "/library/album",
+            "blank-source_path current evidence was loaded as authoritative",
+        ),
+        (
+            "lossless-source row became available",
+            "blank", True, "backfilled", True, "/library/album",
+            ("lossless-source row without a V0 backfill source must fail "
+             "closed, not become available"),
+        ),
+        (
+            "blank path failed closed instead of rebuilding",
+            "blank", False, "failed", False, None,
+            ("blank-source_path row must rebuild from album_info, not fail "
+             "closed"),
+        ),
+        (
+            "rebuilt row still carries a blank path",
+            "whitespace", False, "backfilled", True, "   ",
+            "rebuilt action evidence still carries a blank source_path",
+        ),
+    )
 
-    def test_trips_on_rebuilt_row_still_blank(self):
-        with self.assertRaises(AssertionError):
-            assert_blank_path_outcome(
-                source_path_kind="whitespace", requires_lossless_v0=False,
-                current_status="backfilled",
-                available=True, result_source_path="   ")
+    def test_every_clause_trips_with_its_own_message(self):
+        for (
+            description, kind, requires_v0, status, available, path, message,
+        ) in self.CASES:
+            with self.subTest(description=description), self.assertRaisesRegex(
+                AssertionError, re.escape(message),
+            ):
+                assert_blank_path_outcome(
+                    source_path_kind=kind,
+                    requires_lossless_v0=requires_v0,
+                    current_status=status,
+                    available=available,
+                    result_source_path=path,
+                )
 
-    def test_trips_on_real_path_not_loading(self):
-        with self.assertRaises(AssertionError):
-            assert_blank_path_outcome(
-                source_path_kind="real", requires_lossless_v0=False,
-                current_status="backfilled",
-                available=True, result_source_path="/library/album")
-
-    def test_trips_on_lossless_no_scalar_becoming_available(self):
-        with self.assertRaises(AssertionError):
-            assert_blank_path_outcome(
-                source_path_kind="blank", requires_lossless_v0=True,
-                current_status="backfilled",
-                available=True, result_source_path="/library/album")
+    def test_complete_real_path_world_is_accepted(self):
+        """The must-still-work control: no clause fires on a legal world."""
+        assert_blank_path_outcome(
+            source_path_kind="real", requires_lossless_v0=False,
+            current_status="loaded", available=True,
+            result_source_path="/library/album")
+        assert_blank_path_outcome(
+            source_path_kind="blank", requires_lossless_v0=False,
+            current_status="backfilled", available=True,
+            result_source_path="/library/album")
 
 
 LosslessSpectralFailureKind = Literal[
@@ -661,6 +717,34 @@ def assert_lossless_spectral_failure_lifecycle(
         raise AssertionError("harness ran without usable lossless spectral evidence")
 
 
+def integrity_precedence_violations(
+    *,
+    job_status: str,
+    preview_status: str | None,
+    decision: str | None,
+    harness_calls: int,
+    candidate_evidence_id: int | None,
+) -> list[str]:
+    """Accumulate every integrity-precedence violation of one preview run.
+
+    Accumulating rather than raising (issue #1094 per-clause audit): leaving
+    the measurement-only path is the only way production can reach the
+    harness, and doing so also moves the decision and the job status — so
+    under a raise chain the harness and link clauses could never witness
+    anything the first clause had not already caught.
+    """
+    violations: list[str] = []
+    if job_status != "queued" or preview_status != "evidence_ready":
+        violations.append("audio corruption was demoted to measurement failure")
+    if decision != "audio_corrupt":
+        violations.append("audio corruption did not win decision precedence")
+    if harness_calls:
+        violations.append("harness ran after completed audio-corrupt evidence")
+    if candidate_evidence_id is None:
+        violations.append("audio-corrupt candidate evidence was not linked")
+    return violations
+
+
 def assert_integrity_fact_precedes_spectral_failure(
     *,
     job_status: str,
@@ -671,14 +755,15 @@ def assert_integrity_fact_precedes_spectral_failure(
 ) -> None:
     """Completed corruption evidence must not become measurement_failed."""
 
-    if job_status != "queued" or preview_status != "evidence_ready":
-        raise AssertionError("audio corruption was demoted to measurement failure")
-    if decision != "audio_corrupt":
-        raise AssertionError("audio corruption did not win decision precedence")
-    if harness_calls:
-        raise AssertionError("harness ran after completed audio-corrupt evidence")
-    if candidate_evidence_id is None:
-        raise AssertionError("audio-corrupt candidate evidence was not linked")
+    violations = integrity_precedence_violations(
+        job_status=job_status,
+        preview_status=preview_status,
+        decision=decision,
+        harness_calls=harness_calls,
+        candidate_evidence_id=candidate_evidence_id,
+    )
+    if violations:
+        raise AssertionError("; ".join(violations))
 
 
 def _lossless_spectral_detail(
@@ -907,53 +992,210 @@ class TestGeneratedLosslessSpectralFailureLifecycle(unittest.TestCase):
 
 
 class TestLosslessSpectralFailureCheckerTripsOnViolations(unittest.TestCase):
-    def test_trips_when_failed_preview_changes_force_request_status(self):
-        with self.assertRaises(AssertionError):
-            assert_lossless_spectral_failure_lifecycle(
-                request_status="imported",
-                expected_request_status="downloading",
-                job_status="failed",
-                preview_status="measurement_failed",
-                harness_calls=0,
-            )
+    """Per-clause known-bad worlds for both preview checkers (issue #1094)."""
 
-    def test_trips_when_harness_runs(self):
-        with self.assertRaises(AssertionError):
-            assert_lossless_spectral_failure_lifecycle(
-                request_status="wanted",
-                expected_request_status="wanted",
-                job_status="failed",
-                preview_status="measurement_failed",
-                harness_calls=1,
-            )
+    # (description, request_status, expected_request_status, job_status,
+    #  preview_status, harness_calls, message)
+    LIFECYCLE_CASES: tuple[
+        tuple[str, str, str, str, str | None, int, str], ...
+    ] = (
+        (
+            "failed preview moved the force request",
+            "imported", "downloading", "failed", "measurement_failed", 0,
+            ("lossless spectral failure changed the force-import request from "
+             "'downloading' to 'imported'"),
+        ),
+        (
+            "job did not fail",
+            "downloading", "downloading", "queued", "measurement_failed", 0,
+            "lossless spectral failure did not terminate the preview job",
+        ),
+        (
+            "preview did not record measurement_failed",
+            "downloading", "downloading", "failed", "evidence_ready", 0,
+            "lossless spectral failure did not terminate the preview job",
+        ),
+        (
+            "harness ran anyway",
+            "downloading", "downloading", "failed", "measurement_failed", 1,
+            "harness ran without usable lossless spectral evidence",
+        ),
+    )
 
-    def test_integrity_checker_trips_on_measurement_failure(self):
-        with self.assertRaisesRegex(AssertionError, "demoted"):
-            assert_integrity_fact_precedes_spectral_failure(
-                job_status="failed",
-                preview_status="measurement_failed",
-                decision="spectral_analysis_failed",
-                harness_calls=0,
-                candidate_evidence_id=None,
-            )
+    # (description, job_status, preview_status, decision, harness_calls,
+    #  candidate_evidence_id, message)
+    INTEGRITY_CASES: tuple[
+        tuple[str, str, str | None, str | None, int, int | None, str], ...
+    ] = (
+        (
+            "corruption demoted to a failed job",
+            "failed", "measurement_failed", "audio_corrupt", 0, 7,
+            "audio corruption was demoted to measurement failure",
+        ),
+        (
+            "corruption demoted to a non-ready preview status",
+            "queued", "measurement_failed", "audio_corrupt", 0, 7,
+            "audio corruption was demoted to measurement failure",
+        ),
+        (
+            "another fact won decision precedence",
+            "queued", "evidence_ready", "bad_audio_hash", 0, 7,
+            "audio corruption did not win decision precedence",
+        ),
+        (
+            "harness ran on completed corruption evidence",
+            "queued", "evidence_ready", "audio_corrupt", 1, 7,
+            "harness ran after completed audio-corrupt evidence",
+        ),
+        (
+            "candidate evidence was not linked to the job",
+            "queued", "evidence_ready", "audio_corrupt", 0, None,
+            "audio-corrupt candidate evidence was not linked",
+        ),
+    )
+
+    def test_every_lifecycle_clause_trips_with_its_own_message(self):
+        for (
+            description, request_status, expected_status, job_status,
+            preview_status, harness_calls, message,
+        ) in self.LIFECYCLE_CASES:
+            with self.subTest(description=description), self.assertRaisesRegex(
+                AssertionError, re.escape(message),
+            ):
+                assert_lossless_spectral_failure_lifecycle(
+                    request_status=request_status,
+                    expected_request_status=expected_status,
+                    job_status=job_status,
+                    preview_status=preview_status,
+                    harness_calls=harness_calls,
+                )
+
+    def test_every_integrity_clause_trips_with_its_own_message(self):
+        for (
+            description, job_status, preview_status, decision, harness_calls,
+            candidate_evidence_id, message,
+        ) in self.INTEGRITY_CASES:
+            with self.subTest(description=description), self.assertRaisesRegex(
+                AssertionError, re.escape(message),
+            ):
+                assert_integrity_fact_precedes_spectral_failure(
+                    job_status=job_status,
+                    preview_status=preview_status,
+                    decision=decision,
+                    harness_calls=harness_calls,
+                    candidate_evidence_id=candidate_evidence_id,
+                )
+
+    def test_legal_worlds_are_accepted(self):
+        """The must-still-work control for both preview checkers."""
+        assert_lossless_spectral_failure_lifecycle(
+            request_status="downloading",
+            expected_request_status="downloading",
+            job_status="failed",
+            preview_status="measurement_failed",
+            harness_calls=0,
+        )
+        assert_integrity_fact_precedes_spectral_failure(
+            job_status="queued",
+            preview_status="evidence_ready",
+            decision="audio_corrupt",
+            harness_calls=0,
+            candidate_evidence_id=7,
+        )
 
 class TestLifecycleCheckerTripsOnViolations(unittest.TestCase):
-    """Known-bad self-tests for the lifecycle invariant checker."""
+    """Per-clause known-bad worlds for the lifecycle checker (issue #1094)."""
 
-    def test_trips_on_loaded_without_v0(self):
-        with self.assertRaises(AssertionError):
-            assert_lifecycle_outcome(
-                current_status="loaded", available=True, result_v0_avg=171)
+    # (description, current_status, available, result_v0_avg, message)
+    CASES: tuple[tuple[str, str, bool, int | None, str], ...] = (
+        (
+            "loaded without the linked V0 metric",
+            "loaded", False, None,
+            ("lossless-source transcode current evidence loaded without V0 "
+             "metric"),
+        ),
+        (
+            "available despite the missing linked fact",
+            "rebuilt", True, None,
+            "request stamps resurrected a missing linked V0 fact",
+        ),
+        (
+            "request scalar resurrected as an evidence V0 average",
+            "rebuilt", False, 171,
+            "request stamps resurrected a missing linked V0 fact",
+        ),
+    )
 
-    def test_trips_when_scalar_fact_is_resurrected(self):
-        with self.assertRaises(AssertionError):
-            assert_lifecycle_outcome(
-                current_status="rebuilt", available=False, result_v0_avg=171)
+    def test_every_clause_trips_with_its_own_message(self):
+        for description, status, available, v0_avg, message in self.CASES:
+            with self.subTest(description=description), self.assertRaisesRegex(
+                AssertionError, re.escape(message),
+            ):
+                assert_lifecycle_outcome(
+                    current_status=status,
+                    available=available,
+                    result_v0_avg=v0_avg,
+                )
 
-    def test_trips_on_not_failing_closed(self):
-        with self.assertRaises(AssertionError):
-            assert_lifecycle_outcome(
-                current_status="rebuilt", available=True, result_v0_avg=None)
+    def test_fail_closed_world_is_accepted(self):
+        """The must-still-work control: the legal fail-closed outcome passes."""
+        assert_lifecycle_outcome(
+            current_status="failed", available=False, result_v0_avg=None)
+
+
+def fingerprint_flip_two_axis_violations(
+    *,
+    original_subject: str,
+    evidence: AlbumQualityEvidence,
+) -> list[str]:
+    """Accumulate every two-axis carry violation of one rebuilt row.
+
+    Accumulating rather than raising (issue #1094 per-clause audit): under
+    the original raise chain the two cross-product clauses had no world of
+    their own. ``installed V0 fact cannot be carried`` could only arrive
+    behind ``installed V0 fact crossed fingerprints`` or
+    ``source V0 fact was not marked carried``, both of which raised first,
+    so the clause was unfalsifiable rather than satisfied.
+    """
+    violations: list[str] = []
+    measurement = evidence.measurement
+    if original_subject == "source":
+        if measurement.spectral_grade is None:
+            violations.append("source spectral fact was dropped")
+        elif (
+            measurement.spectral_subject,
+            measurement.spectral_provenance,
+        ) != ("source", "carried"):
+            violations.append("source spectral fact was not marked carried")
+        if evidence.v0_metric is None:
+            violations.append("source V0 fact was dropped")
+        elif (
+            evidence.v0_metric.subject,
+            evidence.v0_metric.provenance,
+        ) != ("source", "carried"):
+            violations.append("source V0 fact was not marked carried")
+    else:
+        if measurement.spectral_grade is not None:
+            violations.append("installed spectral fact crossed fingerprints")
+        if evidence.v0_metric is not None:
+            violations.append("installed V0 fact crossed fingerprints")
+
+    if (
+        measurement.spectral_subject == "installed"
+        and measurement.spectral_provenance == "carried"
+    ):
+        violations.append("installed spectral fact cannot be carried")
+    if (
+        evidence.v0_metric is not None
+        and evidence.v0_metric.subject == "installed"
+        and evidence.v0_metric.provenance == "carried"
+    ):
+        violations.append("installed V0 fact cannot be carried")
+    if evidence.verified_lossless_proof is None:
+        violations.append("verified-lossless proof was dropped")
+    elif evidence.verified_lossless_proof.provenance != "carried":
+        violations.append("verified-lossless proof was not marked carried")
+    return violations
 
 
 def assert_fingerprint_flip_two_axis_carry(
@@ -967,43 +1209,12 @@ def assert_fingerprint_flip_two_axis_carry(
     facts remain meaningful but become carried; installed facts must be
     measured again from the new files rather than copied from the old row.
     """
-    measurement = evidence.measurement
-    if original_subject == "source":
-        if measurement.spectral_grade is None:
-            raise AssertionError("source spectral fact was dropped")
-        if (
-            measurement.spectral_subject,
-            measurement.spectral_provenance,
-        ) != ("source", "carried"):
-            raise AssertionError("source spectral fact was not marked carried")
-        if evidence.v0_metric is None:
-            raise AssertionError("source V0 fact was dropped")
-        if (
-            evidence.v0_metric.subject,
-            evidence.v0_metric.provenance,
-        ) != ("source", "carried"):
-            raise AssertionError("source V0 fact was not marked carried")
-    else:
-        if measurement.spectral_grade is not None:
-            raise AssertionError("installed spectral fact crossed fingerprints")
-        if evidence.v0_metric is not None:
-            raise AssertionError("installed V0 fact crossed fingerprints")
-
-    if (
-        measurement.spectral_subject == "installed"
-        and measurement.spectral_provenance == "carried"
-    ):
-        raise AssertionError("installed spectral fact cannot be carried")
-    if (
-        evidence.v0_metric is not None
-        and evidence.v0_metric.subject == "installed"
-        and evidence.v0_metric.provenance == "carried"
-    ):
-        raise AssertionError("installed V0 fact cannot be carried")
-    if evidence.verified_lossless_proof is None:
-        raise AssertionError("verified-lossless proof was dropped")
-    if evidence.verified_lossless_proof.provenance != "carried":
-        raise AssertionError("verified-lossless proof was not marked carried")
+    violations = fingerprint_flip_two_axis_violations(
+        original_subject=original_subject,
+        evidence=evidence,
+    )
+    if violations:
+        raise AssertionError("; ".join(violations))
 
 
 def _run_fingerprint_flip_world(
@@ -1087,58 +1298,189 @@ class TestGeneratedTwoAxisFingerprintCarry(unittest.TestCase):
                 )
 
 
+def _carried_proof(
+    provenance: EvidenceProvenance = "carried",
+) -> VerifiedLosslessProof:
+    return VerifiedLosslessProof(
+        provenance=provenance,
+        source="flac",
+        classifier="spectral_verified_lossless",
+    )
+
+
+def _two_axis_evidence(
+    *,
+    spectral_grade: str | None = "genuine",
+    spectral_subject: EvidenceSubject | None = "source",
+    spectral_provenance: EvidenceProvenance | None = "carried",
+    v0_metric: AlbumQualityV0Metric | None = None,
+    proof_provenance: EvidenceProvenance | None = "carried",
+) -> AlbumQualityEvidence:
+    """A rebuilt row with exactly the two-axis facts a known-bad world needs.
+
+    ``proof_provenance=None`` drops the verified-lossless proof entirely.
+    """
+    evidence = make_album_quality_evidence(
+        lineage_version=3,
+        measurement=AudioQualityMeasurement(
+            spectral_grade=spectral_grade,
+            spectral_subject=spectral_subject,
+            spectral_provenance=spectral_provenance,
+        ),
+        v0_metric=v0_metric,
+        verified_lossless_proof=(
+            _carried_proof(proof_provenance)
+            if proof_provenance is not None
+            else None
+        ),
+    )
+    # The builder normalises a grade with no subject; these worlds need the
+    # exact stored tuple, including shapes production's own validator refuses.
+    return msgspec.structs.replace(
+        evidence,
+        measurement=msgspec.structs.replace(
+            evidence.measurement,
+            spectral_grade=spectral_grade,
+            spectral_subject=spectral_subject,
+            spectral_provenance=spectral_provenance,
+        ),
+    )
+
+
 class TestTwoAxisCarryCheckerTripsOnViolations(unittest.TestCase):
-    """Known-bad self-tests prove the generated checker has teeth."""
+    """Per-clause known-bad worlds for the two-axis checker (issue #1094).
 
-    def test_trips_when_installed_facts_cross_fingerprints(self):
-        known_bad = make_album_quality_evidence(
-            lineage_version=3,
-            measurement=AudioQualityMeasurement(
-                spectral_grade="genuine",
-                spectral_subject="installed",
-                spectral_provenance="carried",
+    Two clauses — the installed/carried cross-product pair — can only ever
+    arrive alongside another violation, which is why the checker accumulates
+    rather than raising on the first hit. Their worlds name their own message
+    out of the accumulated report.
+    """
+
+    SOURCE_V0 = AlbumQualityV0Metric(
+        subject="source", provenance="carried", avg_bitrate_kbps=245,
+    )
+
+    def _cases(self) -> tuple[tuple[str, str, AlbumQualityEvidence, str], ...]:
+        return (
+            (
+                "source spectral grade dropped",
+                "source",
+                _two_axis_evidence(
+                    spectral_grade=None, spectral_subject=None,
+                    spectral_provenance=None, v0_metric=self.SOURCE_V0,
+                ),
+                "source spectral fact was dropped",
             ),
-            v0_metric=AlbumQualityV0Metric(
-                subject="installed",
-                provenance="carried",
-                avg_bitrate_kbps=245,
+            (
+                "source spectral still marked measured",
+                "source",
+                _two_axis_evidence(
+                    spectral_provenance="measured", v0_metric=self.SOURCE_V0,
+                ),
+                "source spectral fact was not marked carried",
             ),
-            verified_lossless_proof=VerifiedLosslessProof(
-                provenance="carried",
-                source="flac",
-                classifier="spectral_verified_lossless",
+            (
+                "source V0 dropped",
+                "source",
+                _two_axis_evidence(v0_metric=None),
+                "source V0 fact was dropped",
+            ),
+            (
+                "source V0 still marked measured",
+                "source",
+                _two_axis_evidence(
+                    v0_metric=AlbumQualityV0Metric(
+                        subject="source", provenance="measured",
+                        avg_bitrate_kbps=245,
+                    ),
+                ),
+                "source V0 fact was not marked carried",
+            ),
+            (
+                "installed spectral survived the flip",
+                "installed",
+                _two_axis_evidence(
+                    spectral_subject="installed",
+                    spectral_provenance="measured",
+                ),
+                "installed spectral fact crossed fingerprints",
+            ),
+            (
+                "installed V0 survived the flip",
+                "installed",
+                _two_axis_evidence(
+                    spectral_grade=None, spectral_subject=None,
+                    spectral_provenance=None,
+                    v0_metric=AlbumQualityV0Metric(
+                        subject="installed", provenance="measured",
+                        avg_bitrate_kbps=245,
+                    ),
+                ),
+                "installed V0 fact crossed fingerprints",
+            ),
+            (
+                "installed spectral markers stamped carried",
+                "installed",
+                _two_axis_evidence(
+                    spectral_grade=None, spectral_subject="installed",
+                    spectral_provenance="carried",
+                ),
+                "installed spectral fact cannot be carried",
+            ),
+            (
+                "installed V0 stamped carried",
+                "installed",
+                _two_axis_evidence(
+                    spectral_grade=None, spectral_subject=None,
+                    spectral_provenance=None,
+                    v0_metric=AlbumQualityV0Metric(
+                        subject="installed", provenance="carried",
+                        avg_bitrate_kbps=245,
+                    ),
+                ),
+                "installed V0 fact cannot be carried",
+            ),
+            (
+                "verified-lossless proof dropped",
+                "source",
+                _two_axis_evidence(
+                    v0_metric=self.SOURCE_V0, proof_provenance=None,
+                ),
+                "verified-lossless proof was dropped",
+            ),
+            (
+                "verified-lossless proof still marked measured",
+                "source",
+                _two_axis_evidence(
+                    v0_metric=self.SOURCE_V0, proof_provenance="measured",
+                ),
+                "verified-lossless proof was not marked carried",
             ),
         )
-        with self.assertRaises(AssertionError):
-            assert_fingerprint_flip_two_axis_carry(
-                original_subject="installed",
-                evidence=known_bad,
-            )
 
-    def test_trips_when_source_fact_is_not_marked_carried(self):
-        known_bad = make_album_quality_evidence(
-            lineage_version=3,
-            measurement=AudioQualityMeasurement(
-                spectral_grade="genuine",
-                spectral_subject="source",
-                spectral_provenance="measured",
-            ),
-            v0_metric=AlbumQualityV0Metric(
-                subject="source",
-                provenance="measured",
-                avg_bitrate_kbps=245,
-            ),
-            verified_lossless_proof=VerifiedLosslessProof(
-                provenance="measured",
-                source="flac",
-                classifier="spectral_verified_lossless",
+    def test_every_clause_trips_with_its_own_message(self):
+        for description, subject, evidence, message in self._cases():
+            with self.subTest(description=description), self.assertRaisesRegex(
+                AssertionError, re.escape(message),
+            ):
+                assert_fingerprint_flip_two_axis_carry(
+                    original_subject=subject,
+                    evidence=evidence,
+                )
+
+    def test_legal_carried_rebuild_is_accepted(self):
+        """The must-still-work control: both legal rebuilt shapes pass."""
+        assert_fingerprint_flip_two_axis_carry(
+            original_subject="source",
+            evidence=_two_axis_evidence(v0_metric=self.SOURCE_V0),
+        )
+        assert_fingerprint_flip_two_axis_carry(
+            original_subject="installed",
+            evidence=_two_axis_evidence(
+                spectral_grade=None, spectral_subject=None,
+                spectral_provenance=None,
             ),
         )
-        with self.assertRaises(AssertionError):
-            assert_fingerprint_flip_two_axis_carry(
-                original_subject="source",
-                evidence=known_bad,
-            )
 
 
 _POISONED_LINK_IDENTITIES = (
@@ -1184,18 +1526,63 @@ def poisoned_link_identity_pairs(
     )
 
 
-def assert_no_poisoned_link_facts(evidence: AlbumQualityEvidence) -> None:
+def _single_fact_evidence(
+    *,
+    spectral_grade: str | None = None,
+    spectral_bitrate_kbps: int | None = None,
+    spectral_subject: EvidenceSubject | None = None,
+    spectral_provenance: EvidenceProvenance | None = None,
+    v0_metric: AlbumQualityV0Metric | None = None,
+    verified_lossless_proof: VerifiedLosslessProof | None = None,
+    on_disk_v0_research_attempted: bool = False,
+) -> AlbumQualityEvidence:
+    """A rebuilt row carrying exactly one linked HAVE fact, or none."""
+    evidence = make_album_quality_evidence(
+        measurement=AudioQualityMeasurement(
+            min_bitrate_kbps=128, format="MP3",
+        ),
+        v0_metric=v0_metric,
+        verified_lossless_proof=verified_lossless_proof,
+        on_disk_v0_research_attempted=on_disk_v0_research_attempted,
+    )
+    return msgspec.structs.replace(
+        evidence,
+        measurement=msgspec.structs.replace(
+            evidence.measurement,
+            spectral_grade=spectral_grade,
+            spectral_bitrate_kbps=spectral_bitrate_kbps,
+            spectral_subject=spectral_subject,
+            spectral_provenance=spectral_provenance,
+        ),
+    )
+
+
+def poisoned_link_facts(evidence: AlbumQualityEvidence) -> list[str]:
+    """Name every HAVE fact that survived a mismatched exact identity.
+
+    Naming the facts (issue #1094) keeps the seven disjuncts individually
+    provable: one shared message could only ever witness whichever fact the
+    known-bad world happened to set.
+    """
     measurement = evidence.measurement
-    if any((
-        measurement.spectral_grade is not None,
-        measurement.spectral_bitrate_kbps is not None,
-        measurement.spectral_subject is not None,
-        measurement.spectral_provenance is not None,
-        evidence.v0_metric is not None,
-        evidence.verified_lossless_proof is not None,
-        evidence.on_disk_v0_research_attempted,
-    )):
-        raise AssertionError("poisoned linked HAVE facts crossed exact identity")
+    crossed = (
+        ("spectral_grade", measurement.spectral_grade is not None),
+        ("spectral_bitrate_kbps", measurement.spectral_bitrate_kbps is not None),
+        ("spectral_subject", measurement.spectral_subject is not None),
+        ("spectral_provenance", measurement.spectral_provenance is not None),
+        ("v0_metric", evidence.v0_metric is not None),
+        ("verified_lossless_proof", evidence.verified_lossless_proof is not None),
+        ("on_disk_v0_research_attempted", evidence.on_disk_v0_research_attempted),
+    )
+    return [name for name, present in crossed if present]
+
+
+def assert_no_poisoned_link_facts(evidence: AlbumQualityEvidence) -> None:
+    facts = poisoned_link_facts(evidence)
+    if facts:
+        raise AssertionError(
+            "poisoned linked HAVE facts crossed exact identity: "
+            + ", ".join(facts))
 
 
 class TestGeneratedPoisonedCurrentLink(unittest.TestCase):
@@ -1267,16 +1654,57 @@ class TestGeneratedPoisonedCurrentLink(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
-    def test_checker_rejects_a_known_bad_poisoned_carry(self):
-        known_bad = make_album_quality_evidence(
-            measurement=AudioQualityMeasurement(
-                spectral_grade="genuine",
-                spectral_subject="source",
-                spectral_provenance="carried",
+    def test_every_carried_fact_trips_the_checker_by_name(self):
+        """One known-bad world per fact the poisoned-link clause enumerates."""
+        cases: tuple[tuple[str, AlbumQualityEvidence], ...] = (
+            (
+                "spectral_grade",
+                _single_fact_evidence(spectral_grade="genuine"),
+            ),
+            (
+                "spectral_bitrate_kbps",
+                _single_fact_evidence(spectral_bitrate_kbps=228),
+            ),
+            (
+                "spectral_subject",
+                _single_fact_evidence(spectral_subject="source"),
+            ),
+            (
+                "spectral_provenance",
+                _single_fact_evidence(spectral_provenance="measured"),
+            ),
+            (
+                "v0_metric",
+                _single_fact_evidence(v0_metric=AlbumQualityV0Metric(
+                    subject="source", provenance="measured",
+                    avg_bitrate_kbps=245,
+                )),
+            ),
+            (
+                "verified_lossless_proof",
+                _single_fact_evidence(
+                    verified_lossless_proof=_carried_proof("measured"),
+                ),
+            ),
+            (
+                "on_disk_v0_research_attempted",
+                _single_fact_evidence(on_disk_v0_research_attempted=True),
             ),
         )
-        with self.assertRaises(AssertionError):
-            assert_no_poisoned_link_facts(known_bad)
+        for fact, known_bad in cases:
+            with self.subTest(fact=fact):
+                self.assertEqual(poisoned_link_facts(known_bad), [fact])
+                with self.assertRaisesRegex(
+                    AssertionError,
+                    re.escape(
+                        "poisoned linked HAVE facts crossed exact identity: "
+                        f"{fact}"),
+                ):
+                    assert_no_poisoned_link_facts(known_bad)
+
+    def test_fact_free_rebuild_is_accepted(self):
+        """The must-still-work control: a fact-free rebuild carries nothing."""
+        assert_no_poisoned_link_facts(_single_fact_evidence())
 
 # ---------------------------------------------------------------------------
 # 2026-07-18 proof-mint incident (Passenger / request 8877) — two invariants:
@@ -1298,16 +1726,25 @@ def assert_minted_proof_consistent(
     spectral_grade: Any,
     proof: Any,
 ) -> None:
-    """Checker: mint output obeys the proof-construction contract."""
+    """Checker: mint output obeys the proof-construction contract.
+
+    Every clause carries its own message (issue #1094) so a known-bad world
+    proves the clause it is named for rather than whichever one happens to
+    evaluate first.
+    """
     if not will_be:
         assert proof is None, "unverified attempt must not mint a proof"
         return
     assert proof is not None, "verified attempt must mint a proof"
-    assert proof.provenance == "measured", proof.provenance
-    assert proof.classifier == "spectral_verified_lossless", proof.classifier
+    assert proof.provenance == "measured", (
+        f"minted proof provenance must be measured: {proof.provenance!r}")
+    assert proof.classifier == "spectral_verified_lossless", (
+        f"minted proof classifier must be the base name: {proof.classifier!r}")
     assert proof.source, "minted proof source must be non-empty"
-    assert proof.source == proof.source.strip().lower(), proof.source
-    assert proof.detail == spectral_grade
+    assert proof.source == proof.source.strip().lower(), (
+        f"minted proof source must be normalised: {proof.source!r}")
+    assert proof.detail == spectral_grade, (
+        f"minted proof detail must be the spectral grade: {proof.detail!r}")
 
 
 def assert_crashed_result_never_persists(
@@ -1319,7 +1756,9 @@ def assert_crashed_result_never_persists(
         assert build_result.evidence is None, (
             "a crashed ImportResult must never become candidate evidence"
         )
-        assert build_result.status == "crashed_result", build_result.status
+        assert build_result.status == "crashed_result", (
+            "a crashed ImportResult must report status crashed_result: "
+            f"{build_result.status!r}")
 
 
 _filetype_token = st.one_of(
@@ -1343,6 +1782,14 @@ class TestGeneratedProofMint(unittest.TestCase):
     @example(  # the live Passenger world that crashed on args.filetype
         will_be=True, was_converted_from="flac", detected="FLAC",
         grade="genuine",
+    )
+    @example(  # #1094: the only world where the source fallback decides
+        will_be=True, was_converted_from=None, detected="UNKNOWN",
+        grade="genuine",
+    )
+    @example(  # #1094: the only world where source normalisation decides
+        will_be=True, was_converted_from="  FLAC ", detected=None,
+        grade="marginal",
     )
     def test_mint_is_total_and_consistent(
         self, will_be, was_converted_from, detected, grade,
@@ -1413,35 +1860,113 @@ class EvidenceBuildResultForTest:
     status: str
 
 
+def _planted_proof(
+    *,
+    provenance: EvidenceProvenance = "measured",
+    source: str = "flac",
+    classifier: str = "spectral_verified_lossless",
+    detail: str | None = "genuine",
+) -> VerifiedLosslessProof:
+    return VerifiedLosslessProof(
+        provenance=provenance, source=source,
+        classifier=classifier, detail=detail,
+    )
+
+
 class TestProofMintCheckersTripOnViolations(unittest.TestCase):
-    def test_trips_on_missing_proof_for_verified_attempt(self):
-        with self.assertRaises(AssertionError):
-            assert_minted_proof_consistent(
-                True, "flac", "FLAC", "genuine", None)
+    """Per-clause known-bad worlds for both mint checkers (issue #1094)."""
 
-    def test_trips_on_phantom_proof_for_unverified_attempt(self):
-        planted = VerifiedLosslessProof(
-            provenance="measured", source="flac",
-            classifier="spectral_verified_lossless",
+    # (description, will_be_verified_lossless, planted proof, message)
+    MINT_CASES: tuple[
+        tuple[str, bool, VerifiedLosslessProof | None, str], ...
+    ] = (
+        (
+            "phantom proof on an unverified attempt",
+            False, _planted_proof(),
+            "unverified attempt must not mint a proof",
+        ),
+        (
+            "no proof on a verified attempt",
+            True, None,
+            "verified attempt must mint a proof",
+        ),
+        (
+            "proof minted as carried",
+            True, _planted_proof(provenance="carried"),
+            "minted proof provenance must be measured: 'carried'",
+        ),
+        (
+            "proof minted with a leg classifier no leg adjudicated",
+            True, _planted_proof(classifier="spectral_verified_lossless_v3"),
+            ("minted proof classifier must be the base name: "
+             "'spectral_verified_lossless_v3'"),
+        ),
+        (
+            "proof minted with an empty source",
+            True, _planted_proof(source=""),
+            "minted proof source must be non-empty",
+        ),
+        (
+            "proof minted with an unnormalised source",
+            True, _planted_proof(source="FLAC "),
+            "minted proof source must be normalised: 'FLAC '",
+        ),
+        (
+            "proof detail is not the measured grade",
+            True, _planted_proof(detail=None),
+            "minted proof detail must be the spectral grade: None",
+        ),
+    )
+
+    # (description, planted build result, message) — decision is always "crash"
+    CRASH_CASES: tuple[
+        tuple[str, EvidenceBuildResultForTest, str], ...
+    ] = (
+        (
+            "crashed result built evidence",
+            EvidenceBuildResultForTest(
+                evidence=object(), status="crashed_result"),
+            "a crashed ImportResult must never become candidate evidence",
+        ),
+        (
+            "crashed result reported another status",
+            EvidenceBuildResultForTest(evidence=None, status="incomplete"),
+            ("a crashed ImportResult must report status crashed_result: "
+             "'incomplete'"),
+        ),
+    )
+
+    def test_every_mint_clause_trips_with_its_own_message(self):
+        for description, will_be, proof, message in self.MINT_CASES:
+            with self.subTest(description=description), self.assertRaisesRegex(
+                AssertionError, re.escape(message),
+            ):
+                assert_minted_proof_consistent(
+                    will_be, "flac", "FLAC", "genuine", proof,
+                )
+
+    def test_every_crash_clause_trips_with_its_own_message(self):
+        for description, build_result, message in self.CRASH_CASES:
+            with self.subTest(description=description), self.assertRaisesRegex(
+                AssertionError, re.escape(message),
+            ):
+                assert_crashed_result_never_persists(
+                    "crash", build_result,
+                )
+
+    def test_legal_mint_and_crash_worlds_are_accepted(self):
+        """The must-still-work control for both mint-side checkers."""
+        assert_minted_proof_consistent(
+            True, "flac", "FLAC", "genuine", _planted_proof())
+        assert_minted_proof_consistent(False, "flac", "FLAC", "genuine", None)
+        assert_crashed_result_never_persists(
+            "crash",
+            EvidenceBuildResultForTest(evidence=None, status="crashed_result"),
         )
-        with self.assertRaises(AssertionError):
-            assert_minted_proof_consistent(
-                False, "flac", "FLAC", "genuine", planted)
-
-    def test_trips_on_unnormalised_source(self):
-        planted = VerifiedLosslessProof(
-            provenance="measured", source="FLAC ",
-            classifier="spectral_verified_lossless", detail="genuine",
+        assert_crashed_result_never_persists(
+            "import", EvidenceBuildResultForTest(
+                evidence=object(), status="ready"),
         )
-        with self.assertRaises(AssertionError):
-            assert_minted_proof_consistent(
-                True, "FLAC ", None, "genuine", planted)
-
-    def test_trips_when_crashed_result_builds_evidence(self):
-        planted = EvidenceBuildResultForTest(
-            evidence=object(), status="ready")
-        with self.assertRaises(AssertionError):
-            assert_crashed_result_never_persists("crash", planted)
 
 
 if __name__ == "__main__":
