@@ -114,6 +114,16 @@ PHASE_PREPARED_CONTROLLED = "prepared-controlled"
 PHASE_MAIN_TIMER_OPEN = "main-timer-open"
 PHASE_COMPLETE_PENDING = "complete-pending"
 
+# Real deployments run this tool as root; every receipt, marker, and
+# metadata-gate artifact it owns or validates must be root-owned, so every
+# ownership check in RealSystemdBackend compares against this constant
+# rather than a bare literal ``0``. It is never a security policy switch --
+# production never sets it to anything else -- but tests can patch it to
+# the current process's uid (`unittest.mock.patch` on this module
+# attribute) to exercise the SAME real filesystem validation logic against
+# a real tmpdir without requiring the test runner itself to run as root.
+_ROOT_UID = 0
+
 _RECEIPT_VERSION = "cratedigger-deploy-hold-v1"
 _RECEIPT_FILE = "receipt"
 _PHASE_FILE = "phase"
@@ -121,15 +131,21 @@ _MANUAL_MARKER = "owned-manual-hold"
 _LINK_MARKER_PREFIX = "owned-link-"
 _INHIBITOR_MARKER_PREFIX = "owned-inhibitor-"
 _INVOCATION_FILE = "ordinary-invocation"
+# Persistent siblings of the two owned-object classes that outlive a reboot
+# (#1096): both live in METADATA_GATE_STATE_DIR, beside the manual hold file
+# and each inhibitor file they mark. Consulted only when no receipt exists --
+# while a receipt is present, the tmpfs markers above remain sole authority.
+_PERSISTENT_MANUAL_MARKER = "deploy-hold-owned-manual"
+_PERSISTENT_INHIBITOR_MARKER_PREFIX = "deploy-hold-owned-inhibit-"
 _INVOCATION_RE = re.compile(r"[0-9a-f]{32}")
 # Bounds every ``_drain_services`` call whose unit set includes
-# ``cratedigger-unfindable.service`` (review round 2, R2 -- line numbers
-# re-verified against the tree merged with issue #1100's fake-gate-model
-# PR): ``_verify_authoritative_hold`` (:1258), ``_drain_producers_then_
-# hold`` (:1485, :1491), ``recover_held``'s cold-start branch (:1572),
-# and ``open_main_timer`` (:1845) -- verified individually against
-# ``SERVICE_UNITS`` / ``TIMER_DRIVEN_PRODUCER_UNITS`` / ``PRODUCER_
-# SERVICE_UNITS``, which all include ``UNFINDABLE_SERVICE``. Must exceed
+# ``cratedigger-unfindable.service`` (line numbers re-verified against the
+# tree merged with #1096's correction round, review round 2): ``_verify_
+# authoritative_hold`` (:1413), ``_drain_producers_then_hold`` (:1640,
+# :1646), ``recover_held``'s cold-start branch (:1741), and
+# ``open_main_timer`` (:2238) -- verified individually against ``SERVICE_UNITS`` /
+# ``TIMER_DRIVEN_PRODUCER_UNITS`` / ``PRODUCER_SERVICE_UNITS``, which all
+# include ``UNFINDABLE_SERVICE``. Must exceed
 # the longest BOUNDED run among the units it drains, or an
 # acquire/verify/recover launched while that run is mid-flight times out
 # here with a misleading ``DeployHoldError`` instead of just waiting for
@@ -145,18 +161,32 @@ _INVOCATION_RE = re.compile(r"[0-9a-f]{32}")
 # against. 21600.0 (6h) keeps a 1h margin over it. Resize alongside any
 # future change to that unit's ``TimeoutStartSec``.
 _PRODUCER_DRAIN_TIMEOUT_SECONDS = 21600.0
-# Bounds ``_wait_controlled_workers_active`` (:1341 -- all four call
-# sites: :1738/:1768 from ``abort_hold``, :1810/:1819 from
-# ``prepare_controlled``) and the main+YouTube drain at :1820
+# Bounds ``_wait_controlled_workers_active`` (:1496 -- five call sites,
+# line numbers re-verified against the tree merged with #1096's
+# correction round, review round 2: :1958 from ``_adopt_persistent_
+# markers_or_refuse``, :2125/:2159 from ``abort_hold``, :2203/:2212 from
+# ``prepare_controlled``) and the main+YouTube drain at :2213
 # (``prepare_controlled``, ``_drain_services(backend, (MAIN_SERVICE,
-# YOUTUBE_SERVICE))``). Neither unit set this constant bounds ever
-# contains ``cratedigger-unfindable.service``, so it keeps the pre-
-# #1112 value (2h) rather than following ``_PRODUCER_DRAIN_TIMEOUT_
-# SECONDS`` up to 6h (round 2, R2). This matters most for
-# ``abort_hold``, which calls ``_wait_controlled_workers_active`` TWICE
-# on its worst-case path -- silently tripling that budget to 6h would
-# have tripled abort's worst-case hang on a crash-looping controlled
-# worker, an unrelated and unintended regression.
+# YOUTUBE_SERVICE))``). No unit set any of these five calls ever bounds
+# contains ``cratedigger-unfindable.service``, so it keeps the pre-#1112
+# value (2h) rather than following ``_PRODUCER_DRAIN_TIMEOUT_SECONDS`` up
+# to 6h (round 2, R2).
+#
+# Counted honestly after #1096's correction round added the fifth call
+# site (:1958): within a SINGLE invocation of ``abort_hold`` itself, the
+# worst case is still exactly two sequential waits (:2125 then :2159,
+# both on the receipt-owned path) -- unchanged from before #1096, and
+# ``_adopt_persistent_markers_or_refuse``'s receiptless path (:1958) is
+# mutually exclusive with that path, never both in the same call. But
+# #1096 introduced a genuinely NEW troubleshooting sequence this budget
+# did not previously have to bound: the retired-receipt-plus-unrelated-
+# orphan-marker "two-run" case (correction round, N6) can see abort's
+# receipt-owned path (2 waits) on one invocation and adoption's
+# receiptless path (1 wait) on the very next, for up to three sequential
+# 2h waits across that realistic pair of calls where at most two existed
+# before #1096 existed at all. Silently tripling this budget to 6h would
+# have multiplied that same worst case, an unrelated and unintended
+# regression.
 _DRAIN_TIMEOUT_SECONDS = 7200.0
 _POLL_SECONDS = 1.0
 _STABLE_SAMPLES = 2
@@ -248,6 +278,9 @@ class DeployHoldBackend(Protocol):
     def mark_manual_hold_owned(self) -> None: ...
     def unmark_manual_hold_owned(self) -> None: ...
     def manual_hold_is_owned(self) -> bool: ...
+    def persistent_manual_marker_exists(self) -> bool: ...
+    def write_persistent_manual_marker(self) -> None: ...
+    def remove_persistent_manual_marker(self) -> None: ...
     def mark_link_owned(self, timer: str) -> None: ...
     def unmark_link_owned(self, timer: str) -> None: ...
     def link_is_owned(self, timer: str) -> bool: ...
@@ -256,6 +289,9 @@ class DeployHoldBackend(Protocol):
     def unmark_inhibitor_owned(self, service: str) -> None: ...
     def inhibitor_is_owned(self, service: str) -> bool: ...
     def owned_inhibitor_units(self) -> tuple[str, ...]: ...
+    def persistent_inhibitor_marker_exists(self, service: str) -> bool: ...
+    def write_persistent_inhibitor_marker(self, service: str) -> None: ...
+    def remove_persistent_inhibitor_marker(self, service: str) -> None: ...
     def inhibitor_exists(self, service: str) -> bool: ...
     def create_start_inhibitor(self, service: str) -> None: ...
     def remove_start_inhibitor(self, service: str) -> None: ...
@@ -550,7 +586,7 @@ class RealSystemdBackend:
         if (
             not stat.S_ISDIR(info.st_mode)
             or stat.S_ISLNK(info.st_mode)
-            or info.st_uid != 0
+            or info.st_uid != _ROOT_UID
             or stat.S_IMODE(info.st_mode) != 0o755
         ):
             raise DeployHoldError(
@@ -576,7 +612,7 @@ class RealSystemdBackend:
             raise DeployHoldError(f"{description} is missing") from exc
         if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
             raise DeployHoldError(f"{description} is not a directory")
-        if info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o700:
+        if info.st_uid != _ROOT_UID or stat.S_IMODE(info.st_mode) != 0o700:
             raise DeployHoldError(f"{description} is not root-owned mode 0700")
 
     @classmethod
@@ -598,7 +634,7 @@ class RealSystemdBackend:
             info = entry.lstat()
             if (
                 not stat.S_ISREG(info.st_mode)
-                or info.st_uid != 0
+                or info.st_uid != _ROOT_UID
                 or stat.S_IMODE(info.st_mode) != 0o600
             ):
                 raise DeployHoldError(
@@ -634,7 +670,7 @@ class RealSystemdBackend:
             info = path.lstat()
         except FileNotFoundError as exc:
             raise DeployHoldError(f"receipt marker is missing: {name}") from exc
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0:
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != _ROOT_UID:
             raise DeployHoldError(f"receipt marker is not a root-owned file: {name}")
         if stat.S_IMODE(info.st_mode) != 0o600:
             raise DeployHoldError(f"receipt marker has unsafe mode: {name}")
@@ -661,7 +697,7 @@ class RealSystemdBackend:
             info = temp_path.lstat()
             if (
                 not stat.S_ISREG(info.st_mode)
-                or info.st_uid != 0
+                or info.st_uid != _ROOT_UID
                 or stat.S_IMODE(info.st_mode) != 0o600
             ):
                 raise DeployHoldError(
@@ -679,6 +715,83 @@ class RealSystemdBackend:
     def _remove_marker(cls, name: str) -> None:
         cls._read_marker(name)
         cls._marker_path(name).unlink()
+
+    @staticmethod
+    def _persistent_marker_path(name: str) -> Path:
+        if not name or "/" in name or name in {".", ".."}:
+            raise DeployHoldError(f"invalid persistent ownership marker: {name!r}")
+        return METADATA_GATE_STATE_DIR / name
+
+    @classmethod
+    def _persistent_marker_exists(cls, name: str) -> bool:
+        cls._validate_metadata_gate_state_dir()
+        path = cls._persistent_marker_path(name)
+        if not os.path.lexists(path):
+            return False
+        info = path.lstat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != _ROOT_UID
+            or stat.S_IMODE(info.st_mode) != 0o600
+        ):
+            raise DeployHoldError(
+                f"persistent ownership marker has unsafe state: {name}"
+            )
+        return True
+
+    @classmethod
+    def _write_persistent_marker(cls, name: str, value: str) -> None:
+        """Idempotently ensure the persistent sibling marker exists.
+
+        Every caller writes this before the persistent object it names is
+        ever created (#1096) -- the same intent-before-mutation discipline
+        the tmpfs markers already follow, so an object without its marker is
+        provably foreign. A retry after a crash between this write and the
+        object's own creation must not fail here: the marker may already
+        exist from the interrupted attempt, so this tolerates (and
+        validates) an existing marker rather than requiring absence.
+        """
+        cls._validate_metadata_gate_state_dir()
+        path = cls._persistent_marker_path(name)
+        if os.path.lexists(path):
+            # _persistent_marker_exists re-checks lexists() itself; barring
+            # a concurrent unlink racing this exact instant (TOCTOU, not a
+            # shape this single-threaded tool defends against elsewhere
+            # either), it can only return True here or raise its own
+            # DeployHoldError -- never False. Its validation is what we
+            # want; there is no separate "unsafe state" outcome to invent.
+            cls._persistent_marker_exists(name)
+            return
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+        descriptor = os.open(path, flags, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(value + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+    @classmethod
+    def _remove_persistent_marker(cls, name: str) -> None:
+        """Idempotently clear the persistent sibling marker.
+
+        Every caller removes this only after the persistent object it names
+        is already gone, so a retry that finds the marker already removed
+        (a prior attempt got this far before failing) is not an error.
+        """
+        cls._validate_metadata_gate_state_dir()
+        path = cls._persistent_marker_path(name)
+        if not os.path.lexists(path):
+            return
+        info = path.lstat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != _ROOT_UID
+        ):
+            raise DeployHoldError(
+                f"persistent ownership marker has unsafe state: {name}"
+            )
+        path.unlink()
 
     def receipt_exists(self) -> bool:
         return os.path.lexists(STATE_DIR)
@@ -758,11 +871,19 @@ class RealSystemdBackend:
         self._write_marker(_PHASE_FILE, phase, replace=True)
 
     def mark_manual_hold_owned(self) -> None:
+        # Persistent marker first: it must exist on disk before the manual
+        # hold object itself is ever created, so a reboot between the two
+        # can never find the object without its sibling marker (#1096).
+        self.write_persistent_manual_marker()
         self._write_marker(_MANUAL_MARKER, "manual", replace=False)
 
     def unmark_manual_hold_owned(self) -> None:
         if self._read_marker(_MANUAL_MARKER) != "manual":
             raise DeployHoldError("manual hold ownership marker changed")
+        # Every caller reaches this only after the manual hold object is
+        # already released; the persistent sibling clears first (tolerating
+        # an already-removed marker on retry), then the tmpfs marker.
+        self.remove_persistent_manual_marker()
         self._marker_path(_MANUAL_MARKER).unlink()
 
     def manual_hold_is_owned(self) -> bool:
@@ -770,6 +891,15 @@ class RealSystemdBackend:
         if not path.exists():
             return False
         return self._read_marker(_MANUAL_MARKER) == "manual"
+
+    def persistent_manual_marker_exists(self) -> bool:
+        return self._persistent_marker_exists(_PERSISTENT_MANUAL_MARKER)
+
+    def write_persistent_manual_marker(self) -> None:
+        self._write_persistent_marker(_PERSISTENT_MANUAL_MARKER, "manual")
+
+    def remove_persistent_manual_marker(self) -> None:
+        self._remove_persistent_marker(_PERSISTENT_MANUAL_MARKER)
 
     @staticmethod
     def _link_marker(timer: str) -> str:
@@ -820,6 +950,10 @@ class RealSystemdBackend:
         return _INHIBITOR_MARKER_PREFIX + service
 
     def mark_inhibitor_owned(self, service: str) -> None:
+        # Same ordering discipline as mark_manual_hold_owned: the persistent
+        # marker exists before _ensure_owned_start_inhibitor ever creates
+        # the inhibitor file itself (#1096).
+        self.write_persistent_inhibitor_marker(service)
         self._write_marker(
             self._inhibitor_marker(service),
             service,
@@ -832,7 +966,28 @@ class RealSystemdBackend:
             raise DeployHoldError(
                 f"start-inhibitor ownership marker changed: {service}"
             )
+        self.remove_persistent_inhibitor_marker(service)
         self._marker_path(marker).unlink()
+
+    @staticmethod
+    def _persistent_inhibitor_marker_name(service: str) -> str:
+        RealSystemdBackend._validate_inhibited_service(service)
+        return _PERSISTENT_INHIBITOR_MARKER_PREFIX + service
+
+    def persistent_inhibitor_marker_exists(self, service: str) -> bool:
+        return self._persistent_marker_exists(
+            self._persistent_inhibitor_marker_name(service)
+        )
+
+    def write_persistent_inhibitor_marker(self, service: str) -> None:
+        self._write_persistent_marker(
+            self._persistent_inhibitor_marker_name(service), service
+        )
+
+    def remove_persistent_inhibitor_marker(self, service: str) -> None:
+        self._remove_persistent_marker(
+            self._persistent_inhibitor_marker_name(service)
+        )
 
     def inhibitor_is_owned(self, service: str) -> bool:
         marker_name = self._inhibitor_marker(service)
@@ -867,7 +1022,7 @@ class RealSystemdBackend:
         if (
             not stat.S_ISREG(info.st_mode)
             or stat.S_ISLNK(info.st_mode)
-            or info.st_uid != 0
+            or info.st_uid != _ROOT_UID
             or stat.S_IMODE(info.st_mode) != 0o600
             or path.read_text(encoding="utf-8") != _RECEIPT_VERSION + "\n"
         ):
@@ -886,7 +1041,7 @@ class RealSystemdBackend:
         if (
             not stat.S_ISDIR(info.st_mode)
             or stat.S_ISLNK(info.st_mode)
-            or info.st_uid != 0
+            or info.st_uid != _ROOT_UID
             or stat.S_IMODE(info.st_mode) not in {0o700, 0o755}
         ):
             raise DeployHoldError(
@@ -933,7 +1088,7 @@ class RealSystemdBackend:
         if (
             not stat.S_ISREG(info.st_mode)
             or stat.S_ISLNK(info.st_mode)
-            or info.st_uid != 0
+            or info.st_uid != _ROOT_UID
         ):
             raise DeployHoldError("manual metadata hold has unsafe state")
         return True
@@ -962,7 +1117,7 @@ class RealSystemdBackend:
         if (
             not stat.S_ISDIR(info.st_mode)
             or stat.S_ISLNK(info.st_mode)
-            or info.st_uid != 0
+            or info.st_uid != _ROOT_UID
         ):
             raise DeployHoldError("metadata-gate holds path is not root-owned")
         reasons: list[str] = []
@@ -971,7 +1126,7 @@ class RealSystemdBackend:
             if (
                 not stat.S_ISREG(entry_info.st_mode)
                 or stat.S_ISLNK(entry_info.st_mode)
-                or entry_info.st_uid != 0
+                or entry_info.st_uid != _ROOT_UID
             ):
                 raise DeployHoldError(
                     f"metadata-gate hold has unsafe state: {entry.name}"
@@ -1502,9 +1657,23 @@ def acquire_hold(backend: DeployHoldBackend) -> None:
         _require_phase(backend, PHASE_ACQUIRING)
     else:
         if backend.manual_hold_active():
+            if backend.persistent_manual_marker_exists():
+                raise DeployHoldError(
+                    "manual hold already exists and is marked as ours from "
+                    "a previous deploy hold (a reboot likely lost the "
+                    "receipt) -- run 'abort' to adopt and release it, then "
+                    "re-acquire"
+                )
             raise DeployHoldError("unowned manual hold already exists")
         for service in START_INHIBITORS:
             if backend.inhibitor_exists(service):
+                if backend.persistent_inhibitor_marker_exists(service):
+                    raise DeployHoldError(
+                        f"producer inhibitor already exists for {service} "
+                        "and is marked as ours from a previous deploy hold "
+                        "(a reboot likely lost the receipt) -- run 'abort' "
+                        "to adopt and release it, then re-acquire"
+                    )
                 raise DeployHoldError(
                     f"unowned producer inhibitor already exists for {service}"
                 )
@@ -1615,12 +1784,24 @@ def _validate_no_unowned_deploy_hold_conflicts(backend: DeployHoldBackend) -> No
     gone: the receipt still claims ``held`` while nothing blocks the foreign
     hold's own eventual ``resume-if-clear`` from starting every guarded unit,
     including a main cycle, underneath it (#1078 BLOCKER F1).
+
+    The ``manual`` reason is excluded from ``foreign_reasons`` only when this
+    receipt actually owns the manual hold -- never merely because *something*
+    here is owned (#1096 correction round, S1). A hold coincidentally named
+    ``manual`` that this receipt does NOT own is exactly as foreign as any
+    other reason: every gate-guarded unit's ``ExecCondition`` checks that the
+    *entire* holds directory is empty, not just that no reason other than
+    ``manual`` is present, so a same-named-but-unowned hold would otherwise
+    pass this check, let an owned inhibitor's file be deleted, and only then
+    discover -- deep inside the restart-verification wait -- that nothing it
+    starts can actually come up.
     """
-    if backend.manual_hold_is_owned() or backend.owned_inhibitor_units():
+    manual_hold_owned = backend.manual_hold_is_owned()
+    if manual_hold_owned or backend.owned_inhibitor_units():
         foreign_reasons = tuple(
             reason
             for reason in backend.metadata_hold_reasons()
-            if reason != METADATA_MANUAL_HOLD.name
+            if not (manual_hold_owned and reason == METADATA_MANUAL_HOLD.name)
         )
         if foreign_reasons:
             raise DeployHoldError(
@@ -1639,6 +1820,160 @@ def _validate_no_unowned_deploy_hold_conflicts(backend: DeployHoldBackend) -> No
             )
 
 
+def _validate_no_unowned_persistent_conflicts(
+    backend: DeployHoldBackend,
+    *,
+    manual_marked: bool,
+    inhibited_marked: tuple[str, ...],
+) -> None:
+    """Mirror ``_validate_no_unowned_deploy_hold_conflicts`` for adoption.
+
+    No receipt exists in this branch, so there is no tmpfs authority to
+    consult -- ownership is exactly the set of persistent markers the caller
+    already discovered. Checked in full before adoption mutates anything, so
+    a refusal here leaves every marker and object exactly as found for a
+    rerun once the conflict clears. Timer control-links need no equivalent
+    check here: this function's precondition is exactly "no receipt", not
+    "a reboot happened", so a control-link mask could in principle still be
+    present for a wholly unrelated reason -- but there is no persistent
+    marker for a control-link, so adoption owns none and deliberately never
+    inspects or touches one, surviving or not. Validating an unowned control
+    path remains solely ``acquire``'s job, the next time it runs --
+    ``acquire`` itself never adopts one either: an unowned link with a
+    target already present is a hard refusal
+    (``_ensure_owned_control_mask``), never silently taken over.
+
+    The ``manual`` reason is excluded from ``foreign_reasons`` only when
+    ``manual_marked`` is true -- never merely because *something* here is
+    marked (#1096 correction round, S1; mirrors the identical fix in
+    ``_validate_no_unowned_deploy_hold_conflicts``). A hold coincidentally
+    named ``manual`` that we do not hold the persistent marker for is
+    exactly as foreign as any other reason: every gate-guarded unit's
+    ``ExecCondition`` checks that the *entire* holds directory is empty, so
+    a same-named-but-unmarked hold would otherwise pass this check, let a
+    marked inhibitor's file be deleted, and only then discover -- deep
+    inside the restart-verification wait -- that nothing it starts can
+    actually come up.
+    """
+    if manual_marked or inhibited_marked:
+        foreign_reasons = tuple(
+            reason
+            for reason in backend.metadata_hold_reasons()
+            if not (manual_marked and reason == METADATA_MANUAL_HOLD.name)
+        )
+        if foreign_reasons:
+            raise DeployHoldError(
+                f"foreign metadata gate holds block abort: {foreign_reasons!r}"
+            )
+    for service in START_INHIBITORS:
+        if backend.inhibitor_exists(service) and service not in inhibited_marked:
+            raise DeployHoldError(
+                f"unowned producer inhibitor exists for {service}"
+            )
+
+
+def _adopt_persistent_markers_or_refuse(backend: DeployHoldBackend) -> bool:
+    """Receiptless abort: adopt exactly what our persistent markers own.
+
+    Reached only once ``abort_hold`` has already confirmed there is no live
+    or retired receipt to work from -- the shape a reboot leaves behind
+    (#1096): ``/run/cratedigger-deploy-hold`` and every tmpfs ownership
+    marker it held are gone, but the manual gate hold and the producer start
+    inhibitors under ``/var/lib/cratedigger-metadata-gate`` are real disk
+    state and can outlive the receipt that took them, together with the
+    persistent sibling marker each one carries (written before the object
+    itself, per ``mark_manual_hold_owned`` / ``mark_inhibitor_owned``).
+
+    Returns ``False`` -- touching nothing -- when no persistent marker
+    exists at all, so a clean boot with no prior deploy hold refuses exactly
+    like today rather than mass-restarting every held unit. Every conflict
+    this world could contain is proven absent up front
+    (``_validate_no_unowned_persistent_conflicts``), before any mutation, so
+    a refusal there leaves every marker and object exactly as found.
+
+    Ordering is deliberate and load-bearing (#1096 correction round, M1/M2):
+
+    - every marked inhibitor is removed FIRST, before anything below tries
+      to (re)start a gate-guarded unit. A still-present inhibitor
+      condition-skips its own unit's start (systemd exit 0, unit stays
+      down) -- if the manual hold is *also* marked (reachable from a reboot
+      mid ``prepare_controlled``, after both inhibitors are created but
+      before the manual hold is released), releasing the hold and starting
+      ``GATE_STOPPED_UNITS`` -- which includes YouTube ingest -- before
+      YouTube's own inhibitor is gone would silently skip its start and
+      hang the proof waiting for it forever;
+    - the restart-and-prove step excludes ``MAIN_SERVICE`` even when it is
+      marked (reachable from a reboot mid ``prepare_controlled``, after
+      both inhibitors are created but before ``MAIN_SERVICE``'s own is
+      released again near the end of that function). ``MAIN_SERVICE`` is
+      ``Type=oneshot``: it runs one cycle and exits, so it can never satisfy
+      ``_wait_controlled_workers_active``'s active/running proof -- waiting
+      for it there would hang for the full drain timeout every single time,
+      inhibitor files already deleted, before failing and leaving the
+      markers stranded for an identical rerun. It is started separately,
+      with no active-wait, exactly like ``prepare_controlled``'s own
+      handling (``_release_owned_inhibitor(MAIN_SERVICE)`` immediately
+      followed by a bare ``start_unit``, never a wait).
+
+    Every marker is removed only after this function has done everything it
+    is ever going to do for the object it names -- proven active for
+    everything but ``MAIN_SERVICE``, attempted at least once for
+    ``MAIN_SERVICE`` -- so an interrupted retry recomputes the identical
+    marked set and safely repeats whatever remains idempotent (removing an
+    already-absent inhibitor file, starting an already-active unit).
+    Adoption never re-establishes a receipt or a phase -- there is nothing
+    here to recover TO, only ordinary unheld operation to restore.
+    """
+    manual_marked = backend.persistent_manual_marker_exists()
+    inhibited_marked = tuple(
+        service
+        for service in START_INHIBITORS
+        if backend.persistent_inhibitor_marker_exists(service)
+    )
+    if not manual_marked and not inhibited_marked:
+        return False
+
+    _validate_no_unowned_persistent_conflicts(
+        backend, manual_marked=manual_marked, inhibited_marked=inhibited_marked
+    )
+
+    for service in inhibited_marked:
+        if backend.inhibitor_exists(service):
+            backend.remove_start_inhibitor(service)
+
+    if manual_marked and backend.manual_hold_active():
+        backend.metadata_gate("release manual")
+        if backend.manual_hold_active():
+            raise DeployHoldError(
+                "metadata gate did not release the marked manual hold"
+            )
+
+    restart_and_prove: set[str] = set(GATE_STOPPED_UNITS) if manual_marked else set()
+    restart_and_prove |= set(inhibited_marked)
+    restart_and_prove.discard(MAIN_SERVICE)
+    if restart_and_prove:
+        ordered = tuple(sorted(restart_and_prove))
+        for service in ordered:
+            backend.start_unit(service)
+        _wait_controlled_workers_active(backend, ordered)
+
+    if manual_marked:
+        backend.metadata_gate("resume-if-clear")
+        if reasons := backend.metadata_hold_reasons():
+            raise DeployHoldError(
+                f"metadata gate retained holds after adoption resume: {reasons!r}"
+            )
+        backend.remove_persistent_manual_marker()
+
+    if MAIN_SERVICE in inhibited_marked:
+        backend.start_unit(MAIN_SERVICE)
+
+    for service in inhibited_marked:
+        backend.remove_persistent_inhibitor_marker(service)
+
+    return True
+
+
 def abort_hold(backend: DeployHoldBackend) -> None:
     """Release every receipt-owned object and remove an incomplete receipt.
 
@@ -1652,32 +1987,49 @@ def abort_hold(backend: DeployHoldBackend) -> None:
     that walks away from it -- back to ordinary, unheld operation -- for a
     receipt that cannot or should not proceed.
 
-    It does NOT cover a host reboot. The receipt under ``/run`` and the
-    timer control-links under ``/run/systemd/system.control`` are both
-    tmpfs and do not survive one; a reboot leaves nothing for ``abort`` (or
-    ``recover_held``) to act on, because there is no receipt left proving
-    what this deployment ever owned. #1078's own producer-drain-before-hold
-    window keeps no receipt-owned object on persistent storage, so it does
-    not widen that exposure: it takes no start inhibitor at all (nothing is
-    waited on for YouTube pre-hold, and masking already blocks a fresh
-    *timer* trigger -- though not an unrelated hold's own
-    resume-if-clear, which starts ``cratedigger.service`` directly via the
-    gate's ``resume_units`` regardless of the timer's mask state), so a
-    reboot during acquisition self-heals through an ordinary systemd boot.
-    The same asymmetry already existed for
-    ``prepare_controlled``'s YouTube start inhibitor (owned across
-    ``prepared-controlled``/``main-timer-open``, on persistent
-    ``/var/lib/cratedigger-metadata-gate``) before this change and is not
-    this function's job to fix -- tracked as #1096.
+    A host reboot clears ``/run`` -- the receipt and every tmpfs ownership
+    marker (manual hold, producer inhibitors, timer control-links) -- but
+    the manual gate hold and the producer start inhibitors under
+    ``/var/lib/cratedigger-metadata-gate`` are real disk state and can
+    outlive the receipt that took them (#1096). Each carries its own
+    persistent sibling marker, written before the object itself and removed
+    only after it, so a receiptless ``abort`` can prove which surviving
+    objects are ours (``_adopt_persistent_markers_or_refuse``) and adopt
+    exactly those -- releasing the manual hold and/or producer inhibitors it
+    still owns, restarting and proving active whatever they blocked (except
+    ``MAIN_SERVICE``, which is ``Type=oneshot`` and is only ever proven
+    attempted, never active -- see that function's own docstring), then
+    clearing the markers -- ending at the same ordinary, unheld operation
+    every other path through this function reaches. It never
+    re-establishes a receipt or a phase: there is nothing to recover TO
+    after a reboot, only ordinary operation to restore. Timer control-links
+    need no such marker: this receiptless path's own precondition is
+    exactly "no receipt", not "a reboot happened", so a control-link mask
+    could in principle still be present for an unrelated reason -- but
+    there is no persistent marker for one, so adoption owns none and
+    deliberately never inspects or touches one either way; reclaiming an
+    unowned control path remains solely ``acquire``'s job. A foreign hold
+    or an unmarked inhibitor is
+    refused exactly as it is under a live receipt, with every marker
+    retained for a rerun once the conflict clears. With no receipt and no
+    persistent marker at all -- an ordinary clean boot -- ``abort`` still
+    refuses, so a boot with no prior deploy hold can never turn into a mass
+    restart. ``acquire``'s own refusal for an object carrying one of these
+    markers names ``abort`` as the way out; ``recover_held`` still requires
+    a receipt, because the phase knowledge a reboot destroys is exactly what
+    it exists to resume -- the supported reboot recovery is always ``abort``
+    followed by a fresh ``acquire``.
 
     Every ownership class this receipt could hold is validated up front,
     before any mutation (``_validate_no_unowned_deploy_hold_conflicts``), so
     a refusal here never leaves the boundary half torn down. It then walks
     the same ownership markers acquisition records intent through and
     releases exactly the ones this receipt owns, in the reverse of the order
-    acquisition took them -- restarting what that ownership implies this
-    receipt stopped only after each restart is *proven*, and disowning only
-    after that proof, so an interrupted retry never sees "nothing owned"
+    acquisition took them -- disowning each only once this function has done
+    everything it is ever going to do for the object that ownership implies
+    it stopped: proven stably active for every unit that can reach that
+    state, or attempted at least once for ``MAIN_SERVICE`` (``Type=oneshot``,
+    which never can) -- so an interrupted retry never sees "nothing owned"
     while the underlying object is still down:
 
     - the manual gate hold, if owned -- releasing it is what the external
@@ -1688,7 +2040,11 @@ def abort_hold(backend: DeployHoldBackend) -> None:
       trusting the release and disowning the hold. A foreign hold (for
       example the monthly discogs-import hold) makes that proof fail loudly
       instead of ``abort`` silently exiting 0 with every worker still down;
-    - every owned producer-start inhibitor;
+    - every owned producer-start inhibitor -- restarted and proven active,
+      except ``MAIN_SERVICE``'s, which is started with no active-wait
+      (#1096 correction round, M1: a receipt can own both inhibitors
+      together, interrupted mid ``prepare_controlled``, and waiting for the
+      oneshot to reach active/running would hang forever);
     - every owned timer control-link mask -- releasing it restarts that
       timer, which is what returns ``cratedigger-unfindable.service`` and
       the watchdog to their ordinary cadence, and ``cratedigger.service``
@@ -1706,13 +2062,25 @@ def abort_hold(backend: DeployHoldBackend) -> None:
     """
     if not backend.receipt_exists():
         if backend.retired_receipt_exists():
-            # Mirrors complete_release: abort's own receipt removal was
+            # Mirrors complete_release: THIS receipt's own removal was
             # interrupted after the atomic retirement rename but before
-            # clearing the retired directory. Finish it; there is nothing
-            # else left owned to release.
+            # clearing the retired directory -- finishing that retirement
+            # is everything left owned by IT. A wholly unrelated, earlier
+            # incident's orphaned persistent marker(s) (#1096 correction
+            # round, N6) are a real but separate possibility this branch
+            # deliberately does not also adopt in the same run: retirement
+            # finishes first, and a rerun of abort -- now hitting neither
+            # this branch nor a receipt -- reaches
+            # _adopt_persistent_markers_or_refuse below on its own. Two
+            # runs, not a dead end.
             backend.finish_retired_receipt()
             return
-        raise DeployHoldError("deploy hold receipt is missing")
+        if _adopt_persistent_markers_or_refuse(backend):
+            return
+        raise DeployHoldError(
+            "deploy hold receipt is missing and no persistent ownership "
+            "markers exist to adopt"
+        )
     phase = backend.read_phase()
     known_phases = {
         PHASE_ACQUIRING,
@@ -1725,6 +2093,25 @@ def abort_hold(backend: DeployHoldBackend) -> None:
         raise DeployHoldError(f"cannot abort unknown phase: {phase!r}")
 
     _validate_no_unowned_deploy_hold_conflicts(backend)
+
+    # Every owned inhibitor is removed FIRST, before anything below tries to
+    # (re)start a gate-guarded unit -- the same M2 ordering fix adoption
+    # needs (#1096 correction round), for the identical reason: a
+    # still-present inhibitor condition-skips its own unit's start (exit 0,
+    # unit stays down). A receipt can own the manual hold and an inhibitor
+    # together -- interrupted mid ``prepare_controlled``, after both
+    # inhibitors are created but before the manual hold is released -- and
+    # releasing the hold and restarting ``GATE_STOPPED_UNITS`` (which
+    # includes YouTube ingest) before YouTube's own inhibitor is gone would
+    # silently skip its start and hang the proof below forever.
+    owned_inhibited_services = backend.owned_inhibitor_units()
+    for service in owned_inhibited_services:
+        if not backend.inhibitor_is_owned(service):
+            raise DeployHoldError(
+                f"refusing to remove unowned producer inhibitor: {service}"
+            )
+        if backend.inhibitor_exists(service):
+            backend.remove_start_inhibitor(service)
 
     if backend.manual_hold_is_owned():
         if backend.manual_hold_active():
@@ -1753,21 +2140,27 @@ def abort_hold(backend: DeployHoldBackend) -> None:
     # metadata_gate("resume-if-clear") that starts every remaining guarded
     # unit. abort has no such following resume, so it must restart and prove
     # each service its own inhibitor release unblocks, exactly like the
-    # manual-hold branch does for GATE_STOPPED_UNITS, before disowning it.
-    owned_inhibited_services = backend.owned_inhibitor_units()
-    for service in owned_inhibited_services:
-        if not backend.inhibitor_is_owned(service):
-            raise DeployHoldError(
-                f"refusing to remove unowned producer inhibitor: {service}"
-            )
-        if backend.inhibitor_exists(service):
-            backend.remove_start_inhibitor(service)
-    if owned_inhibited_services:
-        for service in owned_inhibited_services:
+    # manual-hold branch does for GATE_STOPPED_UNITS, before disowning it --
+    # except MAIN_SERVICE (#1096 correction round, M1 mirror): a receipt can
+    # own MAIN_SERVICE's own inhibitor too (the same interrupted-mid
+    # prepare_controlled window as above, this time caught after the manual
+    # hold is released but before prepare_controlled's own
+    # ``_release_owned_inhibitor(MAIN_SERVICE)`` runs). MAIN_SERVICE is
+    # Type=oneshot -- it runs one cycle and exits, so it can never satisfy
+    # ``_wait_controlled_workers_active``'s active/running proof; it is
+    # started separately below with no active-wait, exactly like
+    # ``prepare_controlled``'s own handling.
+    restart_and_prove_inhibited = tuple(
+        service for service in owned_inhibited_services if service != MAIN_SERVICE
+    )
+    if restart_and_prove_inhibited:
+        for service in restart_and_prove_inhibited:
             backend.start_unit(service)
-        _wait_controlled_workers_active(backend, owned_inhibited_services)
-        for service in owned_inhibited_services:
-            backend.unmark_inhibitor_owned(service)
+        _wait_controlled_workers_active(backend, restart_and_prove_inhibited)
+    if MAIN_SERVICE in owned_inhibited_services:
+        backend.start_unit(MAIN_SERVICE)
+    for service in owned_inhibited_services:
+        backend.unmark_inhibitor_owned(service)
 
     owned_timers = backend.owned_link_units()
     for timer in owned_timers:

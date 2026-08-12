@@ -1640,20 +1640,20 @@ pkgs.testers.nixosTest {
     # race entirely. It also means this dirty-preflight shape is
     # deterministic only while the importer stays stopped, not forever:
     # once abort restarts it later in this scenario, the same sweep would
-    # converge a fresh copy of this shape on its own, which is why cleanup
-    # below drops the row instead of leaving it for the sweep to find.
+    # converge a fresh copy of this shape on its own, so cleanup below
+    # deletes the rows outright rather than leaving converged debris behind.
     #
     # Multiple semicolon-separated statements in one `psql -c` invocation
     # already share a single implicit Postgres transaction (the simple-query
     # protocol wraps them), so migration 066's deferred owner-integrity
     # constraint triggers -- which only check at COMMIT -- see the fully
     # seeded, self-consistent end state here regardless of the explicit
-    # BEGIN/COMMIT below. That BEGIN/COMMIT documents the intent and guards
-    # against a future edit accidentally splitting this SQL across separate
-    # `-c` invocations, each its own connection and transaction: that was
-    # this scenario's actual first-draft bug -- seeding the job and its
-    # owning request as three separate `psql -c` calls tripped
-    # `enforce_complete_processing_owner` on the intermediate,
+    # BEGIN/COMMIT below. That BEGIN/COMMIT documents to a future editor
+    # that these statements must stay in one transaction -- splitting them
+    # across separate `-c` invocations would trip
+    # `enforce_complete_processing_owner` again, which is this scenario's
+    # actual first-draft bug: seeding the job and its owning request as
+    # three separate `psql -c` calls tripped it on the intermediate,
     # single-statement-committed state every time (verified against a
     # throwaway ephemeral-PG instance before writing this).
     abort_vm_seed_mbid = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
@@ -1746,7 +1746,7 @@ pkgs.testers.nixosTest {
     web_state_under_foreign_hold = machine.succeed(
         "systemctl show cratedigger-web.service --property=ActiveState --value"
     ).strip()
-    assert web_state_under_foreign_hold != "active", web_state_under_foreign_hold
+    assert web_state_under_foreign_hold == "inactive", web_state_under_foreign_hold
 
     # Issue requirement 2 -- abort with a foreign gate hold present fails
     # loudly rather than exiting 0 with workers still down.
@@ -5108,6 +5108,479 @@ pkgs.testers.nixosTest {
     # Initial activation, healthy lifecycle restart, then recovery from the
     # deliberately failed producer world.
     assert readiness_log.count("BEETS_EXTERNAL_READINESS_OK") == 3, readiness_log
+
+    # #1096: acquire's producer-drain-before-hold window owns no persistent
+    # object at all (#1078), so the only reboot exposure left is the
+    # persistent manual gate hold and producer start inhibitors -- both
+    # live under /var/lib/cratedigger-metadata-gate, which (unlike /run)
+    # survives a real QEMU crash+restart, because this VM's root filesystem
+    # is the default persistent qcow2 disk (virtualisation.diskImage), not
+    # tmpfs. Deliberately the LAST group of scenarios this whole test does
+    # (this one and its #1096 correction-round M1+M2 sibling immediately
+    # below): earlier scenarios above this point count service restarts and
+    # journal messages "since boot" (BEETS_EXTERNAL_READINESS_OK above,
+    # "Beets configuration admitted" counts elsewhere) -- a real reboot
+    # resets that boot marker and a reboot scenario's own test-fixture
+    # worker restarts would otherwise inflate those counts out from under
+    # assertions such a scenario has no other reason to know about. Placed
+    # last, neither this scenario's nor its sibling's reboots and restarts
+    # can ever be observed by anything; the sibling scenario's own second
+    # reboot is symmetrically safe for the identical reason, since nothing
+    # follows it either.
+    #
+    # Drive a real acquire through prepare-controlled -- reusing the phase
+    # the first deploy-hold scenario reaches at prepare-controlled/
+    # open-main-timer -- then reboot for real, and prove a receiptless
+    # abort adopts the surviving YouTube inhibitor and its new persistent
+    # ownership marker, restoring ordinary operation with no receipt at
+    # all. Nothing needs to continue after this, so there is no matching
+    # re-acquire/re-release: ordinary operation is this test's own final
+    # state.
+    #
+    # prepared-controlled is deliberately the phase under test, not held:
+    # prepare_controlled releases the manual hold (and its persistent
+    # marker) before this phase is ever written, so only the YouTube start
+    # inhibitor -- and its sibling persistent marker -- remain owned across
+    # it. That is the genuinely novel, multi-phase-surviving case #1096
+    # exists for; the manual-hold adoption branch reuses the exact
+    # restart-and-prove shape abort_hold's existing manual-hold branch
+    # already exercises at the unit level
+    # (tests/test_deploy_hold.py::TestReceiptlessAbortAdoptsPersistentMarkers).
+    machine.fail("test -e /run/cratedigger-deploy-hold")
+
+    # The synthetic metadata-gate fixture (metadataGateTool, above) only
+    # records the hold marker file; unlike the real deployment-owned gate
+    # tool it never stops already-running units (documented at length where
+    # the #1098 abort scenario above hits the identical divergence). This
+    # test does not know whether the four gate-guarded workers are
+    # currently active this late in the file, so stop them unconditionally
+    # first -- systemctl stop on an already-inactive unit is a harmless
+    # no-op -- exactly as the #1098 scenario does before its own acquire
+    # call, so a fresh acquire's own SERVICE_UNITS drain observes them
+    # already inactive instead of waiting the full 7200s timeout for a stop
+    # nothing in this fixture ever performs.
+    machine.succeed(
+        "systemctl stop cratedigger-web.service cratedigger-importer.service "
+        "cratedigger-import-preview-worker.service "
+        "cratedigger-youtube-ingest.service"
+    )
+    # (Re-)provision the pgpass secret the lifecycle-preflight query reads
+    # (the VM uses peer auth, so the value is intentionally synthetic while
+    # the boundary is real); harmless if a still-valid copy already exists
+    # from earlier in this test.
+    machine.succeed("install -d -o root -g root -m 0700 /run/secrets")
+    machine.succeed(
+        "printf 'PGPASSWORD=module-vm-unused\\n' "
+        "> /run/secrets/cratedigger-pgpass"
+    )
+    machine.succeed("chmod 0400 /run/secrets/cratedigger-pgpass")
+
+    machine.succeed("timeout 120 cratedigger-deploy-hold acquire")
+    machine.succeed("cratedigger-deploy-hold prepare-controlled")
+    reboot_phase = machine.succeed(
+        "cat /run/cratedigger-deploy-hold/phase"
+    ).strip()
+    assert reboot_phase == "prepared-controlled", reboot_phase
+    machine.succeed(
+        "test -f /run/cratedigger-deploy-hold/owned-inhibitor-"
+        "cratedigger-youtube-ingest.service"
+    )
+    machine.succeed(
+        "test -f /var/lib/cratedigger-metadata-gate/"
+        "inhibit-cratedigger-youtube-ingest.service"
+    )
+    machine.succeed(
+        "test -f /var/lib/cratedigger-metadata-gate/"
+        "deploy-hold-owned-inhibit-cratedigger-youtube-ingest.service"
+    )
+    machine.succeed(
+        "test ! -e /var/lib/cratedigger-metadata-gate/deploy-hold-owned-manual"
+    )
+    machine.succeed("test ! -e /var/lib/cratedigger-metadata-gate/holds/manual")
+    for service in (
+        "cratedigger-web.service",
+        "cratedigger-importer.service",
+        "cratedigger-import-preview-worker.service",
+    ):
+        state = machine.succeed(
+            f"systemctl show {service} --property=ActiveState --value"
+        ).strip()
+        assert state == "active", (service, state)
+
+    # The real reboot: a graceful poweroff (not machine.crash(), which
+    # simulates an abrupt power failure and can therefore surface ordinary
+    # ext4 write-back-caching non-durability of a very recent unlink() --
+    # ext4 crash-consistency is a real but entirely separate concern from
+    # #1096, which is about what /run tmpfs does and does not carry across
+    # an ordinary reboot). shutdown() sends the guest a clean poweroff,
+    # unmounting and syncing filesystems the way an operator-initiated
+    # reboot does, before start() boots a fresh instance against the same
+    # persistent disk.
+    machine.shutdown()
+    machine.start()
+    machine.wait_for_unit("multi-user.target")
+    machine.wait_for_unit("postgresql.service")
+
+    # /run is tmpfs and did not survive the reboot: the receipt, every
+    # tmpfs ownership marker, and both remaining timer control-link masks
+    # are gone, and every timer is back to its ordinary loaded/active state
+    # -- unlike a receipt-owned mask, a timer control-link needs no
+    # persistent marker to recover, because tmpfs on both sides means there
+    # is nothing here to adopt in the first place.
+    machine.succeed("test ! -e /run/cratedigger-deploy-hold")
+    for timer in (
+        "cratedigger.timer",
+        "cratedigger-unfindable.timer",
+        "cratedigger-metadata-gate-watchdog.timer",
+    ):
+        machine.succeed(f"test ! -e /run/systemd/system.control/{timer}")
+        timer_load_state = machine.succeed(
+            f"systemctl show {timer} --property=LoadState --value"
+        ).strip()
+        assert timer_load_state == "loaded", (timer, timer_load_state)
+        timer_active_state = machine.succeed(
+            f"systemctl show {timer} --property=ActiveState --value"
+        ).strip()
+        assert timer_active_state == "active", (timer, timer_active_state)
+
+    # /var/lib survived: the YouTube inhibitor and its new persistent
+    # ownership marker are both exactly where prepare-controlled left them,
+    # self-describing this receiptless world as ours; the main inhibitor
+    # (already released before prepare-controlled wrote this phase) and the
+    # manual hold (released even earlier) are correctly still absent.
+    machine.succeed(
+        "test -f /var/lib/cratedigger-metadata-gate/"
+        "inhibit-cratedigger-youtube-ingest.service"
+    )
+    machine.succeed(
+        "test -f /var/lib/cratedigger-metadata-gate/"
+        "deploy-hold-owned-inhibit-cratedigger-youtube-ingest.service"
+    )
+    machine.succeed(
+        "test ! -e /var/lib/cratedigger-metadata-gate/"
+        "inhibit-cratedigger.service"
+    )
+    machine.succeed(
+        "test ! -e /var/lib/cratedigger-metadata-gate/deploy-hold-owned-manual"
+    )
+    machine.succeed("test ! -e /var/lib/cratedigger-metadata-gate/holds/manual")
+    youtube_state_before_adopt = machine.succeed(
+        "systemctl show cratedigger-youtube-ingest.service "
+        "--property=ActiveState --value"
+    ).strip()
+    assert youtube_state_before_adopt == "inactive", youtube_state_before_adopt
+
+    # Before adoption: acquire must refuse this world and point the operator
+    # at abort, not silently step around a hold it does not itself hold a
+    # receipt for. Needs nothing from pipeline-cli -- the refusal is proven
+    # before acquire ever reaches its lifecycle-preflight query.
+    reboot_reacquire_status, reboot_reacquire_output = machine.execute(
+        "timeout 20 cratedigger-deploy-hold acquire 2>&1"
+    )
+    assert reboot_reacquire_status != 0, reboot_reacquire_output
+    assert "run 'abort'" in reboot_reacquire_output, reboot_reacquire_output
+    machine.succeed("test ! -e /run/cratedigger-deploy-hold")
+
+    # This module-vm.nix fixture's synthetic first-boot config-hold gate
+    # (configHoldGate, above) is wantedBy multi-user.target with no
+    # first-boot guard of its own, so it recreates
+    # /run/cratedigger-test-config-hold on every boot -- including this one
+    # -- re-blocking every held application unit exactly as it did on the
+    # VM's true first boot (a module-vm.nix-only artifact standing in for a
+    # real downstream readiness gate, not anything cratedigger-deploy-hold
+    # owns). Clear it again, and confirm the readiness fixture -- also
+    # wantedBy multi-user.target -- completed again before trusting anything
+    # downstream of it.
+    machine.wait_for_unit("cratedigger-test-config-hold.service")
+    machine.succeed("test -f /run/cratedigger-test-config-hold")
+    machine.wait_for_unit("cratedigger-test-beets-readiness.service")
+    reboot_readiness_state = machine.succeed(
+        "systemctl is-active cratedigger-test-beets-readiness.service"
+    ).strip()
+    assert reboot_readiness_state == "active", reboot_readiness_state
+    machine.succeed("rm /run/cratedigger-test-config-hold")
+
+    # The config-hold gate condition-skipped these three controlled workers
+    # at this boot's one and only start attempt, before this test ever
+    # removed the marker above -- systemd does not retry a
+    # condition-skipped unit on its own. Production carries no such extra
+    # gate; restarting them here is this fixture's own workaround, not
+    # evidence about abort's restart set (already covered at the unit level
+    # by TestReceiptlessAbortAdoptsPersistentMarkers, which restarts exactly
+    # GATE_STOPPED_UNITS only when the manual hold marker is present -- not
+    # the case at this phase).
+    machine.succeed(
+        "systemctl start cratedigger-web.service "
+        "cratedigger-importer.service "
+        "cratedigger-import-preview-worker.service"
+    )
+    for service in (
+        "cratedigger-web.service",
+        "cratedigger-importer.service",
+        "cratedigger-import-preview-worker.service",
+    ):
+        machine.wait_until_succeeds(
+            f"systemctl show {service} --property=ActiveState --value "
+            "| grep -qx active"
+        )
+
+    # The adoption itself: no receipt, only the persistent markers above.
+    machine.succeed("timeout 60 cratedigger-deploy-hold abort")
+
+    # Ordinary operation, genuinely restored with no receipt at all.
+    machine.succeed("test ! -e /run/cratedigger-deploy-hold")
+    machine.succeed(
+        "test ! -e /var/lib/cratedigger-metadata-gate/"
+        "inhibit-cratedigger-youtube-ingest.service"
+    )
+    machine.succeed(
+        "test ! -e /var/lib/cratedigger-metadata-gate/"
+        "deploy-hold-owned-inhibit-cratedigger-youtube-ingest.service"
+    )
+    machine.succeed(
+        "test ! -e /var/lib/cratedigger-metadata-gate/deploy-hold-owned-manual"
+    )
+    machine.succeed("test ! -e /var/lib/cratedigger-metadata-gate/holds/manual")
+    for timer in (
+        "cratedigger.timer",
+        "cratedigger-unfindable.timer",
+        "cratedigger-metadata-gate-watchdog.timer",
+    ):
+        timer_state = machine.succeed(
+            f"systemctl show {timer} --property=ActiveState --value"
+        ).strip()
+        assert timer_state == "active", (timer, timer_state)
+    for service in (
+        "cratedigger-web.service",
+        "cratedigger-importer.service",
+        "cratedigger-import-preview-worker.service",
+        "cratedigger-youtube-ingest.service",
+    ):
+        state = machine.succeed(
+            f"systemctl show {service} --property=ActiveState --value"
+        ).strip()
+        assert state == "active", (service, state)
+    machine.succeed("cratedigger-metadata-gate start-check")
+
+    # #1096 correction round (M1+M2): the scenario above only ever leaves
+    # the YouTube inhibitor and its persistent marker surviving a reboot --
+    # prepare-controlled had already released the manual hold and main's
+    # own inhibitor by the time it wrote prepared-controlled. Independent
+    # review found two real-systemd hangs in exactly the WIDER window this
+    # scenario never reaches: a reboot after prepare-controlled's ``for
+    # service in START_INHIBITORS: _ensure_owned_start_inhibitor(...)``
+    # loop creates BOTH the main and YouTube inhibitors, but before it ever
+    # calls ``metadata_gate("release manual")``, leaves the manual hold,
+    # the main inhibitor, and the YouTube inhibitor ALL persistently marked
+    # together. M1: naming ``cratedigger.service`` -- a Type=oneshot that
+    # can never reach active/running -- among the units
+    # ``_wait_controlled_workers_active`` proves hangs for the full
+    # ``_DRAIN_TIMEOUT_SECONDS`` bound (2h, 7200 polls -- NOT the 6h
+    # ``_PRODUCER_DRAIN_TIMEOUT_SECONDS``, which nothing in this call ever
+    # uses), inhibitor files already deleted, every rerun identical. M2:
+    # releasing the manual hold and restarting
+    # ``GATE_STOPPED_UNITS`` (which includes YouTube ingest) BEFORE
+    # removing the still-present YouTube inhibitor file lets real systemd's
+    # ConditionPathExists condition-skip that very restart -- ``systemctl
+    # start`` exits 0, the unit stays down -- so the wait times out
+    # identically. The structural fix removes every marked inhibitor file
+    # and releases the marked manual hold before a single restart-and-prove
+    # pass over ``GATE_STOPPED_UNITS | (inhibited_marked - {MAIN_SERVICE})``,
+    # starting ``cratedigger.service`` separately with no wait; this
+    # scenario proves that fix against real systemd rather than the Python
+    # fake the unit tests above (TestReceiptlessAbortAdoptsPersistentMarkers)
+    # already qualify with planted mutants.
+    #
+    # Reaching this exact crash window through prepare-controlled itself
+    # would mean interrupting a live subprocess at one specific Python
+    # statement -- fragile and racy in a VM. Constructing the filesystem
+    # delta directly is the faithful, deterministic alternative: the
+    # persistent-marker mechanism is deliberately designed to trust file
+    # presence regardless of how it got there (#1096), so acquiring HELD
+    # for real (which genuinely marks and activates the manual hold) and
+    # then hand-writing exactly the two inhibitor files and their two
+    # persistent markers prepare-controlled's own inhibitor loop would have
+    # written is the identical world a genuine crash there would leave --
+    # exercised against real systemd rather than re-driving the fake.
+    machine.succeed("test ! -e /run/cratedigger-deploy-hold")
+    for service in (
+        "cratedigger-web.service",
+        "cratedigger-importer.service",
+        "cratedigger-import-preview-worker.service",
+        "cratedigger-youtube-ingest.service",
+    ):
+        state = machine.succeed(
+            f"systemctl show {service} --property=ActiveState --value"
+        ).strip()
+        assert state == "active", (service, state)
+
+    machine.succeed(
+        "systemctl stop cratedigger-web.service cratedigger-importer.service "
+        "cratedigger-import-preview-worker.service "
+        "cratedigger-youtube-ingest.service"
+    )
+    # /run was wiped by the first reboot above and never re-provisioned;
+    # acquire's lifecycle-preflight query needs it again.
+    machine.succeed("install -d -o root -g root -m 0700 /run/secrets")
+    machine.succeed(
+        "printf 'PGPASSWORD=module-vm-unused\\n' "
+        "> /run/secrets/cratedigger-pgpass"
+    )
+    machine.succeed("chmod 0400 /run/secrets/cratedigger-pgpass")
+
+    machine.succeed("timeout 120 cratedigger-deploy-hold acquire")
+    m1m2_held_phase = machine.succeed(
+        "cat /run/cratedigger-deploy-hold/phase"
+    ).strip()
+    assert m1m2_held_phase == "held", m1m2_held_phase
+    machine.succeed("test -f /var/lib/cratedigger-metadata-gate/holds/manual")
+    machine.succeed(
+        "test -f /var/lib/cratedigger-metadata-gate/deploy-hold-owned-manual"
+    )
+
+    # By hand, create exactly the filesystem delta prepare-controlled's own
+    # inhibitor loop makes -- persistent marker before the inhibitor file
+    # itself, mirroring mark_inhibitor_owned()/create_start_inhibitor()
+    # (#1096) -- for BOTH main and YouTube, without ever invoking
+    # prepare-controlled itself.
+    for service in ("cratedigger.service", "cratedigger-youtube-ingest.service"):
+        machine.succeed(
+            f"printf '{service}\\n' > /var/lib/cratedigger-metadata-gate/"
+            f"deploy-hold-owned-inhibit-{service}"
+        )
+        machine.succeed(
+            "chmod 0600 /var/lib/cratedigger-metadata-gate/"
+            f"deploy-hold-owned-inhibit-{service}"
+        )
+        machine.succeed(
+            "printf 'cratedigger-deploy-hold-v1\\n' "
+            f"> /var/lib/cratedigger-metadata-gate/inhibit-{service}"
+        )
+        machine.succeed(
+            f"chmod 0600 /var/lib/cratedigger-metadata-gate/inhibit-{service}"
+        )
+
+    # The second real reboot: identical justification to the first
+    # (machine.shutdown(), never machine.crash() -- see that scenario's own
+    # comment on ext4 write-back-caching non-durability being an unrelated
+    # concern from #1096).
+    machine.shutdown()
+    machine.start()
+    machine.wait_for_unit("multi-user.target")
+    machine.wait_for_unit("postgresql.service")
+
+    # /run is gone again; every hand-written /var/lib artifact above
+    # survived, exactly like the simpler single-inhibitor case.
+    machine.succeed("test ! -e /run/cratedigger-deploy-hold")
+    for service in ("cratedigger.service", "cratedigger-youtube-ingest.service"):
+        machine.succeed(
+            f"test -f /var/lib/cratedigger-metadata-gate/inhibit-{service}"
+        )
+        machine.succeed(
+            "test -f /var/lib/cratedigger-metadata-gate/"
+            f"deploy-hold-owned-inhibit-{service}"
+        )
+    machine.succeed("test -f /var/lib/cratedigger-metadata-gate/holds/manual")
+    machine.succeed(
+        "test -f /var/lib/cratedigger-metadata-gate/deploy-hold-owned-manual"
+    )
+
+    # acquire must refuse and point at abort, exactly as the simpler case.
+    m1m2_reacquire_status, m1m2_reacquire_output = machine.execute(
+        "timeout 20 cratedigger-deploy-hold acquire 2>&1"
+    )
+    assert m1m2_reacquire_status != 0, m1m2_reacquire_output
+    assert "run 'abort'" in m1m2_reacquire_output, m1m2_reacquire_output
+    machine.succeed("test ! -e /run/cratedigger-deploy-hold")
+
+    # Clear this module-vm.nix-only fixture's one-shot first-boot marker so
+    # it is not an extra confounding condition-skip source once abort tries
+    # to start these units below -- unlike the simpler single-inhibitor
+    # scenario above, this scenario does NOT need to restart the three
+    # workers by hand here: the manual hold this scenario deliberately kept
+    # active is what actually condition-skips them at this boot's one
+    # start attempt, not merely this fixture's marker, and the hold stays
+    # active until abort itself releases it below. Proving that abort's own
+    # restart -- not a hand workaround -- is what brings them up is exactly
+    # what this scenario exists to test.
+    machine.wait_for_unit("cratedigger-test-config-hold.service")
+    machine.succeed("test -f /run/cratedigger-test-config-hold")
+    machine.wait_for_unit("cratedigger-test-beets-readiness.service")
+    machine.succeed("rm /run/cratedigger-test-config-hold")
+
+    for service in (
+        "cratedigger-web.service",
+        "cratedigger-importer.service",
+        "cratedigger-import-preview-worker.service",
+        "cratedigger-youtube-ingest.service",
+    ):
+        state = machine.succeed(
+            f"systemctl show {service} --property=ActiveState --value"
+        ).strip()
+        assert state == "inactive", (service, state)
+    main_state_before_m1m2_adopt = machine.succeed(
+        "systemctl show cratedigger.service --property=ActiveState --value"
+    ).strip()
+    assert main_state_before_m1m2_adopt == "inactive", main_state_before_m1m2_adopt
+
+    # The M1+M2 adoption itself: manual hold, main inhibitor, and YouTube
+    # inhibitor ALL persistently marked together, restarting all four
+    # gate-guarded units from cold (unlike the simpler scenario above,
+    # which only asks abort to restart YouTube). Bounded well under the
+    # pre-fix failure mode (a full 7200s _DRAIN_TIMEOUT_SECONDS wait) so an
+    # unfixed ordering fails this assertion via timeout, not a hang of the
+    # test suite itself.
+    machine.succeed("timeout 120 cratedigger-deploy-hold abort")
+
+    # Every marker, inhibitor file, and the hold itself are gone; the four
+    # gate-guarded units are active -- proving M2's fix (the YouTube
+    # restart was not condition-skipped by its own now-removed inhibitor).
+    machine.succeed("test ! -e /run/cratedigger-deploy-hold")
+    for service in ("cratedigger.service", "cratedigger-youtube-ingest.service"):
+        machine.succeed(
+            f"test ! -e /var/lib/cratedigger-metadata-gate/inhibit-{service}"
+        )
+        machine.succeed(
+            "test ! -e /var/lib/cratedigger-metadata-gate/"
+            f"deploy-hold-owned-inhibit-{service}"
+        )
+    machine.succeed("test ! -e /var/lib/cratedigger-metadata-gate/holds/manual")
+    machine.succeed(
+        "test ! -e /var/lib/cratedigger-metadata-gate/deploy-hold-owned-manual"
+    )
+    for service in (
+        "cratedigger-web.service",
+        "cratedigger-importer.service",
+        "cratedigger-import-preview-worker.service",
+        "cratedigger-youtube-ingest.service",
+    ):
+        state = machine.succeed(
+            f"systemctl show {service} --property=ActiveState --value"
+        ).strip()
+        assert state == "active", (service, state)
+
+    # cratedigger.service proving M1's fix: abort started it unproven and
+    # returned without waiting on it. A real cycle here has no slskd to
+    # talk to and will eventually fail on that unrelated ground (out of
+    # this scenario's contract, same as the module-vm main-service scenario
+    # far above) -- what this scenario needs is only that it was actually
+    # STARTED for real rather than condition-skipped by its own
+    # already-removed inhibitor. This boot never started main before now
+    # (proven above: main_state_before_m1m2_adopt == "inactive", and this
+    # is a fresh boot with nothing else in this scenario starting it), so
+    # "-b" alone -- the identical pattern the module-vm main-service
+    # scenario far above already uses -- unambiguously scopes the search to
+    # abort's own start.
+    machine.wait_until_succeeds(
+        "journalctl -b -u cratedigger.service -o cat "
+        "| grep -q 'Beets configuration admitted for main'"
+    )
+    machine.succeed(
+        "systemctl kill --kill-whom=all --signal=SIGKILL cratedigger.service || true"
+    )
+    machine.succeed("systemctl reset-failed cratedigger.service || true")
+
+    machine.succeed("cratedigger-metadata-gate start-check")
     '';
   in ''
     exec(compile(open("${script}", encoding="utf-8").read(), "${script}", "exec"))
