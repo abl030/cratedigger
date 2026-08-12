@@ -919,6 +919,93 @@ class TestCleanupStagedDir(unittest.TestCase):
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_realpath_protects_a_protected_parent_reached_via_symlink(self):
+        """Issue #1077, R3-3 (round-3 review): the guard compared
+        ``os.path.abspath`` on both sides, which does not resolve
+        symlinks. A ``dest`` reached through a symlinked path component
+        would compare unequal to the canonical ``protected_parent`` even
+        though they name the SAME directory on disk — silently defeating
+        the guard and letting it ``rmdir`` the shared root anyway.
+        Switched to ``os.path.realpath`` on both sides so this world is
+        correctly recognized as protected."""
+        from lib.dispatch import _cleanup_staged_dir
+        tmpdir = tempfile.mkdtemp()
+        try:
+            real_albums = os.path.join(tmpdir, "real_albums")
+            os.makedirs(real_albums)
+            staged = os.path.join(real_albums, "Album")
+            os.makedirs(staged)
+            symlinked_albums = os.path.join(tmpdir, "albums_link")
+            os.symlink(real_albums, symlinked_albums)
+            dest_via_symlink = os.path.join(symlinked_albums, "Album")
+
+            _cleanup_staged_dir(dest_via_symlink, protected_parent=real_albums)
+
+            self.assertFalse(os.path.exists(staged))
+            self.assertTrue(
+                os.path.isdir(real_albums),
+                "the protected root must survive even when dest was "
+                "reached through a symlinked path component",
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class TestRunPostCommitCleanupProtectedParent(unittest.TestCase):
+    """Issue #1077, R3-3 (round-3 review): the importer's deferred
+    post-commit cleanup (``scripts.importer._run_post_commit_cleanup``) is
+    the THIRD real caller of ``_cleanup_staged_dir`` and the furthest from
+    ``cfg`` — reached only through the ``PostCommitCleanup`` plan a caller
+    built earlier and handed across the queue-owner boundary. Before this
+    fix it called ``_cleanup_staged_dir(plan.staged_path)`` with no guard
+    at all, so a successful automation import (``scripts/importer.py``)
+    whose ``staged_path`` was the last remaining canonical processing
+    album could ``rmdir`` the shared, Nix-provisioned
+    ``<processing_dir>/albums/`` root right out from under every other
+    request. This proves the guard now travels end to end: the plan
+    carries ``staged_path_protected_parent``, and the real (unpatched)
+    ``_cleanup_staged_dir`` honours it."""
+
+    def test_post_commit_cleanup_never_removes_the_processing_albums_root(self):
+        from lib.dispatch.types import DispatchOutcome, PostCommitCleanup
+        from lib.processing_paths import processing_albums_dir
+        from scripts.importer import _run_post_commit_cleanup
+
+        tmpdir = tempfile.mkdtemp()
+        try:
+            processing_dir = os.path.join(tmpdir, "processing")
+            albums_root = processing_albums_dir(processing_dir)
+            staged_path = os.path.join(albums_root, "Artist - Album")
+            os.makedirs(staged_path)
+            with open(os.path.join(staged_path, "01.flac"), "wb") as handle:
+                handle.write(b"imported audio")
+
+            outcome = DispatchOutcome(
+                success=True,
+                message="imported",
+                post_commit_cleanup=PostCommitCleanup(
+                    staged_path=staged_path,
+                    staged_path_protected_parent=albums_root,
+                ),
+            )
+
+            details = _run_post_commit_cleanup(outcome)
+
+            assert details is not None
+            staged_path_detail = details["staged_path"]
+            assert isinstance(staged_path_detail, dict)
+            self.assertTrue(staged_path_detail["success"])
+            self.assertFalse(os.path.exists(staged_path))
+            self.assertTrue(
+                os.path.isdir(albums_root),
+                "the shared processing albums root must survive even "
+                "though it is now empty — it is a Nix-provisioned root, "
+                "not a disposable per-artist directory",
+            )
+            self.assertEqual(os.listdir(albums_root), [])
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
 
 class TestAudioCorruptBanAndDelete(unittest.TestCase):
     """Bad rips are ban + delete, never quarantined (issue #1077, D3).
@@ -1519,6 +1606,8 @@ class TestRejectImportFromEvidenceDecisionCallerLifecycle(unittest.TestCase):
         pending: bool = False,
         search_filetype_override: str | None = None,
         initial_status: str = "downloading",
+        processing_dir: str | None = None,
+        capture_cleanup_call: dict[str, object] | None = None,
     ):
         from lib.dispatch import _reject_import_from_evidence_decision
         from lib.dispatch.types import ImportAttemptResult
@@ -1555,7 +1644,7 @@ class TestRejectImportFromEvidenceDecisionCallerLifecycle(unittest.TestCase):
                     "failed_path": "/tmp/cratedigger-caller-lifecycle-test",
                 },
             ).id
-        with patch_dispatch_externals():
+        with patch_dispatch_externals() as ext:
             outcome = _reject_import_from_evidence_decision(
                 db=db,  # type: ignore[arg-type]
                 request_id=42,
@@ -1572,7 +1661,11 @@ class TestRejectImportFromEvidenceDecisionCallerLifecycle(unittest.TestCase):
                 source_path_cleanup_scenario=decision,
                 cooled_down_users=None,
                 import_job_id=import_job_id,
+                processing_dir=processing_dir,
             )
+            if capture_cleanup_call is not None and ext.cleanup.call_args is not None:
+                capture_cleanup_call["args"] = ext.cleanup.call_args.args
+                capture_cleanup_call["kwargs"] = ext.cleanup.call_args.kwargs
         if pending:
             self.assertIsNotNone(outcome.terminal_outcome)
             assert outcome.terminal_outcome is not None
@@ -1669,6 +1762,55 @@ class TestRejectImportFromEvidenceDecisionCallerLifecycle(unittest.TestCase):
         self.assertEqual(db.download_logs[-1].outcome, "rejected")
         self.assertEqual(db.denylist, [])
         self.assertEqual(db.download_logs[-1].outcome, "rejected")
+
+    def test_processing_dir_threads_the_protected_parent_guard(self) -> None:
+        """Issue #1077, R3-3 (round-3 review): the synchronous cleanup
+        branch inside ``_reject_import_from_evidence_decision`` is one of
+        the two unguarded ``_cleanup_staged_dir`` call sites the reviewer
+        found — this one fires on every quality reject whose
+        ``staged_path`` is a canonical processing album. Proves the
+        function computes ``protected_parent`` from ``processing_dir`` and
+        actually passes it through to ``_cleanup_staged_dir`` — a seam
+        assertion on the SAME mocked cleanup call the shared ``_reject``
+        helper (and every other test in this class) already exercises, so
+        this reuses that call site's existing ``# type: ignore[arg-type]``
+        rather than adding a new one (tests/test_typing_ratchet.py's
+        escape-hatch ratchet is frozen, only-decrease). The real
+        (unpatched) ``_cleanup_staged_dir`` honouring this guard is proven
+        separately by ``TestCleanupStagedDir.
+        test_realpath_protects_a_protected_parent_reached_via_symlink``."""
+        from lib.processing_paths import processing_albums_dir
+
+        capture: dict[str, object] = {}
+        processing_dir = "/tmp/cratedigger-r3-3-processing-dir"
+        self._reject(
+            decision="bad_audio_hash",
+            requeue_on_failure=True,
+            processing_dir=processing_dir,
+            capture_cleanup_call=capture,
+        )
+
+        kwargs = capture.get("kwargs")
+        assert isinstance(kwargs, dict)
+        self.assertEqual(
+            kwargs.get("protected_parent"),
+            processing_albums_dir(processing_dir),
+        )
+
+    def test_no_processing_dir_passes_no_protected_parent(self) -> None:
+        """Must-still-work control: without a ``processing_dir`` (the
+        non-canonical staged lane), the guard stays ``None`` rather than
+        inventing a spurious protected root."""
+        capture: dict[str, object] = {}
+        self._reject(
+            decision="bad_audio_hash",
+            requeue_on_failure=True,
+            capture_cleanup_call=capture,
+        )
+
+        kwargs = capture.get("kwargs")
+        assert isinstance(kwargs, dict)
+        self.assertIsNone(kwargs.get("protected_parent"))
 
 
 class TestHaveAnalysisErrorAbort(unittest.TestCase):

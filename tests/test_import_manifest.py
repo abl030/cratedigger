@@ -2,6 +2,7 @@ import os
 import tempfile
 import unittest
 from typing import Any, cast
+from unittest.mock import patch
 
 from lib.dispatch import (
     DISPATCH_CODE_IMPORT_MANIFEST_REJECTED,
@@ -9,7 +10,9 @@ from lib.dispatch import (
     dispatch_import_from_db,
 )
 from lib.grab_list import DownloadFile
+from lib.import_execution import ExecutionCancelled
 from lib.import_manifest import (
+    _observe_leftovers,
     check_audio_manifest,
     move_failed_import_curated,
     tracked_audio_paths_for_downloads,
@@ -148,6 +151,49 @@ class TestImportManifest(unittest.TestCase):
                 os.path.join(result.target_path, "bonus.opus")))
             self.assertFalse(os.path.exists(source))
 
+    def test_sweep_cancellation_propagates_instead_of_being_swallowed(self):
+        """Issue #1077, R3-5 (round-3 review): ``ExecutionCancelled`` is a
+        ``RuntimeError`` subclass, so the sweep call site's pre-existing
+        bare ``except Exception:`` would silently swallow a real
+        cancellation as though it were an ordinary sweep failure — worst-
+        casing it toward "leftovers present" instead of letting it
+        interrupt the pipeline. A dedicated ``except ExecutionCancelled:
+        raise`` above that handler (and every other new except block added
+        for R3-1) must let it through unchanged.
+
+        Drives a REAL ``CancellationToken`` rather than patching one of our
+        own functions (mocks are leaf-seam only — code-quality.md): the
+        checkpoint cancels itself the moment ``01.flac`` (the only file the
+        main move loop is allowed to touch) has actually landed at the
+        destination, which is exactly the first checkpoint reached inside
+        ``_sweep_residue_into_destination`` for the untracked
+        ``bonus.opus`` leftover — real production code decides when the
+        interruption lands, not a hand-picked call count."""
+        from lib.import_execution import CancellationToken
+
+        with tempfile.TemporaryDirectory() as parent:
+            source = os.path.join(parent, "Album")
+            os.mkdir(source)
+            open(os.path.join(source, "01.flac"), "wb").close()
+            open(os.path.join(source, "bonus.opus"), "wb").close()
+            moved_marker = os.path.join(
+                parent, "wrong_matches", "Album", "01.flac")
+
+            token = CancellationToken()
+
+            def before_mutation():
+                if os.path.exists(moved_marker):
+                    token.cancel("test cancellation mid-sweep")
+                token.raise_if_cancelled()
+
+            with self.assertRaises(ExecutionCancelled):
+                move_failed_import_curated(
+                    source,
+                    allowed_audio=["01.flac"],
+                    scenario="high_distance",
+                    before_mutation=before_mutation,
+                )
+
     def test_integrity_rejection_lands_in_wrong_matches_quarantine(self):
         """Issue #1077, F1: ``_allocate_target`` no longer branches on
         scenario — the historical ``failed_imports`` (non-``bad_files``)
@@ -237,6 +283,33 @@ class TestImportManifest(unittest.TestCase):
             )
 
         self.assertEqual(paths, ["01 Perth.flac"])
+
+
+class TestObserveLeftovers(unittest.TestCase):
+    """Issue #1077, R3-1/R3-5: the shared best-effort leftover-presence
+    check every post-move statement in ``move_failed_import_curated`` now
+    routes through — pinned directly since three separate call sites
+    inherit its contract."""
+
+    def test_cancellation_propagates(self):
+        with patch(
+            "os.scandir", side_effect=ExecutionCancelled("stop"),
+        ), self.assertRaises(ExecutionCancelled):
+            _observe_leftovers("/nonexistent/path", context="test")
+
+    def test_other_failures_worst_case_toward_leftovers_present(self):
+        with patch("os.scandir", side_effect=OSError("EACCES simulated")):
+            self.assertTrue(
+                _observe_leftovers("/nonexistent/path", context="test"))
+
+    def test_real_empty_directory_reports_no_leftovers(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.assertFalse(_observe_leftovers(tmpdir, context="test"))
+
+    def test_real_non_empty_directory_reports_leftovers(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            open(os.path.join(tmpdir, "leftover.txt"), "wb").close()
+            self.assertTrue(_observe_leftovers(tmpdir, context="test"))
 
 
 class TestForceImportManifestGuard(unittest.TestCase):

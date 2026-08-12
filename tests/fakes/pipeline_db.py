@@ -9208,7 +9208,76 @@ class FakePipelineDBSource:
                 )
                 for username in sorted(usernames or ())
             ))
-        return None
+        # Issue #1077, R3-6: mirror ``album_source.DatabaseSource``'s own
+        # synchronous branch (``import_job_id is None``) instead of silently
+        # no-op'ing it. The prior version of this fake only recorded the
+        # call args and returned ``None`` here, so no test could ever prove
+        # a rejection reaches a REAL persisted ``download_log`` row through
+        # this entry point — exactly the "test infrastructure more
+        # permissive than production" smell ``test-fidelity.md`` Rule A
+        # exists to catch. Production writes directly via ``db.log_download``
+        # on this path; do the same against the underlying ``FakePipelineDB``.
+        from lib.quality import DownloadInfo
+
+        request_id = getattr(album_record, "db_request_id", None)
+        if not isinstance(request_id, int):
+            return None
+        dl = (
+            download_info
+            if isinstance(download_info, DownloadInfo)
+            else DownloadInfo()
+        )
+        transition_kwargs: dict[str, object] = {}
+        if search_filetype_override is not None:
+            transition_kwargs["search_filetype_override"] = search_filetype_override
+        transitions.require_transition_applied(
+            transitions.finalize_request(
+                self.db,
+                request_id,
+                transitions.RequestTransition.to_wanted_fields(
+                    attempt_type="validation",
+                    fields=transition_kwargs,
+                ),
+            )
+        )
+        validation_result = dl.validation_result or bv_result.to_json()
+        download_log_id = self.db.log_download(
+            request_id=request_id,
+            soulseek_username=dl.username,
+            filetype=dl.filetype,
+            beets_detail=bv_result.detail,
+            outcome="rejected",
+            error_message=bv_result.error,
+            bitrate=dl.bitrate,
+            sample_rate=dl.sample_rate,
+            bit_depth=dl.bit_depth,
+            is_vbr=dl.is_vbr,
+            was_converted=dl.was_converted,
+            original_filetype=dl.original_filetype,
+            slskd_filetype=dl.slskd_filetype,
+            actual_filetype=dl.actual_filetype,
+            actual_min_bitrate=dl.actual_min_bitrate,
+            spectral_grade=(
+                dl.download_spectral.grade if dl.download_spectral else None
+            ),
+            spectral_bitrate=(
+                dl.download_spectral.bitrate_kbps if dl.download_spectral else None
+            ),
+            existing_min_bitrate=dl.existing_min_bitrate,
+            existing_spectral_bitrate=(
+                dl.current_spectral.bitrate_kbps if dl.current_spectral else None
+            ),
+            import_result=dl.import_result,
+            validation_result=validation_result,
+        )
+        for username in usernames or ():
+            self.db.add_denylist(request_id, username, "beets validation rejected")
+            if (
+                self.db.check_and_apply_cooldown(username)
+                and cooled_down_users is not None
+            ):
+                cooled_down_users.add(username)
+        return download_log_id
 
     def close(self) -> None:
         self.close_calls += 1

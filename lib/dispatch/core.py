@@ -1023,6 +1023,9 @@ def dispatch_import_core(
                         quality_ranks=(
                             cfg.quality_ranks if cfg is not None else None
                         ),
+                        processing_dir=(
+                            cfg.processing_dir if cfg is not None else None
+                        ),
                     )
                 quality_evidence_action_file = _write_quality_evidence_action_file(
                     candidate=evidence_gate.candidate,

@@ -232,7 +232,15 @@ def _run_post_commit_cleanup(
         try:
             from lib.dispatch.helpers import _cleanup_staged_dir
 
-            _cleanup_staged_dir(plan.staged_path)
+            # Issue #1077, R3-3: this is the third real caller of
+            # ``_cleanup_staged_dir`` and the one furthest from ``cfg`` —
+            # the guard has to travel through the ``PostCommitCleanup``
+            # plan itself (``staged_path_protected_parent``) since this
+            # function only ever receives ``outcome: DispatchOutcome``.
+            _cleanup_staged_dir(
+                plan.staged_path,
+                protected_parent=plan.staged_path_protected_parent,
+            )
             details["staged_path"] = {
                 "path": plan.staged_path,
                 "success": True,
@@ -443,21 +451,31 @@ def _cleanup_failed_force_import(
         # source — delete it here, reusing the same source-deletion helper
         # the successful-force-import (D7) and cleanup-reducer paths use
         # (no new teardown machinery, CLAUDE.md invariant 7).
-        # ``cleanup_wrong_match_source``'s ``clear_missing`` DEFAULTS to
-        # True; explicit ``False`` here (issue #1077, B2) matches the
-        # cleanup reducer's own explicit override, not the library
-        # default. This is an AUTONOMOUS quality observation
-        # (audio_corrupt), not an operator's own explicit action —
-        # issue #1063's lesson governs: a path we could not observe must
-        # never clear a live pointer off an intact folder, since "missing"
-        # here can mean "transiently unreadable," not "gone."
+        # ``clear_missing=True`` (issue #1077, R3-2 — corrects round-2's
+        # false premise). ``clear_missing`` is NEVER consulted for an
+        # unobservable path: ``cleanup_wrong_match_source`` short-circuits
+        # at the indeterminate-observation check
+        # (``lib/wrong_matches.py``) and returns with nothing cleared,
+        # BEFORE ``clear_missing`` is ever read — an unreadable folder
+        # already can't clear its pointer here, regardless of this flag.
+        # ``clear_missing`` only governs a DETERMINATE absence (the path
+        # was positively proven gone, or vanished between resolve and
+        # delete). This force-failure IS an explicit operator action
+        # completing (the operator chose this exact candidate to force-
+        # import; the terminal audio_corrupt failure is the answer), so a
+        # proven-gone source must clear its pointer here rather than
+        # leaving a phantom row the worklist can never act on again
+        # (``wrong_match_row_is_visible`` never consults the filesystem).
+        # Only the autonomous reducer (``lib.wrong_match_cleanup_service``)
+        # keeps ``False`` — a quality decision second-guessing its own
+        # read, not an operator's completed action.
         from lib.wrong_matches import cleanup_wrong_match_source
 
         result = cleanup_wrong_match_source(
             db,
             download_log_id,
             failed_path_hint=failed_path_hint,
-            clear_missing=False,
+            clear_missing=True,
         )
         payload = result.to_dict()
         payload["outcome"] = "deleted_operator_force_source"
@@ -500,17 +518,23 @@ def _dismiss_successful_force_import(
         from lib.wrong_matches import cleanup_wrong_match_source
 
         # ``clear_missing=True`` (the library default, stated explicitly
-        # here for clarity) — the OPPOSITE of the reducer's and the D3
-        # force-failure path's override (issue #1077, B2). This is the
-        # operator's OWN explicit action completing: force-import already
-        # succeeded, so the row must leave the worklist even if its source
-        # folder happens to be unobservable at this exact moment. A dead
-        # pointer left visible here is the stranded-phantom state — an
-        # already-imported row that looks stuck in the queue forever — not
-        # a safety net. Issue #1063's "don't clear on an unobserved path"
-        # caution is about AUTONOMOUS quality decisions second-guessing a
-        # transient read failure, not about honoring a completed operator
-        # action.
+        # here for clarity) — matches the D3 force-failure path above,
+        # both now the OPPOSITE of the autonomous reducer's own override
+        # (issue #1077, R3-2, correcting round-2's false premise).
+        # ``clear_missing`` is never even reached for an unobservable path
+        # — ``cleanup_wrong_match_source`` short-circuits at the
+        # indeterminate-observation check and returns with nothing
+        # cleared regardless of this flag (see
+        # ``lib/wrong_matches.py::cleanup_wrong_match_source``). It only
+        # governs a DETERMINATE absence: force-import already succeeded,
+        # so a proven-gone source folder must clear its pointer here — a
+        # dead pointer left visible would be the stranded-phantom state,
+        # an already-imported row that looks stuck in the queue forever,
+        # not a safety net (``wrong_match_row_is_visible`` never consults
+        # the filesystem). Only the autonomous reducer
+        # (``lib.wrong_match_cleanup_service``) keeps ``False`` — a
+        # quality decision second-guessing its own read, not an
+        # operator's completed action.
         return cleanup_wrong_match_source(
             db,
             download_log_id,

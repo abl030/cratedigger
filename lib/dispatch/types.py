@@ -105,6 +105,14 @@ class PostCommitCleanup:
     """
 
     staged_path: str | None = None
+    # Issue #1077, R3-3: the canonical processing albums root
+    # (``lib.processing_paths.processing_albums_dir``) that
+    # ``_cleanup_staged_dir``'s parent-prune step must never remove, even
+    # though this deferred cleanup runs after ``dispatch_import_core`` has
+    # already returned and lost direct access to ``cfg``. Carried here so
+    # the eventual caller (``scripts/importer.py::_run_post_commit_cleanup``)
+    # can pass it through without needing its own config.
+    staged_path_protected_parent: str | None = None
     duplicate_guard_source_path: str | None = None
     duplicate_guard_staging_dir: str | None = None
     duplicate_guard_request_id: int | None = None

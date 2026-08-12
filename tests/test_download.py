@@ -2349,6 +2349,165 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
                 os.path.join(rejected.failed_path, "Scans", "front.jpg")))
             self.assertFalse(os.path.exists(current_path))
 
+    def test_sweep_anomaly_reaches_the_persisted_download_log_row(self):
+        """Issue #1077, R3-6 (round-3 review): a REAL sweep anomaly must
+        reach the persisted ``download_log`` row, not just the in-memory
+        ``ValidationResult`` the caller builds. The chain: a genuinely
+        untracked audio file on disk (out-of-manifest — the caller's
+        ``allowed_audio`` set is narrower than what is really there) makes
+        ``move_failed_import_curated`` sweep instead of raising and compose
+        ``CuratedMoveResult.anomaly``; ``_handle_rejected_result`` folds
+        that into ``bv_result.detail``; ``dl_info.validation_result =
+        bv_result.to_json()`` carries the same string into the JSON
+        envelope; and the SAME ``bv_result.detail`` is written verbatim to
+        ``download_log.beets_detail`` (this is the actual production
+        column the persisted row exposes for Recents forensics — see
+        ``album_source.DatabaseSource.reject_and_requeue``'s synchronous
+        branch, which this test drives for real through
+        ``FakePipelineDBSource`` rather than stopping at its previously
+        no-op call-recording shim)."""
+        from lib.download_rejection import _handle_rejected_result
+        from lib.quality import ValidationResult
+        from lib.staged_album import StagedAlbum
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            current_path = os.path.join(tmpdir, "Artist - Album")
+            os.makedirs(current_path)
+            with open(os.path.join(current_path, "01.flac"), "wb") as handle:
+                handle.write(b"audio bytes")
+            # Untracked audio the download manifest below never names — the
+            # exact "genuinely unexpected residue" world
+            # ``_sweep_residue_into_destination`` exists for.
+            with open(os.path.join(current_path, "bonus.opus"), "wb") as handle:
+                handle.write(b"bonus audio bytes")
+
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=717, status="downloading", mb_release_id="test-mbid-717",
+            ))
+            ctx = make_ctx_with_fake_db(db)
+            album = make_grab_list_entry(
+                files=[make_download_file(
+                    username="peer717", filename="01.flac", file_dir="",
+                )],
+                artist="Artist", title="Album",
+                mb_release_id="test-mbid-717", db_request_id=717,
+                db_source="request",
+            )
+            result = ValidationResult(
+                valid=False, distance=0.4, scenario="high_distance",
+                detail="too far",
+            )
+            staged_album = StagedAlbum(current_path=current_path, request_id=717)
+
+            outcome = _handle_rejected_result(album, result, staged_album, ctx)
+
+            self.assertFalse(outcome.success)
+            self.assertEqual(len(db.download_logs), 1)
+            persisted = db.download_logs[0]
+            self.assertEqual(persisted.request_id, 717)
+            self.assertIsNotNone(persisted.beets_detail)
+            assert persisted.beets_detail is not None
+            self.assertIn("swept into", persisted.beets_detail)
+            # The bundled JSON envelope carries the identical composed
+            # string (``dl_info.validation_result = bv_result.to_json()``)
+            # — the same detail lands in both places, not just one.
+            self.assertIsNotNone(persisted.validation_result)
+            assert persisted.validation_result is not None
+            self.assertIn("swept into", persisted.validation_result)
+            # The untracked file really did get swept into the quarantine
+            # destination rather than silently vanishing.
+            source = ctx.pipeline_db_source
+            assert isinstance(source, FakePipelineDBSource)
+            rejected = source.reject_and_requeue_calls[0]["bv_result"]
+            assert rejected.failed_path is not None
+            self.assertTrue(os.path.exists(
+                os.path.join(rejected.failed_path, "bonus.opus")))
+
+    def test_prune_failure_never_strands_the_rejection_or_leaks_wrong_matches(self):
+        """Issue #1077, R3-1 (HIGH, round-3 review): the B1 fix moved the
+        fragile post-move filesystem work (prune, leftover-check, sweep,
+        final removal) into ``move_failed_import_curated`` but left every
+        one of those statements unwrapped. A transient ``OSError`` there
+        (EACCES/EIO/ENOTEMPTY race — virtiofs makes these real) used to
+        propagate straight out of the function, past
+        ``log_validation_result``/``reject_and_requeue`` — recreating the
+        exact record-nothing stranding B1 exists to kill. Worse: because
+        the request would stay parked, ``poll_active_downloads`` would
+        re-enter every cycle and leak a fresh ``wrong_matches/<name>_N``
+        folder via the ``exist_ok=False`` allocation, unbounded — the
+        reviewer's exact probe world: ``os.rmdir`` failing specifically on
+        the benign ``Scans/`` skeleton. The move must still complete
+        without raising, the row + ban + requeue must land, the anomaly
+        must be recorded (the failed prune reads as "leftovers", so the
+        sweep runs and folds a note into the persisted detail), and —
+        because the call completes on its first attempt rather than
+        needing to retry — exactly ONE ``wrong_matches/`` destination
+        folder exists: no per-cycle leak."""
+        from lib.download_rejection import _handle_rejected_result
+        from lib.quality import ValidationResult
+        from lib.staged_album import StagedAlbum
+
+        real_rmdir = os.rmdir
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            current_path = os.path.join(tmpdir, "Artist - Album")
+            os.makedirs(current_path)
+            with open(os.path.join(current_path, "01.flac"), "wb") as handle:
+                handle.write(b"audio bytes")
+            scans_dir = os.path.join(current_path, "Scans")
+            os.makedirs(scans_dir)
+            with open(os.path.join(scans_dir, "front.jpg"), "wb") as handle:
+                handle.write(b"scan bytes")
+
+            def _flaky_rmdir(path, *args, **kwargs):
+                if os.path.abspath(path) == os.path.abspath(scans_dir):
+                    raise OSError("simulated ENOTEMPTY race on Scans/")
+                return real_rmdir(path, *args, **kwargs)
+
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=911, status="downloading", mb_release_id="test-mbid-911",
+            ))
+            ctx = make_ctx_with_fake_db(db)
+            album = make_grab_list_entry(
+                files=[make_download_file(
+                    username="peer911", filename="01.flac", file_dir="",
+                )],
+                artist="Artist", title="Album",
+                mb_release_id="test-mbid-911", db_request_id=911,
+                db_source="request",
+            )
+            result = ValidationResult(
+                valid=False, distance=0.4, scenario="high_distance",
+                detail="too far",
+            )
+            staged_album = StagedAlbum(current_path=current_path, request_id=911)
+
+            with patch("os.rmdir", side_effect=_flaky_rmdir):
+                # Must not raise.
+                outcome = _handle_rejected_result(album, result, staged_album, ctx)
+
+            self.assertFalse(outcome.success)
+            # Row + ban + requeue landed despite the internal rmdir failure.
+            self.assertEqual(len(db.download_logs), 1)
+            persisted = db.download_logs[0]
+            self.assertIsNotNone(persisted.beets_detail)
+            assert persisted.beets_detail is not None
+            self.assertIn("swept into", persisted.beets_detail)
+            self.assertEqual(len(db.denylist), 1)
+            self.assertEqual(db.denylist[0].username, "peer911")
+            self.assertEqual(db.request(911)["status"], "wanted")
+            # No per-cycle leak: exactly one wrong_matches destination
+            # folder, no "_1"/"_2" suffix from a retry that never had to
+            # happen because the call above completed on its first pass.
+            quarantine_root = os.path.join(tmpdir, "wrong_matches")
+            self.assertEqual(os.listdir(quarantine_root), ["Artist - Album"])
+            dest = os.path.join(quarantine_root, "Artist - Album")
+            self.assertTrue(os.path.exists(os.path.join(dest, "01.flac")))
+            self.assertTrue(os.path.exists(
+                os.path.join(dest, "Scans", "front.jpg")))
+
     def test_multi_audio_non_flac_never_reaches_beets_validation(self):
         import subprocess
 

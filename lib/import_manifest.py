@@ -9,6 +9,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from lib.import_execution import ExecutionCancelled
 from lib.quality import AUDIO_EXTENSIONS_DOTTED
 from lib.staged_album import staged_filename
 from lib.wrong_match_policy import WRONG_MATCH_QUARANTINE_DIR
@@ -203,6 +204,37 @@ def _sweep_residue_into_destination(
             )
             _move(full_src, full_dst, before_mutation=before_mutation)
     _prune_empty_dirs(src_path, before_mutation=before_mutation)
+
+
+def _observe_leftovers(path: str, *, context: str) -> bool:
+    """Best-effort presence check for the post-move cleanup path only.
+
+    Issue #1077, R3-1: every statement after the move loop in
+    ``move_failed_import_curated`` must uphold "never raises post-
+    mutation" — an ``OSError`` here (EACCES/EIO/ENOTEMPTY race; virtiofs
+    makes these real) used to propagate straight out of the function,
+    recreating the exact stranding B1 exists to kill, and — because the
+    request stays parked at its pre-move status — every later poll cycle
+    re-entered the same code and leaked another
+    ``wrong_matches/<name>_N`` via the ``exist_ok=False`` allocation
+    above, outside the rollback block: unbounded disk growth from a
+    single flaky stat. A failed observation is therefore worst-cased as
+    "entries present" (routes to the sweep, which is itself defended the
+    same way) rather than propagated. Cancellation is a distinct
+    interruption, not an observation failure, and still propagates.
+    """
+    try:
+        with os.scandir(path) as entries:
+            return any(entries)
+    except ExecutionCancelled:
+        raise
+    except Exception:
+        logger.exception(
+            "Failed to observe %r while %s — treating as non-empty",
+            path,
+            context,
+        )
+        return True
 
 
 def _allocate_target(
@@ -435,9 +467,24 @@ def move_failed_import_curated(
         # otherwise read as "leftovers" despite nothing untracked
         # surviving. This is the exact reproduction the reviewer proved
         # against the real Lane A entry point.
-        _prune_empty_dirs(src_path, before_mutation=before_mutation)
-        with os.scandir(src_path) as entries:
-            has_leftovers = any(entries)
+        #
+        # Issue #1077, R3-1: every statement from here on must uphold
+        # "never raises post-mutation" (see ``_observe_leftovers``'s
+        # docstring for why). Cancellation always propagates; every other
+        # failure worst-cases toward "leftovers present" and falls
+        # through to the sweep, which is itself defended the same way.
+        try:
+            _prune_empty_dirs(src_path, before_mutation=before_mutation)
+        except ExecutionCancelled:
+            raise
+        except Exception:
+            logger.exception(
+                "Failed to prune empty directory skeletons under %r",
+                src_path,
+            )
+        has_leftovers = _observe_leftovers(
+            src_path, context="checking for leftovers after the curated move",
+        )
         if has_leftovers:
             # Genuinely unexpected — the caller's manifest guard
             # (``_check_staged_audio_manifest`` in
@@ -466,14 +513,17 @@ def move_failed_import_curated(
                 _sweep_residue_into_destination(
                     src_path, target_path, before_mutation=before_mutation,
                 )
+            except ExecutionCancelled:
+                raise
             except Exception:
                 logger.exception(
                     "Failed to sweep curated-move residue from %r into %r",
                     src_path,
                     target_path,
                 )
-            with os.scandir(src_path) as remaining:
-                has_leftovers = any(remaining)
+            has_leftovers = _observe_leftovers(
+                src_path, context="re-checking after the residue sweep",
+            )
             anomaly = (
                 "curated move left untracked content behind despite an "
                 "exact allowed_audio match; swept into the wrong_matches "
@@ -482,11 +532,20 @@ def move_failed_import_curated(
                    if has_leftovers else "")
             )
         if not has_leftovers:
-            if before_mutation is None:
-                shutil.rmtree(src_path, ignore_errors=True)
-            else:
-                before_mutation()
-                os.rmdir(src_path)
+            try:
+                if before_mutation is None:
+                    shutil.rmtree(src_path, ignore_errors=True)
+                else:
+                    before_mutation()
+                    os.rmdir(src_path)
+            except ExecutionCancelled:
+                raise
+            except Exception:
+                logger.exception(
+                    "Failed to remove empty source directory %r after "
+                    "the curated move",
+                    src_path,
+                )
         # else: best-effort — leave whatever the sweep genuinely could not
         # move rather than raising; the rejection record must still be
         # written regardless (never block on cosmetic cleanup).

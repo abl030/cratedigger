@@ -44,7 +44,7 @@ on anything spelled but unclassified.
 
 | scenario | producer | denylist | artifact destination | worklist visible | cleanup-lane admission | requeue |
 |---|---|---|---|---|---|---|
-| `extra_tracks` | `lib/beets.py:175` (`choose_match` handler) | yes | `wrong_matches/` (curated move — untracked audio outside the download manifest stays out) | yes | **yes** (allowlist) | yes → `wanted` |
+| `extra_tracks` | `lib/beets.py:175` (`choose_match` handler) | yes | `wrong_matches/` (curated move — see "The curated move's actual residue behavior (B1)" below) | yes | **yes** (allowlist) | yes → `wanted` |
 | `high_distance` | `lib/beets.py:183` | yes | `wrong_matches/` (curated) | yes | **yes** (allowlist) | yes → `wanted` |
 | `mbid_not_found` | `lib/beets.py:325` | yes | `wrong_matches/` (curated) | yes | **yes** (allowlist) | yes → `wanted` |
 | `no_choose_match` | `lib/beets.py:124` (`NO_CHOOSE_MATCH_SCENARIO`) | yes | `wrong_matches/` (curated) | yes | **yes** (allowlist) | yes → `wanted` |
@@ -104,6 +104,53 @@ gate `PipelineDB.get_wrong_matches()` filters on:
    `post_commit_quarantine` audit key protects those rows from the disk
    reaper for as long as the audit row exists — no current writer produces
    the key any more).
+
+## The curated move's actual residue behavior (B1)
+
+`move_failed_import_curated` (`lib/import_manifest.py`) does NOT split
+untracked content out of the folder it quarantines. Earlier drafts of this
+document said untracked audio "stays out" of `wrong_matches/` — that was
+never quite true, and B1 (a round-2 review blocker) makes the actual
+behavior load-bearing rather than incidental:
+
+- **Empty directory skeletons are pruned silently.** The move loop
+  relocates files via `os.walk` but never removes the directories it
+  walked through, so a benign non-audio subdirectory (e.g. a `Scans/`
+  folder whose contents all moved) is left behind as an empty shell.
+  `_prune_empty_dirs` removes these bottom-up before the leftover check
+  runs, so a benign sidecar-only world produces no anomaly and no note in
+  the persisted detail.
+- **Genuine residue is swept into the SAME destination, never split off
+  or silently dropped.** If real content survives the move plus pruning —
+  including an out-of-manifest audio file the main loop deliberately
+  skipped — "kept implies visible" (D1) outranks manifest purity:
+  `_sweep_residue_into_destination` moves it into the same
+  `wrong_matches/<name>/` folder the curated files landed in, and
+  `CuratedMoveResult.anomaly` carries a note ("swept into the
+  wrong_matches quarantine destination"). The caller
+  (`lib.download_rejection._handle_rejected_result`) folds that note into
+  the persisted `ValidationResult.detail`, so it surfaces in Recents
+  forensics (`download_log.beets_detail`) — never as a stack trace, and
+  never silently.
+- **This is deliberate, not a fallback.** Before B1, a genuinely
+  unexpected leftover raised an exception AFTER the move had already
+  happened — outside the function's own rollback block — which stranded
+  the album in `wrong_matches/` with zero `download_log` rows, zero
+  denylist writes, and no requeue: the exact invisible-quarantine
+  pathology this issue exists to kill. Sweeping instead of raising is the
+  fix; the anomaly note is how the operator still finds out.
+- **The F7 consequence:** a folder that received swept-in, out-of-manifest
+  audio will subsequently REFUSE force-import. The force-import manifest
+  guard (`lib.dispatch.manifest_guard._guard_force_import_audio_manifest`)
+  compares the folder's actual audio against the request's validated
+  manifest and rejects with `untracked_audio` when they don't match
+  exactly. The swept folder stays exactly where the curated move put it —
+  visible in the worklist, kept, and deletable by the operator — but it
+  will not import via the normal force-import path until the extra audio
+  is removed by hand. This is accepted design, not a bug: the guard's own
+  job is refusing to hand beets a folder whose contents don't match what
+  the operator is confirming, and a swept anomaly folder is exactly such
+  a folder.
 
 ## Force-import outcomes (D7)
 

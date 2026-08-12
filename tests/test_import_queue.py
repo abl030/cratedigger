@@ -1186,29 +1186,33 @@ class TestImporterWorker(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
-    def test_acknowledged_force_success_clears_the_pointer_even_when_the_source_is_unobservable(
+    def test_acknowledged_force_success_clears_the_pointer_when_the_source_is_genuinely_absent(
         self,
     ) -> None:
-        """Issue #1077, B2 (round-2 review): D7 success dismissal must use
-        ``clear_missing=True`` — the OPPOSITE of the reducer's and the D3
-        force-failure path's ``clear_missing=False``. This is the
-        operator's OWN explicit action completing: force-import already
-        succeeded, so the Wrong Matches row must leave the worklist even if
-        its ORIGINAL source folder is unobservable at dismissal time (e.g.
-        already gone by some other path). Leaving the pointer visible here
-        would be the stranded-phantom state — an already-imported row that
-        looks permanently stuck in the queue — not a safety net; issue
-        #1063's "don't clear on an unobserved path" caution is about
-        autonomous quality decisions second-guessing a transient read
-        failure, not about honoring a completed operator action.
+        """Issue #1077, R3-2 (round-3 review, correcting round-2's false
+        premise): D7 success dismissal uses ``clear_missing=True``. This
+        value is reached ONLY on a DETERMINATE absence — the source path
+        was positively proven gone (ENOENT-shaped, not a permission/IO
+        refusal) — never for an unobservable one, which short-circuits
+        earlier in ``cleanup_wrong_match_source`` regardless of this flag
+        (see the sibling test below). This is the operator's OWN explicit
+        action completing: force-import already succeeded, so the Wrong
+        Matches row must leave the worklist once its ORIGINAL source
+        folder is proven gone. Leaving the pointer visible here would be
+        the stranded-phantom state — an already-imported row that looks
+        permanently stuck in the queue — not a safety net; issue #1063's
+        "don't clear on an unobserved path" caution is about autonomous
+        quality decisions second-guessing a transient read failure, not
+        about honoring a completed operator action's proven-gone target.
         """
         db = FakePipelineDB()
         root = tempfile.mkdtemp()
         try:
-            # Never created on disk — genuinely absent, not merely
-            # unreadable, so ``cleanup_wrong_match_source`` observes
-            # ``path_missing=True`` and the ``clear_missing`` value is what
-            # decides whether the pointer survives.
+            # Never created on disk — genuinely (determinately) absent,
+            # ENOENT-shaped, not merely unreadable, so
+            # ``cleanup_wrong_match_source`` observes ``path_missing=True``
+            # and the ``clear_missing`` value is what decides whether the
+            # pointer survives.
             missing_source = os.path.join(root, "failed_imports", "Album")
             log_id = self._log_wrong_match(db, failed_path=missing_source)
             job = db.enqueue_import_job(
@@ -1234,8 +1238,66 @@ class TestImporterWorker(unittest.TestCase):
             result = self._result(updated)
             self.assertTrue(result["wrong_match_dismissal"]["success"])
             self.assertTrue(result["wrong_match_dismissal"]["path_missing"])
+            self.assertFalse(result["wrong_match_dismissal"]["path_unavailable"])
             self.assertEqual(result["wrong_match_dismissal"]["cleared_rows"], 1)
         finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_acknowledged_force_success_leaves_the_pointer_when_the_source_is_unobservable(
+        self,
+    ) -> None:
+        """The sibling of the test above: an INDETERMINATE observation
+        (EACCES-shaped — the probe was refused, not proven absent) never
+        even reaches ``clear_missing`` — ``cleanup_wrong_match_source``
+        short-circuits at the indeterminate check
+        (``lib/wrong_matches.py``) and returns with nothing cleared
+        regardless of that flag's value. A dismissal completing over a
+        folder the process could not read must leave the row exactly
+        where it was — not because ``clear_missing`` says so, but because
+        ``clear_missing`` is never even consulted for this observation.
+        """
+        db = FakePipelineDB()
+        root = tempfile.mkdtemp()
+        unreadable_parent = os.path.join(root, "failed_imports")
+        try:
+            unreadable_source = os.path.join(unreadable_parent, "Album")
+            os.makedirs(unreadable_source)
+            with open(os.path.join(unreadable_source, "01.mp3"), "wb") as handle:
+                handle.write(b"audio")
+            os.chmod(unreadable_parent, 0o000)
+
+            log_id = self._log_wrong_match(db, failed_path=unreadable_source)
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(log_id),
+                payload=force_import_payload(
+                    download_log_id=log_id,
+                    failed_path=unreadable_source,
+                ),
+            )
+            self._mark_importable(db, job)
+            claimed = claim_next_import_job(db, worker_id="worker")
+            assert claimed is not None
+
+            updated = finalize_claimed_dispatch(
+                db, claimed, DispatchOutcome(True, "imported"),
+            )
+
+            assert updated is not None
+            self.assertEqual(updated.status, "completed")
+            # The row survives — the pointer was never cleared.
+            self.assertEqual(
+                [row["download_log_id"] for row in db.get_wrong_matches()],
+                [log_id],
+            )
+            result = self._result(updated)
+            self.assertTrue(result["wrong_match_dismissal"]["path_unavailable"])
+            self.assertFalse(result["wrong_match_dismissal"]["path_missing"])
+            self.assertEqual(result["wrong_match_dismissal"]["cleared_rows"], 0)
+        finally:
+            if os.path.isdir(unreadable_parent):
+                os.chmod(unreadable_parent, 0o700)
             shutil.rmtree(root, ignore_errors=True)
 
     def test_force_import_job_forwards_source_dirs(self):
@@ -1522,6 +1584,66 @@ class TestImporterWorker(unittest.TestCase):
                 result["cleanup"]["deleted_path"], os.path.abspath(source),
             )
             self.assertTrue(result["force_action_cleanup"]["removed"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_corrupt_force_action_clears_the_pointer_when_the_source_is_genuinely_absent(
+        self,
+    ) -> None:
+        """Issue #1077, R3-2 (round-3 review): the D3 force-failure path
+        also uses ``clear_missing=True`` now, matching the D7 success path
+        — round-2's split (``False`` here, ``True`` there) rested on a
+        false premise about when ``clear_missing`` is even consulted (see
+        the D7-side siblings above). A proven-gone ORIGINAL Wrong Matches
+        source leaves nothing for the operator to act on regardless of
+        which force-lane outcome ended the review, so this force-failure
+        path clears the pointer on a determinate absence exactly like
+        success does. Drives the full production queue owner
+        (``finalize_claimed_dispatch``, matching the D7 sibling above and
+        every other test in this file) with a constructed
+        ``audio_corrupt`` outcome standing in for a real beets decode —
+        reaching an actual decode failure would require the ORIGINAL
+        source to exist for the force-action-copy step, which is exactly
+        what this scenario says it must NOT do.
+        """
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, mb_release_id="mbid-123", status="unsearchable",
+        ))
+        root = tempfile.mkdtemp()
+        try:
+            missing_source = os.path.join(root, "failed_imports", "Album")
+            log_id = self._log_wrong_match(db, failed_path=missing_source)
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                dedupe_key=force_import_dedupe_key(log_id),
+                payload=force_import_payload(
+                    download_log_id=log_id,
+                    failed_path=missing_source,
+                ),
+            )
+            self._mark_importable(db, job)
+            claimed = claim_next_import_job(db, worker_id="worker")
+            assert claimed is not None
+            outcome = DispatchOutcome(
+                success=False,
+                message="audio_corrupt",
+                post_commit_wrong_match_scenario="audio_corrupt",
+            )
+
+            updated = finalize_claimed_dispatch(db, claimed, outcome)
+
+            assert updated is not None
+            result = updated.result
+            assert isinstance(result, dict)
+            cleanup = result["cleanup"]
+            assert isinstance(cleanup, dict)
+            self.assertEqual(cleanup["outcome"], "deleted_operator_force_source")
+            self.assertTrue(cleanup["path_missing"])
+            self.assertFalse(cleanup["path_unavailable"])
+            self.assertEqual(cleanup["cleared_rows"], 1)
+            self.assertEqual(db.get_wrong_matches(), [])
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

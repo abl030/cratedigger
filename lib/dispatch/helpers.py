@@ -180,7 +180,7 @@ def _cleanup_staged_dir(dest: str, *, protected_parent: str | None = None) -> No
         logger.info(f"  Cleaned up staged dir: {dest}")
         parent = os.path.dirname(dest)
         if protected_parent is not None and os.path.isdir(parent) and (
-            os.path.abspath(parent) == os.path.abspath(protected_parent)
+            os.path.realpath(parent) == os.path.realpath(protected_parent)
         ):
             return
         if os.path.isdir(parent) and not os.listdir(parent):
