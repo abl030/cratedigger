@@ -73,9 +73,10 @@ def _fast_probe_runner(
     db: FakePipelineDB, request_id: int | None = None,
 ) -> ArtistProbeResult:
     """The REAL production ``run_artist_probe`` with its retry/settle/
-    watchdog sleeps injected as no-ops -- a generated example runs this
-    up to 6 times per candidate x up to 150 examples, and the production
-    backoff schedule alone is 2s/5s/10s real wall time otherwise."""
+    watchdog sleeps injected as no-ops -- a batch has up to 6 candidates
+    and each generated example draws a fresh batch (up to 150 examples
+    per property), and the production backoff schedule alone is
+    2s/5s/10s real wall time per retried candidate otherwise."""
     return run_artist_probe(
         slskd_client, artist_name=artist_name, db=db, request_id=request_id,
         poll_sleep=lambda _s: None,
