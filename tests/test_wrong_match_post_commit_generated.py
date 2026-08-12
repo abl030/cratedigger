@@ -19,7 +19,10 @@ from lib.import_execution import ExecutionLeaseSnapshot, ProcessIdentity
 from lib.quality import ActiveDownloadState, DownloadInfo, ValidationResult
 from lib.quality_evidence import snapshot_audio_files
 from lib.terminal_outcomes import PendingImportTerminalOutcome
-from lib.wrong_match_policy import WRONG_MATCH_EXCLUDED_REJECTION_SCENARIOS
+from lib.wrong_match_policy import (
+    DELETE_ELIGIBLE_REJECTION_SCENARIOS,
+    WRONG_MATCH_EXCLUDED_REJECTION_SCENARIOS,
+)
 from tests.fakes import FakePipelineDB
 from tests.helpers import (
     claim_next_import_job,
@@ -32,11 +35,18 @@ from tests.helpers import (
 
 _REQUEST_ID = 42
 _RELEASE_ID = "generated-wrong-match-release"
+# The four delete-eligible scenarios (D6 allowlist), plus a mix of visible-
+# but-not-delete-eligible world failures (untracked_audio, request_missing_*)
+# and quality/fact rejects that never even carry a failed_path — every one of
+# these must reach post-commit ONLY if it is in the allowlist.
 _CANDIDATE_SCENARIOS = (
-    "high_distance",
+    *DELETE_ELIGIBLE_REJECTION_SCENARIOS,
     "strong_mismatch",
     "downgrade",
     "transcode_downgrade",
+    "untracked_audio",
+    "request_missing_mbid",
+    "request_missing_request_id",
 )
 _SCENARIOS = tuple(sorted(
     {*_CANDIDATE_SCENARIOS, *WRONG_MATCH_EXCLUDED_REJECTION_SCENARIOS},
@@ -48,15 +58,33 @@ def assert_wrong_match_cleanup_reaches_post_commit(
     scenario: str,
     cleanup_calls: list[tuple[str, str]],
 ) -> None:
-    """Candidate rejects clean once, after request and job are terminal."""
+    """Only a delete-eligible reject reaches the cleanup reducer (#1077, D6).
+
+    Everything else — world failures with a reviewable folder, quality/fact
+    rejects, and every unknown string — cleans once at post-commit only in
+    the sense of running the terminal bundle; the destructive reducer itself
+    must never be consulted.
+    """
     expected_calls = (
         [("wanted", "failed")]
-        if scenario not in WRONG_MATCH_EXCLUDED_REJECTION_SCENARIOS
+        if scenario in DELETE_ELIGIBLE_REJECTION_SCENARIOS
         else []
     )
+    if expected_calls and not cleanup_calls:
+        raise AssertionError(
+            "delete-eligible automation rejection bypassed post-commit "
+            f"Wrong Matches triage: scenario={scenario!r} "
+            f"calls={cleanup_calls!r}"
+        )
+    if not expected_calls and cleanup_calls:
+        raise AssertionError(
+            "delete-ineligible automation rejection reached post-commit "
+            f"Wrong Matches cleanup: scenario={scenario!r} "
+            f"calls={cleanup_calls!r}"
+        )
     if cleanup_calls != expected_calls:
         raise AssertionError(
-            "automation rejection bypassed post-commit Wrong Matches triage: "
+            "unexpected post-commit cleanup shape: "
             f"scenario={scenario!r} calls={cleanup_calls!r}"
         )
 
@@ -225,4 +253,17 @@ class TestWrongMatchPostCommitGenerated(unittest.TestCase):
             assert_wrong_match_cleanup_reaches_post_commit(
                 scenario="high_distance",
                 cleanup_calls=[],
+            )
+
+    def test_checker_rejects_delete_ineligible_scenario_reaching_cleanup(
+        self,
+    ) -> None:
+        """#1077, D6: a world failure must never reach the reducer."""
+        with self.assertRaisesRegex(
+            AssertionError,
+            "delete-ineligible",
+        ):
+            assert_wrong_match_cleanup_reaches_post_commit(
+                scenario="untracked_audio",
+                cleanup_calls=[("wanted", "failed")],
             )

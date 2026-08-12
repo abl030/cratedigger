@@ -259,8 +259,12 @@ depends on.
 - **Wrong Matches tab** — the obsolete Complete-folder/manual-import page is gone;
   the tab now opens straight into Wrong Matches. Import actions queue work and
   poll `import_jobs`, so long beets imports do not block the web request.
-  Failed queued force-imports remove the reviewed wrong-match source from the
-  actionable list while preserving the failed job/download audit.
+  A successful queued force-import deletes the reviewed wrong-match source
+  (issue #1077, D7 — completing the operator's own explicit action) and
+  clears it from the actionable list. A failed force-import on the
+  `audio_corrupt` decision also deletes it (D3: bad rips are never
+  preserved); every other failure preserves the source and the actionable
+  list entry exactly as-is, alongside the failed job/download audit.
 - **Recents Acquisition + Imports subviews** — Recents has History,
   Acquisition, and Imports subviews. Acquisition combines downloading and
   processing requests with the separate active YouTube-rescue feed; it does
@@ -703,9 +707,16 @@ depends on.
   `Cleanup stopped — ...` toast reporting exactly what ran before the stop,
   and the pane refreshes either way. A failed Stop request itself toasts
   `Stop request failed` and re-enables the button.
-- **Wrong Matches history** — old rows with
-  `download_log.validation_result.wrong_match_triage` still render their
-  historical chip/detail in Recents. New cleanup does not write that blob.
+- **Wrong Matches history** — rows evaluated by the cleanup reducer
+  (`lib.wrong_match_cleanup_service.cleanup_wrong_match`, individual or bulk)
+  render their chip/detail in Recents from
+  `download_log.validation_result.wrong_match_triage`, the reducer's ONLY
+  writer. Rejection scenarios outside the cleanup-lane-admission allowlist
+  (`extra_tracks` / `high_distance` / `mbid_not_found` / `no_choose_match` —
+  D6, `docs/rejection-routing.md`) never reach the reducer, so they never get
+  this block — they still render, just with no triage chip, which is correct
+  for that whole cohort and not a missing-data bug. `recents.js`/`history.js`
+  render the `wrong_match_triage_*` fields conditionally on presence.
 
 ## Dev Server Workflows
 

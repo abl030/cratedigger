@@ -1286,22 +1286,28 @@ def assert_operator_retained_lifecycle(
         )
 
 
-def assert_archival_quarantine_isolated(
+def assert_wrong_match_evidence_link_isolated(
     *,
     cleanup_call_count: int,
     terminal_log: DownloadLogRow,
     expected_candidate_evidence_id: int | None,
 ) -> None:
-    """An archival quarantine never enters a destructive WM reducer."""
+    """A delete-ineligible scenario never enters the destructive WM reducer.
+
+    Issue #1077, D6: the cleanup lane ("evaluate and possibly delete") is an
+    explicit allowlist. Evidence-linking may still run (any scenario the
+    worklist visibility predicate admits gets linked, even when it is not
+    delete-eligible), but the reducer itself must never be consulted.
+    """
     if cleanup_call_count:
-        raise AssertionError("archival quarantine reached Wrong Matches cleanup")
+        raise AssertionError("delete-ineligible scenario reached Wrong Matches cleanup")
     if terminal_log.candidate_evidence_id != expected_candidate_evidence_id:
-        raise AssertionError("archival terminal audit lost candidate evidence")
+        raise AssertionError("terminal audit lost its candidate evidence link")
     validation = terminal_log.validation_result
     if isinstance(validation, str):
         validation = json.loads(validation)
     if isinstance(validation, dict) and "wrong_match_triage" in validation:
-        raise AssertionError("archival terminal audit gained deletion triage")
+        raise AssertionError("delete-ineligible terminal audit gained deletion triage")
 
 
 # ===========================================================================
@@ -1436,11 +1442,16 @@ class TestGeneratedEveryRejectionWriterProjection(unittest.TestCase):
                     payload = json.loads(
                         db.download_logs[-1].validation_result or "{}"
                     )
-                    self.assertIn(
+                    # Issue #1077, D6: the cleanup lane is an explicit
+                    # allowlist. A `None` scenario is never delete-eligible,
+                    # so `_run_post_rejection_wrong_match_cleanup` returns
+                    # before ever calling the reducer — no `wrong_match_
+                    # triage` audit is written.
+                    self.assertNotIn(
                         "wrong_match_triage",
                         payload,
-                        "request-auto-import matrix case must run the real "
-                        "post-rejection cleanup orchestration",
+                        "a None scenario must never reach the delete-"
+                        "eligible cleanup reducer",
                     )
 
     @given(
@@ -1572,8 +1583,20 @@ class TestGeneratedOperatorRetainedLifecycle(unittest.TestCase):
         )
 
 
-class TestGeneratedArchivalQuarantineIsolation(unittest.TestCase):
-    def test_archive_plan_never_reaches_wrong_match_cleanup(self) -> None:
+class TestGeneratedDeleteIneligibleScenarioIsolation(unittest.TestCase):
+    """Issue #1077, D6: the cleanup lane is an allowlist, not a fail-open set.
+
+    None of these five scenarios is in ``DELETE_ELIGIBLE_REJECTION_SCENARIOS``
+    — ``audio_corrupt`` is additionally excluded from worklist visibility
+    itself (D3: bad rips are ban + delete, never quarantined, so evidence-
+    linking is never even attempted for it), while the other four are
+    visible-but-not-delete-eligible (world failures / unknown strings /
+    ``None``): evidence-linking may run for them, but the reducer must not.
+    """
+
+    def test_delete_ineligible_scenario_never_reaches_wrong_match_cleanup(
+        self,
+    ) -> None:
         scenarios = (
             None,
             "force_import",
@@ -1586,19 +1609,21 @@ class TestGeneratedArchivalQuarantineIsolation(unittest.TestCase):
             ("none", "read", "write"),
         ):
             with self.subTest(scenario=scenario, link_fault=link_fault):
-                self._assert_archive_plan_isolated(
+                self._assert_isolated(
                     scenario=scenario,
                     link_fault=link_fault,
                 )
 
-    def _assert_archive_plan_isolated(
+    def _assert_isolated(
         self,
         *,
         scenario: str | None,
         link_fault: str,
     ) -> None:
-        from lib.dispatch.types import PostCommitCleanup
         from lib.import_queue import IMPORT_JOB_FORCE
+        from lib.wrong_match_policy import (
+            rejection_scenario_is_wrong_match_candidate,
+        )
         from scripts.importer import _cleanup_committed_wrong_match_rejection
 
         db = FakePipelineDB()
@@ -1635,14 +1660,16 @@ class TestGeneratedArchivalQuarantineIsolation(unittest.TestCase):
         db.set_import_job_candidate_evidence(job.id, persisted.id)
         outcome = DispatchOutcome(
             success=False,
-            message="audio_corrupt",
+            message="rejected",
             post_commit_wrong_match_scenario=scenario,
-            post_commit_cleanup=PostCommitCleanup(
-                audio_quarantine_source_path="/source/album",
-                audio_quarantine_root="/download-root",
-            ),
         )
 
+        # audio_corrupt fails the OUTER (worklist-visibility) gate, so
+        # evidence-linking is never attempted for it at all; the other four
+        # scenarios pass that gate but fail the INNER (delete-eligible) one.
+        evidence_linking_attempted = rejection_scenario_is_wrong_match_candidate(
+            scenario
+        )
         evidence_link_patch = (
             patch.object(
                 db,
@@ -1671,14 +1698,16 @@ class TestGeneratedArchivalQuarantineIsolation(unittest.TestCase):
             )
         self.assertEqual(
             log_exception.call_count,
-            0 if link_fault == "none" else 1,
+            1 if evidence_linking_attempted and link_fault != "none" else 0,
         )
 
-        assert_archival_quarantine_isolated(
+        assert_wrong_match_evidence_link_isolated(
             cleanup_call_count=cleanup_wrong_match.call_count,
             terminal_log=db.download_logs[-1],
             expected_candidate_evidence_id=(
-                persisted.id if link_fault == "none" else None
+                persisted.id
+                if evidence_linking_attempted and link_fault == "none"
+                else None
             ),
         )
 
@@ -2077,13 +2106,18 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         ):
             assert_download_log_row_created(db)
 
-    def test_archival_checker_names_every_clause_it_trips_on(self):
-        """Per-clause Q1 for the archival-quarantine isolation checker.
+    def test_evidence_link_checker_names_every_clause_it_trips_on(self):
+        """Per-clause Q1 for the wrong-match evidence-link isolation checker.
 
-        The deletion-triage clause is the persisted-row witness of the same
-        fail-open the cleanup-call clause catches: the destructive reducer
-        is injected as a recorder at that boundary, so only a writer that
-        stamps triage onto an archival audit row can produce it.
+        Issue #1077, D6: the cleanup lane ("evaluate and possibly delete")
+        is an explicit allowlist — a delete-ineligible scenario may still be
+        evidence-linked (any scenario the worklist-visibility predicate
+        admits gets linked), but the destructive reducer itself must never
+        be consulted. The deletion-triage clause is the persisted-row
+        witness of the same fail-open the cleanup-call clause catches: the
+        destructive reducer is injected as a recorder at that boundary, so
+        only a writer that stamps triage onto a delete-ineligible audit row
+        can produce it.
         """
         def planted(**overrides: object) -> DownloadLogRow:
             kwargs: dict[str, object] = {
@@ -2100,13 +2134,13 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
                 "destructive reducer reached",
                 1,
                 planted(),
-                r"^archival quarantine reached Wrong Matches cleanup$",
+                r"^delete-ineligible scenario reached Wrong Matches cleanup$",
             ),
             (
                 "candidate evidence dropped",
                 0,
                 planted(candidate_evidence_id=None),
-                r"^archival terminal audit lost candidate evidence$",
+                r"^terminal audit lost its candidate evidence link$",
             ),
             (
                 "deletion triage attached",
@@ -2115,14 +2149,14 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
                     "scenario": "audio_corrupt",
                     "wrong_match_triage": {"decision": "delete"},
                 })),
-                r"^archival terminal audit gained deletion triage$",
+                r"^delete-ineligible terminal audit gained deletion triage$",
             ),
         ]
         for clause, cleanup_calls, terminal_log, pattern in cases:
             with self.subTest(clause=clause), self.assertRaisesRegex(
                 AssertionError, pattern,
             ):
-                assert_archival_quarantine_isolated(
+                assert_wrong_match_evidence_link_isolated(
                     cleanup_call_count=cleanup_calls,
                     terminal_log=terminal_log,
                     expected_candidate_evidence_id=7,
