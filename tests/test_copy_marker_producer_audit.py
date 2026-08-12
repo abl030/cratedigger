@@ -64,17 +64,26 @@ and ``tests/test_classify_producer_audit.py``:
   invisible to it — the same trade-off
   ``test_wrong_match_scenario_producer_audit.py``'s docstring names for
   its own ``scenario=``/``.scenario =`` grammar.
-* **A matched name whose value the audit cannot read FAILS CLOSED.** A
+* **A matched name whose value the audit cannot read FAILS CLOSED — and a
+  matched name can never silently vanish from the population either.** A
   plain string (or bytes, decoded) ``ast.Constant`` resolves normally,
   including the ``str``-annotated ``AnnAssign`` idiom
   (``_FUTURE_COPY: str = "..."``, this module's own house style). Anything
   else with a matching name — a binary-op concatenation
   (``_SPLIT_COPY = "a" + "b"``), an f-call, a bare annotation with no
-  value — is DISCOVERED (the name matched the grammar) but its value comes
-  back ``None``: ``check_marker_value_is_resolvable`` fails closed on it
-  rather than silently dropping it from the population, which is exactly
-  the "checker was silently inert" failure mode this audit exists to
-  prevent, reintroduced inside its own discovery step.
+  value, a TUPLE-UNPACKED target (``_A_COPY, _B_COPY = "a", "b"`` —
+  issue #1111 review round-2 MAJOR: the round-1 fix's own ``ast.Name``-
+  only target check silently dropped BOTH names in this shape, the exact
+  vanishing failure this bullet exists to rule out), or an ``AugAssign``
+  target (``_FOO_COPY += "y"``, which fails closed by marking the name
+  unresolvable rather than keeping a now-stale earlier value on record) —
+  is DISCOVERED (the name matched the grammar) but its value comes back
+  ``None``: ``check_marker_value_is_resolvable`` fails closed on it rather
+  than silently dropping it from the population OR reporting a value
+  production no longer spells, which is exactly the "checker was silently
+  inert for the exact shape it was meant to police" failure mode this
+  audit exists to prevent, reintroduced twice now inside its own
+  discovery step.
 * **A discovered marker with no classification FAILS CLOSED.** Every
   marker found by that scan must be registered in exactly one of
   ``_MARKER_PRODUCERS`` (a copy-pin marker, with the production files that
@@ -240,7 +249,7 @@ _MARKER_PRODUCERS: dict[str, _Producers] = {
     "INSECURE_AUTH_WARNING_COPY": _Producers(
         files=("web/server.py",),
         why=(
-            "web/server.py:54's own INSECURE_AUTH_WARNING module "
+            "web/server.py:53's own INSECURE_AUTH_WARNING module "
             "constant, logged via log.critical(...) at startup. The "
             "identical sentence is ALSO duplicated (not derived from "
             "this constant) as static text in web/index.html's insecure- "
@@ -248,10 +257,11 @@ _MARKER_PRODUCERS: dict[str, _Producers] = {
             ".count() checks actually render — issue #1111 review "
             "deliberately registers only the server.py copy rather than "
             "adding an .html literal extractor, accepting that the two "
-            "copies could in principle drift apart independently. A live "
-            "instance of the inert-marker class the review found sitting "
-            "outside both of this audit's bounds (unregistered "
-            "participating modules, no _COPY suffix)"
+            "copies could in principle drift apart independently. "
+            "Previously outside both of this audit's discovery bounds "
+            "(unregistered participating modules, no _COPY suffix) — "
+            "never actually inert, since both producers already spelled "
+            "it correctly"
         ),
     ),
 }
@@ -276,7 +286,7 @@ def _read_source(relpath: str) -> str:
 
 
 def _constant_marker_value(node: ast.expr | None) -> str | None:
-    """A discovered marker's value, or ``None`` when it cannot be read.
+    """One name's value from ITS OWN plain-constant value node, or ``None``.
 
     Only a plain ``ast.Constant`` resolves: a ``str`` value is used as-is;
     a ``bytes`` value is UTF-8-decoded (issue #1111 review MAJOR-4 —
@@ -284,9 +294,9 @@ def _constant_marker_value(node: ast.expr | None) -> str | None:
     ``bytes`` literal, matched against an HTTP response body). Anything
     else — a binary-op concatenation (``"a" + "b"``), a call, an f-string,
     a bare annotation with no value at all (``node is None``) — is NOT
-    resolved. The caller still records the NAME as discovered; only the
-    value comes back ``None``, so a matching name can never silently
-    vanish from the population the way a value-blind filter would.
+    resolved. This function only computes the value for a name the CALLER
+    has already decided to discover; ``discovered_markers_in_source`` is
+    what guarantees the name itself is never dropped (see its docstring).
     """
     if isinstance(node, ast.Constant):
         if isinstance(node.value, str):
@@ -299,17 +309,75 @@ def _constant_marker_value(node: ast.expr | None) -> str | None:
     return None
 
 
+def _marker_names_in_target(target: ast.expr) -> list[str]:
+    """Every ``*_COPY``/``*_QUALIFIER`` name a target BINDS, however nested.
+
+    A plain ``ast.Name`` yields itself when it matches the suffix grammar.
+    ``ast.Tuple``/``ast.List`` targets (tuple/list-unpacking assignment,
+    e.g. ``_A_COPY, _B_COPY = "a", "b"``) recurse into every element, at
+    any nesting depth — issue #1111 review round-2 MAJOR: the ``ast.Name``-
+    only check silently dropped BOTH names in that exact shape with no
+    violation raised at all, the "matching name silently vanishes from the
+    population" failure this audit's whole discovery step exists to
+    prevent, reintroduced by the round-1 fix for the SAME failure class.
+    Anything else — an ``Attribute`` or ``Subscript`` target, or a
+    ``Starred`` element inside a tuple/list unpack (``*_REST_COPY, = ...``)
+    — is out of this bounded grammar and simply not discovered; none of
+    those shapes are the house idiom this audit's own file uses, and a
+    starred bulk-capture is not a plausible way to spell one operator-copy
+    constant.
+    """
+    if isinstance(target, ast.Name):
+        return (
+            [target.id] if target.id.endswith(_MARKER_NAME_SUFFIXES) else []
+        )
+    if isinstance(target, (ast.Tuple, ast.List)):
+        names: list[str] = []
+        for elt in target.elts:
+            names.extend(_marker_names_in_target(elt))
+        return names
+    return []
+
+
 def discovered_markers_in_source(source: str) -> dict[str, str | None]:
     """Module-level ``*_COPY``/``*_QUALIFIER`` constants in one source.
 
     Restricted to ``tree.body`` (direct children of the module) rather
     than a full ``ast.walk`` — "module-level" means exactly that, and it
     keeps a function-local variable that happens to share the suffix (none
-    exist today) from being mistaken for a copy-pin marker. Matches BOTH
-    ``ast.Assign`` (``_FOO_COPY = "..."``) and ``ast.AnnAssign``
+    exist today) from being mistaken for a copy-pin marker. Matches
+    ``ast.Assign`` (``_FOO_COPY = "..."``), ``ast.AnnAssign``
     (``_FOO_COPY: str = "..."``, the house-style typed-constant idiom used
-    elsewhere in this very module) — issue #1111 review MAJOR-2: the
-    Assign-only scan silently could not discover its own idiom.
+    elsewhere in this very module — issue #1111 review MAJOR-2: the
+    Assign-only scan silently could not discover its own idiom), and
+    ``ast.AugAssign`` (``_FOO_COPY += "..."``).
+
+    Two shapes are DISCOVERED (the name is recorded) but resolve to
+    ``None`` (unresolvable — ``check_marker_value_is_resolvable`` fails
+    closed on it) rather than a real or a stale value:
+
+    * a tuple/list-unpacked target (``_A_COPY, _B_COPY = "a", "b"``) — the
+      RHS is a matching ``ast.Tuple``/``ast.List`` of its own, and pairing
+      element POSITIONS across the two trees to recover each name's own
+      value is exactly the kind of inference
+      ``.claude/rules/code-quality.md`` § "Semantic source scanners are
+      prohibited" rules out for a bounded lexical scan; every name bound
+      this way is simply marked unresolvable instead.
+    * an ``AugAssign`` target (``_FOO_COPY += "y"`` after an earlier
+      ``_FOO_COPY = "x"``) — issue #1111 review round-2 MAJOR: an earlier
+      version of this function only matched ``ast.Assign``/``ast.AnnAssign``,
+      so the ``AugAssign`` statement was invisible to it entirely and the
+      EARLIER plain assignment's value ("x") stayed on record while
+      production actually spells "xy" — a wrong-value FAIL-OPEN, the
+      opposite failure from a name silently vanishing. Computing the
+      correct concatenated value would again require inferring runtime
+      semantics; instead the name is marked unresolvable AT the
+      ``AugAssign`` statement, overriding whatever the last plain
+      assignment recorded. A subsequent plain re-assignment after the
+      ``AugAssign`` still resolves normally — statements are walked in
+      file order, so the dict entry always reflects the LAST statement
+      that bound the name, matching ordinary sequential Python semantics
+      except at the one point genuine inference would be required.
     """
     tree = ast.parse(source)
     found: dict[str, str | None] = {}
@@ -317,18 +385,27 @@ def discovered_markers_in_source(source: str) -> dict[str, str | None]:
         if isinstance(node, ast.Assign):
             targets: list[ast.expr] = list(node.targets)
             value_node: ast.expr | None = node.value
+            forced_unresolvable = False
         elif isinstance(node, ast.AnnAssign):
             targets = [node.target]
             value_node = node.value
+            forced_unresolvable = False
+        elif isinstance(node, ast.AugAssign):
+            targets = [node.target]
+            value_node = None
+            forced_unresolvable = True
         else:
             continue
         for target in targets:
-            if not (
-                isinstance(target, ast.Name)
-                and target.id.endswith(_MARKER_NAME_SUFFIXES)
-            ):
+            names = _marker_names_in_target(target)
+            if not names:
                 continue
-            found[target.id] = _constant_marker_value(value_node)
+            tuple_unpacked = isinstance(target, (ast.Tuple, ast.List))
+            for name in names:
+                if forced_unresolvable or tuple_unpacked:
+                    found[name] = None
+                else:
+                    found[name] = _constant_marker_value(value_node)
     return found
 
 
@@ -816,6 +893,57 @@ class TestTheAuditIsFailClosed(unittest.TestCase):
         self.assertIn("_BARE_COPY", markers)
         self.assertIsNone(markers["_BARE_COPY"])
 
+    def test_a_tuple_unpacked_marker_is_discovered_and_fails_closed(
+        self,
+    ) -> None:
+        """Issue #1111 review round-2 MAJOR.
+
+        ``_TUPLE_COPY, _OTHER_COPY = "a", "b"`` has an ``ast.Tuple``
+        target — the round-1 fix's ``isinstance(target, ast.Name)`` check
+        failed on it and BOTH suffix-matching names vanished from the
+        population with no violation raised at all. Both must now be
+        discovered, both unresolvable.
+        """
+        source = '_TUPLE_COPY, _OTHER_COPY = "a", "b"\n'
+        markers = discovered_markers_in_source(source)
+        self.assertEqual(
+            markers, {"_TUPLE_COPY": None, "_OTHER_COPY": None})
+        for name in ("_TUPLE_COPY", "_OTHER_COPY"):
+            with self.subTest(name):
+                violation = check_marker_value_is_resolvable(
+                    name, markers[name])
+                assert violation is not None
+                self.assertIn(name, violation)
+
+    def test_an_augmented_marker_does_not_keep_a_stale_value(self) -> None:
+        """Issue #1111 review round-2 MAJOR.
+
+        ``_AUG_COPY = "x"`` then ``_AUG_COPY += "y"`` used to discover
+        ``"x"`` while production actually spells ``"xy"`` — a wrong-value
+        FAIL-OPEN (the round-1 fix only matched ``Assign``/``AnnAssign``,
+        so the ``AugAssign`` statement was invisible to it and the
+        earlier plain assignment's value stayed on record unchanged).
+        """
+        source = '_AUG_COPY = "x"\n_AUG_COPY += "y"\n'
+        markers = discovered_markers_in_source(source)
+        self.assertIn("_AUG_COPY", markers)
+        self.assertIsNone(markers["_AUG_COPY"])
+
+    def test_a_reassignment_after_augassign_still_resolves(self) -> None:
+        """A later plain assignment overwrites the AugAssign's None.
+
+        Ordinary sequential Python semantics: the LAST statement that
+        binds the name wins, matching what the name actually equals by
+        the end of the module.
+        """
+        source = (
+            '_REASSIGNED_COPY = "x"\n'
+            '_REASSIGNED_COPY += "y"\n'
+            '_REASSIGNED_COPY = "final"\n'
+        )
+        markers = discovered_markers_in_source(source)
+        self.assertEqual(markers, {"_REASSIGNED_COPY": "final"})
+
     def test_a_bytes_constant_marker_is_decoded_and_discovered(self) -> None:
         """Issue #1111 review MAJOR-4.
 
@@ -1051,22 +1179,35 @@ class TestTheAuditIsFailClosed(unittest.TestCase):
         """RED — the class this guard DOES catch: no producer anywhere.
 
         Paired with the GREEN test above (issue #1111 review MAJOR-1): a
-        fully-inert marker — every registered file's wording rephrased
-        so NONE of them spell it any more (a producer deletion, rename,
-        or sole-spelling drift) — is exactly what this audit's
-        file-level evidence is built to catch, and does.
+        fully-inert marker — every registered file's wording rephrased so
+        NONE of them spell it any more (a producer deletion, rename, or
+        sole-spelling drift) — is exactly what this audit's file-level
+        evidence is built to catch, and does. Issue #1111 review MINOR-A:
+        driven through the REAL ``_js_literal_fragments`` lexer over
+        rephrased JS SOURCE, not a hand-written fragment list — the half
+        of this pair proving the audit's actual reason for existing is
+        the one that should touch the real lexer, the same way the GREEN
+        test above does.
         """
-        drifted_fragments = {
-            "wrong-matches.js": [
-                "entries were flagged unreadable",
-                "This folder is currently inaccessible.",
-            ],
-            "util.js": ["the storage refused or failed"],
-        }
+        rephrased_wrong_matches_source = (
+            "const unreadableLead = unreadableIsContainment\n"
+            "  ? `${unreadableCount} entries were flagged unreadable`\n"
+            "  : `${unreadableCount} entries were flagged unreadable`;\n"
+        )
+        rephrased_util_source = (
+            "export function wrongMatchExplorerFailureCopy(status) {\n"
+            "  return 'This folder is currently inaccessible.';\n"
+            "}\n"
+        )
         producers = _Producers(
             files=("wrong-matches.js", "util.js"),
             why="every producer's wording rephrased away from the marker",
         )
+        drifted_fragments = {
+            "wrong-matches.js": _js_literal_fragments(
+                rephrased_wrong_matches_source),
+            "util.js": _js_literal_fragments(rephrased_util_source),
+        }
         violation = check_marker_has_a_producer(
             "could not be read", producers,
             fragments_by_file=drifted_fragments,
