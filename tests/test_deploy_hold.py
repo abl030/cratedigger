@@ -1005,11 +1005,16 @@ class TestAbortHold(unittest.TestCase):
         self.assertIn(YOUTUBE_SERVICE, backend.started_units)
 
     def test_abort_fails_loudly_on_a_foreign_gate_hold(self) -> None:
-        """#1078 MUST FIX 2 corollary: a foreign hold (e.g. the monthly
-        discogs-import hold) blocks every gate-guarded ExecCondition, so a
-        bare systemctl start is a silent no-op -- abort must prove the
-        workers actually came up (_wait_controlled_workers_active) rather
-        than exit 0 with everything still down.
+        """#1078 BLOCKER F1: refused before our own hold is ever released.
+
+        A foreign hold (e.g. the monthly discogs-import hold) blocks every
+        gate-guarded ExecCondition, so a bare systemctl start is a silent
+        no-op. Without the up-front check, abort would release our manual
+        hold, discover the foreign hold only inside the restart-verification
+        wait, and exit non-zero with our hold already gone -- the receipt
+        stuck claiming "held" while nothing blocks the foreign hold's own
+        eventual resume from starting every guarded unit, including a main
+        cycle, underneath it.
         """
         backend = FakeDeployHoldBackend()
         acquire_hold(backend)
@@ -1017,11 +1022,19 @@ class TestAbortHold(unittest.TestCase):
         backend.other_metadata_holds.add("discogs-import")
 
         with self.assertRaisesRegex(
-            DeployHoldError, "metadata gate became held",
+            DeployHoldError, "foreign metadata gate holds block abort",
         ):
             abort_hold(backend)
 
         self.assertTrue(backend.receipt)
+        self.assertTrue(backend.manual_hold)
+        self.assertTrue(backend.owned_manual_hold)
+        self.assertEqual(
+            [event for event in backend.events if event[0] == "metadata-gate"],
+            [("metadata-gate", "hold manual")],
+        )
+        for service in CONTROLLED_WORKER_UNITS:
+            self.assertEqual(backend.unit_state(service).active_state, "inactive")
 
     def test_abort_retries_after_an_interrupted_timer_restart(self) -> None:
         """#1078 MUST FIX 3: restart before disowning.

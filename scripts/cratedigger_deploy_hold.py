@@ -1476,7 +1476,27 @@ def _validate_no_unowned_deploy_hold_conflicts(backend: DeployHoldBackend) -> No
     still there) nor cleanly go back to HELD (``recover_held`` hits the same
     conflict re-taking the hold). Proving it first removes that stuck state
     by construction.
+
+    A foreign metadata gate hold (any reason other than our own owned
+    ``manual`` one) gets the same up-front treatment whenever abort is about
+    to attempt a gate-guarded restart -- releasing the owned manual hold, or
+    removing an owned producer-start inhibitor. Without this, abort could
+    release our manual hold, discover the foreign hold only afterward (inside
+    the restart-verification wait), and exit non-zero with our hold already
+    gone: the receipt still claims ``held`` while nothing blocks the foreign
+    hold's own eventual ``resume-if-clear`` from starting every guarded unit,
+    including a main cycle, underneath it (#1078 BLOCKER F1).
     """
+    if backend.manual_hold_is_owned() or backend.owned_inhibitor_units():
+        foreign_reasons = tuple(
+            reason
+            for reason in backend.metadata_hold_reasons()
+            if reason != METADATA_MANUAL_HOLD.name
+        )
+        if foreign_reasons:
+            raise DeployHoldError(
+                f"foreign metadata gate holds block abort: {foreign_reasons!r}"
+            )
     for service in START_INHIBITORS:
         if backend.inhibitor_exists(service) and not backend.inhibitor_is_owned(service):
             raise DeployHoldError(
