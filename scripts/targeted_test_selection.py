@@ -249,7 +249,11 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
 #: silently discard a real, hand-authored mapping for the same file. Do not
 #: add an entry here to silence the fail-closed check in
 #: _changed_path_neighbours — only for a module genuinely reviewed and found
-#: to have no consumer.
+#: to have no consumer. That "no consumer" claim is not merely reviewer say-
+#: so: tests/test_negative_coverage_audit.py mechanically enforces it —
+#: any real `import`/`from ... import ...` statement anywhere under tests/
+#: naming a registered module's dotted path fails the audit, naming both
+#: the registry entry and the importing file (issue #1095).
 SHARED_MODULES_WITHOUT_COVERAGE: dict[str, str] = {
     "tests/ephemeral_slskd.py": (
         "No test drives EphemeralSlskd directly. Its only consumer is the "
