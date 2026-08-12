@@ -53,18 +53,27 @@ hold that stops the controlled workers (web, preview, importer) and YouTube
 ingest.
 
 YouTube ingest is deliberately excluded from the pre-hold producer drain and
-drained afterward instead, in `GATE_STOPPED_UNITS` alongside the three
-controlled workers, once the gate hold has actually stopped it. It is
+drained afterward instead, once the gate hold has actually stopped it -- the
+same `GATE_STOPPED_UNITS` restart target `abort` restarts, alongside the
+three controlled workers. The drain that proves this happened is
+`SERVICE_UNITS` (every unit the module knows about), not the narrower
+`GATE_STOPPED_UNITS`: `cratedigger.service` is itself gate-guarded, so the
+hold should already have stopped it if it was running, but nothing before
+that re-verified it for main specifically -- the one unit this module never
+protects with a start inhibitor (#1078 BLOCKER F3). YouTube is
 `Type=simple`, `wantedBy=multi-user.target`, `Restart=on-failure`, with no
 timer at all -- an always-on daemon nothing before the gate hold ever asks to
 stop. Draining it pre-hold (the original #1078 fix's mistake) waits the full
 7200s service-drain timeout for a unit nothing is going to stop, then fails
 with the gate hold never taken -- the exact failure shape #1078 exists to
 remove, reproduced by the reorder itself. The pre-hold window also owns no
-temporary start inhibitor: masking already blocks a new main-cycle trigger,
-and YouTube is not being waited on in this window at all, so there is no
-persistent `/var/lib` artifact to orphan if the host reboots mid-window (see
-`abort`, below, for the reboot boundary this module actually has).
+temporary start inhibitor: masking already blocks a fresh *timer* trigger
+(though not an unrelated hold's own resume-if-clear, which starts
+`cratedigger.service` directly via the gate's `resume_units` regardless of
+the timer's mask state), and YouTube is not being waited on in this window
+at all, so there is no persistent `/var/lib` artifact to orphan if the host
+reboots mid-window (see `abort`, below, for the reboot boundary this module
+actually has).
 
 Taking the gate hold before draining the queue is exactly the pre-#1078 bug:
 the hold's external tool stops the importer and preview workers, which are
@@ -180,9 +189,14 @@ underlying object is still stopped:
 - every owned producer-start inhibitor;
 - every owned timer control-link mask, restarted and proven active before
   being disowned -- restarting that timer is what returns
-  `cratedigger.service`, `cratedigger-unfindable.service`, and the watchdog
-  to their ordinary cadence. Neither producer is ever started directly: each
-  is only ever timer-triggered.
+  `cratedigger-unfindable.service` and the watchdog to their ordinary
+  cadence, and `cratedigger.service` too if nothing restarted it already.
+  Unlike the other two, main is also named in the metadata gate's own
+  `resume_units`, so a `resume-if-clear` call -- the one `abort` issues
+  above, or one raised by an unrelated hold's release -- can and does start
+  it directly, independent of its timer. `cratedigger-unfindable.service`
+  and the watchdog are absent from `resume_units`, so they really are only
+  ever timer-triggered.
 
 It then removes the receipt, resuming an interrupted retirement the same way
 `complete` does if a prior `abort` was itself interrupted mid-retirement.

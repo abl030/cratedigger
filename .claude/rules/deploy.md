@@ -63,9 +63,11 @@
   controlled workers, `GATE_STOPPED_UNITS`), never in the pre-hold producer
   drain; draining it there would wait the full service-drain timeout for
   nothing. The pre-hold window owns no start inhibitor at all: masking
-  already blocks a new main-cycle trigger, and YouTube is not waited on
-  there, so there is no persistent `/var/lib` artifact to orphan across a
-  reboot.
+  already blocks a fresh *timer* trigger (though not an unrelated hold's
+  own resume-if-clear, which starts `cratedigger.service` directly via the
+  gate's `resume_units` regardless of the timer's mask state), and YouTube
+  is not waited on there, so there is no persistent `/var/lib` artifact to
+  orphan across a reboot.
 - **`abort` releases every object the receipt owns and removes the
   receipt, returning to ordinary (unheld) operation — the only way out of an
   acquire that cannot or will never reach HELD** (an anomaly preflight field,

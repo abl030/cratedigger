@@ -54,15 +54,25 @@ SERVICE_UNITS = (*PRODUCER_SERVICE_UNITS, *CONTROLLED_WORKER_UNITS)
 # timer is stopped the current invocation (if any) finishes naturally and
 # the unit goes idle -- nothing needs to actively stop it. This is the
 # grouping #1078's acquire-side producer drain (before the gate hold) uses.
-# YouTube ingest is deliberately excluded: it is Type=simple,
-# wantedBy=multi-user.target, Restart=on-failure, no timer at all -- an
-# always-on daemon nothing before the gate hold ever asks to stop, so
-# draining it there waits the full service-drain timeout for nothing
-# (#1078 MUST FIX 1, nix/module.nix cratedigger-youtube-ingest).
+# The watchdog unit (cratedigger-metadata-gate-watchdog.{service,timer}) is
+# nixosconfig-owned, not defined in this repo's nix/module.nix, so its shape
+# is not something this module can cite from here; what this module DOES
+# verify is that it is absent from the metadata gate's own guarded_units
+# (verify_controlled_start_contract's expected_guarded, below), which is why
+# this pre-hold drain -- not a gate-hold-side stop -- is the only place it is
+# ever handled. YouTube ingest is deliberately excluded from this grouping:
+# it is Type=simple, wantedBy=multi-user.target, Restart=on-failure, no timer
+# at all -- an always-on daemon nothing before the gate hold ever asks to
+# stop, so draining it there waits the full service-drain timeout for
+# nothing (#1078 MUST FIX 1, nix/module.nix cratedigger-youtube-ingest).
 TIMER_DRIVEN_PRODUCER_UNITS = (MAIN_SERVICE, UNFINDABLE_SERVICE, WATCHDOG_SERVICE)
-# Everything the metadata-gate hold actually stops rather than something
-# that goes naturally idle on its own: the three controlled daemons plus
-# YouTube ingest.
+# The units abort_hold explicitly starts and proves stably active when it
+# releases the receipt-owned manual gate hold -- not "everything the gate
+# hold actually stops": cratedigger.service is also gate-guarded (it is in
+# the metadata gate's guarded_units/resume_units alongside these four), but
+# abort never restarts it here directly. It comes back either through the
+# timer once its control-link mask is released later in the same function,
+# or directly via that same resume-if-clear call's resume_units.
 GATE_STOPPED_UNITS = (YOUTUBE_SERVICE, *CONTROLLED_WORKER_UNITS)
 
 MAIN_START_INHIBITOR = METADATA_GATE_STATE_DIR / f"inhibit-{MAIN_SERVICE}"
@@ -1542,9 +1552,12 @@ def abort_hold(backend: DeployHoldBackend) -> None:
     what this deployment ever owned. #1078's own producer-drain-before-hold
     window keeps no receipt-owned object on persistent storage, so it does
     not widen that exposure: it takes no start inhibitor at all (nothing is
-    waited on for YouTube pre-hold, and masking already blocks a new
-    main-cycle trigger), so a reboot during acquisition self-heals through
-    an ordinary systemd boot. The same asymmetry already existed for
+    waited on for YouTube pre-hold, and masking already blocks a fresh
+    *timer* trigger -- though not an unrelated hold's own
+    resume-if-clear, which starts ``cratedigger.service`` directly via the
+    gate's ``resume_units`` regardless of the timer's mask state), so a
+    reboot during acquisition self-heals through an ordinary systemd boot.
+    The same asymmetry already existed for
     ``prepare_controlled``'s YouTube start inhibitor (owned across
     ``prepared-controlled``/``main-timer-open``, on persistent
     ``/var/lib/cratedigger-metadata-gate``) before this change and is not
@@ -1570,10 +1583,15 @@ def abort_hold(backend: DeployHoldBackend) -> None:
       instead of ``abort`` silently exiting 0 with every worker still down;
     - every owned producer-start inhibitor;
     - every owned timer control-link mask -- releasing it restarts that
-      timer, which is what returns ``cratedigger.service``,
-      ``cratedigger-unfindable.service``, and the watchdog to their ordinary
-      cadence. None of the three is ever started directly: each is only
-      ever timer-triggered.
+      timer, which is what returns ``cratedigger-unfindable.service`` and
+      the watchdog to their ordinary cadence, and ``cratedigger.service``
+      too if nothing has restarted it already. Unlike the other two, main
+      is also named in the metadata gate's own ``resume_units`` (see
+      ``verify_controlled_start_contract``'s ``expected_resume``) -- so a
+      ``resume-if-clear`` call, the one above or one raised by an unrelated
+      hold's release, can and does start it directly, independent of its
+      timer. ``cratedigger-unfindable.service`` and the watchdog are absent
+      from ``resume_units``, so they really are only ever timer-triggered.
 
     It never adopts or mutates an object this receipt did not itself own --
     the same ownership discipline every other command in this module already
