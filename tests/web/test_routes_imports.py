@@ -1721,6 +1721,161 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         self.assertEqual(status, 404)
         self.assertIn("not found", data["error"])
 
+    # NOTE on the whole-root explorer's TWO containment shapes (issue
+    # #1099 review): a real, unmocked whole-root 422 IS constructible —
+    # ``lib.config`` never strips a trailing separator off a configured
+    # quarantine root (an ordinary INI value), and
+    # ``open_directory_path(root)`` computes ``root.lstrip(os.sep)`` and
+    # hands it to ``_parts()``, which rejects the resulting trailing EMPTY
+    # component as ``path_escape`` — a containment code — for the ROOT
+    # ITSELF. That is pinned below
+    # (``test_a_root_with_a_trailing_slash_is_refused_not_missing``).
+    #
+    # A symlinked/special-file (socket/FIFO/plain-file) root is a
+    # DIFFERENT story and stays 404 by design: every directory-open
+    # primitive this module uses (`open_directory_path`/
+    # `open_relative_directory`, both via
+    # `lib.fs_authority.open_configured_quarantine_directory`) opens with
+    # `O_DIRECTORY`, and the kernel answers ENOTDIR — never ELOOP or
+    # ENXIO/ENODEV — for ANY non-directory name under `O_DIRECTORY`, at
+    # any component position (proven empirically; see
+    # `tests.test_path_authority.TestAuthorityFailureClassification
+    # .test_regular_file_used_as_a_directory_is_not_called_a_symlink`,
+    # which pins the identical ENOTDIR-not-ELOOP shape for a regular file
+    # used as a directory component). `not_a_directory` is an ABSENCE
+    # code, so this is correct, not a gap: there genuinely is no
+    # directory at that name. `untrusted_ownership` stays unreached here
+    # too — `open_configured_quarantine_directory` has no ownership
+    # check (only `lib.fs_authority._assert_private_parent`, used by the
+    # sibling private-processing-root open, raises it).
+
+    def test_a_root_with_a_trailing_slash_is_refused_not_missing(self):
+        """Issue #1099 review MUST-FIX 1: a real, unmocked whole-root 422.
+
+        A configured quarantine root with a TRAILING SLASH — an ordinary,
+        unnormalised INI value — makes ``open_directory_path(root)``
+        raise ``path_escape`` for the root's own final (empty) path
+        component. That refusal is a genuine ``contained_refusal`` inside
+        ``open_configured_quarantine_directory``, so it reaches
+        ``_opened_wrong_match_root`` as a real containment code, not a
+        fabricated one.
+        """
+        tmpdir = self.enterContext(tempfile.TemporaryDirectory())
+        other = self.enterContext(tempfile.TemporaryDirectory())
+        staging_root = os.path.join(tmpdir, "Incoming")
+        failed_dir = os.path.join(staging_root, "failed_imports", "Album")
+        os.makedirs(failed_dir)
+        log_id = self.db.log_download(
+            100, outcome="rejected",
+            validation_result={"failed_path": failed_dir},
+        )
+
+        with self._wrong_match_runtime_config(
+            other, staging_root=staging_root + os.sep,
+        ):
+            status, data = self._get(
+                f"/api/wrong-matches/explorer?download_log_id={log_id}")
+
+        self.assertEqual(status, 422)
+        self.assertIn("refused", data["error"])
+        self.assertNotIn("not found", data["error"])
+
+    def test_a_root_with_a_trailing_slash_is_refused_on_the_audio_route_too(
+        self,
+    ):
+        """Same trigger, the sibling route: both share ``_opened_wrong_match_root``."""
+        tmpdir = self.enterContext(tempfile.TemporaryDirectory())
+        other = self.enterContext(tempfile.TemporaryDirectory())
+        staging_root = os.path.join(tmpdir, "Incoming")
+        failed_dir = os.path.join(staging_root, "failed_imports", "Album")
+        os.makedirs(failed_dir)
+        with open(os.path.join(failed_dir, "01 - Track.mp3"), "wb") as handle:
+            handle.write(b"\x00" * 32)
+        log_id = self.db.log_download(
+            100, outcome="rejected",
+            validation_result={"failed_path": failed_dir},
+        )
+
+        with self._wrong_match_runtime_config(
+            other, staging_root=staging_root + os.sep,
+        ):
+            status, data = self._get(
+                f"/api/wrong-matches/audio?download_log_id={log_id}"
+                "&path=01%20-%20Track.mp3",
+            )
+
+        self.assertEqual(status, 422)
+        self.assertIn("refused", data["error"])
+        self.assertNotIn("not found", data["error"])
+
+    def test_a_root_outside_every_quarantine_root_is_unavailable_not_missing(self):
+        """Issue #1099: the whole-root open's OTHER real status flip.
+
+        ``open_configured_quarantine_directory``'s final fallback —
+        "path is outside configured quarantine roots" — carries the
+        default ``unspecified`` code when a ``failed_path`` lexically
+        escapes every configured root's tree entirely (a legitimate,
+        real, non-mocked world: a garbage/legacy path that never matches
+        any of ``slskd_download_dir``/``beets_staging_dir``/
+        ``processing_dir``). The OLD ``refusal_is_indeterminate`` gate
+        answered ``False`` for ``unspecified`` and fell through to 404
+        "not found" — as definitive a claim as the symlink case, just
+        never named in the issue. The classifier's residual clause
+        (#1099 clause 4) answers 503 instead: an unclassifiable refusal
+        must never make a definitive claim of absence, so it falls to
+        the same non-claim side as a genuine world failure.
+        """
+        tmpdir = self.enterContext(tempfile.TemporaryDirectory())
+        outside_root = self.enterContext(tempfile.TemporaryDirectory())
+        # Lexically nowhere near any of the three configured roots under
+        # ``tmpdir`` — every ``_relative_to`` computation inside
+        # ``open_configured_quarantine_directory`` yields a ``..``-laden
+        # relative path, so every root is skipped via ``path_escape``
+        # rather than opened, and the function falls all the way through
+        # to its final ``unspecified`` fallback.
+        failed_dir = os.path.join(outside_root, "failed_imports", "Ghost Album")
+        os.makedirs(failed_dir)
+        log_id = self.db.log_download(
+            100, outcome="rejected",
+            validation_result={"failed_path": failed_dir},
+        )
+
+        with self._wrong_match_runtime_config(tmpdir):
+            status, data = self._get(
+                f"/api/wrong-matches/explorer?download_log_id={log_id}")
+
+        self.assertEqual(status, 503)
+        self.assertNotIn("not found", data["error"])
+
+    def test_a_symlinked_single_file_stream_is_refused_not_unavailable(self):
+        """Issue #1099: the single-file stream resolve owes the same split.
+
+        A per-FILE containment refusal (a symlinked track) must not land
+        in the retryable 503 bucket a world failure owns — retrying can
+        never satisfy a containment refusal.
+        """
+        tmpdir = self.enterContext(tempfile.TemporaryDirectory())
+        failed_dir = os.path.join(tmpdir, "failed_imports", "Album")
+        os.makedirs(failed_dir)
+        real = os.path.join(failed_dir, "01 - Real.mp3")
+        with open(real, "wb") as handle:
+            handle.write(b"\x00" * 32)
+        os.symlink(real, os.path.join(failed_dir, "02 - Linked.mp3"))
+        log_id = self.db.log_download(
+            100, outcome="rejected",
+            validation_result={"failed_path": failed_dir},
+        )
+
+        with self._wrong_match_runtime_config(tmpdir):
+            status, data = self._get(
+                f"/api/wrong-matches/audio?download_log_id={log_id}"
+                "&path=02%20-%20Linked.mp3",
+            )
+
+        self.assertEqual(status, 422)
+        self.assertIn("02 - Linked.mp3", data["error"])
+        self.assertNotIn("not found", data["error"])
+
     def test_candidate_has_distance_breakdown(self):
         _status, data = self._get("/api/wrong-matches")
         entry = data["groups"][0]["entries"][0]
@@ -1990,6 +2145,68 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         self.assertEqual(status, 200)
         self.assertEqual(data["state"], "idle")
 
+    def test_cancel_body_rejects_coercion_and_extra_fields(self) -> None:
+        """Issue #1106 N2: ``arm_pending`` must be a strict bool and
+        unknown fields must be rejected, matching this file's own
+        neighbors (``ImportPreviewValuesRequest`` /
+        ``ImportPreviewRequest``, ``ConfigDict(strict=True,
+        extra="forbid")``). Without ``strict=True``, 1/"true"/"on"
+        would all silently coerce to ``True``."""
+        _fresh_triage_runner(self)
+        rejected_payloads = (
+            {"arm_pending": 1},
+            {"arm_pending": "true"},
+            {"arm_pending": "on"},
+            {"arm_pending": True, "unexpected": "field"},
+        )
+        for payload in rejected_payloads:
+            with self.subTest(payload=payload):
+                status, data = self._post(
+                    "/api/wrong-matches/triage/cancel", payload,
+                )
+                self.assertEqual(status, 400)
+                self.assertIn("error", data)
+
+    def test_default_unarmed_cancel_before_start_does_not_poison_the_sweep(
+        self,
+    ) -> None:
+        """Issue #1106 N6: the DEFAULT (``arm_pending`` omitted) must
+        NOT arm -- a cancel with an empty body while nothing is
+        running, followed by a start, must run to completion over
+        every row. Pinned at the route adapter: flipping
+        ``WrongMatchTriageCancelRequest.arm_pending``'s default to
+        True must turn this test red."""
+        from lib.wrong_match_cleanup_service import WrongMatchCleanupSummary
+
+        runner = _fresh_triage_runner(self)
+
+        def cleanup_fn(db, *, confirm_all_wrong_matches, cancellation_token=None):
+            assert cancellation_token is not None
+            if cancellation_token.cancelled:
+                return WrongMatchCleanupSummary(processed=0, deleted=0, cancelled=True)
+            return WrongMatchCleanupSummary(processed=3, deleted=2, cancelled=False)
+
+        with patch(
+            "web.routes.imports.cleanup_all_wrong_matches",
+            side_effect=cleanup_fn,
+        ):
+            status, data = self._post("/api/wrong-matches/triage/cancel", {})
+            self.assertEqual(status, 200)
+            self.assertEqual(data["state"], "idle")
+
+            status, data = self._post(
+                "/api/wrong-matches/triage",
+                {"confirm_all_wrong_matches": True},
+            )
+            self.assertEqual(status, 202)
+            runner.join(timeout=5)
+
+        status, data = self._get("/api/wrong-matches/triage/status")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["state"], "completed")
+        self.assertEqual(data["summary"]["processed"], 3)
+        self.assertFalse(data["summary"]["cancelled"])
+
     def test_cancel_racing_a_finishing_sweep_is_not_a_conflict(self) -> None:
         """A cancel that lands after the sweep already recorded its own
         completion is not an error — the route never answers 409 here."""
@@ -2012,6 +2229,47 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         self.assertEqual(status, 200)
         self.assertEqual(data["state"], "completed")
         self.assertEqual(data["summary"]["deleted"], 2)
+
+    def test_armed_cancel_before_start_stops_the_sweep_with_zero_rows(
+        self,
+    ) -> None:
+        """Issue #1106 F3/F8: the outermost-adapter proof that
+        ``{"arm_pending": true}`` actually wires through the real HTTP
+        body → pydantic → ``TriageRunner.cancel()`` boundary. The
+        runner-level pins in ``tests/test_web_triage_runner.py`` cover
+        the sticky-cancel mechanism itself; this proves the route
+        exposes it."""
+        from lib.wrong_match_cleanup_service import WrongMatchCleanupSummary
+
+        runner = _fresh_triage_runner(self)
+
+        def cleanup_fn(db, *, confirm_all_wrong_matches, cancellation_token=None):
+            assert cancellation_token is not None
+            if cancellation_token.cancelled:
+                return WrongMatchCleanupSummary(processed=0, deleted=0, cancelled=True)
+            return WrongMatchCleanupSummary(processed=3, deleted=2, cancelled=False)
+
+        with patch(
+            "web.routes.imports.cleanup_all_wrong_matches",
+            side_effect=cleanup_fn,
+        ):
+            status, data = self._post(
+                "/api/wrong-matches/triage/cancel", {"arm_pending": True},
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(data["state"], "idle")
+
+            status, data = self._post(
+                "/api/wrong-matches/triage",
+                {"confirm_all_wrong_matches": True},
+            )
+            self.assertEqual(status, 202)
+            runner.join(timeout=5)
+
+        status, data = self._get("/api/wrong-matches/triage/status")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["state"], "cancelled")
+        self.assertEqual(data["summary"]["processed"], 0)
 
     def test_groups_in_beets_still_shown(self):
         """Wrong matches still appear when the release is already in the library."""

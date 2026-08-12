@@ -40,6 +40,7 @@ export function renderPipelineDashboard(navHtml) {
       ${renderPeerBrowseHeavyQueries(peers)}
       ${renderLoopSuspects(coverage.top_loop_suspects || [])}
       ${renderStaleWanted(coverage.stale_wanted || [])}
+      ${renderUnfindableCard(data.unfindable || {})}
     </div>
   `;
 }
@@ -518,6 +519,95 @@ function renderStaleWanted(rows) {
   `;
 }
 
+/**
+ * Render the "Unfindable detection" card — latest-run facts, per-outcome
+ * breakdown for recent runs, and a due-backlog trend chart (#1112). Modest
+ * by design: one card, no interactive toggles, mirroring the daily (not
+ * 5-min) cadence of the underlying data.
+ * @param {any} unfindable
+ * @returns {string}
+ */
+function renderUnfindableCard(unfindable) {
+  const runs = /** @type {any[]} */ (unfindable.recent_runs || []);
+  const latest = runs.length > 0 ? runs[0] : null;
+  const trend = unfindable.backlog_trend || {};
+  const breakerClass = latest && latest.breaker_tripped ? 'metric-bad' : 'metric-good';
+  return `
+    <div class="dashboard-card dashboard-wide">
+      <div class="dashboard-card-title">Unfindable Detection</div>
+      ${renderUnfindableBacklogChart(trend.series || [])}
+      <div class="metric-list">
+        <div class="metric-row"><span>Last run</span><strong>${latest ? awstDateTime(latest.created_at) : 'never'}</strong></div>
+        <div class="metric-row"><span>Cohort</span><strong>${latest ? formatCount(latest.cohort_total) : 'n/a'}</strong></div>
+        <div class="metric-row"><span>Due backlog</span><strong>${latest ? formatCount(latest.due_backlog_at_start) : 'n/a'}</strong></div>
+        <div class="metric-row"><span>Batch limit / processed</span><strong>${latest ? `${formatCount(latest.batch_limit)} / ${formatCount(latest.candidates_processed)}` : 'n/a'}</strong></div>
+        <div class="metric-row"><span>Probes attempted</span><strong>${latest ? formatCount(latest.probes_attempted) : 'n/a'}</strong></div>
+        <div class="metric-row"><span>Breaker tripped</span><strong class="${latest ? breakerClass : 'metric-muted'}">${latest ? (latest.breaker_tripped ? 'yes' : 'no') : 'n/a'}</strong></div>
+      </div>
+      <table class="dashboard-table">
+        <thead><tr><th>Run</th><th>Probes</th><th>Categorised</th><th>Downgraded</th><th>No change</th><th>Probe failed</th><th>Breaker</th></tr></thead>
+        <tbody>
+          ${runs.map(r => `
+            <tr>
+              <td>${awstDateTime(r.created_at || '')}</td>
+              <td>${formatCount(r.probes_attempted)}</td>
+              <td>${formatCount(r.categorised_count)}</td>
+              <td>${formatCount(r.downgraded_count)}</td>
+              <td>${formatCount(r.no_change_count)}</td>
+              <td class="${r.probe_failed_count ? 'metric-warn' : ''}">${formatCount(r.probe_failed_count)}</td>
+              <td class="${r.breaker_tripped ? 'metric-bad' : ''}">${r.breaker_tripped ? 'yes' : 'no'}</td>
+            </tr>
+          `).join('')}
+          ${runs.length === 0 ? '<tr><td colspan="7">No unfindable-detection runs yet</td></tr>' : ''}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderUnfindableBacklogChart(points) {
+  const series = normalizeUnfindableBacklogSeries(points);
+  if (series.length < 2) {
+    return `<div class="wanted-trend-chart"><div class="chart-empty">Collecting run history</div></div>`;
+  }
+
+  const width = 240;
+  const height = 64;
+  const minBacklog = Math.min(...series.map(p => p.backlog));
+  const maxBacklog = Math.max(...series.map(p => p.backlog));
+  const range = Math.max(1, maxBacklog - minBacklog);
+  const coords = series.map((point, index) => {
+    const x = series.length === 1 ? width : (index / (series.length - 1)) * width;
+    const y = height - ((point.backlog - minBacklog) / range) * height;
+    return `${x.toFixed(2)},${y.toFixed(2)}`;
+  }).join(' ');
+  const area = `0,${height} ${coords} ${width},${height}`;
+  const first = series[0]?.time ? awstDate(series[0].time) : '';
+  const last = series[series.length - 1]?.time ? awstDate(series[series.length - 1].time) : '';
+  const latest = series[series.length - 1]?.backlog;
+  return `
+    <div class="wanted-trend-chart">
+      <div class="match-rate-chart-head"><span>Due backlog per run</span><strong>${formatCount(latest)}</strong></div>
+      <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-label="Unfindable due-backlog trend">
+        <polygon class="wanted-trend-area" points="${area}"></polygon>
+        <polyline class="wanted-trend-line" points="${coords}"></polyline>
+      </svg>
+      <div class="match-rate-chart-axis"><span>${first}</span><span>${last}</span></div>
+    </div>
+  `;
+}
+
+function normalizeUnfindableBacklogSeries(points) {
+  return (Array.isArray(points) ? points : []).map(point => {
+    const row = point || {};
+    const backlog = Number(row.due_backlog_at_start);
+    return {
+      time: row.sampled_at || '',
+      backlog: Number.isFinite(backlog) ? backlog : 0,
+    };
+  }).filter(point => point.time || Number.isFinite(point.backlog));
+}
+
 function formatCount(value) {
   if (value == null || Number.isNaN(Number(value))) return '0';
   return Number(value).toLocaleString();
@@ -618,6 +708,7 @@ export const __test__ = {
   formatEtaHours,
   formatWantedTrendWindow,
   normalizeMatchRateSeries,
+  normalizeUnfindableBacklogSeries,
   normalizeWantedTrendSeries,
   renderDailyMatchRateChart,
   renderCoverageCard,
@@ -625,6 +716,8 @@ export const __test__ = {
   renderMatchRateChart,
   renderPeerBrowseHeavyQueries,
   renderPeersCard,
+  renderUnfindableBacklogChart,
+  renderUnfindableCard,
   renderWantedTrendCard,
   renderWantedTrendChart,
   withCoverageMatchRates,

@@ -102,7 +102,7 @@ depends on.
 | `/api/wrong-matches/converge` | POST | Queue every wrong-match candidate within a release's loosen threshold and delete the rest |
 | `/api/wrong-matches/triage` | POST | Evidence-only full-queue Wrong Matches cleanup; requires `{"confirm_all_wrong_matches": true}` |
 | `/api/wrong-matches/triage/status` | GET | Poll the background sweep's state (`idle`/`running`/`completed`/`cancelled`/`failed`) and summary |
-| `/api/wrong-matches/triage/cancel` | POST | Request cancellation of the in-flight sweep, if any; never 409 — same route the CLI's `Ctrl-C` handler and the UI's Stop button both use (#1083) |
+| `/api/wrong-matches/triage/cancel` | POST | Request cancellation of the in-flight sweep, if any; never 409 — same route the CLI's `Ctrl-C` handler and the UI's Stop button both use (#1083). Optional `{"arm_pending": true}` (#1106) arms a sticky pre-cancel for the next sweep start admitted within a short window; only the CLI's `Ctrl-C` handler sends it — the UI's Stop button and the standalone `wrong-match-triage-cancel` command stay unarmed |
 | `/api/import-preview` | POST | Strict path-free preview: nested typed `values` or a positive `download_log_id`. `pipeline-cli import-preview --download-log-id` relays this route (its `failed_path` is under the private processing tree, #1063); the CLI-only `--path` mode keeps the explicit-path inspector off the HTTP surface (CD-SEC-03). |
 | `/api/import-jobs` | GET | List recent import queue jobs |
 | `/api/import-jobs/timeline` | GET | List active queued/running/recovery-required import jobs in importer order, with server-classified display fields |
@@ -259,8 +259,12 @@ depends on.
 - **Wrong Matches tab** — the obsolete Complete-folder/manual-import page is gone;
   the tab now opens straight into Wrong Matches. Import actions queue work and
   poll `import_jobs`, so long beets imports do not block the web request.
-  Failed queued force-imports remove the reviewed wrong-match source from the
-  actionable list while preserving the failed job/download audit.
+  A successful queued force-import deletes the reviewed wrong-match source
+  (issue #1077, D7 — completing the operator's own explicit action) and
+  clears it from the actionable list. A failed force-import on the
+  `audio_corrupt` decision also deletes it (D3: bad rips are never
+  preserved); every other failure preserves the source and the actionable
+  list entry exactly as-is, alongside the failed job/download audit.
 - **Recents Acquisition + Imports subviews** — Recents has History,
   Acquisition, and Imports subviews. Acquisition combines downloading and
   processing requests with the separate active YouTube-rescue feed; it does
@@ -600,22 +604,69 @@ depends on.
   EACCES/EIO refusal, each with its own honest reason: a containment refusal
   (symlink/socket) reads "refused ... out of the quarantine root", never
   worded like a transient world failure. `web/js/wrong-matches.js` renders both `ok` and
-  `unavailable` payloads; a refusal of the whole root is a 503 whose reason is
-  shown next to the Retry button. **Every listing that recorded a refusal —
+  `unavailable` payloads; a refusal of the WHOLE root (the folder open
+  itself, not one entry inside it) also splits into three verdicts, via the
+  single `web/wrong_match_file_service.py::_classify_wrong_match_refusal`
+  function that both the whole-root open and the single-file stream resolve
+  share (issue #1099; before this, every CONTAINMENT refusal, and the
+  unclassified residual, of either was reported as 404 "not found" — the
+  pre-existing world-failure codes already routed to 503 at both sites):
+  - **404** — the name is definitively absent (`missing`/`not_a_directory`).
+    This also covers a symlink, socket, FIFO, or plain file used AS the root
+    itself: every directory-open primitive this module uses always opens
+    with `O_DIRECTORY`, and the kernel answers ENOTDIR (`not_a_directory`,
+    an ABSENCE code) rather than a containment errno for any non-directory
+    name under `O_DIRECTORY` — there genuinely is no directory at that
+    name, so 404 is correct here, not a gap.
+  - **422** — a containment DECISION (`path_escape`, `unsafe_symlink`,
+    `not_regular_file`, `untrusted_ownership`): the name may well exist, the
+    server simply refuses to read it. At this exact whole-root granularity
+    only `path_escape` is actually reachable today — from an ordinary,
+    unnormalised configured root (`lib.config` never strips or validates
+    one) that hands `open_directory_path`'s own `_parts()` check a
+    ``""``/``"."``/``".."`` path component, e.g. a TRAILING SLASH (an empty
+    final component) but equally a stray `//`, `/./`, or `/../` anywhere in
+    the value. `untrusted_ownership` is a real declared `FsAuthorityCode`
+    member but is never raised at this granularity:
+    `open_configured_quarantine_directory` has no ownership check (only
+    `lib.fs_authority._assert_private_parent`, used by the sibling
+    private-processing-root open, raises it).
+  - **503** — either a genuine, potentially-retryable world failure
+    (`open_failed`/`read_failed`/`write_failed`, e.g. EACCES/EIO/ESTALE) or
+    an unclassified residual code (`unspecified` — e.g. a `failed_path`
+    lexically outside every configured quarantine root). The two share a
+    verdict deliberately: an unclassifiable refusal must never make a
+    definitive claim of absence or containment.
+
+  The browser's load-failure catch turns each status into its own honest
+  lead sentence via the pure `wrongMatchExplorerFailureCopy` function in
+  `web/js/util.js` — never "not found" for a 422, and the 503 wording
+  deliberately does NOT promise a retry will succeed (the residual code in
+  that bucket is a data mismatch, not a disk hiccup); before this fix every
+  non-ok status showed the identical generic "Failed to load file explorer."
+  **Every listing that recorded a refusal —
   `unavailable`, or a PARTIAL `ok` listing that read some files and was refused
   others — is deliberately NOT cached**, so reopening the panel always
-  re-fetches rather than short-circuiting on a stale answer. Only a
-  WORLD-FAILURE refusal (EACCES/EIO/ESTALE/…) also carries a Retry button on
-  its notice: the operator is expected to go and fix the permission, and a
-  plain reload might just see the fix. A CONTAINMENT refusal (a symlink,
-  socket, FIFO or device node) carries no Retry — re-fetching the same name
-  answers the same refusal every time, whatever `unavailable`/`ok` status it
-  arrives under; nothing short of the operator physically replacing the entry
-  changes it, and that is a filesystem action, not a button click (#1086). A
-  listing that was truncated by a LIMIT and recorded no
-  refusals stays cached, because retrying hits the same limit; one that was
-  both truncated and refused is still evicted, since the refusal half is
-  repairable.
+  re-fetches rather than short-circuiting on a stale answer. The Retry
+  button follows one doctrine across BOTH the per-entry notice (inside a
+  200 payload) and the whole-root load-failure catch: offer Retry only
+  where retrying could plausibly change the answer. Per-entry, a
+  WORLD-FAILURE refusal (EACCES/EIO/ESTALE/…) carries a Retry — the
+  operator is expected to go and fix the permission, and a plain reload
+  might just see the fix — while a CONTAINMENT refusal (a symlink, socket,
+  FIFO or device node) carries none, since re-fetching the same name
+  answers the same refusal every time (#1086). The whole-root catch
+  applies the identical rule keyed on STATUS instead of the per-entry
+  discriminator: 404/503/an unrecognised status keep the Retry button (a
+  genuinely-missing folder can reappear, a world failure can clear, and an
+  unrecognised failure shape must not silently strand the operator with no
+  way to reload), a 422 offers none — nothing short of the operator
+  physically replacing the entry changes a containment decision, and that
+  is a filesystem action, not a button click (#1099). A listing that was
+  truncated by a LIMIT and
+  recorded no refusals stays cached, because retrying hits the same limit;
+  one that was both truncated and refused is still evicted, since the
+  refusal half is repairable.
 - **Replace picker distance badge** — each pressing row carries the best
   beets-distance against the request's Wrong Matches folders. When the service
   was refused part of a folder, the response's `partial_read` is set and the
@@ -646,19 +697,55 @@ depends on.
   evidence only, deletes force-mode confident cleanup-eligible rejects, and
   leaves would-import, uncertain, missing-evidence, stale-evidence,
   active-job, and missing-path candidates for review. A second "Stop"
-  control sits beside it, enabled while the sweep started from that
-  browser session is running (issue #1083; a CLI-started sweep, another
-  tab, or a mid-sweep refresh leaves it disabled — see #1106):
-  clicking it posts `/api/wrong-matches/triage/cancel` — the same route the
-  CLI's `Ctrl-C` handler uses — and cancellation lands between rows, never
-  mid-delete, so a row already in flight always finishes. A completed sweep
-  shows its summary as an ordinary toast; a stopped one shows a distinct
-  `Cleanup stopped — ...` toast reporting exactly what ran before the stop,
-  and the pane refreshes either way. A failed Stop request itself toasts
-  `Stop request failed` and re-enables the button.
-- **Wrong Matches history** — old rows with
-  `download_log.validation_result.wrong_match_triage` still render their
-  historical chip/detail in Recents. New cleanup does not write that blob.
+  control sits beside it, and is always rendered even when the queue is
+  currently empty (issue #1106 review) — a mid-sweep Refresh that drains the
+  last visible candidate must not lose the control while a sweep started
+  elsewhere is still running against rows this pane no longer shows. Both
+  toolbar buttons are looked up by element id at every mutation, never held
+  as a node captured at click time, and on EVERY render of the pane (initial
+  load, a tab switch back to it, an explicit Refresh, a threshold slider
+  re-render) the frontend fetches `GET /api/wrong-matches/triage/status` and
+  derives the buttons' state from the server's answer rather than this tab's
+  memory of it (issue #1106, closing the #1083 gap where Stop was only ever
+  enabled inside the click handler that happened to start the sweep). A
+  failed status fetch gets one bounded (~3s) background retry before
+  painting a conservative fallback (Cleanup disabled, Stop enabled) instead
+  of leaving whatever shape the last successful render painted stranded.
+  When the status is `running` — because this tab's own click started it,
+  because a mid-sweep Refresh or a page reload just discovered one already
+  running, or because it was started from the CLI or another browser tab —
+  Cleanup disables, Stop enables, and the tab ATTACHES a poll with no
+  confirm dialog, keyed by the sweep's own `started_at` so a second,
+  genuinely different sweep discovered while an earlier one's terminal
+  handling is still unwinding always gets its own follower rather than
+  being silently stranded; that poll runs the exact same terminal handling
+  described below as the click path that actually started the sweep.
+  Clicking Stop posts `/api/wrong-matches/triage/cancel` with no body — the
+  same route the CLI's `Ctrl-C` handler uses, but UNARMED — and
+  cancellation lands between rows, never mid-delete, so a row already in
+  flight always finishes. An unarmed cancel (the browser's Stop button, and
+  the standalone `wrong-match-triage-cancel` command) only ever stops a
+  sweep it can see is actually RUNNING; it is a pure no-op with nothing
+  running, and never affects a LATER sweep it did not itself observe. Only
+  the CLI's own `Ctrl-C` handler sends `{"arm_pending": true}` — it is
+  specifically racing its own still-in-flight start POST, so a cancel that
+  beats the server's `start()` still needs to stop that exact sweep: it is
+  recorded and consumed by the very next start admitted within a short
+  window, pre-cancelling it before any row runs (issue #1106). A completed
+  sweep shows its summary as an ordinary toast; a stopped one shows a
+  distinct `Cleanup stopped — ...` toast reporting exactly what ran before
+  the stop, and the pane refreshes either way. A failed Stop request itself
+  toasts `Stop request failed` and re-enables the button.
+- **Wrong Matches history** — rows evaluated by the cleanup reducer
+  (`lib.wrong_match_cleanup_service.cleanup_wrong_match`, individual or bulk)
+  render their chip/detail in Recents from
+  `download_log.validation_result.wrong_match_triage`, the reducer's ONLY
+  writer. Rejection scenarios outside the cleanup-lane-admission allowlist
+  (`extra_tracks` / `high_distance` / `mbid_not_found` / `no_choose_match` —
+  D6, `docs/rejection-routing.md`) never reach the reducer, so they never get
+  this block — they still render, just with no triage chip, which is correct
+  for that whole cohort and not a missing-data bug. `recents.js`/`history.js`
+  render the `wrong_match_triage_*` fields conditionally on presence.
 
 ## Dev Server Workflows
 

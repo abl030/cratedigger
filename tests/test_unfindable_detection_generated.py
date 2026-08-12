@@ -87,6 +87,7 @@ import os
 import sys
 import unittest
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Literal
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -95,6 +96,7 @@ from hypothesis import example, given
 from hypothesis import strategies as st
 
 import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
+from lib.pipeline_db import UnfindableRunMetricsRow
 from lib.unfindable_detection_service import (
     CIRCUIT_BREAKER_CONSECUTIVE_SUBMIT_FAILURES,
     PROBE_SUBMIT_RETRY_MAX_ATTEMPTS,
@@ -506,6 +508,56 @@ def assert_exit_code_matches_completeness(
         )
 
 
+def run_metrics_row_violations(
+    db: FakePipelineDB, *, expected_tripped: bool,
+) -> list[str]:
+    """I-D (issue #1112 review round 1, F5): every ``_process_batch`` call
+    -- whatever its outcome -- writes exactly one ``unfindable_run_metrics``
+    row (the write executes on every example; #1112 review found it
+    unasserted here), whose six ``RESULT_*`` outcome counts partition
+    ``candidates_processed`` exactly, and whose ``breaker_tripped`` field
+    agrees with the run's independently-derived breaker expectation.
+
+    Deliberately narrower than the full write-payload contract: the
+    ``probes_attempted = candidates_processed - not_due_count -
+    request_not_found_count`` arithmetic (F7) is NOT re-checked here --
+    this world model's candidates are always real, freshly-seeded
+    ``wanted`` rows that ``categorise_due_batch`` always attempts, so
+    ``not_due_count``/``request_not_found_count`` are always 0 in every
+    world this generator can draw (a mutant flipping that arithmetic
+    would be an unfalsifiable clause here, per code-quality.md's per-
+    clause rule) -- that arithmetic is pinned instead by
+    ``tests/test_run_unfindable_detection.py::
+    test_probes_attempted_excludes_request_not_found``, which drives the
+    real TOCTOU race the generator's world model doesn't simulate.
+    """
+    violations: list[str] = []
+    rows = db.unfindable_run_metrics
+    if len(rows) != 1:
+        violations.append(
+            f"expected exactly one unfindable_run_metrics row per "
+            f"_process_batch call, found {len(rows)}"
+        )
+        return violations
+    row = rows[0]
+    counted = (
+        row["categorised_count"] + row["downgraded_count"]
+        + row["no_change_count"] + row["probe_failed_count"]
+        + row["not_due_count"] + row["request_not_found_count"]
+    )
+    if counted != row["candidates_processed"]:
+        violations.append(
+            f"six RESULT_* counts sum to {counted}, expected "
+            f"candidates_processed={row['candidates_processed']}"
+        )
+    if row["breaker_tripped"] != expected_tripped:
+        violations.append(
+            f"breaker_tripped={row['breaker_tripped']}, expected "
+            f"{expected_tripped} (independently derived from world)"
+        )
+    return violations
+
+
 # ---------------------------------------------------------------------------
 # Generated properties.
 # ---------------------------------------------------------------------------
@@ -612,13 +664,23 @@ class TestGeneratedSubmitResiliencePatrol(unittest.TestCase):
 
     @given(world=batch_worlds())
     def test_exit_code_matches_batch_completeness(self, world: BatchWorld) -> None:
-        db, slskd, _rids = _build_batch(world)
+        db, slskd, rids = _build_batch(world)
         svc = UnfindableDetectionService(db, slskd, probe_runner=_fast_probe_runner)
         # ONE real run (issue #1090 NIT-10) -- the expected outcome is
         # independently derived from the world, not a second live batch.
-        exit_code = _process_batch(svc, limit=100)
+        # cohort_total / due_backlog_at_start (#1112) are run-telemetry
+        # inputs the completeness invariant doesn't depend on -- the
+        # seeded cohort size is a faithful stand-in for both.
+        exit_code = _process_batch(
+            svc, db, limit=100,
+            cohort_total=len(rids), due_backlog_at_start=len(rids),
+        )
         expected_tripped = _expected_trip_index(world) is not None
         assert_exit_code_matches_completeness(expected_tripped, exit_code)
+        self.assertEqual(
+            run_metrics_row_violations(db, expected_tripped=expected_tripped),
+            [],
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -934,6 +996,85 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         )
         self.assertEqual(
             breaker_trip_expectation_violations(world, batch), [],
+        )
+
+
+class TestRunMetricsRowViolationsTripsOnViolations(unittest.TestCase):
+    """Per-clause proof for ``run_metrics_row_violations`` (issue #1112
+    review round 1, F5/F8). The checker accumulates a ``list[str]``
+    rather than raising, so each clause is proven through the returned
+    list, matching the house pattern for accumulating checkers
+    (``deterministic_candidate_silent_success_violations`` above)."""
+
+    @staticmethod
+    def _valid_row(
+        *,
+        candidates_processed: int = 3,
+        no_change_count: int = 1,
+        breaker_tripped: bool = False,
+    ) -> UnfindableRunMetricsRow:
+        return UnfindableRunMetricsRow(
+            id=1, created_at=datetime.now(UTC),
+            cohort_total=10, due_backlog_at_start=5, batch_limit=5,
+            candidates_processed=candidates_processed,
+            probes_attempted=candidates_processed,
+            categorised_count=1, downgraded_count=0,
+            no_change_count=no_change_count, probe_failed_count=1,
+            not_due_count=0, request_not_found_count=0,
+            breaker_tripped=breaker_tripped, duration_seconds=1.0,
+        )
+
+    def test_missing_row_clause_trips_when_no_row_written(self) -> None:
+        db = FakePipelineDB()  # never called record_unfindable_run_metrics
+        violations = run_metrics_row_violations(db, expected_tripped=False)
+        self.assertEqual(len(violations), 1)
+        self.assertRegex(
+            violations[0],
+            r"expected exactly one unfindable_run_metrics row per "
+            r"_process_batch call, found 0",
+        )
+
+    def test_missing_row_clause_trips_when_two_rows_written(self) -> None:
+        db = FakePipelineDB()
+        db.unfindable_run_metrics.append(self._valid_row())
+        db.unfindable_run_metrics.append(self._valid_row())
+        violations = run_metrics_row_violations(db, expected_tripped=False)
+        self.assertEqual(len(violations), 1)
+        self.assertRegex(violations[0], r"found 2")
+
+    def test_partition_clause_trips_when_counts_do_not_sum(self) -> None:
+        db = FakePipelineDB()
+        # candidates_processed=3 but the six counts sum to 2 -- one
+        # candidate's outcome vanished (the "obvious mutant" shape:
+        # _summarise dropping one outcome).
+        db.unfindable_run_metrics.append(
+            self._valid_row(no_change_count=0))
+        violations = run_metrics_row_violations(db, expected_tripped=False)
+        self.assertEqual(len(violations), 1)
+        self.assertRegex(
+            violations[0],
+            r"six RESULT_\* counts sum to 2, expected "
+            r"candidates_processed=3",
+        )
+
+    def test_breaker_clause_trips_when_breaker_tripped_disagrees(self) -> None:
+        db = FakePipelineDB()
+        # Counts partition candidates_processed correctly (earlier clause
+        # passes), but breaker_tripped disagrees with the independently
+        # derived expectation.
+        db.unfindable_run_metrics.append(
+            self._valid_row(breaker_tripped=False))
+        violations = run_metrics_row_violations(db, expected_tripped=True)
+        self.assertEqual(len(violations), 1)
+        self.assertRegex(violations[0], r"breaker_tripped=False, expected True")
+
+    def test_valid_row_produces_no_violations(self) -> None:
+        """Sanity: a row whose counts partition candidates_processed and
+        whose breaker_tripped matches the expectation reports clean."""
+        db = FakePipelineDB()
+        db.unfindable_run_metrics.append(self._valid_row())
+        self.assertEqual(
+            run_metrics_row_violations(db, expected_tripped=False), [],
         )
 
 

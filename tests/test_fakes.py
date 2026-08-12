@@ -4499,6 +4499,88 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         self.assertEqual(
             dashboard["coverage"]["wanted_trend"]["current_wanted"], 0)
 
+    def test_unfindable_run_metrics_stub_round_trips_and_feeds_dashboard(self):
+        db = FakePipelineDB()
+
+        empty = db.get_pipeline_dashboard_metrics()["unfindable"]
+        self.assertEqual(empty["recent_runs"], [])
+        self.assertIsNone(empty["backlog_trend"]["current_backlog"])
+
+        first_id = db.record_unfindable_run_metrics(
+            cohort_total=1301, due_backlog_at_start=900,
+            batch_limit=240, candidates_processed=240, probes_attempted=240,
+            categorised_count=5, downgraded_count=1, no_change_count=210,
+            probe_failed_count=24, breaker_tripped=False,
+            duration_seconds=6900.0,
+        )
+        second_id = db.record_unfindable_run_metrics(
+            cohort_total=1301, due_backlog_at_start=686,
+            batch_limit=240, candidates_processed=93, probes_attempted=90,
+            probe_failed_count=90, not_due_count=0,
+            request_not_found_count=3, breaker_tripped=True,
+            duration_seconds=1800.0,
+        )
+        self.assertEqual((first_id, second_id), (1, 2))
+
+        rows = db.get_unfindable_run_metrics(limit=5)
+        self.assertEqual(len(rows), 2)
+        # Newest first, and every field of the second call round-trips.
+        newest = rows[0]
+        self.assertEqual(newest["id"], second_id)
+        self.assertEqual(newest["due_backlog_at_start"], 686)
+        self.assertEqual(newest["candidates_processed"], 93)
+        self.assertEqual(newest["probes_attempted"], 90)
+        self.assertEqual(newest["probe_failed_count"], 90)
+        self.assertEqual(newest["request_not_found_count"], 3)
+        self.assertTrue(newest["breaker_tripped"])
+        self.assertEqual(newest["duration_seconds"], 1800.0)
+        self.assertEqual(newest["categorised_count"], 0)
+
+        dashboard = db.get_pipeline_dashboard_metrics()["unfindable"]
+        self.assertEqual(len(dashboard["recent_runs"]), 2)
+        self.assertEqual(
+            dashboard["recent_runs"][0]["due_backlog_at_start"], 686)
+        self.assertEqual(dashboard["backlog_trend"]["current_backlog"], 686)
+        self.assertEqual(
+            [pt["due_backlog_at_start"]
+             for pt in dashboard["backlog_trend"]["series"]],
+            [900, 686],
+        )
+
+    def test_record_unfindable_run_metrics_rejects_non_partitioning_counts(
+        self,
+    ):
+        """Mirror of unfindable_run_metrics_partition_check (migration
+        077, #1112 review round 2 R5) -- the six RESULT_* outcome counts
+        must sum to candidates_processed exactly."""
+        import psycopg2.errors
+        db = FakePipelineDB()
+        with self.assertRaises(psycopg2.errors.CheckViolation):
+            db.record_unfindable_run_metrics(
+                cohort_total=10, due_backlog_at_start=5,
+                batch_limit=5, candidates_processed=5, probes_attempted=5,
+                breaker_tripped=False, duration_seconds=1.0,
+                categorised_count=1, no_change_count=1,  # sums to 2, not 5
+            )
+
+    def test_record_unfindable_run_metrics_rejects_wrong_probes_attempted(
+        self,
+    ):
+        """Mirror of unfindable_run_metrics_probes_attempted_check
+        (migration 077, #1112 review round 2 R5) -- probes_attempted
+        must equal candidates_processed minus not_due_count minus
+        request_not_found_count."""
+        import psycopg2.errors
+        db = FakePipelineDB()
+        with self.assertRaises(psycopg2.errors.CheckViolation):
+            db.record_unfindable_run_metrics(
+                cohort_total=10, due_backlog_at_start=5,
+                batch_limit=5, candidates_processed=5,
+                probes_attempted=5,  # should be 5 - 0 - 2 = 3
+                breaker_tripped=False, duration_seconds=1.0,
+                no_change_count=3, request_not_found_count=2,
+            )
+
     def test_import_job_preview_methods_mirror_core_lifecycle(self):
         from lib.import_queue import IMPORT_JOB_FORCE
 
@@ -7886,6 +7968,99 @@ class TestFakeSlskdEvents(unittest.TestCase):
 
         self.assertEqual(
             api.call_log, ["transfers.get_all_downloads", "events.list"])
+
+
+class TestFakePipelineDBSourceRejectAndRequeueGating(unittest.TestCase):
+    """Issue #1077, R4-5 (round-4 review): ``FakePipelineDBSource.
+    reject_and_requeue`` must gate identically to the real
+    ``album_source.DatabaseSource.reject_and_requeue`` it stands in for —
+    a single falsy ``request_id`` check before branching on
+    ``import_job_id``, not a per-branch ``isinstance(request_id, int)``
+    re-check that treats ``request_id=0`` as valid, and not an
+    additional ``get_import_job(...) is not None`` requirement production
+    never applies before taking the deferred path."""
+
+    def _source(self):
+        from tests.fakes import FakePipelineDB, FakePipelineDBSource
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        return FakePipelineDBSource(db), db
+
+    def test_falsy_request_id_writes_nothing_on_the_sync_branch(self) -> None:
+        """``request_id=0`` is falsy — production's own ``if not
+        request_id: return None`` (``album_source.py``) writes nothing for
+        it. An ``isinstance(0, int)`` check would wrongly treat it as a
+        valid request and write a full requeue+log+denylist."""
+        from lib.quality import ValidationResult
+
+        source, db = self._source()
+        album = MagicMock(db_request_id=0)
+        result = ValidationResult(
+            valid=False, distance=0.4, scenario="high_distance",
+            detail="test",
+        )
+
+        outcome = source.reject_and_requeue(album, result)
+
+        self.assertIsNone(outcome)
+        self.assertEqual(db.download_logs, [])
+        self.assertEqual(db.denylist, [])
+
+    def test_falsy_request_id_writes_nothing_on_the_deferred_branch(self) -> None:
+        """Same falsy gate applies before the ``import_job_id`` branch
+        decision is even made — ``request_id=0`` (falsy but ``isinstance``-
+        valid, same distinguishing case as the sync-branch pin above) must
+        not reach the deferred path either."""
+        from lib.import_queue import IMPORT_JOB_FORCE, force_import_payload
+        from lib.quality import ValidationResult
+
+        source, db = self._source()
+        job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            payload=force_import_payload(
+                download_log_id=1, failed_path="/tmp/cratedigger-r4-5-test"),
+        )
+        album = MagicMock(db_request_id=0)
+        result = ValidationResult(
+            valid=False, distance=0.4, scenario="high_distance",
+            detail="test",
+        )
+
+        outcome = source.reject_and_requeue(
+            album, result, import_job_id=job.id)
+
+        self.assertIsNone(outcome)
+
+    def test_unseeded_import_job_id_still_takes_the_deferred_path(self) -> None:
+        """Production takes the deferred path on ``import_job_id is not
+        None`` alone (``album_source.py``) — it never checks the job
+        exists first. The fake used to require
+        ``get_import_job(...) is not None``, which made an unseeded job id
+        silently fall through to the SYNC branch instead — a materially
+        different code path than production would take for the same
+        input. This proves the fake now takes the SAME (deferred) path
+        regardless of whether the id happens to be seeded."""
+        from lib.quality import ValidationResult
+        from lib.terminal_outcomes import PendingImportTerminalOutcome
+
+        source, db = self._source()
+        self.assertIsNone(db.get_import_job(999999))
+        album = MagicMock(db_request_id=42)
+        result = ValidationResult(
+            valid=False, distance=0.4, scenario="high_distance",
+            detail="test",
+        )
+
+        outcome = source.reject_and_requeue(
+            album, result, import_job_id=999999)
+
+        # The deferred path returns a PendingImportTerminalOutcome command
+        # bundle, never a plain int/None sync-path return.
+        self.assertIsInstance(outcome, PendingImportTerminalOutcome)
+        # And critically: no download_log row was written directly — a
+        # sync-branch fallthrough would have written one immediately.
+        self.assertEqual(db.download_logs, [])
 
 
 if __name__ == "__main__":

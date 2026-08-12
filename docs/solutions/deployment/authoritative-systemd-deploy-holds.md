@@ -70,9 +70,14 @@ BLOCKER F3). YouTube is
 `Type=simple`, `wantedBy=multi-user.target`, `Restart=on-failure`, with no
 timer at all -- an always-on daemon nothing before the gate hold ever asks to
 stop. Draining it pre-hold (the original #1078 fix's mistake) waits the full
-7200s service-drain timeout for a unit nothing is going to stop, then fails
-with the gate hold never taken -- the exact failure shape #1078 exists to
-remove, reproduced by the reorder itself. The pre-hold window also owns no
+service-drain timeout for a unit nothing is going to stop -- that drain's
+unit set (`PRODUCER_SERVICE_UNITS`) includes `cratedigger-unfindable.service`,
+so as of issue #1112 review round 2 it is bounded by
+`_PRODUCER_DRAIN_TIMEOUT_SECONDS` (21600s / 6h), not the shorter
+`_DRAIN_TIMEOUT_SECONDS` that bounds unit sets without unfindable in them --
+then fails with the gate hold never taken -- the exact failure shape #1078
+exists to remove, reproduced by the reorder itself. The pre-hold window also
+owns no
 temporary start inhibitor: masking already blocks a fresh *timer* trigger
 (though not an unrelated hold's own resume-if-clear, which starts
 `cratedigger.service` directly via the gate's `resume_units` regardless of

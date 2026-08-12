@@ -370,6 +370,7 @@ class WrongMatchExplorerRenderTarget:
 
     def render(self, row: Mapping[str, object]) -> RenderedRow:
         from web.wrong_match_file_service import (
+            WrongMatchSourceRefused,
             WrongMatchSourceUnavailable,
             build_wrong_match_explorer,
         )
@@ -381,9 +382,19 @@ class WrongMatchExplorerRenderTarget:
         try:
             payload = build_wrong_match_explorer(
                 download_log_id=row_id, entry=row, cfg=self._cfg())
-        except (WrongMatchSourceUnavailable, FileNotFoundError) as exc:
-            # A whole-root refusal/not-found is not a 200 payload — record
-            # it as its own comparable shape rather than losing the row.
+        except (
+            WrongMatchSourceUnavailable,
+            WrongMatchSourceRefused,
+            FileNotFoundError,
+        ) as exc:
+            # A whole-root refusal (retryable, containment, or not-found)
+            # is not a 200 payload — record it as its own comparable shape
+            # rather than losing the row or aborting the whole differential
+            # run. Issue #1099 added ``WrongMatchSourceRefused`` (422,
+            # containment) alongside the pre-existing
+            # ``WrongMatchSourceUnavailable`` (503) and ``FileNotFoundError``
+            # (404); a corpus row that hits it must still render, or every
+            # OTHER row's differential is lost behind an unhandled raise.
             # Only the WATCHED fields need a value here (unwatched ones
             # are never read by ``project_output_fields``), but every
             # watched field must be present or the projection fails

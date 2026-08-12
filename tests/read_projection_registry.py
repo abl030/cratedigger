@@ -509,6 +509,25 @@ def _seed_list_unfindable_probe_candidates(db: Any) -> "list[dict[str, Any]]":
         limit=10, probe_interval_days=7))
 
 
+def _seed_get_unfindable_run_metrics(
+    db: PipelineDB | FakePipelineDB,
+) -> "list[dict[str, Any]]":
+    # Typed narrower than this module's usual ``db: Any`` seeder signature
+    # (both concrete backends are already imported here) -- avoids adding
+    # a new escape-hatch occurrence to the tests-tree typing-ratchet
+    # freeze (issue #765/#784) for a two-call seeder that doesn't need it.
+    db.record_unfindable_run_metrics(
+        cohort_total=10, due_backlog_at_start=5,
+        batch_limit=5, candidates_processed=5, probes_attempted=5,
+        breaker_tripped=False, duration_seconds=12.5,
+        categorised_count=1, no_change_count=4)
+    # dict(row) rather than list(...): get_unfindable_run_metrics returns
+    # the typed UnfindableRunMetricsRow TypedDict, not a bare dict, and
+    # list()'s invariance rejects it as-is against this module's
+    # deliberately loose Seeder contract.
+    return [dict(row) for row in db.get_unfindable_run_metrics(limit=5)]
+
+
 # --------------------------------------------------------------------------
 # The registry. One entry per read-projection method newly covered by a
 # seeded keyset-parity check. Methods already covered by a hand-written
@@ -560,6 +579,7 @@ PARITY_REGISTRY: dict[str, Seeder] = {
     "get_pending_plex_added_at_pins": _seed_get_pending_plex_added_at_pins,
     "get_pending_jellyfin_date_created_pins": _seed_get_pending_jellyfin_date_created_pins,
     "list_unfindable_probe_candidates": _seed_list_unfindable_probe_candidates,
+    "get_unfindable_run_metrics": _seed_get_unfindable_run_metrics,
 }
 
 

@@ -29,15 +29,19 @@ required PAIR (``.claude/rules/code-quality.md`` § Red/Green TDD):
   2. A generated property (``TestPreviewManifestPurityProperty``)
      patrolling the same composed path over varied manifests (file count,
      basenames with spaces/unicode, mp3/flac mix).
-  3. Known-bad self-tests proving both checkers trip on a planted
-     violation (the pre-fix shape: an extra file left in the canonical
-     directory / a guarded rematerialize).
+  3. Known-bad self-tests proving EVERY CLAUSE of every checker trips on
+     a planted violation of exactly that clause (the pre-fix shape: an
+     extra file left in the canonical directory / a guarded
+     rematerialize / an action file that moved or vanished), each
+     asserting its own message anchored end to end — issue #1094's
+     per-clause proof.
 
 Profiles and promotion policy: tests/_hypothesis_profiles.py and
 docs/generated-testing.md.
 """
 
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -589,52 +593,159 @@ class TestPreviewManifestPurityProperty(unittest.TestCase):
 # ============================================================================
 # 3. Known-bad self-tests for the invariant checkers
 # ============================================================================
+#
+# Per-clause proof (issue #1094, docs/generated-testing.md § "Per-clause
+# proof"). Every clause of every checker above gets its OWN named world —
+# the minimal one that makes that clause's condition true while every
+# EARLIER clause in the same function passes — and asserts that clause's
+# own message anchored end to end. A bare ``assertRaises(AssertionError)``
+# proves only that *something* refused, which is how a short-circuiting
+# ``raise`` chain advertises clauses it never evaluates.
+
+
+def _exactly(message: str) -> str:
+    """Anchor one clause's complete message for ``assertRaisesRegex``."""
+    return f"^{re.escape(message)}$"
+
 
 class TestPreviewManifestCheckersTripOnViolations(unittest.TestCase):
-    """Every checker above must trip on a planted violation of the
-    invariant it claims to enforce — the pre-fix #859 shape."""
+    """Every clause of every checker above must trip on a planted
+    violation of the invariant it claims to enforce — the pre-fix #859
+    shape, one clause at a time."""
 
-    def test_manifest_purity_checker_trips_on_leaked_sidecar(self):
-        with self.assertRaises(AssertionError):
-            assert_canonical_manifest_pure(
+    def test_manifest_purity_clause_names_the_exact_divergence(self):
+        cases = (
+            (
+                "leaked sidecar (the #859 shape)",
                 frozenset({"01.flac", "preview-spectral-evidence.json"}),
                 frozenset({"01.flac"}),
-                label="known-bad",
-            )
+                ("known-bad: canonical album directory diverged from its "
+                "manifest after preview (missing=[] "
+                "extra=['preview-spectral-evidence.json'])"),
+            ),
+            (
+                "a manifest file went missing",
+                frozenset(),
+                frozenset({"01.flac"}),
+                ("known-bad: canonical album directory diverged from its "
+                "manifest after preview (missing=['01.flac'] extra=[])"),
+            ),
+        )
+        for label, actual, expected, message in cases:
+            with self.subTest(clause=label), self.assertRaisesRegex(
+                AssertionError, _exactly(message),
+            ):
+                assert_canonical_manifest_pure(
+                    actual, expected, label="known-bad",
+                )
 
-    def test_manifest_purity_checker_trips_on_missing_file(self):
-        with self.assertRaises(AssertionError):
-            assert_canonical_manifest_pure(
-                frozenset(), frozenset({"01.flac"}), label="known-bad",
-            )
+    def test_rematerialize_clause_names_the_guarded_result(self):
+        guarded = MaterializeGuarded(detail="incomplete_or_unsafe_canonical")
+        with self.assertRaisesRegex(AssertionError, _exactly(
+            "known-bad: rematerialize after preview must return "
+            f"Materialized, got {guarded!r}",
+        )):
+            assert_rematerializes_cleanly(guarded, label="known-bad")
 
-    def test_rematerialize_checker_trips_on_guarded_result(self):
-        with self.assertRaises(AssertionError):
-            assert_rematerializes_cleanly(
-                MaterializeGuarded(detail="incomplete_or_unsafe_canonical"),
-                label="known-bad",
-            )
+    def test_every_action_file_handoff_clause_fires_on_its_own_world(self):
+        """Each clause's world lets every earlier clause pass.
 
-    def test_action_file_checker_trips_on_in_album_handoff(self):
-        canonical_dir = os.path.join(tempfile.gettempdir(), "canonical-album")
-        with self.assertRaises(AssertionError):
-            assert_preview_action_file_handoff_is_safe(
+        Clause 3 (``inside canonical album``) is the one clause with no
+        production-shaped world: clause 2 demands the action file's
+        parent be the system temp directory ITSELF, so an album directory
+        anywhere below it — where every real canonical album lives —
+        trips clause 2 first. It is kept as fail-closed legislation for a
+        future relaxation of clause 2 into a prefix test, which is exactly
+        the relocation-only #859 regression clause 2's docstring names.
+        Its only legitimate caller is this world.
+        """
+        tmp = os.path.realpath(tempfile.gettempdir())
+        album_below_tmp = os.path.join(tmp, "canonical-album")
+        cases = (
+            (
+                "1: the action file did not exist at handoff",
                 PreviewActionFileHandoff(
-                    path=f"{canonical_dir}/action.json",
-                    exists_at_handoff=True,
-                    resolved_parent=os.path.realpath(tempfile.gettempdir()),
+                    path=os.path.join(tmp, "action.json"),
+                    exists_at_handoff=False,
+                    resolved_parent=tmp,
                 ),
-                canonical_dir,
-                label="known-bad",
-            )
+                album_below_tmp,
+                "known-bad: action file did not exist at handoff",
+            ),
+            (
+                "2: relocated out of the system temp directory",
+                PreviewActionFileHandoff(
+                    path=os.path.join(album_below_tmp, "action.json"),
+                    exists_at_handoff=True,
+                    resolved_parent=album_below_tmp,
+                ),
+                album_below_tmp,
+                (f"known-bad: action file parent {album_below_tmp!r} is not "
+                f"the system tempfile directory {tmp!r}"),
+            ),
+            (
+                "3: inside the canonical album (fail-closed legislation)",
+                PreviewActionFileHandoff(
+                    path=os.path.join(tmp, "action.json"),
+                    exists_at_handoff=True,
+                    resolved_parent=tmp,
+                ),
+                tmp,
+                (f"known-bad: action file {os.path.join(tmp, 'action.json')!r} "
+                f"was inside canonical album {tmp!r}"),
+            ),
+        )
+        for clause, handoff, canonical_dir, message in cases:
+            with self.subTest(clause=clause), self.assertRaisesRegex(
+                AssertionError, _exactly(message),
+            ):
+                assert_preview_action_file_handoff_is_safe(
+                    handoff, canonical_dir, label="known-bad",
+                )
+
+    def test_a_safe_handoff_passes_every_clause(self):
+        """The must-still-work control: no clause fires on the real shape."""
+        tmp = os.path.realpath(tempfile.gettempdir())
+        assert_preview_action_file_handoff_is_safe(
+            PreviewActionFileHandoff(
+                path=os.path.join(tmp, "cratedigger-quality-evidence.json"),
+                exists_at_handoff=True,
+                resolved_parent=tmp,
+            ),
+            os.path.join(tmp, "processing", "albums", "Artist - Album (2026)"),
+            label="must-still-work",
+        )
 
     def test_filename_mask_domain_checker_trips_on_a_collapsed_world(self):
         collapsed = tuple(
             frozenset()
             for _mask in range(1 << len(_EXTRA_FILENAME_POOL))
         )
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(AssertionError, _exactly(
+            "filename masks do not map one-to-one onto every manifest subset",
+        )):
             assert_extra_filename_mask_domain(collapsed)
+
+    def test_filename_mask_domain_checker_trips_on_a_short_domain(self):
+        """The other half of the same clause: a domain missing worlds."""
+        short = tuple(
+            _extra_filenames_for_mask(mask)
+            for mask in range(_EXTRA_FILENAME_WORLD_COUNT - 1)
+        )
+        with self.assertRaisesRegex(AssertionError, _exactly(
+            "filename masks do not map one-to-one onto every manifest subset",
+        )):
+            assert_extra_filename_mask_domain(short)
+
+    def test_mask_mapper_refuses_a_value_outside_the_finite_domain(self):
+        """The strategy mapper's own domain guard: the certified budget and
+        the mask range must not drift apart silently."""
+        for mask in (-1, _EXTRA_FILENAME_WORLD_COUNT):
+            with self.subTest(mask=mask), self.assertRaisesRegex(
+                ValueError,
+                _exactly(f"filename mask is outside the finite domain: {mask}"),
+            ):
+                _extra_filenames_for_mask(mask)
 
 
 class TestPreviewManifestFiniteDomain(unittest.TestCase):

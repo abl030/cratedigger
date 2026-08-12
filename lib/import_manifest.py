@@ -7,23 +7,33 @@ import os
 import shutil
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
+from lib.import_execution import ExecutionCancelled
 from lib.quality import AUDIO_EXTENSIONS_DOTTED
 from lib.staged_album import staged_filename
-from lib.wrong_match_policy import (
-    WRONG_MATCH_QUARANTINE_DIR,
-    rejection_scenario_is_wrong_match_candidate,
-)
+from lib.wrong_match_policy import WRONG_MATCH_QUARANTINE_DIR
 
 if TYPE_CHECKING:
     from lib.grab_list import DownloadFile
 
 logger = logging.getLogger("cratedigger")
 
-_BAD_FILE_SCENARIOS = frozenset({"audio_corrupt", "spectral_reject"})
-_LEFTOVER_QUARANTINE_DIR = "untracked_audio"
 MutationCheckpoint = Callable[[], None]
+
+
+@dataclass(frozen=True)
+class CuratedMoveResult:
+    """Outcome of ``move_failed_import_curated``.
+
+    ``anomaly`` is set only in the unreachable-in-practice residue case
+    (issue #1077, B1): real content survived the curated move and
+    empty-directory pruning, and got swept into ``target_path`` instead of
+    raising. The caller folds this into the persisted ``ValidationResult``
+    detail so the anomaly surfaces in Recents, not as a stack trace.
+    """
+    target_path: str
+    anomaly: str | None = None
 
 
 @dataclass(frozen=True)
@@ -123,26 +133,159 @@ def _remove_tree(
     os.rmdir(path)
 
 
+def _prune_empty_dirs(
+    root: str,
+    *,
+    before_mutation: MutationCheckpoint | None,
+) -> None:
+    """Remove every empty directory under ``root``, bottom-up.
+
+    The curated move below relocates FILES via ``os.walk`` but never
+    removes the directory skeletons it walked through — a benign non-audio
+    subdirectory (e.g. ``Scans/``) with every file already moved out of it
+    is left behind as an empty shell (issue #1077, B1), indistinguishable
+    from a real leftover to a plain ``os.scandir`` presence check. Leaves
+    ``root`` itself and any directory that still holds a file at any depth
+    untouched.
+    """
+    if not os.path.isdir(root) or os.path.islink(root):
+        return
+    with os.scandir(root) as entries:
+        subdirs = sorted(
+            entry.name for entry in entries
+            if entry.is_dir(follow_symlinks=False)
+        )
+    for name in subdirs:
+        child = os.path.join(root, name)
+        _prune_empty_dirs(child, before_mutation=before_mutation)
+        with os.scandir(child) as remaining:
+            still_has_entries = any(remaining)
+        if not still_has_entries:
+            if before_mutation is not None:
+                before_mutation()
+            os.rmdir(child)
+
+
+def _sweep_residue_into_destination(
+    src_path: str,
+    target_path: str,
+    *,
+    before_mutation: MutationCheckpoint | None,
+) -> None:
+    """Move every remaining entry under ``src_path`` into ``target_path``.
+
+    Reached only when real content survives the curated move plus
+    empty-directory pruning (issue #1077, B1) — genuinely unexpected, since
+    the caller's manifest guard is expected to have already proven an
+    exact audio match. "Kept implies visible" (D1) takes priority over a
+    clean move: residue merges into the SAME quarantine destination rather
+    than being left split outside it, or raising and blocking the
+    rejection record that must still be written.
+    """
+    for dirpath, _dirnames, filenames in os.walk(src_path):
+        rel_dir = os.path.relpath(dirpath, src_path)
+        ordered_filenames = (
+            sorted(filenames) if before_mutation is not None else filenames
+        )
+        for filename in ordered_filenames:
+            full_src = os.path.join(dirpath, filename)
+            rel = filename if rel_dir == "." else os.path.join(rel_dir, filename)
+            rel = os.path.normpath(rel)
+            full_dst = os.path.join(target_path, rel)
+            counter = 1
+            while os.path.exists(full_dst):
+                base, ext = os.path.splitext(full_dst)
+                full_dst = f"{base}_leftover{counter}{ext}"
+                counter += 1
+            _makedirs(
+                os.path.dirname(full_dst),
+                exist_ok=True,
+                before_mutation=before_mutation,
+            )
+            _move(full_src, full_dst, before_mutation=before_mutation)
+    _prune_empty_dirs(src_path, before_mutation=before_mutation)
+
+
+LeftoverObservation = Literal["empty", "present", "unverified"]
+
+
+def _observe_leftovers(path: str, *, context: str) -> LeftoverObservation:
+    """Best-effort presence check for the post-move cleanup path only.
+
+    Issue #1077, R3-1: every statement after the move loop in
+    ``move_failed_import_curated`` must uphold "never raises post-
+    mutation" (cooperative cancellation excepted) — an ``OSError`` here
+    (EACCES/EIO/ENOTEMPTY race; virtiofs makes these real) used to
+    propagate straight out of the function, recreating the exact stranding
+    B1 exists to kill, and — because the request stays parked at its
+    pre-move status — every later poll cycle re-entered the same code and
+    leaked another ``wrong_matches/<name>_N`` via the ``exist_ok=False``
+    allocation above, outside the rollback block: unbounded disk growth
+    from a single flaky stat.
+
+    Issue #1077, R4-2 (round-4 review): a SHALLOW presence check (any
+    top-level entry) used to report "present" for a directory node the
+    pruning step above could not remove even though it holds no actual
+    FILES — composing a false "left untracked content behind" claim for a
+    world that left nothing behind at all. This walks the whole subtree
+    looking for a real file, so an unprunable-but-empty directory skeleton
+    correctly reports ``"empty"``. A failed or partial walk (a
+    sub-directory this process cannot read, EACCES/EIO) can neither
+    confirm nor deny real content and reports ``"unverified"`` — the
+    caller must not claim untracked content definitely existed for that
+    case. This function never calls ``before_mutation`` (nothing here
+    mutates), so it has no cancellation checkpoint of its own; a real
+    cancellation is instead observed at the mutating checkpoints in
+    ``move_failed_import_curated`` and its helpers.
+    """
+    unreadable: list[OSError] = []
+    try:
+        for _dirpath, _dirnames, filenames in os.walk(
+            path, onerror=unreadable.append,
+        ):
+            if filenames:
+                return "present"
+    except Exception:
+        logger.exception(
+            "Failed to walk %r while %s — treating as unverified",
+            path,
+            context,
+        )
+        return "unverified"
+    if unreadable:
+        logger.warning(
+            "Could not fully walk %r while %s (%d unreadable "
+            "sub-director%s) — treating as unverified",
+            path,
+            context,
+            len(unreadable),
+            "y" if len(unreadable) == 1 else "ies",
+        )
+        return "unverified"
+    return "empty"
+
+
 def _allocate_target(
     src_path: str,
     *,
-    scenario: str | None,
     quarantine_root: str | None = None,
     before_mutation: MutationCheckpoint | None = None,
 ) -> str:
+    """Allocate a free destination under the Wrong Matches quarantine root.
+
+    Every production caller (issue #1077, D3/D6) is a kept, worklist-visible
+    rejection — the historical ``failed_imports`` (non-``bad_files``) branch
+    for excluded scenarios had no producer left once ``audio_corrupt`` moved
+    to ban+delete, so this always targets ``wrong_matches/`` now. Kept holds
+    by construction: there is no second destination for a caller to pick
+    wrong.
+    """
     parent_dir = (
         os.path.abspath(quarantine_root)
         if quarantine_root is not None
         else os.path.dirname(os.path.abspath(src_path))
     )
-    quarantine_dir_name = (
-        WRONG_MATCH_QUARANTINE_DIR
-        if rejection_scenario_is_wrong_match_candidate(scenario)
-        else "failed_imports"
-    )
-    quarantine_dir = os.path.join(parent_dir, quarantine_dir_name)
-    if scenario in _BAD_FILE_SCENARIOS:
-        quarantine_dir = os.path.join(quarantine_dir, "bad_files")
+    quarantine_dir = os.path.join(parent_dir, WRONG_MATCH_QUARANTINE_DIR)
     _makedirs(
         quarantine_dir,
         exist_ok=True,
@@ -154,29 +297,6 @@ def _allocate_target(
     counter = 1
     while os.path.exists(target_path):
         target_path = os.path.join(quarantine_dir, f"{folder_name}_{counter}")
-        counter += 1
-    return target_path
-
-
-def _allocate_leftover_target(
-    src_path: str,
-    *,
-    quarantine_root: str | None = None,
-    before_mutation: MutationCheckpoint | None = None,
-) -> str:
-    parent_dir = (
-        os.path.abspath(quarantine_root)
-        if quarantine_root is not None
-        else os.path.dirname(os.path.abspath(src_path))
-    )
-    root = os.path.join(parent_dir, "failed_imports", _LEFTOVER_QUARANTINE_DIR)
-    _makedirs(root, exist_ok=True, before_mutation=before_mutation)
-
-    folder_name = os.path.basename(os.path.abspath(src_path))
-    target_path = os.path.join(root, folder_name)
-    counter = 1
-    while os.path.exists(target_path):
-        target_path = os.path.join(root, f"{folder_name}_{counter}")
         counter += 1
     return target_path
 
@@ -266,6 +386,31 @@ def check_audio_manifest(root: str, allowed_audio: Iterable[str]) -> ManifestChe
     )
 
 
+# Issue #1077, R4-2 (round-4 review): three distinct, truthful anomaly notes
+# for ``move_failed_import_curated``'s post-move composition — a single
+# "swept into" wording used to be composed even when observation had merely
+# worst-cased a transient read failure, asserting untracked content existed
+# when the real world may have been perfectly clean. Only
+# ``_ANOMALY_SWEPT_CLEAN``/``_ANOMALY_SWEPT_INCOMPLETE`` claim confirmed
+# content; ``_ANOMALY_UNVERIFIED`` is used whenever the observation itself
+# (not the presence of real content) is what's uncertain.
+_ANOMALY_SWEPT_CLEAN = (
+    "curated move left untracked content behind despite an exact "
+    "allowed_audio match; swept into the wrong_matches quarantine "
+    "destination"
+)
+_ANOMALY_SWEPT_INCOMPLETE = (
+    "curated move left untracked content behind despite an exact "
+    "allowed_audio match; swept into the wrong_matches quarantine "
+    "destination (incompletely — some residue could not be moved)"
+)
+_ANOMALY_UNVERIFIED = (
+    "could not verify the curated move source was fully consumed despite "
+    "an exact allowed_audio match; any residue was swept into the "
+    "wrong_matches quarantine destination if present"
+)
+
+
 def move_failed_import_curated(
     src_path: str,
     *,
@@ -273,13 +418,28 @@ def move_failed_import_curated(
     scenario: str | None = None,
     quarantine_root: str | None = None,
     before_mutation: MutationCheckpoint | None = None,
-) -> str | None:
-    """Move curated files into their rejection-specific quarantine root.
+) -> CuratedMoveResult | None:
+    """Move curated files into the Wrong Matches quarantine root.
 
     Curated means the accepted audio manifest plus non-audio sidecars. Audio
-    files not present in ``allowed_audio`` never enter Wrong Matches. Match
-    failures go to ``wrong_matches``; all other failures retain the existing
-    ``failed_imports`` layout.
+    files not present in ``allowed_audio`` are skipped by the main move and
+    never enter Wrong Matches ALONGSIDE it — the caller's manifest guard is
+    expected to have already proven an exact match, so this never routes
+    anything to a second, silent destination (issue #1077, D1: kept implies
+    visible in the worklist, by construction).
+
+    Never raises post-mutation except cooperative cancellation (issue
+    #1077, B1; qualified R4-2): a benign non-audio subdirectory left as an
+    empty shell by the move loop is pruned, not mistaken for a leftover.
+    In the genuinely-unexpected case where real content still survives
+    that pruning — including an out-of-manifest audio file the main loop
+    deliberately skipped — "kept implies visible" outranks manifest
+    purity: it is swept into the SAME ``wrong_matches/`` destination
+    rather than raising and stranding the album with no ``download_log``
+    row, no denylist write, and no requeue. When the observation itself
+    cannot be trusted (a transient read failure, not confirmed content),
+    the composed anomaly says so rather than asserting untracked content
+    definitely existed. See ``CuratedMoveResult.anomaly``.
     """
     src_path = os.path.abspath(src_path)
     if not os.path.isdir(src_path):
@@ -288,7 +448,6 @@ def move_failed_import_curated(
     allowed = {rel for rel in (_safe_relpath(p) for p in allowed_audio) if rel}
     target_path = _allocate_target(
         src_path,
-        scenario=scenario,
         quarantine_root=quarantine_root,
         before_mutation=before_mutation,
     )
@@ -355,58 +514,161 @@ def move_failed_import_curated(
             )
         raise
 
+    anomaly: str | None = None
     if os.path.exists(src_path):
-        with os.scandir(src_path) as entries:
-            has_leftovers = any(entries)
-        if has_leftovers:
-            leftover_target = _allocate_leftover_target(
+        # Prune empty directory skeletons FIRST (issue #1077, B1): the move
+        # loop above relocates files but never removes the directories it
+        # walked through, so a benign non-audio subdirectory (e.g.
+        # ``Scans/``) with everything already moved out of it would
+        # otherwise read as "leftovers" despite nothing untracked
+        # surviving. This is the exact reproduction the reviewer proved
+        # against the real Lane A entry point.
+        #
+        # Issue #1077, R3-1: every statement from here on must uphold
+        # "never raises post-mutation" (cooperative cancellation excepted
+        # — see ``_observe_leftovers``'s docstring for why). Cancellation
+        # always propagates; every other failure is recorded and handled
+        # without raising.
+        prune_failed = False
+        try:
+            _prune_empty_dirs(src_path, before_mutation=before_mutation)
+        except ExecutionCancelled:
+            raise
+        except Exception:
+            logger.exception(
+                "Failed to prune empty directory skeletons under %r",
                 src_path,
-                quarantine_root=quarantine_root,
-                before_mutation=before_mutation,
             )
-            _move(
-                src_path,
-                leftover_target,
-                before_mutation=before_mutation,
-            )
+            prune_failed = True
+        observation = _observe_leftovers(
+            src_path, context="checking for leftovers after the curated move",
+        )
+        if observation != "empty":
+            # Genuinely unexpected (when ``observation == "present"``) or
+            # simply unconfirmed (``"unverified"``) — the caller's manifest
+            # guard (``_check_staged_audio_manifest`` in
+            # ``lib/download_validation.py``) is expected to have already
+            # proven the staged folder's actual audio exactly equals
+            # ``allowed_audio`` before Lane A (the canonical automation
+            # caller) can be reached, and the sealed canonical-processing
+            # invariant (CLAUDE.md #9) means nothing can add files
+            # afterward there. The non-canonical staged lane (YouTube
+            # rescue / operator-staged, ``_evaluate_staged_path_readiness``)
+            # only constrains audio, so a non-audio residue is a producible
+            # world there. Either way this must never raise post-mutation:
+            # a raise here used to strand the album in ``wrong_matches/``
+            # with zero download_log rows, zero denylist writes, and no
+            # requeue — the exact invisible-quarantine pathology this issue
+            # kills. Sweep the residue (best-effort — a read failure here
+            # just moves whatever is reachable) into the SAME destination
+            # instead and surface a truthful anomaly through the caller's
+            # own validation detail, never a stack trace and never a false
+            # accusation when the observation itself was the only thing
+            # that failed.
             logger.warning(
-                "Quarantined untracked import leftovers: %s -> %s",
+                "Curated move may have left untracked content behind in "
+                "%r (observation=%s) despite an exact allowed_audio match "
+                "— sweeping into %r",
                 src_path,
-                leftover_target,
+                observation,
+                target_path,
             )
-        else:
-            if before_mutation is None:
-                shutil.rmtree(src_path, ignore_errors=True)
+            try:
+                _sweep_residue_into_destination(
+                    src_path, target_path, before_mutation=before_mutation,
+                )
+            except ExecutionCancelled:
+                raise
+            except Exception:
+                logger.exception(
+                    "Failed to sweep curated-move residue from %r into %r",
+                    src_path,
+                    target_path,
+                )
+            post_sweep = _observe_leftovers(
+                src_path, context="re-checking after the residue sweep",
+            )
+            if observation == "present" and post_sweep == "empty":
+                anomaly = _ANOMALY_SWEPT_CLEAN
+            elif observation == "present" and post_sweep == "present":
+                anomaly = _ANOMALY_SWEPT_INCOMPLETE
             else:
-                before_mutation()
-                os.rmdir(src_path)
+                # The original observation was itself unverified, or the
+                # post-sweep re-check could not confirm the destination is
+                # clean — never claim untracked content definitely existed
+                # or was definitely fully swept.
+                anomaly = _ANOMALY_UNVERIFIED
+            has_leftovers = post_sweep != "empty"
+        else:
+            # Issue #1077, R4-2: a prune failure that leaves behind an
+            # empty (no real files) directory skeleton is NOT untracked
+            # content — ``_observe_leftovers`` walks the whole subtree for
+            # actual files, so this branch is reached even though
+            # ``prune_failed`` is True. Still worth a hedged note (the
+            # skeleton itself may linger below), but never the "content was
+            # found and swept" claim.
+            if prune_failed:
+                anomaly = _ANOMALY_UNVERIFIED
+            has_leftovers = False
+        if not has_leftovers:
+            try:
+                if before_mutation is None:
+                    shutil.rmtree(src_path, ignore_errors=True)
+                else:
+                    before_mutation()
+                    os.rmdir(src_path)
+            except ExecutionCancelled:
+                raise
+            except Exception:
+                logger.exception(
+                    "Failed to remove empty source directory %r after "
+                    "the curated move",
+                    src_path,
+                )
+        # else: best-effort — leave whatever the sweep genuinely could not
+        # move rather than raising; the rejection record must still be
+        # written regardless (never block on cosmetic cleanup).
 
-    logger.info("Curated rejected import moved to: %s", target_path)
-    return target_path
+    logger.info(
+        "Curated rejected import moved to: %s (scenario=%s)",
+        target_path,
+        scenario,
+    )
+    return CuratedMoveResult(target_path=target_path, anomaly=anomaly)
 
 
 def move_failed_import_whole(
     src_path: str,
     *,
-    scenario: str,
-    quarantine_root: str,
+    scenario: str | None = None,
+    quarantine_root: str | None = None,
+    before_mutation: MutationCheckpoint | None = None,
 ) -> str | None:
     """Atomically retain one complete rejected source directory.
 
-    Unlike curated Wrong Matches moves, corrupt-audio quarantine has no
-    untracked-file distinction: the complete source is audit evidence. A
-    directory rename is therefore both simpler and safer. ``os.rename`` never
-    falls back to a cross-filesystem copy, so failure leaves the authoritative
-    source untouched instead of creating a split retained state.
+    Unlike curated Wrong Matches moves, this has no untracked-file
+    distinction: the complete source, including anything outside the
+    downloaded manifest, moves as one unit — the reviewable folder must be
+    what was actually rejected (issue #1077, D4: world failures with a
+    reviewable folder move whole, not curated). A directory rename is
+    therefore both simpler and safer. ``os.rename`` never falls back to a
+    cross-filesystem copy, so failure leaves the authoritative source
+    untouched instead of creating a split retained state.
     """
     src_path = os.path.abspath(src_path)
     if not os.path.isdir(src_path):
         return None
     target_path = _allocate_target(
         src_path,
-        scenario=scenario,
         quarantine_root=quarantine_root,
+        before_mutation=before_mutation,
     )
+    if before_mutation is not None:
+        before_mutation()
     os.rename(src_path, target_path)
-    logger.info("Complete rejected import moved to: %s", target_path)
+    logger.info(
+        "Complete rejected import moved to: %s (scenario=%s)",
+        target_path,
+        scenario,
+    )
     return target_path

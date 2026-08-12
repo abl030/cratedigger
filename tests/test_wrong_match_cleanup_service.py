@@ -336,7 +336,18 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
         self.assertTrue(os.path.isdir(stale_source))
         self.assertTrue(os.path.isdir(missing_source))
 
-    def test_bulk_does_not_process_candidate_audio_corrupt_rows(self) -> None:
+    def test_bulk_processes_candidate_audio_corrupt_rows(self) -> None:
+        """Issue #1077, F2: a kept row with corrupt-flagged linked evidence
+        must stay VISIBLE to bulk cleanup, not vanish from the queue.
+
+        ``wrong_match_row_is_visible`` used to hide any row whose linked
+        candidate evidence carried ``audio_corrupt=True`` regardless of the
+        scenario that actually rejected it — a garbled grab attached to an
+        ordinary ``wrong_match`` scenario became kept + banned + invisible
+        forever (D1 violation: kept implies visible). The reducer's own
+        audio_corrupt branch is a confident, cleanup-eligible reject, so once
+        the row is visible it is processed straight through to deletion.
+        """
         source = _make_source(self.tmp, "candidate-corrupt-source")
         log_id = _log_wrong_match(self.db, 1, source)
         self.db.set_download_log_candidate_evidence(
@@ -348,9 +359,14 @@ class WrongMatchCleanupServiceTest(unittest.TestCase):
             self.db, confirm_all_wrong_matches=True, cfg=_cfg(),
         )
 
-        self.assertEqual(summary.processed, 0)
-        self.assertEqual(summary.results, ())
-        self.assertTrue(os.path.isdir(source))
+        self.assertEqual(summary.processed, 1)
+        self.assertEqual(summary.deleted, 1)
+        self.assertEqual(len(summary.results), 1)
+        result = summary.results[0]
+        self.assertEqual(result.outcome, OUTCOME_DELETED)
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "audio_corrupt")
+        self.assertFalse(os.path.exists(source))
 
     def _make_stale_row(self, name: str) -> tuple[str, int]:
         """Wrong-match row whose evidence predates a late-arriving file."""

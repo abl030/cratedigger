@@ -160,12 +160,29 @@ def _guard_failure_detail(ir: ImportResult) -> str | None:
     return detail
 
 
-def _cleanup_staged_dir(dest: str) -> None:
-    """Remove a staged directory and its parent if empty."""
+def _cleanup_staged_dir(dest: str, *, protected_parent: str | None = None) -> None:
+    """Remove a staged directory and its parent if empty.
+
+    ``protected_parent`` (issue #1077, "smalls" round-2 review): a root
+    that must NEVER be removed by the parent-prune step, however empty it
+    looks. Callers passing a canonical processing album path (``dest``
+    directly under ``<processing_dir>/albums/``) MUST pass that root here
+    — it is a Nix-provisioned, 0700 directory ``open_private_child_
+    directory`` refuses to recreate, and is today shielded from this
+    prune only by lock-shard files that happen to never be unlinked, a
+    side effect, not a guard. Callers whose ``dest`` genuinely nests under
+    a disposable per-artist directory (the ordinary slskd download-dir
+    layout) pass nothing and keep the existing prune-the-empty-parent
+    behavior.
+    """
     if os.path.isdir(dest):
         shutil.rmtree(dest)
         logger.info(f"  Cleaned up staged dir: {dest}")
         parent = os.path.dirname(dest)
+        if protected_parent is not None and os.path.isdir(parent) and (
+            os.path.realpath(parent) == os.path.realpath(protected_parent)
+        ):
+            return
         if os.path.isdir(parent) and not os.listdir(parent):
             os.rmdir(parent)
             logger.info(f"  Cleaned up empty artist dir: {parent}")

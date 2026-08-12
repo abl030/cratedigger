@@ -163,6 +163,15 @@ def cmd_wrong_match_triage(
     the sweep's status — silently swallowing that failure would have
     the CLI claim it stopped the sweep while the whole remaining queue
     keeps deleting underneath it.
+
+    This is the ONE caller in the whole codebase that sends
+    ``arm_pending: true`` (issue #1106 F3): we are specifically racing
+    OUR OWN start POST just above, so a cancel that lands before the
+    server's ``start()`` has flipped the sweep to ``running`` must still
+    stop it. Every other cancel caller (the web UI's Stop button, the
+    standalone ``wrong-match-triage-cancel`` command below) stays
+    unarmed — arming there would risk pre-cancelling a later, unrelated
+    sweep that operator never asked to stop.
     """
     if not args.apply:
         print(
@@ -194,7 +203,8 @@ def cmd_wrong_match_triage(
             file=sys.stderr,
         )
         cancel_request = _ApiMutation(
-            path="/api/wrong-matches/triage/cancel", body={},
+            path="/api/wrong-matches/triage/cancel",
+            body={"arm_pending": True},
         )
         # One retry before giving up (``_post``'s own contract:
         # ``report_failure=False`` silences the structured line for a
@@ -236,6 +246,14 @@ def cmd_wrong_match_triage_cancel(_db: object, args: argparse.Namespace) -> int:
     or over any connection the operator is no longer attached to. Always
     exits 0: the route itself is a no-op, never a refusal, whether or not
     a sweep happens to be running.
+
+    Sends no ``arm_pending`` (defaults false, issue #1106 F3): this
+    command has no start POST of its own to race, so it must stay a
+    pure #1083 no-op when nothing is running — arming here would risk
+    silently pre-cancelling a LATER, unrelated sweep the operator has
+    not even started yet. The documented recovery sequence (this
+    command, then a fresh ``wrong-match-triage --apply``) relies on
+    that: the fresh sweep must run normally, not land pre-cancelled.
     """
     return _relay(args.api_endpoint, _ApiMutation(
         path="/api/wrong-matches/triage/cancel", body={},

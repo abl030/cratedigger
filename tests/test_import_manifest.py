@@ -2,6 +2,7 @@ import os
 import tempfile
 import unittest
 from typing import Any, cast
+from unittest.mock import patch
 
 from lib.dispatch import (
     DISPATCH_CODE_IMPORT_MANIFEST_REJECTED,
@@ -9,7 +10,9 @@ from lib.dispatch import (
     dispatch_import_from_db,
 )
 from lib.grab_list import DownloadFile
+from lib.import_execution import ExecutionCancelled
 from lib.import_manifest import (
+    _observe_leftovers,
     check_audio_manifest,
     move_failed_import_curated,
     tracked_audio_paths_for_downloads,
@@ -37,7 +40,14 @@ class TestImportManifest(unittest.TestCase):
         self.assertEqual(check.extra_audio, ["bonus.opus"])
         self.assertEqual(check.missing_audio, [])
 
-    def test_curated_failed_import_excludes_extra_audio_and_keeps_sidecars(self):
+    def test_curated_failed_import_keeps_extra_audio_and_sidecars_together(self):
+        """Issue #1077, F1/Extra 2: every production caller is a kept,
+        worklist-visible rejection, so ``_allocate_target`` no longer
+        branches on scenario — everything lands under ``wrong_matches/``.
+        Extra tracks a real production caller could never leave behind (the
+        pre-beets manifest guard proves an exact audio match before Lane A
+        is reachable) simply move with the rest of the folder now; there is
+        no second, silent quarantine destination to split them into."""
         with tempfile.TemporaryDirectory() as parent:
             source = os.path.join(parent, "Album")
             os.mkdir(source)
@@ -45,63 +55,192 @@ class TestImportManifest(unittest.TestCase):
             open(os.path.join(source, "bonus.opus"), "wb").close()
             open(os.path.join(source, "cover.jpg"), "wb").close()
 
-            failed_path = move_failed_import_curated(
+            result = move_failed_import_curated(
+                source,
+                allowed_audio=["01.flac", "bonus.opus"],
+                scenario="high_distance",
+            )
+
+            self.assertIsNotNone(result)
+            assert result is not None
+            self.assertIsNone(result.anomaly)
+            self.assertEqual(
+                result.target_path,
+                os.path.join(parent, "wrong_matches", "Album"),
+            )
+            self.assertTrue(
+                os.path.exists(os.path.join(result.target_path, "01.flac")))
+            self.assertTrue(
+                os.path.exists(os.path.join(result.target_path, "cover.jpg")))
+            self.assertTrue(
+                os.path.exists(os.path.join(result.target_path, "bonus.opus")))
+
+    def test_curated_failed_import_prunes_benign_empty_directory_skeleton(self):
+        """Issue #1077, B1 (round-2 review blocker): the move loop relocates
+        FILES via ``os.walk`` but never removes the directory skeletons it
+        walked through. A benign non-audio ``Scans/`` subdirectory with an
+        otherwise-exact audio manifest — the reviewer's exact reproduction
+        against the real Lane A entry point — used to trip the leftover
+        check on an EMPTY shell and raise post-mutation, even though
+        nothing untracked actually survived. It must complete cleanly with
+        no anomaly, and the sidecar's own contents move to the destination
+        too."""
+        with tempfile.TemporaryDirectory() as parent:
+            source = os.path.join(parent, "Album")
+            os.mkdir(source)
+            open(os.path.join(source, "01.flac"), "wb").close()
+            scans_dir = os.path.join(source, "Scans")
+            os.mkdir(scans_dir)
+            open(os.path.join(scans_dir, "front.jpg"), "wb").close()
+
+            result = move_failed_import_curated(
                 source,
                 allowed_audio=["01.flac"],
                 scenario="high_distance",
             )
 
-            self.assertIsNotNone(failed_path)
-            assert failed_path is not None
+            self.assertIsNotNone(result)
+            assert result is not None
+            self.assertIsNone(result.anomaly)
             self.assertEqual(
-                failed_path,
+                result.target_path,
                 os.path.join(parent, "wrong_matches", "Album"),
             )
-            self.assertTrue(os.path.exists(os.path.join(failed_path, "01.flac")))
-            self.assertTrue(os.path.exists(os.path.join(failed_path, "cover.jpg")))
-            self.assertFalse(os.path.exists(os.path.join(failed_path, "bonus.opus")))
+            self.assertTrue(
+                os.path.exists(os.path.join(result.target_path, "01.flac")))
+            self.assertTrue(os.path.exists(
+                os.path.join(result.target_path, "Scans", "front.jpg")))
+            self.assertFalse(os.path.exists(source))
 
-            quarantined = os.path.join(
-                parent,
-                "failed_imports",
-                "untracked_audio",
-                "Album",
-                "bonus.opus",
+    def test_curated_failed_import_sweeps_genuine_residue_instead_of_raising(self):
+        """Issue #1077, B1 (round-2 review blocker): even genuinely
+        unexpected leftover content — a caller passing an ``allowed_audio``
+        set narrower than what is actually on disk — must never raise
+        post-mutation. Before this fix, a raise here left zero
+        download_log rows, zero denylist writes, no requeue, and the album
+        stranded in ``wrong_matches/`` with no DB row: the exact invisible-
+        quarantine pathology this issue kills. Now it sweeps the residue
+        into the SAME destination and records an anomaly the caller folds
+        into the persisted detail — never a stack trace."""
+        with tempfile.TemporaryDirectory() as parent:
+            source = os.path.join(parent, "Album")
+            os.mkdir(source)
+            open(os.path.join(source, "01.flac"), "wb").close()
+            open(os.path.join(source, "bonus.opus"), "wb").close()
+
+            result = move_failed_import_curated(
+                source,
+                allowed_audio=["01.flac"],
+                scenario="high_distance",
             )
-            self.assertTrue(os.path.exists(quarantined))
 
-    def test_integrity_rejection_stays_in_failed_imports(self):
+            self.assertIsNotNone(result)
+            assert result is not None
+            self.assertIsNotNone(result.anomaly)
+            assert result.anomaly is not None
+            self.assertIn("swept into", result.anomaly)
+            self.assertEqual(
+                result.target_path,
+                os.path.join(parent, "wrong_matches", "Album"),
+            )
+            # Kept implies visible (D1): everything lands under the SAME
+            # destination, nothing split outside it.
+            self.assertTrue(
+                os.path.exists(os.path.join(result.target_path, "01.flac")))
+            self.assertTrue(os.path.exists(
+                os.path.join(result.target_path, "bonus.opus")))
+            self.assertFalse(os.path.exists(source))
+
+    def test_sweep_cancellation_propagates_instead_of_being_swallowed(self):
+        """Issue #1077, R3-5 (round-3 review): ``ExecutionCancelled`` is a
+        ``RuntimeError`` subclass, so the sweep call site's pre-existing
+        bare ``except Exception:`` would silently swallow a real
+        cancellation as though it were an ordinary sweep failure — worst-
+        casing it toward "leftovers present" instead of letting it
+        interrupt the pipeline. A dedicated ``except ExecutionCancelled:
+        raise`` above that handler (and every other new except block added
+        for R3-1) must let it through unchanged.
+
+        Drives a REAL ``CancellationToken`` rather than patching one of our
+        own functions (mocks are leaf-seam only — code-quality.md): the
+        checkpoint cancels itself the moment ``01.flac`` (the only file the
+        main move loop is allowed to touch) has actually landed at the
+        destination, which is exactly the first checkpoint reached inside
+        ``_sweep_residue_into_destination`` for the untracked
+        ``bonus.opus`` leftover — real production code decides when the
+        interruption lands, not a hand-picked call count."""
+        from lib.import_execution import CancellationToken
+
+        with tempfile.TemporaryDirectory() as parent:
+            source = os.path.join(parent, "Album")
+            os.mkdir(source)
+            open(os.path.join(source, "01.flac"), "wb").close()
+            open(os.path.join(source, "bonus.opus"), "wb").close()
+            moved_marker = os.path.join(
+                parent, "wrong_matches", "Album", "01.flac")
+
+            token = CancellationToken()
+
+            def before_mutation():
+                if os.path.exists(moved_marker):
+                    token.cancel("test cancellation mid-sweep")
+                token.raise_if_cancelled()
+
+            with self.assertRaises(ExecutionCancelled):
+                move_failed_import_curated(
+                    source,
+                    allowed_audio=["01.flac"],
+                    scenario="high_distance",
+                    before_mutation=before_mutation,
+                )
+
+    def test_integrity_rejection_lands_in_wrong_matches_quarantine(self):
+        """Issue #1077, F1: ``_allocate_target`` no longer branches on
+        scenario — the historical ``failed_imports`` (non-``bad_files``)
+        destination had no producer left once ``audio_corrupt`` moved to
+        ban+delete, so every scenario this mover ever sees now lands under
+        the single ``wrong_matches/`` quarantine root."""
         with tempfile.TemporaryDirectory() as parent:
             source = os.path.join(parent, "Album")
             os.mkdir(source)
             open(os.path.join(source, "01.flac"), "wb").close()
 
-            failed_path = move_failed_import_curated(
+            result = move_failed_import_curated(
                 source,
                 allowed_audio=["01.flac"],
                 scenario="bad_audio_hash",
             )
 
+            assert result is not None
             self.assertEqual(
-                failed_path,
-                os.path.join(parent, "failed_imports", "Album"),
+                result.target_path,
+                os.path.join(parent, "wrong_matches", "Album"),
             )
 
-    def test_spectral_rejection_stays_in_failed_imports_bad_files(self):
+    def test_spectral_rejection_lands_in_wrong_matches_quarantine(self):
+        """Issue #1077, D3/F1: the ``bad_files`` sub-routing is gone —
+        ``_BAD_FILE_SCENARIOS`` was audio_corrupt's and spectral_reject's
+        only consumer, and neither ever reaches this curated mover in
+        production any more (audio_corrupt bans + deletes outright;
+        spectral_reject was never quarantined, only immediately cleaned
+        up). This pins the pure function's current behavior for the
+        historical scenario string: the single ``wrong_matches/`` bucket
+        every scenario this mover sees now gets."""
         with tempfile.TemporaryDirectory() as parent:
             source = os.path.join(parent, "Album")
             os.mkdir(source)
             open(os.path.join(source, "01.flac"), "wb").close()
 
-            failed_path = move_failed_import_curated(
+            result = move_failed_import_curated(
                 source,
                 allowed_audio=["01.flac"],
                 scenario="spectral_reject",
             )
 
+            assert result is not None
             self.assertEqual(
-                failed_path,
-                os.path.join(parent, "failed_imports", "bad_files", "Album"),
+                result.target_path,
+                os.path.join(parent, "wrong_matches", "Album"),
             )
 
     def test_download_manifest_uses_staged_filenames(self):
@@ -144,6 +283,72 @@ class TestImportManifest(unittest.TestCase):
             )
 
         self.assertEqual(paths, ["01 Perth.flac"])
+
+
+class TestObserveLeftovers(unittest.TestCase):
+    """Issue #1077, R3-1/R4-2: the shared best-effort leftover-presence
+    check every post-move statement in ``move_failed_import_curated`` now
+    routes through — pinned directly since two call sites inherit its
+    contract. Tri-state (``"empty"``/``"present"``/``"unverified"``,
+    round-4 review): a shallow "any entry" check used to report
+    ``"present"`` for a directory node holding no real files, and a failed
+    read used to be worst-cased identically to confirmed content — both
+    composed a false "untracked content" claim upstream. This function has
+    no ``before_mutation`` checkpoint of its own (it never mutates), so it
+    has no ``ExecutionCancelled`` handling to pin here — see
+    ``TestImportManifest.test_sweep_cancellation_propagates_instead_of_being_swallowed``
+    for the real, load-bearing cancellation checkpoints inside
+    ``move_failed_import_curated`` itself."""
+
+    def test_real_empty_directory_reports_no_leftovers(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.assertEqual(
+                _observe_leftovers(tmpdir, context="test"), "empty")
+
+    def test_real_non_empty_directory_reports_leftovers(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            open(os.path.join(tmpdir, "leftover.txt"), "wb").close()
+            self.assertEqual(
+                _observe_leftovers(tmpdir, context="test"), "present")
+
+    def test_empty_directory_skeleton_reports_no_leftovers(self):
+        """Issue #1077, R4-2: a directory NODE with no real file anywhere
+        in its subtree must never read as "present" — only actual files
+        do. This is what lets a prune failure on a benign empty skeleton
+        (the R3-1 pin's world) report ``"empty"`` rather than falsely
+        claiming untracked content."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.makedirs(os.path.join(tmpdir, "Scans", "nested"))
+            self.assertEqual(
+                _observe_leftovers(tmpdir, context="test"), "empty")
+
+    def test_unreadable_subdirectory_reports_unverified(self):
+        """Issue #1077, R4-2: a REAL EACCES-shaped read failure — a
+        sub-directory this process cannot list — must report
+        ``"unverified"``, never ``"present"``. Worst-casing an unreadable
+        world to "present" is what let the caller compose a false
+        "untracked content" accusation for a transient failure the
+        reviewer proved could coincide with a genuinely clean move."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            blocked = os.path.join(tmpdir, "blocked")
+            os.makedirs(blocked)
+            os.chmod(blocked, 0o000)
+            try:
+                self.assertEqual(
+                    _observe_leftovers(tmpdir, context="test"), "unverified")
+            finally:
+                os.chmod(blocked, 0o700)
+
+    def test_walk_exception_reports_unverified(self):
+        """A failure the walk itself cannot even start from (rather than
+        one ``onerror`` observes mid-walk) also worst-cases to
+        ``"unverified"``, never a silent ``"empty"`` or a false
+        ``"present"``."""
+        with patch("os.walk", side_effect=OSError("simulated walk failure")):
+            self.assertEqual(
+                _observe_leftovers("/nonexistent/path", context="test"),
+                "unverified",
+            )
 
 
 class TestForceImportManifestGuard(unittest.TestCase):
