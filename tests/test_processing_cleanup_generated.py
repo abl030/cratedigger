@@ -103,11 +103,18 @@ class TestProcessingCleanupGenerated(unittest.TestCase):
         files=[("a", b"one"), ("b", b"two")],
     )
     # #1094 Q3/Q4: one pin per decisive arm. ``remove_source_tree`` is the
-    # only arm that can fire ``CLAUSE_SOURCE_RETAINED``, and the two
-    # non-quarantine arms are the only ones that can fire
+    # only arm that can fire ``CLAUSE_SOURCE_RETAINED`` or
     # ``CLAUSE_INVENTED_DESTINATION``. Editing this property body reshuffles
     # the whole generated sequence, so the arms are pinned rather than left to
     # the deterministic draw.
+    #
+    # The ``no_op`` pin is a coverage pin, not a clause pin: this property
+    # never creates ``source`` for that action, so ``base`` holds no directory
+    # and ``observed_cleanup_destination`` returns ``None`` whatever
+    # ``execute_processing_cleanup`` does — no mutant can make that arm fire
+    # the invented-destination clause. Giving a no-op journal a source tree it
+    # must leave untouched is a real entropy gap in this property, pre-dating
+    # #1094 and not closed here (round-3 review N2).
     @example(
         action=PROCESSING_CLEANUP_REMOVE_SOURCE,
         files=[("a", b"one"), ("b", b"two")],

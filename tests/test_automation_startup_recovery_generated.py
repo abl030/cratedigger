@@ -707,9 +707,11 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
     ``assertRaises(AssertionError)`` proved nothing: the previous five
     self-tests matched substrings, and two of those substrings
     (``owner equivalence is broken``) belong to two different clauses, so a
-    message-collision mutant would have survived both. The table therefore
-    also proves that no clause's pattern matches any sibling clause's
-    message.
+    message-collision mutant would have survived both. Each table therefore
+    also proves that no clause's pattern matches any sibling clause's message
+    **within that checker** — ``_prove_clauses`` cross-checks the cases it is
+    given, which is one checker per call, not across the module's three
+    (round-3 review N4).
 
     Deterministic by policy — this is test machinery, never a generated
     subject.
