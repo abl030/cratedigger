@@ -663,7 +663,33 @@ def main(argv: Iterable[str] | None = None) -> int:
     )
     worker_id = args.worker_id or f"{socket.gethostname()}:{os.getpid()}"
 
-    args.temp_dir.mkdir(parents=True, exist_ok=True)
+    # Startup write-probe (issue #1085): fail loudly, before any queue
+    # recovery, claim, DB mutation, or filesystem mutation, if a required
+    # path cannot be used the way this unit is about to use it. This
+    # worker has no CratediggerConfig -- it never calls
+    # enforce_beets_startup (Beets mutation is deferred to the importer
+    # queue) -- so both required paths come straight from its own CLI
+    # args. Both must already exist: the scratch dir is created once by
+    # the deployment's systemd tmpfiles rule, and the staging root is the
+    # same externally provisioned Incoming root every other unit stages
+    # into. Neither is created here any more (the former defensive
+    # ``mkdir`` masked exactly the failure this probe now surfaces).
+    from lib.startup_write_probe import (
+        StartupProbeError,
+        probe_startup_paths,
+        youtube_ingest_required_paths,
+    )
+    required_paths = youtube_ingest_required_paths(
+        temp_dir=str(args.temp_dir), staging_dir=str(args.staging_dir),
+    )
+    try:
+        probe_startup_paths(
+            unit="cratedigger-youtube-ingest",
+            logger=logger,
+            required=required_paths,
+        )
+    except StartupProbeError:
+        return 1
 
     db = PipelineDB(args.dsn)
     try:

@@ -2048,6 +2048,24 @@ def main() -> int:
     except BeetsStartupError:
         return 1
 
+    # Startup write-probe (issue #1085): fail loudly, before any queue
+    # recovery, claim, DB mutation, or filesystem mutation, if a required
+    # path cannot be used the way this unit is about to use it.
+    from lib.startup_write_probe import (
+        StartupProbeError,
+        preview_worker_required_paths,
+        probe_startup_paths,
+    )
+    required_paths = preview_worker_required_paths(admitted_config)
+    try:
+        probe_startup_paths(
+            unit="cratedigger-import-preview-worker",
+            logger=logger,
+            required=required_paths,
+        )
+    except StartupProbeError:
+        return 1
+
     worker_id = args.worker_id or f"{socket.gethostname()}:{os.getpid()}"
     db = PipelineDB(args.dsn)
     try:

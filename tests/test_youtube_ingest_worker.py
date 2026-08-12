@@ -663,13 +663,17 @@ class TestMainAdvisoryLockContention(unittest.TestCase):
             sweep_calls.append(db)
             return []
 
-        with patch.object(worker, "PipelineDB", return_value=pdb), \
+        with tempfile.TemporaryDirectory() as temp_dir, \
+                tempfile.TemporaryDirectory() as staging_dir, \
+                patch.object(worker, "PipelineDB", return_value=pdb), \
                 patch.object(
                     worker, "sweep_orphan_running_rows",
                     side_effect=_fake_sweep):
-            rc = worker.main(
-                ["--temp-dir", "/tmp/yt-test-tempdir-contention", "--once"]
-            )
+            rc = worker.main([
+                "--temp-dir", temp_dir,
+                "--staging-dir", staging_dir,
+                "--once",
+            ])
 
         self.assertEqual(rc, 0)
         # Sweep NEVER runs when the lock isn't acquired.
@@ -691,15 +695,19 @@ class TestMainKeyboardInterrupt(unittest.TestCase):
         def _interrupting_run_loop(*_a: Any, **_kw: Any) -> int:
             raise KeyboardInterrupt
 
-        with patch.object(worker, "PipelineDB", return_value=pdb), \
+        with tempfile.TemporaryDirectory() as temp_dir, \
+                tempfile.TemporaryDirectory() as staging_dir, \
+                patch.object(worker, "PipelineDB", return_value=pdb), \
                 patch.object(
                     worker, "run_loop", side_effect=_interrupting_run_loop), \
                 patch.object(
                     worker, "build_service",
                     return_value=YoutubeIngestService(pdb)):
-            rc = worker.main(
-                ["--temp-dir", "/tmp/yt-test-tempdir-sigint", "--once"]
-            )
+            rc = worker.main([
+                "--temp-dir", temp_dir,
+                "--staging-dir", staging_dir,
+                "--once",
+            ])
 
         self.assertEqual(rc, 0)
 
@@ -731,16 +739,20 @@ class TestMainHappyPath(unittest.TestCase):
             _seed_running_row(db)
             return []
 
-        with patch.object(worker, "PipelineDB", return_value=pdb), \
+        with tempfile.TemporaryDirectory() as temp_dir, \
+                tempfile.TemporaryDirectory() as staging_dir, \
+                patch.object(worker, "PipelineDB", return_value=pdb), \
                 patch.object(
                     worker, "sweep_orphan_running_rows",
                     side_effect=_fake_sweep), \
                 patch.object(
                     worker, "build_service",
                     side_effect=_fake_build_service):
-            rc = worker.main(
-                ["--temp-dir", "/tmp/yt-test-tempdir-mainhappy", "--once"]
-            )
+            rc = worker.main([
+                "--temp-dir", temp_dir,
+                "--staging-dir", staging_dir,
+                "--once",
+            ])
 
         self.assertEqual(rc, 0)
         # The pending row was drained.
@@ -854,14 +866,17 @@ class TestMainSourceAddressWiring(unittest.TestCase):
             captured.update(kw)
             return YoutubeIngestService(pdb)
 
-        with patch.object(worker, "PipelineDB", return_value=pdb), \
+        with tempfile.TemporaryDirectory() as temp_dir, \
+                tempfile.TemporaryDirectory() as staging_dir, \
+                patch.object(worker, "PipelineDB", return_value=pdb), \
                 patch.object(
                     worker, "sweep_orphan_running_rows", return_value=[]), \
                 patch.object(
                     worker, "build_service",
                     side_effect=_fake_build_service):
             rc = worker.main([
-                "--temp-dir", "/tmp/yt-test-srcaddr",
+                "--temp-dir", temp_dir,
+                "--staging-dir", staging_dir,
                 "--source-address", "192.168.1.36",
                 "--once",
             ])

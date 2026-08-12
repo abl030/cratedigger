@@ -11,6 +11,7 @@ import threading
 import unittest
 import unittest.mock
 from collections.abc import Callable
+from typing import get_args
 from unittest.mock import MagicMock
 
 from lib.download_materialization import (
@@ -25,7 +26,11 @@ from lib.download_materialization import (
 )
 from lib.fs_authority import (
     FilesystemAuthorityError,
+    FsAuthorityCode,
     SharedDownloadRootError,
+    classify_path_errno,
+    errno_proves_absence,
+    is_containment_refusal,
     open_configured_quarantine_directory,
     open_directory_path,
     open_private_child_directory,
@@ -33,6 +38,7 @@ from lib.fs_authority import (
     open_regular_relative,
     open_regular_under_held_root,
     open_shared_download_root,
+    unreadable_reason_text,
 )
 from lib.grab_list import DownloadFile
 from lib.import_preview import (
@@ -279,6 +285,182 @@ class TestAuthorityFailureClassification(unittest.TestCase):
             with self.assertRaises(FilesystemAuthorityError) as caught, open_private_processing_root(source, source):
                 pass
         self.assertEqual(caught.exception.code, "unspecified")
+
+
+class TestUnreadableEntryCountingAndReasonText(unittest.TestCase):
+    """Issue #1086: the counted/uncounted decision and its honest reason.
+
+    Both ``web/wrong_match_file_service.py``'s per-entry loop and
+    ``lib.beets_distance``'s ``lstat`` guard build on THIS pair of shared
+    functions — :func:`errno_proves_absence` decides "counted this entry
+    as unreadable", :func:`unreadable_reason_text` decides "what to call
+    it". Pinning both, per real errno class, here is the single place
+    every consumer's counted/uncounted decision ultimately rests on.
+    """
+
+    def test_eacces_is_counted_as_a_world_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, "track.mp3")
+            with open(path, "wb") as handle:
+                handle.write(b"audio")
+            os.chmod(path, 0o000)
+            try:
+                with open_directory_path(root) as root_fd, self.assertRaises(FilesystemAuthorityError) as caught:
+                    open_regular_relative(root_fd, "track.mp3")
+            finally:
+                os.chmod(path, 0o600)
+        exc = caught.exception
+        self.assertEqual(exc.code, "open_failed")
+        self.assertFalse(errno_proves_absence(exc.code))
+        text = unreadable_reason_text(exc.code, errno_symbol=exc.errno_symbol)
+        self.assertIn("may be transient", text)
+        self.assertIn("EACCES", text)
+
+    def test_eloop_is_counted_as_containment_not_a_world_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as parent:
+            root = os.path.join(parent, "root")
+            outside = os.path.join(parent, "outside")
+            os.mkdir(root)
+            with open(outside, "wb") as handle:
+                handle.write(b"outside")
+            os.symlink(outside, os.path.join(root, "track.mp3"))
+            with open_directory_path(root) as root_fd, self.assertRaises(FilesystemAuthorityError) as caught:
+                open_regular_relative(root_fd, "track.mp3")
+        exc = caught.exception
+        self.assertEqual(exc.code, "unsafe_symlink")
+        self.assertFalse(errno_proves_absence(exc.code))
+        text = unreadable_reason_text(exc.code, errno_symbol=exc.errno_symbol)
+        self.assertIn("symlink", text)
+        self.assertIn("quarantine root", text)
+        self.assertNotIn("may be transient", text)
+
+    def test_enxio_is_counted_as_containment_not_a_world_failure(self) -> None:
+        """A live Unix-domain socket answers ENXIO at ``open`` (issue
+        #868), the second of the two silently-dropped codes #1086 fixes."""
+        with tempfile.TemporaryDirectory() as root:
+            sock = socket.socket(socket.AF_UNIX)
+            try:
+                sock.bind(os.path.join(root, "sock"))
+                with open_directory_path(root) as root_fd, self.assertRaises(FilesystemAuthorityError) as caught:
+                    open_regular_relative(root_fd, "sock")
+            finally:
+                sock.close()
+        exc = caught.exception
+        self.assertEqual(exc.code, "not_regular_file")
+        self.assertFalse(errno_proves_absence(exc.code))
+        text = unreadable_reason_text(exc.code, errno_symbol=exc.errno_symbol)
+        self.assertIn("socket, FIFO or device node", text)
+        self.assertNotIn("may be transient", text)
+
+    def test_enodev_is_counted_as_containment_not_a_world_failure(self) -> None:
+        """A driverless device node needs ``CAP_MKNOD``, unavailable in
+        this sandbox. ``classify_path_errno`` is a pure function of the
+        errno alone, so a real ``OSError`` carrying ``ENODEV`` — the same
+        technique ``tests/test_materialize_evidence_generated.py`` uses
+        for the identical constraint — drives the REAL classifier without
+        needing a real device node.
+        """
+        exc = OSError(errno.ENODEV, os.strerror(errno.ENODEV), "device")
+        code = classify_path_errno(exc)
+        self.assertEqual(code, "not_regular_file")
+        self.assertFalse(errno_proves_absence(code))
+        text = unreadable_reason_text(code)
+        self.assertIn("socket, FIFO or device node", text)
+        self.assertNotIn("may be transient", text)
+
+    def test_enoent_proves_absence_and_is_never_counted(self) -> None:
+        with tempfile.TemporaryDirectory() as root, open_directory_path(root) as root_fd, self.assertRaises(FilesystemAuthorityError) as caught:
+            open_regular_relative(root_fd, "absent.mp3")
+        exc = caught.exception
+        self.assertEqual(exc.code, "missing")
+        self.assertTrue(errno_proves_absence(exc.code))
+        # Proven absence has no honest "why refused" text: no caller may
+        # reach this branch, so the shared function fails loudly instead
+        # of composing a plausible-looking lie.
+        with self.assertRaises(ValueError):
+            unreadable_reason_text(exc.code)
+
+    def test_the_pair_is_exhaustive_and_agrees_over_every_declared_code(
+        self,
+    ) -> None:
+        """Every ``FsAuthorityCode`` is classified by BOTH functions with
+        no gap — the pure-function twin of the real-producer property in
+        ``tests/test_protected_path_truth_generated.py``.
+        """
+        for code in get_args(FsAuthorityCode):
+            with self.subTest(code=code):
+                absent = errno_proves_absence(code)
+                self.assertIsInstance(absent, bool)
+                if absent:
+                    with self.assertRaises(ValueError):
+                        unreadable_reason_text(code)
+                else:
+                    text = unreadable_reason_text(code, errno_symbol="ESTALE")
+                    self.assertTrue(text)
+
+    def test_known_bad_predicate_is_killed_by_this_pair(self) -> None:
+        """Restoring the retired ``refusal_is_indeterminate`` gate must
+        disagree with :func:`errno_proves_absence` on every containment
+        code that is not itself a proof of absence — ``unsafe_symlink``
+        and ``not_regular_file`` (ELOOP/ENXIO/ENODEV, issue #1086's named
+        defect) among them. Only the two absence codes (``missing``,
+        ``not_a_directory``, where both predicates correctly say "don't
+        count it") and the three genuine world-failure codes (where both
+        correctly say "count it") may agree.
+        """
+        from lib.fs_authority import refusal_is_indeterminate
+
+        agreeing_codes = {
+            "missing", "not_a_directory",  # both say: proven absent
+            "open_failed", "read_failed", "write_failed",  # both say: count it
+        }
+        for code in get_args(FsAuthorityCode):
+            with self.subTest(code=code):
+                old_gate = refusal_is_indeterminate(code) is True
+                new_gate = not errno_proves_absence(code)
+                if code in agreeing_codes:
+                    self.assertEqual(old_gate, new_gate)
+                else:
+                    self.assertNotEqual(
+                        old_gate, new_gate,
+                        f"{code!r} must be where the two predicates diverge",
+                    )
+
+    def test_is_containment_refusal_partitions_every_declared_code(self) -> None:
+        """The exact family :func:`unreadable_reason_text` words as
+        "containment, not a world failure" — the shared predicate two
+        consumers (``lib.beets_distance._Refusal.is_containment`` and
+        the Wrong Matches explorer's ``unreadable_is_containment``) both
+        ask instead of re-deriving a narrower copy (issue #1086). Every
+        declared code is checked, so a new code added to the
+        ``FsAuthorityCode`` Literal without updating this predicate
+        fails a subTest instead of silently inheriting the wrong side.
+        """
+        containment_codes = {
+            "unsafe_symlink", "not_regular_file",
+            "path_escape", "untrusted_ownership",
+        }
+        for code in get_args(FsAuthorityCode):
+            with self.subTest(code=code):
+                self.assertEqual(
+                    is_containment_refusal(code), code in containment_codes)
+
+    def test_known_bad_is_containment_refusal_is_caught(self) -> None:
+        """A mutant calling every non-absence code containment must be
+        distinguishable from the real predicate on a genuine world
+        failure — EACCES/EIO/ESTALE must never be reported as a
+        containment decision."""
+        def _bad_is_containment_refusal(code: FsAuthorityCode) -> bool:
+            return not errno_proves_absence(code)
+
+        for code in ("open_failed", "read_failed", "write_failed"):
+            with self.subTest(code=code):
+                self.assertNotEqual(
+                    _bad_is_containment_refusal(code),
+                    is_containment_refusal(code),
+                    f"the known-bad predicate must diverge from the real "
+                    f"one on {code!r}",
+                )
 
 
 class TestPrivateProcessingAuthority(unittest.TestCase):
