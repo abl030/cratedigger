@@ -1721,6 +1721,109 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         self.assertEqual(status, 404)
         self.assertIn("not found", data["error"])
 
+    # NOTE on the whole-root explorer 422 case (issue #1099): every
+    # directory-open primitive `_opened_wrong_match_root` uses
+    # (`open_directory_path`/`open_relative_directory`, both via
+    # `lib.fs_authority.open_configured_quarantine_directory`) opens with
+    # `O_DIRECTORY`, and the kernel answers ENOTDIR — never ELOOP or
+    # ENXIO/ENODEV — for ANY non-directory name (symlink, socket, FIFO,
+    # regular file) under `O_DIRECTORY`, at any component position
+    # (proven empirically; see
+    # `tests.test_path_authority.TestAuthorityFailureClassification
+    # .test_regular_file_used_as_a_directory_is_not_called_a_symlink`,
+    # which pins the identical ENOTDIR-not-ELOOP shape for a regular file
+    # used as a directory component). So a real symlinked/special-file
+    # ROOT classifies as `not_a_directory` — absence, 404 — correctly,
+    # since there is no directory at that name; it can never reach a
+    # containment code at this exact granularity. `untrusted_ownership`
+    # is the one containment code that COULD reach this site (the same
+    # code `lib.fs_authority._assert_private_parent` raises for the
+    # sibling private-processing-root open) but only if
+    # `open_configured_quarantine_directory` grew an ownership check —
+    # it does not have one today. A real end-to-end whole-root 422 pin is
+    # therefore not constructible without mocking
+    # `open_configured_quarantine_directory` itself, which is ~85 lines
+    # of real containment logic (not a thin leaf wrapper) and is
+    # correctly refused by `tests/_mock_audit_scanner.py`'s "no new
+    # owned-function patches" ratchet. The 422 route wiring for the
+    # explorer is instead proven by construction: `get_wrong_match_explorer`
+    # catches the exact same `WrongMatchSourceRefused` type, raised by the
+    # exact same `_opened_wrong_match_root` classifier, with the identical
+    # `except ... : h._error(str(exc), 422)` shape as
+    # `get_wrong_match_audio` below — which DOES have a real end-to-end
+    # 422 reproduction — and `_classify_wrong_match_refusal`'s exhaustive
+    # table (`tests/test_wrong_match_file_service.py`) independently
+    # proves every containment code, including `untrusted_ownership`,
+    # classifies as "refused" wherever it is raised from.
+
+    def test_a_root_outside_every_quarantine_root_is_unavailable_not_missing(self):
+        """Issue #1099: the whole-root open's OTHER real status flip.
+
+        ``open_configured_quarantine_directory``'s final fallback —
+        "path is outside configured quarantine roots" — carries the
+        default ``unspecified`` code when a ``failed_path`` lexically
+        escapes every configured root's tree entirely (a legitimate,
+        real, non-mocked world: a garbage/legacy path that never matches
+        any of ``slskd_download_dir``/``beets_staging_dir``/
+        ``processing_dir``). The OLD ``refusal_is_indeterminate`` gate
+        answered ``False`` for ``unspecified`` and fell through to 404
+        "not found" — as definitive a claim as the symlink case, just
+        never named in the issue. The classifier's residual clause
+        (#1099 clause 4) answers 503 instead: an unclassifiable refusal
+        must never make a definitive claim of absence, so it falls to
+        the same non-claim side as a genuine world failure.
+        """
+        tmpdir = self.enterContext(tempfile.TemporaryDirectory())
+        outside_root = self.enterContext(tempfile.TemporaryDirectory())
+        # Lexically nowhere near any of the three configured roots under
+        # ``tmpdir`` — every ``_relative_to`` computation inside
+        # ``open_configured_quarantine_directory`` yields a ``..``-laden
+        # relative path, so every root is skipped via ``path_escape``
+        # rather than opened, and the function falls all the way through
+        # to its final ``unspecified`` fallback.
+        failed_dir = os.path.join(outside_root, "failed_imports", "Ghost Album")
+        os.makedirs(failed_dir)
+        log_id = self.db.log_download(
+            100, outcome="rejected",
+            validation_result={"failed_path": failed_dir},
+        )
+
+        with self._wrong_match_runtime_config(tmpdir):
+            status, data = self._get(
+                f"/api/wrong-matches/explorer?download_log_id={log_id}")
+
+        self.assertEqual(status, 503)
+        self.assertNotIn("not found", data["error"])
+
+    def test_a_symlinked_single_file_stream_is_refused_not_unavailable(self):
+        """Issue #1099: the single-file stream resolve owes the same split.
+
+        A per-FILE containment refusal (a symlinked track) must not land
+        in the retryable 503 bucket a world failure owns — retrying can
+        never satisfy a containment refusal.
+        """
+        tmpdir = self.enterContext(tempfile.TemporaryDirectory())
+        failed_dir = os.path.join(tmpdir, "failed_imports", "Album")
+        os.makedirs(failed_dir)
+        real = os.path.join(failed_dir, "01 - Real.mp3")
+        with open(real, "wb") as handle:
+            handle.write(b"\x00" * 32)
+        os.symlink(real, os.path.join(failed_dir, "02 - Linked.mp3"))
+        log_id = self.db.log_download(
+            100, outcome="rejected",
+            validation_result={"failed_path": failed_dir},
+        )
+
+        with self._wrong_match_runtime_config(tmpdir):
+            status, data = self._get(
+                f"/api/wrong-matches/audio?download_log_id={log_id}"
+                "&path=02%20-%20Linked.mp3",
+            )
+
+        self.assertEqual(status, 422)
+        self.assertIn("02 - Linked.mp3", data["error"])
+        self.assertNotIn("not found", data["error"])
+
     def test_candidate_has_distance_breakdown(self):
         _status, data = self._get("/api/wrong-matches")
         entry = data["groups"][0]["entries"][0]

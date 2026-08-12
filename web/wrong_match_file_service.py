@@ -9,12 +9,13 @@ import stat
 from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, TypeGuard
+from typing import Any, Literal, TypeGuard
 from urllib.parse import quote
 
 from lib.config import read_runtime_config
 from lib.fs_authority import (
     FilesystemAuthorityError,
+    FsAuthorityCode,
     HeldDirectory,
     OpenedRegularFile,
     errno_proves_absence,
@@ -155,6 +156,63 @@ class WrongMatchSourceUnavailable(OSError):
     """
 
 
+class WrongMatchSourceRefused(OSError):
+    """The storage refused a Wrong Matches source on containment grounds.
+
+    Its own type so the routes answer 422 instead of 404 or 503
+    (issue #1099). #1086 fixed the identical category error at the
+    per-entry granularity (``unreadable_is_containment`` in
+    :func:`build_wrong_match_explorer`); this is the same fix one level
+    up, for the WHOLE root open and the single-file stream resolve. An
+    ``unsafe_symlink``, ``not_regular_file``, ``path_escape`` or
+    ``untrusted_ownership`` refusal is a security-boundary DECISION, not
+    evidence the folder is missing (404 would state a definitive
+    negative we never observed) and not a retryable world failure (503
+    would imply a retry might help — it cannot: the same name refuses
+    identically every time).
+    """
+
+
+_WrongMatchRefusalVerdict = Literal["not_found", "refused", "unavailable"]
+
+
+def _classify_wrong_match_refusal(code: FsAuthorityCode) -> _WrongMatchRefusalVerdict:
+    """Map one filesystem refusal onto the Wrong Matches HTTP-status vocabulary.
+
+    The ONE classifier both ``_opened_wrong_match_root`` (the whole-root
+    open) and :func:`resolve_wrong_match_stream_file` (the single-file
+    stream resolve) ask, so the two sites cannot drift on "what does this
+    errno mean" the way they did before issue #1099. Composed ONLY from
+    ``lib.fs_authority``'s three existing owner predicates — never a new
+    errno/code set of its own:
+
+    1. :func:`errno_proves_absence` — a POSITIVE proof the name holds
+       nothing (``missing``, ``not_a_directory``) → ``"not_found"``
+       (404): the only codes allowed to claim a definitive absence.
+    2. Else :func:`is_containment_refusal` — a security-boundary DECISION
+       (``unsafe_symlink``, ``not_regular_file``, ``path_escape``,
+       ``untrusted_ownership``) → ``"refused"`` (422): the name may well
+       exist, we simply refuse to read it. Follows the #1084 precedent
+       (``OUTCOME_SKIPPED_UNSAFE_PATH`` → 422 on the delete path).
+    3. Else :func:`refusal_is_indeterminate` — a genuine world failure
+       (``open_failed``, ``read_failed``, ``write_failed``) →
+       ``"unavailable"`` (503): retryable, we learned nothing.
+    4. Any residual code (``unspecified`` today, or a future
+       :data:`FsAuthorityCode` this function has not been taught about)
+       also answers ``"unavailable"``: an unclassifiable refusal must
+       never make a definitive claim of absence or containment — non-
+       claim is the fail-safe side, matching
+       :func:`refusal_is_indeterminate`'s own falsy-fallthrough doctrine.
+    """
+    if errno_proves_absence(code):
+        return "not_found"
+    if is_containment_refusal(code):
+        return "refused"
+    if refusal_is_indeterminate(code) is True:
+        return "unavailable"
+    return "unavailable"
+
+
 @contextmanager
 def _opened_wrong_match_root(
     entry: Mapping[str, object],
@@ -169,9 +227,15 @@ def _opened_wrong_match_root(
         with open_configured_quarantine_directory(failed_path, runtime_config) as root:
             yield validation_result, root
     except FilesystemAuthorityError as exc:
-        if refusal_is_indeterminate(exc.code) is True:
+        verdict = _classify_wrong_match_refusal(exc.code)
+        if verdict == "unavailable":
             raise WrongMatchSourceUnavailable(
                 "Wrong-match files could not be read: "
+                f"{failed_path or '<missing>'} ({exc})",
+            ) from exc
+        if verdict == "refused":
+            raise WrongMatchSourceRefused(
+                "Wrong-match files refused: "
                 f"{failed_path or '<missing>'} ({exc})",
             ) from exc
         raise FileNotFoundError(
@@ -648,15 +712,22 @@ def resolve_wrong_match_stream_file(
     # Classify the per-FILE refusal HERE. ``_opened_wrong_match_root`` is a
     # context manager, so a refusal raised inside its ``with`` is thrown
     # back into the generator and converted there — attributing a single
-    # unreadable file to the whole folder. Neither replacement type is a
-    # ``FilesystemAuthorityError``, so both pass through untouched.
+    # unreadable file to the whole folder. None of the three replacement
+    # types is a ``FilesystemAuthorityError``, so all three pass through
+    # untouched.
     with _opened_wrong_match_root(entry) as (_validation_result, root):
         try:
             opened = open_regular_relative(root.fd, cleaned_relative_path)
         except FilesystemAuthorityError as exc:
-            if refusal_is_indeterminate(exc.code) is True:
+            verdict = _classify_wrong_match_refusal(exc.code)
+            if verdict == "unavailable":
                 raise WrongMatchSourceUnavailable(
                     f"Wrong-match file could not be read: "
+                    f"{cleaned_relative_path} ({exc})",
+                ) from exc
+            if verdict == "refused":
+                raise WrongMatchSourceRefused(
+                    f"Wrong-match file refused: "
                     f"{cleaned_relative_path} ({exc})",
                 ) from exc
             raise FileNotFoundError(

@@ -1477,12 +1477,47 @@ console.log('maybeLoadWrongMatchExplorer() surfaces a 503 refusal reason instead
 
   await __test__.maybeLoadWrongMatchExplorer(201, { open: true });
 
-  assert(mount.innerHTML.includes('Failed to load file explorer'),
-    'a real transport/authority failure still reads as a failure');
+  // Issue #1099: a whole-root 503 now gets its own status-honest lead
+  // sentence instead of the old one-size-fits-all "Failed to load file
+  // explorer" — the operator still needs to know this IS a failure and
+  // that it's the retryable-world-failure kind, not a containment refusal.
+  assert(mount.innerHTML.includes('temporarily unavailable'),
+    'a real transport/authority failure still reads as a retryable failure');
   assert(mount.innerHTML.includes('could not be read'),
     'the server’s own reason reaches the operator');
   assert(mount.innerHTML.includes('Retry'),
     'the retry affordance survives');
+}
+
+console.log('maybeLoadWrongMatchExplorer() surfaces a whole-root 422 refusal, never as "not found" (issue #1099)');
+{
+  installStorage();
+  const dom = installDom();
+  const mount = { innerHTML: '' };
+  const elements = new Map([['wm-explorer-205', mount]]);
+  globalThis.document.getElementById = (id) => {
+    if (id === 'wrong-matches-content') return dom.wrongMatches;
+    if (id === 'toast') return dom.toast;
+    return elements.get(id) || null;
+  };
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 422,
+    json: async () => ({
+      error: 'Wrong-match files refused: /x/wrong_matches/Album '
+        + '(quarantine path is contained but unavailable: unsafe symlink: '
+        + '/x/wrong_matches/Album)',
+    }),
+  });
+
+  await __test__.maybeLoadWrongMatchExplorer(205, { open: true });
+
+  assert(mount.innerHTML.toLowerCase().includes('refused'),
+    'a whole-root containment refusal names itself as a refusal');
+  assert(!mount.innerHTML.toLowerCase().includes('not found'),
+    'a containment refusal must never read as a definitive absence');
+  assert(mount.innerHTML.includes('Retry'),
+    'the retry affordance is still offered by this catch (unconditional per #1099)');
 }
 
 console.log('maybeLoadWrongMatchExplorer() treats a PARTIAL listing as repairable too');

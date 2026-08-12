@@ -910,6 +910,12 @@ _REFUSAL_COPY = "could not be read"
 #: docstring states).
 _CONTAINMENT_REFUSAL_COPY = "refused (not read)"
 _NOT_EMPTY_COPY = "NOT evidence that the folder is empty"
+#: Issue #1099 — the whole-root LOAD-FAILURE catch (as opposed to the
+#: per-entry copy above, which lives inside a 200 payload) now answers
+#: status-honest copy instead of the generic ``_LOAD_FAILURE_COPY``
+#: sentence for every non-ok status. A whole-root 503 (a retryable world
+#: failure) gets its own lead sentence naming that.
+_WHOLE_ROOT_UNAVAILABLE_LOAD_COPY = "temporarily unavailable"
 
 #: Entry kinds refused for a WORLD reason (EACCES) vs a CONTAINMENT
 #: reason (a symlink or a special file) — the same split
@@ -1080,7 +1086,8 @@ class TestExplorerReachesTheOperatorGenerated(unittest.TestCase):
         a 200 payload. The route answers ``h._error(str(exc), 503)``, and
         the browser used to discard the message entirely — leaving an
         operator with a bare "Failed to load" over a world that needs
-        fixing.
+        fixing. Issue #1099: the browser now says something status-honest
+        instead of the old one-size-fits-all sentence.
         """
         db = FakePipelineDB()
         with tempfile.TemporaryDirectory() as root:
@@ -1099,7 +1106,7 @@ class TestExplorerReachesTheOperatorGenerated(unittest.TestCase):
         # Exactly the envelope ``web/routes/imports.py`` writes for it.
         reason = str(caught.exception)
         html = self._render({"error": reason}, 503)
-        self.assertIn(_LOAD_FAILURE_COPY, html)
+        self.assertIn(_WHOLE_ROOT_UNAVAILABLE_LOAD_COPY, html)
         self.assertIn(_REFUSAL_COPY, html)
         self.assertIn("Retry", html)
 

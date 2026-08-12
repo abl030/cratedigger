@@ -3,7 +3,7 @@
  * Run with: node tests/test_js_util.mjs
  */
 
-import { qualityLabel, qualityLabelShort, toAWST, awstDate, awstTime, awstDateTime, esc, jsArg, overrideToIntent, detectSource, externalReleaseUrl, sourceLabel, youtubeBrowseUrl, renderForensicBlock, parsePastedId, youtubeSectionState, consoleEmphasis, withApplyDistance, isExternalAuthInterruption } from '../web/js/util.js';
+import { qualityLabel, qualityLabelShort, toAWST, awstDate, awstTime, awstDateTime, esc, jsArg, overrideToIntent, detectSource, externalReleaseUrl, sourceLabel, youtubeBrowseUrl, renderForensicBlock, parsePastedId, youtubeSectionState, consoleEmphasis, withApplyDistance, isExternalAuthInterruption, wrongMatchExplorerFailureCopy } from '../web/js/util.js';
 import { state } from '../web/js/state.js';
 import { applyLabelFilters, sortByYearDesc, buildLabelSearchUrl, buildLabelDetailUrl, loadLabelReleases, parseYear, renderLabelLinks, distinctFormats, renderPaginationControls, renderLabelRows } from '../web/js/labels.js';
 import { __test__ as longTailTest } from '../web/js/long_tail.js';
@@ -2047,6 +2047,46 @@ console.log('long_tail_console.js console persistence (#398 / #481 item 1)');
     'an undefined response is not an interruption');
   assert(!isExternalAuthInterruption({}),
     'a response with no status or redirect flag is not an interruption');
+}
+
+{
+  // #1099: the Wrong Matches file explorer's whole-root load-failure catch
+  // used to say "Failed to load file explorer" for every non-ok status —
+  // a 404 (definitive absence), a 422 (a containment decision a retry can
+  // never satisfy) and a 503 (a retryable world failure) all got the exact
+  // same wording. wrongMatchExplorerFailureCopy is the pure function that
+  // turns the status into honest, status-specific copy.
+  assert(wrongMatchExplorerFailureCopy(404, null).includes('not'),
+    '404 gets an absence-family lead sentence');
+  assertEqual(wrongMatchExplorerFailureCopy(404, null),
+    'This wrong-match folder could not be located.',
+    '404 with no server detail appends nothing extra');
+  assertEqual(wrongMatchExplorerFailureCopy(404, 'Wrong-match files not found or unauthorized: /x'),
+    'This wrong-match folder could not be located. Wrong-match files not found or unauthorized: /x',
+    '404 appends the server detail');
+
+  const refused = wrongMatchExplorerFailureCopy(422, null);
+  assert(refused.toLowerCase().includes('refused'),
+    '422 gets a containment-family lead sentence naming the refusal');
+  assert(!refused.toLowerCase().includes('not found'),
+    '422 copy must never say "not found" — the name may well exist');
+
+  const unavailable = wrongMatchExplorerFailureCopy(503, null);
+  assert(unavailable.toLowerCase().includes('unavailable')
+    || unavailable.toLowerCase().includes('retry'),
+    '503 gets a retryable/unavailable-family lead sentence');
+  assert(!unavailable.toLowerCase().includes('refused'),
+    '503 must not borrow the containment wording — a retry can help here');
+
+  assertEqual(wrongMatchExplorerFailureCopy(200, null),
+    'Failed to load file explorer.',
+    'an unrecognized status falls back to the generic sentence');
+  assertEqual(wrongMatchExplorerFailureCopy(undefined, null),
+    'Failed to load file explorer.',
+    'a missing status (e.g. a thrown non-HTTP error) falls back to the generic sentence');
+  assertEqual(wrongMatchExplorerFailureCopy(undefined, 'network error'),
+    'Failed to load file explorer. network error',
+    'the fallback still appends whatever detail is available');
 }
 
 {

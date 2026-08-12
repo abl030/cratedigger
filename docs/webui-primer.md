@@ -600,8 +600,21 @@ depends on.
   EACCES/EIO refusal, each with its own honest reason: a containment refusal
   (symlink/socket) reads "refused ... out of the quarantine root", never
   worded like a transient world failure. `web/js/wrong-matches.js` renders both `ok` and
-  `unavailable` payloads; a refusal of the whole root is a 503 whose reason is
-  shown next to the Retry button. **Every listing that recorded a refusal —
+  `unavailable` payloads; a refusal of the WHOLE root (the folder open
+  itself, not one entry inside it) answers 404 when the name is definitively
+  absent, 422 when it was refused on containment grounds (a symlink,
+  socket/FIFO/device node, path escape, or private-root ownership decision —
+  the name may well exist), or 503 when it is a retryable world failure that
+  proved nothing, all classified by the single
+  `web/wrong_match_file_service.py::_classify_wrong_match_refusal` function
+  that both the whole-root open and the single-file stream resolve share
+  (issue #1099; before this, an `unsafe_symlink`/`untrusted_ownership`/
+  `path_escape` refusal of either was reported as 404 "not found"). The
+  browser's load-failure catch turns each status into its own honest lead
+  sentence next to the Retry button — never "not found" for a 422 — via the
+  pure `wrongMatchExplorerFailureCopy` function in `web/js/util.js`; before this fix every
+  non-ok status showed the identical generic "Failed to load file explorer."
+  **Every listing that recorded a refusal —
   `unavailable`, or a PARTIAL `ok` listing that read some files and was refused
   others — is deliberately NOT cached**, so reopening the panel always
   re-fetches rather than short-circuiting on a stale answer. Only a
