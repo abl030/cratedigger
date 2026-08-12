@@ -63,6 +63,13 @@ SEARCH_CANCEL_WAIT_POLL_S = 0.2
 SEARCH_RESPONSE_SETTLE_DEADLINE_S = 2.0
 SEARCH_RESPONSE_SETTLE_POLL_S = 0.2
 
+# Floor (not zero) for a submit-retry wait when ``server_ready`` reports
+# ready (issue #1090 NON-BLOCKING-3). A "ready" reading is advisory and can
+# race the actual reconnect; collapsing straight to a 0s wait makes a WRONG
+# reading load-bearing (3 POSTs within milliseconds instead of the intended
+# backoff). Flooring to this value degrades gracefully instead.
+SUBMIT_RETRY_READY_FLOOR_S = 0.5
+
 
 class SearchSubmitError(Exception):
     """Raised when ``searches.search_text`` fails before slskd accepts a search.
@@ -73,7 +80,85 @@ class SearchSubmitError(Exception):
     only ever raises this from the submit phase; poll/harvest transport
     errors propagate as their original exception type. The underlying slskd
     exception is preserved as ``__cause__`` via ``raise ... from``.
+
+    ``retry_exhausted`` (issue #1090 BLOCKING-1) is a typed discriminator a
+    caller uses to decide whether this failure represents a TRANSIENT
+    slskd-connectivity condition worth counting toward a circuit breaker, as
+    opposed to a DETERMINISTIC per-row rejection (a 429 rate limit, a 400,
+    a network error, or any submit with no retry policy) that will recur
+    identically on every future run. True ONLY when a retryable 409 (see
+    ``_submit_is_retryable_409``) persisted through every attempt of a
+    configured ``SearchSubmitRetryPolicy``'s budget. Reconstructing this
+    from ``str(exc)`` is exactly the fragile-string-matching this field
+    replaces — callers must read the typed attribute, never the message.
     """
+
+    def __init__(self, message: str, *, retry_exhausted: bool = False) -> None:
+        super().__init__(message)
+        self.retry_exhausted = retry_exhausted
+
+
+@dataclass(frozen=True)
+class SearchSubmitRetryPolicy:
+    """Bounded retry for a transient slskd search-SUBMIT rejection (#1090).
+
+    2026-08-12 root cause: a ~3s burst of 49/50 unfindable-probe submits
+    got HTTP 409 when slskd's underlying Soulseek connection reset and
+    reconnected — while slskd sits in ``Connected, LoggingIn``,
+    Soulseek.NET's ``SearchAsync`` guard throws, and slskd's
+    ``SearchesController`` maps that to 409. This is NOT slskd's rate
+    limiter (``SearchRequestLimiter`` returns 429, never 409), so no other
+    HTTP status is ever retried by this policy — widening it would paper
+    over a genuinely different failure mode.
+
+    ``max_attempts`` counts the FIRST attempt: ``max_attempts=3`` allows up
+    to 2 retries. ``backoff_s`` supplies the wait before each retry (index
+    0 = wait before retry #1); the last entry repeats once attempts exceed
+    the schedule length.
+
+    ``mint_ledgered_search_id`` is called before every RETRY (never the
+    first attempt — the caller already ledgered the id in its
+    ``submit_kwargs``) to mint a fresh search id and record it via
+    ``db.record_search_id`` BEFORE the retried POST. This preserves the
+    write-ahead invariant (issue #576, I2) per attempt, mirroring
+    ``cratedigger.py::_submit_plan_search``'s existing per-attempt ledger
+    write for the parallel pipeline's own (separate) submit-retry loop.
+
+    ``server_ready`` is an ADVISORY pre-retry check (typically
+    ``SlskdClient.server.state()``) that FLOORS (never zeroes) the wait once
+    slskd reports it reconnected — a "ready" reading shortens the wait to a
+    small fixed floor rather than skipping it outright, so a WRONG readiness
+    reading (a race between the probe and the actual reconnect) degrades to
+    "retried a bit sooner than the full backoff" instead of "retried
+    immediately, 3 POSTs within milliseconds" (issue #1090 NON-BLOCKING-3).
+    An absent, false, or raising probe falls back to the full fixed backoff.
+    The bounded retry — not the probe — is the load-bearing mechanism; a
+    SLOW probe still adds its own latency per retry, so production gives it
+    a short dedicated timeout independent of the main HTTP client's (see
+    ``lib.slskd_client.SlskdServerApi.state``).
+    """
+
+    mint_ledgered_search_id: Callable[[], str]
+    max_attempts: int = 3
+    # Paired with the default max_attempts=3 -- exactly 2 retries ever
+    # happen (indices 0, 1), so the default schedule has exactly 2
+    # entries. A caller raising max_attempts should also extend
+    # backoff_s; the last entry repeats past its own length rather than
+    # padding with an unreachable value here (issue #1090 F5).
+    backoff_s: tuple[float, ...] = (2.0, 5.0)
+    server_ready: Callable[[], bool] | None = None
+
+
+def _submit_is_retryable_409(exc: BaseException) -> bool:
+    """True for slskd's transient mid-reconnect 409 (issue #1090).
+
+    Deliberately narrow: checks the real ``requests.HTTPError.response
+    .status_code`` shape via ``getattr`` (no ``requests`` import needed
+    here) so a 429 rate-limit response, a network error, or any other
+    submit failure is never silently retried by this policy.
+    """
+    response = getattr(exc, "response", None)
+    return getattr(response, "status_code", None) == 409
 
 
 @dataclass
@@ -170,6 +255,7 @@ def execute_search(
     delete: bool,
     clock_fn: Callable[[], float] | None = None,
     sleep_fn: Callable[[float], None] | None = None,
+    submit_retry: SearchSubmitRetryPolicy | None = None,
 ) -> SearchExecutionResult:
     """Run the full slskd search lifecycle for one search.
 
@@ -187,6 +273,13 @@ def execute_search(
     Exception contract:
       * Submit failure raises :class:`SearchSubmitError` before any poll runs,
         so the caller can classify it as non-consuming.
+      * ``submit_retry.mint_ledgered_search_id`` (when the policy is
+        supplied) is called OUTSIDE the try/except that classifies slskd
+        submit exceptions — a DB failure while minting a retry id
+        propagates UNWRAPPED, never as ``SearchSubmitError``. This mirrors
+        the write-ahead ledger's existing "DB-down is cycle-fatal, never
+        silently swallowed" contract elsewhere (``cratedigger.py::
+        _submit_plan_search``'s identical carve-out).
       * A state-poll exception is absorbed by the watchdog loop (it breaks and
         proceeds to a best-effort harvest) — the loop must be resilient to run
         the #212 watchdog at all.
@@ -199,6 +292,13 @@ def execute_search(
 
     ``clock_fn`` / ``sleep_fn`` are injected for test determinism; production
     callers omit them.
+
+    ``submit_retry`` (issue #1090) is an OPTIONAL bounded retry for a
+    transient slskd search-submit 409 — see :class:`SearchSubmitRetryPolicy`.
+    Defaults to ``None``, which submits exactly once (byte-identical
+    pre-#1090 behaviour); only the unfindable probe opts in today. Ignored
+    entirely in pre-submitted mode (``search_id`` given) — there is no
+    submit phase to retry.
     """
     clock = clock_fn or time.monotonic
     sleep = sleep_fn or time.sleep
@@ -209,12 +309,69 @@ def execute_search(
             raise ValueError(
                 "execute_search requires submit_kwargs when search_id is None"
             )
-        try:
-            submitted = slskd_client.searches.search_text(**submit_kwargs)
-        except Exception as exc:
-            raise SearchSubmitError(
-                f"slskd search submission failed: {exc}"
-            ) from exc
+        # Bounded submit retry (issue #1090): ``submit_retry=None`` submits
+        # exactly once and raises ``SearchSubmitError`` on any exception —
+        # byte-identical to pre-#1090 behaviour. A non-409 exception (first
+        # attempt or any retry) also raises immediately without consuming
+        # the remaining attempt budget; only a 409 (see
+        # ``_submit_is_retryable_409``) is ever retried.
+        kwargs = dict(submit_kwargs)
+        attempts = 1 if submit_retry is None else max(1, submit_retry.max_attempts)
+        for attempt in range(attempts):
+            try:
+                submitted = slskd_client.searches.search_text(**kwargs)
+                break
+            except Exception as exc:
+                is_last_attempt = attempt >= attempts - 1
+                is_retryable_409 = _submit_is_retryable_409(exc)
+                if submit_retry is None or is_last_attempt or not is_retryable_409:
+                    # retry_exhausted (issue #1090 BLOCKING-1): True ONLY
+                    # when a retryable 409 persisted through the FULL
+                    # attempt budget -- the one TRANSIENT-connectivity
+                    # shape a circuit breaker should ever count. Every
+                    # other raise here (a 429, a 400, a network error, or
+                    # any submit with no policy at all) is a DETERMINISTIC
+                    # per-row rejection that will recur identically on
+                    # every future run and must NOT accumulate toward a
+                    # breaker trip.
+                    raise SearchSubmitError(
+                        f"slskd search submission failed: {exc}",
+                        retry_exhausted=(
+                            submit_retry is not None
+                            and is_last_attempt
+                            and is_retryable_409
+                        ),
+                    ) from exc
+                wait = submit_retry.backoff_s[
+                    min(attempt, len(submit_retry.backoff_s) - 1)
+                ]
+                ready = False
+                if submit_retry.server_ready is not None:
+                    try:
+                        ready = bool(submit_retry.server_ready())
+                    except Exception:  # noqa: BLE001 - advisory probe never blocks the retry
+                        ready = False
+                # A "ready" reading FLOORS the wait rather than zeroing it
+                # (issue #1090 NON-BLOCKING-3) -- a race between this probe
+                # and the actual reconnect must degrade to "sooner than the
+                # full backoff", never to "no wait at all".
+                effective_wait = (
+                    min(wait, SUBMIT_RETRY_READY_FLOOR_S) if ready else wait
+                )
+                logger.warning(
+                    "slskd search submit got 409 (mid-reconnect); "
+                    "retrying attempt %d/%d (server_ready=%s, wait=%.1fs)",
+                    attempt + 2, attempts, ready, effective_wait,
+                )
+                if effective_wait > 0:
+                    sleep(effective_wait)
+                kwargs = dict(kwargs)
+                kwargs["id"] = submit_retry.mint_ledgered_search_id()
+        else:
+            raise AssertionError(
+                "execute_search submit-retry loop exited without "
+                "returning or raising"
+            )
         search_id = submitted["id"]
 
     # Wait for slskd to process the search. Searches go through:

@@ -23,12 +23,14 @@ import msgspec
 import requests
 
 from lib.slskd_client import (
+    SLSKD_SERVER_READINESS_TIMEOUT_S,
     DownloadDirectory,
     DownloadUser,
     SlskdClient,
     SlskdDownloadDirectoryCompleteEvent,
     SlskdDownloadFileCompleteEvent,
     SlskdRawEvent,
+    SlskdServerState,
     TransferSnapshot,
     decode_download_directory_complete,
     decode_download_file_complete,
@@ -497,6 +499,90 @@ class TestApplicationEndpoint(SlskdClientTestCase):
         self.set_fixture("GET", "/application/version", "0.24.5")
 
         self.assertEqual(self.client.application.version(), "0.24.5")
+
+
+class TestServerEndpoint(SlskdClientTestCase):
+    """``GET /api/v0/server`` readiness reader (issue #1090)."""
+
+    def test_state_uses_short_dedicated_timeout(self):
+        """NON-BLOCKING-4: the readiness GET must NOT inherit the client's
+        full HTTP timeout (120s default, 30s for the unfindable-detection
+        client) -- a hung /server would otherwise add up to that much
+        latency PER submit retry. Seam test on ``_client._request`` (our
+        own typed method, not ``requests.Session.request``'s stub) so the
+        replacement's signature matches exactly."""
+        self.set_fixture(
+            "GET", "/server", {"isConnected": True, "isLoggedIn": True})
+        captured: dict[str, float | None] = {}
+        original_request = self.client._request
+
+        def _capture(
+            method: str,
+            path: str,
+            *,
+            params: dict[str, object] | None = None,
+            json_body: object | None = None,
+            timeout: float | None = None,
+        ) -> requests.Response:
+            captured["timeout"] = timeout
+            return original_request(
+                method, path, params=params, json_body=json_body,
+                timeout=timeout,
+            )
+
+        self.client._request = _capture
+
+        self.client.server.state()
+
+        self.assertEqual(captured["timeout"], SLSKD_SERVER_READINESS_TIMEOUT_S)
+        self.assertNotEqual(captured["timeout"], self.client._timeout)
+
+    def test_state_decodes_connected_and_logged_in(self):
+        self.set_fixture(
+            "GET", "/server",
+            {"isConnected": True, "isLoggedIn": True, "version": "0.24.5"},
+        )
+
+        state = self.client.server.state()
+
+        self.assertIsInstance(state, SlskdServerState)
+        self.assertTrue(state.is_connected)
+        self.assertTrue(state.is_logged_in)
+        self.assertEqual(self.last_request()["method"], "GET")
+
+    def test_state_decodes_mid_reconnect_window(self):
+        """A mid-reconnect ``Connected, LoggingIn`` state — the exact
+        window that produces the transient 409 (issue #1090)."""
+        self.set_fixture(
+            "GET", "/server",
+            {"isConnected": True, "isLoggedIn": False},
+        )
+
+        state = self.client.server.state()
+
+        self.assertTrue(state.is_connected)
+        self.assertFalse(state.is_logged_in)
+
+    def test_state_missing_fields_default_false(self):
+        """An unrecognised/empty payload degrades to "not ready" via the
+        Struct's field defaults, never a decode crash."""
+        self.set_fixture("GET", "/server", {})
+
+        state = self.client.server.state()
+
+        self.assertFalse(state.is_connected)
+        self.assertFalse(state.is_logged_in)
+
+    def test_wire_type_drift_raises_validation_error(self):
+        # RED-boundary guard per code-quality rules: a bool-typed field
+        # arriving as a string must fail loudly at the decode site.
+        self.set_fixture(
+            "GET", "/server",
+            {"isConnected": "true", "isLoggedIn": True},
+        )
+
+        with self.assertRaises(msgspec.ValidationError):
+            self.client.server.state()
 
 
 class TestPoolSizing(unittest.TestCase):

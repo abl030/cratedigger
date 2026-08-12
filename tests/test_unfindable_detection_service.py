@@ -34,13 +34,16 @@ from typing import Any, ClassVar
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from lib.search_exec import SearchSubmitError
 from lib.unfindable_detection_service import (
     ARTIST_MATCH_THRESHOLD,
     CATEGORY_ALBUM_ABSENT_ARTIST_PRESENT,
     CATEGORY_ARTIST_ABSENT,
     CATEGORY_ONE_TRACK_STRUCTURAL,
     CATEGORY_WRONG_PRESSING_AVAILABLE,
+    CIRCUIT_BREAKER_CONSECUTIVE_SUBMIT_FAILURES,
     PROBE_INTERVAL_DAYS,
+    PROBE_SUBMIT_RETRY_BACKOFF_S,
     REQUIRED_ZERO_FIND_CYCLES,
     RESULT_CATEGORISED,
     RESULT_DOWNGRADED,
@@ -59,6 +62,7 @@ from lib.unfindable_detection_service import (
     run_artist_probe,
 )
 from tests.fakes import FakePipelineDB, FakeSlskdAPI
+from tests.helpers import make_requests_http_error
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -360,6 +364,63 @@ class TestRunArtistProbe(unittest.TestCase):
         ledgered = self.db.record_search_id_calls[0]
         self.assertEqual(ledgered.purpose, "artist_probe")
         self.assertEqual(ledgered.request_id, 7)
+
+    def test_409_then_success_retries_and_reledgers_before_recording(self) -> None:
+        """Issue #1090 pin (a): a transient 409 on the first submit
+        attempt retries once and succeeds -- the probe records exactly
+        once, with the count from the SUCCESSFUL attempt, and the retry
+        mints + ledgers its OWN fresh search id (write-ahead invariant,
+        per attempt -- issue #576 I2)."""
+        slskd = FakeSlskdAPI()
+        slskd.searches.search_text_error_sequence = [
+            make_requests_http_error("conflict", status_code=409),
+        ]
+        # The retry (the first NON-raising call) gets this fixed id so
+        # the test can pre-register its harvest without predicting the
+        # production-minted uuid4.
+        slskd.searches.search_text_id_sequence = [99]
+        slskd.searches.add_search(
+            search_id=99, state="Completed",
+            responses=[{"username": "peer",
+                        "files": [{"filename": "/Russian-Winters/t.flac"}]}],
+            response_count=17,
+        )
+        probe = run_artist_probe(
+            slskd, artist_name="Russian Winters", db=self.db,
+            request_id=7, poll_sleep=self._noop,
+        )
+        self.assertEqual(probe.match_count, 17)
+        self.assertTrue(probe.artist_observed)
+        self.assertEqual(len(slskd.searches.search_text_calls), 2)
+        # Write-ahead ledger: the initial attempt PLUS the one retry,
+        # both tagged for this probe/request -- exactly once each, not
+        # merged or skipped.
+        self.assertEqual(len(self.db.record_search_id_calls), 2)
+        for ledgered in self.db.record_search_id_calls:
+            self.assertEqual(ledgered.purpose, "artist_probe")
+            self.assertEqual(ledgered.request_id, 7)
+
+    def test_empty_artist_name_never_posts_and_raises_plain_value_error(
+        self,
+    ) -> None:
+        """Issue #1090 BLOCKING-1: an empty/NULL ``artist_name`` must never
+        submit a blank slskd search (mirrors ``cratedigger.py::
+        _submit_plan_search``'s ``if not query`` guard) -- and the raised
+        exception must be a plain ``ValueError``, NOT ``SearchSubmitError``,
+        so a deterministic per-row condition like this can never be
+        misclassified as a transient submit failure that counts toward the
+        batch's circuit breaker."""
+        slskd = FakeSlskdAPI()
+        with self.assertRaises(ValueError) as caught:
+            run_artist_probe(
+                slskd, artist_name="", db=self.db, request_id=7,
+                poll_sleep=self._noop,
+            )
+        self.assertNotIsInstance(caught.exception, SearchSubmitError)
+        # No POST, no write-ahead ledger write -- the guard fires before
+        # either side effect.
+        self.assertEqual(slskd.searches.search_text_calls, [])
+        self.assertEqual(self.db.record_search_id_calls, [])
 
     def test_delete_failure_still_returns_probe_result(self) -> None:
         """A failed cleanup DELETE must not fail the probe (pre-#466 the probe
@@ -718,6 +779,58 @@ class TestUnfindableDetectionService(unittest.TestCase):
         self.assertEqual(self.db.set_unfindable_category_calls, [])
         self.assertIn("ProbeDegradedError", result.error_message or "")
 
+    def test_submit_409_exhausts_retry_budget_records_nothing(self) -> None:
+        """Issue #1090 pin (b): 409 on every submit attempt exhausts the
+        probe's own bounded retry budget -- RESULT_PROBE_FAILED with
+        ZERO writes to the candidate row, the same conservative rule as
+        any other probe failure. ``submit_retry_exhausted`` is the typed
+        discriminator that makes this outcome (and ONLY this outcome)
+        breaker-eligible.
+
+        NON-BLOCKING-5: composes the incident's exact readiness state
+        (isConnected=True, isLoggedIn=False -- mid-reconnect, still
+        logging in) so the retry honours the FULL backoff schedule
+        rather than the zero-wait branch a wrongly-ready default would
+        silently take. Driven end-to-end through the REAL production
+        ``run_artist_probe``/``execute_search`` via a probe_runner that
+        only injects the poll_sleep test-determinism seam (a legitimate
+        DI seam, not a stub of the retry logic itself)."""
+        rid = _seed_wanted_request(self.db)
+        self.slskd.server.set_ready(is_connected=True, is_logged_in=False)
+        self.slskd.searches.search_text_error = make_requests_http_error(
+            "conflict", status_code=409)
+        sleeps: list[float] = []
+
+        def _probe_with_recorded_sleep(
+            client: FakeSlskdAPI, *, artist_name: str, db: FakePipelineDB,
+            request_id: int | None = None,
+        ) -> ArtistProbeResult:
+            return run_artist_probe(
+                client, artist_name=artist_name, db=db,
+                request_id=request_id, poll_sleep=sleeps.append,
+            )
+
+        svc = UnfindableDetectionService(
+            self.db, self.slskd, probe_runner=_probe_with_recorded_sleep)
+        result = svc.categorise_request(rid)
+        self.assertEqual(result.outcome, RESULT_PROBE_FAILED)
+        self.assertTrue(result.submit_retry_exhausted)
+        self.assertEqual(self.db.record_artist_probe_calls, [])
+        self.assertEqual(self.db.set_unfindable_category_calls, [])
+        self.assertIn("SearchSubmitError", result.error_message or "")
+        # The probe's own retry budget attempted 3 submits before giving up.
+        self.assertEqual(len(self.slskd.searches.search_text_calls), 3)
+        # Not-ready -> the full backoff schedule is honoured (2 retries
+        # between 3 attempts), never floored/zeroed. Isolate backoff-
+        # magnitude sleeps (>=1.0) from the unrelated #242 settle-poll
+        # sleep a harvest phase would issue (none here -- every attempt
+        # fails at submit, before any poll/harvest runs).
+        self.assertEqual(
+            [s for s in sleeps if s >= 1.0], list(PROBE_SUBMIT_RETRY_BACKOFF_S))
+        row = self.db.request(rid)
+        self.assertIsNone(row["unfindable_category"])
+        self.assertIsNone(row["last_artist_probe_at"])
+
     def test_cadence_independent_of_plan_cursor(self) -> None:
         """next_plan_ordinal stays unchanged across a categorisation."""
         now = datetime.now(UTC)
@@ -757,7 +870,9 @@ class TestUnfindableDetectionService(unittest.TestCase):
 
         probe = _StubProbe(match_count=0)
         svc = self._service(probe, now=now)
-        results = svc.categorise_due_batch(limit=10)
+        batch = svc.categorise_due_batch(limit=10)
+        self.assertFalse(batch.breaker_tripped)
+        results = batch.results
 
         rids_processed = [r.request_id for r in results]
         # Fresh row not included.
@@ -854,7 +969,9 @@ class TestUnfindableDetectionService(unittest.TestCase):
         svc = UnfindableDetectionService(
             self.db, self.slskd, probe_runner=probe,
         )
-        results = svc.categorise_due_batch(limit=10)
+        batch = svc.categorise_due_batch(limit=10)
+        self.assertFalse(batch.breaker_tripped)
+        results = batch.results
         # Both rows produced an outcome — the crash didn't drop the
         # second row.
         outcomes = {r.request_id: r.outcome for r in results}
@@ -864,6 +981,95 @@ class TestUnfindableDetectionService(unittest.TestCase):
             sum(1 for r in results if r.outcome == RESULT_PROBE_FAILED),
             1,
         )
+
+    def test_breaker_trips_after_consecutive_submit_failures(self) -> None:
+        """Issue #1090 pin (c): after
+        ``CIRCUIT_BREAKER_CONSECUTIVE_SUBMIT_FAILURES`` consecutive
+        submit-failure outcomes -- each a genuine budget-exhausted 409,
+        ``retry_exhausted=True`` -- the batch stops early. Candidates
+        never attempted are left byte-untouched and excluded from
+        ``batch.results`` -- they simply roll into the next daily run.
+        """
+        rids = [
+            _seed_wanted_request(self.db, artist_name=f"Artist{i}")
+            for i in range(5)
+        ]
+        # Snapshot the trailing (never-attempted) rows BEFORE the run.
+        untouched_before = {
+            rid: dict(self.db.request(rid)) for rid in rids[3:]
+        }
+
+        def _always_submit_failure(
+            _client: object, *, artist_name: str, **_kw: object,
+        ) -> ArtistProbeResult:
+            raise SearchSubmitError(
+                "simulated sustained slskd outage", retry_exhausted=True)
+
+        svc = UnfindableDetectionService(
+            self.db, self.slskd, probe_runner=_always_submit_failure,
+        )
+        batch = svc.categorise_due_batch(limit=10)
+
+        self.assertTrue(batch.breaker_tripped)
+        self.assertEqual(batch.candidates_considered, 5)
+        self.assertEqual(
+            len(batch.results), CIRCUIT_BREAKER_CONSECUTIVE_SUBMIT_FAILURES,
+        )
+        for r in batch.results:
+            self.assertEqual(r.outcome, RESULT_PROBE_FAILED)
+        attempted_ids = {r.request_id for r in batch.results}
+        # The last two candidates were never attempted at all.
+        self.assertFalse(attempted_ids & set(rids[3:]))
+        for rid in rids[3:]:
+            self.assertEqual(
+                dict(self.db.request(rid)), untouched_before[rid],
+                msg=f"request {rid} row mutated despite never being attempted",
+            )
+        # And none of the writers that would prove an attempt fired.
+        self.assertEqual(self.db.record_artist_probe_calls, [])
+        self.assertEqual(self.db.set_unfindable_category_calls, [])
+
+    def test_breaker_does_not_trip_on_deterministic_non_409_failures(
+        self,
+    ) -> None:
+        """Issue #1090 BLOCKING-1 regression pin: THREE consecutive
+        DETERMINISTIC failures (a 429 rate-limit on every submit -- never
+        retried, never "budget exhausted") must NOT trip the circuit
+        breaker. Pre-fix, the breaker counted every ``SearchSubmitError``
+        regardless of cause: three rows that always 429 (or always 400,
+        or have an empty ``artist_name``) would trip the breaker at 3/N
+        EVERY DAY FOREVER, since a failed probe never advances
+        ``last_artist_probe_at`` and the candidate query sorts NULLS
+        FIRST -- cohort drain would drop to 0/day permanently. Driven
+        through the REAL production ``run_artist_probe``/
+        ``execute_search`` (default probe_runner) so the typed
+        ``retry_exhausted`` discriminator is exercised end-to-end, not
+        just stubbed at the service layer.
+        """
+        rids = [
+            _seed_wanted_request(self.db, artist_name=f"Artist{i}")
+            for i in range(5)
+        ]
+        self.slskd.searches.search_text_error = make_requests_http_error(
+            "rate limited", status_code=429)
+        svc = UnfindableDetectionService(self.db, self.slskd)
+        batch = svc.categorise_due_batch(limit=10)
+
+        # The breaker must NOT trip -- the WHOLE batch is attempted,
+        # exactly matching pre-#1090 behaviour for this failure shape.
+        self.assertFalse(batch.breaker_tripped)
+        self.assertEqual(len(batch.results), 5)
+        self.assertEqual(batch.candidates_considered, 5)
+        attempted_ids = {r.request_id for r in batch.results}
+        self.assertEqual(attempted_ids, set(rids))
+        for r in batch.results:
+            self.assertEqual(r.outcome, RESULT_PROBE_FAILED)
+            self.assertFalse(r.submit_retry_exhausted)
+        # 429 is never retried -- exactly one submit attempt per candidate.
+        self.assertEqual(len(self.slskd.searches.search_text_calls), 5)
+        # Conservative rule holds regardless of failure kind.
+        self.assertEqual(self.db.record_artist_probe_calls, [])
+        self.assertEqual(self.db.set_unfindable_category_calls, [])
 
 
 # ---------------------------------------------------------------------------
@@ -1053,7 +1259,9 @@ class TestR20CursorIsolation(unittest.TestCase):
             return per_artist_probe[artist_name]
 
         svc = UnfindableDetectionService(db, slskd, probe_runner=_probe)
-        results = svc.categorise_due_batch(limit=100)
+        batch = svc.categorise_due_batch(limit=100)
+        self.assertFalse(batch.breaker_tripped)
+        results = batch.results
         # Sanity: every seeded request got an outcome.
         rids_seen = {r.request_id for r in results}
         self.assertEqual(
