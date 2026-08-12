@@ -146,6 +146,11 @@ def assert_operation_fence(
         # A genuine, positively-captured success. Nothing ambiguous to fence.
         return
     if final_status == IMPORT_JOB_RECOVERY_REQUIRED:
+        # Fail-closed legislation (#1094 clause audit): no current writer
+        # creates ``recovery_required``, and a planted revival is refused
+        # upstream by ``validate_automation_terminal_authority`` before this
+        # clause can see it. Kept so a future writer that bypasses that
+        # validation fails loudly here instead of parking silently.
         raise AssertionError(
             f"{job_type} ambiguous Beets operation parked at "
             "'recovery_required' — CLAUDE.md invariant 11 forbids a state "
@@ -160,6 +165,14 @@ def assert_operation_fence(
         raise AssertionError("ambiguous Beets operation became claimable")
     row = db.request(request_id)
     if job_type == IMPORT_JOB_AUTOMATION:
+        # Fail-closed legislation (#1094 clause audit) for the request-status
+        # and owner-pointer clauses immediately below (NOT the audit-row
+        # clause after them, which an importer-side mutant does reach): both
+        # are decided by the terminal SQL ``_finish_processing_request_last``,
+        # which this module stands in for, and every importer-side mutant that
+        # declares a non-wanted edge is refused first by
+        # ``validate_automation_terminal_authority``. They patrol the DB-layer
+        # writer, not this drive path.
         if row["status"] != "wanted":
             raise AssertionError(
                 f"automation self-heal left request status {row['status']!r}, "
@@ -248,6 +261,11 @@ def assert_non_automation_failure_lifecycle(
         row for row in db.download_logs if row.id == source_download_log_id
     )
     if job_type == IMPORT_JOB_YOUTUBE and origin.outcome != "youtube_success":
+        # Fail-closed legislation (#1094 clause audit): the canonical handoff
+        # is written by ``lib/youtube_ingest_service.py``, which no world here
+        # executes — the driver enqueues through the same atomic DB command
+        # the service uses. Kept so a future ingest path that enqueues an
+        # import without promoting its origin row fails loudly.
         raise AssertionError("YouTube import did not use the canonical handoff")
     failed = [
         row for row in db.download_logs
@@ -257,9 +275,20 @@ def assert_non_automation_failure_lifecycle(
     if len(failed) != 1:
         raise AssertionError("non-automation failure did not write one audit row")
     if failed[0].source != origin.source:
+        # Fail-closed legislation (#1094 clause audit): the terminal INSERT
+        # COALESCEs ``source`` out of the origin row and sets
+        # ``source_download_log_id`` from the same subquery, so today the two
+        # cannot disagree — dropping the origin trips the clause above first.
+        # Kept so a future writer that defaults ``source`` by job type while
+        # keeping the link fails loudly.
         raise AssertionError("terminal audit source drifted from its origin")
     audit = db.get_download_log_entry(failed[0].id)
     if audit is None:
+        # Fail-closed legislation (#1094 clause audit): the audit row is
+        # written inside the terminal transaction against the locked request
+        # and its foreign key keeps the joined request alive, so the read-back
+        # cannot miss. Kept so a bundle that reports an id it did not commit
+        # fails loudly instead of rendering nothing in Recents.
         raise AssertionError("linked terminal audit disappeared")
     rendered = classify_log_entry(LogEntry.from_row(dict(audit)))
     expected_prefix = (
@@ -728,8 +757,10 @@ class TestGeneratedImportOperationFence(unittest.TestCase):
                     authorized, status, invocations, replay_claimed, db = (
                         _exercise_world(world, beets=self.beets)
                     )
-                    self.assertFalse(authorized)
-                    self.assertEqual(invocations, [])
+                    # The fence checker runs FIRST: the narrow assertions
+                    # below are a superset of its "Beets ran without exact
+                    # current authority" clause, and running them first
+                    # masked that clause's own message (#1094 Q2).
                     assert_operation_fence(
                         job_type=job_type,
                         authorized=authorized,
@@ -738,6 +769,8 @@ class TestGeneratedImportOperationFence(unittest.TestCase):
                         replay_claimed=replay_claimed,
                         db=db,
                     )
+                    self.assertFalse(authorized)
+                    self.assertEqual(invocations, [])
 
     def test_definitely_not_started_recovery_may_retry(self) -> None:
         for job_type in (
