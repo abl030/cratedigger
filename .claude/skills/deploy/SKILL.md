@@ -416,6 +416,20 @@ and metadata-gate-watchdog timers plus every metadata-gate-guarded service. It
 records only the control links, manual hold, and main/YouTube start inhibitors
 it created.
 
+`acquire` masks and stops the three timers, then drains the producers (main,
+unfindable, watchdog, YouTube ingest) and waits — bounded, separately from the
+overall service-drain timeout — for the still-running importer/preview to
+empty the automation queue, **before** taking the metadata-gate manual hold
+that stops the controlled workers (#1078). Taking the hold first would stop
+the very workers that drain the queue, deadlocking against the old-lifecycle
+preflight below. `active_automation_jobs`/`dirty_downloading_rows` drain this
+way; `recovery_required_jobs`/`malformed_enqueued_at_rows` are anomalies
+nothing drains, so they still fail immediately once the hold is taken.
+`cratedigger-youtube-ingest` has no timer and an operator can start
+`cratedigger.service` by hand, so `acquire` owns a temporary start inhibitor
+for both across the whole drain-and-wait window, releasing it once the gate
+hold is active.
+
 Run the reviewed helper on doc2 through Python stdin so the pre-switch host does
 not need this revision deployed already:
 
@@ -426,10 +440,10 @@ DEPLOY_HOLD="$CRATEDIGGER_REPO/scripts/cratedigger_deploy_hold.py"
 CYCLE_VERIFY="$CRATEDIGGER_REPO/scripts/verify_cratedigger_cycle.sh"
 
 # Before fleet-deploy: prove the independently deployed main/YouTube
-# controlled-start prerequisite, acquire authoritative masks and stable
-# quiescence, query the old live schema, and abort under the hold unless
-# automation jobs/recovery rows/staged downloading rows/malformed enqueued_at
-# witnesses are all zero.
+# controlled-start prerequisite, drain producers and the automation queue,
+# take authoritative masks and the gate hold, and query the old live schema --
+# failing under the strict hold unless automation jobs/recovery rows/staged
+# downloading rows/malformed enqueued_at witnesses are all zero.
 env -u SSH_AUTH_SOCK ssh doc2 'sudo python3 - acquire' < "$DEPLOY_HOLD"
 ```
 
@@ -570,12 +584,27 @@ helper phase fails closed on an unexpected phase, stale downstream
 controlled-start contract, dirty old lifecycle, pre-existing unowned
 hold/link/inhibitor, changed owned object, surviving job, or wrong invocation
 ID. On failure, leave the receipt and remaining masks/inhibitors in place and
-inspect the exact reported boundary. Rerun an interrupted `acquire`; after a
-failed release phase, return safely to the strict boundary with
+inspect the exact reported boundary. Rerun an interrupted `acquire` directly
+-- it resumes from whatever it already owns, including a bounded queue-drain
+wait interrupted mid-poll. After a failed release phase, return safely to the
+strict boundary with
 `env -u SSH_AUTH_SOCK ssh doc2 'sudo python3 - recover-held' < "$DEPLOY_HOLD"` before restarting
 release. Rerun an interrupted `complete` to finish its atomic retired-receipt
 cleanup. Do not remove `/run/cratedigger-deploy-hold` or its
-`system.control` links by hand; they are the recovery ownership record. See
+`system.control` links by hand; they are the recovery ownership record.
+
+If `acquire` cannot or should not reach HELD -- an anomaly preflight field
+(`recovery_required_jobs`/`malformed_enqueued_at_rows`, nothing drains them),
+a stale controlled-start contract, or a SIGINT/dropped SSH/reboot that left
+the receipt stranded partway through -- `recover-held` cannot help: it
+re-proves the identical, unfixable preconditions. Use
+`env -u SSH_AUTH_SOCK ssh doc2 'sudo python3 - abort' < "$DEPLOY_HOLD"`
+instead: it releases every object the receipt owns (gate hold, start
+inhibitors, timer masks), restarts what that ownership implies it stopped,
+and removes the receipt -- returning to ordinary, unheld operation. It is
+safe from every known receipt phase and never touches an object it did not
+own; it is the one command in this module you run to walk away from a hold
+rather than advance or re-prove it. See
 `docs/solutions/deployment/authoritative-systemd-deploy-holds.md`.
 
 ## Database migrations

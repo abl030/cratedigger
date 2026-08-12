@@ -44,6 +44,30 @@
   exact waiting/running jobs without ever masking a service, and releases in
   controlled-cycle then ordinary-successor stages. Invocation proof remains
   owned by `scripts/verify_cratedigger_cycle.sh`.
+- **`acquire` masks the three timers and drains `PRODUCER_SERVICE_UNITS`
+  (main, unfindable, watchdog, YouTube ingest) — letting any in-flight main
+  cycle finish and, bounded by its own shorter timeout, waiting for the
+  still-running importer/preview to drain the automation queue — before it
+  ever takes the metadata-gate manual hold that stops the controlled workers
+  (#1078).** Taking the hold first would stop the very workers that drain the
+  queue, deadlocking against the old-lifecycle preflight this hold exists to
+  prove clean. `active_automation_jobs`/`dirty_downloading_rows` are
+  drainable this way; `recovery_required_jobs`/`malformed_enqueued_at_rows`
+  are anomalies nothing drains, so they still fail fast once the hold is
+  taken. `cratedigger-youtube-ingest` has no timer and an operator can start
+  `cratedigger.service` by hand, so `acquire` owns a temporary start
+  inhibitor for both across the whole drain-and-wait window, releasing it
+  once the gate hold is active.
+- **`abort` releases every object the receipt owns and removes the
+  receipt, returning to ordinary (unheld) operation — the only way out of an
+  acquire that cannot or will never reach HELD** (an anomaly preflight field,
+  a stale controlled-start contract, or a SIGINT/dropped SSH/reboot mid-run).
+  It is safe from every known receipt phase and never touches an object it
+  did not own. `recover-held` remains the tool for re-establishing the strict
+  boundary after a failed *release* phase; it does not get you out of a hold
+  that should never have been acquired in the first place. Do not remove
+  `/run/cratedigger-deploy-hold` or its `system.control` links by hand —
+  `abort` is the documented alternative.
 - Always derive the active cratedigger wrapper from `systemctl show cratedigger.service --property=ExecStart --value`, extract its exact `*-source` path from the wrapper, and verify the unique source string there; never glob historical store generations, which can produce a false positive. For module changes, inspect `systemctl cat cratedigger.service` and the wrapper's exact immutable `--config` store path.
 - Before deploying changes to `nix/module.nix`, run the VM check: `nix build .#checks.x86_64-linux.moduleVm`.
 - **Every `nix flake update nixpkgs` in cratedigger must re-run the real-beets drift gate** (`tests/test_harness_beets2_contract.py` inside the re-pinned shell, plus the full suite): the repository lock is Cratedigger's last verified standalone reference snapshot. `scripts/daily_flake_update.sh` updates only that node. `scripts/daily_beets_tip_update.sh` separately updates only the checks-only tip node under the same state lock; neither runner supplies the deployment-owned Beets runtime package.
