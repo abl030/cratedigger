@@ -11,37 +11,56 @@ T1  The query is ANCHORED to exactly one release id, and the assignment
     irrelevant — pinned directly.
 T2  A ready outcome (the caller may rekey) is returned only when the
     library is observably at the new id, or holds neither id.
-T3  **``modify``'s exit status is not evidence, in either direction.** It
-    prints "No changes to make." and skips a query that matches nothing,
-    still exit 0 — exactly as ``mbsync`` logged and skipped an unfetchable
-    release. So a clean exit without observable movement is a FAILURE; and
-    a nonzero exit with observable movement is a success.
+T3  **``modify``'s exit status is not evidence, in either direction.** A
+    query matching NOTHING raises ``UserError`` and exits 1
+    (``beets/ui/commands/utils.py::do_query`` + ``beets/ui/__init__.py``'s
+    top-level handler) — not 0. The genuine exit-0-without-movement case is
+    a query that MATCHES but changes nothing: ``modify_items`` prints "No
+    changes to make." and returns, still exit 0. Either way, a subprocess
+    exit code read against a shared SQLite file another process can
+    concurrently mutate is never itself an observation of the end state —
+    so a clean exit without observable movement is a FAILURE, and a
+    nonzero exit with observable movement is a success.
 T4  Both sides held is the double-sided merge: fail closed, never retag.
     Merging or deleting either album is the operator's call (invariant 5).
 T5  An unreadable or incomplete Beets authority is a failure, never
     "absent". Reading it as absence would authorize a rekey that
     manufactures a duplicate pressing.
 T6  **The real primitive moves the identity on the ALBUM row AND every
-    ITEM row — this is the whole point of #1087.** #1075 shipped with every
-    test injecting the retag runner, so "real primitive x real merged
-    release" was never exercised, and the shipped primitive (``beet mbsync``)
-    turned out to be unable to follow a release-only merge at all (0/10
-    items mapped on the live request). Pinned against the REAL pinned Beets
-    in ``TestRealModifyRetagMovesEveryIdentity``, including the exact
-    mutant that would have shipped blind again: dropping ``-a``, which
-    leaves the ALBUM row behind while each ITEM's own ``mb_albumid`` moves
-    — a library silently split into disagreeing identity fields.
+    ITEM row — this is the whole point of #1087.** #1075 DID ship a
+    real-subprocess test (``TestRealMbsyncMovesIdentityNotFiles``, driving
+    the real ``beet mbsync`` over four real path-shape worlds) — a real
+    subprocess ran. What it never did was drive that subprocess over a
+    world SHAPED LIKE the failure: its fake ``album_for_id`` returned track
+    ids identical to the seeded items' ``mb_trackid``s, modelling a
+    RECORDING-PRESERVING merge, while the live failure is a RELEASE-ONLY
+    merge where every recording id changes. A real subprocess is
+    necessary, not sufficient — the fixture must be shaped like the
+    production world the invariant is about. Pinned against the REAL
+    pinned Beets in ``TestRealModifyRetagMovesEveryIdentity``, including
+    the exact mutant that a shape-blind test would still miss: dropping
+    ``-a``, which leaves the ALBUM row behind while each ITEM's own
+    ``mb_albumid`` moves — a library silently split into disagreeing
+    identity fields.
+T7  **An album with zero items is a real, reachable Beets state** — the
+    current-release resolver's authority query is a ``LEFT JOIN`` — and
+    ``resolve_current_releases`` classifies it ``CurrentBeetsAmbiguous``
+    (``reason="empty_topology"``), never ``CurrentBeetsUnique``. So
+    ``retag_merged_album`` refuses it exactly like any other ambiguous
+    topology, BEFORE ``beet modify`` ever runs: verified empirically
+    against the real resolver, not assumed (#1087 review).
 
 Most of the Beets read is driven by the repository's ``FakeBeetsDB``, whose
 current-release resolver is state-derived — so the injected ``modify``
 mutates the fake library exactly as the real command mutates the real one,
 and the REAL ``retag_merged_album`` re-reads it. ``run_modify`` is injected,
 never patched: it is a definition-time default, and patching the module
-binding does not replace a captured default. T6 is the exception: it composes
-the REAL ``retag_merged_album``, the REAL ``run_beets_modify_retag`` captured
-default, the REAL ``beet modify`` subprocess, and the REAL ``BeetsDB``
-resolver over one real temporary library, because the invariant is about what
-the command does to a shared filesystem namespace
+binding does not replace a captured default. T6 and T7 are the exception:
+they compose the REAL ``retag_merged_album``, the REAL
+``run_beets_modify_retag`` captured default, the REAL ``beet modify``
+subprocess, and the REAL ``BeetsDB`` resolver over one real temporary
+library, because the invariant is about what the command does to a shared
+filesystem namespace
 (`.claude/rules/code-quality.md` § "Invariants live at the widest boundary").
 """
 
@@ -203,7 +222,7 @@ class TestRetagQueryAndAssignmentAreAnchored(unittest.TestCase):
     def test_query_shape(self) -> None:
         self.assertEqual(
             retag_album_query(OLD),
-            f"mb_albumid::^{re.escape(MERGED)}$",
+            f"mb_albumid::^{re.escape(MERGED)}\\Z",
         )
 
     def test_the_regex_matches_only_the_exact_release_id(self) -> None:
@@ -215,6 +234,12 @@ class TestRetagQueryAndAssignmentAreAnchored(unittest.TestCase):
             MERGED + "0",
             "x" + MERGED,
             MERGED.replace("-", ""),
+            # #1087 review (F1): a bare trailing `$` also matches just
+            # before ONE trailing newline in non-MULTILINE Python regex,
+            # so an unrelated album whose stored id carries a stray
+            # newline would match too. `\Z` (not `$`) is why this case
+            # must stay rejected.
+            MERGED + "\n",
         ):
             with self.subTest(other=other):
                 self.assertIsNone(
@@ -366,8 +391,10 @@ class TestModifyExitStatusIsNotEvidence(unittest.TestCase):
     """T3 — the decisive pair. The library decides, the subprocess does not."""
 
     def test_clean_exit_without_movement_is_a_failure(self) -> None:
-        """``modify`` prints "No changes to make." and skips a query that
-        matches nothing and STILL exits 0. Trusting that exit code would
+        """A subprocess exit code, taken against a shared SQLite file
+        another process can concurrently mutate, is never itself an
+        observation of the end state — ``modify`` can exit 0 on a query
+        that matched but changed nothing. Trusting that exit code would
         rekey the request while the library is still filed under the
         merged-away id — the exact state that makes the next import land a
         second album."""
@@ -582,24 +609,75 @@ INSTALLED_ARTIST = "Installed Artist"
 INSTALLED_ALBUM = "Installed Album"
 INSTALLED_YEAR = 1999
 
-#: The finite world space this module's generated sibling patrols: how many
-#: items one album carries. The live DICE "Midnight Zoo" merge (#1087) that
-#: motivated this fix carried 10.
-ITEM_COUNTS: tuple[int, ...] = (1, 2, 10)
+#: The finite, CERTIFIED world space this module's generated sibling
+#: patrols: not a sample, but one representative of each equivalence class
+#: the primitive's own composition can actually put a real album in.
+#:
+#: 0  — the empty-item album. Reachable in real Beets via the
+#:      current-release resolver's ``LEFT JOIN`` (``lib/beets_db.py``):
+#:      ``resolve_current_releases`` classifies it ``CurrentBeetsAmbiguous``
+#:      (``reason="empty_topology"``), so ``retag_merged_album`` refuses it
+#:      BEFORE ``beet modify`` ever runs (T7) — a genuinely different code
+#:      path from every other count, verified empirically (#1087 review).
+#: 1  — the smallest world where the retag actually reaches ``modify`` and
+#:      ``Album.store(inherit=True)``'s ``for item in self.items(): ...``
+#:      loop (``beets/library/models.py:593-628``) iterates at all.
+#: 2  — the smallest world that can prove this module's OWN per-item
+#:      checks (``all(...)``/``len(...)`` over independent items) actually
+#:      iterate every item rather than accidentally passing on an
+#:      index-0-only check that a singleton album could never distinguish
+#:      from correct. Every count above 2 repeats the identical code path
+#:      per item with no cross-item interaction in either the primitive or
+#:      the checker, so 2 already represents every "many" world.
+#: The deterministic pin at item_count=10 (the live DICE "Midnight Zoo"
+#: shape) lives outside this generated domain — see
+#: ``TestRealModifyRetagMovesEveryIdentity``.
+ITEM_COUNTS: tuple[int, ...] = (0, 1, 2)
 
 
 def _installed_dir(root: Path) -> Path:
     return root / INSTALLED_ARTIST / f"{INSTALLED_YEAR} - {INSTALLED_ALBUM}"
 
 
+def _make_real_mp3(path: Path) -> None:
+    """A genuine, taggable minimal MP3 — the nix-shell environment's own
+    ffmpeg (`.claude/rules/nix-shell.md`), not a synthetic byte string.
+    Only the ``-W`` falsifiability test needs this; every other world in
+    this module uses cheap placeholder bytes, since they never ask beets to
+    write a tag."""
+    sp.run(
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=0.08",
+            "-c:a", "libmp3lame", "-b:a", "32k", str(path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+
 def _seed_real_modify_world(
-    base: Path, *, item_count: int,
+    base: Path, *, item_count: int, real_audio: bool = False,
 ) -> tuple[Path, Path, int]:
     """Build one real Beets world: config, library DB, files.
 
     No plugin or metadata-source stub is needed here — unlike the
     ``mbsync`` primitive this replaces, ``beet modify`` never calls
     MusicBrainz; it needs no candidate mapping at all.
+
+    ``item_count == 0`` builds the album row through one real seeded item,
+    then deletes exactly that item's row (``with_album=False``, so the
+    album row survives) and its file — beets' own ``LEFT JOIN`` current-
+    release authority read proves an album row can genuinely outlive every
+    one of its items, so the primitive's composition must be exercised
+    against that world too, not merely assumed to handle it (T7).
+
+    ``real_audio`` writes a genuine, taggable minimal MP3 (via ffmpeg)
+    instead of placeholder bytes. Only the ``-W`` falsifiability test needs
+    it — a synthetic byte string is not valid audio, so a real
+    ``item.try_write()`` attempt against one fails closed with a parse
+    error before touching the file, which would make a dropped ``-W``
+    unfalsifiable by file mtime (#1087 review, F5a).
     """
     root = base / "library"
     root.mkdir()
@@ -610,9 +688,13 @@ def _seed_real_modify_world(
     album_dir.mkdir(parents=True)
     track_paths: list[Path] = []
     track_ids: list[str] = []
-    for ordinal in range(1, item_count + 1):
+    seed_count = max(item_count, 1)
+    for ordinal in range(1, seed_count + 1):
         track_path = album_dir / f"{ordinal:02d} Installed {ordinal}.mp3"
-        track_path.write_bytes(b"installed audio")
+        if real_audio:
+            _make_real_mp3(track_path)
+        else:
+            track_path.write_bytes(b"installed audio")
         track_paths.append(track_path)
         track_ids.append(f"{ordinal:08x}-1111-4111-8111-111111111111")
     (album_dir / SIDECAR_NAME).write_text(
@@ -654,10 +736,16 @@ def _seed_real_modify_world(
         )
     ]
     lib = beets_library.Library(str(library_db), str(root))
+    # add_album refuses an empty item list, so item_count == 0 seeds one
+    # real item to construct the album row, then deletes exactly that item.
     album = lib.add_album(items)
     if album.id is None:
         raise AssertionError("seeded Beets album is missing its database id")
     album_id = album.id
+    if item_count == 0:
+        for item in list(album.items()):
+            item.remove(delete=False, with_album=False)
+        track_paths[0].unlink()
     lib._close()
 
     runtime_config = base / "config.ini"
@@ -693,6 +781,38 @@ def _run_modify_without_album_flag(
         [
             python, "-m", "beets", "modify",
             "-M", "-W", "-y", query, assignment,
+        ],
+        capture_output=True,
+        timeout=RETAG_TIMEOUT_SECONDS,
+        env=env,
+        check=False,
+    )
+    return ModifyRetagRun(
+        returncode=proc.returncode,
+        stdout=proc.stdout.decode("utf-8", errors="replace"),
+        stderr=proc.stderr.decode("utf-8", errors="replace"),
+    )
+
+
+def _run_modify_without_nowrite_flag(
+    query: str, assignment: str,
+) -> ModifyRetagRun:
+    """The F5a mutant: the exact primitive minus ``-W``.
+
+    Run for real, against a real TAGGABLE library file (never the
+    placeholder bytes the other fixtures use) — ``import.write: true`` in
+    the fixture config matches the deployed default, so without ``-W`` this
+    calls ``item.try_write()`` for real, observable as a genuine mtime
+    change rather than only inferred from the argv literal.
+    """
+    from lib.util import beets_subprocess_env
+
+    env = beets_subprocess_env()
+    python = env["CRATEDIGGER_BEETS_PYTHON"]
+    proc = sp.run(
+        [
+            python, "-m", "beets", "modify",
+            "-a", "-M", "-y", query, assignment,
         ],
         capture_output=True,
         timeout=RETAG_TIMEOUT_SECONDS,
@@ -771,11 +891,22 @@ def check_real_modify_retag_moved_every_identity(
 ) -> None:
     """Criterion 3 (#1087) — the real primitive moves ``mb_albumid`` on the
     ALBUM row AND every ITEM row, and touches nothing else in the library.
+    For ``item_count >= 1`` only — an empty-item album never reaches
+    ``modify`` at all; see :func:`check_real_modify_retag_refuses_empty_topology`.
 
     Module level so the known-bad mutant test can call it directly — this is
     exactly the composition #1075 never exercised: every prior test injected
-    the retag runner, so nothing ever proved a real primitive could move a
-    real id.
+    the retag runner, so a real subprocess never proved it could move a real
+    id over a world shaped like the failing production merge (T6).
+
+    The relocation loop below is honest about its own limit: ``-M`` is
+    belt-and-braces (see :data:`lib.beets_retag.RETAG_NOMOVE_FLAG`), not
+    something this fixture's path templates make reachable — ``mb_albumid``
+    names no path component, so a dropped ``-M`` mutant is NOT expected to
+    trip this check; only the argv-literal seam test
+    (``TestRunBeetsModifyRetagSeam``) pins ``-M``'s presence. What this loop
+    DOES patrol for real: that the retag never moves a file for any OTHER
+    reason on the current, real path configuration.
     """
     if observation.result.outcome != RETAG_RETAGGED:
         raise AssertionError(
@@ -794,8 +925,6 @@ def check_real_modify_retag_moved_every_identity(
         raise AssertionError(
             f"an item went missing during the retag: {observation.item_mb_albumids!r}"
         )
-    if not observation.item_paths:
-        raise AssertionError("no item paths were observed")
     # Compared against the FIXED expected shape, never against the observed
     # paths themselves — otherwise a world where every file relocated
     # together (all items agreeing on a new, wrong directory) would pass by
@@ -809,7 +938,7 @@ def check_real_modify_retag_moved_every_identity(
             raise AssertionError(
                 f"beet modify RELOCATED an installed file to {path!r}: the "
                 "retag follows an identity change, it does not reorganise "
-                "the library (missing -M/--nomove)"
+                "the library"
             )
     if SIDECAR_NAME not in observation.installed_dir_entries:
         raise AssertionError(
@@ -823,14 +952,42 @@ def check_real_modify_retag_moved_every_identity(
         )
 
 
+def check_real_modify_retag_refuses_empty_topology(
+    observation: RealModifyObservation,
+) -> None:
+    """T7 (#1087 review) — an empty-item album is a real Beets state, and
+    the composed ``retag_merged_album`` fails closed on it exactly like any
+    other ambiguous topology, BEFORE ``beet modify`` ever runs.
+
+    Module level so the known-bad self-test can call it directly.
+    """
+    if observation.result.outcome != RETAG_AMBIGUOUS:
+        raise AssertionError(
+            f"an empty-item album did not fail closed: {observation.result!r}"
+        )
+    if observation.album_mb_albumid != MERGED:
+        raise AssertionError(
+            "the ALBUM row moved despite the fail-closed outcome: "
+            f"{observation.album_mb_albumid!r}"
+        )
+    if observation.item_mb_albumids:
+        raise AssertionError(
+            f"an empty-item album unexpectedly carries items: "
+            f"{observation.item_mb_albumids!r}"
+        )
+
+
 class TestRealModifyRetagMovesEveryIdentity(unittest.TestCase):
-    """T6 — the real command, composed with the real guard, real filesystem.
+    """T6/T7 — the real command, composed with the real guard, real
+    filesystem.
 
     Every other test in this file stands the retag runner down to a stub
-    that mutates a dict. #1075 shipped exactly that blind spot: the
-    interface contract (returns a ``RetagOutcome``) was tested; whether a
-    real primitive can move a real id never was — and the shipped primitive
-    (``beet mbsync``) turned out unable to.
+    that mutates a dict. #1075 DID ship a real-subprocess test — a real
+    ``beet mbsync`` ran over four real path-shape worlds — but its fake
+    metadata source modelled a RECORDING-PRESERVING merge, when the live
+    failure is a RELEASE-ONLY merge where every recording id changes. A
+    real subprocess is necessary, not sufficient: the fixture must be
+    shaped like the failing production world.
     """
 
     def test_the_real_primitive_moves_the_album_and_every_item(self) -> None:
@@ -839,6 +996,14 @@ class TestRealModifyRetagMovesEveryIdentity(unittest.TestCase):
         observation = observe_real_modify_retag(10)
 
         check_real_modify_retag_moved_every_identity(observation)
+
+    def test_an_empty_item_album_fails_closed_before_modify_runs(self) -> None:
+        """T7 — a real, reachable Beets state (an album row surviving its
+        last item's deletion) is refused by the composed guard, never
+        retagged."""
+        observation = observe_real_modify_retag(0)
+
+        check_real_modify_retag_refuses_empty_topology(observation)
 
     def test_dropping_the_album_flag_leaves_a_split_library(self) -> None:
         """The criterion-4 mutant. Real subprocess: drop ``-a``. ``modify``
@@ -858,6 +1023,45 @@ class TestRealModifyRetagMovesEveryIdentity(unittest.TestCase):
         self.assertNotIn(observation.result.outcome, RETAG_READY_OUTCOMES)
         self.assertEqual(observation.album_mb_albumid, MERGED)
         self.assertEqual(observation.item_mb_albumids, (SURVIVOR,) * 3)
+
+    def test_dropping_the_nowrite_flag_writes_tags_to_the_real_file(
+        self,
+    ) -> None:
+        """F5a (#1087 review) — ``-W`` is falsifiable by real behaviour, not
+        only by the argv-literal seam pin. Drop ``-W`` for real against a
+        genuinely taggable audio file: ``import.write: true`` (the fixture's
+        pinned default, matching the deployed config) takes over, and
+        ``modify`` calls ``item.try_write()`` on the matched item —
+        observable as a changed mtime on synthetic-but-real audio, unlike
+        the placeholder bytes every other test in this module uses (which a
+        real write attempt fails to parse, closed, before touching the
+        file — making the drop unfalsifiable by mtime against them)."""
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            root, library_db, _album_id = _seed_real_modify_world(
+                base, item_count=1, real_audio=True,
+            )
+            track_path = next(_installed_dir(root).glob("*.mp3"))
+            before_mtime_ns = track_path.stat().st_mtime_ns
+
+            with patch.dict(
+                os.environ,
+                {"CRATEDIGGER_RUNTIME_CONFIG": str(base / "config.ini")},
+                clear=False,
+            ), BeetsDB(str(library_db), library_root=str(root)) as beets:
+                result = retag_merged_album(
+                    beets, old_identity=OLD, new_identity=NEW,
+                    run_modify=_run_modify_without_nowrite_flag,
+                )
+
+            after_mtime_ns = track_path.stat().st_mtime_ns
+
+        self.assertEqual(result.outcome, RETAG_RETAGGED)
+        self.assertNotEqual(
+            before_mtime_ns, after_mtime_ns,
+            "dropping -W left the real audio file untouched — the mutant "
+            "was not killed by real behaviour",
+        )
 
 
 if __name__ == "__main__":

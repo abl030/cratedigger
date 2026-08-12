@@ -50,7 +50,7 @@ Cratedigger has exactly three Beets mutation lanes:
 2. An explicitly operator-authorized library deletion resolves one exact Beets
    album primary key and drives the exact-album delete child.
 3. The import-time MusicBrainz merge retag runs `beet modify -a -M -W -y`
-   under an anchored `mb_albumid::^<old-id>$` query and a `mb_albumid=<new-id>`
+   under an anchored `mb_albumid::^<old-id>\Z` query and a `mb_albumid=<new-id>`
    assignment (`lib/beets_retag.py`), from inside whichever importer lane
    holds the request's exact import claim — the automation processing owner,
    or a claimed force-import job (#1080). Issue #1087 replaced the original
@@ -69,13 +69,28 @@ load-bearing:
   each item's own `mb_albumid` moves while the ALBUM row's does not, leaving
   the library split into disagreeing identity fields.
 - **Identity only, never a tag write, never layout.** `-M` (`--nomove`) and
-  `-W` (`--nowrite`) are mandatory. `modify` otherwise honours `import.move` /
-  `import.write` — which the config contract pins to `yes` — and would
-  relocate the album whenever the merge changed a path component (minting new
-  Jellyfin item identities, since identity is a hash of the path; risking the
-  documented Plex album-split footgun; pruning the vacated directory's
-  `clutter`, which includes the `cratedigger.json` verified-lossless sidecar)
-  or write mismatched tags to disk while the DB already reports success.
+  `-W` (`--nowrite`) are mandatory; `modify` otherwise honours `import.move` /
+  `import.write`, which the config contract pins to `yes`. `-W` is the one
+  that matters today: without it `modify` calls `item.try_write()` on every
+  matched file, rewriting tags to disk while the DB already reports success
+  — a divergence the DB-only post-retag guard cannot see. `-M` is
+  belt-and-braces rather than something reachable right now: `mb_albumid` is
+  in no path template (`$albumartist`, `$year`, `$album`, and the
+  `%aunique` disambiguator all derive from other fields), so retagging it
+  alone cannot itself relocate a file under the current path configuration.
+  It stays because `modify -a` with `-M` dropped would relocate the album on
+  any FUTURE config that makes `mb_albumid` path-relevant — minting new
+  Jellyfin item identities (identity is a hash of the path), risking the
+  documented Plex album-split footgun, and pruning the vacated directory's
+  `clutter`, which includes the `cratedigger.json` verified-lossless
+  sidecar — and there is no cost to keeping the flag now. The accepted
+  residual of `-W`: if the import later rejects, installed files stay
+  tagged with the merged-away id while the beets DB already holds the
+  survivor. That divergence is dormant — `beet update` skips any item whose
+  on-disk mtime has not advanced past what the DB recorded
+  (`beets/ui/commands/update.py`), so an untouched file set is never
+  re-read as stale — and it self-corrects the next time a successful import
+  replaces the album.
 - **One album.** The regex is anchored, so it can only name albums filed under
   exactly the merged-away release id.
 - **Only on `mbid_not_found`, only under an exact import claim**, and only

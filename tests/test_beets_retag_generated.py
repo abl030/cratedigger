@@ -30,14 +30,24 @@ G3  The query handed to ``modify`` always names the OLD identity and the
     wrong-album mutation at worst.
 G4  Both sides held never returns a ready outcome. Two installed albums that
     MusicBrainz now calls one release is the operator's decision.
-G5  Over every item-count the real album can carry, the REAL ``beet modify``
-    subprocess moves ``mb_albumid`` on the ALBUM row AND every ITEM row —
-    the property patrolling the T6 pin. No fake in this repository models a
-    real subprocess mutating a real library, which is exactly how the
-    predecessor primitive's total inability to follow a release-only merge
-    (#1087) survived implementation, review, and the whole suite. The
-    domain is finite and certified: one world per item count the fixture
-    can carry.
+G5  Over every certified item-count EQUIVALENCE CLASS, the REAL composed
+    ``retag_merged_album`` behaves correctly — the property patrolling the
+    T6/T7 pins. No fake in this repository models a real subprocess
+    mutating a real library, which is exactly how the predecessor
+    primitive's total inability to follow a release-only merge (#1087)
+    survived implementation, review, and the whole suite. The domain is
+    finite and CERTIFIED, not sampled: ``ITEM_COUNTS`` in
+    ``tests/test_beets_retag.py`` is one representative per genuine
+    equivalence class (0 items — the empty-topology fail-closed branch,
+    verified to be a real reachable Beets state, not merely assumed;
+    1 item — the smallest world where ``modify`` actually runs; 2 items —
+    the smallest world proving this module's own per-item checks iterate
+    every item rather than passing on an index-0-only check a singleton
+    album could not distinguish from correct), with the argument recorded
+    beside the constant. Every count above 2 repeats the identical
+    per-item code path with no cross-item interaction, so sampling more of
+    them would add subprocess cost without adding coverage — the opposite
+    of capping an arbitrary strategy because examples repeated.
 """
 
 from __future__ import annotations
@@ -83,6 +93,7 @@ from tests.test_beets_retag import (
     SURVIVOR,
     RealModifyObservation,
     check_real_modify_retag_moved_every_identity,
+    check_real_modify_retag_refuses_empty_topology,
     library,
     observe_real_modify_retag,
 )
@@ -407,21 +418,34 @@ class TestRetagProperties(unittest.TestCase):
 
 
 def _verify_item_count_domain() -> None:
-    """Prove the G5 domain: one world per distinct item count."""
-    if len(set(ITEM_COUNTS)) != len(ITEM_COUNTS):
-        raise AssertionError("item-count domain collapsed: a count repeats")
-    if len(ITEM_COUNTS) != 3:
+    """Independently prove the domain is EXACTLY the three certified
+    equivalence-class representatives — not a re-statement of the
+    literal's own length (`.claude/rules/code-quality.md`: never infer
+    finiteness from a green report or cap an arbitrary strategy because
+    examples repeated).
+
+    The classes, and why no fourth is needed, are recorded beside
+    ``ITEM_COUNTS`` in ``tests/test_beets_retag.py``: 0 is a structurally
+    distinct code path (fails closed on ``empty_topology`` before ``beet
+    modify`` ever runs); 1 is the smallest world where the primitive
+    actually runs; 2 is the smallest "many" world, and every count above 2
+    repeats that identical per-item code path with no cross-item
+    interaction in either the primitive or this module's own per-item
+    checks.
+    """
+    if set(ITEM_COUNTS) != {0, 1, 2}:
         raise AssertionError(
-            f"the item-count domain changed cardinality: {ITEM_COUNTS!r}"
+            "item-count domain is not exactly the three certified "
+            f"equivalence-class representatives {{0, 1, 2}}: {ITEM_COUNTS!r}"
         )
 
 
 class TestRealModifyRetagMovesEveryIdentityOverItemCounts(unittest.TestCase):
     """G5 — the real command over the whole finite item-count domain.
 
-    Each world runs the REAL ``beet modify`` subprocess once (memoised by
-    ``observe_real_modify_retag``), so the budget is exactly the certified
-    cardinality no matter which tier schedules this module.
+    Each world runs the REAL composed ``retag_merged_album`` once (memoised
+    by ``observe_real_modify_retag``), so the budget is exactly the
+    certified cardinality no matter which tier schedules this module.
     """
 
     @finite_generated_domain(
@@ -430,12 +454,18 @@ class TestRealModifyRetagMovesEveryIdentityOverItemCounts(unittest.TestCase):
     @given(item_count=st.sampled_from(ITEM_COUNTS))
     @example(item_count=ITEM_COUNTS[0])
     @example(item_count=ITEM_COUNTS[-1])
-    def test_every_item_count_moves_the_album_and_every_item(
+    def test_every_item_count_behaves_correctly(
         self, item_count: int,
     ) -> None:
-        check_real_modify_retag_moved_every_identity(
-            observe_real_modify_retag(item_count),
-        )
+        observation = observe_real_modify_retag(item_count)
+        if item_count == 0:
+            # T7 — a real, reachable empty-item album fails closed BEFORE
+            # `beet modify` ever runs; it is not the same outcome class as
+            # every other count, and asserting `moved_every_identity` here
+            # would be asserting a world the composition cannot produce.
+            check_real_modify_retag_refuses_empty_topology(observation)
+        else:
+            check_real_modify_retag_moved_every_identity(observation)
 
 
 class TestInvariantCheckersTripOnViolations(unittest.TestCase):
@@ -585,9 +615,32 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             ))
         self.assertIn("not every ITEM", str(caught.exception))
 
+    def test_an_empty_topology_that_actually_retagged_is_rejected(self) -> None:
+        """T7's self-test: a would-be world where the empty-item album
+        somehow reports ``retagged`` — the composed guard must never reach
+        this, but the checker must still be provably falsifiable."""
+        with self.assertRaises(AssertionError) as caught:
+            check_real_modify_retag_refuses_empty_topology(self._real_observation(
+                album_mb_albumid=SURVIVOR, outcome=RETAG_RETAGGED,
+                item_count=0, item_mb_albumids=(),
+            ))
+        self.assertIn("did not fail closed", str(caught.exception))
+
+    def test_an_empty_topology_with_leftover_items_is_rejected(self) -> None:
+        with self.assertRaises(AssertionError) as caught:
+            check_real_modify_retag_refuses_empty_topology(self._real_observation(
+                album_mb_albumid=MERGED, outcome=RETAG_AMBIGUOUS,
+                item_count=0, item_mb_albumids=(MERGED,),
+            ))
+        self.assertIn("unexpectedly carries items", str(caught.exception))
+
     def test_checkers_accept_the_legitimate_retag(self) -> None:
         """Must-still-work: a real successful retag passes every checker."""
         check_real_modify_retag_moved_every_identity(self._real_observation())
+        check_real_modify_retag_refuses_empty_topology(self._real_observation(
+            album_mb_albumid=MERGED, outcome=RETAG_AMBIGUOUS,
+            item_count=0, item_mb_albumids=(),
+        ))
         check_ready_only_when_rekeyable(
             RETAG_RETAGGED,
             old_after=self._missing(OLD),

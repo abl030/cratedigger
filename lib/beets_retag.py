@@ -31,10 +31,12 @@ by query. It has no equivalent failure mode, and it makes no network call.
 Five properties are load-bearing:
 
 * **The query names one album.** :func:`retag_album_query` anchors the regex
-  so it can only ever name albums filed under exactly the old ID. ``beet
-  modify`` retags everything its query matches, so an unanchored or
-  substring query is the difference between one album and part of the
-  library.
+  with ``^`` and ``\\Z`` — NOT a trailing ``$`` — so it can only ever name
+  albums filed under exactly the old ID. ``beet modify`` retags everything
+  its query matches, so an unanchored or substring query is the difference
+  between one album and part of the library; ``$`` would additionally have
+  matched a stored value carrying one trailing newline, which ``\\Z`` does
+  not (#1087 review; see the function docstring for the mechanism).
 * **``-a`` targets Albums, not Items — and that is what makes the identity
   move on both.** ``beets/ui/commands/modify.py::modify_parse_args``
   classifies each argument by CONTENT, not position: a token is an
@@ -63,10 +65,15 @@ Five properties are load-bearing:
   DB already says the retag landed — a divergence the guard would report as
   success. ``-W`` makes the effect exactly one ``Album.store()`` transaction:
   it lands or it doesn't.
-* **``modify``'s exit status is not evidence.** ``modify_items`` prints "No
-  changes to make." and returns — still exit 0 — whenever its query matches
-  nothing, exactly as ``mbsync`` did on a release it could not fetch. Nothing
-  about the subprocess decides the outcome; the re-read library does.
+* **``modify``'s exit status is not evidence.** A query that matches NOTHING
+  raises ``UserError("No matching albums found.")``
+  (``beets/ui/commands/utils.py::do_query``), which the CLI entry point maps
+  to exit 1 — not 0. The genuine exit-0-without-movement case is a query
+  that MATCHES but produces no field change: ``modify_items`` prints "No
+  changes to make." and returns, still exit 0. Either way, a subprocess exit
+  code read against a shared SQLite file another process can concurrently
+  mutate is never itself an observation of the end state — the re-read
+  library is.
 * **An unreadable Beets authority is never absence.** A resolver that omits
   an identity, or raises, is a failure — never "the album is not held".
   Reading it as absence would authorize a rekey that manufactures a
@@ -121,8 +128,12 @@ RETAG_ALBUM_FLAG: Final = "-a"
 #: ``action="store_false", dest="move"``, and ``beets/ui/__init__.py::
 #: should_move`` returns that explicit ``False`` instead of falling back to
 #: ``import.move or import.copy`` (which our config contract pins to True).
-#: This flag is load-bearing, not a tidiness preference: we are following an
-#: identity change, not reorganising the library.
+#: Belt-and-braces, not something the current config makes reachable:
+#: ``mb_albumid`` is in no path template, so retagging it alone cannot
+#: itself relocate a file today. Kept because a future path-template or
+#: config change that made ``mb_albumid`` path-relevant would otherwise
+#: silently start reorganising the library under a merge follow, and there
+#: is no cost to keeping the flag now.
 RETAG_NOMOVE_FLAG: Final = "-M"
 
 #: ``-W`` is ``--nowrite``: forces ``should_write`` to return ``False``
@@ -167,8 +178,11 @@ class ModifyRetagRun:
     """What one ``beet modify`` retag invocation reported.
 
     Kept for the diagnostic detail only. ``returncode`` is deliberately NOT a
-    decision input: ``modify`` prints "No changes to make." and still exits 0
-    when its query matches nothing.
+    decision input: a query matching nothing exits 1 (``UserError``), but a
+    query that MATCHES and produces no field change still prints "No changes
+    to make." and exits 0 — and either way, an exit code read against a
+    shared SQLite file another process can concurrently mutate is not itself
+    evidence of the end state.
     """
 
     returncode: int
@@ -230,17 +244,28 @@ def retag_album_query(identity: ReleaseIdentity) -> str:
     """The anchored Beets query naming exactly the album filed under ``identity``.
 
     ``beet modify`` retags everything the query matches, so the regex is
-    anchored: ``mb_albumid::^<escaped-id>$`` cannot match a longer id that
+    anchored: ``mb_albumid::^<escaped-id>\\Z`` cannot match a longer id that
     merely contains this one. An unanchored or substring query is the
     difference between retagging one album and retagging part of the
     library.
+
+    The end anchor is ``\\Z``, never a bare ``$``. Beets compiles the
+    pattern with plain ``re.compile`` (no flags) and matches via
+    ``pattern.search()`` — both the Python fallback and the SQLite
+    ``regexp()`` UDF (``beets/dbcore/query.py::RegexpQuery``,
+    ``beets/dbcore/db.py::Database.add_functions``). Without ``re.MULTILINE``,
+    a trailing ``$`` matches at the true end of the string OR immediately
+    before ONE trailing newline — so ``^<old-id>$`` would additionally match
+    an ``mb_albumid`` of ``"<old-id>\\n"`` on an unrelated album, silently
+    retagging it onto an id that is not its own (#1087 review; reproduced
+    live). ``\\Z`` matches only the true end of the string, so it does not.
     """
     if identity.source != "musicbrainz":
         raise ValueError(
             "retag query is MusicBrainz-only; refusing to build a query for "
             f"{identity.source} release {identity.release_id}"
         )
-    return f"mb_albumid::^{re.escape(identity.release_id)}$"
+    return f"mb_albumid::^{re.escape(identity.release_id)}\\Z"
 
 
 def retag_assignment(identity: ReleaseIdentity) -> str:
@@ -458,10 +483,11 @@ def retag_merged_album(
                 old_identity.release_id, run.returncode, run.stderr.strip()[-500:],
             )
 
-    # The exit status decided nothing; the re-read library does. This is the
-    # whole reason the outcome is not derived from the subprocess: modify
-    # prints "No changes to make." and skips a query that matches nothing,
-    # and still exits 0.
+    # The exit status decided nothing; the re-read library does. A query
+    # matching nothing exits 1 (UserError); a query that matches but changes
+    # nothing prints "No changes to make." and exits 0 — and either way, an
+    # exit code read against a shared SQLite file another process can
+    # concurrently mutate is not itself evidence of the end state.
     reresolved = _resolve_pair(beets, old_identity, new_identity)
     if isinstance(reresolved, str):
         return _failed(f"{modify_note}; {reresolved}")
