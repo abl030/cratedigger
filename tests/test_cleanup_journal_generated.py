@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 import unittest
 from dataclasses import dataclass
@@ -25,6 +26,21 @@ from lib.pipeline_db import (
 TEST_DSN = os.environ["TEST_DB_DSN"]
 GuardMutation = Literal["none", "owner_blind", "revision_blind"]
 
+# Per-clause proof (#1094). Every clause of ``assert_owner_revision_guard``
+# is named here so a self-test can anchor on that clause's own message rather
+# than a substring a sibling could also satisfy.
+CLAUSE_FOREIGN_MUTATION = (
+    "cleanup journal mutated without exact owner and revision"
+)
+CLAUSE_EXACT_REFUSED = (
+    "exact owner and revision did not admit its checkpoint"
+)
+
+
+def _exact_clause(message: str) -> str:
+    """Anchor a clause message so no sibling clause can satisfy the regex."""
+    return "^" + re.escape(message) + "$"
+
 
 @dataclass(frozen=True)
 class GuardWorld:
@@ -44,13 +60,9 @@ def assert_owner_revision_guard(
         or world.expected_revision_delta != 0
     )
     if guard_is_wrong and mutation_committed:
-        raise AssertionError(
-            "cleanup journal mutated without exact owner and revision"
-        )
+        raise AssertionError(CLAUSE_FOREIGN_MUTATION)
     if not guard_is_wrong and not mutation_committed:
-        raise AssertionError(
-            "exact owner and revision did not admit its checkpoint"
-        )
+        raise AssertionError(CLAUSE_EXACT_REFUSED)
 
 
 class TestCleanupJournalGenerated(unittest.TestCase):
@@ -107,6 +119,15 @@ class TestCleanupJournalGenerated(unittest.TestCase):
     @example(
         mutation="revision_blind",
         expected_revision_delta=-1,
+        progress_key="published",
+    )
+    # Pins the ONLY world that can fire ``CLAUSE_EXACT_REFUSED``: the exact
+    # owner at the exact revision. Measured at 6 / 150 in the gating `suite`
+    # tier before this pin, so any future edit to the property body could
+    # reshuffle it to zero and retire the clause silently (#1094 Q4).
+    @example(
+        mutation="none",
+        expected_revision_delta=0,
         progress_key="published",
     )
     @given(
@@ -185,35 +206,64 @@ class TestCleanupJournalGenerated(unittest.TestCase):
         else:
             self.assertEqual(persisted["step_progress"], {})
 
-    def test_checker_rejects_owner_blind_known_bad_mutant(self) -> None:
-        world = GuardWorld(
-            mutation="owner_blind",
-            expected_revision_delta=0,
-            progress_key="published",
-        )
-        with self.assertRaisesRegex(
-            AssertionError,
-            "without exact owner and revision",
-        ):
-            assert_owner_revision_guard(
-                world,
-                mutation_committed=True,
-            )
+    def test_every_guard_clause_has_a_named_world(self) -> None:
+        """One world per clause, anchored on that clause's own message.
 
-    def test_checker_rejects_revision_blind_known_bad_mutant(self) -> None:
-        world = GuardWorld(
-            mutation="revision_blind",
-            expected_revision_delta=-1,
-            progress_key="published",
+        Both historical known-bad self-tests asserted the substring
+        ``"without exact owner and revision"``, which only the
+        foreign-mutation clause can emit — so the exact-refusal clause had no
+        proof at all. Each row below is the minimal world that makes exactly
+        one clause's condition true.
+        """
+        cases: tuple[tuple[str, GuardWorld, bool, str], ...] = (
+            (
+                "owner_blind committed",
+                GuardWorld("owner_blind", 0, "published"),
+                True,
+                CLAUSE_FOREIGN_MUTATION,
+            ),
+            (
+                "revision_blind committed",
+                GuardWorld("revision_blind", -1, "published"),
+                True,
+                CLAUSE_FOREIGN_MUTATION,
+            ),
+            (
+                "stale revision committed under the exact owner",
+                GuardWorld("none", 1, "published"),
+                True,
+                CLAUSE_FOREIGN_MUTATION,
+            ),
+            (
+                "exact owner and revision refused",
+                GuardWorld("none", 0, "published"),
+                False,
+                CLAUSE_EXACT_REFUSED,
+            ),
         )
-        with self.assertRaisesRegex(
-            AssertionError,
-            "without exact owner and revision",
-        ):
-            assert_owner_revision_guard(
-                world,
-                mutation_committed=True,
-            )
+        for description, world, committed, message in cases:
+            with (
+                self.subTest(description),
+                self.assertRaisesRegex(
+                    AssertionError,
+                    _exact_clause(message),
+                ),
+            ):
+                assert_owner_revision_guard(
+                    world,
+                    mutation_committed=committed,
+                )
+
+    def test_guard_admits_the_only_two_correct_worlds(self) -> None:
+        """Must-still-work: neither clause fires on a correctly guarded world."""
+        assert_owner_revision_guard(
+            GuardWorld("none", 0, "published"),
+            mutation_committed=True,
+        )
+        assert_owner_revision_guard(
+            GuardWorld("owner_blind", 0, "published"),
+            mutation_committed=False,
+        )
 
 
 if __name__ == "__main__":
