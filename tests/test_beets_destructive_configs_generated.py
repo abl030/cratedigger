@@ -407,12 +407,16 @@ def exercise_real_beets_world(
             library_root=str(child_root),
         )
         child_env = {**os.environ, "BEETSDIR": str(child_config)}
+        # This is a hang backstop, not an assertion — under the parallel
+        # Hypothesis scheduler it once timed out at 30s (FlakyFailure) then
+        # passed on retry and in isolation (13.7s). 120s gives real headroom
+        # against scheduler contention without being a load-aware cap.
         child = sp.run(
             [sys.executable, str(REPO / "harness" / "delete_album.py")],
             input=msgspec.json.encode(request),
             capture_output=True,
             env=child_env,
-            timeout=30,
+            timeout=120,
             check=False,
         )
         outcome = msgspec.json.decode(child.stdout, type=BeetsDeleteOutcome)
