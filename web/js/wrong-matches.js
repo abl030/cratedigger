@@ -272,6 +272,13 @@ function renderWrongMatchExplorer(data) {
     ? data.unreadable_entry_count : 0;
   const unreadableReason = typeof data?.unreadable_reason === 'string'
     ? data.unreadable_reason : '';
+  // Structured, not string-sniffed (same rule as
+  // `partial_read_is_containment` on the Replace picker): `true` only
+  // when the SERVER classified the refusal as a containment decision —
+  // a symlink, socket, FIFO or device node — never derived by matching
+  // words in `unreadableReason`, which is free-text diagnostics (issue
+  // #1086).
+  const unreadableIsContainment = data?.unreadable_is_containment === true;
   const truncatedReason = typeof data?.truncated_reason === 'string' ? data.truncated_reason.replace(/_/g, ' ') : 'limit';
   // Two different reasons a listing is incomplete, and they must not be
   // told as one: a LIMIT stopped us, or the server was REFUSED. Issue
@@ -280,18 +287,32 @@ function renderWrongMatchExplorer(data) {
   const truncatedNotice = data?.truncated_reason
     ? `<div style="color:#e5a84b;font-size:0.76em;margin:6px 0;">Partial explorer result: ${esc(truncatedReason)} reached.</div>`
     : '';
-  // A refused listing describes a world the operator can REPAIR (fix the
-  // mode, remount the share), so the notice carries its own Retry. It
-  // rides on the NOTICE, not on the empty-state branch: a PARTIAL listing
-  // — some files read, some refused — renders the notice above a real
-  // track list and is exactly as repairable, but it answers
-  // ``status: "ok"`` and so never reached the empty branch (issue #1063).
+  // A WORLD-FAILURE refusal (EACCES, EIO, ESTALE, …) describes a state
+  // the operator can REPAIR (fix the mode, remount the share) and a
+  // plain reload might just see the fix, so the notice carries its own
+  // Retry. It rides on the NOTICE, not on the empty-state branch: a
+  // PARTIAL listing — some files read, some refused — renders the
+  // notice above a real track list and is exactly as repairable, but it
+  // answers ``status: "ok"`` and so never reached the empty branch
+  // (issue #1063). A CONTAINMENT refusal (a symlink, socket, FIFO or
+  // device node) gets no Retry: re-fetching the same name answers the
+  // same refusal every time — nothing short of the operator physically
+  // replacing the entry changes it, and that is a filesystem action, not
+  // a button click (issue #1086).
   const retryId = Number(data?.download_log_id);
-  const retry = Number.isFinite(retryId)
+  const retry = (Number.isFinite(retryId) && !unreadableIsContainment)
     ? ` <button class="p-btn" style="margin-left:6px;" onclick="event.stopPropagation(); window.reloadWrongMatchExplorer(${retryId})">Retry</button>`
     : '';
+  // The LEAD sentence must not say "could not be read" for a containment
+  // refusal — that phrasing implies a disk/permission problem a retry
+  // might clear, which is exactly the wording a security decision must
+  // never get (issue #1086 review). The containment/world distinction
+  // was previously visible ONLY in the parenthetical reason text.
+  const unreadableLead = unreadableIsContainment
+    ? `${unreadableCount} entr${unreadableCount === 1 ? 'y was' : 'ies were'} refused (not read) as a containment decision`
+    : `${unreadableCount} entr${unreadableCount === 1 ? 'y' : 'ies'} could not be read`;
   const unreadableNotice = unreadableCount > 0
-    ? `<div style="color:#d9a441;font-size:0.76em;margin:6px 0;">${unreadableCount} entr${unreadableCount === 1 ? 'y' : 'ies'} could not be read — this listing is incomplete and nothing here is confirmed missing.${unreadableReason ? ` (${esc(unreadableReason)})` : ''}${retry}</div>`
+    ? `<div style="color:#d9a441;font-size:0.76em;margin:6px 0;">${unreadableLead} — this listing is incomplete and nothing here is confirmed missing.${unreadableReason ? ` (${esc(unreadableReason)})` : ''}${retry}</div>`
     : '';
   const partialNotice = `${truncatedNotice}${unreadableNotice}`;
   let summary = '';
@@ -312,7 +333,9 @@ function renderWrongMatchExplorer(data) {
   }
   if (files.length === 0) {
     const emptyText = unreadableCount > 0
-      ? 'The server could not read this folder\u2019s contents, so no listing is available. This is NOT evidence that the folder is empty.'
+      ? (unreadableIsContainment
+          ? 'This folder\u2019s contents were refused (not read) as a containment decision, so no listing is available. This is NOT evidence that the folder is empty.'
+          : 'This folder\u2019s contents could not be read, so no listing is available. This is NOT evidence that the folder is empty.')
       : partial
         ? 'No audio files were found before exploration was truncated.'
         : 'No audio files found in this folder.';

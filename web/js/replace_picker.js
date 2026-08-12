@@ -634,6 +634,7 @@ const tracklistCache = new Map();
  * @property {string|null} [folder_path]
  * @property {number|null} [download_log_id]
  * @property {string|null} [partial_read]
+ * @property {boolean|null} [partial_read_is_containment]
  */
 
 /**
@@ -672,15 +673,38 @@ export function distanceIsPartial(best) {
 }
 
 /**
+ * Short, VISIBLE reason for an incomplete manifest.
+ *
+ * Branches on the structured ``partial_read_is_containment`` discriminator
+ * — never on the free-text ``partial_read`` message, which is human
+ * diagnostics and free to change (the same rule the server's own
+ * ``FilesystemAuthorityError.code`` follows, issue #868). A symlink or
+ * socket refusal is a containment DECISION, not a world failure, and the
+ * operator must not need to hover a tooltip to learn the difference — a
+ * correct server string behind copy nobody sees is the recurring defect
+ * this series keeps finding (issue #1086).
+ *
+ * @param {BeetsDistanceResult|null} best
+ * @returns {string}
+ */
+export function distanceIncompleteQualifier(best) {
+  if (!distanceIsPartial(best)) return '';
+  return best?.partial_read_is_containment === true
+    ? 'refused: symlink or special file'
+    : 'may be transient';
+}
+
+/**
  * Format a distance badge for the pressing-row meta line: `best 0.07 (12/12)`.
  *
  * Distance only — no folder path, that's a different surface (the
  * expanded-row breakdown will carry the per-download details). Returns
  * an empty string for null so callers can concatenate unconditionally.
  *
- * A partial read appends `· incomplete manifest`: the number is real but
- * it was computed over fewer local tracks than the folder holds, and a
- * bare score would state a completeness we did not earn (issue #1063).
+ * A partial read appends `· incomplete manifest (<reason>)`: the number
+ * is real but it was computed over fewer local tracks than the folder
+ * holds, and a bare score would state a completeness we did not earn
+ * (issue #1063) — the reason qualifier says WHY, honestly (issue #1086).
  *
  * @param {BeetsDistanceResult|null} best
  * @returns {string}
@@ -693,7 +717,8 @@ export function formatDistanceBadge(best) {
   const ratio = (typeof matched === 'number' && typeof total === 'number')
     ? ` (${matched}/${total})`
     : '';
-  const partial = distanceIsPartial(best) ? ' · incomplete manifest' : '';
+  const qualifier = distanceIncompleteQualifier(best);
+  const partial = qualifier ? ` · incomplete manifest (${qualifier})` : '';
   return `best ${best.distance.toFixed(2)}${ratio}${partial}`;
 }
 
@@ -945,8 +970,13 @@ function paintDistanceBadge(modal, mbid, best) {
     meta.appendChild(badge);
   }
   badge.textContent = text;
-  // Amber + the refusal itself on hover: the same vocabulary the Wrong
-  // Matches explorer uses for an incomplete listing (issue #1063).
+  // Amber, same vocabulary the Wrong Matches explorer uses for an
+  // incomplete listing (issue #1063). The WHICH — containment refusal
+  // vs. an ordinary world failure — is baked into `text` itself via
+  // `distanceIncompleteQualifier`, so it is visible without hovering
+  // (issue #1086); the title attribute adds the specific filename/detail
+  // for an operator who wants it, never the operator's only way to see
+  // the distinction.
   const partial = distanceIsPartial(best);
   badge.style.color = partial ? '#d9a441' : '';
   if (partial && best && typeof best.partial_read === 'string') {

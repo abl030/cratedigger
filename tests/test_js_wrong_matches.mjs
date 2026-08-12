@@ -1162,6 +1162,110 @@ console.log('renderWrongMatchExplorer() collapses shared album tags and hides re
   assert(!html.includes('replaygain_track_gain'), 'hides replaygain track tags');
 }
 
+console.log('renderWrongMatchExplorer() distinguishes a containment refusal from a world failure, visibly and without a futile Retry (issue #1086 review)');
+{
+  // A CONTAINMENT refusal (symlink/socket/FIFO/device node) alongside a
+  // readable track: `status: "ok"`, `files` non-empty. Re-fetching can
+  // never change a containment decision, so no Retry, and the lead
+  // sentence must not say "could not be read" — that phrasing is
+  // reserved for a world failure a retry might clear.
+  const containmentHtml = __test__.renderWrongMatchExplorer({
+    status: 'ok',
+    download_log_id: 900,
+    partial: true,
+    unreadable_entry_count: 1,
+    unreadable_reason: '02 - dirlink.flac: this is a symlink, refused '
+      + 'rather than followed out of the quarantine root (containment, '
+      + 'not a world failure)',
+    unreadable_is_containment: true,
+    audio_file_count: 1,
+    files: [{
+      relative_path: '01 - Readable.flac', filename: '01 - Readable.flac',
+      format: 'FLAC', playable: true, duration_seconds: 210,
+      bitrate_kbps: 989, size_bytes: 4300000, tags: {},
+    }],
+  });
+  assert(
+    containmentHtml.includes('1 entry was refused (not read) as a containment decision'),
+    'containment refusal leads with the containment sentence',
+  );
+  assert(!containmentHtml.includes('could not be read'), 'containment refusal never says "could not be read"');
+  assert(!containmentHtml.includes('Retry'), 'containment refusal offers no Retry — re-fetching cannot change it');
+
+  // The world-failure control: same shape, EACCES instead of a symlink.
+  const worldFailureHtml = __test__.renderWrongMatchExplorer({
+    status: 'ok',
+    download_log_id: 901,
+    partial: true,
+    unreadable_entry_count: 1,
+    unreadable_reason: '02 - locked.flac: could not be read, may be '
+      + 'transient (EACCES)',
+    unreadable_is_containment: false,
+    audio_file_count: 1,
+    files: [{
+      relative_path: '01 - Readable.flac', filename: '01 - Readable.flac',
+      format: 'FLAC', playable: true, duration_seconds: 210,
+      bitrate_kbps: 989, size_bytes: 4300000, tags: {},
+    }],
+  });
+  assert(
+    worldFailureHtml.includes('1 entry could not be read'),
+    'world-failure refusal leads with the "could not be read" sentence',
+  );
+  assert(!worldFailureHtml.includes('refused (not read)'), 'world-failure refusal never uses the containment wording');
+  assert(worldFailureHtml.includes('Retry'), 'world-failure refusal offers Retry — the world might have cleared');
+  assert(
+    worldFailureHtml.includes('window.reloadWrongMatchExplorer(901)'),
+    'Retry targets the exact entry id',
+  );
+}
+
+console.log('renderWrongMatchExplorer() empty-state (status:"unavailable") also honours the containment discriminator — the #1086 review blocker 1 shape');
+{
+  // The exact scenario the review named: a folder holding ONLY a
+  // symlink is `status: "unavailable"` (nothing readable), so this hits
+  // the EMPTY branch (`files.length === 0`), not the per-entry-notice
+  // branch a partial listing uses above. Before the fix, this branch's
+  // own wording ignored `unreadableIsContainment` entirely.
+  const containmentEmpty = __test__.renderWrongMatchExplorer({
+    status: 'unavailable',
+    download_log_id: 902,
+    partial: true,
+    unreadable_entry_count: 1,
+    unreadable_reason: '01 - dirlink.flac: this is a symlink, refused '
+      + 'rather than followed out of the quarantine root (containment, '
+      + 'not a world failure)',
+    unreadable_is_containment: true,
+    audio_file_count: 0,
+    files: [],
+  });
+  assert(!containmentEmpty.includes('could not be read'), 'containment-refused empty state never says "could not be read"');
+  assert(containmentEmpty.includes('refused (not read)'), 'containment-refused empty state uses the containment wording');
+  assert(!containmentEmpty.includes('Retry'), 'containment-refused empty state offers no Retry');
+  assert(
+    containmentEmpty.includes('NOT evidence that the folder is empty'),
+    'still denies the folder is confidently empty',
+  );
+
+  const worldFailureEmpty = __test__.renderWrongMatchExplorer({
+    status: 'unavailable',
+    download_log_id: 903,
+    partial: true,
+    unreadable_entry_count: 3,
+    unreadable_reason: '01.flac: could not be read, may be transient (EACCES)',
+    unreadable_is_containment: false,
+    audio_file_count: 0,
+    files: [],
+  });
+  assert(worldFailureEmpty.includes('could not be read'), 'world-failure empty state still says "could not be read"');
+  assert(!worldFailureEmpty.includes('refused (not read)'), 'world-failure empty state never uses the containment wording');
+  assert(worldFailureEmpty.includes('Retry'), 'world-failure empty state still offers Retry');
+  assert(
+    worldFailureEmpty.includes('NOT evidence that the folder is empty'),
+    'still denies the folder is confidently empty',
+  );
+}
+
 console.log('maybeLoadWrongMatchExplorer() lazy-loads explorer tags and audio on <details> toggle');
 {
   installStorage();
