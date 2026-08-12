@@ -269,8 +269,12 @@ real-PostgreSQL round trips; typed write payloads also have table-column
 contracts in `tests/test_pipeline_db_column_contract.py`. Rule B's narrow
 adapter-fake pattern is guarded by `tests/test_mirror_contracts.py` and
 `tests/test_lambda_audit.py`. Rule C's producer audits name an unproducible
-literal; Rule D remains a PR-time live-corpus procedure because no test can
-decide which derived operator-facing presentation or output matters.
+literal — `tests/test_copy_marker_producer_audit.py` covers Rule C's inverse
+direction, failing closed on a copy-pin marker constant that is not a
+substring of any string literal a registered production file (Python or JS)
+actually spells (issue #1111 item 2); Rule D remains a PR-time live-corpus
+procedure because no test can decide which derived operator-facing
+presentation or output matters.
 
 These gates enforce their declared shapes, not every semantic equivalent. The
 rules above retain the judgement the executable checks cannot supply.
