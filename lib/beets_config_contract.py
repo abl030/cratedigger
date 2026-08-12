@@ -507,10 +507,19 @@ def _effective_config(config_dir: Path) -> Generator[IncludeLazyConfig]:
 def _available_plugins() -> frozenset[str]:
     """Enumerate capabilities from the admitted Beets package only.
 
-    Beets 2.1 ships MusicBrainz support as ``beets.autotag.mb`` rather than a
-    ``beetsplug.musicbrainz`` module.  Treat that built-in provider as the
-    same declared capability so the compatibility matrix validates the real
-    release configuration instead of rejecting an implementation detail.
+    MusicBrainz support moved from the built-in ``beets.autotag.mb`` module
+    to a discoverable ``beetsplug.musicbrainz`` plugin in Beets 2.4.0
+    (2025-09-13); the admitted production package (currently 2.13.1) has
+    only the latter, already found by the ``pkgutil.iter_modules`` scan
+    below. The ``find_spec("beets.autotag.mb")`` branch here is dead on
+    that admitted package but still serves the historical v2.1.0-v2.3.x
+    legs of the compatibility matrix (``nix/beets-compat-releases.json``,
+    ``flake.nix``'s ``releaseChecks``), where MusicBrainz is ONLY the
+    built-in ``beets.autotag.mb`` provider and no ``beetsplug.musicbrainz``
+    module exists at all. Treat that built-in provider as the same
+    declared capability there, so the compatibility matrix validates the
+    real release configuration instead of rejecting an implementation
+    detail.
     """
     beets_module = importlib.import_module("beets")
     module_file = getattr(beets_module, "__file__", "") or ""

@@ -107,6 +107,22 @@
             "mbsync, discogs, fetchart, embedart, lyrics, lastgenre, scrub, info, missing, duplicates, edit, fromfilename, ftintitle, the, inline, permissions"
           else
             "musicbrainz, mbsync, discogs, fetchart, embedart, lyrics, lastgenre, scrub, info, missing, duplicates, edit, fromfilename, ftintitle, the, inline, permissions";
+          # Only the tip leg — not the 19-leg historical matrix, whose
+          # releases lib/beets_distance.py was never written or verified
+          # against. This is what actually exercises the modern
+          # (>= era #6681) branch of _beets_match_distance for real:
+          # without it, that branch's arity was type-erased to
+          # Callable[..., Distance] for pyright, so a wrong adaptation
+          # would fail soft into "distance_failed" with the canary staying
+          # green (issue #1088 review finding 2).
+          testTargets = [
+            "tests.test_harness_beets2_contract.TestHarnessBeets2Contract.test_help_stays_on_normal_stdout_and_protocol_is_private"
+            "tests.test_harness_beets2_contract.TestHarnessBeets2Contract.test_real_beets_import_library_and_duplicate_action"
+            "tests.test_harness_beets2_contract.TestHarnessBeets2Contract.test_real_incremental_import_uses_external_statefile_only"
+            "tests.test_harness_beets2_contract.TestHarnessBeets2Contract.test_real_harness_pretend_keeps_source_manifest_unchanged"
+          ] ++ nixpkgs.lib.optionals (name == "beets-tip") [
+            "tests.test_beets_distance.TestBeetsDistanceIntegrationSlice"
+          ];
           authority = pkgs.runCommand "cratedigger-${name}-matrix-authority" { } ''
             mkdir -p "$out/beets" "$out/secrets"
             cat > "$out/runtime.ini" <<EOF
@@ -198,10 +214,7 @@ EOF
           grep -F '"ok":true' "$TMPDIR/admission.json"
           CRATEDIGGER_BEETS_MATRIX_RUNTIME_CONFIG=${authority}/importer-runtime.ini \
           ${python}/bin/python -m unittest \
-            tests.test_harness_beets2_contract.TestHarnessBeets2Contract.test_help_stays_on_normal_stdout_and_protocol_is_private \
-            tests.test_harness_beets2_contract.TestHarnessBeets2Contract.test_real_beets_import_library_and_duplicate_action \
-            tests.test_harness_beets2_contract.TestHarnessBeets2Contract.test_real_incremental_import_uses_external_statefile_only \
-            tests.test_harness_beets2_contract.TestHarnessBeets2Contract.test_real_harness_pretend_keeps_source_manifest_unchanged \
+            ${nixpkgs.lib.concatStringsSep " \\\n            " testTargets} \
             > "$TMPDIR/contract.stdout" 2> "$TMPDIR/contract.stderr" || {
               cat "$TMPDIR/contract.stdout" >&2
               cat "$TMPDIR/contract.stderr" >&2
