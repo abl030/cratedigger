@@ -54,6 +54,20 @@ def _class(module: ModuleType, name: str) -> type[object] | None:
     return value if isinstance(value, type) else None
 
 
+def _construct(ctor: Callable[..., object], *args: object) -> object:
+    """Call ``ctor`` with ``args``, ignoring its statically-inferred arity.
+
+    A ``type[object]``-typed value (a resolved-but-unknown-shape class like
+    ``ImportTask``) appears to pyright as taking zero constructor
+    arguments, since ``object.__init__`` takes none. Routing the call
+    through this ``Callable[..., object]``-typed parameter — rather than
+    calling the class value directly — is what makes pyright honour the
+    wider shape; a local variable re-annotated the same way keeps the
+    narrower type from the assigned expression instead.
+    """
+    return ctor(*args)
+
+
 @dataclass(frozen=True)
 class BeetsCapabilities:
     importer_session: type[object]
@@ -63,10 +77,14 @@ class BeetsCapabilities:
     path_bytes: type[bytes]
     duplicate_era: str
     library_era: str
+    task_metadata_era: str
 
     @property
     def era(self) -> str:
-        return f"{self.duplicate_era}-duplicates/{self.library_era}-library"
+        return (
+            f"{self.duplicate_era}-duplicates/{self.library_era}-library/"
+            f"{self.task_metadata_era}-task-metadata"
+        )
 
 
 def _load_capabilities() -> BeetsCapabilities:
@@ -116,6 +134,29 @@ def _load_capabilities() -> BeetsCapabilities:
             "configured constructor era"
         )
 
+    # Task-metadata era (issue #1088): attribute presence, never __version__.
+    modern_task_metadata = hasattr(task, "source")
+    legacy_task_metadata = hasattr(task, "cur_artist")
+    if not modern_task_metadata and not legacy_task_metadata:
+        # v2.1.0/v2.2.0: cur_artist/cur_album are set only inside __init__.
+        try:
+            legacy_task_metadata = hasattr(
+                _construct(task, None, None, None), "cur_artist")
+        except Exception:  # noqa: BLE001 — an unexpected ctor shape fails closed below
+            legacy_task_metadata = False
+    if modern_task_metadata and legacy_task_metadata:
+        raise BeetsCapabilityError(
+            "Beets ImportTask metadata access is ambiguous: both source and "
+            "cur_artist are present — an unexpected upstream shape; "
+            "investigate before trusting either era"
+        )
+    if not modern_task_metadata and not legacy_task_metadata:
+        raise BeetsCapabilityError(
+            "Beets ImportTask metadata access is ambiguous: neither source "
+            "nor cur_artist is present, even via a construction probe — an "
+            "unrecognised upstream release"
+        )
+
     util_module = _optional_module("beets.util")
     path_bytes_candidate = (
         getattr(util_module, "PathBytes", bytes) if util_module is not None else bytes
@@ -129,6 +170,7 @@ def _load_capabilities() -> BeetsCapabilities:
         path_bytes=path_bytes,
         duplicate_era="modern" if modern_duplicates else "legacy",
         library_era="modern" if modern_library else "legacy",
+        task_metadata_era="modern" if modern_task_metadata else "legacy",
     )
 
 
@@ -163,10 +205,27 @@ def duplicate_outcome(decision: str, task: object) -> DuplicateAction | None:
     return getattr(CAPABILITIES.duplicate_action, "REMOVE" if remove else "SKIP")
 
 
+def task_description(task: object) -> tuple[str, str]:
+    """Return ``(artist, album)`` for ``task`` across both metadata eras.
+
+    ``CAPABILITIES.task_metadata_era`` already proved the attribute this
+    branch reads exists, so a raising ``source`` cached_property propagates
+    instead of being swallowed into ``""`` — no ``getattr`` default.
+    """
+    if CAPABILITIES.task_metadata_era == "modern":
+        source = getattr(task, "source")  # noqa: B009 - task is untyped object; era already proved this attribute exists
+        return (source.artist or "", source.name or "")
+    return (
+        getattr(task, "cur_artist") or "",  # noqa: B009 - task is untyped object; era already proved this attribute exists
+        getattr(task, "cur_album") or "",  # noqa: B009 - task is untyped object; era already proved this attribute exists
+    )
+
+
 def capability_report() -> dict[str, str]:
     return {
         "duplicate_era": CAPABILITIES.duplicate_era,
         "library_era": CAPABILITIES.library_era,
+        "task_metadata_era": CAPABILITIES.task_metadata_era,
         "era": CAPABILITIES.era,
     }
 

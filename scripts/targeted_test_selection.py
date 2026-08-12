@@ -217,6 +217,7 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
     ),
     "tests/harness_test_support.py": (
         "tests.test_harness_test_support",
+        "tests.test_harness_beets2_contract",
     ),
     "tests/helpers.py": (
         "tests.test_quality_decisions",

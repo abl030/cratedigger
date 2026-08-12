@@ -63,9 +63,21 @@ from beets import library as _beets_library
 # .distance import distance), shadowing the submodule of the same name — so
 # `from beets.autotag import distance` binds the function, not the module.
 # Call it directly; `_beets_distance_mod.distance(...)` would AttributeError.
-from beets.autotag import distance as _beets_distance_fn
+#
+# Upstream PR #6681 (unreleased tip, issue #1088) re-signatured `distance()`
+# from `(items, album_info, item_info_pairs)` to `(likelies, album_info,
+# item_info_pairs, unmatched_count)` in the SAME change that replaced
+# `ImportTask.cur_artist` with `ImportTask.source` (harness/beets_compat.py).
+# Both call shapes are legitimate depending on the loaded Beets' era, so the
+# binding is retyped to `Callable[..., Distance]` — the same escape hatch
+# `beets_compat._module_callable` already uses for cross-era callables —
+# rather than statically committing to one arity that fails pyright under
+# whichever era's stub isn't active.
+from beets.autotag import Distance
+from beets.autotag import distance as _beets_distance_impl
 from beets.autotag import hooks as _beets_hooks
 from beets.autotag import match as _beets_match_mod
+from beets.util import get_most_common_tags as _get_most_common_tags
 
 from lib.fs_authority import (
     DirectoryObservation,
@@ -77,6 +89,8 @@ from lib.fs_authority import (
     unreadable_reason_text,
 )
 from lib.validation_envelope import decode_validation_envelope
+
+_beets_distance_fn: Callable[..., Distance] = _beets_distance_impl
 
 log = logging.getLogger(__name__)
 
@@ -728,6 +742,33 @@ def _build_items_from_synthetic(
     return out
 
 
+def _beets_match_distance(
+    items: list[_beets_library.Item],
+    album_info: _beets_hooks.AlbumInfo,
+    mapping: list[tuple[_beets_library.Item, _beets_hooks.TrackInfo]],
+    extra_items: list[_beets_library.Item],
+) -> Distance:
+    """Call beets' ``distance()`` across both ``ImportTask`` metadata eras.
+
+    Reuses ``beets_compat.CAPABILITIES.task_metadata_era`` (the SAME
+    upstream PR #6681 removed ``ImportTask.cur_artist`` and re-signatured
+    this exact function) rather than probing ``distance()``'s own shape a
+    second time — issue #1088.
+    """
+    # Deferred: importing this at module scope would evaluate
+    # beets_compat.CAPABILITIES (and so fail-closed on an era-ambiguous
+    # Beets) at web-server/pipeline-cli import time, not just when a
+    # distance is actually computed — the same deferred shape
+    # web/routes/beets_distance.py already uses for compute_beets_distance.
+    from harness import beets_compat
+
+    if beets_compat.CAPABILITIES.task_metadata_era == "modern":
+        return _beets_distance_fn(
+            _get_most_common_tags(items), album_info, mapping, len(extra_items),
+        )
+    return _beets_distance_fn(items, album_info, mapping)
+
+
 # === Service entrypoint =================================================
 
 
@@ -1024,7 +1065,7 @@ def compute_beets_distance(
         album_info = _build_album_info(mb_release, mbid)
         mapping, extra_items, extra_tracks = _beets_match_mod.assign_items(
             items, album_info.tracks)
-        dist = _beets_distance_fn(items, album_info, mapping)
+        dist = _beets_match_distance(items, album_info, mapping, extra_items)
     except Exception as exc:  # noqa: BLE001 — beets bugs shouldn't 500 us
         return _result(
             "distance_failed",

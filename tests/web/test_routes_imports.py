@@ -8,12 +8,14 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from contextlib import contextmanager
 from email.message import Message
 from io import BufferedIOBase, BytesIO, IOBase
 from typing import ClassVar
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -183,6 +185,9 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         "cleared_missing",
         "deleted_paths", "cleared", "skipped", "errors", "remaining",
         "group_empty", "results",
+    }
+    TRIAGE_STATUS_REQUIRED_FIELDS: ClassVar = {
+        "state", "started_at", "finished_at", "summary", "error",
     }
 
     GROUP_FIELD_TYPES: ClassVar = {
@@ -1910,12 +1915,95 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         mock_cleanup.assert_called_once_with(
             self.db,
             confirm_all_wrong_matches=True,
+            cancellation_token=ANY,
         )
 
         status, data = self._get("/api/wrong-matches/triage/status")
         self.assertEqual(status, 200)
         self.assertEqual(data["state"], "completed")
         self.assertEqual(data["summary"]["processed"], 3)
+        self.assertEqual(data["summary"]["deleted"], 2)
+
+    def test_cancel_stops_a_running_sweep_and_reports_cancelled_not_failed(
+        self,
+    ) -> None:
+        """Issue #1083: cancel is observed between rows, never mid-delete,
+        and the resulting summary is reported as cancelled — never
+        failed — with exactly what ran preserved."""
+        from lib.wrong_match_cleanup_service import WrongMatchCleanupSummary
+
+        runner = _fresh_triage_runner(self)
+        entered = threading.Event()
+
+        def slow_cleanup(db, *, confirm_all_wrong_matches, cancellation_token=None):
+            entered.set()
+            assert cancellation_token is not None
+            deadline = time.monotonic() + 5
+            while (
+                not cancellation_token.cancelled
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
+            return WrongMatchCleanupSummary(
+                processed=1, deleted=1, cancelled=cancellation_token.cancelled,
+            )
+
+        with patch(
+            "web.routes.imports.cleanup_all_wrong_matches",
+            side_effect=slow_cleanup,
+        ):
+            status, _data = self._post(
+                "/api/wrong-matches/triage",
+                {"confirm_all_wrong_matches": True},
+            )
+            self.assertEqual(status, 202)
+            self.assertTrue(entered.wait(timeout=5))
+
+            status, data = self._post("/api/wrong-matches/triage/cancel", {})
+            self.assertEqual(status, 200)
+            _assert_required_fields(
+                self, data, self.TRIAGE_STATUS_REQUIRED_FIELDS,
+                "wrong match triage cancel response")
+
+            runner.join(timeout=5)
+
+        status, data = self._get("/api/wrong-matches/triage/status")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["state"], "cancelled")
+        self.assertNotEqual(data["state"], "failed")
+        self.assertIsNone(data["error"])
+        self.assertEqual(data["summary"]["processed"], 1)
+        self.assertTrue(data["summary"]["cancelled"])
+
+    def test_cancel_with_no_sweep_running_is_not_an_error(self) -> None:
+        _fresh_triage_runner(self)
+
+        status, data = self._post("/api/wrong-matches/triage/cancel", {})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["state"], "idle")
+
+    def test_cancel_racing_a_finishing_sweep_is_not_a_conflict(self) -> None:
+        """A cancel that lands after the sweep already recorded its own
+        completion is not an error — the route never answers 409 here."""
+        from lib.wrong_match_cleanup_service import WrongMatchCleanupSummary
+
+        runner = _fresh_triage_runner(self)
+        with patch(
+            "web.routes.imports.cleanup_all_wrong_matches",
+            return_value=WrongMatchCleanupSummary(processed=2, deleted=2),
+        ):
+            status, _data = self._post(
+                "/api/wrong-matches/triage",
+                {"confirm_all_wrong_matches": True},
+            )
+            self.assertEqual(status, 202)
+            runner.join(timeout=5)
+
+        status, data = self._post("/api/wrong-matches/triage/cancel", {})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["state"], "completed")
         self.assertEqual(data["summary"]["deleted"], 2)
 
     def test_groups_in_beets_still_shown(self):
