@@ -7,7 +7,7 @@ metadata:
   originSessionId: 112affdc-9033-495e-b8ec-0799417bfaf8
 ---
 
-Cratedigger has exactly one user: the operator. There is no "other people's installs" to worry about. The agent IS the operator for ops purposes.
+Cratedigger has exactly one user: the operator, and the agent IS that operator for ops purposes. That removes multi-tenant/backwards-compat machinery — it does NOT mean "no other installs exist". `.claude/rules/scope.md` is explicit that the module is distributed and other installations exist, so defaults, examples, and security boundaries must not rely on this homelab's paths or identities. See [[no-homelab-specific-process-rules]] for the process-side corollary.
 
 **The rule:** When the conversation considers committing a script for one-time data work, a `# DEPRECATED` helper, retry-window machinery for one-shot operations, or defensive `if old_shape: …` fallbacks for "what if the migration didn't run" — push back. The agent runs the one-shot. The repo carries product code only.
 

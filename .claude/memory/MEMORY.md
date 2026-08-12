@@ -16,6 +16,7 @@
 - [Test fidelity meta-pattern](feedback_test_fidelity_meta_pattern.md) — "Fix lands in code but production never sees it" smell at DB-write and external-adapter boundaries; force real-PG round-trip + real-exception fakes
 - [No bridge, do backfill](feedback_no_bridge_no_backfill.md) — Don't write compat code for two shapes — widen the producer and backfill old rows so the DB looks uniform
 - [Single-operator, no backfill scripts](feedback_single_operator_no_backfill_scripts.md) — Backfills/one-shots are agent-driven during deploys, never committed scripts. No compat shims, no deprecated-but-kept helpers, no retry-window machinery for one-shots.
+- [No homelab-specific process rules](feedback_no_homelab_specific_process_rules.md) — don't add deploy-runbook/rule steps that only make sense for doc1/doc2; #1079 was closed for exactly that
 - [Pyright on the full repo](feedback_pyright_full_repo.md) — Pyright uses `nix-shell --run "pyright --threads 4"` on the whole repo; fix pre-existing errors in the same pass
 - [No skipped tests](feedback_no_skipped_tests.md) — Skipped/gated tests are forbidden; `test_skip_audit.py` enforces it; nix-shell must provide every resource a test needs
 - [Deploy via master worktree](feedback_deploy_via_master_worktree.md) — doc2 deploys from nixosconfig master; if ~/nixosconfig is dirty/on a feature branch, do flake bumps in a throwaway worktree off origin/master
