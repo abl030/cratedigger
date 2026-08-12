@@ -192,7 +192,9 @@ contracts, Ruff, and Vulture to one failure bundle. Use direct `unittest` only
 to debug an isolated failure, not as local convergence evidence. Exit code 2
 with no phase output at all means a changed shared `tests/**.py` module has no
 mapping in `scripts/targeted_test_selection.py` — map it there (or record it
-in `SHARED_MODULES_WITHOUT_COVERAGE` if it genuinely has no consuming test),
+in `SHARED_MODULES_WITHOUT_COVERAGE` if it genuinely has no consuming test —
+`tests/test_negative_coverage_audit.py` mechanically enforces that no module
+under `tests/` imports it),
 not a failure in your change.
 
 Direct runs are development feedback; before independent-review handoff, use
