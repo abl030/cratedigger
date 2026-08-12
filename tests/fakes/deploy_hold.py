@@ -6,16 +6,39 @@ from collections.abc import Iterable
 
 from scripts.cratedigger_deploy_hold import (
     CONTROL_DIR,
+    GATE_STOPPED_UNITS,
+    IMPORTER_SERVICE,
     MAIN_SERVICE,
     PHASE_HELD,
+    PREVIEW_SERVICE,
     SERVICE_UNITS,
     START_INHIBITORS,
     TIMER_UNITS,
+    WEB_SERVICE,
+    YOUTUBE_SERVICE,
     DeployHoldError,
     JobState,
     LifecyclePreflight,
     UnitState,
 )
+
+# Type=simple, wantedBy=multi-user.target, Restart=on-failure daemons with no
+# timer: the real world every acquire actually meets has these already
+# running, not idle. Defaulting them to "inactive" (as this fake once did)
+# is more permissive than production in exactly the shape test-fidelity.md
+# Rule B forbids -- it hid #1078 MUST FIX 1 (acquire hanging the full
+# service-drain timeout waiting for YouTube ingest, which nothing before
+# the gate hold ever asks to stop) behind 429 green targets.
+_ALWAYS_ON_DAEMONS = (WEB_SERVICE, IMPORTER_SERVICE, PREVIEW_SERVICE, YOUTUBE_SERVICE)
+
+# The metadata gate's own guarded_units (verify_controlled_start_contract's
+# expected_guarded) is cratedigger.timer/.service plus the three controlled
+# workers plus YouTube ingest -- cratedigger-unfindable.service and the
+# watchdog are NOT guarded, so a real "hold manual" never touches them.
+# Stopping every SERVICE_UNITS member here (as this fake once did) is more
+# permissive than production in exactly the shape test-fidelity.md Rule B
+# forbids.
+_METADATA_GATE_GUARDED_SERVICES = (MAIN_SERVICE, *GATE_STOPPED_UNITS)
 
 
 class FakeDeployHoldBackend:
@@ -35,6 +58,7 @@ class FakeDeployHoldBackend:
         inhibitor_files: set[str] | None = None,
         interrupt_receipt_publication: bool = False,
         interrupt_receipt_retirement: bool = False,
+        queue_drain_after_calls: int | None = None,
     ) -> None:
         self.manual_hold = manual_hold
         self.other_metadata_holds = set(metadata_holds or set())
@@ -49,6 +73,16 @@ class FakeDeployHoldBackend:
         self.inhibitor_files = set(inhibitor_files or set())
         self.interrupt_receipt_publication = interrupt_receipt_publication
         self.interrupt_receipt_retirement = interrupt_receipt_retirement
+        # Models the causal claim behind #1078's reorder: the automation
+        # queue only drains while the importer or preview worker is still
+        # running. `active_automation_jobs`/`dirty_downloading_rows` latch to
+        # 0 once `preflight_calls` exceeds this threshold, but ONLY on a call
+        # where one of those workers is observed active -- so a caller that
+        # stops them first (today's pre-#1078 order) never observes the
+        # drain, no matter how many times it polls.
+        self.queue_drain_after_calls = queue_drain_after_calls
+        self._preflight_calls = 0
+        self._queue_drained = False
         self.unit_states: dict[str, UnitState] = {
             **{
                 timer: UnitState(
@@ -64,20 +98,20 @@ class FakeDeployHoldBackend:
                     active_state=(
                         "failed"
                         if service in self.failed_services
-                        else (
-                            "activating"
-                            if self.jobs.get(service, JobState.none()).state == "running"
-                            else "inactive"
-                        )
+                        else "activating"
+                        if self.jobs.get(service, JobState.none()).state == "running"
+                        else "active"
+                        if service in _ALWAYS_ON_DAEMONS
+                        else "inactive"
                     ),
                     sub_state=(
                         "failed"
                         if service in self.failed_services
-                        else (
-                            "start"
-                            if self.jobs.get(service, JobState.none()).state == "running"
-                            else "dead"
-                        )
+                        else "start"
+                        if self.jobs.get(service, JobState.none()).state == "running"
+                        else "running"
+                        if service in _ALWAYS_ON_DAEMONS
+                        else "dead"
                     ),
                 )
                 for service in SERVICE_UNITS
@@ -95,6 +129,7 @@ class FakeDeployHoldBackend:
         self.cancelled_jobs: list[str] = []
         self.started_units: list[str] = []
         self.sleep_calls = 0
+        self._monotonic_seconds = 0.0
 
     def verify_controlled_start_contract(self) -> None:
         if not self.controlled_start_contract_current:
@@ -102,6 +137,25 @@ class FakeDeployHoldBackend:
 
     def lifecycle_preflight(self) -> LifecyclePreflight:
         self.events.append(("lifecycle-preflight",))
+        self._preflight_calls += 1
+        if not self._queue_drained:
+            importer_or_preview_running = any(
+                self.unit_states[service].active_state == "active"
+                for service in (IMPORTER_SERVICE, PREVIEW_SERVICE)
+            )
+            if (
+                self.queue_drain_after_calls is not None
+                and self._preflight_calls > self.queue_drain_after_calls
+                and importer_or_preview_running
+            ):
+                self._queue_drained = True
+        if self._queue_drained:
+            return LifecyclePreflight(
+                active_automation_jobs=0,
+                recovery_required_jobs=self.preflight.recovery_required_jobs,
+                dirty_downloading_rows=0,
+                malformed_enqueued_at_rows=self.preflight.malformed_enqueued_at_rows,
+            )
         return self.preflight
 
     def ensure_control_dir(self) -> None:
@@ -233,7 +287,7 @@ class FakeDeployHoldBackend:
         self.events.append(("metadata-gate", command))
         if command == "hold manual":
             self.manual_hold = True
-            for service in SERVICE_UNITS:
+            for service in _METADATA_GATE_GUARDED_SERVICES:
                 state = self.unit_states[service]
                 if state.active_state == "active":
                     self.unit_states[service] = UnitState(
@@ -340,10 +394,16 @@ class FakeDeployHoldBackend:
         self.events.append(("reset-failed", unit))
 
     def monotonic(self) -> float:
-        return float(self.sleep_calls)
+        return self._monotonic_seconds
 
     def sleep(self, seconds: float) -> None:
-        del seconds
+        # Advances by the real requested duration (not a fixed +1 per call)
+        # so every production timeout/poll-interval constant governs this
+        # fake exactly as it governs production, with no need to patch a
+        # constant down for test speed: the fake's sleep is instant, so even
+        # the full production timeout is a fast, bounded number of Python
+        # loop iterations here.
+        self._monotonic_seconds += seconds
         self.sleep_calls += 1
         self.events.append(("sleep",))
         for unit in tuple(SERVICE_UNITS):

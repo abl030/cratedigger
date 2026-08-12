@@ -11,17 +11,26 @@ from hypothesis import strategies as st
 import tests._hypothesis_profiles  # noqa: F401
 from scripts.cratedigger_deploy_hold import (
     CONTROLLED_WORKER_UNITS,
+    IMPORTER_SERVICE,
     MAIN_SERVICE,
     MAIN_TIMER,
     PHASE_ACQUIRING,
     PHASE_COMPLETE_PENDING,
     PHASE_HELD,
+    PHASE_MAIN_TIMER_OPEN,
+    PHASE_PREPARED_CONTROLLED,
     SERVICE_UNITS,
     TIMER_UNITS,
+    WATCHDOG_TIMER,
     YOUTUBE_SERVICE,
+    DeployHoldBackend,
     DeployHoldError,
     JobState,
     LifecyclePreflight,
+    UnitState,
+    _clear_owned_inhibitors,
+    _release_owned_link,
+    abort_hold,
     acquire_hold,
     complete_release,
     finish_release,
@@ -30,6 +39,55 @@ from scripts.cratedigger_deploy_hold import (
     recover_held,
 )
 from tests.fakes.deploy_hold import FakeDeployHoldBackend
+
+_KNOWN_PHASES = (
+    PHASE_ACQUIRING,
+    PHASE_HELD,
+    PHASE_PREPARED_CONTROLLED,
+    PHASE_MAIN_TIMER_OPEN,
+    PHASE_COMPLETE_PENDING,
+)
+# No production-constant patch needed: the fake's monotonic clock advances by
+# the real requested duration per sleep() call (tests/fakes/deploy_hold.py),
+# and its sleep is instant -- so even the unpatched production
+# _QUEUE_DRAIN_TIMEOUT_SECONDS/_QUEUE_POLL_SECONDS bound (1800s / 5s poll =
+# 360 loop iterations) is fast, and every property here exercises the exact
+# bound production uses.
+
+
+def _acquire_boundary_outcome(
+    counts: tuple[int, int, int, int],
+) -> str:
+    """Classify what acquire_hold/recover_held(acquiring) does against this
+    preflight, given nothing configured to resolve the queue over time
+    (``queue_drain_after_calls=None``).
+
+    Returns ``"held"`` (everything clean), ``"anomaly"`` (fails immediately
+    at the final old-lifecycle check, gate hold taken), or
+    ``"drainable_timeout"`` (bounded wait, gate hold never taken).
+
+    ``recovery_required_jobs`` is ALSO counted inside
+    ``active_automation_jobs``'s own SQL (``status IN ('queued', 'running',
+    'recovery_required')``), and neither anomaly field
+    (``recovery_required_jobs``, ``malformed_enqueued_at_rows``) is ever
+    cleared by any current writer -- so an anomaly field dirty takes
+    precedence over a drainable one: the queue-drain wait short-circuits
+    immediately rather than waiting toward its own timeout for a count that
+    can never reach zero (#1078 MUST FIX 6). Field order matches
+    ``LifecyclePreflight``: active_automation_jobs, recovery_required_jobs,
+    dirty_downloading_rows, malformed_enqueued_at_rows.
+    """
+    (
+        active_automation_jobs,
+        recovery_required_jobs,
+        dirty_downloading_rows,
+        malformed_enqueued_at_rows,
+    ) = counts
+    if recovery_required_jobs or malformed_enqueued_at_rows:
+        return "anomaly"
+    if active_automation_jobs or dirty_downloading_rows:
+        return "drainable_timeout"
+    return "held"
 
 
 def assert_held_invariants(backend: FakeDeployHoldBackend) -> None:
@@ -144,24 +202,44 @@ class TestGeneratedHoldLifecycle(unittest.TestCase):
     @example(counts=(0, 1, 0, 0))
     @example(counts=(0, 0, 1, 0))
     @example(counts=(0, 0, 0, 1))
+    @example(counts=(1, 1, 0, 0))
     def test_any_dirty_old_lifecycle_shape_aborts_under_the_hold(
         self,
         counts: tuple[int, int, int, int],
     ) -> None:
+        """#1078: a drainable field (alone) waits (bounded) with the gate
+        hold never taken; an anomaly field -- alone, or combined with a
+        drainable one, since it takes precedence (MUST FIX 6) -- fails
+        immediately with the full boundary (masks + gate hold) established,
+        same as before the reorder. The pre-hold window owns no start
+        inhibitor at all (MUST FIX 5), so neither outcome ever owns one.
+        """
         backend = FakeDeployHoldBackend(
             lifecycle_preflight=LifecyclePreflight(*counts),
         )
+        outcome = _acquire_boundary_outcome(counts)
 
-        with self.assertRaisesRegex(
-            DeployHoldError,
-            "old lifecycle is not clean",
-        ):
-            acquire_hold(backend)
+        if outcome == "drainable_timeout":
+            with self.assertRaisesRegex(
+                DeployHoldError,
+                "timed out waiting for the automation queue to drain",
+            ):
+                acquire_hold(backend)
+            self.assertFalse(backend.manual_hold)
+            self.assertFalse(backend.owned_manual_hold)
+        else:
+            assert outcome == "anomaly"
+            with self.assertRaisesRegex(
+                DeployHoldError,
+                "old lifecycle is not clean",
+            ):
+                acquire_hold(backend)
+            self.assertTrue(backend.manual_hold)
 
         self.assertTrue(backend.receipt)
         self.assertEqual(backend.phase, "acquiring")
-        self.assertTrue(backend.manual_hold)
         self.assertEqual(backend.owned_links, set(TIMER_UNITS))
+        self.assertEqual(backend.owned_inhibitor_units(), ())
         self.assertEqual(backend.inhibitor_files, set())
 
     def test_atomic_receipt_publication_retry_precedes_hold_mutation(self) -> None:
@@ -276,11 +354,23 @@ class TestGeneratedHoldLifecycle(unittest.TestCase):
         )
 
         if phase_before == PHASE_ACQUIRING and not preconditions_provable:
+            # #1078: _ensure_owned_manual_hold only ever takes the gate, never
+            # releases it -- so if an earlier pass (e.g. the acquire_counts
+            # anomaly failure above) already took it, it stays taken
+            # regardless of what this recovery's own preflight shows; a
+            # drainable-only field (MUST FIX 6: an anomaly field takes
+            # precedence) only keeps a hold NOT YET taken from being
+            # (re)taken (bounded wait, gate never touched, exactly like a
+            # fresh acquire).
+            manual_hold_before_recovery = backend.manual_hold
             with self.assertRaises(DeployHoldError):
                 recover_held(backend)
             self.assertEqual(backend.phase, PHASE_ACQUIRING)
-            # Refusing to promote never costs the strict boundary itself.
-            self.assertTrue(backend.manual_hold)
+            self.assertEqual(
+                backend.manual_hold,
+                manual_hold_before_recovery
+                or _acquire_boundary_outcome(recovery_counts) != "drainable_timeout",
+            )
             self.assertEqual(backend.owned_links, set(TIMER_UNITS))
         else:
             recover_held(backend)
@@ -489,6 +579,276 @@ class TestHoldInvariantCheckersKnownBad(unittest.TestCase):
 
         with self.assertRaises(AssertionError):
             assert_release_invariants(backend, "a" * 32)
+
+
+def _assert_fully_reversed(backend: FakeDeployHoldBackend) -> None:
+    """The #1078 invariant: abort leaves zero owned objects, no receipt."""
+    if backend.owned_link_units():
+        raise AssertionError(
+            f"abort left owned timer links: {backend.owned_link_units()!r}"
+        )
+    if backend.manual_hold_is_owned():
+        raise AssertionError("abort left the manual hold owned")
+    if backend.owned_inhibitor_units():
+        raise AssertionError(
+            f"abort left owned inhibitors: {backend.owned_inhibitor_units()!r}"
+        )
+    if backend.receipt_exists():
+        raise AssertionError("abort left the receipt in place")
+    if backend.retired_receipt_exists():
+        raise AssertionError("abort left a retired receipt behind")
+
+
+def _assert_unowned_manual_hold_untouched(backend: FakeDeployHoldBackend) -> None:
+    if not backend.manual_hold:
+        raise AssertionError("abort released a manual hold it did not own")
+
+
+def _assert_unowned_control_links_untouched(
+    backend: FakeDeployHoldBackend,
+    unowned_timers: frozenset[str],
+) -> None:
+    for timer in unowned_timers:
+        if backend.control_links.get(timer) != "/dev/null":
+            raise AssertionError(f"abort touched an unowned control link: {timer}")
+
+
+def _abort_hold_ignores_manual_hold_ownership(backend: DeployHoldBackend) -> None:
+    """Known-bad #1078 abort mutant.
+
+    Releases the gate hold whether or not this receipt owns it -- the exact
+    shape of bug the ownership guard in the real ``abort_hold`` exists to
+    prevent. Retained only to prove the property traps it; never call this
+    from production code.
+    """
+    if not backend.receipt_exists():
+        raise DeployHoldError("deploy hold receipt is missing")
+    backend.read_phase()
+    if backend.manual_hold_active():
+        backend.metadata_gate("release manual")
+        for service in CONTROLLED_WORKER_UNITS:
+            backend.start_unit(service)
+    if backend.manual_hold_is_owned():
+        backend.unmark_manual_hold_owned()
+    _clear_owned_inhibitors(backend)
+    owned_timers = backend.owned_link_units()
+    for timer in owned_timers:
+        _release_owned_link(backend, timer)
+    if owned_timers:
+        backend.daemon_reload()
+        for timer in owned_timers:
+            backend.start_unit(timer)
+    backend.remove_receipt()
+
+
+class TestFailedAcquireIsReversibleByAbort(unittest.TestCase):
+    """#1078 property: every failed acquire_hold is fully reversed by abort_hold."""
+
+    @given(
+        active_automation_jobs=st.integers(min_value=0, max_value=2),
+        dirty_downloading_rows=st.integers(min_value=0, max_value=2),
+        recovery_required_jobs=st.integers(min_value=0, max_value=1),
+        malformed_enqueued_at_rows=st.integers(min_value=0, max_value=1),
+        queue_drain_after_calls=st.one_of(
+            st.none(), st.integers(min_value=0, max_value=3),
+        ),
+        contract_current=st.booleans(),
+    )
+    @example(
+        active_automation_jobs=1,
+        dirty_downloading_rows=0,
+        recovery_required_jobs=0,
+        malformed_enqueued_at_rows=0,
+        queue_drain_after_calls=1,
+        contract_current=True,
+    )
+    @example(
+        active_automation_jobs=0,
+        dirty_downloading_rows=0,
+        recovery_required_jobs=1,
+        malformed_enqueued_at_rows=0,
+        queue_drain_after_calls=None,
+        contract_current=True,
+    )
+    @example(
+        active_automation_jobs=1,
+        dirty_downloading_rows=0,
+        recovery_required_jobs=0,
+        malformed_enqueued_at_rows=0,
+        queue_drain_after_calls=None,
+        contract_current=True,
+    )
+    @example(
+        active_automation_jobs=0,
+        dirty_downloading_rows=0,
+        recovery_required_jobs=0,
+        malformed_enqueued_at_rows=0,
+        queue_drain_after_calls=None,
+        contract_current=False,
+    )
+    def test_every_failed_acquire_is_fully_reversed_by_abort(
+        self,
+        active_automation_jobs: int,
+        dirty_downloading_rows: int,
+        recovery_required_jobs: int,
+        malformed_enqueued_at_rows: int,
+        queue_drain_after_calls: int | None,
+        contract_current: bool,
+    ) -> None:
+        preflight = LifecyclePreflight(
+            active_automation_jobs=active_automation_jobs,
+            recovery_required_jobs=recovery_required_jobs,
+            dirty_downloading_rows=dirty_downloading_rows,
+            malformed_enqueued_at_rows=malformed_enqueued_at_rows,
+        )
+        backend = FakeDeployHoldBackend(
+            lifecycle_preflight=preflight,
+            controlled_start_contract_current=contract_current,
+            queue_drain_after_calls=queue_drain_after_calls,
+        )
+        if queue_drain_after_calls is not None:
+            # Models the causal claim behind the #1078 reorder: the
+            # still-running importer is what drains the queue during the
+            # wait window.
+            backend.unit_states[IMPORTER_SERVICE] = UnitState(
+                "loaded", "active", "running",
+            )
+
+        expected_success = (
+            contract_current
+            and recovery_required_jobs == 0
+            and malformed_enqueued_at_rows == 0
+            and (
+                (active_automation_jobs == 0 and dirty_downloading_rows == 0)
+                or queue_drain_after_calls is not None
+            )
+        )
+
+        try:
+            acquire_hold(backend)
+            succeeded = True
+        except DeployHoldError:
+            succeeded = False
+
+        self.assertEqual(succeeded, expected_success)
+        if succeeded:
+            backend.assert_default_held()
+            return
+
+        if not backend.receipt_exists():
+            # The controlled-start contract failed before anything was ever
+            # created -- nothing to abort, and abort says so plainly.
+            with self.assertRaisesRegex(DeployHoldError, "receipt is missing"):
+                abort_hold(backend)
+            return
+
+        abort_hold(backend)
+        _assert_fully_reversed(backend)
+
+    def test_known_bad_fully_reversed_checker_trips_on_an_owned_manual_hold(
+        self,
+    ) -> None:
+        backend = FakeDeployHoldBackend()
+        backend.create_receipt()
+        backend.mark_manual_hold_owned()
+        with self.assertRaisesRegex(AssertionError, "manual hold owned"):
+            _assert_fully_reversed(backend)
+
+
+class TestAbortNeverTouchesAnUnownedObject(unittest.TestCase):
+    """#1078 property: abort_hold never mutates an object it did not own."""
+
+    @given(
+        owned_timers=st.frozensets(st.sampled_from(TIMER_UNITS)),
+        unowned_timers=st.frozensets(st.sampled_from(TIMER_UNITS)),
+        manual_hold_owned=st.booleans(),
+        unowned_manual_hold=st.booleans(),
+        phase=st.sampled_from(_KNOWN_PHASES),
+    )
+    @example(
+        owned_timers=frozenset({MAIN_TIMER}),
+        unowned_timers=frozenset({WATCHDOG_TIMER}),
+        manual_hold_owned=False,
+        unowned_manual_hold=False,
+        phase=PHASE_ACQUIRING,
+    )
+    @example(
+        owned_timers=frozenset(),
+        unowned_timers=frozenset(),
+        manual_hold_owned=False,
+        unowned_manual_hold=True,
+        phase=PHASE_ACQUIRING,
+    )
+    def test_abort_never_touches_an_unowned_object(
+        self,
+        owned_timers: frozenset[str],
+        unowned_timers: frozenset[str],
+        manual_hold_owned: bool,
+        unowned_manual_hold: bool,
+        phase: str,
+    ) -> None:
+        unowned_timers = unowned_timers - owned_timers
+        if manual_hold_owned:
+            # Not representable: there is exactly one gate, so it cannot be
+            # simultaneously owned by this receipt and unowned-but-present.
+            unowned_manual_hold = False
+
+        backend = FakeDeployHoldBackend()
+        backend.create_receipt()
+        backend.write_phase(phase)
+        for timer in owned_timers:
+            backend.mark_link_owned(timer)
+            backend.create_control_mask(timer)
+        for timer in unowned_timers:
+            backend.control_links[timer] = "/dev/null"
+        if manual_hold_owned:
+            backend.mark_manual_hold_owned()
+            backend.manual_hold = True
+        elif unowned_manual_hold:
+            backend.manual_hold = True
+
+        if unowned_timers:
+            # #1078 MUST FIX 4: every ownership class is validated before
+            # any mutation, so an unowned control link anywhere refuses
+            # closed -- nothing moves, not even objects abort DOES own.
+            before_control_links = dict(backend.control_links)
+            before_owned_links = set(backend.owned_links)
+            before_manual_hold = backend.manual_hold
+            before_owned_manual_hold = backend.owned_manual_hold
+            with self.assertRaisesRegex(DeployHoldError, "unowned control path"):
+                abort_hold(backend)
+            self.assertTrue(backend.receipt_exists())
+            self.assertEqual(backend.control_links, before_control_links)
+            self.assertEqual(backend.owned_links, before_owned_links)
+            self.assertEqual(backend.manual_hold, before_manual_hold)
+            self.assertEqual(backend.owned_manual_hold, before_owned_manual_hold)
+            return
+
+        abort_hold(backend)
+
+        _assert_fully_reversed(backend)
+        if unowned_manual_hold:
+            _assert_unowned_manual_hold_untouched(backend)
+
+    def test_known_bad_untouched_control_link_checker_trips(self) -> None:
+        backend = FakeDeployHoldBackend()
+        backend.control_links[WATCHDOG_TIMER] = "/dev/null"
+        del backend.control_links[WATCHDOG_TIMER]  # simulates: touched anyway
+        with self.assertRaisesRegex(AssertionError, "unowned control link"):
+            _assert_unowned_control_links_untouched(
+                backend, frozenset({WATCHDOG_TIMER}),
+            )
+
+    def test_known_bad_abort_ignoring_ownership_releases_an_unowned_hold(
+        self,
+    ) -> None:
+        backend = FakeDeployHoldBackend(manual_hold=True)
+        backend.create_receipt()
+
+        _abort_hold_ignores_manual_hold_ownership(backend)
+
+        with self.assertRaisesRegex(AssertionError, "did not own"):
+            _assert_unowned_manual_hold_untouched(backend)
 
 
 if __name__ == "__main__":

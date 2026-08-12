@@ -1384,7 +1384,12 @@ pkgs.testers.nixosTest {
         state = machine.succeed(f"systemctl show {job} --property=State --value").strip()
         assert state == "waiting", f"{service} job was not waiting: {state}"
 
-    acquire_status, acquire_output = machine.execute("timeout 60 cratedigger-deploy-hold acquire")
+    # #1078: acquire now drains producers and controlled workers in two
+    # separate passes (each its own two-stable-sample proof) around a
+    # queue-drain wait that itself round-trips pipeline-cli at least once
+    # more than before the reorder. 120s keeps comfortable headroom over the
+    # measured few extra seconds this adds.
+    acquire_status, acquire_output = machine.execute("timeout 120 cratedigger-deploy-hold acquire")
     if acquire_status != 0:
         print(acquire_output)
         print(machine.succeed("systemctl list-jobs --no-legend || true"))
@@ -1427,7 +1432,11 @@ pkgs.testers.nixosTest {
     machine.succeed("cratedigger-deploy-hold finish-release aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
     machine.succeed("cratedigger-deploy-hold complete aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
     machine.fail("test -e /run/cratedigger-deploy-hold")
-    machine.fail("test -e /run/cratedigger-metadata-gate/holds/manual")
+    # #1078: this previously checked /run/cratedigger-metadata-gate/holds/manual,
+    # a path nothing under this tool ever writes (the real state dir is
+    # metadataGateStateDir = /var/lib/cratedigger-metadata-gate) -- the
+    # assertion could never fail and proved nothing about the released hold.
+    machine.fail("test -e /var/lib/cratedigger-metadata-gate/holds/manual")
     for timer in (
         "cratedigger.timer",
         "cratedigger-unfindable.timer",
