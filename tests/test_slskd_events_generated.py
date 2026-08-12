@@ -39,12 +39,29 @@ hand tests in tests/test_slskd_events.py (they need >500-event feeds).
 The T2 deterministic pins live in
 ``tests/test_slskd_events.py::TestTransferLedgerStamping``.
 
+Per-clause proof (issue #1094): every checker clause here has a named
+world in ``TestEventCheckersTripOnViolations`` asserting that clause's own
+ANCHORED message, plus a production mutant killed at the gating (``suite``)
+tier. Two clauses are deliberately kept as fail-closed legislation with a
+self-test but no reachable production world: ``assert_ledger_stamps_match``'s
+key-set clause (expected and actual are both projected from the world's
+``ledgered_keys``, so divergence is unreachable by construction) and
+``assert_result_well_formed``'s cursor-gap-plus-hold clause (production
+couples the two, and the page-cap world needs a >10k-event feed — pinned by
+``tests/test_slskd_events.py::TestIncarnationAwareStamping::
+test_cursor_gap_fail_open_advances_despite_lost_dirty_write``). Note also
+that a request leaving ``downloading`` is excluded here by
+``get_downloading()``, not by the CAS status predicate: dropping that
+predicate from the DB layer changes nothing in these worlds, so this module
+does not patrol an interleaved status flip.
+
 Profiles and promotion policy: tests/_hypothesis_profiles.py and
 docs/generated-testing.md.
 """
 
 import json
 import os
+import re
 import sys
 import unittest
 from collections.abc import Callable
@@ -628,6 +645,31 @@ def assert_ledger_stamps_match(expected: dict, actual: dict) -> None:
             + "\n  ".join(diffs))
 
 
+def feed_origin_violations(
+    *,
+    stamped: dict,
+    ledger: dict,
+    feed_paths: set[str],
+) -> list[str]:
+    """Totality checker: no stamp invents a path (issue #571 good citizen).
+
+    Accumulating (``list[str]``) so the active-state clause cannot mask the
+    ledger clause: an ingest pass that invents BOTH must report both, and
+    each clause carries its own message for the known-bad self-test.
+    """
+    violations = []
+    for path in stamped.values():
+        if path is not None and path not in feed_paths:
+            violations.append(
+                f"stamped path {path!r} does not originate from the feed")
+    for path in ledger.values():
+        if path is not None and path not in feed_paths:
+            violations.append(
+                f"ledger-stamped path {path!r} does not originate "
+                "from the feed")
+    return violations
+
+
 def assert_result_well_formed(result: EventIngestResult) -> None:
     if result.outcome not in _VALID_OUTCOMES:
         raise AssertionError(f"unknown ingest outcome: {result.outcome!r}")
@@ -675,6 +717,64 @@ def assert_incarnation_window(
 class TestGeneratedEventStamping(unittest.TestCase):
     """Property 1: the stamping oracle on clean-cursor worlds."""
 
+    # Per-clause audit (issue #1094): the gating tier drew ZERO worlds in
+    # which any STAMPED key carried two decodable completions, so "newest
+    # decodable event wins" — the whole point of the oracle — had no
+    # decisive example. A production mutant selecting the OLDEST candidate
+    # survived this property entirely. This world pins four decisive arms:
+    # newest-wins (key A), newest-DECODABLE-wins over a newer undecodable
+    # payload (key B), no active stamp for a request that left downloading
+    # (key C), and a ledger stamp for that same left-downloading request
+    # (T2, issue #571 — the ledger is independent of the status gate).
+    @example(world=EventWorld(
+        rows=(
+            RequestWorld(
+                request_id=1,
+                file_keys=(
+                    ("peer0", "single.flac"),
+                    ("peer1", "Music\\Artist\\Album\\01 track.flac"),
+                ),
+                leaves_before_classification=False,
+            ),
+            RequestWorld(
+                request_id=2,
+                file_keys=(("PEER3", "Music\\Ártîst 音\\Å l b u m\\01.mp3"),),
+                leaves_before_classification=True,
+            ),
+        ),
+        events=(
+            FeedEvent(
+                id="ev-0", timestamp=_timestamp_for(0, False),
+                type=_FILE_COMPLETE, username="peer1",
+                filename="Music\\Artist\\Album\\01 track.flac",
+                local_filename="/downloads/complete/0", decodable=False),
+            FeedEvent(
+                id="ev-1", timestamp=_timestamp_for(1, False),
+                type=_FILE_COMPLETE, username="peer0",
+                filename="single.flac",
+                local_filename="/downloads/complete/1", decodable=True),
+            FeedEvent(
+                id="ev-2", timestamp=_timestamp_for(2, False),
+                type=_FILE_COMPLETE, username="peer1",
+                filename="Music\\Artist\\Album\\01 track.flac",
+                local_filename="/downloads/complete/2", decodable=True),
+            FeedEvent(
+                id="ev-3", timestamp=_timestamp_for(3, False),
+                type=_FILE_COMPLETE, username="peer0",
+                filename="single.flac",
+                local_filename="/downloads/complete/3", decodable=True),
+            FeedEvent(
+                id="ev-4", timestamp=_timestamp_for(4, False),
+                type=_FILE_COMPLETE, username="PEER3",
+                filename="Music\\Ártîst 音\\Å l b u m\\01.mp3",
+                local_filename="/downloads/complete/4", decodable=True),
+        ),
+        cursor_index=5,
+        ledgered_keys=(
+            ("peer0", "single.flac"),
+            ("PEER3", "Music\\Ártîst 音\\Å l b u m\\01.mp3"),
+        ),
+    ))
     @given(world=oracle_worlds())
     def test_stamps_match_newest_decodable_event_in_window(self, world):
         db, slskd = _build_harness(world)
@@ -796,18 +896,26 @@ class TestGeneratedIncarnationEventStamping(unittest.TestCase):
         else:
             first = ingest_download_file_events(db, slskd)
 
-        assert_result_well_formed(first)
         expected_first_path = (
             None
             if first_eligible_b is None or loses_dirty_write
             else f"/downloads/incarnation/{first_eligible_b}"
         )
+        # Checker order is attribution (issue #1094): assert_result_well_formed
+        # rejects advance-plus-hold generally, so running it first made
+        # assert_incarnation_window's "advanced cursor unexpectedly held"
+        # clause unreachable — every mutant that could fire it died on the
+        # earlier checker's message. The window checker legislates this
+        # window's commit marker, so it judges first; the general result
+        # shape is still asserted immediately after, and still owns the
+        # clause on every other property.
         assert_incarnation_window(
             expected_path=expected_first_path,
             actual_path=_current_local_path(db),
             expected_cursor_advanced=not loses_dirty_write,
             result=first,
         )
+        assert_result_well_formed(first)
         self.assertEqual(
             db.expected_enqueued_at_calls,
             [world.witness_text] if first_eligible_b is not None else [],
@@ -873,6 +981,23 @@ class TestGeneratedIncarnationEventStamping(unittest.TestCase):
 class TestGeneratedEventIngestTotality(unittest.TestCase):
     """Property 2: totality + exactly-once on arbitrary worlds."""
 
+    # Per-clause audit (issue #1094): 105 of the gating tier's 150 wild
+    # worlds bootstrap (no cursor row) and stamp nothing at all, leaving
+    # only ~4 examples in which either feed-origin clause has a non-None
+    # path to judge. This world always stamps both surfaces, so an
+    # invented-path mutant cannot survive on entropy.
+    @example(world=EventWorld(
+        rows=(RequestWorld(
+            request_id=1,
+            file_keys=(("peer0", "single.flac"),),
+            leaves_before_classification=False),),
+        events=(FeedEvent(
+            id="ev-0", timestamp=_timestamp_for(0, False),
+            type=_FILE_COMPLETE, username="peer0", filename="single.flac",
+            local_filename="/downloads/complete/0", decodable=True),),
+        cursor_index=1,
+        ledgered_keys=(("peer0", "single.flac"),),
+    ))
     @given(world=wild_worlds())
     def test_ingest_never_crashes_and_second_pass_is_noop(self, world):
         db, slskd = _build_harness(world)
@@ -884,18 +1009,15 @@ class TestGeneratedEventIngestTotality(unittest.TestCase):
         assert_result_well_formed(first)
 
         stamped_after_first = _stamped_paths(db, world)
-        for path in stamped_after_first.values():
-            if path is not None and path not in generated_paths:
-                raise AssertionError(
-                    f"stamped path {path!r} does not originate from the feed")
-
-        # T2: same totality property for the ledger.
+        # T2: the same totality clause covers the ledger, accumulated so
+        # neither stamp surface can mask the other.
         ledger_after_first = _owned_local_paths(db, world)
-        for path in ledger_after_first.values():
-            if path is not None and path not in generated_paths:
-                raise AssertionError(
-                    f"ledger-stamped path {path!r} does not originate "
-                    "from the feed")
+        self.assertEqual(
+            feed_origin_violations(
+                stamped=stamped_after_first,
+                ledger=ledger_after_first,
+                feed_paths=generated_paths),
+            [])
         cursor_after_first = db.get_slskd_event_cursor()
 
         second = ingest_download_file_events(db, slskd)
@@ -953,70 +1075,312 @@ class TestGeneratedEventDuplicateInvariance(unittest.TestCase):
             base_result.transfers_stamped, dup_result.transfers_stamped)
 
 
+_KEY_A = (1, ("peer0", "single.flac"))
+_KEY_B = (2, ("peer1", "02 track.flac"))
+_LEDGER_A = ("peer0", "single.flac")
+_LEDGER_B = ("peer1", "02 track.flac")
+
+
+def _exact(message: str) -> str:
+    """Whole-message anchor — the clause's message is fully determined."""
+    return "^" + re.escape(message) + "$"
+
+
+def _prefix(message: str) -> str:
+    """Head anchor — the clause's tail carries a generated repr."""
+    return "^" + re.escape(message)
+
+
 class TestEventCheckersTripOnViolations(unittest.TestCase):
-    """Known-bad self-tests for the event-ingest checkers."""
+    """Known-bad self-tests: one anchored world per checker CLAUSE.
 
-    def test_stamp_checker_trips_on_wrong_path(self):
-        key = (1, ("peer0", "single.flac"))
-        with self.assertRaises(AssertionError):
-            assert_stamps_match({key: "/downloads/complete/0"}, {key: None})
+    Issue #1094 per-clause proof. Every case makes exactly one clause's
+    condition true while every EARLIER clause in the same checker passes,
+    and asserts that clause's OWN message anchored. The anchoring is
+    load-bearing rather than decorative here: ``ledger-stamped local paths
+    diverged from the event oracle`` contains the active-state clause's
+    entire message, and ``ledger-stamped path ... does not originate from
+    the feed`` contains the active-state feed-origin clause's, so an
+    unanchored substring assertion for either active-state clause is
+    satisfied by its ledger sibling.
+    """
 
-    def test_stamp_checker_trips_on_invented_stamp(self):
-        key = (1, ("peer0", "single.flac"))
-        with self.assertRaises(AssertionError):
-            assert_stamps_match({key: None}, {key: "/invented/path"})
+    def test_stamp_checker_clauses(self):
+        cases = [
+            (
+                "C1 key set diverged — a file left active_download_state",
+                {_KEY_A: None, _KEY_B: None},
+                {_KEY_A: None},
+                _exact("file-key sets diverged: "
+                       "{(2, ('peer1', '02 track.flac'))}"),
+            ),
+            (
+                "C2 expected stamp missing",
+                {_KEY_A: "/downloads/complete/0"},
+                {_KEY_A: None},
+                _exact(
+                    "stamped local paths diverged from the event oracle:\n"
+                    "  (1, ('peer0', 'single.flac')): "
+                    "expected='/downloads/complete/0' actual=None"),
+            ),
+            (
+                "C2 invented stamp",
+                {_KEY_A: None},
+                {_KEY_A: "/invented/path"},
+                _exact(
+                    "stamped local paths diverged from the event oracle:\n"
+                    "  (1, ('peer0', 'single.flac')): "
+                    "expected=None actual='/invented/path'"),
+            ),
+        ]
+        for clause, expected, actual, pattern in cases:
+            with (self.subTest(clause=clause),
+                  self.assertRaisesRegex(AssertionError, pattern)):
+                assert_stamps_match(expected, actual)
 
-    def test_result_checker_trips_on_unknown_outcome(self):
-        with self.assertRaises(AssertionError):
-            assert_result_well_formed(EventIngestResult(outcome="exploded"))
+    def test_ledger_stamp_checker_clauses(self):
+        cases = [
+            (
+                "C3 ledgered-key set diverged",
+                {_LEDGER_A: None, _LEDGER_B: None},
+                {_LEDGER_A: None},
+                _exact("ledgered-key sets diverged: "
+                       "{('peer1', '02 track.flac')}"),
+            ),
+            (
+                "C4 expected ledger stamp missing",
+                {_LEDGER_A: "/downloads/complete/0"},
+                {_LEDGER_A: None},
+                _exact(
+                    "ledger-stamped local paths diverged from the event "
+                    "oracle:\n  ('peer0', 'single.flac'): "
+                    "expected='/downloads/complete/0' actual=None"),
+            ),
+            (
+                "C4 invented ledger stamp",
+                {_LEDGER_A: None},
+                {_LEDGER_A: "/invented/path"},
+                _exact(
+                    "ledger-stamped local paths diverged from the event "
+                    "oracle:\n  ('peer0', 'single.flac'): "
+                    "expected=None actual='/invented/path'"),
+            ),
+        ]
+        for clause, expected, actual, pattern in cases:
+            with (self.subTest(clause=clause),
+                  self.assertRaisesRegex(AssertionError, pattern)):
+                assert_ledger_stamps_match(expected, actual)
 
-    def test_ledger_stamp_checker_trips_on_wrong_path(self):
-        key = ("peer0", "single.flac")
-        with self.assertRaises(AssertionError):
-            assert_ledger_stamps_match(
-                {key: "/downloads/complete/0"}, {key: None})
-
-    def test_ledger_stamp_checker_trips_on_invented_stamp(self):
-        key = ("peer0", "single.flac")
-        with self.assertRaises(AssertionError):
-            assert_ledger_stamps_match({key: None}, {key: "/invented/path"})
-
-    def test_result_checker_trips_on_negative_transfers_stamped(self):
-        with self.assertRaises(AssertionError):
-            assert_result_well_formed(
-                EventIngestResult(outcome="ingested", transfers_stamped=-1))
-
-    def test_incarnation_checker_trips_on_stale_attempt_stamp(self):
-        with self.assertRaises(AssertionError):
-            assert_incarnation_window(
-                expected_path="/downloads/current-b",
-                actual_path="/downloads/stale-a",
-                expected_cursor_advanced=True,
-                result=EventIngestResult(
+    def test_result_checker_clauses(self):
+        cases = [
+            (
+                "C5 unknown outcome",
+                EventIngestResult(outcome="exploded"),
+                _exact("unknown ingest outcome: 'exploded'"),
+            ),
+            # One raise site, five clauses: the loop stands in for every
+            # counter, so each field owes its own world (issue #1094).
+            (
+                "C6 negative events_seen",
+                EventIngestResult(outcome="ingested", events_seen=-1),
+                _prefix("negative counter events_seen: EventIngestResult("),
+            ),
+            (
+                "C7 negative file_events",
+                EventIngestResult(outcome="ingested", file_events=-1),
+                _prefix("negative counter file_events: EventIngestResult("),
+            ),
+            (
+                "C8 negative files_stamped",
+                EventIngestResult(outcome="ingested", files_stamped=-1),
+                _prefix("negative counter files_stamped: EventIngestResult("),
+            ),
+            (
+                "C9 negative requests_updated",
+                EventIngestResult(outcome="ingested", requests_updated=-1),
+                _prefix(
+                    "negative counter requests_updated: EventIngestResult("),
+            ),
+            (
+                "C10 negative transfers_stamped",
+                EventIngestResult(outcome="ingested", transfers_stamped=-1),
+                _prefix(
+                    "negative counter transfers_stamped: EventIngestResult("),
+            ),
+            (
+                "C11 advanced cursor also reports a hold",
+                EventIngestResult(
                     outcome="ingested",
                     cursor_advanced=True,
-                ),
-            )
+                    cursor_hold_reason="lost_current_incarnation_write"),
+                _prefix("advanced cursor cannot also report a hold: "
+                        "EventIngestResult("),
+            ),
+            (
+                # cursor_advanced=False so the advance/hold clause above
+                # passes and this clause is the one that fires.
+                "C12 cursor-gap fail-open claims a replay hold",
+                EventIngestResult(
+                    outcome="ingested",
+                    cursor_gap=True,
+                    cursor_advanced=False,
+                    cursor_hold_reason="lost_current_incarnation_write"),
+                _prefix("cursor-gap fail-open cannot claim a replay hold: "
+                        "EventIngestResult("),
+            ),
+        ]
+        for clause, result, pattern in cases:
+            with (self.subTest(clause=clause),
+                  self.assertRaisesRegex(AssertionError, pattern)):
+                assert_result_well_formed(result)
 
-    def test_incarnation_checker_trips_on_unconditional_cursor_advance(self):
-        with self.assertRaises(AssertionError):
-            assert_incarnation_window(
-                expected_path=None,
-                actual_path=None,
-                expected_cursor_advanced=False,
-                result=EventIngestResult(
+    def test_incarnation_checker_clauses(self):
+        cases = [
+            (
+                "C13 stale-attempt stamp",
+                "/downloads/current-b",
+                "/downloads/stale-a",
+                True,
+                EventIngestResult(outcome="ingested", cursor_advanced=True),
+                _exact("current-incarnation stamp diverged: "
+                       "expected='/downloads/current-b' "
+                       "actual='/downloads/stale-a'"),
+            ),
+            (
+                "C14 cursor advanced over a lost dirty write",
+                None,
+                None,
+                False,
+                EventIngestResult(outcome="ingested", cursor_advanced=True),
+                _exact("cursor commit-marker divergence: "
+                       "expected=False actual=True"),
+            ),
+            (
+                "C15 advance held anyway",
+                None,
+                None,
+                True,
+                EventIngestResult(
                     outcome="ingested",
                     cursor_advanced=True,
-                ),
-            )
+                    cursor_hold_reason="lost_current_incarnation_write"),
+                _exact("advanced cursor unexpectedly held: "
+                       "'lost_current_incarnation_write'"),
+            ),
+            (
+                "C16 lost dirty write held with no reason",
+                None,
+                None,
+                False,
+                EventIngestResult(outcome="ingested", cursor_advanced=False),
+                _exact("lost dirty write lacked the safe hold reason: None"),
+            ),
+            (
+                "C16 lost dirty write held for the wrong reason",
+                None,
+                None,
+                False,
+                EventIngestResult(
+                    outcome="ingested",
+                    cursor_advanced=False,
+                    cursor_hold_reason="lost_write"),
+                _exact("lost dirty write lacked the safe hold reason: "
+                       "'lost_write'"),
+            ),
+        ]
+        for (clause, expected_path, actual_path, expected_advanced,
+             result, pattern) in cases:
+            with (self.subTest(clause=clause),
+                  self.assertRaisesRegex(AssertionError, pattern)):
+                assert_incarnation_window(
+                    expected_path=expected_path,
+                    actual_path=actual_path,
+                    expected_cursor_advanced=expected_advanced,
+                    result=result,
+                )
 
-    def test_result_checker_trips_on_advance_and_hold(self):
-        with self.assertRaises(AssertionError):
+    def test_feed_origin_checker_clauses(self):
+        feed = {"/downloads/complete/0"}
+        active_violation = (
+            "stamped path '/invented/active' does not originate from the feed")
+        ledger_violation = (
+            "ledger-stamped path '/invented/ledger' does not originate "
+            "from the feed")
+        with self.subTest(clause="C17 active stamp not from the feed"):
+            self.assertEqual(
+                feed_origin_violations(
+                    stamped={_KEY_A: "/invented/active"},
+                    ledger={_LEDGER_A: "/downloads/complete/0"},
+                    feed_paths=feed),
+                [active_violation])
+        with self.subTest(clause="C18 ledger stamp not from the feed"):
+            self.assertEqual(
+                feed_origin_violations(
+                    stamped={_KEY_A: "/downloads/complete/0"},
+                    ledger={_LEDGER_A: "/invented/ledger"},
+                    feed_paths=feed),
+                [ledger_violation])
+        with self.subTest(clause="both clauses report — neither masks"):
+            self.assertEqual(
+                feed_origin_violations(
+                    stamped={_KEY_A: "/invented/active"},
+                    ledger={_LEDGER_A: "/invented/ledger"},
+                    feed_paths=feed),
+                [active_violation, ledger_violation])
+
+    def test_owning_request_id_fails_closed_on_a_foreign_key(self):
+        world = EventWorld(
+            rows=(RequestWorld(
+                request_id=1,
+                file_keys=(("peer0", "single.flac"),),
+                leaves_before_classification=False),),
+            events=(),
+            cursor_index=0,
+        )
+        with self.assertRaisesRegex(
+            AssertionError,
+            _prefix("ledgered key ('peer9', 'nope.flac') owned by no row in"),
+        ):
+            _owning_request_id(world, ("peer9", "nope.flac"))
+
+    def test_checkers_accept_conforming_worlds(self):
+        """Must-still-work: none of the clauses fires on a clean pass."""
+        assert_stamps_match(
+            {_KEY_A: "/downloads/complete/0", _KEY_B: None},
+            {_KEY_A: "/downloads/complete/0", _KEY_B: None})
+        assert_ledger_stamps_match(
+            {_LEDGER_A: "/downloads/complete/0", _LEDGER_B: None},
+            {_LEDGER_A: "/downloads/complete/0", _LEDGER_B: None})
+        for outcome in _VALID_OUTCOMES:
             assert_result_well_formed(EventIngestResult(
+                outcome=outcome, events_seen=2, file_events=1,
+                files_stamped=1, requests_updated=1, transfers_stamped=1,
+                cursor_advanced=True))
+        assert_result_well_formed(EventIngestResult(
+            outcome="ingested",
+            cursor_advanced=False,
+            cursor_hold_reason="lost_current_incarnation_write"))
+        assert_result_well_formed(EventIngestResult(
+            outcome="ingested", cursor_gap=True, cursor_advanced=True))
+        assert_incarnation_window(
+            expected_path="/downloads/incarnation/0",
+            actual_path="/downloads/incarnation/0",
+            expected_cursor_advanced=True,
+            result=EventIngestResult(outcome="ingested", cursor_advanced=True))
+        assert_incarnation_window(
+            expected_path=None,
+            actual_path=None,
+            expected_cursor_advanced=False,
+            result=EventIngestResult(
                 outcome="ingested",
-                cursor_advanced=True,
-                cursor_hold_reason="lost_current_incarnation_write",
-            ))
+                cursor_advanced=False,
+                cursor_hold_reason="lost_current_incarnation_write"))
+        self.assertEqual(
+            feed_origin_violations(
+                stamped={_KEY_A: "/downloads/complete/0", _KEY_B: None},
+                ledger={_LEDGER_A: None},
+                feed_paths={"/downloads/complete/0"}),
+            [])
 
 
 if __name__ == "__main__":
