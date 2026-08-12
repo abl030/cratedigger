@@ -14,6 +14,13 @@ outcomes are logged as structured INFO lines so operators can grep
 ``journalctl -u cratedigger-unfindable`` for "categorised" /
 "downgraded" / "probe_failed".
 
+Run-health / exit code (issue #1090): a fully classified run returns
+``0``. When ``categorise_due_batch``'s circuit breaker trips (a
+sustained run of slskd search-submit failures), the process returns
+``EXIT_INCOMPLETE_RUN`` so systemd reports the unit as failed --
+distinct from the pre-existing config/schema abort (``2``) returned
+before any work runs. See ``_process_batch``.
+
 The script is intentionally narrow: it does not import any
 cursor-mutating PipelineDB methods, plan-service module, or
 search-execution module. The R20 AST guard test enforces that on

@@ -129,9 +129,11 @@ PROBE_SUBMIT_RETRY_MAX_ATTEMPTS: int = 3
 PROBE_SUBMIT_RETRY_BACKOFF_S: tuple[float, ...] = (2.0, 5.0, 10.0)
 
 # Circuit breaker (issue #1090): after this many CONSECUTIVE submit-
-# failure outcomes (a probe whose slskd submit exhausted its retry
-# budget -- see ``_is_submit_failure``), ``categorise_due_batch`` stops
-# consuming candidates and ends the run early. This is the multi-minute-
+# failure outcomes (a probe whose slskd submit ultimately raised
+# SearchSubmitError -- either after exhausting the 409-retry budget above,
+# or immediately for a non-retryable submit failure; see
+# ``_is_submit_failure``), ``categorise_due_batch`` stops consuming
+# candidates and ends the run early. This is the multi-minute-
 # outage case the bounded per-probe retry alone cannot absorb. Candidates
 # never attempted are left byte-untouched and excluded from the batch's
 # processed count -- they roll into the next daily run via the normal
@@ -292,10 +294,11 @@ _SUBMIT_FAILURE_ERROR_PREFIX = f"{SearchSubmitError.__name__}:"
 
 def _is_submit_failure(result: UnfindableServiceResult) -> bool:
     """True when a ``RESULT_PROBE_FAILED`` outcome was caused by a slskd
-    search-submit rejection that exhausted its own bounded retry budget
-    (``SearchSubmitError``), as opposed to some other probe failure mode
-    (a degraded harvest, a DB error, ...). Only submit failures drive the
-    ``categorise_due_batch`` circuit breaker — an unrelated one-off
+    search-submit rejection (``SearchSubmitError`` -- raised either after
+    exhausting the probe's bounded 409-retry budget, or immediately for a
+    non-retryable submit failure), as opposed to some other probe failure
+    mode (a degraded harvest, a DB error, ...). Only submit failures drive
+    the ``categorise_due_batch`` circuit breaker — an unrelated one-off
     failure on a single row must not stop the whole batch.
     """
     return (
@@ -829,7 +832,7 @@ class UnfindableDetectionService:
         Circuit breaker (issue #1090): after
         ``CIRCUIT_BREAKER_CONSECUTIVE_SUBMIT_FAILURES`` consecutive submit-
         failure outcomes (see ``_is_submit_failure`` — a probe whose slskd
-        submit exhausted its own bounded retry, NOT an unrelated one-off
+        submit raised ``SearchSubmitError``, NOT an unrelated one-off
         probe failure), the batch stops early. This absorbs a multi-minute
         slskd outage the per-probe retry alone cannot: candidates never
         attempted are left byte-untouched (no write of any kind) and
