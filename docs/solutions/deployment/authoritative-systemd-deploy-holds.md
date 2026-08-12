@@ -186,16 +186,34 @@ those markers: with none present at all -- an ordinary clean boot with no
 prior deploy hold -- it refuses precisely like it always has, so a boot can
 never turn into a mass restart. With one or more present, it proves no
 unmarked (foreign) object or foreign metadata-gate hold conflicts before
-touching anything, then adopts exactly the marked objects -- releasing the
-manual hold and/or removing the marked inhibitors, restarting and proving
-active whatever they blocked (reusing the identical restart-then-disown shape
-the receipt-owned branches below already use, including for an orphan marker
-whose object was never actually created because the crash landed between the
-marker write and the object's own creation -- starting an already-running or
-never-actually-blocked unit is an idempotent no-op), then clearing the
-markers -- ending at the same ordinary, unheld operation every other path
-through `abort` reaches. It never re-establishes a receipt or a phase: after
-a reboot there is nothing to recover TO, only ordinary operation to restore.
+touching anything, then adopts exactly the marked objects in a fixed order:
+every marked inhibitor file is removed first, then a marked manual hold is
+released, and only after both mutations does it restart once and prove
+active whatever they blocked -- except `cratedigger.service`, a `Type=oneshot`
+that never reaches active/running and is instead started unproven, never
+waited on (mirroring `prepare_controlled`'s own main-service handling) --
+before finally clearing the markers.
+
+That ordering is load-bearing, not cosmetic (#1096 correction round, caught
+by independent review before the first version of this adoption path ever
+shipped). An earlier shape released the hold and started+proved `GATE_STOPPED_UNITS`
+active *before* touching the inhibitor branch: a still-present marked
+YouTube inhibitor then condition-skipped that very restart (`systemctl
+start` returns 0, the unit stays down -- not a job failure), so the wait
+polled for the full producer-drain budget and failed with both markers
+still on disk and the inhibitor file untouched -- a hang every rerun
+reproduced identically, with the hand-`rm` this module's docs exist to
+forbid as the only way out. The same shape let a marked-but-never-created
+inhibitor (the crash landed between the marker write and the inhibitor
+file's own creation) reach `_wait_controlled_workers_active` naming
+`cratedigger.service` among the units to prove active -- a wait that unit
+can never satisfy, since a oneshot never reaches `active`/`running` at all;
+that reproduced the identical hang even with no YouTube inhibitor in play.
+Removing/releasing everything the call owns before the single restart pass,
+and excluding the oneshot from that pass's wait, closes both dead ends by
+construction -- ending at the same ordinary, unheld operation every other
+path through `abort` reaches. It never re-establishes a receipt or a phase:
+after a reboot there is nothing to recover TO, only ordinary operation to restore.
 `acquire`'s own refusal for an object carrying one of these markers now names
 `abort` as the way out (distinct from its refusal for a genuinely unmarked,
 foreign object, which still refuses with no such pointer). `recover-held`
@@ -220,16 +238,25 @@ unable to cleanly return to HELD either (`recover-held` hits the identical
 conflict re-taking the hold).
 
 `abort` then walks the same ownership markers acquisition records intent
-through and releases exactly the ones the receipt owns, in the reverse of the
-order acquisition took them -- restarting what that ownership implies it
-stopped only after that restart is *proven*, and disowning only after that
-proof, so an interrupted retry never sees "nothing owned" while the
-underlying object is still stopped:
+through and releases exactly the ones the receipt owns, restarting what
+that ownership implies it stopped, first removing/releasing every owned
+object it disowns before that restart, and proving the restart *before*
+disowning -- except `cratedigger.service`, a `Type=oneshot` that never
+reaches active/running and so is always restarted unproven and disowned
+without waiting (the same exception `_adopt_persistent_markers_or_refuse`
+makes for the persistent-marker path above, and for the identical reason:
+`_wait_controlled_workers_active` can never be satisfied by a unit that
+runs once and exits). This ordering -- release/remove everything first,
+restart once, then disown -- is what an interrupted retry needs to never
+see "nothing owned" while an underlying unit is still stopped, and (#1096
+correction round) what stops a still-owned inhibitor from condition-
+skipping a restart this same call's hold-release branch is mid-proving:
 
-- the manual gate hold, if owned. Releasing it is what the external gate tool
-  consults to let every gate-guarded unit start again, so `abort` restarts
-  all four -- web, preview, importer, and YouTube ingest, itself gate-guarded
-  since #1078 -- and proves every one is stably active
+- the manual gate hold, if owned. Its owned producer-start inhibitors are
+  released first (see below), then releasing the hold is what the external
+  gate tool consults to let every gate-guarded unit start again, so `abort`
+  restarts all four -- web, preview, importer, and YouTube ingest, itself
+  gate-guarded since #1078 -- and proves every one is stably active
   (`_wait_controlled_workers_active`, the same check `prepare_controlled`
   uses) before trusting the release and disowning the hold. A foreign hold
   (for example the monthly discogs-import hold) makes that proof fail loudly
@@ -237,7 +264,12 @@ underlying object is still stopped:
   `systemctl start` that a gate-guarded unit's `ExecCondition` silently
   skips still returns success -- the CLI sees a condition skip, not a
   failure;
-- every owned producer-start inhibitor;
+- every owned producer-start inhibitor, its file removed before the manual
+  hold above is released (not after -- a still-present inhibitor would
+  otherwise condition-skip that release's own restart) and before that
+  removal's own restart is attempted, proven active same as above --
+  except `cratedigger.service` among them, restarted unproven per the
+  oneshot exception stated above;
 - every owned timer control-link mask, restarted and proven active before
   being disowned -- restarting that timer is what returns
   `cratedigger-unfindable.service` and the watchdog to their ordinary

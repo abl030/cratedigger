@@ -139,13 +139,13 @@ _PERSISTENT_MANUAL_MARKER = "deploy-hold-owned-manual"
 _PERSISTENT_INHIBITOR_MARKER_PREFIX = "deploy-hold-owned-inhibit-"
 _INVOCATION_RE = re.compile(r"[0-9a-f]{32}")
 # Bounds every ``_drain_services`` call whose unit set includes
-# ``cratedigger-unfindable.service`` (review round 2, R2 -- line numbers
-# re-verified against the tree merged with issue #1100's fake-gate-model
-# PR): ``_verify_authoritative_hold`` (:1258), ``_drain_producers_then_
-# hold`` (:1485, :1491), ``recover_held``'s cold-start branch (:1572),
-# and ``open_main_timer`` (:1845) -- verified individually against
-# ``SERVICE_UNITS`` / ``TIMER_DRIVEN_PRODUCER_UNITS`` / ``PRODUCER_
-# SERVICE_UNITS``, which all include ``UNFINDABLE_SERVICE``. Must exceed
+# ``cratedigger-unfindable.service`` (line numbers re-verified against the
+# tree merged with #1096's correction round): ``_verify_authoritative_
+# hold`` (:1413), ``_drain_producers_then_hold`` (:1640, :1646),
+# ``recover_held``'s cold-start branch (:1741), and ``open_main_timer``
+# (:2236) -- verified individually against ``SERVICE_UNITS`` /
+# ``TIMER_DRIVEN_PRODUCER_UNITS`` / ``PRODUCER_SERVICE_UNITS``, which all
+# include ``UNFINDABLE_SERVICE``. Must exceed
 # the longest BOUNDED run among the units it drains, or an
 # acquire/verify/recover launched while that run is mid-flight times out
 # here with a misleading ``DeployHoldError`` instead of just waiting for
@@ -161,18 +161,32 @@ _INVOCATION_RE = re.compile(r"[0-9a-f]{32}")
 # against. 21600.0 (6h) keeps a 1h margin over it. Resize alongside any
 # future change to that unit's ``TimeoutStartSec``.
 _PRODUCER_DRAIN_TIMEOUT_SECONDS = 21600.0
-# Bounds ``_wait_controlled_workers_active`` (:1341 -- all four call
-# sites: :1738/:1768 from ``abort_hold``, :1810/:1819 from
-# ``prepare_controlled``) and the main+YouTube drain at :1820
+# Bounds ``_wait_controlled_workers_active`` (:1496 -- five call sites,
+# line numbers re-verified against the tree merged with #1096's
+# correction round: :1956 from ``_adopt_persistent_markers_or_refuse``,
+# :2123/:2157 from ``abort_hold``, :2201/:2210 from
+# ``prepare_controlled``) and the main+YouTube drain at :2212
 # (``prepare_controlled``, ``_drain_services(backend, (MAIN_SERVICE,
-# YOUTUBE_SERVICE))``). Neither unit set this constant bounds ever
-# contains ``cratedigger-unfindable.service``, so it keeps the pre-
-# #1112 value (2h) rather than following ``_PRODUCER_DRAIN_TIMEOUT_
-# SECONDS`` up to 6h (round 2, R2). This matters most for
-# ``abort_hold``, which calls ``_wait_controlled_workers_active`` TWICE
-# on its worst-case path -- silently tripling that budget to 6h would
-# have tripled abort's worst-case hang on a crash-looping controlled
-# worker, an unrelated and unintended regression.
+# YOUTUBE_SERVICE))``). No unit set any of these five calls ever bounds
+# contains ``cratedigger-unfindable.service``, so it keeps the pre-#1112
+# value (2h) rather than following ``_PRODUCER_DRAIN_TIMEOUT_SECONDS`` up
+# to 6h (round 2, R2).
+#
+# Counted honestly after #1096's correction round added the fifth call
+# site (:1956): within a SINGLE invocation of ``abort_hold`` itself, the
+# worst case is still exactly two sequential waits (:2123 then :2157,
+# both on the receipt-owned path) -- unchanged from before #1096, and
+# ``_adopt_persistent_markers_or_refuse``'s receiptless path (:1956) is
+# mutually exclusive with that path, never both in the same call. But
+# #1096 introduced a genuinely NEW troubleshooting sequence this budget
+# did not previously have to bound: the retired-receipt-plus-unrelated-
+# orphan-marker "two-run" case (correction round, N6) can see abort's
+# receipt-owned path (2 waits) on one invocation and adoption's
+# receiptless path (1 wait) on the very next, for up to three sequential
+# 2h waits across that realistic pair of calls where at most two existed
+# before #1096 existed at all. Silently tripling this budget to 6h would
+# have multiplied that same worst case, an unrelated and unintended
+# regression.
 _DRAIN_TIMEOUT_SECONDS = 7200.0
 _POLL_SECONDS = 1.0
 _STABLE_SAMPLES = 2
@@ -1932,7 +1946,7 @@ def _adopt_persistent_markers_or_refuse(backend: DeployHoldBackend) -> bool:
                 "metadata gate did not release the marked manual hold"
             )
 
-    restart_and_prove = set(GATE_STOPPED_UNITS) if manual_marked else set()
+    restart_and_prove: set[str] = set(GATE_STOPPED_UNITS) if manual_marked else set()
     restart_and_prove |= set(inhibited_marked)
     restart_and_prove.discard(MAIN_SERVICE)
     if restart_and_prove:

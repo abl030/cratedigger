@@ -606,22 +606,27 @@ receipt stranded partway through while the host stayed up -- `recover-held`
 cannot help: it re-proves the identical, unfixable preconditions. Use
 `env -u SSH_AUTH_SOCK ssh doc2 'sudo python3 - abort' < "$DEPLOY_HOLD"`
 instead: it releases every object the receipt owns (gate hold, start
-inhibitors, timer masks), restarts what that ownership implies it stopped,
-and removes the receipt -- returning to ordinary, unheld operation. It is
-safe from every known receipt phase and never touches an object it did not
-own; it is the one command in this module you run to walk away from a hold
-rather than advance or re-prove it.
+inhibitors, timer masks) before restarting what that ownership implies it
+stopped, proving each restart before disowning the object it unblocked --
+except `cratedigger.service`, a `Type=oneshot` that never reaches
+active/running and so is always restarted unproven -- then removes the
+receipt, returning to ordinary, unheld operation. It is safe from every
+known receipt phase and never touches an object it did not own; it is the
+one command in this module you run to walk away from a hold rather than
+advance or re-prove it.
 
 `abort` also survives a host reboot (#1096). The receipt under `/run` does
 not survive one, but the manual gate hold and the producer start inhibitors
 under `/var/lib/cratedigger-metadata-gate` are real disk state and can
 outlive it, each carrying its own persistent sibling ownership marker. Run
 `abort` with no receipt present exactly as above -- it adopts exactly the
-objects its persistent markers own, restarts and proves active whatever they
-blocked, then clears the markers, ending at ordinary operation. With no
-receipt and no persistent marker at all (an ordinary clean boot), `abort`
-still refuses. `recover-held` still requires a receipt -- the reboot recovery
-path is always `abort` followed by a fresh `acquire`. See
+objects its persistent markers own, removing/releasing every one of them
+before restarting and proving active whatever they blocked (again excepting
+`cratedigger.service`, restarted unproven), then clears the markers, ending
+at ordinary operation. With no receipt and no persistent marker at all (an
+ordinary clean boot), `abort` still refuses. `recover-held` still requires a
+receipt -- the reboot recovery path is always `abort` followed by a fresh
+`acquire`. See
 `docs/solutions/deployment/authoritative-systemd-deploy-holds.md`.
 
 ## Database migrations

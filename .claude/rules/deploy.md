@@ -74,11 +74,15 @@
   a stale controlled-start contract, or a SIGINT/dropped SSH that left the
   receipt stranded while the host stayed up). Every ownership class is
   validated before any mutation, so a refusal never leaves the boundary half
-  torn down; restarting a stopped unit is proven (`_wait_controlled_workers_active`,
-  the same check `prepare_controlled` uses — a foreign gate hold, e.g. the
-  monthly discogs-import hold, now fails loudly instead of a silent
-  exit-0 no-op) before that object is disowned, so an interrupted retry
-  never sees "nothing owned" while the underlying unit is still down. It is
+  torn down; every owned object it removes is removed first, then a restarted
+  unit is proven active (`_wait_controlled_workers_active`, the same check
+  `prepare_controlled` uses — a foreign gate hold, e.g. the monthly
+  discogs-import hold, now fails loudly instead of a silent exit-0 no-op)
+  before that object is disowned — except `cratedigger.service`, a
+  `Type=oneshot` that never reaches active/running, which `abort` restarts
+  unproven and disowns without waiting, mirroring `prepare_controlled`'s own
+  main-service handling — so an interrupted retry never sees "nothing owned"
+  while an underlying controlled/YouTube unit is still down. It is
   safe from every known receipt phase and never touches an object it did not
   own. **A host reboot clears `/run` — the receipt and every tmpfs
   ownership marker — but the manual gate hold and the producer start
@@ -87,10 +91,16 @@
   persistent sibling marker (`deploy-hold-owned-manual`,
   `deploy-hold-owned-inhibit-<unit>`), written before the object itself and
   removed only after it, so a receiptless `abort` proves which surviving
-  objects are ours and adopts exactly those — releasing/removing them,
-  restarting and proving active whatever they blocked, then clearing the
-  markers — ending at the same ordinary, unheld operation every other path
-  through `abort` reaches. It never re-establishes a receipt or a phase:
+  objects are ours and adopts exactly those — removing every marked
+  inhibitor file first, then releasing a marked manual hold, then restarting
+  once and proving active whatever they blocked (except `cratedigger.service`,
+  restarted unproven and never waited on, the same oneshot exception as the
+  receipt-owned path above), then clearing the markers — ending at the same
+  ordinary, unheld operation every other path through `abort` reaches.
+  Removing the inhibitor files before releasing the hold, rather than the
+  reverse, is what stops a still-present inhibitor from condition-skipping a
+  unit's restart out from under a hold this same call already released
+  (#1096 correction round). It never re-establishes a receipt or a phase:
   after a reboot there is nothing to recover TO, only ordinary operation to
   restore. A foreign hold or an unmarked inhibitor is refused exactly as it
   is under a live receipt, with every marker retained for a rerun once the

@@ -2123,9 +2123,11 @@ class TestRealSystemdBackendMarkerLifecycle(unittest.TestCase):
         real_open = os.open
         opened_paths: list[str] = []
 
-        def spying_open(path: object, *args: object, **kwargs: object) -> int:
-            opened_paths.append(os.fspath(path))  # type: ignore[arg-type]
-            return real_open(path, *args, **kwargs)  # type: ignore[arg-type]
+        def spying_open(
+            path: str | os.PathLike[str], flags: int, mode: int = 0o777
+        ) -> int:
+            opened_paths.append(os.fspath(path))
+            return real_open(path, flags, mode)
 
         with mock.patch.object(deploy_hold_module.os, "open", spying_open):
             backend.mark_manual_hold_owned()
@@ -2155,9 +2157,11 @@ class TestRealSystemdBackendMarkerLifecycle(unittest.TestCase):
         real_open = os.open
         opened_paths: list[str] = []
 
-        def spying_open(path: object, *args: object, **kwargs: object) -> int:
-            opened_paths.append(os.fspath(path))  # type: ignore[arg-type]
-            return real_open(path, *args, **kwargs)  # type: ignore[arg-type]
+        def spying_open(
+            path: str | os.PathLike[str], flags: int, mode: int = 0o777
+        ) -> int:
+            opened_paths.append(os.fspath(path))
+            return real_open(path, flags, mode)
 
         with mock.patch.object(deploy_hold_module.os, "open", spying_open):
             backend.mark_inhibitor_owned(YOUTUBE_SERVICE)
