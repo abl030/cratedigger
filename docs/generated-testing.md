@@ -779,6 +779,89 @@ deeper randomized entropy, 2 survivors fixed in PR #555
 (`assert_below_gate_never_stops_search` and the
 `_SPECTRAL_OVERRIDE_DECISIVE_WORLD` parity pin).
 
+## Per-clause proof — name the world that makes each clause fire
+
+Issue #1094. Fault injection above qualifies a *suite*; this qualifies a
+*checker*, one clause at a time. The two are the same instrument at
+different resolutions, and the finer one exists because four defects in the
+#1063 series hid behind green properties whose strategies could not reach
+the violating world. In each case the invariant was written correctly. The
+property was green because the world set could not produce a
+counterexample, so the guard was unfalsifiable rather than satisfied.
+
+**The practice:** for each clause of each invariant, name the world that
+makes that clause fire, and plant a mutant that only that world kills. A
+clause with no such world is either fail-closed legislation or decoration,
+and you must say which.
+
+Two questions per clause, in order. Q1 is cheap and deterministic; Q2 is
+the one that catches the #1063 shape. A clause can pass Q1 and fail Q2, but
+there is no point asking Q2 about a clause that would not fire if the world
+arrived.
+
+**Q1 — does the clause trip at all?** Build the minimal world that makes
+that clause's condition true *while every earlier clause in the same
+function passes*, feed it directly to the checker, and assert that clause's
+own message with `assertRaisesRegex`. Use a `subTest` mutant table when a
+checker has many clauses.
+
+Bare `assertRaises(AssertionError)` is not proof. `raise`-style checkers
+short-circuit, so a self-test whose world violates several clauses only
+ever exercises the first — and the test name goes on advertising the rest.
+The canonical instance, found in minutes when this audit started:
+`test_publication_checker_rejects_overwrite_source_loss` in
+`tests/test_path_authority_generated.py` was named for the overwrite and
+source-loss clauses, and its world really did set mismatched destination
+names and plant an unpublished temp artifact. It also passed a wrong result
+type, so the checker raised on the result-type clause and never evaluated
+either clause the test was named for. Three clauses of that checker had no
+proof at all.
+
+**Q2 — can the strategy reach that world?** Plant a mutant in production
+that makes the condition true through the real code path, run the module's
+generated properties, and record KILLED or SURVIVED. Revert every mutant
+before you finish; a left-behind mutant is the worst outcome this procedure
+can produce. Target one module at a time —
+`python3 scripts/run_fuzz_tests.py <module> --jobs N`.
+
+**A survivor is not a licence to delete.** The default remedy is to widen
+the strategy until the world is producible. A guard over a shared namespace
+legislates for every *other* writer of that namespace, present and future
+(§ "Invariants live at the widest boundary" in
+`.claude/rules/code-quality.md`), so a clause today's strategy cannot reach
+may still be correct. Three dispositions, and the PR must say which applies:
+
+- **widen** — the world is producible and the strategy was too narrow. This
+  is the #1063 shape and the expected outcome.
+- **fail-closed legislation** — the world cannot occur today but the clause
+  refuses an unrecognised input rather than passing it. Keep it and say
+  why. `assert_quarantine_verdict_is_earned` in
+  `tests/test_path_authority_generated.py` is the pattern: it raises on a
+  world it has no rule for, because a checker that silently passes input it
+  has no rule for is unfalsifiable for exactly the cases most likely to be
+  new.
+- **decoration** — the world is impossible by construction (type-impossible,
+  not merely unreached). Delete the clause.
+
+**Prefer accumulating checkers in new code.** A checker that returns
+`list[str]` violations evaluates every clause, so ordering cannot mask one
+and each clause carries a distinct message the self-test can name
+(`mode_selection_violations` in `tests/test_web_auth_mode_generated.py`,
+`tests/test_cleanup_journal_generated.py`). Short-circuiting `raise` chains
+are the structural cause of the masking above. This is a preference for new
+checkers, not a licence for a blanket rewrite sweep: convert an existing
+chain only where an audit shows ordering actually hides a clause.
+
+**Scope and limits.** The standing rule is that a PR touching a generated
+module audits that module's clauses as part of the change; a prioritised
+sweep of the modules guarding the most expensive invariants runs separately,
+scoped module by module. The audit examines test machinery, so its own
+artifacts are deterministic-only — never schedule a generated audit of the
+audit. Do not build a scanner that infers clause reachability from source
+(`.claude/rules/code-quality.md` § "Semantic source scanners are
+prohibited"); the evidence is the named world and the killed mutant,
+recorded in the PR exactly as the fault-injection kill matrices are.
+
 ## Every property must use every input it draws
 
 Issue #882 item 5. During the #868 series one generated property invoked no

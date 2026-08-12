@@ -200,12 +200,39 @@ Any type that **crosses JSON** — harness stdout, an HTTP response, a JSONB blo
   the real fresh-audit value (`genuine/160`) flips `imported` False↔True
   through `full_pipeline_decision_from_evidence` — the actual consequence
   and the strictly stronger regression guard.
-- **Every invariant checker owes a known-bad self-test**: a planted
-  violating decision/state proving the checker trips. A property that has
-  never failed anything is unfalsifiable until proven otherwise. Keep
-  checkers as module-level functions so the self-test can call them
+- **Every invariant checker owes a known-bad self-test — per CLAUSE, not
+  per checker.** A property that has never failed anything is unfalsifiable
+  until proven otherwise, and a checker with eight `raise` sites and one
+  self-test has proven exactly one of them. Two questions per clause, in
+  order. **Q1: does the clause trip at all?** Build the minimal world that
+  makes that clause's condition true while every EARLIER clause passes,
+  feed it straight to the checker, and assert **that clause's message**
+  with `assertRaisesRegex`. Bare `assertRaises(AssertionError)` is not
+  proof — `raise`-style checkers short-circuit, so a world violating
+  several clauses only ever exercises the first, while the test name goes
+  on claiming the rest. **Q2: can the strategy reach that world?** Plant a
+  production mutant that makes the condition true through the real path and
+  require the generated property to fail. A survivor means the world set
+  cannot produce a counterexample — the guard is unfalsifiable rather than
+  satisfied, which is how four defects shipped green in the #1063 series.
+  Keep checkers as module-level functions so the self-test can call them
   directly (pattern: `TestInvariantCheckersTripOnViolations` in
-  `tests/test_quality_generated.py`).
+  `tests/test_quality_generated.py`). The remedy for a survivor is to
+  **widen the strategy, not delete the clause**: a guard legislates for
+  future writers (#859), so a clause no world reaches today may be correct
+  fail-closed legislation — `assert_quarantine_verdict_is_earned` in
+  `tests/test_path_authority_generated.py` is that pattern. Delete only
+  when the world is impossible by construction, and say so. In NEW
+  checkers prefer an accumulating `list[str]` of violations over a
+  short-circuiting `raise` chain: every clause evaluates, so ordering
+  cannot mask one (`mode_selection_violations` in
+  `tests/test_web_auth_mode_generated.py`). **Standing scope:** a PR
+  touching a generated module audits that module's clauses as part of the
+  change, and records the kill matrix in the PR. The audit examines test
+  machinery, so its artifacts are deterministic-only, and its evidence is a
+  named world plus a killed mutant — never a scanner inferring reachability
+  from source (issue #1094). Procedure: `docs/generated-testing.md`
+  § "Per-clause proof".
 - **Qualify the harness by fault injection when in doubt.** "Do these tests
   actually constrain the code?" is an empirical question: plant mutants in
   production code (revert a real past fix; break an adapter derivation;
@@ -411,7 +438,8 @@ generated-test scheduler.
 4. **RED → fix → GREEN** in one PR: the shrunk world becomes a
    deterministic regression pin, the invariant becomes a permanent
    property, a must-still-work guard proves the fix doesn't fail-closed
-   legitimate behavior, and a known-bad self-test proves the checker trips.
+   legitimate behavior, and a message-asserting known-bad self-test proves
+   each of the checker's clauses trips.
 5. **Qualify when in doubt** — plant a mutant reverting your fix; the
    property must kill it.
 
@@ -529,7 +557,7 @@ Before writing any new code, decide which test types you owe and what infrastruc
 | A new typed dataclass | A pure test of construction + serialization, and a builder in `tests/helpers.py` if it crosses test boundaries | `tests/helpers.py` |
 | A new `PipelineDB` method | An equivalent stub on `FakePipelineDB`, with a self-test in `tests/test_fakes.py` | `tests/fakes/`, `tests/test_fakes.py` |
 | A new `BeetsDB` method | Either (a) an equivalent stub on `FakeBeetsDB` with a self-test in `tests/test_fakes.py::TestFakeBeetsDB`, OR (b) drive the test against a real test SQLite DB if it's a read-only query | `tests/fakes/`, `tests/test_fakes.py` |
-| A feature with policy invariants (pure decisions, lifecycle / state machine, wire or event ingestion) | Generated properties + strategies in the same PR, each invariant checker with a known-bad self-test; invariants written down FIRST | `tests/_hypothesis_profiles.py`, checker/strategy patterns in `tests/test_*_generated.py`, `docs/generated-testing.md` |
+| A feature with policy invariants (pure decisions, lifecycle / state machine, wire or event ingestion) | Generated properties + strategies in the same PR, a message-asserting known-bad self-test for every CLAUSE of every invariant checker; invariants written down FIRST | `tests/_hypothesis_profiles.py`, checker/strategy patterns in `tests/test_*_generated.py`, `docs/generated-testing.md` § "Per-clause proof" |
 | A documented surface (a module option, a beets plugin, an operator action / CLI subcommand, the permission/ownership model, or a subsystem's documented behavior) | The doc update in the SAME PR (README / `docs/` / `examples/` / CLAUDE.md) — docs are part of done, not a follow-up | `tests/test_docs_audit.py` (structural coverage: plugins, CLI, dead-links, option descriptions); the relevant `docs/*.md` |
 
 Routes are the strictest gate: `TestRouteContractAudit` will fail at test time if you add a route to `web/routes/` without classifying it. This is intentional — it prevents shipping endpoints the frontend can rely on without contract coverage.
