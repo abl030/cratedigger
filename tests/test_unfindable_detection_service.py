@@ -826,7 +826,7 @@ class TestUnfindableDetectionService(unittest.TestCase):
         # sleep a harvest phase would issue (none here -- every attempt
         # fails at submit, before any poll/harvest runs).
         self.assertEqual(
-            [s for s in sleeps if s >= 1.0], list(PROBE_SUBMIT_RETRY_BACKOFF_S[:2]))
+            [s for s in sleeps if s >= 1.0], list(PROBE_SUBMIT_RETRY_BACKOFF_S))
         row = self.db.request(rid)
         self.assertIsNone(row["unfindable_category"])
         self.assertIsNone(row["last_artist_probe_at"])

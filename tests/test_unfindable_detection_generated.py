@@ -46,7 +46,7 @@ Review round 2 widened this further, per issue #1090's per-clause audit
   ``retry_exhausted``'s computation (a uniform all-409 burst can't tell
   the two formulas apart, since both agree once the final attempt really
   is a 409).
-* **F4** — ``assert_deterministic_candidates_never_silently_succeed`` is
+* **F4** — ``deterministic_candidate_silent_success_violations`` is
   a new checker that closes a blind spot the original checkers left:
   removing the empty-``artist_name`` guard makes the candidate submit
   ``searchText=""`` successfully against the fake and WRITE a real row
@@ -375,7 +375,7 @@ def assert_submit_retry_exhausted_matches_world(
             )
 
 
-def assert_deterministic_candidates_never_silently_succeed(
+def deterministic_candidate_silent_success_violations(
     world: BatchWorld, rids: list[int], batch: UnfindableBatchResult,
 ) -> list[str]:
     """I-B (issue #1090 review round 2, F4): an ATTEMPTED deterministic-
@@ -413,7 +413,7 @@ def assert_deterministic_candidates_never_silently_succeed(
     return violations
 
 
-def assert_breaker_trips_exactly_when_expected(
+def breaker_trip_expectation_violations(
     world: BatchWorld, batch: UnfindableBatchResult,
 ) -> list[str]:
     """I-A (precise form): the circuit breaker trips if and only if the
@@ -442,6 +442,19 @@ def assert_breaker_trips_exactly_when_expected(
     * C3 -- no qualifying run exists but the breaker tripped anyway.
     * C4 -- the breaker correctly did not trip (C3 satisfied) but did not
       attempt every candidate.
+
+    C4 has a Q1 self-test (a minimal hand-built world proves the clause
+    fires) but NO single-point production mutant reaches it today: the real
+    loop only stops short of the full candidate list by tripping the
+    breaker (which C3 already patrols) or by an early exception, and both
+    ``categorise_due_batch`` and ``run_artist_probe`` were re-derived
+    (review round 3) to have no other early-exit branch a one-line mutant
+    can open. C4 is therefore FAIL-CLOSED LEGISLATION (per #859's "a guard
+    over a shared namespace ships with a patrolling property") against a
+    FUTURE early-exit the breaker loop might grow, not a mutant-qualified
+    clause today -- record this status wherever the kill matrix for this
+    checker is reported so an absent single-point kill doesn't read as an
+    oversight.
     """
     violations: list[str] = []
     expected_trip_at = _expected_trip_index(world)
@@ -588,12 +601,12 @@ class TestGeneratedSubmitResiliencePatrol(unittest.TestCase):
         assert_probe_failed_writes_nothing(rids, batch, before, after)
         assert_submit_retry_exhausted_matches_world(world, rids, batch)
         self.assertEqual(
-            assert_deterministic_candidates_never_silently_succeed(
+            deterministic_candidate_silent_success_violations(
                 world, rids, batch),
             [], (world, batch),
         )
         self.assertEqual(
-            assert_breaker_trips_exactly_when_expected(world, batch),
+            breaker_trip_expectation_violations(world, batch),
             [], (world, batch),
         )
 
@@ -715,7 +728,7 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         ):
             assert_exit_code_matches_completeness(False, EXIT_INCOMPLETE_RUN)
 
-    # -- assert_deterministic_candidates_never_silently_succeed (F4) --
+    # -- deterministic_candidate_silent_success_violations (F4) --
 
     def test_deterministic_429_silently_succeeding_trips_the_checker(self) -> None:
         world = BatchWorld(candidates=(
@@ -725,7 +738,7 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
                 outcome=RESULT_CATEGORISED, request_id=7)],  # planted: NOT probe_failed
             candidates_considered=1,
         )
-        violations = assert_deterministic_candidates_never_silently_succeed(
+        violations = deterministic_candidate_silent_success_violations(
             world, [7], batch)
         self.assertTrue(
             any("expected RESULT_PROBE_FAILED" in v for v in violations),
@@ -743,7 +756,7 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
                 outcome=RESULT_NO_CHANGE, request_id=7)],  # planted: guard-removed shape
             candidates_considered=1,
         )
-        violations = assert_deterministic_candidates_never_silently_succeed(
+        violations = deterministic_candidate_silent_success_violations(
             world, [7], batch)
         self.assertTrue(
             any("expected RESULT_PROBE_FAILED" in v for v in violations),
@@ -759,7 +772,7 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             candidates_considered=1,
         )
         self.assertEqual(
-            assert_deterministic_candidates_never_silently_succeed(
+            deterministic_candidate_silent_success_violations(
                 world, [7], batch),
             [],
         )
@@ -776,7 +789,7 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             candidates_considered=1,
         )
         self.assertEqual(
-            assert_deterministic_candidates_never_silently_succeed(
+            deterministic_candidate_silent_success_violations(
                 world, [7], batch),
             [],
         )
@@ -789,12 +802,12 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             CandidateWorld(kind="deterministic_429"),))
         batch = UnfindableBatchResult(results=[], candidates_considered=1)
         self.assertEqual(
-            assert_deterministic_candidates_never_silently_succeed(
+            deterministic_candidate_silent_success_violations(
                 world, [7], batch),
             [],
         )
 
-    # -- assert_breaker_trips_exactly_when_expected (C1-C4) --
+    # -- breaker_trip_expectation_violations (C1-C4) --
 
     def test_breaker_c1_trips_when_expected_trip_did_not_happen(self) -> None:
         """C1 in isolation: a real 3-consecutive-retry-exhausted run
@@ -816,7 +829,7 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             candidates_considered=3,
             breaker_tripped=False,  # C1 violation
         )
-        violations = assert_breaker_trips_exactly_when_expected(world, batch)
+        violations = breaker_trip_expectation_violations(world, batch)
         self.assertTrue(
             any(v.startswith("C1 breaker-did-not-trip") for v in violations),
             violations,
@@ -845,7 +858,7 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             candidates_considered=3,
             breaker_tripped=True,  # C1 satisfied
         )
-        violations = assert_breaker_trips_exactly_when_expected(world, batch)
+        violations = breaker_trip_expectation_violations(world, batch)
         self.assertFalse(
             any(v.startswith("C1") for v in violations), violations,
         )
@@ -870,7 +883,7 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             candidates_considered=3,
             breaker_tripped=True,  # C3 violation
         )
-        violations = assert_breaker_trips_exactly_when_expected(world, batch)
+        violations = breaker_trip_expectation_violations(world, batch)
         self.assertTrue(
             any(v.startswith("C3 breaker-tripped-without-cause")
                 for v in violations),
@@ -894,7 +907,7 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             candidates_considered=3,
             breaker_tripped=False,  # C3 satisfied
         )
-        violations = assert_breaker_trips_exactly_when_expected(world, batch)
+        violations = breaker_trip_expectation_violations(world, batch)
         self.assertFalse(
             any(v.startswith("C3") for v in violations), violations,
         )
@@ -920,7 +933,7 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             breaker_tripped=False,
         )
         self.assertEqual(
-            assert_breaker_trips_exactly_when_expected(world, batch), [],
+            breaker_trip_expectation_violations(world, batch), [],
         )
 
 
