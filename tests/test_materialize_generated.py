@@ -434,22 +434,23 @@ class TestMaterializeCheckersTripOnViolations(unittest.TestCase):
             (
                 "1: the fingerprint suffix is absent",
                 "Artist - Title (2020)",
-                "basename 'Artist - Title (2020)' does not end with "
-                "fingerprint suffix ' [abcd1234]'",
+                ("basename 'Artist - Title (2020)' does not end with "
+                "fingerprint suffix ' [abcd1234]'"),
             ),
             (
                 # The suffix IS present here, so clause 1 passes and only
                 # the byte cap can answer — the PR #560 r2 truncation guard.
                 "2: suffixed, but over the 255-byte ext4 cap",
                 overlong,
-                f"basename {overlong!r} is {len(overlong.encode('utf-8'))} "
-                "bytes, exceeds the 255-byte ext4 filename cap",
+                (f"basename {overlong!r} is {len(overlong.encode('utf-8'))} "
+                "bytes, exceeds the 255-byte ext4 filename cap"),
             ),
         )
         for clause, basename, message in cases:
-            with self.subTest(clause=clause):
-                with self.assertRaisesRegex(AssertionError, _exactly(message)):
-                    assert_canonical_basename_bounded(basename, "abcd1234")
+            with self.subTest(clause=clause), self.assertRaisesRegex(
+                AssertionError, _exactly(message),
+            ):
+                assert_canonical_basename_bounded(basename, "abcd1234")
 
     def test_a_basename_exactly_on_the_cap_passes_every_clause(self):
         """The must-still-work control: 255 bytes is legal, 256 is not."""
@@ -470,21 +471,22 @@ class TestMaterializeCheckersTripOnViolations(unittest.TestCase):
             (
                 "a manifest file never landed",
                 frozenset(),
-                "attempt B: folder contents diverged from its manifest "
-                "(missing=['01 Track.flac'] extra=[])",
+                ("attempt B: folder contents diverged from its manifest "
+                "(missing=['01 Track.flac'] extra=[])"),
             ),
             (
                 "another attempt's file blended in (the #550 shape)",
                 frozenset({"01 Track.flac", "alien-track.flac"}),
-                "attempt B: folder contents diverged from its manifest "
-                "(missing=[] extra=['alien-track.flac'])",
+                ("attempt B: folder contents diverged from its manifest "
+                "(missing=[] extra=['alien-track.flac'])"),
             ),
         )
         for label, actual, message in cases:
-            with self.subTest(world=label):
-                with self.assertRaisesRegex(AssertionError, _exactly(message)):
-                    assert_folder_contents_match_manifest(
-                        actual, frozenset({"01 Track.flac"}), label="attempt B")
+            with self.subTest(world=label), self.assertRaisesRegex(
+                AssertionError, _exactly(message),
+            ):
+                assert_folder_contents_match_manifest(
+                    actual, frozenset({"01 Track.flac"}), label="attempt B")
 
     def test_each_resume_stability_clause_fires_on_its_own_world(self):
         cases = (
@@ -493,24 +495,25 @@ class TestMaterializeCheckersTripOnViolations(unittest.TestCase):
                 "/tmp/downloads/Album [aaaa1111]",
                 "/tmp/downloads/Album [bbbb2222]",
                 True,
-                "identical manifests produced different canonical folders "
+                ("identical manifests produced different canonical folders "
                 "(resume stability broken): '/tmp/downloads/Album [aaaa1111]' "
-                "!= '/tmp/downloads/Album [bbbb2222]'",
+                "!= '/tmp/downloads/Album [bbbb2222]'"),
             ),
             (
                 "2: different manifests collapsed onto one folder",
                 "/tmp/downloads/Album [aaaa1111]",
                 "/tmp/downloads/Album [aaaa1111]",
                 False,
-                "different manifests collided on the same canonical folder: "
-                "'/tmp/downloads/Album [aaaa1111]'",
+                ("different manifests collided on the same canonical folder: "
+                "'/tmp/downloads/Album [aaaa1111]'"),
             ),
         )
         for clause, path_a, path_b, manifests_equal, message in cases:
-            with self.subTest(clause=clause):
-                with self.assertRaisesRegex(AssertionError, _exactly(message)):
-                    assert_resume_stability(
-                        path_a, path_b, manifests_equal=manifests_equal)
+            with self.subTest(clause=clause), self.assertRaisesRegex(
+                AssertionError, _exactly(message),
+            ):
+                assert_resume_stability(
+                    path_a, path_b, manifests_equal=manifests_equal)
 
 
 if __name__ == "__main__":

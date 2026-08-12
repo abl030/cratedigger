@@ -705,17 +705,17 @@ class TestMaterializeEvidenceCheckersTripOnViolations(unittest.TestCase):
                 {"reason": REASON_UNSAFE_SOURCE_PATH,
                  "repeated_reason": REASON_EVENT_PATH_GONE_FROM_DISK,
                  "expected_family": "containment", "errno_symbol": None},
-                "reason was not stable across calls: 'unsafe_source_path' vs "
-                "'event_path_gone_from_disk'",
+                ("reason was not stable across calls: 'unsafe_source_path' vs "
+                "'event_path_gone_from_disk'"),
             ),
             (
                 "2: a colon the retired split derivation would truncate",
                 {"reason": "unsafe_source_path: /peer/track.mp3",
                  "repeated_reason": "unsafe_source_path: /peer/track.mp3",
                  "expected_family": "containment", "errno_symbol": None},
-                "reason 'unsafe_source_path: /peer/track.mp3' contains a "
+                ("reason 'unsafe_source_path: /peer/track.mp3' contains a "
                 "colon — the retired ``str(exc).split(':', 1)[0]`` "
-                "derivation would truncate it",
+                "derivation would truncate it"),
             ),
             (
                 "3: a reason belonging to no known family",
@@ -728,15 +728,15 @@ class TestMaterializeEvidenceCheckersTripOnViolations(unittest.TestCase):
                 {"reason": REASON_UNSAFE_SOURCE_PATH,
                  "repeated_reason": REASON_UNSAFE_SOURCE_PATH,
                  "expected_family": "storage", "errno_symbol": "ESTALE"},
-                "reason 'unsafe_source_path' is family 'containment', "
-                "expected 'storage'",
+                ("reason 'unsafe_source_path' is family 'containment', "
+                "expected 'storage'"),
             ),
             (
                 "4: the mirror image — a containment called storage",
                 {"reason": storage_reason, "repeated_reason": storage_reason,
                  "expected_family": "containment", "errno_symbol": "ESTALE"},
-                "reason 'source_open_failed_ESTALE' is family 'storage', "
-                "expected 'containment'",
+                ("reason 'source_open_failed_ESTALE' is family 'storage', "
+                "expected 'containment'"),
             ),
             (
                 # The generated I2b property found this one: a subject that
@@ -746,8 +746,8 @@ class TestMaterializeEvidenceCheckersTripOnViolations(unittest.TestCase):
                 {"reason": REASON_UNSAFE_SOURCE_PATH,
                  "repeated_reason": REASON_UNSAFE_SOURCE_PATH,
                  "expected_family": "unclassified", "errno_symbol": None},
-                "reason 'unsafe_source_path' is family 'containment', "
-                "expected 'unclassified'",
+                ("reason 'unsafe_source_path' is family 'containment', "
+                "expected 'unclassified'"),
             ),
             (
                 # Clause 5 is reachable in production: an ``errno_symbol``
@@ -764,8 +764,8 @@ class TestMaterializeEvidenceCheckersTripOnViolations(unittest.TestCase):
                  "repeated_reason":
                      f"{REASON_SOURCE_OPEN_FAILED_PREFIX}UNKNOWN",
                  "expected_family": "storage", "errno_symbol": "ESTALE"},
-                "storage reason 'source_open_failed_UNKNOWN' lost its errno "
-                "'ESTALE'",
+                ("storage reason 'source_open_failed_UNKNOWN' lost its errno "
+                "'ESTALE'"),
             ),
             (
                 # Clause 7 is the converse of 5: a containment verdict is
@@ -775,14 +775,15 @@ class TestMaterializeEvidenceCheckersTripOnViolations(unittest.TestCase):
                 {"reason": REASON_UNSAFE_SOURCE_PATH,
                  "repeated_reason": REASON_UNSAFE_SOURCE_PATH,
                  "expected_family": "containment", "errno_symbol": "ESTALE"},
-                "non-storage reason 'unsafe_source_path' was built from "
-                "errno 'ESTALE'",
+                ("non-storage reason 'unsafe_source_path' was built from "
+                "errno 'ESTALE'"),
             ),
         )
         for clause, kwargs, message in cases:
-            with self.subTest(clause=clause):
-                with self.assertRaisesRegex(AssertionError, _exactly(message)):
-                    assert_reason_partition_invariant(**kwargs)
+            with self.subTest(clause=clause), self.assertRaisesRegex(
+                AssertionError, _exactly(message),
+            ):
+                assert_reason_partition_invariant(**kwargs)
 
     def test_a_correctly_named_refusal_passes_every_partition_clause(self) -> None:
         """The must-still-work control for all seven clauses at once."""
@@ -817,15 +818,15 @@ class TestMaterializeEvidenceCheckersTripOnViolations(unittest.TestCase):
                 "1: the share refused but arrived untyped",
                 {"leg": "root", "raised": untyped,
                  "reason": REASON_SLSKD_ROOT_MISSING},
-                "root leg raised FilesystemAuthorityError: attribution is "
-                "inverted or absent",
+                ("root leg raised FilesystemAuthorityError: attribution is "
+                "inverted or absent"),
             ),
             (
                 "1: the inverse — one file's refusal typed as the share's",
                 {"leg": "descendant", "raised": typed,
                  "reason": REASON_SLSKD_ROOT_MISSING},
-                "descendant leg raised SharedDownloadRootError: attribution "
-                "is inverted or absent",
+                ("descendant leg raised SharedDownloadRootError: attribution "
+                "is inverted or absent"),
             ),
             (
                 # The exact D1 defect: the share refused, but the reason
@@ -833,21 +834,22 @@ class TestMaterializeEvidenceCheckersTripOnViolations(unittest.TestCase):
                 "2: a root refusal blamed on one file's event stamp",
                 {"leg": "root", "raised": typed,
                  "reason": REASON_EVENT_PATH_GONE_FROM_DISK},
-                "root leg produced reason 'event_path_gone_from_disk', which "
-                "names the file — wrong subject",
+                ("root leg produced reason 'event_path_gone_from_disk', which "
+                "names the file — wrong subject"),
             ),
             (
                 "2: one file's refusal escalated to the whole share",
                 {"leg": "descendant", "raised": untyped,
                  "reason": REASON_SLSKD_ROOT_MISSING},
-                "descendant leg produced reason 'slskd_root_missing', which "
-                "names the share — wrong subject",
+                ("descendant leg produced reason 'slskd_root_missing', which "
+                "names the share — wrong subject"),
             ),
         )
         for clause, kwargs, message in cases:
-            with self.subTest(clause=clause):
-                with self.assertRaisesRegex(AssertionError, _exactly(message)):
-                    assert_leg_attribution_invariant(**kwargs)
+            with self.subTest(clause=clause), self.assertRaisesRegex(
+                AssertionError, _exactly(message),
+            ):
+                assert_leg_attribution_invariant(**kwargs)
 
     def test_a_correctly_attributed_leg_passes_every_clause(self) -> None:
         """The must-still-work control: both legs, named right."""
@@ -1040,21 +1042,21 @@ class TestGeneratedCopyPhaseSubjects(unittest.TestCase):
             (
                 "1: the defect that shipped — collapsed with no errno",
                 "source", "ESTALE", REASON_PRIVATE_MATERIALIZE_FAILED,
-                "source failure collapsed into 'private_materialize_failed' "
-                "with no errno",
+                ("source failure collapsed into 'private_materialize_failed' "
+                "with no errno"),
             ),
             (
                 "1: the same collapse on the destination side",
                 "destination", "ENOSPC", REASON_PRIVATE_MATERIALIZE_FAILED,
-                "destination failure collapsed into "
-                "'private_materialize_failed' with no errno",
+                ("destination failure collapsed into "
+                "'private_materialize_failed' with no errno"),
             ),
             (
                 "2: our own tree blamed for the share's read failure",
                 "source", "ESTALE",
                 f"{REASON_PROCESSING_WRITE_FAILED_PREFIX}ESTALE",
-                "source failure named the wrong subject or verb: "
-                "'processing_write_failed_ESTALE'",
+                ("source failure named the wrong subject or verb: "
+                "'processing_write_failed_ESTALE'"),
             ),
             (
                 # The verb matters as much as the subject: an open failure
@@ -1062,15 +1064,15 @@ class TestGeneratedCopyPhaseSubjects(unittest.TestCase):
                 "2: right subject, wrong verb (open, not read)",
                 "source", "ESTALE",
                 f"{REASON_SOURCE_OPEN_FAILED_PREFIX}ESTALE",
-                "source failure named the wrong subject or verb: "
-                "'source_open_failed_ESTALE'",
+                ("source failure named the wrong subject or verb: "
+                "'source_open_failed_ESTALE'"),
             ),
             (
                 "2: right subject, wrong verb on the destination side",
                 "destination", "ENOSPC",
                 f"{REASON_PROCESSING_OPEN_FAILED_PREFIX}ENOSPC",
-                "destination failure named the wrong subject or verb: "
-                "'processing_open_failed_ENOSPC'",
+                ("destination failure named the wrong subject or verb: "
+                "'processing_open_failed_ENOSPC'"),
             ),
             (
                 # Clause 3 needs a reason that is neither the collapsed
@@ -1079,20 +1081,20 @@ class TestGeneratedCopyPhaseSubjects(unittest.TestCase):
                 # handler that reaches for the shared-root mapper.
                 "3: a third subject's noun entirely",
                 "source", "ESTALE", REASON_SLSKD_ROOT_MISSING,
-                "source failure did not name its subject: "
-                "'slskd_root_missing'",
+                ("source failure did not name its subject: "
+                "'slskd_root_missing'"),
             ),
             (
                 "3: the same third subject on the destination side",
                 "destination", "ENOSPC", REASON_SLSKD_ROOT_MISSING,
-                "destination failure did not name its subject: "
-                "'slskd_root_missing'",
+                ("destination failure did not name its subject: "
+                "'slskd_root_missing'"),
             ),
             (
                 "4: right subject and verb, wrong errno",
                 "source", "ESTALE", f"{REASON_SOURCE_READ_FAILED_PREFIX}EIO",
-                "source failure lost its errno: 'source_read_failed_EIO' "
-                "(want ESTALE)",
+                ("source failure lost its errno: 'source_read_failed_EIO' "
+                "(want ESTALE)"),
             ),
         )
         for clause, subject, errno_name, reason, message in cases:

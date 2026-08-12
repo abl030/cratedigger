@@ -616,24 +616,25 @@ class TestPreviewManifestCheckersTripOnViolations(unittest.TestCase):
                 "leaked sidecar (the #859 shape)",
                 frozenset({"01.flac", "preview-spectral-evidence.json"}),
                 frozenset({"01.flac"}),
-                "known-bad: canonical album directory diverged from its "
+                ("known-bad: canonical album directory diverged from its "
                 "manifest after preview (missing=[] "
-                "extra=['preview-spectral-evidence.json'])",
+                "extra=['preview-spectral-evidence.json'])"),
             ),
             (
                 "a manifest file went missing",
                 frozenset(),
                 frozenset({"01.flac"}),
-                "known-bad: canonical album directory diverged from its "
-                "manifest after preview (missing=['01.flac'] extra=[])",
+                ("known-bad: canonical album directory diverged from its "
+                "manifest after preview (missing=['01.flac'] extra=[])"),
             ),
         )
         for label, actual, expected, message in cases:
-            with self.subTest(clause=label):
-                with self.assertRaisesRegex(AssertionError, _exactly(message)):
-                    assert_canonical_manifest_pure(
-                        actual, expected, label="known-bad",
-                    )
+            with self.subTest(clause=label), self.assertRaisesRegex(
+                AssertionError, _exactly(message),
+            ):
+                assert_canonical_manifest_pure(
+                    actual, expected, label="known-bad",
+                )
 
     def test_rematerialize_clause_names_the_guarded_result(self):
         guarded = MaterializeGuarded(detail="incomplete_or_unsafe_canonical")
@@ -676,8 +677,8 @@ class TestPreviewManifestCheckersTripOnViolations(unittest.TestCase):
                     resolved_parent=album_below_tmp,
                 ),
                 album_below_tmp,
-                f"known-bad: action file parent {album_below_tmp!r} is not "
-                f"the system tempfile directory {tmp!r}",
+                (f"known-bad: action file parent {album_below_tmp!r} is not "
+                f"the system tempfile directory {tmp!r}"),
             ),
             (
                 "3: inside the canonical album (fail-closed legislation)",
@@ -687,16 +688,17 @@ class TestPreviewManifestCheckersTripOnViolations(unittest.TestCase):
                     resolved_parent=tmp,
                 ),
                 tmp,
-                f"known-bad: action file {os.path.join(tmp, 'action.json')!r} "
-                f"was inside canonical album {tmp!r}",
+                (f"known-bad: action file {os.path.join(tmp, 'action.json')!r} "
+                f"was inside canonical album {tmp!r}"),
             ),
         )
         for clause, handoff, canonical_dir, message in cases:
-            with self.subTest(clause=clause):
-                with self.assertRaisesRegex(AssertionError, _exactly(message)):
-                    assert_preview_action_file_handoff_is_safe(
-                        handoff, canonical_dir, label="known-bad",
-                    )
+            with self.subTest(clause=clause), self.assertRaisesRegex(
+                AssertionError, _exactly(message),
+            ):
+                assert_preview_action_file_handoff_is_safe(
+                    handoff, canonical_dir, label="known-bad",
+                )
 
     def test_a_safe_handoff_passes_every_clause(self):
         """The must-still-work control: no clause fires on the real shape."""
@@ -736,11 +738,11 @@ class TestPreviewManifestCheckersTripOnViolations(unittest.TestCase):
         """The strategy mapper's own domain guard: the certified budget and
         the mask range must not drift apart silently."""
         for mask in (-1, _EXTRA_FILENAME_WORLD_COUNT):
-            with self.subTest(mask=mask):
-                with self.assertRaisesRegex(ValueError, _exactly(
-                    f"filename mask is outside the finite domain: {mask}",
-                )):
-                    _extra_filenames_for_mask(mask)
+            with self.subTest(mask=mask), self.assertRaisesRegex(
+                ValueError,
+                _exactly(f"filename mask is outside the finite domain: {mask}"),
+            ):
+                _extra_filenames_for_mask(mask)
 
 
 class TestPreviewManifestFiniteDomain(unittest.TestCase):
