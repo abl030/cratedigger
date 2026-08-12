@@ -19,6 +19,8 @@ import scripts.cratedigger_deploy_hold as deploy_hold_module
 from scripts.cratedigger_deploy_hold import (
     CONTROL_DIR,
     CONTROLLED_WORKER_UNITS,
+    GATE_GUARDED_UNITS,
+    GATE_RESUME_UNITS,
     GATE_STOPPED_UNITS,
     MAIN_SERVICE,
     MAIN_TIMER,
@@ -32,6 +34,7 @@ from scripts.cratedigger_deploy_hold import (
     SERVICE_UNITS,
     START_INHIBITORS,
     TIMER_UNITS,
+    UNFINDABLE_SERVICE,
     WATCHDOG_TIMER,
     YOUTUBE_SERVICE,
     DeployHoldBackend,
@@ -1320,6 +1323,82 @@ class TestAbortHold(unittest.TestCase):
 
         self.assertTrue(backend.manual_hold)
         self.assertFalse(backend.receipt)
+
+
+class TestGateGuardModelDerivation(unittest.TestCase):
+    """#1100 item 1: the gate's guarded/resume sets are named constants, and
+    verify_controlled_start_contract's expected literals are built from
+    them -- byte-identical to the hardcoded strings they replace.
+    """
+
+    def test_guarded_units_includes_the_main_timer_and_service(self) -> None:
+        self.assertIn(MAIN_TIMER, GATE_GUARDED_UNITS)
+        self.assertIn(MAIN_SERVICE, GATE_GUARDED_UNITS)
+        self.assertEqual(set(GATE_GUARDED_UNITS), set(GATE_RESUME_UNITS))
+
+    def test_expected_guarded_and_resume_lines_are_byte_identical_to_the_original_literal(
+        self,
+    ) -> None:
+        self.assertEqual(
+            deploy_hold_module._guarded_units_line(GATE_GUARDED_UNITS),
+            "guarded_units=(cratedigger.timer cratedigger.service "
+            "cratedigger-web.service cratedigger-importer.service "
+            "cratedigger-import-preview-worker.service "
+            "cratedigger-youtube-ingest.service)",
+        )
+        self.assertEqual(
+            deploy_hold_module._resume_units_line(GATE_RESUME_UNITS),
+            "resume_units=(cratedigger.service cratedigger.timer "
+            "cratedigger-web.service cratedigger-importer.service "
+            "cratedigger-import-preview-worker.service "
+            "cratedigger-youtube-ingest.service)",
+        )
+
+
+class TestRecoverHeldWaitsOutAnActiveTimerDrivenProducer(unittest.TestCase):
+    """#1100 item 2.
+
+    recover_held's non-acquiring else branch (any phase from PHASE_HELD
+    onward) re-establishes the manual gate hold with NO producer drain
+    before it -- unlike acquire_hold's acquiring branch, which always drains
+    TIMER_DRIVEN_PRODUCER_UNITS first (_drain_producers_then_hold). Production
+    is still correct there: cratedigger-unfindable.service and the watchdog
+    are bounded oneshots the gate does not guard (GATE_GUARDED_UNITS), so the
+    post-hold SERVICE_UNITS drain that already runs unconditionally is what
+    waits a still-running one out. Nothing pinned that before this.
+    """
+
+    def test_recover_held_from_prepared_controlled_waits_out_a_running_unfindable_cycle(
+        self,
+    ) -> None:
+        # UNFINDABLE_SERVICE is never gate-guarded -- the gate hold literally
+        # cannot reap it, so only the drain below can.
+        self.assertNotIn(UNFINDABLE_SERVICE, GATE_GUARDED_UNITS)
+
+        backend = FakeDeployHoldBackend()
+        acquire_hold(backend)
+        prepare_controlled(backend)
+        self.assertEqual(backend.phase, PHASE_PREPARED_CONTROLLED)
+        # prepare_controlled released the manual hold -- recover_held's else
+        # branch is about to re-take it.
+        self.assertFalse(backend.manual_hold)
+
+        # A genuinely active timer-driven producer at the exact moment this
+        # recovery is invoked -- e.g. a still-running cycle from the window
+        # right before its own timer's mask took effect (stopping the timer
+        # does not kill an already-launched invocation).
+        backend.unit_states[UNFINDABLE_SERVICE] = UnitState(
+            load_state="loaded", active_state="active", sub_state="running",
+        )
+        backend.running_samples[UNFINDABLE_SERVICE] = 3
+        sleep_calls_before = backend.sleep_calls
+
+        recover_held(backend)
+
+        backend.assert_default_held()
+        # The drain waited it out -- at least 3 polls to exhaust
+        # running_samples, plus 2 more for the stability requirement.
+        self.assertGreaterEqual(backend.sleep_calls - sleep_calls_before, 3)
 
 
 class TestFixedAuthoritySurface(unittest.TestCase):
