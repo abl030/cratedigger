@@ -1556,6 +1556,9 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         # a containment refusal (a symlink, a socket) owns instead.
         self.assertIn("may be transient", data["unreadable_reason"])
         self.assertIn("EACCES", data["unreadable_reason"])
+        # Structured, not string-sniffed: EACCES is a WORLD failure, so
+        # the frontend's discriminator must say so (issue #1086).
+        self.assertFalse(data["unreadable_is_containment"])
 
     def test_readable_entries_alongside_unreadable_ones_are_still_listed(self):
         """A partial listing is served, and says it is partial."""
@@ -1604,6 +1607,37 @@ class TestWrongMatchesContract(_FakeDbWebServerCase):
         self.assertFalse(data["partial"])
         self.assertEqual(data["unreadable_entry_count"], 0)
         self.assertIsNone(data["unreadable_reason"])
+        self.assertIsNone(data["unreadable_is_containment"])
+
+    def test_a_symlinked_entry_is_flagged_as_a_containment_refusal(self):
+        """Issue #1086: the frontend discriminator, over the real route.
+
+        A symlink is a CONTAINMENT decision, never a world failure — the
+        wire field the Replace-picker badge equivalent
+        (``partial_read_is_containment``) already carries must be
+        ``True`` here too, not merely present in the free-text reason.
+        """
+        tmpdir = self.enterContext(tempfile.TemporaryDirectory())
+        failed_dir = os.path.join(tmpdir, "failed_imports", "Symlinked Album")
+        os.makedirs(failed_dir)
+        readable = os.path.join(failed_dir, "01 - Readable.mp3")
+        with open(readable, "wb") as handle:
+            handle.write(b"\x00" * 32)
+        os.symlink(readable, os.path.join(failed_dir, "02 - Linked.mp3"))
+        log_id = self.db.log_download(
+            100, outcome="rejected",
+            validation_result={"failed_path": failed_dir},
+        )
+
+        with self._wrong_match_runtime_config(tmpdir):
+            status, data = self._get(
+                f"/api/wrong-matches/explorer?download_log_id={log_id}")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["unreadable_entry_count"], 1)
+        assert isinstance(data["unreadable_reason"], str)
+        self.assertIn("symlink", data["unreadable_reason"])
+        self.assertTrue(data["unreadable_is_containment"])
 
     def test_unreadable_explorer_source_is_retryable_not_not_found(self):
         """The explorer owes the same distinction (#1063 review T2.4).
