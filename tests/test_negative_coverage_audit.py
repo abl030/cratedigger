@@ -92,15 +92,19 @@ gate.
 
 **Fail-closed edges.** A registry key not ending in `.py`, a `tests/`
 directory that is missing or contains zero `.py` files, an unparseable
-importer module, and an importer module that is not valid UTF-8 all raise
+module, and a module that is not valid UTF-8 all raise
 `NegativeCoverageAuditError` naming the offending path — the audit never
 silently treats "could not read this file" as "this file does not import the
-target". The one boundary deliberately NOT hardened: an unparseable
-*registered* module itself. This audit patrols importers of a registered
-module, not the registered module's own health, and its own parseability
-cannot hide a real importer elsewhere in the tree — the general per-file
-parse guard above already covers it uniformly with every other file, so no
-special-case handling was added.
+target". This is uniform across every `.py` file under `tests/`, including a
+registered module's OWN file: every file is read and parsed exactly once
+before any registry entry is checked against it, so a registered module that
+fails to parse raises the same `NegativeCoverageAuditError` an unparseable
+importer would — even though, once parsed, it is then skipped as an
+importer of ITSELF. This audit's purpose is to patrol importers of a
+registered module, not the registered module's own health, but no
+special-case exemption was carved out to avoid that side effect either — the
+uniform per-file guard is simpler than adding one, and its own parseability
+cannot hide a real importer elsewhere in the tree.
 """
 
 from __future__ import annotations
@@ -441,6 +445,26 @@ class TestNegativeCoverageCheckerTripsOnViolations(unittest.TestCase):
             self.assertEqual(len(violations), 1)
             self.assertEqual(violations[0].line, 1)
 
+    def test_multi_alias_from_import_trips(self) -> None:
+        """``from tests.world_model import os, mirror_harness`` shape —
+        the multi-name ``ImportFrom`` twin of the multi-alias ``Import``
+        case above, reviewer-probed as trip-worthy but previously unpinned."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = self._world(
+                tmp,
+                target_relpath="tests/world_model/leaf_target.py",
+                importer_relpath="tests/test_importer.py",
+                importer_source="from tests.world_model import os, leaf_target\n",
+            )
+            registry = {
+                "tests/world_model/leaf_target.py": "synthetic gap for self-test"
+            }
+
+            violations = find_negative_coverage_violations(registry, repo_root)
+
+            self.assertEqual(len(violations), 1)
+            self.assertEqual(violations[0].line, 1)
+
     def test_nested_import_inside_a_function_trips(self) -> None:
         """A deferred import inside a function body is still a real import —
         the grammar walks the whole tree, not just module-level statements."""
@@ -678,6 +702,26 @@ class TestNegativeCoverageCheckerTripsOnViolations(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 NegativeCoverageAuditError, "tests/test_broken.py"
+            ):
+                find_negative_coverage_violations(registry, repo_root)
+
+    def test_unparseable_registered_module_also_fails_closed(self) -> None:
+        """The registered-module skip only governs which files are eligible
+        to be counted as an IMPORTER — every file, including the registered
+        target itself, is still read and parsed once by the same uniform
+        per-file guard. A registered module that fails to parse therefore
+        raises too, even though (once parsed) it is never checked against
+        itself. Driven through the PUBLIC entry point, matching how the
+        prior test drives an unparseable importer."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            target = repo_root / "tests" / "leaf_target.py"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("def broken(:\n", encoding="utf-8")
+            registry = {"tests/leaf_target.py": "synthetic gap for self-test"}
+
+            with self.assertRaisesRegex(
+                NegativeCoverageAuditError, "tests/leaf_target.py"
             ):
                 find_negative_coverage_violations(registry, repo_root)
 

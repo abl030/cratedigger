@@ -252,8 +252,10 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
 #: to have no consumer. That "no consumer" claim is not merely reviewer say-
 #: so: tests/test_negative_coverage_audit.py mechanically enforces it —
 #: any real `import`/`from ... import ...` statement anywhere under tests/
-#: naming a registered module's dotted path fails the audit, naming both
-#: the registry entry and the importing file (issue #1095).
+#: naming a registered module — by its dotted path, or by the repository's
+#: sanctioned bare-leaf `sys.path.append(dirname(__file__))` convention —
+#: fails the audit, naming both the registry entry and the importing file
+#: (issue #1095).
 SHARED_MODULES_WITHOUT_COVERAGE: dict[str, str] = {
     "tests/ephemeral_slskd.py": (
         "No test drives EphemeralSlskd directly. Its only consumer is the "

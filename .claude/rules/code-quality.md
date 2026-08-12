@@ -290,7 +290,7 @@ the target source. A changed shared `tests/**.py` module resolves via an
 `scripts/targeted_test_selection.py::EXACT_PATH_NEIGHBOURS` entry, one of the
 few remaining directory prefix rules, or an admitted gap in
 `SHARED_MODULES_WITHOUT_COVERAGE` (`tests/test_negative_coverage_audit.py`
-mechanically enforces that a registered gap really has no importer, not just
+mechanically enforces that no module under `tests/` imports it, not just
 review); one with none of those fails the whole
 entrypoint closed (`scripts/test.sh` exit code 2) before any phase runs —
 silent under-selection there is worse than a loud refusal. This is development
