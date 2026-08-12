@@ -430,6 +430,93 @@ never passed to mutating media tools directly. A force/quarantine preview keeps
 one private normalized action copy through Beets; its original path remains the
 job's audit and recovery authority.
 
+### Startup write-probe
+
+The container-entrypoint pattern (issue #1085): a unit whose required
+directory is missing, unwritable, or wrongly owned fails at switch time,
+loudly, instead of discovering it later one operation at a time — exactly
+the class of defect the #570/#578 root → `group-users` cutover found by
+hand (a tmpfiles `z`-rule that could not survive the ownership transition,
+a preStart that needed the Discogs token readable). `lib/startup_write_probe.py`
+is a **list of required paths per unit**, not a capability model, probed
+once immediately after strict runtime/Beets configuration admission and
+before any queue recovery, claim, DB mutation, or filesystem mutation:
+
+- **Read authority** — a no-follow descriptor open plus an enumerate.
+- **Write authority** — a safely named create → write → fsync → rename →
+  unlink probe, with the artifact always removed. Every probed path must
+  already exist — each one is either externally provisioned (the slskd
+  share, the beets staging root) or created once by this module's own
+  tmpfiles rules (`stateDir`, `processingDir`'s `albums`/`preview`
+  children, `youtubeIngest.tempDir`); the probe never creates its own
+  required directory, and it never writes inside an album directory
+  (`processing/albums/<album>` stays an exact media manifest — invariant 9
+  / issues #853/#859).
+- **The configured processing tree is probed through the SAME strict
+  private-root primitives every action-time writer uses**
+  (`lib.fs_authority.open_private_processing_root` /
+  `open_private_child_directory` — root owned by the service identity,
+  mode exactly `0700`, no group/other-writable ancestor), never a generic
+  descriptor open. A generic open only proves "can I open and write" — it
+  is green on a root that drifted to `0750` or a child a bad chown left at
+  `0770`, exactly the #570/#578 shape, and every subsequent materialization
+  / preview retention / force-action write then fails one album at a time,
+  which is the outcome this probe exists to eliminate. Quarantine *reads*
+  (`open_configured_quarantine_directory`) stay on the generic primitive,
+  matching that function's own deliberately looser action-time behaviour.
+- **`beets.validation.stagingDir` is probed only when configured.** An
+  unset staging root (validation disabled) is a legitimate, supported
+  configuration — production code never reaches the staging branch in that
+  case — so it is never probed, never reported "missing". Every other
+  required path is unconditional.
+- **On failure** — the unit exits non-zero with a message naming the unit,
+  the path, the operation, and the errno class. `cratedigger-importer`,
+  `cratedigger-import-preview-worker`, `cratedigger-web`, and
+  `cratedigger-youtube-ingest` are `Restart=on-failure`, so systemd retries
+  automatically; `cratedigger.service` is timer-driven and the timer's next
+  cycle retries. No new status, flag, or `*_required` marker is ever
+  written — nothing is parked (invariant 11).
+
+`cratedigger-unfindable.service` is **deliberately never gated** by this
+probe. It has its own systemd unit specifically so the never-stop-searching
+invariant is enforceable at the systemd level; refusing it because storage
+is unavailable would violate that invariant at the one place it is
+currently guaranteed.
+
+This probe is an earlier, louder check, never the only one — every
+existing action-time authority check (the private-root/quarantine
+descriptor checks above, the Beets startup contract) still runs on every
+mutation, because mounts, ACLs, ownership, and modes can all change after
+a unit has started.
+
+**Which unit requires which path** — the fact an operator actually needs
+when a unit refuses at startup:
+
+| Unit | Read | Write |
+|---|---|---|
+| `cratedigger` | `slskd.downloadDir` | `stateDir`; `slskd.downloadDir` (disk reaper); `processingDir/albums` (private primitives); validation staging root (if configured) |
+| `cratedigger-importer` | `slskd.downloadDir`, `processingDir/albums`, validation staging root (if configured) | `processingDir/albums` (private primitives — force-action reclaim); validation staging root (if configured) |
+| `cratedigger-import-preview-worker` | `slskd.downloadDir`, `processingDir/albums`, validation staging root (if configured) | `stateDir` (CD-rip cache/spool); `processingDir` root, `processingDir/albums`, `processingDir/preview` (all private primitives) |
+| `cratedigger-web` | `slskd.downloadDir`, `processingDir/albums`, validation staging root (if configured) | `stateDir` (CD-rip cache/spool); `processingDir/albums`, validation staging root (if configured, generic — never the private primitives, matching Wrong Matches/Bad Rip's own `shutil.rmtree`-based delete); `processingDir` root, `processingDir/preview` (private primitives) |
+| `cratedigger-youtube-ingest` | — | `youtubeIngest.tempDir`; validation staging root (unconditionally required whenever this unit is enabled — the module's own assertion guarantees it is set) |
+| `cratedigger-unfindable` | never gated | never gated |
+
+`cratedigger-web` deliberately excludes `slskd.downloadDir` from write: that
+root is the untrusted third-party slskd share (issue #571's good-citizen
+doctrine — not ours to touch), web only ever deletes from its own
+`wrong_matches`/`failed_imports` quarantine children there (never required
+to exist), and a startup probe writing into slskd's own tree on every boot
+would be exactly the unprompted third-party write that doctrine forbids.
+
+**Known constraint, recorded rather than fixed:** the shared
+`open_directory_path` primitive opens every path component `O_NOFOLLOW`. A
+single symlinked component in `slskd.downloadDir` or the validation staging
+root (plausible on another installation, e.g. a `/mnt/music ->
+/pool/music` bind-mount substitute) now permanently blocks every unit that
+requires the path, where it previously only degraded the one operation that
+resolved it. No live impact on this deployment; changing the shared
+primitive's symlink posture is out of this issue's remit.
+
 ### The `permissions` plugin + `fix_library_modes`
 
 The deployment-owned Beets config must enable the built-in `permissions`

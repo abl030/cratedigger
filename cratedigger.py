@@ -1390,6 +1390,24 @@ def main() -> int:
     except BeetsStartupError:
         return 1
 
+    # Startup write-probe (issue #1085): fail loudly, before any queue
+    # recovery, claim, DB mutation, or filesystem mutation, if a required
+    # path cannot be used the way this unit is about to use it.
+    from lib.startup_write_probe import (
+        StartupProbeError,
+        cratedigger_required_paths,
+        probe_startup_paths,
+    )
+    required_paths = cratedigger_required_paths(cfg)
+    try:
+        probe_startup_paths(
+            unit="cratedigger",
+            logger=logger,
+            required=required_paths,
+        )
+    except StartupProbeError:
+        return 1
+
     # Belt-and-suspenders for systemd's UMask=0000 — see
     # lib/permissions.py / GH #84. This changes process state, so it follows
     # the startup contract gate.

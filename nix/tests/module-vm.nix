@@ -4706,6 +4706,75 @@ pkgs.testers.nixosTest {
         "systemctl reset-failed cratedigger-importer.service"
     )
     assert _beets_world_digest() == beets_before_root_alias
+
+    # Issue #1085: a unit that cannot use a required path fails at switch
+    # time, loudly -- the container-entrypoint pattern -- instead of
+    # discovering the problem later one operation at a time. Representative
+    # case: the importer's canonical processing write/read target
+    # (/var/lib/cratedigger/processing/albums, already proven 0700
+    # cratedigger:cratedigger above) becomes unreachable.
+    beets_before_probe = _beets_world_digest()
+    pipeline_before_probe = _pipeline_data_snapshot()
+    machine.succeed(
+        "systemctl stop cratedigger-importer.service; "
+        "chmod 000 /var/lib/cratedigger/processing/albums; "
+        "install -d /run/systemd/system/"
+        "cratedigger-importer.service.d; "
+        "printf '[Service]\\nRestart=no\\n' > /run/systemd/system/"
+        "cratedigger-importer.service.d/startup-probe.conf; "
+        "systemctl daemon-reload; "
+        "systemctl reset-failed cratedigger-importer.service; "
+        "systemctl start --no-block cratedigger-importer.service"
+    )
+    machine.wait_until_succeeds(
+        "systemctl is-failed cratedigger-importer.service"
+    )
+    probe_invocation = machine.succeed(
+        "systemctl show cratedigger-importer.service "
+        "-p InvocationID --value"
+    ).strip()
+    probe_log = machine.succeed(
+        f"journalctl _SYSTEMD_INVOCATION_ID={probe_invocation} -o cat"
+    )
+    # Beets admission succeeded (this is not a Beets-authority rejection);
+    # the startup write-probe is what stops the unit, before any queue
+    # recovery/claim/DB mutation.
+    assert probe_log.count(
+        "Beets configuration admitted for importer"
+    ) == 1, probe_log
+    assert (
+        "startup open probe failed at "
+        "/var/lib/cratedigger/processing/albums [EACCES]"
+    ) in probe_log, probe_log
+    assert _pipeline_data_snapshot() == pipeline_before_probe
+    machine.succeed(
+        "chmod 700 /var/lib/cratedigger/processing/albums; "
+        "rm -r /run/systemd/system/cratedigger-importer.service.d; "
+        "systemctl daemon-reload; "
+        "systemctl reset-failed cratedigger-importer.service; "
+        "systemctl start cratedigger-importer.service"
+    )
+    machine.wait_for_unit("cratedigger-importer.service")
+    recovered_invocation = machine.succeed(
+        "systemctl show cratedigger-importer.service "
+        "-p InvocationID --value"
+    ).strip()
+    # wait_for_unit only proves systemd's own "active" state; the
+    # admission log line can land a moment after that.
+    machine.wait_until_succeeds(
+        f"journalctl _SYSTEMD_INVOCATION_ID={recovered_invocation} -o cat "
+        "| grep -q 'Beets configuration admitted for importer'"
+    )
+    recovered_log = machine.succeed(
+        f"journalctl _SYSTEMD_INVOCATION_ID={recovered_invocation} -o cat"
+    )
+    # The natural retry starts cleanly: admitted once, no probe failure.
+    assert recovered_log.count(
+        "Beets configuration admitted for importer"
+    ) == 1, recovered_log
+    assert "probe failed" not in recovered_log, recovered_log
+    assert _beets_world_digest() == beets_before_probe
+
     readiness_log = machine.succeed(
         "journalctl -b -u cratedigger-test-beets-readiness.service -o cat"
     )
