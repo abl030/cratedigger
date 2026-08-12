@@ -16,7 +16,9 @@ exit code):
 * **I-B** — no probe outcome that is not a clean terminal harvest ever
   writes ``last_artist_probe_at`` / ``last_artist_probe_match_count`` /
   ``unfindable_category``. A ``RESULT_PROBE_FAILED`` outcome writes
-  nothing, regardless of WHICH failure kind produced it.
+  nothing, regardless of WHICH failure kind produced it -- and a
+  DETERMINISTIC failure kind (429, empty artist_name) must always END
+  UP as ``RESULT_PROBE_FAILED`` when attempted, never a silent success.
 * **I-C** — a run that did not classify its whole batch (the circuit
   breaker tripped) is distinguishable, by process exit code, from a
   fully classified run — without parking anything on any request row.
@@ -33,17 +35,37 @@ advances that column). The world model below generates ALL THREE
 candidate kinds so this composition is patrolled directly, not just
 argued about.
 
+Review round 2 widened this further, per issue #1090's per-clause audit
+(``.claude/rules/code-quality.md`` § "known-bad self-test... per CLAUSE"):
+
+* **F1** — ``CandidateWorld`` gained ``trailing_kind`` so a
+  ``retryable_409`` candidate's FINAL consumed attempt can independently
+  be a success, another 409, or a non-retryable 429 -- the mixed
+  "409, 409, then 429 on the last attempt" world is the ONLY shape that
+  falsifies the mutant that drops the ``is_retryable_409`` term from
+  ``retry_exhausted``'s computation (a uniform all-409 burst can't tell
+  the two formulas apart, since both agree once the final attempt really
+  is a 409).
+* **F4** — ``assert_deterministic_candidates_never_silently_succeed`` is
+  a new checker that closes a blind spot the original checkers left:
+  removing the empty-``artist_name`` guard makes the candidate submit
+  ``searchText=""`` successfully against the fake and WRITE a real row
+  from a blank search -- attempted, so I-A's checker is silent; not
+  ``RESULT_PROBE_FAILED``, so the write-conservation checker is silent
+  too.
+
 Two properties drive the REAL production code:
 
 1. ``test_batch_write_invariants_hold_over_submit_failure_patterns`` runs
    the REAL ``UnfindableDetectionService.categorise_due_batch`` over the
    REAL production ``run_artist_probe`` (``_fast_probe_runner`` only
    injects a no-op sleep so a generated example doesn't really wait out
-   the 2s/5s/10s backoff schedule — the retry/backoff/settle LOGIC in
+   the 2s/5s backoff schedule — the retry/backoff/settle LOGIC in
    ``lib.search_exec.execute_search`` is unmodified and fully exercised)
    against generated per-candidate submit-failure patterns (409 bursts of
-   varying length, deterministic 429s, empty-artist_name guard fires,
-   and a varying server-readiness state), checking I-A and I-B.
+   varying length and varying final-attempt kind, deterministic 429s,
+   empty-artist_name guard fires, and a varying server-readiness state),
+   checking I-A and I-B.
 2. ``test_exit_code_matches_batch_completeness`` runs the REAL
    ``scripts.run_unfindable_detection._process_batch`` over the same
    world shapes (one real run; the expected outcome is independently
@@ -76,10 +98,13 @@ import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.unfindable_detection_service import (
     CIRCUIT_BREAKER_CONSECUTIVE_SUBMIT_FAILURES,
     PROBE_SUBMIT_RETRY_MAX_ATTEMPTS,
+    RESULT_CATEGORISED,
+    RESULT_NO_CHANGE,
     RESULT_PROBE_FAILED,
     ArtistProbeResult,
     UnfindableBatchResult,
     UnfindableDetectionService,
+    UnfindableServiceResult,
     run_artist_probe,
 )
 from scripts.run_unfindable_detection import EXIT_INCOMPLETE_RUN, _process_batch
@@ -95,7 +120,7 @@ def _fast_probe_runner(
     watchdog sleeps injected as no-ops -- a batch has up to 6 candidates
     and each generated example draws a fresh batch (up to 150 examples
     per property), and the production backoff schedule alone is
-    2s/5s/10s real wall time per retried candidate otherwise."""
+    2s/5s real wall time per retried candidate otherwise."""
     return run_artist_probe(
         slskd_client, artist_name=artist_name, db=db, request_id=request_id,
         poll_sleep=lambda _s: None,
@@ -110,6 +135,7 @@ CandidateKind = Literal["retryable_409", "deterministic_429", "empty_artist_name
 _CANDIDATE_KINDS: tuple[CandidateKind, ...] = (
     "retryable_409", "deterministic_429", "empty_artist_name",
 )
+TrailingKind = Literal["success", "429"]
 
 
 @dataclass(frozen=True)
@@ -117,9 +143,19 @@ class CandidateWorld:
     """One cohort member's submit behaviour.
 
     * ``retryable_409`` — the transient shape the retry policy targets.
-      ``submit_burst_len`` leading 409s before either succeeding (burst <
-      the retry budget) or exhausting the budget (burst >= it) --
-      ``submit_retry_exhausted=True`` ONLY in the latter case.
+      ``submit_burst_len`` leading 409s, then:
+
+      - if ``submit_burst_len >= PROBE_SUBMIT_RETRY_MAX_ATTEMPTS``, the
+        burst alone exhausts the budget (every attempt was a 409) --
+        ``submit_retry_exhausted=True``, ``trailing_kind`` is moot (no
+        attempts remain to carry it).
+      - otherwise, the NEXT (final consumed) attempt is ``trailing_kind``:
+        ``"success"`` (the pre-existing "burst then succeeds" shape) or
+        ``"429"`` (issue #1090 F1 -- a DETERMINISTIC failure lands on
+        what may be the last attempt in the budget; this is the world
+        that falsifies a mutant computing ``retry_exhausted`` from
+        ``is_last_attempt`` alone, ignoring whether that final attempt
+        was actually a retryable 409).
     * ``deterministic_429`` — slskd's real rate limiter. Never retried,
       never "exhausted" (there was no retryable failure to exhaust).
     * ``empty_artist_name`` — the request row has a NULL/blank
@@ -127,11 +163,13 @@ class CandidateWorld:
 
     Both non-``retryable_409`` kinds are DETERMINISTIC: identical every
     day forever for the same row. Neither may ever count toward the
-    circuit breaker (issue #1090 BLOCKING-1).
+    circuit breaker (issue #1090 BLOCKING-1), and both must always END
+    UP ``RESULT_PROBE_FAILED`` when attempted (issue #1090 F4).
     """
 
     kind: CandidateKind
     submit_burst_len: int = 0  # only meaningful for kind="retryable_409"
+    trailing_kind: TrailingKind = "success"  # only meaningful for kind="retryable_409"
 
 
 @dataclass(frozen=True)
@@ -153,11 +191,14 @@ def candidate_worlds(draw, *, count: int) -> tuple[CandidateWorld, ...]:
     worlds = []
     for _ in range(count):
         kind = draw(st.sampled_from(_CANDIDATE_KINDS))
-        burst = (
-            draw(st.integers(min_value=0, max_value=_MAX_BURST))
-            if kind == "retryable_409" else 0
-        )
-        worlds.append(CandidateWorld(kind=kind, submit_burst_len=burst))
+        if kind == "retryable_409":
+            burst = draw(st.integers(min_value=0, max_value=_MAX_BURST))
+            trailing = draw(st.sampled_from(("success", "429")))
+        else:
+            burst = 0
+            trailing = "success"
+        worlds.append(CandidateWorld(
+            kind=kind, submit_burst_len=burst, trailing_kind=trailing))
     return tuple(worlds)
 
 
@@ -173,7 +214,10 @@ def batch_worlds(draw) -> BatchWorld:
 def _causes_retry_exhausted_failure(cand: CandidateWorld) -> bool:
     """True when ``cand`` produces a ``SearchSubmitError`` with
     ``retry_exhausted=True`` -- the ONLY candidate shape that may ever
-    count toward the circuit breaker (issue #1090 BLOCKING-1)."""
+    count toward the circuit breaker (issue #1090 BLOCKING-1). A
+    ``trailing_kind="429"`` NEVER exhausts the budget in the
+    retry-exhausted sense, however late it lands -- the final attempt
+    that actually failed was not a retryable 409 (issue #1090 F1)."""
     return (
         cand.kind == "retryable_409"
         and cand.submit_burst_len >= PROBE_SUBMIT_RETRY_MAX_ATTEMPTS
@@ -229,14 +273,19 @@ def _build_batch(
         ])
         rids.append(rid)
         if cand.kind == "retryable_409":
-            attempts_that_fail = min(
+            attempts_with_409 = min(
                 cand.submit_burst_len, PROBE_SUBMIT_RETRY_MAX_ATTEMPTS)
             queue: list[Exception | None] = [
                 make_requests_http_error("conflict", status_code=409)
-                for _ in range(attempts_that_fail)
+                for _ in range(attempts_with_409)
             ]
-            if not _causes_retry_exhausted_failure(cand):
-                queue.append(None)  # the attempt after the burst succeeds
+            if attempts_with_409 < PROBE_SUBMIT_RETRY_MAX_ATTEMPTS:
+                # F1: the final consumed attempt independently varies.
+                if cand.trailing_kind == "success":
+                    queue.append(None)
+                else:  # "429"
+                    queue.append(
+                        make_requests_http_error("rate limited", status_code=429))
             if queue:
                 slskd.searches.search_text_error_by_query[artist] = queue
         elif cand.kind == "deterministic_429":
@@ -326,9 +375,47 @@ def assert_submit_retry_exhausted_matches_world(
             )
 
 
+def assert_deterministic_candidates_never_silently_succeed(
+    world: BatchWorld, rids: list[int], batch: UnfindableBatchResult,
+) -> list[str]:
+    """I-B (issue #1090 review round 2, F4): an ATTEMPTED deterministic-
+    failure candidate (``deterministic_429``, ``empty_artist_name``) must
+    yield ``RESULT_PROBE_FAILED`` -- never a real "success" outcome.
+
+    This is the clause that catches removal of the empty-``artist_name``
+    guard itself: with the guard gone, an empty ``searchText=""`` submits
+    SUCCESSFULLY against the fake, and ``categorise_request``'s
+    ``record_artist_probe`` would write a REAL row from a blank search --
+    a write no other checker in this module catches, because the
+    candidate WAS attempted (so ``assert_no_batch_slot_lost`` is silent)
+    and its outcome is not ``RESULT_PROBE_FAILED`` (so
+    ``assert_probe_failed_writes_nothing`` is silent too, since it only
+    ever checks the ``RESULT_PROBE_FAILED`` branch).
+
+    Accumulates every violation (new checker; prefers the list[str] shape
+    per the per-clause rule) rather than raising on the first.
+    """
+    violations: list[str] = []
+    results_by_rid = {r.request_id: r for r in batch.results}
+    for i, rid in enumerate(rids):
+        cand = world.candidates[i]
+        if cand.kind not in ("deterministic_429", "empty_artist_name"):
+            continue
+        result = results_by_rid.get(rid)
+        if result is None:
+            continue  # never attempted (breaker cut it short) -- I-A's job
+        if result.outcome != RESULT_PROBE_FAILED:
+            violations.append(
+                f"candidate index {i} (request {rid}, kind={cand.kind}) "
+                f"was attempted but outcome={result.outcome!r}, expected "
+                f"RESULT_PROBE_FAILED"
+            )
+    return violations
+
+
 def assert_breaker_trips_exactly_when_expected(
     world: BatchWorld, batch: UnfindableBatchResult,
-) -> None:
+) -> list[str]:
     """I-A (precise form): the circuit breaker trips if and only if the
     cohort-processing order contains a run of
     ``CIRCUIT_BREAKER_CONSECUTIVE_SUBMIT_FAILURES`` CONSECUTIVE candidates
@@ -340,35 +427,53 @@ def assert_breaker_trips_exactly_when_expected(
     from ``world`` (never reads the production breaker's own counter) so
     a mutant that drops the breaker, miscounts its threshold, widens its
     counted-failure-kind, or forgets to reset on a non-qualifying outcome
-    is caught."""
+    is caught.
+
+    Returns every way ``batch`` breaks the invariant as an ACCUMULATING
+    list (issue #1090 review round 2, F3) -- every clause evaluates
+    regardless of the others, so a world violating more than one clause
+    can never mask one from a self-test asserting a specific clause's
+    message. Four clauses, named C1-C4 in their own message so a
+    self-test can pin exactly one:
+
+    * C1 -- a qualifying run exists but the breaker did not trip.
+    * C2 -- the breaker tripped (C1 satisfied) but attempted the wrong
+      candidate count for the derived trip point.
+    * C3 -- no qualifying run exists but the breaker tripped anyway.
+    * C4 -- the breaker correctly did not trip (C3 satisfied) but did not
+      attempt every candidate.
+    """
+    violations: list[str] = []
     expected_trip_at = _expected_trip_index(world)
 
     if expected_trip_at is not None:
         if not batch.breaker_tripped:
-            raise AssertionError(
-                f"expected the breaker to trip at candidate index "
-                f"{expected_trip_at} (world={world}) but "
-                f"batch.breaker_tripped=False"
+            violations.append(
+                f"C1 breaker-did-not-trip: expected the breaker to trip "
+                f"at candidate index {expected_trip_at} (world={world}) "
+                f"but batch.breaker_tripped=False"
             )
         if len(batch.results) != expected_trip_at + 1:
-            raise AssertionError(
-                f"breaker tripped but attempted {len(batch.results)} "
-                f"candidates, expected exactly {expected_trip_at + 1} "
-                f"(world={world})"
+            violations.append(
+                f"C2 wrong-attempted-count-on-trip: breaker tripped but "
+                f"attempted {len(batch.results)} candidates, expected "
+                f"exactly {expected_trip_at + 1} (world={world})"
             )
     else:
         if batch.breaker_tripped:
-            raise AssertionError(
-                f"breaker tripped but no "
+            violations.append(
+                f"C3 breaker-tripped-without-cause: no "
                 f"{CIRCUIT_BREAKER_CONSECUTIVE_SUBMIT_FAILURES}-consecutive"
                 f"-retry-exhausted-409 run exists in world={world}"
             )
         if len(batch.results) != len(world.candidates):
-            raise AssertionError(
-                f"breaker did not trip but only {len(batch.results)}/"
+            violations.append(
+                f"C4 wrong-attempted-count-without-trip: breaker did not "
+                f"trip but only {len(batch.results)}/"
                 f"{len(world.candidates)} candidates were attempted "
                 f"(world={world})"
             )
+    return violations
 
 
 def assert_exit_code_matches_completeness(
@@ -452,6 +557,22 @@ class TestGeneratedSubmitResiliencePatrol(unittest.TestCase):
         ),
         server_ready=False,
     ))
+    # F1: 409, then a 429 on the FINAL consumed attempt (burst ==
+    # MAX_ATTEMPTS - 1). This is the ONLY world shape that falsifies the
+    # mutant dropping is_retryable_409 from retry_exhausted's formula --
+    # a uniform all-409 burst can't tell the two formulas apart. Pinned
+    # as an @example rather than left to chance because the combination
+    # (burst == MAX_ATTEMPTS - 1 AND trailing_kind == "429") is a single
+    # point in the joint domain.
+    @example(world=BatchWorld(candidates=(
+        CandidateWorld(kind="retryable_409",
+                        submit_burst_len=PROBE_SUBMIT_RETRY_MAX_ATTEMPTS - 1,
+                        trailing_kind="429"),
+    )))
+    # F4: an empty-artist_name candidate must resolve to RESULT_PROBE_FAILED.
+    @example(world=BatchWorld(candidates=(
+        CandidateWorld(kind="empty_artist_name"),
+    )))
     @given(world=batch_worlds())
     def test_batch_write_invariants_hold_over_submit_failure_patterns(
         self, world: BatchWorld,
@@ -466,7 +587,15 @@ class TestGeneratedSubmitResiliencePatrol(unittest.TestCase):
         assert_no_batch_slot_lost(world, rids, batch, before, after)
         assert_probe_failed_writes_nothing(rids, batch, before, after)
         assert_submit_retry_exhausted_matches_world(world, rids, batch)
-        assert_breaker_trips_exactly_when_expected(world, batch)
+        self.assertEqual(
+            assert_deterministic_candidates_never_silently_succeed(
+                world, rids, batch),
+            [], (world, batch),
+        )
+        self.assertEqual(
+            assert_breaker_trips_exactly_when_expected(world, batch),
+            [], (world, batch),
+        )
 
     @given(world=batch_worlds())
     def test_exit_code_matches_batch_completeness(self, world: BatchWorld) -> None:
@@ -480,7 +609,8 @@ class TestGeneratedSubmitResiliencePatrol(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Known-bad self-tests: each checker must trip on a planted violation.
+# Known-bad self-tests: each checker CLAUSE must trip on a planted
+# violation (per-clause proof, issue #1090 review round 2 / #1094).
 # ---------------------------------------------------------------------------
 
 
@@ -494,14 +624,12 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         after: dict[int, dict[str, object]] = {
             7: {"unfindable_category": "artist_absent"},  # never attempted, yet changed
         }
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+            AssertionError, "was never attempted this run but its row changed",
+        ):
             assert_no_batch_slot_lost(world, [7], batch, before, after)
 
     def test_no_batch_slot_lost_passes_when_attempted_row_changes(self) -> None:
-        from lib.unfindable_detection_service import (
-            RESULT_CATEGORISED,
-            UnfindableServiceResult,
-        )
         world = BatchWorld(candidates=(
             CandidateWorld(kind="retryable_409", submit_burst_len=0),))
         batch = UnfindableBatchResult(
@@ -516,7 +644,6 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         assert_no_batch_slot_lost(world, [7], batch, before, after)  # must not raise
 
     def test_probe_failed_writes_nothing_trips_when_column_written(self) -> None:
-        from lib.unfindable_detection_service import UnfindableServiceResult
         batch = UnfindableBatchResult(
             results=[UnfindableServiceResult(
                 outcome=RESULT_PROBE_FAILED, request_id=7,
@@ -534,7 +661,9 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             "last_artist_probe_match_count": 0,
             "unfindable_category": None,
         }}
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+            AssertionError, r"RESULT_PROBE_FAILED but \S+ changed",
+        ):
             assert_probe_failed_writes_nothing([7], batch, before, after)
 
     def test_submit_retry_exhausted_checker_trips_on_deterministic_mismatch(
@@ -542,7 +671,6 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
     ) -> None:
         """A 429 (deterministic) result planted with
         submit_retry_exhausted=True must trip the checker."""
-        from lib.unfindable_detection_service import UnfindableServiceResult
         world = BatchWorld(candidates=(
             CandidateWorld(kind="deterministic_429"),))
         batch = UnfindableBatchResult(
@@ -551,7 +679,9 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
                 submit_retry_exhausted=True)],  # planted bug
             candidates_considered=1,
         )
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+            AssertionError, r"submit_retry_exhausted=True, expected False",
+        ):
             assert_submit_retry_exhausted_matches_world(world, [7], batch)
 
     def test_submit_retry_exhausted_checker_trips_on_exhausted_mismatch(
@@ -559,7 +689,6 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
     ) -> None:
         """A budget-exhausted retryable_409 result planted with
         submit_retry_exhausted=False must trip the checker."""
-        from lib.unfindable_detection_service import UnfindableServiceResult
         world = BatchWorld(candidates=(
             CandidateWorld(kind="retryable_409",
                             submit_burst_len=PROBE_SUBMIT_RETRY_MAX_ATTEMPTS),))
@@ -569,79 +698,230 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
                 submit_retry_exhausted=False)],  # planted bug
             candidates_considered=1,
         )
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+            AssertionError, r"submit_retry_exhausted=False, expected True",
+        ):
             assert_submit_retry_exhausted_matches_world(world, [7], batch)
 
     def test_exit_code_checker_trips_when_incomplete_run_reports_zero(self) -> None:
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+            AssertionError, r"breaker tripped but exit_code=0",
+        ):
             assert_exit_code_matches_completeness(True, 0)
 
     def test_exit_code_checker_trips_when_complete_run_reports_nonzero(self) -> None:
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+            AssertionError, r"breaker NOT tripped but exit_code=\d+",
+        ):
             assert_exit_code_matches_completeness(False, EXIT_INCOMPLETE_RUN)
 
-    def test_breaker_expectation_trips_when_consecutive_run_did_not_trip(
-        self,
-    ) -> None:
-        """3 consecutive exhausted candidates, but the batch (planted)
-        never tripped -- the checker must catch a disabled/broken
-        breaker even though no row was mutated."""
+    # -- assert_deterministic_candidates_never_silently_succeed (F4) --
+
+    def test_deterministic_429_silently_succeeding_trips_the_checker(self) -> None:
+        world = BatchWorld(candidates=(
+            CandidateWorld(kind="deterministic_429"),))
+        batch = UnfindableBatchResult(
+            results=[UnfindableServiceResult(
+                outcome=RESULT_CATEGORISED, request_id=7)],  # planted: NOT probe_failed
+            candidates_considered=1,
+        )
+        violations = assert_deterministic_candidates_never_silently_succeed(
+            world, [7], batch)
+        self.assertTrue(
+            any("expected RESULT_PROBE_FAILED" in v for v in violations),
+            violations,
+        )
+
+    def test_empty_artist_name_silently_succeeding_trips_the_checker(self) -> None:
+        """The exact regression this checker exists for: with the guard
+        removed, an empty-artist_name candidate would resolve to a real
+        (non-probe_failed) outcome."""
+        world = BatchWorld(candidates=(
+            CandidateWorld(kind="empty_artist_name"),))
+        batch = UnfindableBatchResult(
+            results=[UnfindableServiceResult(
+                outcome=RESULT_NO_CHANGE, request_id=7)],  # planted: guard-removed shape
+            candidates_considered=1,
+        )
+        violations = assert_deterministic_candidates_never_silently_succeed(
+            world, [7], batch)
+        self.assertTrue(
+            any("expected RESULT_PROBE_FAILED" in v for v in violations),
+            violations,
+        )
+
+    def test_deterministic_candidate_failing_cleanly_does_not_trip(self) -> None:
+        world = BatchWorld(candidates=(
+            CandidateWorld(kind="deterministic_429"),))
+        batch = UnfindableBatchResult(
+            results=[UnfindableServiceResult(
+                outcome=RESULT_PROBE_FAILED, request_id=7)],
+            candidates_considered=1,
+        )
+        self.assertEqual(
+            assert_deterministic_candidates_never_silently_succeed(
+                world, [7], batch),
+            [],
+        )
+
+    def test_retryable_409_candidate_succeeding_is_out_of_scope(self) -> None:
+        """A retryable_409 candidate is not one of the two deterministic
+        kinds this checker patrols -- a real success outcome for it must
+        never trip this checker (that's the normal, expected shape)."""
+        world = BatchWorld(candidates=(
+            CandidateWorld(kind="retryable_409", submit_burst_len=0),))
+        batch = UnfindableBatchResult(
+            results=[UnfindableServiceResult(
+                outcome=RESULT_CATEGORISED, request_id=7)],
+            candidates_considered=1,
+        )
+        self.assertEqual(
+            assert_deterministic_candidates_never_silently_succeed(
+                world, [7], batch),
+            [],
+        )
+
+    def test_never_attempted_deterministic_candidate_is_out_of_scope(self) -> None:
+        """A deterministic-kind candidate the breaker cut off before
+        attempting is I-A's concern (assert_no_batch_slot_lost), not
+        this checker's."""
+        world = BatchWorld(candidates=(
+            CandidateWorld(kind="deterministic_429"),))
+        batch = UnfindableBatchResult(results=[], candidates_considered=1)
+        self.assertEqual(
+            assert_deterministic_candidates_never_silently_succeed(
+                world, [7], batch),
+            [],
+        )
+
+    # -- assert_breaker_trips_exactly_when_expected (C1-C4) --
+
+    def test_breaker_c1_trips_when_expected_trip_did_not_happen(self) -> None:
+        """C1 in isolation: a real 3-consecutive-retry-exhausted run
+        exists, but the batch claims the breaker never tripped -- with
+        the attempted count matching what C2 would ALSO want, so only C1
+        fires."""
         world = BatchWorld(candidates=tuple(
             CandidateWorld(kind="retryable_409",
                             submit_burst_len=PROBE_SUBMIT_RETRY_MAX_ATTEMPTS)
-            for _ in range(4)
+            for _ in range(3)
         ))
-        from lib.unfindable_detection_service import UnfindableServiceResult
         batch = UnfindableBatchResult(
             results=[
                 UnfindableServiceResult(
                     outcome=RESULT_PROBE_FAILED, request_id=i,
-                    error_message="SearchSubmitError: exhausted",
                     submit_retry_exhausted=True)
-                for i in range(4)
+                for i in range(3)
             ],
-            candidates_considered=4,
-            breaker_tripped=False,  # planted bug: should have tripped at index 2
+            candidates_considered=3,
+            breaker_tripped=False,  # C1 violation
         )
-        with self.assertRaises(AssertionError):
-            assert_breaker_trips_exactly_when_expected(world, batch)
+        violations = assert_breaker_trips_exactly_when_expected(world, batch)
+        self.assertTrue(
+            any(v.startswith("C1 breaker-did-not-trip") for v in violations),
+            violations,
+        )
+        self.assertFalse(
+            any(v.startswith("C2") for v in violations), violations,
+        )
 
-    def test_breaker_expectation_trips_when_non_consecutive_failures_trip_it(
-        self,
-    ) -> None:
-        """A non-consecutive failure pattern (exhaust, success, exhaust,
-        success, exhaust -- 3 total but never 3 IN A ROW) must NOT trip
-        the breaker; a planted batch claiming it tripped is a violation."""
-        world = BatchWorld(candidates=(
+    def test_breaker_c2_trips_when_attempted_count_wrong_on_trip(self) -> None:
+        """C2 in isolation: the breaker DID trip (C1 satisfied) but
+        attempted a candidate count that doesn't match the derived trip
+        point."""
+        world = BatchWorld(candidates=tuple(
             CandidateWorld(kind="retryable_409",
-                            submit_burst_len=PROBE_SUBMIT_RETRY_MAX_ATTEMPTS),
-            CandidateWorld(kind="retryable_409", submit_burst_len=0),
-            CandidateWorld(kind="retryable_409",
-                            submit_burst_len=PROBE_SUBMIT_RETRY_MAX_ATTEMPTS),
-            CandidateWorld(kind="retryable_409", submit_burst_len=0),
-            CandidateWorld(kind="retryable_409",
-                            submit_burst_len=PROBE_SUBMIT_RETRY_MAX_ATTEMPTS),
+                            submit_burst_len=PROBE_SUBMIT_RETRY_MAX_ATTEMPTS)
+            for _ in range(3)
         ))
         batch = UnfindableBatchResult(
-            results=[], candidates_considered=5, breaker_tripped=True,
+            # Expected trip point is index 2 -> exactly 3 results. Plant 2.
+            results=[
+                UnfindableServiceResult(
+                    outcome=RESULT_PROBE_FAILED, request_id=i,
+                    submit_retry_exhausted=True)
+                for i in range(2)
+            ],
+            candidates_considered=3,
+            breaker_tripped=True,  # C1 satisfied
         )
-        with self.assertRaises(AssertionError):
-            assert_breaker_trips_exactly_when_expected(world, batch)
+        violations = assert_breaker_trips_exactly_when_expected(world, batch)
+        self.assertFalse(
+            any(v.startswith("C1") for v in violations), violations,
+        )
+        self.assertTrue(
+            any(v.startswith("C2 wrong-attempted-count-on-trip")
+                for v in violations),
+            violations,
+        )
 
-    def test_breaker_expectation_trips_when_deterministic_failures_trip_it(
-        self,
-    ) -> None:
-        """Issue #1090 BLOCKING-1 known-bad case: 3 consecutive
-        DETERMINISTIC 429s planted as having tripped the breaker is a
-        violation -- only retry-exhausted 409s may ever trip it."""
+    def test_breaker_c3_trips_when_no_run_but_tripped(self) -> None:
+        """C3 in isolation: no qualifying consecutive run exists, but the
+        batch claims the breaker tripped -- with the attempted count
+        matching len(candidates) so C4 does not also fire."""
         world = BatchWorld(candidates=tuple(
             CandidateWorld(kind="deterministic_429") for _ in range(3)
         ))
         batch = UnfindableBatchResult(
-            results=[], candidates_considered=3, breaker_tripped=True,
+            results=[
+                UnfindableServiceResult(outcome=RESULT_PROBE_FAILED, request_id=i)
+                for i in range(3)
+            ],
+            candidates_considered=3,
+            breaker_tripped=True,  # C3 violation
         )
-        with self.assertRaises(AssertionError):
-            assert_breaker_trips_exactly_when_expected(world, batch)
+        violations = assert_breaker_trips_exactly_when_expected(world, batch)
+        self.assertTrue(
+            any(v.startswith("C3 breaker-tripped-without-cause")
+                for v in violations),
+            violations,
+        )
+        self.assertFalse(
+            any(v.startswith("C4") for v in violations), violations,
+        )
+
+    def test_breaker_c4_trips_when_not_all_attempted_without_trip(self) -> None:
+        """C4 in isolation: no qualifying run exists and the breaker
+        correctly reports NOT tripped (C3 satisfied), but fewer than all
+        candidates were attempted."""
+        world = BatchWorld(candidates=tuple(
+            CandidateWorld(kind="deterministic_429") for _ in range(3)
+        ))
+        batch = UnfindableBatchResult(
+            results=[
+                UnfindableServiceResult(outcome=RESULT_PROBE_FAILED, request_id=0),
+            ],  # only 1 of 3
+            candidates_considered=3,
+            breaker_tripped=False,  # C3 satisfied
+        )
+        violations = assert_breaker_trips_exactly_when_expected(world, batch)
+        self.assertFalse(
+            any(v.startswith("C3") for v in violations), violations,
+        )
+        self.assertTrue(
+            any(v.startswith("C4 wrong-attempted-count-without-trip")
+                for v in violations),
+            violations,
+        )
+
+    def test_breaker_clean_world_produces_no_violations(self) -> None:
+        """Sanity: a batch that matches the world exactly reports zero
+        violations from every clause."""
+        world = BatchWorld(candidates=tuple(
+            CandidateWorld(kind="retryable_409", submit_burst_len=0)
+            for _ in range(3)
+        ))
+        batch = UnfindableBatchResult(
+            results=[
+                UnfindableServiceResult(outcome=RESULT_CATEGORISED, request_id=i)
+                for i in range(3)
+            ],
+            candidates_considered=3,
+            breaker_tripped=False,
+        )
+        self.assertEqual(
+            assert_breaker_trips_exactly_when_expected(world, batch), [],
+        )
 
 
 if __name__ == "__main__":
