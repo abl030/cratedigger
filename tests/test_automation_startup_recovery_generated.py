@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sys
 import tempfile
 import unittest
+from collections.abc import Callable, Sequence
 from typing import Literal
 
 from hypothesis import example, given, settings
@@ -183,6 +185,17 @@ def assert_recovery_never_parks(
     Anything else is a park: an attached ``recovery_required`` owner, a
     terminal owner still holding the request, or a released request that still
     names one.
+
+    Clause reachability (issue #1094 audit). The ``recovery_required`` clause
+    is patrolled by the historical-owner worlds: deleting the sweep's
+    ``recovery_required`` exemption strands the request behind a parked owner
+    and fires it. The four owner-equivalence clauses and the missing-owner
+    clause are fail-closed legislation — every write that would violate them
+    is refused at the database boundary (migration 066's owner-equivalence
+    CHECK, mirrored here by a fake that declines to terminalize an automation
+    owner outside the atomic owner-aware command), so no production caller
+    reaches them today. They stay because this guard legislates for every
+    future writer of the owner pointer, not only for the sweep.
     """
     row = db.request(request_id)
     status = row["status"]
@@ -225,29 +238,50 @@ def assert_unproven_execution_untouched(
     before: ImportJob,
     request_status_before: str,
 ) -> None:
-    """An unproven execution keeps its work; recovery may not steal it."""
+    """An unproven execution keeps its work; recovery may not steal it.
+
+    Accumulating on purpose (issue #1094 per-clause audit). As a
+    short-circuiting chain the job-movement clause masked the three that
+    follow it: the one realistic production mutant — a liveness verdict that
+    fails open to ``dead`` — moves the job status in EVERY world, so the
+    lease, request-status, and audit-row clauses could never be the reported
+    violation and none of them had a reachable world. Collecting every
+    violation attributes each consequence to the clause that legislates it,
+    and each clause keeps its own message on its own line.
+
+    With that mutant planted, the terminal-branch worlds (launched or
+    journalled) fire job-moved + request-moved + audit-row and the
+    requeue-branch worlds fire job-moved + lease-cleared, so all four clauses
+    have a named world. The missing-row precondition below has none: nothing
+    in production deletes an import-job row.
+    """
     after = db.get_import_job(before.id)
     if after is None:
+        # A precondition, not a clause: with no row there is nothing to
+        # compare the remaining clauses against.
         raise AssertionError("an unproven owner's job row disappeared")
+    violations: list[str] = []
     if (after.status, after.preview_status) != (
         before.status,
         before.preview_status,
     ):
-        raise AssertionError(
+        violations.append(
             f"unproven execution moved from {before.status}/"
             f"{before.preview_status} to {after.status}/{after.preview_status}"
         )
     if after.execution_invocation_id != before.execution_invocation_id:
-        raise AssertionError("unproven execution had its lease cleared")
+        violations.append("unproven execution had its lease cleared")
     row = db.request(_REQUEST_ID)
     if row["status"] != request_status_before:
-        raise AssertionError(
+        violations.append(
             f"unproven execution's request moved to {row['status']!r}"
         )
     if db.download_logs:
-        raise AssertionError(
+        violations.append(
             "unproven execution produced a world-failure audit row"
         )
+    if violations:
+        raise AssertionError("\n".join(violations))
 
 
 def assert_cleanup_refusal_preserved_tree(
@@ -288,6 +322,7 @@ class _World:
         lane: Lane,
         launched: bool,
         journal: JournalState,
+        historical: bool = False,
     ) -> None:
         root = tempfile.mkdtemp(prefix="generated-startup-recovery-")
         case.addCleanup(shutil.rmtree, root, ignore_errors=True)
@@ -372,6 +407,26 @@ class _World:
                 ),
             )
 
+        if historical:
+            # The one owner shape no current writer can build, applied last
+            # because that is the order it arose in: a live owner did its
+            # work, then a pre-#933 writer parked it. CLAUDE.md invariant 11
+            # retired ``recovery_required`` as a resting state, so rows in it
+            # are historical and are seeded directly for exactly that reason.
+            # Production still owns them —
+            # ``recover_abandoned_automation_owners`` exempts a leaseless
+            # ``recovery_required`` owner from its "waiting to be claimed"
+            # skip precisely so the sweep converges them automatically, and
+            # ``never_claimed`` is their exact death proof.
+            row = next(
+                item
+                for item in self.db._import_jobs
+                if item["id"] == owner.id
+            )
+            row["status"] = IMPORT_JOB_RECOVERY_REQUIRED
+            self.db._clear_execution_lease(row)
+            self.lease = None
+
     def make_cleanup_refuse(self, *, payload: bytes) -> None:
         """Drift a real persisted journal so the real executor refuses it."""
         if (
@@ -450,24 +505,76 @@ class TestAutomationStartupRecoveryGenerated(unittest.TestCase):
         launched=st.booleans(),
         journal=st.sampled_from(("absent", "present")),
         liveness=st.sampled_from(("dead", "live", "unknown", "stale")),
+        historical=st.booleans(),
     )
-    @example(lane="import", launched=True, journal="absent", liveness="dead")
-    @example(lane="import", launched=True, journal="present", liveness="dead")
+    @example(
+        lane="import",
+        launched=True,
+        journal="absent",
+        liveness="dead",
+        historical=False,
+    )
+    @example(
+        lane="import",
+        launched=True,
+        journal="present",
+        liveness="dead",
+        historical=False,
+    )
     @example(
         lane="preview",
         launched=False,
         journal="present",
         liveness="dead",
+        historical=False,
     )
-    @example(lane="preview", launched=False, journal="absent", liveness="dead")
-    @example(lane="import", launched=True, journal="present", liveness="live")
+    @example(
+        lane="preview",
+        launched=False,
+        journal="absent",
+        liveness="dead",
+        historical=False,
+    )
+    @example(
+        lane="import",
+        launched=True,
+        journal="present",
+        liveness="live",
+        historical=False,
+    )
     @example(
         lane="import",
         launched=True,
         journal="present",
         liveness="unknown",
+        historical=False,
     )
-    @example(lane="import", launched=True, journal="present", liveness="stale")
+    @example(
+        lane="import",
+        launched=True,
+        journal="present",
+        liveness="stale",
+        historical=False,
+    )
+    # Issue #1094: the two historical-owner worlds the park clause needs.
+    # Without them, deleting the ``recovery_required`` exemption in
+    # ``recover_abandoned_automation_owners`` — a production fail-open that
+    # strands the request behind a parked owner forever — changed nothing any
+    # generated world could observe.
+    @example(
+        lane="import",
+        launched=True,
+        journal="present",
+        liveness="dead",
+        historical=True,
+    )
+    @example(
+        lane="preview",
+        launched=False,
+        journal="absent",
+        liveness="live",
+        historical=True,
+    )
     def test_recovery_never_parks_any_abandoned_owner(
         self,
         *,
@@ -475,11 +582,18 @@ class TestAutomationStartupRecoveryGenerated(unittest.TestCase):
         launched: bool,
         journal: JournalState,
         liveness: Liveness,
+        historical: bool,
     ) -> None:
         """Drive the real recovery sweep over every abandoned-owner world."""
         from scripts import importer
 
-        world = _World(self, lane=lane, launched=launched, journal=journal)
+        world = _World(
+            self,
+            lane=lane,
+            launched=launched,
+            journal=journal,
+            historical=historical,
+        )
         before = world.snapshot()
         request_status_before = str(world.db.request(_REQUEST_ID)["status"])
 
@@ -489,7 +603,11 @@ class TestAutomationStartupRecoveryGenerated(unittest.TestCase):
         )
 
         assert_recovery_never_parks(world.db)
-        if liveness != "dead":
+        if liveness != "dead" and not historical:
+            # A historical owner is leaseless, so there is no execution to
+            # prove alive: ``never_claimed`` is its exact death proof and the
+            # sweep converges it whatever the probe says. Every other world
+            # holds a real lease, and an unproven one keeps its work.
             assert_unproven_execution_untouched(
                 world.db,
                 before=before,
@@ -577,8 +695,28 @@ class TestAutomationStartupRecoveryGenerated(unittest.TestCase):
         )
 
 
+_ClauseCase = tuple[str, Callable[[], tuple[str, Callable[[], None]]]]
+
+
 class TestInvariantCheckersTripOnViolations(unittest.TestCase):
-    """Known-bad self-tests: a planted park must be caught."""
+    """Known-bad self-tests: one named world per clause (issue #1094).
+
+    Every clause of every checker in this module names the minimal world that
+    makes it fire while each earlier clause in the same function passes, and
+    each assertion is anchored to that clause's own complete message. A bare
+    ``assertRaises(AssertionError)`` proved nothing: the previous five
+    self-tests matched substrings, and two of those substrings
+    (``owner equivalence is broken``) belong to two different clauses, so a
+    message-collision mutant would have survived both. The table therefore
+    also proves that no clause's pattern matches any sibling clause's
+    message.
+
+    Deterministic by policy — this is test machinery, never a generated
+    subject.
+    """
+
+    def _world(self) -> _World:
+        return _World(self, lane="import", launched=True, journal="absent")
 
     def _automation_row(self, db: FakePipelineDB) -> dict[str, object]:
         return next(
@@ -587,55 +725,221 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             if item["job_type"] == IMPORT_JOB_AUTOMATION
         )
 
-    def test_attached_recovery_required_owner_is_rejected(self) -> None:
-        world = _World(self, lane="import", launched=True, journal="absent")
-        self._automation_row(world.db)["status"] = IMPORT_JOB_RECOVERY_REQUIRED
-
-        with self.assertRaises(AssertionError) as caught:
-            assert_recovery_never_parks(world.db)
-
-        self.assertIn("recovery_required", str(caught.exception))
-
-    def test_terminal_owner_still_holding_the_request_is_rejected(
-        self,
-    ) -> None:
-        world = _World(self, lane="import", launched=True, journal="absent")
-        self._automation_row(world.db)["status"] = "failed"
-
-        with self.assertRaises(AssertionError) as caught:
-            assert_recovery_never_parks(world.db)
-
-        self.assertIn("non-claimable owner status", str(caught.exception))
-
-    def test_owner_pointer_left_behind_a_released_request_is_rejected(
-        self,
-    ) -> None:
-        world = _World(self, lane="import", launched=True, journal="absent")
-        world.db._requests[_REQUEST_ID]["status"] = "wanted"
-
-        with self.assertRaises(AssertionError) as caught:
-            assert_recovery_never_parks(world.db)
-
-        self.assertIn("owner equivalence is broken", str(caught.exception))
-
-    def test_stolen_unproven_execution_is_rejected(self) -> None:
-        world = _World(self, lane="import", launched=True, journal="absent")
-        before = world.snapshot()
-        self._automation_row(world.db)["status"] = "queued"
-
-        with self.assertRaises(AssertionError) as caught:
-            assert_unproven_execution_untouched(
-                world.db,
-                before=before,
-                request_status_before="processing",
+    def _prove_clauses(self, cases: Sequence[_ClauseCase]) -> None:
+        """Fire each clause on its own world and pin its exact message."""
+        produced: dict[str, str] = {}
+        patterns: dict[str, str] = {}
+        for name, build in cases:
+            with self.subTest(clause=name):
+                expected, call = build()
+                pattern = "(?m)^" + re.escape(expected) + "$"
+                patterns[name] = pattern
+                with self.assertRaisesRegex(AssertionError, pattern) as caught:
+                    call()
+                produced[name] = str(caught.exception)
+        for name, message in produced.items():
+            matched = sorted(
+                other
+                for other, pattern in patterns.items()
+                if re.search(pattern, message)
+            )
+            self.assertEqual(
+                matched,
+                [name],
+                f"clause {name}'s message is also matched by {matched} — a "
+                "sibling clause could satisfy this test's assertion",
             )
 
-        self.assertIn("unproven execution moved", str(caught.exception))
+    def test_every_recovery_park_clause_fires_with_its_own_message(
+        self,
+    ) -> None:
+        def released_request_still_names_owner() -> tuple[
+            str, Callable[[], None]
+        ]:
+            world = self._world()
+            world.db._requests[_REQUEST_ID]["status"] = "wanted"
+            return (
+                (
+                    f"request left 'wanted' while still naming automation "
+                    f"owner {world.owner_id} — the 066 owner equivalence is "
+                    f"broken"
+                ),
+                lambda: assert_recovery_never_parks(world.db),
+            )
 
-    def test_refusal_checker_rejects_a_deleted_remaining_file(self) -> None:
-        before = (("albums/owner/01.flac", "file", b"audio"),)
+        def released_request_left_non_runnable() -> tuple[
+            str, Callable[[], None]
+        ]:
+            world = self._world()
+            request = world.db._requests[_REQUEST_ID]
+            request["status"] = "downloading"
+            request["active_automation_import_job_id"] = None
+            return (
+                "recovery left request in non-runnable status 'downloading'",
+                lambda: assert_recovery_never_parks(world.db),
+            )
 
-        with self.assertRaises(AssertionError) as caught:
-            assert_cleanup_refusal_preserved_tree(before, ())
+        def processing_without_owner() -> tuple[str, Callable[[], None]]:
+            world = self._world()
+            world.db._requests[
+                _REQUEST_ID
+            ]["active_automation_import_job_id"] = None
+            return (
+                (
+                    "request left 'processing' with no owner — the 066 owner "
+                    "equivalence is broken"
+                ),
+                lambda: assert_recovery_never_parks(world.db),
+            )
 
-        self.assertIn("mutated, renamed, or deleted", str(caught.exception))
+        def owner_pointer_names_no_row() -> tuple[str, Callable[[], None]]:
+            world = self._world()
+            missing = world.owner_id + 5000
+            world.db._requests[
+                _REQUEST_ID
+            ]["active_automation_import_job_id"] = missing
+            return (
+                f"owner {missing} does not exist",
+                lambda: assert_recovery_never_parks(world.db),
+            )
+
+        def owner_parked_at_recovery_required() -> tuple[
+            str, Callable[[], None]
+        ]:
+            world = self._world()
+            self._automation_row(
+                world.db
+            )["status"] = IMPORT_JOB_RECOVERY_REQUIRED
+            return (
+                (
+                    f"owner {world.owner_id} parked at 'recovery_required' "
+                    f"while still holding request {_REQUEST_ID} — invariant "
+                    "11 forbids a state whose only exit is an operator command"
+                ),
+                lambda: assert_recovery_never_parks(world.db),
+            )
+
+        def terminal_owner_still_holds_request() -> tuple[
+            str, Callable[[], None]
+        ]:
+            world = self._world()
+            self._automation_row(world.db)["status"] = "failed"
+            return (
+                (
+                    "request 'processing' behind non-claimable owner status "
+                    "'failed'"
+                ),
+                lambda: assert_recovery_never_parks(world.db),
+            )
+
+        self._prove_clauses((
+            ("released_request_still_names_owner",
+             released_request_still_names_owner),
+            ("released_request_left_non_runnable",
+             released_request_left_non_runnable),
+            ("processing_without_owner", processing_without_owner),
+            ("owner_pointer_names_no_row", owner_pointer_names_no_row),
+            ("owner_parked_at_recovery_required",
+             owner_parked_at_recovery_required),
+            ("terminal_owner_still_holds_request",
+             terminal_owner_still_holds_request),
+        ))
+
+    def test_every_unproven_execution_clause_fires_with_its_own_message(
+        self,
+    ) -> None:
+        def job_row_disappeared() -> tuple[str, Callable[[], None]]:
+            world = self._world()
+            before = world.snapshot()
+            world.db._import_jobs.remove(self._automation_row(world.db))
+            return (
+                "an unproven owner's job row disappeared",
+                lambda: assert_unproven_execution_untouched(
+                    world.db,
+                    before=before,
+                    request_status_before="processing",
+                ),
+            )
+
+        def execution_moved() -> tuple[str, Callable[[], None]]:
+            world = self._world()
+            before = world.snapshot()
+            self._automation_row(world.db)["status"] = "queued"
+            return (
+                (
+                    f"unproven execution moved from {before.status}/"
+                    f"{before.preview_status} to queued/"
+                    f"{before.preview_status}"
+                ),
+                lambda: assert_unproven_execution_untouched(
+                    world.db,
+                    before=before,
+                    request_status_before="processing",
+                ),
+            )
+
+        def lease_cleared() -> tuple[str, Callable[[], None]]:
+            world = self._world()
+            before = world.snapshot()
+            self._automation_row(world.db)["execution_invocation_id"] = None
+            return (
+                "unproven execution had its lease cleared",
+                lambda: assert_unproven_execution_untouched(
+                    world.db,
+                    before=before,
+                    request_status_before="processing",
+                ),
+            )
+
+        def request_moved() -> tuple[str, Callable[[], None]]:
+            world = self._world()
+            before = world.snapshot()
+            world.db._requests[_REQUEST_ID]["status"] = "wanted"
+            return (
+                "unproven execution's request moved to 'wanted'",
+                lambda: assert_unproven_execution_untouched(
+                    world.db,
+                    before=before,
+                    request_status_before="processing",
+                ),
+            )
+
+        def world_failure_audit_written() -> tuple[str, Callable[[], None]]:
+            world = self._world()
+            before = world.snapshot()
+            world.db.log_download(
+                request_id=_REQUEST_ID,
+                outcome="failed",
+                error_message="planted world-failure audit row",
+            )
+            return (
+                "unproven execution produced a world-failure audit row",
+                lambda: assert_unproven_execution_untouched(
+                    world.db,
+                    before=before,
+                    request_status_before="processing",
+                ),
+            )
+
+        self._prove_clauses((
+            ("job_row_disappeared", job_row_disappeared),
+            ("execution_moved", execution_moved),
+            ("lease_cleared", lease_cleared),
+            ("request_moved", request_moved),
+            ("world_failure_audit_written", world_failure_audit_written),
+        ))
+
+    def test_refusal_clause_fires_with_its_own_message(self) -> None:
+        def deleted_remaining_file() -> tuple[str, Callable[[], None]]:
+            before = (("albums/owner/01.flac", "file", b"audio"),)
+            return (
+                (
+                    "cleanup refusal mutated, renamed, or deleted remaining "
+                    "filesystem"
+                ),
+                lambda: assert_cleanup_refusal_preserved_tree(before, ()),
+            )
+
+        self._prove_clauses((
+            ("deleted_remaining_file", deleted_remaining_file),
+        ))
