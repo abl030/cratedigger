@@ -2438,12 +2438,18 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
         folder via the ``exist_ok=False`` allocation, unbounded — the
         reviewer's exact probe world: ``os.rmdir`` failing specifically on
         the benign ``Scans/`` skeleton. The move must still complete
-        without raising, the row + ban + requeue must land, the anomaly
-        must be recorded (the failed prune reads as "leftovers", so the
-        sweep runs and folds a note into the persisted detail), and —
-        because the call completes on its first attempt rather than
-        needing to retry — exactly ONE ``wrong_matches/`` destination
-        folder exists: no per-cycle leak."""
+        without raising and the row + ban + requeue must land.
+
+        Issue #1077, R4-2 (round-4 review): this world has NO untracked
+        content — ``Scans/`` is empty (its one file already moved during
+        the main loop), only the directory node itself resists removal.
+        The composed detail must say so honestly (a hedged "could not
+        verify" note) rather than the confident "left untracked content
+        behind ... swept into" wording, which would be a false accusation
+        for a world where nothing was ever swept because there was nothing
+        to sweep. And — because the call completes on its first attempt
+        rather than needing to retry — exactly ONE ``wrong_matches/``
+        destination folder exists: no per-cycle leak."""
         from lib.download_rejection import _handle_rejected_result
         from lib.quality import ValidationResult
         from lib.staged_album import StagedAlbum
@@ -2494,7 +2500,12 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             persisted = db.download_logs[0]
             self.assertIsNotNone(persisted.beets_detail)
             assert persisted.beets_detail is not None
-            self.assertIn("swept into", persisted.beets_detail)
+            # Truthful, hedged copy for a world with no real leftover
+            # content — never the confident "left untracked content
+            # behind" accusation this world does not earn.
+            self.assertIn("could not verify", persisted.beets_detail)
+            self.assertNotIn(
+                "left untracked content behind", persisted.beets_detail)
             self.assertEqual(len(db.denylist), 1)
             self.assertEqual(db.denylist[0].username, "peer911")
             self.assertEqual(db.request(911)["status"], "wanted")
@@ -2507,6 +2518,81 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(dest, "01.flac")))
             self.assertTrue(os.path.exists(
                 os.path.join(dest, "Scans", "front.jpg")))
+
+    def test_transient_observation_failure_never_falsely_accuses_a_clean_move(
+        self,
+    ) -> None:
+        """Issue #1077, R4-2 (round-4 review): the reviewer's exact probe —
+        a genuinely CLEAN move (no residue, no benign skeleton, nothing to
+        sweep) where the leftover-presence check itself hits one transient
+        read failure right after the move. Before this fix, that failure
+        was worst-cased identically to confirmed content, composing "left
+        untracked content behind ... swept into" for a source that was
+        correctly, fully removed — a false accusation persisted to
+        ``beets_detail``/Recents. Now it composes the honest hedged note,
+        and — because the transient failure resolves on the very next
+        check — the source is still correctly removed: cleanup is not
+        blocked by having been unable to verify once."""
+        from lib.download_rejection import _handle_rejected_result
+        from lib.quality import ValidationResult
+        from lib.staged_album import StagedAlbum
+
+        real_walk = os.walk
+        calls = {"n": 0}
+
+        def _flaky_walk(path, *args, **kwargs):
+            calls["n"] += 1
+            # Call #1 is the main move loop's own walk (moving 01.flac) —
+            # must succeed normally. Call #2 is the FIRST leftover
+            # observation right after the move — the one this test
+            # targets. Every later call succeeds, simulating a failure
+            # that resolves on retry.
+            if calls["n"] == 2:
+                raise OSError("simulated transient EIO on first observation")
+            yield from real_walk(path, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            current_path = os.path.join(tmpdir, "Artist - Album")
+            os.makedirs(current_path)
+            with open(os.path.join(current_path, "01.flac"), "wb") as handle:
+                handle.write(b"audio bytes")
+
+            db = FakePipelineDB()
+            db.seed_request(make_request_row(
+                id=912, status="downloading", mb_release_id="test-mbid-912",
+            ))
+            ctx = make_ctx_with_fake_db(db)
+            album = make_grab_list_entry(
+                files=[make_download_file(
+                    username="peer912", filename="01.flac", file_dir="",
+                )],
+                artist="Artist", title="Album",
+                mb_release_id="test-mbid-912", db_request_id=912,
+                db_source="request",
+            )
+            result = ValidationResult(
+                valid=False, distance=0.4, scenario="high_distance",
+                detail="too far",
+            )
+            staged_album = StagedAlbum(current_path=current_path, request_id=912)
+
+            with patch("os.walk", side_effect=_flaky_walk):
+                outcome = _handle_rejected_result(album, result, staged_album, ctx)
+
+            self.assertFalse(outcome.success)
+            self.assertEqual(len(db.download_logs), 1)
+            persisted = db.download_logs[0]
+            self.assertIsNotNone(persisted.beets_detail)
+            assert persisted.beets_detail is not None
+            self.assertIn("could not verify", persisted.beets_detail)
+            self.assertNotIn(
+                "left untracked content behind", persisted.beets_detail)
+            # The transient failure resolved on the retry: the move
+            # genuinely was clean, so the source is correctly removed —
+            # an unverified FIRST check must not permanently block cleanup.
+            self.assertFalse(os.path.exists(current_path))
+            dest = os.path.join(tmpdir, "wrong_matches", "Artist - Album")
+            self.assertTrue(os.path.exists(os.path.join(dest, "01.flac")))
 
     def test_multi_audio_non_flac_never_reaches_beets_validation(self):
         import subprocess

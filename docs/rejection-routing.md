@@ -125,13 +125,11 @@ behavior load-bearing rather than incidental:
   including an out-of-manifest audio file the main loop deliberately
   skipped — "kept implies visible" (D1) outranks manifest purity:
   `_sweep_residue_into_destination` moves it into the same
-  `wrong_matches/<name>/` folder the curated files landed in, and
-  `CuratedMoveResult.anomaly` carries a note ("swept into the
-  wrong_matches quarantine destination"). The caller
-  (`lib.download_rejection._handle_rejected_result`) folds that note into
-  the persisted `ValidationResult.detail`, so it surfaces in Recents
-  forensics (`download_log.beets_detail`) — never as a stack trace, and
-  never silently.
+  `wrong_matches/<name>/` folder the curated files landed in. The caller
+  (`lib.download_rejection._handle_rejected_result`) folds the resulting
+  note into the persisted `ValidationResult.detail`, so it surfaces in
+  Recents forensics (`download_log.beets_detail`) — never as a stack
+  trace, and never silently.
 - **This is deliberate, not a fallback.** Before B1, a genuinely
   unexpected leftover raised an exception AFTER the move had already
   happened — outside the function's own rollback block — which stranded
@@ -139,6 +137,33 @@ behavior load-bearing rather than incidental:
   denylist writes, and no requeue: the exact invisible-quarantine
   pathology this issue exists to kill. Sweeping instead of raising is the
   fix; the anomaly note is how the operator still finds out.
+- **The composed note is one of three distinct, truthful facts (R4-2,
+  round-4 review) — never a single "confident" wording stretched over an
+  uncertain observation.** `_observe_leftovers` walks the whole subtree
+  for actual FILES (not just directory nodes) and reports a tri-state
+  result — `"empty"`, `"present"`, or `"unverified"` when the walk itself
+  could not fully complete (EACCES/EIO on a sub-directory; virtiofs makes
+  these real):
+  1. **Confirmed content, confirmed swept clean** — the observation found
+     real files, the sweep ran, and a re-check confirms nothing real
+     remains: `"curated move left untracked content behind … swept into
+     the wrong_matches quarantine destination"`.
+  2. **Confirmed content, sweep left some behind** — same as above but the
+     re-check still finds real content (the sweep itself failed, or hit
+     its own per-file error): the same note with an appended `"
+     (incompletely — some residue could not be moved)"`.
+  3. **Unverified — the observation, not the content, is what's in
+     doubt.** Either the FIRST check couldn't complete (a transient read
+     failure that may or may not resolve on retry) or the prune step
+     itself failed while leaving behind only an empty, content-free
+     directory skeleton (an unprunable but genuinely empty `Scans/`, for
+     example — the R3-1 pin's exact world). Both compose the SAME hedged
+     note: `"could not verify the curated move source was fully consumed
+     despite an exact allowed_audio match; any residue was swept into the
+     wrong_matches quarantine destination if present"`. This case never
+     claims untracked content definitely existed — a transient read
+     failure is not evidence of a leftover, and a benign unprunable
+     skeleton holds no content to begin with.
 - **The F7 consequence:** a folder that received swept-in, out-of-manifest
   audio will subsequently REFUSE force-import. The force-import manifest
   guard (`lib.dispatch.manifest_guard._guard_force_import_audio_manifest`)

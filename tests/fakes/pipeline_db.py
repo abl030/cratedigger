@@ -9170,7 +9170,25 @@ class FakePipelineDBSource:
             "search_filetype_override": search_filetype_override,
             "cooled_down_users": cooled_down_users,
         })
-        if import_job_id is not None and self.db.get_import_job(import_job_id) is not None:
+        # Issue #1077, R4-5 (round-4 review): mirror ``album_source.
+        # DatabaseSource.reject_and_requeue`` exactly — ONE falsy
+        # ``request_id`` gate before branching, not a per-branch
+        # ``isinstance(request_id, int)`` re-check. ``isinstance`` treats
+        # ``request_id=0`` as valid and proceeds to write a full
+        # requeue+log+denylist, where production's falsy check (``if not
+        # request_id: return None`` — ``album_source.py``) writes nothing
+        # for that same input. This also removes the fake-only
+        # ``self.db.get_import_job(import_job_id) is not None``
+        # requirement the deferred branch used to add: production takes
+        # the deferred path on ``import_job_id is not None`` alone, so an
+        # unseeded job id must NOT silently fall through to the
+        # synchronous branch here — it must take the same deferred path
+        # production does (and fail the same way production would, at the
+        # eventual commit, not by taking a different route entirely).
+        request_id = getattr(album_record, "db_request_id", None)
+        if not request_id:
+            return None
+        if import_job_id is not None:
             from lib.dispatch import _record_rejection_and_maybe_requeue
             from lib.quality import DownloadInfo
             from lib.terminal_outcomes import (
@@ -9178,9 +9196,6 @@ class FakePipelineDBSource:
                 TerminalDenylist,
             )
 
-            request_id = getattr(album_record, "db_request_id", None)
-            if not isinstance(request_id, int):
-                return None
             dl_info = (
                 download_info
                 if isinstance(download_info, DownloadInfo)
@@ -9219,9 +9234,6 @@ class FakePipelineDBSource:
         # on this path; do the same against the underlying ``FakePipelineDB``.
         from lib.quality import DownloadInfo
 
-        request_id = getattr(album_record, "db_request_id", None)
-        if not isinstance(request_id, int):
-            return None
         dl = (
             download_info
             if isinstance(download_info, DownloadInfo)

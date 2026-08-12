@@ -7888,5 +7888,98 @@ class TestFakeSlskdEvents(unittest.TestCase):
             api.call_log, ["transfers.get_all_downloads", "events.list"])
 
 
+class TestFakePipelineDBSourceRejectAndRequeueGating(unittest.TestCase):
+    """Issue #1077, R4-5 (round-4 review): ``FakePipelineDBSource.
+    reject_and_requeue`` must gate identically to the real
+    ``album_source.DatabaseSource.reject_and_requeue`` it stands in for —
+    a single falsy ``request_id`` check before branching on
+    ``import_job_id``, not a per-branch ``isinstance(request_id, int)``
+    re-check that treats ``request_id=0`` as valid, and not an
+    additional ``get_import_job(...) is not None`` requirement production
+    never applies before taking the deferred path."""
+
+    def _source(self):
+        from tests.fakes import FakePipelineDB, FakePipelineDBSource
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=42, status="downloading"))
+        return FakePipelineDBSource(db), db
+
+    def test_falsy_request_id_writes_nothing_on_the_sync_branch(self) -> None:
+        """``request_id=0`` is falsy — production's own ``if not
+        request_id: return None`` (``album_source.py``) writes nothing for
+        it. An ``isinstance(0, int)`` check would wrongly treat it as a
+        valid request and write a full requeue+log+denylist."""
+        from lib.quality import ValidationResult
+
+        source, db = self._source()
+        album = MagicMock(db_request_id=0)
+        result = ValidationResult(
+            valid=False, distance=0.4, scenario="high_distance",
+            detail="test",
+        )
+
+        outcome = source.reject_and_requeue(album, result)
+
+        self.assertIsNone(outcome)
+        self.assertEqual(db.download_logs, [])
+        self.assertEqual(db.denylist, [])
+
+    def test_falsy_request_id_writes_nothing_on_the_deferred_branch(self) -> None:
+        """Same falsy gate applies before the ``import_job_id`` branch
+        decision is even made — ``request_id=0`` (falsy but ``isinstance``-
+        valid, same distinguishing case as the sync-branch pin above) must
+        not reach the deferred path either."""
+        from lib.import_queue import IMPORT_JOB_FORCE, force_import_payload
+        from lib.quality import ValidationResult
+
+        source, db = self._source()
+        job = db.enqueue_import_job(
+            IMPORT_JOB_FORCE,
+            request_id=42,
+            payload=force_import_payload(
+                download_log_id=1, failed_path="/tmp/cratedigger-r4-5-test"),
+        )
+        album = MagicMock(db_request_id=0)
+        result = ValidationResult(
+            valid=False, distance=0.4, scenario="high_distance",
+            detail="test",
+        )
+
+        outcome = source.reject_and_requeue(
+            album, result, import_job_id=job.id)
+
+        self.assertIsNone(outcome)
+
+    def test_unseeded_import_job_id_still_takes_the_deferred_path(self) -> None:
+        """Production takes the deferred path on ``import_job_id is not
+        None`` alone (``album_source.py``) — it never checks the job
+        exists first. The fake used to require
+        ``get_import_job(...) is not None``, which made an unseeded job id
+        silently fall through to the SYNC branch instead — a materially
+        different code path than production would take for the same
+        input. This proves the fake now takes the SAME (deferred) path
+        regardless of whether the id happens to be seeded."""
+        from lib.quality import ValidationResult
+        from lib.terminal_outcomes import PendingImportTerminalOutcome
+
+        source, db = self._source()
+        self.assertIsNone(db.get_import_job(999999))
+        album = MagicMock(db_request_id=42)
+        result = ValidationResult(
+            valid=False, distance=0.4, scenario="high_distance",
+            detail="test",
+        )
+
+        outcome = source.reject_and_requeue(
+            album, result, import_job_id=999999)
+
+        # The deferred path returns a PendingImportTerminalOutcome command
+        # bundle, never a plain int/None sync-path return.
+        self.assertIsInstance(outcome, PendingImportTerminalOutcome)
+        # And critically: no download_log row was written directly — a
+        # sync-branch fallthrough would have written one immediately.
+        self.assertEqual(db.download_logs, [])
+
+
 if __name__ == "__main__":
     unittest.main()

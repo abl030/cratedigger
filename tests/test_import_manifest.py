@@ -286,30 +286,69 @@ class TestImportManifest(unittest.TestCase):
 
 
 class TestObserveLeftovers(unittest.TestCase):
-    """Issue #1077, R3-1/R3-5: the shared best-effort leftover-presence
+    """Issue #1077, R3-1/R4-2: the shared best-effort leftover-presence
     check every post-move statement in ``move_failed_import_curated`` now
-    routes through — pinned directly since three separate call sites
-    inherit its contract."""
-
-    def test_cancellation_propagates(self):
-        with patch(
-            "os.scandir", side_effect=ExecutionCancelled("stop"),
-        ), self.assertRaises(ExecutionCancelled):
-            _observe_leftovers("/nonexistent/path", context="test")
-
-    def test_other_failures_worst_case_toward_leftovers_present(self):
-        with patch("os.scandir", side_effect=OSError("EACCES simulated")):
-            self.assertTrue(
-                _observe_leftovers("/nonexistent/path", context="test"))
+    routes through — pinned directly since two call sites inherit its
+    contract. Tri-state (``"empty"``/``"present"``/``"unverified"``,
+    round-4 review): a shallow "any entry" check used to report
+    ``"present"`` for a directory node holding no real files, and a failed
+    read used to be worst-cased identically to confirmed content — both
+    composed a false "untracked content" claim upstream. This function has
+    no ``before_mutation`` checkpoint of its own (it never mutates), so it
+    has no ``ExecutionCancelled`` handling to pin here — see
+    ``TestImportManifest.test_sweep_cancellation_propagates_instead_of_being_swallowed``
+    for the real, load-bearing cancellation checkpoints inside
+    ``move_failed_import_curated`` itself."""
 
     def test_real_empty_directory_reports_no_leftovers(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            self.assertFalse(_observe_leftovers(tmpdir, context="test"))
+            self.assertEqual(
+                _observe_leftovers(tmpdir, context="test"), "empty")
 
     def test_real_non_empty_directory_reports_leftovers(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             open(os.path.join(tmpdir, "leftover.txt"), "wb").close()
-            self.assertTrue(_observe_leftovers(tmpdir, context="test"))
+            self.assertEqual(
+                _observe_leftovers(tmpdir, context="test"), "present")
+
+    def test_empty_directory_skeleton_reports_no_leftovers(self):
+        """Issue #1077, R4-2: a directory NODE with no real file anywhere
+        in its subtree must never read as "present" — only actual files
+        do. This is what lets a prune failure on a benign empty skeleton
+        (the R3-1 pin's world) report ``"empty"`` rather than falsely
+        claiming untracked content."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.makedirs(os.path.join(tmpdir, "Scans", "nested"))
+            self.assertEqual(
+                _observe_leftovers(tmpdir, context="test"), "empty")
+
+    def test_unreadable_subdirectory_reports_unverified(self):
+        """Issue #1077, R4-2: a REAL EACCES-shaped read failure — a
+        sub-directory this process cannot list — must report
+        ``"unverified"``, never ``"present"``. Worst-casing an unreadable
+        world to "present" is what let the caller compose a false
+        "untracked content" accusation for a transient failure the
+        reviewer proved could coincide with a genuinely clean move."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            blocked = os.path.join(tmpdir, "blocked")
+            os.makedirs(blocked)
+            os.chmod(blocked, 0o000)
+            try:
+                self.assertEqual(
+                    _observe_leftovers(tmpdir, context="test"), "unverified")
+            finally:
+                os.chmod(blocked, 0o700)
+
+    def test_walk_exception_reports_unverified(self):
+        """A failure the walk itself cannot even start from (rather than
+        one ``onerror`` observes mid-walk) also worst-cases to
+        ``"unverified"``, never a silent ``"empty"`` or a false
+        ``"present"``."""
+        with patch("os.walk", side_effect=OSError("simulated walk failure")):
+            self.assertEqual(
+                _observe_leftovers("/nonexistent/path", context="test"),
+                "unverified",
+            )
 
 
 class TestForceImportManifestGuard(unittest.TestCase):

@@ -7,7 +7,7 @@ import os
 import shutil
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from lib.import_execution import ExecutionCancelled
 from lib.quality import AUDIO_EXTENSIONS_DOTTED
@@ -206,35 +206,63 @@ def _sweep_residue_into_destination(
     _prune_empty_dirs(src_path, before_mutation=before_mutation)
 
 
-def _observe_leftovers(path: str, *, context: str) -> bool:
+LeftoverObservation = Literal["empty", "present", "unverified"]
+
+
+def _observe_leftovers(path: str, *, context: str) -> LeftoverObservation:
     """Best-effort presence check for the post-move cleanup path only.
 
     Issue #1077, R3-1: every statement after the move loop in
     ``move_failed_import_curated`` must uphold "never raises post-
-    mutation" — an ``OSError`` here (EACCES/EIO/ENOTEMPTY race; virtiofs
-    makes these real) used to propagate straight out of the function,
-    recreating the exact stranding B1 exists to kill, and — because the
-    request stays parked at its pre-move status — every later poll cycle
-    re-entered the same code and leaked another
-    ``wrong_matches/<name>_N`` via the ``exist_ok=False`` allocation
-    above, outside the rollback block: unbounded disk growth from a
-    single flaky stat. A failed observation is therefore worst-cased as
-    "entries present" (routes to the sweep, which is itself defended the
-    same way) rather than propagated. Cancellation is a distinct
-    interruption, not an observation failure, and still propagates.
+    mutation" (cooperative cancellation excepted) — an ``OSError`` here
+    (EACCES/EIO/ENOTEMPTY race; virtiofs makes these real) used to
+    propagate straight out of the function, recreating the exact stranding
+    B1 exists to kill, and — because the request stays parked at its
+    pre-move status — every later poll cycle re-entered the same code and
+    leaked another ``wrong_matches/<name>_N`` via the ``exist_ok=False``
+    allocation above, outside the rollback block: unbounded disk growth
+    from a single flaky stat.
+
+    Issue #1077, R4-2 (round-4 review): a SHALLOW presence check (any
+    top-level entry) used to report "present" for a directory node the
+    pruning step above could not remove even though it holds no actual
+    FILES — composing a false "left untracked content behind" claim for a
+    world that left nothing behind at all. This walks the whole subtree
+    looking for a real file, so an unprunable-but-empty directory skeleton
+    correctly reports ``"empty"``. A failed or partial walk (a
+    sub-directory this process cannot read, EACCES/EIO) can neither
+    confirm nor deny real content and reports ``"unverified"`` — the
+    caller must not claim untracked content definitely existed for that
+    case. This function never calls ``before_mutation`` (nothing here
+    mutates), so it has no cancellation checkpoint of its own; a real
+    cancellation is instead observed at the mutating checkpoints in
+    ``move_failed_import_curated`` and its helpers.
     """
+    unreadable: list[OSError] = []
     try:
-        with os.scandir(path) as entries:
-            return any(entries)
-    except ExecutionCancelled:
-        raise
+        for _dirpath, _dirnames, filenames in os.walk(
+            path, onerror=unreadable.append,
+        ):
+            if filenames:
+                return "present"
     except Exception:
         logger.exception(
-            "Failed to observe %r while %s — treating as non-empty",
+            "Failed to walk %r while %s — treating as unverified",
             path,
             context,
         )
-        return True
+        return "unverified"
+    if unreadable:
+        logger.warning(
+            "Could not fully walk %r while %s (%d unreadable "
+            "sub-director%s) — treating as unverified",
+            path,
+            context,
+            len(unreadable),
+            "y" if len(unreadable) == 1 else "ies",
+        )
+        return "unverified"
+    return "empty"
 
 
 def _allocate_target(
@@ -358,6 +386,31 @@ def check_audio_manifest(root: str, allowed_audio: Iterable[str]) -> ManifestChe
     )
 
 
+# Issue #1077, R4-2 (round-4 review): three distinct, truthful anomaly notes
+# for ``move_failed_import_curated``'s post-move composition — a single
+# "swept into" wording used to be composed even when observation had merely
+# worst-cased a transient read failure, asserting untracked content existed
+# when the real world may have been perfectly clean. Only
+# ``_ANOMALY_SWEPT_CLEAN``/``_ANOMALY_SWEPT_INCOMPLETE`` claim confirmed
+# content; ``_ANOMALY_UNVERIFIED`` is used whenever the observation itself
+# (not the presence of real content) is what's uncertain.
+_ANOMALY_SWEPT_CLEAN = (
+    "curated move left untracked content behind despite an exact "
+    "allowed_audio match; swept into the wrong_matches quarantine "
+    "destination"
+)
+_ANOMALY_SWEPT_INCOMPLETE = (
+    "curated move left untracked content behind despite an exact "
+    "allowed_audio match; swept into the wrong_matches quarantine "
+    "destination (incompletely — some residue could not be moved)"
+)
+_ANOMALY_UNVERIFIED = (
+    "could not verify the curated move source was fully consumed despite "
+    "an exact allowed_audio match; any residue was swept into the "
+    "wrong_matches quarantine destination if present"
+)
+
+
 def move_failed_import_curated(
     src_path: str,
     *,
@@ -375,15 +428,18 @@ def move_failed_import_curated(
     anything to a second, silent destination (issue #1077, D1: kept implies
     visible in the worklist, by construction).
 
-    Never raises post-mutation (issue #1077, B1): a benign non-audio
-    subdirectory left as an empty shell by the move loop is pruned, not
-    mistaken for a leftover. In the genuinely-unexpected case where real
-    content still survives that pruning — including an out-of-manifest
-    audio file the main loop deliberately skipped — "kept implies visible"
-    outranks manifest purity: it is swept into the SAME ``wrong_matches/``
-    destination rather than raising and stranding the album with no
-    ``download_log`` row, no denylist write, and no requeue. See
-    ``CuratedMoveResult.anomaly``.
+    Never raises post-mutation except cooperative cancellation (issue
+    #1077, B1; qualified R4-2): a benign non-audio subdirectory left as an
+    empty shell by the move loop is pruned, not mistaken for a leftover.
+    In the genuinely-unexpected case where real content still survives
+    that pruning — including an out-of-manifest audio file the main loop
+    deliberately skipped — "kept implies visible" outranks manifest
+    purity: it is swept into the SAME ``wrong_matches/`` destination
+    rather than raising and stranding the album with no ``download_log``
+    row, no denylist write, and no requeue. When the observation itself
+    cannot be trusted (a transient read failure, not confirmed content),
+    the composed anomaly says so rather than asserting untracked content
+    definitely existed. See ``CuratedMoveResult.anomaly``.
     """
     src_path = os.path.abspath(src_path)
     if not os.path.isdir(src_path):
@@ -469,10 +525,11 @@ def move_failed_import_curated(
         # against the real Lane A entry point.
         #
         # Issue #1077, R3-1: every statement from here on must uphold
-        # "never raises post-mutation" (see ``_observe_leftovers``'s
-        # docstring for why). Cancellation always propagates; every other
-        # failure worst-cases toward "leftovers present" and falls
-        # through to the sweep, which is itself defended the same way.
+        # "never raises post-mutation" (cooperative cancellation excepted
+        # — see ``_observe_leftovers``'s docstring for why). Cancellation
+        # always propagates; every other failure is recorded and handled
+        # without raising.
+        prune_failed = False
         try:
             _prune_empty_dirs(src_path, before_mutation=before_mutation)
         except ExecutionCancelled:
@@ -482,12 +539,14 @@ def move_failed_import_curated(
                 "Failed to prune empty directory skeletons under %r",
                 src_path,
             )
-        has_leftovers = _observe_leftovers(
+            prune_failed = True
+        observation = _observe_leftovers(
             src_path, context="checking for leftovers after the curated move",
         )
-        if has_leftovers:
-            # Genuinely unexpected — the caller's manifest guard
-            # (``_check_staged_audio_manifest`` in
+        if observation != "empty":
+            # Genuinely unexpected (when ``observation == "present"``) or
+            # simply unconfirmed (``"unverified"``) — the caller's manifest
+            # guard (``_check_staged_audio_manifest`` in
             # ``lib/download_validation.py``) is expected to have already
             # proven the staged folder's actual audio exactly equals
             # ``allowed_audio`` before Lane A (the canonical automation
@@ -500,13 +559,18 @@ def move_failed_import_curated(
             # a raise here used to strand the album in ``wrong_matches/``
             # with zero download_log rows, zero denylist writes, and no
             # requeue — the exact invisible-quarantine pathology this issue
-            # kills. Sweep the residue into the SAME destination instead
-            # and surface the anomaly through the caller's own validation
-            # detail, never a stack trace.
+            # kills. Sweep the residue (best-effort — a read failure here
+            # just moves whatever is reachable) into the SAME destination
+            # instead and surface a truthful anomaly through the caller's
+            # own validation detail, never a stack trace and never a false
+            # accusation when the observation itself was the only thing
+            # that failed.
             logger.warning(
-                "Curated move left untracked content behind in %r despite "
-                "an exact allowed_audio match — sweeping into %r",
+                "Curated move may have left untracked content behind in "
+                "%r (observation=%s) despite an exact allowed_audio match "
+                "— sweeping into %r",
                 src_path,
+                observation,
                 target_path,
             )
             try:
@@ -521,16 +585,31 @@ def move_failed_import_curated(
                     src_path,
                     target_path,
                 )
-            has_leftovers = _observe_leftovers(
+            post_sweep = _observe_leftovers(
                 src_path, context="re-checking after the residue sweep",
             )
-            anomaly = (
-                "curated move left untracked content behind despite an "
-                "exact allowed_audio match; swept into the wrong_matches "
-                "quarantine destination"
-                + (" (incompletely — some residue could not be moved)"
-                   if has_leftovers else "")
-            )
+            if observation == "present" and post_sweep == "empty":
+                anomaly = _ANOMALY_SWEPT_CLEAN
+            elif observation == "present" and post_sweep == "present":
+                anomaly = _ANOMALY_SWEPT_INCOMPLETE
+            else:
+                # The original observation was itself unverified, or the
+                # post-sweep re-check could not confirm the destination is
+                # clean — never claim untracked content definitely existed
+                # or was definitely fully swept.
+                anomaly = _ANOMALY_UNVERIFIED
+            has_leftovers = post_sweep != "empty"
+        else:
+            # Issue #1077, R4-2: a prune failure that leaves behind an
+            # empty (no real files) directory skeleton is NOT untracked
+            # content — ``_observe_leftovers`` walks the whole subtree for
+            # actual files, so this branch is reached even though
+            # ``prune_failed`` is True. Still worth a hedged note (the
+            # skeleton itself may linger below), but never the "content was
+            # found and swept" claim.
+            if prune_failed:
+                anomaly = _ANOMALY_UNVERIFIED
+            has_leftovers = False
         if not has_leftovers:
             try:
                 if before_mutation is None:

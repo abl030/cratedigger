@@ -952,19 +952,26 @@ class TestCleanupStagedDir(unittest.TestCase):
 
 
 class TestRunPostCommitCleanupProtectedParent(unittest.TestCase):
-    """Issue #1077, R3-3 (round-3 review): the importer's deferred
-    post-commit cleanup (``scripts.importer._run_post_commit_cleanup``) is
-    the THIRD real caller of ``_cleanup_staged_dir`` and the furthest from
-    ``cfg`` — reached only through the ``PostCommitCleanup`` plan a caller
-    built earlier and handed across the queue-owner boundary. Before this
-    fix it called ``_cleanup_staged_dir(plan.staged_path)`` with no guard
-    at all, so a successful automation import (``scripts/importer.py``)
-    whose ``staged_path`` was the last remaining canonical processing
-    album could ``rmdir`` the shared, Nix-provisioned
-    ``<processing_dir>/albums/`` root right out from under every other
-    request. This proves the guard now travels end to end: the plan
-    carries ``staged_path_protected_parent``, and the real (unpatched)
-    ``_cleanup_staged_dir`` honours it."""
+    """Issue #1077, R3-3 (round-3 review; docstring corrected R4-3): the
+    importer's deferred post-commit cleanup
+    (``scripts.importer._run_post_commit_cleanup``) is the THIRD real
+    caller of ``_cleanup_staged_dir`` and the furthest from ``cfg`` —
+    reached only through the ``PostCommitCleanup`` plan a caller built
+    earlier and handed across the queue-owner boundary. Every
+    ``is_automation`` branch in ``process_claimed_job`` returns before
+    reaching this call site (the journaled ``_complete_automation_
+    processing_cleanup`` lane owns automation cleanup instead) — the real
+    motivating scenario is a FORCE job's success plan, whose
+    ``staged_path`` (``R4-1``) is
+    ``<processing_dir>/albums/force-action-<id>``, a direct child of the
+    same shared root. Before this fix it called
+    ``_cleanup_staged_dir(plan.staged_path)`` with no guard at all, so a
+    successful force import whose ``staged_path`` was the last remaining
+    canonical album under that root could ``rmdir`` the shared,
+    Nix-provisioned ``<processing_dir>/albums/`` root right out from under
+    every other request. This proves the guard now travels end to end: the
+    plan carries ``staged_path_protected_parent``, and the real
+    (unpatched) ``_cleanup_staged_dir`` honours it."""
 
     def test_post_commit_cleanup_never_removes_the_processing_albums_root(self):
         from lib.dispatch.types import DispatchOutcome, PostCommitCleanup
@@ -1608,6 +1615,7 @@ class TestRejectImportFromEvidenceDecisionCallerLifecycle(unittest.TestCase):
         initial_status: str = "downloading",
         processing_dir: str | None = None,
         capture_cleanup_call: dict[str, object] | None = None,
+        capture_post_commit_cleanup: dict[str, object] | None = None,
     ):
         from lib.dispatch import _reject_import_from_evidence_decision
         from lib.dispatch.types import ImportAttemptResult
@@ -1666,6 +1674,8 @@ class TestRejectImportFromEvidenceDecisionCallerLifecycle(unittest.TestCase):
             if capture_cleanup_call is not None and ext.cleanup.call_args is not None:
                 capture_cleanup_call["args"] = ext.cleanup.call_args.args
                 capture_cleanup_call["kwargs"] = ext.cleanup.call_args.kwargs
+            if capture_post_commit_cleanup is not None:
+                capture_post_commit_cleanup["value"] = outcome.post_commit_cleanup
         if pending:
             self.assertIsNotNone(outcome.terminal_outcome)
             assert outcome.terminal_outcome is not None
@@ -1811,6 +1821,36 @@ class TestRejectImportFromEvidenceDecisionCallerLifecycle(unittest.TestCase):
         kwargs = capture.get("kwargs")
         assert isinstance(kwargs, dict)
         self.assertIsNone(kwargs.get("protected_parent"))
+
+    def test_deferred_plan_also_carries_the_protected_parent_guard(self) -> None:
+        """Issue #1077, R4-3 (round-4 review): the SYNC branch's guard
+        (``test_processing_dir_threads_the_protected_parent_guard`` above)
+        does not prove the DEFERRED branch (``import_job_id is not None``)
+        also carries it — ``PostCommitCleanup(staged_path=staged_path,
+        staged_path_protected_parent=protected_parent)`` is a second,
+        independent assignment (``lib/dispatch/outcome_actions.py``) that
+        could silently regress to dropping the field without either sync
+        test noticing. Drives the ``pending=True`` (force job) path and
+        asserts directly on the returned ``PostCommitCleanup``."""
+        from lib.dispatch.types import PostCommitCleanup
+        from lib.processing_paths import processing_albums_dir
+
+        processing_dir = "/tmp/cratedigger-r4-3-processing-dir"
+        capture: dict[str, object] = {}
+        self._reject(
+            decision="bad_audio_hash",
+            requeue_on_failure=False,
+            pending=True,
+            processing_dir=processing_dir,
+            capture_post_commit_cleanup=capture,
+        )
+
+        plan = capture.get("value")
+        assert isinstance(plan, PostCommitCleanup)
+        self.assertEqual(
+            plan.staged_path_protected_parent,
+            processing_albums_dir(processing_dir),
+        )
 
 
 class TestHaveAnalysisErrorAbort(unittest.TestCase):
@@ -2282,6 +2322,18 @@ class TestDispatchImport(unittest.TestCase):
         cleanup = r["outcome"].post_commit_cleanup
         assert cleanup is not None
         self.assertIsNotNone(cleanup.staged_path)
+        # Issue #1077, R4-1 (round-4 review): the SUCCESS-path plan must
+        # carry the same ``staged_path_protected_parent`` guard as the
+        # reject path's plan (R3-3) — before this fix a successful force
+        # job's ``staged_path`` (``<processing_dir>/albums/
+        # force-action-<id>``, a direct child of the shared albums root)
+        # reached ``_run_post_commit_cleanup`` completely unguarded.
+        from lib.processing_paths import processing_albums_dir
+
+        self.assertEqual(
+            cleanup.staged_path_protected_parent,
+            processing_albums_dir(_full_dispatch_config().processing_dir),
+        )
         r["mock_gate"].assert_called_once()
 
     def test_import_with_bad_extensions_logs_error_and_persists_jsonb(self):
