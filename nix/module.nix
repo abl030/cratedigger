@@ -2471,12 +2471,19 @@ in {
         # readiness timeout (SLSKD_SERVER_READINESS_TIMEOUT_S, a few
         # seconds, NOT this client's full HTTP timeout) -- worst case
         # comfortably under 60s/candidate. A sustained outage doesn't run
-        # the full 100-row batch anyway: the circuit breaker stops it
-        # after 3 consecutive submit failures. 2h retains generous
-        # headroom over the ~100min ceiling for a 100-row batch of
-        # individually-retried (not breaker-tripped) candidates, while
-        # still surfacing genuinely stuck runs.
-        TimeoutStartSec = "2h";
+        # the full batch anyway: the circuit breaker stops it after 3
+        # consecutive submit failures.
+        #
+        # Recomputed for DEFAULT_BATCH_SIZE=240 (issue #1112 item 1,
+        # 2026-08-12; was 100/"2h"): nominal ~29s/probe measured in
+        # production x 240 candidates ~= 116min (~1h56m) is the expected
+        # steady-state ceiling; worst case ~60s/candidate x 240 = 240min
+        # (4h) is the individually-retried-but-not-breaker-tripped
+        # ceiling. 5h keeps the same ~1.2x headroom ratio the prior 2h/
+        # ~100min pairing had over its own worst case, while still
+        # surfacing genuinely stuck runs well inside the 24h daily
+        # cadence.
+        TimeoutStartSec = "5h";
       };
     };
 

@@ -23,7 +23,23 @@ class TestPipelineDashboardRouteContracts(_FakeDbWebServerCase):
 
     DASHBOARD_REQUIRED_FIELDS: ClassVar = {
         "generated_at", "redis", "searches", "cycles", "coverage",
-        "peers", "plan_readiness", "disk_coverage",
+        "peers", "plan_readiness", "disk_coverage", "unfindable",
+    }
+    DASHBOARD_UNFINDABLE_FIELDS: ClassVar = {
+        "recent_runs", "backlog_trend",
+    }
+    DASHBOARD_UNFINDABLE_RUN_FIELDS: ClassVar = {
+        "id", "created_at", "cohort_total", "due_backlog_at_start",
+        "batch_limit", "probes_attempted", "categorised_count",
+        "downgraded_count", "no_change_count", "probe_failed_count",
+        "not_due_count", "request_not_found_count", "breaker_tripped",
+        "duration_seconds",
+    }
+    DASHBOARD_UNFINDABLE_BACKLOG_TREND_FIELDS: ClassVar = {
+        "current_backlog", "latest_sample_at", "series",
+    }
+    DASHBOARD_UNFINDABLE_BACKLOG_TREND_POINT_FIELDS: ClassVar = {
+        "sampled_at", "due_backlog_at_start", "probes_attempted",
     }
     DASHBOARD_SEARCH_WINDOW_FIELDS: ClassVar = {
         "label", "hours", "searches", "distinct_requests",
@@ -175,6 +191,19 @@ class TestPipelineDashboardRouteContracts(_FakeDbWebServerCase):
         self.assertEqual(status, 200)
         self.assertIsNone(data["disk_coverage"])
 
+    def test_pipeline_dashboard_unfindable_empty_state(self):
+        """No runs yet -> the honest empty-state shape, not a 500 or a
+        missing key (#1112)."""
+        status, data = self._get("/api/pipeline/dashboard")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(data["unfindable"]["recent_runs"], [])
+        self.assertEqual(data["unfindable"]["backlog_trend"], {
+            "current_backlog": None,
+            "latest_sample_at": None,
+            "series": [],
+        })
+
     def _seed_dashboard_telemetry(self) -> None:
         """Real telemetry rows for every [0]-indexed dashboard assertion:
         cycle metrics (windows + wanted-trend samples), found/loop search
@@ -212,6 +241,16 @@ class TestPipelineDashboardRouteContracts(_FakeDbWebServerCase):
                 fanout_waves=6,
             )
         self.db.record_peer_observations(["peer-a", "peer-b", "peer-c"])
+        # Real datetime-backed run row (code-quality.md § production-shape
+        # mock rule) — the fake stamps ``created_at`` with a real
+        # ``datetime.now(UTC)``, not a synthetic literal.
+        self.db.record_unfindable_run_metrics(
+            cohort_total=1301, due_backlog_at_start=686,
+            batch_limit=240, probes_attempted=240,
+            categorised_count=5, downgraded_count=1, no_change_count=210,
+            probe_failed_count=24, breaker_tripped=False,
+            duration_seconds=6961.5,
+        )
 
     def test_pipeline_dashboard_contract(self):
         self._seed_dashboard_telemetry()
@@ -312,6 +351,28 @@ class TestPipelineDashboardRouteContracts(_FakeDbWebServerCase):
             data["searches"]["windows"][0]["cache_attribution_level"],
             "cycle_only",
         )
+        # Unfindable-detection run health + backlog trend (#1112).
+        _assert_required_fields(
+            self, data["unfindable"], self.DASHBOARD_UNFINDABLE_FIELDS,
+            "pipeline dashboard unfindable")
+        _assert_required_fields(
+            self, data["unfindable"]["recent_runs"][0],
+            self.DASHBOARD_UNFINDABLE_RUN_FIELDS,
+            "pipeline dashboard unfindable recent run")
+        _assert_required_fields(
+            self, data["unfindable"]["backlog_trend"],
+            self.DASHBOARD_UNFINDABLE_BACKLOG_TREND_FIELDS,
+            "pipeline dashboard unfindable backlog trend")
+        _assert_required_fields(
+            self, data["unfindable"]["backlog_trend"]["series"][0],
+            self.DASHBOARD_UNFINDABLE_BACKLOG_TREND_POINT_FIELDS,
+            "pipeline dashboard unfindable backlog trend point")
+        self.assertEqual(
+            data["unfindable"]["recent_runs"][0]["due_backlog_at_start"],
+            686,
+        )
+        self.assertEqual(
+            data["unfindable"]["backlog_trend"]["current_backlog"], 686)
 
 
 if __name__ == "__main__":

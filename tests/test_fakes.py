@@ -4499,6 +4499,51 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         self.assertEqual(
             dashboard["coverage"]["wanted_trend"]["current_wanted"], 0)
 
+    def test_unfindable_run_metrics_stub_round_trips_and_feeds_dashboard(self):
+        db = FakePipelineDB()
+
+        empty = db.get_pipeline_dashboard_metrics()["unfindable"]
+        self.assertEqual(empty["recent_runs"], [])
+        self.assertIsNone(empty["backlog_trend"]["current_backlog"])
+
+        first_id = db.record_unfindable_run_metrics(
+            cohort_total=1301, due_backlog_at_start=900,
+            batch_limit=240, probes_attempted=240,
+            categorised_count=5, downgraded_count=1, no_change_count=210,
+            probe_failed_count=24, breaker_tripped=False,
+            duration_seconds=6900.0,
+        )
+        second_id = db.record_unfindable_run_metrics(
+            cohort_total=1301, due_backlog_at_start=686,
+            batch_limit=240, probes_attempted=90,
+            probe_failed_count=90, breaker_tripped=True,
+            duration_seconds=1800.0,
+        )
+        self.assertEqual((first_id, second_id), (1, 2))
+
+        rows = db.get_unfindable_run_metrics(limit=5)
+        self.assertEqual(len(rows), 2)
+        # Newest first, and every field of the second call round-trips.
+        newest = rows[0]
+        self.assertEqual(newest["id"], second_id)
+        self.assertEqual(newest["due_backlog_at_start"], 686)
+        self.assertEqual(newest["probes_attempted"], 90)
+        self.assertEqual(newest["probe_failed_count"], 90)
+        self.assertTrue(newest["breaker_tripped"])
+        self.assertEqual(newest["duration_seconds"], 1800.0)
+        self.assertEqual(newest["categorised_count"], 0)
+
+        dashboard = db.get_pipeline_dashboard_metrics()["unfindable"]
+        self.assertEqual(len(dashboard["recent_runs"]), 2)
+        self.assertEqual(
+            dashboard["recent_runs"][0]["due_backlog_at_start"], 686)
+        self.assertEqual(dashboard["backlog_trend"]["current_backlog"], 686)
+        self.assertEqual(
+            [pt["due_backlog_at_start"]
+             for pt in dashboard["backlog_trend"]["series"]],
+            [900, 686],
+        )
+
     def test_import_job_preview_methods_mirror_core_lifecycle(self):
         from lib.import_queue import IMPORT_JOB_FORCE
 

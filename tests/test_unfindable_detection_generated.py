@@ -612,11 +612,17 @@ class TestGeneratedSubmitResiliencePatrol(unittest.TestCase):
 
     @given(world=batch_worlds())
     def test_exit_code_matches_batch_completeness(self, world: BatchWorld) -> None:
-        db, slskd, _rids = _build_batch(world)
+        db, slskd, rids = _build_batch(world)
         svc = UnfindableDetectionService(db, slskd, probe_runner=_fast_probe_runner)
         # ONE real run (issue #1090 NIT-10) -- the expected outcome is
         # independently derived from the world, not a second live batch.
-        exit_code = _process_batch(svc, limit=100)
+        # cohort_total / due_backlog_at_start (#1112) are run-telemetry
+        # inputs the completeness invariant doesn't depend on -- the
+        # seeded cohort size is a faithful stand-in for both.
+        exit_code = _process_batch(
+            svc, db, limit=100,
+            cohort_total=len(rids), due_backlog_at_start=len(rids),
+        )
         expected_tripped = _expected_trip_index(world) is not None
         assert_exit_code_matches_completeness(expected_tripped, exit_code)
 

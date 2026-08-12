@@ -659,4 +659,22 @@ ALLOWLIST: dict[str, str] = {
     "get_search_plan_readiness":
         "computed readiness metric dict — key set assembled in Python, "
         "not a raw SELECT column list",
+    # --- Raw-SELECT projections with independent round-trip parity ---
+    # Unlike the computed-aggregate dicts above, this genuinely is a raw
+    # SELECT column list (issue #1112) -- but its parity is already
+    # proven without the shared registry driver: a real-PG round-trip
+    # (tests/test_pipeline_db.py::TestUnfindableDetectionPipelineDB::
+    # test_record_unfindable_run_metrics_round_trip_preserves_every_field)
+    # and an independent fake-mirror round-trip
+    # (tests/test_fakes.py::TestFakePipelineDBNewStubs::
+    # test_unfindable_run_metrics_stub_round_trips_and_feeds_dashboard)
+    # both assert the identical explicit field list against the same
+    # writer inputs, so a column dropped on either side already fails
+    # its own test.
+    "get_unfindable_run_metrics":
+        "TypedDict (UnfindableRunMetricsRow) raw-SELECT return -- field-"
+        "set parity independently proven by a real-PG round-trip "
+        "(test_pipeline_db.py) and a fake round-trip (test_fakes.py) "
+        "asserting the same explicit field list, not the shared registry "
+        "driver",
 }

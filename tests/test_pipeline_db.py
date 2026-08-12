@@ -95,6 +95,7 @@ def make_db():
         "album_quality_evidence",
         "peer_observations",
         "cycle_metrics",
+        "unfindable_run_metrics",
         "bad_audio_hashes",
         "processing_cleanup_journal",
         "import_jobs",
@@ -154,6 +155,7 @@ class TestMakeDbIsolation(unittest.TestCase):
                 "album_quality_evidence",
                 "peer_observations",
                 "cycle_metrics",
+                "unfindable_run_metrics",
                 "bad_audio_hashes",
                 "processing_cleanup_journal",
                 "import_jobs",
@@ -903,6 +905,7 @@ class TestSchemaCreation(unittest.TestCase):
         self.assertIn("user_cooldowns", table_names)
         self.assertIn("import_jobs", table_names)
         self.assertIn("cycle_metrics", table_names)
+        self.assertIn("unfindable_run_metrics", table_names)
         self.assertIn("peer_observations", table_names)
         # Migration 039 dropped the peer/dir combo experiment (#227).
         self.assertNotIn("peer_dir_observations", table_names)
@@ -5646,6 +5649,57 @@ class TestPipelineDashboardMetrics(unittest.TestCase):
         self.assertEqual(heavy[0]["fanout_waves"], 3)
         self.assertEqual(heavy[0]["browse_time_s"], 12.5)
         self.assertEqual(metrics["cycles"]["outliers"][0]["cycle_total_s"], 900.0)
+
+    def test_dashboard_unfindable_block_empty_then_populated(self):
+        """The dashboard's ``unfindable`` block renders sanely with no
+        rows (honest empty state, #1112) and surfaces recent runs +
+        backlog trend newest-first once runs exist."""
+        empty_metrics = self.db.get_pipeline_dashboard_metrics()
+        empty_unfindable = empty_metrics["unfindable"]
+        self.assertEqual(empty_unfindable["recent_runs"], [])
+        self.assertEqual(empty_unfindable["backlog_trend"], {
+            "current_backlog": None,
+            "latest_sample_at": None,
+            "series": [],
+        })
+
+        self.db.record_unfindable_run_metrics(
+            cohort_total=1301, due_backlog_at_start=900,
+            batch_limit=240, probes_attempted=240,
+            categorised_count=5, downgraded_count=1, no_change_count=210,
+            probe_failed_count=24, breaker_tripped=False,
+            duration_seconds=6900.0,
+        )
+        self.db.record_unfindable_run_metrics(
+            cohort_total=1301, due_backlog_at_start=686,
+            batch_limit=240, probes_attempted=90,
+            probe_failed_count=90, breaker_tripped=True,
+            duration_seconds=1800.0,
+        )
+
+        metrics = self.db.get_pipeline_dashboard_metrics()
+        unfindable = metrics["unfindable"]
+        recent = unfindable["recent_runs"]
+        self.assertEqual(len(recent), 2)
+        # Newest first.
+        self.assertEqual(recent[0]["due_backlog_at_start"], 686)
+        self.assertTrue(recent[0]["breaker_tripped"])
+        self.assertEqual(recent[1]["due_backlog_at_start"], 900)
+        self.assertFalse(recent[1]["breaker_tripped"])
+        self.assertIsInstance(recent[0]["created_at"], str)
+
+        trend = unfindable["backlog_trend"]
+        self.assertEqual(trend["current_backlog"], 686)
+        self.assertEqual(trend["latest_sample_at"], recent[0]["created_at"])
+        # Chronological (oldest first) — the inverse of recent_runs.
+        self.assertEqual(
+            [pt["due_backlog_at_start"] for pt in trend["series"]],
+            [900, 686],
+        )
+        self.assertEqual(
+            [pt["probes_attempted"] for pt in trend["series"]],
+            [240, 90],
+        )
 
     def test_cycle_rows_select_recent_and_24_hour_slowest_cycles(self):
         now = datetime.now(UTC)
@@ -13691,6 +13745,85 @@ class TestUnfindableDetectionPipelineDB(unittest.TestCase):
         self.assertEqual(sig.zero_find_cycles, 3)
         # One wrong-pressing hit (cycle 0).
         self.assertEqual(sig.wrong_pressing_hits, 1)
+
+    # ---- record_unfindable_run_metrics (#1112) ----
+
+    def test_record_unfindable_run_metrics_round_trip_preserves_every_field(
+        self,
+    ) -> None:
+        """Every kwarg passed to the writer reads back via the getter."""
+        db = make_db()
+
+        new_id = db.record_unfindable_run_metrics(
+            cohort_total=1301,
+            due_backlog_at_start=686,
+            batch_limit=240,
+            probes_attempted=240,
+            categorised_count=11,
+            downgraded_count=2,
+            no_change_count=190,
+            probe_failed_count=34,
+            not_due_count=1,
+            request_not_found_count=2,
+            breaker_tripped=False,
+            duration_seconds=6961.5,
+        )
+
+        rows = db.get_unfindable_run_metrics(limit=5)
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["id"], new_id)
+        self.assertIsInstance(row["created_at"], datetime)
+        self.assertEqual(row["cohort_total"], 1301)
+        self.assertEqual(row["due_backlog_at_start"], 686)
+        self.assertEqual(row["batch_limit"], 240)
+        self.assertEqual(row["probes_attempted"], 240)
+        self.assertEqual(row["categorised_count"], 11)
+        self.assertEqual(row["downgraded_count"], 2)
+        self.assertEqual(row["no_change_count"], 190)
+        self.assertEqual(row["probe_failed_count"], 34)
+        self.assertEqual(row["not_due_count"], 1)
+        self.assertEqual(row["request_not_found_count"], 2)
+        self.assertEqual(row["breaker_tripped"], False)
+        self.assertEqual(row["duration_seconds"], 6961.5)
+
+    def test_record_unfindable_run_metrics_defaults_outcome_counts_to_zero(
+        self,
+    ) -> None:
+        """A breaker-tripped run before any outcome is recorded still
+        writes a valid row -- the six outcome counts default to 0."""
+        db = make_db()
+
+        db.record_unfindable_run_metrics(
+            cohort_total=50,
+            due_backlog_at_start=50,
+            batch_limit=240,
+            probes_attempted=0,
+            breaker_tripped=True,
+            duration_seconds=3.2,
+        )
+
+        row = db.get_unfindable_run_metrics(limit=1)[0]
+        self.assertEqual(row["probes_attempted"], 0)
+        self.assertTrue(row["breaker_tripped"])
+        for key in (
+            "categorised_count", "downgraded_count", "no_change_count",
+            "probe_failed_count", "not_due_count",
+            "request_not_found_count",
+        ):
+            self.assertEqual(row[key], 0, key)
+
+    def test_get_unfindable_run_metrics_orders_newest_first(self) -> None:
+        db = make_db()
+        for probes in (10, 20, 30):
+            db.record_unfindable_run_metrics(
+                cohort_total=100, due_backlog_at_start=100,
+                batch_limit=240, probes_attempted=probes,
+                breaker_tripped=False, duration_seconds=1.0,
+            )
+
+        rows = db.get_unfindable_run_metrics(limit=10)
+        self.assertEqual([r["probes_attempted"] for r in rows], [30, 20, 10])
 
 
 @requires_postgres

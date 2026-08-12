@@ -21,6 +21,15 @@ sustained run of slskd search-submit failures), the process returns
 distinct from the pre-existing config/schema abort (``EXIT_CONFIG_ABORT``)
 returned before any work runs. See ``_process_batch``.
 
+Run-metrics telemetry (issue #1112): every batch pass that actually
+starts -- a fully classified run AND a breaker-tripped one -- writes one
+``unfindable_run_metrics`` row via ``PipelineDB.record_unfindable_run_metrics``
+so the web dashboard can show run health without scraping journal logs.
+A run that aborts before any probe (``EXIT_CONFIG_ABORT`` -- missing
+slskd config or a behind/missing schema) writes NOTHING: there is no
+cohort/backlog reading to report, and a behind schema may not even have
+the table yet.
+
 The script is intentionally narrow: it does not import any
 cursor-mutating PipelineDB methods, plan-service module, or
 search-execution module. The R20 AST guard test enforces that on
@@ -33,6 +42,8 @@ import argparse
 import logging
 import os
 import sys
+import time
+from typing import Protocol
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
@@ -72,6 +83,32 @@ EXIT_CONFIG_ABORT = 2
 # 11) -- untouched candidates simply roll forward via the normal
 # oldest-probe-first ordering.
 EXIT_INCOMPLETE_RUN = 3
+
+
+class _MetricsDBProto(Protocol):
+    """Narrow DB surface ``_process_batch`` needs for run telemetry --
+    keeps it FakePipelineDB-friendly (same Protocol pattern as
+    ``lib.plex_pin_service._PinDBProto``). Deliberately separate from
+    ``lib.unfindable_detection_service._PipelineDBProto``: run-level
+    telemetry is this script's concern, not the per-request
+    categorisation service's."""
+
+    def record_unfindable_run_metrics(
+        self,
+        *,
+        cohort_total: int,
+        due_backlog_at_start: int,
+        batch_limit: int,
+        probes_attempted: int,
+        breaker_tripped: bool,
+        duration_seconds: float,
+        categorised_count: int = 0,
+        downgraded_count: int = 0,
+        no_change_count: int = 0,
+        probe_failed_count: int = 0,
+        not_due_count: int = 0,
+        request_not_found_count: int = 0,
+    ) -> int: ...
 
 
 def _build_slskd_client(cfg: CratediggerConfig) -> SlskdClient:
@@ -135,9 +172,16 @@ def _log_row_outcome(r: UnfindableServiceResult) -> None:
         )
 
 
-def _process_batch(service: UnfindableDetectionService, *, limit: int) -> int:
-    """Run one due-batch pass, log per-row + summary, return the process
-    exit code (issue #1090).
+def _process_batch(
+    service: UnfindableDetectionService,
+    db: PipelineDB | _MetricsDBProto,
+    *,
+    limit: int,
+    cohort_total: int,
+    due_backlog_at_start: int,
+) -> int:
+    """Run one due-batch pass, log per-row + summary, record run
+    telemetry, return the process exit code (issues #1090, #1112).
 
     Returns 0 for a fully classified run. Returns ``EXIT_INCOMPLETE_RUN``
     when ``UnfindableBatchResult.breaker_tripped`` is True — the circuit
@@ -146,11 +190,32 @@ def _process_batch(service: UnfindableDetectionService, *, limit: int) -> int:
     followed the conservative write rule (a probe-failed outcome writes
     nothing); this function only decides the process exit code, it never
     marks or parks any request.
+
+    Writes exactly one ``unfindable_run_metrics`` row per call —
+    including a breaker-tripped call — via
+    ``db.record_unfindable_run_metrics``. A failed/partial run is
+    exactly the signal an operator needs to see on the dashboard.
     """
+    started = time.monotonic()
     batch: UnfindableBatchResult = service.categorise_due_batch(limit=int(limit))
+    duration_s = time.monotonic() - started
     counts = _summarise(batch.results)
     for r in batch.results:
         _log_row_outcome(r)
+    db.record_unfindable_run_metrics(
+        cohort_total=int(cohort_total),
+        due_backlog_at_start=int(due_backlog_at_start),
+        batch_limit=int(limit),
+        probes_attempted=len(batch.results),
+        breaker_tripped=batch.breaker_tripped,
+        duration_seconds=duration_s,
+        categorised_count=counts.get(RESULT_CATEGORISED, 0),
+        downgraded_count=counts.get(RESULT_DOWNGRADED, 0),
+        no_change_count=counts.get(RESULT_NO_CHANGE, 0),
+        probe_failed_count=counts.get(RESULT_PROBE_FAILED, 0),
+        not_due_count=counts.get(RESULT_NOT_DUE, 0),
+        request_not_found_count=counts.get(RESULT_REQUEST_NOT_FOUND, 0),
+    )
     if batch.breaker_tripped:
         untouched = batch.candidates_considered - len(batch.results)
         logger.error(
@@ -238,11 +303,23 @@ def main() -> int:
         backlog = db.list_unfindable_probe_candidates(
             limit=10_000, probe_interval_days=PROBE_INTERVAL_DAYS,
         )
+        # Full cohort size (status='wanted', regardless of probe-due
+        # status) -- distinct from ``backlog`` above (due-now only).
+        # Reuses the existing ``count_by_status`` aggregate rather than
+        # a bespoke COUNT query (.claude/rules/code-quality.md § "No
+        # Parallel Code Paths").
+        cohort_total = int(db.count_by_status().get("wanted", 0))
         logger.info(
-            "unfindable_detection: backlog due_count=%d batch_limit=%d",
-            len(backlog), int(args.limit),
+            "unfindable_detection: cohort_total=%d backlog due_count=%d "
+            "batch_limit=%d",
+            cohort_total, len(backlog), int(args.limit),
         )
-        return _process_batch(service, limit=int(args.limit))
+        return _process_batch(
+            service, db,
+            limit=int(args.limit),
+            cohort_total=cohort_total,
+            due_backlog_at_start=len(backlog),
+        )
     finally:
         db.close()
 

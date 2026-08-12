@@ -215,5 +215,76 @@ console.log('renderPeersCard() with no observations renders the empty row');
   assertContains(html, 'No peer observations yet', 'empty state rendered');
 }
 
+console.log('renderUnfindableCard() with no runs yet renders the honest empty state (#1112)');
+{
+  const html = __test__.renderUnfindableCard({ recent_runs: [], backlog_trend: {} });
+  assertContains(html, 'Unfindable Detection', 'card title rendered');
+  assertContains(html, 'No unfindable-detection runs yet', 'empty table row rendered');
+  assertContains(html, '>never</strong>', 'last-run falls back to never');
+  assertContains(html, 'Collecting run history', 'chart empty state rendered');
+  assertExcludes(html, '<polyline', 'no chart line drawn with < 2 samples');
+}
+console.log('renderUnfindableCard() shows latest-run facts, outcome breakdown, and breaker state');
+{
+  const html = __test__.renderUnfindableCard({
+    recent_runs: [
+      {
+        created_at: '2026-08-12T00:10:00+00:00',
+        cohort_total: 1301,
+        due_backlog_at_start: 686,
+        batch_limit: 240,
+        probes_attempted: 90,
+        categorised_count: 3,
+        downgraded_count: 1,
+        no_change_count: 0,
+        probe_failed_count: 77,
+        breaker_tripped: true,
+      },
+      {
+        created_at: '2026-08-11T00:10:00+00:00',
+        cohort_total: 1301,
+        due_backlog_at_start: 900,
+        batch_limit: 240,
+        probes_attempted: 240,
+        categorised_count: 5,
+        downgraded_count: 1,
+        no_change_count: 210,
+        probe_failed_count: 24,
+        breaker_tripped: false,
+      },
+    ],
+    backlog_trend: {
+      current_backlog: 686,
+      series: [
+        {sampled_at: '2026-08-11T00:10:00+00:00', due_backlog_at_start: 900, probes_attempted: 240},
+        {sampled_at: '2026-08-12T00:10:00+00:00', due_backlog_at_start: 686, probes_attempted: 90},
+      ],
+    },
+  });
+  assertContains(html, '1,301', 'cohort total rendered');
+  assertContains(html, '686', 'due backlog rendered');
+  assertContains(html, '240 / 90', 'batch limit / attempted rendered for the latest run');
+  assertContains(html, 'metric-bad">yes', 'breaker-tripped latest run flagged bad');
+  assertContains(html, '<polyline', 'backlog trend line rendered with >= 2 samples');
+  assertContains(html, 'Due backlog per run', 'chart head label rendered');
+  assertContains(html, '77', 'probe-failed count for the tripped run rendered');
+}
+console.log('normalizeUnfindableBacklogSeries() maps due_backlog_at_start to a plottable series');
+{
+  const series = __test__.normalizeUnfindableBacklogSeries([
+    {sampled_at: '2026-08-11T00:00:00+00:00', due_backlog_at_start: 900},
+    {sampled_at: '2026-08-12T00:00:00+00:00', due_backlog_at_start: 686},
+  ]);
+  if (series.length === 2
+      && series[0].time === '2026-08-11T00:00:00+00:00'
+      && series[0].backlog === 900
+      && series[1].backlog === 686) {
+    passed++;
+  } else {
+    failed++;
+    console.error('  FAIL: normalizeUnfindableBacklogSeries did not derive expected points', series);
+  }
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

@@ -115,7 +115,19 @@ SEARCH_LOG_WINDOW_DAYS: int = 30
 # Default cohort batch size. The detection job processes the K oldest
 # probe candidates per run; cohort members not picked up this run roll
 # over to the next daily run.
-DEFAULT_BATCH_SIZE: int = 100
+#
+# Raised 100 -> 240 (issue #1112 item 1, 2026-08-12): the wanted cohort
+# measured 1,301 rows against the 7-day PROBE_INTERVAL_DAYS cadence
+# target, needing ~186 probes/day just to keep the backlog flat --
+# K=100 could never clear it (observed due-backlog 624 -> 639 -> 685
+# across three consecutive days) and by the time this was measured the
+# backlog had grown to 686 with the oldest probe 15 days stale. K=240
+# clears ~1,301 rows within PROBE_INTERVAL_DAYS itself (ceil(1301/240)
+# = 6 days <= 7) with headroom for cohort growth. PROBE_INTERVAL_DAYS
+# is deliberately untouched -- this is a capacity fix, not a cadence
+# change. See nix/module.nix's cratedigger-unfindable.service
+# TimeoutStartSec for the matching timeout recompute.
+DEFAULT_BATCH_SIZE: int = 240
 
 # Bounded submit-retry for the probe's slskd search (issue #1090). A
 # 2026-08-12 run lost 50/100 probes to a ~3s burst of 409 Conflict from
