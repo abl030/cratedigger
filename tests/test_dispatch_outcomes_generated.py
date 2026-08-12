@@ -1837,11 +1837,14 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         assert parked is not None
         self.assertEqual(parked.status, "recovery_required")
         self.assertEqual(db.request(42)["status"], "processing")
-        with self.assertRaisesRegex(AssertionError, "non-terminal status"):
+        parked_clause = (
+            r"^automation_import job 1 rested in non-terminal status "
+            r"'recovery_required';")
+        with self.assertRaisesRegex(AssertionError, parked_clause):
             assert_request_never_parked(db)
-        with self.assertRaisesRegex(AssertionError, "non-terminal status"):
+        with self.assertRaisesRegex(AssertionError, parked_clause):
             assert_world_failure_self_heals(db, outcome["result"])
-        with self.assertRaisesRegex(AssertionError, "non-terminal status"):
+        with self.assertRaisesRegex(AssertionError, parked_clause):
             assert_dispatch_outcome_matches_routing(
                 self._ambiguous_world(), db, outcome["result"])
 
@@ -2031,9 +2034,13 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
 
         with self.subTest(plant="no audit row at all"):
             db.download_logs.clear()
-            with self.assertRaisesRegex(AssertionError, "download_log row"):
+            with self.assertRaisesRegex(
+                AssertionError, r"^expected >= 1 download_log row\(s\), got 0$",
+            ):
                 assert_outcome_is_operator_visible(db, result)
-            with self.assertRaisesRegex(AssertionError, "download_log row"):
+            with self.assertRaisesRegex(
+                AssertionError, r"^expected >= 1 download_log row\(s\), got 0$",
+            ):
                 assert_world_failure_self_heals(db, result)
         db.download_logs.append(audit)
 
@@ -2292,7 +2299,10 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         db.log_download(request_id=42, outcome="success")
         world = self._ambiguous_world()
         outcome = DispatchOutcome(success=True, message="")
-        with self.assertRaisesRegex(AssertionError, "reported success=True"):
+        with self.assertRaisesRegex(
+            AssertionError,
+            r"^ambiguous acknowledgement reported success=True$",
+        ):
             assert_dispatch_outcome_matches_routing(world, db, outcome)
 
     def test_preimport_caller_flag_checker_trips_when_flag_ignored(self):

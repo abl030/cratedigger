@@ -2326,6 +2326,19 @@ class TestGeneratedSimulatorInvariants(unittest.TestCase):
         candidate_spectral=192, existing_spectral=192,
         grade="likely_transcode", existing_grade="likely_transcode",
     )
+    # The Deerhunter pin moves the DECISION, so it proves the first clause and
+    # short-circuits before the second. This world moves only the VERDICT
+    # ('equivalent' with the override, 'worse' without) — both map to
+    # ``downgrade``, so ``stage2_import`` holds and the verdict clause is the
+    # only one that can fire. 356 such worlds exist in this strategy's domain
+    # but the derandomized budget draws the bucket twice, and any edit to this
+    # property body reshuffles the sequence, so it is pinned rather than left
+    # to the draw (#1094 round-2 review).
+    @example(
+        candidate_container=64, existing_container=128,
+        candidate_spectral=96, existing_spectral=96,
+        grade="suspect", existing_grade="suspect",
+    )
     def test_existing_spectral_override_is_noop_when_candidate_has_spectral(
         self, candidate_container, existing_container,
         candidate_spectral, existing_spectral, grade, existing_grade,
