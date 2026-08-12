@@ -596,6 +596,51 @@ class TestAcquireAuthoritativeHold(unittest.TestCase):
         self.assertTrue(all(index < gate_hold_index for index in preflight_indices[:2]))
         self.assertGreater(preflight_indices[2], gate_hold_index)
 
+    def test_acquire_catches_main_started_in_the_window_right_after_the_hold(
+        self,
+    ) -> None:
+        """#1078 BLOCKER F3.
+
+        Models an operator manually starting cratedigger.service in the
+        window right after the gate hold is taken -- nothing inhibits that
+        start pre-hold, and the hold itself only stops units that were
+        *already* active at the moment it is taken (this fake's own
+        ``metadata_gate("hold manual")``, mirroring the real gate). Without
+        re-verifying ``SERVICE_UNITS`` (not the narrower
+        ``GATE_STOPPED_UNITS``) after the hold, acquire would reach HELD with
+        main still running, right before the migration this hold gates.
+        """
+        backend = FakeDeployHoldBackend()
+        real_ensure_owned_manual_hold = deploy_hold_module._ensure_owned_manual_hold
+
+        def _ensure_then_start_main(b: FakeDeployHoldBackend) -> None:
+            real_ensure_owned_manual_hold(b)
+            state = b.unit_state(MAIN_SERVICE)
+            b.unit_states[MAIN_SERVICE] = UnitState(
+                load_state=state.load_state,
+                active_state="active",
+                sub_state="running",
+            )
+
+        with mock.patch.object(
+            deploy_hold_module,
+            "_ensure_owned_manual_hold",
+            side_effect=_ensure_then_start_main,
+        ), self.assertRaisesRegex(
+            DeployHoldError,
+            "timed out waiting for exact services to become stably inactive",
+        ):
+            acquire_hold(backend)
+
+        # The gate hold WAS taken (maximally quiesced) -- what's missing is
+        # re-proof, not the hold itself.
+        self.assertTrue(backend.manual_hold)
+        self.assertEqual(
+            (backend.unit_state(MAIN_SERVICE).active_state, backend.unit_state(MAIN_SERVICE).sub_state),
+            ("active", "running"),
+        )
+        self.assertEqual(backend.phase, "acquiring")
+
 
 class TestKnownBadPre1078AcquireOrder(unittest.TestCase):
     """#1078: the reorder is load-bearing, not cosmetic."""

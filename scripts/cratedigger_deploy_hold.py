@@ -1362,25 +1362,37 @@ def _drain_producers_then_hold(backend: DeployHoldBackend) -> None:
     when this function returns successfully, never partially).
 
     Only ``TIMER_DRIVEN_PRODUCER_UNITS`` (main, unfindable, watchdog) drain
-    here -- each stops itself once its timer is masked. YouTube ingest is
-    deliberately NOT drained in this pre-hold phase: it is an always-on
-    ``Type=simple`` daemon with no timer, so nothing before the gate hold
-    ever asks it to stop, and waiting for it here would wait the full
-    service-drain timeout for nothing (#1078 MUST FIX 1). It is drained
-    afterward, in ``GATE_STOPPED_UNITS``, once the gate hold has actually
-    stopped it -- the same mechanism that stops the three controlled
-    workers. No temporary start inhibitor is needed for this pre-hold
-    window either: masking already blocks a new main-cycle trigger, YouTube
-    is not being waited on here at all, and creating one would be a
-    persistent ``/var/lib`` artifact that does not survive a host reboot
-    alongside the ephemeral ``/run`` receipt that would own it (#1078 MUST
-    FIX 5) -- see ``abort_hold``'s docstring for the reboot boundary this
-    module actually has.
+    here, pre-hold -- each stops itself once its timer is masked. YouTube
+    ingest is deliberately NOT drained in this pre-hold phase: it is an
+    always-on ``Type=simple`` daemon with no timer, so nothing before the
+    gate hold ever asks it to stop, and waiting for it here would wait the
+    full service-drain timeout for nothing (#1078 MUST FIX 1). No temporary
+    start inhibitor is needed for this pre-hold window either: masking
+    already blocks the timer trigger, and creating one would be a persistent
+    ``/var/lib`` artifact that does not survive a host reboot alongside the
+    ephemeral ``/run`` receipt that would own it (#1078 MUST FIX 5) -- see
+    ``abort_hold``'s docstring for the reboot boundary this module actually
+    has. It does not block an operator manually starting ``cratedigger.service``
+    during this window, though; the drain below is what catches that.
+
+    The drain *after* the hold is ``SERVICE_UNITS`` -- every unit this
+    module knows about, not just ``GATE_STOPPED_UNITS`` (the ones abort
+    explicitly restarts). ``cratedigger.service`` is itself gate-guarded, so
+    the hold should already have stopped it if it was running -- exactly as
+    it stops web/preview/importer/YouTube -- but nothing before this
+    verified that for main specifically, the one unit this module does not
+    protect with a start inhibitor at any point. Without re-checking it
+    here, acquire could reach HELD with a main cycle still active if it was
+    started (by hand, or any other trigger) during the queue-drain wait
+    above -- and the migration runs between ``acquire`` and ``verify-held``
+    (#1078 BLOCKER F3). Re-verifying the three timer-driven producers here
+    too is redundant in the ordinary case (the first drain already proved
+    them inactive) but free: nothing between the two drains restarts them.
     """
     _drain_services(backend, TIMER_DRIVEN_PRODUCER_UNITS)
     _wait_automation_queue_drained(backend)
     _ensure_owned_manual_hold(backend)
-    _drain_services(backend, GATE_STOPPED_UNITS)
+    _drain_services(backend, SERVICE_UNITS)
 
 
 def acquire_hold(backend: DeployHoldBackend) -> None:
