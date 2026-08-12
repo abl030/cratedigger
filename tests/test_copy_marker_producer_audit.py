@@ -1,17 +1,39 @@
 """Producer audit for copy-PIN marker constants (issue #1111, item 2).
 
-``tests/test_protected_path_truth_generated.py`` polices the Wrong Matches
-explorer's operator copy with module-level constants like
-``_REFUSAL_COPY = "could not be read"``, checked with ``marker in html``
-against real production-rendered text. Issue #1086's review found that one
-of the two paragraphs ``_REFUSAL_COPY`` was written to police read *"The
-server could not read this folder's contents"* — no "be" — so the marker
-had never matched that paragraph. The checker was silently inert for it,
-before AND after the fix it was meant to enforce, because the SAME html
-blob also carried a different, already-correct sentence (the per-entry lead
-notice) that satisfied the aggregate ``marker in html`` check on its own.
-Found only because an implementer noticed a fix pass a checker that could
-not have been exercising it.
+**What this guard catches, stated plainly:** a copy-pin marker constant
+(``_REFUSAL_COPY = "could not be read"`` and its siblings in
+``tests/test_protected_path_truth_generated.py``, checked with ``marker in
+html`` against real production-rendered text) that NO registered production
+file spells ANYWHERE — a fully-inert marker, a producer whose text was
+deleted or reworded without updating the marker, a producer file renamed
+without updating the registry, or the marker's sole spelling drifting away
+character-for-character. Evidence is FILE-level: a marker resolves the
+moment *any* string literal in *any* of its registered producer files
+contains it as a substring, not the specific sentence a docstring says it
+was written to police.
+
+**What this guard does NOT catch — stated equally plainly, because a
+reviewer proved it empirically (running the checker against the real
+pre-fix tree at commit ``dc0b7c2f^`` and getting a clean pass):** the
+issue #1086 SAME-FILE variant. ``_REFUSAL_COPY`` polices two DIFFERENT
+sentences in ``web/js/wrong-matches.js`` — the per-entry lead notice and
+the empty-state paragraph. Pre-fix, the empty-state paragraph read *"The
+server could not read this folder's contents"* — no "be" — while the
+lead notice, a few lines away in the SAME file, already correctly said
+"could not be read". File-level evidence resolves the marker through the
+CORRECT sentence regardless of what the WRONG sentence said, so this guard
+would not have caught issue #1086's specific defect on its own; it was
+found by an implementer noticing a fix pass a checker that could not have
+been exercising it. Tightening to site/sentence-level attribution would
+mean inferring WHICH statement a marker is "supposed" to police from
+control flow — the prohibited semantic-scanner shape
+(``.claude/rules/code-quality.md`` § "Semantic source scanners are
+prohibited") — so this audit deliberately keeps file-level granularity and
+names the limit instead of pretending to close it.
+``TestTheAuditIsFailClosed.test_the_1086_full_file_evidence_resolves_green_a_known_limit``
+proves the limit with the real historical text; the paired
+``test_a_marker_absent_from_every_registered_file_is_red`` proves the
+class this guard DOES catch — a marker with no producer at all.
 
 ``.claude/rules/test-fidelity.md`` Rule C already requires a copy pin's
 *trigger* (the input fed INTO a producer) to come from the producer. This
@@ -25,10 +47,10 @@ Shape, modelled on ``tests/test_wrong_match_scenario_producer_audit.py``
 and ``tests/test_classify_producer_audit.py``:
 
 * **The marker set is DERIVED, not hand-listed.** ``every_discovered_
-  marker`` walks the MODULE-LEVEL statements of each file in
-  ``_PARTICIPATING_TEST_MODULES`` (an explicit, small, reviewable list —
-  same bound as those two modules' own producer-file lists) via AST, and
-  collects every bare string constant whose name ends in one of
+  marker`` walks the MODULE-LEVEL ``Assign``/``AnnAssign`` statements of
+  each file in ``_PARTICIPATING_TEST_MODULES`` (an explicit, small,
+  reviewable list — same bound as those two modules' own producer-file
+  lists) via AST, and collects every constant whose name ends in one of
   ``_MARKER_NAME_SUFFIXES`` — the two suffixes actually in use today
   (``_COPY``, ``_QUALIFIER``; surveyed by grepping the whole ``tests/``
   tree for ``_COPY``/``_QUALIFIER``-suffixed constants matched via
@@ -38,9 +60,21 @@ and ``tests/test_classify_producer_audit.py``:
   FIXTURE PATH fed as an INPUT, never matched against rendered output, so
   it is correctly excluded by not being in ``_PARTICIPATING_TEST_MODULES``
   rather than by a name-based carve-out). A marker suffix outside that
-  bounded set is invisible to this audit, the same trade-off
+  bounded set, OR a participating file this audit does not register, is
+  invisible to it — the same trade-off
   ``test_wrong_match_scenario_producer_audit.py``'s docstring names for
   its own ``scenario=``/``.scenario =`` grammar.
+* **A matched name whose value the audit cannot read FAILS CLOSED.** A
+  plain string (or bytes, decoded) ``ast.Constant`` resolves normally,
+  including the ``str``-annotated ``AnnAssign`` idiom
+  (``_FUTURE_COPY: str = "..."``, this module's own house style). Anything
+  else with a matching name — a binary-op concatenation
+  (``_SPLIT_COPY = "a" + "b"``), an f-call, a bare annotation with no
+  value — is DISCOVERED (the name matched the grammar) but its value comes
+  back ``None``: ``check_marker_value_is_resolvable`` fails closed on it
+  rather than silently dropping it from the population, which is exactly
+  the "checker was silently inert" failure mode this audit exists to
+  prevent, reintroduced inside its own discovery step.
 * **A discovered marker with no classification FAILS CLOSED.** Every
   marker found by that scan must be registered in exactly one of
   ``_MARKER_PRODUCERS`` (a copy-pin marker, with the production files that
@@ -48,10 +82,9 @@ and ``tests/test_classify_producer_audit.py``:
   not itself matched against rendered copy, with the reason) —
   ``check_marker_is_classified`` fails on anything in neither.
   ``_EXEMPT_MARKERS`` is currently empty: every ``_COPY``/``_QUALIFIER``
-  constant the one participating module declares today IS real matched
-  copy (the file's two ``_WORKER``-suffixed constants, JS harness source
-  for the Node worker, don't even reach discovery — their names fail the
-  suffix grammar, proven by
+  constant the participating modules declare today IS real matched copy
+  (the JS-harness ``_WORKER``-suffixed constants don't even reach
+  discovery — their names fail the suffix grammar, proven by
   ``TestTheAuditIsFailClosed.test_worker_source_constants_are_not_discovered``).
   The bucket stays wired and self-tested (with an injected fabricated
   entry) for the day a real one is needed, the same escape hatch
@@ -76,10 +109,12 @@ and ``tests/test_classify_producer_audit.py``:
   JSDoc's `/** */`, skipped only outside any string/template state so a
   literal `//` inside a string is never misread as a comment), and JS's
   regex-vs-division ambiguity via the standard "does the previous
-  significant token allow a regex here" heuristic — required, not
-  decorative, because every registered JS producer file below uses
-  `.replace(/"/g, ...)`-shaped regex literals whose PATTERN contains a
-  literal quote character.
+  significant token allow a regex here" heuristic — required for
+  ``web/js/util.js`` and ``web/js/replace_picker.js``, both of which spell
+  ``.replace(/"/g, ...)``-shaped regex literals whose PATTERN contains a
+  literal quote character (``web/js/wrong-matches.js``'s own regex
+  literals never contain a quote, so the heuristic is inert-but-harmless
+  for that particular file — it is still exercised by the other two).
 * **F-strings and template literals decompose into fragments, the same
   way.** Python's own AST already splits an f-string into one
   ``ast.Constant`` per literal segment between ``{...}`` placeholders —
@@ -98,9 +133,9 @@ and ``tests/test_classify_producer_audit.py``:
 
 Found on the first run: nothing currently inert — every discovered marker
 already resolves against its registered producer(s) (verified below,
-``TestEveryMarkerHasAProducer``). The class guard exists so the NEXT typo
-in this family fails a test instead of shipping fluent and wrong for a
-second time.
+``TestEveryMarkerHasAProducer``), modulo the FILE-level bound named above.
+The class guard exists so the NEXT fully-inert marker fails a test instead
+of shipping fluent and wrong for a second time.
 """
 
 from __future__ import annotations
@@ -124,9 +159,17 @@ _MARKER_NAME_SUFFIXES: tuple[str, ...] = ("_COPY", "_QUALIFIER")
 #: this list widens which files' module-level constants are scanned at
 #: all — the same bound ``test_wrong_match_scenario_producer_audit.py``'s
 #: ``_PRODUCER_FILES`` and ``test_classify_producer_audit.py``'s producer
-#: registries both use, for the same reason: not repo-wide discovery.
+#: registries both use, for the same reason: not repo-wide discovery. This
+#: is the SECOND bound alongside ``_MARKER_NAME_SUFFIXES``: a marker must
+#: both live in a registered file AND match the name grammar to be seen at
+#: all — issue #1111 review found ``INSECURE_AUTH_WARNING`` (renamed here
+#: to ``INSECURE_AUTH_WARNING_COPY`` to fit the grammar) sitting outside
+#: both bounds, matched via ``assertNotIn``/``.count()`` against real
+#: server responses in two test modules that were not registered.
 _PARTICIPATING_TEST_MODULES: tuple[str, ...] = (
     "tests/test_protected_path_truth_generated.py",
+    "tests/test_web_dev_server.py",
+    "tests/web/test_server_endpoints.py",
 )
 
 
@@ -194,6 +237,23 @@ _MARKER_PRODUCERS: dict[str, _Producers] = {
             "unreadable_reason_text's own suffix wording"
         ),
     ),
+    "INSECURE_AUTH_WARNING_COPY": _Producers(
+        files=("web/server.py",),
+        why=(
+            "web/server.py:54's own INSECURE_AUTH_WARNING module "
+            "constant, logged via log.critical(...) at startup. The "
+            "identical sentence is ALSO duplicated (not derived from "
+            "this constant) as static text in web/index.html's insecure- "
+            "footer block, which is what the test bodies' assertNotIn/"
+            ".count() checks actually render — issue #1111 review "
+            "deliberately registers only the server.py copy rather than "
+            "adding an .html literal extractor, accepting that the two "
+            "copies could in principle drift apart independently. A live "
+            "instance of the inert-marker class the review found sitting "
+            "outside both of this audit's bounds (unregistered "
+            "participating modules, no _COPY suffix)"
+        ),
+    ),
 }
 
 #: Would hold any marker discovered by the same name grammar
@@ -215,37 +275,72 @@ def _read_source(relpath: str) -> str:
         return handle.read()
 
 
-def discovered_markers(relpath: str) -> dict[str, str]:
-    """Module-level ``*_COPY``/``*_QUALIFIER`` string constants in one file.
+def _constant_marker_value(node: ast.expr | None) -> str | None:
+    """A discovered marker's value, or ``None`` when it cannot be read.
+
+    Only a plain ``ast.Constant`` resolves: a ``str`` value is used as-is;
+    a ``bytes`` value is UTF-8-decoded (issue #1111 review MAJOR-4 —
+    ``tests/web/test_server_endpoints.py``'s copy of the same marker is a
+    ``bytes`` literal, matched against an HTTP response body). Anything
+    else — a binary-op concatenation (``"a" + "b"``), a call, an f-string,
+    a bare annotation with no value at all (``node is None``) — is NOT
+    resolved. The caller still records the NAME as discovered; only the
+    value comes back ``None``, so a matching name can never silently
+    vanish from the population the way a value-blind filter would.
+    """
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, str):
+            return node.value
+        if isinstance(node.value, bytes):
+            try:
+                return node.value.decode("utf-8")
+            except UnicodeDecodeError:
+                return None
+    return None
+
+
+def discovered_markers_in_source(source: str) -> dict[str, str | None]:
+    """Module-level ``*_COPY``/``*_QUALIFIER`` constants in one source.
 
     Restricted to ``tree.body`` (direct children of the module) rather
     than a full ``ast.walk`` — "module-level" means exactly that, and it
     keeps a function-local variable that happens to share the suffix (none
-    exist today) from being mistaken for a copy-pin marker.
+    exist today) from being mistaken for a copy-pin marker. Matches BOTH
+    ``ast.Assign`` (``_FOO_COPY = "..."``) and ``ast.AnnAssign``
+    (``_FOO_COPY: str = "..."``, the house-style typed-constant idiom used
+    elsewhere in this very module) — issue #1111 review MAJOR-2: the
+    Assign-only scan silently could not discover its own idiom.
     """
-    tree = ast.parse(_read_source(relpath))
-    found: dict[str, str] = {}
+    tree = ast.parse(source)
+    found: dict[str, str | None] = {}
     for node in tree.body:
-        if not isinstance(node, ast.Assign):
+        if isinstance(node, ast.Assign):
+            targets: list[ast.expr] = list(node.targets)
+            value_node: ast.expr | None = node.value
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+            value_node = node.value
+        else:
             continue
-        if not (
-            isinstance(node.value, ast.Constant)
-            and isinstance(node.value.value, str)
-        ):
-            continue
-        for target in node.targets:
-            if (
+        for target in targets:
+            if not (
                 isinstance(target, ast.Name)
                 and target.id.endswith(_MARKER_NAME_SUFFIXES)
             ):
-                found[target.id] = node.value.value
+                continue
+            found[target.id] = _constant_marker_value(value_node)
     return found
+
+
+def discovered_markers(relpath: str) -> dict[str, str | None]:
+    """``discovered_markers_in_source`` against one registered file's text."""
+    return discovered_markers_in_source(_read_source(relpath))
 
 
 def every_discovered_marker(
     relpaths: Sequence[str] = _PARTICIPATING_TEST_MODULES,
-) -> dict[str, str]:
-    found: dict[str, str] = {}
+) -> dict[str, str | None]:
+    found: dict[str, str | None] = {}
     for relpath in relpaths:
         found.update(discovered_markers(relpath))
     return found
@@ -291,8 +386,14 @@ def _python_literal_fragments(source: str) -> list[str]:
 
 #: Characters after which a bare ``/`` is JS regex-literal syntax rather
 #: than division — the standard lexer heuristic: an operator, an opening
-#: bracket, a comma, or (via ``None``) the start of the source.
-_JS_REGEX_MAY_FOLLOW: frozenset[str] = frozenset("([{,;:!&|=?+-*%^~<>\n")
+#: bracket, a comma, or (via ``None``) the start of the source. Whitespace,
+#: including a newline, is NEVER recorded into ``prev_significant`` (see
+#: the main loop's ``if not ch.isspace(): prev_significant = ch``), so a
+#: whitespace character has no membership test here at all — issue #1111
+#: review MINOR-8: an earlier version of this set also listed ``"\n"``,
+#: which ``prev_significant`` can never actually hold, dead by
+#: construction.
+_JS_REGEX_MAY_FOLLOW: frozenset[str] = frozenset("([{,;:!&|=?+-*%^~<>")
 
 
 def _js_literal_fragments(source: str) -> list[str]:
@@ -313,27 +414,48 @@ def _js_literal_fragments(source: str) -> list[str]:
     * ``//`` line comments and ``/* ... */`` block comments (including
       JSDoc's ``/** */``, which starts with ``/*``) — recognised only
       OUTSIDE any string/template state, so a literal ``//`` or ``/*``
-      inside a string is never mistaken for a comment start;
+      inside a string is never mistaken for a comment start
+      (``TestTheAuditIsFailClosed.test_a_literal_double_slash_inside_a_
+      string_is_not_a_comment`` proves it), and a character-class member
+      inside a regex literal (``/[//]/``, ``/[/*]/``, ``/[*/]/``,
+      ``/["']/``) is never mistaken for a comment OR a string start
+      either, because ``skip_regex`` below tracks whether it is currently
+      inside a ``[...]`` class before deciding what any of those
+      characters mean
+      (``TestTheAuditIsFailClosed.test_regex_character_classes_are_
+      lexed_correctly`` proves all four probe shapes);
     * JS's regex-vs-division ambiguity, via the same heuristic real JS
       lexers use: a bare ``/`` starts a regex literal only when the
       previous significant character cannot end an expression (see
       ``_JS_REGEX_MAY_FOLLOW``) or nothing has been seen yet — otherwise
-      it is division and left untouched. This is required, not
-      decorative: every registered JS producer file below spells
-      ``.replace(/"/g, ...)``-shaped regex literals whose PATTERN
-      contains a literal quote character, which a naive "any quote
-      starts a string" scan misreads as an unterminated string
+      it is division and left untouched. This is required for, not
+      decorative to, ``web/js/util.js`` and ``web/js/replace_picker.js``
+      — both spell ``.replace(/"/g, ...)``-shaped regex literals whose
+      PATTERN contains a literal quote character, which a naive "any
+      quote starts a string" scan misreads as an unterminated string
       consuming the rest of the file
       (``TestTheAuditIsFailClosed.test_js_regex_literal_does_not_
       swallow_the_rest_of_the_file`` below proves the fix; run it
       against a reverted lexer to see the failure it guards).
+      ``web/js/wrong-matches.js``'s own regex literals never contain a
+      quote in their pattern, so the heuristic is inert-but-harmless for
+      that particular file — issue #1111 review MAJOR-3 caught an
+      earlier version of this docstring overclaiming "every registered
+      JS producer file" here.
 
-    Not handled, because neither shape occurs in any registered producer
-    file (and both would need real JS parsing, not a bounded lexer): a
+    Not handled, because it does not occur in any registered producer
+    file (and would need real JS parsing, not a bounded lexer): a
     template literal nested inside another template literal's
     ``${...}`` interpolation whose OWN literal text contains an
-    unbalanced ``{``/``}``, and a comment token appearing inside a
-    regex-literal character class.
+    unbalanced ``{``/``}``. Unlike the fail-closed classification checks
+    above, a mis-lex here (or any lexer bug) FAILS OPEN, not closed: a
+    comment or string boundary the lexer gets wrong degrades to
+    substring-matching over MIS-LEXED fragments, which could PROMOTE
+    stray text into a false "spelled" fragment (satisfying a marker that
+    is not really produced) rather than merely dropping a real one — the
+    opposite direction from this audit's own headline fail-closed
+    contract, and worth naming as a residual, honestly asymmetric risk
+    (issue #1111 review MINOR-6).
     """
     fragments: list[str] = []
     i = 0
@@ -449,6 +571,29 @@ def production_literal_fragments(relpath: str) -> tuple[str, ...]:
 # Classification checks
 # ---------------------------------------------------------------------------
 
+def check_marker_value_is_resolvable(name: str, value: str | None) -> str | None:
+    """Return why ``name``'s discovered value cannot be checked, or ``None``.
+
+    ``value`` is ``discovered_markers_in_source``'s output for this name —
+    ``None`` means the name matched the ``*_COPY``/``*_QUALIFIER`` grammar
+    but its assigned value was not a plain string/bytes ``ast.Constant``
+    (issue #1111 review MAJOR-2: a binary-op concatenation, a bare
+    annotation with no value, or any other non-constant shape). Module-
+    level so the known-bad self-test can hand it a fabricated
+    ``(name, None)`` pair directly.
+    """
+    if value is not None:
+        return None
+    return (
+        f"{name!r} matches the {_MARKER_NAME_SUFFIXES} naming grammar but "
+        "its value is not a plain string/bytes constant (e.g. a binary-op "
+        "concatenation, or a bare annotation with no value at all) — the "
+        "audit cannot read what it is supposed to match, so it fails "
+        "closed as undiscoverable-but-conventioned rather than silently "
+        "dropping the name from the population"
+    )
+
+
 def check_marker_is_classified(
     name: str,
     *,
@@ -483,7 +628,11 @@ def check_marker_has_a_producer(
 
     Module-level so the known-bad self-tests can hand it a fabricated
     ``fragments_by_file`` exactly the way the discovery-driven checks use
-    the real files.
+    the real files. An unrecognised producer-file extension is caught HERE
+    (issue #1111 review MINOR-7) rather than escaping as a raw
+    ``ValueError`` from ``production_literal_fragments`` — the whole point
+    of this function is to be the one place a bad registry entry turns
+    into a named, fail-closed violation instead of a traceback.
     """
     for relpath in producers.files:
         if fragments_by_file is not None:
@@ -493,6 +642,8 @@ def check_marker_has_a_producer(
                 fragments = production_literal_fragments(relpath)
             except OSError:
                 return f"{relpath} does not exist"
+            except ValueError as exc:
+                return f"{relpath}: {exc}"
         if any(marker_value in fragment for fragment in fragments):
             return None
     return (
@@ -506,6 +657,21 @@ def check_marker_has_a_producer(
 # ---------------------------------------------------------------------------
 
 class TestEveryMarkerHasAProducer(unittest.TestCase):
+    def test_every_discovered_marker_has_a_resolvable_value(self) -> None:
+        """Issue #1111 review MAJOR-2's fail-closed gate, over real files.
+
+        A future ``_FUTURE_COPY = "a" + "b"``-shaped marker in a
+        participating module trips HERE, by name, before anything else in
+        this class even looks at its (unreadable) value.
+        """
+        violations = [
+            violation
+            for name, value in sorted(every_discovered_marker().items())
+            if (violation := check_marker_value_is_resolvable(
+                name, value)) is not None
+        ]
+        self.assertEqual(violations, [])
+
     def test_no_discovered_marker_is_unclassified(self) -> None:
         violations = [
             violation
@@ -525,8 +691,19 @@ class TestEveryMarkerHasAProducer(unittest.TestCase):
                     f"{name!r} is registered but no participating test "
                     "module declares it any more — stale registry entry",
                 )
-                violation = check_marker_has_a_producer(
-                    markers[name], producers)
+                value = markers[name]
+                # Every currently-registered marker resolves to a real
+                # string (proven by test_every_discovered_marker_has_a_
+                # resolvable_value above); narrow for Pyright rather than
+                # widening check_marker_has_a_producer's signature to
+                # accept None, which would let an unresolvable value
+                # silently short-circuit into "no producer found" instead
+                # of the dedicated MAJOR-2 violation.
+                assert value is not None, (
+                    f"{name!r} is registered as a copy-pin marker but its "
+                    "discovered value is unresolvable"
+                )
+                violation = check_marker_has_a_producer(value, producers)
                 self.assertIsNone(violation, violation)
 
     def test_every_exempt_marker_still_exists_and_carries_a_reason(
@@ -578,8 +755,8 @@ class TestTheAuditIsFailClosed(unittest.TestCase):
         """Proves the (currently-empty) exemption bucket's mechanics.
 
         ``_EXEMPT_MARKERS`` has no live members today (every ``_COPY``/
-        ``_QUALIFIER`` constant the one participating module declares IS
-        real matched copy) — the injectable ``exempt=`` override lets this
+        ``_QUALIFIER`` constant the participating modules declare IS real
+        matched copy) — the injectable ``exempt=`` override lets this
         self-test exercise the bucket without needing a live example, the
         same way ``check_marker_has_a_producer``'s ``fragments_by_file``
         override does for producer evidence.
@@ -589,9 +766,70 @@ class TestTheAuditIsFailClosed(unittest.TestCase):
             exempt={"_FIXTURE_PATH_COPY": "an input fixture, not matched copy"},
         ))
 
-    def test_an_unrecognised_extension_has_no_extractor(self) -> None:
-        with self.assertRaises(ValueError):
-            production_literal_fragments("web/index.html")
+    def test_an_unrecognised_extension_is_a_fail_closed_violation(
+        self,
+    ) -> None:
+        """Issue #1111 review MINOR-7.
+
+        A bad registry entry (wrong extension) must surface as THIS
+        audit's own violation message at ``check_marker_has_a_producer``
+        — the boundary a caller is supposed to be able to trust — not an
+        uncaught ``ValueError`` traceback escaping from the extractor
+        helper underneath it.
+        """
+        violation = check_marker_has_a_producer(
+            "anything",
+            _Producers(
+                files=("web/index.html",), why="wrong extension, test only"),
+        )
+        assert violation is not None
+        self.assertRegex(violation, r"no literal extractor registered")
+
+    def test_an_annotated_assignment_marker_is_discovered(self) -> None:
+        """The house ``_FOO_COPY: str = "..."`` idiom must resolve.
+
+        Issue #1111 review MAJOR-2: the ``Assign``-only scan could not
+        discover its own idiom — ``_MARKER_NAME_SUFFIXES`` a few dozen
+        lines up in THIS module is itself an ``AnnAssign`` — the #1086
+        "checker silently inert for the exact shape it was meant to
+        police" failure mode, reintroduced inside its own fix.
+        """
+        source = '_FUTURE_COPY: str = "future copy text"\n'
+        markers = discovered_markers_in_source(source)
+        self.assertEqual(markers, {"_FUTURE_COPY": "future copy text"})
+
+    def test_a_binop_marker_value_is_undiscoverable_and_fails_closed(
+        self,
+    ) -> None:
+        source = '_SPLIT_COPY = "a" + "b"\n'
+        markers = discovered_markers_in_source(source)
+        self.assertIn("_SPLIT_COPY", markers)
+        self.assertIsNone(markers["_SPLIT_COPY"])
+        violation = check_marker_value_is_resolvable(
+            "_SPLIT_COPY", markers["_SPLIT_COPY"])
+        assert violation is not None
+        self.assertIn("_SPLIT_COPY", violation)
+
+    def test_a_bare_annotation_with_no_value_fails_closed(self) -> None:
+        source = "_BARE_COPY: str\n"
+        markers = discovered_markers_in_source(source)
+        self.assertIn("_BARE_COPY", markers)
+        self.assertIsNone(markers["_BARE_COPY"])
+
+    def test_a_bytes_constant_marker_is_decoded_and_discovered(self) -> None:
+        """Issue #1111 review MAJOR-4.
+
+        ``tests/web/test_server_endpoints.py``'s copy of
+        ``INSECURE_AUTH_WARNING_COPY`` is a ``bytes`` literal, matched
+        against an HTTP response body — the audit decodes it rather than
+        treating a non-``str`` ``Constant`` as unresolvable, so the SAME
+        wording registered once under ``_MARKER_PRODUCERS`` covers both
+        the ``str`` and ``bytes`` copies of the marker.
+        """
+        source = 'INSECURE_AUTH_WARNING_COPY = (\n    b"decoded text"\n)\n'
+        markers = discovered_markers_in_source(source)
+        self.assertEqual(
+            markers, {"INSECURE_AUTH_WARNING_COPY": "decoded text"})
 
     def test_worker_source_constants_are_not_discovered(self) -> None:
         """The ``_WORKER`` suffix fails the naming grammar entirely.
@@ -629,9 +867,26 @@ class TestTheAuditIsFailClosed(unittest.TestCase):
         self.assertIn("genuinely different text", fragments)
 
     def test_a_js_comment_mention_is_not_a_spelling(self) -> None:
+        """Issue #1111 review MINOR-5.
+
+        The block comment spans MULTIPLE lines deliberately: a ONE-LINE
+        ``/* ... */`` starting right after a preceding ``//`` line is
+        ALSO swallowed by the regex-literal heuristic (``prev_significant
+        is None`` right there, since nothing but comments preceded it),
+        so a one-line fixture cannot distinguish "block-comment handling
+        works" from "the regex heuristic happened to eat the same span
+        for an unrelated reason" — the exact per-clause Q1 failure the
+        original version of this test had. A newline inside the comment
+        forces ``skip_regex`` to bail (it never matches a regex across a
+        line break), so with a multi-line comment the block-comment
+        branch is the ONLY thing that can still exclude this text —
+        reverting it here reproduces a real leak, proven independently.
+        """
         source = (
             "// the old copy used to say 'could not be read' here\n"
-            "/* still describing 'could not be read' in a block comment */\n"
+            "/* still describing\n"
+            "   'could not be read'\n"
+            "   across several lines of one block comment */\n"
             "const realCopy = 'a totally different sentence';\n"
         )
         fragments = _js_literal_fragments(source)
@@ -642,18 +897,37 @@ class TestTheAuditIsFailClosed(unittest.TestCase):
         )
         self.assertIn("a totally different sentence", fragments)
 
+    def test_a_literal_double_slash_inside_a_string_is_not_a_comment(
+        self,
+    ) -> None:
+        """The docstring's claim, proven: `//` inside a string stays text.
+
+        Issue #1111 review MINOR-5 named this as a missing test — a URL
+        containing `//` is the natural real-world shape.
+        """
+        source = "const url = 'https://example.com/could-not-be-read';\n"
+        fragments = _js_literal_fragments(source)
+        self.assertIn(
+            "https://example.com/could-not-be-read", fragments)
+
     def test_js_regex_literal_does_not_swallow_the_rest_of_the_file(
         self,
     ) -> None:
         """Fail-closed proof for the regex-vs-string ambiguity.
 
-        Every registered JS producer file spells a
-        ``.replace(/"/g, ...)``-shaped regex literal. Without the
-        regex heuristic, the ``"`` inside the pattern starts a bogus
-        string that never finds its closing quote on the same line and
-        swallows everything after it — including the real marker two
-        lines later. Reverting the ``_JS_REGEX_MAY_FOLLOW`` branch
-        reproduces exactly that failure.
+        ``web/js/util.js`` and ``web/js/replace_picker.js`` spell
+        ``.replace(/"/g, ...)``-shaped regex literals (issue #1111
+        review MAJOR-3: ``web/js/wrong-matches.js`` does NOT — its own
+        regex literals never contain a quote in the pattern, so this
+        synthetic minimal source stands in for the two files that
+        genuinely exercise the branch, rather than naming "every
+        registered JS producer file" as an earlier version of this
+        docstring wrongly claimed). Without the regex heuristic, the
+        ``"`` inside the pattern starts a bogus string that never finds
+        its closing quote on the same line and swallows everything
+        after it — including the real marker two lines later. Reverting
+        the ``_JS_REGEX_MAY_FOLLOW`` branch reproduces exactly that
+        failure.
         """
         source = (
             "function esc(s) {\n"
@@ -665,6 +939,47 @@ class TestTheAuditIsFailClosed(unittest.TestCase):
         self.assertIn("&quot;", fragments)
         self.assertIn("could not be read", fragments)
 
+    def test_regex_character_classes_are_lexed_correctly(self) -> None:
+        """Issue #1111 review MINOR-6 — the reviewer's four probe shapes,
+        plus one adversarial case that actually falsifies ``in_class``.
+
+        An earlier version of this module's docstring wrongly listed "a
+        comment token appearing inside a regex character class" as an
+        UNHANDLED shape. ``skip_regex``'s ``in_class`` tracking already
+        handles it, and the first four cases prove the reviewer's exact
+        probes are lexed correctly. But those four alone do NOT falsify a
+        broken ``in_class``: removing it entirely and re-running these
+        four still passes, because none of their classes contains a quote
+        positioned so the (wrongly) premature regex end lands ON a quote
+        character — the lexer "resynchronises" on the real marker string
+        a few characters later regardless. The fifth case,
+        ``/[/"]/``, does contain that combination: with ``in_class``
+        broken, the internal ``/`` ends the "regex" one character early,
+        landing on the ``"`` and starting a bogus double-quoted string
+        that runs to end-of-source, swallowing the real single-quoted
+        marker text into one garbled fragment — so ``marker in fragments``
+        flips from true to false. This is the case that actually kills a
+        planted ``in_class``-removal mutant; the first four are retained
+        as direct positive proof of the reviewer's own probes.
+        """
+        cases = (
+            ("slash pair", "/[//]/", "after slash-pair class"),
+            ("slash-star", "/[/*]/", "after slash-star class"),
+            ("star-slash", "/[*/]/", "after star-slash class"),
+            ("quote pair", "/[\"']/", "after quote-pair class"),
+            ("slash then quote", "/[/\"]/", "marker text here"),
+        )
+        for label, pattern, marker in cases:
+            with self.subTest(label):
+                source = f"x({pattern}, '{marker}');\n"
+                fragments = _js_literal_fragments(source)
+                self.assertIn(marker, fragments)
+                self.assertTrue(
+                    all("[" not in f and "]" not in f for f in fragments),
+                    f"the character class leaked into a fragment: "
+                    f"{fragments!r}",
+                )
+
     def test_js_template_literal_splits_at_interpolation_like_an_fstring(
         self,
     ) -> None:
@@ -674,58 +989,92 @@ class TestTheAuditIsFailClosed(unittest.TestCase):
         self.assertIn(" could not be read here", fragments)
         self.assertTrue(all("${" not in f for f in fragments))
 
-    def test_the_1086_incident_reconstructed(self) -> None:
-        """The exact historical world (commit ``846c54bd``), isolated.
+    def test_the_1086_full_file_evidence_resolves_green_a_known_limit(
+        self,
+    ) -> None:
+        """GREEN on a faithful reconstruction of the real pre-fix world.
 
-        The real ``web/js/wrong-matches.js`` file also spelled the
-        CORRECT "could not be read" wording elsewhere (the per-entry
-        lead sentence) even while this empty-state paragraph carried the
-        typo — so checking the marker against the WHOLE FILE would not,
-        on its own, have caught this specific bug (this audit's
-        producer-file evidence is FILE-level, the same deliberately-not-
-        closed bound ``tests/test_classify_producer_audit.py``'s
-        docstring names for itself). What this test proves instead is
-        that the audit's LOGIC is sound: isolated to just the paragraph
-        that was actually wrong, ``check_marker_has_a_producer`` rejects
-        the pre-fix wording and accepts the post-fix wording.
+        Issue #1111 review MAJOR-1: an earlier version of this test used
+        a single HAND-TYPED sentence as the entire fixture — a world the
+        real audit can never construct, because
+        ``web/js/wrong-matches.js`` at commit ``dc0b7c2f^`` (the #1086
+        pre-fix tree) ALSO spelled the CORRECT "could not be read"
+        wording a few lines away, in the per-entry lead notice. This
+        fixture is instead a VERBATIM excerpt of that real historical
+        file — both statements, copied character-for-character via
+        ``git show dc0b7c2f^:web/js/wrong-matches.js`` — so the
+        file-level evidence genuinely mirrors what the real audit would
+        have seen. It resolves GREEN, proving empirically (not by
+        argument) that this audit's file-level granularity would NOT, on
+        its own, have caught issue #1086's specific defect. See the
+        module docstring for why that is a deliberately accepted, named
+        limit rather than a gap closed with site-level attribution — and
+        the paired test below for the class this audit DOES catch.
         """
+        # Verbatim excerpt of web/js/wrong-matches.js at commit
+        # dc0b7c2f^ (lines 311-313 and 334-336 of that revision):
+        #   - the per-entry lead notice, CORRECT even pre-fix
+        #   - the empty-state paragraph, the actual #1086 defect
+        pre_fix_wrong_matches_excerpt = (
+            "  const unreadableLead = unreadableIsContainment\n"
+            "    ? `${unreadableCount} entr${unreadableCount === 1 ? "
+            "'y was' : 'ies were'} refused (not read) as a containment "
+            "decision`\n"
+            "    : `${unreadableCount} entr${unreadableCount === 1 ? "
+            "'y' : 'ies'} could not be read`;\n"
+            "  if (files.length === 0) {\n"
+            "    const emptyText = unreadableCount > 0\n"
+            "      ? 'The server could not read this folder\\u2019s "
+            "contents, so no listing is available. This is NOT evidence "
+            "that the folder is empty.'\n"
+        )
+        fragments = {
+            "wrong-matches.js": _js_literal_fragments(
+                pre_fix_wrong_matches_excerpt),
+        }
         producers = _Producers(
             files=("wrong-matches.js",),
-            why="the empty-state paragraph alone",
+            why="verbatim dc0b7c2f^ excerpt — see this test's docstring",
         )
-        pre_fix_source = (
-            "const emptyText = 'The server could not read this "
-            "folder\\u2019s contents, so no listing is available. This "
-            "is NOT evidence that the folder is empty.';\n"
+        violation = check_marker_has_a_producer(
+            "could not be read", producers, fragments_by_file=fragments)
+        self.assertIsNone(
+            violation,
+            "the real pre-fix file's correct lead sentence should still "
+            "satisfy the marker at file-level, demonstrating the known "
+            "limit named in the module docstring",
         )
-        post_fix_source = (
-            "const emptyText = 'This folder\\u2019s contents could not "
-            "be read, so no listing is available. This is NOT evidence "
-            "that the folder is empty.';\n"
-        )
-        pre_fix_fragments = {
-            "wrong-matches.js": _js_literal_fragments(pre_fix_source)}
-        post_fix_fragments = {
-            "wrong-matches.js": _js_literal_fragments(post_fix_source)}
 
+    def test_a_marker_absent_from_every_registered_file_is_red(
+        self,
+    ) -> None:
+        """RED — the class this guard DOES catch: no producer anywhere.
+
+        Paired with the GREEN test above (issue #1111 review MAJOR-1): a
+        fully-inert marker — every registered file's wording rephrased
+        so NONE of them spell it any more (a producer deletion, rename,
+        or sole-spelling drift) — is exactly what this audit's
+        file-level evidence is built to catch, and does.
+        """
+        drifted_fragments = {
+            "wrong-matches.js": [
+                "entries were flagged unreadable",
+                "This folder is currently inaccessible.",
+            ],
+            "util.js": ["the storage refused or failed"],
+        }
+        producers = _Producers(
+            files=("wrong-matches.js", "util.js"),
+            why="every producer's wording rephrased away from the marker",
+        )
         violation = check_marker_has_a_producer(
             "could not be read", producers,
-            fragments_by_file=pre_fix_fragments,
+            fragments_by_file=drifted_fragments,
         )
         self.assertIsNotNone(
             violation,
-            "the pre-fix paragraph never says 'could not be read' — the "
-            "audit must reject it",
-        )
-
-        fixed = check_marker_has_a_producer(
-            "could not be read", producers,
-            fragments_by_file=post_fix_fragments,
-        )
-        self.assertIsNone(
-            fixed,
-            "the post-fix paragraph does say 'could not be read' — the "
-            "audit must accept it",
+            "no registered file spells the marker any more — the audit "
+            "must reject it",
         )
 
 

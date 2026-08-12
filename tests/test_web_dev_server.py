@@ -34,7 +34,7 @@ from scripts.web_dev_server import (
 from tests.fakes import FakeBeetsDB
 from tests.test_web_cache import FakeRedis
 
-INSECURE_AUTH_WARNING = (
+INSECURE_AUTH_WARNING_COPY = (
     "Authentication is disabled for this Cratedigger instance."
 )
 _CONCURRENT_ARTIST_ID = "4fa9413b-7c10-4342-8ddb-b1cd8e82f9e1"
@@ -172,7 +172,7 @@ class WebDevServerTest(unittest.TestCase):
         self.assertIn("DEV fixture:peers", body)
         self.assertIn("new EventSource('/__dev/events')", body)
         self.assertIn('type="module" src="/js/main.js"', body)
-        self.assertNotIn(INSECURE_AUTH_WARNING, body)
+        self.assertNotIn(INSECURE_AUTH_WARNING_COPY, body)
         badge_style = re.search(
             r"#cratedigger-dev-badge \{(?P<rules>[^}]*)\}",
             body,
@@ -199,7 +199,7 @@ class WebDevServerTest(unittest.TestCase):
 
         with urlopen(f"{base}/") as response:
             body = response.read().decode()
-        self.assertEqual(body.count(INSECURE_AUTH_WARNING), 1)
+        self.assertEqual(body.count(INSECURE_AUTH_WARNING_COPY), 1)
         self.assertEqual(body.count("<footer "), 1)
         self.assertIn("DEV fixture:peers", body)
         self.assertIn("new EventSource('/__dev/events')", body)
