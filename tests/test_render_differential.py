@@ -610,6 +610,54 @@ class TestWrongMatchExplorerRenderTargetIsTheProductionPath(unittest.TestCase):
         assert isinstance(rendered.fields["unreadable_reason"], str)
         self.assertIn("not found", rendered.fields["unreadable_reason"])
 
+    def test_a_refused_root_renders_as_its_own_error_shape_not_a_raise(
+        self,
+    ) -> None:
+        """Issue #1099 review MUST-FIX 2: a whole-root containment refusal
+        (``WrongMatchSourceRefused``, 422) must be caught the same way the
+        pre-existing 503/404 cases are, or it escapes ``render()`` uncaught
+        and aborts the WHOLE differential run for every other corpus row.
+
+        The trigger is a REAL, no-mock reproduction: ``lib.config`` never
+        strips a trailing separator from a configured quarantine root, and
+        ``open_directory_path`` computes ``root.lstrip(os.sep)`` before
+        ``_parts()``, which rejects the resulting empty trailing component
+        as ``path_escape`` — a containment code — for the root itself. This
+        is the SAME real-world trigger pinned in
+        ``tests.web.test_routes_imports`` for the two live routes; unlike
+        a symlinked/special-file root (kernel-forced ``not_a_directory`` /
+        404 under the ``O_DIRECTORY`` this module's directory opens always
+        use), a trailing slash reaches containment because ``_parts()`` is
+        a pure string check, not a syscall.
+        """
+        from scripts.render_differential import WrongMatchExplorerRenderTarget
+
+        with TemporaryDirectory() as root:
+            processing_dir = os.path.join(root, "processing")
+            staging_dir = os.path.join(root, "Incoming")
+            os.makedirs(os.path.join(processing_dir, "albums"))
+            os.makedirs(os.path.join(staging_dir, "failed_imports", "Album"))
+            row = {
+                "id": 911,
+                "validation_result": json.dumps({
+                    "failed_path": os.path.join(
+                        staging_dir, "failed_imports", "Album"),
+                }),
+            }
+            env = self._quarantine_env(processing_dir)
+            # The TRAILING SLASH is the whole bug: an ordinary, unnormalised
+            # INI value for ``beets_staging_dir``.
+            env["CRATEDIGGER_QUARANTINE_STAGING_DIR"] = staging_dir + os.sep
+            with unittest.mock.patch.dict(os.environ, env, clear=False):
+                target = WrongMatchExplorerRenderTarget()
+                target.prepare([row])
+                rendered = target.render(row)
+        self.assertEqual(rendered.id, 911)
+        self.assertEqual(rendered.fields["status"], "error")
+        assert isinstance(rendered.fields["unreadable_reason"], str)
+        self.assertIn("refused", rendered.fields["unreadable_reason"])
+        self.assertNotIn("not found", rendered.fields["unreadable_reason"])
+
     def test_row_without_an_integer_id_fails_closed(self) -> None:
         from scripts.render_differential import WrongMatchExplorerRenderTarget
 

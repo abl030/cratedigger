@@ -987,6 +987,24 @@ _REFUSAL_COPY = "could not be read"
 #: docstring states).
 _CONTAINMENT_REFUSAL_COPY = "refused (not read)"
 _NOT_EMPTY_COPY = "NOT evidence that the folder is empty"
+#: Issue #1099 — the whole-root LOAD-FAILURE catch (as opposed to the
+#: per-entry copy above, which lives inside a 200 payload) now answers
+#: status-honest copy instead of the generic ``_LOAD_FAILURE_COPY``
+#: sentence for every non-ok status. A whole-root 503 gets its own lead
+#: sentence naming that — deliberately NOT "temporarily unavailable" or
+#: any other wording that promises a retry will succeed (review round 1):
+#: the 503 bucket also carries the unclassified residual code, which is
+#: a data mismatch a retry cannot clear, not a disk hiccup.
+#:
+#: This constant and ``_REFUSAL_COPY`` are BOTH substrings of the fixed
+#: 503 LEAD sentence alone ("...could not be read — the storage refused
+#: or failed; this may be temporary."), so checking for them proves
+#: nothing about whether the server's own ``reason`` text reached the
+#: DOM at all (review round 2) — a browser that silently dropped
+#: ``serverMessage`` would still satisfy both. The test below therefore
+#: also asserts a substring unique to the PRODUCER's exception text
+#: (never present in the hardcoded lead sentence) to close that gap.
+_WHOLE_ROOT_UNAVAILABLE_LOAD_COPY = "may be temporary"
 
 #: Entry kinds refused for a WORLD reason (EACCES) vs a CONTAINMENT
 #: reason (a symlink or a special file) — the same split
@@ -1157,7 +1175,8 @@ class TestExplorerReachesTheOperatorGenerated(unittest.TestCase):
         a 200 payload. The route answers ``h._error(str(exc), 503)``, and
         the browser used to discard the message entirely — leaving an
         operator with a bare "Failed to load" over a world that needs
-        fixing.
+        fixing. Issue #1099: the browser now says something status-honest
+        instead of the old one-size-fits-all sentence.
         """
         db = FakePipelineDB()
         with tempfile.TemporaryDirectory() as root:
@@ -1176,8 +1195,17 @@ class TestExplorerReachesTheOperatorGenerated(unittest.TestCase):
         # Exactly the envelope ``web/routes/imports.py`` writes for it.
         reason = str(caught.exception)
         html = self._render({"error": reason}, 503)
-        self.assertIn(_LOAD_FAILURE_COPY, html)
+        self.assertIn(_WHOLE_ROOT_UNAVAILABLE_LOAD_COPY, html)
         self.assertIn(_REFUSAL_COPY, html)
+        # Review round 2: both checks above are ALSO satisfied by the
+        # hardcoded 503 lead sentence alone, so neither proves the
+        # producer's OWN reason text reached the DOM — a browser that
+        # silently dropped ``serverMessage`` would still pass them. Assert
+        # a substring that exists ONLY in the real exception (never in
+        # ``wrongMatchExplorerFailureCopy``'s fixed wording) to close that
+        # gap and make this genuinely a Rule C pin.
+        self.assertIn("Permission denied", reason)
+        self.assertIn("Permission denied", html)
         self.assertIn("Retry", html)
 
     def test_known_bad_browser_checker_trips(self) -> None:
