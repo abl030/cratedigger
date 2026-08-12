@@ -851,6 +851,7 @@ import {
   pickBestDistance,
   formatDistanceBadge,
   distanceIsPartial,
+  distanceIncompleteQualifier,
   runWithConcurrency,
   renderMasterlessNote,
   extractTracklist,
@@ -1020,12 +1021,30 @@ assertEqual(
 // The Replace picker is where the operator chooses a pressing — a bare
 // number there states a completeness we did not earn. The composed
 // service->badge property lives in tests/test_protected_path_truth_generated.py.
+//
+// Issue #1086: the badge must also say WHICH kind of incompleteness this
+// is, visibly — not only in a hover-only title attribute (the recurring
+// defect this series keeps finding). A world failure (EACCES/EIO/etc.,
+// ``partial_read_is_containment`` false/absent) reads "may be transient";
+// a containment refusal (a symlink or socket, ``partial_read_is_containment``
+// true) reads "refused: symlink or special file" — never worded like a
+// flaky disk.
 assertEqual(
   formatDistanceBadge({ outcome: 'ok', distance: 0.0712,
                         matched_tracks: 6, total_mb_tracks: 12,
-                        partial_read: '07.flac: Permission denied' }),
-  'best 0.07 (6/12) · incomplete manifest',
-  'formatDistanceBadge flags a distance computed over a partial manifest',
+                        partial_read: '07.flac: could not be read, may be '
+                          + 'transient (EACCES)' }),
+  'best 0.07 (6/12) · incomplete manifest (may be transient)',
+  'formatDistanceBadge flags a world-failure partial manifest, visibly',
+);
+assertEqual(
+  formatDistanceBadge({ outcome: 'ok', distance: 0.0712,
+                        matched_tracks: 6, total_mb_tracks: 12,
+                        partial_read: '07.flac: this is a symlink, refused '
+                          + 'rather than followed out of the quarantine root',
+                        partial_read_is_containment: true }),
+  'best 0.07 (6/12) · incomplete manifest (refused: symlink or special file)',
+  'formatDistanceBadge flags a containment refusal, visibly and distinctly',
 );
 assertEqual(
   formatDistanceBadge({ outcome: 'ok', distance: 0.0712,
@@ -1044,6 +1063,41 @@ assert(
   'distanceIsPartial false for an empty reason',
 );
 assert(!distanceIsPartial(null), 'distanceIsPartial false for no result');
+
+// distanceIncompleteQualifier — the structured discriminator, not a
+// substring match on the free-text reason.
+assertEqual(
+  distanceIncompleteQualifier(null), '',
+  'distanceIncompleteQualifier empty for no result',
+);
+assertEqual(
+  distanceIncompleteQualifier({ outcome: 'ok', distance: 0.1, partial_read: null }),
+  '',
+  'distanceIncompleteQualifier empty for a complete read',
+);
+assertEqual(
+  distanceIncompleteQualifier({
+    outcome: 'ok', distance: 0.1, partial_read: 'x: Permission denied',
+  }),
+  'may be transient',
+  'distanceIncompleteQualifier defaults to world-failure wording',
+);
+assertEqual(
+  distanceIncompleteQualifier({
+    outcome: 'ok', distance: 0.1, partial_read: 'x: symlink refused',
+    partial_read_is_containment: true,
+  }),
+  'refused: symlink or special file',
+  'distanceIncompleteQualifier reads the containment discriminator',
+);
+assertEqual(
+  distanceIncompleteQualifier({
+    outcome: 'ok', distance: 0.1, partial_read: 'x: Permission denied',
+    partial_read_is_containment: false,
+  }),
+  'may be transient',
+  'distanceIncompleteQualifier: false is still world-failure wording',
+);
 
 // runWithConcurrency — caps in-flight workers; preserves input order
 {

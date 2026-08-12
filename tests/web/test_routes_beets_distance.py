@@ -54,6 +54,11 @@ class TestBeetsDistanceRouteContract(_FakeDbWebServerCase):
         # ``web/js/replace_picker.js`` turns it into the badge's
         # "incomplete manifest" marker on the pressing-picking surface.
         "partial_read",
+        # Issue #1086 — structured discriminator: is ``partial_read`` a
+        # containment refusal (symlink/socket) or an ordinary storage
+        # world failure? ``web/js/replace_picker.js`` branches the badge's
+        # VISIBLE wording on this field, never on ``partial_read`` text.
+        "partial_read_is_containment",
         "duration_ms",
     }
 
@@ -115,14 +120,40 @@ class TestBeetsDistanceRouteContract(_FakeDbWebServerCase):
             download_log_id=100,
             request_id=7,
             folder_path="/tmp/x",
-            partial_read="/tmp/x/07.flac: Permission denied",
+            partial_read="/tmp/x/07.flac: could not be read, may be "
+                "transient (EACCES)",
+            partial_read_is_containment=False,
         ):
             status, data = self._get(f"/api/beets-distance/100/{self.UUID_A}")
         self.assertEqual(status, 200)
         _assert_required_fields(self, data, self.REQUIRED_FIELDS,
                                 "beets-distance partial-read response")
-        self.assertEqual(data["partial_read"],
-                         "/tmp/x/07.flac: Permission denied")
+        self.assertEqual(
+            data["partial_read"],
+            "/tmp/x/07.flac: could not be read, may be transient (EACCES)")
+        self.assertFalse(data["partial_read_is_containment"])
+
+    def test_partial_read_is_containment_survives_the_wire(self):
+        """The structured discriminator (#1086), not just the free text."""
+        with self._patch_service(
+            outcome="ok",
+            distance=0.07,
+            matched_tracks=6,
+            total_local_tracks=6,
+            total_mb_tracks=12,
+            candidate_mbid=self.UUID_A,
+            download_log_id=100,
+            request_id=7,
+            folder_path="/tmp/x",
+            partial_read="/tmp/x/07.flac: this is a symlink, refused "
+                "rather than followed out of the quarantine root",
+            partial_read_is_containment=True,
+        ):
+            status, data = self._get(f"/api/beets-distance/100/{self.UUID_A}")
+        self.assertEqual(status, 200)
+        _assert_required_fields(self, data, self.REQUIRED_FIELDS,
+                                "beets-distance containment-refusal response")
+        self.assertTrue(data["partial_read_is_containment"])
 
     def test_download_log_not_found_returns_404(self):
         with self._patch_service(
