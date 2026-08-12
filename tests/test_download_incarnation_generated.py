@@ -18,8 +18,9 @@ the explicit PR2 boundary.
 from __future__ import annotations
 
 import copy
+import re
 import unittest
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Literal
@@ -33,6 +34,7 @@ from lib.download import (
     _admit_download_incarnations,
     _decode_valid_download_incarnations,
 )
+from lib.import_queue import AutomationHandoffResult
 from lib.pipeline_db.rows import AlbumRequestRow
 from lib.quality import ActiveDownloadFileState, ActiveDownloadState
 from tests.fakes import FakePipelineDB
@@ -73,6 +75,25 @@ _ADMISSION_KINDS: tuple[AdmissionKind, ...] = (
     "invalid",
 )
 _DETERMINISTIC_PATH = "/processing/albums/Artist - Album [same-attempt-path]"
+# The four rows whose stored state is undecodable or witness-less are the SAME
+# row observed twice: they are already degenerate in the pre-snapshot, so a
+# dropped decode guard admits a matching pair instead of excluding nothing.
+_DEGENERATE_PRE_KINDS: dict[int, AdmissionKind] = {
+    4: "missing",
+    5: "empty",
+    6: "malformed",
+    7: "invalid",
+}
+
+
+def _anchored(message: str) -> str:
+    """Anchor a full clause message so no sibling clause can satisfy it."""
+    return "^" + re.escape(message) + "$"
+
+
+def _anchored_prefix(prefix: str) -> str:
+    """Anchor a clause message whose tail carries generated values."""
+    return "^" + re.escape(prefix)
 
 
 @dataclass(frozen=True)
@@ -482,15 +503,6 @@ def _build_admission_inputs(
     list[AlbumRequestRow],
     tuple[tuple[int, str], ...],
 ]:
-    pre_db = FakePipelineDB()
-    for request_id in range(1, 9):
-        witness = world.witness_b if request_id == 8 else world.witness_a
-        pre_db.seed_request(_admission_row(request_id, witness=witness))
-    pre_snapshot = _decode_valid_download_incarnations(
-        pre_db.get_downloading(),
-        phase="generated pre-snapshot",
-    )
-
     refreshed_by_kind: dict[AdmissionKind, dict[str, object]] = {
         "unchanged": _admission_row(1, witness=world.witness_a),
         "unchanged_alt": _admission_row(8, witness=world.witness_b),
@@ -519,6 +531,20 @@ def _build_admission_inputs(
         ),
         "invalid": _admission_row(7, witness="not-an-iso-witness"),
     }
+
+    pre_db = FakePipelineDB()
+    for request_id in range(1, 9):
+        degenerate_kind = _DEGENERATE_PRE_KINDS.get(request_id)
+        if degenerate_kind is not None:
+            pre_db.seed_request(copy.deepcopy(refreshed_by_kind[degenerate_kind]))
+            continue
+        witness = world.witness_b if request_id == 8 else world.witness_a
+        pre_db.seed_request(_admission_row(request_id, witness=witness))
+    pre_snapshot = _decode_valid_download_incarnations(
+        pre_db.get_downloading(),
+        phase="generated pre-snapshot",
+    )
+
     refreshed_db = FakePipelineDB()
     for kind in world.refreshed_order:
         refreshed_db.seed_request(refreshed_by_kind[kind])
@@ -561,8 +587,12 @@ def assert_handoff_contract(
         raise AssertionError("exact handoff did not publish one processor owner")
 
 
-def _exercise_handoff(world: HandoffWorld) -> None:
-    db = FakePipelineDB()
+def _exercise_handoff(
+    world: HandoffWorld,
+    *,
+    db_factory: Callable[[], FakePipelineDB] = FakePipelineDB,
+) -> None:
+    db = db_factory()
     request_id = db.add_request(
         "Artist",
         "Album",
@@ -613,13 +643,14 @@ def _exercise_handoff(world: HandoffWorld) -> None:
         job_count=len(jobs),
     )
     if exact:
-        assert result.job is not None
+        if result.job is None:
+            raise AssertionError("committed handoff returned no job record")
         active_state = after["active_download_state"]
         if (
             after["active_automation_import_job_id"] != result.job.id
             or result.job.expected_request_status != "processing"
             or not isinstance(active_state, dict)
-            or active_state["current_path"] != world.canonical_path
+            or active_state.get("current_path") != world.canonical_path
         ):
             raise AssertionError("handoff owner, job, and canonical path diverged")
         before_rejected_writes = copy.deepcopy(after)
@@ -638,8 +669,12 @@ def _exercise_handoff(world: HandoffWorld) -> None:
             raise AssertionError("rejected post-handoff writer changed metadata")
 
 
-def _exercise_rejected_handoff(world: HandoffRejectionWorld) -> None:
-    db = FakePipelineDB()
+def _exercise_rejected_handoff(
+    world: HandoffRejectionWorld,
+    *,
+    db_factory: Callable[[], FakePipelineDB] = FakePipelineDB,
+) -> None:
+    db = db_factory()
     request_id = db.add_request(
         "Artist",
         "Album",
@@ -729,8 +764,8 @@ class TestDeterministicDownloadIncarnationContract(unittest.TestCase):
             ),
             replacement_is_new_id=False,
         )
-        pre_snapshot, refreshed_rows, expected = _build_admission_inputs(world)
         with self.assertLogs("cratedigger", level="WARNING"):
+            pre_snapshot, refreshed_rows, expected = _build_admission_inputs(world)
             admitted = _admit_download_incarnations(
                 pre_snapshot,
                 refreshed_rows,
@@ -842,12 +877,21 @@ class TestGeneratedDownloadIncarnationContract(unittest.TestCase):
         refreshed_order=_ADMISSION_KINDS,
         replacement_is_new_id=True,
     ))
+    # Issue #1094: the same-ID replacement arm is the one that separates exact
+    # pair admission from request-ID admission, so it is pinned rather than
+    # left to the derandomized sweep.
+    @example(world=AdmissionWorld(
+        witness_a="2026-07-28T01:00:00.000000Z",
+        witness_b="2026-07-28T09:00:01.000000+08:00",
+        refreshed_order=tuple(reversed(_ADMISSION_KINDS)),
+        replacement_is_new_id=False,
+    ))
     def test_post_event_cohort_matches_exact_pair_oracle(
         self,
         world: AdmissionWorld,
     ) -> None:
-        pre_snapshot, refreshed_rows, expected = _build_admission_inputs(world)
         with self.assertLogs("cratedigger", level="WARNING"):
+            pre_snapshot, refreshed_rows, expected = _build_admission_inputs(world)
             admitted = _admit_download_incarnations(
                 pre_snapshot,
                 refreshed_rows,
@@ -871,7 +915,10 @@ class TestGeneratedDownloadIncarnationContract(unittest.TestCase):
         )
         with self.assertRaisesRegex(
             AssertionError,
-            "exact incarnation oracle",
+            _anchored_prefix(
+                "post-event poll admission diverged from exact incarnation "
+                "oracle: expected="
+            ),
         ):
             assert_exact_admission(expected, request_id_only_mutant)
 
@@ -880,6 +927,15 @@ class TestGeneratedDownloadIncarnationContract(unittest.TestCase):
         current_witness="2026-07-29T08:00:00+08:00",
         attempted_witness="2026-07-29T00:00:00Z",
         canonical_path=_DETERMINISTIC_PATH,
+    ))
+    # Issue #1094: the exact-commit arm owns every post-handoff clause
+    # (publication, canonical path, and both refused post-handoff writers).
+    # Pinned so a future edit to this body cannot reshuffle it out of the
+    # derandomized gating tier.
+    @example(world=HandoffWorld(
+        current_witness="2026-07-29T08:00:00+08:00",
+        attempted_witness="2026-07-29T08:00:00+08:00",
+        canonical_path="/processing/albums/Ártist - 音 [pressing]",
     ))
     def test_handoff_requires_exact_textual_witness(
         self,
@@ -893,6 +949,24 @@ class TestGeneratedDownloadIncarnationContract(unittest.TestCase):
         witness="2026-07-29T00:00:00Z",
         canonical_path=_DETERMINISTIC_PATH,
     ))
+    # Issue #1094: each rejection kind is the only world that attributes its
+    # own outcome/metadata/job clauses, so all four are pinned into the
+    # derandomized gating tier rather than left to the sweep.
+    @example(world=HandoffRejectionWorld(
+        kind="missing_state",
+        witness="2026-07-29T00:00:00Z",
+        canonical_path=_DETERMINISTIC_PATH,
+    ))
+    @example(world=HandoffRejectionWorld(
+        kind="non_downloading",
+        witness="2026-07-29T00:00:00Z",
+        canonical_path="/processing/albums/Ártist - 音 [rejected]",
+    ))
+    @example(world=HandoffRejectionWorld(
+        kind="active_conflict",
+        witness="2026-07-29T00:00:00Z",
+        canonical_path=_DETERMINISTIC_PATH,
+    ))
     def test_non_admissible_handoffs_preserve_all_state(
         self,
         world: HandoffRejectionWorld,
@@ -900,8 +974,220 @@ class TestGeneratedDownloadIncarnationContract(unittest.TestCase):
         _exercise_rejected_handoff(world)
 
 
+_PLANTED_UPDATED_AT = datetime(2030, 1, 1, tzinfo=UTC)
+_EXACT_HANDOFF_WORLD = HandoffWorld(
+    current_witness="2026-07-29T08:00:00+08:00",
+    attempted_witness="2026-07-29T08:00:00+08:00",
+    canonical_path=_DETERMINISTIC_PATH,
+)
+_STALE_HANDOFF_WORLD = HandoffWorld(
+    current_witness="2026-07-29T08:00:01+08:00",
+    attempted_witness="2026-07-29T00:00:00Z",
+    canonical_path=_DETERMINISTIC_PATH,
+)
+
+
+def _rejection_world(kind: HandoffRejectionKind) -> HandoffRejectionWorld:
+    return HandoffRejectionWorld(
+        kind=kind,
+        witness="2026-07-29T00:00:00Z",
+        canonical_path=_DETERMINISTIC_PATH,
+    )
+
+
+class _PlantedHandoffFake(FakePipelineDB):
+    """Run the real handoff transcript, then plant exactly one defect."""
+
+    def _plant(
+        self,
+        request_id: int,
+        result: AutomationHandoffResult,
+    ) -> AutomationHandoffResult:
+        del request_id
+        return result
+
+    def handoff_automation_import(
+        self,
+        *,
+        request_id: int,
+        expected_enqueued_at: str,
+        canonical_path: str,
+        message: str,
+    ) -> AutomationHandoffResult:
+        return self._plant(request_id, super().handoff_automation_import(
+            request_id=request_id,
+            expected_enqueued_at=expected_enqueued_at,
+            canonical_path=canonical_path,
+            message=message,
+        ))
+
+
+class _NoDownloadingEntry(FakePipelineDB):
+    """The fixture can never enter ``downloading``."""
+
+    def set_downloading(
+        self,
+        request_id: int,
+        state_json: str,
+        *,
+        expected_status: str = "wanted",
+    ) -> bool:
+        del request_id, state_json, expected_status
+        return False
+
+
+class _UnfencedHandoff(FakePipelineDB):
+    """The exact-witness fence is disabled, so a stale attempt commits."""
+
+    def _automation_handoff_enforce_witness(self) -> bool:
+        return False
+
+
+class _NeverCommittingHandoff(FakePipelineDB):
+    """Every handoff attempt reports a witness mismatch."""
+
+    def handoff_automation_import(
+        self,
+        *,
+        request_id: int,
+        expected_enqueued_at: str,
+        canonical_path: str,
+        message: str,
+    ) -> AutomationHandoffResult:
+        del request_id, expected_enqueued_at, canonical_path, message
+        return AutomationHandoffResult("witness_mismatch")
+
+
+class _CommitsWithoutJobRecord(_PlantedHandoffFake):
+    """A committed handoff returns no job record."""
+
+    def _plant(
+        self,
+        request_id: int,
+        result: AutomationHandoffResult,
+    ) -> AutomationHandoffResult:
+        del request_id
+        if result.committed:
+            return AutomationHandoffResult(result.outcome)
+        return result
+
+
+class _PublishesWrongCanonicalPath(_PlantedHandoffFake):
+    """Ownership publishes a canonical path the caller never asked for."""
+
+    def _plant(
+        self,
+        request_id: int,
+        result: AutomationHandoffResult,
+    ) -> AutomationHandoffResult:
+        if result.committed:
+            state = self.request(request_id)["active_download_state"]
+            if isinstance(state, dict):
+                state["current_path"] = "/processing/albums/another-attempt"
+        return result
+
+
+class _RejectionReportsWrongOutcome(_PlantedHandoffFake):
+    """A refused handoff reports the wrong rejection tag."""
+
+    def _plant(
+        self,
+        request_id: int,
+        result: AutomationHandoffResult,
+    ) -> AutomationHandoffResult:
+        del request_id
+        if not result.committed:
+            return AutomationHandoffResult("request_missing")
+        return result
+
+
+class _RejectionTouchesRequestRow(_PlantedHandoffFake):
+    """A refused handoff still stamps the request row."""
+
+    def _plant(
+        self,
+        request_id: int,
+        result: AutomationHandoffResult,
+    ) -> AutomationHandoffResult:
+        if not result.committed:
+            self.request(request_id)["updated_at"] = _PLANTED_UPDATED_AT
+        return result
+
+
+class _RejectionCreatesJob(_PlantedHandoffFake):
+    """A refused handoff still mints an import job."""
+
+    def _plant(
+        self,
+        request_id: int,
+        result: AutomationHandoffResult,
+    ) -> AutomationHandoffResult:
+        if not result.committed:
+            self._append_import_job(
+                "automation_import",
+                request_id=request_id,
+                dedupe_key=None,
+                payload={},
+                message="planted rejection job",
+            )
+        return result
+
+
+class _CasCrossesHandoff(FakePipelineDB):
+    """The whole-state writer accepts a row the processor already owns."""
+
+    def update_download_state_if_downloading(
+        self,
+        request_id: int,
+        state_json: str,
+        *,
+        expected_enqueued_at: str,
+    ) -> bool:
+        del state_json, expected_enqueued_at
+        return self.request(request_id)["status"] in ("downloading", "processing")
+
+
+class _ResetCrossesHandoff(FakePipelineDB):
+    """The reset writer accepts a row the processor already owns."""
+
+    def reset_downloading_to_wanted(
+        self,
+        request_id: int,
+        *,
+        expected_status: str = "downloading",
+        **fields: object,
+    ) -> bool:
+        del request_id, expected_status, fields
+        return True
+
+
+class _RejectedWriterTouchesRow(FakePipelineDB):
+    """A refused whole-state write still stamps the row it refused."""
+
+    def update_download_state_if_downloading(
+        self,
+        request_id: int,
+        state_json: str,
+        *,
+        expected_enqueued_at: str,
+    ) -> bool:
+        self.request(request_id)["updated_at"] = _PLANTED_UPDATED_AT
+        return super().update_download_state_if_downloading(
+            request_id,
+            state_json,
+            expected_enqueued_at=expected_enqueued_at,
+        )
+
+
 class TestIncarnationInvariantCheckersTripOnKnownBad(unittest.TestCase):
-    """Committed known-bad inputs qualify every U5 invariant checker."""
+    """Committed known-bad inputs qualify every U5 invariant checker.
+
+    Issue #1094 per-clause proof: each test below names the minimal world that
+    makes exactly one clause fire while every earlier clause in the same
+    function passes, and asserts that clause's own anchored message. A bare
+    ``assertRaises`` or a loose substring would let a sibling clause satisfy
+    the assertion.
+    """
 
     @staticmethod
     def _planted_applied_row(
@@ -913,11 +1199,39 @@ class TestIncarnationInvariantCheckersTripOnKnownBad(unittest.TestCase):
         after["updated_at"] = datetime(2030, 1, 1, tzinfo=UTC)
         return after
 
+    _PREDICATE_CLAUSE = (
+        "whole-state CAS result diverged from status/stored/outgoing witness "
+        "predicates: expected={expected} actual={actual}"
+    )
+
+    @staticmethod
+    def _published_state() -> dict[str, object]:
+        state = _state_dict(_admission_state("2026-07-29T00:00:00Z"))
+        state["processing_started_at"] = "2026-07-29T00:00:01+00:00"
+        state["current_path"] = _DETERMINISTIC_PATH
+        return state
+
+    @classmethod
+    def _published_row(cls, **overrides: object) -> dict[str, object]:
+        row = _admission_row(
+            1,
+            witness="2026-07-29T00:00:00Z",
+            status="processing",
+            raw_state=cls._published_state(),
+        )
+        row["active_automation_import_job_id"] = 7
+        row.update(overrides)
+        return row
+
     def test_checker_kills_missing_status_predicate(self) -> None:
         witness = "2026-07-28T01:00:00Z"
         outgoing = _admission_state(witness)
         before = _admission_row(1, witness=witness, status="wanted")
-        with self.assertRaisesRegex(AssertionError, "predicates"):
+        with self.assertRaisesRegex(
+            AssertionError,
+            _anchored(self._PREDICATE_CLAUSE.format(
+                expected=False, actual=True)),
+        ):
             assert_witnessed_write_contract(
                 before_row=before,
                 outgoing_state=outgoing,
@@ -933,7 +1247,11 @@ class TestIncarnationInvariantCheckersTripOnKnownBad(unittest.TestCase):
             1,
             witness="2026-07-28T01:00:01Z",
         )
-        with self.assertRaisesRegex(AssertionError, "predicates"):
+        with self.assertRaisesRegex(
+            AssertionError,
+            _anchored(self._PREDICATE_CLAUSE.format(
+                expected=False, actual=True)),
+        ):
             assert_witnessed_write_contract(
                 before_row=before_b,
                 outgoing_state=outgoing_a,
@@ -946,7 +1264,11 @@ class TestIncarnationInvariantCheckersTripOnKnownBad(unittest.TestCase):
         witness_a = "2026-07-28T01:00:00Z"
         outgoing_b = _admission_state("2026-07-28T01:00:01Z")
         before_a = _admission_row(1, witness=witness_a)
-        with self.assertRaisesRegex(AssertionError, "predicates"):
+        with self.assertRaisesRegex(
+            AssertionError,
+            _anchored(self._PREDICATE_CLAUSE.format(
+                expected=False, actual=True)),
+        ):
             assert_witnessed_write_contract(
                 before_row=before_a,
                 outgoing_state=outgoing_b,
@@ -954,6 +1276,86 @@ class TestIncarnationInvariantCheckersTripOnKnownBad(unittest.TestCase):
                 applied=True,
                 after_row=self._planted_applied_row(before_a, outgoing_b),
             )
+
+    def test_checker_kills_fail_closed_witnessed_write(self) -> None:
+        """All three predicates hold, so refusing the write is a violation."""
+        witness = "2026-07-28T01:00:00Z"
+        outgoing = _admission_state(witness)
+        before = _admission_row(1, witness=witness)
+        with self.assertRaisesRegex(
+            AssertionError,
+            _anchored(self._PREDICATE_CLAUSE.format(
+                expected=True, actual=False)),
+        ):
+            assert_witnessed_write_contract(
+                before_row=before,
+                outgoing_state=outgoing,
+                expected_witness=witness,
+                applied=False,
+                after_row=copy.deepcopy(before),
+            )
+
+    def test_checker_kills_rejected_write_that_changed_the_row(self) -> None:
+        """The CAS result agrees; the refused write still moved the row."""
+        witness = "2026-07-28T01:00:00Z"
+        outgoing = _admission_state(witness)
+        before = _admission_row(1, witness=witness, status="wanted")
+        after = copy.deepcopy(before)
+        after["updated_at"] = _PLANTED_UPDATED_AT
+        with self.assertRaisesRegex(
+            AssertionError,
+            _anchored("rejected whole-state CAS changed row state or metadata"),
+        ):
+            assert_witnessed_write_contract(
+                before_row=before,
+                outgoing_state=outgoing,
+                expected_witness=witness,
+                applied=False,
+                after_row=after,
+            )
+
+    def test_checker_kills_accepted_write_beyond_state_and_stamp(self) -> None:
+        """The accepted write carried a field the CAS may not touch."""
+        witness = "2026-07-28T01:00:00Z"
+        outgoing = _admission_state(witness)
+        before = _admission_row(1, witness=witness)
+        after = self._planted_applied_row(before, outgoing)
+        after["validation_attempts"] = 3
+        with self.assertRaisesRegex(
+            AssertionError,
+            _anchored(
+                "accepted whole-state CAS changed fields beyond "
+                "state/updated_at"
+            ),
+        ):
+            assert_witnessed_write_contract(
+                before_row=before,
+                outgoing_state=outgoing,
+                expected_witness=witness,
+                applied=True,
+                after_row=after,
+            )
+
+    def test_witnessed_write_checker_accepts_lawful_worlds(self) -> None:
+        """Must-still-work control: the two lawful shapes raise nothing."""
+        witness = "2026-07-28T01:00:00Z"
+        outgoing = _admission_state(witness)
+        accepted_before = _admission_row(1, witness=witness)
+        assert_witnessed_write_contract(
+            before_row=accepted_before,
+            outgoing_state=outgoing,
+            expected_witness=witness,
+            applied=True,
+            after_row=self._planted_applied_row(accepted_before, outgoing),
+        )
+        rejected_before = _admission_row(1, witness=witness, status="wanted")
+        assert_witnessed_write_contract(
+            before_row=rejected_before,
+            outgoing_state=outgoing,
+            expected_witness=witness,
+            applied=False,
+            after_row=copy.deepcopy(rejected_before),
+        )
 
     def test_checker_kills_request_id_only_admission(self) -> None:
         expected = ((1, "2026-07-28T01:00:00Z"),)
@@ -963,28 +1365,216 @@ class TestIncarnationInvariantCheckersTripOnKnownBad(unittest.TestCase):
         )
         with self.assertRaisesRegex(
             AssertionError,
-            "exact incarnation oracle",
+            _anchored(
+                "post-event poll admission diverged from exact incarnation "
+                f"oracle: expected={expected!r} actual={request_id_only!r}"
+            ),
         ):
             assert_exact_admission(expected, request_id_only)
 
     def test_checker_kills_stale_handoff_mutant(self) -> None:
+        """Both disjuncts of the stale-handoff clause, one world each."""
         before = make_request_row(
             status="downloading",
             active_download_state={"enqueued_at": "B"},
         )
-        after = copy.deepcopy(before)
-        after["status"] = "processing"
-        after["active_automation_import_job_id"] = 1
-        active_state = after["active_download_state"]
-        assert isinstance(active_state, dict)
-        active_state["processing_started_at"] = "now"
+        published = copy.deepcopy(before)
+        published["status"] = "processing"
+        published["active_automation_import_job_id"] = 1
+        published_state = published["active_download_state"]
+        if isinstance(published_state, dict):
+            published_state["processing_started_at"] = "now"
+        cases: tuple[tuple[str, dict[str, object], int], ...] = (
+            ("row changed only", published, 0),
+            ("job created only", copy.deepcopy(before), 1),
+            ("row changed and job created", published, 1),
+        )
+        for description, after, job_count in cases:
+            with self.subTest(world=description), self.assertRaisesRegex(
+                AssertionError,
+                _anchored("stale handoff produced an observable change"),
+            ):
+                assert_handoff_contract(
+                    exact=False,
+                    before=before,
+                    after=after,
+                    job_count=job_count,
+                )
+        assert_handoff_contract(
+            exact=False,
+            before=before,
+            after=copy.deepcopy(before),
+            job_count=0,
+        )
+
+    def test_checker_kills_incomplete_exact_handoff_publication(self) -> None:
+        """Every disjunct of the exact-publication clause, one world each."""
+        stampless_state = self._published_state()
+        del stampless_state["processing_started_at"]
+        cases: tuple[tuple[str, dict[str, object], int], ...] = (
+            ("status is not processing", self._published_row(
+                status="downloading"), 1),
+            ("owner id is not an int", self._published_row(
+                active_automation_import_job_id="7"), 1),
+            ("owner id is not positive", self._published_row(
+                active_automation_import_job_id=0), 1),
+            ("state is not an object", self._published_row(
+                active_download_state=None), 1),
+            ("processing stamp missing", self._published_row(
+                active_download_state=stampless_state), 1),
+            ("no job published", self._published_row(), 0),
+            ("two jobs published", self._published_row(), 2),
+        )
+        for description, after, job_count in cases:
+            with self.subTest(world=description), self.assertRaisesRegex(
+                AssertionError,
+                _anchored("exact handoff did not publish one processor owner"),
+            ):
+                assert_handoff_contract(
+                    exact=True,
+                    before=self._published_row(),
+                    after=after,
+                    job_count=job_count,
+                )
+        assert_handoff_contract(
+            exact=True,
+            before=self._published_row(),
+            after=self._published_row(),
+            job_count=1,
+        )
+
+    def test_transcript_driver_rejects_alphabet_drift(self) -> None:
+        """Fail-closed legislation: a future strategy edit cannot go quiet."""
         with self.assertRaisesRegex(
             AssertionError,
-            "stale handoff",
+            _anchored_prefix("operation alphabet drifted outside PR1: "),
         ):
-            assert_handoff_contract(
-                exact=False,
-                before=before,
-                after=after,
-                job_count=1,
+            _exercise_transcript(TranscriptWorld(
+                witness_a="2026-07-28T01:00:00.000000Z",
+                witness_b="2026-07-28T09:00:01.000000+08:00",
+                operation_order=("enqueue",),
+                username="peer",
+                filename="Music\\Artist\\Album\\01 track.flac",
+                size=1000,
+                progress_bytes=400,
+            ))
+
+    def test_drivers_kill_fixtures_that_never_enter_downloading(self) -> None:
+        with self.subTest(driver="handoff"), self.assertRaisesRegex(
+            AssertionError,
+            _anchored("generated fixture failed to enter downloading"),
+        ):
+            _exercise_handoff(
+                _EXACT_HANDOFF_WORLD,
+                db_factory=_NoDownloadingEntry,
+            )
+        with self.subTest(driver="rejection"), self.assertRaisesRegex(
+            AssertionError,
+            _anchored("rejection fixture failed to enter downloading"),
+        ):
+            _exercise_rejected_handoff(
+                _rejection_world("missing_state"),
+                db_factory=_NoDownloadingEntry,
+            )
+
+    def test_driver_kills_unfenced_stale_handoff_commit(self) -> None:
+        with self.assertRaisesRegex(
+            AssertionError,
+            _anchored("handoff outcome 'committed' disagreed with exact=False"),
+        ):
+            _exercise_handoff(
+                _STALE_HANDOFF_WORLD,
+                db_factory=_UnfencedHandoff,
+            )
+
+    def test_driver_kills_committed_handoff_without_a_job_record(self) -> None:
+        with self.assertRaisesRegex(
+            AssertionError,
+            _anchored("committed handoff returned no job record"),
+        ):
+            _exercise_handoff(
+                _EXACT_HANDOFF_WORLD,
+                db_factory=_CommitsWithoutJobRecord,
+            )
+
+    def test_driver_kills_wrong_published_canonical_path(self) -> None:
+        with self.assertRaisesRegex(
+            AssertionError,
+            _anchored("handoff owner, job, and canonical path diverged"),
+        ):
+            _exercise_handoff(
+                _EXACT_HANDOFF_WORLD,
+                db_factory=_PublishesWrongCanonicalPath,
+            )
+
+    def test_driver_kills_post_handoff_whole_state_writer(self) -> None:
+        with self.assertRaisesRegex(
+            AssertionError,
+            _anchored("poll/event writer crossed the handoff"),
+        ):
+            _exercise_handoff(
+                _EXACT_HANDOFF_WORLD,
+                db_factory=_CasCrossesHandoff,
+            )
+
+    def test_driver_kills_post_handoff_reset_writer(self) -> None:
+        with self.assertRaisesRegex(
+            AssertionError,
+            _anchored("reset writer crossed the handoff"),
+        ):
+            _exercise_handoff(
+                _EXACT_HANDOFF_WORLD,
+                db_factory=_ResetCrossesHandoff,
+            )
+
+    def test_driver_kills_refused_writer_that_stamps_the_row(self) -> None:
+        with self.assertRaisesRegex(
+            AssertionError,
+            _anchored("rejected post-handoff writer changed metadata"),
+        ):
+            _exercise_handoff(
+                _EXACT_HANDOFF_WORLD,
+                db_factory=_RejectedWriterTouchesRow,
+            )
+
+    def test_driver_kills_conflict_seed_that_never_commits(self) -> None:
+        with self.assertRaisesRegex(
+            AssertionError,
+            _anchored("conflict fixture failed to create active job"),
+        ):
+            _exercise_rejected_handoff(
+                _rejection_world("active_conflict"),
+                db_factory=_NeverCommittingHandoff,
+            )
+
+    def test_driver_kills_wrong_rejection_outcome(self) -> None:
+        with self.assertRaisesRegex(
+            AssertionError,
+            _anchored(
+                "missing_state returned request_missing, expected missing_state"
+            ),
+        ):
+            _exercise_rejected_handoff(
+                _rejection_world("missing_state"),
+                db_factory=_RejectionReportsWrongOutcome,
+            )
+
+    def test_driver_kills_rejection_that_stamps_the_request(self) -> None:
+        with self.assertRaisesRegex(
+            AssertionError,
+            _anchored("non_downloading changed request metadata"),
+        ):
+            _exercise_rejected_handoff(
+                _rejection_world("non_downloading"),
+                db_factory=_RejectionTouchesRequestRow,
+            )
+
+    def test_driver_kills_rejection_that_creates_a_job(self) -> None:
+        with self.assertRaisesRegex(
+            AssertionError,
+            _anchored("non_downloading created or changed a job"),
+        ):
+            _exercise_rejected_handoff(
+                _rejection_world("non_downloading"),
+                db_factory=_RejectionCreatesJob,
             )
