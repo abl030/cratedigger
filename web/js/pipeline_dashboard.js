@@ -540,7 +540,8 @@ function renderUnfindableCard(unfindable) {
         <div class="metric-row"><span>Last run</span><strong>${latest ? awstDateTime(latest.created_at) : 'never'}</strong></div>
         <div class="metric-row"><span>Cohort</span><strong>${latest ? formatCount(latest.cohort_total) : 'n/a'}</strong></div>
         <div class="metric-row"><span>Due backlog</span><strong>${latest ? formatCount(latest.due_backlog_at_start) : 'n/a'}</strong></div>
-        <div class="metric-row"><span>Batch limit / attempted</span><strong>${latest ? `${formatCount(latest.batch_limit)} / ${formatCount(latest.probes_attempted)}` : 'n/a'}</strong></div>
+        <div class="metric-row"><span>Batch limit / processed</span><strong>${latest ? `${formatCount(latest.batch_limit)} / ${formatCount(latest.candidates_processed)}` : 'n/a'}</strong></div>
+        <div class="metric-row"><span>Probes attempted</span><strong>${latest ? formatCount(latest.probes_attempted) : 'n/a'}</strong></div>
         <div class="metric-row"><span>Breaker tripped</span><strong class="${latest ? breakerClass : 'metric-muted'}">${latest ? (latest.breaker_tripped ? 'yes' : 'no') : 'n/a'}</strong></div>
       </div>
       <table class="dashboard-table">

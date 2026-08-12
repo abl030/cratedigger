@@ -2475,14 +2475,17 @@ in {
         # consecutive submit failures.
         #
         # Recomputed for DEFAULT_BATCH_SIZE=240 (issue #1112 item 1,
-        # 2026-08-12; was 100/"2h"): nominal ~29s/probe measured in
-        # production x 240 candidates ~= 116min (~1h56m) is the expected
-        # steady-state ceiling; worst case ~60s/candidate x 240 = 240min
-        # (4h) is the individually-retried-but-not-breaker-tripped
-        # ceiling. 5h keeps the same ~1.2x headroom ratio the prior 2h/
-        # ~100min pairing had over its own worst case, while still
-        # surfacing genuinely stuck runs well inside the 24h daily
-        # cadence.
+        # 2026-08-12; was 100/"2h"). Live per-probe wall time over the
+        # last five daily runs (journalctl, 2026-08-08..12): 59.2s,
+        # 56.0s, 52.5s, 43.1s -- all healthy -- and 27.6s on 2026-08-12,
+        # which is NOT nominal: that run was the #1090 409-storm (50
+        # probe_failed), and a failed probe fails fast without a full
+        # search cycle, so it understates true per-probe cost and is
+        # excluded. Healthy nominal is ~52-59s/probe -> a K=240 batch
+        # costs ~3.5-4h. 5h keeps ~1.25x headroom over that range --
+        # comparable to the headroom the prior 2h/~98min pairing held --
+        # while still surfacing genuinely stuck runs well inside the 24h
+        # daily cadence.
         TimeoutStartSec = "5h";
       };
     };

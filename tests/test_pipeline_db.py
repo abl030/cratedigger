@@ -18,7 +18,7 @@ from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar, TypedDict, cast
 from unittest.mock import patch
 
 import msgspec
@@ -5665,14 +5665,14 @@ class TestPipelineDashboardMetrics(unittest.TestCase):
 
         self.db.record_unfindable_run_metrics(
             cohort_total=1301, due_backlog_at_start=900,
-            batch_limit=240, probes_attempted=240,
+            batch_limit=240, candidates_processed=240, probes_attempted=240,
             categorised_count=5, downgraded_count=1, no_change_count=210,
             probe_failed_count=24, breaker_tripped=False,
             duration_seconds=6900.0,
         )
         self.db.record_unfindable_run_metrics(
             cohort_total=1301, due_backlog_at_start=686,
-            batch_limit=240, probes_attempted=90,
+            batch_limit=240, candidates_processed=90, probes_attempted=90,
             probe_failed_count=90, breaker_tripped=True,
             duration_seconds=1800.0,
         )
@@ -13513,6 +13513,28 @@ class TestMarkImportedWithRescue(unittest.TestCase):
         self.assertEqual(retried["prior_unfindable_category"], "artist_absent")
 
 
+class _RecordUnfindableRunMetricsKwargs(TypedDict):
+    """Exact kwarg shape of ``PipelineDB.record_unfindable_run_metrics``
+    (#1112) -- lets the Rule A round-trip test build ONE typed dict, pass
+    it as ``**kwargs`` to the writer, then loop over the SAME dict for
+    every assertion (F6, review round 1) with full pyright coverage on
+    both the call and the loop."""
+
+    cohort_total: int
+    due_backlog_at_start: int
+    batch_limit: int
+    candidates_processed: int
+    probes_attempted: int
+    categorised_count: int
+    downgraded_count: int
+    no_change_count: int
+    probe_failed_count: int
+    not_due_count: int
+    request_not_found_count: int
+    breaker_tripped: bool
+    duration_seconds: float
+
+
 @requires_postgres
 class TestUnfindableDetectionPipelineDB(unittest.TestCase):
     """U13: real-PG round-trip coverage for the 4 detection writers.
@@ -13751,41 +13773,36 @@ class TestUnfindableDetectionPipelineDB(unittest.TestCase):
     def test_record_unfindable_run_metrics_round_trip_preserves_every_field(
         self,
     ) -> None:
-        """Every kwarg passed to the writer reads back via the getter."""
+        """Every kwarg passed to the writer reads back via the getter
+        (Rule A, canonical loop form -- a 15th column can't silently
+        skip assertion)."""
         db = make_db()
 
-        new_id = db.record_unfindable_run_metrics(
-            cohort_total=1301,
-            due_backlog_at_start=686,
-            batch_limit=240,
-            probes_attempted=240,
-            categorised_count=11,
-            downgraded_count=2,
-            no_change_count=190,
-            probe_failed_count=34,
-            not_due_count=1,
-            request_not_found_count=2,
-            breaker_tripped=False,
-            duration_seconds=6961.5,
-        )
+        kwargs: _RecordUnfindableRunMetricsKwargs = {
+            "cohort_total": 1301,
+            "due_backlog_at_start": 686,
+            "batch_limit": 240,
+            "candidates_processed": 246,
+            "probes_attempted": 240,
+            "categorised_count": 11,
+            "downgraded_count": 2,
+            "no_change_count": 190,
+            "probe_failed_count": 34,
+            "not_due_count": 1,
+            "request_not_found_count": 5,
+            "breaker_tripped": False,
+            "duration_seconds": 6961.5,
+        }
+        new_id = db.record_unfindable_run_metrics(**kwargs)
 
         rows = db.get_unfindable_run_metrics(limit=5)
         self.assertEqual(len(rows), 1)
         row = rows[0]
         self.assertEqual(row["id"], new_id)
         self.assertIsInstance(row["created_at"], datetime)
-        self.assertEqual(row["cohort_total"], 1301)
-        self.assertEqual(row["due_backlog_at_start"], 686)
-        self.assertEqual(row["batch_limit"], 240)
-        self.assertEqual(row["probes_attempted"], 240)
-        self.assertEqual(row["categorised_count"], 11)
-        self.assertEqual(row["downgraded_count"], 2)
-        self.assertEqual(row["no_change_count"], 190)
-        self.assertEqual(row["probe_failed_count"], 34)
-        self.assertEqual(row["not_due_count"], 1)
-        self.assertEqual(row["request_not_found_count"], 2)
-        self.assertEqual(row["breaker_tripped"], False)
-        self.assertEqual(row["duration_seconds"], 6961.5)
+        for key, value in kwargs.items():
+            self.assertEqual(
+                row[key], value, f"field {key} was dropped at the PG boundary")
 
     def test_record_unfindable_run_metrics_defaults_outcome_counts_to_zero(
         self,
@@ -13798,12 +13815,14 @@ class TestUnfindableDetectionPipelineDB(unittest.TestCase):
             cohort_total=50,
             due_backlog_at_start=50,
             batch_limit=240,
+            candidates_processed=0,
             probes_attempted=0,
             breaker_tripped=True,
             duration_seconds=3.2,
         )
 
         row = db.get_unfindable_run_metrics(limit=1)[0]
+        self.assertEqual(row["candidates_processed"], 0)
         self.assertEqual(row["probes_attempted"], 0)
         self.assertTrue(row["breaker_tripped"])
         for key in (
@@ -13818,7 +13837,8 @@ class TestUnfindableDetectionPipelineDB(unittest.TestCase):
         for probes in (10, 20, 30):
             db.record_unfindable_run_metrics(
                 cohort_total=100, due_backlog_at_start=100,
-                batch_limit=240, probes_attempted=probes,
+                batch_limit=240, candidates_processed=probes,
+                probes_attempted=probes,
                 breaker_tripped=False, duration_seconds=1.0,
             )
 
@@ -14933,6 +14953,12 @@ class TestDashboardFakeParity(unittest.TestCase):
             wanted_total=10,
         )
         db.record_peer_observations(["peer-a", "peer-b"])
+        db.record_unfindable_run_metrics(
+            cohort_total=10, due_backlog_at_start=5,
+            batch_limit=5, candidates_processed=5, probes_attempted=5,
+            breaker_tripped=False, duration_seconds=12.5,
+            categorised_count=1, no_change_count=4,
+        )
 
     @classmethod
     def _shape(cls, value: Any) -> Any:

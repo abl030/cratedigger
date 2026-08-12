@@ -7,12 +7,19 @@
 -- circuit-breaker trips, wall time) without scraping journal logs.
 -- Issue #1112 item 1.
 
+-- candidates_processed vs. probes_attempted (review round 1, F7):
+-- candidates_processed is every candidate the batch attempted (the six
+-- RESULT_* counts below partition exactly this number); probes_attempted
+-- is the subset that actually fired a Soulseek search -- it excludes
+-- not_due_count and request_not_found_count, the two outcomes decided
+-- before any probe.
 CREATE TABLE unfindable_run_metrics (
     id SERIAL PRIMARY KEY,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     cohort_total INTEGER NOT NULL,
     due_backlog_at_start INTEGER NOT NULL,
     batch_limit INTEGER NOT NULL,
+    candidates_processed INTEGER NOT NULL,
     probes_attempted INTEGER NOT NULL,
     categorised_count INTEGER NOT NULL DEFAULT 0,
     downgraded_count INTEGER NOT NULL DEFAULT 0,

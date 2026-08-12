@@ -233,7 +233,10 @@ console.log('renderUnfindableCard() shows latest-run facts, outcome breakdown, a
         cohort_total: 1301,
         due_backlog_at_start: 686,
         batch_limit: 240,
-        probes_attempted: 90,
+        // 84 candidates processed, 3 of them RESULT_REQUEST_NOT_FOUND
+        // (never fired a probe) -- 81 real probes (F7, #1112).
+        candidates_processed: 84,
+        probes_attempted: 81,
         categorised_count: 3,
         downgraded_count: 1,
         no_change_count: 0,
@@ -245,6 +248,7 @@ console.log('renderUnfindableCard() shows latest-run facts, outcome breakdown, a
         cohort_total: 1301,
         due_backlog_at_start: 900,
         batch_limit: 240,
+        candidates_processed: 240,
         probes_attempted: 240,
         categorised_count: 5,
         downgraded_count: 1,
@@ -257,13 +261,14 @@ console.log('renderUnfindableCard() shows latest-run facts, outcome breakdown, a
       current_backlog: 686,
       series: [
         {sampled_at: '2026-08-11T00:10:00+00:00', due_backlog_at_start: 900, probes_attempted: 240},
-        {sampled_at: '2026-08-12T00:10:00+00:00', due_backlog_at_start: 686, probes_attempted: 90},
+        {sampled_at: '2026-08-12T00:10:00+00:00', due_backlog_at_start: 686, probes_attempted: 81},
       ],
     },
   });
   assertContains(html, '1,301', 'cohort total rendered');
   assertContains(html, '686', 'due backlog rendered');
-  assertContains(html, '240 / 90', 'batch limit / attempted rendered for the latest run');
+  assertContains(html, '240 / 84', 'batch limit / processed rendered for the latest run');
+  assertContains(html, '>81</strong>', 'probes-attempted (real probes, excluding request_not_found) rendered for the latest run');
   assertContains(html, 'metric-bad">yes', 'breaker-tripped latest run flagged bad');
   assertContains(html, '<polyline', 'backlog trend line rendered with >= 2 samples');
   assertContains(html, 'Due backlog per run', 'chart head label rendered');

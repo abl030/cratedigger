@@ -675,8 +675,9 @@ class TestKnownBadPre1078AcquireOrder(unittest.TestCase):
 
         # No timeout patch needed: the fake's clock advances by the real
         # requested duration per sleep() call and its sleep is instant, so
-        # the unpatched production 7200s/1s-poll bound runs here in 7200
-        # fast Python loop iterations at the exact bound production uses.
+        # the unpatched production _DRAIN_TIMEOUT_SECONDS/1s-poll bound
+        # (21600s as of issue #1112) runs here in 21600 fast Python loop
+        # iterations at the exact bound production uses.
         with self.assertRaisesRegex(
             DeployHoldError,
             "timed out waiting for exact services to become stably "

@@ -30,10 +30,10 @@ class TestPipelineDashboardRouteContracts(_FakeDbWebServerCase):
     }
     DASHBOARD_UNFINDABLE_RUN_FIELDS: ClassVar = {
         "id", "created_at", "cohort_total", "due_backlog_at_start",
-        "batch_limit", "probes_attempted", "categorised_count",
-        "downgraded_count", "no_change_count", "probe_failed_count",
-        "not_due_count", "request_not_found_count", "breaker_tripped",
-        "duration_seconds",
+        "batch_limit", "candidates_processed", "probes_attempted",
+        "categorised_count", "downgraded_count", "no_change_count",
+        "probe_failed_count", "not_due_count", "request_not_found_count",
+        "breaker_tripped", "duration_seconds",
     }
     DASHBOARD_UNFINDABLE_BACKLOG_TREND_FIELDS: ClassVar = {
         "current_backlog", "latest_sample_at", "series",
@@ -246,7 +246,7 @@ class TestPipelineDashboardRouteContracts(_FakeDbWebServerCase):
         # ``datetime.now(UTC)``, not a synthetic literal.
         self.db.record_unfindable_run_metrics(
             cohort_total=1301, due_backlog_at_start=686,
-            batch_limit=240, probes_attempted=240,
+            batch_limit=240, candidates_processed=240, probes_attempted=240,
             categorised_count=5, downgraded_count=1, no_change_count=210,
             probe_failed_count=24, breaker_tripped=False,
             duration_seconds=6961.5,

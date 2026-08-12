@@ -4508,15 +4508,16 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
 
         first_id = db.record_unfindable_run_metrics(
             cohort_total=1301, due_backlog_at_start=900,
-            batch_limit=240, probes_attempted=240,
+            batch_limit=240, candidates_processed=240, probes_attempted=240,
             categorised_count=5, downgraded_count=1, no_change_count=210,
             probe_failed_count=24, breaker_tripped=False,
             duration_seconds=6900.0,
         )
         second_id = db.record_unfindable_run_metrics(
             cohort_total=1301, due_backlog_at_start=686,
-            batch_limit=240, probes_attempted=90,
-            probe_failed_count=90, breaker_tripped=True,
+            batch_limit=240, candidates_processed=93, probes_attempted=90,
+            probe_failed_count=90, not_due_count=0,
+            request_not_found_count=3, breaker_tripped=True,
             duration_seconds=1800.0,
         )
         self.assertEqual((first_id, second_id), (1, 2))
@@ -4527,8 +4528,10 @@ class TestFakePipelineDBNewStubs(unittest.TestCase):
         newest = rows[0]
         self.assertEqual(newest["id"], second_id)
         self.assertEqual(newest["due_backlog_at_start"], 686)
+        self.assertEqual(newest["candidates_processed"], 93)
         self.assertEqual(newest["probes_attempted"], 90)
         self.assertEqual(newest["probe_failed_count"], 90)
+        self.assertEqual(newest["request_not_found_count"], 3)
         self.assertTrue(newest["breaker_tripped"])
         self.assertEqual(newest["duration_seconds"], 1800.0)
         self.assertEqual(newest["categorised_count"], 0)

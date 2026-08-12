@@ -96,7 +96,16 @@ _LINK_MARKER_PREFIX = "owned-link-"
 _INHIBITOR_MARKER_PREFIX = "owned-inhibitor-"
 _INVOCATION_FILE = "ordinary-invocation"
 _INVOCATION_RE = re.compile(r"[0-9a-f]{32}")
-_DRAIN_TIMEOUT_SECONDS = 7200.0
+# Bounds the pre-hold drain of TIMER_DRIVEN_PRODUCER_UNITS (main,
+# unfindable, watchdog) -- must exceed the longest of those units'
+# TimeoutStartSec, or an acquire launched while that unit is mid-run times
+# out here with a misleading DeployHoldError instead of just waiting for
+# it to finish. cratedigger-unfindable.service is currently the long pole
+# at TimeoutStartSec="5h" (nix/module.nix, issue #1112 item 1); 21600.0
+# (6h) keeps a 1h margin above it. Resize this alongside any future change
+# to that unit's TimeoutStartSec (or a new TIMER_DRIVEN_PRODUCER_UNITS
+# member with a longer cap).
+_DRAIN_TIMEOUT_SECONDS = 21600.0
 _POLL_SECONDS = 1.0
 _STABLE_SAMPLES = 2
 # The automation queue drains while the importer/preview controlled workers
@@ -104,8 +113,9 @@ _STABLE_SAMPLES = 2
 # drain. 30 minutes matches the bound the deploy skill already uses for the
 # analogous "wait for the triggered nixos-upgrade invocation" step, and a
 # genuinely stuck queue should surface quickly rather than hold the deploy
-# for the full 7200s service-drain budget. Polling is a live pipeline-cli
-# subprocess round trip, so it uses its own, coarser cadence.
+# for the full _DRAIN_TIMEOUT_SECONDS service-drain budget. Polling is a
+# live pipeline-cli subprocess round trip, so it uses its own, coarser
+# cadence.
 _QUEUE_DRAIN_TIMEOUT_SECONDS = 1800.0
 _QUEUE_POLL_SECONDS = 5.0
 

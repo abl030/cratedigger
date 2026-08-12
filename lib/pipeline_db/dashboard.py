@@ -17,13 +17,21 @@ from lib.pipeline_db._shared import (
 
 
 class UnfindableRunMetricsRow(TypedDict):
-    """One ``unfindable_run_metrics`` row (#1112), raw column values."""
+    """One ``unfindable_run_metrics`` row (#1112), raw column values.
+
+    ``candidates_processed`` is every attempted candidate -- the six
+    ``*_count`` fields partition it exactly. ``probes_attempted`` is the
+    narrower subset that actually fired a Soulseek search: it excludes
+    ``not_due_count`` and ``request_not_found_count``, decided before any
+    probe (review round 1, F7).
+    """
 
     id: int
     created_at: datetime
     cohort_total: int
     due_backlog_at_start: int
     batch_limit: int
+    candidates_processed: int
     probes_attempted: int
     categorised_count: int
     downgraded_count: int
@@ -44,6 +52,7 @@ class UnfindableRunMetricsPresentation(TypedDict):
     cohort_total: int
     due_backlog_at_start: int
     batch_limit: int
+    candidates_processed: int
     probes_attempted: int
     categorised_count: int
     downgraded_count: int
@@ -139,6 +148,7 @@ class _DashboardMixin(_PipelineDBBase):
         cohort_total: int,
         due_backlog_at_start: int,
         batch_limit: int,
+        candidates_processed: int,
         probes_attempted: int,
         breaker_tripped: bool,
         duration_seconds: float,
@@ -163,24 +173,28 @@ class _DashboardMixin(_PipelineDBBase):
         The six ``*_count`` fields are one column per
         ``lib.unfindable_detection_service.RESULT_*`` outcome constant --
         the exact taxonomy ``categorise_due_batch`` can return for an
-        attempted candidate.
+        attempted candidate -- and partition ``candidates_processed``
+        exactly. ``probes_attempted`` is the narrower subset that
+        actually fired a Soulseek search (review round 1, F7): the
+        caller derives it as
+        ``candidates_processed - not_due_count - request_not_found_count``.
         """
         cur = self._execute("""
             INSERT INTO unfindable_run_metrics (
                 cohort_total, due_backlog_at_start, batch_limit,
-                probes_attempted, categorised_count, downgraded_count,
-                no_change_count, probe_failed_count, not_due_count,
-                request_not_found_count, breaker_tripped, duration_seconds
+                candidates_processed, probes_attempted, categorised_count,
+                downgraded_count, no_change_count, probe_failed_count,
+                not_due_count, request_not_found_count, breaker_tripped,
+                duration_seconds
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """, (
-            int(cohort_total), int(due_backlog_at_start), int(batch_limit),
-            int(probes_attempted), int(categorised_count),
-            int(downgraded_count), int(no_change_count),
-            int(probe_failed_count), int(not_due_count),
-            int(request_not_found_count), bool(breaker_tripped),
-            float(duration_seconds),
+            cohort_total, due_backlog_at_start, batch_limit,
+            candidates_processed, probes_attempted, categorised_count,
+            downgraded_count, no_change_count, probe_failed_count,
+            not_due_count, request_not_found_count, breaker_tripped,
+            duration_seconds,
         ))
         row = cur.fetchone()
         self.conn.commit()
@@ -197,9 +211,10 @@ class _DashboardMixin(_PipelineDBBase):
         JSON-safe envelope; this is the Rule A round-trip surface."""
         cur = self._execute("""
             SELECT id, created_at, cohort_total, due_backlog_at_start,
-                   batch_limit, probes_attempted, categorised_count,
-                   downgraded_count, no_change_count, probe_failed_count,
-                   not_due_count, request_not_found_count, breaker_tripped,
+                   batch_limit, candidates_processed, probes_attempted,
+                   categorised_count, downgraded_count, no_change_count,
+                   probe_failed_count, not_due_count,
+                   request_not_found_count, breaker_tripped,
                    duration_seconds
             FROM unfindable_run_metrics
             ORDER BY created_at DESC, id DESC
@@ -212,6 +227,7 @@ class _DashboardMixin(_PipelineDBBase):
                 cohort_total=int(r["cohort_total"]),
                 due_backlog_at_start=int(r["due_backlog_at_start"]),
                 batch_limit=int(r["batch_limit"]),
+                candidates_processed=int(r["candidates_processed"]),
                 probes_attempted=int(r["probes_attempted"]),
                 categorised_count=int(r["categorised_count"]),
                 downgraded_count=int(r["downgraded_count"]),
@@ -275,6 +291,7 @@ class _DashboardMixin(_PipelineDBBase):
             cohort_total=row["cohort_total"],
             due_backlog_at_start=row["due_backlog_at_start"],
             batch_limit=row["batch_limit"],
+            candidates_processed=row["candidates_processed"],
             probes_attempted=row["probes_attempted"],
             categorised_count=row["categorised_count"],
             downgraded_count=row["downgraded_count"],

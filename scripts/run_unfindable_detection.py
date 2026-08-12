@@ -28,7 +28,12 @@ so the web dashboard can show run health without scraping journal logs.
 A run that aborts before any probe (``EXIT_CONFIG_ABORT`` -- missing
 slskd config or a behind/missing schema) writes NOTHING: there is no
 cohort/backlog reading to report, and a behind schema may not even have
-the table yet.
+the table yet. The write is non-fatal (review round 1 F10): a DB error
+on the telemetry insert is logged and swallowed, never turned into a
+failed unit for a run that otherwise classified cleanly. Accepted
+residual: a SIGTERM/OOM-killed run leaves no row, indistinguishable
+here from the timer never firing -- the systemd unit's own
+failure/inactive state is the operator's signal for that case.
 
 The script is intentionally narrow: it does not import any
 cursor-mutating PipelineDB methods, plan-service module, or
@@ -99,6 +104,7 @@ class _MetricsDBProto(Protocol):
         cohort_total: int,
         due_backlog_at_start: int,
         batch_limit: int,
+        candidates_processed: int,
         probes_attempted: int,
         breaker_tripped: bool,
         duration_seconds: float,
@@ -174,7 +180,7 @@ def _log_row_outcome(r: UnfindableServiceResult) -> None:
 
 def _process_batch(
     service: UnfindableDetectionService,
-    db: PipelineDB | _MetricsDBProto,
+    db: _MetricsDBProto,
     *,
     limit: int,
     cohort_total: int,
@@ -194,7 +200,14 @@ def _process_batch(
     Writes exactly one ``unfindable_run_metrics`` row per call —
     including a breaker-tripped call — via
     ``db.record_unfindable_run_metrics``. A failed/partial run is
-    exactly the signal an operator needs to see on the dashboard.
+    exactly the signal an operator needs to see on the dashboard. The
+    write itself is non-fatal to the run (issue #1112 review F10): a DB
+    hiccup on the telemetry insert is logged and swallowed, never turned
+    into a failed unit for a run that otherwise classified cleanly.
+    Accepted residual: a run that is SIGTERM'd/OOM-killed before reaching
+    this point leaves no row at all, indistinguishable here from the
+    timer simply never firing — the systemd unit's own failure/inactive
+    state is the operator's signal for that case, not this table.
     """
     started = time.monotonic()
     batch: UnfindableBatchResult = service.categorise_due_batch(limit=int(limit))
@@ -202,20 +215,33 @@ def _process_batch(
     counts = _summarise(batch.results)
     for r in batch.results:
         _log_row_outcome(r)
-    db.record_unfindable_run_metrics(
-        cohort_total=int(cohort_total),
-        due_backlog_at_start=int(due_backlog_at_start),
-        batch_limit=int(limit),
-        probes_attempted=len(batch.results),
-        breaker_tripped=batch.breaker_tripped,
-        duration_seconds=duration_s,
-        categorised_count=counts.get(RESULT_CATEGORISED, 0),
-        downgraded_count=counts.get(RESULT_DOWNGRADED, 0),
-        no_change_count=counts.get(RESULT_NO_CHANGE, 0),
-        probe_failed_count=counts.get(RESULT_PROBE_FAILED, 0),
-        not_due_count=counts.get(RESULT_NOT_DUE, 0),
-        request_not_found_count=counts.get(RESULT_REQUEST_NOT_FOUND, 0),
+    candidates_processed = len(batch.results)
+    probes_attempted = (
+        candidates_processed
+        - counts.get(RESULT_NOT_DUE, 0)
+        - counts.get(RESULT_REQUEST_NOT_FOUND, 0)
     )
+    try:
+        db.record_unfindable_run_metrics(
+            cohort_total=cohort_total,
+            due_backlog_at_start=due_backlog_at_start,
+            batch_limit=limit,
+            candidates_processed=candidates_processed,
+            probes_attempted=probes_attempted,
+            breaker_tripped=batch.breaker_tripped,
+            duration_seconds=duration_s,
+            categorised_count=counts.get(RESULT_CATEGORISED, 0),
+            downgraded_count=counts.get(RESULT_DOWNGRADED, 0),
+            no_change_count=counts.get(RESULT_NO_CHANGE, 0),
+            probe_failed_count=counts.get(RESULT_PROBE_FAILED, 0),
+            not_due_count=counts.get(RESULT_NOT_DUE, 0),
+            request_not_found_count=counts.get(RESULT_REQUEST_NOT_FOUND, 0),
+        )
+    except Exception:
+        logger.exception(
+            "unfindable_detection: failed to record run-metrics telemetry "
+            "-- classification results above are unaffected; continuing",
+        )
     if batch.breaker_tripped:
         untouched = batch.candidates_considered - len(batch.results)
         logger.error(

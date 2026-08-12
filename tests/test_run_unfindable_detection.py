@@ -132,6 +132,7 @@ class TestProcessBatchRunMetrics(unittest.TestCase):
         self.assertEqual(row["cohort_total"], 2)
         self.assertEqual(row["due_backlog_at_start"], 2)
         self.assertEqual(row["batch_limit"], 10)
+        self.assertEqual(row["candidates_processed"], 2)
         self.assertEqual(row["probes_attempted"], 2)
         self.assertFalse(row["breaker_tripped"])
         self.assertGreaterEqual(row["duration_seconds"], 0.0)
@@ -166,10 +167,52 @@ class TestProcessBatchRunMetrics(unittest.TestCase):
         self.assertTrue(row["breaker_tripped"])
         # Circuit breaker trips after 3 consecutive submit failures —
         # fewer than all 5 candidates were attempted.
+        self.assertEqual(row["candidates_processed"], 3)
         self.assertEqual(row["probes_attempted"], 3)
         self.assertEqual(row["probe_failed_count"], 3)
         self.assertEqual(row["cohort_total"], 5)
         self.assertEqual(row["due_backlog_at_start"], 5)
+
+    def test_probes_attempted_excludes_request_not_found(self) -> None:
+        """F7 (#1112): ``candidates_processed`` counts every attempted
+        candidate; ``probes_attempted`` excludes ``RESULT_REQUEST_NOT_FOUND``
+        (and ``RESULT_NOT_DUE``, which ``categorise_due_batch``'s due-
+        filtered candidate list structurally cannot produce) -- outcomes
+        decided before any probe fires.
+
+        Simulates the TOCTOU race directly: request B is already in the
+        due-candidate list (drawn once, up front, by ``categorise_due_batch``)
+        when request A's probe callback deletes it out from under the
+        batch -- exactly what a concurrent operator/rescue action racing
+        the daily run looks like from the fake's point of view.
+        """
+        # Artist A seeded first -> lower id -> sorts first in
+        # list_unfindable_probe_candidates' NULLS-FIRST, id-ascending
+        # order, so its probe callback fires before Artist B's.
+        _seed_wanted_request(self.db, artist_name="Artist A")
+        rid_b = _seed_wanted_request(self.db, artist_name="Artist B")
+
+        def _probe(
+            _client: object, *, artist_name: str, **_kw: object,
+        ) -> ArtistProbeResult:
+            if artist_name == "Artist A":
+                del self.db._requests[rid_b]
+            return ArtistProbeResult(match_count=50, artist_observed=True)
+
+        svc = UnfindableDetectionService(self.db, self.slskd, probe_runner=_probe)
+        exit_code = _process_batch(
+            svc, self.db, limit=10,
+            cohort_total=2, due_backlog_at_start=2,
+        )
+
+        self.assertEqual(exit_code, 0)
+        row = self.db.unfindable_run_metrics[0]
+        self.assertEqual(row["candidates_processed"], 2)
+        self.assertEqual(row["not_due_count"], 0)
+        self.assertEqual(row["request_not_found_count"], 1)
+        # 2 processed - 0 not_due - 1 request_not_found = 1 real probe
+        # (Artist A's) -- Artist B's vanished row never reached slskd.
+        self.assertEqual(row["probes_attempted"], 1)
 
 
 if __name__ == "__main__":
