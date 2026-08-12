@@ -5375,8 +5375,10 @@ pkgs.testers.nixosTest {
     # together. M1: naming ``cratedigger.service`` -- a Type=oneshot that
     # can never reach active/running -- among the units
     # ``_wait_controlled_workers_active`` proves hangs for the full
-    # producer-drain timeout, inhibitor files already deleted, every rerun
-    # identical. M2: releasing the manual hold and restarting
+    # ``_DRAIN_TIMEOUT_SECONDS`` bound (2h, 7200 polls -- NOT the 6h
+    # ``_PRODUCER_DRAIN_TIMEOUT_SECONDS``, which nothing in this call ever
+    # uses), inhibitor files already deleted, every rerun identical. M2:
+    # releasing the manual hold and restarting
     # ``GATE_STOPPED_UNITS`` (which includes YouTube ingest) BEFORE
     # removing the still-present YouTube inhibitor file lets real systemd's
     # ConditionPathExists condition-skip that very restart -- ``systemctl

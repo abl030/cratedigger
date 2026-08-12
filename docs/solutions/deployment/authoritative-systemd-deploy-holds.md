@@ -200,16 +200,25 @@ shipped). An earlier shape released the hold and started+proved `GATE_STOPPED_UN
 active *before* touching the inhibitor branch: a still-present marked
 YouTube inhibitor then condition-skipped that very restart (`systemctl
 start` returns 0, the unit stays down -- not a job failure), so the wait
-polled for the full producer-drain budget and failed with both markers
-still on disk and the inhibitor file untouched -- a hang every rerun
-reproduced identically, with the hand-`rm` this module's docs exist to
-forbid as the only way out. The same shape let a marked-but-never-created
-inhibitor (the crash landed between the marker write and the inhibitor
-file's own creation) reach `_wait_controlled_workers_active` naming
-`cratedigger.service` among the units to prove active -- a wait that unit
-can never satisfy, since a oneshot never reaches `active`/`running` at all;
-that reproduced the identical hang even with no YouTube inhibitor in play.
-Removing/releasing everything the call owns before the single restart pass,
+polled for the full `_DRAIN_TIMEOUT_SECONDS` bound (2h, 7200 polls -- not
+the 6h `_PRODUCER_DRAIN_TIMEOUT_SECONDS`, which nothing on this path ever
+uses) and failed with both markers still on disk and the inhibitor file
+untouched -- a hang every rerun reproduced identically, with the hand-`rm`
+this module's docs exist to forbid as the only way out. The same shape let
+`cratedigger.service`'s own marked inhibitor reach `_wait_controlled_
+workers_active` naming it among the units to prove active -- a wait that
+unit can never satisfy, since a `Type=oneshot` never reaches
+`active`/`running` at all. The most reachable way there is not a rare
+orphan: a reboot anywhere in the wide window `prepare_controlled` spends
+between creating both inhibitors and its own later
+`_release_owned_inhibitor(MAIN_SERVICE)` -- starting the controlled
+workers, waiting on them, the gate's `resume-if-clear`, the timer-link
+asserts, and the main+YouTube drain -- leaves that inhibitor both marked
+AND actually created, which is the common case this correction round
+measured. A marked-but-never-created inhibitor (the crash landed between
+the marker write and the inhibitor file's own creation, a narrower window)
+reproduces the identical hang for the identical reason. Removing/releasing
+everything the call owns before the single restart pass,
 and excluding the oneshot from that pass's wait, closes both dead ends by
 construction -- ending at the same ordinary, unheld operation every other
 path through `abort` reaches. It never re-establishes a receipt or a phase:

@@ -140,10 +140,10 @@ _PERSISTENT_INHIBITOR_MARKER_PREFIX = "deploy-hold-owned-inhibit-"
 _INVOCATION_RE = re.compile(r"[0-9a-f]{32}")
 # Bounds every ``_drain_services`` call whose unit set includes
 # ``cratedigger-unfindable.service`` (line numbers re-verified against the
-# tree merged with #1096's correction round): ``_verify_authoritative_
-# hold`` (:1413), ``_drain_producers_then_hold`` (:1640, :1646),
-# ``recover_held``'s cold-start branch (:1741), and ``open_main_timer``
-# (:2236) -- verified individually against ``SERVICE_UNITS`` /
+# tree merged with #1096's correction round, review round 2): ``_verify_
+# authoritative_hold`` (:1413), ``_drain_producers_then_hold`` (:1640,
+# :1646), ``recover_held``'s cold-start branch (:1741), and
+# ``open_main_timer`` (:2238) -- verified individually against ``SERVICE_UNITS`` /
 # ``TIMER_DRIVEN_PRODUCER_UNITS`` / ``PRODUCER_SERVICE_UNITS``, which all
 # include ``UNFINDABLE_SERVICE``. Must exceed
 # the longest BOUNDED run among the units it drains, or an
@@ -163,9 +163,9 @@ _INVOCATION_RE = re.compile(r"[0-9a-f]{32}")
 _PRODUCER_DRAIN_TIMEOUT_SECONDS = 21600.0
 # Bounds ``_wait_controlled_workers_active`` (:1496 -- five call sites,
 # line numbers re-verified against the tree merged with #1096's
-# correction round: :1956 from ``_adopt_persistent_markers_or_refuse``,
-# :2123/:2157 from ``abort_hold``, :2201/:2210 from
-# ``prepare_controlled``) and the main+YouTube drain at :2212
+# correction round, review round 2: :1958 from ``_adopt_persistent_
+# markers_or_refuse``, :2125/:2159 from ``abort_hold``, :2203/:2212 from
+# ``prepare_controlled``) and the main+YouTube drain at :2213
 # (``prepare_controlled``, ``_drain_services(backend, (MAIN_SERVICE,
 # YOUTUBE_SERVICE))``). No unit set any of these five calls ever bounds
 # contains ``cratedigger-unfindable.service``, so it keeps the pre-#1112
@@ -173,10 +173,10 @@ _PRODUCER_DRAIN_TIMEOUT_SECONDS = 21600.0
 # to 6h (round 2, R2).
 #
 # Counted honestly after #1096's correction round added the fifth call
-# site (:1956): within a SINGLE invocation of ``abort_hold`` itself, the
-# worst case is still exactly two sequential waits (:2123 then :2157,
+# site (:1958): within a SINGLE invocation of ``abort_hold`` itself, the
+# worst case is still exactly two sequential waits (:2125 then :2159,
 # both on the receipt-owned path) -- unchanged from before #1096, and
-# ``_adopt_persistent_markers_or_refuse``'s receiptless path (:1956) is
+# ``_adopt_persistent_markers_or_refuse``'s receiptless path (:1958) is
 # mutually exclusive with that path, never both in the same call. But
 # #1096 introduced a genuinely NEW troubleshooting sequence this budget
 # did not previously have to bound: the retired-receipt-plus-unrelated-
@@ -1837,9 +1837,11 @@ def _validate_no_unowned_persistent_conflicts(
     "a reboot happened", so a control-link mask could in principle still be
     present for a wholly unrelated reason -- but there is no persistent
     marker for a control-link, so adoption owns none and deliberately never
-    inspects or touches one, surviving or not. Validating and reclaiming an
-    unowned control path remains solely ``acquire``'s job, the next time it
-    runs.
+    inspects or touches one, surviving or not. Validating an unowned control
+    path remains solely ``acquire``'s job, the next time it runs --
+    ``acquire`` itself never adopts one either: an unowned link with a
+    target already present is a hard refusal
+    (``_ensure_owned_control_mask``), never silently taken over.
 
     The ``manual`` reason is excluded from ``foreign_reasons`` only when
     ``manual_marked`` is true -- never merely because *something* here is

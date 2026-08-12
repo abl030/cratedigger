@@ -392,7 +392,7 @@ class FakeDeployHoldBackend:
             # what production actually does.
             return
         # Real systemd: ConditionPathExists/ExecCondition is evaluated on
-        # every start attempt. A gate-guarded unit's condition fails while
+        # every start attempt. A gate-guarded SERVICE's condition fails while
         # any metadata-gate hold is active (module-vm.nix's
         # metadataGateStartCheck checks the WHOLE holds directory is empty,
         # not just that no foreign reason exists); main/YouTube additionally
@@ -401,8 +401,18 @@ class FakeDeployHoldBackend:
         # exits 0, but the unit's state is untouched (#1096 correction
         # round -- this fidelity gap is what let the M1/M2 ordering bugs in
         # _adopt_persistent_markers_or_refuse and abort_hold ship green).
+        # ``ExecCondition=`` is a ``[Service]`` directive -- module-vm.nix's
+        # own ``metadataGateServiceNames`` wires it onto every gate-guarded
+        # unit EXCEPT ``cratedigger.timer`` (GATE_GUARDED_UNITS' only timer
+        # member), because a ``.timer`` unit has no ``[Service]`` section to
+        # carry it at all; a real hold cannot condition-skip a timer's own
+        # start. Excluding TIMER_UNITS here is what makes that true in the
+        # fake too (#1096 review round 2, F1) -- without it, an acquiring
+        # receipt owning only links plus a foreign hold would fail abort's
+        # timer restart in the fake while production restarts it cleanly.
         blocked = (unit in START_INHIBITORS and unit in self.inhibitor_files) or (
             unit in GATE_GUARDED_UNITS
+            and unit not in TIMER_UNITS
             and (self.manual_hold or self.other_metadata_holds)
         )
         if blocked:
