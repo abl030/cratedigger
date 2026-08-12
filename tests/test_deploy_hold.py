@@ -1335,9 +1335,15 @@ class TestGateGuardModelDerivation(unittest.TestCase):
     strings they replace. Pinning the bare names (not calling _units_line
     again from the test with test-chosen arguments) is what would catch a
     future call-site mis-wire (e.g. building the guarded line from
-    GATE_RESUME_UNITS): that composition now happens exactly once, at
+    GATE_RESUME_UNITS): that one composition now happens exactly once, at
     import time, so there is nothing left for verify_controlled_start_contract
-    to get wrong independently of what this test already pinned.
+    to get wrong about those two literals independently of what this test
+    already pinned. That scope is narrow, not the whole method: the
+    condition-path presence counts, the ExecCondition path regex, the
+    shared-gate-path uniqueness check, the controlled-worker
+    inhibitor-absence check, and the splitlines().count() == 1 comparison
+    itself have no unit coverage here -- only `nix build
+    .#checks.x86_64-linux.moduleVm` and a live acquire exercise those.
     """
 
     def test_guarded_units_includes_the_main_timer_and_service(self) -> None:
@@ -1367,29 +1373,44 @@ class TestGateGuardModelDerivation(unittest.TestCase):
 class TestFakeGateHoldModelsTheRealGuardedSet(unittest.TestCase):
     """#1100 item 1, closed against the real fault: FakeDeployHoldBackend's
     ``metadata_gate("hold manual")`` must stop every ``GATE_GUARDED_UNITS``
-    member, including ``cratedigger.timer``.
+    member the existing acquire/recover/prepare_controlled suite does not
+    already prove on its own.
 
-    Driving this through ``acquire_hold``/``recover_held``/``prepare_controlled``
-    cannot prove it: every current production call path masks and stops the
-    timers before ever taking the gate hold, so ``cratedigger.timer`` is
-    never "active" at the moment "hold manual" fires through any real call
-    chain -- a planted mutant confirmed a hardcoded pre-#1100
-    ``(MAIN_SERVICE, *GATE_STOPPED_UNITS)`` iterated set (omitting the timer)
-    survives every one of those tests unchanged. Driving the fake's own
-    method directly, with the timer forced active first, is what makes the
-    omission observable and kills that mutant.
+    The four always-on daemons (web, preview, importer, YouTube) default to
+    active in this fake (``_ALWAYS_ON_DAEMONS`` -- the real world every
+    acquire meets), so dropping any of them from the guarded loop is already
+    self-caught: they would stay active past "hold manual," and the
+    post-hold ``SERVICE_UNITS`` drain that follows in every existing
+    acquire/recover test would then time out waiting for them, failing that
+    test on its own. ``cratedigger.timer`` and ``cratedigger.service`` are
+    the two members that suite does NOT cover: every current production
+    call path masks and stops the timers before ever taking the gate hold,
+    and this fake defaults ``cratedigger.service`` to inactive at
+    construction, so neither is ever active at "hold manual" time through
+    any real call chain -- two independently planted mutants, each dropping
+    one of these two units from the fake's guarded loop while keeping the
+    other, each survived every one of those tests unchanged. Driving the
+    fake's own method directly, with both forced active first, is what
+    makes either omission observable.
     """
 
-    def test_hold_manual_stops_an_active_main_timer(self) -> None:
+    def test_hold_manual_stops_an_active_main_timer_and_service(self) -> None:
         backend = FakeDeployHoldBackend()
         backend.unit_states[MAIN_TIMER] = UnitState(
             load_state="loaded", active_state="active", sub_state="waiting",
+        )
+        backend.unit_states[MAIN_SERVICE] = UnitState(
+            load_state="loaded", active_state="active", sub_state="running",
         )
 
         backend.metadata_gate("hold manual")
 
         self.assertEqual(
             backend.unit_state(MAIN_TIMER),
+            UnitState(load_state="loaded", active_state="inactive", sub_state="dead"),
+        )
+        self.assertEqual(
+            backend.unit_state(MAIN_SERVICE),
             UnitState(load_state="loaded", active_state="inactive", sub_state="dead"),
         )
 

@@ -568,6 +568,7 @@ class TestRecoverHeldWaitsOutActiveTimerDrivenProducers(unittest.TestCase):
         running_ticks=st.integers(min_value=2, max_value=4),
     )
     @example(release_phase=1, producer=UNFINDABLE_SERVICE, running_ticks=3)
+    # running_ticks=0: kept as a phase-3 non-wait coverage pin for assert_held_invariants.
     @example(release_phase=3, producer=WATCHDOG_SERVICE, running_ticks=0)
     def test_recover_held_else_branch_waits_out_an_active_producer(
         self,
