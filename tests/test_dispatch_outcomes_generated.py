@@ -54,6 +54,7 @@ Full usage guide: docs/generated-testing.md.
 import configparser
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -688,8 +689,15 @@ def _run_have_analysis_abort(
     search_override: str | None,
     username: str | None,
     cooldown_verdict: bool,
+    attach_import_job: bool = True,
 ) -> FakePipelineDB:
-    """Drive the real current-evidence gate through its terminal DB bundle."""
+    """Drive the real current-evidence gate through its terminal DB bundle.
+
+    ``attach_import_job=False`` is the queue-less production shape (no
+    ``candidate_import_job_id``), which makes ``_record_have_analysis_error``
+    write directly and return a row id instead of a terminal bundle. It is the
+    Q1 world for this harness's own bundle guard below.
+    """
 
     from lib.dispatch import dispatch_import_core
     from lib.import_evidence import (
@@ -830,7 +838,7 @@ def _run_have_analysis_abort(
                     processing_dir=processing_dir,
                 ),
                 requeue_on_failure=mode == "auto",
-                candidate_import_job_id=job.id,
+                candidate_import_job_id=job.id if attach_import_job else None,
                 prevalidated_candidate_result=candidate_result,
                 quality_gate_fn=noop_quality_gate,
                 current_evidence_loader=(
@@ -1682,7 +1690,14 @@ class TestGeneratedArchivalQuarantineIsolation(unittest.TestCase):
 # ===========================================================================
 
 class TestInvariantCheckersTripOnViolations(unittest.TestCase):
-    """Known-bad self-tests: prove the harness detects what it claims to."""
+    """Known-bad self-tests: prove the harness detects what it claims to.
+
+    Per-clause proof (#1094): every ``raise AssertionError`` above owns a
+    world here that makes THAT clause's condition true while every earlier
+    clause in the same function passes, and asserts that clause's own
+    message. A bare ``assertRaises`` would let a short-circuiting checker
+    claim a clause it never evaluated.
+    """
 
     def _ambiguous_world(self) -> DispatchWorld:
         return DispatchWorld(
@@ -1702,6 +1717,108 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         runtime.start()
         self.addCleanup(runtime.stop)
         return beets
+
+    def _planted_terminal_world(
+        self,
+        *,
+        automation: bool = True,
+        job_status: str = "failed",
+        request_status: str = "wanted",
+        owner_attached: bool = False,
+        active_download_state: dict[str, object] | None = None,
+        job_message: str | None = "generated terminal message",
+        job_error: str | None = "generated terminal error",
+    ) -> FakePipelineDB:
+        """One finalized world, planted directly, violating one clause.
+
+        Real dispatch cannot build most of these — the terminal command
+        refuses them (see the module docstring's per-clause notes) — which
+        is exactly why the Q1 worlds are planted rather than dispatched.
+        """
+        from lib.import_queue import IMPORT_JOB_FORCE
+
+        state = {
+            "files": [],
+            "filetype": "mp3",
+            "enqueued_at": "2026-07-29T00:00:00+00:00",
+            "current_path": "/processing/albums/request-42",
+        }
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, status="wanted", mb_release_id="mbid-generated"))
+        if automation:
+            job = handoff_automation_owner(
+                db,
+                42,
+                state=state,
+                canonical_path="/processing/albums/request-42",
+            )
+        else:
+            job = db.enqueue_import_job(
+                IMPORT_JOB_FORCE,
+                request_id=42,
+                payload={
+                    "download_log_id": 1,
+                    "failed_path": "/processing/albums/wrong_matches/album",
+                },
+            )
+        assert job.id == _GENERATED_JOB_ID
+        row = next(r for r in db._import_jobs if r["id"] == job.id)
+        row["status"] = job_status
+        row["message"] = job_message
+        row["error"] = job_error
+        request = db.request(42)
+        request["status"] = request_status
+        request["active_automation_import_job_id"] = (
+            job.id if owner_attached else None
+        )
+        request["active_download_state"] = active_download_state
+        return db
+
+    def _routing_db(
+        self,
+        *,
+        status: str,
+        log_outcome: str,
+        **row_overrides: object,
+    ) -> FakePipelineDB:
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(
+            id=42, status=status, **row_overrides))
+        db.log_download(request_id=42, outcome=log_outcome)
+        return db
+
+    def _routing_world(
+        self, decision: str, *, requeue_on_failure: bool = True,
+    ) -> DispatchWorld:
+        return DispatchWorld(
+            mode="decision", decision=decision, new_min_bitrate=245,
+            prev_min_bitrate=None, spectral_grade="genuine",
+            spectral_bitrate=None, was_converted=False,
+            requeue_on_failure=requeue_on_failure, source_username="user1")
+
+    def test_rejection_writer_harness_refuses_an_unknown_writer(self):
+        """Adding a writer name without a branch fails loudly, not silently."""
+        with self.assertRaisesRegex(
+            AssertionError, r"^unknown rejection writer 'phantom_writer'$",
+        ):
+            _run_rejection_writer(
+                writer="phantom_writer", distance=None, scenario=None)
+
+    def test_have_analysis_harness_requires_a_terminal_bundle(self):
+        """The queue-less shape produces no bundle; the harness says so."""
+        with self.assertRaisesRegex(
+            AssertionError,
+            r"^HAVE-analysis abort did not build a terminal outcome$",
+        ):
+            _run_have_analysis_abort(
+                mode="force",
+                raw_error=_HAVE_ANALYSIS_FAILURES[0],
+                search_override=None,
+                username="user1",
+                cooldown_verdict=False,
+                attach_import_job=False,
+            )
 
     def test_never_parked_checker_trips_on_parked_recovery_required_job(self):
         """The removed policy IS the planted bug now.
@@ -1729,7 +1846,7 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
                 self._ambiguous_world(), db, outcome["result"])
 
     def test_never_parked_checker_trips_on_retained_processing_owner(self):
-        """An owner pointer left attached is a request nothing selects again."""
+        """An unterminalized dispatch leaves the real handoff world behind."""
         db = FakePipelineDB()
         db.seed_request(make_request_row(
             id=42, status="wanted", mb_release_id="mbid-generated"))
@@ -1746,10 +1863,160 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         )
         # Planted mutant: dispatch returned without terminalizing, so the real
         # handoff writer's ``processing`` + owner pointer are still in place.
+        # The QUEUE clause is the one that fires here — ``queued`` is an
+        # active status — so this world proves that clause, not the owner or
+        # ``processing`` clauses below.
         self.assertEqual(job.id, _GENERATED_JOB_ID)
         self.assertEqual(db.request(42)["status"], "processing")
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+            AssertionError,
+            r"automation_import job 1 rested in non-terminal status 'queued'",
+        ):
             assert_request_never_parked(db)
+
+    def test_never_parked_checker_names_every_clause_it_trips_on(self):
+        """Per-clause Q1: one planted world per raise site, own message.
+
+        Three of these are fail-closed legislation rather than worlds a
+        production mutant can still reach (#1094 Q2): nothing deletes an
+        ``import_jobs`` row, the automation terminal command refuses any
+        request edge outside ``wanted``/``imported``, and ``downloading ->
+        unsearchable`` is not in ``transitions.VALID_TRANSITIONS`` (a
+        planted force-reject transition to ``unsearchable`` raises
+        ``RequestTransitionConflict`` instead of landing). They stay so a
+        future writer that bypasses those boundaries fails loudly.
+        """
+        state = {
+            "files": [],
+            "filetype": "mp3",
+            "enqueued_at": "2026-07-29T00:00:00+00:00",
+            "current_path": "/processing/albums/request-42",
+        }
+        no_job = FakePipelineDB()
+        no_job.seed_request(make_request_row(id=42, status="wanted"))
+        cases = [
+            (
+                "no import job row",
+                no_job,
+                r"^dispatch finalized with no import job row to read$",
+            ),
+            (
+                "owner pointer still attached",
+                self._planted_terminal_world(owner_attached=True),
+                (
+                    r"terminal dispatch left active_automation_import_job_id=1 "
+                    r"attached"
+                ),
+            ),
+            (
+                "request left processing behind an inactive job",
+                self._planted_terminal_world(request_status="processing"),
+                (
+                    r"terminal dispatch left the request in 'processing' behind "
+                    r"an inactive job"
+                ),
+            ),
+            (
+                "automation landed off the runnable set",
+                self._planted_terminal_world(request_status="unsearchable"),
+                r"automation terminal left status='unsearchable', want one of "
+                + re.escape("['imported', 'wanted']"),
+            ),
+            (
+                "automation kept its owned download state",
+                self._planted_terminal_world(active_download_state=state),
+                r"^automation terminal left owned download state attached$",
+            ),
+            (
+                "caller-retained landed off the operator's status",
+                self._planted_terminal_world(
+                    automation=False, request_status="unsearchable"),
+                (
+                    r"caller-retained terminal left status='unsearchable', want "
+                    r"the operator's 'downloading'"
+                ),
+            ),
+        ]
+        for clause, db, pattern in cases:
+            with self.subTest(clause=clause), self.assertRaisesRegex(
+                AssertionError, pattern,
+            ):
+                assert_request_never_parked(db)
+
+    def test_operator_visible_checker_names_every_clause_it_trips_on(self):
+        """Per-clause Q1 for the bundle-less and audit-count clauses.
+
+        The "no readable message or error" clause is fail-closed
+        legislation: ``non_automation_failure_terminal_outcome`` raises
+        ``non-automation failure requires a diagnostic`` before an empty
+        one can be persisted (#1094 Q2), so only a writer that bypasses
+        that builder could produce the world it names.
+        """
+        failure = DispatchOutcome(success=False, message="generated failure")
+        no_job = FakePipelineDB()
+        no_job.seed_request(make_request_row(id=42, status="wanted"))
+
+        with self.subTest(clause="no import job row"), self.assertRaisesRegex(
+                AssertionError,
+                r"^dispatch finalized with no import job row to read$",
+            ):
+            assert_outcome_is_operator_visible(no_job, failure)
+
+        with self.subTest(clause="bundle-less force job is not failed"):
+            db = self._planted_terminal_world(
+                automation=False, job_status="completed")
+            with self.assertRaisesRegex(
+                AssertionError,
+                r"bundle-less caller-retained outcome left job "
+                r"status='completed', want 'failed'",
+            ):
+                assert_outcome_is_operator_visible(db, failure)
+
+        with self.subTest(clause="bundle-less force failure says nothing"):
+            db = self._planted_terminal_world(
+                automation=False, job_message=None, job_error=None)
+            with self.assertRaisesRegex(
+                AssertionError,
+                r"bundle-less caller-retained failure recorded no readable "
+                r"message or error",
+            ):
+                assert_outcome_is_operator_visible(db, failure)
+
+        with self.subTest(clause="two audit rows for one outcome"):
+            db = self._planted_terminal_world()
+            db.log_download(request_id=42, outcome="rejected")
+            db.log_download(request_id=42, outcome="rejected")
+            with self.assertRaisesRegex(
+                AssertionError, r"one dispatch wrote 2 audit rows",
+            ):
+                assert_outcome_is_operator_visible(db, failure)
+
+    def test_self_heal_checker_trips_when_ambiguity_is_recorded_as_acquired(
+        self,
+    ):
+        """A world failure recorded as an acquisition never re-searches.
+
+        Fail-closed legislation (#1094 Q2): planting the same world in
+        production — ``_self_heal_automation_world_failure`` transitioning
+        to ``imported`` — is refused by
+        ``validate_automation_terminal_authority`` ("automation
+        world-failure self-heal must fail the job, record a failed audit,
+        and return the request to wanted") before it can commit.
+        """
+        from scripts.importer import _WORLD_FAILURE_AUDIT_PREFIX
+
+        db = self._planted_terminal_world(request_status="imported")
+        db.log_download(
+            request_id=42,
+            outcome="rejected",
+            beets_detail=f"{_WORLD_FAILURE_AUDIT_PREFIX}: generated ambiguity",
+        )
+        with self.assertRaisesRegex(
+            AssertionError,
+            r"automation world failure left status='imported', want 'wanted'",
+        ):
+            assert_world_failure_self_heals(
+                db, DispatchOutcome(success=False, message="ambiguous"))
 
     def test_audit_checker_trips_on_silent_and_invisible_world_failures(self):
         """A self-heal the operator cannot read is still a silent stop."""
@@ -1797,36 +2064,106 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
 
     def test_log_row_checker_trips_on_empty_db(self):
         db = FakePipelineDB()
-        with self.assertRaises(AssertionError):
-            assert_download_log_row_created(db)
-
-    def test_archival_checker_trips_on_wrong_match_cleanup(self):
         with self.assertRaisesRegex(
             AssertionError,
-            "reached Wrong Matches cleanup",
+            r"^expected >= 1 download_log row\(s\), got 0$",
         ):
-            assert_archival_quarantine_isolated(
-                cleanup_call_count=1,
-                terminal_log=DownloadLogRow(
-                    request_id=835,
-                    outcome="rejected",
-                    candidate_evidence_id=7,
-                    validation_result=json.dumps({
-                        "scenario": "audio_corrupt",
-                    }),
-                ),
-                expected_candidate_evidence_id=7,
-            )
+            assert_download_log_row_created(db)
 
-    def test_verified_lossless_lock_checker_trips_on_reopened_request(self):
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=42,
-            status="wanted",
-            search_filetype_override="lossless",
-        ))
-        with self.assertRaises(AssertionError):
-            assert_verified_lossless_lock_preserves_imported(db)
+    def test_archival_checker_names_every_clause_it_trips_on(self):
+        """Per-clause Q1 for the archival-quarantine isolation checker.
+
+        The deletion-triage clause is the persisted-row witness of the same
+        fail-open the cleanup-call clause catches: the destructive reducer
+        is injected as a recorder at that boundary, so only a writer that
+        stamps triage onto an archival audit row can produce it.
+        """
+        def planted(**overrides: object) -> DownloadLogRow:
+            kwargs: dict[str, object] = {
+                "request_id": 835,
+                "outcome": "rejected",
+                "candidate_evidence_id": 7,
+                "validation_result": json.dumps({"scenario": "audio_corrupt"}),
+            }
+            kwargs.update(overrides)
+            return DownloadLogRow(**kwargs)  # pyright: ignore[reportArgumentType]
+
+        cases = [
+            (
+                "destructive reducer reached",
+                1,
+                planted(),
+                r"^archival quarantine reached Wrong Matches cleanup$",
+            ),
+            (
+                "candidate evidence dropped",
+                0,
+                planted(candidate_evidence_id=None),
+                r"^archival terminal audit lost candidate evidence$",
+            ),
+            (
+                "deletion triage attached",
+                0,
+                planted(validation_result=json.dumps({
+                    "scenario": "audio_corrupt",
+                    "wrong_match_triage": {"decision": "delete"},
+                })),
+                r"^archival terminal audit gained deletion triage$",
+            ),
+        ]
+        for clause, cleanup_calls, terminal_log, pattern in cases:
+            with self.subTest(clause=clause), self.assertRaisesRegex(
+                AssertionError, pattern,
+            ):
+                assert_archival_quarantine_isolated(
+                    cleanup_call_count=cleanup_calls,
+                    terminal_log=terminal_log,
+                    expected_candidate_evidence_id=7,
+                )
+
+    def test_verified_lossless_lock_checker_names_every_clause(self):
+        """Per-clause Q1 for the non-punitive proof lock."""
+        from tests.fakes import DenylistEntry
+
+        cases = [
+            (
+                "acquisition reopened",
+                "wanted",
+                None,
+                False,
+                (
+                    r"^verified lossless lock left status='wanted', "
+                    r"want 'imported'$"
+                ),
+            ),
+            (
+                "search policy narrowed",
+                "imported",
+                "lossless",
+                False,
+                r"^verified lossless lock narrowed search policy$",
+            ),
+            (
+                "source blamed",
+                "imported",
+                None,
+                True,
+                r"^verified lossless lock denylisted the source$",
+            ),
+        ]
+        for clause, status, override, denylisted, pattern in cases:
+            with self.subTest(clause=clause):
+                db = FakePipelineDB()
+                db.seed_request(make_request_row(
+                    id=42,
+                    status=status,
+                    search_filetype_override=override,
+                ))
+                if denylisted:
+                    db.denylist.append(
+                        DenylistEntry(42, "user1", "planted mutant"))
+                with self.assertRaisesRegex(AssertionError, pattern):
+                    assert_verified_lossless_lock_preserves_imported(db)
 
     def test_log_row_checker_trips_on_blank_outcome(self):
         db = FakePipelineDB()
@@ -1834,24 +2171,118 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         # Bypass log_download's outcome-taxonomy check to plant a row a
         # real writer could never produce — proves the checker itself
         # (not just the CHECK constraint mirror) catches an empty outcome.
+        # Fail-closed legislation (#1094 Q2): a production writer that
+        # emits outcome='' raises download_log_outcome_check instead, and
+        # the request self-heals; the clause guards a writer that ever
+        # reaches the row without going through log_download.
         db.download_logs.append(DownloadLogRow(request_id=42, outcome=None))
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+            AssertionError, r"^download_log row has empty/None outcome:",
+        ):
             assert_download_log_row_created(db)
 
-    def test_routing_checker_trips_when_import_status_wrong(self):
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(id=42, status="downloading"))
-        db.log_download(request_id=42, outcome="success")
-        # Planted bug: an ordinary "import" decision
-        # that never actually flipped the request to 'imported'.
-        world = DispatchWorld(
-            mode="decision", decision="import", new_min_bitrate=245,
-            prev_min_bitrate=None, spectral_grade="genuine",
-            spectral_bitrate=None, was_converted=False,
-            requeue_on_failure=True, source_username="user1")
-        outcome = DispatchOutcome(success=True, message="ok")
-        with self.assertRaises(AssertionError):
-            assert_dispatch_outcome_matches_routing(world, db, outcome)
+    def test_routing_checker_names_every_clause_it_trips_on(self):
+        """Per-clause Q1 for the routing oracle's eight mismatch clauses."""
+        from tests.fakes import DenylistEntry
+
+        denylisted = self._routing_db(status="imported", log_outcome="success")
+        denylisted.denylist.append(DenylistEntry(42, "user1", "planted"))
+        cases = [
+            (
+                "mark_done logged as a rejection",
+                self._routing_db(status="imported", log_outcome="rejected"),
+                self._routing_world("import"),
+                DispatchOutcome(success=True, message="ok"),
+                (
+                    r"decision='import' mark_done=True but logged "
+                    r"outcome='rejected', want 'success'"
+                ),
+            ),
+            (
+                "mark_done reported failure",
+                self._routing_db(status="imported", log_outcome="success"),
+                self._routing_world("import"),
+                DispatchOutcome(success=False, message="ok"),
+                r"decision='import' mark_done=True but result.success=False",
+            ),
+            (
+                "mark_done never flipped the request",
+                self._routing_db(status="downloading", log_outcome="success"),
+                self._routing_world("import"),
+                DispatchOutcome(success=True, message="ok"),
+                (
+                    r"decision='import' mark_done=True left status='downloading', "
+                    r"want 'imported'"
+                ),
+            ),
+            (
+                "mark_done narrowed the search policy",
+                self._routing_db(
+                    status="imported",
+                    log_outcome="success",
+                    search_filetype_override="lossless",
+                ),
+                self._routing_world("import"),
+                DispatchOutcome(success=True, message="ok"),
+                (
+                    r"decision='import' mark_done=True left override='lossless', "
+                    r"want None"
+                ),
+            ),
+            (
+                "mark_done denylisted the source",
+                denylisted,
+                self._routing_world("import"),
+                DispatchOutcome(success=True, message="ok"),
+                r"decision='import' mark_done=True denylist=True, want False",
+            ),
+            (
+                "rejection logged as a success",
+                self._routing_db(status="wanted", log_outcome="success"),
+                self._routing_world("downgrade"),
+                DispatchOutcome(success=False, message="rejected"),
+                (
+                    r"decision='downgrade' record_rejection=True but logged "
+                    r"outcome='success', want 'rejected'"
+                ),
+            ),
+            (
+                "rejection reported success",
+                self._routing_db(status="wanted", log_outcome="rejected"),
+                self._routing_world("downgrade"),
+                DispatchOutcome(success=True, message="rejected"),
+                r"decision='downgrade' reject reported success=True",
+            ),
+            (
+                "rejection ignored the caller's requeue flag",
+                self._routing_db(status="downloading", log_outcome="rejected"),
+                self._routing_world("downgrade"),
+                DispatchOutcome(success=False, message="rejected"),
+                (
+                    r"decision='downgrade' requeue_on_failure=True left "
+                    r"status='downloading', want 'wanted'"
+                ),
+            ),
+        ]
+        for clause, db, world, outcome, pattern in cases:
+            with self.subTest(clause=clause), self.assertRaisesRegex(
+                AssertionError, pattern,
+            ):
+                assert_dispatch_outcome_matches_routing(world, db, outcome)
+
+    def test_routing_checker_has_no_unroutable_decision_world(self):
+        """The unroutable-decision clause is fail-closed legislation.
+
+        ``dispatch_action``'s final ``else`` returns ``record_rejection``,
+        so no decision string — known, generated, or unknown — can reach
+        the checker's last ``raise``. It stays so a future
+        ``DispatchAction`` that sets neither flag fails loudly instead of
+        passing every routing assertion silently.
+        """
+        for decision in (*_KNOWN_DECISIONS, "a decision nobody wrote yet"):
+            with self.subTest(decision=decision):
+                action = dispatch_action(decision)
+                self.assertTrue(action.mark_done or action.record_rejection)
 
     def test_routing_checker_trips_on_ambiguity_reporting_success(self):
         db = FakePipelineDB()
@@ -1867,7 +2298,11 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
     def test_preimport_caller_flag_checker_trips_when_flag_ignored(self):
         db = FakePipelineDB()
         db.seed_request(make_request_row(id=42, status="wanted"))
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+            AssertionError,
+            r"^preimport-fact reject 'audio_corrupt' left status='wanted', "
+            r"want 'downloading' for requeue_on_failure=False$",
+        ):
             assert_preimport_fact_honors_caller_flag(
                 "audio_corrupt", False, db)
 
@@ -1876,34 +2311,92 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         # Planted bug: status is 'wanted' even though requeue_on_failure
         # was False — the caller's flag was ignored.
         db.seed_request(make_request_row(id=42, status="wanted"))
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+            AssertionError,
+            r"^quality-side reject 'downgrade' requeue_on_failure=False left "
+            r"status='wanted', want 'downloading'$",
+        ):
             assert_quality_side_reject_honors_caller_flag(
                 "downgrade", False, db)
 
-    def test_have_analysis_checker_trips_on_quality_consequences(self):
+    def _have_analysis_db(self, **row_overrides: object) -> FakePipelineDB:
+        """A HAVE-analysis abort world that satisfies every clause."""
+        row: dict[str, object] = {
+            "id": 42,
+            "status": "wanted",
+            "validation_attempts": 1,
+            "next_retry_after": "planted-backoff",
+            "search_filetype_override": None,
+        }
+        row.update(row_overrides)
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(**row))
+        db.log_download(request_id=42, outcome="have_analysis_error")
+        return db
+
+    def test_have_analysis_checker_names_every_clause_it_trips_on(self):
+        """Per-clause Q1 for the non-quality abort checker."""
         from tests.fakes import DenylistEntry
 
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=42,
-            status="wanted",
-            validation_attempts=1,
-            next_retry_after="planted-backoff",
-            search_filetype_override="lossless",
-        ))
-        db.log_download(request_id=42, outcome="have_analysis_error")
-        db.denylist.append(DenylistEntry(42, "bad-user", "planted mutant"))
-        with self.assertRaises(AssertionError):
-            assert_have_analysis_abort_is_non_quality(
-                db,
-                mode="auto",
-                expected_search_override=None,
-            )
+        denylisted = self._have_analysis_db()
+        denylisted.denylist.append(
+            DenylistEntry(42, "bad-user", "planted mutant"))
+        wrong_outcome = self._have_analysis_db()
+        wrong_outcome.log_download(request_id=42, outcome="rejected")
+        cases = [
+            (
+                "caller lifecycle moved",
+                self._have_analysis_db(status="unsearchable"),
+                (
+                    r"^HAVE-analysis abort left status='unsearchable', "
+                    r"want 'wanted' for auto$"
+                ),
+            ),
+            (
+                "search policy narrowed",
+                self._have_analysis_db(search_filetype_override="lossless"),
+                (
+                    r"HAVE-analysis abort changed search_filetype_override from "
+                    r"None to 'lossless'"
+                ),
+            ),
+            (
+                "source blamed",
+                denylisted,
+                r"^HAVE-analysis abort wrote quality denylist entries:",
+            ),
+            (
+                "audit taxonomy lost",
+                wrong_outcome,
+                (
+                    r"^HAVE-analysis abort did not persist "
+                    r"outcome='have_analysis_error'$"
+                ),
+            ),
+            (
+                "retry bookkeeping dropped",
+                self._have_analysis_db(
+                    validation_attempts=0, next_retry_after=None),
+                r"^HAVE-analysis abort applied the wrong retry bookkeeping$",
+            ),
+        ]
+        for clause, db, pattern in cases:
+            with self.subTest(clause=clause), self.assertRaisesRegex(
+                AssertionError, pattern,
+            ):
+                assert_have_analysis_abort_is_non_quality(
+                    db,
+                    mode="auto",
+                    expected_search_override=None,
+                )
 
     def test_have_analysis_cooldown_checker_trips_on_double_evaluation(self):
         db = FakePipelineDB()
         db.cooldowns_applied.extend(("peer", "peer"))
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+            AssertionError,
+            r"^HAVE-analysis cooldown evaluations drifted: ",
+        ):
             assert_have_analysis_abort_cooldown_policy(
                 db,
                 username="peer",
@@ -1913,7 +2406,10 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
     def test_have_analysis_cooldown_checker_trips_on_missing_write(self):
         db = FakePipelineDB()
         db.cooldowns_applied.append("peer")
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+            AssertionError,
+            r"^HAVE-analysis cooldown persistence drifted: ",
+        ):
             assert_have_analysis_abort_cooldown_policy(
                 db,
                 username="peer",
@@ -1927,7 +2423,10 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             datetime.now(UTC) + timedelta(days=1),
             "planted mutant",
         )
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+            AssertionError,
+            r"^HAVE-analysis cooldown persistence drifted: ",
+        ):
             assert_have_analysis_abort_cooldown_policy(
                 db,
                 username=None,
@@ -1942,26 +2441,51 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             datetime.now(UTC) + timedelta(days=1),
             "planted mutant",
         )
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+            AssertionError,
+            r"^HAVE-analysis cooldown persistence drifted: ",
+        ):
             assert_have_analysis_abort_cooldown_policy(
                 db,
                 username="peer",
                 cooldown_verdict=False,
             )
 
-    def test_operator_retained_checker_trips_when_stop_is_cleared(self):
-        db = FakePipelineDB()
-        db.seed_request(make_request_row(
-            id=42,
-            status="wanted",
-            search_filetype_override="lossless",
-        ))
-        with self.assertRaises(AssertionError):
-            assert_operator_retained_lifecycle(
-                db,
-                initial_status="unsearchable",
-                expected_override="lossless",
-            )
+    def test_operator_retained_checker_names_every_clause(self):
+        """Per-clause Q1 for the retained force-import lifecycle checker."""
+        cleared = FakePipelineDB()
+        cleared.seed_request(make_request_row(
+            id=42, status="wanted", search_filetype_override="lossless"))
+        unrecorded = FakePipelineDB()
+        unrecorded.seed_request(make_request_row(
+            id=42, status="unsearchable", search_filetype_override=None))
+        cases = [
+            (
+                "operator search stop cleared",
+                cleared,
+                (
+                    r"^retained force import changed lifecycle from "
+                    r"'unsearchable' to 'wanted'$"
+                ),
+            ),
+            (
+                "canonical search policy not recorded",
+                unrecorded,
+                (
+                    r"^retained force import failed to record canonical search "
+                    r"policy$"
+                ),
+            ),
+        ]
+        for clause, db, pattern in cases:
+            with self.subTest(clause=clause), self.assertRaisesRegex(
+                AssertionError, pattern,
+            ):
+                assert_operator_retained_lifecycle(
+                    db,
+                    initial_status="unsearchable",
+                    expected_override="lossless",
+                )
 
     def test_distance_checker_trips_when_null_gets_fabricated_as_zero(self):
         db = FakePipelineDB()
@@ -1970,7 +2494,10 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         # but the writer fabricated a 0.0 "perfect match" — exactly the
         # #550 defect #4 regression this property exists to catch.
         db.log_download(request_id=42, outcome="rejected", beets_distance=0.0)
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+            AssertionError,
+            r"^expected persisted beets_distance=None, got 0\.0",
+        ):
             assert_beets_distance_round_trips(db, None)
 
     def test_distance_checker_trips_when_measured_value_gets_nulled(self):
@@ -1979,25 +2506,63 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
         # Planted bug: a genuinely measured distance (0.07) was dropped
         # to NULL instead of being persisted as-is.
         db.log_download(request_id=42, outcome="rejected", beets_distance=None)
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+            AssertionError,
+            r"^expected persisted beets_distance=0\.07, got None",
+        ):
             assert_beets_distance_round_trips(db, 0.07)
 
-    def test_validation_projection_checker_trips_on_dual_sink_drift(self):
+    def test_validation_projection_checker_names_every_clause(self):
+        """Per-clause Q1 for the envelope/query-column projection checker."""
         from lib.quality import ValidationResult
 
-        db = FakePipelineDB()
-        db.download_logs.append(DownloadLogRow(
-            request_id=42,
-            outcome="rejected",
-            beets_distance=0.99,
-            beets_scenario="wrong_scenario",
-            validation_result=ValidationResult(
-                distance=0.07,
-                scenario="high_distance",
-            ).to_json(),
-        ))
-        with self.assertRaises(AssertionError):
-            assert_validation_projection_matches_payload(db)
+        envelope = ValidationResult(
+            distance=0.07, scenario="high_distance").to_json()
+        cases = [
+            (
+                "no object envelope persisted",
+                DownloadLogRow(
+                    request_id=42,
+                    outcome="rejected",
+                    validation_result=None,
+                ),
+                r"^rejection writer did not persist an object envelope$",
+            ),
+            (
+                "distance drifted from its envelope",
+                DownloadLogRow(
+                    request_id=42,
+                    outcome="rejected",
+                    beets_distance=0.99,
+                    beets_scenario="high_distance",
+                    validation_result=envelope,
+                ),
+                (
+                    r"^validation distance=0\.07 drifted from "
+                    r"beets_distance=0\.99$"
+                ),
+            ),
+            (
+                "scenario drifted from its envelope",
+                DownloadLogRow(
+                    request_id=42,
+                    outcome="rejected",
+                    beets_distance=0.07,
+                    beets_scenario="wrong_scenario",
+                    validation_result=envelope,
+                ),
+                (
+                    r"^validation scenario='high_distance' drifted from "
+                    r"beets_scenario='wrong_scenario'$"
+                ),
+            ),
+        ]
+        for clause, row, pattern in cases:
+            with self.subTest(clause=clause):
+                db = FakePipelineDB()
+                db.download_logs.append(row)
+                with self.assertRaisesRegex(AssertionError, pattern):
+                    assert_validation_projection_matches_payload(db)
 
     def test_hypothesis_harness_detects_planted_bad_router(self):
         """End-to-end RED proof: strategies + checker + Hypothesis catch a
