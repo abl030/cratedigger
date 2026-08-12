@@ -29,9 +29,12 @@ required PAIR (``.claude/rules/code-quality.md`` § Red/Green TDD):
   2. A generated property (``TestPreviewManifestPurityProperty``)
      patrolling the same composed path over varied manifests (file count,
      basenames with spaces/unicode, mp3/flac mix).
-  3. Known-bad self-tests proving both checkers trip on a planted
-     violation (the pre-fix shape: an extra file left in the canonical
-     directory / a guarded rematerialize).
+  3. Known-bad self-tests proving EVERY CLAUSE of every checker trips on
+     a planted violation of exactly that clause (the pre-fix shape: an
+     extra file left in the canonical directory / a guarded
+     rematerialize / an action file that moved or vanished), each
+     asserting its own message anchored end to end — issue #1094's
+     per-clause proof.
 
 Profiles and promotion policy: tests/_hypothesis_profiles.py and
 docs/generated-testing.md.

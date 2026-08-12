@@ -164,11 +164,13 @@ _LONG_UNICODE_TEXT = st.one_of(
 _SHORT_UNICODE_TEXT = st.text(
     alphabet=_ANY_UNICODE, max_size=12,
 )
-# ``"x" * 240 - ()`` sanitizes to 246 bytes: over the 244-byte base budget
-# the 11-byte `` [<fp>]`` suffix leaves, so the truncation branch runs and
-# the published basename lands exactly on the 255-byte cap. Its 238-byte
-# sibling lands on the same cap WITHOUT truncating — the two sides of the
-# boundary the clause legislates.
+# The two sides of the boundary the clause legislates, measured against
+# the real producer rather than asserted: ``"x" * 240`` sanitizes to a
+# 246-byte base, over the 244 bytes the 11-byte `` [<fp>]`` suffix leaves,
+# so the truncation branch RUNS (244 bytes, then ``rstrip`` trims the
+# trailing separator space, giving a 253-byte basename). ``"y" * 238``
+# sanitizes to exactly 244 and does NOT truncate, landing on the 255-byte
+# cap exactly.
 _TRUNCATING_BASE = "x" * 240
 _EXACT_LIMIT_BASE = "y" * 238
 _ONE_PAIR: list[tuple[str, str]] = [("peer0", "peer0\\Music\\01 Track.flac")]
