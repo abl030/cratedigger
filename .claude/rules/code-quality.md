@@ -256,8 +256,13 @@ The targeted entrypoint pairs deterministic and generated siblings, selects
 tests adjacent to changed production surfaces, discovers every `test_*_audit`
 module plus explicitly named ratchets, and reuses the canonical JavaScript,
 Pyright, Ruff, and Vulture phases. With no explicit selector, changed paths are
-the target source. This is development feedback; the full suite remains the
-exhaustive pre-review boundary.
+the target source. A changed shared `tests/**.py` module resolves via an
+`scripts/targeted_test_selection.py::EXACT_PATH_NEIGHBOURS` entry, one of the
+few remaining directory prefix rules, or an admitted gap in
+`SHARED_MODULES_WITHOUT_COVERAGE`; one with none of those fails the whole
+entrypoint closed (`scripts/test.sh` exit code 2) before any phase runs —
+silent under-selection there is worse than a loud refusal. This is development
+feedback; the full suite remains the exhaustive pre-review boundary.
 
 Always use `nix-shell --run` for Python (`.claude/rules/nix-shell.md`). Direct
 Nix-shell runs are ordinary development feedback; fix their failures in the

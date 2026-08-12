@@ -7,6 +7,7 @@ import sys
 import unittest
 from collections.abc import Mapping
 from pathlib import Path
+from unittest import mock
 
 import psycopg2
 import psycopg2.extras
@@ -14,9 +15,11 @@ import psycopg2.extras
 sys.path.append(os.path.dirname(__file__))
 import conftest  # noqa: F401 - starts and migrates isolated PostgreSQL
 
+import scripts.cratedigger_deploy_hold as deploy_hold_module
 from scripts.cratedigger_deploy_hold import (
     CONTROL_DIR,
     CONTROLLED_WORKER_UNITS,
+    GATE_STOPPED_UNITS,
     MAIN_SERVICE,
     MAIN_TIMER,
     METADATA_MANUAL_HOLD,
@@ -25,15 +28,24 @@ from scripts.cratedigger_deploy_hold import (
     PHASE_HELD,
     PHASE_MAIN_TIMER_OPEN,
     PHASE_PREPARED_CONTROLLED,
+    PRODUCER_SERVICE_UNITS,
     SERVICE_UNITS,
     START_INHIBITORS,
     TIMER_UNITS,
+    WATCHDOG_TIMER,
     YOUTUBE_SERVICE,
+    DeployHoldBackend,
     DeployHoldError,
     JobState,
     LifecyclePreflight,
     RealSystemdBackend,
     UnitState,
+    _assert_clean_old_lifecycle,
+    _drain_services,
+    _ensure_owned_control_mask,
+    _ensure_owned_manual_hold,
+    _wait_automation_queue_drained,
+    abort_hold,
     acquire_hold,
     complete_release,
     finish_release,
@@ -48,6 +60,47 @@ from tests.fakes.deploy_hold import FakeDeployHoldBackend
 INVOCATION = "a" * 32
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TEST_DSN = os.environ["TEST_DB_DSN"]
+
+
+def _acquire_hold_pre_1078_order(backend: DeployHoldBackend) -> None:
+    """Known-bad fixture: the exact pre-#1078 acquire order.
+
+    The gate hold -- which stops every controlled worker, including the
+    importer that is the only thing draining ``active_automation_jobs`` --
+    is taken before that queue ever gets a chance to empty. Retained only to
+    prove #1078's pins trip on it; never call this from production code.
+    """
+    backend.create_receipt()
+    for timer in TIMER_UNITS:
+        _ensure_owned_control_mask(backend, timer)
+    backend.daemon_reload()
+    backend.stop_units(TIMER_UNITS)
+    _ensure_owned_manual_hold(backend)
+    _drain_services(backend, SERVICE_UNITS)
+    _assert_clean_old_lifecycle(backend)
+    backend.write_phase(PHASE_HELD)
+
+
+def _drain_producers_then_hold_pre_must_fix_1(backend: DeployHoldBackend) -> None:
+    """Known-bad fixture: #1078's own first-cut reorder, before MUST FIX 1.
+
+    Drains ``PRODUCER_SERVICE_UNITS`` (including YouTube ingest) before
+    taking the gate hold. YouTube ingest is ``Type=simple``,
+    ``wantedBy=multi-user.target``, ``Restart=on-failure``, with no timer at
+    all -- an always-on daemon nothing before the gate hold ever asks to
+    stop -- so this hangs the full service-drain timeout and then fails with
+    the gate hold never taken: the exact deadlock shape #1078 exists to
+    remove, reproduced by the reorder's own first draft. Retained only to
+    prove MUST FIX 1's pins trip on it; never call this from production code.
+    """
+    for timer in TIMER_UNITS:
+        _ensure_owned_control_mask(backend, timer)
+    backend.daemon_reload()
+    backend.stop_units(TIMER_UNITS)
+    _drain_services(backend, PRODUCER_SERVICE_UNITS)
+    _wait_automation_queue_drained(backend)
+    _ensure_owned_manual_hold(backend)
+    _drain_services(backend, GATE_STOPPED_UNITS)
 
 
 class _PostgresLifecyclePreflightBackend(RealSystemdBackend):
@@ -418,14 +471,22 @@ class TestAcquireAuthoritativeHold(unittest.TestCase):
         self.assertFalse(backend.receipt)
         self.assertEqual(backend.events, [])
 
-    def test_dirty_old_lifecycle_stays_authoritatively_acquiring(self) -> None:
+    def test_anomaly_lifecycle_field_stays_authoritatively_acquiring(self) -> None:
+        """recovery_required_jobs/malformed_enqueued_at_rows drain nothing.
+
+        Unlike active_automation_jobs/dirty_downloading_rows, nothing
+        clears these -- so acquire must fail fast (not wait), and still
+        leave the full boundary (masks + gate hold) established, since the
+        failure comes from the final _assert_clean_old_lifecycle check, after
+        the gate hold is already taken.
+        """
         backend = FakeDeployHoldBackend(
-            lifecycle_preflight=LifecyclePreflight(1, 0, 0, 0),
+            lifecycle_preflight=LifecyclePreflight(0, 1, 0, 0),
         )
 
         with self.assertRaisesRegex(
             DeployHoldError,
-            "active_automation_jobs",
+            "recovery_required_jobs",
         ):
             acquire_hold(backend)
 
@@ -435,6 +496,202 @@ class TestAcquireAuthoritativeHold(unittest.TestCase):
         self.assertEqual(backend.control_links, {
             timer: "/dev/null" for timer in TIMER_UNITS
         })
+        self.assertEqual(backend.owned_inhibitor_units(), ())
+        self.assertEqual(backend.inhibitor_files, set())
+
+    def test_recovery_required_job_short_circuits_the_queue_wait(self) -> None:
+        """#1078 MUST FIX 6.
+
+        recovery_required_jobs is ALSO counted inside active_automation_jobs's
+        own SQL (status IN ('queued', 'running', 'recovery_required')), so a
+        stuck recovery-required job makes active_automation_jobs permanently
+        nonzero too -- the naive wait would run the full 30-minute timeout
+        and then report only the misleading aggregate ("queue" stuck, when
+        the truth is a stuck anomaly). The wait must stop the moment an
+        anomaly field is dirty and let the full, accurate field dict fail
+        immediately instead: fast, correctly diagnosed, and still maximally
+        quiesced (the gate hold is still taken before the failure).
+        """
+        backend = FakeDeployHoldBackend(
+            lifecycle_preflight=LifecyclePreflight(1, 1, 0, 0),
+        )
+
+        with self.assertRaises(DeployHoldError) as caught:
+            acquire_hold(backend)
+
+        message = str(caught.exception)
+        self.assertIn("old lifecycle is not clean", message)
+        self.assertIn("active_automation_jobs", message)
+        self.assertIn("recovery_required_jobs", message)
+        self.assertNotIn("timed out waiting", message)
+        self.assertTrue(backend.receipt)
+        self.assertEqual(backend.phase, "acquiring")
+        # The gate hold WAS taken -- maximally quiesced, not merely fast.
+        self.assertTrue(backend.manual_hold)
+        # Fast: the queue-drain wait never looped toward its own timeout.
+        self.assertLess(backend.sleep_calls, 5)
+
+    def test_acquire_times_out_waiting_for_a_queue_that_never_drains(self) -> None:
+        """active_automation_jobs is drainable -- acquire waits, bounded.
+
+        Unlike an anomaly field, this must NOT fail immediately at the final
+        lifecycle check: it is a bounded wait for the still-running importer
+        to empty the queue, and the gate hold is never taken while waiting.
+        """
+        backend = FakeDeployHoldBackend(
+            lifecycle_preflight=LifecyclePreflight(1, 0, 0, 0),
+        )
+
+        # No timeout patch needed: the fake's clock advances by the real
+        # requested duration per sleep() call and its sleep is instant, so
+        # the unpatched production 1800s/5s-poll bound (360 loop iterations)
+        # runs in this test at the exact bound production uses.
+        with self.assertRaisesRegex(
+            DeployHoldError,
+            r"timed out waiting for the automation queue to drain: "
+            r"active_automation_jobs=1 dirty_downloading_rows=0",
+        ):
+            acquire_hold(backend)
+
+        self.assertTrue(backend.receipt)
+        self.assertEqual(backend.phase, "acquiring")
+        # The whole point of the reorder: the gate hold was never taken.
+        self.assertFalse(backend.manual_hold)
+        self.assertFalse(backend.owned_manual_hold)
+        self.assertEqual(backend.control_links, {
+            timer: "/dev/null" for timer in TIMER_UNITS
+        })
+        # #1078 MUST FIX 5: the pre-hold window owns no start inhibitor at
+        # all -- nothing is waited on for YouTube pre-hold, and masking
+        # already blocks a fresh timer trigger (though not an unrelated
+        # hold's resume-if-clear) -- so a reboot here leaves no persistent
+        # /var/lib artifact to orphan.
+        self.assertEqual(backend.owned_inhibitor_units(), ())
+        self.assertEqual(backend.inhibitor_files, set())
+
+    def test_acquire_completes_once_the_automation_queue_drains(self) -> None:
+        """A job queued just before acquire arrives still lets it complete.
+
+        The importer/preview default to active in this fake (the real
+        world every acquire meets -- #1078 MUST FIX 7), which is what lets
+        the queue-drain wait's latch observe them still running.
+        """
+        backend = FakeDeployHoldBackend(
+            lifecycle_preflight=LifecyclePreflight(1, 0, 0, 0),
+            queue_drain_after_calls=1,
+        )
+
+        acquire_hold(backend)
+
+        backend.assert_default_held()
+        self.assertEqual(backend.owned_inhibitor_units(), ())
+        self.assertEqual(backend.inhibitor_files, set())
+        preflight_indices = [
+            index
+            for index, event in enumerate(backend.events)
+            if event == ("lifecycle-preflight",)
+        ]
+        # Two polls inside the queue-drain wait, one final proof afterward.
+        self.assertEqual(len(preflight_indices), 3)
+        gate_hold_index = backend.events.index(("metadata-gate", "hold manual"))
+        self.assertTrue(all(index < gate_hold_index for index in preflight_indices[:2]))
+        self.assertGreater(preflight_indices[2], gate_hold_index)
+
+    def test_acquire_catches_main_started_in_the_window_right_after_the_hold(
+        self,
+    ) -> None:
+        """#1078 BLOCKER F3.
+
+        Models an operator manually starting cratedigger.service in the
+        window right after the gate hold is taken -- nothing inhibits that
+        start pre-hold, and the hold itself only stops units that were
+        *already* active at the moment it is taken (this fake's own
+        ``metadata_gate("hold manual")``, mirroring the real gate). Without
+        re-verifying ``SERVICE_UNITS`` (not the narrower
+        ``GATE_STOPPED_UNITS``) after the hold, acquire would reach HELD with
+        main still running, right before the migration this hold gates.
+        """
+        backend = FakeDeployHoldBackend()
+        real_ensure_owned_manual_hold = deploy_hold_module._ensure_owned_manual_hold
+
+        def _ensure_then_start_main(b: FakeDeployHoldBackend) -> None:
+            real_ensure_owned_manual_hold(b)
+            state = b.unit_state(MAIN_SERVICE)
+            b.unit_states[MAIN_SERVICE] = UnitState(
+                load_state=state.load_state,
+                active_state="active",
+                sub_state="running",
+            )
+
+        with mock.patch.object(
+            deploy_hold_module,
+            "_ensure_owned_manual_hold",
+            side_effect=_ensure_then_start_main,
+        ), self.assertRaisesRegex(
+            DeployHoldError,
+            "timed out waiting for exact services to become stably inactive",
+        ):
+            acquire_hold(backend)
+
+        # The gate hold WAS taken (maximally quiesced) -- what's missing is
+        # re-proof, not the hold itself.
+        self.assertTrue(backend.manual_hold)
+        self.assertEqual(
+            (backend.unit_state(MAIN_SERVICE).active_state, backend.unit_state(MAIN_SERVICE).sub_state),
+            ("active", "running"),
+        )
+        self.assertEqual(backend.phase, "acquiring")
+
+
+class TestKnownBadPre1078AcquireOrder(unittest.TestCase):
+    """#1078: the reorder is load-bearing, not cosmetic."""
+
+    def test_pre_1078_order_deadlocks_on_a_queued_job(self) -> None:
+        backend = FakeDeployHoldBackend(
+            lifecycle_preflight=LifecyclePreflight(1, 0, 0, 0),
+            queue_drain_after_calls=1,
+        )
+
+        with self.assertRaisesRegex(DeployHoldError, "active_automation_jobs"):
+            _acquire_hold_pre_1078_order(backend)
+
+        # The identical scenario succeeds under the real, reordered acquire.
+        reordered = FakeDeployHoldBackend(
+            lifecycle_preflight=LifecyclePreflight(1, 0, 0, 0),
+            queue_drain_after_calls=1,
+        )
+        acquire_hold(reordered)
+        reordered.assert_default_held()
+
+    def test_pre_must_fix_1_hangs_draining_the_always_on_youtube_daemon(
+        self,
+    ) -> None:
+        """MUST FIX 1 (CRITICAL): the fake defaults YouTube ingest to
+        active/running (#1078 MUST FIX 7 -- the real world every acquire
+        meets), and nothing before the gate hold ever asks it to stop.
+        """
+        backend = FakeDeployHoldBackend()
+        backend.create_receipt()
+
+        # No timeout patch needed: the fake's clock advances by the real
+        # requested duration per sleep() call and its sleep is instant, so
+        # the unpatched production 7200s/1s-poll bound runs here in 7200
+        # fast Python loop iterations at the exact bound production uses.
+        with self.assertRaisesRegex(
+            DeployHoldError,
+            "timed out waiting for exact services to become stably "
+            "inactive and job-free",
+        ):
+            _drain_producers_then_hold_pre_must_fix_1(backend)
+
+        # The deadlock #1078 exists to remove, reproduced by draining
+        # YouTube pre-hold: the gate hold was never taken.
+        self.assertFalse(backend.manual_hold)
+
+        # The identical scenario succeeds under the real, fixed grouping.
+        fixed = FakeDeployHoldBackend()
+        acquire_hold(fixed)
+        fixed.assert_default_held()
 
 
 class TestHeldVerification(unittest.TestCase):
@@ -627,6 +884,31 @@ class TestStagedRelease(unittest.TestCase):
             {timer: "/dev/null" for timer in TIMER_UNITS},
         )
 
+    def test_recovery_from_complete_pending_preserves_the_captured_successor_on_failure(
+        self,
+    ) -> None:
+        """A recover-held that fails mid-branch must not destroy state
+        before the boundary it belongs to is re-proven -- forward hygiene,
+        not a live escape hatch: complete_release is refused anyway here
+        (the manual hold is already re-owned by the time _clear_owned_inhibitors
+        fails), so nothing downstream reads the preserved marker today.
+        """
+        prepare_controlled(self.backend)
+        open_main_timer(self.backend)
+        finish_release(self.backend, INVOCATION)
+        self.assertEqual(self.backend.ordinary_invocation, INVOCATION)
+        # _clear_owned_inhibitors is the LAST step of the else branch, so an
+        # unowned inhibitor here fails recovery only after
+        # _ensure_owned_manual_hold and the SERVICE_UNITS drain already ran.
+        self.backend.inhibitor_files.add(MAIN_SERVICE)
+
+        with self.assertRaisesRegex(DeployHoldError, "unowned producer inhibitor"):
+            recover_held(self.backend)
+
+        self.assertEqual(self.backend.phase, PHASE_COMPLETE_PENDING)
+        self.assertEqual(self.backend.ordinary_invocation, INVOCATION)
+        self.assertEqual(self.backend.read_ordinary_invocation(), INVOCATION)
+
     def test_invocation_id_must_be_exact_systemd_shape(self) -> None:
         prepare_controlled(self.backend)
         open_main_timer(self.backend)
@@ -639,13 +921,20 @@ class TestStagedRelease(unittest.TestCase):
 class TestRecoveryReprovesAnUnprovenAcquisition(unittest.TestCase):
     """A receipt reaches HELD only through the acquire preconditions."""
 
-    def test_recovery_from_acquiring_refuses_a_dirty_old_lifecycle(self) -> None:
+    def test_recovery_from_acquiring_refuses_an_anomaly_lifecycle_field(
+        self,
+    ) -> None:
+        """malformed_enqueued_at_rows is an anomaly -- nothing drains it, so
+        both acquire and recovery must fail fast rather than wait, and still
+        leave the full boundary re-established (masks + gate hold) since the
+        failure is the final _assert_clean_old_lifecycle check.
+        """
         backend = FakeDeployHoldBackend(
-            lifecycle_preflight=LifecyclePreflight(0, 0, 2, 0),
+            lifecycle_preflight=LifecyclePreflight(0, 0, 0, 1),
         )
         with self.assertRaisesRegex(
             DeployHoldError,
-            "dirty_downloading_rows",
+            "malformed_enqueued_at_rows",
         ):
             acquire_hold(backend)
         self.assertEqual(backend.phase, PHASE_ACQUIRING)
@@ -667,6 +956,22 @@ class TestRecoveryReprovesAnUnprovenAcquisition(unittest.TestCase):
             {timer: "/dev/null" for timer in TIMER_UNITS},
         )
         self.assertEqual(backend.inhibitor_files, set())
+
+    def test_recovery_from_acquiring_drains_a_queued_job_before_holding(
+        self,
+    ) -> None:
+        """recover_held's acquiring branch shares acquire_hold's producer-
+        drain-before-hold order -- a queued job still lets it reach HELD."""
+        backend = FakeDeployHoldBackend(
+            lifecycle_preflight=LifecyclePreflight(1, 0, 0, 0),
+            queue_drain_after_calls=1,
+        )
+        backend.create_receipt()
+
+        recover_held(backend)
+
+        backend.assert_default_held()
+        self.assertEqual(backend.owned_inhibitor_units(), ())
 
     def test_recovery_from_acquiring_refuses_a_stale_start_contract(self) -> None:
         backend = FakeDeployHoldBackend(
@@ -720,6 +1025,301 @@ class TestRecoveryReprovesAnUnprovenAcquisition(unittest.TestCase):
             backend.events.count(("lifecycle-preflight",)),
             preflight_calls,
         )
+
+
+class TestAbortHold(unittest.TestCase):
+    """The escape hatch recover_held cannot offer: return to unheld operation."""
+
+    def test_abort_from_acquiring_restores_ordinary_operation(self) -> None:
+        # recovery_required_jobs is an anomaly -- acquire fails forever, and
+        # recover_held would re-prove the identical, unfixable precondition.
+        backend = FakeDeployHoldBackend(
+            lifecycle_preflight=LifecyclePreflight(0, 1, 0, 0),
+        )
+        with self.assertRaises(DeployHoldError):
+            acquire_hold(backend)
+        self.assertEqual(backend.phase, PHASE_ACQUIRING)
+
+        abort_hold(backend)
+
+        self.assertFalse(backend.receipt)
+        self.assertFalse(backend.retired_receipt)
+        self.assertFalse(backend.manual_hold)
+        self.assertFalse(backend.owned_manual_hold)
+        self.assertEqual(backend.owned_links, set())
+        self.assertEqual(backend.control_links, {})
+        self.assertEqual(backend.owned_inhibitors, set())
+        self.assertEqual(backend.inhibitor_files, set())
+        for timer in TIMER_UNITS:
+            state = backend.unit_state(timer)
+            self.assertEqual((state.load_state, state.active_state), ("loaded", "active"))
+        # #1078 MUST FIX 2: YouTube ingest is gate-stopped too (MUST FIX 1),
+        # so abort must restart it, not just the three controlled workers.
+        for service in (*CONTROLLED_WORKER_UNITS, YOUTUBE_SERVICE):
+            self.assertEqual(backend.unit_state(service).active_state, "active")
+
+    def test_abort_restarts_youtube_ingest_and_verifies_it_actually_came_up(
+        self,
+    ) -> None:
+        """#1078 MUST FIX 2: youtube-ingest is Type=simple, wantedBy=multi-
+        user.target, Restart=on-failure, no timer -- a clean stop by the
+        gate hold is not a failure, so nothing restarts it except an
+        explicit start. Releasing the hold restarts nothing by itself.
+        """
+        backend = FakeDeployHoldBackend()
+        acquire_hold(backend)
+        self.assertEqual(backend.unit_state(YOUTUBE_SERVICE).active_state, "inactive")
+
+        abort_hold(backend)
+
+        self.assertEqual(backend.unit_state(YOUTUBE_SERVICE).active_state, "active")
+        self.assertIn(YOUTUBE_SERVICE, backend.started_units)
+
+    def test_abort_fails_loudly_on_a_foreign_gate_hold(self) -> None:
+        """#1078 BLOCKER F1: refused before our own hold is ever released.
+
+        A foreign hold (e.g. the monthly discogs-import hold) blocks every
+        gate-guarded ExecCondition, so a bare systemctl start is a silent
+        no-op. Without the up-front check, abort would release our manual
+        hold, discover the foreign hold only inside the restart-verification
+        wait, and exit non-zero with our hold already gone -- the receipt
+        stuck claiming "held" while nothing blocks the foreign hold's own
+        eventual resume from starting every guarded unit, including a main
+        cycle, underneath it.
+        """
+        backend = FakeDeployHoldBackend()
+        acquire_hold(backend)
+        # A hold unrelated to this receipt, already present when abort runs.
+        backend.other_metadata_holds.add("discogs-import")
+
+        with self.assertRaisesRegex(
+            DeployHoldError, "foreign metadata gate holds block abort",
+        ):
+            abort_hold(backend)
+
+        self.assertTrue(backend.receipt)
+        self.assertTrue(backend.manual_hold)
+        self.assertTrue(backend.owned_manual_hold)
+        self.assertEqual(
+            [event for event in backend.events if event[0] == "metadata-gate"],
+            [("metadata-gate", "hold manual")],
+        )
+        for service in CONTROLLED_WORKER_UNITS:
+            self.assertEqual(backend.unit_state(service).active_state, "inactive")
+
+    def test_abort_retries_after_an_interrupted_timer_restart(self) -> None:
+        """#1078 MUST FIX 3: restart before disowning.
+
+        Injects a real interruption inside abort_hold's own timer-restart
+        block (right after masks are removed, before start/verify), so this
+        exercises abort_hold's own ordering rather than a hand-built "already
+        interrupted" state. Restart-before-disown means a retry still owns
+        the timers and finishes the job; disown-before-restart (the exact
+        defect this fixes) would instead silently remove the receipt next
+        with search cadence dead, since a retry sees "nothing owned."
+        """
+        backend = FakeDeployHoldBackend()
+        acquire_hold(backend)
+        backend.assert_default_held()
+
+        real_assert_load_states = deploy_hold_module._assert_load_states
+        with (
+            mock.patch.object(
+                deploy_hold_module,
+                "_assert_load_states",
+                side_effect=InterruptedError("injected mid-restart interruption"),
+            ),
+            self.assertRaisesRegex(InterruptedError, "mid-restart interruption"),
+        ):
+            abort_hold(backend)
+
+        # The masks are gone (removed before the injected interruption) but
+        # ownership is still retained, and the timers are still stopped.
+        self.assertEqual(backend.owned_links, set(TIMER_UNITS))
+        self.assertEqual(backend.control_links, {})
+        for timer in TIMER_UNITS:
+            self.assertEqual(backend.unit_state(timer).active_state, "inactive")
+        self.assertTrue(backend.receipt)
+
+        with mock.patch.object(
+            deploy_hold_module,
+            "_assert_load_states",
+            side_effect=real_assert_load_states,
+        ):
+            abort_hold(backend)
+
+        self.assertFalse(backend.receipt)
+        for timer in TIMER_UNITS:
+            self.assertEqual(backend.unit_state(timer).active_state, "active")
+
+    def test_abort_while_the_automation_queue_never_drains(self) -> None:
+        """A drainable-field timeout is recoverable too, not just an anomaly."""
+        backend = FakeDeployHoldBackend(
+            lifecycle_preflight=LifecyclePreflight(1, 0, 0, 0),
+        )
+        # No timeout patch needed -- see test_acquire_times_out_waiting_for_a_
+        # queue_that_never_drains.
+        with self.assertRaises(DeployHoldError):
+            acquire_hold(backend)
+        self.assertEqual(backend.phase, PHASE_ACQUIRING)
+        # Interrupted mid-wait: the gate hold was never taken, and (#1078
+        # MUST FIX 5) the pre-hold window owns no inhibitor at all.
+        self.assertFalse(backend.manual_hold)
+        self.assertEqual(backend.owned_inhibitors, set())
+
+        abort_hold(backend)
+
+        self.assertFalse(backend.receipt)
+        self.assertEqual(backend.owned_links, set())
+        self.assertEqual(backend.owned_inhibitors, set())
+        self.assertEqual(backend.inhibitor_files, set())
+        for timer in TIMER_UNITS:
+            self.assertEqual(backend.unit_state(timer).active_state, "active")
+
+    def test_abort_from_held_restores_ordinary_operation(self) -> None:
+        backend = FakeDeployHoldBackend()
+        acquire_hold(backend)
+        backend.assert_default_held()
+
+        abort_hold(backend)
+
+        self.assertFalse(backend.receipt)
+        self.assertFalse(backend.manual_hold)
+        self.assertEqual(backend.owned_links, set())
+        for timer in TIMER_UNITS:
+            self.assertEqual(backend.unit_state(timer).active_state, "active")
+        for service in (*CONTROLLED_WORKER_UNITS, YOUTUBE_SERVICE):
+            self.assertEqual(backend.unit_state(service).active_state, "active")
+
+    def test_abort_from_prepared_controlled_restores_ordinary_operation(
+        self,
+    ) -> None:
+        backend = FakeDeployHoldBackend()
+        acquire_hold(backend)
+        prepare_controlled(backend)
+
+        abort_hold(backend)
+
+        self.assertFalse(backend.receipt)
+        self.assertFalse(backend.manual_hold)
+        self.assertEqual(backend.owned_links, set())
+        self.assertEqual(backend.owned_inhibitors, set())
+        self.assertEqual(backend.inhibitor_files, set())
+        for timer in TIMER_UNITS:
+            self.assertEqual(backend.unit_state(timer).active_state, "active")
+        # #1078 BLOCKER F2: prepare_controlled already unmarked the manual
+        # hold at this phase, so only the owned YouTube inhibitor was ever
+        # blocking it -- removing the inhibitor alone does not start a
+        # stopped Type=simple unit.
+        self.assertEqual(backend.unit_state(YOUTUBE_SERVICE).active_state, "active")
+
+    def test_abort_from_main_timer_open_restores_ordinary_operation(self) -> None:
+        backend = FakeDeployHoldBackend()
+        acquire_hold(backend)
+        prepare_controlled(backend)
+        open_main_timer(backend)
+
+        abort_hold(backend)
+
+        self.assertFalse(backend.receipt)
+        self.assertEqual(backend.owned_links, set())
+        for timer in TIMER_UNITS:
+            self.assertEqual(backend.unit_state(timer).active_state, "active")
+        # #1078 BLOCKER F2
+        self.assertEqual(backend.unit_state(YOUTUBE_SERVICE).active_state, "active")
+
+    def test_abort_from_complete_pending_restores_ordinary_operation(self) -> None:
+        backend = FakeDeployHoldBackend()
+        acquire_hold(backend)
+        prepare_controlled(backend)
+        open_main_timer(backend)
+        finish_release(backend, INVOCATION)
+
+        abort_hold(backend)
+
+        self.assertFalse(backend.receipt)
+        self.assertEqual(backend.owned_links, set())
+        self.assertEqual(backend.owned_inhibitors, set())
+        for timer in TIMER_UNITS:
+            self.assertEqual(backend.unit_state(timer).active_state, "active")
+
+    def test_abort_resumes_after_atomic_receipt_retirement(self) -> None:
+        backend = FakeDeployHoldBackend(interrupt_receipt_retirement=True)
+        acquire_hold(backend)
+
+        with self.assertRaisesRegex(InterruptedError, "retirement interruption"):
+            abort_hold(backend)
+
+        self.assertFalse(backend.receipt)
+        self.assertTrue(backend.retired_receipt)
+        abort_hold(backend)
+        self.assertFalse(backend.retired_receipt)
+
+    def test_abort_on_a_missing_receipt_fails_closed(self) -> None:
+        backend = FakeDeployHoldBackend()
+
+        with self.assertRaisesRegex(DeployHoldError, "receipt is missing"):
+            abort_hold(backend)
+
+    def test_abort_refuses_an_unknown_phase(self) -> None:
+        backend = FakeDeployHoldBackend()
+        backend.create_receipt()
+        backend.write_phase("some-unrecognized-phase")
+
+        with self.assertRaisesRegex(
+            DeployHoldError, "cannot abort unknown phase",
+        ):
+            abort_hold(backend)
+
+        self.assertTrue(backend.receipt)
+
+    def test_abort_fails_closed_on_an_unowned_inhibitor(self) -> None:
+        """#1078 MUST FIX 4: validated before any mutation -- nothing moves."""
+        backend = FakeDeployHoldBackend()
+        acquire_hold(backend)
+        # Simulates external/operator state this receipt never created.
+        backend.inhibitor_files.add(MAIN_SERVICE)
+
+        with self.assertRaisesRegex(
+            DeployHoldError, "unowned producer inhibitor",
+        ):
+            abort_hold(backend)
+
+        self.assertTrue(backend.receipt)
+        self.assertTrue(backend.manual_hold)
+        self.assertTrue(backend.owned_manual_hold)
+        self.assertEqual(backend.owned_links, set(TIMER_UNITS))
+        for service in CONTROLLED_WORKER_UNITS:
+            self.assertEqual(backend.unit_state(service).active_state, "inactive")
+
+    def test_abort_fails_closed_on_an_unowned_control_link(self) -> None:
+        """#1078 MUST FIX 4: validated before any mutation -- nothing moves."""
+        backend = FakeDeployHoldBackend()
+        backend.create_receipt()
+        backend.mark_link_owned(MAIN_TIMER)
+        backend.create_control_mask(MAIN_TIMER)
+        # Simulates external/operator state this receipt never owned.
+        backend.control_links[WATCHDOG_TIMER] = "/dev/null"
+
+        with self.assertRaisesRegex(DeployHoldError, "unowned control path"):
+            abort_hold(backend)
+
+        self.assertTrue(backend.receipt)
+        self.assertEqual(backend.control_links, {
+            MAIN_TIMER: "/dev/null", WATCHDOG_TIMER: "/dev/null",
+        })
+        self.assertIn(MAIN_TIMER, backend.owned_links)
+
+    def test_abort_never_releases_an_unowned_manual_hold(self) -> None:
+        # Interrupted before any ownership marker was ever written -- while
+        # a pre-existing, unrelated hold happens to be active.
+        backend = FakeDeployHoldBackend(manual_hold=True)
+        backend.create_receipt()
+
+        abort_hold(backend)
+
+        self.assertTrue(backend.manual_hold)
+        self.assertFalse(backend.receipt)
 
 
 class TestFixedAuthoritySurface(unittest.TestCase):
