@@ -487,7 +487,7 @@ def _follow_merged_release(
     with ``RELEASE(release_id)`` from OTHER processes (the web routes and
     ``pipeline-cli destructive``). Without both locks, an operator Bad Rip or
     library-delete resolving "the one album at the survivor" can bind to the
-    album ``mbsync`` just retagged onto that id and delete files the operator
+    album the retag just moved onto that id and delete files the operator
     never selected. The IMPORT lock both callers already run under stays
     outer, preserving the documented ``IMPORT → RELEASE`` order
     (``docs/advisory-locks.md``); the acquires are non-blocking, so contention

@@ -116,13 +116,15 @@ force and other request-backed destructive paths use the same order.
 The import-time MusicBrainz merge retag (`_follow_merged_release`, issue
 #1059) is the one site that holds **two** RELEASE locks at once: the retag
 takes an installed album away from the merged-away id and files it under the
-survivor, mutating two release identities in one `beet mbsync` invocation,
-and the destructive operator lanes fence Beets mutation per release from other
-processes. Without the survivor's lock, an operator Bad Rip or library-delete
-resolving "the one album at the survivor" could bind to the album `mbsync`
-just retagged onto that id. The keys are acquired in sorted order and released
-after the request rekey commits; both acquires are non-blocking, so contention
-returns a typed non-ready outcome (`release_locked`) that keeps the existing
+survivor, mutating two release identities in one `beet modify` invocation
+(`lib/beets_retag.py`; issue #1087 replaced the original `beet mbsync`
+primitive, which could not follow a release-only merge), and the destructive
+operator lanes fence Beets mutation per release from other processes. Without
+the survivor's lock, an operator Bad Rip or library-delete resolving "the one
+album at the survivor" could bind to the album the retag just moved onto
+that id. The keys are acquired in sorted order and released after the
+request rekey commits; both acquires are non-blocking, so contention returns
+a typed non-ready outcome (`release_locked`) that keeps the existing
 rejection and leaves the request runnable.
 
 Both importer lanes reach that site, each already holding IMPORT for the

@@ -137,9 +137,15 @@ class TestBeetsStartupAdapter(unittest.TestCase):
         self.assertIn("import_write_disabled", captured.output[0])
         self.assertNotIn("secret", captured.output[0].lower())
 
-    def test_missing_mbsync_plugin_refuses_startup(self) -> None:
-        """Without mbsync a merge cannot be followed, so nothing may start."""
-        from lib.beets_startup import BeetsStartupError, enforce_beets_startup
+    def test_missing_mbsync_plugin_still_starts(self) -> None:
+        """#1087 — the retag primitive is now ``beet modify``; mbsync absence
+        is no longer a hard startup failure. Was
+        ``test_missing_mbsync_plugin_refuses_startup``: the required-plugin
+        refusal behavior itself stays covered by the
+        ``REQUIRED_PLUGINS``-derived generated mutants in
+        ``tests/test_beets_config_contract_generated.py``; this is the
+        must-still-work complement for the plugin that left that set."""
+        from lib.beets_startup import enforce_beets_startup
 
         world = BeetsContractWorld(role="main")
         self.addCleanup(world.close)
@@ -150,19 +156,15 @@ class TestBeetsStartupAdapter(unittest.TestCase):
         world._seal("main")
         logger = logging.getLogger("test.beets-startup-mbsync")
 
-        with (
-            _isolated_installed_authority(),
-            self.assertLogs(logger, level="ERROR") as captured,
-            self.assertRaises(BeetsStartupError),
-        ):
-            enforce_beets_startup(
+        with _isolated_installed_authority():
+            admitted = enforce_beets_startup(
                 role="main",
                 config_path=str(world.runtime_config),
                 runtime_dir=str(world.runtime_dir),
                 logger=logger,
             )
 
-        self.assertIn("mbsync_plugin_missing", captured.output[0])
+        self.assertEqual(admitted.beets_config_dir, str(world.beets_dir))
 
     def test_runtime_parser_failure_logs_only_a_redacted_category(self) -> None:
         from lib.beets_startup import BeetsStartupError, enforce_beets_startup

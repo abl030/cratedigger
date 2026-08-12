@@ -404,7 +404,7 @@ class TestValidationAndRejectionCancellation(unittest.TestCase):
         The harness is the long pole in a validation, so an owner can be lost
         while it runs. The checkpoint that catches that sits between the
         harness and the merge seam — the first mutation — because everything
-        after it is durable: a MusicBrainz lookup, an ``mbsync`` against the
+        after it is durable: a MusicBrainz lookup, a retag against the
         SHARED Beets library, and an identity write. Without it, an execution
         with no authority left would still move another process's library.
         """

@@ -646,7 +646,7 @@ class TestMergeRekeyProperties(unittest.TestCase):
     )
     # An operator destructive action already fences each identity in turn:
     # the survivor's lock is the one a Bad Rip on "the album at the survivor"
-    # would hold while ``mbsync`` was mid-retag.
+    # would hold while the retag was mid-flight.
     @example(
         scenario="mbid_not_found", mirror_answer=SURVIVOR,
         candidates=(SURVIVOR,), retag_outcome=RETAG_RETAGGED,

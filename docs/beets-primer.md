@@ -49,20 +49,33 @@ Cratedigger has exactly three Beets mutation lanes:
    same-release duplicate replacement.
 2. An explicitly operator-authorized library deletion resolves one exact Beets
    album primary key and drives the exact-album delete child.
-3. The import-time MusicBrainz merge retag runs `beet mbsync -M` under an
-   anchored `mb_albumid::^<old-id>$` query (`lib/beets_retag.py`), from inside
-   whichever importer lane holds the request's exact import claim — the
-   automation processing owner, or a claimed force-import job (#1080).
+3. The import-time MusicBrainz merge retag runs `beet modify -a -M -W -y`
+   under an anchored `mb_albumid::^<old-id>$` query and a `mb_albumid=<new-id>`
+   assignment (`lib/beets_retag.py`), from inside whichever importer lane
+   holds the request's exact import claim — the automation processing owner,
+   or a claimed force-import job (#1080). Issue #1087 replaced the original
+   `beet mbsync -M` primitive: `mbsync` maps library items onto a fetched
+   release's tracks by recording id, which a release-only merge (MusicBrainz
+   merges the release but not the underlying recordings) does not preserve —
+   so it silently retagged nothing on the common case. `beet modify` sets one
+   field by query; it needs no candidate mapping and makes no network call.
 
 Lane 3 is deliberately the narrowest of the three, and every clause is
 load-bearing:
 
-- **Identity only, never layout.** `-M` (`--nomove`) is mandatory. `mbsync`
-  otherwise honours `import.move` — which the config contract pins to `yes` —
-  and relocates the album whenever the merge changes a path component, minting
-  new Jellyfin item identities (identity is a hash of the path), risking the
-  documented Plex album-split footgun, and pruning the vacated directory's
-  `clutter`, which includes the `cratedigger.json` verified-lossless sidecar.
+- **`-a` targets Albums, not Items.** `Album.try_sync(inherit=True)` (the
+  default) fans every inheritable fixed attribute — `mb_albumid` is one — out
+  to every item and stores it. Drop `-a` and the query matches ITEMS instead:
+  each item's own `mb_albumid` moves while the ALBUM row's does not, leaving
+  the library split into disagreeing identity fields.
+- **Identity only, never a tag write, never layout.** `-M` (`--nomove`) and
+  `-W` (`--nowrite`) are mandatory. `modify` otherwise honours `import.move` /
+  `import.write` — which the config contract pins to `yes` — and would
+  relocate the album whenever the merge changed a path component (minting new
+  Jellyfin item identities, since identity is a hash of the path; risking the
+  documented Plex album-split footgun; pruning the vacated directory's
+  `clutter`, which includes the `cratedigger.json` verified-lossless sidecar)
+  or write mismatched tags to disk while the DB already reports success.
 - **One album.** The regex is anchored, so it can only name albums filed under
   exactly the merged-away release id.
 - **Only on `mbid_not_found`, only under an exact import claim**, and only
@@ -157,11 +170,13 @@ Each top-level application performs intrinsic exactly-once startup admission in
 a fresh Beets configuration context. Hard failures include a missing or
 incompatible runtime, mismatched database/root/state/interpreter, mutable
 non-secret config, invalid state capability, unsafe import/path policy, an
-inactive required plugin (`musicbrainz`, `mbsync`, `permissions`, `inline`), or
-a missing, multiple, wrong, or non-token-only designated secret include. A
-deployment without `mbsync` cannot follow a MusicBrainz release merge on the
-library side, and merged requests would simply never converge with no error
-anywhere — so the contract refuses to start instead. Approved
+inactive required plugin (`musicbrainz`, `permissions`, `inline`), or a
+missing, multiple, wrong, or non-token-only designated secret include. The
+merge retag (`lib/beets_retag.py`) needs no plugin — since #1087 it runs
+`beet modify`, which makes no network call and needs no candidate mapping —
+so `mbsync` is no longer in this required set; it stays active in the
+deployed configuration for the operator's own manual use, and is still
+reported observationally (`BeetsPluginContract.mbsync`). Approved
 MusicBrainz endpoint drift is warning-only. The checker rejects only named
 harness conflicts: active `convert.auto` or `convert.auto_keep` is unsafe, while
 intentional metadata/artwork hooks such as `fetchart`, `embedart`, `scrub`,
@@ -246,7 +261,7 @@ plugins: musicbrainz mbsync discogs fetchart embedart lyrics lastgenre scrub inf
 | Plugin | Purpose | Auto? |
 |--------|---------|-------|
 | `musicbrainz` | MB lookups (REQUIRED — without it, 0 candidates) | — |
-| `mbsync` | `beet mbsync` command — refetches an album by its stored `mb_albumid`, follows a MusicBrainz merge redirect, and rewrites the ID (REQUIRED — it is the only library-side way to follow a release merge). Cratedigger invokes it at exactly one album, `mb_albumid::^<old-id>$`, from the merge sweep — never library-wide | — |
+| `mbsync` | `beet mbsync` command — refetches an album by its stored `mb_albumid`, follows a MusicBrainz merge redirect, and rewrites the ID. Not required by Cratedigger since #1087 (the merge retag now runs `beet modify`, `lib/beets_retag.py`) — kept active for the operator's own manual use | — |
 | `discogs` | Discogs lookups (fallback for obscure releases) | — |
 | `fetchart` | Downloads cover art from CAA/iTunes/Amazon | Yes |
 | `embedart` | Embeds cover art into audio file tags | Yes |

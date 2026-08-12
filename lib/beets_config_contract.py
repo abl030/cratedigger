@@ -43,15 +43,17 @@ SAFE_DUPLICATE_KEYS = frozenset(("mb_albumid", "discogs_albumid"))
 
 # Plugins whose absence is a hard startup failure for every role.
 #
-# ``mbsync`` is Beets' own "MusicBrainz changed its mind" command: it refetches
-# an album by the release ID already stored on it, follows the merge redirect,
-# and rewrites ``mb_albumid``.  It is the only library-side way to follow a
-# MusicBrainz release merge, so a deployment without it cannot converge a
-# merged request at all — and would fail silently, since nothing else errors.
-# The contract therefore says so once, loudly, at startup rather than never.
+# ``mbsync`` used to be here too: issue #1059 / PR #1075 followed a
+# MusicBrainz release merge on the library side with ``beet mbsync -M``. #1087
+# found that primitive cannot follow a release-only merge (the common case —
+# ``mbsync`` maps items onto the fetched release's tracks by recording id,
+# which a release-only merge does not preserve) and replaced it with
+# ``beet modify`` (`lib/beets_retag.py`), which makes no network call and
+# needs no candidate mapping at all. ``mbsync`` remains an active,
+# operator-invoked plugin in the deployed configuration — see
+# ``BeetsPluginContract.mbsync`` — but Cratedigger no longer requires it.
 REQUIRED_PLUGINS: tuple[str, ...] = (
     "musicbrainz",
-    "mbsync",
     "permissions",
     "inline",
 )
