@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 import unittest
+from collections.abc import Callable
 from dataclasses import dataclass
 from unittest.mock import patch
 
@@ -15,6 +17,7 @@ import tests._hypothesis_profiles  # noqa: F401  (loads the active profile)
 from lib.config import CratediggerConfig
 from lib.dispatch import DISPATCH_CODE_REQUEUE_FAILED, dispatch_import_core
 from lib.dispatch.types import DispatchOutcome, EvidenceImportGate, ImportOneRun
+from lib.failure_presentation import non_automation_import_failure_message
 from lib.import_execution import (
     ExecutionCancelled,
     ExecutionLeaseSnapshot,
@@ -29,6 +32,7 @@ from lib.import_queue import (
     IMPORT_JOB_YOUTUBE,
     youtube_import_payload,
 )
+from lib.pipeline_db.rows import DownloadLogWithEvidenceRow
 from lib.quality import DownloadInfo
 from lib.quality_evidence import snapshot_audio_files
 from scripts.importer import (
@@ -142,6 +146,11 @@ def assert_operation_fence(
         # A genuine, positively-captured success. Nothing ambiguous to fence.
         return
     if final_status == IMPORT_JOB_RECOVERY_REQUIRED:
+        # Fail-closed legislation (#1094 clause audit): no current writer
+        # creates ``recovery_required``, and a planted revival is refused
+        # upstream by ``validate_automation_terminal_authority`` before this
+        # clause can see it. Kept so a future writer that bypasses that
+        # validation fails loudly here instead of parking silently.
         raise AssertionError(
             f"{job_type} ambiguous Beets operation parked at "
             "'recovery_required' — CLAUDE.md invariant 11 forbids a state "
@@ -156,6 +165,14 @@ def assert_operation_fence(
         raise AssertionError("ambiguous Beets operation became claimable")
     row = db.request(request_id)
     if job_type == IMPORT_JOB_AUTOMATION:
+        # Fail-closed legislation (#1094 clause audit) for the request-status
+        # and owner-pointer clauses immediately below (NOT the audit-row
+        # clause after them, which an importer-side mutant does reach): both
+        # are decided by the terminal SQL ``_finish_processing_request_last``,
+        # which this module stands in for, and every importer-side mutant that
+        # declares a non-wanted edge is refused first by
+        # ``validate_automation_terminal_authority``. They patrol the DB-layer
+        # writer, not this drive path.
         if row["status"] != "wanted":
             raise AssertionError(
                 f"automation self-heal left request status {row['status']!r}, "
@@ -244,6 +261,11 @@ def assert_non_automation_failure_lifecycle(
         row for row in db.download_logs if row.id == source_download_log_id
     )
     if job_type == IMPORT_JOB_YOUTUBE and origin.outcome != "youtube_success":
+        # Fail-closed legislation (#1094 clause audit): the canonical handoff
+        # is written by ``lib/youtube_ingest_service.py``, which no world here
+        # executes — the driver enqueues through the same atomic DB command
+        # the service uses. Kept so a future ingest path that enqueues an
+        # import without promoting its origin row fails loudly.
         raise AssertionError("YouTube import did not use the canonical handoff")
     failed = [
         row for row in db.download_logs
@@ -253,9 +275,20 @@ def assert_non_automation_failure_lifecycle(
     if len(failed) != 1:
         raise AssertionError("non-automation failure did not write one audit row")
     if failed[0].source != origin.source:
+        # Fail-closed legislation (#1094 clause audit): the terminal INSERT
+        # COALESCEs ``source`` out of the origin row and sets
+        # ``source_download_log_id`` from the same subquery, so today the two
+        # cannot disagree — dropping the origin trips the clause above first.
+        # Kept so a future writer that defaults ``source`` by job type while
+        # keeping the link fails loudly.
         raise AssertionError("terminal audit source drifted from its origin")
     audit = db.get_download_log_entry(failed[0].id)
     if audit is None:
+        # Fail-closed legislation (#1094 clause audit): the audit row is
+        # written inside the terminal transaction against the locked request
+        # and its foreign key keeps the joined request alive, so the read-back
+        # cannot miss. Kept so a bundle that reports an id it did not commit
+        # fails loudly instead of rendering nothing in Recents.
         raise AssertionError("linked terminal audit disappeared")
     rendered = classify_log_entry(LogEntry.from_row(dict(audit)))
     expected_prefix = (
@@ -267,14 +300,39 @@ def assert_non_automation_failure_lifecycle(
         raise AssertionError("Recents lost the failed job-type identity")
 
 
+class AuditReadBackLostDB(FakePipelineDB):
+    """Model the one shape that loses a committed terminal audit row.
+
+    ``PipelineDB.get_download_log_entry`` INNER JOINs ``album_requests``
+    (``lib/pipeline_db/download_log.py``), so a terminal audit row that a
+    bundle claims to have committed can be enumerable and still not read
+    back. Today's writers cannot produce that world — the audit row is
+    written inside the terminal transaction against the locked request, and
+    the foreign key keeps the joined request alive — so this is the only
+    world that reaches ``assert_non_automation_failure_lifecycle``'s
+    read-back clause. The switch stays off while the world is driven so the
+    production path under test sees the ordinary reader.
+    """
+
+    audit_read_back_lost: bool = False
+
+    def get_download_log_entry(
+        self, log_id: int,
+    ) -> DownloadLogWithEvidenceRow | None:
+        if self.audit_read_back_lost:
+            return None
+        return super().get_download_log_entry(log_id)
+
+
 def _drive_non_automation_failure(
     *,
     job_type: str,
     failure_class: str,
     request_status: str,
+    db_factory: Callable[[], FakePipelineDB] = FakePipelineDB,
 ) -> tuple[FakePipelineDB, int]:
     """Drive each residual path through importer/startup production code."""
-    db = FakePipelineDB()
+    db = db_factory()
     request_id = _OPERATION_FENCE_REQUEST_ID
     db.seed_request(make_request_row(
         id=request_id,
@@ -699,8 +757,10 @@ class TestGeneratedImportOperationFence(unittest.TestCase):
                     authorized, status, invocations, replay_claimed, db = (
                         _exercise_world(world, beets=self.beets)
                     )
-                    self.assertFalse(authorized)
-                    self.assertEqual(invocations, [])
+                    # The fence checker runs FIRST: the narrow assertions
+                    # below are a superset of its "Beets ran without exact
+                    # current authority" clause, and running them first
+                    # masked that clause's own message (#1094 Q2).
                     assert_operation_fence(
                         job_type=job_type,
                         authorized=authorized,
@@ -709,6 +769,8 @@ class TestGeneratedImportOperationFence(unittest.TestCase):
                         replay_claimed=replay_claimed,
                         db=db,
                     )
+                    self.assertFalse(authorized)
+                    self.assertEqual(invocations, [])
 
     def test_definitely_not_started_recovery_may_retry(self) -> None:
         for job_type in (
@@ -919,7 +981,27 @@ class TestGeneratedImportOperationFence(unittest.TestCase):
         )
 
 
+def _exact(message: str) -> str:
+    """Anchor a clause message so a sibling clause cannot satisfy it.
+
+    ``assertRaisesRegex`` searches, so a bare substring is proof only that
+    *some* clause fired. Every known-bad world below names its own clause
+    end to end.
+    """
+    return "^" + re.escape(message) + "$"
+
+
 class TestImportOperationFenceChecker(unittest.TestCase):
+    """Per-clause proof (#1094) for this module's three fence checkers.
+
+    Twenty-one clauses live in ``assert_operation_fence`` (10),
+    ``assert_startup_force_action_lifecycle`` (4) and
+    ``assert_non_automation_failure_lifecycle`` (7). Each table row below
+    names one world that makes THAT clause's condition true while every
+    earlier clause in the same function passes, and asserts that clause's
+    own message anchored end to end.
+    """
+
     def _db(self, **overrides: object) -> FakePipelineDB:
         overrides.setdefault("status", "wanted")
         db = FakePipelineDB()
@@ -928,136 +1010,452 @@ class TestImportOperationFenceChecker(unittest.TestCase):
         ))
         return db
 
-    def test_checker_rejects_the_old_automatic_replay_policy(self) -> None:
-        with self.assertRaisesRegex(AssertionError, "more than once"):
-            assert_operation_fence(
-                job_type=IMPORT_JOB_AUTOMATION,
-                authorized=True,
-                final_status="queued",
-                beets_invocations=[703, 703],
-                replay_claimed=True,
-                db=self._db(),
-            )
-
-    def test_checker_rejects_planted_recovery_required_park(self) -> None:
-        """Known-bad: reviving the removed ``recovery_required`` rest state
-        (the pre-#933 policy this file used to require) trips the checker."""
-        with self.assertRaisesRegex(AssertionError, "recovery_required"):
-            assert_operation_fence(
-                job_type=IMPORT_JOB_AUTOMATION,
-                authorized=True,
-                final_status=IMPORT_JOB_RECOVERY_REQUIRED,
-                beets_invocations=[703],
-                replay_claimed=False,
-                db=self._db(
-                    status="processing", active_automation_import_job_id=7,
-                ),
-            )
-
-    def test_checker_rejects_replay_after_ambiguous_operation(self) -> None:
-        """Known-bad: an ambiguous operation whose job became claimable again."""
-        with self.assertRaisesRegex(AssertionError, "became claimable"):
-            assert_operation_fence(
-                job_type=IMPORT_JOB_FORCE,
-                authorized=True,
-                final_status="failed",
-                beets_invocations=[703],
-                replay_claimed=True,
-                db=self._db(),
-            )
-
-    def test_checker_rejects_automation_self_heal_with_owner_attached(self) -> None:
-        """Known-bad: self-heal that failed to clear the automation owner."""
-        with self.assertRaisesRegex(AssertionError, "owner attached"):
-            assert_operation_fence(
-                job_type=IMPORT_JOB_AUTOMATION,
-                authorized=True,
-                final_status="failed",
-                beets_invocations=[703],
-                replay_claimed=False,
-                db=self._db(
-                    status="wanted", active_automation_import_job_id=7,
-                ),
-            )
-
-    def test_checker_rejects_automation_self_heal_missing_audit_row(self) -> None:
-        """Known-bad: a silent self-heal with no Recents-visible trace."""
-        with self.assertRaisesRegex(AssertionError, "world-failure audit row"):
-            assert_operation_fence(
-                job_type=IMPORT_JOB_AUTOMATION,
-                authorized=True,
-                final_status="failed",
-                beets_invocations=[703],
-                replay_claimed=False,
-                db=self._db(status="wanted"),
-            )
-
-    def test_checker_rejects_force_import_self_healing_the_request(self) -> None:
-        """Known-bad: a force/YouTube job that mutated the caller's request
-        lifecycle — invariant 11 reserves that self-heal for automation,
-        which is the only job type that owns ``processing``."""
-        db = self._db(status="unsearchable")
+    def _db_with_linked_audit(
+        self,
+        *,
+        status: str,
+        audits: int = 1,
+    ) -> FakePipelineDB:
+        """A request whose Recents trail already carries linked failures."""
+        db = self._db(status=status)
         source = db.log_download(
             _OPERATION_FENCE_REQUEST_ID,
             outcome="rejected",
         )
-        db.log_download(
-            _OPERATION_FENCE_REQUEST_ID,
-            outcome="failed",
-            source_download_log_id=source,
-            error_message="Force import attempt failed: known-bad",
+        for index in range(audits):
+            db.log_download(
+                _OPERATION_FENCE_REQUEST_ID,
+                outcome="failed",
+                source_download_log_id=source,
+                error_message=non_automation_import_failure_message(
+                    IMPORT_JOB_FORCE,
+                    f"generated linked audit {index}",
+                ),
+            )
+        return db
+
+    # ---- assert_operation_fence: clauses 1-10 -------------------------
+
+    def test_operation_fence_clause_worlds(self) -> None:
+        """Every ``assert_operation_fence`` clause has a world that fires it."""
+        cases: list[tuple[str, Callable[[], None], str]] = [
+            (
+                "1 one identity reached Beets twice (the old replay policy)",
+                lambda: assert_operation_fence(
+                    job_type=IMPORT_JOB_AUTOMATION,
+                    authorized=True,
+                    final_status="queued",
+                    beets_invocations=[703, 703],
+                    replay_claimed=True,
+                    db=self._db(),
+                ),
+                "one operation identity reached Beets more than once",
+            ),
+            (
+                "2 Beets ran while the launch fence refused authority",
+                lambda: assert_operation_fence(
+                    job_type=IMPORT_JOB_AUTOMATION,
+                    authorized=False,
+                    final_status="queued",
+                    beets_invocations=[703],
+                    replay_claimed=True,
+                    db=self._db(),
+                ),
+                "Beets ran without exact current authority",
+            ),
+            (
+                "3 the removed pre-#933 recovery_required park revived",
+                lambda: assert_operation_fence(
+                    job_type=IMPORT_JOB_AUTOMATION,
+                    authorized=True,
+                    final_status=IMPORT_JOB_RECOVERY_REQUIRED,
+                    beets_invocations=[703],
+                    replay_claimed=False,
+                    db=self._db(
+                        status="processing",
+                        active_automation_import_job_id=7,
+                    ),
+                ),
+                (
+                    f"{IMPORT_JOB_AUTOMATION} ambiguous Beets operation "
+                    "parked at 'recovery_required' — CLAUDE.md invariant 11 "
+                    "forbids a state whose only exit is an operator command"
+                ),
+            ),
+            (
+                "4 an ambiguous operation left a non-terminal queue status",
+                lambda: assert_operation_fence(
+                    job_type=IMPORT_JOB_FORCE,
+                    authorized=True,
+                    final_status="queued",
+                    beets_invocations=[703],
+                    replay_claimed=False,
+                    db=self._db(),
+                ),
+                (
+                    f"{IMPORT_JOB_FORCE} ambiguous Beets operation left job "
+                    "status 'queued', want 'failed'"
+                ),
+            ),
+            (
+                "5 the terminalized ambiguous job became claimable again",
+                lambda: assert_operation_fence(
+                    job_type=IMPORT_JOB_FORCE,
+                    authorized=True,
+                    final_status="failed",
+                    beets_invocations=[703],
+                    replay_claimed=True,
+                    db=self._db(),
+                ),
+                "ambiguous Beets operation became claimable",
+            ),
+            (
+                "6 automation self-heal left the request out of the pool",
+                lambda: assert_operation_fence(
+                    job_type=IMPORT_JOB_AUTOMATION,
+                    authorized=True,
+                    final_status="failed",
+                    beets_invocations=[703],
+                    replay_claimed=False,
+                    db=self._db(
+                        status="processing",
+                        active_automation_import_job_id=7,
+                    ),
+                ),
+                (
+                    "automation self-heal left request status 'processing', "
+                    "want 'wanted' — the request must go back into the "
+                    "search pool"
+                ),
+            ),
+            (
+                "7 automation self-heal left its owner pointer attached",
+                lambda: assert_operation_fence(
+                    job_type=IMPORT_JOB_AUTOMATION,
+                    authorized=True,
+                    final_status="failed",
+                    beets_invocations=[703],
+                    replay_claimed=False,
+                    db=self._db(
+                        status="wanted",
+                        active_automation_import_job_id=7,
+                    ),
+                ),
+                "automation self-heal left the automation owner attached",
+            ),
+            (
+                "8a automation self-heal wrote no audit row at all",
+                lambda: assert_operation_fence(
+                    job_type=IMPORT_JOB_AUTOMATION,
+                    authorized=True,
+                    final_status="failed",
+                    beets_invocations=[703],
+                    replay_claimed=False,
+                    db=self._db(status="wanted"),
+                ),
+                (
+                    "automation self-heal recorded no world-failure audit "
+                    f"row carrying {_WORLD_FAILURE_AUDIT_PREFIX!r}"
+                ),
+            ),
+            (
+                "8b the newest audit row carries no world-failure label",
+                lambda: assert_operation_fence(
+                    job_type=IMPORT_JOB_AUTOMATION,
+                    authorized=True,
+                    final_status="failed",
+                    beets_invocations=[703],
+                    replay_claimed=False,
+                    db=self._db_with_linked_audit(status="wanted"),
+                ),
+                (
+                    "automation self-heal recorded no world-failure audit "
+                    f"row carrying {_WORLD_FAILURE_AUDIT_PREFIX!r}"
+                ),
+            ),
+            (
+                "9 a force job mutated the caller's request lifecycle",
+                lambda: assert_operation_fence(
+                    job_type=IMPORT_JOB_FORCE,
+                    authorized=True,
+                    final_status="failed",
+                    beets_invocations=[703],
+                    replay_claimed=False,
+                    db=self._db_with_linked_audit(status="unsearchable"),
+                ),
+                (
+                    f"{IMPORT_JOB_FORCE} ambiguous operation changed request "
+                    "status to 'unsearchable'; force/YouTube own no request "
+                    "lifecycle to self-heal"
+                ),
+            ),
+            (
+                "10a a terminal force job surfaced nothing in Recents",
+                lambda: assert_operation_fence(
+                    job_type=IMPORT_JOB_FORCE,
+                    authorized=True,
+                    final_status="failed",
+                    beets_invocations=[703],
+                    replay_claimed=False,
+                    db=self._db(),
+                ),
+                "non-automation failure recorded no linked Recents audit row",
+            ),
+            (
+                "10b one attempt surfaced as two linked Recents rows",
+                lambda: assert_operation_fence(
+                    job_type=IMPORT_JOB_FORCE,
+                    authorized=True,
+                    final_status="failed",
+                    beets_invocations=[703],
+                    replay_claimed=False,
+                    db=self._db_with_linked_audit(status="wanted", audits=2),
+                ),
+                "non-automation failure recorded no linked Recents audit row",
+            ),
+        ]
+        for clause, invoke, message in cases:
+            with self.subTest(clause=clause), self.assertRaisesRegex(
+                AssertionError, _exact(message),
+            ):
+                invoke()
+
+    def test_operation_fence_accepts_its_two_early_returns(self) -> None:
+        """Must-still-work: the checker's non-violating worlds stay silent."""
+        assert_operation_fence(
+            job_type=IMPORT_JOB_FORCE,
+            authorized=False,
+            final_status="queued",
+            beets_invocations=[],
+            replay_claimed=True,
+            db=self._db(),
         )
-        with self.assertRaisesRegex(AssertionError, "own no request lifecycle"):
-            assert_operation_fence(
-                job_type=IMPORT_JOB_FORCE,
-                authorized=True,
-                final_status="failed",
-                beets_invocations=[703],
-                replay_claimed=False,
-                db=db,
+        assert_operation_fence(
+            job_type=IMPORT_JOB_FORCE,
+            authorized=True,
+            final_status="completed",
+            beets_invocations=[703],
+            replay_claimed=False,
+            db=self._db(),
+        )
+
+    # ---- assert_startup_force_action_lifecycle: clauses 11-14 ---------
+
+    def test_startup_force_action_clause_worlds(self) -> None:
+        """Every startup action-copy clause has a world that fires it."""
+        cases: list[tuple[str, bool, str, bool, str]] = [
+            (
+                "11 a launched force recovery did not terminalize",
+                True, "queued", True,
+                "launched force recovery ended 'queued', want 'failed'",
+            ),
+            (
+                "12 a terminal force recovery kept its private copy",
+                True, "failed", True,
+                "terminal force recovery leaked its private action copy",
+            ),
+            (
+                "13 an unlaunched force recovery terminalized anyway",
+                False, "failed", True,
+                "unlaunched force recovery ended 'failed', want 'queued'",
+            ),
+            (
+                "14 a retryable force recovery destroyed its own retry input",
+                False, "queued", False,
+                (
+                    "retryable force recovery deleted the action copy it "
+                    "still needs"
+                ),
+            ),
+        ]
+        for clause, launched, final_status, exists, message in cases:
+            with self.subTest(clause=clause), tempfile.TemporaryDirectory() as root:
+                action_path = os.path.join(root, "action")
+                if exists:
+                    os.mkdir(action_path, 0o700)
+                with self.assertRaisesRegex(AssertionError, _exact(message)):
+                    assert_startup_force_action_lifecycle(
+                        launched=launched,
+                        final_status=final_status,
+                        action_path=action_path,
+                    )
+
+    def test_startup_force_action_accepts_both_correct_worlds(self) -> None:
+        """Must-still-work: terminal removes its copy, retry retains it."""
+        with tempfile.TemporaryDirectory() as root:
+            removed = os.path.join(root, "removed")
+            retained = os.path.join(root, "retained")
+            os.mkdir(retained, 0o700)
+            assert_startup_force_action_lifecycle(
+                launched=True, final_status="failed", action_path=removed,
+            )
+            assert_startup_force_action_lifecycle(
+                launched=False, final_status="queued", action_path=retained,
             )
 
-    def test_checker_rejects_silent_non_automation_terminal(self) -> None:
-        """Known-bad: a terminal force job with no Recents-visible audit."""
-        with self.assertRaisesRegex(AssertionError, "linked Recents audit"):
-            assert_operation_fence(
-                job_type=IMPORT_JOB_FORCE,
-                authorized=True,
-                final_status="failed",
-                beets_invocations=[703],
-                replay_claimed=False,
-                db=self._db(),
-            )
+    # ---- assert_non_automation_failure_lifecycle: clauses 15-21 -------
 
-    def test_checker_rejects_terminal_source_drift(self) -> None:
-        """Known-bad: a YT failure that defaulted to slskd must trip."""
-        db, source_download_log_id = _drive_non_automation_failure(
-            job_type=IMPORT_JOB_YOUTUBE,
+    def _driven(
+        self,
+        *,
+        job_type: str = IMPORT_JOB_FORCE,
+        db_factory: Callable[[], FakePipelineDB] = FakePipelineDB,
+    ) -> tuple[FakePipelineDB, int]:
+        return _drive_non_automation_failure(
+            job_type=job_type,
             failure_class="bundle_less_failure",
             request_status="wanted",
+            db_factory=db_factory,
         )
-        failed = next(row for row in db.download_logs if row.outcome == "failed")
-        failed.source = "slskd"
-        with self.assertRaisesRegex(AssertionError, "source drifted"):
-            assert_non_automation_failure_lifecycle(
-                db=db,
-                job_type=IMPORT_JOB_YOUTUBE,
-                request_id=_OPERATION_FENCE_REQUEST_ID,
-                request_status="wanted",
-                source_download_log_id=source_download_log_id,
-            )
 
-    def test_checker_rejects_leaked_terminal_force_action_copy(self) -> None:
-        """Known-bad: a terminal force job left its private copy behind."""
-        with tempfile.TemporaryDirectory() as leaked_path, self.assertRaisesRegex(
-            AssertionError,
-            "leaked its private action copy",
-        ):
-            assert_startup_force_action_lifecycle(
-                launched=True,
-                final_status="failed",
-                action_path=leaked_path,
+    def _check_driven(
+        self,
+        db: FakePipelineDB,
+        source_download_log_id: int,
+        *,
+        job_type: str = IMPORT_JOB_FORCE,
+        request_status: str = "wanted",
+    ) -> None:
+        assert_non_automation_failure_lifecycle(
+            db=db,
+            job_type=job_type,
+            request_id=_OPERATION_FENCE_REQUEST_ID,
+            request_status=request_status,
+            source_download_log_id=source_download_log_id,
+        )
+
+    def _terminal_audit(self, db: FakePipelineDB, source_id: int):
+        return next(
+            row for row in db.download_logs
+            if row.outcome == "failed"
+            and row.source_download_log_id == source_id
+        )
+
+    def test_non_automation_lifecycle_clause_worlds(self) -> None:
+        """Every non-automation lifecycle clause has a world that fires it.
+
+        Each world is a real driven force/YouTube failure — importer,
+        terminal-outcome and Recents production code — with exactly one
+        planted deviation, so no earlier clause can absorb the violation.
+        """
+        def clause_15() -> None:
+            db, source_id = self._driven()
+            job = next(
+                row for row in db._import_jobs
+                if row.get("request_id") == _OPERATION_FENCE_REQUEST_ID
+                and row.get("job_type") == IMPORT_JOB_FORCE
             )
+            job["status"] = "completed"
+            self._check_driven(db, source_id)
+
+        def clause_16() -> None:
+            db, source_id = self._driven()
+            db.request(_OPERATION_FENCE_REQUEST_ID)["status"] = "imported"
+            self._check_driven(db, source_id)
+
+        def clause_17() -> None:
+            db, source_id = self._driven(job_type=IMPORT_JOB_YOUTUBE)
+            origin = next(
+                row for row in db.download_logs if row.id == source_id
+            )
+            # The pre-handoff state ``insert_youtube_running`` writes: the
+            # enqueue never promoted it to ``youtube_success``.
+            origin.outcome = "youtube_running"
+            self._check_driven(db, source_id, job_type=IMPORT_JOB_YOUTUBE)
+
+        def clause_18_missing() -> None:
+            db, source_id = self._driven()
+            db.download_logs.remove(self._terminal_audit(db, source_id))
+            self._check_driven(db, source_id)
+
+        def clause_18_duplicated() -> None:
+            db, source_id = self._driven()
+            db.log_download(
+                _OPERATION_FENCE_REQUEST_ID,
+                outcome="failed",
+                source_download_log_id=source_id,
+                error_message=non_automation_import_failure_message(
+                    IMPORT_JOB_FORCE, "generated duplicate attempt audit",
+                ),
+            )
+            self._check_driven(db, source_id)
+
+        def clause_19() -> None:
+            db, source_id = self._driven(job_type=IMPORT_JOB_YOUTUBE)
+            self._terminal_audit(db, source_id).source = "slskd"
+            self._check_driven(db, source_id, job_type=IMPORT_JOB_YOUTUBE)
+
+        def clause_20() -> None:
+            db, source_id = self._driven(db_factory=AuditReadBackLostDB)
+            assert isinstance(db, AuditReadBackLostDB)
+            db.audit_read_back_lost = True
+            self._check_driven(db, source_id)
+
+        def clause_21() -> None:
+            db, source_id = self._driven()
+            # The other producer's identity prefix: a real string from
+            # ``non_automation_import_failure_message``, wrong for this job.
+            self._terminal_audit(db, source_id).error_message = (
+                non_automation_import_failure_message(
+                    IMPORT_JOB_YOUTUBE, "generated cross-identity diagnostic",
+                )
+            )
+            self._check_driven(db, source_id)
+
+        cases: list[tuple[str, Callable[[], None], str]] = [
+            (
+                "15 the attempt terminalized as a success, not a failure",
+                clause_15,
+                "non-automation job ended 'completed'",
+            ),
+            (
+                "16 a force job moved the request's lifecycle",
+                clause_16,
+                "non-automation failure changed request lifecycle",
+            ),
+            (
+                "17 a YouTube import skipped the canonical success handoff",
+                clause_17,
+                "YouTube import did not use the canonical handoff",
+            ),
+            (
+                "18a the terminal bundle wrote no linked audit row",
+                clause_18_missing,
+                "non-automation failure did not write one audit row",
+            ),
+            (
+                "18b one attempt wrote two linked audit rows",
+                clause_18_duplicated,
+                "non-automation failure did not write one audit row",
+            ),
+            (
+                "19 the terminal audit defaulted its source away from origin",
+                clause_19,
+                "terminal audit source drifted from its origin",
+            ),
+            (
+                "20 the committed audit row did not read back",
+                clause_20,
+                "linked terminal audit disappeared",
+            ),
+            (
+                "21 Recents rendered the other job type's failure identity",
+                clause_21,
+                "Recents lost the failed job-type identity",
+            ),
+        ]
+        for clause, invoke, message in cases:
+            with self.subTest(clause=clause), self.assertRaisesRegex(
+                AssertionError, _exact(message),
+            ):
+                invoke()
+
+    def test_non_automation_lifecycle_accepts_the_driven_worlds(self) -> None:
+        """Must-still-work: an undisturbed driven failure passes every clause."""
+        for job_type in (IMPORT_JOB_FORCE, IMPORT_JOB_YOUTUBE):
+            with self.subTest(job_type=job_type):
+                db, source_id = self._driven(job_type=job_type)
+                self._check_driven(db, source_id, job_type=job_type)
 
 
 if __name__ == "__main__":

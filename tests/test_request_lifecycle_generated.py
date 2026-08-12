@@ -26,7 +26,12 @@ Alongside scenario-shaped rules, ``attempt_any_transition`` deliberately drives
 every target from every current status (including ``replaced``), with both
 current and stale explicit source snapshots. The production transition DAG and
 SQL compare-and-set boundary must reject every invalid/stale world without
-caller-side eligibility filtering.
+caller-side eligibility filtering. ``TestTransitionMatrixPins`` pins that same
+matrix deterministically, including the private ``processing`` edge, because
+the machine's derandomized sequence reshuffles whenever any rule body changes.
+
+Every clause of every checker here carries its own named world and anchored
+message in ``TestLifecycleCheckersTripOnViolations`` (issue #1094).
 
 Profiles, promotion policy, fault-injection qualification:
 docs/generated-testing.md.
@@ -34,10 +39,12 @@ docs/generated-testing.md.
 
 import copy
 import os
+import re
 import sys
 import unittest
 from collections.abc import Mapping
 from itertools import product
+from typing import ClassVar
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -68,6 +75,7 @@ from lib.transitions import (
     RequestTransition,
     TransitionApplied,
     TransitionConflict,
+    TransitionConflictKind,
     TransitionResult,
     finalize_request,
 )
@@ -91,6 +99,18 @@ LEGAL_STATUSES = frozenset({
 _IDENTITY_FIELDS = ("mb_release_id", "source", "created_at")
 
 _RETRY_COUNTERS = ("search_attempts", "download_attempts", "validation_attempts")
+
+
+def exact_clause(message: str) -> str:
+    """Anchor one clause's own message end to end (issue #1094).
+
+    A bare substring is not proof: several clauses here share a prefix
+    (``min_bitrate drifted`` is a substring of ``prev_min_bitrate
+    drifted``; three distinct clauses open with ``replaced request N``),
+    so an unanchored pattern can be satisfied by a sibling clause and a
+    message-collision mutant survives.
+    """
+    return "^" + re.escape(message) + "$"
 
 
 def attach_fake_processing_owner(
@@ -176,8 +196,8 @@ def assert_replacement_linked(
 
 
 def assert_transition_result_matches(
-    before: dict,
-    after: dict,
+    before: Mapping[str, object],
+    after: Mapping[str, object],
     target_status: str,
     result: TransitionResult,
 ) -> None:
@@ -209,6 +229,36 @@ def assert_read_only_cas_result(
         )
     if after != before:
         raise AssertionError(f"read-only CAS mutated row: {before} -> {after}")
+
+
+def resolver_cas_violations(
+    *,
+    applied: bool,
+    should_apply: bool,
+    before_row: Mapping[str, object] | None,
+    after_row: Mapping[str, object] | None,
+    before_tracks: list[dict],
+    after_tracks: list[dict],
+) -> list[str]:
+    """Accumulate every resolver-CAS violation (issue #1094 per-clause proof).
+
+    Accumulating rather than raising: a stale CAS that both lies about its
+    outcome AND mutates rows used to be reported as the outcome clause only,
+    because the raise short-circuited before the mutation clause ran.
+    """
+    violations: list[str] = []
+    if applied is not should_apply:
+        violations.append(
+            f"resolver apply reported {applied}, expected {should_apply}"
+        )
+    if should_apply:
+        if after_row is None or after_row.get("release_group_year") != 1999:
+            violations.append("matching resolver CAS lost parent metadata")
+        if not after_tracks or after_tracks[0]["track_artist"] != "Late Artist":
+            violations.append("matching resolver CAS lost child metadata")
+    elif after_row != before_row or after_tracks != before_tracks:
+        violations.append("stale resolver CAS mutated ancestor or child rows")
+    return violations
 
 
 def assert_wanted_quality_fields(
@@ -315,7 +365,13 @@ class TestReadOnlyMetadataCasGenerated(unittest.TestCase):
         )
         before = copy.deepcopy(db.get_request(request_id))
 
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(
+            ValueError,
+            exact_clause(
+                "metadata CAS cannot mutate reserved lifecycle/identity "
+                f"fields: {field}"
+            ),
+        ):
             db.update_request_fields(request_id, **{field: value})
 
         self.assertEqual(db.get_request(request_id), before)
@@ -323,7 +379,12 @@ class TestReadOnlyMetadataCasGenerated(unittest.TestCase):
 
 class TestWantedQualityFieldsGenerated(unittest.TestCase):
     @given(
-        source_status=st.sampled_from(["downloading", "imported", "unsearchable"]),
+        source_status=st.sampled_from(
+            # ``wanted`` is the same-status field-bearing repeat: it must take
+            # the ordinary CAS writer path, not the status-only idempotent
+            # short circuit that reports success without writing anything.
+            ["wanted", "downloading", "imported", "unsearchable"]
+        ),
         current_min_bitrate=st.one_of(st.none(), st.integers(1, 2000)),
         current_prev_min_bitrate=st.one_of(st.none(), st.integers(1, 2000)),
         next_min_bitrate=st.one_of(st.none(), st.integers(1, 2000)),
@@ -342,6 +403,13 @@ class TestWantedQualityFieldsGenerated(unittest.TestCase):
         current_prev_min_bitrate=128,
         next_min_bitrate=192,
         explicit_prev_min_bitrate=None,
+    )
+    @example(
+        source_status="wanted",
+        current_min_bitrate=128,
+        current_prev_min_bitrate=None,
+        next_min_bitrate=320,
+        explicit_prev_min_bitrate=128,
     )
     def test_explicit_wanted_quality_fields_match_typed_contract(
         self,
@@ -514,7 +582,18 @@ class TestProcessingOwnerGuardsGenerated(unittest.TestCase):
         result = finalize_request(db, request_id, command)
 
         self.assertIsInstance(result, TransitionConflict)
+        assert isinstance(result, TransitionConflict)
         assert before is not None
+        # The conflict must name the exact owner, not a generic stale source:
+        # a fail-open ``processing_locked_conflict`` still produces a refusal
+        # (the writers refuse owned rows too) and is invisible without this.
+        self.assertIs(result.kind, TransitionConflictKind.processing_locked)
+        self.assertIsNotNone(result.processing_owner)
+        assert result.processing_owner is not None
+        self.assertEqual(
+            result.processing_owner.job_id,
+            before["active_automation_import_job_id"],
+        )
         assert_processing_owner_unchanged(
             before,
             copy.deepcopy(db.get_request(request_id)),
@@ -540,8 +619,176 @@ class TestProcessingOwnerGuardsGenerated(unittest.TestCase):
         if (status == "processing") == (owner is not None):
             assert_processing_owner_equivalent(row)
         else:
-            with self.assertRaises(AssertionError):
+            with self.assertRaisesRegex(
+                AssertionError,
+                exact_clause(
+                    f"request 1 has status={status!r} with owner={owner!r}"
+                ),
+            ):
                 assert_processing_owner_equivalent(row)
+
+
+class TestTransitionMatrixPins(unittest.TestCase):
+    """Deterministic pins for every (status, target, source-claim) world.
+
+    ``attempt_any_transition`` explores this matrix randomly, and the
+    machine's derandomized sequence reshuffles whenever ANY rule body
+    changes: during this audit four arms measured at 8 / 4 / 4 / 1
+    executions per suite run dropped to 0 after an unrelated edit to one
+    rule (issue #1094 Q4). These pins hold the whole matrix — invalid
+    edges, stale snapshots, auto-detected sources, and the private
+    ``processing`` edge — independently of that sequence.
+    """
+
+    TARGETS = ("wanted", "downloading", "imported", "unsearchable")
+    SOURCES = (
+        "wanted", "downloading", "imported", "unsearchable", "replaced",
+    )
+
+    @staticmethod
+    def _command(target: str, claimed_source: str | None) -> RequestTransition:
+        if target == "wanted":
+            return RequestTransition.to_wanted(from_status=claimed_source)
+        if target == "downloading":
+            return RequestTransition.to_downloading(
+                from_status=claimed_source,
+                state_json=make_active_download_state_json([]),
+            )
+        if target == "imported":
+            return RequestTransition.to_imported(from_status=claimed_source)
+        return RequestTransition.to_unsearchable(from_status=claimed_source)
+
+    @staticmethod
+    def _row_in(status: str) -> tuple[FakePipelineDB, int]:
+        db = FakePipelineDB()
+        request_id = db.add_request(
+            "Artist", "Album", "request", mb_release_id="matrix-pin")
+        if status == "wanted":
+            return db, request_id
+        if status == "processing":
+            attach_fake_processing_owner(db, request_id)
+            return db, request_id
+        if status == "replaced":
+            db.supersede_request_mbid(
+                request_id,
+                new_mb_release_id="matrix-pin-successor",
+                new_mb_release_group_id=None,
+                new_mb_artist_id=None,
+                new_artist_name="Artist",
+                new_album_title="Album (correct pressing)",
+                new_year=None,
+                new_country=None,
+                new_tracks=[],
+            )
+            return db, request_id
+        if status == "unsearchable":
+            finalize_request(
+                db, request_id,
+                RequestTransition.to_unsearchable(from_status="wanted"))
+            return db, request_id
+        finalize_request(
+            db, request_id,
+            RequestTransition.to_downloading(
+                state_json=make_active_download_state_json([])))
+        if status == "downloading":
+            return db, request_id
+        finalize_request(
+            db, request_id,
+            RequestTransition.to_imported(from_status="downloading"))
+        return db, request_id
+
+    def test_every_ordinary_transition_world(self) -> None:
+        for source in self.SOURCES:
+            for target in self.TARGETS:
+                for claim in ("none", "current", "stale"):
+                    with self.subTest(
+                        source=source, target=target, claim=claim,
+                    ):
+                        self._assert_transition_world(source, target, claim)
+
+    def _assert_transition_world(
+        self, source: str, target: str, claim: str,
+    ) -> None:
+        db, request_id = self._row_in(source)
+        before = copy.deepcopy(db.get_request(request_id))
+        assert before is not None
+        self.assertEqual(before["status"], source)
+        if claim == "none":
+            claimed_source = None
+        elif claim == "current":
+            claimed_source = source
+        else:
+            claimed_source = "wanted" if source != "wanted" else "unsearchable"
+
+        result = finalize_request(
+            db, request_id, self._command(target, claimed_source))
+
+        after = copy.deepcopy(db.get_request(request_id))
+        assert after is not None
+        should_apply = (
+            (claimed_source is None or claimed_source == source)
+            and (source, target) in VALID_TRANSITIONS
+        )
+        assert_transition_result_matches(before, after, target, result)
+        self.assertIsInstance(
+            result,
+            TransitionApplied if should_apply else TransitionConflict,
+        )
+
+    def test_two_writer_requeue_is_all_or_nothing(self) -> None:
+        """The one transition with two writers is the only single-threaded
+        world that can return a conflict AFTER a committed write — which is
+        what the byte-identical-no-op clause legislates against."""
+        db, request_id = self._row_in("downloading")
+        before = copy.deepcopy(db.get_request(request_id))
+        assert before is not None
+
+        result = finalize_request(
+            db, request_id,
+            RequestTransition.to_wanted(
+                from_status="downloading", attempt_type="download"),
+        )
+
+        after = copy.deepcopy(db.get_request(request_id))
+        assert after is not None
+        # The no-op checker runs FIRST so a conflict-after-write world is
+        # attributed to the clause that legislates it, not to the coarser
+        # result-type assertion below (issue #1094 cross-checker masking).
+        assert_transition_result_matches(before, after, "wanted", result)
+        self.assertIsInstance(result, TransitionApplied)
+        self.assertEqual(after["download_attempts"], 1)
+
+    def test_every_processing_world_returns_the_exact_owner_conflict(
+        self,
+    ) -> None:
+        for target in self.TARGETS:
+            for claim in ("none", "current", "stale"):
+                with self.subTest(target=target, claim=claim):
+                    db, request_id = self._row_in("processing")
+                    before = copy.deepcopy(db.get_request(request_id))
+                    assert before is not None
+                    claimed_source = {
+                        "none": None,
+                        "current": "processing",
+                        "stale": "wanted",
+                    }[claim]
+
+                    result = finalize_request(
+                        db, request_id, self._command(target, claimed_source))
+
+                    self.assertIsInstance(result, TransitionConflict)
+                    assert isinstance(result, TransitionConflict)
+                    self.assertIs(
+                        result.kind, TransitionConflictKind.processing_locked)
+                    assert result.processing_owner is not None
+                    self.assertEqual(
+                        result.processing_owner.job_id,
+                        before["active_automation_import_job_id"],
+                    )
+                    assert_processing_owner_unchanged(
+                        before, copy.deepcopy(db.get_request(request_id)))
+                    assert_processing_owner_equivalent(
+                        db.request(request_id))
 
 
 class TestResolverSourceStatusGenerated(unittest.TestCase):
@@ -602,23 +849,16 @@ class TestResolverSourceStatusGenerated(unittest.TestCase):
             ),
             expected_status=expected_status,
         )
-        should_apply = exists and status == expected_status
-        if applied is not should_apply:
-            raise AssertionError(
-                f"resolver apply reported {applied}, expected {should_apply}"
-            )
-        after_row = db.get_request(request_id)
-        after_tracks = db.get_tracks(request_id)
-        if should_apply:
-            assert after_row is not None
-            if after_row["release_group_year"] != 1999:
-                raise AssertionError("matching resolver CAS lost parent metadata")
-            if after_tracks[0]["track_artist"] != "Late Artist":
-                raise AssertionError("matching resolver CAS lost child metadata")
-        elif after_row != before_row or after_tracks != before_tracks:
-            raise AssertionError(
-                "stale resolver CAS mutated ancestor or child rows"
-            )
+        violations = resolver_cas_violations(
+            applied=applied,
+            should_apply=exists and status == expected_status,
+            before_row=before_row,
+            after_row=db.get_request(request_id),
+            before_tracks=before_tracks,
+            after_tracks=db.get_tracks(request_id),
+        )
+        if violations:
+            raise AssertionError("; ".join(violations))
 
 
 class RequestLifecycleMachine(RuleBasedStateMachine):
@@ -832,6 +1072,26 @@ class RequestLifecycleMachine(RuleBasedStateMachine):
                 self._ids_with_status(
                     "wanted", "downloading", "imported", "unsearchable")),
             label="replace target")
+        if not self.db.get_tracks(rid):
+            # Without real child rows the frozen-tracks invariant compares
+            # [] with [] forever and patrols nothing (issue #1094 Q2: a
+            # mutation-on-refusal writer survived against empty tracks).
+            self.db.set_tracks(rid, [
+                {
+                    "disc_number": 1,
+                    "track_number": 1,
+                    "title": f"Track one of {rid}",
+                    "length_seconds": 210,
+                    "track_artist": "Lifecycle Artist",
+                },
+                {
+                    "disc_number": 1,
+                    "track_number": 2,
+                    "title": f"Track two of {rid}",
+                    "length_seconds": 180,
+                    "track_artist": None,
+                },
+            ])
         if self._row(rid).get("active_plan_id") is None:
             self.db.create_successful_search_plan(
                 request_id=rid,
@@ -1035,123 +1295,401 @@ TestRequestLifecycleMachine = RequestLifecycleMachine.TestCase
 
 
 class TestLifecycleCheckersTripOnViolations(unittest.TestCase):
-    """Known-bad self-tests for every lifecycle invariant checker."""
+    """Per-clause known-bad self-tests (issue #1094).
 
-    def test_trips_on_illegal_status(self):
-        with self.assertRaises(AssertionError):
-            assert_statuses_legal([{"id": 1, "status": "zombie"}])
+    Every clause of every lifecycle checker gets its own minimal world —
+    the one that makes THAT clause's condition true while every earlier
+    clause in the same function passes — and asserts THAT clause's own
+    message, anchored end to end. Deterministic by construction: this is
+    test machinery, never a generated target.
+    """
 
-    def test_trips_on_thawed_replaced_row(self):
+    def test_illegal_status_clause(self):
+        with self.assertRaisesRegex(
+            AssertionError,
+            exact_clause("request 7 has illegal status 'zombie'"),
+        ):
+            assert_statuses_legal([{"id": 7, "status": "zombie"}])
+
+    def test_illegal_status_clause_stays_quiet_for_every_legal_status(self):
+        assert_statuses_legal([
+            {"id": index, "status": status}
+            for index, status in enumerate(sorted(LEGAL_STATUSES))
+        ])
+
+    def test_replaced_row_frozen_clause_on_field_drift(self):
         snapshot = {"id": 1, "status": "replaced", "min_bitrate": 245}
         thawed = {"id": 1, "status": "replaced", "min_bitrate": 320}
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+            AssertionError,
+            exact_clause(
+                "replaced request 1 mutated after supersede: "
+                "{'min_bitrate': (245, 320)}"
+            ),
+        ):
             assert_replaced_row_frozen(snapshot, thawed)
 
-    def test_trips_on_rewritten_replaced_tracks(self):
-        with self.assertRaises(AssertionError):
-            assert_replaced_tracks_frozen(
-                1,
-                [{"track_number": 1, "title": "Original"}],
-                [{"track_number": 1, "title": "Late resolver result"}],
-            )
-
-    def test_trips_on_resurrected_replaced_row(self):
+    def test_replaced_row_frozen_clause_on_resurrection(self):
         snapshot = {"id": 1, "status": "replaced"}
         resurrected = {"id": 1, "status": "wanted"}
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+            AssertionError,
+            exact_clause(
+                "replaced request 1 mutated after supersede: "
+                "{'status': ('replaced', 'wanted')}"
+            ),
+        ):
             assert_replaced_row_frozen(snapshot, resurrected)
 
-    def test_trips_on_identity_drift(self):
+    def test_replaced_tracks_frozen_clause(self):
+        snapshot = [{"track_number": 1, "title": "Original"}]
+        rewritten = [{"track_number": 1, "title": "Late resolver result"}]
+        with self.assertRaisesRegex(
+            AssertionError,
+            exact_clause(
+                f"replaced request 1 tracks mutated after supersede: "
+                f"{snapshot!r} -> {rewritten!r}"
+            ),
+        ):
+            assert_replaced_tracks_frozen(1, snapshot, rewritten)
+
+    def test_identity_drift_clause(self):
         row = {"id": 1, "mb_release_id": "mbid-B", "source": "request",
                "created_at": "t0"}
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+            AssertionError,
+            exact_clause(
+                "request 1 identity drifted: ('mbid-A', 'request', 't0') -> "
+                "('mbid-B', 'request', 't0')"
+            ),
+        ):
             assert_identity_immutable(("mbid-A", "request", "t0"), row)
 
-    def test_trips_on_stray_download_state(self):
-        with self.assertRaises(AssertionError):
-            assert_download_state_coherent(
-                {"id": 1, "status": "imported",
-                 "active_download_state": "{}"})
+    def test_stray_download_state_clause_for_every_forbidden_status(self):
+        forbidden = sorted(
+            LEGAL_STATUSES - {"downloading", "processing", "replaced"})
+        for status in forbidden:
+            with self.subTest(status=status), self.assertRaisesRegex(
+                AssertionError,
+                exact_clause(
+                    f"request 1 carries active_download_state while "
+                    f"{status!r}"
+                ),
+            ):
+                assert_download_state_coherent({
+                    "id": 1,
+                    "status": status,
+                    "active_download_state": "{}",
+                })
 
-    def test_trips_on_processing_without_owner_and_owner_without_processing(self):
-        with self.assertRaises(AssertionError):
-            assert_processing_owner_equivalent({
-                "id": 1,
-                "status": "processing",
-                "active_automation_import_job_id": None,
-            })
-        with self.assertRaises(AssertionError):
-            assert_processing_owner_equivalent({
-                "id": 1,
-                "status": "wanted",
-                "active_automation_import_job_id": 9,
-            })
+    def test_download_state_clause_allows_the_three_carrying_statuses(self):
+        for status in ("downloading", "processing", "replaced"):
+            with self.subTest(status=status):
+                assert_download_state_coherent({
+                    "id": 1,
+                    "status": status,
+                    "active_download_state": "{}",
+                })
 
-    def test_processing_owner_guard_checker_trips_on_mutation_and_delete(self):
+    def test_processing_owner_equivalence_clause_both_directions(self):
+        cases = (
+            ("processing", None),
+            ("wanted", 9),
+        )
+        for status, owner in cases:
+            with self.subTest(status=status, owner=owner), self.assertRaisesRegex(
+                AssertionError,
+                exact_clause(
+                    f"request 1 has status={status!r} with owner={owner!r}"
+                ),
+            ):
+                assert_processing_owner_equivalent({
+                    "id": 1,
+                    "status": status,
+                    "active_automation_import_job_id": owner,
+                })
+
+    def test_processing_owner_unchanged_clause_on_mutation(self):
         before = {
             "id": 1,
             "status": "processing",
             "active_automation_import_job_id": 9,
         }
-        with self.assertRaises(AssertionError):
-            assert_processing_owner_unchanged(
-                before,
-                {**before, "status": "wanted"},
-            )
-        with self.assertRaises(AssertionError):
+        after = {**before, "status": "wanted"}
+        with self.assertRaisesRegex(
+            AssertionError,
+            exact_clause(f"processing owner mutated: {before} -> {after}"),
+        ):
+            assert_processing_owner_unchanged(before, after)
+
+    def test_processing_owner_unchanged_clause_on_delete(self):
+        before = {
+            "id": 1,
+            "status": "processing",
+            "active_automation_import_job_id": 9,
+        }
+        with self.assertRaisesRegex(
+            AssertionError,
+            exact_clause(f"processing owner mutated: {before} -> None"),
+        ):
             assert_processing_owner_unchanged(before, None)
 
-    def test_trips_on_dropped_explicit_previous_bitrate(self):
-        with self.assertRaises(AssertionError):
+    def test_wanted_quality_clause_on_wrong_landing_status(self):
+        with self.assertRaisesRegex(
+            AssertionError,
+            exact_clause("wanted transition landed as 'imported'"),
+        ):
             assert_wanted_quality_fields(
-                {
-                    "status": "wanted",
-                    "min_bitrate": 245,
-                    "prev_min_bitrate": 320,
-                },
+                {"status": "imported", "min_bitrate": 245,
+                 "prev_min_bitrate": 320},
+                min_bitrate=245,
+                prev_min_bitrate=320,
+            )
+
+    def test_wanted_quality_clause_on_dropped_min_bitrate(self):
+        # Anchored end to end on purpose: ``min_bitrate drifted`` is a
+        # substring of the prev_min_bitrate clause below, so an unanchored
+        # pattern would be satisfied by the wrong clause.
+        with self.assertRaisesRegex(
+            AssertionError,
+            exact_clause("min_bitrate drifted: 320 != 245"),
+        ):
+            assert_wanted_quality_fields(
+                {"status": "wanted", "min_bitrate": 320,
+                 "prev_min_bitrate": 128},
+                min_bitrate=245,
+                prev_min_bitrate=128,
+            )
+
+    def test_wanted_quality_clause_on_dropped_previous_bitrate(self):
+        with self.assertRaisesRegex(
+            AssertionError,
+            exact_clause("prev_min_bitrate drifted: 320 != 256"),
+        ):
+            assert_wanted_quality_fields(
+                {"status": "wanted", "min_bitrate": 245,
+                 "prev_min_bitrate": 320},
                 min_bitrate=245,
                 prev_min_bitrate=256,
             )
 
-    def test_trips_on_missing_descendant(self):
-        with self.assertRaises(AssertionError):
+    def test_missing_descendant_clause(self):
+        with self.assertRaisesRegex(
+            AssertionError,
+            exact_clause("replaced request 1 has no linked descendant row"),
+        ):
             assert_replacement_linked(1, None)
-        with self.assertRaises(AssertionError):
+
+    def test_descendant_backlink_clause(self):
+        # Fail-closed legislation: the machine reaches this checker through
+        # ``get_request_by_replaces_request_id``, whose result always points
+        # back, so only a future caller resolving the descendant some other
+        # way (by id, by mbid) can reach this clause. Kept so that caller
+        # fails loudly instead of silently accepting a foreign descendant.
+        with self.assertRaisesRegex(
+            AssertionError,
+            exact_clause(
+                "descendant of 1 does not point back "
+                "(replaces_request_id=99)"
+            ),
+        ):
             assert_replacement_linked(1, {"replaces_request_id": 99})
 
-    def test_trips_when_conflict_mutates_row(self):
-        from lib.transitions import TransitionConflictKind
+    def test_transition_result_clause_when_applied_target_did_not_land(self):
+        row = {"id": 1, "status": "wanted"}
+        applied = TransitionApplied(1, "wanted", "unsearchable")
+        with self.assertRaisesRegex(
+            AssertionError,
+            exact_clause(
+                "applied transition reported 'unsearchable' but row is "
+                "'wanted'"
+            ),
+        ):
+            assert_transition_result_matches(row, row, "unsearchable", applied)
 
+    def test_transition_result_clause_when_conflict_mutates_row(self):
         before = {"id": 1, "status": "replaced"}
         after = {"id": 1, "status": "wanted"}
         conflict = TransitionConflict(
             1, "wanted", TransitionConflictKind.invalid_edge,
             "replaced", "replaced",
         )
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(
+            AssertionError,
+            exact_clause(
+                f"conflicted transition mutated request 1: {before} -> {after}"
+            ),
+        ):
             assert_transition_result_matches(before, after, "wanted", conflict)
 
-    def test_trips_when_applied_target_did_not_land(self):
-        row = {"id": 1, "status": "wanted"}
-        applied = TransitionApplied(1, "wanted", "unsearchable")
-        with self.assertRaises(AssertionError):
-            assert_transition_result_matches(row, row, "unsearchable", applied)
+    def test_transition_result_checker_accepts_honest_results(self):
+        row = {"id": 1, "status": "unsearchable"}
+        assert_transition_result_matches(
+            {"id": 1, "status": "wanted"}, row, "unsearchable",
+            TransitionApplied(1, "wanted", "unsearchable"),
+        )
+        assert_transition_result_matches(
+            row, row, "imported",
+            TransitionConflict(
+                1, "imported", TransitionConflictKind.invalid_edge,
+                None, "unsearchable",
+            ),
+        )
 
-    def test_read_only_cas_checker_trips_on_false_success_and_mutation(self):
-        with self.assertRaises(AssertionError):
-            assert_read_only_cas_result(
-                applied=True,
-                expected_applied=False,
-                before=None,
-                after=None,
-            )
-        with self.assertRaises(AssertionError):
+    def test_read_only_cas_outcome_clause_both_directions(self):
+        for applied, expected in ((True, False), (False, True)):
+            with self.subTest(
+                applied=applied, expected=expected,
+            ), self.assertRaisesRegex(
+                AssertionError,
+                exact_clause(
+                    f"read-only CAS reported applied={applied}, "
+                    f"expected={expected}"
+                ),
+            ):
+                assert_read_only_cas_result(
+                    applied=applied,
+                    expected_applied=expected,
+                    before=None,
+                    after=None,
+                )
+
+    def test_read_only_cas_mutation_clause(self):
+        before = {"id": 1, "updated_at": "before"}
+        after = {"id": 1, "updated_at": "after"}
+        with self.assertRaisesRegex(
+            AssertionError,
+            exact_clause(f"read-only CAS mutated row: {before} -> {after}"),
+        ):
             assert_read_only_cas_result(
                 applied=True,
                 expected_applied=True,
-                before={"id": 1, "updated_at": "before"},
-                after={"id": 1, "updated_at": "after"},
+                before=before,
+                after=after,
             )
+
+
+class TestResolverCasViolationClauses(unittest.TestCase):
+    """Per-clause proof for the accumulating resolver-CAS checker."""
+
+    ROW_BEFORE: ClassVar[dict[str, object]] = {
+        "id": 1, "status": "wanted", "release_group_year": None}
+    ROW_AFTER: ClassVar[dict[str, object]] = {
+        "id": 1, "status": "wanted", "release_group_year": 1999}
+    TRACKS_BEFORE: ClassVar[list[dict]] = [
+        {"track_number": 1, "track_artist": None}]
+    TRACKS_AFTER: ClassVar[list[dict]] = [
+        {"track_number": 1, "track_artist": "Late Artist"}]
+
+    def test_clean_matching_world_has_no_violations(self):
+        self.assertEqual(
+            resolver_cas_violations(
+                applied=True,
+                should_apply=True,
+                before_row=self.ROW_BEFORE,
+                after_row=self.ROW_AFTER,
+                before_tracks=self.TRACKS_BEFORE,
+                after_tracks=self.TRACKS_AFTER,
+            ),
+            [],
+        )
+
+    def test_clean_stale_world_has_no_violations(self):
+        self.assertEqual(
+            resolver_cas_violations(
+                applied=False,
+                should_apply=False,
+                before_row=self.ROW_BEFORE,
+                after_row=self.ROW_BEFORE,
+                before_tracks=self.TRACKS_BEFORE,
+                after_tracks=self.TRACKS_BEFORE,
+            ),
+            [],
+        )
+
+    def test_outcome_clause(self):
+        self.assertEqual(
+            resolver_cas_violations(
+                applied=False,
+                should_apply=True,
+                before_row=self.ROW_BEFORE,
+                after_row=self.ROW_AFTER,
+                before_tracks=self.TRACKS_BEFORE,
+                after_tracks=self.TRACKS_AFTER,
+            ),
+            ["resolver apply reported False, expected True"],
+        )
+
+    def test_lost_parent_metadata_clause(self):
+        self.assertEqual(
+            resolver_cas_violations(
+                applied=True,
+                should_apply=True,
+                before_row=self.ROW_BEFORE,
+                after_row=self.ROW_BEFORE,
+                before_tracks=self.TRACKS_BEFORE,
+                after_tracks=self.TRACKS_AFTER,
+            ),
+            ["matching resolver CAS lost parent metadata"],
+        )
+
+    def test_lost_child_metadata_clause(self):
+        self.assertEqual(
+            resolver_cas_violations(
+                applied=True,
+                should_apply=True,
+                before_row=self.ROW_BEFORE,
+                after_row=self.ROW_AFTER,
+                before_tracks=self.TRACKS_BEFORE,
+                after_tracks=self.TRACKS_BEFORE,
+            ),
+            ["matching resolver CAS lost child metadata"],
+        )
+
+    def test_stale_mutation_clause(self):
+        self.assertEqual(
+            resolver_cas_violations(
+                applied=False,
+                should_apply=False,
+                before_row=self.ROW_BEFORE,
+                after_row=self.ROW_AFTER,
+                before_tracks=self.TRACKS_BEFORE,
+                after_tracks=self.TRACKS_BEFORE,
+            ),
+            ["stale resolver CAS mutated ancestor or child rows"],
+        )
+
+    def test_accumulating_checker_reports_every_violated_clause(self):
+        """A raise-chain used to report only the first of these two."""
+        self.assertEqual(
+            resolver_cas_violations(
+                applied=True,
+                should_apply=False,
+                before_row=self.ROW_BEFORE,
+                after_row=self.ROW_AFTER,
+                before_tracks=self.TRACKS_BEFORE,
+                after_tracks=self.TRACKS_AFTER,
+            ),
+            [
+                "resolver apply reported True, expected False",
+                "stale resolver CAS mutated ancestor or child rows",
+            ],
+        )
+        self.assertEqual(
+            resolver_cas_violations(
+                applied=False,
+                should_apply=True,
+                before_row=self.ROW_BEFORE,
+                after_row=self.ROW_BEFORE,
+                before_tracks=self.TRACKS_BEFORE,
+                after_tracks=self.TRACKS_BEFORE,
+            ),
+            [
+                "resolver apply reported False, expected True",
+                "matching resolver CAS lost parent metadata",
+                "matching resolver CAS lost child metadata",
+            ],
+        )
 
 
 if __name__ == "__main__":
