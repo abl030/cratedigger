@@ -16,7 +16,8 @@ mechanical pattern as the ``lib/quality/`` split, issue #477):
                        import-preview
     api_mutations.py     API-backed pipeline-delete / set-quality / upgrade /
                          wrong-match-converge / resolve-rg
-    wrong_match.py       wrong-match-triage / -delete / -delete-group
+    wrong_match.py       wrong-match-triage / -triage-cancel / -delete /
+                       -delete-group
     search_plan.py       search-plan show / regenerate / dry-run /
                        saturation / advance / history
     replace.py           replace
@@ -117,6 +118,7 @@ from scripts.pipeline_cli.wrong_match import (
     cmd_wrong_match_delete,
     cmd_wrong_match_delete_group,
     cmd_wrong_match_triage,
+    cmd_wrong_match_triage_cancel,
 )
 from scripts.pipeline_cli.youtube import (
     OUTCOME_EXIT_CODE,
@@ -169,6 +171,7 @@ __all__ = [
     "cmd_wrong_match_delete",
     "cmd_wrong_match_delete_group",
     "cmd_wrong_match_triage",
+    "cmd_wrong_match_triage_cancel",
     "cmd_youtube_album",
     "cmd_youtube_rescue",
     "fetch_mb_release",

@@ -64,6 +64,7 @@ from scripts.pipeline_cli.wrong_match import (
     cmd_wrong_match_delete,
     cmd_wrong_match_delete_group,
     cmd_wrong_match_triage,
+    cmd_wrong_match_triage_cancel,
 )
 from scripts.pipeline_cli.youtube import cmd_youtube_album, cmd_youtube_rescue
 
@@ -106,7 +107,11 @@ def main(*, api_socket: str | None = None):
     # reads or destroys a path under the private 0700 processing tree, which
     # only the service identity can traverse. Run in the operator's own
     # process they reported intact folders as missing, cleared their DB
-    # pointers, and claimed success.
+    # pointers, and claimed success. ``wrong-match-triage-cancel`` (#1083)
+    # doesn't touch that tree itself, but the sweep it stops runs on a
+    # background thread inside the web service, so it belongs on the same
+    # socket-only surface for the same reason: there is no other way to
+    # reach it.
     api_commands = {
         "pipeline-delete": cmd_pipeline_delete,
         "set-quality": cmd_set_quality,
@@ -116,6 +121,7 @@ def main(*, api_socket: str | None = None):
         "wrong-match-delete": cmd_wrong_match_delete,
         "wrong-match-delete-group": cmd_wrong_match_delete_group,
         "wrong-match-triage": cmd_wrong_match_triage,
+        "wrong-match-triage-cancel": cmd_wrong_match_triage_cancel,
         "replace": cmd_replace,
         "force-import": cmd_force_import,
         "beets-distance": cmd_beets_distance,

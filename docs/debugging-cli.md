@@ -24,7 +24,8 @@ The installed wrapper has two independent authority shapes:
 
 - `pipeline-delete`, `set-quality`, `upgrade`, `wrong-match-converge`,
   `resolve-rg`, `wrong-match-delete`, `wrong-match-delete-group`,
-  `wrong-match-triage`, `replace`, `force-import`, `beets-distance`, and
+  `wrong-match-triage`, `wrong-match-triage-cancel`, `replace`,
+  `force-import`, `beets-distance`, and
   `import-preview --download-log-id` connect to
   `/run/cratedigger-web/web.sock`. The caller must be a
   member of `services.cratedigger.web.accessGroup` (default
@@ -134,7 +135,8 @@ remains after a purge failure.
 
 `pipeline-delete`, `set-quality`, `upgrade`, `wrong-match-converge`,
 `resolve-rg`, `wrong-match-delete`, `wrong-match-delete-group`,
-`wrong-match-triage`, `replace`, `force-import`, `beets-distance`, and
+`wrong-match-triage`, `wrong-match-triage-cancel`, `replace`,
+`force-import`, `beets-distance`, and
 `import-preview --download-log-id` call the canonical web route over the
 module-owned Unix socket.
 The installed Nix wrapper selects that socket while constructing the parser:
@@ -191,7 +193,24 @@ falls through to the ordinary uncaught `KeyboardInterrupt` and detaches the
 terminal — the sweep (and any cancel already in flight) keeps running
 server-side regardless. Its `--json` output is the STATUS envelope (`state`,
 `started_at`, `finished_at`, `summary`, `error`), not the bare summary the
-in-process command printed; the counts live under `summary`.
+in-process command printed; the counts live under `summary`. A cancel POST
+that fails outright (refused socket, timeout, or a route-level 500) gets one
+retry before the CLI gives up and says so on stderr, then still falls through
+to following the sweep's status — a swallowed failure would otherwise have
+the CLI claim it stopped the sweep while the whole remaining queue kept
+deleting underneath it.
+
+**`wrong-match-triage-cancel` reaches the same cancel route directly, with no
+attached sweep to poll.** `Ctrl-C` only helps when an operator is still
+attached to the terminal that started the sweep; a sweep started over SSH
+whose connection then drops (SIGHUP, not `KeyboardInterrupt`) keeps running
+with nothing left to catch a signal, and a fresh `wrong-match-triage --apply`
+on reconnect just 409s against the still-running sweep (issue #1083 review).
+`wrong-match-triage-cancel` is the same `POST /api/wrong-matches/triage/cancel`
+the Ctrl-C handler and the web UI's Stop button use, called directly with no
+polling of its own — run it, then a separate `wrong-match-triage --apply` (or
+the status route) picks up the terminal state. Always exits 0: the route
+itself never refuses, whether or not a sweep happens to be running.
 
 Locally generated transport/protocol failures (including a missing or
 unreachable socket, malformed development origins, redirects, or non-object
@@ -273,6 +292,7 @@ inside socket authorization, never credentials.
 - `pipeline-cli wrong-match-converge` — Converge one Wrong Matches request through its canonical web route.
 - `pipeline-cli wrong-match-delete-group` — Delete visible Wrong Matches folders for one request.
 - `pipeline-cli wrong-match-triage` — Converge the full Wrong Matches queue using persisted evidence.
+- `pipeline-cli wrong-match-triage-cancel` — Request cancellation of the in-flight Wrong Matches triage sweep, if any.
 - `pipeline-cli youtube-album` — Resolve a release to the YouTube Music album
   matrix directly through the shared resolver service; accepts
   `<identifier> [--refresh] [--watch-url YOUTUBE_URL] [--json]`, with human-readable output by default

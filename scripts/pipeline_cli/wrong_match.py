@@ -2,14 +2,18 @@
 
 ``wrong-match-triage`` (whole-queue evidence cleanup), ``wrong-match-delete``
 (single source folder), ``wrong-match-delete-group`` (all visible source
-folders for one request).
+folders for one request), ``wrong-match-triage-cancel`` (request
+cancellation of an in-flight sweep, issue #1083).
 
-All three touch the private ``0700`` processing tree, so all three execute
-through the canonical web routes over the permissioned Unix socket rather
-than in the operator's own process (issue #1063). There is no direct-DB
-fallback: the installed CLI cannot traverse that tree, and an in-process
-run there reported intact 445MB folders as "missing" and cleared their
-pointers. Only the presentation below is CLI-local.
+The first three touch the private ``0700`` processing tree, so all four
+execute through the canonical web routes over the permissioned Unix socket
+rather than in the operator's own process (issue #1063). There is no
+direct-DB fallback: the installed CLI cannot traverse that tree, and an
+in-process run there reported intact 445MB folders as "missing" and
+cleared their pointers. ``wrong-match-triage-cancel`` doesn't touch that
+tree itself, but the sweep it stops runs on a background thread inside
+``cratedigger-web`` — the only way to reach it is the same socket. Only
+the presentation below is CLI-local.
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ from scripts.pipeline_cli.api_mutations import (
     TIMEOUT_SOURCE_DELETE_SECONDS,
     _ApiMutation,
     _post,
+    _relay,
     poll_to_completion,
     relay_polled,
     relay_rendered,
@@ -152,7 +157,12 @@ def cmd_wrong_match_triage(
     (issue #1083). No direct call, no direct-DB fallback: the deletions
     happen under the service identity over the permissioned socket
     either way (issue #1063), and cancellation is just one more request
-    over that same path.
+    over that same path. A failed cancel POST (refused socket, timeout,
+    or a route-level 500) gets one retry and, if that retry also fails,
+    a stderr line saying so before the CLI falls through to following
+    the sweep's status — silently swallowing that failure would have
+    the CLI claim it stopped the sweep while the whole remaining queue
+    keeps deleting underneath it.
     """
     if not args.apply:
         print(
@@ -183,11 +193,27 @@ def cmd_wrong_match_triage(
             "finish...",
             file=sys.stderr,
         )
-        _post(
-            args.api_endpoint,
-            _ApiMutation(path="/api/wrong-matches/triage/cancel", body={}),
-            report_failure=False,
+        cancel_request = _ApiMutation(
+            path="/api/wrong-matches/triage/cancel", body={},
         )
+        # One retry before giving up (``_post``'s own contract:
+        # ``report_failure=False`` silences the structured line for a
+        # RETRIED attempt, the caller reports once it finally gives
+        # up). ``_post`` only returns ``None`` on a transport failure —
+        # a route-level 500 still comes back as a normal non-2xx
+        # result — so both are checked explicitly, matching the
+        # browser's Stop button, which toasts "Stop request failed" on
+        # the same condition (web/js/wrong-matches.js).
+        result = _post(args.api_endpoint, cancel_request, report_failure=False)
+        if result is None or not 200 <= result.status < 300:
+            result = _post(args.api_endpoint, cancel_request)
+            if result is None or not 200 <= result.status < 300:
+                print(
+                    "  Stop request failed — the sweep is still running "
+                    "and may delete the rest of the queue; following its "
+                    "status anyway.",
+                    file=sys.stderr,
+                )
         return poll_to_completion(
             args.api_endpoint,
             status_request,
@@ -197,6 +223,23 @@ def cmd_wrong_match_triage(
             completed_exit_code=_triage_exit_code,
             sleep=sleep,
         )
+
+
+def cmd_wrong_match_triage_cancel(_db: object, args: argparse.Namespace) -> int:
+    """Request cancellation of the in-flight bulk triage sweep.
+
+    Reaches the exact same canonical route the CLI's own ``Ctrl-C``
+    handler (``cmd_wrong_match_triage``, above) and the web UI's Stop
+    button use (issue #1083). This is the only way to stop a sweep that
+    has no interactive terminal left to catch a signal — one started
+    over an SSH session that then dropped (SIGHUP, no ``KeyboardInterrupt``),
+    or over any connection the operator is no longer attached to. Always
+    exits 0: the route itself is a no-op, never a refusal, whether or not
+    a sweep happens to be running.
+    """
+    return _relay(args.api_endpoint, _ApiMutation(
+        path="/api/wrong-matches/triage/cancel", body={},
+    ))
 
 
 def cmd_wrong_match_delete(_db: object, args: argparse.Namespace) -> int:
@@ -246,9 +289,9 @@ def cmd_wrong_match_delete_group(_db: object, args: argparse.Namespace) -> int:
 def add_wrong_match_subparsers(
     sub: argparse._SubParsersAction[argparse.ArgumentParser],
 ) -> None:
-    """Add ``wrong-match-triage`` / ``wrong-match-delete`` /
-    ``wrong-match-delete-group`` (#521 carve out of
-    ``routes_meta._build_parser``, verbatim argument definitions)."""
+    """Add ``wrong-match-triage`` / ``wrong-match-triage-cancel`` /
+    ``wrong-match-delete`` / ``wrong-match-delete-group`` (#521 carve out
+    of ``routes_meta._build_parser``, verbatim argument definitions)."""
     # wrong-match-triage
     p_triage = sub.add_parser(
         "wrong-match-triage",
@@ -257,6 +300,13 @@ def add_wrong_match_subparsers(
     p_triage.add_argument("--apply", action="store_true",
                           help="Allow destructive full-queue cleanup")
     p_triage.add_argument("--json", action="store_true")
+
+    # wrong-match-triage-cancel
+    sub.add_parser(
+        "wrong-match-triage-cancel",
+        help="Request cancellation of the in-flight Wrong Matches "
+             "triage sweep, if any",
+    )
 
     # wrong-match-delete
     p_wm_delete = sub.add_parser(

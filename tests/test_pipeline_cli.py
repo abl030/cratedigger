@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
 import scripts.pipeline_cli.album_requests as pipeline_cli_album_requests
 import scripts.pipeline_cli.long_tail as pipeline_cli_long_tail
+import scripts.pipeline_cli.wrong_match as pipeline_cli_wrong_match
 from scripts import pipeline_cli
 from scripts.pipeline_cli import api_mutations
 from scripts.pipeline_cli.api_mutations import TcpApiEndpoint
@@ -1393,6 +1394,129 @@ class TestCmdWrongMatchTriage(_FakeDbWebServerCase):
         self.assertIsNone(payload["error"])
         self.assertTrue(payload["summary"]["cancelled"])
 
+    def test_sigint_cancel_post_retries_once_before_giving_up(self):
+        """Issue #1083 review: a failed cancel POST must not be silently
+        swallowed. The first attempt fails (simulated dropped socket);
+        the retry succeeds -- the sweep still gets cancelled and nothing
+        is printed claiming the stop failed."""
+        import web.routes.imports as imports_routes
+        from lib.wrong_match_cleanup_service import WrongMatchCleanupSummary
+
+        self.db.seed_request(make_request_row(id=1))
+        entered = threading.Event()
+
+        def slow_cleanup(db, *, confirm_all_wrong_matches, cancellation_token=None):
+            entered.set()
+            assert cancellation_token is not None
+            deadline = time.monotonic() + 5
+            while (
+                not cancellation_token.cancelled
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
+            return WrongMatchCleanupSummary(
+                processed=0, cancelled=cancellation_token.cancelled,
+            )
+
+        real_post = pipeline_cli_wrong_match._post
+        calls = {"n": 0}
+
+        def flaky_cancel_post(endpoint, mutation, *, timeout_seconds=15.0,
+                              report_failure=True):
+            if mutation.path == "/api/wrong-matches/triage/cancel":
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    return None
+            return real_post(
+                endpoint, mutation, timeout_seconds=timeout_seconds,
+                report_failure=report_failure,
+            )
+
+        args = argparse.Namespace(
+            apply=True, json=True, api_endpoint=TcpApiEndpoint(self.base),
+        )
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        interrupted = {"done": False}
+
+        def sleep_then_interrupt(_seconds):
+            if not interrupted["done"]:
+                if entered.wait(timeout=5):
+                    interrupted["done"] = True
+                    raise KeyboardInterrupt
+                return
+            time.sleep(0.01)
+
+        with patch.object(
+            imports_routes, "cleanup_all_wrong_matches", slow_cleanup,
+        ), patch.object(
+            pipeline_cli_wrong_match, "_post", flaky_cancel_post,
+        ), redirect_stdout(stdout), redirect_stderr(stderr):
+            rc = pipeline_cli.cmd_wrong_match_triage(
+                None, args, sleep=sleep_then_interrupt,
+            )
+            imports_routes._triage_runner.join(timeout=5)
+
+        self.assertEqual(rc, 5)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["state"], "cancelled")
+        self.assertTrue(payload["summary"]["cancelled"])
+        self.assertEqual(calls["n"], 2)
+        self.assertNotIn("Stop request failed", stderr.getvalue())
+
+    def test_sigint_cancel_post_failure_is_reported_when_retry_also_fails(self):
+        """Both cancel attempts fail (dropped socket both times): the CLI
+        must say so on stderr instead of silently claiming success -- the
+        sweep, never actually told to stop, keeps running to its normal
+        completion instead of the CLI falsely implying it was cut off."""
+        import web.routes.imports as imports_routes
+        from lib.wrong_match_cleanup_service import WrongMatchCleanupSummary
+
+        self.db.seed_request(make_request_row(id=1))
+        entered = threading.Event()
+        release = threading.Event()
+
+        def quick_cleanup(db, *, confirm_all_wrong_matches, cancellation_token=None):
+            entered.set()
+            release.wait(timeout=5)
+            return WrongMatchCleanupSummary(
+                processed=1, deleted=1, cancelled=False,
+            )
+
+        def always_fail_cancel_post(endpoint, mutation, *, timeout_seconds=15.0,
+                                    report_failure=True):
+            assert mutation.path == "/api/wrong-matches/triage/cancel"
+
+        args = argparse.Namespace(
+            apply=True, json=False, api_endpoint=TcpApiEndpoint(self.base),
+        )
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        interrupted = {"done": False}
+
+        def sleep_then_interrupt(_seconds):
+            if not interrupted["done"]:
+                if entered.wait(timeout=5):
+                    interrupted["done"] = True
+                    release.set()
+                    raise KeyboardInterrupt
+                return
+            time.sleep(0.01)
+
+        with patch.object(
+            imports_routes, "cleanup_all_wrong_matches", quick_cleanup,
+        ), patch.object(
+            pipeline_cli_wrong_match, "_post", always_fail_cancel_post,
+        ), redirect_stdout(stdout), redirect_stderr(stderr):
+            rc = pipeline_cli.cmd_wrong_match_triage(
+                None, args, sleep=sleep_then_interrupt,
+            )
+            imports_routes._triage_runner.join(timeout=5)
+
+        self.assertIn("Stop request failed", stderr.getvalue())
+        self.assertIn("total: 1", stdout.getvalue())
+        self.assertEqual(rc, 0)
+
     def test_cancelled_sweep_reports_distinctly_from_completed_in_text(self):
         """The human-readable renderer says CANCELLED, never FAILED, and
         still prints exactly what the summary says ran."""
@@ -1423,6 +1547,77 @@ class TestCmdWrongMatchTriage(_FakeDbWebServerCase):
         self.assertIn("CANCELLED", output)
         self.assertIn("deleted: 1", output)
         self.assertNotIn("FAILED", output)
+
+
+class TestCmdWrongMatchTriageCancel(_FakeDbWebServerCase):
+    """``wrong-match-triage-cancel`` reaches the exact canonical cancel
+    route the CLI's own Ctrl-C handler and the web UI's Stop button use
+    (issue #1083) — the only way to stop a sweep left running after a
+    dropped connection, with no interactive terminal left to catch
+    Ctrl-C."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        _fresh_triage_runner(self)
+
+    def test_cancel_with_nothing_running_still_exits_zero(self) -> None:
+        args = argparse.Namespace(api_endpoint=TcpApiEndpoint(self.base))
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            rc = pipeline_cli.cmd_wrong_match_triage_cancel(None, args)
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(json.loads(stdout.getvalue())["state"], "idle")
+
+    def test_cancel_stops_a_running_sweep_through_the_real_route(self) -> None:
+        import web.routes.imports as imports_routes
+        from lib.wrong_match_cleanup_service import WrongMatchCleanupSummary
+
+        self.db.seed_request(make_request_row(id=1))
+        entered = threading.Event()
+
+        def slow_cleanup(db, *, confirm_all_wrong_matches, cancellation_token=None):
+            entered.set()
+            assert cancellation_token is not None
+            deadline = time.monotonic() + 5
+            while (
+                not cancellation_token.cancelled
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
+            return WrongMatchCleanupSummary(
+                processed=0, cancelled=cancellation_token.cancelled,
+            )
+
+        with patch.object(
+            imports_routes, "cleanup_all_wrong_matches", slow_cleanup,
+        ):
+            status, _body = self._post(
+                "/api/wrong-matches/triage",
+                {"confirm_all_wrong_matches": True},
+            )
+            self.assertEqual(status, 202)
+            self.assertTrue(entered.wait(timeout=5))
+
+            args = argparse.Namespace(api_endpoint=TcpApiEndpoint(self.base))
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                rc = pipeline_cli.cmd_wrong_match_triage_cancel(None, args)
+            imports_routes._triage_runner.join(timeout=5)
+
+        self.assertEqual(rc, 0)
+        # ``cancel()`` answers with whatever the sweep thread has already
+        # observed at that instant -- honestly async, same as the web
+        # UI's Stop button -- so it may still read "running" the moment
+        # the request lands. The join() above proves the sweep actually
+        # settles into "cancelled" once it next checks the token.
+        payload = json.loads(stdout.getvalue())
+        self.assertIn(payload["state"], ("running", "cancelled"))
+        final = imports_routes._triage_runner.status()
+        self.assertEqual(final["state"], "cancelled")
+        final_summary = final["summary"]
+        assert final_summary is not None
+        self.assertTrue(final_summary["cancelled"])
 
 
 class TestCmdWrongMatchDelete(_FakeDbWebServerCase):

@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 from lib.import_execution import CancellationToken
 from lib.wrong_match_cleanup_service import WrongMatchCleanupSummary
@@ -73,6 +74,43 @@ class TriageRunnerTest(unittest.TestCase):
         self.assertTrue(seen["confirm"])
         self.assertIsInstance(seen["token"], CancellationToken)
         self.assertEqual(self.db.closed, 1)
+
+    def test_summary_payload_is_computed_before_the_lock_is_taken(self) -> None:
+        """#1083 review: ``to_dict()`` must run BEFORE ``self._lock`` is
+        acquired for the terminal write. If the payload were instead
+        computed INSIDE the lock-held block (state written first, then
+        ``to_dict()``), a raise partway through would leave
+        ``self._state`` already CANCELLED/COMPLETED while ``_summary``
+        stayed ``None`` -- then the ``except`` handler overwrites state
+        to FAILED, briefly exposing a cancelled/completed sweep with no
+        summary to a concurrent ``status()`` poll. Structural regression
+        guard: if the payload were computed inside the lock, this would
+        observe the lock already held."""
+        observed_locked: list[bool] = []
+        real_to_dict = WrongMatchCleanupSummary.to_dict
+
+        def spy_to_dict(self_summary):
+            observed_locked.append(self.runner._lock.locked())
+            return real_to_dict(self_summary)
+
+        def cleanup_fn(db, *, confirm_all_wrong_matches, cancellation_token=None):
+            # A brief yield so ``start()``'s OWN initial lock hold
+            # (acquired around ``self._thread.start()``, unrelated to
+            # the terminal-write lock this test targets) has certainly
+            # been released before ``_run`` reaches ``to_dict()`` --
+            # otherwise a fast synchronous fake races the caller thread
+            # and observes the wrong lock hold.
+            time.sleep(0.05)
+            return WrongMatchCleanupSummary(processed=1, deleted=1)
+
+        with patch.object(WrongMatchCleanupSummary, "to_dict", spy_to_dict):
+            self.assertTrue(self.runner.start(
+                db_factory=self._factory, cleanup_fn=cleanup_fn,
+            ))
+            self.runner.join(timeout=5)
+
+        self.assertEqual(observed_locked, [False])
+        self.assertEqual(self.runner.status()["state"], STATE_COMPLETED)
 
     def test_second_start_rejected_while_running(self) -> None:
         release = threading.Event()

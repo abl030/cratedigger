@@ -9,13 +9,35 @@ temporary quarantine root, over generated queue sizes and cancellation
 points, and asserts every seeded directory ends up either fully intact
 (cancelled/kept before it started) or fully gone (deleted) — never a
 partial subset of its original files.
+
+Two cancellation-timing arms are exercised, both over the same real
+production entry points:
+
+- ``mid_row_race=False`` (between rows): the token is cancelled
+  immediately AFTER a target row's real delete returns — proves the
+  between-rows checkpoint itself behaves, but a cancel that only ever
+  lands once a row is already done can never observe (or catch a
+  regression inside) that row's own delete.
+- ``mid_row_race=True`` (in-flight): a REAL second thread cancels the
+  token WHILE the target row's own ``shutil.rmtree`` call is still on
+  the stack, proven by a started/may-proceed handshake rather than a
+  sleep — the cancel is observably concurrent with the row's in-flight
+  delete, not merely "before" or "after" it. Production never reads the
+  token again once a row starts, so every generated example in this arm
+  still finds the row fully deleted; the known-bad self-test below
+  plants the ONE regression this arm exists to catch — a checkpoint
+  moved INSIDE the per-row delete — at the real ``shutil.rmtree`` leaf
+  edge, and proves the property fails.
 """
 
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
+import threading
 import unittest
+from contextlib import contextmanager
 from unittest.mock import patch
 
 from hypothesis import example, given
@@ -24,7 +46,10 @@ from hypothesis import strategies as st
 import tests._hypothesis_profiles  # noqa: F401
 from lib import wrong_match_cleanup_service
 from lib.import_execution import CancellationToken
-from lib.wrong_match_cleanup_service import cleanup_all_wrong_matches
+from lib.wrong_match_cleanup_service import (
+    WrongMatchCleanupSummary,
+    cleanup_all_wrong_matches,
+)
 from tests.fakes import FakePipelineDB
 from tests.helpers import make_request_row
 from tests.test_wrong_match_cleanup_service import (
@@ -65,13 +90,77 @@ def _partial_deletion_violations(
     return violations
 
 
-def assert_cancellation_never_leaves_partial_delete(
-    *, count: int, cancel_after: int,
-) -> None:
+@contextmanager
+def _cancel_while_row_is_in_flight(
+    token: CancellationToken,
+    target_path: str,
+    *,
+    mutant: bool = False,
+):
+    """Cancel ``token`` from a SECOND thread while ``target_path``'s own
+    ``shutil.rmtree`` call is genuinely on the stack — proven by a
+    started/may-proceed handshake, not a sleep, so the cancel is
+    observably concurrent with the row's in-flight delete rather than
+    merely "before" or "after" it.
+
+    ``mutant=True`` (self-test only, #1083 known-bad) swaps the single
+    atomic ``rmtree`` for the exact regression this issue warns against:
+    file-by-file removal that checks ``token.cancelled`` between
+    individual removals instead of only between rows. The generated
+    property never sets this — production has no such checkpoint, so
+    every generated example uses the real atomic ``rmtree`` and the row
+    always ends up intact or fully gone, never partial.
+    """
+    real_rmtree = shutil.rmtree
+    started = threading.Event()
+    may_proceed = threading.Event()
+
+    def wrapped_rmtree(path: str) -> None:
+        # Production only ever calls ``shutil.rmtree(resolved_path)`` --
+        # one positional argument, no options -- so the stand-in matches
+        # that exact call shape rather than a generic ``*args/**kwargs``
+        # passthrough (which pyright cannot resolve against rmtree's
+        # overloaded ``ignore_errors``/``onerror``/``onexc`` signature).
+        if path != target_path:
+            real_rmtree(path)
+            return
+        started.set()
+        may_proceed.wait(timeout=5)
+        if not mutant:
+            real_rmtree(path)
+            return
+        # MUTANT (self-test only): checkpoint moved INSIDE the per-row
+        # delete -- checks cancellation between individual file removals
+        # instead of only between rows, exactly the trap #1083 warns
+        # against.
+        for name in sorted(os.listdir(path)):
+            os.remove(os.path.join(path, name))
+            if token.cancelled:
+                return
+        os.rmdir(path)
+
+    def canceller() -> None:
+        started.wait(timeout=5)
+        token.cancel("generated-stop-mid-row")
+        may_proceed.set()
+
+    thread = threading.Thread(target=canceller, daemon=True)
+    thread.start()
+    with patch("lib.wrong_matches.shutil.rmtree", side_effect=wrapped_rmtree):
+        yield
+    thread.join(timeout=5)
+
+
+def _run_cancellation_sweep(
+    *,
+    count: int,
+    cancel_after: int,
+    mid_row_race: bool = False,
+    mid_row_mutant: bool = False,
+) -> tuple[WrongMatchCleanupSummary, list[str]]:
     """Drive the real per-row delete over a generated queue; cancel
-    ``cancel_after`` rows in (0 = before any row); assert no directory
-    ends up partially deleted, and that the summary tells the truth
-    about how much actually ran."""
+    ``cancel_after`` rows in (0 = before any row). Returns the summary
+    and the partial-deletion violations found once the sweep settles."""
     cancel_after = min(cancel_after, count)
     with tempfile.TemporaryDirectory() as root:
         db = FakePipelineDB()
@@ -122,6 +211,16 @@ def assert_cancellation_never_leaves_partial_delete(
                     db, confirm_all_wrong_matches=True, cfg=_cfg(),
                     cancellation_token=token,
                 )
+            elif mid_row_race:
+                target_id = ordered_ids[cancel_after - 1]
+                target_path = seeded[target_id][0]
+                with _cancel_while_row_is_in_flight(
+                    token, target_path, mutant=mid_row_mutant,
+                ):
+                    summary = cleanup_all_wrong_matches(
+                        db, confirm_all_wrong_matches=True, cfg=_cfg(),
+                        cancellation_token=token,
+                    )
             else:
                 real_cleanup_wrong_match = (
                     wrong_match_cleanup_service.cleanup_wrong_match
@@ -145,43 +244,59 @@ def assert_cancellation_never_leaves_partial_delete(
                         cancellation_token=token,
                     )
 
-        violations = _partial_deletion_violations(seeded)
-        if violations:
-            raise AssertionError(
-                "cancellation left a partially-deleted album directory:\n"
-                + "\n".join(violations)
-            )
+        return summary, _partial_deletion_violations(seeded)
 
-        if cancel_after >= count:
-            if summary.cancelled or summary.processed != count:
-                raise AssertionError(
-                    "cancel landing after the last row must not claim "
-                    f"work it did not do: cancelled={summary.cancelled} "
-                    f"processed={summary.processed} count={count}"
-                )
-        else:
-            if not summary.cancelled or summary.processed != cancel_after:
-                raise AssertionError(
-                    "mid-queue cancellation must stop after exactly the "
-                    f"rows before the stop: cancelled={summary.cancelled} "
-                    f"processed={summary.processed} "
-                    f"cancel_after={cancel_after}"
-                )
+
+def assert_cancellation_never_leaves_partial_delete(
+    *, count: int, cancel_after: int, mid_row_race: bool = False,
+) -> None:
+    """Assert the invariant holds for one generated ``(count,
+    cancel_after, mid_row_race)`` world: no partial directory, and the
+    summary tells the truth about how much actually ran."""
+    cancel_after = min(cancel_after, count)
+    summary, violations = _run_cancellation_sweep(
+        count=count, cancel_after=cancel_after, mid_row_race=mid_row_race,
+    )
+    if violations:
+        raise AssertionError(
+            "cancellation left a partially-deleted album directory:\n"
+            + "\n".join(violations)
+        )
+
+    if cancel_after >= count:
+        if summary.cancelled or summary.processed != count:
+            raise AssertionError(
+                "cancel landing after the last row must not claim "
+                f"work it did not do: cancelled={summary.cancelled} "
+                f"processed={summary.processed} count={count}"
+            )
+    else:
+        if not summary.cancelled or summary.processed != cancel_after:
+            raise AssertionError(
+                "mid-queue cancellation must stop after exactly the "
+                f"rows before the stop: cancelled={summary.cancelled} "
+                f"processed={summary.processed} "
+                f"cancel_after={cancel_after}"
+            )
 
 
 class TestWrongMatchCancellationNeverPartialGenerated(unittest.TestCase):
     @given(
         count=st.integers(min_value=1, max_value=4),
         cancel_after=st.integers(min_value=0, max_value=4),
+        mid_row_race=st.booleans(),
     )
-    @example(count=1, cancel_after=0)   # cancel before the first row
-    @example(count=3, cancel_after=1)   # cancel mid-queue
-    @example(count=3, cancel_after=3)   # cancel races the tail
+    @example(count=1, cancel_after=0, mid_row_race=False)  # cancel before the first row
+    @example(count=3, cancel_after=1, mid_row_race=False)  # cancel mid-queue, between rows
+    @example(count=3, cancel_after=3, mid_row_race=False)  # cancel races the tail, between rows
+    @example(count=3, cancel_after=1, mid_row_race=True)   # cancel races an IN-FLIGHT row
+    @example(count=3, cancel_after=3, mid_row_race=True)   # in-flight race on the tail row
     def test_no_cancellation_ever_leaves_a_partial_directory(
-        self, *, count: int, cancel_after: int,
+        self, *, count: int, cancel_after: int, mid_row_race: bool,
     ) -> None:
         assert_cancellation_never_leaves_partial_delete(
             count=count, cancel_after=cancel_after,
+            mid_row_race=mid_row_race,
         )
 
 
@@ -216,7 +331,6 @@ class TestCheckerRejectsPartialDeleteState(unittest.TestCase):
             untouched_files = tuple(sorted(os.listdir(untouched)))
             deleted = _make_source(root, "deleted")
             deleted_files = tuple(sorted(os.listdir(deleted)))
-            import shutil
             shutil.rmtree(deleted)
 
             violations = _partial_deletion_violations({
@@ -229,32 +343,18 @@ class TestCheckerRejectsPartialDeleteState(unittest.TestCase):
     def test_checkpoint_moved_inside_the_per_row_delete_trips_the_property(
         self,
     ) -> None:
-        """If a future regression moved the cancellation check INSIDE the
-        per-row delete (checking between individual file removals
-        instead of only between rows, the exact trap this issue warns
-        against), the result is a partially-emptied directory. The
-        property's checker must catch it."""
-        with tempfile.TemporaryDirectory() as root:
-            source = _make_source(root, "mid-row-checkpoint")
-            for extra in range(3):
-                with open(
-                    os.path.join(source, f"extra-{extra}.bin"), "wb",
-                ) as handle:
-                    handle.write(b"data")
-            original = tuple(sorted(os.listdir(source)))
-            token = CancellationToken()
-
-            # Mutant per-row delete: checks cancellation between
-            # individual file removals -- the bug this test guards
-            # against -- instead of only between rows.
-            for index, name in enumerate(original):
-                if token.cancelled:
-                    break
-                os.remove(os.path.join(source, name))
-                if index == 1:
-                    token.cancel("mid-row-stop")
-
-            violations = _partial_deletion_violations({1: (source, original)})
+        """A regression that threads the cancellation token into the
+        per-row delete itself -- checking between individual file
+        removals instead of only between rows, the exact shape issue
+        #1083 warns against -- must trip the PROPERTY, driven through
+        the real production entry points
+        (``cleanup_all_wrong_matches`` -> ``cleanup_wrong_match`` ->
+        ``cleanup_wrong_match_source``) with a genuine concurrent race
+        at the real ``shutil.rmtree`` leaf edge, not a hand-written
+        violating world (test-fidelity Rule C)."""
+        _summary, violations = _run_cancellation_sweep(
+            count=3, cancel_after=1, mid_row_race=True, mid_row_mutant=True,
+        )
 
         self.assertTrue(
             violations,

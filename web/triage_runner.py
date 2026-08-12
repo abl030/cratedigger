@@ -27,11 +27,24 @@ import logging
 import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any, TypedDict
+from typing import Protocol, TypedDict
 
 from lib.import_execution import CancellationToken
+from lib.wrong_match_cleanup_service import WrongMatchCleanupSummary
 
 logger = logging.getLogger("cratedigger")
+
+
+class _ClosableDB(Protocol):
+    """The only fact ``TriageRunner`` itself needs about the sweep's own
+    DB handle: it can be closed once the sweep finishes. Everything else
+    about the handle is opaque here and passed straight through to
+    ``cleanup_fn``, which owns the real narrow contract
+    (``lib.wrong_match_cleanup_service.WrongMatchCleanupDB``) — this
+    layer never calls another method on it."""
+
+    def close(self) -> None: ...
+
 
 STATE_IDLE = "idle"
 STATE_RUNNING = "running"
@@ -71,8 +84,8 @@ class TriageRunner:
     def start(
         self,
         *,
-        db_factory: Callable[[], Any],
-        cleanup_fn: Callable[..., Any],
+        db_factory: Callable[[], _ClosableDB],
+        cleanup_fn: Callable[..., WrongMatchCleanupSummary],
     ) -> bool:
         """Start a sweep on a background thread.
 
@@ -139,21 +152,28 @@ class TriageRunner:
 
     def _run(
         self,
-        db_factory: Callable[[], Any],
-        cleanup_fn: Callable[..., Any],
+        db_factory: Callable[[], _ClosableDB],
+        cleanup_fn: Callable[..., WrongMatchCleanupSummary],
         token: CancellationToken,
     ) -> None:
-        db: Any = None
+        db: _ClosableDB | None = None
         try:
             db = db_factory()
             summary = cleanup_fn(
                 db, confirm_all_wrong_matches=True, cancellation_token=token,
             )
+            # Compute the whole terminal payload BEFORE taking the lock
+            # or writing any state. If ``to_dict()`` raised after
+            # ``self._state`` had already been written, the ``except``
+            # below would overwrite a genuinely cancelled/completed
+            # sweep with STATE_FAILED and leave ``_summary`` at None --
+            # a cancelled sweep surfacing as failed with no partial
+            # summary, exactly what this issue exists to prevent.
+            state = STATE_CANCELLED if summary.cancelled else STATE_COMPLETED
+            summary_dict = summary.to_dict()
             with self._lock:
-                self._state = (
-                    STATE_CANCELLED if summary.cancelled else STATE_COMPLETED
-                )
-                self._summary = summary.to_dict()
+                self._state = state
+                self._summary = summary_dict
                 self._finished_at = _utcnow_iso()
             logger.info(
                 "wrong_match_triage_sweep.%s",

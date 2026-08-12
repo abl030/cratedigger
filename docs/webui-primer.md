@@ -592,11 +592,19 @@ depends on.
   refusal on hover (#1063). A distance is a per-track average, so scoring an
   incomplete manifest as a plain number misinforms the one surface where the
   operator picks a pressing.
-- **Wrong Matches cleanup** — one top-level action runs over the full Wrong
-  Matches queue. It consumes existing evidence only, deletes force-mode
-  confident cleanup-eligible rejects, and leaves would-import, uncertain,
-  missing-evidence, stale-evidence, active-job, and missing-path candidates for
-  review. The result is shown as a summary toast and the pane refreshes.
+- **Wrong Matches cleanup** — the "Cleanup Wrong Matches" action runs over
+  the full Wrong Matches queue on a background thread. It consumes existing
+  evidence only, deletes force-mode confident cleanup-eligible rejects, and
+  leaves would-import, uncertain, missing-evidence, stale-evidence,
+  active-job, and missing-path candidates for review. A second "Stop"
+  control sits beside it, disabled until a sweep is running (issue #1083):
+  clicking it posts `/api/wrong-matches/triage/cancel` — the same route the
+  CLI's `Ctrl-C` handler uses — and cancellation lands between rows, never
+  mid-delete, so a row already in flight always finishes. A completed sweep
+  shows its summary as an ordinary toast; a stopped one shows a distinct
+  `Cleanup stopped — ...` toast reporting exactly what ran before the stop,
+  and the pane refreshes either way. A failed Stop request itself toasts
+  `Stop request failed` and re-enables the button.
 - **Wrong Matches history** — old rows with
   `download_log.validation_result.wrong_match_triage` still render their
   historical chip/detail in Recents. New cleanup does not write that blob.
