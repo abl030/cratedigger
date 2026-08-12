@@ -203,6 +203,26 @@ suite bundle, specialized evidence, generated/fuzz testing, no-skips policy,
 and hooks — is in `.claude/rules/code-quality.md` § "Test execution, evidence,
 and hooks".
 
+**The shared host's test RAM root is a fixed-size tmpfs with no other admission
+control, so `bash scripts/run_tests.sh` admits one canonical suite at a time**
+(issue #1111): it takes an advisory lock scoped to the runtime tmpfs before
+running any phase, reaps check bundles nothing can still be writing, and
+checks headroom — all before creating its own bundle. A second
+concurrently-launched canonical suite waits, bounded, printing what it is
+waiting for, instead of colliding with the first one's roughly a dozen
+ephemeral PostgreSQL clusters; insufficient headroom fails the whole suite
+once, immediately, with that one reason rather than tripping deep into a run
+after earlier phases already passed. `scripts/test.sh` targeted runs
+deliberately do NOT go through this admission gate — gating every dev-loop
+iteration behind a lock shared with full suite runs would serialize
+interactive work for no benefit, since a targeted subset spawns far fewer
+PostgreSQL workers than the full suite's own "python" phase. Mid-run, a
+target whose worker legitimately failed
+because the RAM root was exhausted (never inferred from log text — measured
+free bytes at the moment the failure was caught) collapses into ONE named
+`test RAM root exhausted` failure-index entry instead of reading as N
+unrelated test failures.
+
 ## Shared AI surfaces
 
 One authored source exists for each concept; client-specific formats are adapters:

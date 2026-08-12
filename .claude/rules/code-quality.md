@@ -312,6 +312,42 @@ of checks. The suite's terminal output is a compact complete failure index; the
 printed private-tmpfs bundle contains `summary.json`, `summary.md`, and every
 complete phase log.
 
+**Admission control on the shared test RAM root** (issue #1111): the fixed-size
+tmpfs backing `TMPDIR` has no capacity of its own to arbitrate concurrent
+suites, so `scripts/run_test_suite.py::run_suite` takes an advisory
+`fcntl.flock` (`acquire_suite_admission`, lockfile
+`<runtime>/.cratedigger-test-admission.lock`) before running any phase, held
+for the whole run — never per-phase, and never at the `nix-shell` shellHook
+level, which would serialize interactive dev shells and `scripts/test.sh`
+targeted runs too. A second concurrently-launched canonical suite waits,
+bounded (`DEFAULT_ADMISSION_TIMEOUT_SECONDS`, a
+`run_suite(admission_timeout_seconds=...)` kwarg — no environment override,
+unlike the headroom minimum below), printing progress naming the contended
+lockfile. Once admitted, it best-effort reaps `cratedigger-checks.*` bundles
+idle past `DEFAULT_STALE_BUNDLE_MAX_AGE_SECONDS`
+(`reap_stale_check_bundles`) — safe only because reaping happens exclusively
+under the same lock, so nothing found there can belong to a live holder —
+then checks headroom (`_check_suite_headroom`, same
+`CRATEDIGGER_TEST_RAM_MIN_BYTES` env var and 1 GiB default as
+`scripts/test_tmpfs.sh`'s own shell-entry guard) BEFORE creating a bundle.
+Insufficient headroom raises `RamRootExhaustedError` immediately, with no
+phase run and no bundle created — the whole suite fails once, with its real
+reason, instead of a phase deep into the run tripping the same guard after
+earlier phases already passed. Mid-run,
+`scripts/run_python_tests.py::_collapse_disk_full_failures` folds every
+disk-full-classified target/test into ONE `test RAM root exhausted`
+`CheckFailureMarker` (`TEST_RAM_ROOT_EXHAUSTED`, shared with
+`scripts/run_test_suite.py`) instead of N separately-indexed disguises
+(`FileNotFoundError` on `raw-output.log`, a Hypothesis `FlakyFailure`, ...);
+classification measures free bytes at the moment a worker's own exception is
+caught (`_classify_target_infrastructure_failure`) or a running test's own
+ENOSPC-shaped exception fires (`_classify_test_infrastructure_error`) — never
+a scan of log text, per the semantic-source-scanner prohibition above. A
+target whose failures are ENTIRELY disk-full returns
+`TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE` so the phase (and the suite) reports
+`infrastructure-failure`, not an ordinary `failed`, without touching
+`scripts/run_test_suite.py`'s generic phase-state derivation.
+
 **Generated (property-based) production tests**
 (`tests/test_*_generated.py`, Hypothesis)
 run deterministically in the suite. After changing quality policy, run the

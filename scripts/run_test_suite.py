@@ -4,17 +4,20 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import os
 import re
 import shlex
+import shutil
 import signal
 import stat
 import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Generator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -236,6 +239,186 @@ def private_runtime_dir(candidate: Path | None = None) -> Path:
     if completed.returncode != 0 or completed.stdout.strip() != "tmpfs":
         raise RuntimeError(f"private runtime directory is not tmpfs: {runtime}")
     return resolved
+
+
+#: Bound for a second concurrently-launched canonical suite waiting on the
+#: exclusive test-RAM-root admission lock (issue #1111). Generous enough to
+#: outlast one full canonical suite's own runtime; still bounded, so a wait
+#: never becomes a silent hang.
+DEFAULT_ADMISSION_TIMEOUT_SECONDS = 1200.0
+DEFAULT_ADMISSION_POLL_SECONDS = 1.0
+DEFAULT_ADMISSION_PROGRESS_INTERVAL_SECONDS = 30.0
+
+#: Same env var and default as scripts/test_tmpfs.sh's own shell-entry
+#: headroom guard (CRATEDIGGER_TEST_RAM_MIN_BYTES) — one threshold, not two
+#: that can silently drift apart.
+DEFAULT_MIN_HEADROOM_BYTES = 1_073_741_824
+
+#: A completed check bundle survives at least this long before admission-time
+#: reaping may remove it, so the documented "reuse that receipt before push"
+#: workflow (CLAUDE.md "Running tests") keeps working within one ordinary
+#: session. Reaping only ever runs while holding the admission lock
+#: exclusively, so anything found here already predates this run regardless
+#: of age; the age gate exists purely to protect near-term reuse, not to
+#: prove liveness.
+DEFAULT_STALE_BUNDLE_MAX_AGE_SECONDS = 4 * 60 * 60
+
+#: The one named identity every RAM-root-exhaustion signal uses, at suite
+#: start (this module) and mid-run (scripts/run_python_tests.py) alike —
+#: issue #1111 item 2's single failure-index entry instead of N disguised
+#: test failures.
+TEST_RAM_ROOT_EXHAUSTED = "test RAM root exhausted"
+
+
+class SuiteAdmissionTimeout(RuntimeError):
+    """The bounded wait for exclusive canonical-suite admission expired."""
+
+
+class RamRootExhaustedError(RuntimeError):
+    """The shared test RAM root lacks the headroom a suite run requires."""
+
+
+def admission_lock_path(runtime: Path) -> Path:
+    """Lockfile scoped to the shared test RAM root, not to any one suite run."""
+    return runtime / ".cratedigger-test-admission.lock"
+
+
+@contextmanager
+def acquire_suite_admission(
+    runtime: Path,
+    *,
+    stream: TextIO,
+    timeout_seconds: float = DEFAULT_ADMISSION_TIMEOUT_SECONDS,
+    poll_seconds: float = DEFAULT_ADMISSION_POLL_SECONDS,
+    progress_interval_seconds: float = DEFAULT_ADMISSION_PROGRESS_INTERVAL_SECONDS,
+) -> Generator[None]:
+    """Serialize canonical suite runs sharing one fixed-size test RAM root.
+
+    Scoped to the suite-runner level (this module) — never to every
+    ``nix-shell`` entry, which would serialize interactive dev shells and
+    targeted ``scripts/test.sh`` runs too (issue #1111 explicitly rejects
+    that). A second concurrently-launched canonical suite waits here,
+    bounded, reporting what it is waiting for, instead of colliding with the
+    first one's roughly a dozen ephemeral PostgreSQL clusters.
+    """
+    lock_path = admission_lock_path(runtime)
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        deadline = time.monotonic() + timeout_seconds
+        reported = False
+        next_progress = 0.0
+        while True:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                now = time.monotonic()
+                if now >= deadline:
+                    raise SuiteAdmissionTimeout(
+                        f"timed out after {timeout_seconds:.0f}s waiting for "
+                        f"exclusive test admission: {lock_path} is held by "
+                        "another canonical suite run"
+                    ) from None
+                if not reported or now >= next_progress:
+                    stream.write(
+                        "waiting for admission: another canonical suite "
+                        f"holds the test RAM root ({lock_path}); "
+                        f"{deadline - now:.0f}s left before timeout\n"
+                    )
+                    stream.flush()
+                    reported = True
+                    next_progress = now + progress_interval_seconds
+                time.sleep(min(poll_seconds, max(0.0, deadline - now)))
+        if reported:
+            stream.write(f"admission acquired: exclusive lock on {lock_path}\n")
+            stream.flush()
+        yield
+    finally:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+
+
+def _bundle_last_activity(bundle: Path) -> float:
+    """The bundle's most recent evidence write, or its own mtime as a fallback."""
+    summary_path = bundle / "summary.json"
+    try:
+        return summary_path.stat().st_mtime
+    except OSError:
+        pass
+    try:
+        return bundle.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def reap_stale_check_bundles(
+    runtime: Path,
+    *,
+    exclude: Path | None = None,
+    max_age_seconds: float = DEFAULT_STALE_BUNDLE_MAX_AGE_SECONDS,
+    reference_time: float | None = None,
+) -> tuple[Path, ...]:
+    """Best-effort cleanup of check bundles nothing can still be writing.
+
+    Only ever called while holding ``acquire_suite_admission`` exclusively
+    (issue #1111 item 1), so every ``cratedigger-checks.*`` directory found
+    here — including one a crashed prior holder left mid-run — predates this
+    run; no other live suite can be concurrently writing a new one under the
+    same lock. The age gate is the sole safety valve, protecting the
+    documented same-session "reuse that receipt" workflow rather than
+    reaping evidence someone still wants.
+    """
+    reference = reference_time if reference_time is not None else time.time()
+    reaped: list[Path] = []
+    for candidate in sorted(runtime.glob("cratedigger-checks.*")):
+        if exclude is not None and candidate == exclude:
+            continue
+        try:
+            info = candidate.lstat()
+        except OSError:
+            continue
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            continue
+        if info.st_uid != os.getuid():
+            continue
+        age = reference - _bundle_last_activity(candidate)
+        if age < max_age_seconds:
+            continue
+        try:
+            shutil.rmtree(candidate)
+        except OSError:
+            continue
+        reaped.append(candidate)
+    return tuple(reaped)
+
+
+def _default_min_headroom_bytes() -> int:
+    """Read the same env var and default scripts/test_tmpfs.sh uses."""
+    raw = os.environ.get("CRATEDIGGER_TEST_RAM_MIN_BYTES")
+    if raw is None:
+        return DEFAULT_MIN_HEADROOM_BYTES
+    try:
+        value = int(raw)
+    except ValueError:
+        value = -1
+    if value < 0:
+        raise ValueError(
+            "CRATEDIGGER_TEST_RAM_MIN_BYTES must be a non-negative integer"
+        )
+    return value
+
+
+def _check_suite_headroom(runtime: Path, *, minimum_bytes: int) -> None:
+    """Fail the whole suite once, immediately — never mid-run (issue #1111)."""
+    available = shutil.disk_usage(runtime).free
+    if available < minimum_bytes:
+        raise RamRootExhaustedError(
+            f"{TEST_RAM_ROOT_EXHAUSTED}: {runtime} has {available} bytes "
+            f"free, needs {minimum_bytes}"
+        )
 
 
 def _create_bundle(runtime: Path) -> Path:
@@ -645,22 +828,21 @@ def _terminal_summary(summary: CheckSummary, stream: TextIO) -> None:
     stream.flush()
 
 
-def run_suite(
+def _execute_suite(
     *,
-    repo_root: Path = REPO_ROOT,
-    phases: Sequence[PhaseSpec] | None = None,
-    runtime_dir: Path | None = None,
-    executor: PhaseExecutor = execute_phase,
-    stream: TextIO | None = None,
-    command: str = CANONICAL_COMMAND,
+    root: Path,
+    plan: tuple[PhaseSpec, ...],
+    runtime: Path,
+    executor: PhaseExecutor,
+    output: TextIO,
+    command: str,
 ) -> SuiteRun:
-    """Run every phase, preserving complete evidence and one terminal result."""
-    output = stream if stream is not None else sys.stdout
-    root = repo_root.resolve(strict=True)
-    plan = tuple(phases if phases is not None else _default_phases())
-    if not plan or len({phase.name for phase in plan}) != len(plan):
-        raise ValueError("phase plan must be non-empty with unique names")
-    runtime = private_runtime_dir(runtime_dir)
+    """Create one bundle and run every phase to a terminal, published result.
+
+    Called only from inside ``acquire_suite_admission`` — the admission lock
+    is held for this entire call, covering the whole run's tmpfs footprint,
+    not just the preflight (issue #1111).
+    """
     bundle = _create_bundle(runtime)
     started_at = _utc_now()
     started_monotonic = time.monotonic()
@@ -860,6 +1042,70 @@ def run_suite(
     _publish_summary(bundle, summary)
     _terminal_summary(summary, output)
     return SuiteRun(exit_code=exit_code, bundle=bundle, summary=summary)
+
+
+def run_suite(
+    *,
+    repo_root: Path = REPO_ROOT,
+    phases: Sequence[PhaseSpec] | None = None,
+    runtime_dir: Path | None = None,
+    executor: PhaseExecutor = execute_phase,
+    stream: TextIO | None = None,
+    command: str = CANONICAL_COMMAND,
+    admission_timeout_seconds: float = DEFAULT_ADMISSION_TIMEOUT_SECONDS,
+    admission_poll_seconds: float = DEFAULT_ADMISSION_POLL_SECONDS,
+    admission_progress_interval_seconds: float = (
+        DEFAULT_ADMISSION_PROGRESS_INTERVAL_SECONDS
+    ),
+    min_headroom_bytes: int | None = None,
+    reap_max_age_seconds: float = DEFAULT_STALE_BUNDLE_MAX_AGE_SECONDS,
+) -> SuiteRun:
+    """Admit one canonical suite at a time, then run every phase (issue #1111).
+
+    Validates the runtime tmpfs, then acquires the exclusive admission lock
+    (bounded wait, reported progress), reaps stale check bundles, and checks
+    headroom — all BEFORE any phase runs, so an unready environment fails
+    once, immediately, with its real reason instead of tripping deep into a
+    run after earlier phases already passed.
+    """
+    output = stream if stream is not None else sys.stdout
+    root = repo_root.resolve(strict=True)
+    plan = tuple(phases if phases is not None else _default_phases())
+    if not plan or len({phase.name for phase in plan}) != len(plan):
+        raise ValueError("phase plan must be non-empty with unique names")
+    runtime = private_runtime_dir(runtime_dir)
+    headroom_minimum = (
+        min_headroom_bytes
+        if min_headroom_bytes is not None
+        else _default_min_headroom_bytes()
+    )
+    with acquire_suite_admission(
+        runtime,
+        stream=output,
+        timeout_seconds=admission_timeout_seconds,
+        poll_seconds=admission_poll_seconds,
+        progress_interval_seconds=admission_progress_interval_seconds,
+    ):
+        reaped = reap_stale_check_bundles(
+            runtime,
+            max_age_seconds=reap_max_age_seconds,
+        )
+        if reaped:
+            output.write(
+                f"reaped {len(reaped)} stale check bundle(s): "
+                + ", ".join(str(path) for path in reaped)
+                + "\n"
+            )
+            output.flush()
+        _check_suite_headroom(runtime, minimum_bytes=headroom_minimum)
+        return _execute_suite(
+            root=root,
+            plan=plan,
+            runtime=runtime,
+            executor=executor,
+            output=output,
+            command=command,
+        )
 
 
 def _parser() -> argparse.ArgumentParser:
