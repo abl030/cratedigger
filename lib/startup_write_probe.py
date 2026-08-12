@@ -60,10 +60,12 @@ units forever on a deployment that simply never turned validation on, or on
 a fresh host mid-bring-up. Every builder below therefore includes
 ``beets_staging_dir`` in a unit's required paths ONLY when it is configured
 (non-empty); an unconfigured path is never probed, never "missing" here.
-``slskd_download_dir`` gets no such treatment -- the module's own NixOS
-option is unconditionally required (``services.cratedigger.slskd.downloadDir``
-has no null default), so an empty value there is a genuine misconfiguration
-this probe is right to catch.
+``slskd_download_dir`` gets no such treatment -- unlike ``stagingDir``,
+``services.cratedigger.slskd.downloadDir`` is guarded by an UNCONDITIONAL
+module assertion (``nix/module.nix``: ``assertion = cfg.slskd.downloadDir !=
+null``, no gating predicate), so any deployment that evaluates at all already
+has it set. An empty value here is therefore a genuine misconfiguration this
+probe is right to catch.
 
 Every existing action-time authority check -- ``lib.fs_authority``'s
 private-root/quarantine checks, and this same module's descriptor
@@ -146,9 +148,9 @@ class RequiredPaths(NamedTuple):
     """One unit's exact probe list.
 
     ``read``/``write`` are ordinary absolute paths probed with the generic
-    descriptor primitives. ``private_write_root`` and the two
-    ``private_*_children`` fields probe the configured processing tree
-    through the strict private-root primitives instead
+    descriptor primitives. ``private_write_root`` and
+    ``private_write_children`` probe the configured processing tree through
+    the strict private-root primitives instead
     (``private_processing_dir``/``private_slskd_download_dir`` supply the
     two paths ``open_private_processing_root`` needs); leave them at their
     defaults for a unit that never touches the private tree.
@@ -159,7 +161,6 @@ class RequiredPaths(NamedTuple):
     private_processing_dir: str = ""
     private_slskd_download_dir: str = ""
     private_write_root: bool = False
-    private_read_children: tuple[str, ...] = ()
     private_write_children: tuple[str, ...] = ()
 
 
@@ -191,7 +192,6 @@ def probe_startup_paths(
             processing_dir=required.private_processing_dir,
             slskd_download_dir=required.private_slskd_download_dir,
             write_root=required.private_write_root,
-            read_children=required.private_read_children,
             write_children=required.private_write_children,
         )
     except StartupProbeError as exc:
@@ -243,13 +243,12 @@ def _probe_private_tree(
     processing_dir: str,
     slskd_download_dir: str,
     write_root: bool,
-    read_children: Sequence[str],
     write_children: Sequence[str],
 ) -> None:
     """Probe the configured processing tree through the SAME strict
     private-root primitives every action-time writer uses -- never the
     generic descriptor open (see the module docstring)."""
-    if not (write_root or read_children or write_children):
+    if not (write_root or write_children):
         return
     _presence_or_raise(unit=unit, path=processing_dir, operation="read")
     try:
@@ -259,10 +258,6 @@ def _probe_private_tree(
             if write_root:
                 _write_probe_steps(
                     unit=unit, path=processing_dir, dir_fd=root_fd)
-            for child in read_children:
-                _probe_private_read_child(
-                    unit=unit, processing_dir=processing_dir,
-                    root_fd=root_fd, child=child)
             for child in write_children:
                 _probe_private_write_child(
                     unit=unit, processing_dir=processing_dir,
@@ -270,22 +265,6 @@ def _probe_private_tree(
     except FilesystemAuthorityError as exc:
         raise StartupProbeError(
             _authority_message(unit, processing_dir, "open", exc)) from exc
-
-
-def _probe_private_read_child(
-    *, unit: str, processing_dir: str, root_fd: int, child: str,
-) -> None:
-    child_path = os.path.join(processing_dir, child)
-    try:
-        with open_private_child_directory(root_fd, child) as child_fd:
-            try:
-                os.listdir(child_fd)
-            except OSError as exc:
-                raise StartupProbeError(
-                    _os_message(unit, child_path, "enumerate", exc)) from exc
-    except FilesystemAuthorityError as exc:
-        raise StartupProbeError(
-            _authority_message(unit, child_path, "open", exc)) from exc
 
 
 def _probe_private_write_child(
@@ -488,13 +467,16 @@ def web_required_paths(cfg: CratediggerConfig) -> RequiredPaths:
     snapshots through the private tree
     (``preview_import_from_download_log`` -> ``_preview_copy_lock``).
 
-    Deliberately excludes ``slskd_download_dir`` from write: that root is
-    the untrusted THIRD-PARTY slskd share (issue #571's good-citizen
-    doctrine -- not ours to touch), web never actually needs write
-    authority on it (only on its own ``wrong_matches``/``failed_imports``
-    quarantine children, which are not required to exist), and a startup
-    probe writing there on every boot is exactly the unprompted third-
-    party write that doctrine forbids.
+    Deliberately excludes ``slskd_download_dir`` from write: web never
+    actually needs write authority there -- it only ever deletes from its
+    own ``wrong_matches``/``failed_imports`` quarantine children (which are
+    not required to exist). The governing rule is to probe only the
+    authority a unit actually uses, not a blanket ban on ever writing into
+    the slskd share -- ``cratedigger_required_paths`` DOES require write
+    there, correctly, because the disk reaper
+    (``lib.slskd_transfers.reap_disk_orphans``) genuinely unlinks proven-
+    owned files and prunes emptied directories back up to that same root on
+    every cycle.
     """
     write = [cfg.var_dir, processing_albums_dir(cfg.processing_dir)]
     if cfg.beets_staging_dir:

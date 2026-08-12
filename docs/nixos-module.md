@@ -464,10 +464,15 @@ before any queue recovery, claim, DB mutation, or filesystem mutation:
   which is the outcome this probe exists to eliminate. Quarantine *reads*
   (`open_configured_quarantine_directory`) stay on the generic primitive,
   matching that function's own deliberately looser action-time behaviour.
-- **`beets.validation.stagingDir` is probed only when configured.** An
-  unset staging root (validation disabled) is a legitimate, supported
-  configuration — production code never reaches the staging branch in that
-  case — so it is never probed, never reported "missing". Every other
+- **`beets.validation.stagingDir` is probed only when configured
+  (non-empty).** It is unset only on a deployment with NEITHER
+  `beets.validation.enable` NOR `youtubeIngest.enable` turned on — each
+  flag independently forces `stagingDir` non-null via its own module
+  assertion (`nix/module.nix`), and the rendered config value is
+  unconditional either way. When it genuinely is unset, production code
+  never reaches the staging branch (`lib.download_processing`) and
+  `open_configured_quarantine_directory` already skips a non-absolute
+  root — so it is never probed, never reported "missing". Every other
   required path is unconditional.
 - **On failure** — the unit exits non-zero with a message naming the unit,
   the path, the operation, and the errno class. `cratedigger-importer`,
@@ -501,12 +506,16 @@ when a unit refuses at startup:
 | `cratedigger-youtube-ingest` | — | `youtubeIngest.tempDir`; validation staging root (unconditionally required whenever this unit is enabled — the module's own assertion guarantees it is set) |
 | `cratedigger-unfindable` | never gated | never gated |
 
-`cratedigger-web` deliberately excludes `slskd.downloadDir` from write: that
-root is the untrusted third-party slskd share (issue #571's good-citizen
-doctrine — not ours to touch), web only ever deletes from its own
-`wrong_matches`/`failed_imports` quarantine children there (never required
-to exist), and a startup probe writing into slskd's own tree on every boot
-would be exactly the unprompted third-party write that doctrine forbids.
+`cratedigger-web` deliberately excludes `slskd.downloadDir` from write:
+web only ever deletes from its own `wrong_matches`/`failed_imports`
+quarantine children there (never required to exist) and never needs
+write authority on the share itself. The governing rule is to probe
+only the authority a unit actually uses, not a blanket ban on ever
+writing into the slskd share — `cratedigger` DOES require write there,
+correctly, because its disk reaper
+(`lib.slskd_transfers.reap_disk_orphans`) genuinely unlinks proven-owned
+files and prunes emptied directories back up to that same root on every
+cycle.
 
 **Known constraint, recorded rather than fixed:** the shared
 `open_directory_path` primitive opens every path component `O_NOFOLLOW`. A

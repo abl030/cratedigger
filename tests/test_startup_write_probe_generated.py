@@ -225,22 +225,14 @@ def _leaf_requirement(
     needs_read = path in required.read
     needs_write = path in required.write
     private_engaged = bool(
-        required.private_write_root
-        or required.private_read_children
-        or required.private_write_children
+        required.private_write_root or required.private_write_children
     )
     if private_engaged and leaf == "slskd_download_dir":
         needs_read = True
-    if leaf == "processing_albums":
-        if "albums" in required.private_read_children:
-            needs_read = True
-        if "albums" in required.private_write_children:
-            needs_write = True
-    if leaf == "processing_preview":
-        if "preview" in required.private_read_children:
-            needs_read = True
-        if "preview" in required.private_write_children:
-            needs_write = True
+    if leaf == "processing_albums" and "albums" in required.private_write_children:
+        needs_write = True
+    if leaf == "processing_preview" and "preview" in required.private_write_children:
+        needs_write = True
     return needs_read, needs_write
 
 

@@ -332,10 +332,7 @@ class TestRequiredPathsBuilders(unittest.TestCase):
                     path.startswith(albums + os.sep),
                     f"{path} writes inside an album directory",
                 )
-            for child in (
-                *required.private_read_children,
-                *required.private_write_children,
-            ):
+            for child in required.private_write_children:
                 self.assertIn(child, ("albums", "preview"))
 
 
