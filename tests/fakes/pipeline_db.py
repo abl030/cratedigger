@@ -122,6 +122,8 @@ from lib.pipeline_db import (
     SearchPlanProvenance,
     SearchPlanRow,
     TransferLedgerRow,
+    UnfindableRunMetricsPresentation,
+    UnfindableRunMetricsRow,
     WantedReconciliationCandidate,
 )
 from lib.pipeline_db._core import OwnerSessionLost, ReadOnlyQueryCursor
@@ -478,6 +480,7 @@ class FakePipelineDB:
         ] = {}
         self.search_logs: list[SearchLogRow] = []
         self.cycle_metrics: list[dict[str, Any]] = []
+        self.unfindable_run_metrics: list[UnfindableRunMetricsRow] = []
         # Distinct-peer roster mirroring `peer_observations` (#227).
         # Keyed by username_hash.
         self.peer_observations: dict[str, dict[str, Any]] = {}
@@ -6807,6 +6810,137 @@ class FakePipelineDB:
                    if req.get("status") in (
                        "wanted", "downloading", "processing"))
 
+    # --- Unfindable-detection run telemetry (#1112) ---
+
+    def record_unfindable_run_metrics(
+        self,
+        *,
+        cohort_total: int,
+        due_backlog_at_start: int,
+        batch_limit: int,
+        candidates_processed: int,
+        probes_attempted: int,
+        breaker_tripped: bool,
+        duration_seconds: float,
+        categorised_count: int = 0,
+        downgraded_count: int = 0,
+        no_change_count: int = 0,
+        probe_failed_count: int = 0,
+        not_due_count: int = 0,
+        request_not_found_count: int = 0,
+    ) -> int:
+        partition_sum = (
+            categorised_count + downgraded_count + no_change_count
+            + probe_failed_count + not_due_count + request_not_found_count
+        )
+        if partition_sum != candidates_processed:
+            # Mirror unfindable_run_metrics_partition_check (migration
+            # 077, #1112 review round 2 R5) -- a fake that accepts any
+            # combination shipped a row production rejects (#146-style
+            # fake-mirrors-CHECK precedent).
+            import psycopg2.errors
+
+            raise psycopg2.errors.CheckViolation(
+                'new row for relation "unfindable_run_metrics" violates '
+                'check constraint '
+                '"unfindable_run_metrics_partition_check" '
+                f'(sum={partition_sum}, '
+                f'candidates_processed={candidates_processed})'
+            )
+        expected_probes_attempted = (
+            candidates_processed - not_due_count - request_not_found_count
+        )
+        if probes_attempted != expected_probes_attempted:
+            # Mirror unfindable_run_metrics_probes_attempted_check
+            # (migration 077, #1112 review round 2 R5).
+            import psycopg2.errors
+
+            raise psycopg2.errors.CheckViolation(
+                'new row for relation "unfindable_run_metrics" violates '
+                'check constraint '
+                '"unfindable_run_metrics_probes_attempted_check" '
+                f'(probes_attempted={probes_attempted}, '
+                f'expected={expected_probes_attempted})'
+            )
+        row = UnfindableRunMetricsRow(
+            id=len(self.unfindable_run_metrics) + 1,
+            created_at=_utcnow(),
+            cohort_total=cohort_total,
+            due_backlog_at_start=due_backlog_at_start,
+            batch_limit=batch_limit,
+            candidates_processed=candidates_processed,
+            probes_attempted=probes_attempted,
+            categorised_count=categorised_count,
+            downgraded_count=downgraded_count,
+            no_change_count=no_change_count,
+            probe_failed_count=probe_failed_count,
+            not_due_count=not_due_count,
+            request_not_found_count=request_not_found_count,
+            breaker_tripped=breaker_tripped,
+            duration_seconds=duration_seconds,
+        )
+        self.unfindable_run_metrics.append(row)
+        return row["id"]
+
+    def get_unfindable_run_metrics(
+        self, *, limit: int = 30,
+    ) -> list[UnfindableRunMetricsRow]:
+        rows = sorted(
+            self.unfindable_run_metrics,
+            key=lambda r: (self._as_utc(r["created_at"]), r["id"]),
+            reverse=True,
+        )
+        return list(rows[:limit])
+
+    def _dashboard_unfindable(
+        self,
+    ) -> dict[str, list[UnfindableRunMetricsPresentation] | dict[str, object]]:
+        rows = [
+            self._serialize_unfindable_run_row(r)
+            for r in self.get_unfindable_run_metrics(limit=14)
+        ]
+        chronological = list(reversed(rows))
+        series: list[dict[str, object]] = [
+            {
+                "sampled_at": r["created_at"],
+                "due_backlog_at_start": r["due_backlog_at_start"],
+                "candidates_processed": r["candidates_processed"],
+            }
+            for r in chronological
+        ]
+        latest = rows[0] if rows else None
+        return {
+            "recent_runs": rows,
+            "backlog_trend": {
+                "current_backlog": (
+                    latest["due_backlog_at_start"] if latest else None
+                ),
+                "latest_sample_at": latest["created_at"] if latest else None,
+                "series": series,
+            },
+        }
+
+    def _serialize_unfindable_run_row(
+        self, row: UnfindableRunMetricsRow,
+    ) -> UnfindableRunMetricsPresentation:
+        return UnfindableRunMetricsPresentation(
+            id=row["id"],
+            created_at=row["created_at"].isoformat(),
+            cohort_total=row["cohort_total"],
+            due_backlog_at_start=row["due_backlog_at_start"],
+            batch_limit=row["batch_limit"],
+            candidates_processed=row["candidates_processed"],
+            probes_attempted=row["probes_attempted"],
+            categorised_count=row["categorised_count"],
+            downgraded_count=row["downgraded_count"],
+            no_change_count=row["no_change_count"],
+            probe_failed_count=row["probe_failed_count"],
+            not_due_count=row["not_due_count"],
+            request_not_found_count=row["request_not_found_count"],
+            breaker_tripped=row["breaker_tripped"],
+            duration_seconds=row["duration_seconds"],
+        )
+
     def _dashboard_wanted_trend(self, current_wanted: int) -> dict[str, Any]:
         now = _utcnow()
         samples: list[tuple[datetime, int]] = []
@@ -7393,6 +7527,7 @@ class FakePipelineDB:
             "coverage": self._dashboard_coverage(now),
             "peers": peers,
             "plan_readiness": self.get_search_plan_readiness(plan_generator_id),
+            "unfindable": self._dashboard_unfindable(),
         }
 
     def get_search_plan_readiness(

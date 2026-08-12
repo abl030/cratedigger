@@ -70,16 +70,22 @@ BLOCKER F3). YouTube is
 `Type=simple`, `wantedBy=multi-user.target`, `Restart=on-failure`, with no
 timer at all -- an always-on daemon nothing before the gate hold ever asks to
 stop. Draining it pre-hold (the original #1078 fix's mistake) waits the full
-7200s service-drain timeout for a unit nothing is going to stop, then fails
-with the gate hold never taken -- the exact failure shape #1078 exists to
-remove, reproduced by the reorder itself. The pre-hold window also owns no
+service-drain timeout for a unit nothing is going to stop -- that drain's
+unit set (`PRODUCER_SERVICE_UNITS`) includes `cratedigger-unfindable.service`,
+so as of issue #1112 review round 2 it is bounded by
+`_PRODUCER_DRAIN_TIMEOUT_SECONDS` (21600s / 6h), not the shorter
+`_DRAIN_TIMEOUT_SECONDS` that bounds unit sets without unfindable in them --
+then fails with the gate hold never taken -- the exact failure shape #1078
+exists to remove, reproduced by the reorder itself. The pre-hold window also
+owns no
 temporary start inhibitor: masking already blocks a fresh *timer* trigger
 (though not an unrelated hold's own resume-if-clear, which starts
 `cratedigger.service` directly via the gate's `resume_units` regardless of
 the timer's mask state), and YouTube is not being waited on in this window
 at all, so there is no persistent `/var/lib` artifact to orphan if the host
-reboots mid-window (see `abort`, below, for the reboot boundary this module
-actually has).
+reboots mid-window at all -- unlike the manual hold and producer inhibitors
+taken later, which do persist and are exactly what `abort`'s reboot recovery
+below adopts.
 
 Taking the gate hold before draining the queue is exactly the pre-#1078 bug:
 the hold's external tool stops the importer and preview workers, which are
@@ -153,17 +159,83 @@ stranded partway through acquisition while the host stayed up. Before #1078
 the only documented answer was "do not remove the receipt by hand," with
 nothing offered instead.
 
-**`abort` does NOT cover a host reboot.** The receipt under `/run` and the
-timer control-links under `/run/systemd/system.control` are both tmpfs and do
-not survive one; a reboot leaves nothing for `abort` (or `recover-held`) to
-act on, because there is no receipt left proving what this deployment ever
-owned. #1078's own producer-drain-before-hold window keeps no receipt-owned
-object on persistent storage, so it does not widen that exposure. The same
-asymmetry already existed for `prepare_controlled`'s YouTube start inhibitor
-(persistent, owned only across `prepared-controlled`/`main-timer-open`)
-before this change; making the receipt (or its ownership markers) durable
-across a reboot is a separate, wider redesign of this module's authority
-model, tracked as #1096 -- not something `abort` attempts.
+**`abort` survives a host reboot too (#1096).** The receipt under `/run` and
+the timer control-links under `/run/systemd/system.control` are both tmpfs
+and do not survive one -- but the manual gate hold and the producer start
+inhibitors under `/var/lib/cratedigger-metadata-gate` are real disk state and
+can outlive the receipt that took them. #1078's own producer-drain-before-hold
+window keeps no receipt-owned object on persistent storage, so it does not
+widen that exposure; the exposure that remains is exactly `prepare_controlled`'s
+YouTube start inhibitor (persistent, owned across `prepared-controlled`/
+`main-timer-open`) and, for a reboot at or after `PHASE_HELD` before
+`prepare_controlled` releases it, the manual hold itself.
+
+The fix is a persistent sibling marker beside each of those two owned-object
+classes -- `deploy-hold-owned-manual` and `deploy-hold-owned-inhibit-<unit>`,
+both directly in `/var/lib/cratedigger-metadata-gate` (never inside `holds/`,
+which the gate reads as hold *reasons*). `mark_manual_hold_owned()` /
+`mark_inhibitor_owned()` write the persistent marker before the object itself
+is ever created, so an object without its marker is provably foreign;
+`unmark_manual_hold_owned()` / `unmark_inhibitor_owned()` remove it only after
+the object is already gone. While a receipt exists it remains the sole
+authority -- these persistent markers are consulted only when no receipt (live
+or retired) exists, which is exactly the shape a reboot leaves behind.
+
+A receiptless `abort` (`_adopt_persistent_markers_or_refuse`) reads exactly
+those markers: with none present at all -- an ordinary clean boot with no
+prior deploy hold -- it refuses precisely like it always has, so a boot can
+never turn into a mass restart. With one or more present, it proves no
+unmarked (foreign) object or foreign metadata-gate hold conflicts before
+touching anything, then adopts exactly the marked objects in a fixed order:
+every marked inhibitor file is removed first, then a marked manual hold is
+released, and only after both mutations does it restart once and prove
+active whatever they blocked -- except `cratedigger.service`, a `Type=oneshot`
+that never reaches active/running and is instead started unproven, never
+waited on (mirroring `prepare_controlled`'s own main-service handling) --
+before finally clearing the markers.
+
+That ordering is load-bearing, not cosmetic (#1096 correction round, caught
+by independent review before the first version of this adoption path ever
+shipped). An earlier shape released the hold and started+proved `GATE_STOPPED_UNITS`
+active *before* touching the inhibitor branch: a still-present marked
+YouTube inhibitor then condition-skipped that very restart (`systemctl
+start` returns 0, the unit stays down -- not a job failure), so the wait
+polled for the full `_DRAIN_TIMEOUT_SECONDS` bound (2h, 7200 polls -- not
+the 6h `_PRODUCER_DRAIN_TIMEOUT_SECONDS`, which nothing on this path ever
+uses) and failed with both markers still on disk and the inhibitor file
+untouched -- a hang every rerun reproduced identically, with the hand-`rm`
+this module's docs exist to forbid as the only way out. The same shape let
+`cratedigger.service`'s own marked inhibitor reach `_wait_controlled_
+workers_active` naming it among the units to prove active -- a wait that
+unit can never satisfy, since a `Type=oneshot` never reaches
+`active`/`running` at all. The most reachable way there is not a rare
+orphan: a reboot anywhere in the wide window `prepare_controlled` spends
+between creating both inhibitors and its own later
+`_release_owned_inhibitor(MAIN_SERVICE)` -- starting the controlled
+workers, waiting on them, the gate's `resume-if-clear`, the timer-link
+asserts, and the main+YouTube drain -- leaves that inhibitor both marked
+AND actually created, which is the common case this correction round
+measured. A marked-but-never-created inhibitor (the crash landed between
+the marker write and the inhibitor file's own creation, a narrower window)
+reproduces the identical hang for the identical reason. Removing/releasing
+everything the call owns before the single restart pass,
+and excluding the oneshot from that pass's wait, closes both dead ends by
+construction -- ending at the same ordinary, unheld operation every other
+path through `abort` reaches. It never re-establishes a receipt or a phase:
+after a reboot there is nothing to recover TO, only ordinary operation to restore.
+`acquire`'s own refusal for an object carrying one of these markers now names
+`abort` as the way out (distinct from its refusal for a genuinely unmarked,
+foreign object, which still refuses with no such pointer). `recover-held`
+still requires a receipt -- the phase knowledge a reboot destroys is exactly
+what it exists to resume -- so the supported reboot recovery is always
+`abort` followed by a fresh `acquire`.
+
+Rejected alternatives (issue comment
+[5266609958](https://github.com/abl030/cratedigger/issues/1096#issuecomment-5266609958)):
+moving the whole receipt to `/var/lib` (the tmpfs receipt's reboot-clears-
+stale-state property is deliberate), and encoding ownership in the inhibitor
+file's own content (the inhibitor's content is a format the external gate
+tool reads; changing it is a wider, riskier change than a sibling marker).
 
 Every ownership class this receipt could hold -- the manual gate hold, every
 owned producer-start inhibitor, every owned timer control-link mask -- is
@@ -175,16 +247,25 @@ unable to cleanly return to HELD either (`recover-held` hits the identical
 conflict re-taking the hold).
 
 `abort` then walks the same ownership markers acquisition records intent
-through and releases exactly the ones the receipt owns, in the reverse of the
-order acquisition took them -- restarting what that ownership implies it
-stopped only after that restart is *proven*, and disowning only after that
-proof, so an interrupted retry never sees "nothing owned" while the
-underlying object is still stopped:
+through and releases exactly the ones the receipt owns, restarting what
+that ownership implies it stopped, first removing/releasing every owned
+object it disowns before that restart, and proving the restart *before*
+disowning -- except `cratedigger.service`, a `Type=oneshot` that never
+reaches active/running and so is always restarted unproven and disowned
+without waiting (the same exception `_adopt_persistent_markers_or_refuse`
+makes for the persistent-marker path above, and for the identical reason:
+`_wait_controlled_workers_active` can never be satisfied by a unit that
+runs once and exits). This ordering -- release/remove everything first,
+restart once, then disown -- is what an interrupted retry needs to never
+see "nothing owned" while an underlying unit is still stopped, and (#1096
+correction round) what stops a still-owned inhibitor from condition-
+skipping a restart this same call's hold-release branch is mid-proving:
 
-- the manual gate hold, if owned. Releasing it is what the external gate tool
-  consults to let every gate-guarded unit start again, so `abort` restarts
-  all four -- web, preview, importer, and YouTube ingest, itself gate-guarded
-  since #1078 -- and proves every one is stably active
+- the manual gate hold, if owned. Its owned producer-start inhibitors are
+  released first (see below), then releasing the hold is what the external
+  gate tool consults to let every gate-guarded unit start again, so `abort`
+  restarts all four -- web, preview, importer, and YouTube ingest, itself
+  gate-guarded since #1078 -- and proves every one is stably active
   (`_wait_controlled_workers_active`, the same check `prepare_controlled`
   uses) before trusting the release and disowning the hold. A foreign hold
   (for example the monthly discogs-import hold) makes that proof fail loudly
@@ -192,7 +273,12 @@ underlying object is still stopped:
   `systemctl start` that a gate-guarded unit's `ExecCondition` silently
   skips still returns success -- the CLI sees a condition skip, not a
   failure;
-- every owned producer-start inhibitor;
+- every owned producer-start inhibitor, its file removed before the manual
+  hold above is released (not after -- a still-present inhibitor would
+  otherwise condition-skip that release's own restart) and before that
+  removal's own restart is attempted, proven active same as above --
+  except `cratedigger.service` among them, restarted unproven per the
+  oneshot exception stated above;
 - every owned timer control-link mask, restarted and proven active before
   being disowned -- restarting that timer is what returns
   `cratedigger-unfindable.service` and the watchdog to their ordinary

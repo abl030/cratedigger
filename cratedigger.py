@@ -18,7 +18,9 @@ from lib.config import resolve_startup_config_paths
 # Unified slskd search lifecycle (issue #466).
 from lib.search_exec import (
     SearchSubmitError,
+    SearchSubmitRetryPolicy,
     execute_search,
+    submit_search_with_retry,
 )
 from lib.slskd_client import (
     SLSKD_HTTP_TIMEOUT_S,
@@ -459,6 +461,21 @@ def search_for_album(
     return result
 
 
+# Bounded submit-retry for the main pipeline's own slskd search POST
+# (issue #1112 folded the pre-existing bespoke loop below onto the shared
+# ``lib.search_exec.SearchSubmitRetryPolicy`` mechanism issue #1090
+# introduced for the unfindable probe). 6 attempts total (5 retries),
+# 1/2/4/8/8s backoff — UNCHANGED by the consolidation: the parallel
+# pipeline's 4-wide pipelined submits are timing-sensitive, so this
+# budget/backoff is preserved byte-for-byte from the pre-#1112 loop.
+# Retries BOTH 409 (slskd mid-reconnect) and 429 (slskd's real rate
+# limiter, SearchRequestLimiter) — unlike the probe's policy, which stays
+# 409-only (see ``SearchSubmitRetryPolicy.retryable_statuses``).
+PLAN_SEARCH_SUBMIT_MAX_ATTEMPTS: int = 6
+PLAN_SEARCH_SUBMIT_BACKOFF_S: tuple[float, ...] = (1.0, 2.0, 4.0, 8.0, 8.0)
+PLAN_SEARCH_SUBMIT_RETRYABLE_STATUSES: frozenset[int] = frozenset({409, 429})
+
+
 def _submit_plan_search(
     album: AlbumRecord,
     query: str,
@@ -484,12 +501,17 @@ def _submit_plan_search(
     retries) is exactly the kind of stray the sweep exists to clean up
     (I1). Reusing one id across retries would let that stray go unledgered.
 
+    Thin adapter (issue #1112) over ``lib.search_exec.submit_search_with_retry``
+    — the same shared submit-retry mechanism the unfindable probe uses
+    (issue #1090), configured with this call site's own unchanged
+    409+429 / 6-attempt / 1-2-4-8-8s policy (``PLAN_SEARCH_SUBMIT_*``
+    above). Only the submit phase is shared; poll/harvest for the parallel
+    pipeline still runs separately via ``_collect_search_results``.
+
     Returns ``None`` on submission failure (pre-attempt, non-consuming):
     the caller already has the plan-execution context to record a
     non-consuming telemetry row.
     """
-    import requests
-
     album_title = album.title
     artist_name = album.artist_name
     album_id = album.id
@@ -502,38 +524,51 @@ def _submit_plan_search(
     logger.info(f"Submitting search: {query} "
                 f"(from '{artist_name} - {album_title}', variant={strategy_tag})")
 
-    # Retry on 429 (rate limit) or 409 with backoff. Prose-only correction
-    # (issue #1090 NON-BLOCKING-3, root-caused against slskd's real
-    # source): 409 here is NOT slskd's SemaphoreSlim(1,1) submission lock
-    # -- SearchesController maps InvalidOperationException to 409, which
-    # Soulseek.NET's SearchAsync guard throws while slskd is mid-reconnect
-    # (Connected, LoggingIn), not a submission-lock contention signal.
-    # slskd's real rate limiter (SearchRequestLimiter) is what emits 429.
-    # Behaviour here is UNCHANGED by that correction.
-    for attempt in range(6):
-        search_id = str(uuid.uuid4())
+    def _mint_and_ledger_id() -> str:
         # A DB failure here deliberately propagates (write-ahead: no POST
         # before the ledger commits; DB-down is already cycle-fatal).
-        db.record_search_id(search_id, purpose="plan_search", request_id=request_id)
-        try:
-            submit_kwargs = _plan_search_submit_kwargs(query, search_cfg)
-            submit_kwargs["id"] = search_id
-            search = slskd_client.searches.search_text(**submit_kwargs)
-            return (search["id"], query, album_id, strategy_tag)
-        except requests.exceptions.HTTPError as e:
-            status = e.response.status_code if e.response is not None else 0
-            if status in (429, 409) and attempt < 5:
-                wait = min(2 ** attempt, 8)  # 1, 2, 4, 8, 8s
-                logger.warning(f"{status} on search submit for {query}, "
-                               f"retrying in {wait}s (attempt {attempt + 1}/6)")
-                time.sleep(wait)
-            else:
-                logger.exception(f"Failed to submit search via SLSKD: {query}")
-                return None
-        except Exception:
-            logger.exception(f"Failed to submit search via SLSKD: {query}")
-            return None
-    return None
+        new_id = str(uuid.uuid4())
+        db.record_search_id(new_id, purpose="plan_search", request_id=request_id)
+        return new_id
+
+    # Retry on 409 or 429 with backoff. Prose-only correction (issue #1090
+    # NON-BLOCKING-3, root-caused against slskd's real source): 409 here is
+    # NOT slskd's SemaphoreSlim(1,1) submission lock -- SearchesController
+    # maps InvalidOperationException to 409, which Soulseek.NET's
+    # SearchAsync guard throws while slskd is mid-reconnect (Connected,
+    # LoggingIn), not a submission-lock contention signal. slskd's real
+    # rate limiter (SearchRequestLimiter) is what emits 429. Behaviour here
+    # is UNCHANGED by that correction, and UNCHANGED again by the #1112
+    # consolidation onto the shared policy below.
+    submit_kwargs = _plan_search_submit_kwargs(query, search_cfg)
+    submit_kwargs["id"] = _mint_and_ledger_id()
+    try:
+        submitted = submit_search_with_retry(
+            slskd_client, submit_kwargs,
+            submit_retry=SearchSubmitRetryPolicy(
+                mint_ledgered_search_id=_mint_and_ledger_id,
+                max_attempts=PLAN_SEARCH_SUBMIT_MAX_ATTEMPTS,
+                backoff_s=PLAN_SEARCH_SUBMIT_BACKOFF_S,
+                retryable_statuses=PLAN_SEARCH_SUBMIT_RETRYABLE_STATUSES,
+            ),
+        )
+        # A malformed 2xx body (accepted, but missing "id") is classified
+        # exactly like a submission failure -- the pre-#1112 bespoke loop
+        # evaluated this subscript INSIDE its try/except too, so a KeyError
+        # here fell into the same generic handler as an HTTP failure. This
+        # must stay INSIDE the try (post-#1112 review MAJOR-1): a bare
+        # KeyError/TypeError escaping _submit_plan_search propagates to the
+        # parallel pipeline's owner path, which aborts the ENTIRE cycle's
+        # search phase for every other in-flight album, not just this one.
+        return (submitted["id"], query, album_id, strategy_tag)
+    except (SearchSubmitError, KeyError, TypeError):
+        # Narrower than a blanket ``except Exception`` on purpose: a DB
+        # failure raised by ``_mint_and_ledger_id`` during a retry (called
+        # from inside submit_search_with_retry, which lives in this same
+        # try) must still propagate UNWRAPPED -- DB-down is cycle-fatal,
+        # never silently swallowed here.
+        logger.exception(f"Failed to submit search via SLSKD: {query}")
+        return None
 
 
 def _collect_search_results(
@@ -1000,8 +1035,9 @@ def _search_and_queue_parallel(
 
     # Pipeline depth — number of search-collection futures in flight at once.
     # Configurable via cfg.search_max_inflight (issue #198 U4). Submission
-    # stays sequential through the existing 429-retry loop; only the
-    # collect-side concurrency increases.
+    # stays sequential through _submit_plan_search's existing 409+429
+    # submit-retry policy (lib.search_exec.SearchSubmitRetryPolicy, #1112);
+    # only the collect-side concurrency increases.
     search_cfg = ctx.cfg
     max_inflight = search_cfg.search_max_inflight
 

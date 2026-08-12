@@ -55,7 +55,7 @@ TYPING_RATCHET_BASELINE: dict[str, dict[str, int]] = {
     "lib/release_snapshot.py": {"any": 6},
     "lib/repair.py": {"any": 4},
     "lib/search.py": {"any": 17},
-    "lib/search_exec.py": {"any": 9},
+    "lib/search_exec.py": {"any": 4},
     "lib/search_plan_inspection.py": {"any": 21},
     "lib/search_plan_service.py": {"any": 30},
     "lib/slskd_client.py": {"any": 13},
