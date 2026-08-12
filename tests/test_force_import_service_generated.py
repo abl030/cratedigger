@@ -45,24 +45,31 @@ from tests.helpers import (
 
 # Independently authored producer inventory. These are the rejection lanes that
 # can persist a force-importable quarantine path; importing the authority table
-# from lib.fs_authority would make this contract agree by construction. The
-# four folder/integrity rejects deliberately name the plain
-# ``failed_imports/<album>`` shape that the original inventory omitted.
+# from lib.fs_authority would make this contract agree by construction.
+#
+# Issue #1077, Extra 1: this used to also carry ``spectral_reject``,
+# ``bad_audio_hash``, ``nested_layout``, ``empty_fileset``, and
+# ``mixed_source`` — the folder/audio-integrity facts and the quality-only
+# spectral reject. None of those can actually reach ``_handle_rejected_
+# result`` (the real producer this table drives, via ``_produce_download_
+# rejection`` / ``_produce_youtube_rejection``): per the producer audit in
+# ``tests/test_wrong_match_scenario_producer_audit.py``, they are written by
+# the quality decision pipeline, not by ``lib/beets.py``, ``lib/download_
+# validation.py``, ``lib/download_processing.py``, or ``lib/dispatch/
+# manifest_guard.py`` — the only files that ever feed a scenario into this
+# lane. Driving this table with them exercised an impossible world and, once
+# ``_allocate_target`` stopped branching on scenario (issue #1077, D3/D6),
+# their expected path also went stale (``failed_imports`` — a destination
+# nothing produces any more). The remaining four are the DELETE_ELIGIBLE
+# scenarios ``lib/beets.py`` actually spells on a rejected beets match —
+# genuinely reachable through this test's real producer, and all four are
+# non-``audio_corrupt``, so they all resolve to the single quarantine root.
 PRODUCER_LANES = ("slskd", "youtube_staging", "private_processing")
 REJECTION_CLASSES: dict[str, tuple[str, ...]] = {
     "high_distance": ("wrong_matches",),
-    # The `bad_files` sub-routing (issue #1077, D3) is gone — audio_corrupt
-    # and spectral_reject were its only two consumers, and neither reaches
-    # this curated mover with a produced failed_path in production any more
-    # (audio_corrupt bans + deletes outright at the media-readiness lane
-    # this test drives; spectral_reject was never quarantined at all,
-    # cleaned up immediately). spectral_reject now shares the plain
-    # `failed_imports/` bucket with every other folder/integrity reject.
-    "spectral_reject": ("failed_imports",),
-    "bad_audio_hash": ("failed_imports",),
-    "nested_layout": ("failed_imports",),
-    "empty_fileset": ("failed_imports",),
-    "mixed_source": ("failed_imports",),
+    "extra_tracks": ("wrong_matches",),
+    "mbid_not_found": ("wrong_matches",),
+    "no_choose_match": ("wrong_matches",),
 }
 PATH_CASES = ("existing", "missing", "lookalike")
 
@@ -116,8 +123,6 @@ def _source_album(
     source_parent = os.path.join(lane_root, "nested") if nested else lane_root
     source = os.path.join(source_parent, album_name)
     os.makedirs(source)
-    if scenario == "empty_fileset":
-        return source, []
     with open(os.path.join(source, "01 - Track.flac"), "wb") as handle:
         handle.write(b"audio")
     return source, [make_download_file(
@@ -387,7 +392,7 @@ class TestForceImportProducerAuthorityGenerated(unittest.TestCase):
             self.assertEqual(result.job.payload.source_dirs, [])
 
     def test_every_produced_quarantine_path_matches_force_import_authority(self) -> None:
-        """Exhaust all 108 producer lane/rejection/layout/path worlds."""
+        """Exhaust all 72 producer lane/rejection/layout/path worlds."""
         worlds = product(
             PRODUCER_LANES,
             sorted(REJECTION_CLASSES.items()),

@@ -257,9 +257,10 @@ class TestWrongMatchCleanup(unittest.TestCase):
     # behaviour these tests covered — relative/absolute duplicate rows, a
     # missing directory, a missing entry — is still exercised by
     # `cleanup_wrong_match_source`'s own tests above (which additionally
-    # assert the file deletion), and D7's dedicated pin/property in
-    # `tests/test_wrong_match_post_commit_generated.py` drives
-    # `_dismiss_successful_force_import` itself end to end.
+    # assert the file deletion), and D7's dedicated pin drives
+    # `_dismiss_successful_force_import` itself end to end:
+    # `tests/test_import_queue.py::TestImporterWorker::
+    # test_acknowledged_force_success_deletes_wrong_match_source`.
 
 class TestWrongMatchDeleteService(unittest.TestCase):
     def _make_db(self) -> FakePipelineDB:

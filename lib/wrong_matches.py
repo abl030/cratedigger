@@ -32,10 +32,20 @@ def wrong_match_row_is_visible(
     Replaced requests are frozen audit history, not live/actionable Wrong
     Matches. Explicit history views can opt back in; every default consumer
     shares this predicate so card visibility and lifecycle references agree.
+
+    Issue #1077, F2: this used to ALSO hide any row whose linked candidate
+    evidence carried ``audio_corrupt=True`` — a garbled grab that trips both
+    a kept, banned, non-delete-eligible scenario (``untracked_audio`` etc.)
+    AND an audio_corrupt evidence flag became kept + banned + invisible
+    forever, the exact pathology this issue kills. New-world audio_corrupt
+    REJECTIONS never reach this row shape at all (D3: ban + delete, no
+    quarantine, no worklist row) — the historical bad_files cohort quarantined
+    before that fix is excluded below by ``terminal_import_decision`` alone,
+    which is sufficient: it is the decision that actually rejected the
+    candidate, not incidental evidence attached to something else that
+    rejected for an unrelated reason.
     """
     if not include_replaced and row.get("request_status") == "replaced":
-        return False
-    if row.get("candidate_audio_corrupt") is True:
         return False
     if row.get("terminal_import_decision") == "audio_corrupt":
         return False

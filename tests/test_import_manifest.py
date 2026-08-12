@@ -37,7 +37,14 @@ class TestImportManifest(unittest.TestCase):
         self.assertEqual(check.extra_audio, ["bonus.opus"])
         self.assertEqual(check.missing_audio, [])
 
-    def test_curated_failed_import_excludes_extra_audio_and_keeps_sidecars(self):
+    def test_curated_failed_import_keeps_extra_audio_and_sidecars_together(self):
+        """Issue #1077, F1/Extra 2: every production caller is a kept,
+        worklist-visible rejection, so ``_allocate_target`` no longer
+        branches on scenario — everything lands under ``wrong_matches/``.
+        Extra tracks a real production caller could never leave behind (the
+        pre-beets manifest guard proves an exact audio match before Lane A
+        is reachable) simply move with the rest of the folder now; there is
+        no second, silent quarantine destination to split them into."""
         with tempfile.TemporaryDirectory() as parent:
             source = os.path.join(parent, "Album")
             os.mkdir(source)
@@ -47,7 +54,7 @@ class TestImportManifest(unittest.TestCase):
 
             failed_path = move_failed_import_curated(
                 source,
-                allowed_audio=["01.flac"],
+                allowed_audio=["01.flac", "bonus.opus"],
                 scenario="high_distance",
             )
 
@@ -59,18 +66,36 @@ class TestImportManifest(unittest.TestCase):
             )
             self.assertTrue(os.path.exists(os.path.join(failed_path, "01.flac")))
             self.assertTrue(os.path.exists(os.path.join(failed_path, "cover.jpg")))
-            self.assertFalse(os.path.exists(os.path.join(failed_path, "bonus.opus")))
+            self.assertTrue(os.path.exists(os.path.join(failed_path, "bonus.opus")))
 
-            quarantined = os.path.join(
-                parent,
-                "failed_imports",
-                "untracked_audio",
-                "Album",
-                "bonus.opus",
-            )
-            self.assertTrue(os.path.exists(quarantined))
+    def test_curated_failed_import_raises_loudly_on_unexpected_leftovers(self):
+        """Issue #1077, Extra 2: a caller that passes an ``allowed_audio``
+        set narrower than what is actually on disk used to fall back to a
+        silent second quarantine destination
+        (``failed_imports/untracked_audio/``) that violated "kept implies
+        visible" (D1) by construction. That path is unreachable from any
+        real production caller (the pre-beets manifest guard already proves
+        an exact match), so it now fails loudly instead — a future
+        regression of that precondition gets investigated, not hidden."""
+        with tempfile.TemporaryDirectory() as parent:
+            source = os.path.join(parent, "Album")
+            os.mkdir(source)
+            open(os.path.join(source, "01.flac"), "wb").close()
+            open(os.path.join(source, "bonus.opus"), "wb").close()
 
-    def test_integrity_rejection_stays_in_failed_imports(self):
+            with self.assertRaisesRegex(RuntimeError, "untracked files"):
+                move_failed_import_curated(
+                    source,
+                    allowed_audio=["01.flac"],
+                    scenario="high_distance",
+                )
+
+    def test_integrity_rejection_lands_in_wrong_matches_quarantine(self):
+        """Issue #1077, F1: ``_allocate_target`` no longer branches on
+        scenario — the historical ``failed_imports`` (non-``bad_files``)
+        destination had no producer left once ``audio_corrupt`` moved to
+        ban+delete, so every scenario this mover ever sees now lands under
+        the single ``wrong_matches/`` quarantine root."""
         with tempfile.TemporaryDirectory() as parent:
             source = os.path.join(parent, "Album")
             os.mkdir(source)
@@ -84,18 +109,18 @@ class TestImportManifest(unittest.TestCase):
 
             self.assertEqual(
                 failed_path,
-                os.path.join(parent, "failed_imports", "Album"),
+                os.path.join(parent, "wrong_matches", "Album"),
             )
 
-    def test_spectral_rejection_stays_in_plain_failed_imports(self):
-        """Issue #1077, D3: the ``bad_files`` sub-routing is gone —
+    def test_spectral_rejection_lands_in_wrong_matches_quarantine(self):
+        """Issue #1077, D3/F1: the ``bad_files`` sub-routing is gone —
         ``_BAD_FILE_SCENARIOS`` was audio_corrupt's and spectral_reject's
         only consumer, and neither ever reaches this curated mover in
         production any more (audio_corrupt bans + deletes outright;
         spectral_reject was never quarantined, only immediately cleaned
         up). This pins the pure function's current behavior for the
-        historical scenario string: same plain ``failed_imports/`` bucket
-        every other excluded scenario gets."""
+        historical scenario string: the single ``wrong_matches/`` bucket
+        every scenario this mover sees now gets."""
         with tempfile.TemporaryDirectory() as parent:
             source = os.path.join(parent, "Album")
             os.mkdir(source)
@@ -109,7 +134,7 @@ class TestImportManifest(unittest.TestCase):
 
             self.assertEqual(
                 failed_path,
-                os.path.join(parent, "failed_imports", "Album"),
+                os.path.join(parent, "wrong_matches", "Album"),
             )
 
     def test_download_manifest_uses_staged_filenames(self):

@@ -11,17 +11,13 @@ from typing import TYPE_CHECKING, Any
 
 from lib.quality import AUDIO_EXTENSIONS_DOTTED
 from lib.staged_album import staged_filename
-from lib.wrong_match_policy import (
-    WRONG_MATCH_QUARANTINE_DIR,
-    rejection_scenario_is_wrong_match_candidate,
-)
+from lib.wrong_match_policy import WRONG_MATCH_QUARANTINE_DIR
 
 if TYPE_CHECKING:
     from lib.grab_list import DownloadFile
 
 logger = logging.getLogger("cratedigger")
 
-_LEFTOVER_QUARANTINE_DIR = "untracked_audio"
 MutationCheckpoint = Callable[[], None]
 
 
@@ -125,21 +121,24 @@ def _remove_tree(
 def _allocate_target(
     src_path: str,
     *,
-    scenario: str | None,
     quarantine_root: str | None = None,
     before_mutation: MutationCheckpoint | None = None,
 ) -> str:
+    """Allocate a free destination under the Wrong Matches quarantine root.
+
+    Every production caller (issue #1077, D3/D6) is a kept, worklist-visible
+    rejection — the historical ``failed_imports`` (non-``bad_files``) branch
+    for excluded scenarios had no producer left once ``audio_corrupt`` moved
+    to ban+delete, so this always targets ``wrong_matches/`` now. Kept holds
+    by construction: there is no second destination for a caller to pick
+    wrong.
+    """
     parent_dir = (
         os.path.abspath(quarantine_root)
         if quarantine_root is not None
         else os.path.dirname(os.path.abspath(src_path))
     )
-    quarantine_dir_name = (
-        WRONG_MATCH_QUARANTINE_DIR
-        if rejection_scenario_is_wrong_match_candidate(scenario)
-        else "failed_imports"
-    )
-    quarantine_dir = os.path.join(parent_dir, quarantine_dir_name)
+    quarantine_dir = os.path.join(parent_dir, WRONG_MATCH_QUARANTINE_DIR)
     _makedirs(
         quarantine_dir,
         exist_ok=True,
@@ -151,29 +150,6 @@ def _allocate_target(
     counter = 1
     while os.path.exists(target_path):
         target_path = os.path.join(quarantine_dir, f"{folder_name}_{counter}")
-        counter += 1
-    return target_path
-
-
-def _allocate_leftover_target(
-    src_path: str,
-    *,
-    quarantine_root: str | None = None,
-    before_mutation: MutationCheckpoint | None = None,
-) -> str:
-    parent_dir = (
-        os.path.abspath(quarantine_root)
-        if quarantine_root is not None
-        else os.path.dirname(os.path.abspath(src_path))
-    )
-    root = os.path.join(parent_dir, "failed_imports", _LEFTOVER_QUARANTINE_DIR)
-    _makedirs(root, exist_ok=True, before_mutation=before_mutation)
-
-    folder_name = os.path.basename(os.path.abspath(src_path))
-    target_path = os.path.join(root, folder_name)
-    counter = 1
-    while os.path.exists(target_path):
-        target_path = os.path.join(root, f"{folder_name}_{counter}")
         counter += 1
     return target_path
 
@@ -271,12 +247,13 @@ def move_failed_import_curated(
     quarantine_root: str | None = None,
     before_mutation: MutationCheckpoint | None = None,
 ) -> str | None:
-    """Move curated files into their rejection-specific quarantine root.
+    """Move curated files into the Wrong Matches quarantine root.
 
     Curated means the accepted audio manifest plus non-audio sidecars. Audio
-    files not present in ``allowed_audio`` never enter Wrong Matches. Match
-    failures go to ``wrong_matches``; all other failures retain the existing
-    ``failed_imports`` layout.
+    files not present in ``allowed_audio`` never enter Wrong Matches — the
+    caller's manifest guard is expected to have already proven an exact
+    match, so this never routes anything to a second destination (issue
+    #1077, D1: kept implies visible in the worklist, by construction).
     """
     src_path = os.path.abspath(src_path)
     if not os.path.isdir(src_path):
@@ -285,7 +262,6 @@ def move_failed_import_curated(
     allowed = {rel for rel in (_safe_relpath(p) for p in allowed_audio) if rel}
     target_path = _allocate_target(
         src_path,
-        scenario=scenario,
         quarantine_root=quarantine_root,
         before_mutation=before_mutation,
     )
@@ -356,29 +332,34 @@ def move_failed_import_curated(
         with os.scandir(src_path) as entries:
             has_leftovers = any(entries)
         if has_leftovers:
-            leftover_target = _allocate_leftover_target(
-                src_path,
-                quarantine_root=quarantine_root,
-                before_mutation=before_mutation,
+            # Unreachable in production (issue #1077, Extra 2): the pre-
+            # beets manifest guard (``_check_staged_audio_manifest`` in
+            # ``lib/download_validation.py``) already proves the staged
+            # folder's actual audio exactly equals ``allowed_audio`` before
+            # Lane A (the only caller) can be reached, and the sealed
+            # canonical-processing invariant (CLAUDE.md #9) means nothing
+            # can add files afterward. A silent leftover quarantine under
+            # ``failed_imports/untracked_audio/`` used to violate "kept
+            # implies visible" by construction (D1) — fail loudly instead
+            # so a future regression of that precondition is investigated,
+            # never hidden.
+            raise RuntimeError(
+                "curated move left untracked files behind in "
+                f"{src_path!r} despite an exact allowed_audio match — "
+                "investigate the manifest-guard precondition instead of "
+                "silently quarantining them"
             )
-            _move(
-                src_path,
-                leftover_target,
-                before_mutation=before_mutation,
-            )
-            logger.warning(
-                "Quarantined untracked import leftovers: %s -> %s",
-                src_path,
-                leftover_target,
-            )
+        if before_mutation is None:
+            shutil.rmtree(src_path, ignore_errors=True)
         else:
-            if before_mutation is None:
-                shutil.rmtree(src_path, ignore_errors=True)
-            else:
-                before_mutation()
-                os.rmdir(src_path)
+            before_mutation()
+            os.rmdir(src_path)
 
-    logger.info("Curated rejected import moved to: %s", target_path)
+    logger.info(
+        "Curated rejected import moved to: %s (scenario=%s)",
+        target_path,
+        scenario,
+    )
     return target_path
 
 
@@ -405,12 +386,15 @@ def move_failed_import_whole(
         return None
     target_path = _allocate_target(
         src_path,
-        scenario=scenario,
         quarantine_root=quarantine_root,
         before_mutation=before_mutation,
     )
     if before_mutation is not None:
         before_mutation()
     os.rename(src_path, target_path)
-    logger.info("Complete rejected import moved to: %s", target_path)
+    logger.info(
+        "Complete rejected import moved to: %s (scenario=%s)",
+        target_path,
+        scenario,
+    )
     return target_path

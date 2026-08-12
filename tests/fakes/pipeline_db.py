@@ -7749,9 +7749,6 @@ class FakePipelineDB:
                 "evidence_verified_lossless": (
                     ev is not None and ev.verified_lossless_proof is not None
                 ),
-                "candidate_audio_corrupt": (
-                    ev.audio_corrupt if ev is not None else None
-                ),
                 "terminal_import_decision": (
                     entry.import_result.get("decision")
                     if isinstance(entry.import_result, dict)

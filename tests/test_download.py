@@ -215,6 +215,64 @@ class TestPostRejectionWrongMatchTriage(unittest.TestCase):
         )
         self.assertIs(result, cleanup.return_value)
 
+    def test_links_evidence_for_visible_but_not_delete_eligible_scenario(self):
+        """Issue #1077, F3/F8: the two-stage gate is worklist visibility
+        FIRST, then evidence-linking, then delete-eligibility — matching
+        ``scripts/importer.py::_cleanup_committed_wrong_match_rejection``.
+        Before this fix, delete-eligibility was the OUTER gate, so a kept,
+        banned, visible-but-never-delete-eligible row (e.g.
+        ``untracked_audio``, Lane B's own vocabulary) never even attempted
+        to link its candidate evidence — the worklist card rendered with no
+        candidate measurement even though the evidence was one call away.
+        """
+        from lib.download_rejection import _run_post_rejection_wrong_match_cleanup
+
+        db = FakePipelineDB()
+        db.seed_request(make_request_row(id=1, status="wanted"))
+        log_id = db.log_download(
+            1,
+            outcome="rejected",
+            validation_result={
+                "scenario": "untracked_audio", "failed_path": "/tmp/source",
+            },
+        )
+        job = handoff_automation_owner(db, 1)
+        preview_lease = ExecutionLeaseSnapshot(
+            host_boot_id="download-test-boot",
+            invocation_id="download-test-preview-untracked",
+            systemd_unit="cratedigger-import-preview-worker.service",
+            worker=ProcessIdentity(pid=4055, start_ticks=55),
+        )
+        claimed = claim_next_import_preview_job(
+            db, worker_id="download-test-preview-untracked",
+            execution_lease=preview_lease,
+        )
+        assert claimed is not None and claimed.id == job.id
+        self.assertTrue(db.set_import_job_candidate_evidence(
+            job.id,
+            55,
+            expected_execution_lease=preview_lease,
+        ))
+        ctx = make_ctx_with_fake_db(db)
+
+        with patch("lib.wrong_match_cleanup_service.cleanup_wrong_match") as cleanup:
+            result = _run_post_rejection_wrong_match_cleanup(
+                ctx,
+                log_id,
+                scenario="untracked_audio",
+                import_job_id=job.id,
+                contributor_usernames=("peer-one", "peer-two"),
+            )
+
+        self.assertEqual(db.get_download_log_candidate_evidence_id(log_id), 55)
+        linked_row = next(row for row in db.download_logs if row.id == log_id)
+        self.assertEqual(
+            linked_row.candidate_contributor_usernames,
+            ["peer-one", "peer-two"],
+        )
+        cleanup.assert_not_called()
+        self.assertIsNone(result)
+
     def test_skips_every_non_match_rejection_scenario(self):
         from lib.download_rejection import _run_post_rejection_wrong_match_cleanup
         from lib.wrong_match_policy import WRONG_MATCH_EXCLUDED_REJECTION_SCENARIOS
@@ -2059,6 +2117,79 @@ class TestProcessCompletedAlbumReturnOwnership(unittest.TestCase):
             self.assertIsNone(rejected.failed_path)
             self.assertIsNotNone(album.import_folder)
             self.assertFalse(os.path.exists(album.import_folder or ""))
+
+    def test_audio_corrupt_delete_failure_still_records_rejection(self):
+        """Issue #1077, F4: a failed/partial delete must never block the
+        rejection record — invariant 11 ("broken worlds surface and
+        restart; nothing is parked"). Before this fix, an uncaught delete
+        exception propagated straight out of ``_handle_rejected_result``:
+        no download_log row, no denylist entry, no requeue, and the
+        request stayed wherever it was before the delete — the opposite
+        of restart-on-failure. Pinned both ways: delete succeeds records
+        the rejection (the must-still-work control), delete fails midway
+        records it identically."""
+        from lib.download_rejection import _handle_rejected_result
+        from lib.quality import ValidationResult
+        from lib.staged_album import StagedAlbum
+
+        def _run(*, delete_raises: bool):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                current_path = os.path.join(tmpdir, "Artist - Album")
+                os.makedirs(current_path)
+                with open(os.path.join(current_path, "01.flac"), "wb") as handle:
+                    handle.write(b"corrupt bytes")
+
+                db = FakePipelineDB()
+                db.seed_request(make_request_row(
+                    id=99, status="downloading", mb_release_id="test-mbid-99",
+                ))
+                ctx = make_ctx_with_fake_db(db)
+                album = make_grab_list_entry(
+                    files=[make_download_file(username="peer99")],
+                    artist="Artist", title="Album",
+                    mb_release_id="test-mbid-99", db_request_id=99,
+                    db_source="request",
+                )
+                result = ValidationResult(
+                    valid=False, distance=None, scenario="audio_corrupt",
+                    detail="garbled",
+                )
+                staged_album = StagedAlbum(current_path=current_path, request_id=99)
+
+                if delete_raises:
+                    with patch(
+                        "lib.download_rejection._cleanup_staged_dir",
+                        side_effect=OSError("simulated delete failure"),
+                    ):
+                        outcome = _handle_rejected_result(
+                            album, result, staged_album, ctx,
+                        )
+                else:
+                    outcome = _handle_rejected_result(
+                        album, result, staged_album, ctx,
+                    )
+
+                source = ctx.pipeline_db_source
+                assert isinstance(source, FakePipelineDBSource)
+                # Checked before the TemporaryDirectory cleans itself up on
+                # exit — checking the caller-visible ``current_path`` after
+                # ``_run`` returns would always report "gone".
+                folder_survives = os.path.exists(current_path)
+                return source, outcome, folder_survives
+
+        for delete_raises in (False, True):
+            with self.subTest(delete_raises=delete_raises):
+                source, outcome, folder_survives = _run(delete_raises=delete_raises)
+                self.assertFalse(outcome.success)
+                self.assertEqual(len(source.reject_and_requeue_calls), 1)
+                rejected = source.reject_and_requeue_calls[0]["bv_result"]
+                self.assertEqual(rejected.scenario, "audio_corrupt")
+                self.assertIsNone(rejected.failed_path)
+                self.assertEqual(rejected.denylisted_users, ["peer99"])
+                # The delete genuinely failed in the ``delete_raises`` case
+                # — the folder is still there — but that must never be why
+                # the record above is missing.
+                self.assertEqual(folder_survives, delete_raises)
 
     def test_multi_audio_non_flac_never_reaches_beets_validation(self):
         import subprocess

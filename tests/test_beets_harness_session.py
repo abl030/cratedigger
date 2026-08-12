@@ -708,7 +708,6 @@ class TestNamingTheScenarioDoesNotMoveTheDownload(unittest.TestCase):
                         "failed_path": "/quarantine/wrong_matches/Album",
                         "scenario": scenario,
                     },
-                    "candidate_audio_corrupt": False,
                     "terminal_import_decision": None,
                 }))
 

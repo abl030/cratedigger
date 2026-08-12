@@ -599,9 +599,16 @@ depends on.
   confident cleanup-eligible rejects, and leaves would-import, uncertain,
   missing-evidence, stale-evidence, active-job, and missing-path candidates for
   review. The result is shown as a summary toast and the pane refreshes.
-- **Wrong Matches history** — old rows with
-  `download_log.validation_result.wrong_match_triage` still render their
-  historical chip/detail in Recents. New cleanup does not write that blob.
+- **Wrong Matches history** — rows evaluated by the cleanup reducer
+  (`lib.wrong_match_cleanup_service.cleanup_wrong_match`, individual or bulk)
+  render their chip/detail in Recents from
+  `download_log.validation_result.wrong_match_triage`, the reducer's ONLY
+  writer. Rejection scenarios outside the cleanup-lane-admission allowlist
+  (`extra_tracks` / `high_distance` / `mbid_not_found` / `no_choose_match` —
+  D6, `docs/rejection-routing.md`) never reach the reducer, so they never get
+  this block — they still render, just with no triage chip, which is correct
+  for that whole cohort and not a missing-data bug. `recents.js`/`history.js`
+  render the `wrong_match_triage_*` fields conditionally on presence.
 
 ## Dev Server Workflows
 

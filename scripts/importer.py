@@ -443,12 +443,16 @@ def _cleanup_failed_force_import(
         # source — delete it here, reusing the same source-deletion helper
         # the successful-force-import (D7) and cleanup-reducer paths use
         # (no new teardown machinery, CLAUDE.md invariant 7).
+        # ``clear_missing=False`` matches the reducer's own deliberate
+        # default (issue #1077, F6): a path we could not observe must never
+        # clear a live pointer off an intact folder — issue #1063.
         from lib.wrong_matches import cleanup_wrong_match_source
 
         result = cleanup_wrong_match_source(
             db,
             download_log_id,
             failed_path_hint=failed_path_hint,
+            clear_missing=False,
         )
         payload = result.to_dict()
         payload["outcome"] = "deleted_operator_force_source"
@@ -490,10 +494,14 @@ def _dismiss_successful_force_import(
     try:
         from lib.wrong_matches import cleanup_wrong_match_source
 
+        # ``clear_missing=False`` matches the reducer's own deliberate
+        # default (issue #1077, F6): a path we could not observe must never
+        # clear a live pointer off an intact folder — issue #1063.
         return cleanup_wrong_match_source(
             db,
             download_log_id,
             failed_path_hint=failed_path_hint,
+            clear_missing=False,
         ).to_dict()
     except Exception as exc:
         logger.exception(

@@ -810,7 +810,6 @@ class _DownloadLogMixin(_PipelineDBBase):
                 e.min_bitrate_kbps AS evidence_min_bitrate,
                 e.avg_bitrate_kbps AS evidence_avg_bitrate,
                 e.verified_lossless AS evidence_verified_lossless,
-                e.audio_corrupt AS candidate_audio_corrupt,
                 dl.import_result->>'decision' AS terminal_import_decision,
                 ar.status AS request_status,
                 ar.min_bitrate AS request_min_bitrate,

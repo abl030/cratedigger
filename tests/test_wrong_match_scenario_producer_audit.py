@@ -24,9 +24,13 @@ classified into one of:
 * ``VISIBLE_NOT_DELETE_ELIGIBLE`` — world failures with a reviewable folder:
   kept, banned, shown, but the reducer never even looks at them.
 * ``NEVER_REACHES_ADMISSION`` — spelled by a producer, but structurally
-  cannot reach either admission surface (``strong_match`` only fires on a
-  VALID beets match, and the rejection helpers this audit's producers feed
-  are reached only on an invalid one).
+  cannot reach either admission surface AS ITS OWN SCENARIO (``strong_match``
+  only fires on a VALID beets match, fenced out of the invalid-only
+  ``_handle_rejected_result`` — but it DOES pass through
+  ``_reject_request_auto_import`` as the positional ``bv_result`` on the
+  ``request_missing_mbid`` / ``request_missing_request_id`` guards; a fresh
+  ``ValidationResult`` with the caller's explicit ``scenario=`` is what
+  actually gets classified, persisted, and admitted).
 * ``HISTORICAL_SCENARIOS`` — no current writer; registered with the live
   evidence a reviewer can falsify.
 
@@ -80,11 +84,23 @@ VISIBLE_NOT_DELETE_ELIGIBLE: frozenset[str] = frozenset({
     "unverifiable_source",
 })
 
-# Spelled by a registered producer, but structurally cannot reach either
-# admission surface: ``lib/beets.py`` sets ``strong_match`` in the same
-# statement it sets ``valid = True`` — the ONE place ``valid`` is ever set —
-# so a `ValidationResult` carrying it can never be the rejected result
-# `_handle_rejected_result` / `_reject_request_auto_import` receive.
+# Spelled by a registered producer, but structurally cannot reach EITHER
+# admission surface AS ITS OWN SCENARIO. ``lib/beets.py`` sets
+# ``result.scenario = "strong_match"`` right after ``result.valid = True`` —
+# the ONE place ``valid`` is ever set — so a decided-valid ``ValidationResult``
+# carrying it never reaches ``_handle_rejected_result`` (guarded to invalid
+# results only). It DOES, however, reach ``_reject_request_auto_import``: the
+# ``request_missing_mbid`` / ``request_missing_request_id`` guards in
+# ``lib/download_validation.py`` pass that SAME strong-match ``bv_result``
+# through as the positional ``bv_result`` argument, ahead of confirming the
+# request is even auto-importable. It still never becomes the classified,
+# persisted, or admitted scenario: ``_reject_request_auto_import`` only reads
+# ``bv_result.distance`` off it and builds a FRESH ``ValidationResult`` with
+# the explicit ``scenario=`` keyword the caller passed
+# ("request_missing_mbid" / "request_missing_request_id") — that fresh
+# object, never the strong-match one, is what gets logged, denylisted, and
+# persisted. "Never reaches admission" is about the SCENARIO, not the
+# ``ValidationResult`` instance.
 NEVER_REACHES_ADMISSION: frozenset[str] = frozenset({"strong_match"})
 
 
