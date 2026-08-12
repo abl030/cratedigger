@@ -11,6 +11,7 @@ import msgspec
 
 from lib.fs_authority import DirectoryObservation
 from lib.import_evidence import CURRENT_STATUS_LOADED, load_current_evidence_for_action
+from lib.import_execution import CancellationToken
 from lib.import_queue import ImportJob
 from lib.pipeline_db import (
     ADVISORY_LOCK_NAMESPACE_WRONG_MATCH_CLEANUP,
@@ -185,6 +186,11 @@ class WrongMatchCleanupSummary(msgspec.Struct, frozen=True):
     skipped_operational: int = 0
     delete_failed: int = 0
     results: tuple[WrongMatchCleanupOutcome, ...] = ()
+    cancelled: bool = False
+    """Issue #1083: the sweep stopped early on an operator cancel request,
+    between rows. ``results`` still holds exactly what ran before the
+    stop — a cancelled sweep never discards or rolls back completed
+    work."""
 
     def to_dict(self) -> dict[str, object]:
         return msgspec.to_builtins(self)
@@ -203,8 +209,20 @@ def cleanup_all_wrong_matches(
     ignore_import_job_id: int | None = None,
     cfg: Any = None,
     preview_fn: Any = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> WrongMatchCleanupSummary:
-    """Run cleanup over the full current Wrong Matches queue."""
+    """Run cleanup over the full current Wrong Matches queue.
+
+    Issue #1083: ``cancellation_token`` is checked once per iteration,
+    BEFORE a row starts — never inside a row's own delete. This is
+    "reuse the token, not the raise": the loop reads
+    ``cancellation_token.cancelled`` as a plain boolean and breaks, it
+    never calls ``raise_if_cancelled()``. Raising would unwind out of
+    this function and lose the ``results`` accumulated so far, which
+    is exactly the partial-summary trap this issue calls out. A row
+    that has already started always runs to its normal completion —
+    cancellation is observed between rows, never mid-delete.
+    """
     if confirm_all_wrong_matches is not True:
         raise ValueError("confirm_all_wrong_matches must be true")
 
@@ -212,7 +230,11 @@ def cleanup_all_wrong_matches(
         cfg = _runtime_config()
 
     results: list[WrongMatchCleanupOutcome] = []
+    cancelled = False
     for row in db.get_wrong_matches():
+        if cancellation_token is not None and cancellation_token.cancelled:
+            cancelled = True
+            break
         # ``download_log_id`` is a required, non-nullable ``download_log.id``
         # column (WrongMatchCandidateRow), so the row type already proves
         # this is an ``int`` — only the bool-subtype guard still needs a
@@ -232,7 +254,7 @@ def cleanup_all_wrong_matches(
             cfg=cfg,
             preview_fn=preview_fn,
         ))
-    return _summary(results)
+    return _summary(results, cancelled=cancelled)
 
 
 def cleanup_wrong_match(
@@ -877,6 +899,8 @@ def _runtime_config() -> Any:
 
 def _summary(
     results: list[WrongMatchCleanupOutcome],
+    *,
+    cancelled: bool = False,
 ) -> WrongMatchCleanupSummary:
     # Outcome strings ARE the Summary's count-field names (guarded by
     # TestSummaryOutcomeContract), so the counts dict splats straight in.
@@ -888,6 +912,7 @@ def _summary(
         WrongMatchCleanupSummary(
             processed=len(results),
             results=tuple(results),
+            cancelled=cancelled,
         ),
         **counts,
     )

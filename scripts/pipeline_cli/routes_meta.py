@@ -96,7 +96,7 @@ def _build_parser(
     # force-import / import-jobs / import-preview
     add_imports_subparsers(sub)
 
-    # wrong-match-triage / wrong-match-delete / wrong-match-delete-group
+    # wrong-match-triage / -triage-cancel / -delete / -delete-group
     add_wrong_match_subparsers(sub)
 
     # replace

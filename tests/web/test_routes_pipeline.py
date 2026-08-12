@@ -18,7 +18,7 @@ import threading
 import unittest
 from datetime import UTC, datetime
 from typing import ClassVar
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 import msgspec
 
@@ -112,6 +112,10 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         "skipped_current_evidence_failed",
         "skipped_active_job", "skipped_invalid_row", "skipped_missing_path",
         "skipped_operational", "delete_failed", "results",
+        # Issue #1083: distinguishes an operator-stopped sweep from a full
+        # completion; the deleted/kept/skipped counts above still reflect
+        # exactly what ran before the stop either way.
+        "cancelled",
     }
     WRONG_MATCH_TRIAGE_STATUS_REQUIRED_FIELDS: ClassVar = {
         "state", "started_at", "finished_at", "summary", "error",
@@ -2389,6 +2393,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         mock_cleanup.assert_called_once_with(
             self.db,
             confirm_all_wrong_matches=True,
+            cancellation_token=ANY,
         )
 
         status, data = self._get("/api/wrong-matches/triage/status")
@@ -2413,7 +2418,7 @@ class TestPipelineRouteContracts(_FakeDbWebServerCase):
         release = threading.Event()
         entered = threading.Event()
 
-        def slow_cleanup(db, *, confirm_all_wrong_matches):
+        def slow_cleanup(db, *, confirm_all_wrong_matches, cancellation_token=None):
             entered.set()
             release.wait(timeout=5)
             return WrongMatchCleanupSummary(processed=0)

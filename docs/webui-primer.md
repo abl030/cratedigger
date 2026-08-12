@@ -101,6 +101,8 @@ depends on.
 | `/api/wrong-matches/audio` | GET | Stream an individual wrong-match audio file with byte-range support |
 | `/api/wrong-matches/converge` | POST | Queue every wrong-match candidate within a release's loosen threshold and delete the rest |
 | `/api/wrong-matches/triage` | POST | Evidence-only full-queue Wrong Matches cleanup; requires `{"confirm_all_wrong_matches": true}` |
+| `/api/wrong-matches/triage/status` | GET | Poll the background sweep's state (`idle`/`running`/`completed`/`cancelled`/`failed`) and summary |
+| `/api/wrong-matches/triage/cancel` | POST | Request cancellation of the in-flight sweep, if any; never 409 — same route the CLI's `Ctrl-C` handler and the UI's Stop button both use (#1083) |
 | `/api/import-preview` | POST | Strict path-free preview: nested typed `values` or a positive `download_log_id`. `pipeline-cli import-preview --download-log-id` relays this route (its `failed_path` is under the private processing tree, #1063); the CLI-only `--path` mode keeps the explicit-path inspector off the HTTP surface (CD-SEC-03). |
 | `/api/import-jobs` | GET | List recent import queue jobs |
 | `/api/import-jobs/timeline` | GET | List active queued/running/recovery-required import jobs in importer order, with server-classified display fields |
@@ -620,11 +622,21 @@ depends on.
   (`failed_path`) via `observe_directory` → `os.stat`, which follows a
   symlinked parent component and performs no quarantine-root containment
   check on it — a gap that predates this guard and is out of scope here.
-- **Wrong Matches cleanup** — one top-level action runs over the full Wrong
-  Matches queue. It consumes existing evidence only, deletes force-mode
-  confident cleanup-eligible rejects, and leaves would-import, uncertain,
-  missing-evidence, stale-evidence, active-job, and missing-path candidates for
-  review. The result is shown as a summary toast and the pane refreshes.
+- **Wrong Matches cleanup** — the "Cleanup Wrong Matches" action runs over
+  the full Wrong Matches queue on a background thread. It consumes existing
+  evidence only, deletes force-mode confident cleanup-eligible rejects, and
+  leaves would-import, uncertain, missing-evidence, stale-evidence,
+  active-job, and missing-path candidates for review. A second "Stop"
+  control sits beside it, enabled while the sweep started from that
+  browser session is running (issue #1083; a CLI-started sweep, another
+  tab, or a mid-sweep refresh leaves it disabled — see #1106):
+  clicking it posts `/api/wrong-matches/triage/cancel` — the same route the
+  CLI's `Ctrl-C` handler uses — and cancellation lands between rows, never
+  mid-delete, so a row already in flight always finishes. A completed sweep
+  shows its summary as an ordinary toast; a stopped one shows a distinct
+  `Cleanup stopped — ...` toast reporting exactly what ran before the stop,
+  and the pane refreshes either way. A failed Stop request itself toasts
+  `Stop request failed` and re-enables the button.
 - **Wrong Matches history** — old rows with
   `download_log.validation_result.wrong_match_triage` still render their
   historical chip/detail in Recents. New cleanup does not write that blob.
