@@ -501,7 +501,9 @@ def retag_merged_album(
             detail=(
                 f"retagged album {new_after.album_id} from "
                 f"{old_identity.release_id} to {new_identity.release_id} "
-                f"({modify_note})"
+                f"({modify_note}); -W left file tags on disk still naming "
+                f"{old_identity.release_id} until a successful import "
+                "writes them"
             ),
         )
 

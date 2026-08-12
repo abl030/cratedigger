@@ -72,25 +72,50 @@ load-bearing:
   `-W` (`--nowrite`) are mandatory; `modify` otherwise honours `import.move` /
   `import.write`, which the config contract pins to `yes`. `-W` is the one
   that matters today: without it `modify` calls `item.try_write()` on every
-  matched file, rewriting tags to disk while the DB already reports success
-  — a divergence the DB-only post-retag guard cannot see. `-M` is
-  belt-and-braces rather than something reachable right now: `mb_albumid` is
-  in no path template (`$albumartist`, `$year`, `$album`, and the
-  `%aunique` disambiguator all derive from other fields), so retagging it
-  alone cannot itself relocate a file under the current path configuration.
-  It stays because `modify -a` with `-M` dropped would relocate the album on
-  any FUTURE config that makes `mb_albumid` path-relevant — minting new
-  Jellyfin item identities (identity is a hash of the path), risking the
-  documented Plex album-split footgun, and pruning the vacated directory's
-  `clutter`, which includes the `cratedigger.json` verified-lossless
-  sidecar — and there is no cost to keeping the flag now. The accepted
-  residual of `-W`: if the import later rejects, installed files stay
-  tagged with the merged-away id while the beets DB already holds the
-  survivor. That divergence is dormant — `beet update` skips any item whose
-  on-disk mtime has not advanced past what the DB recorded
-  (`beets/ui/commands/update.py`), so an untouched file set is never
-  re-read as stale — and it self-corrects the next time a successful import
-  replaces the album.
+  matched file — a WRITE, not the retag's one DB transaction, so a partial
+  failure across N files could leave some files re-tagged and some not
+  while the DB already reports the retag landed as one unit. That is the
+  divergence `-W` closes: a fully successful write would actually leave
+  disk and DB agreeing, but the guard has no way to tell "fully succeeded"
+  from "landed on disk 2 files out of 3" — so it stays DB-only and the
+  effect stays exactly one `Album.store()` transaction: it lands or it
+  doesn't. `-M` is belt-and-braces rather than something reachable right
+  now: `mb_albumid` is in no path template (`$albumartist`, `$year`,
+  `$album`, and the `%aunique` disambiguator all derive from other
+  fields), so retagging it alone cannot itself relocate a file under the
+  current path configuration. It stays because `modify -a` with `-M`
+  dropped would relocate the album on any FUTURE config that makes
+  `mb_albumid` path-relevant — minting new Jellyfin item identities
+  (identity is a hash of the path), risking the documented Plex
+  album-split footgun, and pruning the vacated directory's `clutter`,
+  which includes the `cratedigger.json` verified-lossless sidecar — and
+  there is no cost to keeping the flag now.
+
+  **The accepted residual of `-W` is not merely dormant — it can actively
+  revert.** After a successful retag the beets DB holds the survivor while
+  every installed file's tags still name the merged-away id. If the import
+  that follows never lands, that gap persists; `beet update` normally
+  leaves it alone, because it skips any item whose on-disk mtime has not
+  advanced past what the DB recorded (`beets/ui/commands/update.py`). But
+  the moment ANYTHING advances one track's mtime — an operator `beet
+  write`, an unrelated tag edit, an art embed, a restore, a storage
+  migration that recopies the file — a subsequent `beet update` re-reads
+  that file's stale `mb_albumid` into the item row, and `update_items`
+  then copies `first_item[key]` back onto the ALBUM row for every
+  `Album.item_keys` field, `mb_albumid` included
+  (`beets/ui/commands/update.py`). The album can therefore revert to the
+  merged-away id while the pipeline's request row still names the
+  survivor. Nothing re-derives that split — the merge branch only fires on
+  a fresh `mbid_not_found`, and the request already believes it holds the
+  survivor — so the next import at the survivor id finds no duplicate,
+  lands a SECOND album, and `get_album_info` misses so the quality
+  decision routes through `import_no_exist`, silently skipping the
+  downgrade guard. `-w` would not close this either — a partial write
+  across N files leaves the identical class of drift, just narrower — so
+  `-W` stays; the mitigation is visibility, not a different flag. Every
+  successful retag records the divergence in its outcome detail
+  (`lib/beets_retag.py`) so an operator can find "DB identity moved, file
+  tags did not" in the audit trail rather than never knowing.
 - **One album.** The regex is anchored, so it can only name albums filed under
   exactly the merged-away release id.
 - **Only on `mbid_not_found`, only under an exact import claim**, and only

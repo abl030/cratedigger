@@ -837,6 +837,20 @@ class RealModifyObservation:
     item_mb_albumids: tuple[str, ...]
     item_paths: tuple[str, ...]
     installed_dir_entries: tuple[str, ...]
+    #: F2 (#1087 review) — the must-still-work counterpart to the ``-W``
+    #: mutant test: captured before and after the retag, sorted by path so
+    #: the two tuples line up positionally. The production primitive (``-W``
+    #: present) never attempts a write, so these must be pairwise equal —
+    #: proven on real files, not inferred from the argv literal.
+    item_mtimes_before_ns: tuple[int, ...]
+    item_mtimes_after_ns: tuple[int, ...]
+
+
+def _track_files(root: Path) -> list[Path]:
+    return (
+        sorted(_installed_dir(root).glob("*.mp3"))
+        if _installed_dir(root).exists() else []
+    )
 
 
 @cache
@@ -849,6 +863,8 @@ def observe_real_modify_retag(
         root, library_db, album_id = _seed_real_modify_world(
             base, item_count=item_count,
         )
+        track_files = _track_files(root)
+        item_mtimes_before_ns = tuple(path.stat().st_mtime_ns for path in track_files)
         with patch.dict(
             os.environ,
             {"CRATEDIGGER_RUNTIME_CONFIG": str(base / "config.ini")},
@@ -865,6 +881,7 @@ def observe_real_modify_retag(
                 result = retag_merged_album(
                     beets, old_identity=OLD, new_identity=NEW,
                 )
+        item_mtimes_after_ns = tuple(path.stat().st_mtime_ns for path in track_files)
 
         lib = beets_library.Library(str(library_db), str(root))
         album = lib.get_album(album_id)
@@ -881,6 +898,8 @@ def observe_real_modify_retag(
             installed_dir_entries=tuple(sorted(
                 entry.name for entry in _installed_dir(root).iterdir()
             )) if _installed_dir(root).exists() else (),
+            item_mtimes_before_ns=item_mtimes_before_ns,
+            item_mtimes_after_ns=item_mtimes_after_ns,
         )
         lib._close()
         return observation
@@ -890,9 +909,15 @@ def check_real_modify_retag_moved_every_identity(
     observation: RealModifyObservation,
 ) -> None:
     """Criterion 3 (#1087) — the real primitive moves ``mb_albumid`` on the
-    ALBUM row AND every ITEM row, and touches nothing else in the library.
-    For ``item_count >= 1`` only — an empty-item album never reaches
-    ``modify`` at all; see :func:`check_real_modify_retag_refuses_empty_topology`.
+    ALBUM row AND every ITEM row, touches no file's mtime, and touches
+    nothing else in the library. For ``item_count >= 1`` only — an
+    empty-item album never reaches ``modify`` at all; see
+    :func:`check_real_modify_retag_refuses_empty_topology`.
+
+    The mtime assertion is the must-still-work counterpart to
+    ``test_dropping_the_nowrite_flag_writes_tags_to_the_real_file``: that
+    test proves dropping ``-W`` writes a real file; this proves the
+    production primitive (``-W`` present) does not.
 
     Module level so the known-bad mutant test can call it directly — this is
     exactly the composition #1075 never exercised: its real-subprocess test
@@ -926,6 +951,16 @@ def check_real_modify_retag_moved_every_identity(
     if len(observation.item_mb_albumids) != observation.item_count:
         raise AssertionError(
             f"an item went missing during the retag: {observation.item_mb_albumids!r}"
+        )
+    # F2 (#1087 review) — the must-still-work control for the -W mutant
+    # test: the production primitive never attempts a write, so no file's
+    # mtime may move. Proven on real files, the same way the -W-dropped
+    # mutant proves the converse.
+    if observation.item_mtimes_after_ns != observation.item_mtimes_before_ns:
+        raise AssertionError(
+            "beet modify WROTE to a real file despite -W: "
+            f"before={observation.item_mtimes_before_ns!r} "
+            f"after={observation.item_mtimes_after_ns!r}"
         )
     # Compared against the FIXED expected shape, never against the observed
     # paths themselves — otherwise a world where every file relocated
