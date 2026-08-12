@@ -585,6 +585,35 @@ function greenEntries(group, thresholdMilli) {
 }
 
 /**
+ * Candidates the group "Delete All" action can actually act on right now.
+ *
+ * Mirrors the converge button beside it (issue #1086 item 2): a candidate
+ * whose source folder the server could not read is not deletable, so it is
+ * excluded from the actionable count the same way it is excluded from
+ * `greenEntries`. A group can be PARTIALLY unavailable — the button must
+ * stay usable for the rest — so this only disables the action when NONE
+ * of the group's candidates are actionable.
+ * @param {any} group
+ * @returns {any[]}
+ */
+function actionableDeleteEntries(group) {
+  return (group.entries || []).filter((/** @type {any} */ entry) => (
+    !entryPathUnavailable(entry)
+  ));
+}
+
+/**
+ * @param {number} actionableCount
+ * @param {number} totalCount
+ * @returns {string}
+ */
+function deleteAllButtonLabel(actionableCount, totalCount) {
+  return actionableCount === totalCount
+    ? `Delete All (${totalCount})`
+    : `Delete All (${actionableCount} of ${totalCount})`;
+}
+
+/**
  * @param {number|string} requestId
  * @param {unknown} thresholdMilli
  * @returns {{request_id: number, threshold_milli: number, delete_unmatched: boolean}}
@@ -905,8 +934,14 @@ function removeWrongMatchEntry(logId) {
       if (release) release.setAttribute('data-pending-count', String(remaining));
       const badge = release ? release.querySelector('.badge-library') : null;
       if (badge) badge.textContent = `${remaining} candidate${remaining !== 1 ? 's' : ''}`;
-      const groupDeleteBtn = document.getElementById(`wm-delete-group-btn-${owningGroup.request_id}`);
-      if (groupDeleteBtn) groupDeleteBtn.textContent = `Delete All (${remaining})`;
+      const groupDeleteBtn = /** @type {HTMLButtonElement | null} */ (
+        document.getElementById(`wm-delete-group-btn-${owningGroup.request_id}`)
+      );
+      if (groupDeleteBtn) {
+        const actionableCount = actionableDeleteEntries(owningGroup).length;
+        groupDeleteBtn.textContent = deleteAllButtonLabel(actionableCount, remaining);
+        groupDeleteBtn.disabled = actionableCount === 0;
+      }
       updateWrongMatchesSummary();
     }
   } else {
@@ -1147,6 +1182,9 @@ function renderConvergeControls(g, count, thresholdMilli) {
   const greenCount = greenEntries(g, thresholdMilli).length;
   const disabled = greenCount === 0;
   const label = convergeButtonLabel(greenCount);
+  const actionableCount = actionableDeleteEntries(g).length;
+  const deleteDisabled = actionableCount === 0;
+  const deleteLabel = deleteAllButtonLabel(actionableCount, count);
   return `
     <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin:4px 0 0 0;padding:6px 8px;background:#151515;border:1px solid #242424;border-radius:4px;">
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
@@ -1157,7 +1195,7 @@ function renderConvergeControls(g, count, thresholdMilli) {
         <span id="wm-green-count-${g.request_id}" class="badge" style="${greenCountStyle(greenCount)}">${greenCountLabel(greenCount)}</span>
       </div>
       <div style="display:flex;align-items:center;gap:6px;">
-        <button id="wm-delete-group-btn-${g.request_id}" class="p-btn delete" onclick="event.stopPropagation(); window.deleteWrongMatchGroup(${g.request_id}, this)">Delete All (${count})</button>
+        <button id="wm-delete-group-btn-${g.request_id}" class="p-btn delete" ${deleteDisabled ? 'disabled' : ''} onclick="event.stopPropagation(); window.deleteWrongMatchGroup(${g.request_id}, this)">${deleteLabel}</button>
         <button id="wm-converge-btn-${g.request_id}" class="p-btn" style="border-color:#6a9;color:#6a9;" ${disabled ? 'disabled' : ''} onclick="event.stopPropagation(); window.convergeWrongMatches(${g.request_id}, this)">${label}</button>
         ${renderReplaceButton({
           mode: 'standard',
@@ -1496,10 +1534,12 @@ export const __test__ = {
   EXPLORER_RENDERABLE_STATUSES,
   explorerListingIsRepairable,
   pollImportJob: _pollImportJob,
+  actionableDeleteEntries,
   bulkTriageWrongMatches,
   cleanupSummaryToast,
   convergeRequestBody,
   convergeWrongMatches,
+  deleteAllButtonLabel,
   deleteWrongMatch,
   deleteWrongMatchGroup,
   deleteUnmatchedOnConverge,
@@ -1667,6 +1707,11 @@ export async function deleteWrongMatchGroup(requestId, btn) {
   const group = ((_lastData && Array.isArray(_lastData.groups)) ? _lastData.groups : [])
     .find((/** @type {any} */ g) => Number(g.request_id) === Number(requestId));
   const count = group ? (group.pending_count || (group.entries ? group.entries.length : 0)) : 0;
+  // The pre-request actionable count (issue #1086 item 2): a failed
+  // request restores the button to whatever it looked like before the
+  // click, not a plain "Delete All (N)" that lies about a still-unavailable
+  // candidate.
+  const actionableCount = group ? actionableDeleteEntries(group).length : count;
   if (!confirm(`Delete all ${count} wrong-match candidate source folders for this release?`)) return;
 
   btn.disabled = true;
@@ -1691,6 +1736,13 @@ export async function deleteWrongMatchGroup(requestId, btn) {
       const clearedMissing = Number(data.cleared_missing) || 0;
       const cleared = clearedMissing
         ? ` · cleared ${clearedMissing} already-missing` : '';
+      // "unavailable" is its own bucket, never folded into skipped or
+      // errors (issue #1086 item 3): a source the server could not even
+      // observe is neither a policy skip nor a genuine delete failure, and
+      // counting it into both used to read `skipped 1 · errors 1` for one
+      // real outcome.
+      const unavailableCount = Number(data.unavailable) || 0;
+      const unavailable = unavailableCount ? ` · unavailable ${unavailableCount}` : '';
       const skipped = data.skipped ? ` · skipped ${data.skipped}` : '';
       const errors = data.errors ? ` · errors ${data.errors}` : '';
       const remaining = data.remaining ? ` · ${data.remaining} left` : '';
@@ -1701,8 +1753,8 @@ export async function deleteWrongMatchGroup(requestId, btn) {
       const incomplete = Boolean(data.errors) || Boolean(data.remaining);
       toast(
         failed
-          ? `Deleted nothing${skipped}${errors}${remaining}`
-          : `Deleted ${deleted} folder${deleted === 1 ? '' : 's'}${cleared}${skipped}${errors}${remaining}`,
+          ? `Deleted nothing${skipped}${unavailable}${errors}${remaining}`
+          : `Deleted ${deleted} folder${deleted === 1 ? '' : 's'}${cleared}${skipped}${unavailable}${errors}${remaining}`,
         failed || incomplete,
       );
       invalidateWrongMatches();
@@ -1714,19 +1766,19 @@ export async function deleteWrongMatchGroup(requestId, btn) {
         // — "Delete All (2)" and "1 green" over the ONE unavailable
         // candidate that survived, which is the client/server green
         // disagreement all over again (issue #1063 F-review).
-        btn.disabled = false;
-        btn.textContent = `Delete All (${count})`;
+        btn.disabled = actionableCount === 0;
+        btn.textContent = deleteAllButtonLabel(actionableCount, count);
         await _refreshWrongMatches();
       }
     } else {
-      btn.disabled = false;
-      btn.textContent = `Delete All (${count})`;
+      btn.disabled = actionableCount === 0;
+      btn.textContent = deleteAllButtonLabel(actionableCount, count);
       invalidateWrongMatches();
       toast(data.error || data.message || 'Delete all failed', true);
     }
   } catch (_e) {
-    btn.disabled = false;
-    btn.textContent = `Delete All (${count})`;
+    btn.disabled = actionableCount === 0;
+    btn.textContent = deleteAllButtonLabel(actionableCount, count);
     toast('Delete all request failed', true);
   }
 }

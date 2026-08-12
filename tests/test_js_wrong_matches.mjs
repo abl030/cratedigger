@@ -1685,8 +1685,11 @@ console.log('a partial group delete asks for attention and re-renders');
           processed: 2,
           deleted: 1,
           cleared_missing: 0,
-          skipped: 1,
-          errors: 1,
+          // Issue #1086 item 3: the unavailable candidate is its own
+          // bucket now, not double-counted into skipped AND errors.
+          unavailable: 1,
+          skipped: 0,
+          errors: 0,
           remaining: 1,
           results: [
             { download_log_id: 1, success: true },
@@ -1706,6 +1709,13 @@ console.log('a partial group delete asks for attention and re-renders');
 
   assert(dom.toast.textContent.includes('Deleted 1 folder'),
     'the toast still credits the folder that really went');
+  assert(dom.toast.textContent.includes('unavailable 1'),
+    'the toast surfaces the unavailable bucket by name');
+  assert(!dom.toast.textContent.includes('skipped'),
+    'an unavailable candidate is not ALSO reported as skipped');
+  assert(!dom.toast.textContent.includes('errors'),
+    'an unavailable candidate is not ALSO reported as an error — that was '
+    + 'the double count issue #1086 item 3 fixes');
   assert(dom.toast.textContent.includes('1 left'),
     'the toast says work remains');
   assert(dom.toast.className.includes('error'),
@@ -1713,6 +1723,56 @@ console.log('a partial group delete asks for attention and re-renders');
   assert(calls.some(call => call.url === '/api/wrong-matches'),
     'a partial outcome re-renders from the server instead of leaving a '
     + 'stale group strip');
+}
+
+console.log('Delete All reflects actionable candidates, never a dead end (issue #1086 item 2)');
+{
+  installStorage();
+  const dom = installDom();
+
+  // A fully available group keeps today's plain label and stays enabled —
+  // the common case must not regress just because unavailability exists.
+  __test__.renderWrongMatches(wrongMatchesData(), dom.wrongMatches);
+  assert(dom.wrongMatches.innerHTML.includes('Delete All (3)'),
+    'a fully available group keeps the plain label');
+  assert(!/id="wm-delete-group-btn-42"[^>]*disabled/.test(dom.wrongMatches.innerHTML),
+    'a fully available group stays enabled');
+
+  // A partially unavailable group relabels with the actionable count and
+  // stays enabled — a partial group is still the right action to take.
+  const partial = JSON.parse(JSON.stringify(wrongMatchesData()));
+  partial.groups[0].entries[0].path_unavailable = true;
+  __test__.renderWrongMatches(partial, dom.wrongMatches);
+  assert(dom.wrongMatches.innerHTML.includes('Delete All (2 of 3)'),
+    'a partially unavailable group shows the actionable count');
+  assert(!/id="wm-delete-group-btn-42"[^>]*disabled/.test(dom.wrongMatches.innerHTML),
+    'a partially unavailable group stays enabled');
+
+  // A group with ZERO actionable candidates is a dead end today: the
+  // server truthfully refuses (503, nothing destroyed) and the operator
+  // gets an error toast instead of a control that told them up front.
+  const dead = JSON.parse(JSON.stringify(wrongMatchesData()));
+  for (const entry of dead.groups[0].entries) entry.path_unavailable = true;
+  __test__.renderWrongMatches(dead, dom.wrongMatches);
+  assert(dom.wrongMatches.innerHTML.includes('Delete All (0 of 3)'),
+    'a fully unavailable group names zero actionable candidates');
+  assert(/id="wm-delete-group-btn-42"[^>]*disabled/.test(dom.wrongMatches.innerHTML),
+    'a fully unavailable group disables Delete All instead of a dead-end 503');
+
+  assertEqual(__test__.deleteAllButtonLabel(3, 3), 'Delete All (3)',
+    'a fully actionable group keeps the plain label');
+  assertEqual(__test__.deleteAllButtonLabel(2, 3), 'Delete All (2 of 3)',
+    'a partially actionable group shows X of N');
+  assertEqual(__test__.deleteAllButtonLabel(0, 2), 'Delete All (0 of 2)',
+    'zero actionable candidates still names the total');
+  assertEqual(
+    __test__.actionableDeleteEntries({ entries: [
+      { download_log_id: 1 },
+      { download_log_id: 2, path_unavailable: true },
+    ] }).length,
+    1,
+    'actionableDeleteEntries excludes unavailable candidates',
+  );
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

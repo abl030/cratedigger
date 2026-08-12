@@ -118,8 +118,43 @@ class WrongMatchDeleteSummary(msgspec.Struct, frozen=True):
     cleared_missing: int
     deleted_paths: int
     cleared: int
+    unavailable: int
+    """Candidates refused with :data:`OUTCOME_SKIPPED_PATH_UNAVAILABLE`.
+
+    Split out of both ``skipped`` and ``errors`` (issue #1086 item 3): that
+    outcome sets a ``WrongMatchDeleteResult`` with ``skipped=True`` AND a
+    non-``None`` ``error`` (the unavailable reason doubles as the error
+    text), so counting ``skipped`` and ``errors`` independently landed one
+    candidate in both totals — the toast read ``deleted 1 · skipped 1 ·
+    errors 1`` for two real outcomes, not three. "Unavailable" is precisely
+    the fact #1084 exists to keep distinct from both "skipped" (an
+    operator/policy decision) and "failed" (a genuine delete error): the
+    server never learned whether the folder is even there, so lumping it
+    into either bucket loses that distinction. ``skipped_unsafe_path`` sets
+    the identical ``skipped=True`` + non-``None`` ``error`` shape and is a
+    DIFFERENT double-count of the same pre-existing convention, but it does
+    NOT join this bucket — the path there WAS positively observed and
+    refused on containment grounds, which is nothing like "could not be
+    observed". It is fixed by no longer also counting toward ``errors``
+    (see ``errors`` below), keeping it in ``skipped`` alone.
+    """
     skipped: int
+    """Refused for a reason OTHER than path-unavailable.
+
+    ``result.skipped`` is ``True`` and ``result.outcome`` is not
+    ``OUTCOME_SKIPPED_PATH_UNAVAILABLE`` — active-job holds, lock
+    contention, and (issue #1086) the unsafe-path refusal, which used to
+    double-count into ``errors`` too.
+    """
     errors: int
+    """A genuine delete failure: never also ``skipped`` (issue #1086).
+
+    ``skipped`` and ``errors`` are disjoint by construction — a refused
+    candidate (unavailable or otherwise skipped) is not also a delete
+    failure, and every candidate in ``results`` lands in exactly one of
+    ``deleted`` / ``cleared_missing`` / ``unavailable`` / ``skipped`` /
+    ``errors``.
+    """
     remaining: int
     group_empty: bool
     results: tuple[WrongMatchDeleteResult, ...]
@@ -193,21 +228,35 @@ def delete_wrong_match_group(
     )
     deleted_paths = sum(1 for result in results if result.deleted_path)
     cleared = sum(result.cleared_rows for result in results)
-    skipped = sum(1 for result in results if result.skipped)
+    # Three disjoint buckets, in that order, so every candidate lands in
+    # exactly one (issue #1086 item 3): unavailable is carved out of both
+    # skipped and errors FIRST, then skipped excludes it, then errors
+    # excludes anything skipped (including skipped_unsafe_path, which used
+    # to double-count into errors the same way path_unavailable did).
+    unavailable = sum(
+        1 for result in results
+        if result.outcome == OUTCOME_SKIPPED_PATH_UNAVAILABLE
+    )
+    skipped = sum(
+        1 for result in results
+        if result.skipped and result.outcome != OUTCOME_SKIPPED_PATH_UNAVAILABLE
+    )
     errors = sum(
         1
         for result in results
-        if result.error or result.outcome == OUTCOME_DELETE_FAILED
+        if not result.skipped
+        and (result.error or result.outcome == OUTCOME_DELETE_FAILED)
     )
     success = (
         (not results and remaining == 0)
-        or (errors == 0 and skipped == 0 and remaining == 0)
+        or (errors == 0 and skipped == 0 and unavailable == 0 and remaining == 0)
     )
     outcome = _group_outcome(
         processed=len(results),
         success=success,
         errors=errors,
         skipped=skipped,
+        unavailable=unavailable,
         remaining=remaining,
     )
     return WrongMatchDeleteSummary(
@@ -219,6 +268,7 @@ def delete_wrong_match_group(
         cleared_missing=cleared_missing,
         deleted_paths=deleted_paths,
         cleared=cleared,
+        unavailable=unavailable,
         skipped=skipped,
         errors=errors,
         remaining=remaining,
@@ -481,13 +531,14 @@ def _group_outcome(
     success: bool,
     errors: int,
     skipped: int,
+    unavailable: int,
     remaining: int,
 ) -> str:
     if success:
         return GROUP_OUTCOME_DELETED if processed else GROUP_OUTCOME_EMPTY
     if errors:
         return GROUP_OUTCOME_FAILED
-    if skipped or remaining:
+    if skipped or unavailable or remaining:
         return GROUP_OUTCOME_PARTIAL
     return GROUP_OUTCOME_PARTIAL
 

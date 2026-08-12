@@ -528,6 +528,25 @@ depends on.
   such a row was silently dropped from the payload, hiding the broken world
   from the only surface that could report it. A folder proven absent still
   leaves the list as before.
+- **Wrong Matches group Delete All** — like Converge, the group Delete All
+  button is gated on what it can actually act on (issue #1086 item 2): it
+  relabels `Delete All (X of N)` when some (but not all) candidates in the
+  group are unavailable, and disables outright only when the actionable
+  count is zero — a partially unavailable group is still the right thing to
+  act on, so only a fully dead-end group is blocked before the operator hits
+  a truthful 503. A fully available group keeps the plain `Delete All (N)`
+  label.
+- **Wrong Matches group delete summary** — the delete-group response and
+  toast split a candidate the server could not even observe into its own
+  `unavailable` count, distinct from both `skipped` and `errors` (issue
+  #1086 item 3). Before this fix `OUTCOME_SKIPPED_PATH_UNAVAILABLE` set both
+  fields on the same result, so the toast could read `deleted 1 · skipped 1
+  · errors 1` for two real outcomes; it now reads `deleted 1 · unavailable
+  1`. The unsafe-path refusal (`skipped_unsafe_path`) shares the same
+  pre-existing double-counting shape and is fixed the same way, but stays in
+  `skipped` rather than joining `unavailable` — that path WAS positively
+  observed and refused on containment grounds, unlike a folder the server
+  never got to look at.
 - **Wrong Matches evidence provenance** — candidate rows keep the downloaded
   source codec, configured target contract, and temporary V0 probe separate.
   A lossless candidate destined for Opus therefore reads `FLAC → OPUS 128

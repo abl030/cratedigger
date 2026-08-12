@@ -1572,7 +1572,11 @@ class TestCmdWrongMatchDeleteGroup(_FakeDbWebServerCase):
         self.assertEqual(payload["deleted"], 0)
         self.assertEqual(payload["deleted_paths"], 0)
         self.assertEqual(payload["cleared"], 0)
-        self.assertGreaterEqual(payload["errors"], 1)
+        # Issue #1086 item 3: an unreadable (never proven gone) parent is
+        # NOT a delete error — it lands in its own ``unavailable`` bucket,
+        # not double-counted into ``errors`` alongside ``skipped``.
+        self.assertEqual(payload["errors"], 0)
+        self.assertGreaterEqual(payload["unavailable"], 1)
         os.chmod(source.parent, 0o700)
         self.assertTrue(os.path.isdir(source.path))
         self.assertEqual(
