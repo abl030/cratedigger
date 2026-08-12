@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import unittest
 from itertools import product
-from unittest import mock
 
 from hypothesis import example, given
 from hypothesis import strategies as st
 
-import scripts.cratedigger_deploy_hold as deploy_hold_module
 import tests._hypothesis_profiles  # noqa: F401
 from scripts.cratedigger_deploy_hold import (
     CONTROLLED_WORKER_UNITS,
@@ -22,7 +20,6 @@ from scripts.cratedigger_deploy_hold import (
     PHASE_MAIN_TIMER_OPEN,
     PHASE_PREPARED_CONTROLLED,
     SERVICE_UNITS,
-    START_INHIBITORS,
     TIMER_UNITS,
     WATCHDOG_TIMER,
     YOUTUBE_SERVICE,
@@ -50,44 +47,47 @@ _KNOWN_PHASES = (
     PHASE_MAIN_TIMER_OPEN,
     PHASE_COMPLETE_PENDING,
 )
-# Short enough that a "never drains" example completes in a handful of loop
-# iterations under the fake's one-tick-per-sleep-call monotonic clock, rather
-# than the production 1800s bound (still ~1800 fast in-process iterations,
-# but wasted ones). Patched module-wide since #1078 made a bounded queue-drain
-# wait reachable from several of this module's existing acquire/recover
-# scenarios, not just the ones added for #1078 itself.
-_SHORT_QUEUE_DRAIN_TIMEOUT_SECONDS = 5.0
-_queue_drain_timeout_patch: mock._patch[object] | None = None
+# No production-constant patch needed: the fake's monotonic clock advances by
+# the real requested duration per sleep() call (tests/fakes/deploy_hold.py),
+# and its sleep is instant -- so even the unpatched production
+# _QUEUE_DRAIN_TIMEOUT_SECONDS/_QUEUE_POLL_SECONDS bound (1800s / 5s poll =
+# 360 loop iterations) is fast, and every property here exercises the exact
+# bound production uses.
 
 
-def setUpModule() -> None:
-    global _queue_drain_timeout_patch
-    _queue_drain_timeout_patch = mock.patch.object(
-        deploy_hold_module,
-        "_QUEUE_DRAIN_TIMEOUT_SECONDS",
-        _SHORT_QUEUE_DRAIN_TIMEOUT_SECONDS,
-    )
-    _queue_drain_timeout_patch.start()
+def _acquire_boundary_outcome(
+    counts: tuple[int, int, int, int],
+) -> str:
+    """Classify what acquire_hold/recover_held(acquiring) does against this
+    preflight, given nothing configured to resolve the queue over time
+    (``queue_drain_after_calls=None``).
 
+    Returns ``"held"`` (everything clean), ``"anomaly"`` (fails immediately
+    at the final old-lifecycle check, gate hold taken), or
+    ``"drainable_timeout"`` (bounded wait, gate hold never taken).
 
-def tearDownModule() -> None:
-    assert _queue_drain_timeout_patch is not None
-    _queue_drain_timeout_patch.stop()
-
-
-def _drainable_lifecycle_fields_dirty(counts: tuple[int, int, int, int]) -> bool:
-    """True iff a drainable ``LifecyclePreflight`` field is nonzero.
-
-    Drainable fields (``active_automation_jobs``, ``dirty_downloading_rows``)
-    make ``acquire_hold``/``recover_held`` wait -- bounded, gate hold not yet
-    taken -- rather than fail immediately at the final old-lifecycle check
-    the way an anomaly field (``recovery_required_jobs``,
-    ``malformed_enqueued_at_rows``) does. Field order matches
+    ``recovery_required_jobs`` is ALSO counted inside
+    ``active_automation_jobs``'s own SQL (``status IN ('queued', 'running',
+    'recovery_required')``), and neither anomaly field
+    (``recovery_required_jobs``, ``malformed_enqueued_at_rows``) is ever
+    cleared by any current writer -- so an anomaly field dirty takes
+    precedence over a drainable one: the queue-drain wait short-circuits
+    immediately rather than waiting toward its own timeout for a count that
+    can never reach zero (#1078 MUST FIX 6). Field order matches
     ``LifecyclePreflight``: active_automation_jobs, recovery_required_jobs,
     dirty_downloading_rows, malformed_enqueued_at_rows.
     """
-    active_automation_jobs, _, dirty_downloading_rows, _ = counts
-    return bool(active_automation_jobs or dirty_downloading_rows)
+    (
+        active_automation_jobs,
+        recovery_required_jobs,
+        dirty_downloading_rows,
+        malformed_enqueued_at_rows,
+    ) = counts
+    if recovery_required_jobs or malformed_enqueued_at_rows:
+        return "anomaly"
+    if active_automation_jobs or dirty_downloading_rows:
+        return "drainable_timeout"
+    return "held"
 
 
 def assert_held_invariants(backend: FakeDeployHoldBackend) -> None:
@@ -202,19 +202,24 @@ class TestGeneratedHoldLifecycle(unittest.TestCase):
     @example(counts=(0, 1, 0, 0))
     @example(counts=(0, 0, 1, 0))
     @example(counts=(0, 0, 0, 1))
+    @example(counts=(1, 1, 0, 0))
     def test_any_dirty_old_lifecycle_shape_aborts_under_the_hold(
         self,
         counts: tuple[int, int, int, int],
     ) -> None:
-        """#1078: a drainable field waits (bounded) with the gate hold never
-        taken; an anomaly field still fails immediately with the full
-        boundary (masks + gate hold) established, same as before the reorder.
+        """#1078: a drainable field (alone) waits (bounded) with the gate
+        hold never taken; an anomaly field -- alone, or combined with a
+        drainable one, since it takes precedence (MUST FIX 6) -- fails
+        immediately with the full boundary (masks + gate hold) established,
+        same as before the reorder. The pre-hold window owns no start
+        inhibitor at all (MUST FIX 5), so neither outcome ever owns one.
         """
         backend = FakeDeployHoldBackend(
             lifecycle_preflight=LifecyclePreflight(*counts),
         )
+        outcome = _acquire_boundary_outcome(counts)
 
-        if _drainable_lifecycle_fields_dirty(counts):
+        if outcome == "drainable_timeout":
             with self.assertRaisesRegex(
                 DeployHoldError,
                 "timed out waiting for the automation queue to drain",
@@ -222,23 +227,20 @@ class TestGeneratedHoldLifecycle(unittest.TestCase):
                 acquire_hold(backend)
             self.assertFalse(backend.manual_hold)
             self.assertFalse(backend.owned_manual_hold)
-            self.assertEqual(
-                set(backend.owned_inhibitor_units()), set(START_INHIBITORS),
-            )
-            self.assertEqual(backend.inhibitor_files, set(START_INHIBITORS))
         else:
+            assert outcome == "anomaly"
             with self.assertRaisesRegex(
                 DeployHoldError,
                 "old lifecycle is not clean",
             ):
                 acquire_hold(backend)
             self.assertTrue(backend.manual_hold)
-            self.assertEqual(backend.owned_inhibitor_units(), ())
-            self.assertEqual(backend.inhibitor_files, set())
 
         self.assertTrue(backend.receipt)
         self.assertEqual(backend.phase, "acquiring")
         self.assertEqual(backend.owned_links, set(TIMER_UNITS))
+        self.assertEqual(backend.owned_inhibitor_units(), ())
+        self.assertEqual(backend.inhibitor_files, set())
 
     def test_atomic_receipt_publication_retry_precedes_hold_mutation(self) -> None:
         for interrupt_publication in (False, True):
@@ -356,7 +358,8 @@ class TestGeneratedHoldLifecycle(unittest.TestCase):
             # releases it -- so if an earlier pass (e.g. the acquire_counts
             # anomaly failure above) already took it, it stays taken
             # regardless of what this recovery's own preflight shows; a
-            # drainable field only keeps a hold NOT YET taken from being
+            # drainable-only field (MUST FIX 6: an anomaly field takes
+            # precedence) only keeps a hold NOT YET taken from being
             # (re)taken (bounded wait, gate never touched, exactly like a
             # fresh acquire).
             manual_hold_before_recovery = backend.manual_hold
@@ -366,7 +369,7 @@ class TestGeneratedHoldLifecycle(unittest.TestCase):
             self.assertEqual(
                 backend.manual_hold,
                 manual_hold_before_recovery
-                or not _drainable_lifecycle_fields_dirty(recovery_counts),
+                or _acquire_boundary_outcome(recovery_counts) != "drainable_timeout",
             )
             self.assertEqual(backend.owned_links, set(TIMER_UNITS))
         else:
@@ -804,10 +807,26 @@ class TestAbortNeverTouchesAnUnownedObject(unittest.TestCase):
         elif unowned_manual_hold:
             backend.manual_hold = True
 
+        if unowned_timers:
+            # #1078 MUST FIX 4: every ownership class is validated before
+            # any mutation, so an unowned control link anywhere refuses
+            # closed -- nothing moves, not even objects abort DOES own.
+            before_control_links = dict(backend.control_links)
+            before_owned_links = set(backend.owned_links)
+            before_manual_hold = backend.manual_hold
+            before_owned_manual_hold = backend.owned_manual_hold
+            with self.assertRaisesRegex(DeployHoldError, "unowned control path"):
+                abort_hold(backend)
+            self.assertTrue(backend.receipt_exists())
+            self.assertEqual(backend.control_links, before_control_links)
+            self.assertEqual(backend.owned_links, before_owned_links)
+            self.assertEqual(backend.manual_hold, before_manual_hold)
+            self.assertEqual(backend.owned_manual_hold, before_owned_manual_hold)
+            return
+
         abort_hold(backend)
 
         _assert_fully_reversed(backend)
-        _assert_unowned_control_links_untouched(backend, unowned_timers)
         if unowned_manual_hold:
             _assert_unowned_manual_hold_untouched(backend)
 

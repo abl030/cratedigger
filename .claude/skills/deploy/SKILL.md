@@ -595,16 +595,20 @@ cleanup. Do not remove `/run/cratedigger-deploy-hold` or its
 
 If `acquire` cannot or should not reach HELD -- an anomaly preflight field
 (`recovery_required_jobs`/`malformed_enqueued_at_rows`, nothing drains them),
-a stale controlled-start contract, or a SIGINT/dropped SSH/reboot that left
-the receipt stranded partway through -- `recover-held` cannot help: it
-re-proves the identical, unfixable preconditions. Use
+a stale controlled-start contract, or a SIGINT/dropped SSH that left the
+receipt stranded partway through while the host stayed up -- `recover-held`
+cannot help: it re-proves the identical, unfixable preconditions. Use
 `env -u SSH_AUTH_SOCK ssh doc2 'sudo python3 - abort' < "$DEPLOY_HOLD"`
 instead: it releases every object the receipt owns (gate hold, start
 inhibitors, timer masks), restarts what that ownership implies it stopped,
 and removes the receipt -- returning to ordinary, unheld operation. It is
 safe from every known receipt phase and never touches an object it did not
 own; it is the one command in this module you run to walk away from a hold
-rather than advance or re-prove it. See
+rather than advance or re-prove it. It does NOT cover a host reboot: the
+receipt lives on `/run` tmpfs and does not survive one, so neither `abort`
+nor `recover-held` has anything to act on afterward. #1096 tracks the wider
+receipt-durability gap this exposes for `prepare_controlled`'s persistent
+YouTube start inhibitor specifically. See
 `docs/solutions/deployment/authoritative-systemd-deploy-holds.md`.
 
 ## Database migrations

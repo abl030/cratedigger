@@ -13,11 +13,22 @@ from scripts.cratedigger_deploy_hold import (
     SERVICE_UNITS,
     START_INHIBITORS,
     TIMER_UNITS,
+    WEB_SERVICE,
+    YOUTUBE_SERVICE,
     DeployHoldError,
     JobState,
     LifecyclePreflight,
     UnitState,
 )
+
+# Type=simple, wantedBy=multi-user.target, Restart=on-failure daemons with no
+# timer: the real world every acquire actually meets has these already
+# running, not idle. Defaulting them to "inactive" (as this fake once did)
+# is more permissive than production in exactly the shape test-fidelity.md
+# Rule B forbids -- it hid #1078 MUST FIX 1 (acquire hanging the full
+# service-drain timeout waiting for YouTube ingest, which nothing before
+# the gate hold ever asks to stop) behind 429 green targets.
+_ALWAYS_ON_DAEMONS = (WEB_SERVICE, IMPORTER_SERVICE, PREVIEW_SERVICE, YOUTUBE_SERVICE)
 
 
 class FakeDeployHoldBackend:
@@ -77,20 +88,20 @@ class FakeDeployHoldBackend:
                     active_state=(
                         "failed"
                         if service in self.failed_services
-                        else (
-                            "activating"
-                            if self.jobs.get(service, JobState.none()).state == "running"
-                            else "inactive"
-                        )
+                        else "activating"
+                        if self.jobs.get(service, JobState.none()).state == "running"
+                        else "active"
+                        if service in _ALWAYS_ON_DAEMONS
+                        else "inactive"
                     ),
                     sub_state=(
                         "failed"
                         if service in self.failed_services
-                        else (
-                            "start"
-                            if self.jobs.get(service, JobState.none()).state == "running"
-                            else "dead"
-                        )
+                        else "start"
+                        if self.jobs.get(service, JobState.none()).state == "running"
+                        else "running"
+                        if service in _ALWAYS_ON_DAEMONS
+                        else "dead"
                     ),
                 )
                 for service in SERVICE_UNITS
@@ -108,6 +119,7 @@ class FakeDeployHoldBackend:
         self.cancelled_jobs: list[str] = []
         self.started_units: list[str] = []
         self.sleep_calls = 0
+        self._monotonic_seconds = 0.0
 
     def verify_controlled_start_contract(self) -> None:
         if not self.controlled_start_contract_current:
@@ -372,10 +384,16 @@ class FakeDeployHoldBackend:
         self.events.append(("reset-failed", unit))
 
     def monotonic(self) -> float:
-        return float(self.sleep_calls)
+        return self._monotonic_seconds
 
     def sleep(self, seconds: float) -> None:
-        del seconds
+        # Advances by the real requested duration (not a fixed +1 per call)
+        # so every production timeout/poll-interval constant governs this
+        # fake exactly as it governs production, with no need to patch a
+        # constant down for test speed: the fake's sleep is instant, so even
+        # the full production timeout is a fast, bounded number of Python
+        # loop iterations here.
+        self._monotonic_seconds += seconds
         self.sleep_calls += 1
         self.events.append(("sleep",))
         for unit in tuple(SERVICE_UNITS):

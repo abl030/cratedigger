@@ -49,6 +49,21 @@ PRODUCER_SERVICE_UNITS = (
     YOUTUBE_SERVICE,
 )
 SERVICE_UNITS = (*PRODUCER_SERVICE_UNITS, *CONTROLLED_WORKER_UNITS)
+# Timer-driven producers that stop themselves once their own timer is
+# masked: each is a Type=oneshot triggered only by that timer, so once the
+# timer is stopped the current invocation (if any) finishes naturally and
+# the unit goes idle -- nothing needs to actively stop it. This is the
+# grouping #1078's acquire-side producer drain (before the gate hold) uses.
+# YouTube ingest is deliberately excluded: it is Type=simple,
+# wantedBy=multi-user.target, Restart=on-failure, no timer at all -- an
+# always-on daemon nothing before the gate hold ever asks to stop, so
+# draining it there waits the full service-drain timeout for nothing
+# (#1078 MUST FIX 1, nix/module.nix cratedigger-youtube-ingest).
+TIMER_DRIVEN_PRODUCER_UNITS = (MAIN_SERVICE, UNFINDABLE_SERVICE, WATCHDOG_SERVICE)
+# Everything the metadata-gate hold actually stops rather than something
+# that goes naturally idle on its own: the three controlled daemons plus
+# YouTube ingest.
+GATE_STOPPED_UNITS = (YOUTUBE_SERVICE, *CONTROLLED_WORKER_UNITS)
 
 MAIN_START_INHIBITOR = METADATA_GATE_STATE_DIR / f"inhibit-{MAIN_SERVICE}"
 YOUTUBE_START_INHIBITOR = METADATA_GATE_STATE_DIR / f"inhibit-{YOUTUBE_SERVICE}"
@@ -1119,15 +1134,26 @@ def _wait_automation_queue_drained(backend: DeployHoldBackend) -> None:
     at this point in acquisition the controlled workers (importer/preview)
     are still running -- the gate hold that would stop them has not been
     taken yet -- so they are what empties the queue and clears any
-    mid-handoff row the drained main cycle left behind. The other two
-    ``LifecyclePreflight`` fields are anomalies nothing drains; this loop
-    ignores them and leaves proving them clean to ``_assert_clean_old_lifecycle``
-    after the gate hold stops the controlled workers too.
+    mid-handoff row the drained main cycle left behind.
+
+    The other two ``LifecyclePreflight`` fields, ``recovery_required_jobs``
+    and ``malformed_enqueued_at_rows``, are anomalies nothing drains -- and
+    ``recovery_required_jobs`` is itself counted inside
+    ``active_automation_jobs``'s own SQL (``status IN ('queued', 'running',
+    'recovery_required')``), so a stuck recovery-required job can make the
+    drainable count above permanently unable to reach zero. Waiting out the
+    full timeout for that would be both slow and misdiagnosed (reporting
+    "queue" when the truth is a stuck anomaly), so this loop stops the
+    moment either anomaly field is dirty and lets the still-to-be-taken gate
+    hold plus ``_assert_clean_old_lifecycle`` report the complete, accurate
+    field dict immediately afterward instead (#1078 MUST FIX 6).
     """
     deadline = backend.monotonic() + _QUEUE_DRAIN_TIMEOUT_SECONDS
     while True:
         preflight = backend.lifecycle_preflight()
         if preflight.active_automation_jobs == 0 and preflight.dirty_downloading_rows == 0:
+            return
+        if preflight.recovery_required_jobs != 0 or preflight.malformed_enqueued_at_rows != 0:
             return
         if backend.monotonic() >= deadline:
             raise DeployHoldError(
@@ -1225,7 +1251,21 @@ def _clear_owned_inhibitors(backend: DeployHoldBackend) -> None:
             )
 
 
-def _wait_controlled_workers_active(backend: DeployHoldBackend) -> None:
+def _wait_controlled_workers_active(
+    backend: DeployHoldBackend,
+    units: tuple[str, ...] = CONTROLLED_WORKER_UNITS,
+) -> None:
+    """Prove every one of ``units`` is stably active, not merely started.
+
+    A ``systemctl start`` that a gate-guarded unit's ``ExecCondition``
+    silently skips still returns success -- it is a condition skip, not a
+    failure -- so a caller that only issues the start and never checks back
+    cannot tell a real start from a silent no-op under a foreign gate hold
+    (#1078 MUST FIX 2). Checking ``metadata_hold_reasons()`` first on every
+    poll catches that: any hold present before or appearing during the wait,
+    ours or a foreign one (e.g. the monthly discogs-import hold), fails this
+    loudly instead of exiting 0 with the unit still down.
+    """
     deadline = backend.monotonic() + _DRAIN_TIMEOUT_SECONDS
     stable_samples = 0
     while backend.monotonic() < deadline:
@@ -1235,7 +1275,7 @@ def _wait_controlled_workers_active(backend: DeployHoldBackend) -> None:
                 f"{reasons!r}"
             )
         active = True
-        for service in CONTROLLED_WORKER_UNITS:
+        for service in units:
             state = backend.unit_state(service)
             if (
                 (state.active_state, state.sub_state) != ("active", "running")
@@ -1250,7 +1290,8 @@ def _wait_controlled_workers_active(backend: DeployHoldBackend) -> None:
             stable_samples = 0
         backend.sleep(_POLL_SECONDS)
     raise DeployHoldError(
-        "timed out waiting for controlled workers to become stably active"
+        f"timed out waiting for controlled workers to become stably active: "
+        f"{units!r}"
     )
 
 
@@ -1305,7 +1346,7 @@ def _mask_and_stop_timers(backend: DeployHoldBackend) -> None:
 
 
 def _drain_producers_then_hold(backend: DeployHoldBackend) -> None:
-    """Drain producers and the automation queue before taking the gate hold.
+    """Drain timer-driven producers and the automation queue, then hold.
 
     Order matters (#1078). The metadata gate's external tool stops every
     gate-guarded unit, including the importer and preview workers that are
@@ -1317,26 +1358,29 @@ def _drain_producers_then_hold(backend: DeployHoldBackend) -> None:
     producers, waiting for the still-running importer/preview to empty the
     queue, and only then taking the hold removes that deadlock by
     construction; every later failure still leaves the deployment more
-    quiesced than it started (both timers and the gate end up held).
+    quiesced than it started (timers stay held; the gate is taken exactly
+    when this function returns successfully, never partially).
 
-    ``cratedigger-youtube-ingest`` has no timer, and an operator can start
-    ``cratedigger.service`` by hand outside its timer -- so both own a
-    temporary start inhibitor for this whole window: the gate hold that
-    would otherwise be the only thing blocking a fresh start does not exist
-    yet, and web (a controlled worker, not yet drained here) is still up and
-    could trigger one. The inhibitors are released again once the gate hold
-    is active, because ``_verify_authoritative_hold`` (``verify_held``,
-    ``prepare_controlled``) requires zero owned inhibitors at the held
-    boundary; ``prepare_controlled`` re-establishes them itself for the
-    release side of the lifecycle.
+    Only ``TIMER_DRIVEN_PRODUCER_UNITS`` (main, unfindable, watchdog) drain
+    here -- each stops itself once its timer is masked. YouTube ingest is
+    deliberately NOT drained in this pre-hold phase: it is an always-on
+    ``Type=simple`` daemon with no timer, so nothing before the gate hold
+    ever asks it to stop, and waiting for it here would wait the full
+    service-drain timeout for nothing (#1078 MUST FIX 1). It is drained
+    afterward, in ``GATE_STOPPED_UNITS``, once the gate hold has actually
+    stopped it -- the same mechanism that stops the three controlled
+    workers. No temporary start inhibitor is needed for this pre-hold
+    window either: masking already blocks a new main-cycle trigger, YouTube
+    is not being waited on here at all, and creating one would be a
+    persistent ``/var/lib`` artifact that does not survive a host reboot
+    alongside the ephemeral ``/run`` receipt that would own it (#1078 MUST
+    FIX 5) -- see ``abort_hold``'s docstring for the reboot boundary this
+    module actually has.
     """
-    for service in START_INHIBITORS:
-        _ensure_owned_start_inhibitor(backend, service)
-    _drain_services(backend, PRODUCER_SERVICE_UNITS)
+    _drain_services(backend, TIMER_DRIVEN_PRODUCER_UNITS)
     _wait_automation_queue_drained(backend)
     _ensure_owned_manual_hold(backend)
-    _clear_owned_inhibitors(backend)
-    _drain_services(backend, CONTROLLED_WORKER_UNITS)
+    _drain_services(backend, GATE_STOPPED_UNITS)
 
 
 def acquire_hold(backend: DeployHoldBackend) -> None:
@@ -1390,19 +1434,14 @@ def recover_held(backend: DeployHoldBackend) -> None:
     if phase not in known_phases:
         raise DeployHoldError(f"cannot recover unknown phase: {phase!r}")
     _mask_and_stop_timers(backend)
+    backend.clear_ordinary_invocation()
     if phase == PHASE_ACQUIRING:
         # An acquiring receipt has never reached HELD, so recovery must
         # re-prove exactly what acquire_hold proves, in the same
         # producer-drain-before-hold order -- otherwise recovery reintroduces
         # the exact #1078 deadlock (the gate hold stopping the importer
         # before the automation queue it drains ever gets a chance to).
-        _drain_producers_then_hold(backend)
-    else:
-        _ensure_owned_manual_hold(backend)
-        _drain_services(backend, SERVICE_UNITS)
-        _clear_owned_inhibitors(backend)
-    backend.clear_ordinary_invocation()
-    if phase == PHASE_ACQUIRING:
+        #
         # create_receipt() persists PHASE_ACQUIRING before acquire_hold reaches
         # either precondition, so an acquiring receipt has never proven them.
         # Recovery must re-prove exactly what acquire_hold proves before it may
@@ -1410,15 +1449,45 @@ def recover_held(backend: DeployHoldBackend) -> None:
         # prepare_controlled trust. Proving last mirrors acquire_hold: a
         # failure leaves the strictest boundary re-established and the receipt
         # authoritatively acquiring.
-        #
+        _drain_producers_then_hold(backend)
+        backend.verify_controlled_start_contract()
+        _assert_clean_old_lifecycle(backend)
+    else:
         # Every later phase already proved both before the switch that runs the
         # migration this hold gates. The preflight is deliberately NOT re-run
         # there: post-migration it reads a schema and a lifecycle the controlled
         # cycle has legitimately moved on, so re-proving it could only brick a
         # recovery that exists to restore safety.
-        backend.verify_controlled_start_contract()
-        _assert_clean_old_lifecycle(backend)
+        _ensure_owned_manual_hold(backend)
+        _drain_services(backend, SERVICE_UNITS)
+        _clear_owned_inhibitors(backend)
     backend.write_phase(PHASE_HELD)
+
+
+def _validate_no_unowned_deploy_hold_conflicts(backend: DeployHoldBackend) -> None:
+    """Fail closed on any unowned object abort would need to touch or trust.
+
+    Checked in full before abort mutates anything, so a refusal here always
+    leaves the receipt exactly as it was found -- never half-dismantled
+    (#1078 MUST FIX 4). ``_clear_owned_inhibitors`` already carries an
+    equivalent per-service check, but discovering it mid-teardown -- after
+    the manual hold is already released and workers already started -- would
+    leave abort stuck: it can neither finish releasing (the conflict is
+    still there) nor cleanly go back to HELD (``recover_held`` hits the same
+    conflict re-taking the hold). Proving it first removes that stuck state
+    by construction.
+    """
+    for service in START_INHIBITORS:
+        if backend.inhibitor_exists(service) and not backend.inhibitor_is_owned(service):
+            raise DeployHoldError(
+                f"unowned producer inhibitor exists for {service}"
+            )
+    for timer in TIMER_UNITS:
+        target = backend.control_link_target(timer)
+        if target is not None and not backend.link_is_owned(timer):
+            raise DeployHoldError(
+                f"unowned control path exists for {timer}: {target!r}"
+            )
 
 
 def abort_hold(backend: DeployHoldBackend) -> None:
@@ -1428,31 +1497,55 @@ def abort_hold(backend: DeployHoldBackend) -> None:
     the strict old-lifecycle preflight or the controlled-start contract keeps
     refusing forever (nothing will ever fix an anomaly field, and
     ``recover_held`` on an acquiring receipt re-proves the identical
-    preconditions), or one a SIGINT, dropped SSH, or host reboot left
-    stranded partway through. Where every other command in this module
-    re-proves or advances the strict boundary, ``abort`` is the one that
-    walks away from it -- back to ordinary, unheld operation -- for a
+    preconditions), or a SIGINT or dropped SSH that left the process
+    interrupted while the host stayed up. Where every other command in this
+    module re-proves or advances the strict boundary, ``abort`` is the one
+    that walks away from it -- back to ordinary, unheld operation -- for a
     receipt that cannot or should not proceed.
 
-    It walks the same ownership markers acquisition records intent through
-    and releases exactly the ones this receipt owns, in the reverse of the
-    order acquisition took them, then restarts what that ownership implies
-    this receipt stopped:
+    It does NOT cover a host reboot. The receipt under ``/run`` and the
+    timer control-links under ``/run/systemd/system.control`` are both
+    tmpfs and do not survive one; a reboot leaves nothing for ``abort`` (or
+    ``recover_held``) to act on, because there is no receipt left proving
+    what this deployment ever owned. #1078's own producer-drain-before-hold
+    window keeps no receipt-owned object on persistent storage, so it does
+    not widen that exposure: it takes no start inhibitor at all (nothing is
+    waited on for YouTube pre-hold, and masking already blocks a new
+    main-cycle trigger), so a reboot during acquisition self-heals through
+    an ordinary systemd boot. The same asymmetry already existed for
+    ``prepare_controlled``'s YouTube start inhibitor (owned across
+    ``prepared-controlled``/``main-timer-open``, on persistent
+    ``/var/lib/cratedigger-metadata-gate``) before this change and is not
+    this function's job to fix -- tracked as #1096.
 
-    - the manual gate hold, if owned -- releasing it restarts the controlled
-      workers the external gate tool stopped when the hold was taken;
+    Every ownership class this receipt could hold is validated up front,
+    before any mutation (``_validate_no_unowned_deploy_hold_conflicts``), so
+    a refusal here never leaves the boundary half torn down. It then walks
+    the same ownership markers acquisition records intent through and
+    releases exactly the ones this receipt owns, in the reverse of the order
+    acquisition took them -- restarting what that ownership implies this
+    receipt stopped only after each restart is *proven*, and disowning only
+    after that proof, so an interrupted retry never sees "nothing owned"
+    while the underlying object is still down:
+
+    - the manual gate hold, if owned -- releasing it is what the external
+      gate tool consults to let every gate-guarded unit start again, so
+      abort restarts all four (web, preview, importer, and YouTube ingest --
+      itself gate-guarded since #1078 MUST FIX 1) and proves every one is
+      stably active, the same way ``prepare_controlled`` does, before
+      trusting the release and disowning the hold. A foreign hold (for
+      example the monthly discogs-import hold) makes that proof fail loudly
+      instead of ``abort`` silently exiting 0 with every worker still down;
     - every owned producer-start inhibitor;
     - every owned timer control-link mask -- releasing it restarts that
       timer, which is what returns ``cratedigger.service``,
       ``cratedigger-unfindable.service``, and the watchdog to their ordinary
-      cadence.
+      cadence. None of the three is ever started directly: each is only
+      ever timer-triggered.
 
-    Neither producer is ever started directly: each is only ever timer- or
-    externally-triggered, and ``cratedigger-youtube-ingest`` has no timer at
-    all, so clearing its inhibitor (and restoring the metadata gate) is what
-    returns it to ordinary operation. It never adopts or mutates an object
-    this receipt did not itself own -- the same ownership discipline every
-    other command in this module already follows.
+    It never adopts or mutates an object this receipt did not itself own --
+    the same ownership discipline every other command in this module already
+    follows.
     """
     if not backend.receipt_exists():
         if backend.retired_receipt_exists():
@@ -1474,6 +1567,8 @@ def abort_hold(backend: DeployHoldBackend) -> None:
     if phase not in known_phases:
         raise DeployHoldError(f"cannot abort unknown phase: {phase!r}")
 
+    _validate_no_unowned_deploy_hold_conflicts(backend)
+
     if backend.manual_hold_is_owned():
         if backend.manual_hold_active():
             backend.metadata_gate("release manual")
@@ -1481,20 +1576,40 @@ def abort_hold(backend: DeployHoldBackend) -> None:
                 raise DeployHoldError(
                     "metadata gate did not release the owned manual hold"
                 )
-        backend.unmark_manual_hold_owned()
-        for service in CONTROLLED_WORKER_UNITS:
+        for service in GATE_STOPPED_UNITS:
             backend.start_unit(service)
+        _wait_controlled_workers_active(backend, GATE_STOPPED_UNITS)
+        backend.metadata_gate("resume-if-clear")
+        if reasons := backend.metadata_hold_reasons():
+            raise DeployHoldError(
+                f"metadata gate retained holds after abort resume: {reasons!r}"
+            )
+        backend.unmark_manual_hold_owned()
 
     _clear_owned_inhibitors(backend)
 
     owned_timers = backend.owned_link_units()
     for timer in owned_timers:
-        _release_owned_link(backend, timer)
+        if not backend.link_is_owned(timer):
+            raise DeployHoldError(f"refusing to remove unowned control link: {timer}")
+        target = backend.control_link_target(timer)
+        if target is not None and target != "/dev/null":
+            raise DeployHoldError(f"owned control link changed for {timer}: {target!r}")
+        if target is not None:
+            backend.remove_control_mask(timer)
     if owned_timers:
         backend.daemon_reload()
         _assert_load_states(backend, masked=(), loaded=owned_timers)
         for timer in owned_timers:
             backend.start_unit(timer)
+        for timer in owned_timers:
+            state = backend.unit_state(timer)
+            if state.active_state != "active":
+                raise DeployHoldError(
+                    f"restarted timer is not active for {timer}: {state.active_state}"
+                )
+        for timer in owned_timers:
+            backend.unmark_link_owned(timer)
 
     backend.remove_receipt()
 
