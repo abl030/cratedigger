@@ -420,9 +420,14 @@ def exercise_real_beets_world(
         # test_real_pinned_beets_common_config_worlds, 2 direct calls in
         # test_invariant_rejects_stdout_prefix_and_false_completion, and 60
         # generated test_common_config_p*_t*_* methods (10 PROFILES x 3
-        # track counts x 2 sources) — and up to 96x120s in a fuzz burst
-        # (scripts/run_fuzz_tests.py discovers @given properties only, so
-        # only the @given test's max_examples=96 counts there).
+        # track counts x 2 sources). A fuzz burst costs proportionally more,
+        # not less: this module is in HOTSPOT_SHARD_POLICIES, so
+        # build_fuzz_targets schedules the @given property AND separate
+        # method-batch pin targets covering every deterministic test above —
+        # each batch is its own process, so exercise_real_beets_world()'s
+        # @cache does not dedupe repeated (profile, track_count, source)
+        # calls across them. No exact multiple is asserted here; see the
+        # commit message for why one keeps turning out wrong.
         child = sp.run(
             [sys.executable, str(REPO / "harness" / "delete_album.py")],
             input=msgspec.json.encode(request),

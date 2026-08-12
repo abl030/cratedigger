@@ -20,6 +20,7 @@ from scripts.targeted_test_selection import (
     ALWAYS_AMBIENT_TESTS,
     EXACT_PATH_NEIGHBOURS,
     SHARED_MODULES_WITHOUT_COVERAGE,
+    _assert_no_double_registration,
     _changed_path_neighbours,
     ambient_test_modules,
     assert_selection_complete,
@@ -172,17 +173,20 @@ class TestTargetedTestSelection(unittest.TestCase):
             relative = path.relative_to(REPO_ROOT).as_posix()
             with self.subTest(path=relative):
                 if relative in SHARED_MODULES_WITHOUT_COVERAGE:
-                    # Admitted gap, not silent under-selection: registered by
-                    # name with a rationale (MUST FIX 7, #1081 review round).
-                    # Assert the absence explicitly rather than accepting it
-                    # by omission — a future real mapping added here without
-                    # also removing the registry entry would go unnoticed.
+                    # Pins _changed_path_neighbours's early-return behavior
+                    # for a registered gap: it selects nothing beyond
+                    # ambient. This condition is identical to the
+                    # early-return's own guard, so on its own it cannot
+                    # prove the registry entry lacks a contradicting
+                    # EXACT_PATH_NEIGHBOURS mapping for the same path — a
+                    # prior version of this branch claimed it did (#1081
+                    # review round 3), which was a tautology. That
+                    # contradiction is instead made impossible at import
+                    # time by _assert_no_double_registration, self-tested in
+                    # test_double_registered_path_fails_at_import_time below.
                     self.assertEqual(
                         _changed_path_neighbours(relative, REPO_ROOT),
                         (),
-                        f"{relative} is registered as uncovered but now "
-                        "has a real neighbour — remove it from "
-                        "SHARED_MODULES_WITHOUT_COVERAGE",
                     )
                     continue
                 selection = expand_test_selection(
@@ -231,6 +235,41 @@ class TestTargetedTestSelection(unittest.TestCase):
                     rationale.strip(),
                     f"{path} is registered with an empty rationale",
                 )
+
+    def test_the_two_registries_are_disjoint(self) -> None:
+        """No path claims both a real mapping and an admitted coverage gap.
+
+        Defensive restatement of the guard that already ran at module import
+        (_assert_no_double_registration, called with the real registries at
+        the bottom of scripts/targeted_test_selection.py) — if this were
+        ever violated, the module would already have failed to import before
+        this test file could even load. Named here so the failure mode has a
+        home in the test suite, not only a traceback at collection time.
+        """
+        self.assertEqual(
+            set(EXACT_PATH_NEIGHBOURS) & set(SHARED_MODULES_WITHOUT_COVERAGE),
+            set(),
+        )
+
+    def test_double_registered_path_fails_at_import_time(self) -> None:
+        """Known-bad self-test for _assert_no_double_registration.
+
+        A path present in both registries would silently discard its real
+        EXACT_PATH_NEIGHBOURS mapping — _changed_path_neighbours returns
+        early for any SHARED_MODULES_WITHOUT_COVERAGE path before
+        EXACT_PATH_NEIGHBOURS is even consulted (#1081 review round 3). This
+        proves the checker actually trips on a planted contradiction, using
+        synthetic registries so the test does not depend on (or risk
+        corrupting) the real module-level dicts.
+        """
+        with self.assertRaisesRegex(
+            ValueError,
+            r"tests/_double_registered\.py",
+        ):
+            _assert_no_double_registration(
+                {"tests/_double_registered.py": ("tests.test_something",)},
+                {"tests/_double_registered.py": "claimed as both mapped and a gap"},
+            )
 
     def test_exact_path_neighbour_keys_still_exist_on_disk(self) -> None:
         """Reverse direction of the tree-walking pin: no stale mapping keys.

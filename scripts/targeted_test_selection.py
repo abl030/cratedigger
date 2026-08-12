@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import subprocess
 from collections import Counter
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 
 ALWAYS_AMBIENT_TESTS = (
@@ -239,13 +239,16 @@ EXACT_PATH_NEIGHBOURS: dict[str, tuple[str, ...]] = {
 }
 
 #: Shared tests/ modules with NO real consuming test today — an admitted,
-#: named gap, not a silent under-selection. A change to one of these
-#: selects only the ambient gates (_changed_path_neighbours returns early,
-#: before any prefix rule can contribute a lookalike neighbour); the
-#: tree-walking pin in tests/test_targeted_test_selection.py asserts the
-#: absence of a real neighbour explicitly rather than accepting it by
-#: omission. Do not add an entry here to silence the fail-closed check —
-#: only for a module genuinely reviewed and found to have no consumer.
+#: named gap, not a silent under-selection. A change to one of these selects
+#: only the ambient gates (_changed_path_neighbours returns early, before
+#: EXACT_PATH_NEIGHBOURS or any prefix rule can contribute a lookalike
+#: neighbour). _assert_no_double_registration below fails at import time if
+#: a path is ever registered here AND in EXACT_PATH_NEIGHBOURS — the two
+#: registries must stay disjoint, since an early return would otherwise
+#: silently discard a real, hand-authored mapping for the same file. Do not
+#: add an entry here to silence the fail-closed check in
+#: _changed_path_neighbours — only for a module genuinely reviewed and found
+#: to have no consumer.
 SHARED_MODULES_WITHOUT_COVERAGE: dict[str, str] = {
     "tests/ephemeral_slskd.py": (
         "No test drives EphemeralSlskd directly. Its only consumer is the "
@@ -263,6 +266,34 @@ SHARED_MODULES_WITHOUT_COVERAGE: dict[str, str] = {
         "(2026-08 review round, issue #1081)."
     ),
 }
+
+
+def _assert_no_double_registration(
+    exact_path_neighbours: Mapping[str, tuple[str, ...]],
+    shared_modules_without_coverage: Mapping[str, str],
+) -> None:
+    """A path cannot be both a real mapping and an admitted coverage gap.
+
+    _changed_path_neighbours returns early for any path in
+    SHARED_MODULES_WITHOUT_COVERAGE, before EXACT_PATH_NEIGHBOURS or any
+    prefix rule runs — so a path present in BOTH registries would silently
+    discard its real, hand-authored EXACT_PATH_NEIGHBOURS mapping (issue
+    #1081 review round: the tree-walking pin's assertion that a registered
+    path selects nothing was a tautology of the early-return condition and
+    could never have caught this on its own). Fail at import time instead of
+    merely detecting it later — the contradiction becomes impossible to ship.
+    """
+    contradictions = sorted(
+        set(exact_path_neighbours) & set(shared_modules_without_coverage)
+    )
+    if contradictions:
+        raise ValueError(
+            "path(s) registered in both EXACT_PATH_NEIGHBOURS and "
+            f"SHARED_MODULES_WITHOUT_COVERAGE: {', '.join(contradictions)}"
+        )
+
+
+_assert_no_double_registration(EXACT_PATH_NEIGHBOURS, SHARED_MODULES_WITHOUT_COVERAGE)
 
 
 def _module_path(module: str, repo_root: Path) -> Path:
