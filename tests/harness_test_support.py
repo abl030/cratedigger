@@ -6,15 +6,23 @@ import importlib
 import json
 import os
 import sys
-from collections.abc import Iterator, Mapping
+from collections.abc import Generator, Mapping
 from contextlib import contextmanager
 from types import ModuleType
 
 _HARNESS_MODULES = ("harness.beets_harness", "harness.beets_compat")
 
 
+def legacy_import_task_stub() -> type:
+    """A bare ``ImportTask`` stand-in carrying the legacy task-metadata
+    attributes. Every harness mock-module fixture that swaps in a synthetic
+    ``beets.importer.tasks.ImportTask`` needs one attribute present or
+    ``beets_compat.py``'s era ambiguity check (issue #1088) fails closed."""
+    return type("ImportTask", (object,), {"cur_artist": None, "cur_album": None})
+
+
 @contextmanager
-def isolated_beets_harness(modules: Mapping[str, ModuleType]) -> Iterator[ModuleType]:
+def isolated_beets_harness(modules: Mapping[str, ModuleType]) -> Generator[ModuleType]:
     """Return a fresh harness bound to mocks, restoring all import state after."""
     package_existed = "harness" in sys.modules
     package = importlib.import_module("harness")

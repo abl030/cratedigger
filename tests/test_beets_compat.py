@@ -154,13 +154,7 @@ class TestBeetsCompatTaskMetadataEra(TestCase):
         self.assertEqual(capabilities.task_metadata_era, "legacy")
 
     def test_pre_2_3_0_init_only_cur_artist_still_resolves_legacy(self) -> None:
-        """The exact live defect the 19-leg compat matrix caught (#1088):
-        v2.1.0/v2.2.0's real ``ImportTask`` assigns ``cur_artist``/
-        ``cur_album`` only inside ``__init__`` — never as a class
-        attribute (unlike v2.3.0 onward, which the cheap ``hasattr(cls,
-        ...)`` check above relies on). Both class-level checks report
-        False/False here, so this pins the throwaway-probe-instance
-        fallback that must still resolve "legacy", not "ambiguous"."""
+        """v2.1.0/v2.2.0 shape: the live defect the 19-leg matrix caught (#1088)."""
         class _InitOnlyTask:
             def __init__(self, toppath: object, paths: object, items: object) -> None:
                 self.toppath = toppath
@@ -231,6 +225,20 @@ class TestBeetsCompatTaskDescription(TestCase):
         legacy = dataclasses.replace(beets_compat.CAPABILITIES, task_metadata_era="legacy")
         with patch.object(beets_compat, "CAPABILITIES", legacy):
             self.assertEqual(beets_compat.task_description(task), ("", ""))
+
+    def test_a_raising_source_property_propagates_not_swallowed(self) -> None:
+        """A raising ``source`` property must propagate, not swallow to ``("", "")`` (#1088 review finding 6)."""
+        class _ExplodingSource:
+            @property
+            def source(self) -> object:
+                raise RuntimeError("Source.from_items blew up")
+
+        modern = dataclasses.replace(beets_compat.CAPABILITIES, task_metadata_era="modern")
+        with (
+            patch.object(beets_compat, "CAPABILITIES", modern),
+            self.assertRaisesRegex(RuntimeError, "Source.from_items blew up"),
+        ):
+            beets_compat.task_description(_ExplodingSource())
 
 
 if __name__ == "__main__":

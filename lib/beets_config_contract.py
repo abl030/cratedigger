@@ -513,7 +513,7 @@ def _available_plugins() -> frozenset[str]:
     only the latter, already found by the ``pkgutil.iter_modules`` scan
     below. The ``find_spec("beets.autotag.mb")`` branch here is dead on
     that admitted package but still serves the historical v2.1.0-v2.3.x
-    legs of the compatibility matrix (``nix/beets-compat-releases.json`,
+    legs of the compatibility matrix (``nix/beets-compat-releases.json``,
     ``flake.nix``'s ``releaseChecks``), where MusicBrainz is ONLY the
     built-in ``beets.autotag.mb`` provider and no ``beetsplug.musicbrainz``
     module exists at all. Treat that built-in provider as the same

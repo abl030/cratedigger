@@ -957,23 +957,8 @@ class TestBeetsDistanceIntegrationSlice(unittest.TestCase):
 
 
 class TestBeetsMatchDistanceEraAdaptation(unittest.TestCase):
-    """``_beets_match_distance`` calls beets' ``distance()`` with the shape
-    the loaded Beets' ``task_metadata_era`` actually has (issue #1088).
-
-    ``TestBeetsDistanceIntegrationSlice`` above already drives the legacy
-    branch through the REAL admitted beets and asserts a genuine numeric
-    ``outcome="ok"`` result — that is the direct-behavior evidence that
-    the legacy call shape still lands. The modern (beets-tip) call shape
-    can't run for real in this suite (the dev shell only supplies the
-    admitted Beets), so this class instead pins the CALL SHAPE each era
-    produces: beets' ``distance()`` is the third-party edge the leaf-seam
-    mocking rule sanctions patching for exactly this kind of cross-version
-    call-shape assertion (``.claude/rules/code-quality.md``). A wrong
-    adaptation here fails SOFT in production — every branch falls through
-    to the shared ``except Exception`` and returns ``distance_failed``
-    (never a crash) — so nothing else in the suite would catch a swapped
-    argument order or a dropped ``len(extra_items)``.
-    """
+    """``_beets_match_distance`` calls beets' ``distance()`` with the exact
+    argument shape each ``task_metadata_era`` requires (issue #1088)."""
 
     @staticmethod
     def _dummy_distance_inputs():

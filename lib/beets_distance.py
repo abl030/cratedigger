@@ -78,7 +78,6 @@ from beets.autotag import hooks as _beets_hooks
 from beets.autotag import match as _beets_match_mod
 from beets.util import get_most_common_tags as _get_most_common_tags
 
-from harness import beets_compat
 from lib.fs_authority import (
     DirectoryObservation,
     classify_path_errno,
@@ -609,6 +608,13 @@ def _beets_match_distance(
     this exact function) rather than probing ``distance()``'s own shape a
     second time — issue #1088.
     """
+    # Deferred: importing this at module scope would evaluate
+    # beets_compat.CAPABILITIES (and so fail-closed on an era-ambiguous
+    # Beets) at web-server/pipeline-cli import time, not just when a
+    # distance is actually computed — the same deferred shape
+    # web/routes/beets_distance.py already uses for compute_beets_distance.
+    from harness import beets_compat
+
     if beets_compat.CAPABILITIES.task_metadata_era == "modern":
         return _beets_distance_fn(
             _get_most_common_tags(items), album_info, mapping, len(extra_items),

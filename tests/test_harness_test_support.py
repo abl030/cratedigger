@@ -9,7 +9,7 @@ import unittest
 from types import ModuleType
 from unittest.mock import MagicMock, patch
 
-from tests.harness_test_support import isolated_beets_harness
+from tests.harness_test_support import isolated_beets_harness, legacy_import_task_stub
 
 
 def _mock_modules():
@@ -32,13 +32,7 @@ def _mock_modules():
     modules["beets.importer.session"].ImportSession = type(
         "ImportSession", (object,), {"resolve_duplicate": lambda *_args: None},
     )
-    # Legacy task-metadata shape (cur_artist/cur_album), matching the
-    # legacy resolve_duplicate hook above — one ImportTask attribute must
-    # exist or harness/beets_compat.py's task-metadata era check (#1088)
-    # fails closed as ambiguous.
-    modules["beets.importer.tasks"].ImportTask = type(
-        "ImportTask", (object,), {"cur_artist": None, "cur_album": None},
-    )
+    modules["beets.importer.tasks"].ImportTask = legacy_import_task_stub()
     return modules
 
 
@@ -72,7 +66,7 @@ class TestIsolatedBeetsHarness(unittest.TestCase):
         script = textwrap.dedent("""
             import sys
             from unittest.mock import MagicMock
-            from tests.harness_test_support import isolated_beets_harness
+            from tests.harness_test_support import isolated_beets_harness, legacy_import_task_stub
 
             def modules():
                 result = {
@@ -89,9 +83,7 @@ class TestIsolatedBeetsHarness(unittest.TestCase):
                 result["beets.importer.session"].ImportSession = type(
                     "ImportSession", (object,), {"resolve_duplicate": lambda *_: None},
                 )
-                result["beets.importer.tasks"].ImportTask = type(
-                    "ImportTask", (object,), {"cur_artist": None, "cur_album": None},
-                )
+                result["beets.importer.tasks"].ImportTask = legacy_import_task_stub()
                 return result
 
             assert "harness" not in sys.modules

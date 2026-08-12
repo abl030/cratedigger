@@ -124,11 +124,18 @@ sess = h.HarnessImportSession.__new__(h.HarnessImportSession)
 # hand-typed ``cur_artist`` alone would silently stop exercising
 # ``_duplicate_decision``'s real attribute read the moment tip ships.
 if h.beets_compat.CAPABILITIES.task_metadata_era == "modern":
-    import types as _types
+    from beets.autotag import Source
+    from beets.util import Likelies
 
     class _Task:
         paths = [b"/incoming/x"]
-        source = _types.SimpleNamespace(artist="A", name="B")
+        # The real NamedTuple, not a SimpleNamespace stand-in (Rule B
+        # fidelity) — task_description only reads .artist/.name; the other
+        # fields are untested here and get minimal type-valid values.
+        source = Source(
+            type="album", artist="A", name="B", data=Likelies({}),
+            items=[], id="", id_consensus=True,
+        )
 else:
     class _Task:
         paths = [b"/incoming/x"]

@@ -81,7 +81,10 @@ class BeetsCapabilities:
 
     @property
     def era(self) -> str:
-        return f"{self.duplicate_era}-duplicates/{self.library_era}-library"
+        return (
+            f"{self.duplicate_era}-duplicates/{self.library_era}-library/"
+            f"{self.task_metadata_era}-task-metadata"
+        )
 
 
 def _load_capabilities() -> BeetsCapabilities:
@@ -131,33 +134,27 @@ def _load_capabilities() -> BeetsCapabilities:
             "configured constructor era"
         )
 
-    # Upstream PR #6681 (unreleased tip, issue #1088) removed
-    # ``ImportTask.cur_artist``/``cur_album`` in favour of a cached
-    # ``ImportTask.source`` property (a ``Source`` NamedTuple exposing
-    # ``.artist``/``.name``), in the SAME change that re-signatured
-    # ``beets.autotag.distance()``. Key on attribute presence, never on
-    # ``__version__`` — mirrors the duplicate/library era checks above.
+    # Task-metadata era (issue #1088): attribute presence, never __version__.
     modern_task_metadata = hasattr(task, "source")
     legacy_task_metadata = hasattr(task, "cur_artist")
     if not modern_task_metadata and not legacy_task_metadata:
-        # v2.1.0/v2.2.0 (verified against their real historical source):
-        # ``cur_artist``/``cur_album`` are assigned only inside
-        # ``ImportTask.__init__``, never declared as class attributes —
-        # unlike v2.3.0 onward, which added the class-level
-        # ``cur_artist: str | None = None`` declaration ``hasattr`` above
-        # relies on. ``BaseImportTask.__init__(toppath, paths, items)`` is
-        # pure attribute assignment (no I/O) across the whole supported
-        # range, so a throwaway probe instance is the only reliable
-        # legacy signal for these two releases.
+        # v2.1.0/v2.2.0: cur_artist/cur_album are set only inside __init__.
         try:
             legacy_task_metadata = hasattr(
                 _construct(task, None, None, None), "cur_artist")
         except Exception:  # noqa: BLE001 — an unexpected ctor shape fails closed below
             legacy_task_metadata = False
-    if modern_task_metadata == legacy_task_metadata:
+    if modern_task_metadata and legacy_task_metadata:
         raise BeetsCapabilityError(
-            "Beets ImportTask metadata access is ambiguous; expected exactly "
-            "one of source or cur_artist"
+            "Beets ImportTask metadata access is ambiguous: both source and "
+            "cur_artist are present — an unexpected upstream shape; "
+            "investigate before trusting either era"
+        )
+    if not modern_task_metadata and not legacy_task_metadata:
+        raise BeetsCapabilityError(
+            "Beets ImportTask metadata access is ambiguous: neither source "
+            "nor cur_artist is present, even via a construction probe — an "
+            "unrecognised upstream release"
         )
 
     util_module = _optional_module("beets.util")
@@ -211,25 +208,16 @@ def duplicate_outcome(decision: str, task: object) -> DuplicateAction | None:
 def task_description(task: object) -> tuple[str, str]:
     """Return ``(artist, album)`` for ``task`` across both metadata eras.
 
-    Upstream PR #6681 replaced ``ImportTask.cur_artist``/``cur_album`` with
-    a cached ``ImportTask.source`` property (a ``Source`` NamedTuple
-    exposing ``.artist``/``.name``). ``CAPABILITIES.task_metadata_era``
-    names the one attribute the loaded Beets actually has; this is the
-    only place either name is read, so a future era only ever changes
-    this one function. ``getattr`` throughout (never a static attribute
-    access) keeps this pyright-clean under BOTH the admitted and the
-    beets-tip stub, since only one of the two attributes exists on
-    ``ImportTask`` under either stub.
+    ``CAPABILITIES.task_metadata_era`` already proved the attribute this
+    branch reads exists, so a raising ``source`` cached_property propagates
+    instead of being swallowed into ``""`` — no ``getattr`` default.
     """
     if CAPABILITIES.task_metadata_era == "modern":
-        source = getattr(task, "source", None)
-        return (
-            getattr(source, "artist", "") or "",
-            getattr(source, "name", "") or "",
-        )
+        source = getattr(task, "source")  # noqa: B009 - task is untyped object; era already proved this attribute exists
+        return (source.artist or "", source.name or "")
     return (
-        getattr(task, "cur_artist", "") or "",
-        getattr(task, "cur_album", "") or "",
+        getattr(task, "cur_artist") or "",  # noqa: B009 - task is untyped object; era already proved this attribute exists
+        getattr(task, "cur_album") or "",  # noqa: B009 - task is untyped object; era already proved this attribute exists
     )
 
 

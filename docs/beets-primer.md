@@ -57,7 +57,13 @@ computation (the Replace picker + YouTube resolver) reuses the SAME detected
 era rather than probing `distance()`'s shape a second time. Both/neither
 attribute present fails closed. The admitted production package remains
 pre-#6681 (`cur_artist`/`cur_album`, the 3-arg `distance()`); the modern era is
-exercised only by the `beets-tip` checks above. One older-release wrinkle the
+exercised only by the `beets-tip` checks above — `task_description` through the
+harness `choose_match`/`resolve_duplicate` contract assertions, and the modern
+branch of `_beets_match_distance` through `tests.test_beets_distance.
+TestBeetsDistanceIntegrationSlice`, which the tip leg of the shared `contract`
+function in `flake.nix` runs in addition to the harness contract tests (the
+19-leg historical matrix does not run it — those releases were never a target
+of `lib/beets_distance.py`). One older-release wrinkle the
 cheap `hasattr(ImportTask, "cur_artist")` class-level check alone cannot see:
 v2.1.0/v2.2.0 assign `cur_artist`/`cur_album` only inside `ImportTask.__init__`,
 never as a class attribute (v2.3.0 added the class-level declaration), so the
