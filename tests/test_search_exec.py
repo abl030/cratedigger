@@ -238,7 +238,7 @@ class TestExecuteSearchSubmitRetry(unittest.TestCase):
         minted_ids: list[str] | None = None,
         server_ready: Callable[[], bool] | None = None,
         max_attempts: int = 3,
-        backoff_s: tuple[float, ...] = (2.0, 5.0, 10.0),
+        backoff_s: tuple[float, ...] = (2.0, 5.0),
     ) -> SearchSubmitRetryPolicy:
         ids = iter(f"retry-{i}" for i in range(1, 100))
 
@@ -432,13 +432,11 @@ class TestExecuteSearchSubmitRetry(unittest.TestCase):
         )
         self.assertEqual([s for s in sleeps if s >= 1.0], [2.0, 2.0])
 
-    def test_retry_exhausted_flag_true_only_when_409_survives_full_budget(
-        self,
-    ):
+    def test_retry_exhausted_flag_false_for_immediate_429(self):
         """Issue #1090 BLOCKING-1: SearchSubmitError.retry_exhausted is
-        True ONLY for a retryable 409 that persisted through every
-        attempt of a configured policy -- never for a non-retryable
-        failure (a 429 here) even though it also raises SearchSubmitError."""
+        False for a non-retryable failure (a 429 here) even though it
+        also raises SearchSubmitError -- a 429 is never retried at all,
+        so there is no budget to exhaust."""
         api = FakeSlskdAPI()
         api.searches.search_text_error = make_requests_http_error(
             "rate limited", status_code=429)
@@ -452,6 +450,54 @@ class TestExecuteSearchSubmitRetry(unittest.TestCase):
             )
         self.assertFalse(caught.exception.retry_exhausted)
         self.assertEqual(len(api.searches.search_text_calls), 1)
+
+    def test_retry_exhausted_flag_true_when_409_survives_full_budget(self):
+        """Issue #1090 review round 2 (F1): the TRUE case this class of
+        test was named for but never actually asserted -- a retryable 409
+        on EVERY attempt through the full budget must set
+        retry_exhausted=True."""
+        api = FakeSlskdAPI()
+        api.searches.search_text_error = make_requests_http_error(
+            "conflict", status_code=409)
+        with self.assertRaises(SearchSubmitError) as caught:
+            execute_search(
+                api,
+                submit_kwargs={"id": "initial-id", "searchText": "q",
+                               "responseLimit": 100},
+                delete=False, clock_fn=_FakeClock(), sleep_fn=_noop_sleep,
+                submit_retry=self._policy(),
+            )
+        self.assertTrue(caught.exception.retry_exhausted)
+        self.assertEqual(len(api.searches.search_text_calls), 3)
+
+    def test_retry_exhausted_flag_false_when_final_attempt_is_429_not_409(
+        self,
+    ):
+        """Issue #1090 review round 2 (F1): 409, 409, then a 429 on the
+        FINAL attempt -- retry_exhausted must be False, because the
+        attempt that actually exhausted the budget was NOT a retryable
+        409. This is the world that kills the mutant
+        `retry_exhausted=(submit_retry is not None and is_last_attempt)`
+        (dropping the is_retryable_409 term): that mutant sets True for
+        ANY exhausted-budget raise regardless of the final attempt's
+        real cause, so a deterministic 429 landing on the last attempt
+        would wrongly count toward the circuit breaker forever."""
+        api = FakeSlskdAPI()
+        api.searches.search_text_error_sequence = [
+            make_requests_http_error("conflict", status_code=409),
+            make_requests_http_error("conflict", status_code=409),
+            make_requests_http_error("rate limited", status_code=429),
+        ]
+        with self.assertRaises(SearchSubmitError) as caught:
+            execute_search(
+                api,
+                submit_kwargs={"id": "initial-id", "searchText": "q",
+                               "responseLimit": 100},
+                delete=False, clock_fn=_FakeClock(), sleep_fn=_noop_sleep,
+                submit_retry=self._policy(),
+            )
+        self.assertFalse(caught.exception.retry_exhausted)
+        self.assertEqual(len(api.searches.search_text_calls), 3)
 
     def test_retry_exhausted_flag_false_when_no_policy_supplied(self):
         """A 409 with no ``submit_retry`` policy raises SearchSubmitError
