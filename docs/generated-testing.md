@@ -765,7 +765,10 @@ only. How to pick mutants:
 - revert a real past bug fix (the strongest single check);
 - break each adapter derivation the parity property claims to pin;
 - flip decision comparisons; remove early-exit guards and readiness gates;
-- for each property, plant the exact violation it claims to catch.
+- for each property, plant the exact violation it claims to catch;
+- when the diff adds several sites, mutate and name each one — a killed
+  mutant at one site does not qualify any other
+  (`.claude/rules/code-quality.md` § "Testing — Red/Green TDD").
 
 Interpret results per mutant: **killed** = the property works; **killed only at
 fuzz entropy** = the deterministic suite budget misses the decisive world, so
