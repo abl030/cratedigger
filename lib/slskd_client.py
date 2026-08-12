@@ -259,6 +259,24 @@ def parse_downloads_envelope(raw: list[Any]) -> list[DownloadUser]:
     return users
 
 
+class SlskdServerState(msgspec.Struct, rename="camel", frozen=True):
+    """``GET /api/v0/server`` readiness snapshot (issue #1090).
+
+    Mirrors the exact two fields the module's own health-check script
+    already reads (``nix/module.nix``'s ``slskdHealthCheck``:
+    ``.isConnected`` / ``.isLoggedIn``) so both consumers share one
+    contract instead of a second hand-parsed shape. Both must be true for
+    a search submit to be safe: after slskd's underlying Soulseek
+    connection resets, slskd reconnects and sits in
+    ``Connected, LoggingIn`` for a window during which Soulseek.NET's
+    ``SearchAsync`` guard throws ``InvalidOperationException`` — slskd's
+    ``SearchesController`` maps that to HTTP 409.
+    """
+
+    is_connected: bool = False
+    is_logged_in: bool = False
+
+
 DOWNLOAD_FILE_COMPLETE = "DownloadFileComplete"
 DOWNLOAD_DIRECTORY_COMPLETE = "DownloadDirectoryComplete"
 
@@ -338,6 +356,7 @@ class SlskdClient:
         self.searches = SlskdSearchesApi(self)
         self.events = SlskdEventsApi(self)
         self.application = SlskdApplicationApi(self)
+        self.server = SlskdServerApi(self)
 
     def _request(
         self,
@@ -522,6 +541,24 @@ class SlskdApplicationApi:
     def version(self) -> str:
         response = self._client._request("GET", "/application/version")
         return response.json()
+
+
+class SlskdServerApi:
+    """``GET /api/v0/server`` (issue #1090) — Soulseek connection readiness.
+
+    Consumed by the unfindable probe's bounded submit-retry policy
+    (``lib.unfindable_detection_service.run_artist_probe``) as an ADVISORY
+    pre-retry check: a mid-outage reconnect can be observed here to shorten
+    the fixed backoff, but the retry loop itself — not this reader — is
+    the load-bearing mechanism.
+    """
+
+    def __init__(self, client: SlskdClient) -> None:
+        self._client = client
+
+    def state(self) -> SlskdServerState:
+        response = self._client._request("GET", "/server")
+        return msgspec.convert(response.json(), type=SlskdServerState)
 
 
 def derive_slskd_http_pool_size(cfg: CratediggerConfig) -> int:

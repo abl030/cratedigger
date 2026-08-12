@@ -29,6 +29,7 @@ from lib.slskd_client import (
     SlskdDownloadDirectoryCompleteEvent,
     SlskdDownloadFileCompleteEvent,
     SlskdRawEvent,
+    SlskdServerState,
     TransferSnapshot,
     decode_download_directory_complete,
     decode_download_file_complete,
@@ -497,6 +498,57 @@ class TestApplicationEndpoint(SlskdClientTestCase):
         self.set_fixture("GET", "/application/version", "0.24.5")
 
         self.assertEqual(self.client.application.version(), "0.24.5")
+
+
+class TestServerEndpoint(SlskdClientTestCase):
+    """``GET /api/v0/server`` readiness reader (issue #1090)."""
+
+    def test_state_decodes_connected_and_logged_in(self):
+        self.set_fixture(
+            "GET", "/server",
+            {"isConnected": True, "isLoggedIn": True, "version": "0.24.5"},
+        )
+
+        state = self.client.server.state()
+
+        self.assertIsInstance(state, SlskdServerState)
+        self.assertTrue(state.is_connected)
+        self.assertTrue(state.is_logged_in)
+        self.assertEqual(self.last_request()["method"], "GET")
+
+    def test_state_decodes_mid_reconnect_window(self):
+        """A mid-reconnect ``Connected, LoggingIn`` state — the exact
+        window that produces the transient 409 (issue #1090)."""
+        self.set_fixture(
+            "GET", "/server",
+            {"isConnected": True, "isLoggedIn": False},
+        )
+
+        state = self.client.server.state()
+
+        self.assertTrue(state.is_connected)
+        self.assertFalse(state.is_logged_in)
+
+    def test_state_missing_fields_default_false(self):
+        """An unrecognised/empty payload degrades to "not ready" via the
+        Struct's field defaults, never a decode crash."""
+        self.set_fixture("GET", "/server", {})
+
+        state = self.client.server.state()
+
+        self.assertFalse(state.is_connected)
+        self.assertFalse(state.is_logged_in)
+
+    def test_wire_type_drift_raises_validation_error(self):
+        # RED-boundary guard per code-quality rules: a bool-typed field
+        # arriving as a string must fail loudly at the decode site.
+        self.set_fixture(
+            "GET", "/server",
+            {"isConnected": "true", "isLoggedIn": True},
+        )
+
+        with self.assertRaises(msgspec.ValidationError):
+            self.client.server.state()
 
 
 class TestPoolSizing(unittest.TestCase):
