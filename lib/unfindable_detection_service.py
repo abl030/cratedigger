@@ -125,15 +125,22 @@ DEFAULT_BATCH_SIZE: int = 100
 # design (R12-style internal tuning, not an operator knob) -- see
 # ``lib.search_exec.SearchSubmitRetryPolicy`` for the exact retry
 # contract (409 only; never widens to 429 rate-limiting).
+# backoff_s has exactly 2 entries because max_attempts=3 permits exactly
+# 2 retries (indices 0, 1) -- a third entry would be unreachable padding
+# (issue #1090 F5).
 PROBE_SUBMIT_RETRY_MAX_ATTEMPTS: int = 3
-PROBE_SUBMIT_RETRY_BACKOFF_S: tuple[float, ...] = (2.0, 5.0, 10.0)
+PROBE_SUBMIT_RETRY_BACKOFF_S: tuple[float, ...] = (2.0, 5.0)
 
 # Circuit breaker (issue #1090): after this many CONSECUTIVE submit-
-# failure outcomes (a probe whose slskd submit ultimately raised
-# SearchSubmitError -- either after exhausting the 409-retry budget above,
-# or immediately for a non-retryable submit failure; see
+# failure outcomes where the probe's slskd submit exhausted the 409-retry
+# budget above (SearchSubmitError.retry_exhausted=True -- see
 # ``_is_submit_failure``), ``categorise_due_batch`` stops consuming
-# candidates and ends the run early. This is the multi-minute-
+# candidates and ends the run early. An IMMEDIATE non-retryable submit
+# failure (a 429, a 400, a network error, or an empty-artist_name guard
+# failure) never counts, however many occur or however they're
+# interleaved with genuine retry-exhausted 409s -- that class of failure
+# is DETERMINISTIC per row and would otherwise trip the breaker at 3/N
+# forever (round 1 review, BLOCKING-1). This is the multi-minute-
 # outage case the bounded per-probe retry alone cannot absorb. Candidates
 # never attempted are left byte-untouched and excluded from the batch's
 # processed count -- they roll into the next daily run via the normal

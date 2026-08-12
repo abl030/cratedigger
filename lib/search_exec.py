@@ -140,7 +140,12 @@ class SearchSubmitRetryPolicy:
 
     mint_ledgered_search_id: Callable[[], str]
     max_attempts: int = 3
-    backoff_s: tuple[float, ...] = (2.0, 5.0, 10.0)
+    # Paired with the default max_attempts=3 -- exactly 2 retries ever
+    # happen (indices 0, 1), so the default schedule has exactly 2
+    # entries. A caller raising max_attempts should also extend
+    # backoff_s; the last entry repeats past its own length rather than
+    # padding with an unreachable value here (issue #1090 F5).
+    backoff_s: tuple[float, ...] = (2.0, 5.0)
     server_ready: Callable[[], bool] | None = None
 
 

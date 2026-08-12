@@ -940,8 +940,8 @@ oneshot's exit code gave no signal that half the batch went unclassified.
   a few seconds), NOT the main HTTP client's full timeout — a hung
   `/server` must not add tens of seconds per retry.
 - **`lib.search_exec.execute_search(..., submit_retry=SearchSubmitRetryPolicy(...))`**
-  — an OPTIONAL bounded retry for a submit-phase 409 (3 attempts,
-  2s/5s/10s backoff, advisedly FLOORED — never zeroed — by the
+  — an OPTIONAL bounded retry for a submit-phase 409 (3 attempts, so
+  exactly 2 retries; 2s/5s backoff, advisedly FLOORED — never zeroed — by the
   server-readiness reader between attempts, so a wrongly-"ready" reading
   degrades to "retried sooner" rather than "3 POSTs within
   milliseconds"). Default `submit_retry=None` is byte-identical to
