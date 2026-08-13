@@ -101,24 +101,65 @@ class EphemeralPostgres:
             "-c fsync=off",
             "-c full_page_writes=off",
             "-c synchronous_commit=off",
-            # Recycled-WAL-segment floor. The stock 80MB/1GB defaults size
-            # for sustained production write volume; shrinking both keeps
-            # pg_wal from ballooning under a busy test worker while staying
-            # well above the single-segment floor initdb --wal-segsize=1
-            # already established below.
-            "-c min_wal_size=32MB",
-            "-c max_wal_size=64MB",
+            # wal_level=minimal cannot start with wal_senders > 0 — nothing
+            # here streams, replicates, or does PITR, so replica-level WAL
+            # (the default) buys this cluster nothing. Beyond shrinking
+            # what's retained, minimal also lets Postgres skip WAL entirely
+            # for operations on a relation created or truncated in the SAME
+            # transaction — tests TRUNCATE between runs, so that path is hit
+            # constantly here.
+            "-c wal_level=minimal",
+            "-c max_wal_senders=0",
+            # 2MB is the hard-enforced floor with 1MB WAL segments (initdb
+            # --wal-segsize=1 below); measured empirically (issue #1131) —
+            # postgres refuses to start below it. Pushed to the floor
+            # deliberately: a wider ceiling measured zero wall-time benefit
+            # on a 553-real-DB-test burst (both landed at ~14s) while
+            # costing an extra ~8MB of retained WAL for every doubling, so
+            # there is no knee to stop at short of the floor itself — the
+            # checkpoint churn this forces is CPU work against RAM, not disk
+            # I/O, and this cluster has nothing else to do with that CPU.
+            "-c min_wal_size=2MB",
+            "-c max_wal_size=8MB",
+            # The much smaller max_wal_size above forces frequent
+            # checkpoints; both of these silence the resulting log spam
+            # ("checkpoint starting: wal" and "checkpoints are occurring too
+            # frequently") — that log lives in this same tmpdir on the same
+            # tmpfs, so left on it would claw back a meaningful slice of the
+            # WAL saving over a real worker's lifetime (measured: ~50KB of
+            # spam from ONE 553-test module before these were added, at
+            # zero cost since nothing here reads this cluster's checkpoint
+            # telemetry).
+            "-c checkpoint_warning=0",
+            "-c log_checkpoints=off",
             # Autovacuum exists to reclaim space and update planner stats
             # over a database's working lifetime. Nothing here has one:
             # tests TRUNCATE between runs (reclaiming space immediately,
             # unlike DELETE) and the whole cluster is destroyed in minutes.
             "-c autovacuum=off",
-            # One worker process owns this cluster; the busiest concurrent-
-            # connection tests in this repo top out around 2-3 threads
-            # sharing it. 20 keeps a comfortable multiple of that instead of
-            # reserving shared-memory bookkeeping (PGPROC slots, the lock
-            # table) for the stock 100.
-            "-c max_connections=20",
+            # NOT one connection at a time: scripts/run_world_model_burst.py
+            # runs ONE coordinator-owned EphemeralPostgres (this same class)
+            # with up to IN_PROCESS_JOB_CAP=30 concurrent child processes,
+            # each holding a connection to its own cloned database on this
+            # cluster, plus transient createdb/dropdb maintenance
+            # connections for every clone create/drop. 50 clears that cap
+            # with real headroom instead of the canonical suite's own
+            # handful-of-threads ceiling; the PGPROC/lock-table cost of 50
+            # vs. the stock 100 is trivial next to the WAL/shared_buffers
+            # savings above.
+            "-c max_connections=50",
+        )
+
+    @property
+    def _initdb_args(self) -> tuple[str, ...]:
+        return (
+            "initdb", "-D", str(self._datadir), "--no-locale", "-E", "UTF8",
+            "-A", "trust",
+            # Disposable cluster (see _server_options): skip initdb's own
+            # fsync of the freshly written catalog files, and shrink the
+            # WAL segment size to its 1MB floor so pg_wal starts (and
+            # stays) far below the 16MB-per-segment default footprint.
+            "--no-sync", "--wal-segsize=1",
         )
 
     def _failure_detail(self, error: subprocess.CalledProcessError) -> str:
@@ -171,16 +212,7 @@ class EphemeralPostgres:
             # unattended gate.
             self._socket_tmpdir = Path(tempfile.mkdtemp(prefix="cdpg-", dir="/tmp"))
             subprocess.run(
-                [
-                    "initdb", "-D", str(self._datadir), "--no-locale", "-E", "UTF8",
-                    "-A", "trust",
-                    # Disposable cluster (see _server_options): skip initdb's
-                    # own fsync of the freshly written catalog files, and
-                    # shrink the WAL segment size to its 1MB floor so pg_wal
-                    # starts (and stays) far below the 16MB-per-segment
-                    # default footprint.
-                    "--no-sync", "--wal-segsize=1",
-                ],
+                self._initdb_args,
                 capture_output=True,
                 check=True,
             )

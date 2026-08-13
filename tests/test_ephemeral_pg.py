@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import tempfile
+import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -65,20 +66,57 @@ class TestEphemeralPostgresIsolation(unittest.TestCase):
         pg._socket_tmpdir = Path("/tmp/cdpg-checkpoint-contract")
 
         self.assertEqual(
-            pg._server_options,
+            pg._server_options[:4],
             (
                 "-k /tmp/cdpg-checkpoint-contract",
                 "-c listen_addresses=''",
                 "-c checkpoint_timeout=30s",
                 "-c checkpoint_completion_target=0.1",
+            ),
+        )
+
+    def test_server_options_include_the_disposable_diet_settings(self) -> None:
+        """Issue #1131: argv-pins the RAM/tmpfs trims, split out from the
+        checkpoint/delayed-unlink pin above so each test's name matches what
+        it actually asserts."""
+        pg = EphemeralPostgres()
+        pg._socket_tmpdir = Path("/tmp/cdpg-diet-contract")
+
+        self.assertEqual(
+            pg._server_options[4:],
+            (
                 "-c shared_buffers=16MB",
                 "-c fsync=off",
                 "-c full_page_writes=off",
                 "-c synchronous_commit=off",
-                "-c min_wal_size=32MB",
-                "-c max_wal_size=64MB",
+                "-c wal_level=minimal",
+                "-c max_wal_senders=0",
+                "-c min_wal_size=2MB",
+                "-c max_wal_size=8MB",
+                "-c checkpoint_warning=0",
+                "-c log_checkpoints=off",
                 "-c autovacuum=off",
-                "-c max_connections=20",
+                "-c max_connections=50",
+            ),
+        )
+
+    def test_initdb_args_skip_fsync_and_shrink_wal_segments(self) -> None:
+        """Issue #1131: mirrors the `_server_options` seam pin above.
+
+        Before this test, nothing asserted `initdb`'s argv at all — the only
+        existing initdb test patches `subprocess.run` wholesale with a
+        `CalledProcessError` side effect and never inspects the call args —
+        so `--no-sync`/`--wal-segsize=1` could be deleted without failing
+        anything.
+        """
+        pg = EphemeralPostgres()
+        pg.tmpdir = Path("/tmp/cdpg-initdb-contract")
+
+        self.assertEqual(
+            pg._initdb_args,
+            (
+                "initdb", "-D", "/tmp/cdpg-initdb-contract/data", "--no-locale",
+                "-E", "UTF8", "-A", "trust", "--no-sync", "--wal-segsize=1",
             ),
         )
 
@@ -108,14 +146,21 @@ class TestEphemeralPostgresIsolation(unittest.TestCase):
                     "current_setting('fsync'), "
                     "current_setting('full_page_writes'), "
                     "current_setting('synchronous_commit'), "
+                    "current_setting('wal_level'), "
+                    "current_setting('max_wal_senders'), "
                     "current_setting('min_wal_size'), "
                     "current_setting('max_wal_size'), "
+                    "current_setting('checkpoint_warning'), "
+                    "current_setting('log_checkpoints'), "
                     "current_setting('autovacuum'), "
                     "current_setting('max_connections')"
                 )
                 self.assertEqual(
                     cursor.fetchone(),
-                    ("16MB", "off", "off", "off", "32MB", "64MB", "off", "20"),
+                    (
+                        "16MB", "off", "off", "off", "minimal", "0", "2MB", "8MB",
+                        "0", "off", "off", "50",
+                    ),
                 )
 
     def test_initdb_shrinks_the_wal_segment_size_to_its_floor(self) -> None:
@@ -156,3 +201,41 @@ class TestEphemeralPostgresIsolation(unittest.TestCase):
             databases = tuple(executor.map(start_query_stop, range(4)))
 
         self.assertEqual(databases, ("cratedigger_test",) * 4)
+
+    def test_admits_more_than_the_world_model_burst_cap_concurrently(self) -> None:
+        """Issue #1131: max_connections must clear more than the canonical
+        suite's own handful of threads.
+
+        scripts/run_world_model_burst.py runs ONE coordinator-owned cluster
+        (this same `EphemeralPostgres`) with up to `IN_PROCESS_JOB_CAP` (30)
+        concurrent child processes, each holding a connection to its own
+        cloned database on that cluster, plus transient createdb/dropdb
+        maintenance connections for every clone create/drop. Deliberately
+        not importing that constant — scripts/run_world_model_burst.py
+        imports this module, so importing it back would be circular — but
+        the number below must stay above it: a too-low max_connections
+        fails closed with "sorry, too many clients already", which a
+        Barrier forces every successful connection to prove did not happen
+        by holding them all open simultaneously before releasing any.
+        """
+        concurrent_connections = 32  # > IN_PROCESS_JOB_CAP (30) in that script
+
+        with EphemeralPostgres() as pg:
+            assert pg.dsn is not None
+            barrier = threading.Barrier(concurrent_connections)
+            errors: list[BaseException] = []
+
+            def connect_and_hold(_: int) -> None:
+                try:
+                    with psycopg2.connect(pg.dsn) as connection:
+                        barrier.wait(timeout=10)
+                        with connection.cursor() as cursor:
+                            cursor.execute("SELECT 1")
+                            cursor.fetchone()
+                except BaseException as error:  # noqa: BLE001 - proving admission
+                    errors.append(error)
+
+            with ThreadPoolExecutor(max_workers=concurrent_connections) as executor:
+                list(executor.map(connect_and_hold, range(concurrent_connections)))
+
+        self.assertEqual(errors, [])
