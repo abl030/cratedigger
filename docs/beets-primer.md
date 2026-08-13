@@ -171,9 +171,12 @@ load-bearing:
   `beet modify` re-selects by value on a separate connection at a later
   time, so a value-only query would retag WHOEVER holds that value at
   `modify`-time, not only the row the guard actually authorized. Pinning
-  the primary key makes the guard's resolution literally the selection;
-  the value clause stays alongside it as the compare-and-set, so a row
-  that has already moved off the old id since the guard's read is not
+  the primary key makes the guard's resolution literally the selection —
+  by ROWID, not a row identity guaranteed unique forever: `albums.id` is
+  `INTEGER PRIMARY KEY` with no `AUTOINCREMENT` (live-verified against the
+  real schema), so SQLite may reuse a deleted album's rowid for a later
+  insert; the value clause stays alongside it as the compare-and-set, so a
+  row that has already moved off the old id since the guard's read is not
   blindly overwritten by primary key alone. Live-verified against a real
   subprocess: correct id + correct value retags; correct value with a
   WRONG id (a different album now holding the resolved id) is refused

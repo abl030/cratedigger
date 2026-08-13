@@ -88,7 +88,7 @@ import subprocess as sp
 import tempfile
 import unittest
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cache
 from pathlib import Path
 from unittest.mock import patch
@@ -432,17 +432,38 @@ def _seed_two_album_world(
 
 
 class TestExactMatchQueryConvergesWithTheGuard(unittest.TestCase):
-    """#1093 item 2 — one selection mechanism, proven by composing the REAL
-    exact-match query, a REAL two-album library, and the REAL guard
-    (``lib.beets_db.BeetsDB``). Two divergence shapes, both real: a
-    BLOB-stored phantom (before this fix, the anchored regex — evaluated by
-    Beets' ``regexp()`` UDF, which decodes bytes — could see it while the
-    guard's exact SQL equality could not) and a same-PREFIX plain-TEXT
-    decoy (which a substring/prefix-matching query would also select).
-    This proves AGREEMENT, not merely coverage: both phantoms are now
-    invisible to BOTH sides, and a real ``beet modify`` run through the
-    composed production entry point touches only the album the guard
-    already counted.
+    """#1093 item 2 — the two-album composed tests below prove the
+    ``id:=<album_id>`` clause (#1093 review residual), driven through the
+    REAL production entry point (``retag_merged_album``, a REAL two-album
+    library, and the REAL guard, ``lib.beets_db.BeetsDB``): a phantom or
+    decoy filed under a DIFFERENT album id is never touched, regardless of
+    what its ``mb_albumid`` value looks like.
+
+    They do NOT prove the ``mb_albumid:=<old-id>`` VALUE clause's own
+    exact-match-vs-regex selection mechanism agrees with the guard's — and,
+    since #1093 round 3 review F-3, that claim has been corrected rather
+    than merely dropped. Live-verified (planted the retired anchored-regex
+    mutant back into :func:`lib.beets_retag.retag_album_query`'s value
+    token): both composed tests below STILL PASS, because in a two-album
+    world the ``id:=<album_id>`` clause alone already excludes whichever
+    row is NOT the guard-resolved album, independent of the value clause's
+    mechanism. The real, independently-computed proof that the VALUE
+    clause's mechanism agrees with the guard is
+    ``TestQueryAndGuardConvergeOnStorageShape`` (M1) in
+    ``tests/test_beets_retag_generated.py``: its world holds exactly ONE
+    album, so the id clause is a non-discriminating no-op there and
+    ``_query_matches``'s truth value is governed entirely by the value
+    clause's own compiled SQL — the same planted mutant fails M1
+    immediately (``blob_exact``: ``guard_matches=False,
+    query_matches=True``, the historical BLOB-phantom divergence this
+    module's docstring above describes).
+
+    ``test_the_retired_regex_form_would_have_matched_the_phantom_too``
+    below is unaffected by this correction: it hand-builds the retired
+    query string directly and runs it as its own subprocess, never through
+    :func:`lib.beets_retag.retag_album_query`, so it remains historical
+    evidence of the pre-#1093 divergence regardless of what the current
+    query builder does.
     """
 
     def test_a_blob_stored_phantom_is_invisible_to_the_guard_and_the_query(
@@ -1420,6 +1441,7 @@ def check_real_modify_retag_moved_every_identity(
             "the verified-lossless sidecar is gone from the album directory: "
             f"{observation.installed_dir_entries!r}"
         )
+
     if len(observation.installed_dir_entries) != observation.item_count + 1:
         raise AssertionError(
             "the album directory no longer holds exactly its tracks and the "
@@ -1555,6 +1577,84 @@ class TestRealModifyRetagMovesEveryIdentity(unittest.TestCase):
             "dropping -W left the real audio file untouched — the mutant "
             "was not killed by real behaviour",
         )
+
+
+class TestRealModifyRetagMovedEveryIdentityClausesTripIndependently(
+    unittest.TestCase,
+):
+    """#1093 round-3 review F-2 — three clauses in
+    ``check_real_modify_retag_moved_every_identity`` were unfalsifiable:
+    deleting the ALBUM-row clause, the item-count clause, or the
+    directory-entry-count clause left every test in this module green,
+    because the only self-test that could reach them
+    (``test_dropping_the_album_flag_leaves_a_split_library``) also breaks
+    the OUTCOME clause, which raises first and short-circuits the rest.
+
+    Each test below starts from ``observe_real_modify_retag(10)`` — a REAL,
+    fully-passing observation from an actual ``beet modify`` subprocess run
+    — and flips EXACTLY the one field the target clause reads, via
+    ``dataclasses.replace``. Every earlier clause keeps its real, passing
+    value, so the target clause is the only one that can fire; the message
+    proves it fired for the right reason (``assertRaisesRegex``, not a bare
+    ``assertRaises``).
+
+    This checker has no Hypothesis strategy anywhere in this module (this
+    file is deterministic-only) — the per-clause doctrine's Q2 ("can the
+    strategy reach this world") does not apply here. The honest
+    characterization of what each of these three worlds models: a
+    divergence between the guard's OWN internal readback inside
+    ``retag_merged_album`` (which decides ``outcome``) and this module's
+    separately-executed re-read of the row/directory afterward
+    (``observe_real_modify_retag``'s own
+    ``beets_library.Library(...).get_album(...)`` call and
+    ``installed_dir_entries`` scan) — the same class of time-of-check/
+    time-of-use gap the compound query closes on the SELECTION side
+    (#1093 review residual), here surfacing on the OBSERVATION side
+    instead. A concurrent writer touching the row or directory in that
+    window is the real-world event each flipped field stands in for.
+    """
+
+    def test_album_row_diverging_from_the_outcome_trips_its_own_clause(
+        self,
+    ) -> None:
+        good = observe_real_modify_retag(10)
+        bad = replace(good, album_mb_albumid=MERGED)
+
+        with self.assertRaisesRegex(
+            AssertionError,
+            r"the ALBUM row is not filed under the survivor",
+        ):
+            check_real_modify_retag_moved_every_identity(bad)
+
+    def test_a_missing_item_trips_its_own_clause(self) -> None:
+        good = observe_real_modify_retag(10)
+        # Drop one item's id from the tuple while item_count stays at the
+        # real, original value — every REMAINING id is still SURVIVOR, so
+        # the earlier "not every ITEM moved" clause passes vacuously true.
+        bad = replace(good, item_mb_albumids=good.item_mb_albumids[:-1])
+
+        with self.assertRaisesRegex(
+            AssertionError,
+            r"an item went missing during the retag",
+        ):
+            check_real_modify_retag_moved_every_identity(bad)
+
+    def test_a_stray_directory_entry_trips_its_own_clause(self) -> None:
+        good = observe_real_modify_retag(10)
+        # The sidecar is still present (the earlier "sidecar is gone"
+        # clause passes) but the directory now holds one extra entry that
+        # neither the tracks nor the sidecar account for.
+        bad = replace(
+            good,
+            installed_dir_entries=(*good.installed_dir_entries, "stray.txt"),
+        )
+
+        with self.assertRaisesRegex(
+            AssertionError,
+            r"the album directory no longer holds exactly its tracks and "
+            r"the sidecar",
+        ):
+            check_real_modify_retag_moved_every_identity(bad)
 
 
 # ---------------------------------------------------------------------------
@@ -1781,9 +1881,16 @@ class TestRealModifyRetagWithDeploymentPlugins(unittest.TestCase):
     ""``, while production loads the full deployment list
     (``examples/cratedigger.nix``). #1087's review closed this gap BY HAND
     — a reviewer read every deployed plugin's ``register_listener`` calls
-    and found none fire on ``modify -a -M -W -y`` — but the TESTS never
-    encoded that, so a future plugin gaining a ``write`` or
-    ``database_change`` listener would not be caught here.
+    and found none of them registers for the ``database_change`` event
+    ``beet modify`` sends. The EVENT ITSELF still fires regardless — Beets'
+    ``plugins.send()`` always emits ``Sending event: database_change``
+    (live-verified against the full deployment plugin list under ``-v``:
+    three times for a one-item album, scaling with item count) whether or
+    not anything is listening; the reviewer's finding is that no DEPLOYED
+    PLUGIN currently listens for it, not that the event is suppressed. But
+    the TESTS never encoded even that narrower fact, so a future plugin
+    gaining a ``write`` or ``database_change`` listener would not be
+    caught here.
 
     Composes the REAL ``retag_merged_album``, a REAL ``beet modify``
     subprocess, and a library configured with the REAL deployment plugin
@@ -1936,7 +2043,10 @@ class TestCompoundQueryClosesTheTimeOfCheckTimeOfUseRace(unittest.TestCase):
     def test_a_second_album_sharing_the_value_is_never_touched_by_the_guards_query(
         self,
     ) -> None:
-        """The id clause pins the EXACT row the guard resolved. Seeds a
+        """The id clause pins the exact ROWID the guard resolved
+        (``albums.id`` is ``INTEGER PRIMARY KEY`` with no
+        ``AUTOINCREMENT`` — a bare, reusable-after-delete SQLite rowid,
+        not a row identity guaranteed unique forever). Seeds a
         genuine two-album-SAME-VALUE world (the shape a raw third-party
         write — or an organic race window before beets' own ambiguity
         check runs — could produce) and builds the query via the REAL

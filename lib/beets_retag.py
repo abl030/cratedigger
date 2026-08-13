@@ -56,8 +56,12 @@ Five properties are load-bearing:
   re-selects BY VALUE on a SEPARATE connection at a LATER time. If a second
   album lands at the old id in that window, a value-only query would retag
   BOTH — the guard counted one, but the query matches whatever holds the
-  value NOW. The ``id:=<album_id>`` clause closes this: it pins the EXACT
-  row the guard authorized, so a second album at the same value is never
+  value NOW. The ``id:=<album_id>`` clause closes this: it pins the exact
+  ROWID the guard authorized (``albums.id`` is ``INTEGER PRIMARY KEY``
+  with no ``AUTOINCREMENT`` — live-verified against the real schema — so
+  it is a bare SQLite rowid, reusable by a later insert after a delete;
+  the id clause pins that rowid, not a row identity guaranteed unique
+  forever), so a second album at the same value is never
   touched by this execution regardless of what the value-only clause would
   have matched. The ``mb_albumid:=<old-id>`` clause is not redundant with
   it — dropping it would turn a conditional retag into a blind write:
@@ -562,10 +566,12 @@ def retag_merged_album(
 
     # `old` is CurrentBeetsUnique here — every other pre-state returned
     # above. Its album_id is what the compound query pins (#1093 review
-    # residual): the id clause names the EXACT row this resolution
-    # authorized, closing the gap a value-only re-select would leave open
-    # to a second album landing at old_identity between this read and the
-    # subprocess launch.
+    # residual): the id clause names the EXACT ROWID this resolution
+    # authorized (`albums.id` is INTEGER PRIMARY KEY with no
+    # AUTOINCREMENT, so it is a bare, reusable-after-delete SQLite rowid,
+    # not a row identity guaranteed unique forever), closing the gap a
+    # value-only re-select would leave open to a second album landing at
+    # old_identity between this read and the subprocess launch.
     query_tokens = retag_album_query(old_identity, album_id=old.album_id)
     assignment = retag_assignment(new_identity)
     try:
@@ -640,9 +646,16 @@ def retag_merged_album(
         isinstance(old_after, CurrentBeetsUnique)
         and old_after.album_id == old.album_id
     ):
+        # #1093 round 3 review F-4: the subject is the ROW THIS EXECUTION
+        # TARGETED, matching the comment above (not "the library" — a
+        # concurrent writer can independently move new_identity between
+        # the pre-check and this re-read, e.g. landing it uniquely at a
+        # different album entirely, while this row stays put; "the
+        # library did not move" would then contradict its own trailer the
+        # moment new_after names that different album).
         return _failed(
-            f"{modify_note}, but the library did not move: "
-            f"{old_identity.release_id} is {_describe(old_after)}; "
+            f"{modify_note}, but the row this execution targeted did not "
+            f"move: {old_identity.release_id} is {_describe(old_after)}; "
             f"{new_identity.release_id} is {_describe(new_after)}"
         )
     if isinstance(old_after, CurrentBeetsMissing):
