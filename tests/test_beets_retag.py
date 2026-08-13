@@ -1585,10 +1585,12 @@ class TestRealModifyRetagMovedEveryIdentityClausesTripIndependently(
     """#1093 round-3 review F-2 — three clauses in
     ``check_real_modify_retag_moved_every_identity`` were unfalsifiable:
     deleting the ALBUM-row clause, the item-count clause, or the
-    directory-entry-count clause left every test in this module green,
-    because the only self-test that could reach them
-    (``test_dropping_the_album_flag_leaves_a_split_library``) also breaks
-    the OUTCOME clause, which raises first and short-circuits the rest.
+    directory-entry-count clause left every test in this module green.
+    (``test_dropping_the_album_flag_leaves_a_split_library`` reaches the
+    OUTCOME clause first and short-circuits before the ALBUM-row clause —
+    but that test's own measured observation satisfies the item-count and
+    directory-entry-count clauses regardless, so short-circuiting is not
+    why THOSE two are unreached; see the honest characterization below.)
 
     Each test below starts from ``observe_real_modify_retag(10)`` — a REAL,
     fully-passing observation from an actual ``beet modify`` subprocess run

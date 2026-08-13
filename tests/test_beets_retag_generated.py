@@ -662,29 +662,33 @@ MB_ALBUMID_STORAGE_SHAPES: tuple[MbAlbumidStorageShape, ...] = (
 
 MB_ALBUMID_STORAGE_SHAPE_STRATEGY = st.sampled_from(MB_ALBUMID_STORAGE_SHAPES)
 
-#: The QUERIED identity's own case (#1093 review round 3, F1 secondary
-#: finding). The fuzzed property below uses ONLY ``"exact"`` — the ONLY
-#: case reachable in production. Verified, not merely asserted: EVERY
-#: ``ReleaseIdentity`` that reaches :func:`lib.beets_retag.retag_merged_album`
-#: is built via ``ReleaseIdentity.from_id`` (traced through both call sites
-#: in ``lib/download_validation.py`` — ``old_identity =
-#: ReleaseIdentity.from_id(normalize_release_id(stored_release_id))`` and
-#: ``new_identity = ReleaseIdentity.from_id(survivor)``), and ``from_id``
-#: normalizes (lowercases UUIDs) internally. ``"upper"`` exists so
-#: :class:`TestKnownUnreachableQueriedIdentityCaseDivergence` below can
-#: drive the SAME real machinery over the one combination that is NOT
-#: reachable this way — proving the boundary empirically rather than
-#: asserting it, per the "state the invariant explicitly" branch of the
-#: review finding: widening the FUZZED property to include it would patrol
-#: a genuine, but currently unreachable, pre-existing defect in
-#: ``resolve_current_releases`` itself (its SQL comparison and Python-side
-#: re-key disagree on which side to normalize) — a defect in a WIDELY
-#: shared method well beyond the retag module's scope, not something to
-#: silently absorb into #1093.
-QUERIED_IDENTITY_CASES = st.sampled_from(["exact", "upper"])
-
-
 def _queried_identity(case: str) -> ReleaseIdentity:
+    """The QUERIED identity's own case (#1093 review round 3, F1 secondary
+    finding; round-3-of-round-3 N-3 — this is a plain two-literal helper,
+    not a Hypothesis strategy: nothing in this module draws a case at
+    random, so no ``st.sampled_from`` object sits over it).
+
+    ``case="exact"`` — the ONLY case the fuzzed property below draws, and
+    the ONLY case reachable in production. Verified, not merely asserted:
+    EVERY ``ReleaseIdentity`` that reaches
+    :func:`lib.beets_retag.retag_merged_album` is built via
+    ``ReleaseIdentity.from_id`` (traced through both call sites in
+    ``lib/download_validation.py`` — ``old_identity =
+    ReleaseIdentity.from_id(normalize_release_id(stored_release_id))`` and
+    ``new_identity = ReleaseIdentity.from_id(survivor)``), and ``from_id``
+    normalizes (lowercases UUIDs) internally.
+
+    ``case="upper"`` is called directly, ONCE, by
+    :class:`TestKnownUnreachableQueriedIdentityCaseDivergence` below — the
+    one combination NOT reachable this way — proving the boundary
+    empirically rather than asserting it, per the "state the invariant
+    explicitly" branch of the review finding: widening the FUZZED property
+    to draw it would patrol a genuine, but currently unreachable,
+    pre-existing defect in ``resolve_current_releases`` itself (its SQL
+    comparison and Python-side re-key disagree on which side to normalize)
+    — a defect in a WIDELY shared method well beyond the retag module's
+    scope, not something to silently absorb into #1093.
+    """
     release_id = MERGED if case == "exact" else MERGED.upper()
     return ReleaseIdentity(source="musicbrainz", release_id=release_id)
 
@@ -749,8 +753,9 @@ def _guard_matches(
     case-insensitivity mutant, `LOWER(...)` on both the SQL comparison and
     the Python-side re-key, made the guard match a row this query does
     not) left the bystander-driven version of this property green on all
-    33 examples (#1093 review round 3, F1). A fresh read-only connection
-    per call, mirroring how production reopens it."""
+    11 examples — one per entry in ``MB_ALBUMID_STORAGE_SHAPES`` — (#1093
+    review round 3, F1). A fresh read-only connection per call, mirroring
+    how production reopens it."""
     with BeetsDB(str(library_db), library_root=str(library_root)) as beets:
         resolution = beets.resolve_current_release(identity)
     return not isinstance(resolution, CurrentBeetsMissing)
@@ -805,8 +810,9 @@ class TestQueryAndGuardConvergeOnStorageShape(unittest.TestCase):
     other direction: a real mutant making ``resolve_current_releases``
     case-insensitive (`LOWER(...)` on the SQL comparison AND the Python-side
     re-key) is invisible to a guard side driven by ``_matching_album_ids``
-    (all 33 examples passed) but is caught immediately once the guard side
-    drives the real ``resolve_current_release``.
+    (all 11 examples — one per ``MB_ALBUMID_STORAGE_SHAPES`` entry —
+    passed) but is caught immediately once the guard side drives the real
+    ``resolve_current_release``.
     """
 
     @settings(deadline=None)
@@ -815,8 +821,8 @@ class TestQueryAndGuardConvergeOnStorageShape(unittest.TestCase):
         self, shape: MbAlbumidStorageShape,
     ) -> None:
         """Queries with ``identity_case="exact"`` — the ONLY case reachable
-        in production (see :data:`QUERIED_IDENTITY_CASES`). The
-        ``"upper"`` case is exercised separately, deterministically, in
+        in production (see :func:`_queried_identity`). The ``"upper"``
+        case is exercised separately, deterministically, in
         :class:`TestKnownUnreachableQueriedIdentityCaseDivergence`."""
         library_db, album_id, library_root = _mb_albumid_convergence_world()
         _write_mb_albumid(library_db, album_id, shape.value)
@@ -1024,13 +1030,18 @@ class TestInvariantCheckersTripOnViolations(unittest.TestCase):
             )
 
     def test_a_query_using_a_different_mechanism_is_rejected(self) -> None:
-        """#1093 — the invariant this self-test proves ("the query can
-        only ever name albums filed under exactly the old id") is now
-        enforced through the exact-match mechanism, not a regex; this
-        world names the old id's value token with the RETIRED unanchored
-        regex prefix (``:``, not ``:=``) instead of the exact-match token
-        the module actually emits, and the checker must still catch the
-        mismatch even with a correct id token alongside it."""
+        """#1093 (round-3-of-round-3 N-4 correction) — the invariant this
+        self-test proves ("the query can only ever name albums filed
+        under exactly the old id") is now enforced through the
+        exact-match mechanism, not a different one; this world names the
+        old id's value token with a single ``:`` (real beets:
+        ``field:value`` with no further prefix falls to the field's
+        default query class, ``SubstringQuery`` for ``mb_albumid`` — NOT
+        a regex; that requires the DOUBLE colon ``field::value``, which is
+        what #1093 actually retired, ``mb_albumid::^<id>\\Z``) instead of
+        the exact-match ``:=`` token the module actually emits, and the
+        checker must still catch the mismatch even with a correct id
+        token alongside it."""
         with self.assertRaisesRegex(
             AssertionError,
             r"is not the compound exact-match query for",
