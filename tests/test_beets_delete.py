@@ -34,9 +34,13 @@ RELEASE = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 class _PinnedBeetsFixture:
     """Shared real pinned-Beets config/DB/root fixture (not a TestCase)."""
 
+    def _case(self) -> unittest.TestCase:
+        assert isinstance(self, unittest.TestCase)
+        return self
+
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)  # type: ignore[attr-defined]
+        self._case().addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name) / "library"
         self.root.mkdir()
         self.db_path = Path(self.tmp.name) / "beets.db"
