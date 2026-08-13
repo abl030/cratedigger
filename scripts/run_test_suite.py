@@ -311,7 +311,12 @@ def _write_lock_holder_identity(descriptor: int) -> None:
 
     Mirrors run_final_gate.sh's own pid+start-ticks identity precedent
     (helper_pid/helper_start_ticks, gate_pid/gate_start_ticks): a bare pid is
-    ambiguous across process reuse, start ticks disambiguate it.
+    ambiguous across process reuse, start ticks disambiguate it. This write
+    can itself be lost to the very exhaustion this PR exists for (the
+    ``except OSError: pass`` below) — safe only because the identity is
+    always cleared on release first (``_clear_lock_holder_identity``), so a
+    lost write degrades to an empty file, never a stale one, and the reader
+    additionally verifies liveness before trusting any content it finds.
     """
     ticks = _proc_start_ticks(os.getpid()) or "0"
     payload = f"{os.getpid()} {ticks}\n".encode()
@@ -323,8 +328,34 @@ def _write_lock_holder_identity(descriptor: int) -> None:
         pass
 
 
+def _clear_lock_holder_identity(descriptor: int) -> None:
+    """Erase the holder identity before releasing the lock.
+
+    Must run while still holding the exclusive flock (issue #1111 review
+    MAJOR-2): without this, a released holder's identity lingers in the
+    lockfile until the next acquirer overwrites it, so a waiter reading in
+    that window would confidently name a pid that no longer holds — or no
+    longer exists at all. Clearing before unlock also means a delayed clear
+    can never race a new holder's own write and wipe it.
+    """
+    try:
+        os.ftruncate(descriptor, 0)
+    except OSError:
+        pass
+
+
 def _read_lock_holder_identity(lock_path: Path) -> str | None:
-    """Best-effort description of whoever currently holds the lock."""
+    """The lock's live holder identity, or None if stale/malformed/unreadable.
+
+    A stored pid+ticks pair is trusted only after an explicit liveness
+    check (``_proc_start_ticks(pid) == ticks``, the same ``same_process``
+    precedent ``run_final_gate.sh`` uses) — never on readability alone.
+    Without it, a lingering write from a process that has since released or
+    died (a write the release path failed to clear, or a write the current
+    holder's own ``except OSError: pass`` swallowed) would be reported as
+    live. A mismatch or a dead pid falls back to ``None``, and the caller
+    falls back to the plain lockfile-path message.
+    """
     try:
         content = lock_path.read_text().strip()
     except OSError:
@@ -332,7 +363,10 @@ def _read_lock_holder_identity(lock_path: Path) -> str | None:
     parts = content.split()
     if len(parts) != 2 or not all(part.isdigit() for part in parts):
         return None
-    return f"pid {parts[0]}, start ticks {parts[1]}"
+    pid_str, ticks = parts
+    if _proc_start_ticks(int(pid_str)) != ticks:
+        return None
+    return f"pid {pid_str}, start ticks {ticks}"
 
 
 @contextmanager
@@ -356,13 +390,16 @@ def acquire_suite_admission(
     contends for the identical lockfile as the canonical suite. This is
     deliberate, not an oversight — issue #1111's own incident record
     includes a ``scripts/test.sh`` run hitting ``BrokenProcessPool`` at host
-    load ~46, the canonical suite itself is only a couple of minutes on this
-    host, and the reap-safety argument in ``reap_stale_check_bundles`` below
-    depends on every caller of this function serializing through it. A
-    second concurrently-launched ``run_suite`` call — canonical or targeted —
-    waits here, bounded, reporting what it is waiting for (including the
-    current holder's identity when available), instead of colliding with the
-    first one's roughly a dozen ephemeral PostgreSQL clusters.
+    load ~46, a full canonical suite is short-lived relative to the default
+    wait budget below (an operator can raise it via
+    ``admission_timeout_seconds`` on any installation where that stops being
+    true), and the reap-safety argument in ``reap_stale_check_bundles``
+    below depends on every caller of this function serializing through it.
+    A second concurrently-launched ``run_suite`` call — canonical or
+    targeted — waits here, bounded, reporting what it is waiting for
+    (including the current holder's identity when verified live), instead
+    of colliding with the first one's roughly a dozen ephemeral PostgreSQL
+    clusters.
     """
     lock_path = admission_lock_path(runtime)
     descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
@@ -402,9 +439,12 @@ def acquire_suite_admission(
         yield
     finally:
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            _clear_lock_holder_identity(descriptor)
         finally:
-            os.close(descriptor)
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
 
 
 def _bundle_last_activity(bundle: Path) -> float:
@@ -436,6 +476,30 @@ _REAPABLE_PREFIXES = (
 )
 
 
+def _receipt_protected_bundles(runtime: Path) -> frozenset[Path]:
+    """Bundle paths a run_final_gate.sh receipt still references.
+
+    ``cratedigger-final-gate.*`` receipts are never themselves in
+    ``_REAPABLE_PREFIXES`` (a different prefix, never reaped), so protecting
+    the bundle path they name preserves both the pass/fail verdict AND its
+    evidence for a long-running review (issue #1111 review m13) — without
+    this, a review that outlives the age floor would lose the bundle out
+    from under a still-valid receipt. If a protected bundle is somehow gone
+    anyway, that is a genuinely dangling receipt; this function's exclusion
+    does not paper over it — ``run_final_gate.sh status``'s own stat check
+    (issue #1111 review m5) is what surfaces that honestly.
+    """
+    protected: set[Path] = set()
+    for receipt in sorted(runtime.glob("cratedigger-final-gate.*")):
+        try:
+            content = (receipt / "bundle").read_text().strip()
+        except OSError:
+            continue
+        if content:
+            protected.add(Path(content))
+    return frozenset(protected)
+
+
 def reap_stale_check_bundles(
     runtime: Path,
     *,
@@ -456,9 +520,11 @@ def reap_stale_check_bundles(
     ``run_suite``. The age gate is what actually protects those, not lock
     exclusivity, which is also why it covers this PR's own test-scaffolding
     prefixes above — a killed test process can leak one with no
-    ``run_suite`` involved at all.
+    ``run_suite`` involved at all. A bundle a live receipt still references
+    (``_receipt_protected_bundles``) is never reaped regardless of age.
     """
     reference = reference_time if reference_time is not None else time.time()
+    protected = _receipt_protected_bundles(runtime)
     reaped: list[Path] = []
     candidates = sorted(
         {
@@ -468,6 +534,8 @@ def reap_stale_check_bundles(
         }
     )
     for candidate in candidates:
+        if candidate in protected:
+            continue
         try:
             info = candidate.lstat()
         except OSError:

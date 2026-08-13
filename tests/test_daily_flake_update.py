@@ -194,6 +194,28 @@ class TestDailyFlakeUpdateScript(unittest.TestCase):
         self.assertEqual(mirror["CRATEDIGGER_WORLD_EXAMPLES"], "2")
         self.assertEqual(mirror["CRATEDIGGER_WORLD_STEPS"], "5")
 
+    def test_deterministic_suite_stage_sets_the_suite_owns_headroom_env_var(
+        self,
+    ) -> None:
+        """Issue #1111 review MAJOR-1/MAJOR-3: the nightly deterministic_suite
+        stage's own nix-shell invocation must set
+        CRATEDIGGER_SUITE_OWNS_HEADROOM=1 — without it the unattended
+        launcher dies at shell entry under contention with the old unnamed
+        message, and run_stage records that as an indistinguishable "FAIL
+        deterministic full suite" rather than the named exhaustion. Pinned
+        as an exact block, the same grep-the-source shape as
+        tests/test_targeted_test_selection.py's scripts/test.sh pin, so
+        deleting just this var (not some other CRATEDIGGER_SUITE_OWNS_
+        HEADROOM occurrence) fails this test."""
+        source = SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn(
+            'run_stage deterministic_suite "deterministic full suite" \\\n'
+            "    env CRATEDIGGER_SUITE_OWNS_HEADROOM=1 \\\n"
+            '    nix-shell --run "bash scripts/run_tests.sh"',
+            source,
+        )
+
     def test_missing_required_configuration_fails_before_clone(self) -> None:
         proc = self.fake.run(
             SCRIPT,

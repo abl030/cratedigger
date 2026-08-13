@@ -352,6 +352,18 @@ class TestTargetedSuiteWiring(unittest.TestCase):
         self.assertIn('"$@"', source)
         self.assertNotIn("python3 -m unittest discover", source)
 
+    def test_shell_entrypoint_sets_the_suite_owns_headroom_env_var(self) -> None:
+        """Issue #1111 review MAJOR-3: the M2 producer side is otherwise
+        unpinned — deleting `env CRATEDIGGER_SUITE_OWNS_HEADROOM=1` from
+        scripts/test.sh's own nix-shell invocation would leave every other
+        test green while M2 silently reverts to the old shell-entry-dies-
+        under-contention shape."""
+        source = (REPO_ROOT / "scripts" / "test.sh").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "env CRATEDIGGER_SUITE_OWNS_HEADROOM=1 nix-shell", source
+        )
+
     def test_targeted_runner_takes_the_same_suite_admission_lock(self) -> None:
         """Issue #1111 review B1: scripts/test.sh targeted runs DO
         participate in run_suite's admission lock — they are NOT excluded
@@ -372,7 +384,11 @@ class TestTargetedSuiteWiring(unittest.TestCase):
         shared = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"))
         self.assertTrue(shared.is_dir(), "private runtime tmpfs is required")
         isolated = Path(
-            tempfile.mkdtemp(dir=shared, prefix="cratedigger-targeted-admission-test-")
+            # Matches _REAPABLE_PREFIXES' "cratedigger-admission-test-" entry
+            # (scripts/run_test_suite.py) — a literal-prefix glob, so a
+            # differently-worded prefix here would silently escape reaping
+            # (issue #1111 review m12).
+            tempfile.mkdtemp(dir=shared, prefix="cratedigger-admission-test-")
         )
         lock_path = admission_lock_path(isolated)
         held = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)

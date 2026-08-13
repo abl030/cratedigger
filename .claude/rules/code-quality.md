@@ -350,20 +350,41 @@ one lock. A second concurrently-launched `run_suite` call waits, bounded
 `run_suite(admission_timeout_seconds=...)` kwarg — no environment override,
 unlike the headroom minimum below; expiry is exit-2-indistinguishable from a
 genuine infrastructure failure, a stated residual), printing progress naming
-the contended lockfile and, when readable, the current holder's pid and
-process start ticks (`_write_lock_holder_identity` /
-`_read_lock_holder_identity`, mirroring `run_final_gate.sh`'s own
-helper/gate pid+start-ticks identity precedent). Since the shellHook's own
+the contended lockfile and, only when a stored pid+start-ticks pair is BOTH
+present AND verified currently live (`_proc_start_ticks(pid) == ticks`, the
+same `same_process` liveness check `run_final_gate.sh` already uses), the
+current holder's identity — never an unverified one, since the identity is
+cleared on release but a write can itself be lost to the very exhaustion
+this PR exists for, so a stale or unreadable value falls back to the plain
+lockfile-path message rather than confidently naming a dead process
+(`_write_lock_holder_identity` / `_read_lock_holder_identity`, mirroring
+`run_final_gate.sh`'s own helper/gate identity precedent). Since the shellHook's own
 entry-time headroom check (`scripts/test_tmpfs.sh`) runs BEFORE this lock is
 even reached, a naive second suite would still die at shell entry under
-contention with the old unnamed message instead of queueing — so
-`scripts/test.sh` and `scripts/run_final_gate.sh` each set
-`CRATEDIGGER_SUITE_OWNS_HEADROOM=1` before their own `nix-shell` invocation,
+contention with the old unnamed message instead of queueing — so every
+automated launcher of the canonical suite (`scripts/test.sh`,
+`scripts/run_final_gate.sh`, and `scripts/daily_flake_update.sh`'s
+`deterministic_suite` stage — the complete set as of issue #1111 review
+MAJOR-1, grepped for every `nix-shell --run .*run_tests.sh` invocation) sets
+`CRATEDIGGER_SUITE_OWNS_HEADROOM=1` before its own `nix-shell` invocation,
 which tells that shellHook check to skip only its free-bytes refusal
 (everything else in `setup_cratedigger_test_tmpfs` still runs); `run_suite`'s
 own post-lock headroom precondition is then the single enforcement point for
-every suite run. An interactive `nix-shell` entry never sets this, so its
-entry guard is unchanged.
+every suite run launched this way. The documented DIRECT command
+(`nix-shell --run "bash scripts/run_tests.sh"`, CLAUDE.md/README.md/this
+file's own code block above) deliberately stays as-is: a human running it
+interactively gets the entry guard on purpose, since nothing there is
+launching it as an unattended, contention-prone automation.
+
+It is NOT only interactive entries that differ: the var is
+an inherited process-environment setting, so a NESTED `nix-shell` a test
+spawns as its own subprocess (`tests/test_decision_corpus_export.py` does
+this) also inherits it from the enclosing suite and skips the same
+refusal — deliberately, since the enclosing `run_suite` already owns
+headroom enforcement for the whole run and a nested shell re-imposing its
+own would be redundant, not protective. Only a genuinely interactive
+`nix-shell` entry, started outside any suite run, never has this var set and
+keeps its entry guard.
 
 Once admitted, `run_suite` best-effort reaps scratch directories nothing can
 still be writing (`reap_stale_check_bundles`, prefix set
@@ -381,7 +402,16 @@ summary.md), not receipt reuse itself: `run_final_gate.sh status` checks a
 receipt's `bundle` FILE (a path string) and now separately stats the
 directory it names, failing visibly when it is gone rather than silently
 reporting `pass` over evidence that no longer exists — a receipt's own
-`terminal` verdict was always durable regardless of this floor.
+`terminal` verdict was always durable regardless of this floor. Before the
+age gate ever applies, `_receipt_protected_bundles` excludes any bundle path
+still named by a `cratedigger-final-gate.*/bundle` file (receipts are never
+themselves reaped — a different, unlisted prefix) — so a bundle a live
+receipt still references survives regardless of age, preserving both the
+verdict and its evidence for a long-running review (issue #1111 review
+m13). A receipt whose protected bundle turns out to be missing anyway is a
+genuinely dangling receipt; the protection does not paper over that —
+`status`'s own stat check surfaces it, and the honest response is to
+re-run.
 
 `run_suite` then checks headroom (`_check_suite_headroom`, same
 `CRATEDIGGER_TEST_RAM_MIN_BYTES` env var and 1 GiB default as

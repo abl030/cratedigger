@@ -78,8 +78,13 @@ setup_cratedigger_test_tmpfs() {
     # launched suite would die right here at shell entry with this unnamed
     # message instead of queueing on the lock (issue #1111 review M2) — this
     # setup still runs in full otherwise; only the free-bytes refusal defers.
-    # An interactive `nix-shell` entry never sets this, so its own entry
-    # guard is unchanged.
+    # This is inherited process environment, not an entry-time flag: a
+    # NESTED nix-shell a test spawns as its own subprocess (e.g.
+    # tests/test_decision_corpus_export.py) also inherits it from the
+    # enclosing suite and skips the same refusal — deliberately, since the
+    # enclosing run_suite() already owns headroom enforcement for the whole
+    # run. Only a genuinely interactive nix-shell entry, started outside any
+    # suite run, never has this set and keeps its own entry guard.
     if [[ "${CRATEDIGGER_SUITE_OWNS_HEADROOM:-}" != "1" ]]; then
         available_bytes="$(
             df -B1 --output=avail "$parent" | tail -n 1 | tr -d '[:space:]'

@@ -1131,12 +1131,10 @@ def _classify_target_infrastructure_failure(
     default) — not the running-test classifier's much lower internal
     ``_MIN_VALID_TEMP_HEADROOM_BYTES`` (64 MiB), which is intentionally
     unchanged. Below the suite's own floor is by definition the unsupported
-    regime, since ``run_suite`` refuses to even start there; a worker crash
-    measured in the 64 MiB-1 GiB band is real exhaustion this classifier
-    would otherwise miss (issue #1111 review:
-    ``tests/test_decision_corpus_export.py``'s nested nix-shell subprocesses
-    genuinely fail in that band mid-run, and used to read as an ordinary
-    failure).
+    regime, since ``run_suite`` refuses to even start there and the floor
+    only shrinks as the run consumes tmpfs: a worker crash measured in the
+    64 MiB-1 GiB band is real exhaustion this classifier would otherwise
+    miss, wherever in the run it happens to be measured.
 
     Residual, stated honestly: this can still MISS a genuine exhaustion
     event whose measured moment happened to read comfortably above the

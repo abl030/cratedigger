@@ -18,6 +18,7 @@ from pathlib import Path
 import msgspec
 
 from scripts.run_python_tests import TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE
+from scripts.run_targeted_tests import targeted_phases
 from scripts.run_test_suite import (
     FAILURE_MARKER_PREFIX,
     TEST_RAM_ROOT_EXHAUSTED,
@@ -29,6 +30,7 @@ from scripts.run_test_suite import (
     _check_suite_headroom,
     _default_min_headroom_bytes,
     _default_phases,
+    _proc_start_ticks,
     _read_lock_holder_identity,
     acquire_suite_admission,
     admission_lock_path,
@@ -435,17 +437,29 @@ class SuiteCoordinatorTestCase(unittest.TestCase):
     def test_ram_root_exhausted_exit_code_is_not_an_ordinary_python_failure_code(
         self,
     ) -> None:
-        """Issue #1111 review M4(a): TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE must
-        stay outside the "python" phase's declared failure_exit_codes, or
-        run_test_suite.py's generic phase-state derivation would route it to
-        an ordinary "failed" instead of "infrastructure-failure"."""
-        python_phase = next(
+        """Issue #1111 review M4(a)/m14: TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE
+        must stay outside the "python" phase's declared failure_exit_codes
+        in BOTH the canonical suite's _default_phases() and the targeted
+        runner's targeted_phases() — either one silently regaining it would
+        let the infrastructure-failure promotion revert with no test
+        noticing, exactly the shape M4 closed for the plain exit-code
+        contract."""
+        canonical_python = next(
             phase for phase in _default_phases() if phase.name == "python"
         )
-
-        self.assertNotIn(
-            TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE, python_phase.failure_exit_codes
+        targeted_python = next(
+            phase
+            for phase in targeted_phases(("tests.test_typing_ratchet",))
+            if phase.name == "python"
         )
+        for desc, phase in (
+            ("canonical _default_phases", canonical_python),
+            ("targeted targeted_phases", targeted_python),
+        ):
+            with self.subTest(desc=desc):
+                self.assertNotIn(
+                    TEST_RAM_ROOT_EXHAUSTED_EXIT_CODE, phase.failure_exit_codes
+                )
 
     def test_pure_ram_root_exhaustion_promotes_the_suite_to_infrastructure_failure(
         self,
@@ -635,13 +649,73 @@ class SuiteAdmissionTestCase(unittest.TestCase):
 
                 self.assertIsNone(_read_lock_holder_identity(lock_path))
 
-    def test_read_lock_holder_identity_parses_well_formed_content(self) -> None:
+    def test_read_lock_holder_identity_parses_well_formed_live_content(
+        self,
+    ) -> None:
+        """A syntactically well-formed pid+ticks pair is only trusted once
+        verified live (issue #1111 review MAJOR-2) — this uses our own real,
+        currently-running process so the liveness check genuinely passes."""
         lock_path = admission_lock_path(self.runtime)
-        lock_path.write_text("12345 6789\n")
+        ticks = _proc_start_ticks(os.getpid())
+        assert ticks is not None
+        lock_path.write_text(f"{os.getpid()} {ticks}\n")
 
         self.assertEqual(
-            _read_lock_holder_identity(lock_path), "pid 12345, start ticks 6789"
+            _read_lock_holder_identity(lock_path),
+            f"pid {os.getpid()}, start ticks {ticks}",
         )
+
+    def test_read_lock_holder_identity_rejects_a_stale_dead_pid(self) -> None:
+        """A syntactically well-formed but DEAD pid+ticks pair — e.g. a
+        lingering write from a holder that has since released — must never
+        be reported as live (issue #1111 review MAJOR-2)."""
+        lock_path = admission_lock_path(self.runtime)
+        # A PID far past any real process on this host; guaranteed dead.
+        lock_path.write_text("999999999 123456\n")
+
+        self.assertIsNone(_read_lock_holder_identity(lock_path))
+
+    def test_waiter_falls_back_to_pathname_only_message_for_a_stale_identity(
+        self,
+    ) -> None:
+        """The waiter must not confidently name a dead process (issue #1111
+        review MAJOR-2): a lingering/bogus identity in the lockfile degrades
+        to the plain lockfile-path message, exercised through the real
+        contended-wait path, not just the pure reader in isolation."""
+        lock_path = admission_lock_path(self.runtime)
+        held = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(held, fcntl.LOCK_EX)
+        lock_path.write_text("999999999 123456\n")
+        try:
+            stream = io.StringIO()
+            with (
+                self.assertRaises(SuiteAdmissionTimeout),
+                acquire_suite_admission(
+                    self.runtime,
+                    stream=stream,
+                    timeout_seconds=0.15,
+                    poll_seconds=0.02,
+                    progress_interval_seconds=0.05,
+                ),
+            ):
+                raise AssertionError("must not run while contended")
+            output = stream.getvalue()
+            self.assertIn("waiting for admission", output)
+            self.assertNotIn("999999999", output)
+            self.assertNotIn("pid ", output)
+        finally:
+            fcntl.flock(held, fcntl.LOCK_UN)
+            os.close(held)
+
+    def test_release_clears_the_holder_identity(self) -> None:
+        """Issue #1111 review MAJOR-2: releasing must not leave a stale
+        identity for the next waiter to mis-attribute."""
+        lock_path = admission_lock_path(self.runtime)
+
+        with acquire_suite_admission(self.runtime, stream=io.StringIO()):
+            self.assertNotEqual(lock_path.read_text().strip(), "")
+
+        self.assertEqual(lock_path.read_text().strip(), "")
 
 
 class StaleCheckBundleReapTestCase(unittest.TestCase):
@@ -753,6 +827,49 @@ class StaleCheckBundleReapTestCase(unittest.TestCase):
             self.assertFalse(path.exists())
         self.assertTrue(fresh.exists())
 
+    def _receipt(self, name: str, *, bundle: Path) -> Path:
+        receipt = self.runtime / name
+        receipt.mkdir(mode=0o700)
+        (receipt / "bundle").write_text(f"{bundle}\n", encoding="utf-8")
+        return receipt
+
+    def test_never_reaps_a_bundle_a_live_receipt_still_references(self) -> None:
+        """Issue #1111 review m13: a run_final_gate.sh receipt's own bundle
+        survives regardless of age, preserving both verdict and evidence
+        for a long-running review."""
+        now = time.time()
+        referenced = self._bundle(
+            "cratedigger-checks.referenced", age_seconds=999, now=now
+        )
+        self._receipt("cratedigger-final-gate.live", bundle=referenced)
+
+        reaped = reap_stale_check_bundles(
+            self.runtime, max_age_seconds=100, reference_time=now
+        )
+
+        self.assertEqual(reaped, ())
+        self.assertTrue(referenced.exists())
+
+    def test_still_reaps_an_unreferenced_bundle_alongside_a_protected_one(
+        self,
+    ) -> None:
+        now = time.time()
+        referenced = self._bundle(
+            "cratedigger-checks.referenced", age_seconds=999, now=now
+        )
+        unreferenced = self._bundle(
+            "cratedigger-checks.unreferenced", age_seconds=999, now=now
+        )
+        self._receipt("cratedigger-final-gate.live", bundle=referenced)
+
+        reaped = reap_stale_check_bundles(
+            self.runtime, max_age_seconds=100, reference_time=now
+        )
+
+        self.assertEqual(reaped, (unreferenced,))
+        self.assertTrue(referenced.exists())
+        self.assertFalse(unreferenced.exists())
+
 
 class SuiteHeadroomPreconditionTestCase(unittest.TestCase):
     """The whole suite fails once, immediately, before any phase runs (#1111)."""
@@ -834,8 +951,11 @@ class SuiteHeadroomPreconditionTestCase(unittest.TestCase):
         """Issue #1111 review m10: CRATEDIGGER_TEST_RAM_ROOT must be measured
         the same way scripts/test_tmpfs.sh's own shell-entry guard measures
         it — not silently ignored in favour of the passed-in runtime_dir."""
+        # Matches _REAPABLE_PREFIXES' "cratedigger-headroom-test-" entry — a
+        # differently-worded prefix here would silently escape reaping
+        # (issue #1111 review m12).
         other = Path(
-            tempfile.mkdtemp(dir=self.runtime.parent, prefix="cratedigger-other-root-")
+            tempfile.mkdtemp(dir=self.runtime.parent, prefix="cratedigger-headroom-test-")
         )
         original = os.environ.pop("CRATEDIGGER_TEST_RAM_ROOT", None)
         try:

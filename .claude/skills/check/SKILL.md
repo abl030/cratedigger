@@ -40,11 +40,13 @@ it still exists — contains the typed summaries and complete per-phase logs.
 A second concurrently-launched canonical suite on this shared host waits on
 `run_suite`'s own admission lock rather than colliding with this one; once
 admitted it best-effort reaps check bundles idle past ~4 hours
-(`scripts/run_test_suite.py::DEFAULT_STALE_BUNDLE_MAX_AGE_SECONDS`), so an
-old receipt's `bundle` directory can be gone even though the receipt's own
-`terminal` verdict is unaffected — `status` (below) stats the bundle path and
-fails visibly rather than silently reporting `pass` over evidence that no
-longer exists.
+(`scripts/run_test_suite.py::DEFAULT_STALE_BUNDLE_MAX_AGE_SECONDS`), but never
+one this receipt still references — `status` (below) still stats the bundle
+path and fails visibly rather than silently reporting `pass` over evidence
+that no longer exists. A dangling receipt (bundle gone despite that
+protection) means something genuinely unusual happened to it outside the
+normal reap path — the honest response is to re-run the gate, not to trust
+the stale `terminal` verdict.
 
 If the client detaches, recover the exact invocation from the same committed clean
 worktree:
