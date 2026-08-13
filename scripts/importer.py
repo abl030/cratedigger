@@ -1015,8 +1015,10 @@ def execute_youtube_import_job(
     the staged audio manifest, so the rejection paths inside
     ``_handle_rejected_result`` find no peers to denylist.
     """
+    from lib.config import read_runtime_config
     from lib.download_processing import process_completed_album
     from lib.download_reconstruction import reconstruct_grab_list_entry
+    from lib.processing_paths import stage_to_ai_root
 
     request_id = job.request_id
     if request_id is None:
@@ -1031,6 +1033,21 @@ def execute_youtube_import_job(
         return DispatchOutcome(False, f"Album request {request_id} not found")
     status = str(row.get("status") or "")
     if status not in YOUTUBE_IMPORT_ALLOWED_REQUEST_STATUSES:
+        # Issue #1122 item 4: payload.staged_path is a direct child of
+        # the shared, externally provisioned auto-import staging root (the
+        # U6 worker's build_service stages every YT rescue there — see
+        # lib.youtube_ingest_service.YoutubeIngestService.staging_root
+        # and scripts/youtube_ingest_worker.py). Without this guard,
+        # _run_post_commit_cleanup's empty-parent prune
+        # (lib.dispatch.helpers._cleanup_staged_dir) could rmdir
+        # that shared root the moment this album's staged folder was its
+        # only child — the same shape issue #1077 guarded at the three
+        # other real callers of that helper. ctx is always None
+        # from the production caller at this point (the runtime context
+        # below is only built after this early return), so the config is
+        # resolved directly — mirroring the getattr(ctx, "cfg", None) or
+        # read_runtime_config() pattern used by the FORCE branch above.
+        cfg = getattr(ctx, "cfg", None) or read_runtime_config()
         return DispatchOutcome(
             False,
             (
@@ -1039,6 +1056,9 @@ def execute_youtube_import_job(
             ),
             post_commit_cleanup=PostCommitCleanup(
                 staged_path=payload.staged_path,
+                staged_path_protected_parent=stage_to_ai_root(
+                    staging_dir=cfg.beets_staging_dir, auto_import=True,
+                ),
             ),
         )
 
