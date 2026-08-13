@@ -588,8 +588,12 @@ def cmd_quality(db: PipelineDB, args: argparse.Namespace) -> None:
             "candidate_v0_probe_kind": "lossless_source_v0"}),
         # --- MP3 VBR downloads ---
         # avg_bitrate drives the new preimport spectral gate (issue #93):
-        # VBR with avg >= cfg.mp3_vbr.excellent skips spectral entirely,
-        # below gates through analysis even without a spectral_grade input.
+        # VBR with avg >= cfg.mp3_vbr_spectral_gate_kbps skips spectral
+        # entirely, below gates through analysis even without a
+        # spectral_grade input. (That is ``spectral_gate_trigger``'s
+        # comparison, the mirror this simulator runs; production's own
+        # ``_needs_spectral_check`` is inclusive the other way and still
+        # scans AT the threshold.)
         ("MP3 V0 genuine (avg 245kbps, gate skips)", {
             "is_flac": False, "min_bitrate": 240, "is_cbr": False,
             "is_vbr": True, "avg_bitrate": 245}),

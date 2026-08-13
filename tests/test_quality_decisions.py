@@ -53,7 +53,9 @@ from lib.quality import (
     spectral_import_decision,
     transcode_detection,
 )
+from lib.quality.compare import _shared_spectral_bitrates
 from lib.quality.decisions import post_import_search_action
+from lib.quality.spectral_interpretation import interpret_measurement
 from tests.helpers import make_audio_corrupt_validation_report
 
 # ============================================================================
@@ -2993,7 +2995,7 @@ class TestRejectionBackfillOverride(unittest.TestCase):
         result = self._override(
             is_cbr=True, min_bitrate_kbps=256,
             spectral_grade="genuine", verified_lossless=False)
-        # 256 against mp3_cbr (transparent=320, excellent=256) → EXCELLENT,
+        # 256 against cfg.mp3 (transparent=320, excellent=256) → EXCELLENT,
         # EXCELLENT < TRANSPARENT → no backfill
         self.assertIsNone(result)
 
@@ -3324,7 +3326,7 @@ class TestQualityRank(unittest.TestCase):
 
         Paired with the promotion pin below — together they are the whole
         point of ordering scope A before scope B. This one would pass just as
-        well against the old ``mp3_cbr`` table, which is why it is not
+        well against the retired CBR table, which is why it is not
         sufficient on its own.
         """
         self.assertEqual(quality_rank("MP3", 245, CFG), QualityRank.GOOD)
@@ -3826,6 +3828,89 @@ class TestCompareQualitySharedSpectralBucket(unittest.TestCase):
         # refused and the genuine copy stays installed.
         self.assertEqual(import_quality_decision(new, existing, cfg=CFG).decision,
                          "downgrade")
+
+    def test_one_bound_side_never_reaches_the_spectral_tiebreak(self):
+        """``both_spectral_bound`` is a GATE, and this is the world it gates.
+
+        Candidate MP3 raw 320 with a decision-grade class of 192; installed
+        MP3 raw 224 with a class of 256. ``_shared_spectral_bitrates``
+        returns ``(192, 224, True, False)`` — the candidate's class binds
+        (192 <= 320), the installed side's does not (256 > 224), so its
+        "clamped" value is just its raw metric. Comparing a spectral class
+        against a raw metric with no tolerance is not a like-for-like
+        tiebreak, so the branch must withhold and the raw +/-5 kbps
+        ``metric_tiebreak`` decides instead.
+
+        Issue #1145 deleted ``_classify_with_cbr_bands``, the flags' only
+        other consumer, leaving this branch as their ONLY reader — and no
+        test reached it, so both faithful mutants (``both_spectral_bound =
+        True`` at the assignment, and ``and both_spectral_bound`` ->
+        ``and True`` at the guard) survived. Under either one this world
+        reads ``spectral_tiebreak`` on 192 vs 224 and the DECIDED outcome
+        flips from import to downgrade.
+        """
+        new = self._m(
+            format="MP3", min_bitrate_kbps=320, avg_bitrate_kbps=320,
+            median_bitrate_kbps=320, is_cbr=True,
+            spectral_grade="likely_transcode", spectral_bitrate_kbps=192,
+        )
+        existing = self._m(
+            format="MP3", min_bitrate_kbps=224, avg_bitrate_kbps=224,
+            median_bitrate_kbps=224, is_cbr=True,
+            spectral_grade="likely_transcode", spectral_bitrate_kbps=256,
+        )
+
+        # The asymmetry is real, not assumed: assert the production helper's
+        # own bound flags rather than trusting the world's construction.
+        self.assertEqual(
+            _shared_spectral_bitrates(
+                new, existing, CFG,
+                new_spectral=interpret_measurement(new),
+                existing_spectral=interpret_measurement(existing),
+            ),
+            (192, 224, True, False),
+        )
+
+        basis = compare_quality(new, existing, CFG)
+        self.assertEqual(basis.branch, "metric_tiebreak")
+        self.assertEqual(basis.verdict, "better")
+        self.assertEqual(basis.new_value_kbps, 320)
+        self.assertEqual(basis.existing_value_kbps, 224)
+        # The consequence, not the branch label.
+        self.assertEqual(
+            import_quality_decision(new, existing, cfg=CFG).decision, "import")
+
+    def test_both_bound_sides_do_reach_the_spectral_tiebreak(self):
+        """Must-still-work: the gate is not "always withhold".
+
+        Both classes bind (224 and 192 against raw 320), both land in the
+        same ``good`` band, and they differ — so the clamped values decide
+        directly. Without this arm the pin above would pass just as well
+        against a branch deleted outright.
+        """
+        new = self._m(
+            format="MP3", min_bitrate_kbps=320, avg_bitrate_kbps=320,
+            median_bitrate_kbps=320, is_cbr=True,
+            spectral_grade="likely_transcode", spectral_bitrate_kbps=224,
+        )
+        existing = self._m(
+            format="MP3", min_bitrate_kbps=320, avg_bitrate_kbps=320,
+            median_bitrate_kbps=320, is_cbr=True,
+            spectral_grade="likely_transcode", spectral_bitrate_kbps=192,
+        )
+        self.assertEqual(
+            _shared_spectral_bitrates(
+                new, existing, CFG,
+                new_spectral=interpret_measurement(new),
+                existing_spectral=interpret_measurement(existing),
+            ),
+            (224, 192, True, True),
+        )
+        basis = compare_quality(new, existing, CFG)
+        self.assertEqual(basis.branch, "spectral_tiebreak")
+        self.assertEqual(basis.verdict, "better")
+        self.assertEqual(basis.new_value_kbps, 224)
+        self.assertEqual(basis.existing_value_kbps, 192)
 
     def test_transcode_candidate_bounded_rank_strictly_better_still_imports(self):
         """Must-still-work: the bound blocks nothing that is really better.

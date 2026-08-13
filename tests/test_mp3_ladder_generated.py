@@ -12,6 +12,17 @@ Three production invariants, each paired with a deterministic pin elsewhere:
 * **I3 — comparison symmetry.** Two measurements of the same audio rank equal
   regardless of which side of a comparison they sit on. Pin:
   ``tests/test_encoder_contract.py::TestContractChangesTheDecidedOutcome``.
+* **I4 — a spectral class only decides against another spectral class.**
+  ``spectral_tiebreak`` fires only when BOTH sides' clamped values ARE their
+  spectral classes; one bound side against one raw metric falls through to the
+  tolerant ``metric_tiebreak``. Pin:
+  ``tests/test_quality_decisions.py::TestCompareQualitySharedSpectralBucket``
+  ``::test_one_bound_side_never_reaches_the_spectral_tiebreak``.
+
+  This invariant is here because #1145 deleted ``_classify_with_cbr_bands``,
+  which was ``both_spectral_bound``'s other consumer. The tiebreak guard
+  became the flags' only reader and no test reached it, so both faithful
+  mutants survived every quality/compare/spectral module.
 
 Every checker below accumulates violations rather than short-circuiting on
 the first ``raise``, so one clause cannot mask another (the
@@ -42,6 +53,9 @@ from lib.quality import (
     mp3_vbr_contract_level,
     quality_rank,
 )
+from lib.quality.compare import _shared_spectral_bitrates
+from lib.quality.spectral_interpretation import interpret_measurement
+from lib.spectral_check import LAME_LOWPASS
 
 CFG = QualityRankConfig.defaults()
 
@@ -51,6 +65,21 @@ CFG = QualityRankConfig.defaults()
 #: non-MP3 families.
 _BARE_LOSSY_LABELS = ("MP3", "mp3", "Opus", "opus", "AAC", "aac",
                       "Vorbis", "vorbis", "WMA", "wma")
+
+#: The only spectral class values a producer can emit, DERIVED from the
+#: producer's own table rather than transcribed
+#: (``.claude/rules/test-fidelity.md`` Rule C). A number outside this set is
+#: not a legacy bucket, carries no class under the codec-aware
+#: interpretation, and so describes a world where the clamp these properties
+#: patrol never fires at all.
+_PRODUCIBLE_CLASSES: tuple[int, ...] = tuple(
+    kbps for _cliff_hz, kbps in LAME_LOWPASS
+)
+
+#: Grades that authorise a spectral FINDING. Without one the interpretation is
+#: audit-only, carries no class, and the clamp is withheld — so a strategy
+#: that omitted them would generate nothing but the no-clamp path.
+_ACCUSING_GRADES = ("suspect", "likely_transcode")
 
 #: Settings strings drawn from the live ``items.encoder_settings`` census.
 _LIVE_SETTINGS = (
@@ -176,6 +205,57 @@ def contract_minting_violations(
 # ---------------------------------------------------------------------------
 
 _MIRRORED = {"better": "worse", "worse": "better", "equivalent": "equivalent"}
+
+
+# ---------------------------------------------------------------------------
+# I4 — a spectral class only decides against another spectral class
+# ---------------------------------------------------------------------------
+
+def spectral_tiebreak_violations(
+    *,
+    shared: tuple[int | None, int | None, bool, bool] | None,
+    branch: str,
+    verdict: str,
+    new_value: int | None,
+    existing_value: int | None,
+) -> list[str]:
+    """Every way the ``spectral_tiebreak`` branch could stop being a gate.
+
+    ``shared`` is ``_shared_spectral_bitrates``' own return for the same pair
+    — the production derivation of which side is bound, never a
+    re-derivation here. ``branch``/``verdict``/``*_value`` come from the real
+    ``compare_quality`` basis.
+    """
+    violations: list[str] = []
+    if branch != "spectral_tiebreak":
+        return violations
+    if shared is None:
+        violations.append(
+            "spectral_tiebreak fired with no shared spectral clamp at all"
+        )
+        return violations
+    _new_clamped, _existing_clamped, new_bound, existing_bound = shared
+    if not (new_bound and existing_bound):
+        violations.append(
+            "spectral_tiebreak fired without both sides spectral-bound: "
+            f"new_bound={new_bound}, existing_bound={existing_bound} "
+            f"({new_value} vs {existing_value})"
+        )
+    if new_value is None or existing_value is None:
+        violations.append(
+            "spectral_tiebreak decided on a missing value: "
+            f"{new_value} vs {existing_value}"
+        )
+    elif new_value == existing_value:
+        violations.append(
+            f"spectral_tiebreak fired on equal clamped values: {new_value}"
+        )
+    elif verdict != ("better" if new_value > existing_value else "worse"):
+        violations.append(
+            f"spectral_tiebreak verdict {verdict!r} contradicts its own "
+            f"clamped values {new_value} vs {existing_value}"
+        )
+    return violations
 
 
 def comparison_symmetry_violations(
@@ -345,6 +425,117 @@ class TestComparisonSymmetryGenerated(unittest.TestCase):
         self.assertEqual(violations, [], f"{left!r} vs {right!r}")
 
 
+def _spectral_measurement(
+    label: str, raw: int, spectral_class: int, grade: str,
+) -> AudioQualityMeasurement:
+    return AudioQualityMeasurement(
+        min_bitrate_kbps=raw,
+        avg_bitrate_kbps=raw,
+        median_bitrate_kbps=raw,
+        format=label,
+        spectral_grade=grade,
+        spectral_bitrate_kbps=spectral_class,
+    )
+
+
+class TestSpectralTiebreakIsGatedGenerated(unittest.TestCase):
+    """The clamp branch, driven over worlds that actually reach it."""
+
+    @given(
+        label=st.sampled_from(("MP3", "mp3")),
+        new_raw=st.integers(min_value=64, max_value=400),
+        existing_raw=st.integers(min_value=64, max_value=400),
+        new_class=st.sampled_from(_PRODUCIBLE_CLASSES),
+        existing_class=st.sampled_from(_PRODUCIBLE_CLASSES),
+        new_grade=st.sampled_from(_ACCUSING_GRADES),
+        existing_grade=st.sampled_from(_ACCUSING_GRADES),
+    )
+    # The asymmetric world the deterministic pin names: only the candidate's
+    # class binds, so the branch must withhold.
+    @example(
+        label="MP3", new_raw=320, existing_raw=224,
+        new_class=192, existing_class=256,
+        new_grade="likely_transcode", existing_grade="likely_transcode",
+    )
+    # Its mirror — only the INSTALLED side bound.
+    @example(
+        label="MP3", new_raw=224, existing_raw=320,
+        new_class=256, existing_class=192,
+        new_grade="likely_transcode", existing_grade="likely_transcode",
+    )
+    # Both bound and differing: the branch's own live world.
+    @example(
+        label="MP3", new_raw=320, existing_raw=320,
+        new_class=224, existing_class=192,
+        new_grade="likely_transcode", existing_grade="likely_transcode",
+    )
+    def test_the_tiebreak_only_fires_with_both_sides_bound(
+        self,
+        label: str,
+        new_raw: int,
+        existing_raw: int,
+        new_class: int,
+        existing_class: int,
+        new_grade: str,
+        existing_grade: str,
+    ) -> None:
+        new = _spectral_measurement(label, new_raw, new_class, new_grade)
+        existing = _spectral_measurement(
+            label, existing_raw, existing_class, existing_grade)
+        shared = _shared_spectral_bitrates(
+            new, existing, CFG,
+            new_spectral=interpret_measurement(new),
+            existing_spectral=interpret_measurement(existing),
+        )
+        basis = compare_quality(new, existing, CFG)
+        violations = spectral_tiebreak_violations(
+            shared=shared,
+            branch=basis.branch,
+            verdict=basis.verdict,
+            new_value=basis.new_value_kbps,
+            existing_value=basis.existing_value_kbps,
+        )
+        self.assertEqual(violations, [], f"{new!r} vs {existing!r}")
+
+    @given(
+        new_raw=st.integers(min_value=64, max_value=400),
+        existing_raw=st.integers(min_value=64, max_value=400),
+        new_class=st.sampled_from(_PRODUCIBLE_CLASSES),
+        existing_class=st.sampled_from(_PRODUCIBLE_CLASSES),
+    )
+    @example(
+        new_raw=320, existing_raw=224, new_class=192, existing_class=256)
+    def test_an_unbound_side_keeps_its_raw_metric(
+        self,
+        new_raw: int,
+        existing_raw: int,
+        new_class: int,
+        existing_class: int,
+    ) -> None:
+        """The flags mean what the branch reads them as.
+
+        A side is spectral-bound iff its class is at or below its own selected
+        metric, and the value the clamp returns for an unbound side is that
+        raw metric untouched. That is the fact ``spectral_tiebreak`` depends
+        on, asserted at the helper rather than inferred from a verdict.
+        """
+        new = _spectral_measurement("MP3", new_raw, new_class, "suspect")
+        existing = _spectral_measurement(
+            "MP3", existing_raw, existing_class, "suspect")
+        shared = _shared_spectral_bitrates(
+            new, existing, CFG,
+            new_spectral=interpret_measurement(new),
+            existing_spectral=interpret_measurement(existing),
+        )
+        assert shared is not None, "same-codec accusing pair must be comparable"
+        new_value, existing_value, new_bound, existing_bound = shared
+        self.assertEqual(new_bound, new_class <= new_raw)
+        self.assertEqual(existing_bound, existing_class <= existing_raw)
+        self.assertEqual(new_value, new_class if new_bound else new_raw)
+        self.assertEqual(
+            existing_value, existing_class if existing_bound else existing_raw)
+
+
 class TestMp3LadderCheckersTripOnViolations(unittest.TestCase):
     """Known-bad self-tests: one minimal world per CLAUSE, asserting that
     clause's own message. Every clause here is reachable while the clauses
@@ -444,6 +635,61 @@ class TestMp3LadderCheckersTripOnViolations(unittest.TestCase):
         self.assertEqual(len(violations), 1, violations)
         self.assertIn("identical audio did not compare equivalent",
                       violations[0])
+
+    def test_tiebreak_clause_no_shared_clamp(self) -> None:
+        violations = spectral_tiebreak_violations(
+            shared=None, branch="spectral_tiebreak", verdict="better",
+            new_value=224, existing_value=192,
+        )
+        self.assertEqual(len(violations), 1, violations)
+        self.assertIn("no shared spectral clamp at all", violations[0])
+
+    def test_tiebreak_clause_one_side_unbound(self) -> None:
+        """The exact shape both surviving mutants produce."""
+        violations = spectral_tiebreak_violations(
+            shared=(192, 224, True, False), branch="spectral_tiebreak",
+            verdict="worse", new_value=192, existing_value=224,
+        )
+        self.assertEqual(len(violations), 1, violations)
+        self.assertIn("without both sides spectral-bound", violations[0])
+
+    def test_tiebreak_clause_missing_value(self) -> None:
+        """Both bound, so only the value clause can fire."""
+        violations = spectral_tiebreak_violations(
+            shared=(None, 192, True, True), branch="spectral_tiebreak",
+            verdict="better", new_value=None, existing_value=192,
+        )
+        self.assertEqual(len(violations), 1, violations)
+        self.assertIn("decided on a missing value", violations[0])
+
+    def test_tiebreak_clause_equal_values(self) -> None:
+        violations = spectral_tiebreak_violations(
+            shared=(192, 192, True, True), branch="spectral_tiebreak",
+            verdict="better", new_value=192, existing_value=192,
+        )
+        self.assertEqual(len(violations), 1, violations)
+        self.assertIn("fired on equal clamped values", violations[0])
+
+    def test_tiebreak_clause_verdict_contradicts_values(self) -> None:
+        violations = spectral_tiebreak_violations(
+            shared=(224, 192, True, True), branch="spectral_tiebreak",
+            verdict="worse", new_value=224, existing_value=192,
+        )
+        self.assertEqual(len(violations), 1, violations)
+        self.assertIn("contradicts its own", violations[0])
+
+    def test_tiebreak_checker_is_silent_on_every_other_branch(self) -> None:
+        """Must-still-work: the checker judges its own branch and no other."""
+        for branch in ("rank", "metric_tiebreak", "label_contract_same_rank",
+                       "cross_family_same_rank", "spectral_candidate_bound"):
+            with self.subTest(branch=branch):
+                self.assertEqual(
+                    spectral_tiebreak_violations(
+                        shared=(192, 224, True, False), branch=branch,
+                        verdict="worse", new_value=192, existing_value=224,
+                    ),
+                    [],
+                )
 
 
 if __name__ == "__main__":

@@ -750,8 +750,8 @@ class InadmissibleSpectralPairWorld:
       2, which this domain does not cover; see
       ``test_every_generated_candidate_reaches_stage_1_with_a_class``;
     * the preimport gate would actually fire (CBR, or VBR below
-      ``cfg.mp3_vbr.excellent``), so ``stage1_spectral`` is a real verdict
-      rather than ``None``;
+      ``cfg.mp3_vbr_spectral_gate_kbps``), so ``stage1_spectral`` is a real
+      verdict rather than ``None``;
     * the HAVE carries real spectral evidence that the pre-#829 seam WOULD
       have consumed, while ``spectral_classes_comparable`` refuses it —
       for the reason named in ``shape``.
@@ -953,7 +953,7 @@ def assert_stage1_never_contradicts_stage2(
 
     ``stage1 is None`` means the Stage-0 preimport gate never fired for this
     candidate at all (a non-MP3 codec, or a VBR MP3 whose average is at or
-    above ``cfg.mp3_vbr.excellent``), so Stage 1 has no verdict to
+    above ``cfg.mp3_vbr_spectral_gate_kbps``), so Stage 1 has no verdict to
     contradict with. That case became VISIBLE only in issue #829 Phase 5
     PR2d: the harness used to reproduce the decider's Stage-1 wiring inline
     and computed a Stage-1 verdict for worlds where production skips the
@@ -1584,7 +1584,7 @@ def stage_parity_worlds(draw) -> StageParityWorld:
     make, applied to facts the harness could not see until it started
     driving the real decider. ``spectral_gate_trigger`` fires the preimport
     gate ONLY for an MP3 candidate, and skips a VBR MP3 whose average is at
-    or above ``cfg.mp3_vbr.excellent``; outside that domain
+    or above ``cfg.mp3_vbr_spectral_gate_kbps``; outside that domain
     ``stage1_spectral`` is ``None`` and the disagreement this property
     hunts is unreachable by construction — not "safe", *absent*. The old
     inline harness computed a Stage-1 verdict regardless, which is how
@@ -1802,7 +1802,8 @@ def inadmissible_spectral_pair_worlds(draw) -> InadmissibleSpectralPairWorld:
     shape = draw(st.sampled_from(_INADMISSIBLE_SHAPES))
     grade = draw(st.sampled_from(("suspect", "likely_transcode")))
     # The preimport gate must fire for Stage 1 to produce a verdict at all:
-    # MP3 CBR always, MP3 VBR only below ``cfg.mp3_vbr.excellent`` (210).
+    # MP3 CBR always, MP3 VBR only below
+    # ``cfg.mp3_vbr_spectral_gate_kbps`` (210).
     new_is_cbr = draw(st.booleans())
     new_container = draw(
         _bitrates(min_value=1, max_value=3000) if new_is_cbr
@@ -2469,7 +2470,8 @@ class TestGeneratedSimulatorInvariants(unittest.TestCase):
     # exists for never fires; it only ever "worked" because the old harness
     # fed ``compare_quality`` raw stored numbers. The producible values
     # (256/320) do fire the clamp, but the CONTRADICTION shape cannot
-    # follow: a VBR MP3 is gate-skipped at or above ``cfg.mp3_vbr.excellent``
+    # follow: a VBR MP3 is gate-skipped at or above
+    # ``cfg.mp3_vbr_spectral_gate_kbps``
     # and below it no container can exceed a high enough class for the
     # candidate to be spectral-bound, so Stage 1 has no verdict at all — the
     # checker returns immediately. An exhaustive sweep of the producible

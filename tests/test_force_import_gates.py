@@ -117,7 +117,7 @@ class TestNeedsSpectralCheckDecisions(unittest.TestCase):
     Genuine V0 (avg ~245kbps+) falls through unchanged.
     """
 
-    # Threshold matches cfg.quality_ranks.mp3_vbr.excellent default (210).
+    # Threshold matches cfg.quality_ranks.mp3_vbr_spectral_gate_kbps (210).
     THRESHOLD = 210
 
     def _run(self, filetype, is_vbr, avg_kbps=None, threshold=None):
@@ -324,7 +324,7 @@ class TestInspectLocalFilesRecursive(unittest.TestCase):
     def test_inspect_reports_avg_bitrate(self):
         """inspect_local_files must also return avg_bitrate_bps across all
         MP3 files so measure_preimport_state can decide whether to gate a
-        VBR upload against cfg.quality_ranks.mp3_vbr.excellent.
+        VBR upload against cfg.quality_ranks.mp3_vbr_spectral_gate_kbps.
 
         A VBR MP3 transcode at avg 182kbps (issue #93, The Go! Team) must be
         distinguishable from a genuine V0 at avg ~245kbps. Container min
@@ -815,7 +815,7 @@ class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
         The Go! Team - Are You Ready for More?: uploaded as VBR MP3 with
         126min / 182avg kbps. Current gate skips all VBR MP3 → transcode
         imports through. Post-fix: the gate runs spectral because avg
-        (182) < cfg.quality_ranks.mp3_vbr.excellent (210) → transcode
+        (182) < cfg.quality_ranks.mp3_vbr_spectral_gate_kbps (210) → transcode
         correctly caught.
         """
         import os
@@ -901,6 +901,12 @@ class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
             with patch("lib.measurement.inspect_local_files",
                        return_value=inspected), \
                  patch("lib.measurement.spectral_analyze") as mock_spectral:
+                # A real result, not a bare MagicMock: if the gate wrongly
+                # runs, this test must fail on its own call_count assertion
+                # rather than crash formatting a mock downstream.
+                mock_spectral.return_value = AlbumResult(
+                    grade="genuine", estimated_bitrate_kbps=None,
+                    suspect_pct=0.0, tracks=[])
                 measure_preimport_state(
                     path=tmpdir,
                     mb_release_id="",
@@ -919,6 +925,76 @@ class TestUnknownVbrResolvesViaInspection(unittest.TestCase):
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_the_scan_boundary_is_the_configured_gate_not_a_band(self):
+        """``measure_preimport_state``'s own threshold read (issue #1145 F4).
+
+        ``lib/measurement.py`` and ``lib/quality/pipeline.py`` are two
+        separate production reads of the VBR scan threshold, and only the
+        pipeline one had a test that moved when it moved. Repointing this
+        site at ``cfg.quality_ranks.mp3.excellent`` — the surviving band
+        table, and the field this threshold used to borrow from — shifts the
+        boundary from 210 to 256. Before this test landed, that mutant left
+        ``test_quality_generated``, ``test_measurement``,
+        ``test_import_preview`` and ``test_integration_slices`` all green,
+        and the one fixture it did disturb
+        (``test_high_avg_vbr_mp3_skips_spectral``, since repaired) died on a
+        MagicMock format crash rather than on its own assertion.
+
+        The two averages here are derived from the configured gate, never
+        typed. This site's comparison is ``avg <= threshold`` — deliberately
+        inclusive, because reading exactly the threshold means "not yet
+        proven above it" — so at the gate it scans and one kbps above it
+        stops. A mutant that reads any other field moves that boundary out
+        from under both arms.
+        """
+        import os
+        from unittest.mock import patch
+
+        from lib.measurement import LocalFileInspection, measure_preimport_state
+
+        cfg = CratediggerConfig(audio_check_mode="off")
+        gate_kbps = cfg.quality_ranks.mp3_vbr_spectral_gate_kbps
+
+        for avg_kbps, expected_calls, why in (
+            (gate_kbps, 1, "at the configured gate the scan still runs"),
+            (gate_kbps + 1, 0, "one kbps above it the scan stops"),
+        ):
+            with self.subTest(avg_kbps=avg_kbps):
+                tmpdir = tempfile.mkdtemp()
+                try:
+                    with open(os.path.join(tmpdir, "01.mp3"), "wb") as handle:
+                        handle.write(b"x")
+                    inspected = LocalFileInspection(
+                        filetype="mp3",
+                        min_bitrate_bps=avg_kbps * 1000,
+                        avg_bitrate_bps=avg_kbps * 1000,
+                        is_vbr=True,
+                    )
+                    with patch("lib.measurement.inspect_local_files",
+                               return_value=inspected), \
+                         patch("lib.measurement.spectral_analyze") as spectral:
+                        spectral.return_value = AlbumResult(
+                            grade="genuine", estimated_bitrate_kbps=None,
+                            suspect_pct=0.0, tracks=[])
+                        # No ``db``/``request_id``: this test asks only
+                        # whether the scan RAN, and the optional persistence
+                        # those two enable is a different seam. Omitting them
+                        # also keeps the file's frozen escape-hatch count
+                        # from growing (issue #784 ratchet).
+                        measure_preimport_state(
+                            path=tmpdir,
+                            mb_release_id="",
+                            label="Scan boundary",
+                            download_filetype="mp3",
+                            download_min_bitrate_bps=avg_kbps * 1000,
+                            download_is_vbr=True,
+                            cfg=cfg,
+                        )
+                    self.assertEqual(spectral.call_count, expected_calls, why)
+                finally:
+                    import shutil
+                    shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_vbr_mp3_without_avg_still_gates(self):
         """VBR MP3 with avg=None → still gate (conservative).
@@ -1081,7 +1157,7 @@ class TestVbrScanThresholdIsInclusive(unittest.TestCase):
     ``average_bitrate_kbps_from_frames`` reports the nearest integer rather
     than the floor (PR #1144). That lifts a per-track rate by up to one kbps,
     so an album whose true average sits just under
-    ``cfg.quality_ranks.mp3_vbr.excellent`` can now read exactly the
+    ``cfg.quality_ranks.mp3_vbr_spectral_gate_kbps`` can now read exactly the
     threshold. With a strict ``<`` that album silently stops being scanned —
     the issue #93 fake-V0 gate losing coverage in the last kbps before the
     boundary, which is the one place a fake V0 is most likely to sit.

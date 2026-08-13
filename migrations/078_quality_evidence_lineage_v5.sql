@@ -11,9 +11,14 @@
 -- migrations 050 and 055 used.
 --
 -- The two-axis fact vocabulary is IDENTICAL between v4 and v5, so every
--- version-gated shape/domain CHECK added by 055, 057, 072 and 073 is written
+-- version-gated shape/domain CHECK on this table is written
 -- `lineage_version < 4 OR ...` and already applies unchanged to a v5 row.
--- The same is true of the `lineage_version < 4` merge predicates in
+-- All ten live ones came from migration 055 (which also added the
+-- `lineage_version` domain check this migration replaces); 057 added an
+-- eleventh, 072 rewrote it, and 073 dropped it outright, so nothing from
+-- 057/072/073 survives to re-gate here.
+--
+-- The same reasoning covers the `lineage_version < 4` merge predicates in
 -- `lib/pipeline_db/evidence.py`: they mean "predates the two-axis
 -- vocabulary", not "predates the current version", and widening them would
 -- replace rather than merge the preserved spectral/V0 tuples on every v4

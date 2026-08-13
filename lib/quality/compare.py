@@ -190,16 +190,27 @@ def _shared_spectral_bitrates(
     existing_spectral_bound)`` — the two ``*_spectral_bound`` flags tell the
     caller which side's returned value IS the spectral class (clamp bound,
     ``class <= raw``) versus which is still the untouched raw metric (clamp
-    did not bind, ``class > raw``). Those flags still gate the same-rank
+    did not bind, ``class > raw``). Those flags gate the same-rank
     ``spectral_tiebreak`` (issue #813 Finding 1) — a like-for-like tiebreak
     needs BOTH sides holding a class, not one class against one raw metric.
 
-    They no longer select a band table. The MP3 class ladder is drawn from
+    That is now their ONLY consumer: issue #1145 deleted
+    ``_classify_with_cbr_bands``, because the MP3 class ladder is drawn from
     the nominal kbps values 96/112/128/160/192/224/256/320, which are exactly
     ``QualityRankConfig.mp3``'s thresholds now that the VBR/CBR ladder split
-    is gone (issue #1145); there is no second, more generous MP3 table left
-    for a spectral-bound value to be inflated by, so the "force CBR bands
-    when both sides are bound" rule has nothing to force.
+    is gone. There is no second, more generous MP3 table left for a
+    spectral-bound value to be inflated by, so the "force CBR bands when both
+    sides are bound" rule has nothing to force.
+
+    Being the only consumer is why the gate is pinned directly rather than
+    left to prose: ``tests/test_quality_decisions.py``
+    ``::test_one_bound_side_never_reaches_the_spectral_tiebreak`` drives the
+    asymmetric world, and
+    ``tests/test_mp3_ladder_generated.py::TestSpectralTiebreakIsGatedGenerated``
+    patrols it. Both mutants — pinning the flag ``True`` at the assignment,
+    and dropping it from the guard — flip a live decision from import to
+    downgrade, and survived every quality/compare/spectral module before
+    those landed.
     """
     if not spectral_classes_comparable(new_spectral, existing_spectral).comparable:
         return None
@@ -529,7 +540,9 @@ def compare_quality(
         # ``both_spectral_bound`` survives the #1145 ladder collapse: it no
         # longer picks a band table (there is one per family now), but it
         # still gates the same-rank ``spectral_tiebreak`` below, which is only
-        # like-for-like when BOTH clamped values ARE spectral classes.
+        # like-for-like when BOTH clamped values ARE spectral classes. That
+        # branch is its only remaining reader — see ``_shared_spectral_bitrates``
+        # for the pin and the property that hold it up.
         both_spectral_bound = new_bound and existing_bound
         new_rank = quality_rank(new_format, clamped_new_br, cfg)
         existing_rank = quality_rank(existing.format, clamped_existing_br, cfg)
